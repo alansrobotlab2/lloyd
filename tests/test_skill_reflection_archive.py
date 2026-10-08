@@ -225,26 +225,33 @@ EXPECTED_BOUND_WRITERS: dict[str, tuple[str, set[str]]] = {
 }
 
 # --- Tier 2: write prescriptions that are not machine-bindable, and why. --------
-# Each entry is re-verified to still be true by
-# test_declared_write_prescriptions_are_still_accurate, and the discovered tier-2
-# set must equal this set. If a skill here gains a real Write call it moves to
-# tier 1 and owes an archive step; both families are recorded as findings on #436.
+# Both sides of this dict are re-verified every run: the discovered tier-2 set must
+# equal it and every entry must still classify as `vault-write`
+# (test_the_only_exemption_is_a_call_that_cannot_reach_the_path), and the writer the
+# exemption rests on must still refuse the paths those prescriptions name
+# (test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree). If a skill here
+# gains a real Write call it moves to tier 1 and owes an archive step; both families
+# are recorded as findings on #436.
 #: Write prescriptions routed through vault_write / mem_write, which reject any
 #: ~/lloyd/ or ~/lloyd-data/ target with PATH_ESCAPE — the instruction cannot
 #: destroy a report, so the absence of an archive step costs nothing today.
-#: (`autonomy-reflection-pipeline` names prompt-audit-latest and test-results-latest
-#: only inside Step 6.1's *read* list, so they classify as reads; it prescribes
-#: producing them by bare filename, which no path-shaped check can attribute.)
-#: Two entries were dropped on 2026-09-20 (backlog #1270): `nightly-prompt-audit`
-#: and `nightly-behavior-test` are `status: archived` since vault commit `978aa34b`
-#: (backlog #900), so `_load_skill` returns None for them, the discovery loop can
-#: never produce them, and the assert below — an equality, not a subset — was red at
-#: the checkout while the gate's `-m "not live_vault"` deselected it. A retired
-#: skill cannot hold an exemption: there is no instruction left to exempt.
+#: `nightly-day-end-synthesis` is the entry that reason belongs to: it publishes the
+#: report with `vault_write(path="~/lloyd-data/_pipeline/reflection/day-end-synthesis-latest.md")`,
+#: and a `~/lloyd-data/` target is exactly what `agent_mcp/vault.py` refuses.
+#: An entry is dropped in the round that archives its skill, never left behind. A
+#: quarantined skill leaves the scan that discovers this set, so a stale key turns the
+#: equality assert named above red at the checkout while the gate's
+#: `-m "not live_vault"` deselects the node carrying it — which is how the two #900
+#: archivals stayed invisible for five days. Two entries were dropped on 2026-09-20
+#: (backlog #1270): `nightly-prompt-audit` and `nightly-behavior-test` are
+#: `status: archived` since vault commit `978aa34b` (backlog #900). One entry was
+#: dropped on 2026-10-08 (backlog #2405): `autonomy-reflection-pipeline` is
+#: `status: archived` since vault commit `42144a4b` (backlog #2401).
 #: tests/test_archived_skill_artifacts.py pins that rule for both tiers, so the
-#: recurrence guard no longer depends on anyone remembering to prune this dict.
+#: recurrence guard no longer depends on anyone remembering to prune this dict, and
+#: test_the_exempt_dict_comment_block_names_only_recorded_entries below is what keeps
+#: this block from outliving the entries it documents.
 EXPECTED_VAULT_WRITE_WRITERS: dict[str, set[str]] = {
-    "autonomy-reflection-pipeline": {"signals-latest", "day-end-synthesis-latest"},
     "nightly-day-end-synthesis": {"day-end-synthesis-latest"},
 }
 
@@ -492,8 +499,8 @@ def test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree(tmp_path, mo
 
     # Both homes the reports have had. `~/lloyd/` is the 2026-07 incident path and the
     # spelling older skill text still carries; `~/lloyd-data/` is where the reports
-    # live since 2026-09-22 and what the exempt skills prescribe today
-    # (`autonomy-reflection-pipeline`'s `vault_write(path="~/lloyd-data/…")`), so the
+    # live since 2026-09-22 and what the exempt skill prescribes today
+    # (`nightly-day-end-synthesis`'s `vault_write(path="~/lloyd-data/…")`), so the
     # exemption is only honest while the resolver refuses that one too.
     targets = (
         "~/lloyd/_pipeline/reflection/signals-latest.md",
@@ -1154,6 +1161,121 @@ def test_the_only_exemption_is_a_call_that_cannot_reach_the_path(skills):
                 f"{classified.get((name, stem))}; if it now writes with Write/Edit, "
                 "or merges in prose, it must archive before overwriting"
             )
+
+
+def _skill_folder_names() -> set[str]:
+    """Every skill folder on disk, advertised **or** archived — both states, because
+    the rule this serves is about a name appearing in prose, which is exactly what an
+    archived skill keeps doing. Deliberately the same unmarked inventory scan
+    `tests/test_archived_skill_artifacts.py` runs (see its section "Why these nodes
+    are NOT marked `live_vault`"): an exemption-vs-retired check that is only ever
+    reported is how a stale entry survived five days, and this one is structural —
+    does this block name a skill the dict no longer records — not a quote of skill
+    prose that will legitimately drift."""
+    names: set[str] = set()
+    for root in SKILLS_DIRS:
+        if not root.is_dir():
+            continue
+        names.update(
+            entry.name
+            for entry in root.iterdir()
+            if entry.is_dir() and (entry / "SKILL.md").is_file()
+        )
+    return names
+
+
+def _comment_block_above(constant: str) -> str:
+    """The contiguous comment block directly above a module-level constant, as one
+    string with the comment sigils stripped and the wrapping closed up, so a sentence
+    that runs across three `#:` lines is still the one sentence the rule reads."""
+    lines = Path(__file__).read_text(encoding="utf-8").splitlines()
+    declarations = [i for i, line in enumerate(lines) if line.startswith(constant)]
+    assert len(declarations) == 1, (
+        f"{constant} is declared {len(declarations)} times in this file, so 'the "
+        "comment block above it' does not identify one place to check"
+    )
+    block: list[str] = []
+    for line in reversed(lines[: declarations[0]]):
+        stripped = line.strip()
+        if not stripped or not stripped.startswith("#"):
+            break
+        block.append(stripped.lstrip("#").lstrip(":").strip())
+    assert block, (
+        f"nothing documents {constant}, so nothing states why its entries are exempt"
+    )
+    return " ".join(reversed(block))
+
+
+def test_the_exempt_dict_comment_block_names_only_recorded_entries():
+    """Clause 4 of #2405: the prose above `EXPECTED_VAULT_WRITE_WRITERS` is held to
+    the dict's shape, in the rung the gate actually runs.
+
+    Unmarked, and that is the point. The exemption equality it documents lives in a
+    `live_vault` node the gate deselects, which is why #1270's and #2405's stale keys
+    read as green to every hard rung; a comment block that keeps justifying a key
+    nobody records any more would otherwise rot in the same blind spot.
+
+    Three things, one per way this block went wrong:
+    * the PATH_ESCAPE reason is still stated, so a reader learns *why* an entry is
+      exempt instead of being asked to trust a name;
+    * every key the dict records is named in the block, so that reason attaches to an
+      entry rather than floating over the dict;
+    * a skill named in the block that the dict does *not* record may appear only in a
+      sentence saying the entry was dropped. A present-tense justification is what
+      makes a pruned key look live — the paragraph deleted here explained why
+      `autonomy-reflection-pipeline`'s mentions classify as reads, a reason that died
+      with that skill's advertisement on 2026-10-08 (vault commit `42144a4b`), while
+      the two #1270 sentences beside it were written in the dropped form and stay
+      true.
+    """
+    block = _comment_block_above("EXPECTED_VAULT_WRITE_WRITERS")
+    named_skills = _skill_folder_names()
+    assert named_skills, (
+        f"no skill folders found under {SKILLS_DIRS} — 'is this name a skill' "
+        "discriminates nothing when the scan read none, so the rule below would pass "
+        "on an unread vault"
+    )
+
+    assert "PATH_ESCAPE" in block and "vault_write" in block, (
+        "the block no longer names the mechanism the exemption rests on, so a reader "
+        "cannot tell an entry that is exempt from one that was simply never looked at"
+    )
+    for key in EXPECTED_VAULT_WRITE_WRITERS:
+        assert key in block, (
+            f"{key} is recorded as exempt but never named where its reason is stated"
+        )
+    # The entry that reason belongs to, pinned in the enforced rung: pruning the dict
+    # dry is not a way out of this file (#2405's acceptance says the same of the
+    # truthiness guard in tests/test_archived_skill_artifacts.py).
+    assert EXPECTED_VAULT_WRITE_WRITERS.get("nightly-day-end-synthesis") == {
+        "day-end-synthesis-latest"
+    }, (
+        "nightly-day-end-synthesis no longer records day-end-synthesis-latest as a "
+        "`vault_write` prescription, so the reason above documents an exemption that "
+        "is no longer taken — re-point it at the entry that is, not at nothing"
+    )
+
+    unlisted = [
+        (name, sentence)
+        for name in sorted(named_skills - set(EXPECTED_VAULT_WRITE_WRITERS))
+        for sentence in re.split(r"(?<=[.!?])\s+", block)
+        if name in sentence and "dropped" not in sentence
+    ]
+    assert not unlisted, (
+        f"the block justifies exemptions for skills the dict does not record: "
+        f"{[(name, sentence[:90]) for name, sentence in unlisted]}. Say the entry was "
+        "dropped and when, or delete the sentence — a retired skill holds no "
+        "exemption, and this is the sentence the next reader will otherwise trust."
+    )
+    # Teeth for the rule just run: `not unlisted` is also satisfied by a block that
+    # stopped recording its own prunings, so the pruning history has to be there.
+    pruned_named = sorted(
+        name for name in named_skills - set(EXPECTED_VAULT_WRITE_WRITERS) if name in block
+    )
+    assert pruned_named, (
+        "the block names no dropped entry, so the rule above passed by saying nothing "
+        "about any of them — keep the pruning history, in a `dropped` sentence"
+    )
 
 
 @pytest.mark.live_vault

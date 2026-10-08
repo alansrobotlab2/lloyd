@@ -178,13 +178,21 @@ def test_no_recorded_reflection_writer_expectation_names_a_retired_skill(retired
         "quarantined status), so the equality assert in "
         "test_skill_reflection_archive.py can never pass while it is listed."
     )
-    # Positive control that this guard has teeth today: the two skills whose entries
-    # #1270 deleted are still archived. Without it, `not stale` would also be satisfied
-    # by their reappearing as active skills.
-    assert {"nightly-prompt-audit", "nightly-behavior-test"} <= set(retired), (
-        f"the two #900 skills this pin exists for are no longer archived "
-        f"(retired now: {sorted(retired)}). If they were un-archived, their entries "
-        "belong back in EXPECTED_VAULT_WRITE_WRITERS — do not delete this check"
+    # Positive control that this guard has teeth today: the three skills whose entries
+    # #1270 and #2405 deleted are still archived. Without it, `not stale` would also be
+    # satisfied by their reappearing as active skills — and un-archiving is the wrong
+    # half to move, because in both cases the archiving was the correct call and the
+    # recorded exemption was the stale side.
+    assert {
+        "nightly-prompt-audit",
+        "nightly-behavior-test",
+        "autonomy-reflection-pipeline",
+    } <= set(retired), (
+        f"a skill this pin exists for is no longer archived "
+        f"(retired now: {sorted(retired)}). If one was un-archived, its entry belongs "
+        "back in EXPECTED_VAULT_WRITE_WRITERS in that same change, and the block above "
+        "the dict has to name it as a recorded exemption rather than as a dropped one — "
+        "do not delete this check"
     )
 
 
