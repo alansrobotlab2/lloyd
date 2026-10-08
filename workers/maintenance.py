@@ -539,6 +539,65 @@ def last_sweep(queue: WorkQueue) -> Optional[dict]:
 #: until the orphan's own wait window is nearly spent.
 _drill_proc: Optional[subprocess.Popen] = None
 
+#: The stamp this process wrote for the child it spawned, and the stamp it has
+#: already pronounced an outcome on. Both process-local, both for one reason: the
+#: watermark OUTLIVES the handle. `last_drill_at` says a drill was spawned;
+#: `_drill_proc` is the child THIS process owns, and after a restart the new
+#: process has the first and not the second, so nothing in the seat could tell "a
+#: firing produced nothing" from "a child of mine is still waiting" (#2431). The
+#: stamp the seat wrote itself is what tells them apart — a stamp that is not
+#: this process's own is a spawn nobody here is watching — and
+#: `_drill_outcome_reported` is what stops the answer arriving once a minute for
+#: the rest of the hour.
+_drill_stamp_here: Optional[str] = None
+_drill_outcome_reported: Optional[str] = None
+
+
+def _drill_stamp_of(value: Optional[str]) -> Optional[datetime]:
+    """A drill watermark stamp as a datetime, or None when it will not parse.
+
+    The caller decides what an unparseable stamp means, and for the interval gate
+    that is "due, and rewrite it" — `test_an_unreadable_watermark_is_read_as_due_not_as_never_run`
+    pins which way that trade went. The outcome note below reads the same None as
+    "no spawn time to compare against" instead.
+    """
+    try:
+        return datetime.fromisoformat(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _drill_state_note(spawned_at: Optional[datetime]) -> str:
+    """One clause saying what the state file currently says about a drill that has
+    ended — the half of the verdict line the exit code cannot carry.
+
+    A child that exits 0 having recorded nothing is the case that matters: on
+    2026-10-08 the 18:05:17Z firing left no reading, no `refused:` text on stderr
+    and no line in the log, so an hour of the series simply was not there and the
+    only way to find that out was to diff the file against `server.err` by hand.
+
+    `spawned_at` loses its sub-second part before the comparison, because
+    `mitigation_state.record()` stamps `at` with `timespec="seconds"`: a child
+    spawned at 12:00:00.800 that records at 12:00:00.900 writes `12:00:00`, and
+    comparing the two whole would report it as predating its own spawn — a false
+    accusation of a no-op firing, in the one line this round exists to make
+    trustworthy. The comparison errs the other way by at most a second.
+
+    Import of `app.mitigation_state` is lazy and by name for the same reason the
+    drill's argv is a subprocess and not a call: this module is imported by the
+    scheduler loop, and the state file is reached only on the two lines that need
+    it — once per reaped child, once per orphaned stamp — not on every 60 s tick.
+    """
+    from app import mitigation_state
+
+    newest = mitigation_state.newest_reading_at()
+    if newest is None:
+        return "the state file holds no reading with a usable timestamp"
+    if spawned_at is not None and newest < spawned_at.replace(microsecond=0):
+        return (f"the newest reading predates the spawn ({newest.isoformat()} "
+                f"against {spawned_at.isoformat()}), so this drill recorded nothing")
+    return f"newest reading {newest.isoformat()}"
+
 #: The checkout this module runs from, which is the cwd a `-m scripts.…` argv
 #: needs — the module's own tree, so a candidate venv run from a worktree spawns
 #: the drill out of that same worktree and never out of production's.
@@ -582,8 +641,16 @@ def maybe_run_mitigation_drill(queue: WorkQueue, cfg: Optional[dict] = None, *,
     The watermark is stamped BEFORE the spawn, not after: a failed spawn costs an
     hour, while a successful spawn whose stamp failed costs a second drill running
     beside the first, and the second is the failure the gate exists to prevent.
+
+    Two of the four gates end a drill's story rather than starting one, and both
+    exist because a firing used to be able to end with no line at all (#2431
+    clause 4): the reap says what the child this process spawned returned, and
+    the orphan report says what became of a spawn this process cannot see.
+    Together they cover every way a firing ends — a restart between the spawn and
+    the next tick loses the handle and lands in the second branch, which is the
+    branch that says so rather than saying nothing.
     """
-    global _drill_proc
+    global _drill_proc, _drill_stamp_here, _drill_outcome_reported
 
     settings = {**MITIGATION_DRILL_DEFAULTS, **((cfg or {}).get("mitigation_drill") or {})}
     if not settings["enabled"]:
@@ -593,21 +660,39 @@ def maybe_run_mitigation_drill(queue: WorkQueue, cfg: Optional[dict] = None, *,
         rc = _drill_proc.poll()
         if rc is None:
             return {"skipped": "drill-already-running", "pid": _drill_proc.pid}
-        logger.info("Mitigation drill exited with rc=%s", rc)
+        logger.info("Mitigation drill exited with rc=%s; %s", rc,
+                    _drill_state_note(_drill_stamp_of(_drill_stamp_here)))
         _drill_proc = None
 
     stamp = now() if now else datetime.now(timezone.utc)
     interval = int(settings["interval_seconds"])
     last = queue.wm_get(SOURCE, _LAST_DRILL_AT)
+
+    # A stamp in the watermark that this process did not write, with no child of
+    # ours alive to poll, is a drill whose ending nobody here witnessed. The
+    # handle dies with the process that spawned it, so the ordinary way to arrive
+    # here is a restart that orphaned the child — and the ordinary consequence was
+    # silence: the gate below answers "not-due" for the rest of that hour, the
+    # child is somebody else's orphan, and the hour is simply missing from the
+    # series with no line beside it. One line per stamp, on the way past.
+    if (last and _drill_proc is None and last != _drill_stamp_here
+            and last != _drill_outcome_reported):
+        _drill_outcome_reported = last
+        logger.warning(
+            "Mitigation drill outcome unknown: a drill was spawned at %s by a "
+            "process whose handle this one does not have (handles die with the "
+            "process that spawned them, so a restart orphans the child); %s",
+            last, _drill_state_note(_drill_stamp_of(last)))
+
     if last:
-        try:
-            elapsed = (stamp - datetime.fromisoformat(last)).total_seconds()
-        except ValueError:
-            elapsed = interval  # unparseable watermark: treat as due and rewrite it
+        parsed = _drill_stamp_of(last)
+        elapsed = (interval if parsed is None
+                   else (stamp - parsed).total_seconds())
         if elapsed < interval:
             return {"skipped": "not-due", "seconds_left": round(interval - elapsed)}
 
     queue.wm_set(SOURCE, _LAST_DRILL_AT, stamp.isoformat())
+    _drill_stamp_here = stamp.isoformat()
     argv = mitigation_drill_argv(settings)
     try:
         _drill_proc = (popen or subprocess.Popen)(

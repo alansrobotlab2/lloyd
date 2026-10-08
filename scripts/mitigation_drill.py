@@ -294,6 +294,7 @@ async def drill_pool_pause(pause: Optional[Callable[[Any], None]] = None,
 # ── the drill ───────────────────────────────────────────────────────────────
 
 async def run(status: Optional[dict] = None, *, state_path: Optional[Path] = None,
+              invocation: Optional[str] = None,
               **overrides: Any) -> dict[str, Any]:
     """Run every surface and return the report. `overrides` replace a surface's
     control (`session_cancel=`, `pool_pause=`), which is how the tests prove a
@@ -301,7 +302,14 @@ async def run(status: Optional[dict] = None, *, state_path: Optional[Path] = Non
 
     Every measured surface is merged into `app.paths.MITIGATION_DRILL_STATE`
     (or `state_path`), which `GET /api/workers/status` reports as `mitigation`.
-    A refused drill measured nothing and writes nothing."""
+    A refused drill measured nothing and writes nothing.
+
+    `invocation` is written onto each reading as the command line responsible
+    for it, and only `main()` passes it: an in-process caller of `run()` — a
+    test, a REPL, whatever loop left the 20 readings #2431 is about — leaves it
+    null, and that is what makes the file self-explaining. `pid` is stamped by
+    `mitigation_state.record()` itself, so attribution does not depend on any
+    caller remembering to pass it."""
     reason = refusal(status)
     if reason:
         return {"refused": reason, "surfaces": [], "ok": False}
@@ -311,7 +319,7 @@ async def run(status: Optional[dict] = None, *, state_path: Optional[Path] = Non
     ]
     from app import mitigation_state
     try:
-        mitigation_state.record(surfaces, path=state_path)
+        mitigation_state.record(surfaces, path=state_path, invocation=invocation)
     except Exception as e:  # the measurement is the report; a lost write is a note
         print(f"mitigation drill: could not record state: {e}", file=sys.stderr)
     return {
@@ -324,6 +332,22 @@ async def run(status: Optional[dict] = None, *, state_path: Optional[Path] = Non
                           if s["classification"] == "dispatch-only"],
         "ok": all(s["ok"] for s in surfaces),
     }
+
+
+def _invocation() -> str:
+    """This process's own command line, as it goes onto every reading it writes.
+
+    The seat spawns `[python, "-m", "scripts.mitigation_drill",
+    "--wait-free-window", "3600"]`, and python rewrites `argv[0]` to the module's
+    FILE path for a `-m` launch — so the recorded string names
+    `scripts/mitigation_drill.py` rather than the literal `-m
+    scripts.mitigation_drill`. The path is the better half anyway: it says WHICH
+    checkout drilled, and `sys.executable` leads it because a candidate venv
+    booted from a worktree and the production backend both write to the same
+    state file. Neither fact is recoverable afterwards from the reading alone,
+    which is exactly the hole #2431 fell into.
+    """
+    return " ".join([sys.executable, *sys.argv])
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -350,7 +374,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
     else:
         status = live_status(args.status_url)
-    report = asyncio.run(run(status))
+    report = asyncio.run(run(status, invocation=_invocation()))
     print(json.dumps(report, indent=2))
     if report["refused"]:
         print(f"refused: {report['refused']}", file=sys.stderr)

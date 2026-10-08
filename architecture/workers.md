@@ -826,6 +826,25 @@ in-process, and classifies each by what it measured: `session_cancel` as
 control stubbed to a no-op as `no-op`, which exits non-zero. It refuses while
 `round_hold` is engaged.
 
+**A reading is not a firing.** The drill's readings land in
+`paths.MITIGATION_DRILL_STATE` and `/api/workers/status` publishes them per
+surface, so the count there is what "has this control been drilled five times"
+gets answered from — and on 2026-10-08 that answer was `n: 20` for a file whose
+twenty readings were all stamped inside ten seconds, written by one process
+looping while exactly two seat spawns were logged (#2431). Two things close
+that. Each reading carries the writing process's `pid`, and the CLI stamps the
+command line it was run under (`invocation`), so a seat firing and an ad-hoc
+caller of `run()` are told apart off the bytes rather than off `server.err`; and
+`mitigation_state.read()` publishes `spaced_firings` beside `n` — how many
+firings the stored readings could have come from at `SPACING_GAP_S` apart, which
+is 1 for that burst and rises only as readings land further apart. `n` stays the
+readings, because that is what was measured. And the seat logs the ending of
+every firing it can see: a reaped child's exit code with what the state file
+says beside it, and a WARNING naming the stamp when the only evidence of a spawn
+is a `last_drill_at` its own process did not write — a handle dies with the
+process that spawned it, so a restart used to cost an hour of the series with no
+line anywhere.
+
 The dashboard reads the pool through `app/routers/dashboard.py::_workers`,
 off the loop via `asyncio.to_thread`; `completed` is excluded from the "open"
 counts because it dominates the depth table.

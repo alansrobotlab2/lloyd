@@ -756,18 +756,68 @@ async def test_the_status_carries_each_surfaces_last_measured_mitigation(q, monk
     body = await _status_body(q, monkeypatch)
     # #2153: every surface entry now carries the aggregate over its history too.
     # This fixture records once, so the median IS that reading and n is 1 — the
-    # exact-equality form is kept deliberately, because a fifth key here is a
-    # fifth thing `/api/workers/status` sends on every call, and a null median
+    # exact-equality form is kept deliberately, because a sixth key here is a
+    # sixth thing `/api/workers/status` sends on every call, and a null median
     # for a dispatch-only control is the honest answer rather than a missing
     # measurement (`seconds: None` already says a pause times no stop).
+    # #2431 added the sixth, `spaced_firings`: one reading is one firing.
     assert body["mitigation"] == {
         "session_cancel": {"classification": "in-flight", "seconds": 0.021,
                            "at": "2026-09-24T20:00:00+00:00",
-                           "median_seconds": 0.021, "n": 1},
+                           "median_seconds": 0.021, "n": 1, "spaced_firings": 1},
         "pool_pause": {"classification": "dispatch-only", "seconds": None,
                        "at": "2026-09-24T20:00:00+00:00",
-                       "median_seconds": None, "n": 1},
+                       "median_seconds": None, "n": 1, "spaced_firings": 1},
     }
+
+
+async def test_the_route_still_publishes_last_median_and_n_for_a_reading_with_no_pid(
+        q, monkeypatch, tmp_path):
+    """#2431 clause 5: the shape the route published before, still published.
+
+    A hand-written reading carrying the four keys the pre-#2431 writer emitted —
+    no `pid`, no `invocation`, no `history` — must still come back with its
+    `classification`, `seconds` and `at`, `n: 1` and a usable `median_seconds`.
+    This is the file that exists on the box right now: the change ships to a tree
+    whose state file was written by the previous writer, and if the route went
+    quiet, or reported n=0, on those bytes the drill series would restart from
+    nothing at exactly the moment it is being re-observed.
+
+    And the burst the route could not previously disown, published: 20 readings
+    stamped inside ten seconds is `n: 20` AND `spaced_firings: 1`, so the owed
+    check's `n >= 5` can no longer be satisfied by one process looping.
+    """
+    import app.paths as paths
+    import json
+    from app import mitigation_state
+
+    state = tmp_path / "mitigation_drill.json"
+    monkeypatch.setattr(paths, "MITIGATION_DRILL_STATE", state)
+
+    state.write_text(json.dumps({"surfaces": {
+        "session_cancel": {"classification": "in-flight", "seconds": 0.07,
+                           "ok": True, "at": "2026-10-08T17:17:44+00:00"}}}),
+        encoding="utf-8")
+    legacy = (await _status_body(q, monkeypatch))["mitigation"]["session_cancel"]
+    assert (legacy["classification"], legacy["seconds"], legacy["at"]) == (
+        "in-flight", 0.07, "2026-10-08T17:17:44+00:00"), legacy
+    assert (legacy["n"], legacy["median_seconds"], legacy["spaced_firings"]) == (
+        1, 0.07, 1), f"a pre-#2431 reading reads as {legacy}"
+
+    for i in range(20):
+        mitigation_state.record(
+            [{"surface": "session_cancel", "classification": "in-flight",
+              "seconds": 0.2, "ok": True}],
+            at=f"2026-10-08T17:17:{40 + i // 2:02d}+00:00")
+    burst = (await _status_body(q, monkeypatch))["mitigation"]["session_cancel"]
+    assert (burst["n"], burst["spaced_firings"]) == (20, 1), (
+        f"20 readings inside ten seconds published {burst}: `n` is the readings, "
+        "`spaced_firings` is the firings they could have come from, and a check "
+        "that wants five hourly firings has to read the second"
+    )
+    assert burst["at"] == "2026-10-08T17:17:49+00:00", (
+        "the newest reading is still the one published beside the counts"
+    )
 
 
 async def test_the_status_median_is_the_history_and_not_the_last_drill(q, monkeypatch, tmp_path):

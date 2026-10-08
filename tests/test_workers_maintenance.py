@@ -390,3 +390,144 @@ def test_the_seat_never_raises_out_of_the_drill_tick(q, monkeypatch, caplog):
         "the seat swallowed the failure without a word. A drill series going quiet with "
         "no line beside it is the shape of this whole item"
     )
+
+
+# ── #2431 clause 4: every firing that records nothing leaves a line ─────────
+#
+# `server.err` for 2026-10-08 holds a spawn at 18:05:17Z and no exit line beside
+# it, no `refused:` text, no reading in the state file, and no live child when it
+# was checked at 18:36Z: an hour of the drill series went missing with nothing
+# written about it anywhere. Two endings were silent, and both are a line now —
+# the reap of a child this process owned, and the orphan report for a spawn whose
+# handle died with a previous process.
+
+
+@pytest.fixture
+def no_verdict_state(monkeypatch):
+    """#2431 added two more pieces of process-local seat state beside the handle:
+    the stamp THIS process wrote, and the stamp it has already reported an outcome
+    for. Node-local rather than bolted onto the autouse fixture above, which every
+    existing node in this file depends on and none of them asked to change.
+
+    Both start empty for the same reason the handle does: inheriting either is
+    inheriting a verdict, and the orphan report is precisely a claim about which
+    process wrote a given stamp."""
+    monkeypatch.setattr(M, "_drill_stamp_here", None)
+    monkeypatch.setattr(M, "_drill_outcome_reported", None)
+
+
+def _drill_state_at(state, at):
+    """One reading in the state file, stamped `at`, written by the real writer."""
+    from app import mitigation_state
+    mitigation_state.record(
+        [{"surface": "session_cancel", "classification": "in-flight",
+          "seconds": 0.2, "ok": True}], path=state, at=at)
+
+
+def test_a_drill_child_that_recorded_nothing_says_so_beside_its_exit_code(
+        q, popen, monkeypatch, caplog, tmp_path, no_verdict_state):
+    """#2431 clause 4, the branch that runs when the handle was NOT lost.
+
+    The 2026-10-08 case re-made: a child this seat spawned, exiting 0, with the
+    state file's newest reading predating the spawn — a drill that measured
+    nothing and looked, from every log line in the file, like it had not been
+    tried at all. The line now names the rc AND what the witness file says, so
+    the two facts are on one line rather than in two files a human has to diff.
+
+    The control is the second half of the same node, same rc: a child that DID
+    record leaves the exit code with the reading's timestamp beside it, and must
+    not be accused of recording nothing. And neither half emits the orphan report,
+    because this process wrote the stamp the watermark holds — which is the only
+    thing that distinguishes "my child, reaped" from "someone else's spawn, lost".
+    """
+    import app.paths as paths
+    from app import mitigation_state
+
+    state = tmp_path / "mitigation_drill.json"
+    monkeypatch.setattr(paths, "MITIGATION_DRILL_STATE", state)
+    q.wm_set(M.SOURCE, "last_drill_at", T0.isoformat())
+    monkeypatch.setattr(M, "_drill_stamp_here", T0.isoformat())
+    monkeypatch.setattr(M, "_drill_proc", _Proc(pid=4242, rc=0))
+    _drill_state_at(state, (T0 - timedelta(hours=1)).isoformat())
+
+    with caplog.at_level(logging.INFO, logger="lloyd-workers.maintenance"):
+        out = _tick(q, CFG_ON, when=T0 + timedelta(minutes=30), popen=popen)
+        silent = [r.getMessage() for r in caplog.records]
+        caplog.clear()
+        monkeypatch.setattr(M, "_drill_proc", _Proc(pid=4243, rc=0))
+        _drill_state_at(state, (T0 + timedelta(minutes=10)).isoformat())
+        _tick(q, CFG_ON, when=T0 + timedelta(minutes=30), popen=popen)
+        recorded = [r.getMessage() for r in caplog.records]
+
+    assert out["skipped"] == "not-due", (
+        "the reap is a side effect of the tick, and the interval gate still "
+        f"holds it off spawning another: {out}"
+    )
+    assert any("Mitigation drill exited with rc=0" in m and "recorded nothing" in m
+               for m in silent), (
+        f"a drill that exited 0 having written no reading left {silent}: this is "
+        "the exact shape of the 18:05:17Z firing that vanished without a trace"
+    )
+    assert not any("outcome unknown" in m for m in silent + recorded), (
+        "this process wrote the stamp and reaped its own child, so the orphan "
+        "report would be a lie: the two branches are told apart by "
+        "`_drill_stamp_here` and nothing else"
+    )
+    assert any("Mitigation drill exited with rc=0" in m and "recorded nothing" not in m
+               and (T0 + timedelta(minutes=10)).isoformat() in m
+               for m in recorded), (
+        f"a drill that DID record left {recorded}: the line must cite the newest "
+        "reading, or it is an accusation rather than a verdict"
+    )
+    assert mitigation_state.read(path=state)["session_cancel"]["n"] == 2
+
+
+def test_a_drill_orphaned_by_a_restart_reports_its_outcome_as_unknown_once(
+        q, popen, monkeypatch, caplog, tmp_path, no_verdict_state):
+    """#2431 clause 4, the branch that runs when the handle WAS lost.
+
+    `_drill_proc` is process-local, so a backend restart between the spawn and the
+    next tick leaves the new process holding a `last_drill_at` stamp it did not
+    write and no child to poll. Before #2431 the gate then answered `not-due` for
+    the rest of the hour and the firing's fate was never recorded anywhere; now the
+    first tick past such a stamp says the outcome is unknown, names the stamp, and
+    says what the state file holds.
+
+    The second tick is the control that makes it a report rather than an alarm: the
+    seat ticks every 60 s, and one line per orphaned stamp is the whole claim —
+    twelve lines an hour about a fact that cannot change is the noise that gets a
+    log line ignored, which is how the first one stayed unread.
+    """
+    import app.paths as paths
+
+    state = tmp_path / "mitigation_drill.json"
+    monkeypatch.setattr(paths, "MITIGATION_DRILL_STATE", state)
+    orphaned = (T0 - timedelta(minutes=10)).isoformat()
+    q.wm_set(M.SOURCE, "last_drill_at", orphaned)
+
+    with caplog.at_level(logging.INFO, logger="lloyd-workers.maintenance"):
+        first = _tick(q, CFG_ON, popen=popen)
+        lines = [r for r in caplog.records]
+        caplog.clear()
+        second = _tick(q, CFG_ON, popen=popen)
+        again = [r for r in caplog.records]
+
+    assert first["skipped"] == second["skipped"] == "not-due"
+    assert not popen.calls, "an orphan report is a verdict, not a licence to re-spawn"
+    unknown = [r.getMessage() for r in lines if "outcome unknown" in r.getMessage()]
+    assert len(unknown) == 1, f"first tick left {len(unknown)} orphan lines: {unknown}"
+    assert orphaned in unknown[0], (
+        f"the line must name the stamp it is judging: {unknown[0]}"
+    )
+    assert any(r.levelno >= logging.WARNING for r in lines), (
+        "a lost firing is worth a WARNING: the default threshold on some readers "
+        "is WARNING, and an hour silently missing from the series is the failure "
+        "this item exists to catch"
+    )
+    assert "no reading" in unknown[0], (
+        f"the state file was absent, and the line says so: {unknown[0]}"
+    )
+    assert not [r for r in again if "outcome unknown" in r.getMessage()], (
+        "the same stamp reported twice; the seat ticks every 60 s and the dedupe "
+        "is what keeps the line readable"
+    )

@@ -410,7 +410,7 @@ def test_read_publishes_median_and_n_per_surface_and_still_says_never_run(tmp_pa
     _record(state, "session_cancel", 0.042, "only")
     assert mitigation_state.read(path=state)["session_cancel"] == {
         "classification": "in-flight", "seconds": 0.042, "at": "only",
-        "median_seconds": 0.042, "n": 1,
+        "median_seconds": 0.042, "n": 1, "spaced_firings": 1,
     }, "a one-reading series must report its own stop-time as its median"
 
     _record(state, "pool_pause", None, "only", classification="dispatch-only")
@@ -428,3 +428,239 @@ def test_read_publishes_median_and_n_per_surface_and_still_says_never_run(tmp_pa
         f"a file written before history existed reads as {old}: the reading it "
         "does hold must count, or the route goes quiet on a control it measured"
     )
+
+
+# ── #2431: whose reading is this, and how many firings is that ──────────────
+#
+# `n: 20` per surface, every stamp inside 17:17:34→17:17:44+00:00, against two
+# logged seat spawns (`server.err`: 17:04:39Z → rc=0 at 17:06:07Z, and 18:05:17Z
+# with no exit line). A count of readings is not a count of drillings, and
+# nothing published — and nothing in the file — could tell a ten-second burst
+# from twenty hourly firings. Attribution is now in the bytes (pid per reading,
+# command line from the CLI) and `spaced_firings` is the published count of
+# firings the readings could evidence.
+
+def test_every_reading_carries_the_pid_that_wrote_it(tmp_path):
+    """#2431 clause 1 — twenty readings from one process, readable off the file.
+
+    The burst, re-made: one process, twenty `record()` calls, every stamp inside
+    ten seconds. Before this change the file's only answer to "how many drillings
+    produced these?" was `n: 20`, and the correct answer here is 1. Now one pid
+    appears twenty times, which is the finding, and no log archaeology is needed
+    to reach it. The same pid goes on the surface's top-level keys, because that
+    is the copy the pre-#2153 readers look at.
+    """
+    import json
+    import os
+
+    state = tmp_path / "mitigation_drill.json"
+    for i in range(20):
+        _record(state, "session_cancel", float(i + 1),
+                f"2026-10-08T17:17:{34 + i // 2:02d}+00:00")
+
+    hist = _history(state, "session_cancel")
+    assert len(hist) == 20 and all(r["pid"] == os.getpid() for r in hist), (
+        f"{len(hist)} readings, pids "
+        f"{sorted({r.get('pid') for r in hist})}; this process wrote all of them, "
+        "so the file must say so twenty times over"
+    )
+    top = json.loads(state.read_text())["surfaces"]["session_cancel"]
+    assert top["pid"] == os.getpid(), (
+        "the latest-reading copy beside classification/seconds/at carries the "
+        "same attribution as the history entry it duplicates"
+    )
+
+
+def test_the_cli_records_the_invocation_that_wrote_it(tmp_path):
+    """#2431 clause 1+2 across a real process boundary — the seat's spawn in a child.
+
+    A `python -m scripts.mitigation_drill` child (the maintenance seat's own
+    argv shape, pinned by
+    `tests/test_workers_maintenance.py::test_the_argv_is_the_module_invocation_with_a_bounded_wait`)
+    drills into the state file that this test's own in-process `run()` already
+    wrote, through `LLOYD_DATA` — the env var `app.paths` honours, and the reason
+    this is safe to run against the real module default.
+
+    The two readings are then told apart by what #2431 could not: the child's
+    carries its pid and the command line that launched it, the in-process one
+    carries this pid and a null invocation. `spaced_firings` is 1 for the pair —
+    two processes a second apart are one cluster by the spacing rule — which is
+    exactly why the two fields are complements: spacing says how many firings the
+    clock can evidence, the pid and invocation say which processes actually
+    wrote. Python rewrites `argv[0]` to the module's FILE path for a `-m` launch,
+    so the recorded string names `mitigation_drill.py`, and it names the checkout
+    the drill ran from — a candidate venv and the production backend share one
+    state file, and that is the half the item needed most.
+    """
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    state = tmp_path / "mitigation_drill.json"
+    repo_root = Path(D.__file__).resolve().parents[1]
+    import asyncio
+    asyncio.run(D.run(None, state_path=state))
+
+    argv = [sys.executable, "-m", "scripts.mitigation_drill",
+            "--status-url", "http://127.0.0.1:9/x"]
+    # Output to FILES, not pipes, and in its own process group. A pipe was the
+    # first shape and it stalled the node: the child printed its entire report
+    # (visible in the TimeoutExpired payload) and the pipe then never reached EOF,
+    # so `communicate` spent its whole timeout waiting on a writer with nothing
+    # left to say. What this node needs is the exit code and the state file, and
+    # a file-backed redirect asks for neither of the two things a pipe couples it
+    # to. The seat itself already redirects both to DEVNULL.
+    #
+    # `Popen`/`wait` rather than `subprocess.run` because the pid IS the claim:
+    # `CompletedProcess` does not carry one, and asserting the reading names the
+    # writing process's pid against a pid the test never held would pin nothing.
+    log = tmp_path / "cli.log"
+    with open(log, "wb") as fp:
+        proc = subprocess.Popen(argv, cwd=str(repo_root), stdin=subprocess.DEVNULL,
+                                stdout=fp, stderr=fp, start_new_session=True,
+                                env={**os.environ, "LLOYD_DATA": str(tmp_path)})
+        try:
+            rc = proc.wait(timeout=180)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise AssertionError(
+                f"the CLI child {proc.pid} never exited. log: "
+                f"{log.read_text()[-2000:]}") from None
+    assert rc == 0, f"the CLI exited {rc}.\nlog: {log.read_text()[-2000:]}"
+
+    hist = _history(state, "session_cancel")
+    assert len(hist) == 2, f"expected the in-process reading plus the child's: {hist}"
+    mine, child = hist
+    assert mine["pid"] == os.getpid() and mine["invocation"] is None, (
+        "an in-process caller of run() that passed no invocation must record a "
+        f"null one, which is itself the answer: {mine}"
+    )
+    assert child["pid"] == proc.pid and child["pid"] != os.getpid(), (
+        f"the child wrote {child}; expected its own pid {proc.pid}, not the "
+        "test process's — a reading whose pid is the reader's is the misattribution "
+        "#2431 is about"
+    )
+    assert child["invocation"] and "mitigation_drill" in child["invocation"] \
+            and str(repo_root) in child["invocation"] \
+            and "--status-url" in child["invocation"], (
+        f"the CLI must record the command line that wrote its readings, got "
+        f"{child['invocation']!r}: the module invocation, the checkout it ran "
+        "from and the flags it was given are the three things that told a seat "
+        "firing from an ad-hoc caller, and none of them were recoverable after "
+        "the fact"
+    )
+    assert mitigation_state.read(path=state)["session_cancel"]["n"] == 2
+    assert mitigation_state.read(path=state)["session_cancel"]["spaced_firings"] == 1, (
+        "two writings one second apart are one cluster by the spacing rule even "
+        "though two processes did them: spacing counts what the clock can "
+        "separate, and only the pid separates these"
+    )
+    assert json.loads(state.read_text())["surfaces"]["pool_pause"]["history"][-1]["pid"] \
+        == proc.pid, (
+        "attribution goes on every surface one drill measures, not just the one "
+        "with a stop-time — the burst was 20 readings on BOTH surfaces"
+    )
+
+
+def test_twenty_readings_inside_ten_seconds_are_one_firing_not_twenty(tmp_path):
+    """#2431 clause 3 — the published count that a burst cannot satisfy.
+
+    The file found on 2026-10-08 re-made: 20 readings per surface, stamps spanning
+    10 s, seconds 1.0…20.0 so the median has a known value. `n` says 20 and must
+    keep saying it — those are the readings that were taken, and HISTORY_CAP is
+    still the 20 the cap test pins. `spaced_firings` says 1, which is the answer
+    the owed check actually wanted. `median_seconds` is unchanged at 10.5: the
+    new field is additive, and a slow median is still a slow median however the
+    readings arrived.
+    """
+    state = tmp_path / "burst.json"
+    for i in range(20):
+        _record(state, "session_cancel", float(i + 1),
+                f"2026-10-08T17:17:{34 + i // 2:02d}+00:00")
+
+    got = mitigation_state.read(path=state)["session_cancel"]
+    assert got["n"] == 20 == mitigation_state.HISTORY_CAP, (
+        f"the burst filled the cap and `n` is still the readings on disk: {got}"
+    )
+    assert got["spaced_firings"] == 1, (
+        f"20 readings inside ten seconds reported {got['spaced_firings']} "
+        "firings; the whole point of the field is that this number is 1"
+    )
+    assert got["median_seconds"] == 10.5, (
+        f"the median moved with the new field: {got['median_seconds']}"
+    )
+    assert 10.0 < mitigation_state.SPACING_GAP_S < 3600, (
+        f"SPACING_GAP_S={mitigation_state.SPACING_GAP_S}: it has to exceed the "
+        "ten-second span of the burst it must count as one, and stay under the "
+        "seat's hourly interval or it merges genuine hourly firings into one"
+    )
+
+
+def test_the_firing_count_rises_only_as_readings_land_further_apart(tmp_path):
+    """#2431 clause 3, the other direction — it is a spacing count, not an age count.
+
+    Four readings ten seconds apart, then one an hour later, then one an hour
+    after that: 6 readings, 3 firings. Same file, same `n`, and the count moves
+    only because the stamps moved. A run of readings whose `at` will not parse
+    (the pre-#2153 file wrote bare words) reports the one firing the file at
+    least evidences rather than 0, because `n: 5, spaced_firings: 0` reads as
+    "measured five times, caused by nothing".
+    """
+    from datetime import datetime, timedelta, timezone
+
+    base = datetime(2026, 10, 8, 17, 17, 34, tzinfo=timezone.utc)
+    stamps = [0, 10, 20, 30, 3600, 7200]
+    state = tmp_path / "mixed.json"
+    for off in stamps:
+        _record(state, "session_cancel", 0.2,
+                (base + timedelta(seconds=off)).isoformat(timespec="seconds"))
+
+    got = mitigation_state.read(path=state)["session_cancel"]
+    assert (got["n"], got["spaced_firings"]) == (6, 3), (
+        f"six stamps at {stamps}s should cluster into 3 firings, got {got}"
+    )
+
+    words = tmp_path / "words.json"
+    for at in ("first", "second", "third"):
+        _record(words, "session_cancel", 0.2, at)
+    unparseable = mitigation_state.read(path=words)["session_cancel"]
+    assert (unparseable["n"], unparseable["spaced_firings"]) == (3, 1), (
+        f"three readings with no parseable clock reported {unparseable}: the "
+        "honest floor is one firing evidenced, never zero"
+    )
+
+
+def test_newest_reading_at_is_the_seat_s_witness_and_none_when_there_is_none(tmp_path):
+    """#2431 clause 4's seam, pinned where it is defined.
+
+    `workers/maintenance.py` asks the state module one question about a drill that
+    has ended: did anything get written, and when was the newest thing there? The
+    answer is the maximum over EVERY surface (the seat has no business knowing
+    which control drilled) and None for no file, an unreadable file, and stamps
+    that will not parse — a seat that could raise here is a seat that stops
+    ticking over a malformed state file.
+    """
+    from datetime import datetime, timezone
+
+    absent = tmp_path / "absent" / "mitigation_drill.json"
+    assert mitigation_state.newest_reading_at(path=absent) is None
+
+    state = tmp_path / "mitigation_drill.json"
+    _record(state, "session_cancel", 0.2, "2026-10-08T17:06:07+00:00")
+    _record(state, "pool_pause", None, "2026-10-08T18:51:40+00:00",
+            classification="dispatch-only")
+    assert mitigation_state.newest_reading_at(path=state) == datetime(
+        2026, 10, 8, 18, 51, 40, tzinfo=timezone.utc), (
+        "the max must be across surfaces: the seat asks whether anything was "
+        "written, not whether one control was"
+    )
+
+    words = tmp_path / "words.json"
+    _record(words, "session_cancel", 0.2, "old")
+    assert mitigation_state.newest_reading_at(path=words) is None
+
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    assert mitigation_state.newest_reading_at(path=broken) is None
