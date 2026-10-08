@@ -216,7 +216,12 @@ asked in order. Anything that answers no is a **hold**, not a failure:
    once per process like the no-skill gate (`_no_frequency_warned`). #24's
    `frequency: 6x-daily` is not in that map and runs only because
    `runs_per_day: 6` is consulted first; the linter warns on such a file the
-   day `runs_per_day` goes missing.
+   day `runs_per_day` goes missing, **and** on the opposite error (#2445) — a
+   word that IS in the map contradicting a `runs_per_day` that is present, which
+   is what #30 did for 47 days (`daily` + `3`, resolved 28800 s, dispatched 3×/day)
+   while the linter passed all 38 files. The two are silent on `weekly` +
+   `0.14` (2.04% apart: two decimals of 1/7) and on `6x-daily` + `6` (the label
+   is outside the map on purpose).
 4. **No failure cooldown, and the dependency is met.**
 5. **The current hour is a preferred hour.**
 

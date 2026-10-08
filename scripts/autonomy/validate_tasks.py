@@ -27,6 +27,12 @@ key is present (#811) — three classes the scheduler only objects to at dispatc
     `_record_failure(kind="infra")` keeps off the retry budget.
   * `skill_name`/`skill_path` that resolves to no SKILL.md under the skills dirs,
     which fails at dispatch with "Skill not found".
+  * `frequency:` and `runs_per_day:` contradicting each other (#2445) — #30
+    declared `frequency: daily` beside `runs_per_day: 3` and the scheduler obeys
+    the number, so a job that said once a day dispatched three times a day for 47
+    days while this script reported 0 warnings over 38 files. The `frequency:`
+    word being outside the map with NO `runs_per_day` beside it (#815) is the
+    other half: that pair resolves no interval at all and never dispatches.
   * `requires_slot:` naming a program whose enabled flag is false (#1577) —
     `agent-llm-secondary` while `secondary_enabled: false`, the shape that retired
     #85. No name check can see this one: `secondary` is still a key of `models:`,
@@ -105,6 +111,35 @@ def _clean(value) -> str:
 
 def _is_nullish(value: str) -> bool:
     return value.strip().lower() in NULLISH
+
+
+#: How far a `runs_per_day:` may sit from the `frequency:` word written beside it
+#: before the pair is a contradiction instead of a rounding (#2445). Both ends of
+#: the gap are measured on the live board, not guessed: the three files carrying
+#: `weekly` + `runs_per_day: 0.14` resolve 617142.9 s against the word's 604800 s,
+#: 2.04% apart because 0.14 is two decimals of 1/7, while #30's `daily` + `3`
+#: resolved 28800 s against 86400 s — 66.67% apart, which is the defect that fired
+#: a daily job three times a day. It stays a warning, never a parse failure: a task
+#: that genuinely means 0.15 runs/day still dispatches on its number.
+_RPD_AGREEMENT_TOLERANCE = 0.05
+
+
+def _runs_per_day_seconds(value) -> float | None:
+    """What a `runs_per_day:` resolves to, or None when it resolves to nothing.
+
+    Mirrors the scheduler's own read of the field (`app/autonomy.py:1227-1238`):
+    `86400 / float(rpd)`, reached only for a positive number, with a non-number or
+    a zero falling through to the `frequency:` word. Mirroring the fallback is what
+    keeps this check quiet on a value the scheduler would have ignored anyway.
+    """
+    text = _clean(value)
+    if _is_nullish(text):
+        return None
+    try:
+        runs = float(text)
+    except ValueError:
+        return None
+    return 86400.0 / runs if runs > 0 else None
 
 
 def _parse(path: Path):
@@ -319,22 +354,48 @@ def main() -> int:
                 warnings.append(f"{p.name}: {problem}")
         frequency = _clean(fm.get("frequency")).lower()
         rpd = _clean(fm.get("runs_per_day"))
-        if frequency and not _is_nullish(frequency) and (not rpd or _is_nullish(rpd)):
-            # `runs_per_day` is read first by the scheduler, so a task carrying
-            # it dispatches whatever `frequency` says; without it the string
-            # must be one the map knows or the task is parked with no signal.
+        rpd_seconds = _runs_per_day_seconds(fm.get("runs_per_day"))
+        if frequency and not _is_nullish(frequency):
+            # `runs_per_day` is read FIRST by the scheduler, so a task carrying a
+            # positive numeric one dispatches at 86400/n whatever its `frequency:`
+            # word says; the word only rules when the number is absent, nullish,
+            # zero or unparseable. Two ways to get that wrong, and until #2445 the
+            # gate below only ever looked at the first one, because the whole
+            # block sat behind `(not rpd or _is_nullish(rpd))` — a file carrying
+            # BOTH fields was never compared with itself.
             if FREQUENCY_INTERVALS is None:
-                warnings.append(
-                    f"{p.name}: frequency '{frequency}' unchecked — the scheduler's "
-                    "FREQUENCY_INTERVALS could not be imported"
-                )
+                if rpd_seconds is None:
+                    # Nothing resolves an interval, and the map needed to say so
+                    # could not be imported.
+                    warnings.append(
+                        f"{p.name}: frequency '{frequency}' unchecked — the scheduler's "
+                        "FREQUENCY_INTERVALS could not be imported"
+                    )
             elif frequency not in FREQUENCY_INTERVALS:
-                warnings.append(
-                    f"{p.name}: frequency '{frequency}' is not one of "
-                    f"{', '.join(sorted(FREQUENCY_INTERVALS))} and there is no "
-                    "runs_per_day — the scheduler resolves no interval and will "
-                    "never dispatch it"
-                )
+                # Out of the four-word map is legal only when the number carries the
+                # schedule: #24's `6x-daily` + `runs_per_day: 6` is that idiom.
+                if rpd_seconds is None:
+                    warnings.append(
+                        f"{p.name}: frequency '{frequency}' is not one of "
+                        f"{', '.join(sorted(FREQUENCY_INTERVALS))} and there is no "
+                        "runs_per_day — the scheduler resolves no interval and will "
+                        "never dispatch it"
+                    )
+            elif rpd_seconds is not None:
+                # Both fields speak. The word is the human-declared period, so a
+                # number that disagrees with it is the file contradicting itself —
+                # and the number is the one that wins, which is why #30 ran 3x/day
+                # for 47 days reporting `frequency: daily` the whole time.
+                declared = FREQUENCY_INTERVALS[frequency]
+                if abs(rpd_seconds - declared) > declared * _RPD_AGREEMENT_TOLERANCE:
+                    warnings.append(
+                        f"{p.name}: frequency '{frequency}' is {declared:g}s but "
+                        f"runs_per_day {rpd} resolves {rpd_seconds:g}s — the "
+                        "scheduler dispatches at the number, so runs_per_day wins "
+                        "and this job does not run on the period it declares; make "
+                        "the two agree, or take the label outside the four-word map "
+                        "the way #24's `6x-daily` + `runs_per_day: 6` does"
+                    )
         # A declared `acceptance:` block (#623) is graded on every run; one that
         # cannot grade what it says (a regex that does not compile reads as a
         # false completion forever) is caught here, before the first run.

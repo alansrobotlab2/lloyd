@@ -4708,6 +4708,41 @@ def test_an_up_next_task_outside_the_domain_warns_once_per_process(
     assert not [r for r in caplog.records if "6x-daily" in r.getMessage()]
 
 
+def test_task_30_resolves_one_declared_period_not_a_third_of_one():
+    """#2445 clause 1, read off the file that actually dispatches.
+
+    `~/obsidian/autonomy/30-intelligence-pipeline-scan-score.md` carried
+    `frequency: daily` beside `runs_per_day: 3`, and `_frequency_interval_seconds`
+    answers from `runs_per_day` first ("runs_per_day wins",
+    architecture/autonomy.md:600), so the resolved interval was 28800.0 s — the
+    ~8 h cadence behind exactly 3 successes on every one of the eight UTC days
+    2026-10-01..2026-10-08 in `~/lloyd-data/workers.db`. That value shipped in
+    the vault's own baseline commit `05ce35ae` (2026-08-22), so the pair had
+    contradicted itself for 47 days and no test had ever compared the two.
+
+    Live and unmarked, like `test_the_live_board_suppresses_the_task_alan_parked_and_says_so`
+    further down this file: the fact under test is a line in a task file on this
+    box, and a `live_vault` mark would deselect the only check that catches this
+    regressing. The scheduler rewrites that file's run stamps on every dispatch
+    but never its `frequency` or `runs_per_day`, which are the two lines read here.
+    """
+    path = autonomy._find_task_file(30)
+    assert path is not None and path.is_file(), (
+        f"the scheduler's own lookup does not resolve id 30 to a file (got {path}),"
+        " so the assertions below would be reading nothing")
+    task = autonomy._parse_task_file(path)
+    assert task, f"{path.name} parsed to nothing, so this proves nothing"
+    assert str(task.get("frequency")).strip().lower() == "daily", (
+        "task #30 is not the `daily` job this clause is about, so the interval "
+        f"below is not the one #2445 asked for: frequency={task.get('frequency')!r}")
+    resolved = autonomy._frequency_interval_seconds(task)
+    assert resolved == 86400.0, (
+        f"task #30 resolves {resolved} s, not one 86400 s period: its "
+        f"`frequency` ({task.get('frequency')!r}) and `runs_per_day` "
+        f"({task.get('runs_per_day')!r}) disagree again, and runs_per_day is the "
+        "field the scheduler obeys")
+
+
 # ── #1550: a held pool must not read as a stalled scheduler ──────────────────
 #
 # On 2026-09-24 an operator paused the worker pool at 19:16 local and it stayed

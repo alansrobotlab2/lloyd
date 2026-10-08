@@ -448,6 +448,130 @@ def test_an_unreadable_config_leaves_a_slot_declaration_unchecked(tmp_path):
     assert "switched-off" not in out
 
 
+# ── #2445: a `frequency:` word beside a `runs_per_day:` that contradicts it ───
+#
+# Task #30 carried `frequency: daily` (line 25 of its file) and `runs_per_day: 3`
+# (line 39). `_frequency_interval_seconds` (app/autonomy.py:1227-1238) tries
+# `runs_per_day` FIRST, so the task resolved 86400/3 = 28800 s and dispatched
+# three times a day — measured as exactly 3 runs on every one of the eight UTC
+# days 2026-10-01..2026-10-08 in `~/lloyd-data/workers.db`. The linter passed it:
+# the whole frequency check sat behind `(not rpd or _is_nullish(rpd))`
+# (validate_tasks.py:322), so a file carrying BOTH fields never had the two
+# compared, and the run over 38 live files printed "✅ all task files parse and
+# pass structural checks" with 0 warnings.
+
+
+def test_a_frequency_word_contradicted_by_runs_per_day_names_the_file(tmp_path):
+    """The warning has to carry both intervals, because which one wins is the finding.
+
+    A reader who is told only "`daily` and 3 disagree" cannot tell whether the job
+    is running too often or too seldom; the line says the scheduler dispatches at
+    28800 s, which is the 8-hour cadence the item was filed over.
+    """
+    lint = Linter(tmp_path)
+    lint.add("30-i.md", id=30, name="intel", status="up_next",
+             frequency="daily", runs_per_day=3, skill_name="heartbeat")
+
+    code, out = lint.run()
+
+    assert code == 0, "a structural warning is only a failure under --strict"
+    # Warnings are indented under the "structural warning(s)" header, so the
+    # match is on the substring the other checks in this file use.
+    line = next((l for l in out.splitlines() if "30-i.md:" in l), "")
+    assert "30-i.md: frequency 'daily'" in line, \
+        f"no frequency warning for this file: {out!r}"
+    assert "runs_per_day" in line and " 3" in line, line
+    assert "86400" in line and "28800" in line, (
+        "the line must name the period the word declares AND the one runs_per_day "
+        f"resolves to, or it cannot say which way the job is wrong: {line!r}")
+    assert "runs_per_day wins" in line, (
+        f"the line must say which field the scheduler obeyed: {line!r}")
+
+
+def test_a_contradicted_frequency_fails_the_strict_rung(tmp_path):
+    """`--strict` is the rung a job that runs 3x more than declared belongs on."""
+    lint = Linter(tmp_path)
+    lint.add("30-i.md", id=30, name="intel", status="up_next",
+             frequency="daily", runs_per_day=3, skill_name="heartbeat")
+
+    code, out = lint.run("--strict")
+
+    assert code == 2, f"expected a strict failure, got exit {code}: {out!r}"
+    assert "30-i.md" in out
+
+
+@pytest.mark.parametrize("frequency,runs_per_day", [
+    ("daily", 1),            # 14 board files, exactly: 86400/1 == 86400
+    ("weekly", 0.14),        # #47/#54/#67: 617142.9 vs 604800, 2.04% — two decimals of 1/7
+    ("hourly", 24),          # 3600 == 3600
+    ("every-15min", 96),     # 900 == 900
+    ("6x-daily", 6),         # #24: the label is OUTSIDE the map on purpose
+    ("weekly", 0),           # a zero rpd is skipped by the scheduler, so the word rules
+    ("daily", "three"),      # a non-number likewise
+])
+def test_an_agreeing_pair_or_a_label_outside_the_map_stays_silent(
+        tmp_path, frequency, runs_per_day):
+    """The other 17 board files must gain no warning, and #24's idiom must stay legal.
+
+    `weekly` + `0.14` is the case an exact comparison would get wrong: three files
+    carry it and it is 2.04% off 604800 s only because 0.14 is the two-decimal
+    rounding of 1/7. #30's `daily` + `3` was 66.67% off, which is a contradiction
+    and not a rounding artefact.
+    """
+    lint = Linter(tmp_path)
+    lint.add("7-x.md", id=7, name="x", status="up_next",
+             frequency=frequency, runs_per_day=runs_per_day,
+             skill_name="heartbeat")
+
+    code, out = lint.run("--strict")
+
+    assert code == 0, f"{frequency}+{runs_per_day} warned: {out!r}"
+    assert "7-x.md" not in out
+
+
+def test_the_seventeen_board_files_that_agree_still_lint_clean(tmp_path):
+    """The whole surviving board in one run, not one pair at a time.
+
+    The 17 files that carry both fields, as measured on `~/obsidian/autonomy`
+    on 2026-10-08: thirteen `daily`+1, three `weekly`+0.14, one `6x-daily`+6.
+    Per-pair tests can each pass while a linter that warns on *any* pair still
+    floods the real board; this run is the one that says they would not.
+    """
+    lint = Linter(tmp_path)
+    board = [(f"{n}-x.md", "daily", 1) for n in
+             (35, 51, 53, 65, 74, 76, 81, 82, 86, 90, 93, 94, 95)]
+    board += [(f"{n}-x.md", "weekly", 0.14) for n in (47, 54, 67)]
+    board += [("24-x.md", "6x-daily", 6)]
+    assert len(board) == 17, board
+    for name, frequency, runs_per_day in board:
+        lint.add(name, id=name.split("-")[0], name="x", status="up_next",
+                 frequency=frequency, runs_per_day=runs_per_day,
+                 skill_name="heartbeat")
+
+    code, out = lint.run("--strict")
+
+    assert code == 0, f"a board file that agrees with itself warned: {out!r}"
+    assert "Scanned 17 task files" in out, out
+
+
+def test_a_label_outside_the_map_with_no_runs_per_day_still_warns(tmp_path):
+    """#815's check is untouched by widening the gate around it.
+
+    That warning is the reason #24's `runs_per_day: 6` going missing would be
+    caught rather than parking a nightly pipeline in silence, so it must survive
+    the branch rewrite that added the disagreement check beside it.
+    """
+    lint = Linter(tmp_path)
+    lint.add("24-x.md", id=24, name="pipeline", status="up_next",
+             frequency="6x-daily", skill_name="heartbeat")
+
+    code, out = lint.run()
+
+    assert code == 0
+    assert "24-x.md: frequency '6x-daily' is not one of" in out, out
+    assert "never dispatch it" in out, out
+
+
 # ── The pre-existing contract, pinned so the new checks cannot quietly widen ──
 
 def test_an_unparseable_file_still_exits_1_and_outranks_warnings(tmp_path):
