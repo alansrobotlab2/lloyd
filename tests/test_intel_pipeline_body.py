@@ -342,13 +342,18 @@ _RULE_AT_LINE_START = re.compile(r"^\s*[_=]{5,}\s*$", re.MULTILINE)
 
 def _yt(id: str = "youtube:UCtest:vid1", *, summary: str = "", why: str = "",
         title: str = "OpenAI paused all training runs... ALIGNMENT FAILURE",
-        relevance: int = 8) -> ScoredItem:
+        relevance: int = 8, gate_description: str = "") -> ScoredItem:
     """A scored YouTube row, the shape `--score` hands the writer for a video whose
-    channel has no monitor note — the branch #1269 clause 2 routes to `summary`."""
+    channel has no monitor note — the branch #1269 clause 2 routes to `summary`.
+
+    `gate_description` is the pre-strip channel text #2241 keeps beside that summary;
+    "" is a row written before #2314 gave the key existence.
+    """
     return ScoredItem(id=id, source="youtube", title=title,
                       url=f"https://www.youtube.com/watch?v={id.rsplit(':', 1)[-1]}",
                       summary=summary, discovered_at="2026-09-27T06:00:00+00:00",
-                      relevance=relevance, why=why, category="ai-llms")
+                      relevance=relevance, why=why, category="ai-llms",
+                      gate_description=gate_description)
 
 
 @pytest.fixture
@@ -642,9 +647,10 @@ def test_a_promo_footer_with_no_separator_rule_is_stripped_by_shape():
 
 
 #: `DIGEST_PROFILE` matches on `agent`, which this row's title and summary do not say:
-#: routing scores `title + " " + summary` only (`determine_vault_path`,
-#: vault_writer.py:245), never `why`. So the profile here matches on the row's own
-#: phrase, which routes it to the same `DIGEST_FILE` the real run used.
+#: the YouTube branch of `determine_vault_path` scores `item.stage1_text()`, and this
+#: row carries no `gate_description`, so for it that is `title + " " + summary` — never
+#: `why` (#2380). So the profile here matches on the row's own phrase, which routes it
+#: to the same `DIGEST_FILE` the real run used.
 RSI_DIGEST_PROFILE = {"topics": [{"name": "ai-llms", "weight": 0.9,
                                   "keywords": ["self-improvement"]}]}
 
@@ -829,9 +835,11 @@ MUSE_STORED_SUMMARY = (
 #: The trailer the item names; all three marks are in the recorded row.
 MUSE_LINK_MARKS = ("Full post:", "My Links", "👉")
 
-#: `DIGEST_PROFILE` matches on `agent`, which this row's title and summary do not say
-#: (`determine_vault_path` scores `title + " " + summary`, never `why`), so this profile
-#: matches on the row's own word and routes to the same `DIGEST_FILE`.
+#: `DIGEST_PROFILE` matches on `agent`, which this row's title and summary do not say:
+#: the YouTube branch of `determine_vault_path` scores `item.stage1_text()`, and this
+#: row carries no `gate_description`, so for it that is `title + " " + summary`, never
+#: `why` (#2380) — so this profile matches on the row's own word and routes to the same
+#: `DIGEST_FILE`.
 MUSE_DIGEST_PROFILE = {"topics": [{"name": "ai-llms", "weight": 0.9,
                                   "keywords": ["subscriptions"]}]}
 
@@ -1025,11 +1033,13 @@ MANUS_WHY = ("The item focuses on autonomous AI agents and LLM benchmarks, which
              "details.")
 
 #: `DIGEST_PROFILE`'s keyword is `agent`, and `match_keywords` tests a single-word keyword
-#: WHOLE-WORD (`profile.py:180`): both stored rows say `agents`, neither says `agent`, so
+#: WHOLE-WORD (`profile.py:177`): both stored rows say `agents`, neither says `agent`, so
 #: with that profile they route to `knowledge/feeds/youtube-uncategorized.md` and never
 #: reach the file this item is about. These two keywords are each a word one of the stored
-#: titles really contains — `determine_vault_path` scores `title + " " + summary`, never
-#: `why` — which is what sends both rows to `DIGEST_FILE`.
+#: titles really contains — the YouTube branch of `determine_vault_path` scores
+#: `item.stage1_text()`, and neither row carries a `gate_description`, so for both of them
+#: that is `title + " " + summary`, never `why` (#2380) — which is what sends both rows to
+#: `DIGEST_FILE`.
 STORED_ROW_PROFILE = {"topics": [{"name": "ai-llms", "weight": 0.9,
                                   "keywords": ["chatgpt", "manus"]}]}
 
@@ -3135,3 +3145,55 @@ def test_widening_who_gets_asked_publishes_the_stripped_summary_and_never_the_ga
         assert line not in published, line
     for mark in ("Subscribe", "Patreon", "Business Inquiries", "vLLM", "channelfolio"):
         assert mark not in published, f"the note body gained the block: {mark}"
+
+
+# ── #2380 — routing on the gate text publishes only the stripped summary ──────
+#
+# Backlog #2380 made `determine_vault_path`'s YouTube branch score `stage1_text()` so a
+# keep whose interest keyword lives only in `gate_description` reaches its topic note
+# instead of `knowledge/feeds/youtube-uncategorized.md`. `tests/
+# test_intel_pipeline_youtube_dedup.py` pins that routing on the verbatim 2026-10-07
+# row; what this file owns is the other half of the same change — that the widened text
+# changed the DESTINATION and nothing else. `GATE_ONLY_*` below is the same shape at
+# body-test size, not that row's text.
+
+#: The stored, stripped summary shape: prose only, and no whole-word `agent` — the
+#: summary says `agents`, and `match_keywords` matches a single-word keyword whole-word.
+GATE_ONLY_SUMMARY = ("Engineers are going from typing code to governing agents. The next "
+                     "step is a system that turns bug reports into production code.")
+
+#: The same channel text before the strip: the summary's prose, one further sentence
+#: carrying the profile keyword, and the link footer `strip_link_footer` exists to take
+#: off. Only this wider text matches `DIGEST_PROFILE`.
+GATE_ONLY_RAW = GATE_ONLY_SUMMARY + (
+    " He covers Factory's eight pillars of agent readiness, and why token leaderboards "
+    "are Goodhart's law.\n\n"
+    "My Links 🔗\n"
+    "👉 More talks: https://ai.engineer\n")
+
+
+def test_routing_on_the_gate_text_publishes_the_stripped_summary_only(intel_state):
+    """Clause 4 (#2380): the entry reaches `DIGEST_FILE` only by the widened route — no
+    copy the writer publishes says `agent` — and its body is still the stripped
+    `summary`. The sentence that exists solely in the gate text, and the footer the
+    strip removes, appear nowhere in the published file."""
+    item = _yt(id="youtube:UCtest:gateonly", title="The Software Factory",
+               summary=GATE_ONLY_SUMMARY, gate_description=GATE_ONLY_RAW,
+               why="Scores 8/10: agents that turn bug reports into production code.")
+    assert vw_mod.keyword_match(f"{item.title} {item.summary}".lower(),
+                                DIGEST_PROFILE) == []
+    assert vw_mod.keyword_match(item.stage1_text().lower(), DIGEST_PROFILE), \
+        "the fixture is no longer the gate-only shape this test is about"
+
+    published = _publish(intel_state, item)
+
+    assert (intel_state / "vault" / DIGEST_FILE).exists(), \
+        "the gate-text keyword did not route the item to its topic"
+    assert not (intel_state / "vault" / "knowledge" / "feeds"
+                / "youtube-uncategorized.md").exists(), \
+        "the item also reached the file that means 'no topic matched'"
+    assert GATE_ONLY_SUMMARY in published
+    assert "eight pillars of agent readiness" not in published, \
+        "the raw channel description leaked into the published body"
+    assert "My Links" not in published and "👉" not in published
+    assert "watch?v=gateonly" in published

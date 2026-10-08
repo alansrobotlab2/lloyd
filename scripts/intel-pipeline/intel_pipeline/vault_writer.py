@@ -270,8 +270,23 @@ def determine_vault_path(item: ScoredItem, profile: dict) -> Path:
     
     # YouTube items
     elif source == "youtube":
-        # Match to interest profile topics
-        matched_topics = keyword_match(text, profile)
+        # Match to interest profile topics — on the text stage 1 gated ON, not on the
+        # published copy. Since #2241 the gate scores `item.stage1_text()` (title plus
+        # the pre-strip `gate_description`) while #2314 clause 3 deliberately pinned
+        # published prose to the stripped `summary`. That split left this branch
+        # scoring a text stage 1 no longer consults: a description that stripped to
+        # nothing — or to prose carrying no whole-word keyword — scores 0.0 here, so a
+        # model-graded keep could clear `RELEVANCE_FLOOR` and then take the no-match
+        # branch below, into the file whose own semantics read "no topic matched".
+        # Before #2314 such an item stayed at relevance 1 and was never written, so the
+        # widening had moved it from `below_floor` to misfiled (#2380, measured on the
+        # 2026-10-07T23:00Z run: `exiwa9QbQXI`, relevance 8, `keyword_match` empty on
+        # `text` and `[('ai-llms', 1.0)]` on `stage1_text()`).
+        #
+        # Routing only. The entry's body still comes from `summary` via `_entry_body`,
+        # so no raw channel description reaches the vault, and the fallback below keeps
+        # its meaning for an item whose gate text matches nothing either.
+        matched_topics = keyword_match(item.stage1_text().lower(), profile)
         if matched_topics:
             # Use highest weighted topic
             topic_name = max(matched_topics, key=lambda x: x["weight"])["name"]

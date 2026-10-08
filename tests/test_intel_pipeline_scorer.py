@@ -2071,6 +2071,67 @@ def test_a_vault_path_no_longer_files_a_substring_only_item_under_robotics(redir
         f"the genuine match must keep its topic note, got {whole_word_path}")
 
 
+#: One topic for the routing assertions below: `inference`, at a weight no other
+#: keyword in this file's fixtures reaches.
+ROUTING_PROFILE = {"topics": [{"name": "ai-llms", "weight": 0.9,
+                               "keywords": ["inference"]}]}
+
+
+def _routed(source: str, title: str, summary: str, **over) -> ScoredItem:
+    """A scored row for a non-YouTube source, which no scanner gives a
+    `gate_description` (#2241 kept that field for the one scanner with pre-strip text).
+    """
+    return ScoredItem(id=f"{source}:o/r:1", source=source, title=title,
+                      url=over.pop("url", "https://github.com/o/r/pull/1"),
+                      summary=summary, discovered_at="2026-10-07T23:00:00Z",
+                      relevance=6, urgency="morning", why="Matches: inference",
+                      projects=[], category="ai-llms", **over)
+
+
+def test_routing_the_gate_text_moves_no_other_source_path():
+    """Clause 4 (#2380): only the YouTube branch of `determine_vault_path` reads
+    `stage1_text()`. arXiv and Hacker News still route on `title + " " + summary` — the
+    topic note with the keyword present, the uncategorized feed with it absent — GitHub
+    routes by repo and type and consults no keyword at all, and an arXiv row whose
+    keyword sat only in a `gate_description` (a shape no non-YouTube scanner produces
+    today) would still take the feed file. Widening the text is therefore confined to
+    the one branch that had the split, and no other source's destination moves."""
+    keyword_in = "Inference serving: batching and KV reuse"
+    keyword_out = "A note about sourdough hydration"
+
+    assert vw_mod.determine_vault_path(
+        _routed("arxiv", keyword_in, "Paper text"), ROUTING_PROFILE).parts[-2:] == (
+        "ai-llms", "papers.md")
+    assert vw_mod.determine_vault_path(
+        _routed("arxiv", keyword_out, "Paper text"), ROUTING_PROFILE).parts[-2:] == (
+        "feeds", "arxiv-uncategorized.md")
+    assert vw_mod.determine_vault_path(
+        _routed("hackernews", "Show HN: a batching proxy", keyword_in),
+        ROUTING_PROFILE).parts[-2:] == ("ai-llms", "news.md")
+    assert vw_mod.determine_vault_path(
+        _routed("hackernews", "Show HN: a bread timer", keyword_out),
+        ROUTING_PROFILE).parts[-2:] == ("feeds", "hn-uncategorized.md")
+
+    # GitHub never asks `keyword_match`, so a keyword present or absent is the same path.
+    github_kwargs = {"source_tags": ["pr"]}
+    assert (vw_mod.determine_vault_path(
+        _routed("github", keyword_in, "Body", **github_kwargs), ROUTING_PROFILE)
+        == vw_mod.determine_vault_path(
+            _routed("github", keyword_out, "Body", **github_kwargs), ROUTING_PROFILE))
+    assert vw_mod.determine_vault_path(
+        _routed("github", keyword_in, "Body", **github_kwargs),
+        ROUTING_PROFILE).parts[-2:] == ("r", "prs.md")
+
+    # The one case the widened text could have moved: an arXiv row carrying gate text
+    # and no keyword in its stored summary. It does not, because the widening is in the
+    # YouTube branch and nowhere else.
+    gate_only = _routed("arxiv", keyword_out, "Paper text",
+                        gate_description=keyword_in)
+    assert gate_only.stage1_text().endswith(keyword_in)
+    assert vw_mod.determine_vault_path(gate_only, ROUTING_PROFILE).parts[-2:] == (
+        "feeds", "arxiv-uncategorized.md")
+
+
 def test_the_cli_drops_a_substring_only_item_before_the_day_file(tmp_path):
     """The process boundary the unit tests cannot cross: the `python -m
     intel_pipeline` subprocess autonomy task #30 spawns, its own HOME, the
