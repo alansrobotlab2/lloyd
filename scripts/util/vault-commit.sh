@@ -43,6 +43,10 @@
 #   5b. Print every repo path a staged skill or task edit newly names that the
 #      checkout does not have (the skill-path block below). Reports, never
 #      blocks. #1969.
+#   5c. Print a warning naming the fixture for every staged `skills/` or
+#      `knowledge/` path that has a whole-file witness under `tests/fixtures/`,
+#      with both sides' byte and newline counts (the witness block below).
+#      Reports, never blocks, and prints nothing when nothing matches. #2381.
 #   6. With LLOYD_JOB set, commit as the job rather than as whoever `user.name`
 #      says, and add a `Job:` trailer (see the job-identity block below). Unset
 #      means no change of any kind to what this wrapper used to do. #668.
@@ -462,6 +466,26 @@ elif [ -z "$PY" ]; then
     echo "vault-commit.sh: skill-path CHECK SKIPPED (no python interpreter)" >&2
 else
     "$PY" "$PATH_RUNG" --repo "$VAULT" || echo "vault-commit.sh: skill-path rung exited nonzero; committing anyway" >&2
+fi
+
+# Third pre-flight rung (#2381): name every whole-file witness in
+# `tests/fixtures/*_witness_*.md` for a staged `skills/` or `knowledge/` path, with
+# both sides' byte and newline counts. A `live_vault` node byte-compares such a pair
+# (`tests/test_memory_ledger_bound.py`), and vault `e45a6b6c` — one appended bullet
+# in a nightly knowledge write — left that node red until the NEXT morning's #83
+# pre-flight ran it, because nothing on the writer's side said the file it appended
+# to was frozen. REPORT ONLY, like the two rungs above, and deliberately so: the
+# byte pin exists to make a re-freeze a reviewed act, so the committing job is told
+# to file a draft, never to re-freeze it itself. Silence is the normal answer — an
+# ordinary commit stages no witnessed file. Prints to stdout, because #1070 makes
+# the unattributed path list the last thing on stderr and its nodes pin that tail.
+WITNESS_RUNG="$SCRIPT_DIR/witness_fixture_findings.py"
+if [ ! -f "$WITNESS_RUNG" ]; then
+    echo "vault-commit.sh: witness CHECK SKIPPED (missing $WITNESS_RUNG)" >&2
+elif [ -z "$PY" ]; then
+    echo "vault-commit.sh: witness CHECK SKIPPED (no python interpreter)" >&2
+else
+    "$PY" "$WITNESS_RUNG" --repo "$VAULT" || echo "vault-commit.sh: witness rung exited nonzero; committing anyway" >&2
 fi
 
 # The `-c` overrides go BEFORE the subcommand: after it, git parses `-c` as
