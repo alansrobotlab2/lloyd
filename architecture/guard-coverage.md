@@ -64,6 +64,22 @@ conventions keep the greps honest:
   failed command;
 - a line number is a convenience, not the claim. Quote the symbol.
 
+Re-run in full on 2026-10-08 at `4f248293` (#2391) — the first stamp that vouches
+for the commands this page actually prints: take the fenced blocks at that sha and
+the ones on this page and all **20 fenced blocks** pair off byte-identical, which
+neither line above it can claim. `tests/test_architecture_coverage_doc_claims.py`
+now grades the *newest* stamp by exactly that comparison, so a stamp can no longer
+outlive the text it was run against. The 2026-10-06 `ed1cecfd` line is the case the
+check rejects, and it is worth being plain about why it stays on the page: it
+vouched for two commands this page no longer carries — the matrix block ran on the
+system `python`, which has no `httpx`, and §4's family count grepped the tuple shape
+`FAMILIES` had before #1959 moved it — and both were repaired in the very commit
+that wrote that stamp, so it never described the page it sat on. Re-run here from
+the repository root in a round worktree, matrix block through the absolute venv
+path: all 20 blocks come back printing, and the one zero is still §3's documented
+absence grep, `text_delta` in `app/harness/action_review.py`, with its control in
+`app/harness/events.py` hitting.
+
 ## The guards, and where each one is wired
 
 | Guard | Question it answers | Sees | Wired at |

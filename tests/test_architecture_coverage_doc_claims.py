@@ -2189,60 +2189,360 @@ def test_the_passage_says_what_each_resolver_consumer_does_on_a_miss():
     assert elsewhere == ["agent_mcp/_tool_sandbox.py"], elsewhere
 
 
-#: The commit that last edited `guard-coverage.md` before #2301's stamp existed
-#: (#2022's landing). A stamped re-run sha must be this commit or a descendant of
-#: it. The comparison is against a named sha and NOT against
-#: `git log -1 -- architecture/guard-coverage.md`, because the commit that writes
-#: a stamp is necessarily newer than any sha it is able to name: measuring "is
-#: the stamp as new as the page" against the log's head is unsatisfiable from
-#: inside the round that stamps. That is the exact defect #2301 exists to break,
-#: and why the owed step after a landing is a reader re-stamping the new HEAD.
-GUARD_COVERAGE_LAST_EDIT = "a0d3cbe4"
+#: One dated full re-run, as the page writes them: `Re-run in full on <date> at
+#: `<sha>``. The dated form is what separates a re-run that counted what it ran from
+#: the earlier prose stamps, which named a sha mid-sentence and said "all blocks still
+#: hit" with no denominator to age.
+_STAMP = re.compile(r"Re-run in full on (\d{4}-\d{2}-\d{2}) at `([0-9a-f]{8})`")
+
+#: One fenced block. One definition, shared by the count the stamp's denominator is
+#: checked against and the pairs the content check compares, so the two cannot be
+#: measuring different things and calling it agreement.
+_FENCE = re.compile(r"^```\n.*?^```$", re.S | re.M)
+
+
+def _fenced_blocks(text: str) -> list[str]:
+    blocks = _FENCE.findall(text)
+    assert blocks, "no fenced block extracted — the pattern matched nothing at all"
+    return blocks
+
+
+def _fenced_blocks_at(rev: str) -> list[str]:
+    """The page's fenced blocks as of one revision, via `git show` rather than the
+    working tree: the whole question a stamp answers is what the tree at the sha it
+    names contained, and the working tree is the thing being vouched for."""
+    out = subprocess.run(["git", "-C", str(ROOT), "show",
+                          f"{rev}:architecture/guard-coverage.md"],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, (
+        f"`git show {rev}:architecture/guard-coverage.md` exited {out.returncode} — a "
+        f"stamp has to name a commit this repo can resolve")
+    return _fenced_blocks(out.stdout)
+
+
+def _differing_blocks(a: list[str], b: list[str]) -> list[int]:
+    """1-based indices of the blocks that are not byte-identical. A page that grew or
+    lost a block differs here too, which is the same drift a stamp hides."""
+    if a == b:
+        return []
+    return [i + 1 for i in range(max(len(a), len(b)))
+            if (a[i] if i < len(a) else None) != (b[i] if i < len(b) else None)]
+
+
+def _newest_stamp(stamp: str) -> tuple[str, str, str]:
+    """The LAST dated re-run in a stamp paragraph, as `(date, sha, text from there on)`.
+
+    #2391 clause 3, and the reason is the page's own shape: the stamps are a log, older
+    lines stay as history, so the FIRST match is always the stalest sha on the page and
+    grading it is how a re-run from 2026-10-06 kept passing a page whose commands had
+    been rewritten twice since. The paragraph is wrap-normalised because a reflow is not
+    a change of claim, and the tail comes back too so the denominator is read from the
+    stamp that is being graded rather than from whichever `**N fenced blocks**` appears
+    first.
+    """
+    norm = " ".join(stamp.split())
+    found = list(_STAMP.finditer(norm))
+    assert found, "the stamp paragraph carries no `Re-run in full on <date> at <sha>` line"
+    date, sha = found[-1].group(1), found[-1].group(2)
+    return date, sha, norm[found[-1].start():]
 
 
 def _stamp_denominator(stamp: str) -> int:
-    """The block denominator the stamp's own prose states. A re-run that counts
+    """The block denominator a stamp's own prose states. A re-run that counts
     nothing cannot age, so #2301 requires the number be written down."""
     m = re.search(r"\*\*(\d+) fenced blocks\*\*", " ".join(stamp.split()))
     assert m, "the stamp states no block denominator"
     return int(m.group(1))
 
 
-def test_the_guard_coverage_stamp_names_a_real_commit_and_the_block_count():
-    """#2022 clause 5, extended by #2301 clauses 1 and 2: the re-run line names
-    `219e1314`, that sha is in this repo's history, and the page now states a
-    block denominator that equals the fenced blocks actually on it — exactly 20,
-    not the open-ended `>= 18` that let a page grow past its own stamp. The
-    #2301 line is the first re-run stamped at a tree containing the page's own
-    last edit; `a03a7300`, the newest sha the stamp carried before it, is an
-    ancestor of that edit, which is what the descendant test can fail on."""
+def test_the_stamp_line_names_an_existing_commit_and_what_the_old_one_vouched_for():
+    """#2391 clause 1, holding #2022 clause 5 and #2301 clauses 1 and 2 inside it: the
+    page's newest dated re-run line names a commit that exists in this repo, states the
+    denominator it counted — `**20 fenced blocks**`, the blocks the page actually carries,
+    not the open-ended `>= 18` that let a page grow past its own stamp — and says plainly
+    that the `ed1cecfd` line above it vouched for two commands the page no longer prints,
+    naming both.
+
+    A date alone is not a finding. The reason #2301's stamp misleads is specific — the
+    matrix block ran on the system `python`, which has no `httpx`, and §4's family count
+    grepped the tuple shape `FAMILIES` had before #1959 — and both were repaired in the
+    commit that wrote the stamp, so the sha it names describes commands nobody runs any
+    more. A reader who is not told that repeats the mistake on the next re-run.
+    """
     text = _text("guard-coverage.md")
     how = _section(text, "How to read this page")
     assert "`219e1314` (2026-10-01)" in how and "all 18 blocks still hit" in how
     assert subprocess.run(["git", "cat-file", "-e", "219e1314^{commit}"], cwd=ROOT).returncode == 0
-    blocks = re.findall(r"^```\n.*?^```$", text, re.S | re.M)
+    blocks = _fenced_blocks(text)
     assert len(blocks) == 20, f"the page carries {len(blocks)} fenced blocks"
 
-    # Wrap-insensitive: a reflow of the paragraph must not break the extraction.
-    m = re.search(r"Re-run in full on \d{4}-\d{2}-\d{2} at `([0-9a-f]{8})`",
-                  " ".join(how.split()))
-    assert m, "the stamp carries no #2301 full re-run line"
-    stamped = m.group(1)
+    date, stamped, newest = _newest_stamp(how)
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", date), f"{date} is not a dated re-run line"
     assert subprocess.run(["git", "cat-file", "-e", f"{stamped}^{{commit}}"],
                           cwd=ROOT).returncode == 0, f"{stamped} is not a commit here"
-    assert subprocess.run(["git", "merge-base", "--is-ancestor",
-                           GUARD_COVERAGE_LAST_EDIT, stamped], cwd=ROOT).returncode == 0, (
-        f"the stamp vouches for {stamped}, which predates the page's own last "
-        f"edit {GUARD_COVERAGE_LAST_EDIT}")
-    assert subprocess.run(["git", "merge-base", "--is-ancestor",
-                           GUARD_COVERAGE_LAST_EDIT, "a03a7300"],
-                          cwd=ROOT).returncode != 0, (
-        "a03a7300 is now a descendant of #2022's landing, so it no longer shows "
-        "what an un-refreshed stamp looks like — pick a genuinely older sha")
-    assert _stamp_denominator(how) == len(blocks), (
+    assert _stamp_denominator(newest) == len(blocks) == 20, (
         "the stamp counted a different number of blocks than the page carries")
-    # The extractor reads the prose rather than restating a constant.
+
+    assert "vouched for two commands this page no longer carries" in newest, (
+        "the stamp does not say plainly that the `ed1cecfd` line above it vouched for "
+        "commands the page does not print")
+    assert "system `python`" in newest and "family count" in newest, (
+        "the stamp names neither of the two commands it says were repaired under the old "
+        "stamp: the matrix's interpreter line and §4's family count")
+
+
+def test_the_stamp_extractor_grades_the_last_re_run_line_and_not_ed1cecfd():
+    """#2391 clause 3: with the superseded stamp still on the page, the sha extracted is
+    the newest one.
+
+    The paragraph carries `ed1cecfd` first and this round's stamp second, deliberately:
+    #2301's line is history worth keeping, and the defect being closed is that a
+    `re.search` over that paragraph returns the FIRST match, which since #2391 is always
+    the stalest sha on the page. Grading that stale sha is how a re-run dated 2026-10-06
+    kept passing a page whose commands had been rewritten twice since.
+
+    The date order is pinned beside the extractor because the two are one claim: "the
+    last line" answers "the newest re-run" only while stamps are appended in date order,
+    and an editor who pasted an older re-run underneath a newer one would move the graded
+    sha back onto a tree whose blocks no longer match — the same defect, arriving by a
+    route no node had re-measured. `sorted` over ISO dates is the comparison.
+    """
+    text = _text("guard-coverage.md")
+    how = _section(text, "How to read this page")
+    dated = _STAMP.findall(" ".join(how.split()))  # wrap-insensitive on purpose
+    assert len(dated) >= 2, (
+        f"{len(dated)} dated re-run line(s) on the page; with one, a last-match extractor "
+        f"could not be told apart from a first-match one")
+    assert ("2026-10-06", "ed1cecfd") in dated, (
+        "the #2301 stamp line is gone from the page, so this node can no longer show the "
+        "extractor passing the stale sha by")
+    dates = [d for d, _ in dated]
+    assert dates == sorted(dates), (
+        f"the page's stamps run {dates}, so its LAST match is not its newest re-run and "
+        f"the sha being graded is an older tree's")
+
+    date, stamped, newest = _newest_stamp(how)
+    assert stamped != "ed1cecfd", (
+        "the graded sha is the 2026-10-06 stamp, so the extractor is reading the first "
+        "match again and the newest re-run on the page goes ungraded")
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", date), f"{date} is not a dated re-run line"
+
+    # The denominator is read from the stamp being graded, not from whichever
+    # `**N fenced blocks**` sits earliest on the page.
+    two = ("Re-run in full on 2026-10-06 at `ed1cecfd` (#2301) older prose. "
+           "Re-run in full on 2026-11-02 at `deadbeef` (#9999): **21 fenced blocks**.")
+    assert _newest_stamp(two)[1] == "deadbeef", "the extractor is not reading the last line"
+    assert _stamp_denominator(_newest_stamp(two)[2]) == 21, (
+        "the denominator was read from the older stamp, so a growing page would keep "
+        "its stale count green")
     assert _stamp_denominator("re-run at `abc12345`: **7 fenced blocks**") == 7
+
+
+def test_the_stamped_tree_s_fenced_blocks_are_the_page_s_and_ed1cecfd_s_are_not():
+    """#2391 clause 2: the stamped tree's fenced blocks are byte-identical to the page's,
+    all 20 pairs, which is what lets the stamp be said to have vouched for the commands
+    this page prints.
+
+    This is also the check that keeps this item honest about its own diff: #2391 adds a
+    prose paragraph and may not touch a block, because editing a block would make the sha
+    it stamps a tree that does not contain that text. The 2026-10-06 stamp is the rejecting
+    case and it is on the page to be read: two of `ed1cecfd`'s blocks are not the page's
+    (the matrix's `.venvs/lloyd/bin/python` interpreter line, §4's dict-shaped family
+    count), so at the sha that stamp vouches for, two of the commands presented here do
+    not exist.
+    """
+    text = _text("guard-coverage.md")
+    how = _section(text, "How to read this page")
+    _, stamped, _ = _newest_stamp(how)
+    page = _fenced_blocks(text)
+    assert len(page) == 20, f"the page carries {len(page)} fenced blocks"
+
+    at_stamp = _fenced_blocks_at(stamped)
+    assert len(at_stamp) == len(page) == 20
+    assert _differing_blocks(at_stamp, page) == [], (
+        f"the stamp names {stamped}, but its fenced blocks differ from the page's at the "
+        f"indices above: the re-run vouched for commands this page no longer prints")
+
+    # Clause 2's invariant, read the way the page tells a reader to read everything.
+    miss = subprocess.run(["git", "grep", "-n", "other four", "--",
+                           "architecture/guard-coverage.md"],
+                          cwd=ROOT, capture_output=True, text=True)
+    assert miss.returncode != 0 and not miss.stdout, (
+        f"`other four` is back on the page ({miss.stdout.strip()}): the hand-counted line "
+        f"total #2022 replaced with the three guards it derives")
+
+
+def test_the_content_check_rejects_ed1cecfd_and_the_hand_carried_ancestor_is_gone():
+    """#2391 clause 4: the check that passes the new stamp fails `ed1cecfd`, and the
+    hand-carried constant it replaced stays deleted.
+
+    The ancestor node that used to sit here asked whether the stamped sha was a descendant
+    of a hand-typed sha, which #2301's own landing showed is not the claim anyone wanted:
+    that commit wrote the stamp and repaired two fenced blocks in the same commit, so the
+    sha it named was a flawless descendant of text that did not exist yet. A descent
+    assertion cannot see a fenced-block edit at the sha it grades; a content comparison can,
+    and `ed1cecfd` is the measured example — blocks 4 and 13, nothing else.
+
+    The deletions are part of the clause, so the evidence is this file's own text. Each
+    needle is built from two pieces on purpose: written whole it would be sitting in the
+    text being searched, and the assertion could then never come out green.
+    """
+    page = _fenced_blocks(_text("guard-coverage.md"))
+    stale = _differing_blocks(_fenced_blocks_at("ed1cecfd"), page)
+    assert stale == [4, 13], (
+        f"ed1cecfd differs from the page at {stale}, not at blocks 4 and 13 — the matrix "
+        f"interpreter line and §4's family count the page says were repaired under that "
+        f"stamp. Either the check has stopped seeing a stale stamp or the page's account "
+        f"of what #2301 repaired is wrong")
+
+    here = Path(__file__).read_text(encoding="utf-8")
+    hand_carried = "GUARD_COVERAGE_" + "LAST_EDIT"
+    descent = "merge" + "-base"
+    assert hand_carried not in here, (
+        "the hand-carried stamp ancestor is back, and with it a freshness check that "
+        "cannot see a fenced block edit at the sha it grades")
+    assert descent not in here, (
+        "a descent assertion on the stamped sha is back beside the content check")
+
+
+#: The one command on this page that is supposed to print nothing: §3's absence grep
+#: for the harness event the reviewer does not branch on. Named by pattern and not by
+#: block index, so a reflow of §3 cannot quietly move the only silence a run may allow.
+DOCUMENTED_ZERO = "text_delta"
+
+#: …and the file its positive control reads, per the page's own convention that every
+#: absence command rides a control that must hit.
+ZERO_CONTROL = "app/harness/events.py"
+
+
+def _block_commands(block: str) -> list[str]:
+    """One fenced block's commands: backslash continuations joined into the command
+    they are written as, and the trailing `# note` the page rides a line with split off
+    so the runner gets a command and not a comment.
+
+    An unquoted `#` anywhere else is refused rather than partitioned, because a
+    truncated command that happens to print something is the one result worse than a
+    failing one: it would look like the page verifying itself.
+    """
+    body = block.split("\n", 1)[1][:-4]
+    assert not body.endswith("\\"), f"a block ends on a continuation: {block!r}"
+    cmds, buf = [], ""
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        buf = f"{buf} {line}".strip() if buf else line
+        if buf.endswith("\\"):
+            buf = buf[:-1].rstrip()
+            continue
+        code, mark, _note = buf.partition("  # ")
+        assert mark or "#" not in code, f"an unquoted '#' in a command: {buf}"
+        cmds.append(code.strip())
+        buf = ""
+    assert not buf, f"a block ends mid-command: {block!r}"
+    assert cmds, f"a fenced block carries no command: {block!r}"
+    return cmds
+
+
+def _run_block(block: str) -> list[tuple[str, int, list[str]]]:
+    """Run one block's commands from the repository root — the way the page's own
+    stamp paragraph tells a reader to run them — and return one
+    `(command_as_run, exit status, stdout lines)` entry per command.
+
+    `.venvs/lloyd/bin/python` becomes `sys.executable` because `.venvs/` is
+    git-ignored and so absent from a round worktree: the page's interpreter line is
+    the claim being run, not decoration, and left alone it dies at exit 127 with
+    `No such file or directory` — which is how #2301's re-run first misread a working
+    matrix script as a broken one. Every other command is run exactly as written.
+    """
+    runs = []
+    for cmd in _block_commands(block):
+        runnable = cmd.replace(".venvs/lloyd/bin/python", sys.executable)
+        out = subprocess.run(runnable, shell=True, cwd=ROOT, capture_output=True,
+                             text=True, timeout=600)
+        runs.append((runnable, out.returncode, out.stdout.strip().splitlines()))
+    return runs
+
+
+def test_every_fenced_block_on_the_guard_coverage_page_prints_when_run():
+    """#2391 clause 5. The page opens with "Run the command; do not trust the
+    sentence", and until this node nothing in the suite did: the stamp node checked
+    that a sha existed and the §4 nodes ran two commands, while eighteen blocks went
+    unexecuted since whoever last typed them. Every fenced block is now extracted, its
+    continuations joined, and run from the repository root, and each block has to put
+    at least one line on stdout.
+
+    What this can see that a stamp cannot: at `ed1cecfd` the matrix block died on
+    `ModuleNotFoundError` under the system `python` and §4's family count printed
+    nothing on a grep that had outlived the shape of `FAMILIES` — both under a stamp
+    line saying every block hit. A stamp records that a re-run happened somewhere; this
+    runs the commands in the tree the reader is standing in, on the interpreter the
+    test is running under.
+
+    One silent command is allowed, and only the documented one: §3's
+    `git grep -c "text_delta" -- app/harness/action_review.py` is an absence claim, so
+    the page's convention requires it ride a positive control, and this node accepts
+    the zero only while `git grep -c text_delta -- app/harness/events.py` is printing.
+    A zero whose control has gone quiet is a typo, which is the case the control exists
+    to catch."""
+    blocks = _fenced_blocks(_text("guard-coverage.md"))
+    assert len(blocks) == 20, f"the page carries {len(blocks)} fenced blocks"
+
+    runs_by_block: dict[int, list[tuple[str, int, list[str]]]] = {}
+    for i, block in enumerate(blocks, 1):
+        runs = runs_by_block[i] = _run_block(block)
+        broke = [(c, rc) for c, rc, _ in runs if rc not in (0, 1)]
+        assert not broke, (
+            f"block {i} did not answer, it broke: {broke}. Only a `git grep` miss "
+            f"exits 1 here; anything else is a command the page cannot run")
+        printed = [ln for _, _, lines in runs for ln in lines]
+        assert printed, f"block {i} printed nothing at all: {block!r}"
+        silent = [(c, rc) for c, rc, lines in runs if rc == 1 and not lines]
+        for cmd, _rc in silent:
+            assert DOCUMENTED_ZERO in cmd, (
+                f"block {i} carries an undocumented zero: {cmd!r} exits 1 and prints "
+                f"nothing, and this page documents exactly one such command — §3's "
+                f"`{DOCUMENTED_ZERO}` absence grep")
+        if silent:
+            assert len(silent) == 1, f"block {i} went quiet twice: {silent}"
+            control = [(rc, lines) for c, rc, lines in runs if ZERO_CONTROL in c]
+            assert control and control[0][1], (
+                f"block {i}'s zero is unpaired: the page says an absence grep rides a "
+                f"control that must hit, and nothing naming {ZERO_CONTROL} printed")
+
+    # The matrix block on its own, because it is the one block whose interpreter is
+    # git-ignored: it proves the substitution above ran rather than merely was written.
+    matrix_at = [i for i, b in enumerate(blocks, 1) if "guard_arm_matrix.py" in b]
+    assert len(matrix_at) == 1, (
+        f"{len(matrix_at)} blocks name the guard-arm matrix, so the block graded below "
+        f"is not the one the page presents as the arm table")
+    assert ".venvs/lloyd/bin/python" in blocks[matrix_at[0] - 1], (
+        "the matrix block stopped naming the git-ignored interpreter, so this node is "
+        "no longer exercising the substitution it exists for")
+    at_matrix = runs_by_block[matrix_at[0]]
+    assert at_matrix[0][1] == 0, f"the matrix block exited {at_matrix[0][1]}"
+    rows = [ln for _, _, lines in at_matrix for ln in lines if ln.startswith("| `")]
+    assert rows, (
+        f"the matrix printed no dispatch row (only {at_matrix[0][2][:2]!r}), so there is "
+        f"no arm table on the page — the script's own failure mode is to print its header "
+        f"over nothing")
+    assert not any("Traceback" in ln or "No module named" in ln
+                   for _, _, lines in at_matrix for ln in lines)
+
+    # The runner can see a silent command at all, which is the whole worth of the
+    # assertions above. Proved on a grep of a sentinel no source carries, so it costs
+    # one subprocess rather than the page.
+    quiet = _run_block("```\ngit grep -c 'lloyd-2391-no-such-sentinel' -- app\n```")
+    assert quiet[0][1] == 1 and not quiet[0][2], (
+        "the runner reports output for a command that printed nothing, so 'every block "
+        "prints' would pass on a page of dead greps")
+    joined = _block_commands("```\ngit grep -n foo \\\n-- app\n```")
+    assert joined == ["git grep -n foo -- app"], (
+        f"continuations are not being joined, so a wrapped command runs as two: {joined}")
+    noted = _block_commands('```\ngit grep -c x -- app   # nothing, exit 1\n```')
+    assert noted == ["git grep -c x -- app"], (
+        f"a command still carries its trailing note, so the runner is executing a "
+        f"comment: {noted}")
 
 
 # --------------------------------------------------------------------------- #
