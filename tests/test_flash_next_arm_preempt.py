@@ -231,9 +231,15 @@ def test_the_arm_route_calls_the_step_once_between_the_boot_guard_and_skip_bench
         guard = arm.index(echo)
         refuse = arm.index("exit 2", guard)
         assert refuse < at, f"the step sits above a boot-guard exit ({echo[:40]}…)"
-    # After the #1625 canary verdict persistence (#2163), so the canary's
-    # decision is already on disk whatever the load does.
-    assert arm.index("verdict NOT persisted to $CANARY_LOG") < at
+    # After the #1625 canary (#2163 persists its verdict), so the canary's decision
+    # is already on disk whatever the load does. Since #2404 the canary is a step the
+    # route calls rather than a fold inlined here, so what has to precede this call is
+    # that call; the persistence line it is being ordered against lives in
+    # `flash-next-canary-step.sh`, and `tests/test_flash_next_launcher.py` pins that it
+    # is still there.
+    assert arm.index('flash-next-canary-step.sh') < at, (
+        "the load step runs before the engine-output canary, so a preempted arm "
+        "loses the verdict the canary was meant to have written first")
     # Before the SKIP_BENCH=1 exit, so an admission arm — which is how a sweep
     # that might reach a preemption actually runs — still gets its load step.
     assert at < arm.index('if [[ "${SKIP_BENCH:-0}" == "1" ]]')

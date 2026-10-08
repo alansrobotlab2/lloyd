@@ -576,8 +576,21 @@ def test_the_restart_skill_cites_the_gate_by_symbol_and_quotes_the_shared_number
 # prompts, temperature 0) and compares it to one named reference record.
 # ---------------------------------------------------------------------------
 
+# The fold has its own executable since #2404, because the sweep arm route is no
+# longer its only caller — `eval/run_kv_dtype_arm.sh` runs the same fold inside a
+# one-shot KV-dtype window, and the file is what keeps `flash-next-canary.jsonl` to
+# one writer. So `CANARY_START`/`CANARY_END` now sit in the step and the extracted
+# block is read from there; what the harness appends after the block is the step's
+# own tail, and the arm's `SKIP_BENCH` line — which is where the fold is supposed to
+# sit in the route — keeps a marker of its own for the position assertion alone.
+CANARY_STEP = BIN / "flash-next-canary-step.sh"
 CANARY_START = "# --- engine-output integrity canary"
-CANARY_END = "# SKIP_BENCH=1 stops here"
+CANARY_END = "# --- end of the engine-output integrity canary fold"
+SKIP_BENCH_MARK = "# SKIP_BENCH=1 stops here"
+
+#: Where the route runs the fold: the call replaced the inline block, so the arm's
+#: tail is measured from here.
+CANARY_CALL = 'bash "$ROOT/agent-services/bin/flash-next-canary-step.sh" "$LABEL"'
 
 
 def _canary_statements() -> list[str]:
@@ -602,14 +615,19 @@ def _statement(match: str) -> str:
 
 
 def _canary_block() -> str:
-    """The canary's own lines, lifted out of the arm script.
+    """The canary's own lines, lifted out of the shared step script.
+
+    Read from `flash-next-canary-step.sh` since #2404, when the fold got its own
+    executable because the sweep arm stopped being its only caller — a second copy
+    in `eval/run_kv_dtype_arm.sh` is how `flash-next-canary.jsonl` would end up with
+    two writers and two record shapes.
 
     Everything the tests below assert is then asserted about the code that runs,
     not about a copy: the block is executed by real bash in `_canary_run`, so a
     status that escaped into the script's own exit, or a verdict line that lost
     its label, fails the way it would fail an arm.
     """
-    text = ARM.read_text()
+    text = CANARY_STEP.read_text()
     start = text.index(CANARY_START)
     end = text.index(CANARY_END, start)
     return text[start:end]
@@ -718,9 +736,13 @@ exit 9
         # To the END of the arm script, bench call included: with SKIP_BENCH=1 the
         # run has to stop at the exit, and the bench's own line is how this test
         # knows it did. Slicing before the bench would make the absence of that
-        # line unfalsifiable — it was never in the script.
+        # line unfalsifiable — it was never in the script. Since #2404 the fold is a
+        # step the route calls, so the tail starts at that call rather than at a
+        # marker inside the fold: same position in the route, and the call runs the
+        # real step against this harness's fake `$ROOT`, which is what the step does
+        # on a box with no engine — print its reason and exit 0.
         arm_text = ARM.read_text()
-        body += arm_text[arm_text.index(CANARY_END):]
+        body += arm_text[arm_text.index(CANARY_CALL):]
     script = tmp_path / "canary-under-test.sh"
     script.write_text(
         "set -euo pipefail\n"
@@ -760,10 +782,16 @@ def test_the_output_canary_sits_below_the_boot_guard_and_above_the_bench():
     text = ARM.read_text()
     guard = text.index('echo "boot guard: 1 engine init, no startup failures')
     skip = text.index('if [[ "${SKIP_BENCH:-0}" == "1" ]]; then')
-    assert CANARY_START in text, "no engine-output canary in the arm route"
-    assert guard < text.index(CANARY_START) < skip, (
+    # The fold moved to `flash-next-canary-step.sh` (#2404), so what sits at this
+    # position in the route is the call that runs it. Ordering is still the
+    # property, and it is the route's ordering: a fold that has somewhere better to
+    # be is a fold that is not running where this asserts it runs.
+    assert CANARY_CALL in text, "the arm route does not run the engine-output canary"
+    assert guard < text.index(CANARY_CALL) < skip, (
         "the canary must run after the boot guard proves which engine is "
         "serving and before SKIP_BENCH can exit the arm")
+    assert CANARY_START in CANARY_STEP.read_text(), (
+        "the fold left the arm route but has no home: the step must carry it")
 
     run_call = _statement(r'"\$ENGINE_OUTPUT_PROBE" run')
     assert '--label "arm-$LABEL"' in run_call, run_call
@@ -815,7 +843,10 @@ def test_the_canary_names_its_reference_rather_than_taking_the_newest(tmp_path):
     which is exactly the silent-blind state this canary exists to close); and it
     is NOT inside the probe's own output dir, where the newest-other-record
     default lives."""
-    text = ARM.read_text()
+    # The seam moved with the fold (#2404): the default lives in the step that runs
+    # it, and `ROOT` resolves the same way in both — `$ROOT` is the repo root there as
+    # it is here.
+    text = CANARY_STEP.read_text()
     compare_call = _statement(r'"\$ENGINE_OUTPUT_PROBE" compare')
     assert '--reference "$ENGINE_OUTPUT_REF"' in compare_call, compare_call
     assert "--current" in compare_call, compare_call
