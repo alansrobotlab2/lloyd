@@ -2276,6 +2276,89 @@ def run_repair(store: Path, dead: str, live: str, *extra) -> tuple[int, str]:
     return rc, buf.getvalue()
 
 
+# ── #2433: `repair` naming the falsifiers `audit` already called blind ────────────
+#
+# The nodes below take the ledger of the 2026-10-08 measurement down to one key that executes
+# fine and prints a zero it never read: the dated snapshots its pattern names were pruned by
+# #2166's retention, `N=$(ls $C 2>/dev/null | grep -xE '…' | wc -l)` is 0, and the command's
+# last act is an `echo` of those counts — #1588's own fix for the missing-input lie, and the
+# thing that lets the row exit 0. `audit` reads the row plus a directory listing and names the
+# key; `falsifier_repair` looked only at the exit status and called it RUNNABLE;
+# `repair_verdicts` drops RUNNABLE. Live figures at triage: `audit` exit 1 with `input_lost 6`
+# over four `seq-*` keys and `run:2026-09-2[01]-nightly-mining`, repair `disposed: 0
+# needs_rerecord: 0` and exit 0 over the same 118 keys.
+
+#: A key of the ledger's own family, so the class is proved on the shape that is blind tonight.
+INPUT_LOST_KEY_2433 = "seq-3-bash-fs-edit-bash-fs-read"
+#: Its pattern as the ledger stores one: an ERE whose extension is backslash-escaped, which is
+#: the spelling `input_lost_input` must be able to pin (`UNSAFE_PIN_CHARS` explains why).
+INPUT_LOST_PATTERN_2433 = "candidate-seq-3-bash-fs-edit-bash-fs-read-[0-9]{8}\\.md"
+
+
+def _cand_dir_2433(tmp_path: Path, dir_name: str = "candidates") -> Path:
+    """A candidate directory that exists and holds no file the lost pattern could match."""
+    cand = tmp_path / "_pipeline" / "skills" / dir_name
+    cand.mkdir(parents=True, exist_ok=True)
+    (cand / "candidate-something-else-20260920.md").write_text(
+        "---\npattern_key: candidate-something-else\n---\nbody\n", encoding="utf-8")
+    return cand
+
+
+def input_lost_cmd_2433(cand: Path, pattern: str = INPUT_LOST_PATTERN_2433,
+                        skill: Path | None = None) -> str:
+    """The stored falsifier of that measurement, over `cand`, counting `pattern`.
+
+    The real shape, not a flattering one: an assigned candidate directory, `ls` through a
+    `grep -xE` over the pattern, a `wc -l` of what matched, an owner-skill read, and the
+    trailing count `echo`. `candidate_input_lost` has to read the directory out of the `C=`
+    assignment and the pattern out of the grep to name this row, which is exactly the reading
+    it performs on the ledger's keys; `_cand_dir_2433` holds one unrelated candidate, so the
+    directory exists, lists, and matches nothing.
+    """
+    owner = skill or (Path.home() / "obsidian" / "skills" / "no-such-owner-skill" / "SKILL.md")
+    return (f"C={cand}; N=$(ls $C 2>/dev/null | grep -xE '{pattern}' | wc -l); "
+            f"K=$(grep -ci 'nothing of mine' {owner} 2>/dev/null || echo 0); "
+            f"echo seq_count=$N owner_skill_K=$K")
+
+
+def input_lost_row(store: Path, cmd: str, *, key: str = INPUT_LOST_KEY_2433,
+                   verdict: str = "rejected", occurrences: int = 15) -> dict:
+    """Append that command as a decided key. No root rewrite: this row is not UNRUNNABLE."""
+    return stored_row(store, key, cmd, verdict=verdict,
+                      reason="installed skill already owns this shape",
+                      occurrences=occurrences)
+
+
+def rerecord_lines_2433(out: str) -> list[str]:
+    """The `NEEDS_RERECORD` lines, in the order printed."""
+    return [ln for ln in out.splitlines() if ln.startswith("NEEDS_RERECORD ")]
+
+
+def rerecord_keys_2433(out: str) -> list[str]:
+    """The keys of those lines, so a tally can be compared with the lines that made it."""
+    return [ln.split()[1] for ln in rerecord_lines_2433(out)]
+
+
+def run_repair_2433(store: Path, tmp_path: Path, *extra) -> tuple[int, str]:
+    """`repair` over a ledger with no root defect, which is what the clause ledger is.
+
+    `run_repair` always passes `--rewrite`, and the two spellings it is given have to name
+    directories that exist for `dead_root_spellings` to have anything to replace. Here the
+    only defect is the lost corpus, so the pair is two real-but-unreferenced paths and the
+    substitution cannot quietly be what fixed the row.
+    """
+    dead = tmp_path / "root-that-no-row-names"
+    live = tmp_path / "root-replacement"
+    dead.mkdir(parents=True, exist_ok=True)
+    return run_repair(store, str(dead), str(live), *extra)
+
+
+def repair_tally_2433(out: str) -> dict[str, int]:
+    """The last line's `label: N` figures, so a test can fail on the figure and the label."""
+    return {pair.split(":")[0].strip(): int(pair.split(":")[1])
+            for pair in out.splitlines()[-1].split("  ") if ":" in pair}
+
+
 # ── #1717: the two trees are written together, or the skip is said out loud ──────
 #
 # On 2026-09-27 a repair pass appended 79 rows to the live ledger and none of them to the
@@ -5135,3 +5218,275 @@ def test_each_of_the_six_exit_terms_alone_fails_the_run_and_is_named_as_a_driver
     assert rc == 1, f"{term}: {out}"
     assert out.splitlines()[-1] == f"keys: 2 unrunnable: {1 if term == 'unrunnable' else 0}", out
     assert drivers_2343(out) == {term: 1}, f"{term}: {out}"
+
+
+# ── #2433: the repair side of the class audit already published ───────────────────
+
+def test_a_blind_falsifier_that_still_executes_is_classified_input_lost_not_runnable(tmp_path):
+    """Clause 1: the class exists, is decided by `audit`'s predicate, and says nothing new.
+
+    The whole finding in one call. The row executes clean — `sv.evidence_cmd_status` says so
+    below, at rc 0 — and `sv.candidate_input_lost`, the predicate `audit` runs independent of
+    any status, says the corpus its pattern names is off the disk (`1 files there, none
+    matching`, the directory listing standing where the deleted snapshots were). `audit`
+    therefore exits 1 over this ledger while `falsifier_repair` used to answer `RUNNABLE` and
+    `repair_verdicts` dropped it, which is the pair the item measured on 2026-10-08: 6 keys
+    named by one surface and zero by the other, over the same 118-key file. The class carries
+    that predicate's detail VERBATIM, because a second reader of the same question would be a
+    second number, and #1588 already measured what happens when one of them gets believed.
+
+    The `$`-pattern half is the rail the item names by hand:
+    `ledger/falsifier_input_lost_for_non_error_seq_keys` stores a command whose pattern holds
+    `$k` tonight, and resolving that token would mean matching a literal `$k` against a
+    filename, finding nothing, and calling that a finding. `candidate_input_lost` refuses to
+    decide it; so does this class, and no `NEEDS_RERECORD` line is emitted for such a key.
+    """
+    cand = _cand_dir_2433(tmp_path)
+    cmd = input_lost_cmd_2433(cand)
+    row = input_lost_row(tmp_path / "verdicts.jsonl", cmd)
+
+    status = sv.evidence_cmd_status(row, timeout=5)
+    assert status[0] != sv.UNRUNNABLE, f"fixture must execute: {status}"
+    detail = sv.candidate_input_lost(cmd)
+    assert detail is not None, "fixture: audit's own predicate must call this row blind"
+
+    cls, replacement, carried = sv.falsifier_repair(row, timeout=5)
+    assert cls == sv.INPUT_LOST_CORPUS, (cls, carried)
+    assert carried == detail, "the class must carry the classifier's sentence, unchanged"
+    assert replacement == "", "no substitution can restore a file retention deleted"
+
+    blind = tmp_path / "blind.jsonl"
+    input_lost_row(blind, cmd)
+    rc, out = run_audit(blind)
+    assert rc == 1, out
+    assert out.splitlines()[-1] == "keys: 1 unrunnable: 0", out
+
+    dollar = tmp_path / "dollar.jsonl"
+    input_lost_row(dollar, input_lost_cmd_2433(cand, pattern="candidate-$k-[0-9]{8}\\.md"),
+                   key="ledger/falsifier_input_lost_for_non_error_seq_keys")
+    dollar_rc, dollar_out = run_audit(dollar)
+    assert sv.candidate_input_lost(input_lost_cmd_2433(
+        cand, pattern="candidate-$k-[0-9]{8}\\.md")) is None
+    assert sv.falsifier_repair(sv.load_verdicts(dollar)[
+        "ledger/falsifier_input_lost_for_non_error_seq_keys"], timeout=5)[0] == sv.RUNNABLE
+    assert dollar_rc == 0, f"a $-pattern row must stay undecided, and undecided is quiet: {dollar_out}"
+
+
+def test_a_reanchor_file_reaches_a_key_whose_only_defect_is_lost_input(tmp_path):
+    """Clause 2: the operator's remedy is reached before the class is dropped.
+
+    `--reanchor-file` is how a person hands the ledger a falsifier for a key no substitution
+    can save, and #2339's class is precisely where they would hand one: the dated snapshots are
+    gone, but the signature may well have an owner-skill count now that means something. The
+    lookup sat downstream of the `RUNNABLE: continue`, so the flag was answered `reanchored: 0
+    refused: 0` and exit 0 with the file accepted — the same swallow as the disposal route, one
+    branch later. Asserted across the CLI, because the failure was invisible in every
+    in-process test that never reached that line.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    cand = _cand_dir_2433(tmp_path)
+    input_lost_row(store, input_lost_cmd_2433(cand))
+    reanchors = tmp_path / "reanchors.json"
+    # What a person would hand this key: a count of the corpus that DOES survive, declaring
+    # its denominator, which is what `reanchor_verdict` executes before accepting a
+    # replacement (#1586: a re-anchor born dead is only a new blind key).
+    authored = f"C={cand}; echo input_rows=$(ls $C 2>/dev/null | wc -l) owner_skill_K=0"
+    reanchors.write_text(json.dumps({INPUT_LOST_KEY_2433: authored}), encoding="utf-8")
+
+    rc, out = run_repair_2433(store, tmp_path, "--dry-run",
+                              f"--reanchor-file={reanchors}")
+    tally = repair_tally_2433(out)
+    assert tally["reanchored"] + tally["needs_rerecord"] == 1, out
+    assert rc == 1, f"a ledger whose only defect is blind input must not exit 0: {out}"
+
+    dry_rc, dry_out = run_repair_2433(store, tmp_path, "--dry-run")
+    assert repair_tally_2433(dry_out)["reanchored"] == 0, dry_out
+    assert rerecord_keys_2433(dry_out) == [INPUT_LOST_KEY_2433], dry_out
+
+
+def test_repair_names_a_blind_key_as_needs_rerecord_and_fails_without_disposing(tmp_path):
+    """Clause 3: `repair`'s output and exit agree with `audit`'s about the same ledger.
+
+    One line per key, bracketed `input_lost` — the token `audit` publishes, not a fourth word
+    for one finding — and the last line keeps its six-label shape with `needs_rerecord: 1`
+    where the item measured `needs_rerecord: 0`, exiting 1. The two directions are asserted
+    together: the tally figure and the printed lines that earned it, because a tally that
+    counted a class nobody printed is exactly as unread as one that never counted it, and
+    #2433's whole existence is a `repair` that exits 0 while `audit` exits 1 over 6 keys.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    cand = _cand_dir_2433(tmp_path)
+    input_lost_row(store, input_lost_cmd_2433(cand))
+    rows_before = len(store.read_text(encoding="utf-8").splitlines())
+
+    rc, out = run_repair_2433(store, tmp_path, "--dry-run")
+
+    assert rc == 1, out
+    assert rerecord_lines_2433(out) == [f"NEEDS_RERECORD {INPUT_LOST_KEY_2433} [input_lost]"], out
+    tally = repair_tally_2433(out)
+    assert tally["needs_rerecord"] == 1, out
+    assert tally["disposed"] == 0 and tally["reanchored"] == 0, out
+    assert out.splitlines()[-1].startswith("repaired: 0  reanchored: 0  disposed: 0"), out
+    assert len(store.read_text(encoding="utf-8").splitlines()) == rows_before, (
+        "a dry run appends nothing to an append-only ledger")
+
+
+def test_a_blind_key_is_disposed_with_a_pinned_input_the_predicate_accepts(tmp_path):
+    """Clause 4: the appended tombstone pins what the classifier measured, not the row's text.
+
+    The pinned input is `directory` + `/` + `pattern` — the two halves
+    `candidate_input_lost` resolved the corpus *in* and *as* — never a span lifted out of
+    `evidence_cmd`, which is a compound command and not a path. So the pin is asserted equal to
+    what this module can derive from the detail, and the appended command then counts that pin
+    absent: `dated_corpus_files=0` with the pin published back inside the command, which is what
+    makes the disposal falsifiable (restore the four snapshots and the count is nonzero).
+
+    The metacharacter screen is the other half of the clause and it is not decoration: an
+    assigned directory is raw command text, so the ledger can store
+    `C=/tmp/…/a\\ b/skills/candidates`, whose backslash-space pins a path no file has ever lived
+    in — a tombstone over it would count an absence nobody measured. That key is reported as
+    work and nothing is appended. What the screen does NOT refuse is the backslash inside
+    `[0-9]{8}\\.md`, the extension every `grep -xE` key stores; `UNSAFE_PIN_CHARS` says why in
+    one paragraph, and refusing it would strand all four live `seq-*` keys with `audit` unable
+    to reach 0.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    cand = _cand_dir_2433(tmp_path)
+    input_lost_row(store, input_lost_cmd_2433(cand))
+
+    rc, out = run_repair_2433(store, tmp_path, "--dispose-unverifiable")
+
+    assert rc == 0, out
+    assert repair_tally_2433(out)["disposed"] == 1, out
+    assert rerecord_lines_2433(out) == [], f"a disposed key is not also a tally line: {out}"
+    latest = sv.load_verdicts(store)[INPUT_LOST_KEY_2433]
+    # `rejected` is the verdict all six live keys of this class carry, and `disposal_verdict`
+    # relabels terminal → terminal only: the row keeps its word and gets a falsifier that can
+    # no longer lie, which is the whole of a machine-safe disposal (#1769). The relabelling
+    # branch is pinned too, one store down, so neither half of that rule is assumed.
+    assert latest["verdict"] == "rejected", latest
+    assert latest["decided_by"] == sv.DISPOSE_DECIDED_BY, latest
+    assert not sv.is_terminal(latest), "fixture: `rejected` is not terminal on this box"
+
+    terminal = tmp_path / "terminal.jsonl"
+    input_lost_row(terminal, input_lost_cmd_2433(cand), key="seq-7-reviewed",
+                   verdict="reviewed_no_skill")
+    t_rc, t_out = run_repair_2433(terminal, tmp_path, "--dispose-unverifiable")
+    assert repair_tally_2433(t_out)["disposed"] == 1, t_out
+    t_latest = sv.load_verdicts(terminal)["seq-7-reviewed"]
+    assert t_latest["verdict"] == sv.UNVERIFIABLE_VERDICT, t_latest
+    assert sv.is_terminal(t_latest), "a disposal must not unblock a blocked pattern"
+
+    derived = sv.input_lost_input(sv.candidate_input_lost(input_lost_cmd_2433(cand)))
+    assert derived == f"{cand}/{INPUT_LOST_PATTERN_2433}", derived
+    assert derived in latest["evidence_cmd"], latest["evidence_cmd"]
+    assert f"pinned_input='{derived}'" in latest["evidence_cmd"], latest["evidence_cmd"]
+    assert latest["evidence_cmd"] == sv.TOMBSTONE_TEMPLATE.format(input=derived), (
+        "the appended check is this module's template over the derived pin, not a span of the "
+        "row's own compound command")
+    assert f"C={cand}" not in latest["evidence_cmd"], latest["evidence_cmd"]
+
+    ran = subprocess.run(["bash", "-c", latest["evidence_cmd"]],
+                         capture_output=True, text=True)
+    assert ran.returncode == 0, ran.stderr
+    assert "dated_corpus_files=0" in ran.stdout, ran.stdout
+    assert sv.candidate_input_lost(latest["evidence_cmd"]) is None, (
+        "the disposal re-tripped the predicate it was written to retire")
+
+    escaped = tmp_path / "escaped.jsonl"
+    esc_dir = _cand_dir_2433(tmp_path, "a\\ b/skills/candidates")
+    input_lost_row(escaped, input_lost_cmd_2433(esc_dir), key="seq-9-escaped-dir")
+    esc_rows_before = len(escaped.read_text(encoding="utf-8").splitlines())
+    esc_rc, esc_out = run_repair_2433(escaped, tmp_path, "--dispose-unverifiable")
+    assert rerecord_keys_2433(esc_out) == ["seq-9-escaped-dir"], esc_out
+    assert repair_tally_2433(esc_out)["disposed"] == 0, esc_out
+    assert esc_rc == 1, esc_out
+    assert len(escaped.read_text(encoding="utf-8").splitlines()) == esc_rows_before, (
+        "an unsafe pin was appended anyway")
+
+
+def test_a_disposed_blind_key_leaves_audit_with_nothing_to_name(tmp_path):
+    """Clause 5: the figure can reach 0, which is the property the whole item is for.
+
+    The #2433 measurement was not only that repair was blind: `run:2026-09-20-nightly-mining`
+    had a #1588 disposal already appended for it and `audit` named it anyway, every night, over
+    a row whose entire claim is that its corpus is gone — a ledger that cannot be brought to 0
+    is one where the alarm has no off switch and the nightly learns to ignore it. So this node
+    runs the real sequence at the CLI and reads the real output: audit 1 over `input_lost 1`,
+    repair with `--dispose-unverifiable`, audit again at 0 with the tally line the item names
+    verbatim and the last line unmoved at `keys: 1 unrunnable: 0`.
+
+    `--no-mirror` on both, since the ledger is a tmp file and a mirror comparison against the
+    live vault copy is #1717's surface, not this one.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    cand = _cand_dir_2433(tmp_path)
+    input_lost_row(store, input_lost_cmd_2433(cand))
+
+    rc, out = run_audit(store)
+    assert rc == 1, out
+    assert "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 1" in out, out
+
+    dispose_rc, dispose_out = run_repair_2433(store, tmp_path, "--dispose-unverifiable")
+    assert repair_tally_2433(dispose_out)["disposed"] == 1, dispose_out
+
+    after_rc, after_out = run_audit(store)
+    assert after_rc == 0, after_out
+    assert "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 0" in after_out, after_out
+    assert after_out.splitlines()[-1] == "keys: 1 unrunnable: 0", after_out
+
+
+def test_the_exemption_needs_the_disposal_frame_and_nothing_wider(tmp_path):
+    """Rail: the exempt shape is a disposal, and a lost corpus outside it is still named.
+
+    Clause 5 could be satisfied by a predicate that stopped seeing, which is the laundering
+    #2433's triage named as the trap. The control is the same bytes minus the frame: the command
+    #1588's tombstone template would have written for this corpus — counting it absent, claiming
+    it in prose, with no `pinned_input=` to bind the count to the path — and `audit` still names
+    it as INPUT_LOST. What is exempted is a row that publishes the corpus it counts, which is a
+    claim a reader can check; what is not exempted is any command that lost its input.
+    """
+    cand = _cand_dir_2433(tmp_path)
+    pin = f"{cand}/{INPUT_LOST_PATTERN_2433}"
+    framed = sv.TOMBSTONE_TEMPLATE.format(input=pin)
+    assert sv.candidate_input_lost(framed) is None, "the disposal itself must not re-trip"
+
+    unframed = (f"bash -c \"echo dated_corpus_files=$(ls \"{pin}\" 2>/dev/null "
+                f"| grep -cxE \"{pin}\")\"")
+    assert sv.candidate_input_lost(unframed) is not None, (
+        "the exemption is wider than a disposal: a lost corpus with no pinned_input is named")
+
+    store = tmp_path / "unframed.jsonl"
+    stored_row(store, "seq-8-old-tombstone", unframed)
+    rc, out = run_audit(store)
+    assert rc == 1, out
+    assert "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 1" in out, out
+
+
+def test_a_key_whose_corpus_is_on_the_disk_is_never_disposed_as_blind(tmp_path):
+    """Rail: the new class is reached only by a row the predicate actually decides.
+
+    A key whose pattern DOES match a file in the directory, and whose command reports that count
+    as its denominator, prints what it claims to print. Before #2433 it was `RUNNABLE` and
+    dropped; after it, it must still be `RUNNABLE` — a repair that disposed healthy keys
+    whenever a directory listing merely succeeded would empty the ledger of real verdicts with a
+    #2339-shaped excuse. Both directions are asserted: `falsifier_repair` on the row, and
+    `repair --dispose-unverifiable` over a ledger of it, which must append nothing and exit 0.
+    """
+    cand = _cand_dir_2433(tmp_path)
+    (cand / "candidate-seq-3-bash-fs-edit-bash-fs-read-20260920.md").write_text(
+        "---\npattern_key: candidate-seq-3-bash-fs-edit-bash-fs-read\n---\n"
+        "A\nB\nC\n", encoding="utf-8")
+    store = tmp_path / "healthy.jsonl"
+    healthy = (f"C={cand}; N=$(ls $C 2>/dev/null | grep -xE '{INPUT_LOST_PATTERN_2433}' "
+               f"| wc -l); echo input_rows=$N owner_skill_K=0")
+    row = input_lost_row(store, healthy)
+
+    assert sv.candidate_input_lost(row["evidence_cmd"]) is None, (
+        "fixture: the pattern names a file that is on the disk")
+    assert sv.falsifier_repair(row, timeout=5)[0] == sv.RUNNABLE
+
+    rc, out = run_repair_2433(store, tmp_path, "--dispose-unverifiable")
+    assert rc == 0, out
+    tally = repair_tally_2433(out)
+    assert tally["disposed"] == 0 and tally["needs_rerecord"] == 0, out

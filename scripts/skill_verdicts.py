@@ -1742,7 +1742,22 @@ def candidate_input_lost(evidence_cmd: str) -> str | None:
 
     A literal dated path that no longer exists is not answered here either: that one prints `No such
     file or directory` and belongs to `UNRUNNABLE`, which decides it by executing.
+
+    One row shape is exempt, and it is exempt for what it CLAIMS rather than how it spells it: a
+    disposal tombstone written by `repair_verdicts`. That row exists precisely because the corpus is
+    gone, so its check counts the absence and prints it — `dated_corpus_files=0 pinned_input='<dir>
+    <pattern>'` — and `audit` reading it as INPUT_LOST makes the ledger permanently unrestorable: the
+    #2433 measurement was `run:2026-09-20-nightly-mining` named by `audit` every night over a
+    disposal that had already been appended for it, which is why `repair --dispose-unverifiable` had
+    nothing left to do and `input_lost` could never reach 0. The alternative — pinning an input the
+    predicate cannot see — would retire the count by hiding the corpus from the detector, which is
+    the blind spot arriving laundered rather than closed. What the exemption cannot buy is a dodge:
+    `_DISPOSAL_TOMBSTONE_RE` is the template's own frame with a backreference, so an exempt row must
+    actually count the corpus it pins, and a command that pins one path while counting another is
+    still named.
     """
+    if _DISPOSAL_TOMBSTONE_RE.fullmatch((evidence_cmd or "").strip()):
+        return None
     specs = list(_CANDIDATE_PATH_RE.finditer(evidence_cmd))
     if not specs:
         return None
@@ -2031,13 +2046,32 @@ def evidence_cmd_status(row: dict, timeout: int = EVIDENCE_TIMEOUT_SECONDS):
 
 # --------------------------------------------------------------- root-move repair --
 
-#: The four answers `falsifier_repair` gives about a key `audit` called UNRUNNABLE.
-#: Only `ROOT_MOVED` is a machine's business: the other two name an input that no
-#: longer exists, or a field that never held a command, and both need a re-derivation.
+#: The five answers `falsifier_repair` gives about a key. The first four are about a check
+#: `audit` called UNRUNNABLE, and only `ROOT_MOVED` is a machine's business: the other two
+#: name an input that no longer exists, or a field that never held a command, and both need a
+#: re-derivation. The fifth arrives at a row `audit` called INPUT_LOST while `check` called it
+#: healthy, and it is here because the two surfaces disagree on live keys today.
 RUNNABLE = "runnable"
 ROOT_MOVED = "root_moved"
 NEEDS_RERECORD = "needs_rerecord"
 UNPARSEABLE = "unparseable"
+
+#: The fifth class, and the one the four above cannot reach: a stored falsifier that still
+#: EXECUTES — so `evidence_cmd_status` has nothing to say about it — while the candidate snapshot
+#: its own pattern names has been pruned, so what it prints is a zero it did not read. `audit`
+#: named 6 such keys on the live ledger and exited 1; `repair` on the same 118-key ledger printed
+#: six zeroes and exit 0, because `falsifier_repair` answered `RUNNABLE` for every row that was
+#: not UNRUNNABLE and `repair_verdicts` drops that class. The one writer that could retire a
+#: blind falsifier therefore reported there was nothing to do, which is the finding #2433 is
+#: about. Decided by `candidate_input_lost` — `audit`'s predicate, called and not re-implemented:
+#: a second predicate would give the pass and the audit two numbers, and #1588 already measured
+#: what happens when one of them gets believed.
+INPUT_LOST_CORPUS = "input_lost_corpus"
+
+#: The `NEEDS_RERECORD` bracket for that class: `NEEDS_RERECORD <key> [input_lost]`. Named apart
+#: from the class word because the bracket is published text a nightly greps, and `audit`'s
+#: uppercase `INPUT_LOST <key> :: <detail>` line is a different surface's line about the same key.
+INPUT_LOST_SHAPE = "input_lost"
 
 #: The two `NEEDS_RERECORD` shapes a re-anchor can actually fix, kept as words because
 #: they are what `reanchor_verdict` is offered for: the dead root is reachable by editing
@@ -2085,6 +2119,65 @@ DISPOSAL_NOTE = (
     "corpus absent instead, and a nonzero count falsifies this disposal and reopens the "
     "decision. Verdict {kept}.")
 
+#: A command that IS `TOMBSTONE_TEMPLATE`, recognised from the template's own frame so the two
+#: cannot drift apart, with a backreference pinning the counted path and the published
+#: `pinned_input=` to the same string. `candidate_input_lost` exempts exactly this shape: a
+#: disposal's claim is the absence of its corpus, so classifying it as a falsifier that lost its
+#: input is a verdict on the ledger's bookkeeping, not on a decision nobody can re-run (#2433).
+_DISPOSAL_TOMBSTONE_PARTS = TOMBSTONE_TEMPLATE.split("{input}")
+_DISPOSAL_TOMBSTONE_RE = re.compile(
+    re.escape(_DISPOSAL_TOMBSTONE_PARTS[0])
+    + r"(?P<pin>[^'\"\n]*)"
+    + re.escape(_DISPOSAL_TOMBSTONE_PARTS[1])
+    + r"(?P=pin)"
+    + re.escape(_DISPOSAL_TOMBSTONE_PARTS[2]) + r"\Z")
+
+#: The characters no pinned path may contain in either tombstone builder: each one can close
+#: the quote the template splices it into, or start a substitution inside it. A backslash is
+#: refused outright by `disposable_input` (#1588, and `tests/test_skill_verdicts.py` pins it).
+#: `input_lost_input` screens it one notch narrower, and cannot do otherwise: the pattern half
+#: of its pin arrives in the dialect the ledger stored it in, and every `grep -xE` key spells
+#: its extension `[0-9]{8}\.md` — refusing that backslash would refuse all four live `seq-*`
+#: keys and leave `audit`'s figure unreachable forever (owed #2433 clause 1). What stays
+#: refused is a backslash escaping anything but a regex metacharacter, which is the class that
+#: actually breaks the quoting: `C=/data/a\ b/skills/candidates` pins a `\ ` whose backslash
+#: survives into `ls "…"` and eats the character after it.
+UNSAFE_PIN_CHARS = "'\"$`"
+PIN_SAFE_ESCAPES = ".*+?[]{}()|"
+
+
+def pin_is_unsafe(pinned: str, *, backslash: str = "any") -> bool:
+    """Whether `pinned` would let ledger DATA choose what the tombstone executes.
+
+    `backslash="any"` is #1588's rule, character for character as `disposable_input` applied
+    it before #2433; `backslash="unsafe"` exempts a backslash whose next character is one of
+    `PIN_SAFE_ESCAPES`, the reading `input_lost_input` needs. Kept as one function so the two
+    builders cannot drift into two different ideas of what is safe to splice.
+    """
+    if any(c in pinned for c in UNSAFE_PIN_CHARS):
+        return True
+    if backslash == "any":
+        return "\\" in pinned
+    i = 0
+    while True:
+        i = pinned.find("\\", i)
+        if i < 0:
+            return False
+        if i + 1 >= len(pinned) or pinned[i + 1] not in PIN_SAFE_ESCAPES:
+            return True
+        i += 2
+
+
+#: One clause of a `candidate_input_lost` detail, verbatim in its two shapes: `<pattern> in
+#: <directory> (N files there, none matching)` or `(no such directory)`. The pattern is that
+#: function's own token — `candidate-[^\s'"]*\.md`, so it carries no space and no quote — which
+#: is what makes `\S+` unambiguous for it; the directory is the greedy remainder up to the last
+#: ` (`, because an assigned directory is raw command text and may itself hold anything the
+#: quoting rules allow.
+_INPUT_LOST_DETAIL_RE = re.compile(
+    r"^(?P<pattern>\S+) in (?P<directory>.+) "
+    r"\((?:no such directory|\d+ files? there, none matching)\)$")
+
 
 def dead_root_spellings(live: Path | None = None) -> tuple[tuple[str, str], ...]:
     """Each spelling the data root used to have, paired with where it lives today.
@@ -2131,19 +2224,49 @@ def disposable_input(detail: str) -> str:
     the tombstone executes. Those keys are reported instead of disposed.
     """
     pinned = missing_input(detail)
-    if not pinned or any(c in pinned for c in "'\"$`\\"):
+    if not pinned or pin_is_unsafe(pinned):
         return ""
     return pinned
+
+
+def input_lost_input(detail: str) -> str:
+    """The corpus path an `INPUT_LOST_CORPUS` detail names, or '' when none is safe to pin.
+
+    The other builder, `disposable_input`, reads a `No such file or directory` line, and there
+    is no such line to read here: the whole point of #2339's class is that the command executes
+    and says nothing of the kind, so its detail is the classifier's own sentence — `<pattern>
+    in <directory> (<why>)` — and the path has to be rebuilt from its two halves.
+
+    Rebuilt, never copied: the row's `evidence_cmd` is not a path, it is the compound command
+    (`C=<dir>; N=$(ls $C | grep -xE "<pattern>"); …`), and lifting text out of it would hand the
+    tombstone a string the ledger authored rather than the one this module measured. The
+    directory and the pattern are what `candidate_input_lost` resolved the file *in* and *as*,
+    which is the claim the appended count has to keep. Joining them with `/` reproduces the
+    pattern's own spelling in the ledger's directory, trailing separator normalised so
+    `/…/candidates/` + `candidate-*-20260920.md` does not become a doubled slash.
+
+    Screened like the other builder, with the one documented exception in
+    `UNSAFE_PIN_CHARS`: an assigned directory is raw command text, so
+    `C=/data/a\\ b/skills/candidates` arrives with its backslash-space intact and would be
+    spliced into the `bash -c` string below — such a key comes back as work, not as a tombstone.
+    """
+    first = (detail or "").split("; ")[0]        # multi-glob detail: pin the first lost corpus
+    match = _INPUT_LOST_DETAIL_RE.match(first)
+    if not match:
+        return ""
+    pinned = f"{match['directory'].rstrip('/')}/{match['pattern']}"
+    return "" if pin_is_unsafe(pinned, backslash="unsafe") else pinned
 
 
 def falsifier_repair(row: dict, *, timeout: int = EVIDENCE_TIMEOUT_SECONDS,
                      rewrites: list[tuple[str, str]] | None = None) -> tuple[str, str, str]:
     """Classify one dead verdict's falsifier: `(class, replacement_cmd, detail)`.
 
-    `ROOT_MOVED` carries the rewritten command; the other dead classes carry the
+    `ROOT_MOVED` carries the rewritten command; the other classes carry the
     classifier detail that says why a rewrite cannot save the key, which is also the
-    input a disposal pins. A row whose check runs answers `RUNNABLE` with nothing to
-    offer: a command that executed is never a repair target whatever its exit code said.
+    input a disposal pins. A row whose check runs answers `RUNNABLE` only when its input
+    is on the disk: a command that executed but can no longer see what it claims to
+    count is `INPUT_LOST_CORPUS`, decided by the predicate `audit` already applies to it.
 
     `evidence_cmd_status` decides both sides, deliberately. #1588 measured that judging
     a rewritten command by `rc in (0,1)` instead reports 62 repaired where the truth is
@@ -2151,9 +2274,22 @@ def falsifier_repair(row: dict, *, timeout: int = EVIDENCE_TIMEOUT_SECONDS,
     traceback, exits 0 or 1 over a missing input, so a zero reads as a clean answer.
     One classifier, shared with `audit` and `check`, or the pass and the audit report
     two numbers and one of them gets believed.
+
+    A row whose check runs is not automatically healthy, though, and `RUNNABLE` used to
+    swallow that: #2339's `INPUT_LOST` keys execute fine, print a zero they did not read,
+    and exit 0 through their trailing `echo`, and `audit` names them from the row and a
+    directory listing rather than from the execution. So the executing half of this
+    function asks `audit`'s own predicate rather than assuming (#2433): the live ledger
+    had `audit` exiting 1 over 6 such keys while `repair` printed six zeroes and exit 0
+    over the same file, because the class the pass could not name was the class it
+    dropped. Carried detail is that predicate's sentence, unchanged, so the repair and
+    the audit quote one reader's finding about the same corpus.
     """
     status = evidence_cmd_status(row, timeout=timeout)
     if status is None or status[0] != UNRUNNABLE:
+        lost = candidate_input_lost(row.get("evidence_cmd") or "")
+        if lost is not None:
+            return INPUT_LOST_CORPUS, "", lost
         return RUNNABLE, "", ""
     if _BASH_PARSE_ERROR_RE.search(status[1]):
         # Bash could not parse the field at all. Rows written before the parse-error
@@ -2272,6 +2408,16 @@ def repair_verdicts(store: str | Path | None = None, *, dry_run: bool = False,
     `dispose=True` additionally records the keys whose measurement corpus is provably
     gone, per `disposal_verdict`. It is opt-in because it relabels decisions however
     conservatively; the default fixes bookkeeping and touches nothing else.
+
+    `INPUT_LOST_CORPUS` keys reach every branch below, which is the whole of #2433: the
+    pass used to see none of them, because `falsifier_repair` called them `RUNNABLE` and
+    the `continue` for that class sits above everything here. So on the live ledger of
+    2026-10-08 `audit` exited 1 over 6 keys this function reported as six zeroes and exit
+    0 — an operator handing it a `--reanchor-file` for one of those keys got `reanchored:
+    0` and no reason, and the tombstone route that could retire them was unreachable. With
+    the class named, a dry run prints `NEEDS_RERECORD <key> [input_lost]` and exits 1, an
+    authored command for such a key is honoured, and `--dispose-unverifiable` appends the
+    count-of-absence check that finally lets `audit` report `input_lost 0`.
     """
     table = load_verdicts(store)
     out: dict[str, list] = {"repaired": [], "disposed": [], "reanchored": [],
@@ -2307,8 +2453,14 @@ def repair_verdicts(store: str | Path | None = None, *, dry_run: bool = False,
         # Which shape it is decides who can fix it. A nested root or a quoted glob is a
         # dead path sitting where a substitution cannot reach but an *authored* command
         # can, so those are the shapes `reanchors` is for; a dated corpus is nobody's to
-        # author around, since the input retention deleted is gone from every tree.
-        shape = rerecord_shape(detail, rewrites=rewrites)
+        # author around, since the input retention deleted is gone from every tree. An
+        # input-lost corpus is the second of those for its count and the first of them for
+        # its key: the dated snapshots are gone, but the signature they were mined from may
+        # well have an owner-skill falsifier now, so an authored command is exactly what a
+        # person would hand this key — which is why the classification happens above the
+        # `authored` lookup below and not inside the disposal branch (#2433 clause 2).
+        shape = (INPUT_LOST_SHAPE if cls == INPUT_LOST_CORPUS
+                 else rerecord_shape(detail, rewrites=rewrites))
         authored = (reanchors or {}).get(key, "").strip()
         if authored:
             try:
@@ -2318,7 +2470,12 @@ def repair_verdicts(store: str | Path | None = None, *, dry_run: bool = False,
             except ValueError as exc:
                 out["refused"].append(f"{key} :: {exc}")
             continue
-        pinned = disposable_input(detail)
+        # Two builders for one bracket: a `No such file or directory` detail names its whole
+        # path, while an input-lost detail names a directory and a pattern separately and has
+        # to be joined here. Both screens are `UNSAFE_PIN_CHARS`, so a key whose path would
+        # splice shell into the tombstone is reported as work on either route.
+        pinned = (input_lost_input(detail) if cls == INPUT_LOST_CORPUS
+                  else disposable_input(detail))
         if not dispose or not pinned:
             out["needs_rerecord"].append(f"{key} [{shape}]")
             continue
