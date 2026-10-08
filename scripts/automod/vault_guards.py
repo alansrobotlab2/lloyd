@@ -63,6 +63,7 @@ which is its own statement that nothing ran.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -721,11 +722,174 @@ def _nodes_naming_a_landed_path(nodes: list[str], tree: Path,
 PROPOSED_DRAWS = 2
 BASELINE_DRAWS = 2
 
+#: The ceiling on a derived probe budget (#2383 clause 4). The probe holds the gate's
+#: tests lock from winning the slot to its `finally`, and the gate's own `tests` rung
+#: queues behind it up to `Gate.SERIAL_MAX_WAIT` (`gate.py:1349`, 2400.0 s), so a
+#: derivation with no ceiling would be an open-ended hold on every gate on the box,
+#: decided by whatever the last slow run happened to cost. 900 s is three of the
+#: slowest parallel draws ever rowed (292.6 s, 2026-10-06T17:57:25Z) and still well
+#: inside the queue the rung already tolerates.
+PROBE_BUDGET_CEILING_S = 900.0
+
+#: How many trailing bytes of the promotions ledger `probe_budget` reads, sized by
+#: measurement rather than by round number. A tail read is only worth paying for if it
+#: reaches the rows that carry a measured draw, and on the live 31 MB rolling ledger the
+#: cheap tails do not: 256 KB reaches just 3 `vault_land` rows (2 with a `candidate`),
+#: 1 MB reaches 10, and 4 MB reaches 42 — parsing which costs 34 ms, 0.01% of the 370 s
+#: the widest derived budget allows and less than one second of the ~240 s parallel draw
+#: it is sizing. At 3 rows the answer is whichever of three lands happened to re-ask;
+#: at 42 the worst case the derivation takes is a worst case over a month of draws,
+#: which is what "derived from measured cost" has to mean to be steadier than the
+#: constant it replaces.
+LEDGER_TAIL_BYTES = 4_194_304
+
+
+def _tail_rows(path: Path, tail_bytes: int = LEDGER_TAIL_BYTES) -> list[dict]:
+    """The JSON objects in the last `tail_bytes` of an append-only ledger.
+
+    A truncated first line is not an error and is not a row: it is the seam of the
+    tail, and `append_event` writes one object per line, so the row it cut in half is
+    either already counted above or still being written. An unreadable file is an
+    empty list, which `probe_budget` reads as "no measured cost" rather than as zero.
+    """
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - int(tail_bytes)))
+            blob = fh.read()
+    except OSError:
+        return []
+    rows = []
+    for line in blob.decode("utf-8", "replace").splitlines()[1 if size > tail_bytes else 0:]:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _draw_seconds(row: dict) -> tuple[float | None, float | None]:
+    """(parallel draw seconds, one serial draw's seconds) off one ledger row.
+
+    Only a draw that REPORTED something counts: `guards.candidate` with `ran: 0` and
+    a `parallel_retry` with `ran: 0` cost the whole remainder of a budget and bought
+    no answer, and averaging or maxing their wall clock into a budget would size the
+    next probe by how long the last one failed to answer. Absent or non-positive
+    reads as None, and `_guards_row` wrote no seconds on the re-ask blocks at all
+    until #2383, which is the input this derivation could not have had before it.
+    """
+    guards = row.get("guards")
+    if not isinstance(guards, dict):
+        return None, None
+    cand = guards.get("candidate")
+    par = (cand.get("seconds") if isinstance(cand, dict) and cand.get("ran") else None)
+    serial = None
+    for key in ("parallel_retry", "parallel_retry_2"):
+        blk = guards.get(key)
+        if not isinstance(blk, dict) or not blk.get("ran"):
+            continue
+        secs = blk.get("seconds")
+        if isinstance(secs, (int, float)) and not isinstance(secs, bool) and secs > 0:
+            serial = secs if serial is None else max(serial, float(secs))
+    par = par if isinstance(par, (int, float)) and not isinstance(par, bool) \
+        and par > 0 else None
+    return par, serial
+
+
+def probe_budget(explicit: float | None = None,
+                 ledger: Path | None = None) -> tuple[float, str]:
+    """The whole-probe budget, and the named input it was derived from.
+
+    The **named measured-cost input** is the promotions ledger's own `guards` rows:
+    `guards.candidate.seconds` is what one full parallel draw of the vault-reading
+    selection costs on this box right now, and `guards.parallel_retry` /
+    `parallel_retry_2`'s `seconds` is what one serial re-ask draw costs. The budget is
+    one of each side's parallel draw plus the draws a full A/B needs —
+    `PROPOSED_DRAWS + BASELINE_DRAWS` serial ones — floored at `PROBE_TIMEOUT_SECONDS`
+    so a narrow measured day never makes a probe tighter than it already is, and
+    capped at `PROBE_BUDGET_CEILING_S`.
+
+    #2283 set both sides to two draws and left the budget at the literal 300.0, and
+    the ledger says what that cost: re-measured at the window 2026-10-06T17:00Z onward,
+    3 of the 25 `vault_land` rows that carry a `guards` block are `state: skipped` with
+    `candidate.failed > 0` and `ok: true` (`2026-10-06T17:57:25Z` #2304 at 292.6 s,
+    `2026-10-07T03:54:53Z` at 246.8 s, `2026-10-07T17:15:16Z` #2367 at 238.4 s) — a
+    parallel draw of 238-293 s leaves the second draw 7-62 s, and the draws that cannot
+    finish are the ones that answer "could not be attributed". Deriving from measured
+    cost is what makes the second draw fit; the cap is what keeps it off the gate's lock
+    queue.
+
+    Two branches, both pinned in `tests/test_automod_vault_round.py`: with a readable
+    ledger carrying a measured parallel draw and a measured serial draw the answer is
+    the derived figure; with the ledger missing, unreadable, empty, or carrying only
+    draws that never reported, it is exactly `PROBE_TIMEOUT_SECONDS` — 300.0 — because
+    the fallback has to be the number every earlier row was measured against, not a
+    new guess. `explicit` (a caller's `timeout=`) wins over both, and the only
+    production caller (`vault_round.py`) passes none.
+    """
+    if explicit is not None:
+        return float(explicit), "caller-supplied `timeout=`"
+    path = Path(ledger) if ledger is not None else Path(S.LEDGER_PATH)
+    parallel = serial = None
+    for row in _tail_rows(path):
+        if row.get("event") != "vault_land":
+            continue
+        par, ser = _draw_seconds(row)
+        if par is not None:
+            parallel = par if parallel is None else max(parallel, par)
+        if ser is not None:
+            serial = ser if serial is None else max(serial, ser)
+    if parallel is None or serial is None:
+        # Which side was missing is the useful half of this sentence. The state between
+        # landing this code and landing the first row that carries a re-ask's seconds is
+        # exactly "parallel measured, serial not": a `budget` of 300.0 with a source
+        # naming the SERIAL side says the derivation is working and waiting on its own
+        # first output, where "no measured draw cost" would read as a ledger with nothing
+        # on it at all.
+        missing: list[str] = []
+        if parallel is None:
+            missing.append("parallel")
+        if serial is None:
+            missing.append("serial re-ask")
+        return (float(PROBE_TIMEOUT_SECONDS),
+                f"fallback `PROBE_TIMEOUT_SECONDS` ({PROBE_TIMEOUT_SECONDS:.0f}s): no "
+                f"measured {' + '.join(missing)} draw cost on the trailing "
+                f"{LEDGER_TAIL_BYTES / 1_048_576:g} MB of {path}")
+    derived = float(parallel) + (PROPOSED_DRAWS + BASELINE_DRAWS) * float(serial)
+    budget = min(max(derived, float(PROBE_TIMEOUT_SECONDS)), PROBE_BUDGET_CEILING_S)
+    return budget, (f"measured from {path}: parallel draw {parallel:.1f}s + "
+                    f"{PROPOSED_DRAWS + BASELINE_DRAWS} serial draws x {serial:.1f}s "
+                    f"= {derived:.1f}s, floored at {PROBE_TIMEOUT_SECONDS:.0f}s and "
+                    f"capped at {PROBE_BUDGET_CEILING_S:.0f}s")
+
+
+def _failed_union(draws: list[dict]) -> list[str]:
+    """Every node id that failed in ANY draw, in first-seen order (#2383 clause 1).
+
+    First-seen, not alphabetical: the order a reader sees a node in is the order the
+    runs reported it, and a sorted list of a capped set would drop a different twelve
+    nodes than the ones that actually failed first. Deduplicated because the same node
+    recurs across the parallel run and each serial re-ask of its file.
+    """
+    seen: list[str] = []
+    for draw in draws:
+        for nid in draw.get("failed") or []:
+            if nid not in seen:
+                seen.append(nid)
+    return seen
+
 
 def agreement(*, paths: list[str], ack: list[str] | None = None,
               live_root: Path | None = None,
               live_vault: Path | None = None, python: Path | None = None,
-              scratch_parent: Path | None = None, timeout: float = PROBE_TIMEOUT_SECONDS,
+              scratch_parent: Path | None = None, timeout: float | None = None,
+              budget_ledger: Path | None = None,
               mark_expr: str | None = None) -> dict:
     """Do the tree's vault guards disagree with the vault as proposed?
 
@@ -761,6 +925,16 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     for the second draw answers `skipped` with "could not be attributed" instead of
     refusing: one draw cannot tell a flake from a disagreement.
 
+    `timeout=None` — what the only production caller passes, since it passes nothing —
+    takes the budget from `probe_budget`, which derives it from the last measured cost
+    of the very runs this probe is about to launch and falls back to
+    `PROBE_TIMEOUT_SECONDS` when that input is missing. The figure the probe actually
+    ran on goes on the report as `budget` (and on the ledger row beside `seconds`), so
+    a later reader can compare what a skip cost against what it was allowed, instead of
+    inferring it from the `{budget:.0f}s` inside the `reason` prose (#2383 clause 5).
+    `budget_ledger` is that derivation's input, redirectable only so a test can hand it
+    a ledger of known cost; production reads the promotions ledger.
+
     Every child run happens inside the gate's tests lock (`_wait_for_tests_slot`),
     taken before anything is mirrored and released once, in the `finally`. What
     that lock holds is cores. It does not hold `~/obsidian`, which the guardian,
@@ -790,8 +964,14 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     and each run's own `seconds`, `files` and captured `excerpt` ride along so a
     non-answer explains itself.
     """
+    # The budget is settled before anything else, including the nesting guard below,
+    # because a row that carried no `budget` would leave "what was this probe allowed"
+    # unanswerable for exactly the skips that never ran — and those are the rows the
+    # figure is read for. A failed ledger read is a fallback, never an outage: the
+    # probe still runs with `PROBE_TIMEOUT_SECONDS`.
+    budget, budget_source = probe_budget(timeout, ledger=budget_ledger)
     started = time.time()
-    deadline = started + max(float(timeout), 0.0)
+    deadline = started + max(float(budget), 0.0)
     # `candidate` and `baseline` are deliberately ABSENT rather than empty: a
     # run that was never launched has no numbers, and `_guards_row`
     # (`vault_round.py:654-666`) already writes them only `if cand:`/`if base:`,
@@ -800,7 +980,8 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     # is a placeholder — the same zero-denominator shape #1691 is about.
     report: dict = {"state": "skipped", "refuse": False, "reason": "", "nodes": [],
                     "tree": {}, "files": [],
-                    "excerpt": "", "seconds": 0.0, "lock_wait_s": 0.0}
+                    "excerpt": "", "seconds": 0.0, "lock_wait_s": 0.0,
+                    "budget": round(float(budget), 1), "budget_source": budget_source}
 
     # The ack is split BEFORE anything runs, and both halves ride on the report: an entry
     # naming a path this land does not declare is a caller reaching for an excuse it has no
@@ -859,7 +1040,7 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         return done(reason=(
             f"the selection was not run: {why_serial}, and "
             f"{len(files)} vault-reading file(s) cost ~{SERIAL_SELECTION_COST_S:.0f}s "
-            f"serially against this {timeout:.0f}s probe budget — which is how the "
+            f"serially against this {budget:.0f}s probe budget — which is how the "
             f"five probes that ran serially all ended at `ran=0`. pytest-xdist is "
             f"what makes this probe answerable at all, so this is a non-answer and "
             f"not agreement"))
@@ -878,7 +1059,7 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         if wt.returncode != 0:
             return done(reason=f"probe worktree failed: {wt.stderr.strip()[:200]}")
         if run_budget() < MIN_RUN_SECONDS:
-            return done(reason=(f"no run fits what is left of the {timeout:.0f}s probe "
+            return done(reason=(f"no run fits what is left of the {budget:.0f}s probe "
                                 f"budget: {left():.1f}s for {len(files)} vault-reading "
                                 f"file(s), less than the {MIN_RUN_SECONDS:.0f}s a pytest "
                                 f"run needs to report anything"))
@@ -968,6 +1149,30 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         # each node is: `parallel_only_failures` lost no serial draw at all, and
         # `flake_only_failures` lost some draws and won others — an order dependence
         # in that test, or the box, and in neither case a prose/code disagreement.
+        def _name_unadjudicated(asked: list[dict]) -> None:
+            """Say which failures this probe SAW and is about to leave unattributed.
+
+            Every return that follows this definition up to the re-ask's verdict leaves
+            a completed proposed-side run's failures unadjudicated, and the row used to
+            record that as a bare count under `candidate.failed` — the same number the
+            rows that DID adjudicate them carry, so a reader of `promotions.jsonl` could
+            not count the lands that committed over a seen failure without reading three
+            `reason` sentences and guessing. The ids were in hand all along
+            (`cand["failed"]`, each `draws[i]["failed"]`) and dropped:
+            `parallel_only_failures` is built further down than every one of these
+            returns. Capped at 10 with the true total beside it, because the three live
+            rows of this shape carried 2, 1 and 1 failures and the wide re-ask behind
+            one of them was 135 nodes.
+
+            Called only where the PROPOSED side is what went unadjudicated. A skip on
+            the pre-land side means the proposed draws completed and their failures were
+            already attributed — naming them again would say the opposite of what
+            happened.
+            """
+            union = _failed_union([cand] + asked)
+            report["unadjudicated"] = union[:10]
+            report["unadjudicated_count"] = len(union)
+
         retry_files = _failing_files(cand["failed"])
         max_files = _parallel_retry_max_files()
         if not retry_files or len(retry_files) > max_files:
@@ -978,13 +1183,18 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
             # attribute. Never a refusal, and never a serial whole-selection
             # re-run that would answer nothing anyway.
             report["parallel_failures"] = cand["failed"][:50]
+            # …and which of them the probe actually SAW. Nothing re-asked past this
+            # point, so the union is the parallel run's own list in its own order;
+            # `parallel_failures` beside it is a 50-bound truncation of the same list,
+            # and neither number is the count of what went unadjudicated.
+            _name_unadjudicated([])
             return done(reason=(
                 f"the parallel proposed-vault run's {len(cand['failed'])} failing "
                 f"node(s) name {len(retry_files)} file(s), past the "
                 f"{max_files}-file ceiling at which a parallel failure is still "
                 f"re-askable file by file, and the whole {len(files)}-file "
                 f"selection re-run serially is the "
-                f"~{SERIAL_SELECTION_COST_S:.0f}s run this {timeout:.0f}s probe "
+                f"~{SERIAL_SELECTION_COST_S:.0f}s run this {budget:.0f}s probe "
                 f"cannot fit — so they are neither this land's nor the tree's"))
         draws: list[dict] = []
         while len(draws) < PROPOSED_DRAWS:
@@ -1005,12 +1215,14 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         completed = [d for d in draws if d["ran"]]
         report["proposed_runs"] = len(completed)
         if not draws:
+            _name_unadjudicated(draws)
             return done(reason=(
                 f"the serial re-ask of the parallel run's "
                 f"{len(cand['failed'])} failing node(s) could not start inside the "
-                f"{timeout:.0f}s probe budget ({left():.1f}s left), so they are "
+                f"{budget:.0f}s probe budget ({left():.1f}s left), so they are "
                 f"neither this land's nor the tree's"))
         if not completed:
+            _name_unadjudicated(draws)
             return done(reason=(f"the serial re-ask of the parallel run's failures "
                                 f"answered nothing, so they cannot be attributed to "
                                 f"this land: {draws[0]['note']}"))
@@ -1021,9 +1233,14 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         # land that agrees with the tree.
         report["excerpt"] = draws[-1]["excerpt"]
         if len(completed) < PROPOSED_DRAWS:
+            # The union across every draw that reported, not just the parallel run's:
+            # a node the serial re-ask also lost is still a failure this land is
+            # committing over, and the whole reason a second draw exists is that the
+            # first one could not settle it alone.
+            _name_unadjudicated(draws)
             return done(reason=(f"only {len(completed)} of the {PROPOSED_DRAWS} draws "
                                 f"against the vault as proposed could run inside the "
-                                f"{timeout:.0f}s probe budget ({left():.1f}s left), and "
+                                f"{budget:.0f}s probe budget ({left():.1f}s left), and "
                                 f"one draw cannot tell a flake from a disagreement, so "
                                 f"the failure could not be attributed to this land"))
         sets = [set(d["failed"]) for d in completed]
@@ -1063,7 +1280,7 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
             # Refusing on a red node alone is the wider rule the module docstring
             # refuses to adopt, so the honest answer is "could not attribute".
             return done(reason=(f"the pre-land run could not start inside the "
-                                f"{timeout:.0f}s probe budget ({left():.1f}s left), so "
+                                f"{budget:.0f}s probe budget ({left():.1f}s left), so "
                                 f"the {len(confirmed)} failing node(s) are neither "
                                 f"this land's nor the tree's"))
         base_draws: list[dict] = []
@@ -1089,7 +1306,7 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         if len(completed_base) < BASELINE_DRAWS:
             return done(reason=(f"only {len(completed_base)} of the {BASELINE_DRAWS} "
                                 f"draws against the pre-land vault could run inside the "
-                                f"{timeout:.0f}s probe budget ({left():.1f}s left), so "
+                                f"{budget:.0f}s probe budget ({left():.1f}s left), so "
                                 f"the failure could not be attributed to this land"))
         # A node that fails here too is red with this land's paths put back as well
         # as with them in place: the tree and the box are saying it either way. The

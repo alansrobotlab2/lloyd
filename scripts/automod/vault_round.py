@@ -873,11 +873,41 @@ def _guards_row(guards: dict) -> dict:
     `parallel_retry` with `ran: 0` is the re-ask that answered nothing
     (`vault_guards.py:836-839`), which is why `parallel_only_failures` can be absent
     beside a present re-ask.
+
+    The four #2383 keys are what a skip owes the reader of this file. `budget` is what
+    the probe was ALLOWED, written beside the `seconds` it spent: the three
+    `state=skipped, candidate.failed>0, ok=true` rows of 2026-10-06..10-07 carried only
+    the spent half, so the shortfall they hit was readable only out of the number inside
+    their `reason` prose. `budget_source` is carried ONLY on the fallback branch, because
+    that is the branch that changes how every other number reads — a `budget` of 300.0
+    that was measured to be 300.0 and a 300.0 that is the standing default because the
+    ledger held no draw that reported are different statements about the box.
+    `unadjudicated` names the node ids the probe watched fail and could not attribute,
+    capped at the same 10 as `nodes` with the true total on `unadjudicated_count` beside
+    it, and it appears only on a skip that DID reach a completed run: on a skip that
+    never got one there was nothing seen to name, and `candidate` is absent there for the
+    same reason. And each serial draw now carries the `seconds` it ran, which is the
+    measurement `vault_guards.probe_budget` reads back off these very rows — no row ever
+    wrote it, so no budget could be derived from measured cost before this.
     """
     out: dict = {"state": guards.get("state", "skipped"),
                  "refuse": bool(guards.get("refuse"))}
     if guards.get("seconds") is not None:
         out["seconds"] = guards["seconds"]
+    if guards.get("budget") is not None:
+        # #2383 clause 5, and the reason `seconds` alone was never enough: the three
+        # `state=skipped, candidate.failed>0, ok=true` rows of 2026-10-06..10-07 show
+        # 240-292 s of elapsed against a budget that lived only inside the `reason`
+        # prose, so "did this probe run out of room, or did it finish and shrug" had to
+        # be read out of a sentence. Beside `seconds` it is one subtraction.
+        out["budget"] = guards["budget"]
+    if str(guards.get("budget_source") or "").startswith("fallback"):
+        # Only the fallback is named, because it is the case that changes how every
+        # other number on the row reads: a `budget` of 300.0 that was DERIVED to be
+        # 300.0 and a 300.0 that is the standing default because the ledger held no
+        # measured draw cost are different statements about the box. The derived
+        # source is prose about the ledger's own rows, which the ledger already holds.
+        out["budget_source"] = guards["budget_source"]
     if guards.get("lock_wait_s"):
         out["lock_wait_s"] = guards["lock_wait_s"]
     if guards.get("workers") is not None:
@@ -921,10 +951,17 @@ def _guards_row(guards: dict) -> dict:
     # `parallel_retry` and `parallel_retry_2` are the two serial draws against the
     # proposed vault (`vault_guards.PROPOSED_DRAWS`). Written only when a draw ran,
     # so an absent key means the probe never re-asked and never "re-asked and
-    # reported nothing" — the same convention as the two run blocks above. `note`,
-    # `seconds` and `files` stay off the row on purpose: the note's content is
-    # already in `reason`, and the row is the shape a clause put there, not a dump
-    # of the report.
+    # reported nothing" — the same convention as the two run blocks above. `note` and
+    # `files` stay off the row on purpose: the note's content is already in `reason`,
+    # and the row is the shape a clause put there, not a dump of the report.
+    #
+    # `seconds` does not stay off, since #2383 clause 5. It is the only number that
+    # separates the two shapes `ran: 0` otherwise shares — a draw that timed out with
+    # the whole remainder spent (`seconds` ~= the run budget, the report's `note` says
+    # `timed out`) from a draw that launched, collected nothing and returned in a
+    # second — and it is the per-draw cost the probe's own budget is derived FROM
+    # (`vault_guards.probe_budget` reads exactly this key off exactly these rows), so
+    # while it was absent no budget could be derived from measured cost at all.
     for key in ("parallel_retry", "parallel_retry_2"):
         retry = guards.get(key)
         if not retry:
@@ -932,6 +969,19 @@ def _guards_row(guards: dict) -> dict:
         out[key] = {"ran": retry.get("ran", 0),
                     "failed": len(retry.get("failed") or []),
                     "workers": retry.get("workers") or 1}
+        if retry.get("seconds") is not None:
+            out[key]["seconds"] = retry["seconds"]
+    if guards.get("unadjudicated") is not None:
+        # #2383 clause 1. The probe reached a completed run, saw failures in it, and is
+        # about to land anyway because it could not adjudicate them — which the row
+        # used to record as a bare count under `candidate.failed`, indistinguishable
+        # from the same count on a row that DID adjudicate them. The ids are what let a
+        # later reader answer "which vault commits went out over a seen failure", and
+        # first-seen order is the order the runs reported them, so the cap drops the
+        # tail of that order rather than an alphabetical slice of it.
+        out["unadjudicated"] = list(guards["unadjudicated"])[:10]
+        out["unadjudicated_count"] = int(guards.get("unadjudicated_count")
+                                        or len(guards["unadjudicated"]))
     for key, dismissed in (("parallel_only_failures", guards.get("parallel_only_failures")),
                            ("flake_only_failures", guards.get("flake_only_failures"))):
         # Both dismissal lists are the flake record a reader is told to search, so

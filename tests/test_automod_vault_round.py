@@ -17,6 +17,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+#: The untouched `time.time`, captured before any test patches the module attribute.
+_REAL_TIME = time.time
+
 from agent_mcp.skills import _QUARANTINE_STATUSES
 from app.harness.policy import SCHEDULE_STATE_FIELDS
 from scripts.automod import state as S, vault_guards as VG, vault_round as V
@@ -1352,14 +1355,32 @@ def test_a_refusal_leaves_the_vault_at_its_previous_head_and_is_ledged(
     # `baseline_runs` are how many draws each side completed, and `mirror_gap_s` is
     # how far apart the two vault mirrors' bytes were. Every one of them is what a
     # refusal's sentence now claims, so every one of them is auditable on the row.
+    # #2383 adds the last two: `budget` is what the probe was ALLOWED against the
+    # `seconds` it spent — the three budget-short skips of 2026-10-06..10-07 carried
+    # only the spent half, so the shortfall they hit was readable only out of their
+    # `reason` prose — and `budget_source` names which of the two ways that number was
+    # arrived at produced it.
     assert set(g) == {"state", "refuse", "seconds", "candidate", "baseline",
                       "nodes", "excerpt", "workers", "parallel_retry", "reason",
                       "parallel_retry_2", "baseline_2", "proposed_runs",
-                      "baseline_runs", "mirror_gap_s"}, g
+                      "baseline_runs", "mirror_gap_s",
+                      "budget", "budget_source"}, g
     assert "tests/test_guard.py::" in g["reason"], g["reason"]
     assert g["workers"] == 2, g
-    assert g["parallel_retry"] == {"ran": 1, "failed": 1, "workers": 1}, g
-    assert g["parallel_retry_2"] == {"ran": 1, "failed": 1, "workers": 1}, g
+    # #2383 clause 4 grew each re-ask block by one key — the seconds that draw ran — so
+    # this exact-dict pin gains a key rather than loosening. Its value is a real child
+    # run's wall clock (this test arms the real probe, it does not stand one in), so the
+    # pin is the key plus its sign under the same bound `candidate` and `baseline`
+    # seconds are held to two lines below, not a literal. The acceptance is what moved
+    # it: "each `parallel_retry`/`parallel_retry_2` block carries the seconds that draw
+    # ran (both absent from every row today)" — and a `ran: 0` block without a cost is
+    # one shape for two events, the 2026-10-07T17:15:16Z row that re-asked 121 nodes and
+    # burned the remainder of a 300 s probe timing out at "[ 59%]" of collection
+    # indistinguishable from a draw that collected nothing in a second.
+    for key in ("parallel_retry", "parallel_retry_2"):
+        assert {k: g[key][k] for k in ("ran", "failed", "workers")} == \
+            {"ran": 1, "failed": 1, "workers": 1}, (key, g[key])
+        assert 0 < g[key]["seconds"] < 60, (key, g[key])
     assert (g["baseline_2"]["ran"], g["baseline_2"]["failed"]) == (1, 0), g
     assert g["baseline_2"]["files"] == 1, g
     assert g["proposed_runs"] == 2 and g["baseline_runs"] == 2, g
@@ -2615,6 +2636,10 @@ def test_a_probe_that_hangs_states_its_seconds_and_still_lands(vault, tmp_path, 
     """
     tree = make_guard_tree(tmp_path / "hanging-tree", src=GUARD_SRC_HANGS)
     _prose(vault, "---\nname: foo\n---\nstores: 5\n", commit=True)   # red at vault HEAD
+    # 12 s, and the node's own overrun bound below is written against 12 s. Halving this
+    # figure while leaving that bound at `<= 12.0 + grace` would leave the node asserting
+    # a deadline the probe was never given, and the ~4 s the comment below records as
+    # lost to prep was measured against this one.
     probed(tree, vault, timeout=12.0)
     _prose(vault, "---\nname: foo\n---\nstores: 5\n\nReworded while the probe hangs.\n")
     head = _head(vault)
@@ -3730,7 +3755,11 @@ def test_a_parallel_probe_states_its_workers_and_its_re_ask_on_the_row_it_lands_
     # Clause 2: the serial re-ask as its own block, `failed` a node COUNT like the
     # two run blocks beside it, `workers` 1 because the re-ask is serial by
     # construction (`vault_guards.py:829`) — which is the whole reason it exists.
-    assert g["parallel_retry"] == {"ran": 2, "failed": 1, "workers": 1}, g
+    # `seconds` is #2383 clause 5: a re-ask's cost was the one number on the report that
+    # never reached the row, so the 2026-10-07T17:15:16Z row's `parallel_retry` of
+    # `ran: 0` could not be told from a re-ask that had timed out at 53% of collection.
+    assert g["parallel_retry"] == {"ran": 2, "failed": 1, "workers": 1,
+                                   "seconds": 4.4}, g
     # Clause 3: the node parallelism alone caused, named rather than implied.
     assert g["parallel_only_failures"] == [FLAKER_NODE], g
     assert "parallel_only_failures_count" not in g, "one node is under the 10 cap"
@@ -3824,7 +3853,8 @@ def test_a_report_that_reported_nothing_adds_no_key_to_the_row():
     no_flakers = V._guards_row(_flaky_report(
         parallel_retry={"ran": 0, "failed": [], "seconds": 1.0, "files": 1,
                         "workers": 1, "note": "timed out after 1.0s"}))
-    assert no_flakers["parallel_retry"] == {"ran": 0, "failed": 0, "workers": 1}, (
+    assert no_flakers["parallel_retry"] == {"ran": 0, "failed": 0, "workers": 1,
+                                            "seconds": 1.0}, (
         "the re-ask that answered nothing is still a re-ask, and it explains itself "
         "in `reason` — `parallel_only_failures` is absent beside it by design")
     assert "parallel_only_failures" not in no_flakers, no_flakers
@@ -4742,6 +4772,27 @@ def _side_of(vault_root, landed: str = "skills/foo/SKILL.md") -> str:
     return "proposed"
 
 
+class _OffsetClock:
+    """A real clock that has merely jumped forward by what the stood-in runs cost.
+
+    `_SteppedClock` freezes time wherever a run has not pushed it, which is exactly what a
+    budget-arithmetic test wants and exactly what a test that goes through `land()` cannot
+    survive: `time.time` is one module-wide function, so a stopped clock stops
+    `state.Lock`'s queue deadline, a subprocess timeout and the git calls with it. Adding
+    an offset to the REAL clock keeps all of those monotonic and real while the probe still
+    sees 296 s of its budget gone, which is the only fact the clause needs.
+    """
+
+    def __init__(self) -> None:
+        self.off = 0.0
+
+    def time(self) -> float:
+        return _REAL_TIME() + self.off
+
+    def advance(self, seconds: float) -> None:
+        self.off += seconds
+
+
 class _SteppedClock:
     """A `time` module stand-in that only moves when a stood-in run says so.
 
@@ -4756,6 +4807,9 @@ class _SteppedClock:
 
     def time(self) -> float:
         return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
 
 
 def _draw_runs(monkeypatch, *, parallel_failed, proposed_draws, base_draws,
@@ -5501,3 +5555,532 @@ def test_an_unbound_or_non_vault_surface_land_is_still_landed(vault, items, monk
     assert out["review"] == "skipped"
     assert _rows("vault_review", 613)[-1]["blocking"] is False
     assert _rows("vault_land", 613)[-1]["ok"] is True
+
+
+
+# ======================================================================================
+#  #2383 — a budget-short agreement skip names the failures it saw, and the probe's
+#  budget is derived from measured draw cost instead of the bare 300.0.
+#
+#  The shape is on the ledger three times over 2026-10-06..10-07: `guards.state ==
+#  "skipped"` with `guards.candidate.failed > 0` and `ok: true` — a vault commit that
+#  went in over node ids the probe had already run and watched fail, with the ids
+#  themselves nowhere on the row. All three carry the same reason, read off the rows:
+#  `only 1 of the 2 draws against the vault as proposed could run inside the 300s probe
+#  budget` — the parallel draw cost 292.6, 246.8 and 238.4 s of the 300, and two of the
+#  second draws were re-asking 135 and 121 nodes when they ran out. The nodes they
+#  re-asked are exactly the ids `unadjudicated` now carries.
+#
+#  Every pytest run here is stood in, and so is the clock. That is deliberate: the
+#  clauses are about what the probe REPORTS about a budget, not about spending one, and a
+#  test that waited 296 s to observe a skip would be a test that cannot run in the gate
+#  whose tests lock the probe is holding. The real `_copy_vault`/`baseline_vault` are
+#  left in place — `_side_of`, which decides which side a stood-in run was handed, reads
+#  the two mirrors' bytes, so a stub of the copy would make both mirrors the same side
+#  and score a one-sided A/B as a comparison.
+# ======================================================================================
+
+#: The two nodes the stood-in parallel run fails, in the order it reports them. The
+#: pair is deliberately NOT in sorted order, and the pin below is what lets the test
+#: claim first-seen order at all: a list that came out alphabetical is visibly a
+#: different list from the one the runs reported.
+SEEN_A = COUNT_NODE
+SEEN_B = PINNED_NODE
+assert SEEN_B < SEEN_A, "the first-seen-order claim needs the fixture pair unsorted"
+
+
+def _budget_runs(monkeypatch, *, parallel: dict, re_ask: list[dict] | None = None,
+                 base: list[dict] | None = None, real_clock: bool = False):
+    """Stand in every run the probe launches, each with the cost and verdict named.
+
+    `parallel`, `re_ask[i]` and `base[i]` carry `seconds` (what it cost — the clock
+    advances by exactly this, so "the second draw could not start" is arithmetic and not
+    a fact about how long `git worktree add` took the day the suite ran), `failed` and an
+    optional `ran`.
+
+    Returns the list of re-ask calls the probe made. A test that needs to assert a draw
+    NEVER STARTED has to be able to say so: `ran: 0` on the row cannot distinguish a draw
+    that timed out mid-run from one that was never launched, which is the same
+    ambiguity #2383 found on the row itself.
+    """
+    re_ask = re_ask if re_ask is not None else []
+    base = base if base is not None else [{"seconds": 3.0}]
+    re_asked: list[list[str]] = []
+    base_calls = {"n": 0}
+
+    clock = (_OffsetClock() if real_clock else _SteppedClock())
+
+    proposed_calls = {"n": 0}
+
+    def fake(python, tree, files, vault, data_root, mark, budget, workers=1):
+        side = _side_of(Path(vault))
+        spec: dict = {}
+        if side == "proposed":
+            # The FIRST proposed-side call is the whole-tree parallel draw and every one
+            # after it is a serial re-ask of the failures it reported — both carry a file
+            # list, so the call order is the only thing that tells them apart.
+            if proposed_calls["n"] == 0:
+                spec = parallel
+            else:
+                re_asked.append(list(files))
+                spec = re_ask[len(re_asked) - 1] if len(re_asked) <= len(re_ask) else {}
+            proposed_calls["n"] += 1
+        else:
+            spec = base[min(base_calls["n"], len(base) - 1)]
+            base_calls["n"] += 1
+        seconds = float(spec.get("seconds", 5.0))
+        clock.advance(seconds)
+        return {"ran": int(spec.get("ran", 1)), "failed": list(spec.get("failed") or []),
+                "note": spec.get("note", ""), "excerpt": spec.get("excerpt", ""),
+                "seconds": seconds,
+                "files": len(files) if files else int(spec.get("files", 196)),
+                "workers": int(spec.get("workers", workers))}
+
+    monkeypatch.setattr(VG, "_run_selection", fake)
+    monkeypatch.setattr(VG.time, "time", clock.time)
+    # `tests/conftest.py` sets the nesting env for the whole suite so ~25 `land()` calls
+    # do not each spawn a ~70 s pytest child; a test of the probe has to clear it, which
+    # is what the `probed` fixture does for the tests that go through `land()`.
+    monkeypatch.delenv(VG.NESTING_ENV, raising=False)
+    return re_asked
+
+
+def _budget_ledger(tmp_path, rows: list[dict], name: str = "budget-ledger.jsonl") -> Path:
+    """A promotions ledger holding exactly `rows`, for `probe_budget` to read."""
+    path = tmp_path / name
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return path
+
+
+def _drawn_row(parallel_seconds: float, retry_seconds: float | None = None) -> dict:
+    """A `vault_land` row of the shape this code writes, to derive a budget FROM.
+
+    `guards.candidate.seconds` is the parallel draw's cost and `guards.parallel_retry`
+    the re-ask's; both are the fields #2383 clause 5 puts on the row, so a row built by
+    the code under test is the only honest input to the derivation.
+    """
+    guards: dict = {"state": "checked", "refuse": False, "seconds": parallel_seconds,
+                    "candidate": {"ran": 1, "failed": 0, "seconds": parallel_seconds}}
+    if retry_seconds is not None:
+        guards["parallel_retry"] = {"ran": 1, "failed": 0, "seconds": retry_seconds}
+    return {"event": "vault_land", "created_at": "2026-10-08T00:00:00Z",
+            "ok": True, "guards": guards}
+
+
+def test_a_budget_short_skip_names_the_failures_it_saw_and_never_adjudicated(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """Clause 1, and the acceptance check's first half: the ids, not just the count.
+
+    The parallel draw costs 296 s of the 300 s fallback budget, leaving 4 s — under the
+    5 s `MIN_RUN_SECONDS` the probe will not launch a pytest for — so the re-ask never
+    starts. Before #2383 the row said `candidate.failed: 2` and nothing else: the ids
+    were in `cand["failed"]` and dropped on exactly this path, because
+    `parallel_only_failures` is computed further down than every budget-short return. A
+    count alone is also the same number a row that DID adjudicate its failures carries,
+    so a reader of `promotions.jsonl` could not tell the two apart at all.
+    """
+    _disagreement_vault(vault)
+    re_asked = _budget_runs(monkeypatch, parallel={"seconds": 296.0,
+                                                   "failed": [SEEN_A, SEEN_B]})
+
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=tmp_path / "no-ledger-here.jsonl")
+
+    assert rep["state"] == "skipped" and rep["refuse"] is False, rep["reason"]
+    assert re_asked == [], "the re-ask ran, so this is not the budget-short shape"
+    assert "could not start inside the 300s probe budget" in rep["reason"], rep["reason"]
+    assert rep["unadjudicated"] == [SEEN_A, SEEN_B], rep
+    assert rep["unadjudicated_count"] == 2, rep
+    # First-seen order is a claim only this fixture can make: the reported order is the
+    # reverse of sorted order, so a sorted implementation could not produce this list.
+    assert rep["unadjudicated"][0] > rep["unadjudicated"][1], rep
+
+
+def test_the_ledger_row_of_a_budget_short_land_names_the_failures_it_skipped(
+        tmp_path, monkeypatch, vault, guard_tree, probed):
+    """Clause 1 across the seam the acceptance is actually read across: `promotions.jsonl`.
+
+    Everything above this node is a probe report in memory. The owed check is a scan of
+    the LEDGER for rows where `guards.state == "skipped"` and a failure was seen —
+    3-in-25 of the rows after #2283 — and a report nobody persisted cannot be scanned.
+    This is one whole landing: the real `land()`, the real projection, the real row on a
+    real ledger, with only the pytest children stood in. The vault commits anyway —
+    whether a timed-out probe should block a land is a standing ruling this round does
+    not make (vault `8034f5e5`, and owed to the owed-check job) — so the row is the only
+    thing that can say afterwards what that commit went over.
+
+    The budget here is the fallback 300.0, which is what production will use until the
+    first row carrying re-ask seconds exists: a 296 s parallel draw leaves 4 s, under the
+    5 s `MIN_RUN_SECONDS`, so no re-ask is launched at all. That is the tighter sibling
+    of the three live rows — each of those got ONE draw in (292.6 s, 246.8 s and 238.4 s
+    of parallel draw leave 7-62 s, enough to start a draw but not to finish a second) —
+    and the reason this node drives the ledger end to end is the `candidate.failed > 0`
+    + `state=skipped` pair, which every branch of it now has to reach the row with.
+    """
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+    re_asked = _budget_runs(monkeypatch, parallel={"seconds": 296.0,
+                                                   "failed": [SEEN_A, SEEN_B]},
+                            real_clock=True)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n")
+
+    out = V.land(["skills/foo/SKILL.md"], "#2383 a land over seen failures", item_id=None)
+
+    assert re_asked == [], "the re-ask ran, so this is not the budget-short shape"
+    row = _events("vault_land")[-1]
+    g = row["guards"]
+    assert out["ok"] is True and g["state"] == "skipped" and g["refuse"] is False, g
+    # The two keys the count is read from, on the row a later scan reads.
+    assert g["unadjudicated"] == [SEEN_A, SEEN_B], g
+    assert g["unadjudicated_count"] == 2, g
+    assert g["candidate"]["failed"] == 2, "the count the row already carried stays"
+    assert g["budget"] == 300.0 and g["seconds"] < g["budget"], g
+    # The 300.0 is the fallback, and the fallback is a claim about an INPUT — so the
+    # input is asserted, not left to the fixture's `S.LEDGER_PATH` redirect: this row
+    # lands in the same file the probe just read looking for a measured draw, and the
+    # source string names it. Without that the pin would hold for a budget derived from
+    # some ledger nobody chose.
+    assert str(g["budget_source"]).startswith("fallback"), g
+    assert str(S.LEDGER_PATH) in str(g["budget_source"]), g
+    # Nothing was dismissed, because nothing was re-asked: a dismissal list beside these
+    # ids would say the probe attributed them after all.
+    assert "parallel_only_failures" not in g and "flake_only_failures" not in g, g["unadjudicated"]
+
+
+def test_the_named_failures_span_every_draw_and_are_capped_beside_the_true_count(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """Clause 1's union, cap and count, on the skip that DID get a draw running.
+
+    One of the three live rows of this shape re-asked 135 nodes and finished one of its
+    two draws, so the union has to span the parallel run AND the draw that reported — a
+    node the serial re-ask also lost is still a failure this land is committing over,
+    and the reason a second draw exists at all is that the first could not settle it.
+    Twelve ids exercise the cap: 10 names on the row, 12 in the count, so a truncated
+    list can never be read as the whole set.
+    """
+    _disagreement_vault(vault)
+    ids = [f"tests/test_guard.py::test_seen_{i:02d}" for i in range(12)]
+    # Draw one reports two ids the parallel run had not — one of them new — so the union
+    # is demonstrably over draws and not a copy of the parallel list.
+    re_asked = _budget_runs(monkeypatch,
+                            parallel={"seconds": 245.0, "failed": ids[:11]},
+                            re_ask=[{"seconds": 5.0, "failed": [ids[11], ids[0]]},
+                                    {"seconds": 45.0, "ran": 0, "failed": [],
+                                     "note": "canned: timed out after 45.0s"}])
+
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=tmp_path / "no-ledger-here.jsonl")
+
+    assert rep["state"] == "skipped" and rep["proposed_runs"] == 1, rep
+    assert len(re_asked) == 2, re_asked
+    assert rep["unadjudicated_count"] == 12, rep
+    assert rep["unadjudicated"] == ids[:10], rep["unadjudicated"]
+    assert len(rep["unadjudicated"]) == 10, "the cap is 10 names"
+    assert rep["unadjudicated"][10 - 1] == ids[9], "first-seen order, truncated, not sorted"
+
+
+def test_the_row_of_every_2383_key_is_what_the_ledger_keeps():
+    """Clauses 1 and 5 on the ledger surface: `_guards_row`, the one writer of the row.
+
+    The acceptance is phrased as a later read of `promotions.jsonl`, and `_guards_row` is
+    the function that decides which of a report's fields survive into that file: it already
+    reduced `candidate.failed` to a bare count, so an `unadjudicated` list it never
+    projected would be invisible to exactly the reader this was written for. Called
+    directly on reports built to the shapes the probe returns, because the projection is
+    the boundary in question and a subprocess land would add nothing it is not pinned on.
+    """
+    ids = [f"tests/test_guard.py::test_seen_{i:02d}" for i in range(12)]
+
+    # A budget-short proposed-side skip: 12 failures seen, the row keeps 10 names + the
+    # count 12, so a truncated list can never be read as the whole set.
+    skip = {"state": "skipped", "refuse": False, "seconds": 296.4, "budget": 300.0,
+            "budget_source": "fallback `PROBE_TIMEOUT_SECONDS` (300s): no measured "
+                             "serial re-ask draw cost",
+            "reason": "the serial re-ask could not start inside the budget",
+            "candidate": {"ran": 1, "failed": ids, "seconds": 296.4, "files": 196,
+                          "workers": 8},
+            "unadjudicated": ids[:10], "unadjudicated_count": 12}
+    row = V._guards_row(skip)
+    assert row["unadjudicated"] == ids[:10], row
+    assert row["unadjudicated_count"] == 12, row
+    assert row["budget"] == 300.0 and row["seconds"] == 296.4, row
+    assert row["budget_source"].startswith("fallback"), row
+    assert row["candidate"]["failed"] == 12, "the count the row already carried stays"
+
+    # A `checked` row whose draws attributed everything: no ids to claim, and every
+    # draw's own cost present — the seconds no row carried before #2383, without which a
+    # `parallel_retry: {ran: 0}` could not be told from a draw that timed out mid-run.
+    checked = {"state": "checked", "refuse": False, "seconds": 264.0, "budget": 370.0,
+               "budget_source": "measured from /ledger: parallel draw 290.0s",
+               "reason": "green against the vault as proposed",
+               "candidate": {"ran": 7070, "failed": [ids[0]], "seconds": 245.0,
+                             "files": 196, "workers": 8},
+               "parallel_retry": {"ran": 3, "failed": [], "seconds": 7.5, "files": 1,
+                                  "workers": 1},
+               "parallel_retry_2": {"ran": 3, "failed": [], "seconds": 6.25, "files": 1,
+                                    "workers": 1},
+               "baseline": {"ran": 3, "failed": [], "seconds": 3.5},
+               "baseline_2": {"ran": 3, "failed": [], "seconds": 2.25}}
+    row = V._guards_row(checked)
+    assert "unadjudicated" not in row and "unadjudicated_count" not in row, row
+    assert row["budget"] == 370.0, row
+    assert "budget_source" not in row, (
+        "only the fallback is carried: a `budget` of exactly 300.0 needs to say it is the "
+        "standing default rather than a measurement that happened to land on 300.0, and a "
+        "derived source is prose about rows the ledger already holds")
+    for key, secs in (("parallel_retry", 7.5), ("parallel_retry_2", 6.25),
+                      ("baseline", 3.5), ("baseline_2", 2.25)):
+        assert row[key]["seconds"] == secs, (key, row[key])
+
+    # A skip that never reached a completed run: no candidate, no ids — clause 2's
+    # absence preserved through the projection and not only in the report.
+    never = {"state": "skipped", "refuse": False, "seconds": 6.0, "budget": 6.0,
+             "budget_source": "caller-supplied `timeout=`",
+             "reason": "the gate's tests lock stayed busy for the whole queue: held"}
+    row = V._guards_row(never)
+    assert "candidate" not in row and "unadjudicated" not in row, row
+    assert row["budget"] == 6.0, row
+
+
+def test_a_skip_that_reached_no_completed_run_keeps_candidate_and_reason_untouched(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """Clause 2, on all three ways the probe reaches no completed run.
+
+    The distinction the clause protects is "the probe watched failures and ran out of
+    room" versus "the probe never got a run back". Naming an `unadjudicated` set for the
+    second family would tell a reader there were failures to attribute where the parallel
+    run itself answered nothing, so these rows keep their absent `candidate`, their
+    absent `unadjudicated`, and their wording exactly: the two sentences that exist
+    today are asserted verbatim, because a paraphrase is the drift the pin is for.
+    """
+    from scripts.automod import state as ST
+    ledger = tmp_path / "no-ledger-here.jsonl"
+
+    # (a) the gate's tests lock stayed busy for the whole queue. The queue itself is
+    # `state.Lock.acquire_wait`, whose own polling is pinned by
+    # `test_the_probe_queues_behind_the_gates_tests_rung_and_says_so`; what clause 2 pins
+    # here is what the probe does with the `LockHeld` that ends that wait — its exact
+    # wording and the two keys that must stay absent — so the refusal is raised at the
+    # seam rather than waited out against a real 2 s poll loop.
+    _disagreement_vault(vault)
+    tree = guard_tree
+    _budget_runs(monkeypatch, parallel={"seconds": 1.0})
+
+    _real_slot = VG._wait_for_tests_slot
+
+    def _busy(remaining):
+        raise ST.LockHeld("canned: tests lock held by gate-SM_TEST")
+
+    monkeypatch.setattr(VG, "_wait_for_tests_slot", _busy)
+    rep = _probe_here(tmp_path, tree, vault, budget_ledger=ledger)
+    assert rep["reason"] == ("the gate's tests lock stayed busy for the whole queue: "
+                             "canned: tests lock held by gate-SM_TEST"), rep
+    assert "candidate" not in rep and "unadjudicated" not in rep, rep
+    # The budget is settled before anything else runs, so a row that never launched a
+    # run still answers "what was this probe allowed" — production's fallback figure,
+    # since the only production caller passes no timeout of its own.
+    assert rep["budget"] == 300.0 and str(rep["budget_source"]).startswith("fallback"), rep
+
+    # (b) the proposed-vault run answered nothing. The canned lock refusal goes back
+    # first, or every probe below inherits it.
+    monkeypatch.setattr(VG, "_wait_for_tests_slot", _real_slot)
+    _budget_runs(monkeypatch, parallel={"seconds": 300.0, "ran": 0,
+                                        "note": "canned: timed out after 300s"})
+    rep2 = _probe_here(tmp_path, tree, vault, budget_ledger=ledger)
+    assert rep2["reason"] == ("the proposed-vault run answered nothing: "
+                              "canned: timed out after 300s"), rep2["reason"]
+    # `candidate` is PRESENT on this branch and has been since #2044 — the run was
+    # launched, so its `ran: 0` is the fact the row carries: every one of the 26
+    # `the proposed-vault run answered nothing` rows in `promotions.jsonl` (counted over
+    # the whole store, 2026-10-08) carries a `candidate` block. What clause 2 protects
+    # here is the rest: no `unadjudicated`, and
+    # the sentence unchanged. Asserting absence here would be a claim about code that
+    # does not exist, and the live ledger refutes it.
+    assert rep2["candidate"]["ran"] == 0, rep2["candidate"]
+    assert "unadjudicated" not in rep2, rep2
+    assert rep2["budget"] == 300.0, rep2
+
+    # (c) pytest-xdist is unusable, so the parallel run would serialise and time out.
+    monkeypatch.setattr(VG, "_parallel_workers",
+                        lambda python: (1, "canned: `import xdist` failed"))
+    rep3 = _probe_here(tmp_path, tree, vault, budget_ledger=ledger)
+    assert rep3["reason"].startswith("the selection was not run: canned: `import xdist` "
+                                     "failed, and "), rep3
+    assert "candidate" not in rep3 and "unadjudicated" not in rep3, rep3
+    assert rep3["budget"] == 300.0, rep3
+
+
+def test_the_budget_is_derived_from_measured_draw_cost_and_falls_back_to_exactly_300(
+        tmp_path):
+    """Clauses 3 and 4, on the derivation: both branches, the ceiling and its reason.
+
+    A full adjudication is one complete parallel draw plus `PROPOSED_DRAWS +
+    BASELINE_DRAWS` serial re-ask draws, and the ledger is the only place either cost is
+    ever measured. A missing, unreadable or draw-less ledger must yield EXACTLY
+    `PROBE_TIMEOUT_SECONDS`, because the fallback's whole job is to leave the probe
+    behaving as it did before this shipped.
+    """
+    from scripts.automod.gate import Gate
+
+    assert VG.PROPOSED_DRAWS + VG.BASELINE_DRAWS == 4, "the derivation's multiplier"
+
+    # Measured, above the floor: 290 s is the shape of the widest live parallel draw
+    # (292.6 s, 2026-10-06T17:57:25Z) and 20 s a re-ask draw wider than the ~2 s the
+    # narrow ones measured. Both figures come from the ledger, and the sum clears the
+    # 300 s floor, so the assertion below lands on the arithmetic and not the floor.
+    led = _budget_ledger(tmp_path, [_drawn_row(290.0, 20.0)])
+    budget, source = VG.probe_budget(ledger=led)
+    assert budget == 290.0 + 4 * 20.0, source
+    assert "parallel draw 290.0s" in source and "4 serial draws x 20.0s" in source, source
+
+    # The floor is not the fallback: a cheap ledger derives, and still says measured.
+    cheap, src = VG.probe_budget(ledger=_budget_ledger(tmp_path, [_drawn_row(10.0, 1.0)],
+                                                       name="cheap.jsonl"))
+    assert cheap == 300.0 and src.startswith("measured from"), src
+
+    # The ceiling. Four re-ask draws as expensive as the parallel one derive 1,463 s from
+    # the widest draw ever recorded, and 900 s is the most the clause allows — because
+    # the probe holds the gate's tests lock from winning the slot to its `finally`, and
+    # the gate's own `tests` rung queues behind it up to `Gate.SERIAL_MAX_WAIT`. A
+    # budget above that wait would make the probe the reason the gate times out on its
+    # own rung, which is a worse failure than the skip this buys a way out of.
+    wide, src = VG.probe_budget(ledger=_budget_ledger(tmp_path, [_drawn_row(292.6, 292.6)],
+                                                      name="wide.jsonl"))
+    assert VG.PROBE_BUDGET_CEILING_S == 900.0, VG.PROBE_BUDGET_CEILING_S
+    assert wide == VG.PROBE_BUDGET_CEILING_S and "capped at 900s" in src, src
+    assert VG.PROBE_BUDGET_CEILING_S <= Gate.SERIAL_MAX_WAIT, Gate.SERIAL_MAX_WAIT
+
+    # Missing input is exactly 300.0 in every shape it takes: an absent file, an
+    # unreadable one (a directory where a file is named), and a ledger whose rows predate
+    # this code and so carry no draw seconds at all.
+    absent, why = VG.probe_budget(ledger=tmp_path / "absent.jsonl")
+    assert absent == float(VG.PROBE_TIMEOUT_SECONDS) == 300.0, absent
+    assert why.startswith(f"fallback `PROBE_TIMEOUT_SECONDS` ({VG.PROBE_TIMEOUT_SECONDS:.0f}s)"), why
+    # Which side was missing is the useful half of the sentence. Between this landing and
+    # the first row that carries a re-ask's seconds, the ledger measures the parallel
+    # draw and not the serial one; naming the SERIAL side says the derivation is working
+    # and waiting on its own first output, where "no measured draw cost" would read as an
+    # empty ledger.
+    assert "parallel" in why and "serial re-ask" in why, why
+    # The gap this landing itself creates: the first rows after it measure the parallel
+    # draw (which `candidate.seconds` has always carried) but not a re-ask, whose seconds
+    # only #2383 clause 5 puts on the row. Naming the SERIAL side says the derivation is
+    # working and waiting on its own first output.
+    half = _budget_ledger(tmp_path, [_drawn_row(235.9, None)], name="half.jsonl")
+    half_why = VG.probe_budget(ledger=half)[1]
+    assert "serial re-ask" in half_why and "parallel +" not in half_why, half_why
+    a_dir = tmp_path / "as-a-directory.jsonl"
+    a_dir.mkdir()
+    assert VG.probe_budget(ledger=a_dir)[0] == 300.0
+    stale = _budget_ledger(tmp_path, [{"event": "vault_land",
+                                       "created_at": "2026-10-08T00:00:00Z",
+                                       "guards": {"state": "skipped", "seconds": 240.6,
+                                                  "reason": "pre-#2383, no candidate"}}],
+                           name="stale.jsonl")
+    stale_why = VG.probe_budget(ledger=stale)[1]
+    assert "parallel" in stale_why and "serial re-ask" in stale_why, stale_why
+
+    # A caller that names a timeout outranks the measurement, and says which it is.
+    assert VG.probe_budget(120.0, ledger=led) == (120.0, "caller-supplied `timeout=`")
+
+
+def test_the_row_shows_the_budget_and_the_cost_of_every_draw_side_by_side(
+        tmp_path, monkeypatch, vault, guard_tree, probed):
+    """Clause 4 on the row: budget beside elapsed, and every draw's own cost.
+
+    `_guards_row`'s own docstring said a re-ask block's `note`, `seconds` and `files`
+    "stay off the row on purpose", reasoning that the note's content is already in
+    `reason`. The seconds went with it, and they are the measurement the item needed: on
+    the 2026-10-07T17:15:16Z row `parallel_retry` reported `ran: 0` and nothing else, so
+    "re-asked and collected nothing" and "re-asked and timed out at 53% of collection"
+    shared one shape — only the report's truncated excerpt told them apart, and the
+    excerpt is not on the row. And no row ever carried a `budget`, so the 300 s a skip
+    ran out of existed only inside its `reason` prose.
+
+    This is the shape a real `land()` takes when the serial re-ask clears the failure:
+    the proposed side attributed it, the pre-land side never runs, and the row owes the
+    fallback budget beside the cost of the two draws that DID run. The companion node
+    `test_a_row_that_ran_both_sides_carries_the_derived_budget_and_every_draw_cost` is
+    the other shape — all four draws, and a budget the ledger measured rather than the
+    standing default, which nothing else in the suite puts on a row.
+    """
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+    _budget_runs(monkeypatch, parallel={"seconds": 245.0, "failed": [SEEN_A]},
+                 re_ask=[{"seconds": 7.5}, {"seconds": 6.25}], real_clock=True)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n")
+
+    out = V.land(["skills/foo/SKILL.md"], "#2383 the row shows every draw", item_id=None)
+
+    g = _events("vault_land")[-1]["guards"]
+    assert out["ok"] is True and g["state"] == "checked", g
+    assert g["budget"] == 300.0 and g["seconds"] < g["budget"], g
+    # Named input, not fixture side-effect: `land()` opens its own ledger, so the figure
+    # is only reproducible if the row says WHICH ledger was read and what was missing
+    # from it — here a real `vault_land` row from the node's own earlier land, holding a
+    # parallel draw but no serial re-ask cost, so `serial` is the named gap.
+    assert str(g["budget_source"]).startswith("fallback"), g
+    assert str(S.LEDGER_PATH) in str(g["budget_source"]), g
+    for key, secs in (("parallel_retry", 7.5), ("parallel_retry_2", 6.25)):
+        assert g[key]["seconds"] == secs, (key, g[key])
+    assert g["candidate"]["seconds"] == 245.0, g["candidate"]
+    # The re-ask went green, so the failure WAS attributed on the proposed side: no
+    # pre-land draw is launched for an attributed failure, and naming one on this row
+    # (or naming the node `unadjudicated`) would claim the opposite of what the draws
+    # concluded.
+    assert "baseline" not in g and "unadjudicated" not in g, g
+    assert g["parallel_only_failures"] == [SEEN_A], g
+
+def test_a_row_that_ran_both_sides_carries_the_derived_budget_and_every_draw_cost(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """Clause 4's other half: the one row that holds all four draws, on a derived budget.
+
+    The `land()` in the node above attributes its failure on the proposed side, so the
+    pre-land side never launches and its row can only ever carry two draw costs against
+    the fallback 300.0. A node that is red on both the re-ask draws and green on both
+    pre-land draws is the shape that runs all four, and `budget` on that row has to be
+    the derived figure beside four per-draw costs — the pair the item asked to be read
+    side by side. `_guards_row` is the single writer of the row, and the node above
+    exercises that projection end to end through `land()`, so what is stood in here is
+    the runs, not the projection.
+
+    The ledger measured 290 s of parallel draw and 20 s of re-ask draw, so the budget is
+    290 + 4 x 20 = 370 s: above the 300 s floor, and a figure the standing default could
+    never have produced. The draws then cost 296 + 8 + 7 + 4 + 3 = 318 s of it, which is
+    the arithmetic the fallback budget could not have held.
+    """
+    _disagreement_vault(vault)
+    _budget_runs(monkeypatch, parallel={"seconds": 296.0, "failed": [SEEN_A]},
+                 re_ask=[{"seconds": 8.0, "failed": [SEEN_A]},
+                         {"seconds": 7.0, "failed": [SEEN_A]}],
+                 base=[{"seconds": 4.0}, {"seconds": 3.0}], real_clock=True)
+
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=_budget_ledger(tmp_path, [_drawn_row(290.0, 20.0)],
+                                                   name="measured.jsonl"))
+    row = V._guards_row(rep)
+
+    assert rep["state"] == "checked" and rep["refuse"] is True, rep["reason"]
+    assert row["budget"] == 370.0, row
+    assert "budget_source" not in row, (
+        "only the fallback is carried: a derived source is prose about rows the ledger "
+        "already holds, and its absence is what says this budget was measured")
+    # What `row["seconds"]` is on this clock: `_OffsetClock` adds each stood-in draw's
+    # cost to the REAL clock rather than freezing time, so the figure is 318 s of charged
+    # draw cost PLUS whatever the box actually spent preparing — two vault mirrors and a
+    # probe worktree — and both bounds are chosen for that: the lower one is the charged
+    # total alone, the upper one leaves the ~52 s between the 318 s of runs and the 370 s
+    # the ledger measured for the probe's own work. Against the standing 300.0 that same
+    # probe is a skip, which is the failure this whole clause exists to make countable.
+    assert sum(row[k]["seconds"] for k in ("candidate", "parallel_retry",
+                                           "parallel_retry_2", "baseline",
+                                           "baseline_2")) == 318.0, row
+    assert 318.0 <= row["seconds"] < row["budget"], row
+    assert row["proposed_runs"] == 2 and row["baseline_runs"] == 2, row
+    for key, secs in (("candidate", 296.0), ("parallel_retry", 8.0),
+                      ("parallel_retry_2", 7.0), ("baseline", 4.0),
+                      ("baseline_2", 3.0)):
+        assert row[key]["seconds"] == secs, (key, row[key])
+    # The failure WAS attributed — red on both proposed draws, green on both pre-land
+    # draws — which is a refusal, and a refusal never has anything left unadjudicated.
+    assert "unadjudicated" not in row and row["nodes"] == [SEEN_A], row
