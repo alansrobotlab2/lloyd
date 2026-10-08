@@ -271,6 +271,69 @@ def _row_vs_records(task: dict) -> dict:
     }
 
 
+def _upstream_block(task: dict, gap: dict, resolution: list[dict], now) -> dict:
+    """What the upstream of a late dependent is itself doing — #2417's early door.
+
+    The nightly chain of 2026-10-08 is the shape this exists for: #38's run died at
+    `05:04:09Z`, and #42, #39 and #40 went ~6.2 h / 3.4 h / 2.7 h late as a block
+    while the only alarm that could see them waited a full declared period apiece.
+    Two facts answer that door, both about the task named in `depends_on`: what its
+    NEWEST run record says, from `autonomy.newest_run_record` — status-agnostic,
+    because `newest_successful_run` answers "failed" and "no records at all" with
+    the same `(None, "")` — and whether its own `next_run` stamp is behind.
+
+    The verdict is `late_or_dead`, and it is the union of those two facts and
+    nothing else: the newest record is not a `success`, OR the upstream is itself
+    past its own `next_run`. On a chain that ran on time neither holds — the
+    completion writer advances `next_run` at completion (`next_run_gap`'s own
+    docstring, `app/autonomy.py`), so a healthy upstream has a `success` newest
+    record AND a stamp still in the future. That is what keeps this tightening from
+    re-creating the noise #2342 retired: an early report here always means the
+    upstream is demonstrably not done, never merely that the dependent is late. A
+    `paused` or `draft` upstream that last completed cleanly is therefore NOT named
+    early — its lateness is a decision somebody wrote down, and the one-period
+    bound still catches it.
+
+    Two shapes answer `{}`: no `depends_on` (no chain to name), and a `depends_on`
+    whose id names no task file — #558's case, where the hold is already held and
+    there is no record and no stamp to name in a sentence. Such a row keeps the
+    bound it has always had.
+
+    Cost is one walk of the UPSTREAM's record directory, paid only for a row that
+    already names an upstream AND is past its own `next_run`. A healthy board has
+    no such row, for the same reason the verdict comes out False there: completing
+    moved its stamp forward. `gap` is handed in rather than recomputed, so the
+    dependent's own arithmetic stays in one place.
+    """
+    from app import autonomy
+    import datetime as _dt
+    up_id = task.get("depends_on")
+    hours_past = gap.get("hours_past_next_run")
+    if up_id is None or not (hours_past is not None and hours_past > 0):
+        return {}
+    up = next((u for u in resolution
+               if u.get("id") is not None and str(u.get("id")) == str(up_id)),
+              None)
+    if up is None:
+        return {}
+    up_hours = autonomy.next_run_gap(up, now=now)["hours_past_next_run"]
+    status, when, run_id = autonomy.newest_run_record(up_id)
+    return {
+        "upstream_id": up.get("id"),
+        "upstream_status": status,
+        # The form the alert quotes: one instant, UTC, whole seconds, and a `Z` so
+        # a reader cannot mistake it for local wall clock. `_row_vs_records` prints
+        # `isoformat()` for its own fields; this one is a new sentence and follows
+        # the shape #2417's report asked for.
+        "upstream_at": (when.astimezone(_dt.timezone.utc)
+                        .strftime("%Y-%m-%dT%H:%M:%SZ") if when else ""),
+        "upstream_run": run_id,
+        "upstream_hours_past": up_hours,
+        "late_or_dead": (status != autonomy.RUN_STATUS_SUCCESS
+                         or (up_hours is not None and up_hours > 0)),
+    }
+
+
 def _next_run_stalled(queue: WorkQueue) -> list[dict]:
     """Tasks of ANY status sitting more than one period past their OWN `next_run`.
 
@@ -312,7 +375,14 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
     and then judged by its run records, because widening the shared bound is what
     #421 was filed against. So each entry also carries what the RECORDS say, from
     `_row_vs_records`: `record_at`, `record_run`, `row_last` and `lost_completion`.
-    `hours` is None exactly on the admitted-without-a-stamp shape,
+    `past_period` records which of those two routes the row came through — True for
+    a row the bound itself admitted — and since #2417 a third route exists, a row the
+    bound can measure but has not crossed: `blocked_by`, from `_upstream_block`, is
+    non-empty exactly when the row is past its own `next_run` and the upstream named
+    in its `depends_on` is late or has a newest run record that is not a `success`.
+    Nothing about the bound moved; this is a second question, asked only of rows that
+    already name an upstream, that lets a chain be reported the hour it goes late
+    instead of a day later. `hours` is None exactly on the admitted-without-a-stamp shape,
     and the return drops such an entry when its records are empty too — a row with
     no stamps and no record has never run, and is the noise this alarm's budget is
     spent avoiding.
@@ -355,8 +425,33 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
         # alone fleet-wide, so the record walk below runs for the flagged rows plus
         # that one, not for all 38. Whether the unstamped row is reportable is then
         # answered by the records themselves, in the filter on the return.
+        # Three doors. The first is the predicate, untouched by #2342 and by #2417.
+        # The second is the row with NO `next_run` key at all: such a row fails
+        # `past_next_run` on its own `hours_past_next is not None` guard, so #96 was
+        # invisible HERE exactly as it is to the due-ness alarm, and the only thing
+        # that knew it had run is its own record. `gap` is not consulted for it —
+        # there is nothing to measure. `next_run_gap` itself is unchanged (clause 5
+        # of #2342): these are a reporter noticing shapes the predicate is built not
+        # to see, not a widening of the bound.
+        #
+        # The third is #2417's, and it is the only one that admits a row the bound
+        # can measure: a dependent that is PAST its own `next_run` but by less than a
+        # period, whose upstream is demonstrably late or dead. It goes through
+        # `_upstream_block`, which is what keeps the general bound intact — a
+        # dependency-held row 3 h late behind a HEALTHY upstream still waits its
+        # period, or this alarm becomes the noise #2342 removed.
+        #
+        # Cost stays bounded because door two is keyed on a missing field and door
+        # three on a stamp that is already behind, neither of which a healthy board
+        # has: `grep -L '^next_run:' ~/obsidian/autonomy/[0-9]*-*.md` names #96 alone
+        # fleet-wide, and completing a run moves `next_run` forward, so the record
+        # walks below and in `_upstream_block` run for the flagged rows and nothing
+        # else, not for all 38. Whether an unstamped row is reportable is then
+        # answered by the records themselves, in the filter on the return.
+        blocked = _upstream_block(t, gap, resolution, now)
         if not (gap["past_next_run"]
-                or autonomy._parse_iso(t.get("next_run")) is None):
+                or autonomy._parse_iso(t.get("next_run")) is None
+                or blocked.get("late_or_dead", False)):
             continue
         stalled.append({
             "id": t.get("id"),
@@ -364,9 +459,17 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
             "status": str(t.get("status", "")).strip(),
             "hours": gap["hours_past_next_run"],
             "gap_ratio": gap["gap_ratio"],
+            # Which door this row came through, kept as its own field rather than
+            # inferred from `hours`: `gap["past_next_run"]` is the shared one-period
+            # predicate, and `_nextrun_alert_message` has to count the rows it held
+            # separately from the ones #2417's door reached, or the head sentence
+            # claims a bound it did not apply.
+            "past_period": bool(gap["past_next_run"]),
             "hold": autonomy.hold_reason(t, resolution, now=now),
             "queued": str(t.get("id")) in active,
             "parked": autonomy.parked_declaration(t),
+            # What the named upstream is doing, {} when there is nothing to name.
+            "blocked_by": blocked,
             # Read AFTER the shortlist, so the record walk costs what it claims to
             # cost in `_row_vs_records`: the flagged rows, 0 or 1 on a healthy board,
             # not all 38 of them every tick.
@@ -411,7 +514,14 @@ def _nextrun_alert_message(stalled: list[dict]) -> str:
     did measure. That split is the same rule as the status one two paragraphs up: a
     line that says "N tasks more than one period past their own next_run" may only
     count tasks that are. On a board where every flagged row has its stamps — the
-    shape every test of the legacy alarm seeds — the string is byte-identical."""
+    shape every test of the legacy alarm seeds — the string is byte-identical.
+
+    #2417 adds a third count for the same reason, not a decoration. Its door admits
+    rows that are past their own `next_run` by LESS than a period, so once a single
+    one is present the first count would be naming tasks the bound never crossed
+    under the very clause that says "more than one period" — the misdescribing-alert
+    defect again, one door over. The counts are read off `past_period`, which is the
+    bound's own verdict, and each new clause says what its rows actually are."""
     suppressed = [e for e in stalled if _parked_note(e)]
     late = [e for e in stalled if not _parked_note(e)]
     # The head sentence claims "more than one period past their own next_run", and a
@@ -421,7 +531,13 @@ def _nextrun_alert_message(stalled: list[dict]) -> str:
     # the count covers the measured entries and the unstamped ones get their own
     # clause, which also keeps the legacy string byte-identical on a board where
     # every flagged row has its stamps.
-    measured = [e for e in late if e.get("hours") is not None]
+    measured = [e for e in late if e.get("hours") is not None
+                and e.get("past_period")]
+    # #2417's rows: measurable, past their stamp, but inside the period. They are
+    # here because an upstream was caught late or dead, and the clause below says so
+    # rather than lending them the sentence above.
+    short = [e for e in late if e.get("hours") is not None
+             and not e.get("past_period")]
     unstamped = [e for e in late if e.get("hours") is None]
     statuses = sorted({str(e.get("status") or "unknown") for e in late})
     # `up_next task(s)` alone reproduces the pre-widening string byte for byte,
@@ -430,6 +546,11 @@ def _nextrun_alert_message(stalled: list[dict]) -> str:
     lines = "; ".join(_stall_line(e) for e in late[:15])
     head = (f"{len(measured)} {scope} more than one period past "
             f"their own next_run, which the due-ness stall alarm cannot see")
+    if short:
+        head += (f" | {len(short)} task(s) past their own next_run by less than one "
+                 f"period, which that bound cannot reach, held behind an upstream "
+                 f"that is itself past its next_run or whose newest run record is "
+                 f"not a success")
     if unstamped:
         head += (f" | {len(unstamped)} task(s) whose row carries no next_run stamp "
                  f"at all, which that predicate cannot see either")
@@ -451,7 +572,15 @@ def _stall_line(entry: dict) -> str:
     `hours` is None on the unstamped shape only, so the two measured branches never
     guard their `:.1f`; a caller that handed an unstamped entry with an elapsed
     figure attached would raise here rather than print `Noneh`.
-    """
+
+    Since #2417 the third shape also carries `_blocked_note` — the upstream's id and
+    what that upstream's own newest run record says — because a chain going late is
+    one event and the reader needs its cause in the same breath as its symptom. The
+    other two shapes deliberately do NOT gain it: the middle one's whole finding is
+    that the row's bookkeeping, not the chain, is what is wrong, and the unstamped
+    one's is that the row carries no stamps at all. Naming a second cause beside
+    either would put two explanations in one line where the evidence supports one,
+    and the reader would have to decide which the alarm meant."""
     if entry.get("hours") is None:
         missing = ("no next_run and no last_run" if not entry.get("row_last")
                    else "no next_run")
@@ -471,7 +600,7 @@ def _stall_line(entry: dict) -> str:
             f"{entry['hours']:.1f}h past its next_run — that elapsed figure is "
             f"measured from a stamp the task's own records contradict")
     return (f"#{entry['id']} ({entry['name']}) is {entry['hours']:.1f}h past its "
-            f"next_run — {_hold_note(entry)}")
+            f"next_run — {_hold_note(entry)}{_blocked_note(entry)}")
 
 
 def _hold_note(entry: dict) -> str:
@@ -488,6 +617,57 @@ def _hold_note(entry: dict) -> str:
     if entry["queued"]:
         return "nothing holds it; a queue row is already waiting for capacity"
     return "nothing holds it; dispatch did not enqueue it"
+
+
+def _blocked_note(entry: dict) -> str:
+    """The chain behind a late dependent, named: which upstream, and what it did.
+
+    #2417. `held: waiting on #38` is dispatch's own reason, and #1739 made sure it is
+    not said over a completed cycle — but it has never been able to say anything
+    about #38 itself, and the reader of the 2026-10-08 alert needed exactly that: the
+    upstream had DIED at 05:04:09Z, which is the fact that turns "three tasks are
+    late" into "one run failed and nobody retried it". Handed the first sentence
+    without the second, a reader goes and looks at three schedulers instead of one
+    run record.
+
+    Three branches, chosen by the strongest fact `_upstream_block` could prove:
+
+    * a newest record that is not a `success` — `which failed at
+      2026-10-08T05:04:09Z`, the shape #2417's report asked for, with the upstream's
+      own lateness appended when it has one, since "failed and not retried" is the
+      whole news;
+    * a `success` record and a stamp behind — nothing upstream is broken except its
+      clock, so the lateness IS the finding;
+    * no readable record at all, which is not the same thing as a success and says
+      so rather than going quiet.
+
+    It returns '' whenever `late_or_dead` is False, so on a healthy chain the line is
+    byte-identical to the pre-#2417 sentence, and whenever the entry came through a
+    door with no upstream to name. The clause rides AFTER `_hold_note`'s rather than
+    replacing it: `waiting on #38` remains why dispatch refused, and this is why that
+    refusal now deserves a person rather than another day of waiting.
+    """
+    from app import autonomy
+    blocked = entry.get("blocked_by") or {}
+    if not blocked.get("late_or_dead"):
+        return ""
+    up_id = blocked.get("upstream_id")
+    status = str(blocked.get("upstream_status") or "")
+    at = str(blocked.get("upstream_at") or "")
+    hours = blocked.get("upstream_hours_past")
+    late_tail = (f" and is {hours:.1f}h past its own next_run"
+                 if hours is not None and hours > 0 else "")
+    if status and status != autonomy.RUN_STATUS_SUCCESS:
+        said = (f"which {status} at {at}" if at
+                else f"which last reported `{status}` with no completed stamp")
+        return f", blocked-by #{up_id}, {said}{late_tail}"
+    if status == autonomy.RUN_STATUS_SUCCESS:
+        # A `success` upstream can only have opened this door through its own stamp,
+        # so there is always an `hours` to print here.
+        return (f", blocked-by #{up_id}, which is "
+                f"{hours:.1f}h past its own next_run")
+    return (f", blocked-by #{up_id}, whose run records report no success"
+            f"{late_tail}")
 
 
 def _queue_starving(queue: WorkQueue, max_duration: int) -> float:

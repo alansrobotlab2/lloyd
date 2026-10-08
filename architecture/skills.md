@@ -115,7 +115,7 @@ would read as "call something to load these"; what actually happens is surface
 
 `include_skills_index` defaults to `True` and every production caller takes the
 default (`app/routers/turn_options.py::build_turn_options`, the one builder
-for chat, ambient, flush and voice turns since P13.4, and `app/autonomy.py:1605`). The `False` branch is for tests
+for chat, ambient, flush and voice turns since P13.4, and `app/autonomy.py:1651`). The `False` branch is for tests
 that assert on the rest of the prompt.
 
 **A quarantined skill is excluded from the index, and that is not cosmetic.**
@@ -198,7 +198,7 @@ carrying the matched `SKILL.md`, and the model re-issues the call informed.
 
 **`is_error=False` is the entire point of the second outcome.** The same
 intercept expressed as a deny comes back `is_error=True` and is booked into
-`tool_errors` (appended at `app/autonomy.py:1792`, reported at `:1807`) — the very
+`tool_errors` (appended at `app/autonomy.py:1838`, reported at `:1853`) — the very
 number this feature exists to improve, so a deny would make the fleet look
 sicker exactly where it is being taught something.
 `HookRegistry.fire_pre_tool_use` recognises

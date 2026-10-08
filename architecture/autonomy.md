@@ -802,6 +802,19 @@ dependent whose upstream's run was never recorded is *not due*, so the due-ness
 alarm cannot see it. Each entry carries `hold_reason`, dispatch's own words, so
 the alert says why it has not run rather than only that it has not.
 
+Two shapes sit outside that period and are reported anyway — each a row the period
+cannot measure, not a widening of it. #2342 admits the row whose file carries **no
+`next_run` at all** and trusts its own run records. #2417 admits a row that *is*
+past its `next_run` but by less than a period, and only when the upstream named in
+its `depends_on` is itself past its own `next_run` or has a newest run record that is
+not a `success`; the line then names the chain — `blocked-by #38, which failed at
+2026-10-08T05:04:09Z` — because a late dependent is the symptom and the upstream's
+run record is the cause. That upstream read goes through
+`autonomy.newest_run_record`, the status-agnostic twin of `newest_successful_run`,
+which filters to `success` before it sorts and so hears a dead upstream as "no
+records". Neither door touched the bound: a task with no `depends_on` still waits one
+whole period, which is what keeps the false stalls #2342 retired from coming back.
+
 Alerts and completion notices are sent through `app/discord_notify.py`, and on
 this box an alert lands on today's daily note (`memory/<date>.md`), not on Discord.
 Discord is unconfigured by decision rather than by accident: `config.yaml` ships

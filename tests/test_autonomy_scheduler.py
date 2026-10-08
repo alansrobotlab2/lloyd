@@ -5241,3 +5241,242 @@ def test_the_live_board_suppresses_the_task_alan_parked_and_says_so(tmp_path):
         f"the live alert still names the deliberately-parked task: {msg!r}")
     assert "suppressed as declared parked" in msg, (
         f"the live scan suppressed a park without saying so: {msg!r}")
+
+
+# ── #2417: a chain is named when the link holding it is late or dead ──────────
+#
+# The nightly chain of 2026-10-08: #38's run died at 05:04:09Z, #42/#39/#40 went
+# ~6.2 h / 3.4 h / 2.7 h late as a block, and `_next_run_stalled` stayed silent
+# because its yardstick is one whole declared period (24 h for these) while its line
+# said nothing about #38 beyond `waiting on #38`. The seeds below use that chain's own
+# instants so every number in an assertion here is the incident's, and `CHAIN_WHEN` is
+# the half-hour after the report read the board (11:10Z, every row still `up_next`).
+
+#: The pinned `now` for this section: 11:15Z, 6 h 15 m after the upstream died.
+CHAIN_WHEN = dt.datetime(2026, 10, 8, 11, 15, tzinfo=dt.timezone.utc)
+#: #38's dead run, `~/lloyd-data/autonomy-runs/38/run_38_20261008_050013.md`.
+UP_FAILED_AT = "2026-10-08T05:04:09+00:00"
+
+
+def _late_chain(aut, *, dep_hours_late=3.0, up_status="failed",
+                up_completed=UP_FAILED_AT,
+                up_next_run="2026-10-08T05:00:00+00:00"):
+    """The 2026-10-08 chain, seeded: `daily` upstream #38, `daily` dependent #42.
+
+    Both are `daily`, so one period is 24 h and a dependent 3 h past its own
+    `next_run` is a row the general bound has not reached — which is the whole
+    premise. `up_status` is the status of #38's NEWEST run record and `up_next_run`
+    its own stamp: the two facts #2417's door reads. The healthy chain is
+    `up_status="success"` with a `next_run` in the future, because completing a run
+    advances the stamp — that pair is what must stay unflagged, or the tightening
+    re-creates the noise #2342 was written to retire.
+    """
+    write_task(aut, 38, last_run="2026-10-07T05:04:09+00:00", next_run=up_next_run)
+    _record(aut, 38, "run_38_20261008_050013", status=up_status,
+            completed_at=up_completed)
+    write_task(aut, 42, depends_on=38, last_run="2026-10-07T05:30:00+00:00",
+               next_run=(CHAIN_WHEN - dt.timedelta(hours=dep_hours_late)).isoformat())
+
+
+def _chain_flagged(aut, tmp_path, db="chain.db"):
+    """The scan's own verdict on whatever board is seeded, keyed by task id."""
+    from workers.queue import WorkQueue
+    return {int(e["id"]): e for e in fw._next_run_stalled(WorkQueue(tmp_path / db))}
+
+
+def test_newest_run_record_names_a_failure_the_success_reader_cannot_see(aut):
+    """The new reader #2417 clause 2 needs, and the gap it exists to fill.
+
+    `newest_successful_run` filters to `success` before it sorts, so a dead task and
+    a task with no records at all are the same `(None, "")` — measured, not inferred:
+    the assertion below is the one that used to be the whole premise. `newest_run_record`
+    is the same walk with the filter lifted, and the three assertions are the three
+    answers it can give that the old one cannot: a failure by name and instant, the
+    newest record when a retry did land, and `("", None, "")` for a task with nothing
+    readable rather than a verdict invented from an absent directory.
+    """
+    _record(aut, 38, "run_38_20261008_050013", status="failed",
+            completed_at=UP_FAILED_AT)
+
+    status, when, run_id = aut.newest_run_record(38)
+    assert status == "failed" and run_id == "run_38_20261008_050013", (
+        f"the failure was not named: {status!r} / {run_id!r}")
+    assert when is not None and when.isoformat() == UP_FAILED_AT, (
+        f"the failure's own instant did not survive the read: {when!r}")
+    assert aut.newest_successful_run(38) == (None, ""), (
+        "the premise is gone: if the success reader can now see this record, the "
+        f"second reader is redundant — {aut.newest_successful_run(38)!r}")
+
+    _record(aut, 38, "run_38_20261008_110445", status="success",
+            completed_at="2026-10-08T11:13:16+00:00")
+    assert aut.newest_run_record(38)[0] == "success", (
+        "a retry that landed is still the newest record, so an alarm must not keep "
+        "naming the failure it replaced")
+    assert aut.newest_successful_run(38) == (
+        when.replace(year=2026, month=10, day=8, hour=11, minute=13, second=16),
+        "run_38_20261008_110445"), "the success reader must still work unchanged"
+
+    assert aut.newest_run_record(999) == ("", None, ""), (
+        "no records must read as no answer, not as a failure to report")
+
+
+def test_a_dependent_three_hours_behind_a_failed_upstream_is_flagged(
+        aut, monkeypatch, tmp_path):
+    """Clauses 1 and 2: late behind a dead upstream, reported at 3 h, chain named.
+
+    This is the 2026-10-08 board at 11:15Z. Before #2417 the scan returned nothing at
+    all for it — the row is inside one period, so `past_next_run` is False — and at 25
+    h it returned the bare `held: waiting on #38`, which is a sentence about dispatch
+    and not about the run that died six hours earlier. Both halves are asserted here
+    as one string, because the clause and the admission are one change: an entry that
+    arrives without naming its upstream tells a reader to go debug three schedulers
+    instead of opening one run record.
+    """
+    _pin(aut, monkeypatch, when=CHAIN_WHEN)
+    _late_chain(aut)
+    flagged = _chain_flagged(aut, tmp_path)
+
+    assert 42 in flagged, (
+        "a dependent 3 h past its own next_run behind an upstream whose newest run "
+        f"record is `failed` was not reported: {sorted(flagged)}")
+    assert flagged[42]["hours"] == 3.0, (
+        f"the elapsed figure is not the chain's: {flagged[42]['hours']!r}")
+    assert flagged[42]["past_period"] is False, (
+        "this row must have come through #2417's door, not the general bound — if "
+        "the bound admitted it, the bound moved")
+    assert flagged[42]["blocked_by"]["upstream_id"] == 38, (
+        f"the entry does not carry its upstream: {flagged[42]['blocked_by']!r}")
+    assert fw._stall_line(flagged[42]) == (
+        "#42 (task42) is 3.0h past its next_run — held: waiting on #38, "
+        "blocked-by #38, which failed at 2026-10-08T05:04:09Z and is 6.2h past "
+        "its own next_run"
+    ), f"the alert sentence is not the one #2417 asked for: {fw._stall_line(flagged[42])!r}"
+
+
+def test_a_dependent_behind_an_upstream_that_ran_on_time_stays_unflagged(
+        aut, monkeypatch, tmp_path):
+    """Clause 3: the same late dependent, a healthy upstream, and no alert.
+
+    The test has teeth in one direction only, and it is the direction that matters:
+    the dependent is 3 h late here exactly as in the test above — asserted rather than
+    assumed, because a board that quietly stopped being late would pass this on an
+    empty scan and prove nothing. What differs is the upstream: a `success` newest
+    record and a `next_run` six hours in the future, which is what a chain that ran on
+    time actually looks like. A door that fired here would be #2342's noise back —
+    every nightly job named for the hours of the day it is politely waiting.
+    """
+    _pin(aut, monkeypatch, when=CHAIN_WHEN)
+    _late_chain(aut, up_status="success", up_completed="2026-10-08T05:17:09+00:00",
+                up_next_run="2026-10-09T05:00:00+00:00")
+
+    dep = aut._parse_task_file(aut._find_task_file(42))
+    gap = aut.next_run_gap(dep, now=CHAIN_WHEN)
+    assert gap["hours_past_next_run"] == 3.0 and gap["past_next_run"] is False, (
+        f"the board is not the shape clause 3 describes: {gap!r}")
+    assert aut.newest_successful_run(38)[0] is not None, (
+        "the upstream's newest record is not readable as a success, so the silence "
+        "below would be the dead-upstream case in disguise")
+
+    flagged = _chain_flagged(aut, tmp_path)
+    assert flagged == {}, (
+        "a dependency-held row late behind a HEALTHY upstream was reported, which is "
+        f"the false-alarm class #2342 retired: {sorted(flagged)}")
+
+
+def test_the_general_one_period_bound_is_untouched_for_a_task_with_no_upstream(
+        aut, monkeypatch, tmp_path):
+    """Clause 4: the bound #421 set still decides the rows with no chain to name.
+
+    #51 is 3 h late and #52 is 25 h late, both `up_next`, `daily`, and neither has a
+    `depends_on`. Only #52 may be flagged, and #52's line must be exactly what it was
+    before this round: an unheld row with no upstream must not acquire a `blocked-by`
+    clause out of a change that is about chains.
+    """
+    _pin(aut, monkeypatch, when=CHAIN_WHEN)
+    write_task(aut, 51, last_run=(CHAIN_WHEN - dt.timedelta(hours=4)).isoformat(),
+               next_run=(CHAIN_WHEN - dt.timedelta(hours=3)).isoformat())
+    write_task(aut, 52, last_run=(CHAIN_WHEN - dt.timedelta(hours=26)).isoformat(),
+               next_run=(CHAIN_WHEN - dt.timedelta(hours=25)).isoformat())
+    flagged = _chain_flagged(aut, tmp_path)
+
+    assert 51 not in flagged, (
+        "the one-period bound moved: a lone daily task 3 h late with nothing "
+        "upstream is exactly the false stall #2342 removed")
+    assert 52 in flagged and flagged[52]["past_period"] is True, (
+        f"the bound stopped admitting a 25 h stall: {sorted(flagged)}")
+    assert fw._stall_line(flagged[52]) == (
+        "#52 (task52) is 25.0h past its next_run — nothing holds it; dispatch did "
+        "not enqueue it"
+    ), f"an unheld row gained words it should not have: {fw._stall_line(flagged[52])!r}"
+
+
+def test_the_two_2342_line_shapes_stay_as_they_were_and_carry_no_chain(
+        aut, monkeypatch, tmp_path):
+    """Clause 5: the bookkeeping and unstamped sentences are unchanged, chain-free.
+
+    Both rows here sit behind the dead #38 on purpose: `blocked_by` is populated for
+    the first one, so the assertion that its line carries no `blocked-by` is a live
+    discrimination and not a tautology. #2342's finding for that row is that the
+    ROW's bookkeeping is the defect — a completion the vault never recorded — and
+    bolting a second cause onto that sentence would leave the reader choosing which
+    one the alarm meant. The unstamped row cannot be measured at all, so it never
+    reaches the door and must print the same words it has always printed.
+    """
+    _pin(aut, monkeypatch, when=CHAIN_WHEN)
+    _late_chain(aut)
+    # #42 is 25 h past its stamp AND has a success record newer than its own
+    # `last_run`: the lost-completion shape, admitted by the bound.
+    write_task(aut, 42, depends_on=38, last_run="2026-10-06T05:00:00+00:00",
+               next_run=(CHAIN_WHEN - dt.timedelta(hours=25)).isoformat())
+    _record(aut, 42, "run_42_20261008_083000", status="success",
+            completed_at="2026-10-08T08:30:00+00:00")
+    # #77 has no `next_run` key at all and a success record: #96's shape.
+    write_task(aut, 77, depends_on=38, last_run="2026-10-06T05:00:00+00:00",
+               next_run=None)
+    _record(aut, 77, "run_77_20261008_060000", status="success",
+            completed_at="2026-10-08T06:00:00+00:00")
+    flagged = _chain_flagged(aut, tmp_path, db="shapes.db")
+
+    assert {42, 77} <= set(flagged), (
+        f"neither #2342 shape reached the alert, so the strings below are ungraded: "
+        f"{sorted(flagged)}")
+    assert flagged[42]["blocked_by"], (
+        "the lost-completion row has no upstream data attached, so the assertion "
+        "below that its line names none is not testing anything")
+    line42 = fw._stall_line(flagged[42])
+    assert line42.startswith(
+        "#42 (task42) row bookkeeping lost a completion: run record "
+        "run_42_20261008_083000 succeeded at 2026-10-08T08:30:00+00:00, "
+        "after the row's last_run 2026-10-06T05:00:00+00:00"), line42
+    assert "blocked-by" not in line42, line42
+
+    line77 = fw._stall_line(flagged[77])
+    assert line77.startswith(
+        "#77 (task77) has no next_run on its row while run record "
+        "run_77_20261008_060000 says it succeeded at 2026-10-08T06:00:00+00:00"
+    ), line77
+    assert "blocked-by" not in line77, line77
+
+
+def test_the_alert_head_counts_a_short_late_row_separately_from_the_bound(
+        aut, monkeypatch, tmp_path):
+    """The head sentence claims what the code measured, now across three doors.
+
+    #1121's and #2342's rule in one line: a message that says "N tasks more than one
+    period past their own next_run" may only count tasks that are. #2417 admits rows
+    inside the period, so the first count has to read 0 here and the late row has to
+    be counted by a clause that describes it — otherwise the change would ship the
+    misdescribing alert as a side effect of fixing a silent one.
+    """
+    _pin(aut, monkeypatch, when=CHAIN_WHEN)
+    _late_chain(aut)
+    msg = fw._nextrun_alert_message(list(_chain_flagged(aut, tmp_path, "head.db").values()))
+
+    assert msg.startswith(
+        "0 up_next task(s) more than one period past their own next_run, which the "
+        "due-ness stall alarm cannot see | 1 task(s) past their own next_run by "
+        "less than one period, which that bound cannot reach, held behind an "
+        "upstream that is itself past its next_run or whose newest run record is "
+        "not a success: "
+    ), f"the head misdescribes or fails to describe its own rows: {msg!r}"
+    assert "blocked-by #38" in msg, msg

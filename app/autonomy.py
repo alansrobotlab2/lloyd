@@ -1345,28 +1345,35 @@ def _run_period_start(task: dict, *, now: datetime.datetime) -> Optional[datetim
     return now - datetime.timedelta(seconds=max(1.0, interval - _due_slack_seconds(task)))
 
 
-def newest_successful_run(task_id, *, not_before=None,
-                          accept=None) -> tuple:
-    """(instant, run_id) of this task's newest `success` record; (None, "") else.
+def _newest_run_record(task_id, *, want_status: Optional[str] = None,
+                       not_before=None, accept=None) -> tuple:
+    """(status, instant, run_id) of this task's newest run record — ONE walk.
 
-    The module's ONE reader of what the run records say about SUCCESS (#2342), so
-    the two questions asked of them are not answered twice and diverge: the veto
-    below passes `not_before` and `accept` and asks "did it run THIS period", the
-    stall alarm passes neither and asks "did it ever". The shapes that answer
-    nothing — no directory, unparseable front matter, no success — all return the
-    same (None, ""), because a caller that cannot read its input must fall back,
-    not invent. A filename's stamp names a run's START while every comparison below
-    is against a completion-derived window, so `started_at` is only the fallback for
-    a missing `completed_at`. `yaml.YAMLError` descends from Exception, NOT
-    ValueError: catching it is why a truncated record no longer raises out of here.
+    THE module's reader of what the run records say (#2342), so the questions
+    asked of them are not answered twice and diverge. `newest_successful_run`
+    passes `want_status` and asks "did it succeed"; `newest_run_record` passes
+    nothing and asks "what is the last thing it reported, whatever that was". They
+    are one loop over one set of files because a second private walk is a second
+    set of rules about what counts as a readable record, and the day those two
+    disagree the dispatch veto and the stall alarm disagree with them.
+
+    `want_status` is compared stripped and lower-cased, the way
+    `_write_run_record` spells it. A record whose `status` is missing or is not a
+    string is skipped in BOTH directions, and that is deliberate: with
+    `want_status` it cannot match, and without it there is no status to report, so
+    an unreadable record answers "nothing" instead of becoming a verdict. A
+    filename's stamp names a run's START while every comparison here is against a
+    completion-derived instant, so `started_at` is only the fallback for a missing
+    `completed_at`. `yaml.YAMLError` descends from Exception, NOT ValueError:
+    catching it is why a truncated record no longer raises out of here.
     """
     task_dir = AUTONOMY_RUNS_DIR / str(task_id)
     if not task_dir.is_dir():
-        return None, ""
+        return "", None, ""
     try:
         paths = sorted(task_dir.glob("run_*.md"))
     except OSError:
-        return None, ""
+        return "", None, ""
     newest = None
     for path in paths:
         try:
@@ -1378,16 +1385,55 @@ def newest_successful_run(task_id, *, not_before=None,
             continue
         if not isinstance(fm, dict) or not isinstance(fm.get("status"), str):
             continue
-        if fm.get("status").strip().lower() != RUN_STATUS_SUCCESS:
+        status = fm.get("status").strip().lower()
+        if want_status is not None and status != want_status:
             continue
         when = _parse_iso(fm.get("completed_at")) or _parse_iso(fm.get("started_at"))
         if when is None or (not_before is not None and when < not_before):
             continue
         if accept is not None and not accept(when):
             continue
-        if newest is None or when > newest[0]:
-            newest = (when, str(fm.get("run_id") or path.stem))
-    return newest if newest is not None else (None, "")
+        # Index 1, not 0: the tuple this walk returns leads with the STATUS word,
+        # and comparing an instant against it is a TypeError, not a comparison.
+        if newest is None or when > newest[1]:
+            newest = (status, when, str(fm.get("run_id") or path.stem))
+    return newest if newest is not None else ("", None, "")
+
+
+def newest_successful_run(task_id, *, not_before=None,
+                          accept=None) -> tuple:
+    """(instant, run_id) of this task's newest `success` record; (None, "") else.
+
+    The `success` projection of `_newest_run_record` (#2342), and the two
+    questions it answers with it: the veto below passes `not_before` and `accept`
+    and asks "did it run THIS period", the stall alarm passes neither and asks
+    "did it ever". The shapes that answer nothing — no directory, unparseable
+    front matter, no success — all return the same (None, ""), because a caller
+    that cannot read its input must fall back, not invent. For the question "what
+    did it last report, if not success" this function is structurally blind: it
+    filters to `success` before it sorts, so a task whose newest record is a
+    FAILURE and a task with no records at all are one answer. That is what
+    `newest_run_record` exists for (#2417).
+    """
+    _status, when, run_id = _newest_run_record(
+        task_id, want_status=RUN_STATUS_SUCCESS,
+        not_before=not_before, accept=accept)
+    return (when, run_id) if when is not None else (None, "")
+
+
+def newest_run_record(task_id) -> tuple:
+    """(status, instant, run_id) of the newest run record, whatever it reports.
+
+    #2417: the stall alarm has to name an upstream that DIED, and
+    `newest_successful_run` cannot name it — it drops every non-`success` record
+    before it picks the newest, so the failure that is the whole news arrives as
+    `(None, "")`, indistinguishable from "no records". Same walk, filter lifted:
+    `("", None, "")` when nothing readable exists, otherwise the record's own
+    status word, its completion instant and its run id. Read-only, and its only
+    caller is `workers/fleet_watchdog._upstream_block`, which asks it about an
+    upstream once per shortlisted row per tick, not once per task.
+    """
+    return _newest_run_record(task_id)
 
 
 def _successful_run_this_period(

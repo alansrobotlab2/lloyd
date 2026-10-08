@@ -723,3 +723,46 @@ def test_a_malformed_call_leaves_the_next_write_working(autonomy_tree):
     assert len(list(autonomy_tree.glob("*.md"))) == 1, (
         "the write after a malformed call did not land")
 
+
+
+def test_the_architecture_paragraph_about_the_stall_alarm_names_its_two_doors():
+    """#2417: `architecture/autonomy.md` said the second stall alarm lists any
+    `up_next` task "more than one whole period past its `next_run`", which stopped
+    being the whole admission with #2342 (a row with no `next_run` at all) and stops
+    again here (a dependency-held row inside the period whose upstream is late or
+    dead). An implementer who read the old sentence and trusted it would go looking
+    for one threshold and find the alarm answering to three questions, so the
+    paragraph is read the way the alerts one above is: the doors it names must be the
+    doors the code asks, the reader it names must exist, and the example sentence it
+    quotes must be the one `_stall_line` actually prints.
+    """
+    import workers.fleet_watchdog as fw
+
+    doc = (REPO / "architecture" / "autonomy.md").read_text(encoding="utf-8")
+    start = doc.index("Two shapes sit outside that period")
+    section = " ".join(
+        doc[start:doc.index("Alerts and completion notices", start)].split())
+
+    assert "#2342" in section and "#2417" in section, (
+        "the paragraph no longer attributes each door to the item that opened it")
+    assert "no `next_run` at all" in section, "the unstamped shape went missing"
+    assert "less than a period" in section and "not a `success`" in section, (
+        f"the late-or-dead condition is not stated: {section[:200]!r}")
+    assert "still waits one whole period" in section, (
+        "the paragraph may not read as though the general bound moved")
+
+    src = (REPO / "app" / "autonomy.py").read_text(encoding="utf-8")
+    assert "def newest_run_record(" in src, (
+        "the doc names a reader that does not exist, which is the #1520 defect again")
+    line = fw._stall_line({
+        "id": 42, "name": "task42", "status": "up_next", "hours": 3.0,
+        "past_period": False, "hold": "waiting on #38", "queued": False,
+        "parked": "", "record_at": None, "record_run": "", "row_last": "",
+        "lost_completion": False,
+        "blocked_by": {"upstream_id": 38, "upstream_status": "failed",
+                       "upstream_at": "2026-10-08T05:04:09Z",
+                       "upstream_hours_past": 6.2, "late_or_dead": True},
+    })
+    assert "blocked-by #38, which failed at 2026-10-08T05:04:09Z" in line, line
+    assert "blocked-by #38, which failed at 2026-10-08T05:04:09Z" in section, (
+        "the doc's example sentence and the printed one have drifted apart")
