@@ -6,38 +6,52 @@ This module adds the currency and nothing else: it is EMIT-ONLY. Nothing here is
 by `promote.evaluate_promotion`, and `tests/test_autoresearch_promotion.py` pins that
 the verdict is the same with these fields present or absent.
 
-**The currency** is re-prefilled prompt tokens: a trial's `input_tokens - cache_read`,
-summed over the usage rows of its recorded session. Not seconds (an estimate, and the
-reason #731's replay "settled nothing"), not total tokens (which prices a cached prefix
-the engine never recomputed), and not `usage.reprefill_tokens`, which read 0 on every
-bench row probed on 2026-10-01 including rows that re-prefilled 42.5k tokens. A count
-that is missing is None, never 0: an unmeasured trial is not a free one.
+**The currency** is re-prefilled prompt tokens: the prompt tokens the engine had to
+compute rather than read from cache. Where that comes from depends on the arm, and only
+on the arm (`_route_of`): an agent turn's is its `input_tokens - cache_read` summed over
+the usage rows of its recorded session, and a direct trial's is `prompt_tokens -
+cached_tokens` off the engine's own usage block that `bench_runner.add_usage` folded onto
+its trace (#2390). Not seconds (an estimate, and the reason #731's replay "settled
+nothing"), not total tokens (which prices a cached prefix the engine never recomputed),
+and not `usage.reprefill_tokens`, which read 0 on every bench row probed on 2026-10-01
+including rows that re-prefilled 42.5k tokens. A count that is missing is None, never 0:
+an unmeasured trial is not a free one, and neither route ever prices a prompt it could
+not also discount — a figure with no cached count beside it is None, not `prompt_tokens`.
 
 **The gate** is the CLM paper's: the efficiency advantage of a rollout is computed only
 over the successful ones — `mean(cost | success) - cost` within the group of trials of
-one task across the round's variants — and a failed rollout gets exactly 0. Rewarding
-cheapness without that gate rewards deleting the context the task needed. An
+one task *on one arm* across the round's variants — and a failed rollout gets exactly 0.
+Rewarding cheapness without that gate rewards deleting the context the task needed. An
 infrastructure-failed trial (`trace_status != "success"`) is in neither the mean nor
-the zeroing: a timeout is not a task failure.
+the zeroing: a timeout is not a task failure. The group is per (task, harness) (#2390)
+because the two routes price different things: an sdk figure discounts a prefix `usage.db`
+saw served, a direct one discounts what the engine itself reported, and a mean over both
+is the average of two currencies.
 
-**The measured population (#2299)** is narrower than the round, and says so. Only a
-harness in `USAGE_ROW_HARNESSES` writes the usage rows this currency is summed from, so
-a trial on any other harness is unmeasured by construction, and a round that benches
-one arm on each has a cost figure for exactly one of them. Every per-variant block
-therefore carries the harnesses that comprise its measured set beside its `unmeasured`
-count, plus a `cost_reason` saying why an absent figure is absent; `rank()` refuses to
-let `advantage_total` separate two variants whose measured sets are harness-disjoint,
-because an unmeasured trial's advantage contribution is a bare 0.0 and a break-even is
-indistinguishable from it. Bounding the block to what it measured is emit-only work
-too: it labels the figure, it never changes it.
+**The measured population (#2299, grown by #2390)** is narrower than the round, and says
+so. Only a harness in `USAGE_BEARING_HARNESSES` has a route that can price it, so a trial
+on any other arm is unmeasured by construction, and an arm whose route found nothing on
+the trial is unmeasured by this round's accounting. Every per-variant block therefore
+carries the harnesses that comprise its measured set beside its `unmeasured` count, plus a
+`cost_reason` saying why an absent figure is absent — in the words of the route that
+should have priced it, which is what keeps "no usage row arrived" and "the engine sent no
+`prompt_tokens_details`" two different findings; `rank()` refuses to let `advantage_total`
+separate two variants whose measured sets are harness-disjoint, because an unmeasured
+trial's advantage contribution is a bare 0.0 and a break-even is indistinguishable from
+it. Bounding the block to what it measured is emit-only work too: it labels the figure, it
+never changes it.
 """
 from __future__ import annotations
 
 from typing import Any, Callable, Iterable
 
+from .bench_runner import CACHED_TOKENS_FIELD, HARNESS as DIRECT_HARNESS
+
 #: Per-trial ledger keys. `recorded_session_id` is the join key: usage.db keys a bench
 #: row by the recorded session (`20261001_053224_bench_7a06`), not by the trial id
-#: (`bench_<variant>_<task>_<hex>`), so without it no usage row reaches its variant.
+#: (`bench_<variant>_<task>_<hex>`), so without it no usage row reaches its variant. It
+#: is None on an arm priced off its own trace, because no store row was joined to
+#: produce the figure that row carries — the field names the join, not a provenance.
 SESSION_FIELD = "recorded_session_id"
 REPREFILL_FIELD = "reprefill_cost_tokens"
 COST_LEDGER_KEYS = (SESSION_FIELD, REPREFILL_FIELD)
@@ -46,19 +60,61 @@ COST_LEDGER_KEYS = (SESSION_FIELD, REPREFILL_FIELD)
 SUCCESS_CONDITION = "trace_status == 'success' and objective_score >= 1.0"
 SUCCESS, FAILED, INFRA = "success", "failed", "infra_failed"
 
-#: The harnesses whose trials can have a cost at all: only one whose trace carries a
-#: recorded session has usage rows for `usage_rows_for` to sum, and `cost_ledger_fields`
-#: resolves a session id on exactly those — so every other arm is unmeasurable by
-#: construction, and the measured population of a round that benches both is the arm
-#: listed here. When the direct arm ever gets engine-usage capture (the other half of
-#: #2299), this tuple is the single place that grows, and the emitted reasons follow it.
-USAGE_BEARING_HARNESSES = ("sdk",)
+#: The arms whose trials can have a cost at all, and one of the two constants that
+#: constitute the priced set (`TRACE_PRICED_ARMS` is the other): `_route_of` answers both
+#: the pricing and the emitted reason from those two and nothing else, so a reason can
+#: never disagree about which arms are priced and growing the set moves the reasons with
+#: it. There is no per-arm comparison of the harness name anywhere in this module — prose
+#: about a route may name the arm it prices, but only these two constants decide it. Both
+#: arms the currency now prices are here: the agent turn, whose usage rows
+#: `usage_rows_for` sums, and the direct bench trial, whose price is the engine's own
+#: usage block off its trace (#2390, the other half of #2299). An arm outside the set has
+#: no route at all and is unmeasurable by construction.
+USAGE_BEARING_HARNESSES = ("sdk", "direct")
+
+#: The arms priced from the engine usage block on their own trace rather than from
+#: usage.db. Membership is not a second list of arms to maintain: it is the direct
+#: runner's own name for its arm, because what makes that arm trace-priced is that its
+#: runner is a bare `/v1/chat/completions` call which writes no usage row anywhere
+#: (#1879). Every other arm in the tuple above is an agent turn whose harness writes
+#: the rows the currency sums, so a newly added arm defaults to that route.
+TRACE_PRICED_ARMS = (DIRECT_HARNESS,)
+
+#: The two routes, named by what they read. `_route_of` picks one, `cost_ledger_fields`
+#: prices through it and `_why_unmeasured` says in words what its absence means, so the
+#: cause a reader is told is the cause the writer actually looked for.
+USAGE_ROWS_ROUTE = "usage rows of its recorded session"
+ENGINE_USAGE_ROUTE = "engine usage block on its own trace"
+
+#: Why a trial priced by this route came home with nothing — kept distinct because the
+#: two are different findings: a missing usage row is a hole in one round's accounting,
+#: while an engine that never sends `prompt_tokens_details` leaves every trial on that
+#: arm unpriced in every round until the endpoint is reconfigured.
+UNPRICED_REASON = {
+    USAGE_ROWS_ROUTE: "no usage row for its recorded session",
+    ENGINE_USAGE_ROUTE: "engine reported no prompt_tokens_details, so its trace "
+                        "carries no prompt count to price",
+}
+NO_ROUTE_REASON = "no pricing route is registered for this arm, so its trials cannot be priced"
 
 #: What a trial row with no `harness` key says it ran on. Both ledger writers always
-#: stamp one (`run_round.trial_ledger_row` defaults to `direct`), so this label can only
-#: ever appear on a hand-built row — which is the point: an unnamed arm must not silently
-#: stand for a population nobody recorded.
+#: stamp one (`bench_runner._run_one_sync` stamps its own `HARNESS` onto the trace, and
+#: `run_round.trial_ledger_row` still defaults a hand-built one to the same name), so
+#: this label can only ever appear on a hand-built row — which is the point: an unnamed
+#: arm must not silently stand for a population nobody recorded.
 UNKNOWN_HARNESS = "unrecorded"
+
+
+def _route_of(harness: str) -> str | None:
+    """The route that prices one arm, or None for an arm nothing can price.
+
+    One function answers it, for the writer and for the reason beside its None. Read
+    through `USAGE_BEARING_HARNESSES` and `TRACE_PRICED_ARMS` rather than by a per-arm
+    `if`, which is how #2299's two arms became two spellings of one test.
+    """
+    if harness not in USAGE_BEARING_HARNESSES:
+        return None
+    return ENGINE_USAGE_ROUTE if harness in TRACE_PRICED_ARMS else USAGE_ROWS_ROUTE
 
 
 def reprefill_cost(usage_rows: Iterable[dict[str, Any]] | None) -> int | None:
@@ -93,22 +149,80 @@ def usage_rows_for(session_id: str) -> list[dict[str, Any]]:
         return []
 
 
+def trace_reprefill_cost(trace: dict[str, Any]) -> int | None:
+    """`prompt_tokens - cached_tokens` off the trial's own trace, or None (#2390).
+
+    Both counts come from one engine usage block, and both are required: a price from
+    `prompt_tokens` alone would charge the trial for a prefix the engine served from
+    cache, which is the one thing this currency exists not to do, and it is why a trace
+    whose engine sent `prompt_tokens` but no `prompt_tokens_details` (the shape of a
+    vLLM without `--enable-prompt-tokens-details`) reads None rather than its raw prompt
+    count. The same rule `reprefill_cost` applies per row: a partial measurement is a
+    missing one, never a cheaper one.
+
+    `cached_tokens` is the count `bench_runner.add_usage` summed over the trial's calls,
+    so on a multi-call trial this discounts every cached prefix it got, not one.
+    """
+    prompt, cached = trace.get("prompt_tokens"), trace.get(CACHED_TOKENS_FIELD)
+    if not _is_count(prompt) or not _is_count(cached):
+        return None
+    return prompt - cached
+
+
+def _price_via_usage_rows(trace: dict[str, Any],
+                          lookup: Callable[[str], list[dict[str, Any]]],
+                          ) -> tuple[str | None, int | None]:
+    """(recorded session, cost summed over its usage rows): the agent-turn route."""
+    sid = trace.get("session_id")
+    sid = str(sid) if sid else None
+    return sid, (reprefill_cost(lookup(sid)) if sid else None)
+
+
+def _price_via_engine_usage(trace: dict[str, Any],
+                            lookup: Callable[[str], list[dict[str, Any]]],
+                            ) -> tuple[str | None, int | None]:
+    """(None, cost off the engine usage block on the trace): the direct route (#2390).
+
+    Never calls `lookup`, and so never reads a usage row: this arm's trial wrote none,
+    and a `session_id` pasted onto one of these traces (a direct trial holds no session
+    at any level of its chain, #1879) would join to rows some other trial wrote. Its
+    `recorded_session_id` therefore stays None even when a price was found — that field
+    names a join, and this figure came no such way.
+    """
+    return None, trace_reprefill_cost(trace)
+
+
+#: One pricer per route, so the sentence in `UNPRICED_REASON` and the arithmetic here
+#: are two readings of the same route and cannot drift apart.
+_PRICERS = {USAGE_ROWS_ROUTE: _price_via_usage_rows,
+            ENGINE_USAGE_ROUTE: _price_via_engine_usage}
+
+
 def cost_ledger_fields(trace: dict[str, Any],
                        lookup: Callable[[str], list[dict[str, Any]]] | None = None
                        ) -> dict[str, Any]:
     """The two per-trial keys, for both ledger writers.
 
-    A trace on a harness outside `USAGE_BEARING_HARNESSES` has no recorded session (the
-    direct arm is one `/v1/chat/completions` call, no usage row), so both read None
-    there — the same honest None `tool_search_enabled` carries on that arm. This is the
-    writer half of the measured population #2299 names: the None it writes here is what
-    `round_cost_records` later reports as an unmeasured trial on that harness, so the
-    two must read one constant, not two spellings of `"sdk"`.
+    A trace on an arm outside `USAGE_BEARING_HARNESSES` has no route at all, so both
+    keys read None — the same honest None `tool_search_enabled` carries there. Inside
+    it, `_route_of` picks the one route that arm has: sum the usage rows of its recorded
+    session, or read the engine usage block the runner folded onto the trace itself.
+
+    This is the writer half of the measured population #2299 names: the None it writes
+    here is what `round_cost_records` later reports as an unmeasured trial on that
+    harness, and the reason it reports is the same route's own sentence, so writer and
+    reason read one mechanism and neither spells an arm out.
+
+    The arm is read off the trace and never guessed: both runners stamp their own name
+    there (`bench_runner.HARNESS`, `bench_runner_sdk.HARNESS`), so a trace from a real
+    trial always says which route prices it, and a hand-built trace that names none is
+    unpriced rather than priced by whichever route the reader expected.
     """
-    sid = (trace.get("session_id") if trace.get("harness") in USAGE_BEARING_HARNESSES
-           else None)
-    sid = str(sid) if sid else None
-    cost = reprefill_cost((lookup or usage_rows_for)(sid)) if sid else None
+    harness = trace.get("harness")
+    price = _PRICERS.get(_route_of(str(harness))) if harness else None
+    if price is None:
+        return {SESSION_FIELD: None, REPREFILL_FIELD: None}
+    sid, cost = price(trace, lookup or usage_rows_for)
     return {SESSION_FIELD: sid, REPREFILL_FIELD: cost}
 
 
@@ -128,14 +242,17 @@ def _harness_of(row: dict[str, Any]) -> str:
 def _why_unmeasured(harness: str) -> str:
     """Why a trial on this harness carries no cost, in the mechanism and not the count.
 
-    The two ways a trial goes unmeasured are different facts: an arm outside
-    `USAGE_BEARING_HARNESSES` never writes a usage row, so its trials are unpriced in
-    every round forever; one on an arm that does write them but arrives without a row is
-    a hole in that round's accounting, and the kind of hole worth reading about.
+    The cause is the sentence of the route that should have priced the arm — read
+    through `_route_of`, the same lookup the writer priced by — because the ways a trial
+    goes unmeasured are different facts worth telling apart: an agent-turn trial with no
+    price is missing a usage row this round's accounting should have written, a direct
+    trial is missing the engine's own `prompt_tokens_details`, and a trial on an arm with
+    no route was never going to be priced anywhere. Before #2399 the first sentence was
+    the only one any arm could get, which is what made an unpriced direct arm read as a
+    hole in the round rather than as the arm the currency did not reach.
     """
-    if harness in USAGE_BEARING_HARNESSES:
-        return "no usage row for its recorded session"
-    return "the harness records no usage row, so its trials cannot be priced"
+    route = _route_of(harness)
+    return NO_ROUTE_REASON if route is None else UNPRICED_REASON[route]
 
 
 def _cost_reason(trials: int, measured: int, unmeasured: int, infra_excluded: int,
@@ -144,9 +261,11 @@ def _cost_reason(trials: int, measured: int, unmeasured: int, infra_excluded: in
 
     None only when every trial that could be priced was priced. Otherwise the reason is
     emitted because a None cost is read as "cost nothing" by the next reader — the exact
-    inversion this block exists to prevent, and the one the 2.9%-measured live ledger
-    makes easy: with `direct` unpriced by construction, a variant benched on both arms
-    has one sdk number standing in for twenty-something trials.
+    inversion this block exists to prevent, and the one a ledger with an unpriced arm
+    makes easy, where one priced trial of twenty stands in for the whole variant. Each
+    arm in the list gets its own clause, in the words of the route that failed it
+    (`_why_unmeasured`), so an arm the currency still cannot reach and an arm whose
+    engine sent no usage block are never reported as the same finding.
     """
     if measured and not unmeasured:
         return None
@@ -165,9 +284,17 @@ def _cost_reason(trials: int, measured: int, unmeasured: int, infra_excluded: in
 def round_cost_records(trial_rows: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Per-variant cost record over one round's per-trial ledger rows.
 
-    The advantage group is one task across every variant that ran it, so two variants
-    benched under different cache profiles get different numbers; within a single
-    variant the advantages of its own successes would always sum to zero.
+    The advantage group is one task on one arm across every variant that ran it, so two
+    variants benched under different cache profiles get different numbers; within a
+    single variant the advantages of its own successes would always sum to zero.
+
+    The arm is in the key because of #2390, and not before it: now that both arms carry a
+    price, a group keyed on the task alone would average an sdk figure discounted by
+    `usage.db`'s `cache_read` with a direct figure discounted by the engine's own
+    `cached_tokens` — two measurements of two different things standing in one mean, and
+    every trial's advantage in that round measured against a number that is neither
+    arm's. `_advantage_basis`/`_cost_slot` then stop the ranking comparing across the
+    arms; this stops the arithmetic from mixing them in the first place.
 
     #2299 bounds every figure to the population that produced it: `measured_on` names the
     harnesses the cost means are summed over, `advantage_on` the harnesses whose *priced
@@ -181,7 +308,8 @@ def round_cost_records(trial_rows: Iterable[dict[str, Any]]) -> dict[str, dict[s
     success_costs: dict[Any, list[int]] = {}
     for r in rows:
         if trial_outcome(r) == SUCCESS and _is_count(r.get(REPREFILL_FIELD)):
-            success_costs.setdefault(r.get("task_id"), []).append(r[REPREFILL_FIELD])
+            success_costs.setdefault((r.get("task_id"), _harness_of(r)), []) \
+                .append(r[REPREFILL_FIELD])
     out: dict[str, dict[str, Any]] = {}
     for r in rows:
         rec = out.setdefault(str(r["variant_id"]), {
@@ -213,7 +341,7 @@ def round_cost_records(trial_rows: Iterable[dict[str, Any]]) -> dict[str, dict[s
                 advantage = 0.0
             else:
                 rec["successes"] += 1
-                group = success_costs.get(r.get("task_id")) or []
+                group = success_costs.get((r.get("task_id"), harness)) or []
                 if cost is None or not group:
                     advantage = None
                 else:
@@ -318,8 +446,11 @@ def report_lines(records: dict[str, dict[str, Any]]) -> list[str]:
     if not records:
         return []
     lines = ["", "## Cost (#2019, emit-only)",
-             f"Currency: `{REPREFILL_FIELD}` = input_tokens - cache_read over each trial's "
-             "recorded session. Advantage = mean(cost | success, same task) - cost for a "
+             f"Currency: `{REPREFILL_FIELD}` = the prompt tokens the engine had to "
+             "re-compute: `input_tokens - cache_read` summed over the usage rows of a "
+             "turn's recorded session, or `prompt_tokens - cached_tokens` off the "
+             "engine's own usage block on a direct trial's trace (#2390). Advantage = "
+             "mean(cost | success, same task on the same arm) - cost for a "
              f"successful trial, 0 for a failed one; success is `{SUCCESS_CONDITION}`. "
              "No promotion leg reads this section.",
              _population_line(records),

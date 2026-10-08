@@ -10,6 +10,10 @@ Trace shape:
   {
     "variant_id": ...,
     "task_id": ...,
+    "harness": "direct",       # this runner's own name for its arm (#2390): the trace
+                               # says so rather than leaving the row writer to default
+                               # it, because `cost.cost_ledger_fields` prices a trace
+                               # and the arm is what picks the route.
     "status": "success|timeout|error",
     "final_text": "...",
     "turns": 1,
@@ -27,6 +31,10 @@ Trace shape:
     "prompt_tokens": int | None,      # #1132: the engine's usage block, summed
     "completion_tokens": int | None,  # over every call the trial made; None
     "total_tokens": int | None,       # when no call reported one (absent != 0)
+    "cached_tokens": int | None,      # #2390: the prefix the engine served from cache,
+                                      # folded from `usage["prompt_tokens_details"]`;
+                                      # None when no call reported that block, and
+                                      # `None` is not a measured zero
     "error": "" | "...",
   }
 """
@@ -63,8 +71,24 @@ def _resolved_model_name(model: str) -> str:
     return resolve_model_alias(model)
 
 
+#: The harness this runner is, in the one name the ledger row stamps it by. A trace
+#: built here carries it; a hand-built trace that names no arm is this arm, which is
+#: the default `run_round.trial_ledger_row` already applies to its row and which
+#: `cost.cost_ledger_fields` reads from here rather than spelling the arm again.
+HARNESS = "direct"
+
 #: The usage keys a trial carries, in the engine's own (OpenAI) names.
 TOKEN_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+#: The engine's name for the prefix it served from cache instead of recomputing
+#: (#2390). Deliberately not one of `TOKEN_KEYS`: the engine reports it nested inside
+#: `prompt_tokens_details`, so it arrives through a different door than the three.
+CACHED_TOKENS_FIELD = "cached_tokens"
+
+#: Every count a direct trial's trace carries: the three top-level counts plus the
+#: cached prefix. A trace is initialised from this and a ledger row restates it, so
+#: the two cannot drift apart when a count is added.
+USAGE_KEYS = TOKEN_KEYS + (CACHED_TOKENS_FIELD,)
 
 
 def add_usage(trace: dict[str, Any], usage: dict[str, Any] | None) -> None:
@@ -75,21 +99,38 @@ def add_usage(trace: dict[str, Any], usage: dict[str, Any] | None) -> None:
     strategies at a matched budget is meaningless otherwise. A key the engine
     did not report leaves the total as it was: None stays None, because a
     missing count is not a zero.
+
+    `cached_tokens` (#2390) is the one count that is not at the top of the block:
+    vLLM sends it as `usage["prompt_tokens_details"]["cached_tokens"]` when the
+    engine runs with `--enable-prompt-tokens-details`, and it is folded the same
+    summed way as the other three, because a trial that made several calls cached
+    several prefixes. A response with no `prompt_tokens_details` leaves the total
+    as it was: an engine that reported no details is not an engine that reported a
+    zero-cached call, and on this engine the two are distinguishable only if the
+    absence survives the fold.
     """
     for key in TOKEN_KEYS:
         value = (usage or {}).get(key)
         if isinstance(value, int):
             trace[key] = (trace.get(key) or 0) + value
+    details = (usage or {}).get("prompt_tokens_details")
+    if isinstance(details, dict):
+        cached = details.get(CACHED_TOKENS_FIELD)
+        if isinstance(cached, int):
+            trace[CACHED_TOKENS_FIELD] = (trace.get(CACHED_TOKENS_FIELD) or 0) + cached
 
 
 def token_ledger_fields(trace: dict[str, Any]) -> dict[str, Any]:
-    """The three counts for a per-trial ledger row, for both writers.
+    """The usage counts for a per-trial ledger row, for both writers.
 
     An sdk trace keeps the harness's own `usage` dict instead, whose
     `input_tokens` is the PEAK single prompt rather than a sum, so it is not
-    restated under these names and its row reads None here.
+    restated under these names and its row reads None here — `cached_tokens`
+    included, because the sdk arm's discount comes from `usage.db`'s `cache_read`
+    and `cost.cost_ledger_fields` prices that arm from the store, not from these
+    keys.
     """
-    return {key: trace.get(key) for key in TOKEN_KEYS}
+    return {key: trace.get(key) for key in USAGE_KEYS}
 
 
 #: Today's single-call completion cap. A strategy arm's ceiling is sized as a
@@ -193,12 +234,16 @@ def _run_one_sync(
         "variant_id": variant_id,
         "task_id": task.get("id", task.get("_path", "?")),
         "task_category": task.get("category", "unknown"),
+        # Stamped here, not defaulted on the row, so the trace names its own arm:
+        # `cost.cost_ledger_fields` prices a trace, and which route prices it is a
+        # property of the arm that ran it (#2390).
+        "harness": HARNESS,
         "status": "success",
         "final_text": "",
         "turns": 1,
         "tool_calls": [],
         "duration_seconds": 0.0,
-        **{key: None for key in TOKEN_KEYS},
+        **{key: None for key in USAGE_KEYS},
         "error": "",
     }
 

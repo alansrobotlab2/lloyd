@@ -210,15 +210,21 @@ surfaces, embedding cosine, query-side expansion) over a namespace and corpus
 it is handed, calls no labeler, and deploys nothing; the bar is entity offered
 >= 0.80 at cap <= 60.
 
-An autoresearch trial also records what it cost (#2019), in one currency:
-`reprefill_cost_tokens`, the trial's `input_tokens - cache_read` summed over
-the usage rows of its recorded session (`recorded_session_id` is the join key —
-usage.db keys a bench row by that id, not by the trial id). A missing count is
-null, never 0, and `usage.reprefill_tokens` is not the source: it read 0 on
-bench rows that re-prefilled a whole prompt. `scripts/autoresearch/cost.py`
-turns the rows into a per-variant record with a success-gated advantage —
-`mean(cost | success, same task) - cost` for a successful trial, exactly 0 for a
-failed one, an infrastructure failure excluded from both — and ranks variants by
+An autoresearch trial also records what it cost (#2019), in one currency —
+`reprefill_cost_tokens`, the prompt tokens the engine had to compute rather than
+read from cache — taken by two routes, one per arm (#2390): an agent turn's is its
+`input_tokens - cache_read` summed over the usage rows of its recorded session
+(`recorded_session_id` is the join key — usage.db keys a bench row by that id, not
+by the trial id), and a direct bench trial's is `prompt_tokens - cached_tokens` off
+the engine usage block its runner folded onto the trace, with no store row joined
+and so no join key. A missing count is null, never 0, and neither route prices a
+prompt it cannot discount: `usage.reprefill_tokens` is not the source, it read 0 on
+bench rows that re-prefilled a whole prompt, and `prompt_tokens` alone is not a
+price either. `scripts/autoresearch/cost.py` turns the rows into a per-variant
+record with a success-gated advantage — `mean(cost | success, same task on the same
+arm) - cost` for a successful trial, exactly 0 for a failed one, an infrastructure
+failure excluded from both; the arm is in the group because the two routes measure
+two quantities — and ranks variants by
 successes before advantage, so cheaper-and-wrong cannot outrank correct. It is
 emit-only: the round report and the decision row carry it, and no leg of
 `evaluate_promotion` reads it.

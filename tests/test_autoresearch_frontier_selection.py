@@ -401,7 +401,11 @@ PUBLISHED_TRIAL_KEYS = {
     "skills_delivered", "skills_injected", "task_category", "task_id",
     "tool_call_count", "tool_search_enabled", "trace_status", "turns", "variant_id",
     # #1132: the trial's summed engine usage, from `bench_runner.token_ledger_fields`.
-    "prompt_tokens", "completion_tokens", "total_tokens",
+    # #2390 adds the fourth count to that same fold: `cached_tokens`, the prefix the
+    # engine served from cache. It is the discount the direct arm's cost was taken at, so
+    # a row carrying a price without it could not say whether the figure had been
+    # discounted at all — and the sdk writer emits it as None, the key being shared.
+    "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens",
     # #698: which rubric judge (`scalar` | `binary`) produced `rubric_overall`,
     # from `judge.rankability_fields`, so a mean across a mode switch is readable.
     "rubric_mode",

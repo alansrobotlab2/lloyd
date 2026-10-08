@@ -22,6 +22,7 @@ from typing import Any, Iterable
 from app.harness.bench_corpus import probe_ledger_fields
 
 from . import auto_restore, post_promotion
+from .bench_runner import HARNESS as DIRECT_HARNESS
 from .bench_runner import run_bench, token_ledger_fields
 from .bench_runner_sdk import DEFAULT_PER_TASK_TIMEOUT as SDK_PER_TASK_TIMEOUT
 from .bench_runner_sdk import run_bench_sdk
@@ -1132,7 +1133,10 @@ def trial_ledger_row(round_id: str, trace: dict[str, Any],
         "skill_dispatch_installed": trace.get("skill_dispatch_installed"),
         "task_id": trace["task_id"],
         "task_category": trace.get("task_category"),
-        "harness": trace.get("harness", "direct"),
+        # The arm, from the trace that ran it; the runner stamps its own name there and
+        # this default is the fallback for a hand-built trace — one constant for both, so
+        # the label on the row and the route that priced it cannot name different arms.
+        "harness": trace.get("harness", DIRECT_HARNESS),
         "tool_search_enabled": trace.get("tool_search_enabled"),
         "trace_status": trace["status"],
         "turns": trace.get("turns"),
@@ -1151,7 +1155,9 @@ def trial_ledger_row(round_id: str, trace: dict[str, Any],
         **token_ledger_fields(trace),
         # #2019: the re-prefill cost of the trial and the recorded session it joins
         # usage.db on. Emit-only — no promotion leg reads either. Same helper on both
-        # writers; None on a direct trace, and None rather than 0 when a count is missing.
+        # writers; on a direct trace the price comes off the trace's own engine usage
+        # block and the join key is None, because no store row was summed to make it
+        # (#2390). Either way a count that is missing reads None, never 0.
         **trial_cost.cost_ledger_fields(trace),
         "composite_score": score["composite_score"],
         "objective_score": score["objective_score"],
