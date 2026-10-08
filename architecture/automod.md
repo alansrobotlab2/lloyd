@@ -2575,8 +2575,8 @@ A block is the expensive verdict of this rung, so it may be put to a second,
 demote-only reader (`RV.confirm_plan` / `confirm_reader` / `confirm_refusal`):
 one grader turn per offered blocking entry, able to retire only the entry it
 is shown. `automod.review.confirm` has three states, resolved by
-`RV.confirm_policy()`; the key is absent from `config.yaml`, which is `off`,
-and an unrecognised or unreadable value is `off` too — never a state that
+`RV.confirm_policy()`; the key ships in `config.yaml` at `confirm: off`, and an
+unrecognised or unreadable value resolves to `off` too — never a state that
 calls a model.
 
 | state | reader runs | review row | refusal and attempt |
@@ -2597,9 +2597,22 @@ missing or empty is a census key (`diff_no_head`, `diff_no_base`,
 `diff_unrecoverable`, `diff_empty`), so `replayable + sum(not_ask_reasons)` is
 the blocking count and the headline counts only blocks a reader can be shown.
 
-The overturn rate is read off live rows: `review_confirm_mode == "shadow"` and
-`review_confirm in ("overturned", "upheld")`. Zero overturns after thirty or
-more askable blocks closes #1903 as tried.
+The rate was read off live rows — `review_confirm_mode == "shadow"` with
+`review_confirm in ("overturned", "upheld")` — and that measurement is closed.
+Over 307 shadow rows, 2026-10-01T17:04Z→2026-10-06T18:44Z, the reader
+overturned 23 of 73 askable blocks (31.5 %), upheld 50, and `not_asked` 234
+blocks were never offered a reader; 10,570 s of reader time across those 5.06
+days, ~0.5 reader-h/day. #1903 and #2017 both closed `done` on that readout
+with `on` declined rather than taken, for two reasons the readout itself
+carries: the second reader grades the same weights as the first pass, so a
+31.5 % overturn rate is indistinguishable from noise, and 21 of the 23 overturn
+reasons retire a vault-witness / committed-bytes obligation no code diff in
+that round can produce, where the remedy is a clause amendment rather than a
+release. The full ruling — including #2017's rework proxy, and what a
+structurally different second reader would have to be before `on` could be
+re-armed — is the comment above `confirm: off` in `config.yaml`. That comment
+and this section are two carriers of one measurement;
+`tests/test_automod_doc_claims.py` fails if they ever state different figures.
 
 ### 4.1 pyflakes is a diff, not a bar
 

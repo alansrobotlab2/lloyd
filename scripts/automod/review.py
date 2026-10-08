@@ -3317,9 +3317,13 @@ def confirm_policy() -> str:
     every askable block and its vote and elapsed seconds ride on the review row,
     while the rung still refuses and the attempt is still spent — the overturn
     rate is then read off live rows instead of replayed over heads git has
-    collected. Changing it is an edit to `config.yaml`, which the
-    self-modification loop may not land. An absent key, an unreadable config and
-    an unrecognised value are all `off`.
+    collected. Changing it is a value edit to `config.yaml` that a round may
+    land: `spec.CONFIG_DENIED_KEYS` fences the loop's own switches —
+    `automod.enabled` and `automod.landing` — along with the engine slots, the
+    services and the guardian, and `automod.review` is none of those, so the key
+    moves through `spec.config_value_change` and `65ec576a` landed exactly that
+    change, `shadow` → `off`. An absent key, an unreadable config and an
+    unrecognised value are all `off`.
     """
     try:
         from app.config import CONFIG

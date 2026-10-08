@@ -1885,3 +1885,175 @@ def test_part8_says_where_the_lazy_load_knob_is_defined_and_where_it_is_overridd
         re.search(r"`environment=`[^.]*override", flat), (
         "the conf's `environment=` must be presented as the override over the "
         "launcher's default, not as a second copy of it")
+
+
+# --- §4.5f The confirmation pass (#1903, #2017, #2400) -----------------------
+#
+# `65ec576a` flipped `automod.review.confirm` to `off` and pinned the comment
+# that records why — `tests/test_automod_review.py` asserts `"then decide" not in
+# block` over it — but the commit touched only `config.yaml` and two test files,
+# so the identical class of standing instruction stayed alive in the doc section
+# describing the same switch, which no test read. Two carriers of one measurement
+# need one pin, and that pin has to read BOTH of them: a node holding its own
+# third copy of the figures would simply rot beside them.
+
+#: The closed #2017 readout, one pattern per figure. The patterns forgive the two
+#: carriers' different word order (`config.yaml` writes "`not_asked 234`", the
+#: doc writes "`not_asked` 234") and forgive whitespace, because both files wrap
+#: at ~80 columns, but never the number: the number is the fact.
+CONFIRM_CENSUS_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("307 shadow rows", re.compile(r"\b307\s+shadow rows\b")),
+    ("23 overturned of 73 askable", re.compile(r"\b23\b\D{0,14}\b73\s+askable")),
+    ("31.5 % overturned", re.compile(r"\b31\.5\s*%")),
+    ("50 upheld", re.compile(r"\b50\s+upheld|upheld\s+\b50\b")),
+    ("234 not_asked", re.compile(r"not_asked\D{0,5}\b234\b|\b234\s+`?not_asked")),
+    ("the window opens", re.compile(r"2026-10-01T17:04Z")),
+    ("the window closes", re.compile(r"2026-10-06T18:44Z")),
+)
+
+#: The shapes that turn a closed census into an order. Every one of these stood
+#: in §4.5f before #2400; every one sends the next reader to re-derive a ruling
+#: owed-check already made. `>= 30` and `30 rows` are the same order in the
+#: spelling the config comment used before #2305 rewrote it, and are pinned
+#: absent there by `test_the_shipped_confirm_comment_carries_the_readout…`.
+CLOSED_CENSUS_FORBIDDEN = ("then decide", "zero overturns", "closes #1903 as tried",
+                           "thirty or more askable", ">= 30", "30 rows")
+
+
+def _confirm_pass_section() -> str:
+    """§4.5f and nothing else: its heading through the next heading, whitespace
+    collapsed.
+
+    Heading-anchored because `automod.review.confirm` is named in other sections
+    of a 4,000-line doc, and #1790 settled that a claim found somewhere in
+    the file is not a claim in the section that owns it. The collapse is the same
+    one `_flat` does for a whole file: without it, "Zero\\noverturns" would dodge
+    a pin that exists to forbid that exact sentence. The heading line ends in
+    `[^\n]*`, not `.*$`: under `re.S` a greedy `.` runs past every line, so
+    `.*$` eats the rest of the doc and the slice silently stops at whichever
+    `## ` heading happens to be nearest the end of the file.
+    """
+    text = DOC.read_text(encoding="utf-8")
+    m = re.search(r"^### 4\.5f[^\n]*\n.*?(?=^#{2,3} )", text, re.M | re.S)
+    assert m, ("architecture/automod.md lost the `### 4.5f` heading the "
+               "confirmation pass is documented under")
+    return " ".join(m.group(0).split())
+
+
+def _shipped_confirm_block() -> str:
+    """`config.yaml`'s `confirm:` line with the comment block directly above it.
+
+    Parsed from the tracked file rather than read out of `CONFIG`: the suite's
+    conftest answers the confirm switch for every node, so an overlay must not
+    get to decide what the shipped state is. The same scan
+    `tests/test_automod_review.py` uses, so both pins grade one block.
+    """
+    lines = (ROOT / "config.yaml").read_text(encoding="utf-8").splitlines()
+    idxs = [i for i, ln in enumerate(lines) if ln.strip().startswith("confirm:")]
+    assert len(idxs) == 1, f"`confirm:` appears {len(idxs)} times in config.yaml"
+    j = idxs[0] - 1
+    while j >= 0 and lines[j].strip().startswith("#"):
+        j -= 1
+    return " ".join("\n".join(lines[j + 1:idxs[0] + 1]).split())
+
+
+def test_the_confirmation_pass_section_carries_the_shipped_value_and_the_census():
+    """Clauses 1 and 2: §4.5f states the key as shipped at `confirm: off`, and
+    states the closed census — same figures, same window as the config comment.
+
+    The figures are matched against the live comment, never against numbers
+    copied into this file: what #2400 was filed for is two carriers of one
+    readout disagreeing, and a pin with its own copy would let all three drift
+    together. The "why `on` was declined" half is asserted too — a census without
+    its conclusion is a table the next reader has to re-adjudicate.
+    """
+    section = _confirm_pass_section()
+    block = _shipped_confirm_block()
+
+    assert "confirm: off" in section, (
+        "§4.5f no longer names the value the key ships at — the sentence that "
+        "replaced 'the key is absent from `config.yaml`, which is `off`'")
+    assert "confirm: off" in block, "config.yaml's confirm line moved out of the block"
+    assert "absent from" not in section, (
+        "§4.5f is calling the key absent again while config.yaml:1436 ships it "
+        "at `off`, which is the falsification #2400 was filed for")
+    assert "config.yaml" in section, (
+        "the section no longer points a reader at the other carrier of the census")
+
+    for label, res in CONFIRM_CENSUS_RES:
+        assert res.search(section), f"§4.5f no longer states {label}"
+        assert res.search(block), (
+            f"config.yaml's confirm comment no longer states {label}, which §4.5f "
+            "copies from it — the two carriers move together or this pin fails")
+
+    assert "same weights" in section, (
+        "§4.5f no longer says what made a 31.5 % overturn rate decide nothing: "
+        "the second reader grades the same weights as the first pass")
+    assert re.search(r"\b21\b\D{0,14}\b23\b", section) and "vault-witness" in section, (
+        "§4.5f lost the reason the arm is self-defeating — 21 of the 23 overturn "
+        "reasons retire a vault-witness obligation no code diff can produce")
+    assert "done" in section, "the section no longer records #1903 and #2017 as closed"
+
+
+def test_the_confirmation_pass_section_orders_no_live_measurement():
+    """Clause 3: the census is reported, never re-opened.
+
+    Case-insensitive over the collapsed slice, so the retired sentence cannot
+    come back with its line break in a different place, and the two extra
+    spellings (`>= 30`, `30 rows`) are the same order as #2305 found it in the
+    config comment — a reworded threshold is the rot this clause exists to stop,
+    so none is left standing anywhere in the section.
+    """
+    section = _confirm_pass_section().lower()
+    for dead in CLOSED_CENSUS_FORBIDDEN:
+        assert dead not in section, (
+            f"§4.5f is ordering the measurement again ({dead!r}): the #2017 census "
+            "closed at 65ec576a, and a standing instruction in the doc is how a "
+            "settled ruling gets re-litigated by whoever reads it next")
+
+
+def test_confirm_policy_docstring_describes_the_fence_that_actually_covers_it():
+    """Clause 4: the docstring's claim about what a round may land is graded
+    against the fence it names, not against its own wording.
+
+    `inspect.getsource` reads the shipped function, so the assertion covers the
+    words a reader finds in `scripts/automod/review.py` rather than a paraphrase
+    kept here. The second block is the load-bearing one: "a round may land this
+    key" is true only while `automod.review` sits outside `CONFIG_DENIED_KEYS`,
+    so the test re-reads that tuple and re-runs the route — if the fence ever
+    grows an `automod.review` prefix, the sentence becomes false again and this
+    fails instead of agreeing with whatever the docstring currently says.
+    """
+    import inspect
+
+    from scripts.automod import review as RV
+    from scripts.automod import spec as S
+
+    src = " ".join(inspect.getsource(RV.confirm_policy).split())
+    assert "may not land" not in src, (
+        "confirm_policy() is back to telling readers the loop may not land this "
+        "key — 65ec576a is a landed diff of exactly that key, `shadow` → `off`")
+    assert "CONFIG_DENIED_KEYS" in src and "config_value_change" in src, (
+        "the docstring has to name the fence and the route that between them "
+        "decide this key, which is what 'what the fence actually covers' means")
+    assert "automod.enabled" in src and "automod.landing" in src, (
+        "the docstring must state what the fence DOES cover, not only retract "
+        "the thing it used to claim")
+    assert "absent key" in src and "unreadable config" in src \
+        and "are all `off`" in src, (
+        "the fail-closed sentence is what `confirm_policy_state()` implements "
+        "(None, a broken config and a typo all resolve to `off`); it stays")
+
+    denied = S.CONFIG_DENIED_KEYS
+    assert "automod.enabled" in denied and "automod.landing" in denied, (
+        "the two prefixes the docstring cites as fenced are no longer in the "
+        "fence it cites — re-read spec.py and rewrite the sentence")
+    assert not any(k == "automod.review" or k.startswith("automod.review.")
+                   for k in denied), (
+        "`automod.review` is under a denied prefix now, so a round may NOT land "
+        "this key and the docstring that says it may is false again")
+    ok, reason, changed = S.config_value_change(
+        "automod:\n  review:\n    confirm: shadow\n",
+        "automod:\n  review:\n    confirm: off\n")
+    assert ok, f"the fence refuses the very flip 65ec576a landed: {reason}"
+    assert changed == ["automod.review.confirm"], changed
