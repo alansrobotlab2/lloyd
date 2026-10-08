@@ -156,6 +156,57 @@ the transcript scratch home from backlog #566:
     off the file. Undated lines (a write killed mid-append is exactly that) are kept and
     counted apart. The file itself is never removed and never created.
 
+16. $TMPDIR/pytest-of-<user>/pytest-<N>/ — the basetemp roots the test suite leaves in
+    /tmp, the only store here bounded on a COUNT and not on an age (#2418). /tmp on this
+    box is a tmpfs with a FIXED inode budget (1,048,576) independent of its size, so it
+    runs out of inodes while `df -h` reads healthy, and it has run out twice with the
+    production tree as the casualty (2026-09-22, 2026-09-29 — the header of
+    `agent-services/guardian/tmpwatch.py`, and `tests/conftest.py`'s refusal to run the
+    suite in the live tree). #1010's closure measured 500,487 inodes across 27 stale runs
+    at 100% inode use.
+    `tmpwatch` is the alarm and says so in its own body ("never a deleter"), naming
+    `/tmp/pytest-of-$USER/pytest-N` as the thing to look at — this rung is the actor that
+    alarm has been pointing at with nothing behind it.
+
+    Bounded on directory count because count is what the pressure is: measured
+    2026-10-08T15:45Z the root held 65 dirs and 131,618 inodes (12.6% of /tmp's budget, in
+    a filesystem reading 16% used), of which FOUR dirs held 129,314 inodes
+    (98.2% of the store — 44,690 / 38,415 / 35,726 / 10,483, all of them low-numbered and
+    therefore old — the four were numbered 356/783/844/895 while the newest dirs in the
+    root at that minute were 1549/1550/1551, so not one of the fat ones was an in-flight
+    run), while the newest three dirs held 1 inode each. An age window over a
+    store whose every entry is younger than the previous sweep is no bound at all, and the
+    item's own history is the same surface at 80%, 66%/367 dirs and 16%/49 dirs in three
+    days. Keep the newest PYTEST_TMP_MAX_DIRS (16) and the tail
+    that holds the fat dirs is what goes first, because pytest numbers these directories
+    upward from the highest it finds, so the LOWEST number is the oldest run and the
+    newest run's directory is never a candidate whatever the bound.
+
+    16 is the count that keeps the worst case well clear of the budget, computed from the
+    incident's own arithmetic: #1010 measured 500,487 inodes over 27 runs, 18,537 a run,
+    and 16 x 18,537 = 296,592 = 28.3% of the 1,048,576-inode tmpfs — where 27 runs at
+    that density is the 100% that deleted the tree. It is also far above the number of
+    suites that can be in flight at once here (one per pytest session, xdist workers share
+    their session's root), which is what makes "the newest is never collected" a live-run
+    guarantee rather than a consolation.
+
+    What is collected is a finished run's failure evidence, and nothing else:
+    `pytest.ini:9` sets `tmp_path_retention_policy = failed`, so a passing run leaves its
+    numbered dir essentially empty (the 1-inode dirs above) and only a run with failures
+    keeps anything inside it. Deleting the oldest 16-plus dirs therefore throws away
+    evidence from runs that have already been reported on, rebuildable by re-running the
+    test, and touches no in-flight run. Nothing is archived: these are scratch inputs to
+    a finished process, and the two tree-deleting incidents are the reason the box needs
+    headroom more than a forty-suite-old tmp_path needs keeping.
+
+    Only a direct child of the root named `pytest-<digits>` and actually a directory is
+    ever a candidate: `pytest-current` is pytest's own symlink to the newest run, and
+    anything else a stray name is not this store's. Those entries are counted apart on
+    the report line, never folded into the collected count and never hidden behind a 0.
+    The root's own name is built the way pytest builds it (`tempfile.gettempdir()` plus
+    `getpass.getuser()`, `_pytest/tmpdir.py`'s `get_user()`), because a store bounded at a
+    path the writer does not write is a bound that reports a number and changes nothing.
+
 Stores 11, 12 and 13 are the three the loop leaves behind, and 13 is the one the other two
 read. None of the three is under `DATA_ROOT`, and store 12 is not even on the filesystem:
 it is the live repo's refs. That is the hazard the production-checkout guard exists for —
@@ -223,6 +274,7 @@ Usage:
 """
 
 import argparse
+import getpass
 import gzip
 import json
 import os
@@ -231,6 +283,7 @@ from datetime import datetime, timedelta, timezone
 import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -2245,6 +2298,164 @@ VOICE_TURNS_FILE = _VOICE_TURNS_MODULE.turns_path(DATA_ROOT)
 VOICE_TURNS_MAX_AGE_DAYS = 90
 VOICE_TURNS_ARCHIVE_PREFIX = "turns-archive-"
 
+# ---------------------------------------------------------------------------
+# Store 16: pytest's basetemp roots in /tmp (#2418). The only store here with a
+# COUNT bound instead of an age window — see the store 16 paragraph in the module
+# docstring for why count is the shape the pressure has.
+# ---------------------------------------------------------------------------
+
+#: How many `pytest-<N>` run directories the root is allowed to hold. The newest N are
+#: kept and every older one is collected, so the value is a ceiling on the PEAK, which is
+#: what the tmpfs actually runs out of. Derived from the incident's own arithmetic rather
+#: than chosen: #1010's closure measured 500,487 inodes across 27 stale runs — 18,537 a
+#: run — so 16 x 18,537 = 296,592 inodes is 28.3% of the 1,048,576-inode tmpfs
+#: `agent-services/guardian/tmpwatch.py` watches, where 27 runs at that density is the
+#: 100% reading under which the production tree was deleted on 2026-09-22 and 2026-09-29.
+#: It also has to sit above the number of pytest sessions that can be in flight at once,
+#: because the guarantee that protects a live run is that the newest-numbered dir is never
+#: a candidate; one dir per session (xdist workers share their session's root) makes 16 an
+#: order of magnitude of slack. `tests/test_retention_sweep.py` asserts both sides.
+PYTEST_TMP_MAX_DIRS = 16
+
+#: What a run directory is called. Digits only, and that is not an aesthetic choice:
+#: pytest keeps a `pytest-current` symlink to the newest run in the same root, so a
+#: `pytest-*` glob would select the one entry that names the run in flight. Anything else
+#: in the root is a stray name, left alone and counted apart on the report line.
+_PYTEST_RUN_DIR_RE = re.compile(r"^pytest-(\d+)$")
+
+
+def _pytest_tmp_root() -> Path:
+    """The root pytest writes its numbered basetemps into, built the way pytest builds it.
+
+    `tempfile.gettempdir()` plus `getpass.getuser()`, with `"unknown"` when the name
+    cannot be resolved — the rules of `_pytest/tmpdir.py` (`get_user()`, and the
+    `pytest-of-{user}` join beside it) rather than a restatement from memory. A store
+    bounded at a path the writer does not write reports a number and changes nothing,
+    which is the failure class this file's own guardrails are about.
+    """
+    try:
+        user = getpass.getuser() or "unknown"
+    except Exception:               # every route getpass takes can raise (KeyError, OSError)
+        user = "unknown"
+    return Path(tempfile.gettempdir()) / f"pytest-of-{user}"
+
+
+#: The store's root, as a module constant so `tests/test_retention_sweep.py`'s fixture
+#: redirects it like every other deletable path here. `/tmp` is not under `DATA_ROOT`, so
+#: nothing about the resolved data root reaches it — the same situation as the vault's
+#: activity logs and the automod ledger, each of which that fixture also redirects.
+PYTEST_TMP_ROOT = _pytest_tmp_root()
+
+
+def _count_inodes(dir: Path) -> int:
+    """How many filesystem objects live under `dir`, itself included.
+
+    The unit the incident on this store was measured in (`df -i`, and #1010's 500,487
+    across 27 runs), which is why this store reports inodes and not bytes: /tmp here is a
+    tmpfs whose 1,048,576-entry budget runs out while `df -h` still reads 1%. One bounded
+    walk, and only over dirs already selected for deletion — walking the whole root would
+    be the million-stat scan `tmpwatch` caps its own tick to avoid.
+    """
+    total = 1
+    for path in dir.rglob("*"):
+        try:
+            path.lstat()
+        except OSError:              # a racing unlink: the entry is already not there
+            continue
+        total += 1
+    return total
+
+
+def sweep_pytest_tmpdirs(apply: bool, *, root: Path | None = None) -> dict:
+    """Collect pytest's oldest basetemp dirs once the root holds more than PYTEST_TMP_MAX_DIRS.
+
+    Returns the dict `_pytest_tmp_line` renders: whether the root is there, how many run
+    dirs it saw, how many were collected and kept, the inodes that gave back, and `other`
+    for entries that are not a `pytest-<digits>` directory. No `now` parameter, because
+    there is no age in this rule: a dir is collected for being the lowest-numbered of the
+    overage, never for being old, and at or under the bound nothing is collected whatever
+    its mtime. `root` is the parameterised root the unit tests seed under, defaulting to
+    `PYTEST_TMP_ROOT` read at call time so the fixture's redirection holds.
+
+    Collection order is by the NUMBER in the name, never by mtime or readdir order: pytest
+    takes the next number from the highest one present, so the lowest number is the oldest
+    run and the highest is the one that may still be writing. An entry whose name parses
+    but which is not a real directory (`pytest-current` is that symlink, and a plain file
+    named `pytest-7` is not a run) is never a candidate and never deleted.
+    """
+    root = Path(root) if root is not None else PYTEST_TMP_ROOT
+    out = {"apply": apply, "present": False, "seen": 0, "collected": 0, "kept": 0,
+           "other": 0, "freed": 0, "refused": None}
+    try:
+        entries = list(root.iterdir())
+    except OSError:                 # absent root: a suite that has never run here, or a
+        return out                  # root pytest recreates on its next session
+    out["present"] = True
+
+    runs: list[tuple[int, Path]] = []
+    for entry in entries:
+        m = _PYTEST_RUN_DIR_RE.match(entry.name)
+        try:
+            a_run_dir = m is not None and entry.is_dir() and not entry.is_symlink()
+        except OSError:              # unreadable stat: never a candidate, but never a crash
+            a_run_dir = False
+        if not a_run_dir:
+            out["other"] += 1        # `pytest-current`, strays: this store's bound is not about them
+            continue
+        runs.append((int(m.group(1)), entry))
+
+    out["seen"] = len(runs)
+    if len(runs) <= PYTEST_TMP_MAX_DIRS:
+        out["kept"] = len(runs)
+        return out                            # the bound holds: nothing is collected
+
+    overage = sorted(runs, key=lambda r: r[0])[:len(runs) - PYTEST_TMP_MAX_DIRS]
+    failures = 0
+    for _, path in overage:
+        try:
+            inodes = _count_inodes(path)
+            if apply:
+                shutil.rmtree(path)
+        except OSError as exc:
+            failures += 1
+            print(f"  ! skip {path.name}: {exc}", file=sys.stderr)
+            continue
+        out["collected"] += 1
+        out["freed"] += inodes
+    out["kept"] = out["seen"] - out["collected"]
+    if failures:
+        out["refused"] = (f"{failures} of {len(overage)} overage dir(s) could not be "
+                          "collected — see the `! skip` lines on stderr")
+    return out
+
+
+def _pytest_tmp_line(p: dict) -> str:
+    """One store line, same in dry run and apply except the verb.
+
+    The count it prints is the count the run acted on, with the count it saw beside it:
+    `0 collected (9 run dir(s) present)` is the bound holding and `0 collected (0 run dir(s)
+    present)` is not, and only the latter is a machine whose suite has never run here. The
+    inode total is what collection gave back, in the unit the alarm on this store speaks —
+    a line that named only dirs could not be compared against the `df -i /tmp` reading
+    tmpwatch watches. A dry run says `~N inode(s) to free`, because until the delete
+    happens the number is a promise about a tree that is still there.
+    """
+    label = f"  pytest tmp dirs (keep newest {PYTEST_TMP_MAX_DIRS})"
+    if not p["present"]:
+        return f"{label}: no store yet — nothing to bound"
+    if p["refused"]:
+        return (f"{label}: REFUSED ({p['refused']}) — "
+                f"{p['collected']} of {p['seen']} run dir(s) collected")
+    verb = "collected" if p["apply"] else "would collect"
+    seen = f"{p['seen']} run dir(s) present"
+    other = "" if not p["other"] else f", {p['other']} non-run name(s) ignored"
+    if p["collected"] == 0:
+        return f"{label}: 0 {verb} ({seen}{other})"
+    tail = (f", {p['freed']:,} inode(s) freed" if p["apply"]
+            else f", ~{p['freed']:,} inode(s) to free")
+    return (f"{label}: {p['collected']} {verb} "
+            f"({seen} → {p['kept']} kept{tail}{other})")
+
 
 def _turn_row_seconds(line: bytes) -> float | None:
     """The age a turn row carries in its own stamp, or None if it carries no readable one.
@@ -2428,6 +2639,7 @@ def main() -> int:
     wq_n, wq_b, wq_skip = sweep_queue_rows(args.apply, now)
     prov = sweep_provenance_journal(args.apply, now)
     turns = sweep_voice_turns(args.apply, now)
+    pytest_dirs = sweep_pytest_tmpdirs(args.apply)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -2482,6 +2694,12 @@ def main() -> int:
     # modes, same `would archive` verb in the dry run an operator approves `--apply`
     # from (#2273 clause 5).
     print(_voice_turns_line(turns))
+    # Sixteenth store, and the one that lives outside the data root without being one of
+    # the loop's three: `/tmp` belongs to neither the tree nor `$HOME`, so no data-root
+    # resolution reaches it and no production-checkout guard covers it — the bound is on
+    # dir count, so the same line prints in both modes with only the verb changed, like
+    # every line above it (#2418 clause 1).
+    print(_pytest_tmp_line(pytest_dirs))
     # Last, so the two lines that can name a production ref are the last thing an
     # operator reads before deciding whether the run did what they asked.
     if refusal:

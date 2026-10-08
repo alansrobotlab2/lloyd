@@ -133,6 +133,17 @@ def rs(tmp_path, monkeypatch):
         # resolver, and `VOICE_TURNS_FILE` is built from it, so the two cannot name
         # different files.
         ("VOICE_TURNS_FILE", "voice/turns.jsonl", False),
+        # Store 16, pytest's own basetemp roots (#2418). Created, because this is a
+        # DIRECTORY store and an empty one is the state of a box whose suite has run
+        # lately: the rung reads it as "the bound holds", which is what every
+        # `_store_report` comparison below has to see to mean what it says. It is the one
+        # path here that lives outside `DATA_ROOT` — `/tmp`, named by neither the resolved
+        # data root nor `$HOME` — so nothing but this line would keep a test from
+        # collecting the real 65 directories the box is holding tonight, including the
+        # four that carry 98% of its inodes. A node that wants the ABSENT root passes
+        # `root=` to the rung; a fixture that left this one unredirected would not be
+        # testing an absent root, it would be emptying /tmp.
+        ("PYTEST_TMP_ROOT", "pytest-of-testuser", True),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -1773,10 +1784,10 @@ def _assert_table_rows_match_report(rows: dict[str, str], report: list[str],
             f"{sorted(rows)}")
 
 
-def test_the_skill_says_fifteen_stores_and_its_table_has_a_row_per_report_line(
+def test_the_skill_says_sixteen_stores_and_its_table_has_a_row_per_report_line(
         rs, _store_report):
-    """Clause 4: `skills/retention-sweep/SKILL.md` says fifteen, and its table's rows
-    are the report's lines.
+    """Clause 4 of #2418: `skills/retention-sweep/SKILL.md` says sixteen, and its table's
+    rows are the report's lines.
 
     The table is the operator's list of what the weekly sweep bounds, and it said nine
     with the groundskeeper queue bounded by nothing — so a reader who saw `0 deleted`
@@ -1787,7 +1798,7 @@ def test_the_skill_says_fifteen_stores_and_its_table_has_a_row_per_report_line(
     It went stale anyway, in the direction this node was blind to: #1644 added two
     stores and the prose stayed at ten for nine commits, because the count of report
     lines came from the suffix selector that could not see them (`#1835`). The report
-    side of the comparison is now the `_store_report` fixture — the fifteen lines
+    side of the comparison is now the `_store_report` fixture — the sixteen lines
     `main()` prints with all three automod rungs in play — so this node reads one
     measurement, not two.
     """
@@ -1800,11 +1811,11 @@ def test_the_skill_says_fifteen_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 15, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 16, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "fifteen unbounded-growth stores" in text, (
-        "the skill's description states a store count other than fifteen")
-    assert "fifteen in all" in text, "the skill's body states a store count other than fifteen"
+    assert "sixteen unbounded-growth stores" in text, (
+        "the skill's description states a store count other than sixteen")
+    assert "sixteen in all" in text, "the skill's body states a store count other than sixteen"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -1862,12 +1873,23 @@ def test_the_skill_says_fifteen_stores_and_its_table_has_a_row_per_report_line(
     assert f">{rs.PROVENANCE_ARCHIVE_AGE_DAYS}d" in prov_row, prov_row
     assert "provenance-archive-" in prov_row, prov_row
 
+    # Sixteenth store (#2418), and the one row whose cell cannot name an age: the bound is
+    # a count, so a row that said `>Nd` here would be describing a rule the script does
+    # not run. The constant has to appear because it is the number an operator would
+    # change, and the path because it is outside `DATA_ROOT` — the table is where a reader
+    # learns which roots the sweep reaches.
+    pytest_row = next((ln for store, ln in rows.items() if "pytest-of-" in store), None)
+    assert pytest_row is not None, (
+        f"no row names the pytest basetemp root the sweep now bounds: {sorted(rows)}")
+    assert "PYTEST_TMP_MAX_DIRS" in pytest_row, pytest_row
+    assert f"{rs.PYTEST_TMP_MAX_DIRS} " in pytest_row, pytest_row
+
     # And what a run from anywhere else prints, since that reader holds a report
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "twelve store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports twelve stores by design")
+    assert "thirteen store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports thirteen stores by design")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -1927,7 +1949,7 @@ def test_the_table_guard_refuses_a_row_short_and_a_row_long(rs, _store_report):
         _assert_table_rows_match_report(_skill_table_rows(dropped), report,
                                         "fixture: store fourteen's row deleted")
     # The message names the store that lost its row, not merely the two counts: with
-    # fifteen lines and fourteen rows the counts cannot say WHICH store drifted, and the
+    # sixteen lines and fifteen rows the counts cannot say WHICH store drifted, and the
     # reader has to be able to answer that from the failure alone.
     assert "provenance journal" in str(short.value), (
         f"the refusal does not name the printed line left without a row: {short.value}")
@@ -1974,7 +1996,7 @@ _STORE_ORDER_ANCHOR = "in this order:"
 _STORE_ORDER_TAIL = "Report all"
 _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                       "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
-                      "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "1": 1, "2": 2, "3": 3, "4": 4,
+                      "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
 
@@ -2028,9 +2050,9 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 15, (
-        f"the sweep prints {len(_store_report)} store lines, not the fifteen its report "
-        f"has had since #2273 added the spoken-turn store: {_store_report}")
+    assert len(_store_report) == 16, (
+        f"the sweep prints {len(_store_report)} store lines, not the sixteen its report "
+        f"has had since #2418 added the pytest basetemp store: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -2040,7 +2062,7 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     assert branch_line in printed, f"the round-branch store is not in the report: {printed}"
 
     # The mechanism of the drift, pinned rather than narrated: the lines the OLD suffix
-    # rule could not see are exactly these five. `len(report) == 15` alone would still
+    # rule could not see are exactly these six. `len(report) == 16` alone would still
     # pass if somebody reintroduced a suffix test alongside a wording change, and it is
     # the coincidence of a store line's wording with a store line's identity that made the
     # count unreadable in the first place. The third is #1975's ledger line, which ends in
@@ -2053,13 +2075,19 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     assert prov_line in printed, f"the provenance journal is not in the report: {printed}"
     turn_line = f"voice turn rows >{rs.VOICE_TURNS_MAX_AGE_DAYS}d"
     assert turn_line in printed, f"the spoken-turn store is not in the report: {printed}"
+    # #2418's line joins the set for a third reason: it ends in a parenthesised count
+    # rather than a byte count, because the store it reports is bounded on a dir COUNT and
+    # has no bytes to give back until it deletes something.
+    pytest_line = f"pytest tmp dirs (keep newest {rs.PYTEST_TMP_MAX_DIRS})"
+    assert pytest_line in printed, f"the pytest basetemp store is not in the report: {printed}"
     invisible = [ln for ln in _store_report
                  if not ln.endswith(("freed", "candidate", "removed (keep last 200)"))]
     assert sorted(ln.split(":")[0] for ln in invisible) == sorted([dirs_line,
                                                                   branch_line,
                                                                   ledger_line,
                                                                   prov_line,
-                                                                  turn_line]), (
+                                                                  turn_line,
+                                                                  pytest_line]), (
         "these store lines are invisible to an endswith(('freed','candidate',"
         "'removed (keep last 200)')) rule, which is how #1835's drift happened: "
         f"{[ln.split(':')[0] for ln in invisible]}")
@@ -2102,16 +2130,16 @@ def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
         f"the rule counted a line that is not a store: {report}")
 
 
-def test_a_run_outside_the_production_checkout_reports_twelve_stores_and_one_refusal_line(
+def test_a_run_outside_the_production_checkout_reports_thirteen_stores_and_one_refusal_line(
         rs, monkeypatch, capsys):
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
-    `  automod stores: REFUSED: …`, so a reader holding that output sees twelve store
-    lines while the skill says fifteen — and SKILL.md now says so in those words. This
+    `  automod stores: REFUSED: …`, so a reader holding that output sees thirteen store
+    lines while the skill says sixteen — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
-    (just "fifteen", which makes every sandbox run look like it lost three stores) or the
+    (just "sixteen", which makes every sandbox run look like it lost three stores) or the
     alarming half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
     owns the predicate itself and the `NOT_PRODUCTION_EXIT` half; what is new here is the
     COUNT, which is the number a report is written from.
@@ -2120,13 +2148,14 @@ def test_a_run_outside_the_production_checkout_reports_twelve_stores_and_one_ref
     the predicate's original reason (a worktree shares the live repo's refs) does not
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
-    the rule. A refused run therefore still prints twelve lines plus one refusal line, not
-    thirteen.
+    the rule. A refused run therefore still prints thirteen lines plus one refusal line,
+    not fourteen — the pytest basetemp root #2418 added is not one of the three guarded
+    stores, so it prints here whatever the tree is.
     """
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 12, f"a refusal run should report twelve stores: {report}"
+    assert len(report) == 13, f"a refusal run should report thirteen stores: {report}"
     refusal = [ln.strip() for ln in out.splitlines()
                if ln.strip().startswith("automod stores:")]
     assert len(refusal) == 1, f"expected one automod refusal line, got: {refusal}"
@@ -2324,18 +2353,20 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 15, (
+    assert len(items) == len(_store_report) == 16, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
     # enumerated LAST because they print last, and each item carries the words the
     # printed line uses for it — `~/lloyd-work` + `dirs`, `automod/*` + `branches` —
     # since the guard matches item i against the i-th line by first and last word. They
-    # sit at items 13 and 14 (0-based 12 and 13) because #2273's turn-row store joined
-    # the data-root group as store 12, ahead of everything the loop leaves behind it.
+    # sit at items 14 and 15 (0-based 13 and 14) because #2273's turn-row store joined
+    # the data-root group as store 12 and #2418's pytest basetemp store came next as 13,
+    # both ahead of everything the loop leaves behind it.
     assert "voice" in items[11][1] and "rows" in items[11][1], items[11]
-    assert "~/lloyd-work" in items[12][1] and "dirs" in items[12][1], items[12]
-    assert "automod/*" in items[13][1] and "branches" in items[13][1], items[13]
+    assert "pytest" in items[12][1] and "dirs" in items[12][1], items[12]
+    assert "~/lloyd-work" in items[13][1] and "dirs" in items[13][1], items[13]
+    assert "automod/*" in items[14][1] and "branches" in items[14][1], items[14]
     assert items[11][0] == 12 and items[12][0] == 13, items[11:]
 
     # Clause 2, on the tenth store's own terms: the groundskeeper pair sits where the
@@ -6071,3 +6102,211 @@ def test_a_turn_row_is_small_enough_that_the_window_bounds_what_it_claims(rs):
     assert 400 < len(line) < 900, len(line)
     assert 365 * _TURNS_ROWS_PER_DAY * len(line) < 200_000, \
         "unbounded, a year of rows is a parse every nightly run pays for"
+
+
+# ---------------------------------------------------------------------------
+# Store 16 — pytest's basetemp roots in /tmp (#2418). The only store here bounded
+# on a COUNT, so most of what follows is about what a count does NOT look at: not
+# mtime, not bytes, and not any name that is not `pytest-<digits>`.
+# ---------------------------------------------------------------------------
+
+def _pytest_line(stdout: str) -> str:
+    lines = [ln for ln in stdout.splitlines() if "pytest tmp dirs" in ln]
+    assert len(lines) == 1, f"expected exactly one pytest tmpdir store line, got {lines}"
+    return lines[0]
+
+
+def _seed_pytest_runs(root: Path, numbers) -> list[Path]:
+    """Create `pytest-<n>` under `root`, two deep, and return them in the given order.
+
+    The file inside each is what makes the inode figure on the store line a measured
+    number: a root of bare directories would report 2 for two dirs because a dir counts
+    itself and nothing else, and the node would pass while proving nothing about the
+    count the operator is shown.
+    """
+    made = []
+    for n in numbers:
+        d = root / f"pytest-{n}"
+        (d / "test_case0").mkdir(parents=True)
+        (d / "test_case0" / "payload.txt").write_text("x")
+        made.append(d)
+    return made
+
+
+def test_the_pytest_store_line_names_the_bound_and_the_count_it_acted_on_in_both_modes(
+        rs, capsys, monkeypatch):
+    """Clause 1 of #2418: one line, naming the store, printing the count it acted on, in
+    dry run and apply alike.
+
+    Both modes run the real `main()`, because the clause is about the report an operator
+    reads before approving `--apply` and not about the rung's return value. The dry run is
+    the one that must not lie: it says what it would collect, in the same words and the
+    same positions, and the dirs are all still there when it says it.
+    """
+    bound = rs.PYTEST_TMP_MAX_DIRS
+    seed = bound + 2
+    made = _seed_pytest_runs(rs.PYTEST_TMP_ROOT, range(1, seed + 1))
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    dry = _pytest_line(capsys.readouterr().out)
+    assert f"{seed - bound} would collect" in dry, dry
+    assert f"{seed} run dir(s) present → {bound} kept" in dry, dry
+    assert all(d.exists() for d in made), "a dry run deleted a run directory"
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    applied = _pytest_line(capsys.readouterr().out)
+    assert f"{seed - bound} collected" in applied, applied
+    assert f"{seed} run dir(s) present → {bound} kept" in applied, applied
+    assert not any(d.exists() for d in made[:seed - bound]), "the oldest survived --apply"
+    assert all(d.exists() for d in made[seed - bound:]), "--apply collected past the bound"
+    # Inodes, the unit the incident on this store was measured in: a line that named only
+    # directories could not be compared against the `df -i /tmp` reading the alarm speaks.
+    assert "inode(s) freed" in applied, applied
+    assert "inode(s) to free" in dry, dry
+
+
+def test_the_pytest_bound_collects_the_lowest_numbers_and_no_other_name_ever(rs):
+    """Clause 2 of #2418: bound N, N+1 dirs, apply collects exactly the oldest (lowest
+    number) leaving N — and touches nothing that is not a `pytest-<digits>` directory.
+
+    The strays seeded beside the runs are the names that actually live in a basetemp root,
+    not invented ones. `pytest-current` is pytest's own symlink to the newest run: a
+    `pytest-*` glob selects it, and deleting it would break the very run the bound exists
+    to protect, so it is seeded as a symlink into the newest dir and checked with
+    `lexists` — a check written as `exists()` would follow the link and read as the store
+    having deleted it. `pytest-abc` is what a hand-made basetemp looks like, and
+    `pytest-9001` a plain FILE whose name parses: neither is a run, and a rung that
+    reasoned from the name alone would `rmtree` the first and crash or misreport on the
+    second.
+
+    The newest run directory is asserted present at the end rather than only implied by
+    the count: it is the one entry that could belong to a suite still writing, and "the
+    bound never reaches the highest number" is the guarantee that makes a count bound safe
+    to run at any hour.
+    """
+    bound = rs.PYTEST_TMP_MAX_DIRS
+    root = rs.PYTEST_TMP_ROOT
+    made = _seed_pytest_runs(root, range(1, bound + 2))          # N+1 runs
+    current = root / "pytest-current"
+    current.symlink_to(made[-1].name)
+    (root / "pytest-abc").mkdir()
+    (root / "scratch").mkdir()
+    (root / "pytest-9001").write_text("not a run")
+
+    out = rs.sweep_pytest_tmpdirs(True, root=root)
+
+    assert out["seen"] == bound + 1, out
+    assert out["collected"] == 1, out
+    assert out["kept"] == bound, out
+    assert out["other"] == 4, f"four stray names, counted apart: {out}"
+    assert not made[0].exists(), "the oldest run dir was not collected"
+    assert all(d.exists() for d in made[1:]), "collection went past the bound"
+    assert made[-1].exists(), "the NEWEST run dir was collected"
+    assert os.path.lexists(current), "pytest-current, the symlink to the live run, is gone"
+    assert (root / "pytest-abc").is_dir() and (root / "scratch").is_dir()
+    assert (root / "pytest-9001").is_file(), "a file named like a run was deleted"
+
+
+def test_the_pytest_bound_is_a_count_so_no_age_ever_collects_a_dir(rs):
+    """Clause 3 of #2418: the bound is directory count and not age, in both directions.
+
+    First direction: `bound` dirs backdated to 400 days, apply run, and nothing is
+    collected. Every other store in this file would have taken all of them, which is
+    exactly why an age rule over this store was refused — the count of dirs is what the
+    tmpfs is out of, and 16 dirs of any age fit.
+
+    Second direction is the one an `assert collected == 1` cannot fake: the mtimes run the
+    OTHER WAY from the numbers, so the lowest-numbered dir is the freshest on disk. If the
+    rung ordered by mtime or by readdir order it would collect a different directory than
+    the one it must. pytest numbers these dirs upward from the highest it finds, so the
+    lowest number is the oldest RUN whatever the filesystem says about the inode.
+    """
+    bound = rs.PYTEST_TMP_MAX_DIRS
+    root = rs.PYTEST_TMP_ROOT
+
+    made = _seed_pytest_runs(root, range(1, bound + 1))
+    for d in made:
+        _backdate(d, 400)
+    assert rs.sweep_pytest_tmpdirs(True, root=root) == {
+        "apply": True, "present": True, "seen": bound, "collected": 0, "kept": bound,
+        "other": 0, "freed": 0, "refused": None}, \
+        "400-day-old dirs inside the bound must survive an apply run"
+    assert all(d.exists() for d in made)
+
+    root2 = root.parent / "reversed"
+    made2 = _seed_pytest_runs(root2, range(1, bound + 2))
+    for i, d in enumerate(reversed(made2)):      # newest number = oldest mtime
+        _backdate(d, 400 - i)
+    out = rs.sweep_pytest_tmpdirs(True, root=root2)
+    assert out["collected"] == 1, out
+    assert not made2[0].exists(), "collection followed mtime, not the number in the name"
+    assert made2[-1].exists(), "the highest-numbered dir must never be a candidate"
+
+
+def test_the_pytest_root_is_the_path_pytest_itself_writes_and_the_bound_outruns_the_worst_case(
+        rs, tmp_path):
+    """Two halves of the same store, each pinned against a source outside this diff.
+
+    The root: `tempfile.gettempdir()` plus `getpass.getuser()`, asserted as two halves —
+    the parent against `tempfile.gettempdir()` read here, and the directory NAME against
+    a real pytest session's own basetemp root, produced by running pytest in a subprocess
+    with `TMPDIR` pointed at a directory this test owns and reading where its `tmp_path`
+    landed. That is the seam this store lives across: the sweep and the suite are separate
+    processes and agree on nothing but a name, so a bound at a path pytest does not write
+    would report a count and change nothing — the failure class this file's own guardrails
+    are about, and the reason the assertion goes to pytest rather than to a restatement of
+    the rule in this file.
+
+    The bound: 16 is not a preference. `agent-services/guardian/tmpwatch.py` watches a
+    tmpfs of 1,048,576 inodes, and #1010's closure measured 500,487 inodes across 27 stale
+    runs — 18,537 a run — so the arithmetic below is that incident's own numbers asked
+    whether 16 dirs of that density fit. They do, at 28.3% of the budget, where 27 of them
+    is the 100% reading under which the production tree was deleted twice. A re-tuned
+    constant that breaks that either reddens this node or has to change the incident's
+    measurements to do it.
+    """
+    import getpass
+    import tempfile
+
+    built = rs._pytest_tmp_root()
+    assert built.parent == Path(tempfile.gettempdir()), built
+    user = getpass.getuser() or "unknown"
+    assert built.name == f"pytest-of-{user}", built
+
+    child_tmp = tmp_path / "child-tmp"
+    child_tmp.mkdir()
+    (tmp_path / "empty.ini").write_text("[pytest]\n")
+    # The child writes where ITS basetemp root is to a path handed to it by name, so this
+    # node never has to assume the answer to get at it: reading a file at a path built from
+    # the expected directory name would only prove that name equals itself.
+    rootfile = tmp_path / "ROOT"
+    (tmp_path / "test_naming.py").write_text(
+        "import os\n"
+        "def test_names_its_root(tmp_path):\n"
+        "    with open(os.environ['LLOYD_TEST_ROOTFILE'], 'w') as fh:\n"
+        "        fh.write(str(tmp_path.parent.parent))\n")
+    run = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                          "-c", str(tmp_path / "empty.ini"),
+                          str(tmp_path / "test_naming.py")],
+                         capture_output=True, text=True, cwd=str(tmp_path),
+                         env=dict(os.environ, TMPDIR=str(child_tmp),
+                                  LLOYD_TEST_ROOTFILE=str(rootfile)), timeout=300)
+    assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
+    child_root = rootfile.read_text()
+    assert Path(child_root).name == built.name, (
+        f"pytest's own basetemp root is {child_root!r}, which this store does not bound")
+    assert Path(child_root).parent == child_tmp, (
+        "pytest put its root somewhere other than $TMPDIR, so gettempdir() is not the "
+        "rule the sweep should copy")
+
+    incident_inodes, incident_runs = 500_487, 27
+    tmpfs_inodes = 1_048_576
+    per_run = incident_inodes / incident_runs
+    assert rs.PYTEST_TMP_MAX_DIRS * per_run < tmpfs_inodes * 0.30, (
+        f"{rs.PYTEST_TMP_MAX_DIRS} dirs at the density #1010 measured is "
+        f"{rs.PYTEST_TMP_MAX_DIRS * per_run / tmpfs_inodes:.1%} of the tmpfs: above the "
+        "headroom the two deletions of the production tree were caused by")
+    assert rs.PYTEST_TMP_MAX_DIRS > 1, (
+        "a bound of 1 would put the newest dir one collection away from being the oldest")
