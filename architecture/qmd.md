@@ -140,9 +140,10 @@ supervisord program agent-qmd-daemon
   never re-embeds anything. That is why the 2026-09-21 switch was built as a side
   copy with every collection re-embedded (~45k chunk vectors at the time, ~1 h at
   15–25 chunks/s on the 3090), caught up with `update` + `embed` against a scratch
-  config, and swapped the files with the watcher and daemon stopped; the old index
-  is kept as `index.sqlite.bak-gemma-20260921`. For the live count, read the
-  daemon's own `GET /health → vecIndex.vectors` rather than any figure here.
+  config, and swapped the files with the watcher and daemon stopped; that Gemma-era
+  copy is gone, unlinked by the nightly retention rule at 2026-10-07T05:00:51, the
+  2026-09-19 copy beside it going in the same run (§5). For the live count, read
+  `GET /health → vecIndex.vectors` off the daemon rather than any figure here.
 - **Daemon knobs** live in `agent-qmd-daemon.conf`'s `environment=` and nowhere
   else (the regression pin reads them from there):
   - `QMD_RERANK_WINDOW_CHARS=1200` — the reranker reads a 1200-char window of the
@@ -254,6 +255,21 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   then 272-297 s — and a swap's backup joins the `.bak` series the nightly
   retention bounds to its newest, which is where
   `index.sqlite.bak-20261005-075912` now sits.
+- **A copy a person wants kept is kept by a data file, not by a sentence (#2420).**
+  #2323 made naming a `.bak` candidate in any `*.py`/`*.ts`/`*.sh`/`*.yml` a violation,
+  and markdown was never in that scan, so afterwards nothing this job reads could say
+  *keep this one*. That is how §3's Gemma-era copy and the 2026-09-19 copy beside it
+  were both unlinked at 2026-10-07T05:00:51 — 2,577,571,840 B, `held: []`, and
+  `deleted_bytes` the only trace of a decision nobody had made. The run now reads
+  `$LLOYD_DATA/_pipeline/reflection/qmd-stray-keep-list.json` (entries of `name` or
+  `glob`, each with a `reason` and a `source` item) before it classifies a candidate: a
+  match keeps the main file and its `-wal`/`-shm` out of the plan, and every held file
+  comes back under `held_for_person` carrying that reason and source, so the next reader
+  can lift the hold instead of re-deleting the file. An absent or blank file changes no
+  figure at all; one that will not parse holds the whole series and reports the error,
+  because a rule that failed open would unlink the copy someone was reaching for. The
+  newest copy is kept by the rule itself either way, so the named file above survives
+  until a newer swap lands — after that only this file can stop it.
 - **A rerank that could not run says so.** No VRAM for a ranking context used to
   be an HTTP 200 with fusion-order results; `meta.reranked` is false, the daemon
   counts it and never caches a fallback score, and `app/qmd_health.py` logs and

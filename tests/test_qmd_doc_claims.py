@@ -31,6 +31,9 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "architecture" / "qmd.md"
 SCRIPT = ROOT / "scripts" / "maintenance" / "qmd_index_maintenance.py"
+#: The other file that told a person to keep a backup the retention rule then deleted
+#: (#2420). Read as text, exactly like `DOC`: what is pinned is the sentence.
+EPISODIC_README = ROOT / "eval" / "episodic-arm" / "README.md"
 
 #: The runtime record the #1992 paragraph cites as `$LLOYD_DATA/_pipeline/reflection/`.
 #: Reached through the account's passwd entry, not `$HOME`: the gate runs the suite
@@ -756,3 +759,116 @@ def test_no_node_of_this_file_reaches_the_vault_copy():
     assert "backlog/data" in src, (
         "the vault witness is no longer named anywhere in this file, which is the other way "
         "the absence above could be satisfied: by forgetting the copy exists")
+
+
+# ── #2420: the two backups the retention rule deleted, and the prose that outlived them ──
+#
+# Two files told a person to keep the pre-wipe session corpus, and neither could stop the
+# rule that deleted it: `architecture/qmd.md` stated the Gemma-era copy "is kept as" its
+# `.bak` name, and this arm's README said "Do not delete those backups". At 2026-10-07T05:00:51
+# the nightly job unlinked both copies — 1,327,300,608 B and 1,250,205,696 B, 2,577,571,840 B
+# in one run, `held: []` in `$LLOYD_DATA/_pipeline/reflection/qmd-index-maintenance-2026-10-07.json`
+# — because a hold was a filename matching in a `*.py`/`*.ts`/`*.sh`/`*.yml`, markdown was
+# never in that scan, and #2323 had banned writing one. The two nodes below pin the retired
+# sentences out of the tree and pin the replacement facts in, so the next reader learns the
+# corpus is gone instead of being told a deleted file is standing by.
+
+#: Assembled at runtime, never spelled: a `.py` naming a `.bak` candidate is a code
+#: reference, and a code reference is a hold — which is the mechanism that just held two
+#: copies nobody wanted held. `tests/test_qmd_index_maintenance.py` walks the tree for
+#: exactly these literals on every run.
+GEMMA_BAK = "index.sqlite.bak-" + "gemma-20260921"
+PREWIPE_BAK = "index.sqlite.bak-" + "20260919-203417"
+
+#: The two claims as they stood at this round's base, and the two absences they must stay.
+KEPT_AS_CLAIM = "is kept as `" + GEMMA_BAK + "`"
+DO_NOT_DELETE = "Do not delete those backups"
+
+#: What replaced them: the acting run, its total, and the surviving markdown corpus — 142
+#: exported transcripts dated before 2026-09-22 under
+#: `~/lloyd-data/_pipeline/vault-derived/sessions`, which is what a pre-wipe re-run can now
+#: be built from. Counted at HEAD: 185 transcripts in that tree, 142 of them before the wipe.
+ACTING_RUN = "2026-10-07T05:00:51"
+DELETED_BYTES = "2,577,571,840"
+SURVIVORS = "142"
+
+
+def test_neither_doc_still_tells_a_person_a_deleted_backup_is_keeping_the_corpus():
+    """Clause 5: the two dead claims are retired, and the control proves the patterns saw
+    them.
+
+    An absence alone is the 0-hit grep with no control. Both patterns here are run against a
+    line assembled from the retired sentences first, and both files are then required to
+    carry the acting run's date, its byte total, and the record of what actually survives —
+    because a retired alarm that is replaced by silence is how the corpus reads as "still
+    backed up" to the next reader who asks.
+    """
+    kept_as = re.compile(r"is kept as \`index\.sqlite\.bak-")
+    dont_delete = re.compile(r"[Dd]o not delete those backups")
+    assert kept_as.search("the old index " + KEPT_AS_CLAIM + ". For the live count")
+    assert dont_delete.search("(`…bak-20260919-203417`). " + DO_NOT_DELETE + ". Restoring")
+
+    qmd = DOC.read_text(encoding="utf-8")
+    readme = EPISODIC_README.read_text(encoding="utf-8")
+    assert not kept_as.search(qmd), (
+        f"architecture/qmd.md claims the Gemma-era copy is still on disk again: "
+        f"{[ln.strip() for ln in qmd.splitlines() if kept_as.search(ln)]}. It is not — the "
+        f"retention rule unlinked {GEMMA_BAK} at {ACTING_RUN}, so the sentence is an "
+        "instruction to rely on a file that is gone.")
+    assert not dont_delete.search(readme), (
+        "eval/episodic-arm/README.md is bargaining with the retention rule again. It has "
+        "already won that argument once, on prose, and the corpus is what the loss cost.")
+
+    for name, text in (("architecture/qmd.md", qmd), ("eval/episodic-arm/README.md", readme)):
+        assert ACTING_RUN in text, f"{name} retires the claim without naming the run"
+        assert DELETED_BYTES in text, (
+            f"{name} says the copies went without saying how much went: that number is why "
+            "this is a ruling and not a tidying")
+    assert GEMMA_BAK in readme and PREWIPE_BAK in readme, (
+        "the README names neither deleted file, so nothing in it can be checked against "
+        "`find ~/.cache/qmd`")
+    assert SURVIVORS in readme, (
+        "the README does not record the 142 pre-2026-09-22 transcripts that do survive, "
+        "which is the only corpus a pre-wipe re-run has now")
+    assert "qmd-stray-keep-list.json" in qmd, (
+        "architecture/qmd.md retired the dead claim without pointing at the channel #2420 "
+        "replaced it with, so the next person in this position writes prose again")
+
+
+def test_the_survivor_count_the_readme_quotes_is_the_one_the_tree_yields():
+    """The 142 in `eval/episodic-arm/README.md` is re-derived here, not vouched for.
+
+    Over `~/lloyd-data/_pipeline/vault-derived/sessions`, 185 exported transcripts exist and
+    142 sit under a date directory earlier than 2026-09-22 — the pre-wipe residue #2323's
+    owed entry calls the surviving corpus, and the only thing left of the arm's own 656
+    documents. No skip when the archive is not on this host, which is what #2396's own guard
+    a few nodes above forbids in this file: the figure is then checked for being traceable to
+    the directory it was counted in, which is the weaker claim, but it is still a claim and
+    not a silence. Where the archive is present the number is re-counted and compared.
+    """
+    readme = EPISODIC_README.read_text(encoding="utf-8")
+    # The same passwd anchor every other runtime read in this file uses, one level up:
+    # the gate's `$HOME` is a round home with no data home in it, and an absolute path
+    # written here would be a second anchor that silently measures nothing there.
+    sessions = REFLECTION.parents[1] / "_pipeline" / "vault-derived" / "sessions"
+    assert f"{SURVIVORS} exported" in readme, (
+        f"the README no longer states its survivor count as {SURVIVORS} transcripts over "
+        f"`{sessions}`, so nothing in it can be checked against the archive it counted")
+    if not sessions.is_dir():
+        return
+    days = [p for p in sessions.iterdir() if re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.name)]
+    assert days, f"{sessions} holds no date-named day directory to count"
+    total = sum(len(list(d.glob("*.md"))) for d in days)
+    before_wipe = sum(len(list(d.glob("*.md"))) for d in days if d.name < "2026-09-22")
+    assert f"{SURVIVORS} exported" in readme, (
+        f"the README no longer states its survivor count as {SURVIVORS} transcripts, so "
+        f"there is nothing here to compare with the {before_wipe} the tree holds")
+    assert before_wipe >= int(SURVIVORS), (
+        f"the README says {SURVIVORS} pre-wipe transcripts survive; the tree holds "
+        f"{before_wipe} of {total}. A count below the quoted one is a second loss on top "
+        "of the one the README records, and prose that understates a loss is the failure "
+        "#2420 exists to stop")
+    assert total > before_wipe, (
+        f"{sessions} holds {total} exported transcripts and every one of them predates the "
+        "wipe, so this tree is a frozen copy rather than the live archive the README's "
+        f"{SURVIVORS} is a count of")

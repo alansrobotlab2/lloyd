@@ -1974,6 +1974,385 @@ def test_a_dry_run_leaves_the_directory_byte_identical_to_what_an_acting_run_wou
     assert "index.sqlite.bak-z" not in _listing(d)
 
 
+# ────────────── #2420: the keep-list, a person's channel into the delete path ─────────────
+#
+# #2323 banned naming a candidate in any `*.py`/`*.ts`/`*.sh`/`*.yml`, and prose was always
+# outside the scan, so once that ban landed a "keep this copy" ruling had no home the job
+# could read. The cost was measured at 2026-10-07T05:00:51, when the acting run unlinked two
+# copies totalling 2,577,571,840 B while the prose of two files said to keep them. Every node
+# below writes the keep-list as a real file in the directory the job reads it from — never by
+# patching the reader — because the seam under test is a hand editing a data file beside the
+# nightly reports and a 05:00 run honouring it, and the dated report is the only thing either
+# of them will ever read again.
+#
+# No real candidate's name appears in this section: the synthetic `bak-a`/`bak-z`/`bak-m`
+# family is used, for the reason the block above `_qmd_dir_at` gives — this file is part of
+# the tree `code_reference_hits` walks, and a name written here is a name the hold reports as
+# read. The one node that needs the real pile reads its names out of the committed witness.
+
+def _keep_list_at(tmp_path: Path, doc) -> Path:
+    """Write the keep-list where `_retention_run` points `REPORT_DIR`, the way a hand would.
+
+    `doc` goes to disk verbatim — a dict as JSON, or raw text for the cases that hand the
+    reader something it cannot parse — so each case exercises the real path, the real bytes
+    and the real reader, and a case that wants no file simply does not call this.
+    """
+    d = tmp_path / "reflection"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / m.KEEP_LIST_NAME
+    p.write_text(doc if isinstance(doc, str) else json.dumps(doc), encoding="utf-8")
+    return p
+
+
+def _three_bak_fixture(tmp_path: Path) -> Path:
+    """Three backups beside the live trio: newest `bak-a`, then `bak-z`, then `bak-m`.
+
+    `bak-a` is kept by rule 1 and never a candidate; `bak-z` and `bak-m` are both delete
+    candidates, each with a sidecar of its own. That is the shape a keep-list has to be
+    selective against: a hold that also swept the unlisted candidate is not a rule, and a
+    hold that let a `-wal` outlive its database would be a bug wearing a safety's clothes.
+    """
+    return _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("index.sqlite.bak-a", 3000, 1.0), ("index.sqlite.bak-z", 2000, 5.0),
+        ("index.sqlite.bak-z-wal", 20, 5.0), ("index.sqlite.bak-z-shm", 32, 5.0),
+        ("index.sqlite.bak-m", 1000, 9.0), ("index.sqlite.bak-m-wal", 10, 9.0)])
+
+
+def test_a_keep_list_entry_naming_a_candidate_keeps_it_and_its_sidecars_on_disk(
+        monkeypatch, tmp_path):
+    """Clause 1: an exact-name entry holds its main file and both sidecars through an
+    acting run, while the candidate nobody named still goes.
+
+    Nothing in the scanned tree names `bak-z` here, and that is the whole point of #2420:
+    before this change the only thing that could stop an unlink was a code reference, and
+    #2323 made writing one a violation. So the hold has to come from the data file. The run
+    is acting, not `--dry-run`, because "never unlinks" is a claim about `unlink()` — a
+    `planned` list nobody ever applied would satisfy the plan alone.
+    """
+    d = _three_bak_fixture(tmp_path)
+    before = _listing(d)
+    _keep_list_at(tmp_path, {"entries": [{
+        "name": "index.sqlite.bak-z",
+        "reason": "the only copy of the pre-wipe corpus that survives",
+        "source": "#2420"}]})
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    sr = report["stray_retention"]
+    assert sr["planned"] == ["index.sqlite.bak-m"], (
+        "the keep-list has to hold what it names and nothing else — a hold that swept the "
+        "series would make this rule a permanent refusal to ever delete anything")
+    assert sr["deleted"] == ["index.sqlite.bak-m"], sr
+    after = _listing(d)
+    for name in ("index.sqlite.bak-z", "index.sqlite.bak-z-wal", "index.sqlite.bak-z-shm"):
+        assert after.get(name) == before[name], f"{name} was unlinked off a keep-list"
+    assert "index.sqlite.bak-m" not in after and "index.sqlite.bak-m-wal" not in after, (
+        "the unlisted candidate has to still be deletable beside a held one")
+    assert sr["kept"] == ["index.sqlite.bak-a"], "rule 1 is unchanged by a keep-list"
+    assert sr["keep_list"]["held"] == ["index.sqlite.bak-z"], sr
+    assert sr["errors"] == [], "a keep-list that parses is not an error to report"
+
+
+def test_a_keep_list_glob_holds_every_candidate_it_matches_and_plans_nothing(
+        monkeypatch, tmp_path):
+    """Clause 1's other half, and the item's own verification: a seeded `index.sqlite.bak-*`
+    entry yields `planned: []` on the directory where the rule otherwise plans an unlink.
+
+    The glob is what a person reaches for when the point is "every copy in this series" — a
+    future swap's name is not knowable in advance, since the next `--swap` renames the live
+    index to a stamp nobody has written down. Matching is `fnmatch`, and exact names are
+    checked first so a specific reason always beats a broad pattern.
+    """
+    d = _three_bak_fixture(tmp_path)
+    before = _listing(d)
+    _keep_list_at(tmp_path, {"entries": [{
+        "glob": "index.sqlite.bak-*",
+        "reason": "series is the only fallback for the live index until the rebuild lands",
+        "source": "#2420"}]})
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    sr = report["stray_retention"]
+    assert sr["planned"] == [], "a glob that matches every candidate has to plan nothing"
+    assert sr["deleted"] == [] and sr["deleted_bytes"] == 0, sr
+    assert _listing(d) == before, "a fully held directory must come out file-for-file equal"
+    assert sr["kept"] == ["index.sqlite.bak-a"], sr
+    assert sorted(sr["keep_list"]["held"]) == ["index.sqlite.bak-m", "index.sqlite.bak-z"], sr
+    assert sr["keep_list"]["entries"] == 1, "one entry, whatever number of files it held"
+
+
+def test_every_file_held_by_the_keep_list_is_reported_with_its_reason_and_source(
+        monkeypatch, tmp_path):
+    """Clause 2: each held file, sidecars included, is a `held_for_person`-shaped entry
+    carrying the reason AND the source item.
+
+    The 2026-10-07 deletion was invisible in advance and untraceable afterwards: `held: []`,
+    and the only record of why anything survived was a byte total. An entry naming who asked
+    and why is what lets the next reader lift a hold instead of either re-deleting the file or
+    leaving a 1 GB reserve for ever — the owed disk decision on #2420 is exactly that
+    decision, and it cannot be made from a report that says only "held".
+    """
+    d = _three_bak_fixture(tmp_path)
+    _keep_list_at(tmp_path, {"entries": [{
+        "name": "index.sqlite.bak-z",
+        "reason": "only surviving copy of the pre-wipe session corpus",
+        "source": "#2323 owed ruling"}]})
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    sr = report["stray_retention"]
+    held = {h["name"]: h for h in sr["held_for_person"]}
+    for name in ("index.sqlite.bak-z", "index.sqlite.bak-z-wal", "index.sqlite.bak-z-shm"):
+        assert name in held, f"{name} is held but was never reported: {sorted(held)}"
+        assert held[name]["reason"] == "only surviving copy of the pre-wipe session corpus"
+        assert held[name]["source"] == "#2323 owed ruling"
+        assert "only surviving copy" in held[name]["because"], held[name]
+        assert "#2323 owed ruling" in held[name]["because"], held[name]
+    assert held["index.sqlite.bak-z"]["bytes"] == 2000, "a hold reports its own bytes"
+    assert held["index.sqlite.bak-z-wal"]["bytes"] == 20
+    assert "sidecar" in held["index.sqlite.bak-z-shm"]["because"], (
+        "a sidecar has to say it is here because its database is, not that it was named")
+    assert "index.sqlite.bak-m" not in held, "the deleted file is not also reported as held"
+    assert sr["keep_list"]["files"] == [
+        "index.sqlite.bak-z", "index.sqlite.bak-z-wal", "index.sqlite.bak-z-shm"], sr
+    assert sr["keep_list"]["path"] == str(tmp_path / "reflection" / m.KEEP_LIST_NAME), (
+        "the report names the file it consulted, or a reader cannot find the ruling")
+
+
+def test_the_keep_list_is_a_data_file_and_no_scanned_file_names_a_real_candidate(tmp_path):
+    """Clause 1's other assertion: the ban #2323 put on naming a candidate still holds.
+
+    The keep-list only earns its keep if the old channel stayed shut — a `.py` naming a copy
+    is both a hold and the thing #2323 ruled out, and the two together are what cost
+    2,577,506,304 B of free space on 2026-10-06. So this walks the same four suffixes
+    `code_reference_hits` reads, looking for any concrete dated or Gemma backup name, which is
+    the tree-wide form of::
+
+        git grep -nE 'index[.]sqlite[.]bak-(2026|gemma)' -- '*.py' '*.ts' '*.sh' '*.yml'
+
+    with the pattern assembled at runtime, so this node adds no literal of its own to the tree
+    it is checking. The positive control is a planted file under `tmp_path`: an empty answer
+    from a walk that also cannot see a name it was handed is the 0-hit grep with no control,
+    which is the exact failure that made the 2026-09-27 zero trustworthy.
+    """
+    pat = re.compile(r"index\.sqlite\.bak-" + r"(2026|gemma)")
+
+    def refs(root: Path) -> list[str]:
+        hits = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [dn for dn in dirnames if dn not in m.CODE_REF_EXCLUDED_DIRS]
+            for fn in filenames:
+                p = Path(dirpath) / fn
+                if p.suffix not in m.CODE_REF_SUFFIXES:
+                    continue
+                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+                hits += [f"{p.relative_to(root).as_posix()}:{i}"
+                         for i, line in enumerate(lines, 1) if pat.search(line)]
+        return hits
+
+    # Both literals are assembled at runtime, for the reason one line of this node's own
+    # failure proved: a concrete name typed into THIS file is a concrete name in the tree the
+    # walk below scans, and it goes red on itself before it can say anything about anyone.
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    dated = "DB = 'index.sqlite.bak-" + "20260101'\n"
+    gemma = "index.sqlite.bak-" + "gemma-20260101\n"
+    (planted / "reader.py").write_text(dated, encoding="utf-8")
+    (planted / "notes.md").write_text(gemma, encoding="utf-8")
+    assert refs(planted) == ["reader.py:1"], (
+        "the walk cannot see a concrete name it was handed, so an empty answer below means "
+        "nothing; the `.md` beside it is out of `CODE_REF_SUFFIXES` on purpose")
+    assert refs(m.REPO_ROOT) == [], (
+        f"a scanned file names a concrete backup candidate again: {refs(m.REPO_ROOT)[:5]}")
+
+
+def test_the_keep_list_cannot_be_mistaken_for_one_of_the_run_reports(tmp_path):
+    """The pickling caution: the keep-list lives in the reports' own directory.
+
+    `previous_run_started` globs `REPORT_PREFIX + "*.json"` in that directory and reads a
+    `ran_at` out of whatever answers, and that value is the upper bound on the #2119 sidecar
+    hold. A keep-list whose name matched the prefix would be parsed for a `ran_at` it does not
+    have, and `_write_report` would land its dated file on top of the human's rulings. So the
+    name carries no prefix, and this pins the consequence: the keep-list alone leaves the
+    bound unset, and adding a real dated report is what sets it.
+    """
+    report_dir = tmp_path / "reflection"
+    assert not m.KEEP_LIST_NAME.startswith(m.REPORT_PREFIX), (
+        "a keep-list named like a report is a report to `previous_run_started`")
+    _keep_list_at(tmp_path, {"entries": [{"name": "index.sqlite.bak-z",
+                                         "reason": "r", "source": "#2420"}]})
+    assert m.previous_run_started(report_dir) is None, (
+        "the keep-list was read as an earlier run, so the #2119 hold bound is now whatever "
+        "whoever's editor saved last says")
+    when = datetime.fromtimestamp(time.time() - 86400)
+    _prior_report(report_dir, when)
+    assert m.previous_run_started(report_dir) == pytest.approx(when.timestamp()), (
+        "a real dated report is still the only thing that bounds the hold")
+
+
+def test_a_keep_list_the_run_cannot_parse_holds_every_candidate_and_says_so(
+        monkeypatch, tmp_path):
+    """A broken instruction is not an absent one: unreadable means nothing is deleted.
+
+    The failure mode is specific and irreversible. A person writes a ruling with a comma in
+    the wrong place; the next 05:00 run reads no entries out of it; a rule that treated that
+    as "nothing was asked for" would then delete the copy the file was written to protect —
+    the loss #2420 exists to make impossible, and the disk it frees is the cheap half of that
+    trade. So an unparseable, wrongly-shaped or half-specified keep-list reports its error in
+    `errors`, holds every candidate and plans nothing. Absent and blank are the shapes that
+    legitimately mean "nothing asked for", and they are pinned beside these in the node
+    below.
+    """
+    cases = [("{ not json", "will not parse"),
+             ('["index.sqlite.bak-z"]', "a list at the top level"),
+             ('{"keeplist": []}', "an unrecognised top-level key"),
+             ('{"entries": {"name": "index.sqlite.bak-z"}}', "entries that is not a list"),
+             ('{"entries": [{"name": "index.sqlite.bak-z"}]}',
+              "an entry with no reason and no source")]
+    for doc, why in cases:
+        d = _three_bak_fixture(tmp_path)
+        before = _listing(d)
+        _keep_list_at(tmp_path, doc)
+        report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+        sr = report["stray_retention"]
+        assert sr["planned"] == [] and sr["deleted"] == [], f"{why}: {sr}"
+        assert _listing(d) == before, (
+            f"{why}: a candidate was unlinked on a keep-list the run could not read")
+        assert sr["errors"], f"{why}: a broken keep-list that reports nothing is a silent " \
+                             "delete ban, the other half of the same failure"
+        assert sr["keep_list"]["error"], f"{why}: the error belongs in the keep-list block"
+        assert sr["errors"][0].startswith(sr["keep_list"]["path"]), (
+            f"{why}: the error does not name the file a person has to go and fix: "
+            f"{sr['errors']}")
+        assert sorted(sr["keep_list"]["held"]) == ["index.sqlite.bak-m",
+                                                  "index.sqlite.bak-z"], sr
+        reported = {h["name"] for h in sr["held_for_person"]}
+        for name in ("index.sqlite.bak-z", "index.sqlite.bak-z-wal",
+                     "index.sqlite.bak-m", "index.sqlite.bak-m-wal"):
+            assert name in reported, f"{why}: {name} held but unreported"
+
+
+#: What the retention rule plans over the 2026-10-03 pile was re-measured here rather than
+#: quoted: `tests/fixtures/qmd-index-maintenance-2026-10-03.json` is 6 stray files and
+#: 2,577,571,840 B, one candidate held on both sidecar legs, and the #2119 releases turn that
+#: hold into a planned delete. Every figure below is read out of those bytes.
+def _sparse(p: Path, size: int, mtime: float) -> None:
+    """A file of the witness's `st_size` and `st_mtime` and none of its bytes on disk.
+
+    The pile is 2.58 GB of database and a fixture that really held it would put the suite on
+    a deadline; `st_size` and `st_mtime` are all the retention rule reads, and both are the
+    witness's own.
+    """
+    with p.open("wb") as fh:
+        fh.truncate(size)
+    os.utime(p, (mtime, mtime))
+
+
+def _witness_pile(tmp_path: Path) -> Path:
+    """Rebuild the 2026-10-03 index directory from the committed witness's bytes.
+
+    Sizes come from that report's `stray` and `before.footprint` blocks; every name is read
+    out of those bytes rather than typed, for the reason `_measured_backup_names` gives — a
+    real candidate's name written into this file is a code reference, and the code reference
+    is a hold, which would change the very plan this node pins.
+    """
+    rep = json.loads(WITNESS.read_text(encoding="utf-8"))
+    d = tmp_path / "qmd"
+    d.mkdir(parents=True, exist_ok=True)
+    ran_at = datetime.fromisoformat(rep["ran_at"]).timestamp()
+    fp = rep["before"]["footprint"]
+    for name, size in (("index.sqlite", fp["main"]), ("index.sqlite-wal", fp["wal"]),
+                       ("index.sqlite-shm", fp["shm"])):
+        _sparse(d / name, size, ran_at)
+    for e in rep["stray"]:
+        _sparse(d / e["name"], e["bytes"], datetime.fromisoformat(e["mtime"]).timestamp())
+    return d
+
+
+@pytest.mark.parametrize("keep_list_doc", [None, "", "{}", '{"entries": []}'],
+                         ids=["absent", "blank", "empty-object", "no-entries"])
+def test_an_absent_or_blank_keep_list_reproduces_the_plan_measured_before_the_feature(
+        monkeypatch, tmp_path, keep_list_doc):
+    """Clause 3: with nothing written in the keep-list, nothing about the plan moves.
+
+    The expected figures were measured against the module as it stands at this round's base
+    (`b8389b2e`, before a keep-list existed at all) over this same directory with this same
+    prior report: kept newest, the older main planned and then unlinked together with its
+    `-wal`/`-shm`, `deleted_bytes` 1,250,238,464 (= 1,250,205,696 + 32,768 + 0, all three read
+    out of the witness), nothing held, nothing reported for a person. Each is asserted here as
+    a figure the witness itself yields, so the equality is with the old code's behaviour and
+    not with this change's own output.
+
+    Four shapes count as "nothing written": no file at all, a file of whitespace, an empty
+    object, and an empty `entries` list. All four have to leave the plan alone — the file's
+    absence is the state every box was in before #2420, and a person blanking it out must not
+    freeze the rule instead.
+    """
+    d = _witness_pile(tmp_path)
+    before = _listing(d)
+    witness = json.loads(WITNESS.read_text(encoding="utf-8"))
+    ran_at = datetime.fromisoformat(witness["ran_at"])
+    if keep_list_doc is not None:
+        _keep_list_at(tmp_path, keep_list_doc)
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False,
+                            prior_reports=[(ran_at, None)])
+    sr = report["stray_retention"]
+    pile = {e["name"]: e for e in witness["stray"]}
+    newest, older = sorted((n for n in pile if not n.endswith(("-wal", "-shm"))),
+                           key=lambda n: pile[n]["mtime"], reverse=True)
+    assert sr["bak_series"] == [newest, older], "the fixture is not the pile the item quoted"
+    assert sr["kept"] == [newest], sr
+    assert sr["held"] == [], "with no keep-list the #2119 releases still release the hold"
+    assert sr["planned"] == [older], sr
+    assert sr["deleted"] == [older], sr
+    assert sr["deleted_bytes"] == 1_250_238_464 == (
+        pile[older]["bytes"] + pile[older + "-wal"]["bytes"]
+        + pile[older + "-shm"]["bytes"]), sr
+    assert sr["held_for_person"] == [], sr
+    after = _listing(d)
+    assert set(before) - set(after) == {older, older + "-wal", older + "-shm"}, (
+        "the acting run freed exactly the older copy and its sidecars, as it did before the "
+        "keep-list existed")
+    assert after[newest] == pile[newest]["bytes"], "the kept copy is untouched"
+    assert sr["keep_list"] == {"path": str(tmp_path / "reflection" / m.KEEP_LIST_NAME),
+                              "entries": 0, "held": [], "files": [], "error": None}, (
+        f"a keep-list shaped like {keep_list_doc!r} still moved something")
+
+
+def test_the_code_reference_hold_still_fires_beside_a_keep_list(monkeypatch, tmp_path):
+    """Clause 4: the measured hold is untouched — a candidate named only by a scanned file is
+    still held on that evidence, with its `code_references` intact, beside a keep-list hold on
+    a different file.
+
+    The two channels answer different questions and neither may absorb the other: a code
+    reference is this run's own measurement of a reader, a keep-list entry is a person's
+    ruling, and the report has to keep saying which is which (`held` carries
+    `code_references`, `held_for_person` carries `reason`/`source`). `CODE_REF_SUFFIXES` and
+    `code_reference_hits` are not changed by this diff; the suffix set and one live walk are
+    pinned here so a later edit that quietly widened the scan — or a keep-list that swallowed
+    the code leg — fails instead of reading as the same green.
+    """
+    assert m.CODE_REF_SUFFIXES == {".py", ".ts", ".sh", ".yml"}, (
+        "the scan's suffix set moved, and with it every hold whose size #2323 set")
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "bench.py").write_text(
+        "DB = Path.home() / '.cache/qmd/index.sqlite.bak-m'\n", encoding="utf-8")
+    assert m.code_reference_hits(["index.sqlite.bak-m", "index.sqlite.bak-z"],
+                                 repo) == {"index.sqlite.bak-m": ["app/bench.py"],
+                                           "index.sqlite.bak-z": []}
+    d = _three_bak_fixture(tmp_path)
+    _keep_list_at(tmp_path, {"entries": [{
+        "name": "index.sqlite.bak-z", "reason": "held for a person", "source": "#2420"}]})
+    report = _retention_run(monkeypatch, tmp_path, d, repo, dry_run=False)
+    sr = report["stray_retention"]
+    held = {h["name"]: h for h in sr["held"]}
+    assert list(held) == ["index.sqlite.bak-m"], sr
+    assert held["index.sqlite.bak-m"]["code_references"] == ["app/bench.py"], held
+    assert any("code reference" in b for b in held["index.sqlite.bak-m"]["because"]), held
+    assert "index.sqlite.bak-m" in _listing(d), "the measured hold still leaves the file"
+    assert sr["keep_list"]["held"] == ["index.sqlite.bak-z"], (
+        "the keep-list leg has to still fire beside the measured one")
+    assert sr["planned"] == [] and sr["deleted"] == [], sr
+    assert "source" not in held["index.sqlite.bak-m"] and "reason" not in held[
+        "index.sqlite.bak-m"], "a hold from a measurement must not borrow the provenance "\
+        "fields that mean a person asked for it"
+
+
 # ── #1897: a fired capacity verdict escalates instead of riding a green run ──
 #
 # The trigger (#844) and its threshold pair are pinned above and are not re-specified

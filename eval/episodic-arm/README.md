@@ -9,7 +9,9 @@ set from `nightly-20260924` (re-derived today; the item's nightly-20260909
 artifact was lost in the 2026-09-22 wipe, so its overall figures are quoted
 only). The corpus is 662 chat transcripts from 2026-08-22 to 2026-09-24. The
 first 656 are the pre-wipe export, recovered from
-`~/.cache/qmd/index.sqlite.bak-gemma-20260921`. They were re-embedded in a
+`~/.cache/qmd/index.sqlite.bak-gemma-20260921` — a file the nightly retention rule
+unlinked on 2026-10-07, so the corpus is cited here and nowhere else (see "Found on the
+way"). They were re-embedded in a
 scratch index with the daemon's own Qwen3 embed and rerank models and searched
 lex+vec with lexMode or and rerank on.
 
@@ -56,15 +58,37 @@ lloyd` and/or `--budget 4096`; retrieval is identical.
 
 ## Found on the way (for a person)
 
-- **The live `sessions` qmd collection holds 6 documents.** It held 656 before
-  the 2026-09-22 data-home wipe, and prefetch's `sessions` leg has searched the
-  6 since. The user-session JSONs before 09-22 are gone too; 9 remain in
-  `~/lloyd-data/sessions`. The last copy of those conversations is the
-  `content` table of `~/.cache/qmd/index.sqlite.bak-gemma-20260921` (and
-  `…bak-20260919-203417`). Do not delete those backups. Restoring means writing
-  the 656 documents back to `~/lloyd-data/_pipeline/vault-derived/sessions/`
-  for the watcher to re-embed. That is a production data write, left to a
-  person.
+- **The live `sessions` qmd collection holds 6 documents**, and the corpus that
+  would refill it is now gone as well. It held 656 before the 2026-09-22
+  data-home wipe, and prefetch's `sessions` leg has searched the 6 since. The
+  user-session JSONs before 09-22 are gone too; 9 remain in `~/lloyd-data/sessions`.
+  **The last copy of those conversations was the `content` table of the two
+  pre-wipe backups in `~/.cache/qmd` — and the nightly retention rule unlinked
+  both at 2026-10-07T05:00:51: `index.sqlite.bak-gemma-20260921`
+  (1,327,300,608 B) and `index.sqlite.bak-20260919-203417` (1,250,205,696 B), each
+  with a 32,768 B `-shm` — 2,577,571,840 B for the run, `deleted_bytes` counting the
+  sidecars too — with `held: []` in
+  `$LLOYD_DATA/_pipeline/reflection/qmd-index-maintenance-2026-10-07.json`. This
+  file told a person to keep exactly those two backups against this rule, and was
+  overruled by a rule that could
+  not read it: what held a backup was a filename appearing in a `*.py`/`*.ts`/`*.sh`
+  or `*.yml`, and #2323 had made writing one a violation, so a protection in prose
+  protected nothing. #2420 gave that ruling a data file the job reads
+  (`architecture/qmd.md` §5); it arrived too late for these two copies, and the
+  656-document `content` table went with them.**
+- **What of that corpus survives is markdown, not the database**: 142 exported
+  session transcripts dated before 2026-09-22 under
+  `~/lloyd-data/_pipeline/vault-derived/sessions/` (185 in the tree altogether,
+  the newest dated 2026-10-07), plus the scored records in this directory. Those
+  142 are what a re-run over the pre-wipe period can actually be built from;
+  `results.json`'s own `corpus` line still cites the Gemma backup as its source,
+  which is now a citation to a deleted file — a person should decide whether to
+  amend the committed results or mark the arm's corpus irreproducible.
+- **Restoring the 656 documents is no longer a write, it is a recovery**, and on
+  present evidence there is nothing to recover from: no other copy of either
+  backup exists on this host (`find ~/lloyd-data ~/.cache/qmd -name '*bak-gemma*'
+  -o -name '*bak-20260919*'` returns nothing). If the loss is to be accepted, say
+  so on #2323's owed entry and retire the `sessions`-restore line with it.
 - `VAULT_SEGMENTS` still omits `sessions`. On this evidence, leave it out: the
   corpus adds no answers the recall pool lacks, it costs tokens, and
   contamination risk comes with it.

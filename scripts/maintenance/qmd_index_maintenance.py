@@ -107,6 +107,23 @@ SAFETY CONTRACT — this runs unattended:
     backup database is not a code round's call, and `/home` is mounted `noatime`,
     so atime is not evidence of "unread" here and is not used as such. `--dry-run`
     deletes nothing; the plan is reported with `dry_run: true` instead.
+  * A person's "keep this copy" ruling lives in a data file, not in a sentence
+    (#2420). #2323 banned naming a candidate in any `*.py`/`*.ts`/`*.sh`/`*.yml`,
+    and prose was always outside the code-reference scan, so after that ban nothing
+    machine-readable could say *do not delete this one* — and the 2026-10-07 acting
+    run unlinked a 1,327,300,608 B pre-wipe corpus copy and a 1,250,205,696 B one
+    beside it while prose in two files said to keep them. So the run now consults an
+    optional keep-list (`KEEP_LIST_NAME`, beside its own dated reports) before it
+    classifies any `index.sqlite.bak*` candidate: an entry naming one — exactly, or
+    by glob — with a `reason` and a `source` keeps that main file and its
+    `-wal`/`-shm` out of `planned` and `apply_stray_retention` never unlinks them,
+    and each held file is reported in the `held_for_person` shape carrying that
+    reason and source. An absent or blank keep-list changes nothing at all; a
+    keep-list the run cannot parse is a broken instruction rather than an absent
+    one, so it reports the error and holds every candidate instead of deleting on
+    the strength of a ruling it could not read. `code_reference_hits` and
+    `CODE_REF_SUFFIXES` are untouched: the scan still holds what a live reader
+    names, and this is the channel for what a *person* names.
 
 Usage:
   python scripts/maintenance/qmd_index_maintenance.py            # act if needed
@@ -121,6 +138,7 @@ By hand only, never scheduled (#1992, see "the side-copy rebuild" below):
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -374,6 +392,13 @@ SIDECAR_COPY_TOLERANCE_S = 60.0
 #: What this job names its own dated reports. `previous_run_started` reads the series
 #: and `_write_report` writes it, so the pattern lives in one place.
 REPORT_PREFIX = "qmd-index-maintenance-"
+#: The one place a person's "do not delete this copy" ruling can live (#2420). It sits in
+#: the same directory as this job's dated reports and must never be mistaken for one, so
+#: the name carries no `REPORT_PREFIX`: `previous_run_started`'s glob cannot read it as an
+#: earlier run's `ran_at` (which would move the #2119 sidecar bound out from under the
+#: hold), and `_write_report`'s dated name can never land on it. It is written by a hand:
+#: nothing in this module creates, edits or deletes it.
+KEEP_LIST_NAME = "qmd-stray-keep-list.json"
 # What counts as "Lloyd's own code" when asking whether a file still has a reader.
 # Prose is deliberately absent: the four 2026-09-27 strays are named in
 # `architecture/qmd.md` and `qmd/WORKLOG.md` and opened by no program, and the
@@ -505,10 +530,114 @@ def previous_run_started(report_dir: Path | None = None) -> float | None:
     return best
 
 
+def keep_list_path(report_dir: Path | None = None) -> Path:
+    """Where the human keep-list lives: beside this job's own dated reports (#2420)."""
+    return (REPORT_DIR if report_dir is None else report_dir) / KEEP_LIST_NAME
+
+
+def read_keep_list(path: Path | None = None) -> dict:
+    """Read the human keep-list: the rulings no scanned file is allowed to carry.
+
+    Shape, one entry per protected copy::
+
+        {"entries": [{"name": "<a main file>", "reason": "...", "source": "#2420"},
+                     {"glob": "<a fnmatch pattern>", "reason": "...", "source": "..."}]}
+
+    `name` matches a `.bak*` main file exactly and `glob` matches it through `fnmatch`;
+    `reason` and `source` are required on every entry, because the failure this file
+    replaces was a protection nobody could point at. A hold that cites no item and no
+    reason is the same unauditable state as the prose that got two 1 GB-plus copies
+    deleted under it, so an entry missing either is refused as malformed rather than
+    honoured without it.
+
+    Absent, blank, `{}`, or `{"entries": []}` is *no rulings* and no error: the plan then
+    comes out exactly as it did before this file existed (#2420 clause 3). Anything else
+    that will not read as a list of rulings is a broken instruction, not an absent one,
+    and the caller holds every candidate on the strength of `error` — a keep-list that
+    failed open would delete the copy somebody was reaching for, which is the exact loss
+    that cost the pre-wipe session corpus on 2026-10-07. `error` is a sentence for the
+    report, never an exception: an unattended run has to still measure and write its
+    artifact.
+    """
+    p = keep_list_path() if path is None else path
+    out: dict = {"path": str(p), "entries": [], "error": None}
+
+    def bad(why: str) -> dict:
+        out["error"] = f"{p}: {why}"
+        return out
+
+    if not p.exists():
+        return out
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return bad(f"could not be read ({e!r})")
+    if not raw.strip():
+        return out
+    try:
+        doc = json.loads(raw)
+    except ValueError as e:
+        return bad(f"is not JSON ({e})")
+    if not isinstance(doc, dict):
+        return bad(f"top level is a {type(doc).__name__}, not an object with 'entries'")
+    if set(doc) - {"entries"}:
+        return bad(f"unrecognised top-level key(s) {sorted(set(doc) - {'entries'})}; "
+                   "the only key this file reads is 'entries'")
+    entries = doc.get("entries")
+    if entries is None:
+        return out                       # `{}` or `"entries": null`: nothing asked for
+    if not isinstance(entries, list):
+        return bad(f"'entries' is a {type(entries).__name__}, not a list")
+    for i, e in enumerate(entries):
+        if not isinstance(e, dict):
+            return bad(f"entry {i} is a {type(e).__name__}, not an object")
+        name, glob = e.get("name"), e.get("glob")
+        if not isinstance(name, str) or not name.strip():
+            if not isinstance(glob, str) or not glob.strip():
+                return bad(f"entry {i} carries neither a non-empty 'name' nor a 'glob'")
+        for field in ("reason", "source"):
+            if not isinstance(e.get(field), str) or not e[field].strip():
+                return bad(f"entry {i} has no non-empty '{field}': a hold has to say "
+                           "why it exists and who asked for it")
+        out["entries"].append({
+            "name": name.strip() if isinstance(name, str) else None,
+            "glob": glob.strip() if isinstance(glob, str) else None,
+            "reason": e["reason"].strip(), "source": e["source"].strip()})
+    return out
+
+
+def keep_list_hold(name: str, entries: list[dict]) -> dict | None:
+    """The keep-list entry that protects `name`, or None. An exact name beats a glob.
+
+    Matching is against a main file's name only: a sidecar is held because the database
+    it belongs to is held, never because a pattern happened to reach it.
+    """
+    for e in entries:
+        if e["name"] == name:
+            return e
+    for e in entries:
+        if e["glob"] and fnmatch.fnmatchcase(name, e["glob"]):
+            return e
+    return None
+
+
 def plan_stray_retention(index: Path | None = None,
                          repo_root: Path | None = None,
-                         report_dir: Path | None = None) -> dict:
+                         report_dir: Path | None = None,
+                         keep_list: Path | None = None) -> dict:
     """Decide what the retention rule would do to the index directory. Touches nothing.
+
+    Before any of the rules below, every candidate is asked of the human keep-list
+    (`read_keep_list`, #2420): an entry naming it — exactly or by glob — keeps that main
+    file and its `-wal`/`-shm` out of `planned` and reports each of them in the
+    `held_for_person` shape carrying that entry's `reason` and `source`. That channel
+    exists because #2323 left no other one: naming a candidate in a `*.py`/`*.ts`/`*.sh`
+    or `*.yml` is banned and prose was never in the scan, so between that ban and this
+    file a "keep this copy" ruling had no machine-readable home, and the 2026-10-07
+    acting run deleted two copies that two files' prose had said to keep. An absent or
+    blank keep-list changes every figure below exactly as it stands; one that will not
+    parse holds every candidate rather than deleting against an instruction it could not
+    read.
 
     Three rules, in the order the safety of each matters:
 
@@ -541,11 +670,15 @@ def plan_stray_retention(index: Path | None = None,
        `eval/embed_side_index.py:52` builds `subctx.sqlite`), and #844:141-142
        already ruled that deleting someone's backup database is not a code round's
        call. `perfbench.sqlite` is in that group too: deleting it retires #408's
-       subject, which is a person's decision, not a clause.
+       subject, which is a person's decision, not a clause. A candidate the keep-list
+       holds is reported in this same `held_for_person` shape, because the reason it
+       survives is a person's ruling rather than a reader this run can measure; the
+       two kinds are told apart by that entry's `reason`/`source`, never by shape.
     """
     index = INDEX if index is None else index
     repo_root = REPO_ROOT if repo_root is None else repo_root
     report_dir = REPORT_DIR if report_dir is None else report_dir
+    keep_list = keep_list_path(report_dir) if keep_list is None else keep_list
     out: dict = {"bak_series": [], "kept": [], "planned": [], "deleted": [],
                  "deleted_bytes": 0, "held": [], "held_for_person": [], "errors": []}
     if not index.exists():
@@ -559,9 +692,45 @@ def plan_stray_retention(index: Path | None = None,
     out["bak_series"] = [p.name for p in mains]
     out["kept"] = [p.name for p in mains[:1]]
     candidates = mains[1:]
+    kl = read_keep_list(keep_list)
+    kl_held: list[str] = []          # the protected mains; `files` adds their sidecars
+    kl_files: list[str] = []
+    out["keep_list"] = {"path": kl["path"], "entries": len(kl["entries"]),
+                        "held": kl_held, "files": kl_files, "error": kl["error"]}
+    if kl["error"]:
+        out["errors"].append(kl["error"])
     hits = code_reference_hits([p.name for p in candidates], repo_root)
     prev_run = previous_run_started(report_dir)
     for p in candidates:
+        entry = None if kl["error"] else keep_list_hold(p.name, kl["entries"])
+        if entry is not None or kl["error"]:
+            # Somebody asked for this one, or asked for something this run could not
+            # read: either way it stays, and the report says which. Held here rather
+            # than in `held` because `held` means "a reader was measured" — this is a
+            # ruling, and the two are never to be conflated by a later reader.
+            out["keep_list"]["held"].append(p.name)
+            for sfx in ("", *LIVE_SIDECARS):
+                target = p.with_name(p.name + sfx)
+                if not target.is_file():
+                    continue
+                if kl["error"]:
+                    reason, source = kl["error"], "keep-list unreadable"
+                    because = (f"the keep-list at {kl['path']} could not be read "
+                               f"({kl['error']}), so nothing in the series is deleted "
+                               "until a person can read it")
+                else:
+                    reason, source = entry["reason"], entry["source"]
+                    because = (f"the keep-list at {kl['path']} names it: {reason} "
+                               f"(source {source})")
+                if sfx:
+                    because += (f" — held with {p.name}, whose {sfx} sidecar never "
+                                "goes without the database it belongs to")
+                out["held_for_person"].append({"name": target.name,
+                                               "bytes": target.stat().st_size,
+                                               "because": because,
+                                               "reason": reason, "source": source})
+                kl_files.append(target.name)
+            continue
         ref = hits.get(p.name, [])
         reasons = []
         if ref:
@@ -585,7 +754,10 @@ def plan_stray_retention(index: Path | None = None,
             out["planned"].append(p.name)
     in_series = {p.name for p in mains} | {p.name + s for p in mains
                                           for s in LIVE_SIDECARS}
-    out["held_for_person"] = [
+    # `+=`, not `=`: the keep-list holds above are in this list too, and replacing it here
+    # is what made a protected copy vanish from the one artifact that records why it
+    # survived — the 2026-10-07 report's `held: []` with 2.58 GB gone.
+    out["held_for_person"] += [
         {"name": f["name"], "bytes": f["bytes"],
          "because": ("outside the index.sqlite.bak* series, so not this job's to "
                      "delete: this directory is shared with live eval side-indexes, "
@@ -1564,14 +1736,21 @@ def main() -> int:
     if not args.dry_run and retention["planned"]:
         apply_stray_retention(retention)
     if stray["files"]:
+        # Three different reasons a file survives, counted apart: a reader this run
+        # measured (`held`), a person's keep-list (#2420), and a stray that was never
+        # in the series to begin with. Summing them into one "held" figure is how a
+        # ruling and a measurement become indistinguishable in the morning's report.
+        kl_files = len(retention.get("keep_list", {}).get("files", []))
         report["actions"].append(
             f"stray files: {len(stray['files'])} file(s), "
             f"{stray['bytes'] / 1e9:.2f} GB beside the live index; kept newest "
             f"{', '.join(retention['kept']) or '—'}; deleted "
             f"{len(retention['deleted'])} ({retention['deleted_bytes'] / 1e9:.2f} GB), "
             f"{len(retention['planned'])} planned on an acting run, "
-            f"{len(retention['held'])} .bak held + "
-            f"{len(retention['held_for_person'])} outside the series")
+            f"{len(retention['held'])} .bak held on measured evidence + "
+            f"{len(retention.get('keep_list', {}).get('held', []))} .bak held by the "
+            f"keep-list + {len(retention['held_for_person']) - kl_files} outside the "
+            f"series")
     report["stray_retention"] = retention
     pend = pending_embeddings()
     report["pending_embeddings"] = pend
@@ -1781,6 +1960,9 @@ def _emit(r: dict, as_json: bool) -> None:
               f"kept {', '.join(sr.get('kept', [])) or '—'}; deleted "
               f"{len(sr.get('deleted', []))}, {len(sr.get('planned', []))} planned, "
               f"{len(sr.get('held', []))} held"
+              + (f", {len(sr['keep_list'].get('held', []))} by keep-list"
+                 f" of {sr['keep_list'].get('entries', 0)} entries"
+                 if sr.get("keep_list") else "")
               + (f"; {sr['skipped']}" if sr.get("skipped") else ""))
     v = b.get("vec0") or {}
     if v.get("occupancy") is not None:
