@@ -721,7 +721,8 @@ def _reconfirm_candidate_failures(python: Path, root: Path,
 
 def _failures_at_base(python: Path, live_root: Path, base: str,
                       node_ids: list[str], scratch: Path,
-                      env: dict | None = None) -> tuple[set[str], str]:
+                      env: dict | None = None, *, by_node: bool = False,
+                      timeout: float | None = None) -> tuple[set[str], str]:
     """Which of `node_ids` already fail at `base`, in a throwaway worktree.
 
     Module-level and fully parameterised so it can be exercised against a real
@@ -743,6 +744,15 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
     fresh per probe and removed with the worktree. `HOME` stays the round's:
     the round home is a symlink farm over the real one, so the only residue it
     can hold is `lloyd-data`, and that is the directory being replaced.
+
+    `by_node` aims pytest at the exact node ids instead of their files, which is
+    what the implement-pickup probe needs: its question is "does THIS item's own
+    node still fail", and a sibling failure in the same file is the file's
+    answer, not the item's. The default stays by-file — the exit-4 hazard below
+    is what makes the base probe safe. And at pickup a node that has vanished
+    since the item was filed is exactly the case that must NOT read as healed,
+    so `by_node` additionally answers "nothing passed and nothing failed" as
+    inconclusive rather than as a clean run, which is what catches that case.
     """
     if not node_ids:
         return set(), "no node ids to probe"
@@ -760,13 +770,27 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
         # every pre-existing failure beside it and the probe would report a red
         # tree as green. Files the round added are skipped for the same reason
         # and are new by construction.
+        # `targets` is the file list, or with `by_node` the node ids whose FILE
+        # exists — the existence check is always by file, because `wt/x.py::t` is
+        # not a path and every node id names the file it lives in.
         files = []
+        vanished = []
         for nid in node_ids:
             f = nid.split("::", 1)[0]
-            if f not in files and (wt / f).exists():
-                files.append(f)
+            t = nid if by_node else f
+            if not (wt / f).exists():
+                if by_node:
+                    # At pickup the file cannot simply be skipped: pytest is
+                    # never told about it, its own green run would answer for a
+                    # node that no longer exists, and the item would be closed as
+                    # healed with its test deleted. It is a node that did not pass.
+                    vanished.append(nid)
+                continue
+            if t not in files:
+                files.append(t)
         if not files:
-            return set(), "none of the failing files exist at base"
+            return set(), ("none of the failing files exist at base" if not by_node
+                           else f"none of the probed nodes exist at base {base[:8]}")
         probe_env = dict(env or {})
         if probe_env:
             probe_env["PYTHONPATH"] = str(wt)
@@ -776,11 +800,13 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
         # `--no-header -p no:cacheprovider`: the probe must not write a
         # .pytest_cache into a tree it is about to delete, and must not read
         # one written by the candidate run.
+        to = float(timeout) if timeout else EXTERNAL_PROBE_TIMEOUT
         r = _run([str(python), "-m", "pytest", "-q", "--no-header",
                   "-p", "no:cacheprovider", "--continue-on-collection-errors",
                   "-m", TESTS_MARK_EXPR, *files],
-                 cwd=wt, env=probe_env or None, timeout=EXTERNAL_PROBE_TIMEOUT)
+                 cwd=wt, env=probe_env or None, timeout=to)
         text = r.stdout + r.stderr
+        summ = _parse_pytest_summary(text)
         failed = set(_failed_node_ids(text))
         # "pytest ran and found nothing pre-existing" and "pytest never ran"
         # both come back as an empty set, and only one of them is an answer.
@@ -789,15 +815,30 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
         # blames the round for breakage it may not own, silently, which is the
         # failure this whole probe exists to stop. Same verdict either way
         # (no exemption), but the note has to say which one happened.
-        if not failed and not _parse_pytest_summary(text)["collected"]:
+        if not failed and not summ["collected"]:
             tail = " | ".join(text.strip().splitlines()[-3:])[:200]
             return set(), (f"baseline probe INCONCLUSIVE at base {base[:8]} — "
                            f"pytest produced no summary (rc={r.returncode}): {tail}")
+        if by_node and vanished:
+            # A node whose FILE is gone was never handed to pytest, so this run
+            # cannot speak for it and the summary cannot be allowed to: it is not
+            # green at this head, which is what `unresolved` asks.
+            failed |= set(vanished)
+        if by_node and not failed and not summ["passed"]:
+            # Selected nothing: a node renamed since the item was filed, every
+            # target deselected by `TESTS_MARK_EXPR`, or a whole run of xfails.
+            # An empty `failed` here is pytest agreeing to a question it was never
+            # asked, and at pickup that reading closes a live item as healed.
+            tail = " | ".join(text.strip().splitlines()[-3:])[:200]
+            return set(), (f"head probe INCONCLUSIVE at base {base[:8]} — nothing "
+                           f"passed and nothing failed (rc={r.returncode}): {tail}")
         where = " in a fresh data root" if "LLOYD_DATA" in probe_env else ""
-        return failed, (f"probed {len(files)} file(s) at base {base[:8]}{where}: "
-                        f"{len(failed)} already failing")
+        lost = (f" (+{len(vanished)} whose file is gone)" if by_node and vanished else "")
+        return failed, (f"probed {len(files)} {'node' if by_node else 'file'}(s) "
+                        f"at base {base[:8]}{where}: {len(failed)} already failing{lost}")
     except subprocess.TimeoutExpired:
-        return set(), f"baseline probe timed out after {EXTERNAL_PROBE_TIMEOUT:.0f}s"
+        return set(), (f"baseline probe timed out after "
+                       f"{(float(timeout) if timeout else EXTERNAL_PROBE_TIMEOUT):.0f}s")
     except Exception as exc:
         return set(), f"baseline probe failed: {type(exc).__name__}: {exc}"
     finally:
@@ -815,6 +856,140 @@ def _probe_conclusive(note: str) -> bool:
     never written into the red set."""
     n = str(note or "")
     return n.startswith("probed ") or n == "none of the failing files exist at base"
+
+
+#: How long the implement-pickup probe waits for its one pytest run before it
+#: calls the answer inconclusive. The run holds only the item's own nodes —
+#: #2384's re-triage answered the same question in 1.73 s — so this is a guard
+#: against a hang, not an expected duration, and it is half the gate's own
+#: `EXTERNAL_PROBE_TIMEOUT` because it runs on the implement loop's slot: a hung
+#: probe idles the pool that much longer before the status quo resumes.
+PICKUP_PROBE_TIMEOUT = 300.0
+
+
+def _pickup_scratch() -> Path:
+    """A throwaway scratch dir for one pickup probe, on disk beside the rounds.
+
+    Not `/tmp`: this box's `/tmp` is a 1M-inode tmpfs the suite has filled twice
+    (2026-09-22, 2026-09-29), and the probe writes a whole checkout into it.
+    """
+    W.WORK_ROOT.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="red-tree-pickup-", dir=str(W.WORK_ROOT)))
+
+
+def _pickup_env(scratch: Path) -> dict:
+    """The environment for one pickup probe: the real `HOME`, and nothing else a
+    test could write into.
+
+    The same guards `Gate._child_env` exists for — a test that forgot its
+    isolation fixture must not be able to write a `BROKEN` flag into the live
+    self-mod state dir or append to the production audit trail from a probe that
+    is supposed to be read-only judgment. `LLOYD_DATA` is set so that
+    `_failures_at_base` swaps in its own fresh data root under `scratch` (the
+    #1436 rule); `HOME` stays real because there is no round home to point at,
+    and the residue a hand-full of tests can leave in a real home is smaller
+    than the wrong verdict a broken symlink farm would produce. No `TMPDIR`: the
+    short-socket-path scheme (`_child_tmpdir`) is owned by a round id, and a
+    pickup scratch is not one.
+    """
+    state = scratch / "state"
+    (state / "automod").mkdir(parents=True, exist_ok=True)
+    (state / "guardian").mkdir(parents=True, exist_ok=True)
+    (scratch / "data").mkdir(parents=True, exist_ok=True)
+    return {
+        "PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
+        "LLOYD_AUTOMOD_STATE": str(state / "automod"),
+        "LLOYD_GUARDIAN_STATE": str(state / "guardian"),
+        "LLOYD_VOICE_ALERTS": "0",
+        "LLOYD_DATA": str(scratch / "data"),
+    }
+
+
+def _reported_red(node: str, named: set[str]) -> bool:
+    """Did pytest report this node — or the test this node names — as failing?
+
+    Three shapes, in the order the summary can actually show them. The exact id,
+    which is the ordinary case. Then its FILE: a collection error is reported as
+    `ERROR path/test_x.py`, naming the file and meaning nothing inside it ran, and
+    the by-FILE base probe reports files for the same reason — a node whose file
+    is in the set has not been seen to pass. Then a parametrization that moved: an
+    item filed against `test_beta` whose test HEAD fails as `test_beta[1]` and
+    `test_beta[2]`, which is what the short summary prints, so exact-id membership
+    alone would close the item while its own red sits in the output two lines up.
+    That comparison is whole-string on `file::name` with the bracket suffix
+    dropped, so `test_a` never matches someone else's `test_ab[1]`.
+    """
+    if node in named:
+        return True
+    if node.split("::", 1)[0] in named:
+        return True
+    base = node.split("[", 1)[0]
+    return "::" in node and any(other.split("[", 1)[0] == base for other in named)
+
+
+def red_tree_state_at_head(node_ids, *, python: Path | None = None,
+                           live_root: Path | None = None,
+                           scratch: Path | None = None,
+                           timeout: float = PICKUP_PROBE_TIMEOUT) -> dict:
+    """Do these nodes still fail at the live tree's HEAD? One throwaway worktree, one pytest.
+
+    The `tests` rung's question is "did the ROUND break this"; this is the
+    implement loop's question — "is the red this item filed still there" — and
+    it is the same probe with the base pointed at HEAD and the targets at the
+    item's own node ids (`by_node`), so it inherits the worktree, the fresh data
+    root and the fail-closed shape rather than copying them.
+
+    Returns `{"head", "probed", "unresolved", "conclusive", "note"}`.
+    `unresolved` holds every node the run did not clearly pass — the node, or its
+    file, named in the summary — which is the same rule `_reconfirm_candidate_
+    failures` uses for "passed": a collection error comes back as `ERROR x.py`,
+    naming the file and meaning nothing inside it ran, and at pickup that is a
+    node still red, never a heal. `conclusive` is `_probe_conclusive` on the
+    probe's own note, never on its empty set: a worktree that would not build, a
+    timeout and a pytest that collected nothing ALL answer "no failures", and
+    only the note tells them from a run that found none (#2385's polarity trap —
+    at pickup the empty set means CLOSE, which is the opposite of what it means
+    at the gate). While `conclusive` is False, `unresolved` is every node asked:
+    the two fields never disagree about what a caller may conclude.
+    """
+    nodes = list(dict.fromkeys(str(n).strip() for n in (node_ids or ()) if str(n).strip()))
+    live = Path(live_root) if live_root else LIVE_ROOT
+    try:
+        head = W.head(live) or ""
+    except Exception:  # noqa: BLE001 — a tree git cannot name is not a tree to close against
+        head = ""
+    if not nodes:
+        return {"head": head, "probed": [], "unresolved": [], "conclusive": False,
+                "note": "no nodes to probe"}
+    if not head:
+        return {"head": "", "probed": nodes, "unresolved": list(nodes),
+                "conclusive": False, "note": "the live tree's HEAD could not be read"}
+    if python is None:
+        from scripts.automod.round import live_venv_python
+        python = live_venv_python(live)
+    mine = scratch is None
+    sc = Path(scratch) if scratch else None
+    try:
+        sc = sc or _pickup_scratch()
+        failed, note = _failures_at_base(Path(python), live, head, nodes, sc,
+                                         _pickup_env(sc), by_node=True, timeout=timeout)
+        conclusive = _probe_conclusive(note)
+        named = set(failed)
+        # No answer is the still-red answer. `_failures_at_base` fails CLOSED, so
+        # on a worktree that would not build, or a pytest that hung or collected
+        # nothing, `failed` is empty for reasons to do with the probe and none to
+        # do with the nodes; leaving `unresolved` empty there would hand a caller
+        # that forgot to read `conclusive` a list that says "everything passed".
+        unresolved = (list(nodes) if not conclusive
+                      else [n for n in nodes if _reported_red(n, named)])
+        return {"head": head, "probed": nodes, "unresolved": unresolved,
+                "conclusive": conclusive, "note": note}
+    except Exception as exc:  # noqa: BLE001 — no answer is never a reason to close an item
+        return {"head": head, "probed": nodes, "unresolved": list(nodes),
+                "conclusive": False, "note": f"pickup probe failed: {type(exc).__name__}: {exc}"}
+    finally:
+        if mine and sc is not None:
+            shutil.rmtree(sc, ignore_errors=True)
 
 
 # How long a per-base red set (`state.read_red_set`) stands in for the base

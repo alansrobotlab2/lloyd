@@ -1638,6 +1638,29 @@ def _round_opened_since(events: list[dict], since_ts: float, *,
     return None
 
 
+def _red_tree_settled_at_pickup(candidate) -> dict:
+    """Ask a red-tree item's own nodes whether they are still red, before the attempt.
+
+    Blocking (one pytest run in one throwaway worktree, bounded by
+    `gate.PICKUP_PROBE_TIMEOUT`) — `execute` calls it through `asyncio.to_thread`
+    so a hung probe cannot idle the worker's event loop.
+
+    Every failure mode, including this function's own, answers `attempt`. Not
+    probing is always safe; closing on a probe that never ran is the one way to
+    make a live red tree read as fixed.
+    """
+    from scripts.automod import backlog as B, gate as G
+    try:
+        # One tree for both halves of the decision: the nodes are run at THIS
+        # tree's HEAD, and the ancestry rule is checked against the same sha.
+        return B.close_healed_red_tree_at_pickup(
+            candidate, lambda nodes: G.red_tree_state_at_head(nodes, live_root=LIVE_ROOT),
+            live_root=LIVE_ROOT)
+    except Exception as exc:  # noqa: BLE001 — a broken probe must not stop the loop
+        return {"action": "attempt",
+                "reason": f"pickup probe errored: {type(exc).__name__}: {exc}"}
+
+
 async def execute(item: QueueItem) -> dict[str, Any]:
     from scripts.automod import backlog as B, state as S
 
@@ -1648,6 +1671,29 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     if pair is None:
         return {"status": "skipped", "summary": "no confirmed item with an acceptance check"}
     candidate, triage = pair
+
+    # A red-tree item whose red has already healed was picked up and worked
+    # anyway, because the only closer — `close_healed_red_tree` — is reachable
+    # solely from a FULL green `tests` rung. A heal that arrived on the vault
+    # surface has no closer on its own route at all (#2384's was vault commit
+    # `1f5900e1`, which runs no pytest), and a delta-only round never reaches the
+    # closer either; the item stayed `high` on the board and the loop spent a
+    # whole attempt learning what the item's own nodes answer in seconds (#2384:
+    # 22 turns, `round_id: null`, nothing to change; #1846: 14 turns, closed
+    # `unnecessary`). Ask before the `started` row below — that row is what spends
+    # the attempt, so a probe after it is a probe that already cost one.
+    settled = await asyncio.to_thread(_red_tree_settled_at_pickup, candidate)
+    if settled.get("action") == "closed":
+        S.append_event({"event": "backlog_implement", "item_id": candidate.id,
+                        "phase": "skipped", "name": candidate.name[:200],
+                        "slot": getattr(item, "dedup_key", None),
+                        "reason": f"red tree healed before the attempt: "
+                                  f"{settled.get('reason', '')}"[:400]})
+        return {"status": "skipped", "item_id": candidate.id,
+                "summary": (f"#{candidate.id}: its own nodes pass at "
+                            f"{str(settled.get('head') or '')[:12]} — closed already_done, "
+                            f"no attempt spent")[:500]}
+
     budget = int((item.payload or {}).get("max_turns") or DEFAULT_MAX_TURNS)
 
     # Read BEFORE the `started` row below, and this ordering is the whole

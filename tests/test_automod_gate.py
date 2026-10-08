@@ -2714,3 +2714,177 @@ def test_the_shapes_the_parser_pinned_before_the_anchor_still_parse():
         "pin_findings"] == [finding]
     for text in (f"{finding}\n", "INTERNALERROR> boom\n", ""):
         assert "pin_findings" in G._parse_pytest_summary(text), text[:40]
+
+
+# ---------------------------------------------------------------------------
+# The implement loop's pickup probe (#2385)
+#
+# The `tests` rung asks "did the ROUND break this". The implement loop asks a
+# different question — "is the red this item filed still there" — and had no way
+# to ask it, so a healed item was picked up and worked anyway: #2384 spent 22
+# turns and opened no round, #1846 spent 14 the same way. `red_tree_state_at_head`
+# is the same base probe with its base aimed at HEAD and its targets at the
+# item's own node ids, which is where it earns the right to close anything.
+# ---------------------------------------------------------------------------
+
+FINE = "tests/test_pre.py::test_fine"
+BROKEN = "tests/test_pre.py::test_already_broken"
+
+
+def test_a_pickup_probe_reruns_the_nodes_it_is_given(tmp_path):
+    """The seam the pickup decision depends on, against a real pytest: the probe
+    checks the live tree's HEAD out into a throwaway worktree and runs exactly
+    the node ids it was given there. A node that passes is not marked red because
+    a neighbour in the same file fails, and a node that fails cannot be read as
+    healed."""
+    repo, head = _repo_with_failing_test(tmp_path)
+    res = G.red_tree_state_at_head([FINE], python=Path(sys.executable),
+                                   live_root=repo, scratch=tmp_path / "green")
+    assert res["head"] == head and res["probed"] == [FINE], res
+    assert res["conclusive"] is True and res["unresolved"] == [], res["note"]
+    assert "fresh data root" in res["note"], \
+        "it runs the live venv against a checkout of HEAD, so #1436's rule applies"
+    listed = git(repo, "worktree", "list", "--porcelain").stdout
+    assert "baseline" not in listed, "the throwaway worktree is deregistered"
+
+    res = G.red_tree_state_at_head([FINE, BROKEN], python=Path(sys.executable),
+                                   live_root=repo, scratch=tmp_path / "red")
+    assert res["conclusive"] is True
+    assert res["unresolved"] == [BROKEN], res["note"]
+
+
+def test_a_pickup_probe_does_not_read_a_vanished_node_as_healed(tmp_path):
+    """The node was renamed since the item was filed, so pytest exits 4 having
+    collected nothing. `_failures_at_base` answers that with the empty set, which
+    at the GATE means "not pre-existing" and at pickup would mean "healed — close
+    it": the polarity is backwards exactly where closing is on the table, so
+    nothing-passed-and-nothing-failed is an inconclusive answer, never a green
+    one."""
+    repo, head = _repo_with_failing_test(tmp_path)
+    (repo / "tests" / "test_pre.py").write_text(
+        "def test_renamed_instead():\n    assert False\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "the node was renamed")
+    res = G.red_tree_state_at_head([BROKEN], python=Path(sys.executable),
+                                   live_root=repo, scratch=tmp_path / "s")
+    assert res["conclusive"] is False, res["note"]
+    assert res["unresolved"] == [BROKEN], "no answer is the still-red answer"
+
+
+def test_a_pickup_probe_calls_a_collection_error_a_node_that_is_still_red(tmp_path):
+    """A collection error names its FILE and means nothing inside it ran, so the
+    node inside it is unresolved — `close` requires every node to have passed,
+    not merely to have gone unmentioned by the summary."""
+    repo, head = _repo_with_failing_test(tmp_path)
+    (repo / "tests" / "test_pre.py").write_text(
+        "import definitely_not_a_real_module\n\ndef test_already_broken():\n"
+        "    assert False\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "a test file that will not import")
+    res = G.red_tree_state_at_head([BROKEN], python=Path(sys.executable),
+                                   live_root=repo, scratch=tmp_path / "s")
+    assert res["conclusive"] is True, res["note"]
+    assert res["unresolved"] == [BROKEN], res["note"]
+
+
+def test_a_pickup_probe_calls_a_hang_no_answer(tmp_path):
+    """The probe runs on the implement loop's slot, so it carries its own bound.
+    A hung test costs that bound and nothing else: the item is attempted as
+    today, and no red tree is retired."""
+    repo, head = _repo_with_failing_test(tmp_path)
+    (repo / "tests" / "test_pre.py").write_text(
+        "import time\n\n\ndef test_slow():\n    time.sleep(30)\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "a test that hangs")
+    res = G.red_tree_state_at_head(["tests/test_pre.py::test_slow"],
+                                   python=Path(sys.executable), live_root=repo,
+                                   scratch=tmp_path / "s", timeout=1.0)
+    assert res["conclusive"] is False, res["note"]
+    assert res["unresolved"] == ["tests/test_pre.py::test_slow"]
+    assert "timed out" in res["note"], res["note"]
+
+
+def test_a_pickup_probe_removes_the_scratch_it_made(tmp_path, monkeypatch):
+    """It is called once per red-tree pickup and never asked to clean up after
+    itself, so its scratch — a whole checkout — is its own to remove, and off
+    `/tmp`, which this box's suite has filled twice."""
+    from scripts.automod import worktree as W
+    monkeypatch.setattr(W, "WORK_ROOT", tmp_path / "work")
+    repo, head = _repo_with_failing_test(tmp_path)
+    res = G.red_tree_state_at_head([FINE], python=Path(sys.executable), live_root=repo)
+    assert res["conclusive"] is True and res["unresolved"] == [], res["note"]
+    assert list((tmp_path / "work").glob("red-tree-pickup-*")) == []
+
+
+@pytest.mark.parametrize("nodes,why", [
+    ([], "nothing to probe"),
+    (["tests/test_pre.py::test_fine"], "no tree to read HEAD from"),
+])
+def test_a_pickup_probe_with_nothing_to_answer_says_so(nodes, why, tmp_path):
+    """Both shapes that cannot produce a verdict say `conclusive: False` before
+    spending a subprocess, so the caller cannot mistake an empty `unresolved` for
+    a heal: an item with no nodes, and a tree git cannot name."""
+    res = G.red_tree_state_at_head(nodes, python=Path(sys.executable),
+                                   live_root=tmp_path / "not-a-repo",
+                                   scratch=tmp_path / "s")
+    assert res["conclusive"] is False and res["unresolved"] == list(nodes), res
+
+
+def test_a_pickup_probe_counts_a_node_whose_file_vanished_as_still_red(tmp_path):
+    """A node whose FILE was deleted since the item was filed cannot be handed to
+    pytest: asked for, pytest exits 4 with `ERROR: file or directory not found`
+    and runs nothing at all (measured), which would answer for its healthy
+    siblings too. So the probe never asks for it — and a green run of the
+    surviving targets says nothing about it. It counts as not passed, because the
+    alternative is retiring an item as healed whose test was simply removed."""
+    repo, head = _repo_with_failing_test(tmp_path)
+    other = "tests/test_other.py::test_sibling_also_red"
+    (repo / "tests" / "test_other.py").write_text(
+        "def test_sibling_also_red():\n    assert False\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "a second file that is red too")
+    (repo / "tests" / "test_pre.py").unlink()
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "one of the two red files was deleted")
+    res = G.red_tree_state_at_head([BROKEN, other], python=Path(sys.executable),
+                                   live_root=repo, scratch=tmp_path / "s")
+    assert res["conclusive"] is True, res["note"]
+    assert res["unresolved"] == [BROKEN, other], res["note"]
+    assert "whose file is gone" in res["note"], res["note"]
+
+
+def test_a_pickup_probe_reads_a_parametrised_failure_as_that_nodes_red(tmp_path):
+    """An item files `tests/test_beta.py::test_beta`; at HEAD the same test fails
+    as `test_beta[1]` and `test_beta[2]`, which is what the short summary reports
+    (measured: `FAILED tests/test_beta.py::test_beta[1] - assert 1 == 99`). Exact
+    id membership reads that as a clean answer and closes the item while its own
+    red sits two lines up in the same output, so a node matches a reported id on
+    its whole `file::name`, bracket suffix ignored, in both directions."""
+    repo, head = _repo_with_failing_test(tmp_path)
+    beta = "tests/test_beta.py::test_beta"
+    (repo / "tests" / "test_beta.py").write_text(
+        "import pytest\n\n\n@pytest.mark.parametrize('v', [1, 2])\n"
+        "def test_beta(v):\n    assert v == 99\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "the red became parametrised")
+    res = G.red_tree_state_at_head(["tests/test_pre.py::test_fine", beta],
+                                   python=Path(sys.executable), live_root=repo,
+                                   scratch=tmp_path / "a")
+    assert res["conclusive"] is True, res["note"]
+    assert res["unresolved"] == [beta], res["note"]
+    assert "2 already failing" in res["note"], \
+        "the run reported both param ids, and the item's node is one of them"
+
+    # The other direction is not a red answer, it is no answer: asked for a param
+    # id of a test that is no longer parametrised, pytest finds no match, exits 4
+    # and runs nothing, so the probe has no verdict to close with and every node
+    # counts unresolved — which spends the attempt, the safe reading of a drift it
+    # cannot resolve into an id.
+    (repo / "tests" / "test_beta.py").write_text(
+        "def test_beta():\n    assert False\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "the parametrization went away again")
+    res = G.red_tree_state_at_head([beta + "[1]"], python=Path(sys.executable),
+                                   live_root=repo, scratch=tmp_path / "b")
+    assert res["conclusive"] is False, res["note"]
+    assert res["unresolved"] == [beta + "[1]"], res["note"]

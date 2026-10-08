@@ -7145,3 +7145,91 @@ def close_healed_red_tree(base: str, round_id: str, live_root: Path | None = Non
                         "round_id": round_id}, path=ledger)
         closed.append(item.id)
     return closed
+
+
+#: Who wrote a `red_tree_closed` row that the full-run closer did not write.
+PICKUP_CLOSER = "pickup-probe"
+
+
+def close_healed_red_tree_at_pickup(item: Item, probe, *, live_root: Path | None = None,
+                                    ledger: Path | None = None,
+                                    closer: str = PICKUP_CLOSER) -> dict:
+    """Re-run one open red-tree item's OWN nodes at HEAD, and close it if they pass.
+
+    The closer above is the only closer the loop had, and it is reachable only
+    from a FULL green `tests` rung (`if ok and not only:` in `gate.rung_tests`).
+    So an already-healed item stays open: a delta-only green run (any round that
+    edits a test file) never reaches the closer, and a heal that arrived on the
+    VAULT surface has no closer on its own route at all — #2384's red was undone
+    by vault commit `1f5900e1`, which runs no pytest. The item then sits
+    `draft`/`high` on the board and the implement loop picks it and discovers by
+    hand, mid-turn, what this probe answers first: #2384 spent 22 turns and
+    opened no round, and #1846 nine days earlier spent 14 the same way — the only
+    two of the 50 red-tree items ever attempted that ended with no round.
+
+    `probe(nodes) -> {"head", "unresolved", "conclusive", "note"}` is injected —
+    in production `gate.red_tree_state_at_head` — so the decision is graded
+    without a pytest subprocess, and the probe's polarity stays with the probe.
+    `conclusive` is load-bearing here and nowhere else: `_failures_at_base` fails
+    CLOSED, so a worktree that would not build, a timeout and a pytest that
+    collected nothing all answer "no failures", which at the gate means "not
+    pre-existing" and would mean HERE "healed — close a live red tree".
+
+    The full-run closer's ancestry rule still holds, and it holds the same way:
+    a green run at a base the item's `red_tree_base` does not descend from says
+    nothing about the tree the item describes and closes nothing.
+
+    Returns `{"action": "closed" | "attempt", "item_id", "head", "reason"}`.
+    Every non-answer, refusal and mismatch is `attempt`, which is exactly today's
+    behaviour: the cost of being wrong that way is one round that was going to be
+    spent anyway, and the cost of being wrong the other way is a real red tree
+    filed as healed.
+    """
+    from scripts.automod import state as S
+    ledger = ledger or S.LEDGER_PATH
+    if item.status not in OPEN_STATUSES:
+        return {"action": "closed", "item_id": item.id, "head": "",
+                "reason": f"the item is `{item.status}`, not open: no attempt to spend"}
+    fm = _red_tree_fm(item)
+    nodes = [str(n) for n in (fm.get("red_tree_nodes") or []) if str(n).strip()]
+    if not nodes:
+        return {"action": "attempt", "item_id": item.id, "head": "",
+                "reason": "no `red_tree_nodes` in its front matter to probe"}
+    res = probe(nodes) or {}
+    head = str(res.get("head") or "")
+    note = str(res.get("note") or "")
+    if not res.get("conclusive"):
+        return {"action": "attempt", "item_id": item.id, "head": head,
+                "reason": f"pickup probe gave no answer: {note[:200]}"}
+    unresolved = [str(n) for n in (res.get("unresolved") or [])]
+    if unresolved:
+        still = ", ".join(unresolved[:3]) + (f", +{len(unresolved) - 3} more"
+                                             if len(unresolved) > 3 else "")
+        return {"action": "attempt", "item_id": item.id, "head": head,
+                "reason": f"still red at {head[:12]}: {still}"}
+    item_base = str(fm.get("red_tree_base") or "")
+    if not _is_ancestor(live_root, item_base, head):
+        return {"action": "attempt", "item_id": item.id, "head": head,
+                "reason": (f"the nodes pass at {head[:12] or '?'}, but the item was filed at "
+                           f"{item_base[:12] or '?'} and that is not an ancestor of the tree "
+                           f"the probe ran — a green run there says nothing about this item")}
+    update_frontmatter(item.path, {"red_tree_healed_base": head})
+    item = load_item(item.path) or item
+    evidence = (f"healed at pickup: the implement loop re-ran this item's own {len(nodes)} "
+                f"node(s) at HEAD {head[:12]}, which descends from {item_base[:12]} where they "
+                f"failed, and every one passed ({note[:160]})")
+    if record_verdict(item, "already_done", evidence, close=True) is None:
+        return {"action": "attempt", "item_id": item.id, "head": head,
+                "reason": "its front matter refused the close; the item stays as it is"}
+    S.append_event({"event": "backlog_triage", "item_id": item.id,
+                    "verdict": "already_done", "closed": True, "auto": True,
+                    "red_tree": True, "evidence": evidence, "spawned": [],
+                    "closed_by": closer}, path=ledger)
+    # `base` keeps the row identical in shape to the full-run closer's, so the
+    # scorecard counts a pickup close beside its closes; `head` names the same
+    # sha for a reader who only knows this probe.
+    S.append_event({"event": "red_tree_closed", "item_id": item.id, "base": head,
+                    "head": head, "closed_by": closer, "nodes": sorted(nodes),
+                    "probe": note}, path=ledger)
+    return {"action": "closed", "item_id": item.id, "head": head,
+            "reason": f"{len(nodes)} node(s) pass at {head[:12]}"}

@@ -228,3 +228,139 @@ def test_the_overflow_merges_into_a_second_open_item_that_is_not_worked(isolated
     assert res == {"item_id": second, "action": "merged"}
     assert _fm(B.item_by_id(second))["red_tree_nodes"] == sorted([OTHER, RED2])
     assert _fm(B.item_by_id(first))["red_tree_nodes"] == [RED]
+
+
+# ── the implement loop's pickup probe ───────────────────────────────────────
+# `close_healed_red_tree` above is reachable only from a FULL green `tests`
+# rung, so an item whose red was healed by a vault commit — or by anything at
+# all that the next round happens not to re-run — stayed open and was picked up:
+# #2384 spent 22 turns and opened no round, and #1846 nine days earlier spent 14
+# and was closed `unnecessary`. These tests drive the decision with the pytest
+# subprocess injected, which is the seam the decision actually lives at; the
+# probe itself, aimed at a real pytest in a throwaway worktree, is
+# `tests/test_automod_gate.py::test_a_pickup_probe_reruns_the_nodes_it_is_given`.
+
+def _probe_result(head, unresolved=(), *, conclusive=True, note=None):
+    """A stand-in for `gate.red_tree_state_at_head`, closing over one answer."""
+    def probe(nodes):
+        return {"head": head, "probed": list(nodes), "unresolved": list(unresolved),
+                "conclusive": conclusive,
+                "note": note if note is not None
+                        else f"probed {len(nodes)} node(s) at base {head[:8]}: "
+                             f"0 already failing"}
+    return probe
+
+
+def _pickup(isolated, item_id, r, probe):
+    """The default ledger is `S.LEDGER_PATH`, which `isolated` points at tmp."""
+    return B.close_healed_red_tree_at_pickup(B.item_by_id(item_id), probe, live_root=r)
+
+
+def test_a_pickup_probe_that_finds_every_node_green_closes_the_item(isolated, repo):
+    """Clause 2: the close goes through `already_done` and leaves a
+    `red_tree_closed` row naming the item, the probed head and who closed it."""
+    r, c = repo
+    iid = B.file_red_tree_item(c["c1"], [RED, RED2], "SM_A", [], live_root=r)["item_id"]
+    res = _pickup(isolated, iid, r, _probe_result(c["c2"]))
+    assert res["action"] == "closed" and res["head"] == c["c2"], res
+
+    item = B.item_by_id(iid)
+    assert item.status == "done", "closed through the verdict path, not parked"
+    assert _fm(item)["autotriage_retired"] == "already_done"
+    assert _fm(item)["red_tree_healed_base"] == c["c2"], \
+        "the heal is recorded on the item, as the full-run closer records its base"
+
+    row = [e for e in _events("red_tree_closed") if e["item_id"] == iid][-1]
+    assert row["base"] == c["c2"] and row["head"] == c["c2"], "the probed head"
+    assert row["closed_by"] == B.PICKUP_CLOSER, "who closed it"
+    assert row["nodes"] == sorted([RED, RED2])
+    triage = [e for e in _events("backlog_triage")
+              if e["item_id"] == iid and e["verdict"] == "already_done"]
+    assert triage and triage[-1]["closed"] is True and triage[-1]["auto"] is True
+    assert _events("backlog_implement") == [], \
+        "the close is the alternative to an attempt, not a note beside one"
+
+
+def test_a_pickup_probe_that_finds_a_node_still_red_credits_nothing(isolated, repo):
+    """Clause 3, the negative control: one listed node still failing at the
+    probed head (of the two this item lists) means the item is picked up exactly
+    as it is today — the decision half here, and `tests/test_autocode_continuation
+    .py::test_a_red_tree_whose_nodes_still_fail_is_started_exactly_as_today` pins
+    the `started` row and the turn."""
+    r, c = repo
+    iid = B.file_red_tree_item(c["c1"], [RED, RED2], "SM_A", [], live_root=r)["item_id"]
+    res = _pickup(isolated, iid, r, _probe_result(c["c2"], unresolved=[RED2]))
+    assert res["action"] == "attempt", res
+    assert res["reason"] == f"still red at {c['c2'][:12]}: {RED2}", \
+        "one red node is enough to pick the item up, and the reason names only it"
+
+    item = B.item_by_id(iid)
+    assert item.status == "up_next" and item.priority == "high", "still queued for the loop"
+    assert "red_tree_healed_base" not in _fm(item)
+    assert _events("red_tree_closed") == [], \
+        "the decision function may not spend a verdict it did not earn"
+
+
+@pytest.mark.parametrize("cause,note", [
+    ("worktree", "baseline worktree failed: fatal: bad object f321907091baa"),
+    ("timeout", "baseline probe timed out after 300s"),
+    ("nothing collected",
+     "baseline probe INCONCLUSIVE at base f3219070 — pytest produced no summary "
+     "(rc=4): ERROR: not found: tests/test_uptake.py::test_a_failing_test"),
+])
+def test_an_inconclusive_pickup_probe_closes_nothing_even_though_it_found_no_failures(
+        isolated, repo, cause, note):
+    """Clause 4. `_failures_at_base` fails CLOSED, so an unbuildable worktree, a
+    timeout and a pytest that collected nothing all come back with an EMPTY set
+    of failures — which at the gate means "not pre-existing" and here would mean
+    "healed, close a live red tree" if the close keyed on the set. The close keys
+    on `conclusive` instead, so all three leave the item exactly as they found
+    it, and the `unresolved` list below is empty in every case: that is the trap.
+    """
+    r, c = repo
+    iid = B.file_red_tree_item(c["c1"], [RED], "SM_A", [], live_root=r)["item_id"]
+    res = _pickup(isolated, iid, r, _probe_result(c["c2"], (), conclusive=False, note=note))
+    assert res["action"] == "attempt", f"{cause}: an empty answer is not a heal"
+    assert cause in res["reason"] or note[:40] in res["reason"]
+    assert B.item_by_id(iid).status == "up_next"
+    assert _events("red_tree_closed") == [], "nothing was credited to a run that did not happen"
+
+
+def test_a_green_pickup_probe_at_a_tree_the_item_does_not_descend_from_closes_nothing(
+        isolated, repo):
+    """Clause 5: the ancestry rule the full-run closer obeys holds at pickup too.
+    `c1` is the item's own base's ancestor and `c3` a sibling branch; a green run
+    at either says nothing about the tree the item was filed against."""
+    r, c = repo
+    iid = B.file_red_tree_item(c["c2"], [RED], "SM_A", [], live_root=r)["item_id"]
+    assert _pickup(isolated, iid, r, _probe_result(c["c1"]))["action"] == "attempt", \
+        "an ancestor of the item's base proves nothing"
+    assert _pickup(isolated, iid, r, _probe_result(c["c3"]))["action"] == "attempt", \
+        "an unrelated branch proves nothing either"
+    assert _events("red_tree_closed") == [] and B.item_by_id(iid).status == "up_next"
+    assert _pickup(isolated, iid, r, _probe_result(c["c2"]))["action"] == "closed", \
+        "the base the item was filed at is itself, and a green run there is the answer"
+
+
+def test_an_item_that_is_not_a_red_tree_item_is_picked_up_without_any_probe(isolated, repo):
+    """The probe is a red-tree-item thing: an ordinary item costs the loop nothing
+    and its nodes are never run."""
+    r, c = repo
+    write_item(isolated, 41)
+    asked: list = []
+    res = B.close_healed_red_tree_at_pickup(
+        B.item_by_id(41), lambda nodes: asked.append(list(nodes)) or {}, live_root=r)
+    assert res["action"] == "attempt" and asked == []
+
+
+def test_a_closed_red_tree_item_is_not_probed_or_resurrected(isolated, repo):
+    """A green probe never re-writes a `done` item's close, and never starts a
+    turn for it either — there is no attempt left to spend."""
+    r, c = repo
+    iid = B.file_red_tree_item(c["c1"], [RED], "SM_A", [], live_root=r)["item_id"]
+    B.close_healed_red_tree_at_pickup(B.item_by_id(iid), _probe_result(c["c2"]), live_root=r)
+    before = _events("red_tree_closed")
+    res = B.close_healed_red_tree_at_pickup(B.item_by_id(iid), _probe_result(c["c3"]),
+                                            live_root=r)
+    assert res["action"] == "closed" and "not open" in res["reason"]
+    assert _events("red_tree_closed") == before, "one close, one row"
