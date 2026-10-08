@@ -28,7 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB
 from app.kg_store import (EDGE_TYPES, StoreUnavailable, canonical_edge_type,
                           store as _kg_store)
-from scripts.reflection_archive import copy_gaps as _copy_gaps, reports_in as _reports_in
+from scripts.reflection_archive import (copy_gaps as _copy_gaps,
+                                        pattern_staleness as _pattern_staleness,
+                                        reports_in as _reports_in)
 
 DEFAULT_OUTPUT_DIR = PIPELINE_DIR / "reflection"
 
@@ -826,6 +828,7 @@ def generate_report(
     copy_gaps: list | None = None,
     trace_coverage: tuple[int, int] | None = None,
     stamp_cohort: dict | None = None,
+    pattern_staleness: list | None = None,
 ) -> str:
     """Generate the markdown health report.
 
@@ -855,6 +858,14 @@ def generate_report(
     `copy_gaps` is `reflection_archive.copy_gaps` over the reflection directory:
     a report naming an archive copy the directory lacks is a lost cycle (#1227).
     None means not measured, and the section says that too.
+
+    `pattern_staleness` is `reflection_archive.pattern_staleness` over the same
+    directory (#2413): a §2e pattern file whose newest dated archive copy predates
+    the newest `knowledge-write-*` report. It is the answer to the shape `copy_gaps`
+    cannot see — a run that skipped the archive step names no copy in its report, so
+    no pointer goes missing and the pointer check is silent while the file on disk is
+    a cycle behind. Task 39's run of 2026-10-07 did exactly that and reported
+    `status: success`. None means not measured.
 
     `trace_coverage` is the `(n, m)` pair from `contradiction_trace_coverage`: how
     many of the m fact records carry a `conflicts_with` resolution trace (#1596).
@@ -1150,6 +1161,27 @@ def generate_report(
             lines.append(f"| `{gap.report.name}` | `{gap.copy}` |")
         if len(copy_gaps) > SECTION_ROW_CAP:
             lines.append(f"| … | *{len(copy_gaps) - SECTION_ROW_CAP:,} more* |")
+    lines.append("")
+
+    # The same retention question, asked of the directory rather than of the
+    # report's own pointer (#2413). A run that skipped §2e's `cp` names no copy, so
+    # the rows above are empty and the pattern file is still a cycle behind.
+    lines.append("### §2e pattern files behind the newest report")
+    lines.append("")
+    if pattern_staleness is None:
+        lines.append("*Not measured: the pattern files were not checked for a stale archive.*")
+    elif not pattern_staleness:
+        lines.append("Pattern files behind the newest report: 0 — every §2e archive is current.")
+    else:
+        lines.append(f"Pattern files behind the newest report: {len(pattern_staleness)}")
+        lines.append("")
+        lines.append("| Pattern file | Newest dated copy | Newest report |")
+        lines.append("|--------------|-------------------|---------------|")
+        for stale in pattern_staleness[:SECTION_ROW_CAP]:
+            lines.append(f"| `{stale.stem}.md` | `{stale.newest_copy or 'none on disk'}` "
+                         f"| `{stale.report}` |")
+        if len(pattern_staleness) > SECTION_ROW_CAP:
+            lines.append(f"| … | *{len(pattern_staleness) - SECTION_ROW_CAP:,} more* |")
     lines.append("")
 
     lines.append("## Suggested Research Questions")
@@ -1457,13 +1489,17 @@ def main():
     trace_coverage = contradiction_trace_coverage(entities)
     reflection_dir = DEFAULT_OUTPUT_DIR
     gaps = _copy_gaps(reflection_dir, _reports_in(reflection_dir))
+    # The directory listing only — no second read of the report bodies, which the
+    # line above already did for the pointer check (#2413).
+    stale_patterns = _pattern_staleness(reflection_dir)
 
     # Generate report
     report = generate_report(entity_stats, rel_stats, edges, stale_facts, now, hygiene,
                              fact_dups=fact_dups, stale_unevaluable=stale_unevaluable,
                              duplicate_id_files=dup_id_files, copy_gaps=gaps,
                              trace_coverage=trace_coverage,
-                             stamp_cohort=stamp_cohort)
+                             stamp_cohort=stamp_cohort,
+                             pattern_staleness=stale_patterns)
 
     # Write output
     output_dir = args.output_dir

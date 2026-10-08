@@ -406,3 +406,141 @@ def reports_in(reflection_dir: Path) -> dict[Path, str]:
                 except OSError:
                     continue
     return out
+
+
+# ── Pattern-file currency: the second directory check (#2413) ────────────────
+#
+# `copy_gaps` above asks one question — did a cycle lose a copy *its own report
+# names*? — and deliberately never asks a calendar question, because pattern
+# files are only rewritten on nights the run wrote them. That discipline is why
+# it cannot see the shape #2413 caught: task 39's run of 2026-10-07 skipped §2e
+# entirely, so it named no copy, `copy_gaps` returned nothing, and the
+# `tool-patterns-latest.md` on disk still read "written 2026-10-06" while the run
+# reported `status: success` with `stop_reason: "stop"`. The only thing that
+# caught it was a step-conformance replay over a 14-day window.
+#
+# So this asks the question the pointer check structurally cannot: is the newest
+# dated archive of a file §2e mandates archiving on *every* cycle older than the
+# newest completed nightly cycle? That is a state comparison, not a per-report
+# one, and it keeps reporting while the stale state persists rather than for the
+# one cycle that caused it — which is the point: the 2026-10-07 gap was still
+# live on 2026-10-08 when the replay caught it.
+#
+# Where the two checks disagree, this one is not contradicting the other. A night
+# that wrote no pattern file at all makes no copy and loses nothing per
+# `copy_gaps`, and still shows here until the next cycle rewrites the file. That
+# is the cost of the shape, and it is bounded: the finding clears as soon as one
+# §2e step runs.
+
+#: The §2e pattern output files, named in
+#: `skills/nightly-reflection-knowledge-write/steps-2b-2f.md` §2e, which requires
+#: one `Read` + one `cp` + one `Write` per file on every cycle. Named as a
+#: constant instead of scanned out of the skill for the reason in this module's
+#: docstring: the vault is state no round under test controls, so a rule read from
+#: it at check time would punish the next author for the previous writer's wording.
+#: §2e names exactly these two; `signals-latest.md` is another skill's archive
+#: contract (`nightly-reflection-signals` Phase 0) and is left to `copy_gaps`.
+PATTERN_STEMS = ("tool-patterns-latest", "conversation-patterns-latest")
+
+#: A dated archive copy of a governed stem, `<stem>-<YYYY-MM-DD>[-HHMM].md`. The
+#: time is optional because the family already holds date-only names
+#: (`signals-latest-2026-08-31.md`) beside `-HHMM` siblings, and a single-format
+#: parser skips the other shape silently. Both are UTC, per §2e's `date -u` rule.
+_STAMPED_COPY = re.compile(r"^(%s)-(\d{4})-(\d{2})-(\d{2})(?:-(\d{2})(\d{2}))?\.md$"
+                           % "|".join(PATTERN_STEMS))
+
+#: The report a completed nightly cycle leaves. Anchored on the date so
+#: `knowledge-write-error-2026-09-24.md` — a cycle that died before §2e — is not
+#: read as one that owed a pattern-file archive.
+KNOWLEDGE_WRITE_REPORT = re.compile(r"^knowledge-write-(\d{4})-(\d{2})-(\d{2})\.md$")
+
+
+@dataclass(frozen=True)
+class PatternStaleness:
+    """A governed pattern file whose newest archive predates the newest report.
+
+    `newest_copy` is None when the directory holds no dated copy of the stem at
+    all, which is the shape the chain lived in from 2026-08-22 to 2026-09-12
+    (#436): nightly cycles, not one archive.
+    """
+    stem: str
+    newest_copy: str | None
+    report: str
+
+
+def _utc_key(year: str, month: str, day: str,
+             hour: str | None = None, minute: str | None = None) -> tuple[int, ...]:
+    """Sortable UTC key for a filename stamp; a missing time reads as 00:00."""
+    return (int(year), int(month), int(day), int(hour or 0), int(minute or 0))
+
+
+def _listing(d: Path) -> list[str]:
+    """The file names in `d`, or an empty list when `d` is not a readable directory.
+
+    `copy_gaps` never had to ask this question: it only ever stats a name a report
+    handed it, so a missing directory reads as "nothing named is missing". This check
+    lists the tree, so the absent tree is its case to handle — a reflection directory
+    that does not exist yet owes no archive, and must not raise out of a nightly
+    report. `tests/test_knowledge_health_stale_facts.py` runs the report's `main()`
+    against an empty tmp tree and caught exactly this.
+    """
+    try:
+        return sorted(p.name for p in d.iterdir() if p.is_file())
+    except OSError:
+        return []
+
+
+def _newest_matching(names: list[str], rx: re.Pattern[str]) -> tuple[str | None, tuple[int, ...] | None]:
+    """The name in `names` matching `rx` with the highest stamp, and that stamp.
+
+    Judged on the stamp in the name and never on mtime: §2e's own rule is that the
+    stamp comes from `date -u`, and a copy restored by hand has an mtime that
+    describes the restoring, not the cycle.
+    """
+    newest_name: str | None = None
+    newest_key: tuple[int, ...] | None = None
+    for name in names:
+        m = rx.match(name)
+        if not m:
+            continue
+        key = _utc_key(*m.groups())
+        if newest_key is None or key > newest_key:
+            newest_name, newest_key = name, key
+    return newest_name, newest_key
+
+
+def pattern_staleness(reflection_dir: Path) -> list[PatternStaleness]:
+    """One finding per governed pattern file whose archive fell behind the cycles.
+
+    The comparison is a `>=` on UTC keys: a copy stamped the same day as the newest
+    report is current, because the report's name carries a date and §2e's stamp
+    carries the hour, so "later that same night" and "the previous evening" are the
+    same day and only the day is shared between the two name shapes.
+
+    Two shapes never fire. A directory with no dated `knowledge-write-*` report has
+    completed no cycle, so nothing is owed — a first run, or a tree whose reports
+    have been swept, must read as silence and not as a gap. And a governed stem
+    with no dated copy and only one report is a first cycle: §2e's `test -f` gate
+    exists precisely because there is nothing to archive the first time. With two
+    or more reports behind it, zero copies is the #436 shape and does fire.
+    """
+    reflection_dir = Path(reflection_dir)
+    names = _listing(reflection_dir)
+    report, report_key = _newest_matching(names, KNOWLEDGE_WRITE_REPORT)
+    if report is None or report_key is None:
+        return []
+    reports = sum(1 for n in names if KNOWLEDGE_WRITE_REPORT.match(n))
+    out: list[PatternStaleness] = []
+    for stem in PATTERN_STEMS:
+        copy_rx = re.compile(
+            r"^%s-(\d{4})-(\d{2})-(\d{2})(?:-(\d{2})(\d{2}))?\.md$" % re.escape(stem))
+        if f"{stem}.md" not in names:
+            continue
+        copy, copy_key = _newest_matching(names, copy_rx)
+        if copy_key is None:
+            if reports >= 2:
+                out.append(PatternStaleness(stem, None, report))
+            continue
+        if copy_key < report_key:
+            out.append(PatternStaleness(stem, copy, report))
+    return out
