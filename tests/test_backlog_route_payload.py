@@ -37,15 +37,21 @@ from app.routers import backlog as BR
 def write_item(
     d: Path, item_id: int, *, board: str = "lloyd", status: str = "draft",
     name: str | None = None, body: str = "Do the thing.", tags: list | None = None,
+    created: str = "2026-09-01T00:00:00", updated: str = "2026-09-01T00:00:00",
 ) -> Path:
-    """One conformant backlog file, the shape `backlog_task_create` writes."""
+    """One conformant backlog file, the shape `backlog_task_create` writes.
+
+    `created`/`updated` are overridable so a test can pin the front-matter stamps
+    it means to read back (#2419 clause 4); every existing caller keeps the
+    defaults, which are the values it always wrote.
+    """
     name = name or f"Item {item_id}"
     p = d / f"{item_id}-{name.lower().replace(' ', '-')[:30]}.md"
     fm = {
         "type": "backlog", "segment": "backlog", "status": status,
         "priority": "medium", "board": board, "blocked": False,
         "assigned": False, "position": item_id * 1000,
-        "created": "2026-09-01T00:00:00", "updated": "2026-09-01T00:00:00",
+        "created": created, "updated": updated,
     }
     if tags:
         fm["tags"] = list(tags)
@@ -147,6 +153,28 @@ def test_payload_matches_the_live_corpus_shape(backlog_dir):
         f"payload {len(payload):,} B against {on_disk:,} B on disk"
     )
     assert len(rows_of(BR.backlog_tasks())) == n, "payload shrank by dropping rows"
+
+
+def test_front_matter_stamps_are_served_unchanged_on_both_read_routes(backlog_dir):
+    """#2419 clause 4: the stamp a writer wrote is served back verbatim.
+
+    This is the boundary of the #2419 clock fix — only the *fallback* may move, so a
+    row with real `created:`/`updated:` must be byte-identical before and after it, on
+    the list and the detail route alike (both are built by `_row_from`). The control
+    that makes this more than a tautology is the inode: the file was written a moment
+    ago, so its ctime and mtime are *now*, months away from the 2026-03-05 and
+    2026-03-09 stamps in its front matter. A fallback that fired anyway, or fired in
+    the machine's zone, lands on a different string.
+    """
+    created, updated = "2026-03-05T04:05:06.123456", "2026-03-09T07:08:09.654321"
+    write_item(backlog_dir, 8, created=created, updated=updated)
+
+    row = rows_of(BR.backlog_tasks())[0]
+    detail = json.loads(bytes(BR.backlog_task_detail(8).body))
+    assert row["created_at"] == created, row["created_at"]
+    assert row["updated_at"] == updated, row["updated_at"]
+    assert detail["created_at"] == created, detail["created_at"]
+    assert detail["updated_at"] == updated, detail["updated_at"]
 
 
 def test_short_body_is_returned_whole_as_the_snippet(backlog_dir):

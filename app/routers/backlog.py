@@ -315,6 +315,29 @@ def _snippet(text: str) -> str:
     return text[:DESC_SNIPPET_CHARS].rstrip() + "…"
 
 
+def _inode_instant(ts: float) -> datetime:
+    """One `stat()` timestamp as the store spells an instant: naive UTC numerals.
+
+    An epoch float has no zone to get wrong; the zone enters at the conversion.
+    `datetime.fromtimestamp(ts)` with no `tz=` argument answers in the machine's
+    local zone, and every consumer of the two fields this feeds reads a bare
+    stamp as **UTC** — the front end (`new Date(task.created_at)`,
+    `web/src/components/pages/BacklogPage.tsx`) and the `?done_since=` window
+    alike — so on this box (PDT, -0700) an inode-derived stamp arrives seven
+    hours behind its own instant. #1517 moved the `?done_since=` mtime rung onto
+    UTC and left this module's other epoch call behind; item #2419 routes both
+    through here so the row the board shows and the clock that windows it cannot
+    disagree.
+
+    Naive on purpose. The store's stamps are naive-UTC by ruling (`
+    `app/backlog_move.py:42-48`, and `now_stamp()` writes no offset), so an
+    *aware* value here would serialise as `...+00:00` — a shape no front-matter
+    stamp in this store has, which is why the fix ends in
+    `.replace(tzinfo=None)` exactly as the sibling rung below does.
+    """
+    return datetime.fromtimestamp(ts, timezone.utc).replace(tzinfo=None)
+
+
 def _row_from(path: Path, fm: dict, body: str, board_map: dict) -> dict:
     """One list row. `description` is a snippet: the whole body lives at
     `GET /api/backlog/task/{id}`, and `?q=` has already matched against it."""
@@ -325,10 +348,12 @@ def _row_from(path: Path, fm: dict, body: str, board_map: dict) -> dict:
     stat = path.stat()
     created = fm.get("created") or fm.get("created_at") or ""
     updated = fm.get("updated") or fm.get("updated_at") or ""
+    # A file whose front matter has no stamp is dated by its inode, in the same
+    # clock as a stamp a writer wrote (#2419).
     if not created:
-        created = datetime.fromtimestamp(stat.st_ctime).isoformat()
+        created = _inode_instant(stat.st_ctime).isoformat()
     if not updated:
-        updated = datetime.fromtimestamp(stat.st_mtime).isoformat()
+        updated = _inode_instant(stat.st_mtime).isoformat()
     if isinstance(created, datetime):
         created = created.isoformat()
     if isinstance(updated, datetime):
@@ -494,12 +519,17 @@ def _done_date(path: Path, fm: dict) -> datetime | None:
     result against `?done_since=`, a date the front end took from
     `toISOString()` (#1517). That is a change for two of the three: a
     `completed`-less `updated:` written before `LOCAL_STAMP_CUTOVER` was naive
-    *local*, and `st_mtime` came back through `fromtimestamp()` in the machine's
-    zone too. Both sat seven hours — enough to move the calendar date — on the far
-    side of a cut-off that never moved with them, so an item closed at 06:00 UTC
-    read as finished the previous evening and was cut from a window it belonged in.
-    `completed:` is the one field read untouched: it was UTC on both sides of the
+    *local*, and `st_mtime` came back through a zone-less `fromtimestamp()` in the
+    machine's zone too. Both sat seven hours — enough to move the calendar date — on
+    the far side of a cut-off that never moved with them, so an item closed at 06:00
+    UTC read as finished the previous evening and was cut from a window it belonged
+    in. `completed:` is the one field read untouched: it was UTC on both sides of the
     cut-off, and re-reading it as local would move every closed item forward.
+
+    The mtime rung goes through `_inode_instant`, the same derivation the row
+    serializer uses for its metadata fallback (#2419), so the stamp the board shows a
+    dateless row and the clock that decides whether that row is inside this window
+    are the one reading of the same inode.
     """
     for key in ("completed", "updated", "updated_at"):
         parsed = _fm_date(fm.get(key))
@@ -507,7 +537,7 @@ def _done_date(path: Path, fm: dict) -> datetime | None:
             # UTC numerals, because `done_since` is a UTC date.
             return utc_instant(parsed, legacy_local=key != "completed").replace(tzinfo=None)
     try:
-        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).replace(tzinfo=None)
+        return _inode_instant(path.stat().st_mtime)
     except OSError:                         # vanished between the scan and here
         return None
 

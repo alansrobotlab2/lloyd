@@ -658,3 +658,151 @@ def test_the_cut_off_comment_names_the_reason_a_backfill_was_refused():
     assert "double-move" in comment, (
         "the mechanism of the harm is missing, leaving only the conclusion"
     )
+
+
+# ── #2419: the row serializer dates a dateless file by its inode, in UTC ──────
+#
+# #1517 put the writers on one clock and moved the `?done_since=` mtime rung onto
+# UTC, but it left a second, zone-less epoch call in the same file: when front matter
+# carries no `created:`/`updated:`, the serializer fills the row from `stat()`, and
+# `datetime.fromtimestamp(ts)` with no `tz=` answers in the machine's local zone while
+# every consumer of `created_at`/`updated_at` reads a bare stamp as UTC — the front
+# end's `new Date(task.created_at)` and the done window both. Triage measured it on
+# the live board (2026-10-08, `TZ=America/Los_Angeles` pinned): item #223, whose front
+# matter has no `created:`, was served `created_at = 2026-09-16T14:20:12.891027`
+# against an inode instant of 2026-09-16T21:20:12.891027Z — seven hours behind its own
+# file — and of 2,357 backlog files 13 have no `created:` and 47 no `updated:`, so the
+# fallback has live rows. It is a read path and never writes the file, which is why
+# the item is low: what moves is the board's display and anything that orders by
+# `created`.
+
+#: The module holding the backlog read path — `_row_from`, both GET routes and the
+#: done window all live in it, so one path is the whole read surface.
+BACKLOG_READ_PATHS = ("app/routers/backlog.py",)
+
+
+def fromtimestamp_calls(path: Path) -> tuple[list[int], list[int]]:
+    """`(bare, zoned)` line numbers of every `…fromtimestamp(…)` call in `path`.
+
+    "bare" is the zone-less form — no second positional argument and no `tz=`
+    keyword — the one that reads an epoch in the machine's local zone. Parsed
+    rather than grepped for the reason `naive_now_calls` gives: this module's
+    docstrings *describe* the retired call, and a grep would grade the prose.
+    """
+    bare: list[int] = []
+    zoned: list[int] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (isinstance(fn, ast.Attribute) and fn.attr == "fromtimestamp"):
+            continue
+        if len(node.args) >= 2 or any(kw.arg == "tz" for kw in node.keywords):
+            zoned.append(node.lineno)
+        else:
+            bare.append(node.lineno)
+    return bare, zoned
+
+
+def test_a_row_without_created_is_dated_by_its_ctime_instant(la_clock, client, route_dir):
+    """#2419 clause 1: `created_at` is the file's `st_ctime` instant, to the second.
+
+    The file is written with an `updated:` and no `created:`, so the only candidate
+    for the field is the inode, and `la_clock` pins the zone rather than inheriting
+    it — on this box the two clocks sit seven hours apart, which
+    `_assert_clocks_differ()` inside `assert_utc_stamp` says out loud. Read through
+    the route, not the helper: `created_at` crosses the HTTP boundary as a string
+    (`str(created)` on the row, then JSON), and a test that called `_row_from`
+    directly would never see how the value is spelled on the wire.
+
+    Before the fix this fails by exactly the seven hours: the same fixture served
+    `2026-09-16T14:20:12` where the inode said `21:20:12Z`.
+    """
+    f = write_item(route_dir, 40, "draft", updated="2026-01-01T00:00:00")
+    assert "created" not in read_fm(f), "the fixture must have no `created:` to fall back on"
+    ctime = datetime.fromtimestamp(f.stat().st_ctime, timezone.utc).replace(tzinfo=None)
+
+    rows = {r["id"]: r for r in json.loads(client.get("/api/backlog/tasks").content)}
+    detail = json.loads(client.get("/api/backlog/task/40").content)
+    for label, row in (("list route", rows[40]), ("detail route", detail)):
+        served = assert_utc_stamp(row["created_at"], what=f"{label} `created_at`")
+        drift = abs((served - ctime).total_seconds())
+        assert drift <= 1, (
+            f"{label} dated item 40 at {served.isoformat()} against an inode ctime "
+            f"of {ctime.isoformat()} — {drift / 3600:+.2f} h off its own file. A "
+            "zone-less `fromtimestamp()` reads the epoch in the machine's zone while "
+            "every reader of this field reads it as UTC."
+        )
+
+
+def test_a_row_without_updated_is_dated_by_its_mtime_instant(la_clock, client, route_dir):
+    """#2419 clause 2: `updated_at` is the file's `st_mtime` instant, to the second.
+
+    The mtime is pinned with `os.utime` to a fixed post-cut-over instant, so this
+    compares against a number the test chose rather than against a clock it read a
+    moment ago — and `created:` is present, so only the `updated:` fallback moves.
+    """
+    instant = (C + timedelta(hours=26)).replace(tzinfo=timezone.utc)
+    ts = int(instant.timestamp())
+    f = write_item(route_dir, 41, "draft", created="2026-01-01T00:00:00")
+    assert "updated" not in read_fm(f), "the fixture must have no `updated:` to fall back on"
+    os.utime(f, (ts, ts))
+
+    rows = {r["id"]: r for r in json.loads(client.get("/api/backlog/tasks").content)}
+    served = assert_utc_stamp(rows[41]["updated_at"], what="list route `updated_at`")
+    drift = abs((served - instant.replace(tzinfo=None)).total_seconds())
+    assert drift <= 1, (
+        f"item 41 was served updated_at={served.isoformat()} for an mtime of "
+        f"{instant.isoformat()}Z — {drift / 3600:+.2f} h off. The done window already "
+        "dates the same inode in UTC, so the board and the window disagreed."
+    )
+
+
+def test_a_metadata_derived_stamp_keeps_the_stores_naive_shape(la_clock, client, route_dir):
+    """#2419 clause 3: an inode-derived stamp is spelled exactly like a written one.
+
+    Both halves come from one request: item 42 has front matter, item 43 has none, so
+    the two rows differ only in where their `created_at` came from. An aware value
+    would serialise as `…+00:00`, a shape no front-matter stamp in this store has
+    (`app/backlog_move.py:42-48` rules a mixed population out because `_fm_date`
+    cannot compare the two), so the fallback has to land on naive numerals — which is
+    also what `assert_utc_stamp` refuses an offset over, with the clock-gap control.
+    """
+    write_item(route_dir, 42, "draft", created="2026-09-01T00:00:00",
+               updated="2026-09-01T00:00:00")
+    write_item(route_dir, 43, "draft")
+
+    rows = {r["id"]: r for r in json.loads(client.get("/api/backlog/tasks").content)}
+    fm_stamp = rows[42]["created_at"]
+    meta_stamp = rows[43]["created_at"]
+    assert_utc_stamp(meta_stamp, what="metadata-derived `created_at`")
+    for label, stamp in (("front-matter", fm_stamp), ("metadata", meta_stamp)):
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?", stamp), (
+            f"the {label} stamp {stamp!r} is not the bare ISO form every board reader "
+            "parses; the fallback must not introduce a second shape"
+        )
+
+
+@pytest.mark.parametrize("rel", BACKLOG_READ_PATHS)
+def test_no_backlog_reader_converts_an_epoch_in_the_local_clock(rel: str):
+    """#2419 clause 5, guarded like `test_no_backlog_writer_calls_the_local_clock`.
+
+    No zone-less `fromtimestamp()` survives anywhere in the backlog read path — the
+    serializer's two fallbacks were the last of them, and 28 other epoch conversions
+    in `app/` and `scripts/` already pass `timezone.utc`. The positive control is the
+    same one that test uses: the module must still convert epochs *somewhere*, through
+    the shared `_inode_instant`, or a zero here would only prove the calls — or the
+    file — had been deleted.
+    """
+    path = _ROOT / rel
+    bare, zoned = fromtimestamp_calls(path)
+    text = path.read_text(encoding="utf-8")
+    assert bare == [], (
+        f"{rel} still converts an epoch in the machine's local zone at line(s) {bare}; "
+        "every stat()-derived stamp comes from `_inode_instant`"
+    )
+    assert zoned, f"{rel} converts no epoch at all, so the sweep above proved nothing"
+    assert "_inode_instant(" in text, (
+        f"{rel}'s epoch calls do not go through the shared derivation, so the next "
+        "reader added here can pick a zone again by hand"
+    )
