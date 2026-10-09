@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import importlib.util
 import inspect
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -272,3 +273,182 @@ def test_the_walk_itself_produces_the_two_stale_measurements(tmp_path):
         result["names"])
     sec = _stale_section(sl.render_report(result))
     assert "2 of 3" in sec, sec
+
+
+# ── #2451: the DUPLICATE trust cell derives its pair, it does not remember one ──
+#
+# The table's fourth column exists to tell a reader whether the 0 in a row is a
+# finding or a side-effect of the check. `CATEGORY_TRUST["DUPLICATE"]` answered
+# that with one named pair of skills — the pair the description gate had
+# suppressed when the sentence was written. Both members then left the scanned
+# set (one body merged into another skill, the other marked `status: archived`),
+# and every weekly run since printed a justification pointing at skills the walker
+# never yields beside a count of 0. That is landed-state-sentence rot in the one
+# column whose job is to be the anti-rot device. The cell now prints the pairs
+# THIS run's description gate suppressed, and says plainly when nothing measured
+# them.
+
+#: The remembered pair, assembled from pieces so this file never contains the
+#: strings it forbids — the same reason `RETIRED_UNEMITTED_CLAIMS` is built above.
+FORBIDDEN_DUPLICATE_PAIR = ("periodic-memory-" + "capture-dee",
+                            "periodic-memory-" + "capture-lloyd")
+
+
+def _skill_lint_source() -> str:
+    return (ROOT / "scripts" / "skill_lint.py").read_text(encoding="utf-8")
+
+
+def _duplicate_cell(report: str) -> str:
+    return _table_rows(report)["DUPLICATE"][3]
+
+
+def _suppressed(a: str, b: str, name_ratio: float = 0.95,
+                desc_ratio: float = 0.383) -> dict:
+    """One entry of `lint()`'s `duplicate_suppressed`, in the shape it writes."""
+    return {"a": a, "b": b, "name_ratio": name_ratio, "desc_ratio": desc_ratio}
+
+
+def _backticked(text: str) -> set[str]:
+    return set(re.findall(r"`([^`]+)`", text))
+
+
+def test_the_duplicate_trust_text_names_no_remembered_pair():
+    """Clause 1, first half: the item's grep, made executable.
+
+    The positive control runs first, because a `not in` over a path that failed to
+    resolve — or over a name whose concatenation broke — passes on every text
+    including the one that still carries the sentence. So the same read has to
+    return the table it is being checked against, and each banned name has to be
+    long enough to be a skill slug rather than a fragment.
+    """
+    source = _skill_lint_source()
+    assert "CATEGORY_TRUST" in source, "the read did not return scripts/skill_lint.py"
+    assert len(FORBIDDEN_DUPLICATE_PAIR) == 2, FORBIDDEN_DUPLICATE_PAIR
+    for name in FORBIDDEN_DUPLICATE_PAIR:
+        assert len(name) > 20 and "capture" in name, (
+            f"{name!r} is a fragment, not a skill name: a ban pattern that short "
+            "matches nothing and the assertion below proves nothing")
+        assert name not in source, (
+            f"{name} is back in scripts/skill_lint.py — the DUPLICATE trust row "
+            "has to derive its pair from the run's own scan, not remember one")
+
+
+def test_duplicate_cell_names_both_members_of_a_pair_the_gate_suppressed():
+    """Clause 3, first half: a fixture carrying exactly one suppressed pair."""
+    cell = _duplicate_cell(sl.render_report(_result(
+        duplicate_suppressed=[_suppressed("weekly-report-writer",
+                                          "weekly-report-writex")])))
+    assert cell.startswith(sl.TRUST_MARK[sl.CATEGORY_TRUST["DUPLICATE"][0]]), cell
+    assert "suppressed 1 name-close pair" in cell, cell
+    assert "`weekly-report-writer`/`weekly-report-writex`" in cell, cell
+    # Both ratios ride along, so the reader can check the call against the gates.
+    assert "0.95" in cell and "0.383" in cell, cell
+
+
+def test_duplicate_cell_says_the_gate_suppressed_nothing_when_the_list_is_empty():
+    """Clause 3, second half: the same cell from a fixture carrying no suppressed pair.
+
+    Empty and absent are different states and must not print the same sentence:
+    an empty list means the scan ran and held nothing back, which is a finding.
+    """
+    cell = _duplicate_cell(sl.render_report(_result(duplicate_suppressed=[])))
+    assert cell.startswith(sl.TRUST_MARK[sl.CATEGORY_TRUST["DUPLICATE"][0]]), cell
+    assert "suppressed none" in cell, cell
+    assert _backticked(cell) == set(), (
+        f"the only backticked tokens this cell may hold are skill names, and "
+        f"there is no name to print: {cell}")
+
+
+def test_duplicate_cell_names_no_skill_when_the_run_measured_nothing():
+    """Clause 4: the `_result()` shape — a result with no `duplicate_suppressed`
+    key at all, which is what every fixture and caller predating #2451 hands over.
+
+    The cell keeps the mechanism, says the pair set was not measured for THIS run,
+    and names nobody. It must not fall back to a remembered pair: that is the
+    sentence that started this item.
+    """
+    result = _result()
+    assert sl.DUPLICATE_SUPPRESSED_KEY not in result
+    cell = _duplicate_cell(sl.render_report(result))
+    assert cell.startswith(sl.TRUST_MARK[sl.CATEGORY_TRUST["DUPLICATE"][0]]), cell
+    assert "not measured" in cell, cell
+    assert "descriptions are close" in cell, (
+        f"the double-gate mechanism has to stay in the cell: {cell}")
+    assert _backticked(cell) == set(), cell
+
+
+def test_duplicate_verdict_stays_short_of_no_so_the_untrustworthy_list_is_unchanged():
+    """Clause 5: `mostly` or `yes`, never `no`.
+
+    `test_drift_and_stale_say_untrustworthy_and_name_their_cause` already pins
+    `untrustworthy_categories() == ["DRIFT", "STALE"]`. This pins the DUPLICATE
+    half of what makes that true, so the category cannot be demoted to `no` to
+    dodge having to derive its pair — a `no` would say the count is unmeasurable
+    when the change makes it more measurable than it was.
+    """
+    verdict = sl.CATEGORY_TRUST["DUPLICATE"][0]
+    assert verdict in ("yes", "mostly"), verdict
+    assert "DUPLICATE" not in sl.untrustworthy_categories()
+    assert sl.untrustworthy_categories() == ["DRIFT", "STALE"]
+
+
+def test_duplicate_cell_names_at_most_the_cap_and_points_at_the_payload():
+    """The cell stays readable when the gate suppresses many pairs.
+
+    Seven hand-built pairs, each with its own ratios, named in the order the scan
+    sorts them. `DUPLICATE_TRUST_NAMED_MAX` exists because the fourth column is
+    one table cell: the live library suppresses one pair today, but a naming
+    convention (`foo-a`, `foo-b`, …) would otherwise turn it into a dump of the
+    payload the JSON already carries.
+    """
+    many = [_suppressed(f"alpha-run-{chr(97 + i)}", f"alpha-run-{chr(97 + i)}x",
+                        name_ratio=round(0.95 - i / 100, 3))
+            for i in range(7)]
+    cell = _duplicate_cell(sl.render_report(_result(duplicate_suppressed=many)))
+    assert "suppressed 7 name-close pairs" in cell, cell
+    for pair in many[:sl.DUPLICATE_TRUST_NAMED_MAX]:
+        assert f"`{pair['a']}`" in cell, cell
+    for pair in many[sl.DUPLICATE_TRUST_NAMED_MAX:]:
+        assert f"`{pair['a']}`" not in cell, cell
+    assert "2 more" in cell, cell
+    assert sl.DUPLICATE_SUPPRESSED_KEY in cell, cell
+
+
+def test_the_duplicate_cell_cites_only_names_the_walk_it_ran_produced(tmp_path):
+    """Clause 1's property across the seam: `lint()`'s own scan feeds the cell.
+
+    One temp corpus, one `lint()` call, one rendered report — the chain the weekly
+    job runs, with no hand-built result in between. The fixture pair is 0.95 apart
+    on names and 0.383 on descriptions, so the only thing the cell can legitimately
+    name is a pair that is in `names` by construction. Before #2451 this failed on
+    every run: the cell named a pair no walk contains.
+    """
+    from agent_mcp.skills import iter_active_skills
+
+    specs = (("weekly-report-writer", "Use this skill when filing the weekly report."),
+             ("weekly-report-writex", "Use it to bleed the hydraulic brakes on the bike."),
+             ("reel-salt-tuning", "Use this skill when tuning a saltwater reel."))
+    for name, description in specs:
+        d = tmp_path / name
+        d.mkdir()
+        (d / "SKILL.md").write_text(
+            "---\n"
+            f"name: {name}\n"
+            f"description: {description}\n"
+            "tags: [demo]\nstatus: active\n---\n"
+            f"# SKILL: {name}\n\nBody for the fixture corpus.\n",
+            encoding="utf-8")
+
+    result = sl.lint(skill_records=list(iter_active_skills(roots=[tmp_path])))
+    assert result["duplicates"] == [], result["duplicates"]
+    assert [(s["a"], s["b"]) for s in result[sl.DUPLICATE_SUPPRESSED_KEY]] == [
+        ("weekly-report-writer", "weekly-report-writex")], result[sl.DUPLICATE_SUPPRESSED_KEY]
+
+    names = set(result["names"])
+    assert names == {n for n, _ in specs}, names
+    cell = _duplicate_cell(sl.render_report(result))
+    cited = _backticked(cell)
+    assert cited, f"the cell named nothing though the gate suppressed a pair: {cell}"
+    assert cited <= names, (
+        f"the DUPLICATE trust cell cites {sorted(cited - names)}, skills this "
+        f"walk never saw — the rot #2451 is about. Names: {sorted(names)}")

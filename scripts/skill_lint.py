@@ -311,17 +311,48 @@ def check_phantom_tools(name: str, content: str) -> list[str]:
 DUPLICATE_DESC_RATIO_THRESHOLD = 0.60
 
 
-def find_duplicates(skills: list[tuple[str, str]]) -> list[tuple[str, str, float]]:
-    """Near-duplicate pairs from a list of (name, description).
+#: The result key `lint()` writes the description-gate suppressions under, and the
+#: key `duplicate_trust_cause` reads. It is optional by design: a result built
+#: before #2451 — or by a caller that has not run the duplicate check — simply has
+#: no key, which is a third state the DUPLICATE trust cell renders (#2451 clause 4).
+DUPLICATE_SUPPRESSED_KEY = "duplicate_suppressed"
 
-    A pair is reported only when the names are close (`DUPLICATE_EDIT_RATIO_THRESHOLD`)
-    AND the descriptions are close (`DUPLICATE_DESC_RATIO_THRESHOLD`). The
-    reported score is the name ratio, so the report reads as before.
+#: How many suppressed pairs one trust cell is allowed to name. The name gate is
+#: strict enough that the live library suppresses exactly one pair today; the cap
+#: is there so a naming convention (`foo-a`, `foo-b`, `foo-c`…) cannot turn the
+#: table's fourth column into a dump of the payload the JSON already carries.
+#: Anything past the cap is pointed at, not printed.
+DUPLICATE_TRUST_NAMED_MAX = 5
+
+
+def find_duplicates(
+        skills: list[tuple[str, str]],
+) -> tuple[list[tuple[str, str, float]], list[dict]]:
+    """Near-duplicate pairs, and the pairs the description gate suppressed.
+
+    Returns `(reported, suppressed)` from ONE scan over `skills`:
+
+    * `reported` — pairs whose names are close (`DUPLICATE_EDIT_RATIO_THRESHOLD`)
+      AND whose descriptions are close (`DUPLICATE_DESC_RATIO_THRESHOLD`), scored
+      by the name ratio so the report reads as before.
+    * `suppressed` — pairs that cleared the name gate and then failed the
+      description gate, each as
+      `{"a", "b", "name_ratio", "desc_ratio"}`, sorted by descending name ratio.
+
+    The second half is why this returns two things. A suppressed pair is the only
+    reason a DUPLICATE count of 0 can be wrong, and until #2451 it was computed
+    and discarded inside the loop, so the report's explanation of its own 0 could
+    only be a remembered example — which rotted the moment the skills it named left
+    the library (#2287, #2401). Deriving it from the same scan that yields the
+    count is what keeps the explanation true without anyone re-reading it.
 
     A skill with no description falls back to name-only, which keeps the check
-    working for anything the MISSING_DESC category has yet to catch.
+    working for anything the MISSING_DESC category has yet to catch. Such a pair
+    has no description ratio and is not suppressed by this gate, so it never
+    reaches `suppressed`.
     """
     out: list[tuple[str, str, float]] = []
+    suppressed: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for i, (a, desc_a) in enumerate(skills):
         for b, desc_b in skills[i + 1:]:
@@ -335,9 +366,13 @@ def find_duplicates(skills: list[tuple[str, str]]) -> list[tuple[str, str, float
             if desc_a and desc_b:
                 d_ratio = difflib.SequenceMatcher(None, desc_a.lower(), desc_b.lower()).ratio()
                 if d_ratio < DUPLICATE_DESC_RATIO_THRESHOLD:
+                    suppressed.append({"a": key[0], "b": key[1],
+                                       "name_ratio": round(ratio, 3),
+                                       "desc_ratio": round(d_ratio, 3)})
                     continue
             out.append((*key, round(ratio, 3)))
-    return sorted(out, key=lambda t: -t[2])
+    suppressed.sort(key=lambda s: (-s["name_ratio"], s["a"], s["b"]))
+    return sorted(out, key=lambda t: -t[2]), suppressed
 
 
 def check_stale(skill_path: Path, fm: dict) -> tuple[bool, int]:
@@ -1156,7 +1191,7 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
                 "status": fm.get("status", "(unset)"),
             })
 
-    duplicates = find_duplicates(skills)
+    duplicates, duplicate_suppressed = find_duplicates(skills)
 
     return {
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
@@ -1172,6 +1207,11 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
         "missing_desc": missing_desc,
         "drift": drift,
         "duplicates": duplicates,
+        # #2451. The pairs the SECOND gate dropped on this very scan, with both
+        # ratios. They are not findings and never enter the count or the verdict:
+        # they are the reason the count can be 0 and still be wrong, which is what
+        # the DUPLICATE trust cell now prints instead of a remembered example.
+        DUPLICATE_SUPPRESSED_KEY: duplicate_suppressed,
         "stale": stale,
         # Why that count is 0, measured over the same walk: how many scanned skills
         # carry the `status: active` exemption that returns before the age check, and
@@ -1227,15 +1267,34 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
 #: cannot ship with an unqualified zero. `verdict` is one of TRUST_VERDICTS;
 #: only `"no"` makes the category untrustworthy for the verdict below.
 TRUST_VERDICTS = ("yes", "mostly", "no")
+
+#: The DUPLICATE mechanism, written once. The table entry and the derived cell
+#: (`duplicate_trust_cause`) both start from this sentence, so the explanation of
+#: the double gate cannot drift from the double gate. It names no skill: in this
+#: column a skill name appears only because the run's own scan produced it (#2451).
+DUPLICATE_TRUST_MECHANISM = (
+    "a pair is reported only when the names are close AND the descriptions are "
+    "close, so a name-close pair whose descriptions differ is suppressed by that "
+    "second gate and never counted — a judgment call this report cannot make")
 CATEGORY_TRUST: dict[str, tuple[str, str]] = {
     "DEAD": ("yes", "verified by independent recount over every scanned file"),
     "MISSING_DESC": ("yes", "same recount; every live skill parses and carries a description"),
     "DRIFT": ("no", "descriptions whose first token is ≤10 characters pass a "
                     "length heuristic, verb or not, and are never tested — "
                     "0 means 'the rest contain a trigger word', not 'none drift'"),
-    "DUPLICATE": ("mostly", "the name + description double gate suppresses a real "
-                            "pair (`periodic-memory-capture-dee`/`-lloyd`), which is "
-                            "a judgment call the report cannot make"),
+    # The mechanism, and nothing else. Until #2451 this entry closed by naming the
+    # one pair the description gate had suppressed when the sentence was written,
+    # and the report kept printing that pair after both members left the scanned
+    # library — one body merged into another skill (#2287), the other marked
+    # `status: archived` — so the column whose whole job is saying whether the 0 is
+    # real was pointing at skills `iter_active_skills` does not yield. No skill name
+    # belongs in this table entry: the live pairs are derived per run by
+    # `duplicate_trust_cause` from the same scan that produces the count, and this
+    # text is what the cell says when a run carries no such measurement.
+    "DUPLICATE": ("mostly", DUPLICATE_TRUST_MECHANISM
+                            + "; which name-close pairs the second gate suppressed "
+                            "is read off the same scan as the count, and for this "
+                            "run they were not measured"),
     # Both inert halves named, and the measured half pointed at. This entry used to
     # close by blaming the missing events, which stopped being true the day #435
     # landed (`3774e27b`, 2026-09-24): the rows exist, `app.skill_telemetry` reads
@@ -1278,8 +1337,61 @@ def untrustworthy_categories() -> list[str]:
     return [c for c, (verdict, _) in CATEGORY_TRUST.items() if verdict == "no"]
 
 
-def trust_cell(category: str) -> str:
+def duplicate_trust_cause(result: dict | None) -> str:
+    """Why the DUPLICATE count is what it is, from THIS run's scan (#2451).
+
+    Three states, and they must not print the same sentence:
+
+    * no measurement (no `duplicate_suppressed` key — the shape every result and
+      fixture predating #2451 has): the mechanism, and that nothing measured it.
+      Names no skill, because there is no measurement to name.
+    * measured, nothing suppressed: that is a finding, and it says so.
+    * measured, something suppressed: every named pair, with the two ratios that
+      put it on the right side of the name gate and the wrong side of the
+      description gate, so a reader can disagree with the call.
+
+    Backticks in this cell mean a skill name and nothing else — that is what makes
+    `tests/test_skill_lint_report_trust.py` able to assert that every name the cell
+    cites is a name the same walk produced, which is the property the old
+    remembered sentence failed. Pairs past `DUPLICATE_TRUST_NAMED_MAX` are named by
+    count and pointed at the JSON payload instead.
+    """
+    base = CATEGORY_TRUST["DUPLICATE"][1]
+    if not isinstance(result, dict) or DUPLICATE_SUPPRESSED_KEY not in result:
+        return base
+    suppressed = result[DUPLICATE_SUPPRESSED_KEY]
+    if not isinstance(suppressed, list):
+        return base
+    if not suppressed:
+        return (DUPLICATE_TRUST_MECHANISM
+                + ". This run's scan suppressed none: no name-close pair failed "
+                "the description gate, so the 0 beside this cell held nothing back")
+    named = suppressed[:DUPLICATE_TRUST_NAMED_MAX]
+    listed = "; ".join(f"`{p['a']}`/`{p['b']}` "
+                       f"(names {p['name_ratio']}, descriptions {p['desc_ratio']})"
+                       for p in named)
+    extra = len(suppressed) - len(named)
+    tail = (f", and {extra} more in the run's {DUPLICATE_SUPPRESSED_KEY} payload"
+            if extra else "")
+    n = len(suppressed)
+    return (DUPLICATE_TRUST_MECHANISM
+            + f". This run's scan suppressed {n} name-close "
+            + f"{'pair' if n == 1 else 'pairs'}: {listed}{tail} — the 0 beside "
+            "this cell is those pairs being judged not-duplicate, a call this "
+            "report cannot make alone")
+
+
+def trust_cell(category: str, result: dict | None = None) -> str:
+    """The table's fourth column.
+
+    `result` is optional because most categories are static prose; DUPLICATE is
+    the one row whose justification is a measurement, so `render_report` passes the
+    run's own result and a caller that cannot (an older test, a bare lookup) gets
+    the measured-nothing sentence rather than a stale example.
+    """
     verdict, cause = CATEGORY_TRUST[category]
+    if category == "DUPLICATE":
+        cause = duplicate_trust_cause(result)
     return f"{TRUST_MARK[verdict]} — {cause}"
 
 
@@ -1589,7 +1701,11 @@ def render_report(result: dict) -> str:
     lines.append("| category | count | action | is this count trustworthy? |")
     lines.append("|---|---|---|---|")
     for category, gloss, count, action in rows:
-        lines.append(f"| {category} ({gloss}) | **{count}** | {action} | {trust_cell(category)} |")
+        # `result` goes in because DUPLICATE's justification is a measurement, not
+        # prose: the cell prints the pairs THIS scan's description gate dropped.
+        # Every other category ignores the argument.
+        lines.append(f"| {category} ({gloss}) | **{count}** | {action} | "
+                     f"{trust_cell(category, result)} |")
     lines.append("")
     # One row per rule in the table, always, including the rules that matched
     # nothing. `n_phantom` is the precedent for why: until 2026-09-11 the count

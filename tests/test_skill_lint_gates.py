@@ -36,6 +36,7 @@ the graph and is not).
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -288,3 +289,136 @@ def test_the_gate_still_measures_the_corpus_task_70_lints(live_scan):
     assert ({f["name"] for f in auto["injection"]}
             == {f["name"] for f in live_scan["injection"]}), (
         "`lint()` and the gated scan disagree about which skills matched")
+
+
+# ── #2451: the DUPLICATE count's justification is derived, not remembered ─────
+#
+# `CATEGORY_TRUST["DUPLICATE"]` used to justify its `mostly` by naming one pair of
+# skills the description gate had suppressed when the sentence was written. Both
+# members had since left the scanned set (one body merged into another skill, the
+# other carrying `status: archived`), so the weekly report kept printing a
+# justification pointing at skills `iter_active_skills` never yields, beside a DUPLICATE
+# count of 0. What the column is FOR — telling the reader whether the 0 is real —
+# needs the pair this run actually suppressed, out of the same scan that produced
+# the count. That is what these tests pin, and the property they pin is
+# "the cell names only skills this walk saw", never a particular pair.
+
+def _dup_cell(report: str) -> str:
+    """The fourth column of the DUPLICATE row.
+
+    Split the way `render_report` builds it (see `tests/test_skill_lint_report_trust.py`):
+    the category cell carries its gloss in parentheses, so a pattern anchored on
+    the bare name followed by a pipe matches nothing and would read as absence.
+    """
+    for line in report.splitlines():
+        if line.startswith("| DUPLICATE ("):
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            assert len(cells) == 4, cells
+            return cells[3]
+    raise AssertionError(f"no DUPLICATE row in:\n{report[:600]}")
+
+
+def _write_fixture_skill(root: Path, name: str, description: str):
+    slug = root / name
+    slug.mkdir(parents=True, exist_ok=True)
+    (slug / "SKILL.md").write_text(
+        "---\n"
+        f"name: {name}\n"
+        f"description: {description}\n"
+        "tags: [demo]\n"
+        "status: active\n"
+        "---\n"
+        f"# SKILL: {name}\n\n"
+        "Body for the fixture corpus; nothing in it is scanned by any other test.\n",
+        encoding="utf-8")
+
+
+#: The suppressed fixture pair: one trailing character apart on the name
+#: (0.95, over `DUPLICATE_EDIT_RATIO_THRESHOLD` 0.85) and sharing only the
+#: "Use it/this skill" prefix on the description (0.383, under
+#: `DUPLICATE_DESC_RATIO_THRESHOLD` 0.60). That is the exact shape the
+#: description gate exists to drop, and the pair `find_duplicates` used to
+#: compute and discard inside the loop.
+SUPPRESSOR = ("weekly-report-writer", "weekly-report-writex")
+SUPPRESSOR_DESCS = ("Use this skill when filing the weekly report.",
+                    "Use it to bleed the hydraulic brakes on the bike.")
+
+#: The reported fixture pair: 0.966 on names and 0.95 on descriptions, so both
+#: gates pass and it lands in the count rather than beside it.
+REPORTED = ("delta-sync-run", "delta-sync-runx")
+REPORTED_DESCS = ("Use this skill to sync the runtime config to the edge boxes.",
+                  "Use this skill to sync the runtime config to the edge hosts.")
+
+
+def test_find_duplicates_returns_the_pairs_the_description_gate_suppressed():
+    """Clause 2: one call, both gates, and the suppressed pair carries both ratios.
+
+    Before #2451 `find_duplicates` returned only the reported pairs: the suppressed
+    one was computed (`d_ratio < DUPLICATE_DESC_RATIO_THRESHOLD`, then `continue`)
+    and thrown away, so nothing downstream could say which pair the 0 was about.
+    Both ratios are asserted numerically, not just present, because a cell that
+    printed the wrong one would be the same rot with a fresh coat.
+    """
+    reported, suppressed = LINT.find_duplicates(list(zip(SUPPRESSOR, SUPPRESSOR_DESCS)))
+    assert reported == [], reported
+    assert len(suppressed) == 1, suppressed
+    pair = suppressed[0]
+    assert (pair["a"], pair["b"]) == SUPPRESSOR, pair
+    assert pair["name_ratio"] == 0.95, pair
+    assert pair["name_ratio"] >= LINT.DUPLICATE_EDIT_RATIO_THRESHOLD, pair
+    assert pair["desc_ratio"] == 0.383, pair
+    assert pair["desc_ratio"] < LINT.DUPLICATE_DESC_RATIO_THRESHOLD, pair
+
+
+def test_the_same_lint_scan_yields_the_count_and_the_suppressed_pairs(tmp_path):
+    """Clause 2's seam: the count and the suppression list come off ONE `lint()` walk.
+
+    Two pairs in one fixture corpus, separated by which gate stops them. If the
+    list beside the count were produced by a second scan — or, worse, by prose —
+    one of the two buckets here would not line up with the other, which is exactly
+    how a remembered justification survives a changing corpus.
+    """
+    from agent_mcp.skills import iter_active_skills
+
+    root = tmp_path / "skills"
+    for name, description in zip(SUPPRESSOR, SUPPRESSOR_DESCS):
+        _write_fixture_skill(root, name, description)
+    for name, description in zip(REPORTED, REPORTED_DESCS):
+        _write_fixture_skill(root, name, description)
+
+    result = LINT.lint(skill_records=list(iter_active_skills(roots=[root])))
+    assert [d[:2] for d in result["duplicates"]] == [REPORTED], result["duplicates"]
+    assert [(s["a"], s["b"]) for s in result[LINT.DUPLICATE_SUPPRESSED_KEY]] == [
+        SUPPRESSOR], result[LINT.DUPLICATE_SUPPRESSED_KEY]
+
+    cell = _dup_cell(LINT.render_report(result))
+    assert f"`{SUPPRESSOR[0]}`/`{SUPPRESSOR[1]}`" in cell, cell
+    assert REPORTED[0] not in cell, (
+        f"a reported pair belongs in the count, not in the suppression note: {cell}")
+
+
+def test_the_live_duplicate_cell_names_only_skills_the_walk_saw(live_scan):
+    """The property the dead sentence violated, checked on the real library.
+
+    The live suppressed SET is deliberately not pinned: naming
+    `github-auth`/`github-watch` here would install a new remembered pair into the
+    instrument, wrong the next time someone renames a skill, which is the defect
+    this item is about. What is pinned is that every name the cell cites is a name
+    this run's walk produced, with both ratios on the right side of both gates.
+    """
+    names = set(live_scan["names"])
+    assert names, "the live walk produced no names: the property below proves nothing"
+    suppressed = live_scan[LINT.DUPLICATE_SUPPRESSED_KEY]
+    assert isinstance(suppressed, list), suppressed
+    for pair in suppressed:
+        assert {pair["a"], pair["b"]} <= names, pair
+        assert pair["name_ratio"] >= LINT.DUPLICATE_EDIT_RATIO_THRESHOLD, pair
+        assert pair["desc_ratio"] < LINT.DUPLICATE_DESC_RATIO_THRESHOLD, pair
+
+    cell = _dup_cell(LINT.render_report(live_scan))
+    cited = set(re.findall(r"`([^`]+)`", cell))
+    assert cited <= names, (
+        f"the DUPLICATE trust cell cites {sorted(cited - names)}, which this "
+        f"run's walk never saw (the #2451 rot): {sorted(names)[:5]}…")
+    for pair in suppressed[:LINT.DUPLICATE_TRUST_NAMED_MAX]:
+        assert f"`{pair['a']}`" in cell and f"`{pair['b']}`" in cell, cell
