@@ -411,6 +411,37 @@ def _worker_state_anchor(max_turns: int, source: str | None,
     )
 
 
+def _per_job_grant_widening(source: str | None) -> tuple[str, ...]:
+    """Tool names the job RUNNING NOW holds live authority grants for (#2471).
+
+    `scheduled-task` only, and only under the scope the pool binds:
+    `grant_scope_for` mints an `autonomy-task:<id>` scope for nothing else, so
+    reading it from `policy.current_scope` — the same contextvar the grant
+    gate reads two layers down — makes the widening per job by construction.
+    A compile with the contextvar at its `worker` default (the baseline
+    recording, a replay, any source that is not a claimed autonomy task)
+    widens nothing: the base set alone.
+
+    The store is read here, not in `capabilities`, because this is the layer
+    that knows a run exists; and a store that cannot be read widens NOTHING
+    rather than failing the compile: a stale grant row must never be the
+    reason a job cannot boot — the grant check at dispatch is what fails
+    closed on the tool itself.
+    """
+    if source != "scheduled-task":
+        return ()
+    try:
+        from app.harness.capabilities import live_grant_names
+        from app.harness.policy import current_scope, default_store
+        scope = str(current_scope.get() or "")
+        if not scope.startswith("autonomy-task:"):
+            return ()
+        return live_grant_names(default_store(), scope)
+    except Exception:  # noqa: BLE001 - see the fail-open-to-base note above
+        logger.exception("scheduled-task grant widening failed; base set only")
+        return ()
+
+
 def _worker_run_options(max_turns: int, *, source: str | None = None,
                         extra_disallowed: Sequence[str] = (),
                         priority: int = 1, session_id: str = ""):
@@ -511,7 +542,13 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
     # shapes of worker turn have to disagree about nothing here: this value goes
     # onto `RunOptions.allowed_tools`, that one crosses the loopback POST and is
     # applied by `app/routers/turn_options.py`.
-    allowed = envelope_for(source, extra_disallowed)
+    #
+    # `grant_widening` (#2471): a claimed autonomy task gets its live
+    # `authority_grants` rows unioned into the ceiling, per job. The same call
+    # `run_prompt_in_session` makes, so the two shapes cannot disagree about
+    # which job is running.
+    allowed = envelope_for(source, extra_disallowed,
+                           grant_widening=_per_job_grant_widening(source))
 
     # The list is now stated to the turn that carries it, from the same value
     # that lands on `RunOptions` below. The `if "Task" in disallowed` clause in
@@ -1076,7 +1113,14 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     # test_worker_capability_allowlist.py::
     # test_the_loopback_post_carries_the_envelope_the_backend_applies, which
     # drives the real `_stream` body into the real `build_turn_options`.
-    allowed = envelope_for(source, extra_disallowed or ())
+    #
+    # The widening is computed HERE, in the pool process that knows the scope,
+    # and travels as names inside the one body key the backend already applies:
+    # the grant rows are never re-read across the seam, so the widened set the
+    # turn is advertised cannot diverge from the one `_worker_run_options`
+    # would have built for the same job.
+    allowed = envelope_for(source, extra_disallowed or (),
+                           grant_widening=_per_job_grant_widening(source))
     payload = {"session_id": session_id,
                "text": prompt + build_denied_tools_block(extra_disallowed,
                                                          allowed=allowed),

@@ -577,3 +577,188 @@ def test_an_ingest_set_that_grants_a_sender_is_reported(monkeypatch):
     assert [f for f in found
             if f.reason == gam.FINDING_INGEST_REACHES_DURABLE
             and f.target == "youtube-digest"]
+
+
+# ── #2471: scheduled-task's declared ceiling and its per-job grant widening ──
+#
+# Everything below compiles the source the way the fleet's single compile point
+# does — `C._worker_run_options(4, source="scheduled-task")` — which is the row
+# `tests/fixtures/worker_capability_baseline.json` measures and the guard
+# matrix reports. The census numbers quoted here were taken on 2026-10-09 over
+# `~/lloyd-data/sessions/*_autonomy_*.json`: 566 files, so the item's >5% rule
+# is 29 files.
+#
+# The grant rows these nodes need are minted into a fixture-scoped store,
+# never the live `workers.db`: `authority_grants` holds exactly one row (id 1,
+# scope `autonomy-task:40`), and it was revoked on 2026-10-07 — before this
+# item was filed. "A live grant exists" is a state this box does not have, so
+# the test builds it and resets the contextvar it binds.
+
+import app.harness.policy as policy_mod  # noqa: E402  (after the constants it patches)
+
+SCHED_SOURCE = "scheduled-task"
+GRANT_NAME = "autonomy_write_task"   # the item's widening example: tier-2, grant-only
+THIS_SCOPE = "autonomy-task:77"
+OTHER_SCOPE = "autonomy-task:78"
+_FAR_FUTURE = "2099-01-01T00:00:00+00:00"
+
+
+def _sched_opts():
+    """The scheduled-task turn as the pool's one compile point builds it."""
+    return C._worker_run_options(4, source=SCHED_SOURCE)
+
+
+def _fixture_grant_store(tmp_path):
+    """A `GrantStore` on a scratch file — the live `workers.db` is read by no node here."""
+    from app.harness.policy import GrantStore
+    store = GrantStore(tmp_path / "grants.db")
+    store.ensure_schema()
+    return store
+
+
+def _bind_scope(request, scope: str):
+    """Bind the pool's per-job scope contextvar, restored at teardown.
+
+    A token/reset pair rather than a contextvar-`setattr`: the leak this
+    avoids is the one that would matter — a test left with a bound
+    `autonomy-task:<id>` scope would make the next test's baseline compile a
+    widened one, and the artifact-vs-live comparison node would go red on the
+    wrong row.
+    """
+    token = policy_mod.current_scope.set(scope)
+    request.addfinalizer(lambda: policy_mod.current_scope.reset(token))
+
+
+def _use_store(monkeypatch, store):
+    monkeypatch.setattr(policy_mod, "default_store", lambda: store)
+
+
+def test_scheduled_task_gets_a_declared_ceiling_smaller_than_the_deny_union():
+    """Clause 1: the ceiling exists, it shrinks the reach, and the matrix row is gone.
+
+    `reachable_after == allowed_tools` is the identity worth pinning, not just
+    the inequality: it says the declared set IS the reach — no name the turn
+    holds is refused by an unrelated rail, and no name outside the ceiling
+    slips in beside it. The matrix half names the source rather than counting
+    rows, so the next source declared does not move this node (#2471's triage
+    finding on `test_guard_arm_matrix.py:257`'s `>= 10`).
+    """
+    opts = _sched_opts()
+    assert opts.allowed_tools is not None, "scheduled-task still runs on a deny union"
+    before, after = _reach_before(opts), _reach_after(opts)
+    assert len(after) < len(before), (
+        f"the declared ceiling reaches {len(after)} of the {len(before)} "
+        "names the deny union left — it is not a ceiling")
+    assert set(after) == set(opts.allowed_tools)
+    undeclared = {f.target for f in gam.capability_findings()
+                  if f.reason == gam.FINDING_UNDECLARED_ENVELOPE}
+    assert SCHED_SOURCE not in undeclared, (
+        "the guard matrix still prints a worker-source-declares-no-capability-set "
+        "row for scheduled-task")
+
+
+def test_the_baseline_row_for_scheduled_task_reads_declared_with_no_durable_external():
+    """Clause 2: the committed artifact describes the new compile.
+
+    `n_allowed == reachable_after` on the artifact is the same identity the
+    node above measures live; pinned on the FILE, it fails if someone records
+    a table from a tree where a grant row was live (widening must not leak
+    into the committed baseline — the recording compile runs unscoped).
+    `durable_external_after == []` is the item's "26 become a base set plus a
+    declared widening": the base reaches none of the 26 by its own names.
+    """
+    recorded = json.loads(FIXTURE.read_text())
+    row = recorded["sources"][SCHED_SOURCE]
+    assert row["declared"] is True
+    assert row["n_allowed"] == row["reachable_after"], (
+        "the baseline was recorded with a widening live, or against a pool "
+        "that does not serve every allowed name")
+    assert row["durable_external_after"] == []
+    assert row["reachable_after"] < row["reachable_before"]
+
+
+def test_every_base_capability_still_dispatches_on_a_scheduled_task_turn():
+    """Clause 3: nothing in the base set dies at the real gate.
+
+    This is the node that makes the base set a census and not a wish: it
+    iterates the shipped ceiling itself, not a hand-picked list, so a future
+    edit that declares a name `_pre_dispatch` refuses for some reason beside
+    the envelope (a tier the grant gate answers, an arg the safety ladder
+    reads) goes red here naming the name. `Bash` carries a benign command
+    because its tier is the command string (`safety.bash_command_tier`).
+    """
+    opts = _sched_opts()
+    assert opts.allowed_tools
+    for name in opts.allowed_tools:
+        evt = _dispatch(opts, name, {"command": "ls"} if name == "Bash" else None)
+        assert evt is None, (
+            f"base capability {name!r} did not reach the MCP layer: "
+            f"{(evt or {}).get('content', '')[:160]}")
+
+
+def test_a_live_grant_widens_this_job_and_a_revoked_one_refuses(tmp_path, monkeypatch, request):
+    """Clause 4, both edges: advertised + dispatched while live, refused once revoked.
+
+    The live edge runs the real grant gate too — `_pre_dispatch` on the
+    source's own hooks, under the bound `autonomy-task:77` scope, with the
+    row live — so `None` means both the envelope widened AND the tier-2
+    grant check answered for it, the two layers agreeing. The revoked edge
+    asserts the refusal is the envelope's own (`not available on this turn`),
+    the same message rule the untrusted-ingest refusals use above.
+    """
+    store = _fixture_grant_store(tmp_path)
+    row = store.mint(scope=THIS_SCOPE, tool_pattern=GRANT_NAME,
+                     issued_by="test-#2471", expires_at=_FAR_FUTURE,
+                     note="clause-4 fixture: this job's own widening")
+    _use_store(monkeypatch, store)
+    _bind_scope(request, THIS_SCOPE)
+
+    opts = _sched_opts()
+    assert GRANT_NAME in opts.allowed_tools, (
+        "the live grant for this job's own scope did not widen the ceiling")
+    discovered = [("lloyd-mcp", [{"name": n} for n in sorted(POOL)])]
+    assert GRANT_NAME not in _allow_list_hidden(opts, discovered), (
+        "widened but not advertised: the turn was never told it holds the tool")
+    assert _dispatch(opts, GRANT_NAME, {"id": 68}) is None, (
+        "the widened name does not dispatch on this turn's own options")
+
+    assert store.revoke(row["id"]) is True
+    opts2 = _sched_opts()
+    assert GRANT_NAME not in opts2.allowed_tools, (
+        "a revoked grant still widens: live() read it as alive")
+    evt = _dispatch(opts2, GRANT_NAME, {"id": 68})
+    assert evt is not None and "not available on this turn" in evt["content"], (
+        f"revoked edge refused by the wrong rail: "
+        f"{(evt or {}).get('content', '')[:160]}")
+
+
+def test_widening_is_per_job_and_cannot_smuggle(tmp_path, monkeypatch, request):
+    """Clause 5: another job's grant, a standing ban and an unserved name all stay out.
+
+    The three negatives mint against the same store and scope this turn has —
+    only their own properties exclude them: a different `scope` (widening is
+    per job, never across jobs), membership in the standing bans
+    (`app.tool_bans`; an allow-list that "grants" `automod_start` must not
+    survive, and `expand` raises for the same case at import), and a name no
+    server serves. The last two also pin the item's hazard rule: widening is
+    applied to the RESOLVED set after `expand`, so a stale or poisoned row
+    drops silently and the turn still compiles — a job that will not boot is
+    the failure `capabilities._validate_declarations` chose import-time for,
+    not a per-run one.
+    """
+    store = _fixture_grant_store(tmp_path)
+    for scope, pattern in ((OTHER_SCOPE, GRANT_NAME),        # another job's row
+                           (THIS_SCOPE, "automod_start"),    # standing worker ban
+                           (THIS_SCOPE, "not_a_real_tool")):  # no server serves it
+        store.mint(scope=scope, tool_pattern=pattern, issued_by="test-#2471",
+                   expires_at=_FAR_FUTURE, note="clause-5 fixture")
+    _use_store(monkeypatch, store)
+    _bind_scope(request, THIS_SCOPE)
+
+    opts = _sched_opts()   # compiles — does not raise — with all three rows live
+    assert opts.allowed_tools is not None
+    for smuggled in (GRANT_NAME, "automod_start", "not_a_real_tool"):
+        assert smuggled not in opts.allowed_tools, (
+            f"{smuggled!r} reached this turn's advertised set from a row that "
+            "does not license it")
+    assert "Bash" in opts.allowed_tools, "the negatives took the base set with them"

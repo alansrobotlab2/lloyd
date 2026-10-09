@@ -717,35 +717,8 @@
    "reachable_before": 133
   },
   "scheduled-task": {
-   "declared": false,
-   "durable_external_after": [
-    "autonomy_delete_task",
-    "autonomy_write_task",
-    "calendar_create",
-    "calendar_delete_event",
-    "calendar_update_event",
-    "contacts_create",
-    "contacts_delete",
-    "contacts_update",
-    "email_apply_filters",
-    "email_create_filter",
-    "email_create_folder",
-    "email_delete",
-    "email_delete_filter",
-    "email_delete_folder",
-    "email_empty_junk",
-    "email_empty_trash",
-    "email_forward",
-    "email_move_folder",
-    "email_rename_folder",
-    "email_reorder_filters",
-    "email_reply",
-    "email_send",
-    "email_update",
-    "email_update_filter",
-    "tasks_create",
-    "tasks_update"
-   ],
+   "declared": true,
+   "durable_external_after": [],
    "durable_external_before": [
     "autonomy_delete_task",
     "autonomy_write_task",
@@ -774,8 +747,8 @@
     "tasks_create",
     "tasks_update"
    ],
-   "n_allowed": null,
-   "reachable_after": 133,
+   "n_allowed": 33,
+   "reachable_after": 33,
    "reachable_before": 133
   },
   "session-distill": {
