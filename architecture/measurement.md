@@ -198,6 +198,18 @@ the ratio is null with a `population mismatch` note naming both n's, in
 `ceiling_notes` and on the printed line (#2014). Scoring the numerator over the
 ceiling's own query set would keep the field live; that is a separate change.
 
+Because that veto can stand for weeks, the emitted block also says what produced
+the divisor and how long ago: `ceiling.menu_builder` carries the artifact's own
+builder name, or `null` when the artifact predates the key, and
+`ceiling.artifact_age_days` is the whole-day gap between the artifact's `ran_at`
+and this run (never a guessed zero — an unreadable timestamp is `null`). An
+artifact that predates the key additionally puts a `menu_builder` entry into
+`ceiling_notes`, under a non-metric key, naming the command that would retire the
+state (#2485). Measured on the tree this was written: the single artifact on disk,
+labelled by djev on 2026-09-29, predates the key, and the nightly that consumed it
+ran 10 days later — so the divisor every `*_normalized` value divides by has a
+builder nobody can name and an age nobody was printing.
+
 The ceiling itself is a function of the candidate menu the second labeler was
 shown, so the artifact names its menu builder (`menu_builder`, beside `caps`) and
 records an `offered` block per leg: gold offered at the run's cap, at 2x/4x/8x,

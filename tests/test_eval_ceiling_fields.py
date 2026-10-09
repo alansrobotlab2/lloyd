@@ -1396,3 +1396,197 @@ def test_an_unaudited_pair_count_prints_absent_and_never_zero(capsys):
 
     missing_line = _cf_page(fields, capsys, n=4)
     assert "unverified=absent" in missing_line, missing_line
+
+
+# ── #2485: the emitted block names the instrument behind the divisor, and its age ──
+
+#: The one artifact on disk as of 2026-10-09 is `label-agreement-20260929-005508.json`,
+#: stamped `2026-09-29T00:55:08.374936+00:00`, and it carries no `menu_builder` key
+#: while the writer has emitted one since #1937. The nightly that consumed it,
+#: `nightly-20261009-20261009-060422.json`, ran at 13:04:22Z on 2026-10-09 — ten whole
+#: days later. Those two stamps are used verbatim below so the arithmetic pinned here
+#: is the arithmetic the nightly actually does.
+_LIVE_RAN_AT = "2026-09-29T00:55:08.374936+00:00"
+_LIVE_RUN_AT = "2026-10-09T13:04:22.835855+00:00"
+
+
+def _iso(stamp: str):
+    from datetime import datetime
+    return datetime.fromisoformat(stamp)
+
+
+def _stamped_artifact(tmp_path, **mutate) -> dict:
+    """A real artifact carrying the live artifact's timestamp, on disk, env-pointed."""
+    art = _synthetic_artifact(**mutate)
+    art["ran_at"] = _LIVE_RAN_AT
+    _write(art, tmp_path)
+    return art
+
+
+def test_the_ceiling_block_names_the_builder_that_made_the_divisor(tmp_path, monkeypatch):
+    """Clause 1, recorded half. The artifact has named its builder since #1937 and the
+    instrument's own `--print` has printed it since then; the emitted block never
+    carried it, so `summary.overall` could not say which instrument made the divisor
+    its ratios divide by."""
+    art = _stamped_artifact(tmp_path)
+    assert art["menu_builder"] == lac.MENU_BUILDER == "query-token-overlap/v1"
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    fields = ev.ceiling_context(_synth_corpus(), now=_iso(_LIVE_RUN_AT))
+    assert fields["ceiling"]["menu_builder"] == "query-token-overlap/v1", (
+        "the builder name must travel out of the artifact into the baseline verbatim, "
+        "not be re-derived from whatever this checkout's MENU_BUILDER constant says — "
+        "a ceiling re-based by a future builder would otherwise read as this one")
+    assert ev.MENU_BUILDER_NOTE not in (fields.get("ceiling_notes") or {}), (
+        "an artifact that names its builder must not carry the unverified-builder "
+        "warning: the note is the predating state, not a standing caption")
+
+
+def test_a_ceiling_from_another_builder_is_recorded_as_that_builder(tmp_path, monkeypatch):
+    """The identity field reports the artifact, not the constant. `alias-expanded/v1`
+    is a real builder name `test_the_artifact_and_the_page_name_the_menu_builder`
+    above uses for the same purpose, so the two nodes cannot drift apart."""
+    art = _stamped_artifact(tmp_path)
+    art["menu_builder"] = "alias-expanded/v1"
+    _write(art, tmp_path)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    fields = ev.ceiling_context(_synth_corpus(), now=_iso(_LIVE_RUN_AT))
+    assert fields["ceiling"]["menu_builder"] == "alias-expanded/v1"
+
+
+def test_an_artifact_that_predates_the_key_emits_null_and_survives_the_round_trip(
+        tmp_path, monkeypatch):
+    """Clause 1, unrecorded half, across the seam the acceptance check is written
+    against: `menu_builder` must be PRESENT AND NULL in the written JSON. An absent
+    key and a null one are the same reading to a tool that only checks membership, and
+    the whole subject of this block is that an unmeasured ceiling must not read as a
+    measured one."""
+    art = _stamped_artifact(tmp_path, menu_builder=_DROP)
+    assert "menu_builder" not in art
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    fields = ev.ceiling_context(_synth_corpus(), now=_iso(_LIVE_RUN_AT))
+    assert "menu_builder" in fields["ceiling"]
+    assert fields["ceiling"]["menu_builder"] is None
+    path = tmp_path / "nightly-menu-builder.json"
+    path.write_text(json.dumps({"summary": {"overall": fields}}), encoding="utf-8")
+    o = json.loads(path.read_text(encoding="utf-8"))["summary"]["overall"]
+    assert "menu_builder" in o["ceiling"] and o["ceiling"]["menu_builder"] is None, (
+        "`null` dropped on the way to disk is a missing field again")
+    assert o["ceiling"]["artifact_age_days"] == 10, (
+        "the age is the other half of what makes this block readable without "
+        "re-opening the artifact, and the only written-file nodes that used to "
+        "cover that field are gated behind LLOYD_CI, which nothing on this box sets")
+
+
+def test_the_ceiling_block_carries_the_artifact_age_in_whole_days(tmp_path, monkeypatch):
+    """Clause 2. The 2026-10-09 triage had to do this subtraction by hand to notice the
+    divisor it was dividing by was ten days old; it is now a field."""
+    _stamped_artifact(tmp_path)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    age = ev.ceiling_context(_synth_corpus(),
+                             now=_iso(_LIVE_RUN_AT))["ceiling"]["artifact_age_days"]
+    assert age == 10, f"the live gap is 10 days 12:09:14; got {age!r}"
+    assert isinstance(age, int) and not isinstance(age, bool)
+    # Same instant is zero days, not null: zero is a measured "brand new".
+    assert ev.ceiling_context(_synth_corpus(), now=_iso(_LIVE_RAN_AT)
+                              )["ceiling"]["artifact_age_days"] == 0
+    # A run one minute after the artifact is a sub-day gap: whole days, so 0.
+    from datetime import timedelta
+    assert ev.ceiling_context(_synth_corpus(), now=_iso(_LIVE_RAN_AT) + timedelta(minutes=1)
+                              )["ceiling"]["artifact_age_days"] == 0
+    # The clamp, on the branch that needs it: an artifact stamped AFTER this run.
+    # Clock skew or a hand-edited stamp makes the gap negative, and -1 is
+    # indistinguishable from a subtraction bug, so a negative gap reads as 0.
+    late = _synthetic_artifact()
+    late["ran_at"] = (_iso(_LIVE_RUN_AT) + timedelta(minutes=1)).isoformat()
+    _write(late, tmp_path / "late")
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path / "late"))
+    assert ev.ceiling_context(_synth_corpus(),
+                              now=_iso(_LIVE_RUN_AT))["ceiling"]["artifact_age_days"] == 0
+    # And the default clock: an artifact minted moments ago is zero days old.
+    fresh = _synthetic_artifact()
+    _write(fresh, tmp_path / "fresh")
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path / "fresh"))
+    assert ev.ceiling_context(_synth_corpus())["ceiling"]["artifact_age_days"] == 0
+
+
+def test_an_unreadable_timestamp_ages_to_none_and_never_to_zero(tmp_path, monkeypatch):
+    """`_artifact_age_days` is a reporter, not a gate: a stamp it cannot parse is
+    reported as unmeasured. 0 would claim a divisor minted this second."""
+    assert ev._artifact_age_days(None) is None
+    assert ev._artifact_age_days("") is None
+    assert ev._artifact_age_days("yesterday") is None
+    # A naive stamp in a machine-facing payload means UTC, so it is read as UTC.
+    from datetime import datetime, timezone
+    assert ev._artifact_age_days("2026-09-29T00:55:08", now=datetime(
+        2026, 10, 9, 13, 4, 22, tzinfo=timezone.utc)) == 10
+    _stamped_artifact(tmp_path)
+    (tmp_path / "label-agreement-20260924-000000.json").write_text(
+        json.dumps(dict(json.loads((tmp_path / "label-agreement-20260924-000000.json")
+                                   .read_text(encoding="utf-8")), ran_at="garbage")),
+        encoding="utf-8")
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    assert ev.ceiling_context(_synth_corpus(),
+                              now=_iso(_LIVE_RUN_AT))["ceiling"]["artifact_age_days"] is None
+
+
+def test_an_artifact_without_the_builder_key_puts_the_regeneration_command_in_the_notes(
+        tmp_path, monkeypatch):
+    """Clause 3. The #654 veto has fired on every nightly since 2026-09-29 without one
+    word about what would retire it, because the notes carried only per-metric
+    population-mismatch reasons. The note has to survive `_normalize_against_ceiling`,
+    which writes into the same dict by `setdefault` — that shared dict is the seam."""
+    _stamped_artifact(tmp_path, menu_builder=_DROP)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    fields = ev.ceiling_context(_synth_corpus(), scored_ids=[q["id"] for q in
+                                                             _synth_corpus()],
+                                now=_iso(_LIVE_RUN_AT))
+    note = fields["ceiling_notes"][ev.MENU_BUILDER_NOTE]
+    assert "unverified" in note, note
+    assert ("cd ~/lloyd && .venvs/lloyd/bin/python eval/label_agreement_ceiling.py "
+            "--engine djev") in note, (
+        "the note must name a command that runs today: `--engine secondary` refuses "
+        "while secondary_enabled is false, and the on-disk ceiling is djev's")
+    assert "menu_builder" in note, note
+    overall = ev.summarize([dict(r, id=q["id"]) for r, q in
+                            zip(_printed_records(5, 2), _synth_corpus())])["overall"]
+    ev._normalize_against_ceiling(fields, overall)
+    assert ev.MENU_BUILDER_NOTE in fields["ceiling_notes"], (
+        "the per-metric notes were written into a dict that replaced the provenance one")
+    for metric, reason in fields["ceiling_notes"].items():
+        if metric != ev.MENU_BUILDER_NOTE:
+            assert metric in METRICS, (
+                f"{metric!r} is neither a metric nor the provenance slot; a stray key "
+                "here would never be printed and never be found")
+
+
+def test_predating_the_builder_key_cannot_blank_the_agreement(tmp_path, monkeypatch):
+    """Clause 4. Exactly four states null a ceiling (no artifact; stub labeler;
+    `labels_sha256` mismatch; stored agreement that does not recompute —
+    the states `ceiling_context`'s own docstring enumerates under its Four states it
+    distinguishes heading), and a missing provenance key is deliberately not a
+    fifth: it would take the raw agreement down with it, which is the reading the veto
+    consumes. So the identity fields are a pure addition: the whole `ceiling` block
+    and both agreement figures are identical once the two new fields are stripped."""
+    recorded = _stamped_artifact(tmp_path)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    corpus = [dict(q) for q in _synth_corpus()]
+    before = ev.ceiling_context(corpus, now=_iso(_LIVE_RUN_AT))
+    # One artifact at a time in the same directory: `_stamped_artifact` writes over the
+    # fixed filename `_write` uses, so the second call REPLACES the file instead of
+    # leaving a newer one for `newest_artifact` to pick.
+    _stamped_artifact(tmp_path, menu_builder=_DROP)
+    after = ev.ceiling_context(corpus, now=_iso(_LIVE_RUN_AT))
+    agree = lac.agreement(recorded)
+    for leg in ("entity_label_agreement", "doc_label_agreement"):
+        assert after["label_agreement"][leg] == agree[leg] == \
+            before["label_agreement"][leg], leg
+    assert after["ceiling"]["kind"] == lac.CEILING_KIND, (
+        "the ceiling went null on an artifact that only lost a provenance key")
+    strip = {"menu_builder", "artifact_age_days"}
+    assert ({k: v for k, v in after["ceiling"].items() if k not in strip}
+            == {k: v for k, v in before["ceiling"].items() if k not in strip}), (
+        "something besides the two identity fields moved, and the added provenance is "
+        "no longer a pure addition")
+    for metric in METRICS:
+        assert after[f"{metric}_normalized"] == before[f"{metric}_normalized"], metric
+        assert after[f"{metric}_ceiling_kind"] == before[f"{metric}_ceiling_kind"], metric

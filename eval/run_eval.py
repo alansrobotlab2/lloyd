@@ -1334,8 +1334,43 @@ CEILING_UNMEASURED = {"fact_entity_recall_avg":
                       "the second labeler labels entities and document paths, not "
                       "fact rows, so no gold-side surrogate exists for the fact leg"}
 
+#: The `ceiling_notes` slot that carries the ceiling's own provenance problem, as
+#: opposed to the per-metric slots that carry a withheld ratio. Not a metric name,
+#: so the printed per-metric line can never pick it up by accident.
+MENU_BUILDER_NOTE = "menu_builder"
 
-def ceiling_context(queries: list[dict], *, scored_ids: list[str] | None = None) -> dict:
+
+def _artifact_age_days(ran_at: object, now: datetime | None = None) -> int | None:
+    """Whole days between the ceiling artifact's `ran_at` and this run's clock.
+
+    `None` when the artifact states no usable timestamp — a field that cannot be
+    derived is reported as unmeasured, never as 0 (which would claim a divisor
+    minted this second) and never by raising (a reporter that dies because the
+    instrument it annotates is malformed takes the retrieval metric down with it,
+    which is the standing reason every ceiling read here is a `reason` string).
+
+    Clamped at zero, so an artifact stamped ahead of this run's clock — clock skew
+    between the labeler run and the nightly — reads as brand new rather than as a
+    negative age, which no reader could tell apart from a subtraction bug.
+    """
+    if not isinstance(ran_at, str) or not ran_at.strip():
+        return None
+    try:
+        ran = datetime.fromisoformat(ran_at.strip())
+    except ValueError:
+        return None
+    if ran.tzinfo is None:
+        # A naive stamp in a machine-facing payload is read as UTC by every later
+        # reader, so it is read as UTC here too rather than as local time.
+        ran = ran.replace(tzinfo=timezone.utc)
+    stamp = now if now is not None else datetime.now(timezone.utc)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return max(0, (stamp - ran).days)
+
+
+def ceiling_context(queries: list[dict], *, scored_ids: list[str] | None = None,
+                    now: datetime | None = None) -> dict:
     """Read the label-agreement artifact and turn it into `summary.overall` fields.
 
     `scored_ids` must be the ids THIS run scored. The ceiling is re-averaged over
@@ -1348,7 +1383,12 @@ def ceiling_context(queries: list[dict], *, scored_ids: list[str] | None = None)
     The returned dict always carries these keys, whatever it finds:
       `label_agreement`        {"entity_label_agreement", "doc_label_agreement",
                                 "labeler", "artifact", "reason"?}
-      `ceiling`                {"kind", per-metric values, "reason"?}
+      `ceiling`                {"kind", per-metric values, "reason"?} plus the
+                               artifact's identity: `artifact`, `ran_at`, `labeler`,
+                               `menu_builder` (the builder name the artifact records,
+                               or null when it predates the key) and
+                               `artifact_age_days` (whole days since it ran, or null
+                               when its timestamp cannot be read)
       `<metric>_normalized`    score / ceiling, or null
       `<metric>_ceiling_kind`  which kind of ceiling that divisor was, or null
 
@@ -1434,10 +1474,35 @@ def ceiling_context(queries: list[dict], *, scored_ids: list[str] | None = None)
         },
         "ceiling": {"kind": ceil["kind"], "artifact": art["_path"],
                     "ran_at": art["ran_at"], "labeler": art["labeler"],
+                    # Which instrument made this divisor, and how stale it is (#2485).
+                    # The artifact has carried `menu_builder` since #1937 and the page
+                    # prints it, but the emitted block never did, so reading the state
+                    # of the ceiling meant re-opening the artifact — four tool calls
+                    # (`--print`, a `json.load` for the key set, `date` arithmetic on
+                    # `ran_at`) per triage. `None` here is a real reading, not an
+                    # absence of one: it is the same fact the printer puts as
+                    # "unrecorded — this artifact predates the key". The two are told
+                    # apart by the note beside it, never by a guess.
+                    "menu_builder": art.get("menu_builder"),
+                    "artifact_age_days": _artifact_age_days(art.get("ran_at"), now),
                     "n": ceil["n"], "excluded": ceil["excluded"],
                     "unmeasured": ceil["unmeasured"],
                     **{m: v for m, v in ceil["values"].items()}},
     }
+    if "menu_builder" not in art:
+        # The standing #654 veto has to say what would retire it. `--engine djev` is
+        # named because that is the engine the one artifact on disk was labelled by
+        # and the branch that resolves today with no flag and no config edit;
+        # `--engine secondary` refuses while `secondary_enabled` is false, so naming
+        # it here would hand the next reader a command that cannot run.
+        fields.setdefault("ceiling_notes", {})[MENU_BUILDER_NOTE] = (
+            "the menu builder behind this ceiling is unverified: the artifact "
+            "predates the `menu_builder` key, so its divisor cannot be attributed to "
+            f"a builder and cannot be checked for comparability against a ceiling "
+            f"made by {lac.MENU_BUILDER}; regenerate the artifact with "
+            "`cd ~/lloyd && .venvs/lloyd/bin/python eval/label_agreement_ceiling.py "
+            "--engine djev` — which re-bases every `*_normalized` value in the trend "
+            "window, so it is a decision, not a re-run")
     for metric in CI_METRICS:
         fields[f"{metric}_normalized"] = None
         fields[f"{metric}_ceiling_kind"] = (
