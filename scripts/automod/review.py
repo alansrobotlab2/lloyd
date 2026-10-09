@@ -252,6 +252,43 @@ def generation_diverged(error: object) -> bool:
 #: still absent from the vault as this ships).
 GRADER_OUTAGE = "grader_outage"
 
+#: #2459: what the finalizer's restatement cost, on the `done` frame the backend
+#: already sends (`app/routers/messages.py` copies both off the result event's
+#: `usage`). Read here so the caller that writes the ledger row can attribute a
+#: divergence. Three `vault_review` rows on 2026-10-08/09 — item 2411 at
+#: 2026-10-08T14:05:54Z and 15:03:15Z, item 2453 at 2026-10-09T03:24:16Z — each
+#: recorded `generation diverged at 8192 tokens` and nothing else, which cannot
+#: tell the uncapped grammar apart from the #1431 reasoning tax; the two need
+#: opposite fixes, one a schema, one a budget.
+#:
+#: Both keys are absent from a frame with no final schema, and `None` when the
+#: finalizer never ran, so an absent count stays absent instead of becoming a 0
+#: that a later mean silently divides by.
+FINALIZER_OUTPUT_TOKENS = "finalizer_output_tokens"
+FINALIZER_REASONING_TOKENS = "finalizer_reasoning_tokens"
+#: The names the LEDGER row carries them under. The row already reads `kind` and
+#: `attempt` rather than `review_kind`, and a `finalizer_` prefix on a row that is
+#: only ever written by the finalizer says nothing.
+USAGE_OUTPUT_TOKENS = "output_tokens"
+USAGE_REASONING_TOKENS = "reasoning_tokens"
+
+
+def finalizer_usage(report: dict) -> dict:
+    """The grading turn's finalizer counts, in the shape a ledger row takes.
+
+    Empty when the frame carried neither, which is the transport-failure case and
+    the no-final-schema case. A value present but not an int is dropped too: the
+    row's reader means these, and one `None` in the column makes the mean wrong
+    rather than missing.
+    """
+    out: dict = {}
+    for frame_key, row_key in ((FINALIZER_OUTPUT_TOKENS, USAGE_OUTPUT_TOKENS),
+                               (FINALIZER_REASONING_TOKENS, USAGE_REASONING_TOKENS)):
+        value = report.get(frame_key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            out[row_key] = value
+    return out
+
 
 def grader_outage(error: object) -> bool:
     """Whether a `run_grader` error is the transport, not the grader's judgement.
@@ -1880,9 +1917,19 @@ def merge_grading_chunks(chunks: list[list[int]], answers: list[dict]) -> tuple[
 def grade_vault(*, item_id: int, paths: list[str], diff: str,
                 vault: Path | None = None, backend: str | None = None,
                 sessions_dir: Path | None = None, timeout: float = REVIEW_TIMEOUT_S,
-                model: str = "primary", attempt: int = 1) -> tuple[str, str, list[dict]]:
+                model: str = "primary", attempt: int = 1,
+                usage_out: dict | None = None) -> tuple[str, str, list[dict]]:
     """`(kind, findings, clauses)` for a vault round's staged edit — the
     `vault_round.GRADER` contract. `skipped` when the grader cannot run.
+
+    `usage_out` (#2459) is an optional dict the CALLER owns, and the token counts
+    of the generation that FAILED are put into it — `output_tokens` and
+    `reasoning_tokens`, read off the `done` frame. It is an out-param rather than a
+    fourth return value because one `grade_vault` call can issue several
+    generations (#2341's shrink), so a single `usage` slot cannot say which one ran
+    out, and because the 3-tuple is `vault_round.GRADER`'s contract, which a
+    64-caller test corpus and `agent_mcp/automod.py:919` all unpack. A caller that
+    passes nothing loses nothing.
 
     The `kind` is `pass`, `retry`, `unsound`, `skipped` — and, since #2263,
     `diverged` or `incomplete` (`GRADER_FAILURE_KINDS`): the finalizer running
@@ -1969,6 +2016,27 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     objs: list[dict] = []                   # the answer object for each of those slices
     generations: list[list[int]] = []       # every generation this grading issued
 
+    # #2459: the counts of the MOST RECENT generation. `ask` is the only place a
+    # generation happens, it runs sequentially, and it returns the moment one
+    # fails — so at the point a failure escapes, this is the failing generation's
+    # own spend and never a sum over the re-asks that preceded it.
+    last_usage: dict = {}
+
+    def verdict(kind: str, why: str,
+                clauses: list[dict] | None = None) -> tuple[str, str, list[dict]]:
+        """Build a return value, recording the failing generation's counts (#2459).
+
+        Only `GRADER_FAILURE_KINDS` are recorded, because those are the rows that
+        carry no attribution today: an outage is the transport and gets no counts by
+        construction, and a `pass` row's token spend is not the measurement the
+        ledger is missing. `usage_out` stays EMPTY otherwise, which is what makes the
+        row omit the keys rather than write `None` into an int column.
+        """
+        if usage_out is not None and kind in GRADER_FAILURE_KINDS:
+            usage_out.clear()
+            usage_out.update(last_usage)
+        return kind, why, (clauses if clauses is not None else [])
+
     def ask(chunk: list[int]) -> tuple[dict | None, list[int], tuple[str, str] | None]:
         """One generation over `chunk`: its answer, the clause indices it earned,
         and the failure it produced (`None` when there was none)."""
@@ -1979,6 +2047,12 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
         res = run_grader(prompt=prompt, item_id=int(item_id), round_id="vault",
                          backend=backend, sessions_dir=sessions_dir, timeout=timeout,
                          model=model)
+        # Refreshed for EVERY generation this call issues, from the `done` frame it
+        # reached (#2459). A transport failure yields an empty dict, so the slot goes
+        # EMPTY rather than keeping an earlier generation's numbers — and a failure
+        # with no frame at all is what makes the ledger row omit the keys.
+        last_usage.clear()
+        last_usage.update(finalizer_usage(res))
         if not res["ok"]:
             if generation_diverged(res.get("error")):
                 # Not `skipped`. A diverged grading is this item's named failure,
@@ -2085,7 +2159,11 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
                 # shrink did not help" from "the shrink never ran", which is the
                 # measurement #2341 leaves owed.
                 why = f"{why} [{len(generations)} grading generations issued]"
-            return kind, why, []
+            # The LAST generation IS the failing one, so this is where its counts go
+            # (#2459): `ask` refreshed the slot on that generation and nothing has
+            # run since, which is what makes this the failing generation and not a
+            # sum across the re-asks that preceded it.
+            return verdict(kind, why)
     merged, why = merge_grading_chunks(answered, objs)
     if merged is None:
         # Unreachable while every slice was gap-checked by the same helper the merge
@@ -2094,7 +2172,8 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
         # contract. `tests/test_automod_review.py::
         # test_merge_grading_chunks_is_the_single_reader_of_both_sides` pins the
         # check itself.
-        return (GRADER_INCOMPLETE, f"grader returned no verdict for every clause: {why}", [])
+        return verdict(GRADER_INCOMPLETE,
+                       f"grader returned no verdict for every clause: {why}")
     # `paths` IS the lander's list — `vault_round._vault_review` passes `land()`'s own
     # normalised argument — and it is the only witness a deletion clause has: the file it
     # cites is off disk because this very edit is removing it. Left at `parse_review`'s
@@ -2278,6 +2357,13 @@ def _grade_once(report: dict, *, backend: str, payload_prompt: str, session_id: 
                 report["stop_reason"] = data.get("stop_reason")
                 report["structured"] = data.get("structured")
                 report["structured_error"] = str(data.get("structured_error") or "")
+                # #2459: what the restatement cost, so a divergence can be
+                # attributed. Copied only when the frame carries the key — a turn
+                # with no final schema has none, and `report.get(key)` would then
+                # hand a caller a `None` to write into an int column.
+                for _key in (FINALIZER_OUTPUT_TOKENS, FINALIZER_REASONING_TOKENS):
+                    if _key in data:
+                        report[_key] = data.get(_key)
                 break
             if time.time() - started > timeout:
                 report["error"] = f"review exceeded {timeout}s"

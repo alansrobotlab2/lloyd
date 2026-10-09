@@ -6740,3 +6740,166 @@ def test_a_merged_clause_puts_its_per_subject_answers_in_the_ledger_row(vault, i
         assert all(s.get("note") for s in subs), (label, subs)
         singles = [c for c in clauses if c["clause"] != 5]
         assert all("sub_verdicts" not in c for c in singles), (label, singles)
+
+
+# ── #2459: the grader-failure row carries the failing generation's token counts ──
+#
+# Three rows on 2026-10-08/09 (item 2411 at 14:05:54Z and 15:03:15Z, item 2453 at
+# 2026-10-09T03:24:16Z) read `generation diverged at 8192 tokens` and carry no token
+# field of any kind, so nothing can tell the uncapped grammar apart from the #1431
+# reasoning tax. `run_grader`'s report already had the numbers — the backend puts
+# `finalizer_output_tokens` and `finalizer_reasoning_tokens` on the `done` frame —
+# and `grade_vault` dropped them. These nodes pin the row that gets written.
+
+#: The one vault write these four nodes land: a skill file, the same shape the
+#: `#2263` diverged-row tests use, so nothing here depends on a bench or memory file.
+SKILL_PATHS = ["skills/foo/SKILL.md"]
+SKILL_MESSAGE = "skill: foo (#2459)"
+#: EDITED_SKILL, not COMMITTED_SKILL: the vault fixture commits the latter, and a
+#: landing whose content already sits at HEAD is refused on the "nothing to commit"
+#: rail before the row is ever written.
+SKILL_BODY = EDITED_SKILL
+def test_a_row_recording_a_grader_failure_carries_the_failing_generations_counts(
+        vault, items, monkeypatch):
+    """#2459 clause 2: the counts reach BOTH rows, read out of the ledger.
+
+    Attempt 1 writes `vault_review` and nothing else; attempt 2 writes the paired
+    `vault_land ok: false` row. Both have to carry `output_tokens` and
+    `reasoning_tokens`, and they have to be the same pair — a row that recorded the
+    review's counts and a land row that recorded a different generation's would be
+    two numbers nobody can compare. Read from the ledger, because the agent is
+    handed `json.dumps(out)`, so an in-process value can still be dropped before the
+    row is written.
+    """
+    import scripts.automod.review as RV
+    _write_six_clause_item(items)
+    calls = {"n": 0}
+
+    def grader(**kw):
+        calls["n"] += 1
+        return (RV.GRADER_DIVERGED, DIVERGED_2260, [],
+                {"output_tokens": 8192, "reasoning_tokens": 6117})
+
+    (vault / "skills" / "foo" / "SKILL.md").write_text(SKILL_BODY)
+    monkeypatch.setattr(V, "GRADER", grader)
+    for _ in (1, 2):
+        with pytest.raises(V.VaultRoundError):
+            V.land(SKILL_PATHS, SKILL_MESSAGE, item_id=610)
+    assert calls["n"] == 2, "attempt 1 burns its attempt and re-offers; attempt 2 blocks"
+
+    rev = _rows("vault_review", 610)[-1]
+    assert rev["kind"] == RV.GRADER_DIVERGED, rev["kind"]
+    assert rev["output_tokens"] == 8192, rev
+    assert rev["reasoning_tokens"] == 6117, rev
+
+    land = next(r for r in _rows("vault_land", 610) if r["ok"] is False)
+    assert land["output_tokens"] == rev["output_tokens"], land
+    assert land["reasoning_tokens"] == rev["reasoning_tokens"], land
+
+
+def test_the_counts_on_the_row_are_the_failing_generation_not_a_sum_over_the_shrink(
+        vault, items, monkeypatch):
+    """#2459 clause 3, end to end: two re-asks, and the row names the one that failed.
+
+    `V.GRADER` is the real `review.grade_vault` and only `RV.run_grader` is replaced,
+    so the shrink in `grade_vault` runs for real over the item's own contract: the
+    planned call is refused at 8192 tokens, #2341 re-asks a smaller chunk, that
+    diverges at 311. The row answers one question — was a generation's budget the
+    problem — so it carries 311, the generation whose error text is in
+    `review_reason`, and a row reading 8503 would describe a budget the model was
+    never given. `review.GEN` is untouched: what reaches the ledger is the same text
+    the rail already wrote.
+    """
+    import scripts.automod.review as RV
+    _write_six_clause_item(items)
+    S.append_event({"event": "backlog_triage", "item_id": 610, "verdict": "confirmed",
+                    "surface": "vault", "check": "pytest tests/ -k vault_round",
+                    "evidence": "the grader-failure ledger row carries no token field",
+                    "premise_check": "read the three `kind: diverged` rows",
+                    "acceptance": "the row carries the failing generation's counts",
+                    "clauses": list(SIX)}, path=S.LEDGER_PATH)
+    state = {"i": 0}
+    counts = [(8192, 6117), (311, 44)]
+
+    def run_grader(**kw):
+        i = min(state["i"], len(counts) - 1)
+        state["i"] += 1
+        out, reason = counts[i]
+        why = f"finalizer failed: generation diverged at {out} tokens"
+        return {"ok": False, "error": why, "structured": None, "structured_error": why,
+                "finalizer_output_tokens": out, "finalizer_reasoning_tokens": reason}
+
+    (vault / "skills" / "foo" / "SKILL.md").write_text(SKILL_BODY)
+    monkeypatch.setattr(RV, "run_grader", run_grader)
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    _real_vr = V._vault_review
+
+    def _probe(*a, **k):
+        import traceback
+        try:
+            return _real_vr(*a, **k)
+        except BaseException:
+            traceback.print_exc()
+            raise
+    monkeypatch.setattr(V, "_vault_review", _probe)
+    with pytest.raises(V.VaultRoundError):
+        V.land(SKILL_PATHS, SKILL_MESSAGE, item_id=610)
+
+    rows = _rows("vault_review", 610)
+    assert rows[-1]["kind"] == RV.GRADER_DIVERGED, rows[-1]["kind"]
+    assert "generation diverged at 311 tokens" in rows[-1]["review_reason"], rows[-1]
+    assert state["i"] > 1, "the shrink has to have re-asked, or this tests nothing"
+    assert rows[-1]["output_tokens"] == 311, rows[-1]
+    assert rows[-1]["reasoning_tokens"] == 44, rows[-1]
+    assert rows[-1]["output_tokens"] != sum(c[0] for c in counts[:state["i"]]), (
+        "a sum across the re-asks is not the budget of any one generation")
+
+
+@pytest.mark.parametrize("usage", [{}, {"output_tokens": None, "reasoning_tokens": None},
+                                   {"output_tokens": 8192}])
+def test_a_grader_failure_row_written_without_usage_omits_the_keys_and_raises_nothing(
+        vault, items, monkeypatch, usage):
+    """#2459 clause 4: no counts is not an error, and it is not a zero either.
+
+    Three shapes the field genuinely takes: no `usage_out` at all (a `run_finalizer`
+    -shaped fake, or a grader that never got a `done` frame because the transport
+    failed or the read timed out); a usage dict whose values are None, which is what
+    `report.get(key)` yields when the key is absent from the frame; and a
+    half-populated dict. The failure still blocks and is still recorded, and the row
+    simply has no token field — `append_event` would happily persist a `None`, and a
+    `None` in a count column is what makes a later mean silently wrong.
+    """
+    import scripts.automod.review as RV
+    _write_six_clause_item(items)
+    (vault / "skills" / "foo" / "SKILL.md").write_text(SKILL_BODY)
+    monkeypatch.setattr(V, "GRADER",
+                        lambda **kw: (RV.GRADER_DIVERGED, DIVERGED_2260, [], usage))
+    with pytest.raises(V.VaultRoundError):
+        V.land(SKILL_PATHS, SKILL_MESSAGE, item_id=610)
+
+    rev = _rows("vault_review", 610)[-1]
+    assert rev["kind"] == RV.GRADER_DIVERGED and rev["blocking"] is True, rev
+    assert "output_tokens" not in rev, rev
+    assert "reasoning_tokens" not in rev, rev
+
+
+def test_a_passing_vault_review_row_still_carries_no_token_field(vault, items,
+                                                                 monkeypatch):
+    """The 392 rows that already exist keep their shape.
+
+    #2459 exists because a failure row cannot be attributed. A completed grading's
+    token spend is not the missing measurement, and stamping it on every landing
+    would change the shape of the passing rows for a question nobody is asking — so
+    the success path writes exactly what it wrote before, with no token key.
+    """
+    clauses = [{"n": i + 1, "verdict": "met", "how_verified": "ran",
+                "evidence": "tests/test_automod_vault_round.py::test_ok"} for i in range(6)]
+    (vault / "skills" / "foo" / "SKILL.md").write_text(SKILL_BODY)
+    monkeypatch.setattr(V, "GRADER",
+                        lambda **kw: ("pass", [], clauses,
+                                      {"output_tokens": 120, "reasoning_tokens": 90}))
+    out = V.land(SKILL_PATHS, SKILL_MESSAGE, item_id=610)
+    assert out["ok"] is True, out
+    rev = _rows("vault_review", 610)[-1]
+    assert rev["kind"] == "pass", rev["kind"]
+    assert "output_tokens" not in rev and "reasoning_tokens" not in rev, rev

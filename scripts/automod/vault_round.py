@@ -936,8 +936,25 @@ def _ledger_clause(c: dict) -> dict:
         row["sub_verdicts"] = c["sub_verdicts"]
     return row
 
+def _usage_fields(usage: dict) -> dict:
+    """The two token counts as ledger fields, or nothing at all (#2459).
+
+    The keys appear only when BOTH counts were reported. A `None` in a count column
+    is what makes a later mean over the ledger silently wrong — summing a handful of
+    `None`s raises, and a mean that quietly skips them is a number about a subset
+    nobody chose — so an unreported measurement is written as an ABSENT key, the same
+    convention `findings` on the row above already uses.
+    """
+    if all(isinstance(usage.get(k), int) and not isinstance(usage.get(k), bool)
+           for k in ("output_tokens", "reasoning_tokens")):
+        return {"output_tokens": usage["output_tokens"],
+                "reasoning_tokens": usage["reasoning_tokens"]}
+    return {}
+
+
 def _vault_review(norm: list[str], item_id: int,
-                  attempt: int = 1) -> tuple[str, str, list[dict]]:
+                  attempt: int = 1, usage_out: dict | None = None) -> tuple[
+        str, str, list[dict]]:
     """`(kind, findings, clauses)` from the grader over the staged diff. Never
     raises; an unusable grader is `("skipped", why, [])` and the landing
     proceeds — a vault edit is already validated through the real loaders,
@@ -950,6 +967,11 @@ def _vault_review(norm: list[str], item_id: int,
     which is the only reason that number existed before this parameter — the
     grader itself was told nothing and fell back to 1.
 
+    `usage_out` (#2459) is the CALLER's dict, filled with the token counts of the
+    generation that FAILED — see `review.grade_vault`, whose docstring says why that
+    travels as an out-param and not a fourth return value. It is passed through to
+    the grader and only read back for a `GRADER_FAILURE_KINDS` kind, so a row for an
+    outage, a `skipped`, or a `pass` keeps the shape it has today.
     On a `skipped` the `findings` slot is the REASON, and every cause has its
     own wording: no grader wired, the grader raising, the grader not answering,
     an unusable object, the surface not being `vault`, the item having no
@@ -988,7 +1010,21 @@ def _vault_review(norm: list[str], item_id: int,
             if (_git("cat-file", "-e", f"HEAD:{p}").returncode != 0 and (VAULT / p).exists()
                     and not _in_index(p)):
                 diff += f"\n+++ new file {p}\n" + (VAULT / p).read_text(encoding="utf-8", errors="replace")
-        res = tuple(GRADER(item_id=item_id, paths=norm, diff=diff, attempt=attempt))
+        res = tuple(GRADER(item_id=item_id, paths=norm, diff=diff,
+                           attempt=attempt, usage_out=usage_out))
+        # #2459: a grader FAILURE is the row that needs attribution. The counts
+        # arrive either in a 4th slot (a grader reporting usage directly, which is
+        # what the fakes write) or in `usage_out` (what the real `grade_vault`
+        # writes, since it is the one that knows WHICH of its generations failed).
+        # An outage has no `done` frame to read, a `skipped` never graded, and a
+        # `pass` row's spend is not the missing measurement — for all three the dict
+        # is left exactly as the caller handed it, so the row omits the keys instead
+        # of writing a None into a count column.
+        from scripts.automod import review as _RV
+        if usage_out is not None and str(res[0]) in _RV.GRADER_FAILURE_KINDS \
+                and len(res) > 3 and isinstance(res[3], dict):
+            usage_out.clear()
+            usage_out.update(res[3])
         graded = res[2] if len(res) > 2 else []
         clauses = [_ledger_clause(c) for c in (graded or []) if isinstance(c, dict)
                    and str(c.get("clause", "")).isdigit() and c.get("verdict")]
@@ -1508,7 +1544,12 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         # would carry — a round on its second attempt decided as attempt 1 is how
         # #1621 was refused twice under a policy that permits neither (#1868).
         attempts = _vault_review_attempts(int(item_id)) + 1
-        kind, findings, clauses = _vault_review(norm, int(item_id), attempts)
+        # `review_usage` (#2459) is this landing's own dict, handed down to the
+        # grader: only a `GRADER_FAILURE_KINDS` kind puts counts in it, so a
+        # `pass`/`retry`/`unsound`/outage row keeps the keys it has today.
+        review_usage: dict = {}
+        kind, findings, clauses = _vault_review(norm, int(item_id), attempts,
+                                                usage_out=review_usage)
         from scripts.automod import review as _RV
         review = kind
         # The grader marks the clauses it refused to grade because they are about
@@ -1599,13 +1640,15 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         if kind in _RV.GRADER_FAILURE_KINDS:
             final = attempts >= VAULT_REVIEW_MAX
             undone = revert_paths(norm) if final else []
-            S.append_event({"event": "vault_review", "item_id": item_id, "paths": norm,
+            S.append_event({**_usage_fields(review_usage),
+                            "event": "vault_review", "item_id": item_id, "paths": norm,
                             "kind": kind, "blocking": True, "attempt": attempts,
                             "findings": findings[:2000], "reverted": undone,
                             "clauses": clauses, "review_grader_failed": True,
                             "review_reason": findings[:600]})
             if final:
-                S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
+                S.append_event({**_usage_fields(review_usage),
+                                "event": "vault_land", "ok": False, "item_id": item_id,
                                 "paths": norm, "errors": [f"vault review: {kind}"],
                                 "reverted": undone, "review": kind,
                                 "review_reason": findings[:600],

@@ -4594,3 +4594,166 @@ def test_a_single_clause_chunk_that_diverges_is_the_end_of_shrinking(
     assert kind == RV.GRADER_DIVERGED
     assert asked == [[1, 2, 3], [1]], asked
     assert "[2 grading generations issued]" in why, why
+
+
+# ── #2459: the finalizer's token counts reach the caller that writes the row ──
+#
+# Three `vault_review` rows on 2026-10-08/09 (items 2411 twice at 14:05:54Z and
+# 15:03:15Z, 2453 at 2026-10-09T03:24:16Z) each say `generation diverged at 8192
+# tokens` and none of them can say whether the 8192 went to reasoning or to
+# malformed output. The numbers were already there: `app/routers/messages.py`
+# puts `finalizer_output_tokens` and `finalizer_reasoning_tokens` on the `done`
+# frame, and `_grade_once`'s `done` handler read four keys and dropped them.
+# These nodes pin the read, and pin that what reaches the caller is the counts of
+# the generation that FAILED rather than a sum over #2341's re-asks.
+
+def test_the_done_frames_finalizer_token_counts_reach_the_graders_report(
+        tmp_path, monkeypatch):
+    """#2459 clause 1: the read in `_grade_once`, over the frame as the backend sends it.
+
+    A diverged grading turn, which is the shape the ledger row is written for: the
+    finalizer errored, so `structured` is None and `structured_error` carries the
+    `generation diverged at 8192 tokens` text — and `app/harness/finalizer.py`'s
+    diverged branch returns its usage dict alongside the error, so the counts ride
+    out on the same frame. Only `_post_stream` is replaced, so the payload build,
+    the event loop and the `done` handler all run.
+    """
+    frames = [("done", {
+        "response": "", "stop_reason": "stop", "structured": None,
+        "structured_error": "finalizer failed: generation diverged at 8192 tokens",
+        "finalizer_output_tokens": 8192, "finalizer_reasoning_tokens": 6117})]
+    monkeypatch.setattr(RV, "_post_stream", lambda *a, **k: list(frames))
+    rep = RV.run_grader(prompt="grade this", item_id=2411, round_id="SM_T",
+                        backend="http://127.0.0.1:9", sessions_dir=tmp_path,
+                        model="m", max_turns=1, timeout=5)
+    assert rep["ok"] is False and rep["structured"] is None, rep
+    assert "generation diverged at 8192 tokens" in rep["structured_error"], rep
+    assert rep["finalizer_output_tokens"] == 8192, rep
+    assert rep["finalizer_reasoning_tokens"] == 6117, rep
+
+
+def test_a_grading_turn_with_no_finalizer_usage_reports_nothing_and_raises_nothing(
+        tmp_path, monkeypatch):
+    """The other side of the same read: a `done` frame that carries neither key.
+
+    A turn that never reached the finalizer — `finalizer_output_tokens` is emitted
+    only when `options.final_schema` is set (`app/routers/messages.py`), and a
+    timeout or transport error means there is no `done` frame at all. A `.get` that
+    raised, or that wrote `None` into the ledger where a count belongs, is the
+    difference between a row that says "no measurement" and a row that lies about
+    one, which is the question #2459 exists to answer.
+    """
+    monkeypatch.setattr(RV, "_post_stream", lambda *a, **k: [
+        ("done", {"response": "hi", "stop_reason": "stop",
+                  "structured": {"clauses": []}, "structured_error": ""})])
+    rep = RV.run_grader(prompt="grade this", item_id=2411, round_id="SM_T",
+                        backend="http://127.0.0.1:9", sessions_dir=tmp_path,
+                        model="m", max_turns=1, timeout=5)
+    assert "finalizer_output_tokens" not in rep, rep
+    assert "finalizer_reasoning_tokens" not in rep, rep
+
+
+def _diverging_grader(counts):
+    """A `run_grader` stub: every generation diverges, and generation *n* spent
+    `counts[n]` = `(output_tokens, reasoning_tokens)`. `counts` is consumed in call
+    order, and the last entry repeats — the shrink asks more generations than there
+    are entries whenever the contract is bigger than the list.
+
+    The marker goes in `error`, the key `ask` classifies on (review.py:1983), and in
+    `structured_error`, the key `_grade_once` fills when the finalizer is the thing
+    that failed — on a real frame the two carry the same text.
+    """
+    state = {"i": 0}
+
+    def grader(**kw):
+        i = min(state["i"], len(counts) - 1)
+        state["i"] += 1
+        out, reason = counts[i]
+        why = f"finalizer failed: generation diverged at {out} tokens"
+        return {"ok": False, "error": why, "structured": None, "structured_error": why,
+                "finalizer_output_tokens": out, "finalizer_reasoning_tokens": reason}
+    return grader
+
+
+def test_a_diverged_grading_hands_the_caller_the_failing_generations_counts(
+        isolated, monkeypatch, tmp_path):
+    """#2459 clause 3, at the seam that decides it: `grade_vault` over a shrink.
+
+    Three clauses are one planned call; it diverges at 8192, #2341 re-asks clause 1
+    alone and that diverges too at 311 tokens. The row has to answer "was one
+    generation's budget the problem", so it carries 311 — the generation whose
+    error text is in `why` — and not 8503, which is what summing the two would say
+    about a budget the model was never given.
+    """
+    _five_clause_item(isolated, 610, tmp_path, clauses=["one", "two", "three"])
+    monkeypatch.setattr(RV, "run_grader",
+                        _diverging_grader([(8192, 6117), (311, 44)]))
+    usage: dict = {}
+    kind, why, clauses = RV.grade_vault(item_id=610, paths=["skills/x/SKILL.md"],
+                                        diff="+x", vault=isolated, usage_out=usage)
+    assert kind == RV.GRADER_DIVERGED and clauses == [], (kind, why)
+    assert usage == {"output_tokens": 311, "reasoning_tokens": 44}, usage
+    assert usage["output_tokens"] != 8192 + 311, "a sum over re-asks is not a budget"
+
+
+def test_a_grading_that_answers_every_clause_leaves_the_usage_out_param_empty(
+        isolated, monkeypatch, tmp_path):
+    """A success row gets no counts, so it gets no keys.
+
+    #2459 records usage on a row that reports a grader FAILURE. The success path
+    stays exactly the row it is today — the out-param is untouched — because a
+    completed grading's token spend is not the measurement the ledger is missing,
+    and writing it on every landing would change 392 existing rows' shape for a
+    question nobody is asking.
+    """
+    _five_clause_item(isolated, 610, tmp_path, clauses=["one", "two", "three"])
+    # Every clause in every answer: the shrink may ask any subset, and a `pass` is
+    # only reachable when nothing is left ungraded.
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: _met_answer([1, 2, 3]))
+    usage = {"untouched": True}
+    kind, why, clauses = RV.grade_vault(item_id=610, paths=["skills/x/SKILL.md"],
+                                        diff="+x", vault=isolated, usage_out=usage)
+    assert kind == "pass", why
+    assert usage == {"untouched": True}, "a pass writes no usage onto the out-param"
+
+
+def test_grade_vault_without_an_out_param_still_returns_the_verdicts(
+        isolated, monkeypatch, tmp_path):
+    """The out-param is optional, and 64 existing callers rely on that.
+
+    Every grade_vault call in this file, in `tests/test_automod_gate.py`,
+    `test_automod_vault_round.py`, `test_review_grader_determinism.py` and
+    `test_automod_review_cli_rendering.py` unpacks three values, and
+    `agent_mcp/automod.py:919` hands `review.grade_vault` to
+    `vault_round.GRADER` directly. This is the shape check for that: a call with no
+    `usage_out` returns the same 3-tuple it always did, on the failing path too.
+    """
+    _five_clause_item(isolated, 610, tmp_path, clauses=["one", "two", "three"])
+    monkeypatch.setattr(RV, "run_grader", _diverging_grader([(8192, 6117)]))
+    out = RV.grade_vault(item_id=610, paths=["skills/x/SKILL.md"], diff="+x",
+                         vault=isolated)
+    assert len(out) == 3, out
+    assert out[0] == RV.GRADER_DIVERGED and out[2] == [], out
+
+
+def test_recording_the_counts_changes_no_budget_and_adds_no_thinking_knob():
+    """#2459 clause 5: this change is a read, not a knob.
+
+    The whole point of recording the counts is to find out whether 8192 is being
+    spent on reasoning or on malformed output, and you cannot learn that from a run
+    whose budget or thinking setting you also changed. Two halves, both measured from
+    the tree: the finalizer's budget is still the 8192 `config.yaml` states, and
+    neither module that now CARRIES the counts mentions a thinking knob in any of its
+    spellings — `app/harness/tests/test_finalizer.py`'s
+    `test_the_finalizer_sends_no_thinking_knob_in_either_spelling` still pins the
+    payload itself, and stays green unchanged.
+    """
+    import yaml
+    repo_root = Path(__file__).resolve().parents[1]
+    cfg = yaml.safe_load((repo_root / "config.yaml").read_text(encoding="utf-8"))
+    assert cfg["harness"]["finalizer"]["max_tokens"] == 8192, "budget unchanged"
+    for rel in ("scripts/automod/review.py", "scripts/automod/vault_round.py"):
+        src = (repo_root / rel).read_text(encoding="utf-8")
+        for key in ("reasoning_effort", "chat_template_kwargs", "enable_thinking",
+                    "thinking_token_budget"):
+            assert key not in src, f"{rel} mentions {key}"
