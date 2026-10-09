@@ -144,6 +144,16 @@ def rs(tmp_path, monkeypatch):
         # `root=` to the rung; a fixture that left this one unredirected would not be
         # testing an absent root, it would be emptying /tmp.
         ("PYTEST_TMP_ROOT", "pytest-of-testuser", True),
+        # Store 17, the tool-quality measurement rows (#2472). The one store here that
+        # this sweep only COUNTS, and deliberately NOT created: the directory is absent
+        # on a box whose writer has never run, which is this box's real state today
+        # (nothing schedules `app/tool_quality.py`), and the two facts this store is
+        # pinned by are that an absent store reports `0 files` without raising and that
+        # the sweep creates nothing where it only counts. A fixture that mkdir'd it
+        # would hand every `_store_report` comparison below a seeded store and erase the
+        # absent case entirely. One path redirects the whole store: the writer puts its
+        # dated files in this directory and nowhere else.
+        ("TOOL_QUALITY_DIR", "eval/tool-quality", False),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -957,7 +967,15 @@ def test_the_one_resolution_owns_every_directory_the_sweep_touches(tmp_path, mon
     assert set(swept) == {"AUTONOMY_RUNS_DIR", "AUTONOMY_TASKS_DIR", "CANDIDATES_DIR",
                           "SESSIONS_DIR", "TASKS_DIR", "TRANSCRIPT_SCRATCH_DIR",
                           "GROUNDSKEEPER_QUEUE_FILE", "GROUNDSKEEPER_WRITES_FILE",
-                          "VOICE_TURNS_FILE"}, \
+                          "VOICE_TURNS_FILE",
+                          # #2472's store joins the set even though this sweep never writes
+                          # there: the hazard this guard exists for is a store whose path the
+                          # sweep resolved WRONG and then walked or deleted outside every
+                          # root, and a read-only store resolves through the same DATA_ROOT as
+                          # a writable one. Exempting it because it is reported-only would
+                          # leave the one class of bug this node catches uncaught for the one
+                          # store that is new.
+                          "TOOL_QUALITY_DIR"}, \
         f"the sweep gained or lost a store dir; update this set deliberately: {sorted(swept)}"
     for name, value in sorted(swept.items()):
         assert value.is_relative_to(root), f"{name} = {value} is outside the root {root}"
@@ -967,6 +985,10 @@ def test_the_one_resolution_owns_every_directory_the_sweep_touches(tmp_path, mon
     # `--apply` outside every root this file otherwise holds it to.
     assert swept["GROUNDSKEEPER_QUEUE_FILE"] == root / "_pipeline" / "groundskeeper-queue.json"
     assert swept["GROUNDSKEEPER_WRITES_FILE"] == root / "_pipeline" / "groundskeeper-writes.jsonl"
+    # The reported-only store is checked to its full join, not just to the root: `0 files`
+    # from an empty directory and `0 files` from a directory nobody writes are the same
+    # string, and only the join says which store the line is about (#2472).
+    assert swept["TOOL_QUALITY_DIR"] == root / "eval" / "tool-quality"
 
 
 def test_the_vault_rung_reads_the_override_the_guardian_already_reads(tmp_path, monkeypatch):
@@ -1784,9 +1806,9 @@ def _assert_table_rows_match_report(rows: dict[str, str], report: list[str],
             f"{sorted(rows)}")
 
 
-def test_the_skill_says_sixteen_stores_and_its_table_has_a_row_per_report_line(
+def test_the_skill_says_seventeen_stores_and_its_table_has_a_row_per_report_line(
         rs, _store_report):
-    """Clause 4 of #2418: `skills/retention-sweep/SKILL.md` says sixteen, and its table's
+    """Clause 4 of #2418, carried by #2472: the skill says seventeen, and its table's
     rows are the report's lines.
 
     The table is the operator's list of what the weekly sweep bounds, and it said nine
@@ -1798,7 +1820,7 @@ def test_the_skill_says_sixteen_stores_and_its_table_has_a_row_per_report_line(
     It went stale anyway, in the direction this node was blind to: #1644 added two
     stores and the prose stayed at ten for nine commits, because the count of report
     lines came from the suffix selector that could not see them (`#1835`). The report
-    side of the comparison is now the `_store_report` fixture — the sixteen lines
+    side of the comparison is now the `_store_report` fixture — the seventeen lines
     `main()` prints with all three automod rungs in play — so this node reads one
     measurement, not two.
     """
@@ -1811,11 +1833,11 @@ def test_the_skill_says_sixteen_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 16, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 17, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "sixteen unbounded-growth stores" in text, (
-        "the skill's description states a store count other than sixteen")
-    assert "sixteen in all" in text, "the skill's body states a store count other than sixteen"
+    assert "seventeen unbounded-growth stores" in text, (
+        "the skill's description states a store count other than seventeen")
+    assert "seventeen in all" in text, "the skill's body states a store count other than seventeen"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -1884,12 +1906,28 @@ def test_the_skill_says_sixteen_stores_and_its_table_has_a_row_per_report_line(
     assert "PYTEST_TMP_MAX_DIRS" in pytest_row, pytest_row
     assert f"{rs.PYTEST_TMP_MAX_DIRS} " in pytest_row, pytest_row
 
+    # Seventeenth store (#2472), and the row that cannot name a window THIS sweep holds:
+    # its bound is the writer's, so like the count-bounded row above it the cell has to
+    # say so in words instead of `>Nd`. `RETENTION_DAYS` and `app/tool_quality.py` are
+    # what an operator needs to see to know which file to open before deleting anything by
+    # hand, and the `never`/`0 files` pair is what stops a `0 files` line reading as a
+    # store that leaked.
+    tq_row = next((ln for store, ln in rows.items() if "eval/tool-quality" in store), None)
+    assert tq_row is not None, (
+        f"no row names the tool-quality store the sweep now reports: {sorted(rows)}")
+    assert "RETENTION_DAYS" in tq_row, tq_row
+    assert "app/tool_quality.py" in tq_row, tq_row
+    assert f"{rs._TOOL_QUALITY_MODULE.RETENTION_DAYS}" in tq_row, (
+        f"the row's window is not the number the line the sweep prints quotes: {tq_row}")
+    assert "deletes nothing" in tq_row.lower(), tq_row
+    assert "0 files" in tq_row, tq_row
+
     # And what a run from anywhere else prints, since that reader holds a report
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "thirteen store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports thirteen stores by design")
+    assert "fourteen store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports fourteen stores by design")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -1996,7 +2034,7 @@ _STORE_ORDER_ANCHOR = "in this order:"
 _STORE_ORDER_TAIL = "Report all"
 _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                       "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
-                      "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "1": 1, "2": 2, "3": 3, "4": 4,
+                      "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
 
@@ -2040,8 +2078,8 @@ def _store_report_lines(out: str) -> list[str]:
 
 def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
         rs, _store_report):
-    """#1835 clause 1: the fifteen lines `main()` prints are fifteen stores, and the
-    three the loop leaves outside the data root are among them.
+    """#1835 clause 1, carried by #2472: the seventeen lines `main()` prints are
+    seventeen stores, and the three the loop leaves outside the data root are among them.
 
     This is the acceptance check itself, run against the real `main()`: the count a
     full sweep reports, taken through the selector every count comparison in this file
@@ -2050,9 +2088,9 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 16, (
-        f"the sweep prints {len(_store_report)} store lines, not the sixteen its report "
-        f"has had since #2418 added the pytest basetemp store: {_store_report}")
+    assert len(_store_report) == 17, (
+        f"the sweep prints {len(_store_report)} store lines, not the seventeen its report "
+        f"has had since #2472 added the tool-quality store: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -2062,7 +2100,7 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     assert branch_line in printed, f"the round-branch store is not in the report: {printed}"
 
     # The mechanism of the drift, pinned rather than narrated: the lines the OLD suffix
-    # rule could not see are exactly these six. `len(report) == 16` alone would still
+    # rule could not see are exactly these seven. `len(report) == 17` alone would still
     # pass if somebody reintroduced a suffix test alongside a wording change, and it is
     # the coincidence of a store line's wording with a store line's identity that made the
     # count unreadable in the first place. The third is #1975's ledger line, which ends in
@@ -2080,6 +2118,14 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     # has no bytes to give back until it deletes something.
     pytest_line = f"pytest tmp dirs (keep newest {rs.PYTEST_TMP_MAX_DIRS})"
     assert pytest_line in printed, f"the pytest basetemp store is not in the report: {printed}"
+    # #2472's line joins for a reason none of the seven share: it never ends in a freed
+    # word in EITHER mode, because the sweep has no delete transition in that store at all.
+    # So this set is now the only place the fact that a store is reported-but-never-touched
+    # is pinned against the selector — and it is the seventh member whose absence would make
+    # the count below silently wrong rather than loudly wrong. Head taken from the renderer,
+    # because the label carries the directory's own name and this file does not decide it.
+    tq_line = rs._tool_quality_line(rs.sweep_tool_quality(False))
+    assert tq_line.split(":")[0].strip() in printed, f"the tool-quality store is not in the report: {printed}"
     invisible = [ln for ln in _store_report
                  if not ln.endswith(("freed", "candidate", "removed (keep last 200)"))]
     assert sorted(ln.split(":")[0] for ln in invisible) == sorted([dirs_line,
@@ -2087,7 +2133,8 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
                                                                   ledger_line,
                                                                   prov_line,
                                                                   turn_line,
-                                                                  pytest_line]), (
+                                                                  pytest_line,
+                                                                  tq_line.split(":")[0].strip()]), (
         "these store lines are invisible to an endswith(('freed','candidate',"
         "'removed (keep last 200)')) rule, which is how #1835's drift happened: "
         f"{[ln.split(':')[0] for ln in invisible]}")
@@ -2130,16 +2177,16 @@ def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
         f"the rule counted a line that is not a store: {report}")
 
 
-def test_a_run_outside_the_production_checkout_reports_thirteen_stores_and_one_refusal_line(
+def test_a_run_outside_the_production_checkout_reports_fourteen_stores_and_one_refusal_line(
         rs, monkeypatch, capsys):
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
-    `  automod stores: REFUSED: …`, so a reader holding that output sees thirteen store
-    lines while the skill says sixteen — and SKILL.md now says so in those words. This
+    `  automod stores: REFUSED: …`, so a reader holding that output sees fourteen store
+    lines while the skill says seventeen — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
-    (just "sixteen", which makes every sandbox run look like it lost three stores) or the
+    (just "seventeen", which makes every sandbox run look like it lost three stores) or the
     alarming half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
     owns the predicate itself and the `NOT_PRODUCTION_EXIT` half; what is new here is the
     COUNT, which is the number a report is written from.
@@ -2148,14 +2195,20 @@ def test_a_run_outside_the_production_checkout_reports_thirteen_stores_and_one_r
     the predicate's original reason (a worktree shares the live repo's refs) does not
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
-    the rule. A refused run therefore still prints thirteen lines plus one refusal line,
-    not fourteen — the pytest basetemp root #2418 added is not one of the three guarded
-    stores, so it prints here whatever the tree is.
+    the rule. A refused run therefore still prints fourteen lines plus one refusal line,
+    not fifteen — neither the pytest basetemp root #2418 added nor the tool-quality store
+    #2472 added is one of the three guarded stores, so both print here whatever the tree
+    is, and the second of those is asserted below rather than left to the count: a store
+    this sweep never deletes has no reason to sit behind the production-checkout guard at
+    all, and if somebody moved it there the count alone would not say which store went.
     """
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 13, f"a refusal run should report thirteen stores: {report}"
+    assert len(report) == 14, f"a refusal run should report fourteen stores: {report}"
+    assert any("tool-quality rows" in ln for ln in report), (
+        f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
+        f"tell a store that never deletes from a store that went missing: {report}")
     refusal = [ln.strip() for ln in out.splitlines()
                if ln.strip().startswith("automod stores:")]
     assert len(refusal) == 1, f"expected one automod refusal line, got: {refusal}"
@@ -2353,21 +2406,27 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 16, (
+    assert len(items) == len(_store_report) == 17, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
     # enumerated LAST because they print last, and each item carries the words the
     # printed line uses for it — `~/lloyd-work` + `dirs`, `automod/*` + `branches` —
     # since the guard matches item i against the i-th line by first and last word. They
-    # sit at items 14 and 15 (0-based 13 and 14) because #2273's turn-row store joined
-    # the data-root group as store 12 and #2418's pytest basetemp store came next as 13,
-    # both ahead of everything the loop leaves behind it.
+    # sit at items 15 and 16 (0-based 14 and 15) because #2273's turn-row store joined
+    # the data-root group as store 12, #2418's pytest basetemp store came next as 13, and
+    # #2472's tool-quality store as 14 — three stores hanging off `DATA_ROOT`, all ahead of
+    # everything the loop leaves outside it.
     assert "voice" in items[11][1] and "rows" in items[11][1], items[11]
     assert "pytest" in items[12][1] and "dirs" in items[12][1], items[12]
-    assert "~/lloyd-work" in items[13][1] and "dirs" in items[13][1], items[13]
-    assert "automod/*" in items[14][1] and "branches" in items[14][1], items[14]
+    # The reported-only store in the same position rule: it prints with the data-root
+    # stores, below the pytest line and above the loop's three, because it is the one line
+    # an operator is NOT approving an `--apply` for.
+    assert "tool-quality" in items[13][1] and "rows" in items[13][1], items[13]
+    assert "~/lloyd-work" in items[14][1] and "dirs" in items[14][1], items[14]
+    assert "automod/*" in items[15][1] and "branches" in items[15][1], items[15]
     assert items[11][0] == 12 and items[12][0] == 13, items[11:]
+    assert items[13][0] == 14 and items[14][0] == 15 and items[15][0] == 16, items[13:]
 
     # Clause 2, on the tenth store's own terms: the groundskeeper pair sits where the
     # sweep prints it, between the session spill dirs and `workers.db runs`, and names
@@ -6478,3 +6537,226 @@ def test_the_pytest_root_is_the_path_pytest_itself_writes_and_the_bound_outruns_
         "headroom the two deletions of the production tree were caused by")
     assert rs.PYTEST_TMP_MAX_DIRS > 1, (
         "a bound of 1 would put the newest dir one collection away from being the oldest")
+
+
+# ---------------------------------------------------------------------------
+# Store 17: the tool-quality measurement rows — reported, never bounded (#2472).
+# ---------------------------------------------------------------------------
+#
+# Every store above this block is pinned by what it deletes. This one is pinned by the
+# opposite, so the shape of the nodes is different: three of the five assert that nothing
+# moved, and the byte-identity node is the one that would catch a later author who decided
+# a second deleter of these files was a free win. They are not folded into the per-store
+# nodes above for the same reason the store is not like the others — a fixture that aged
+# these rows the way the others are aged would have to age them past a window this sweep do
+# not hold, and a green run of that would read as evidence that the window works here.
+
+def _tool_quality_seeded(rs, *, over_age: int = 40, recent: int = 2) -> dict:
+    """Write the store the way `app/tool_quality.py` does, and age the files by mtime.
+
+    Returns `{name: (text, age_days)}` so a caller can re-check the bytes it wrote rather
+    than what the sweep says it saw. The dates are in the NAMES the way the writer names a
+    file it wrote that day; the mtimes are aged deliberately, because the sweep is not the
+    thing that ages these rows and an age no code reads is the cheapest thing to prove this
+    sweep does not read.
+    """
+    from datetime import date, timedelta
+
+    root = Path(rs.TOOL_QUALITY_DIR)
+    root.mkdir(parents=True, exist_ok=True)
+    written = {}
+    for age in (over_age, recent):
+        name = f"{date.today() - timedelta(days=age)}.json"
+        path = root / name
+        payload = json.dumps({"day": name, "tools": {"Bash": {"calls": 12, "zero": 1}}})
+        path.write_text(payload, encoding="utf-8")
+        stamp = time.time() - age * 86400
+        os.utime(path, (stamp, stamp))
+        written[name] = (payload, age, stamp)
+    return written
+
+
+def _tool_quality_report_line(out: str) -> str:
+    """The one tool-quality line in a captured report, and only one.
+
+    Asserted singular rather than `next(... for ...)` with a default: two lines for one
+    store is the failure this fixture is for, and a helper that silently returned the first
+    would report a counts problem instead.
+    """
+    hits = [ln for ln in out.splitlines() if "tool-quality rows" in ln]
+    assert len(hits) == 1, f"expected exactly one tool-quality store line, got {hits}"
+    return hits[0]
+
+
+def test_the_reported_store_line_carries_its_counts_and_no_delete_verb(rs, monkeypatch,
+                                                                      capsys):
+    """#2472 clause 1, the half about the LINE: a file count, an oldest dated file and a
+    byte total, and no verb in any tense that says anything moved.
+
+    Shaped like store 15's line test for the reason that test exists — a line whose only
+    difference between modes is the word `would` is a line an operator reads as something to
+    approve, and this store is not approvable. Each of the three numbers is checked against
+    a value the fixture chose, not with a bare `in line`: a number asserted only to be
+    present can be 0 and still pass, and 0 is this store's steady state on this box.
+    """
+    written = _tool_quality_seeded(rs, over_age=40, recent=2)
+    oldest = min(written)[:10]   # the line prints the date, not the filename
+    total = sum(len(text.encode("utf-8")) for text, _, _ in written.values())
+
+    out = _dry_run_report(rs, monkeypatch, capsys)
+    line = _tool_quality_report_line(out)
+
+    assert f"{len(written)} files" in line, line
+    assert f"oldest {oldest}" in line, line
+    assert f"{total} B" in line, line
+    assert "REPORT ONLY" in line, line
+    for verb in ("would", "deleted", "delete ", "freed", "pruned", "removed", "archived",
+                 "gzipped", "collected"):
+        assert verb not in line.lower(), f"{verb!r} claims an action: {line}"
+    assert "this sweep deletes nothing here" in line, line
+    # The store still holds exactly what the fixture wrote: counting is not touching.
+    assert sorted(p.name for p in Path(rs.TOOL_QUALITY_DIR).iterdir()) == sorted(written)
+
+
+def test_an_absent_tool_quality_store_reports_zero_files_and_creates_nothing(
+        rs, monkeypatch, capsys):
+    """#2472 clause 1, the half about the ABSENT directory — this box's real state today.
+
+    `app/tool_quality.py` has no caller outside its own `__main__`, so nothing has ever
+    written here and `0 files` is the line the operator on this box will read for the
+    foreseeable future. It has to print rather than raise, and the part that is easy to get
+    wrong and impossible to notice afterwards: reporting a store must not CREATE it, because
+    a sweep that `mkdir`s what it only counts leaves the report unable to tell "no rows"
+    from "not yet", and the next reader cannot tell an unrun writer from a leaked store.
+    """
+    assert not Path(rs.TOOL_QUALITY_DIR).exists(), "the fixture must not seed this store"
+
+    out = _dry_run_report(rs, monkeypatch, capsys)
+    line = _tool_quality_report_line(out)
+
+    assert "0 files" in line and "0 B" in line, line
+    assert "no dated file" in line, line
+    assert Path(rs.DATA_ROOT).exists(), (
+        "the data root itself is missing, so `0 files` here would be a fixture artefact "
+        "and not the store being absent — the two states the line must not conflate")
+    assert not Path(rs.TOOL_QUALITY_DIR).exists(), \
+        "reporting a store is not a licence to create it"
+
+
+def test_the_sweep_leaves_an_over_age_tool_quality_file_on_disk_byte_identical(rs,
+                                                                              monkeypatch,
+                                                                              capsys):
+    """#2472 clause 2: `--apply` against rows far past the writer's 30-day window, and not
+    one byte of the store moves — same line, same files, same bytes, same mtimes.
+
+    This is the node that makes the registration safe rather than merely informative. Every
+    other store's apply test asks that the right files LEFT; this one asks that NOTHING
+    left, so a future change that reused this store's counts to drive a prune would have to
+    break it. The window is overshot by more than ten times on purpose: 400 days past a
+    30-day window is not a boundary case anybody could argue was missed by rounding, and the
+    mtime is checked to the second because a deletion is not the only way to damage a row —
+    a rewrite that "normalised" these files would keep the count and the bytes identical and
+    change the data.
+
+    The dry run and the applied run have to print the SAME line, with no `would` in either:
+    `apply` reaches this function and is not read, so there is no second tense to print, and
+    a reader comparing the two runs to decide what an apply costs sees no difference here
+    because there is none.
+    """
+    written = _tool_quality_seeded(rs, over_age=400, recent=300)
+    before = {p.name: (p.read_bytes(), p.stat().st_mtime, p.stat().st_ino)
+              for p in sorted(Path(rs.TOOL_QUALITY_DIR).iterdir())}
+    assert len(before) == len(written) == 2, before
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    dry = _tool_quality_report_line(capsys.readouterr().out)
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    applied = _tool_quality_report_line(capsys.readouterr().out)
+
+    assert dry == applied, (f"a store this sweep cannot change must not change its line "
+                            f"between modes:\n  dry:     {dry}\n  applied: {applied}")
+    assert "would" not in dry.lower(), dry
+    after = {p.name: (p.read_bytes(), p.stat().st_mtime, p.stat().st_ino)
+             for p in sorted(Path(rs.TOOL_QUALITY_DIR).iterdir())}
+    assert after == before, (
+        f"the applied run moved the store: {set(before) ^ set(after)} or a rewritten "
+        f"byte/mtime/inode: {[(k, before[k][:2], after.get(k, ('gone',))[0][:2]) for k in before]}")
+    for name, (payload, age, stamp) in written.items():
+        assert Path(rs.TOOL_QUALITY_DIR, name).read_text(encoding="utf-8") == payload, name
+        assert abs(Path(rs.TOOL_QUALITY_DIR, name).stat().st_mtime - stamp) < 2, (
+            f"{name} is {age} days old by mtime and was re-stamped by the sweep")
+
+
+def test_the_tool_quality_count_path_has_no_way_to_change_the_store(rs):
+    """The same claim as the apply test, one level down: the counting function contains no
+    operation that could remove or rewrite anything, whatever its tests say.
+
+    The behavioural node above proves the current body does nothing; this one proves the
+    body has no INSTRUMENT to do something, which is the difference between a check that
+    holds until somebody adds an `unlink` two lines away and one that fails when they do.
+    `Path.unlink`, `shutil.rmtree` and `os.remove` are the three spellings a prune takes in
+    this file; `mkdir`/`open(`/`write_text` are what a "helpful" normalisation would use.
+    The check reads the function's code object — the names the body can actually reach — so
+    a docstring that merely says "we never delete" cannot satisfy it, and neither can a
+    deletion wrapped in a `try`.
+
+    The `except OSError` half is the other clause of "does not raise": an absent, unreadable
+    or half-deleted store is counted as no files rather than aborting the report above it —
+    and the allowlist is what stops that handler from becoming the place deletions hide, so
+    a prune wrapped in a bare `try` would still be caught here.
+    """
+    code = rs.sweep_tool_quality.__code__
+    reachable = set(code.co_names)              # attributes and globals the body calls
+    reachable |= set(code.co_varnames)          # and the names it binds
+    for tool in ("unlink", "rmtree", "remove", "mkdir", "makedirs", "touch", "chmod",
+                 "rename", "replace", "open", "write_text", "write_bytes", "truncate",
+                 "prune_store"):
+        assert tool not in reachable, f"the counting path can reach {tool}; it is reported-only"
+    assert "OSError" in code.co_names, (
+        "no OSError handler means an absent or unreadable store raises out of the report")
+    tail = Path(_SCRIPT).read_text().split("# Store 17:", 1)[1]
+    for spelling in (".unlink(", "rmtree(", ".remove(", ".prune_store("):
+        assert spelling not in tail, (
+            f"{spelling} appears below the store's own header; the count-only claim is dead")
+
+
+def test_the_tool_quality_window_and_dated_rule_come_from_the_writer(rs):
+    """#2472 clause 4: the 30 days the row and the line quote is the WRITER's number, and
+    the sweep holds no window of its own for this store.
+
+    `test_the_sweep_bounds_the_same_paths_app_paths_declares` is the precedent for the
+    read-the-constant rule, and this store is the case where it matters most: the number is
+    the entire content of the line, and a copy of it here would keep printing 30 the
+    afternoon `app/tool_quality.py` moved it, in both the skill table and the report. The
+    same applies to which NAMES age at all — `_DAY_FILE_RE` is the writer's own rule for
+    what it considers a dated row, and a second spelling of it here is how a sweep starts
+    reporting a file the writer will never prune as though it were covered.
+
+    The `30` and `RETENTION_DAYS` assertions on the line builder are the two halves of the
+    same fact from the other side: no restated literal in the code that prints the number,
+    and the writer's own constant named where a reader can see who to ask.
+    """
+    import app.tool_quality as tq
+
+    assert rs._TOOL_QUALITY_MODULE is tq, "the sweep imports some other writer module"
+    assert tq.RETENTION_DAYS == 30, "the writer moved its window; update the prose too"
+    assert rs._TOOL_QUALITY_MODULE.RETENTION_DAYS is tq.RETENTION_DAYS
+    # The fixture redirects `TOOL_QUALITY_DIR` into a tmp_path, so the two paths cannot be
+    # compared directly; what is comparable is the JOIN each one spells — the same two
+    # components under whichever root each is reading.
+    assert rs.TOOL_QUALITY_DIR.name == paths.TOOL_QUALITY_DIR.name == "tool-quality"
+    assert rs.TOOL_QUALITY_DIR.parent.name == "eval", (
+        "the sweep counts a directory its writer does not write")
+    assert rs.TOOL_QUALITY_STORE_LABEL == "eval/tool-quality/", (
+        "the name the report prints is no longer the path the writer writes")
+    assert 'TOOL_QUALITY_DIR = DATA_ROOT / "eval" / "tool-quality"' in Path(_SCRIPT).read_text()
+    assert paths.TOOL_QUALITY_DIR == paths.DATA_ROOT / "eval" / "tool-quality", (
+        "app.paths moved the store and the sweep's join no longer matches it")
+
+    line_src = inspect.getsource(rs._tool_quality_line)
+    assert "30" not in line_src, "the line builder restates the window as a literal"
+    assert "RETENTION_DAYS" in line_src, "the line builder does not name the writer's window"
+    assert "_TOOL_QUALITY_MODULE._DAY_FILE_RE" in inspect.getsource(rs.sweep_tool_quality), (
+        "the count decides on its own which names are dated rows")

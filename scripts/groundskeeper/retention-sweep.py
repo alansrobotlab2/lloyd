@@ -207,6 +207,17 @@ the transcript scratch home from backlog #566:
     `getpass.getuser()`, `_pytest/tmpdir.py`'s `get_user()`), because a store bounded at a
     path the writer does not write is a bound that reports a number and changes nothing.
 
+17. ~/lloyd-data/eval/tool-quality/ — the dated `YYYY-MM-DD.json` measurement files
+    `app/tool_quality.py` writes, and the only entry here this sweep REPORTS and does not
+    bound (#2472): the line carries its file count, its oldest dated file and its total
+    bytes, and deletes nothing under that directory in either mode, `--apply` included.
+    The reason is not caution about the data, it is that the delete transition already has
+    an owner — `prune_store()` inside that module's own `sweep()`, under its own
+    `RETENTION_DAYS`, unlinks only its own dated names. A second deleter would age the same
+    rows under two rules, and when a row left early nothing would say which of the two did
+    it. The directory is absent on a box whose writer has never run, and that prints
+    `0 files` rather than raising: a store with no measurements is not a store that leaked.
+
 Stores 11, 12 and 13 are the three the loop leaves behind, and 13 is the one the other two
 read. None of the three is under `DATA_ROOT`, and store 12 is not even on the filesystem:
 it is the live repo's refs. That is the hazard the production-checkout guard exists for —
@@ -323,6 +334,19 @@ try:
     from app import voice_turns as _VOICE_TURNS_MODULE
 except ModuleNotFoundError:  # pragma: no cover - same fallback as above
     import voice_turns as _VOICE_TURNS_MODULE
+try:
+    # Store 17's dated-name rule and its prune window, both read off the writer at
+    # report time. The reason is store 15's, applied to a store this sweep only
+    # COUNTS: the line it prints says how old that store's rows may get and which
+    # names age at all, and both of those are `app/tool_quality.py`'s decisions —
+    # `RETENTION_DAYS` and `_DAY_FILE_RE`. Restating either is how the report keeps
+    # printing a confident number the afternoon the owner moves it, when the count
+    # and the window are the whole content of the line. NOTHING HERE AGES OR UNLINKS
+    # A FILE: this sweep has no delete transition on this directory at all, so what
+    # it borrows is only what it PRINTS (#2472).
+    from app import tool_quality as _TOOL_QUALITY_MODULE
+except ModuleNotFoundError:  # pragma: no cover - same fallback as above
+    import tool_quality as _TOOL_QUALITY_MODULE  # type: ignore
 
 # The runtime data root — `app.paths.DATA_ROOT`'s three rules, read from the one
 # copy of them (#1415). It used to be restated here as
@@ -2589,6 +2613,95 @@ def _voice_turns_line(p: dict) -> str:
             f"{p['bytes']} B out)" + tail)
 
 
+# ---------------------------------------------------------------------------
+# Store 17: the dated tool-quality row sets (#2472) — the one store this sweep
+# REPORTS and does not bound.
+# ---------------------------------------------------------------------------
+
+#: The store, the same join `app.paths.TOOL_QUALITY_DIR` makes. The writer owns the
+#: directory through `app.paths`, which this script deliberately does not import (it is
+#: where the marker-checked data root lives — see the `DataRootMissing` refusal above),
+#: so the join is spelled here against the `DATA_ROOT` both files resolve by the same
+#: rules. `test_the_tool_quality_store_is_the_directory_its_writer_writes` pins the two
+#: spellings to the same place relative to the same root, which is the only way this
+#: constant can be wrong: a report line about a directory no writer writes.
+TOOL_QUALITY_DIR = DATA_ROOT / "eval" / "tool-quality"
+
+#: What the report line calls the store, after the label and inside the brackets. A
+#: constant rather than a `relative_to` at print time because the test fixture redirects
+#: `TOOL_QUALITY_DIR` into a tmp_path — and a name that drifted from the real join would
+#: read as a store the sweep invents.
+TOOL_QUALITY_STORE_LABEL = "eval/tool-quality/"
+
+
+def sweep_tool_quality(apply: bool, *, path: Path | None = None) -> dict:
+    """Count the tool-quality store. `apply` is accepted and ignored, on purpose.
+
+    `app/tool_quality.py` writes one `YYYY-MM-DD.json` per run, deletes its own rows
+    older than its own `RETENTION_DAYS` inside its own `sweep()` (`prune_store()`), and is
+    the only writer this directory has. One delete transition needs one writer: a sweep
+    that pruned these files too would age the same rows under two windows, and when a row
+    vanished early there would be no way to say which of the two rules did it. So the
+    parameter that every other store in this file takes exists here only so this store can
+    be called from the same place in `main()` in both modes and prove on the way that
+    NEITHER mode touches anything — the test that pins it passes `apply=True`.
+
+    An absent directory is the state of this box today and reports as `0 files` rather
+    than raising, because nothing schedules the writer yet: a store with no measurements
+    is not a store that leaked, and the line that says so has to print on the run where it
+    becomes false. The directory is never created here — a sweep that `mkdir`s what it
+    only counts would leave the report unable to tell "empty" from "not yet".
+    """
+    store = Path(path) if path is not None else TOOL_QUALITY_DIR
+    out = {"apply": bool(apply), "present": False, "files": 0, "bytes": 0,
+           "oldest": None, "other": 0}
+    try:
+        entries = sorted(store.iterdir())
+    except OSError:
+        # Absent, unreadable, or not a directory: all three mean "no rows here", and
+        # `iterdir` raises rather than returning empty for every one of them.
+        return out
+    out["present"] = True
+    days = []
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                out["other"] += 1
+                continue
+            out["files"] += 1
+            out["bytes"] += entry.stat().st_size
+        except OSError:
+            # Same rule as store 16's `st_size = None`: the entry is counted apart, so a
+            # file that cannot be opened never lands in `0 files` and never stops the line.
+            out["other"] += 1
+            continue
+        if _TOOL_QUALITY_MODULE._DAY_FILE_RE.match(entry.name):
+            days.append(entry.name[:10])
+    out["oldest"] = min(days) if days else None
+    return out
+
+
+def _tool_quality_line(p: dict) -> str:
+    """The count, the age and the bytes, and on the line who holds the window.
+
+    Same shape as its neighbours — an absent store says `0 files` rather than raising, the
+    undated bucket stays its own number — with one difference the tail states outright:
+    there is no `would delete N` / `deleted N` verb here in either mode, because there is
+    no delete. The window it quotes is `_TOOL_QUALITY_MODULE.RETENTION_DAYS`, read at print
+    time, so the number cannot outlive the writer that sets it.
+    """
+    label = f"  tool-quality rows ({TOOL_QUALITY_STORE_LABEL})"
+    window = _TOOL_QUALITY_MODULE.RETENTION_DAYS
+    tail = (f" — REPORT ONLY: self-bounding at {window}d by app/tool_quality.py;"
+            " this sweep deletes nothing here")
+    if p["other"]:
+        tail += f" ({p['other']} non-file entr{'y' if p['other'] == 1 else 'ies'} not counted)"
+    if not p["files"]:
+        return f"{label}: 0 files, no dated file, 0 B" + tail
+    oldest = p["oldest"] or "no dated file"
+    return f"{label}: {p['files']} files, oldest {oldest}, {p['bytes']} B" + tail
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -2640,6 +2753,10 @@ def main() -> int:
     prov = sweep_provenance_journal(args.apply, now)
     turns = sweep_voice_turns(args.apply, now)
     pytest_dirs = sweep_pytest_tmpdirs(args.apply)
+    # Called in both modes like every store here, and `apply` is what proves the point:
+    # the argument is accepted and never read, so an applied run reaches this store with
+    # the same code path a dry run does (#2472 clause 2).
+    tool_q = sweep_tool_quality(args.apply)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -2700,6 +2817,13 @@ def main() -> int:
     # dir count, so the same line prints in both modes with only the verb changed, like
     # every line above it (#2418 clause 1).
     print(_pytest_tmp_line(pytest_dirs))
+    # Seventeenth store, and the last line before the loop's own three: it hangs off the
+    # data root, so it prints with the data-root stores, and it prints BELOW every line an
+    # operator is approving `--apply` for — which is exactly where a store this sweep never
+    # deletes belongs. Its position is the claim: read top to bottom, the lines that free
+    # space end above it, and nothing under it is anyone's to approve. Same line in both
+    # modes, because there is no verb that differs (#2472 clause 1).
+    print(_tool_quality_line(tool_q))
     # Last, so the two lines that can name a production ref are the last thing an
     # operator reads before deciding whether the run did what they asked.
     if refusal:
