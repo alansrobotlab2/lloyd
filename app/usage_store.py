@@ -687,10 +687,15 @@ def reprefill_attribution(hours: float = 168.0, *, since: Optional[str] = None,
     """Price the window's re-prefill per mechanism, and show the split is exhaustive.
 
     The window is the last `hours` hours, or — when `since` is given — the absolute
-    interval `since <= ts < until` (`until` optional). The absolute form exists for
-    a figure that has already been published and must stay checkable after the
-    clock moves: `replay_usage_extract` plus `REPREFILL_WITNESS_SINCE` re-answers
-    the 2026-10-01 verdict over the same rows in a month's time. One row per bucket in
+    interval `since <= ts < until` (`until` optional, and OMITTING IT LEAVES THE
+    WINDOW OPEN at the right edge: `since` is the only bound, every row at or after
+    it is priced in, `window_until` comes back None, and the header says the window
+    is open rather than printing a bound that was never applied — so this is the one
+    form that is NOT a fixed figure and a re-run a week later reads more rows).
+    The closed absolute form exists for a figure that has already been published and
+    must stay checkable after the clock moves: `replay_usage_extract` plus
+    `REPREFILL_WITNESS_SINCE` re-answers the 2026-10-01 verdict over the same rows
+    in a month's time. One row per bucket in
     `ATTRIBUTION_BUCKETS` — every rung, plus the control (`ran_noop`) and the
     unmeasured arm (`no_compaction_record`) — each carrying `n=` beside its mean,
     and a rung the window holds none of is printed with `n=0` rather than
@@ -729,8 +734,20 @@ def reprefill_attribution(hours: float = 168.0, *, since: Optional[str] = None,
     absolute = since is not None
     since = since or _since(hours=hours)
     conn = _conn()
-    span = "ts >= ?" + (" AND ts < ?" if until is not None else "")
-    span_args: list[Any] = [since] + ([until] if until is not None else [])
+    closed = until is not None
+    span = "ts >= ?" + (" AND ts < ?" if closed else "")
+    span_args: list[Any] = [since] + ([until] if closed else [])
+    # The predicate the named total is priced with, in the same words the SQL above
+    # applies, so the interval the report prints can never disagree with the rows
+    # behind it. ONE condition (`closed`) decides both sides, and it is the caller's
+    # `until`, never a substitute for it: an omitted `until` is an OPEN window whose
+    # only bound is `since`, and the prose must not invent an upper one. #2487: this
+    # line read `' AND ts < ' + until` inside the absolute branch, so
+    # `reprefill_attribution(since=...)` raised `TypeError: can only concatenate str
+    # (not "NoneType") to str` AFTER the rows had been summed — every figure was
+    # priced and then the function died naming its own label, and the open-ended read
+    # the microcompact ship-on decision is owed could not be taken at all.
+    window_predicate = "ts >= " + since + (" AND ts < " + until if closed else "")
     # The same sum, asked with the separator sqlite's own datetime() emits. Printed
     # so a shell re-run reconciles instead of looking like a contradiction. Only
     # meaningful for an offset window, where a shell would spell `since` that way.
@@ -845,8 +862,7 @@ def reprefill_attribution(hours: float = 168.0, *, since: Optional[str] = None,
         "window_total_reprefill_tokens": window_total,
         "window_total_named": (
             "row-level COALESCE(SUM(reprefill_tokens), 0) over every usage row "
-            f"with {('ts >= ' + since + (' AND ts < ' + until) if absolute else 'ts >= ' + since)}"
-            ", no validity filter"),
+            f"with {window_predicate}, no validity filter"),
         # The one number the Σ is exhaustive against is `window_total_...` above.
         # These two are printed because a reader who checks this table with a shell
         # will meet both of them, and neither is that total.
@@ -995,9 +1011,20 @@ def _format_attribution(attr: Mapping[str, Any]) -> str:
     `n=` on every line, `n=0` for an empty rung, `mean=-` where there is no
     measured row to average."""
     lines = [
-        (f"reprefill attribution — ABSOLUTE window: {attr['window_since']} <= ts "
-         f"< {attr['window_until']} — a published figure, it does not move with "
-         f"the clock — rows={attr['rows']}"
+        ((f"reprefill attribution — ABSOLUTE window: {attr['window_since']} <= ts "
+          f"< {attr['window_until']} — a published figure, it does not move with "
+          f"the clock — rows={attr['rows']}"
+          if attr["window_until"] is not None else
+          # `until` was omitted. The header says which bound exists instead of
+          # printing `< None`, and drops the "does not move with the clock" claim:
+          # an open window keeps growing, so this is the one form that is NOT a
+          # fixed figure. Inventing a bound here (`until = now`) would print a
+          # tidier header over a total that is quietly smaller than the one the
+          # query priced. #2487.
+          f"reprefill attribution — ABSOLUTE window OPEN at the right edge: "
+          f"ts >= {attr['window_since']} (no upper bound) — NOT a fixed figure: "
+          f"every row that lands after this read is inside it "
+          f"— rows={attr['rows']}")
          if attr["window_absolute"] else
          f"reprefill attribution — window: last {attr['window_hours']} h "
          f"(since {attr['since']}), rows={attr['rows']}"),

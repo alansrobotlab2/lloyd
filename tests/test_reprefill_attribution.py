@@ -490,6 +490,109 @@ def test_an_absolute_window_closes_at_its_until(tmp_path, monkeypatch):
         f"< {usage_store.REPREFILL_WITNESS_UNTIL}" in attr["report"].splitlines()[0]
 
 
+def test_an_omitted_until_is_an_open_window_and_prices_every_row_after_since(
+        tmp_path, monkeypatch):
+    """`since` with no `until` has to ANSWER, and answer as an open window (#2487).
+
+    The read the ship-on decision is owed is `reprefill_attribution(since=<flip>)`:
+    "what has this knob cost since it went on, with no closing bound yet". That call
+    raised `TypeError: can only concatenate str (not "NoneType") to str` before
+    returning anything, because the `window_total_named` predicate was built with an
+    unconditional `' AND ts < ' + until` inside the absolute branch. The query that
+    prices the rows guards the same `None` (`" AND ts < ?" if until is not None`), so
+    every row was summed correctly and then the function died naming its own label —
+    no totals, no table, no report, and no measurement.
+
+    One extract, four rows, covers the three forms a reader can ask with, and every
+    stamp is clock-relative (`_ts_old` / `_ts_recent`) so the node cannot age out the
+    way a literal `ts` priced through a relative window did in #2053:
+
+    * 400 h ago — left of `since` (300 h ago) and left of a 168 h window: in NONE.
+      The guard must not invent a lower bound either, and `since` is the only one.
+    *   3 h ago — inside all three forms.
+    *  30 min ago — at or after `until` (1 h ago): out of the closed form, in the
+      open and the relative one.
+    * 2099-01-01 — right of ANY bound an omitted `until` could be defaulted to, so
+      it is the row that distinguishes "no upper bound" from the tempting wrong
+      guard (`until = now`, or `until = since + window_hours`). A default like that
+      passes a crash-only test and silently reports a smaller, tidier total.
+
+    Rows go in through `replay_usage_extract`, the route the published figures are
+    re-derived by, so the open form is pinned on the same path a reader re-runs.
+    """
+    since = _ts_old(300.0)
+    until = _ts_recent(1.0)
+    extract = tmp_path / "open.jsonl"
+    extract.write_text("\n".join(json.dumps(row) for row in (
+        {"ts": _ts_old(400.0), "input_tokens": 150_000,
+         "reprefill_tokens": 7_000_000, "compaction": MICROCOMPACT},
+        {"ts": _ts_recent(3.0), "input_tokens": 150_000,
+         "reprefill_tokens": 400_000, "compaction": MICROCOMPACT},
+        {"ts": _ts_recent(0.5), "input_tokens": 150_000,
+         "reprefill_tokens": 900_000, "compaction": RELIEF_ONLY},
+        {"ts": "2099-01-01T00:00:00", "input_tokens": 150_000,
+         "reprefill_tokens": 1_000_000, "compaction": RELIEF_ONLY},
+    )) + "\n")
+    db = usage_store.replay_usage_extract(extract, db_path=tmp_path / "open.db")
+    monkeypatch.setattr(usage_store, "DB_PATH", db)
+    open_total = 400_000 + 900_000 + 1_000_000
+
+    # --- the open form: `since` only, which used to raise --------------------
+    attr = usage_store.reprefill_attribution(since=since)
+
+    assert attr["window_absolute"] is True
+    assert attr["window_since"] == since and attr["window_until"] is None
+    # Three of the four rows: only the 400-hour-old one is out, because `since`
+    # itself is the whole of the window's left edge.
+    assert attr["rows"] == 3, attr["rows"]
+    assert attr["window_total_reprefill_tokens"] == open_total, (
+        "an open window must price every row at or after `since`, including the "
+        "2099 row that sits right of any upper bound an omitted `until` could be "
+        "defaulted to")
+    assert attr["bucket_sum_reprefill_tokens"] == sum(
+        b["reprefill_tokens"] for b in attr["buckets"]) == open_total
+    assert attr["gap_pct"] == 0.0
+    # The open rows reach the per-bucket table and the arms table, not just the Σ:
+    # the 2099 relief row's rung is `tool_results`, same as the 30-minute one.
+    assert _row(attr, "turn_start:microcompact")["n"] == 1
+    assert _row(attr, "relief:tool_results")["n"] == 2
+    assert sum(a["n"] for a in attr["arms"].values()) == 3
+    # And the total is NAMED with the predicate the query actually applied: one
+    # bound, spelled, and no invented upper clause.
+    named = attr["window_total_named"]
+    assert f"ts >= {since}" in named, named
+    assert "AND ts <" not in named, (
+        "the printed predicate carries an upper bound the query does not apply — "
+        "the total would not reconcile with the sentence beside it")
+    head = attr["report"].splitlines()[0]
+    assert f"OPEN at the right edge: ts >= {since}" in head, head
+    assert "< None" not in attr["report"], (
+        "the header printed a bound the query never applied")
+    assert f"ts >= {since}" in attr["report"].splitlines()[1]
+    # An absolute window prices no space-spelled twin, open or closed.
+    assert attr["sqlite_spelling_total_reprefill_tokens"] is None
+
+    # --- the closed form: `until` still excludes what it always excluded ------
+    closed = usage_store.reprefill_attribution(since=since, until=until)
+
+    assert closed["window_until"] == until and closed["rows"] == 1, closed["rows"]
+    assert closed["window_total_reprefill_tokens"] == 400_000, (
+        "the closed interval widened: a row at or after `until` is now priced into "
+        "a window the header still prints as bounded")
+    assert f"{since} <= ts < {until}" in closed["report"].splitlines()[0]
+
+    # --- the relative form: untouched, and still its own two-total pair -------
+    rel = usage_store.reprefill_attribution(hours=168)
+
+    assert rel["window_absolute"] is False and rel["window_until"] is None
+    # Same three rows the open form holds: `hours=168` and `since=now-300h` share a
+    # left edge that the 400-hour row is left of and nothing here is right of.
+    assert rel["rows"] == 3 and rel["window_total_reprefill_tokens"] == open_total
+    assert rel["sqlite_spelling_total_reprefill_tokens"] is not None, (
+        "the offset window's reconciliation total is priced only for offset "
+        "windows, and this one still is")
+
+
 # --- the vault extract the #2027 verdict is priced on -----------------------
 #
 # `backlog/data/2026-10-01.2027-reprefill-witness.jsonl` is 3,868 rows of the
