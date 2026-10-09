@@ -331,7 +331,7 @@ def _module_docstring(rel: str) -> str:
 #: `tests/fixtures/.gitignore`, whose reason is literally this one: the gate runs with
 #: HOME at the round home, "a node that opened it would skip, and a skipping node pins
 #: nothing". The whole file, not an extract: an extract of a prose ban is the exact
-#: shape that can hide the offending line, and the file is 74 lines.
+#: shape that can hide the offending line, and the file is 76 lines.
 #:
 #: What the frozen corpus cannot do is notice the LIVE file drifting, so that is the
 #: `live_vault` node's whole job — the marker `pytest.ini` registers for "assertions
@@ -353,20 +353,29 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     anything.
 
     The asserts, in the order that makes each one falsifiable:
-      * the corpus is the whole file at its exact bytes (15,555 B / 74 lines), and it
+      * the corpus is the whole file at its exact bytes (18,554 B / 76 lines), and it
         names `topics/memory-md-ledger`, so a 0-hit below cannot be a wrong path or an
         empty slice;
       * no LINE states a ledger's cap as 32,768 B — `_assert_no_ledger_ceiling_claim`
         carries its own positive and negative control, so the pattern is proven able to
         fire and unable to fire on the correct ordinary-topic sentence;
+      * the predicate is called in-file on both sides of the line it must draw against
+        THIS corpus's own vocabulary, not only #2212's originals: the banned sentence
+        spelled with the drifted corpus's stem, and #2425's front-matter prose, which
+        names no cap and must stay silent;
       * the phrase the false instruction ended with ("split owed") is gone, which is the
         behaviour §1 was sending a curator off to do;
       * the numbers that REPLACE it are present (76,800, 49,152, and `ledger_ceiling` as
         the thing to ask rather than remember), because clause 5 asks that the prose
         "name the new cap", not merely omit the old one;
-      * the §2a-ter bullet vault `e45a6b6c` added is present verbatim. #2284 re-froze this
-        witness WITH that bullet rather than reverting the prose, and the size pin above
-        alone could be satisfied by any 15,555 B file — this names the text.
+      * the text each later re-freeze carried in is present verbatim: the §2a-ter bullet
+        vault `e45a6b6c` added, and both hunks vault `5c6793be` (#2425) added. #2284
+        re-froze this witness WITH that bullet rather than reverting the prose, and the size
+        pin above alone could be satisfied by any 18,554 B file — naming the text is what
+        makes "the freeze kept the prose" a fact about these bytes. It also says which
+        corpus is being read: the node that byte-compares this file to the live skill is a
+        `live_vault` node the gate deselects, so inside a gate these literals are the only
+        evidence that the frozen corpus is the post-#2425 one.
 
     None of that is asserted against the live vault, and that is the honest limit of a
     repo node: it pins this corpus. `live_vault` below is what keeps the pin from
@@ -377,21 +386,43 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         "it clause 5's corpus is a vault file the gate cannot open")
     raw = SKILL_WITNESS.read_bytes()
     text = raw.decode("utf-8")
-    # Bytes, not characters: the file is full of em dashes, so `len(text)` reads 118 short
+    # Bytes, not characters: the file is full of em dashes, so `len(text)` reads 147 short
     # of `wc -c` and a char count would fail on a file nobody truncated. Both figures were
     # measured from the re-frozen fixture itself (`wc -c` and `tr -cd '\n' | wc -c`), which
     # is what #2284 re-freezes it to — a copy of the live skill's text, not a truncation.
-    # Re-frozen 2026-10-08 by #2415, which added the §5 rule that a retire pass waits for
-    # every orphan row to be dispositioned and the §4 `orphan rows: <before> → <after>`
-    # field; both figures below are that copy's own, re-measured the same way.
-    assert len(raw) == 17_272 and text.count("\n") == 74, (
+    # Re-frozen 2026-10-09 by #2468, the third such pairing after #2284 (`3c1c9515`) and
+    # #2415 (`d13514fa`), because vault `5c6793be` (#2425) fenced a hand-created
+    # `lloyd/reviews/` archive against the vault-wide OKF gate and moved the §3 and §5 prose
+    # without touching this copy. Both figures below are that copy's own, re-measured the
+    # same way — never copied from the item that asked for the freeze, since the nightly
+    # appends to this skill and the file may have grown again by landing.
+    assert len(raw) == 18_554 and text.count("\n") == 76, (
         f"{SKILL_WITNESS.name} is {len(raw)} B / {text.count(chr(10))} newlines, not the "
-        "17,272 B / 74 lines of the whole skill file — a partial copy would make the "
+        "18,554 B / 76 lines of the whole skill file — a partial copy would make the "
         "0-hit below a coverage gap rather than a clean result")
     assert "topics/memory-md-ledger" in text and "ledger" in text.lower(), (
         f"{SKILL_WITNESS.name} does not name a ledger, so it is the wrong corpus")
 
     _assert_no_ledger_ceiling_claim("step-2a-ter-curation.md (committed witness)", text)
+
+    # The helper's arms called from this node, on sentences built from THIS corpus's
+    # vocabulary. Its own controls spell #2212's originals — the sentence it was written
+    # against and the ordinary-topic sentence it must not fire on — and those two literals
+    # have not moved since. What nothing has checked is the predicate against the prose this
+    # re-freeze added: #2425's front-matter paragraph is the newest text in the file, it is
+    # full of gate vocabulary and byte-0 talk, and if `THIRTY_TWO_K` or the ledger term were
+    # ever widened it is the neighbour that would start firing. Both directions, because a
+    # one-sided call would let a widened predicate through while the ban still read green.
+    assert _states_a_ledger_cap_at_32768(
+        "`memory-md-ledger` is bounded by the 32,768 B topic-file ceiling"), (
+        "the predicate no longer fires on the banned sentence spelled with this corpus's "
+        "own stem, so the 0-hit above proves nothing about the drifted text")
+    assert not _states_a_ledger_cap_at_32768(
+        "a file you create under `lloyd/reviews/` opens with the `---` front-matter block "
+        "and is scanned by the same gate as its fenced siblings"), (
+        "the predicate fires on #2425's front-matter prose, which states no cap at all — "
+        "the over-broad ban SM_20261006_015104 refused this file for, re-imported by the "
+        "drift it now reads")
 
     assert "split owed" not in text, (
         "the completion-note instruction is back to telling a curator to split a live "
@@ -409,6 +440,27 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         "corpus is the pre-#2284 text: the freeze was made by reverting the skill, which "
         "is the disposition this item explicitly did NOT take")
 
+    # Both hunks vault `5c6793be` (#2425) added to the skill and #2468 re-froze here: §3's
+    # front-matter paragraph for a CREATED `lloyd/reviews/` file, and the Archive bullet's
+    # clause pointing a curator at that block when it creates `memory-md-retired.md`. Pinned
+    # by name for the reason the bullet above is, plus one that only appears at a gate: the
+    # node which proves these bytes are the live ones carries `live_vault` and the gate
+    # deselects it, so inside a gate a literal is the only thing that can tell a re-freeze
+    # that carried the prose forward from a freeze made by reverting the skill. Neither
+    # states a cap or a ledger bound — fencing a created archive is the vault-wide OKF gate's
+    # business — which is both what made them safe to pin and what let the ban be
+    # re-adjudicated as intact over the new corpus rather than weakened by it.
+    assert ("**A file you *create* under `lloyd/reviews/` opens with the `---` "
+            "front-matter block its fenced siblings carry**" in text), (
+        "section 3's #2425 front-matter paragraph is not in the witness, so this corpus is "
+        "the pre-#2425 text again — the same regression #2284 was filed against, one freeze "
+        "later")
+    assert ("if it does not exist yet, §3's front-matter block above" in text
+            and "created by the same hand and scanned by the same gate" in text), (
+        "the Archive bullet never gained its #2425 clause, so the witness still sends a "
+        "curator to create `lloyd/reviews/memory-md-retired.md` without the block section "
+        "3 now requires — the unfenced archive that turned the vault-wide OKF gate red")
+
 
 #: Same reason as the gate node, opposite question: is the file the nightly reads still
 #: the file that was frozen? A frozen corpus with no drift check pins yesterday's prose
@@ -422,13 +474,25 @@ def test_the_live_curation_skill_has_not_drifted_from_the_witness_the_ban_reads(
     precisely because there is no vault at a round home, so this is a node about the
     machine it runs on, marked as one rather than skipping like one.
 
-    Two asserts. The live skill's bytes equal the frozen corpus: if a later nightly,
-    promotion or human edit puts a ledger-cap sentence back, or corrects the prose
-    further, this goes red and the witness gets re-frozen by whoever changed it — a
-    drift is then a decision somebody made, not a gap nobody noticed. And the ban re-runs
-    over the live text, so the reading of "no line states a ledger cap at 32,768 B" is
-    checked against the file that is actually loaded into the nightly's prompt, not only
-    against this tree's copy.
+    Three asserts. The live skill's bytes equal the frozen corpus: if a later nightly,
+    promotion or human edit puts a ledger-cap sentence back, or corrects the prose further,
+    this goes red and the witness gets re-frozen by whoever changed it — a drift is then a
+    decision somebody made, not a gap nobody noticed. #2425's vault commit `5c6793be` is
+    exactly that decision, made on 2026-10-08 and left un-frozen for a day; #2468 re-froze
+    the witness to those bytes in the same change that moved the shape pin above, and the
+    two hunks are named in the gate node so the pairing survives review there. The equality
+    below is what tells the NEXT mover, before it commits to the vault, that it owes the same
+    pairing — `scripts/util/witness_fixture_findings.py` prints both sides' byte and newline
+    counts on the vault-commit door for the same reason.
+
+    Then the ban re-runs over the live text, so the reading of "no line states a ledger cap
+    at 32,768 B" is checked against the file that is actually loaded into the nightly's
+    prompt, not only against this tree's copy — and the third check asks the opposite
+    question of that same text, that it still STATES what the ban replaced (76,800, 49,152,
+    `ledger_ceiling`, and no `split owed`). The ban alone cannot answer it: prose stripped of
+    every cap sentence passes a 0-hit, which is a coverage gap reporting itself as a clean
+    bill of health, and after #2468's re-freeze the live corpus is the only copy a gate
+    cannot open.
     """
     assert SKILL.is_file(), (
         f"{SKILL} is not on this box. The node carries `live_vault`: it reads the live "
@@ -438,8 +502,20 @@ def test_the_live_curation_skill_has_not_drifted_from_the_witness_the_ban_reads(
     assert live == SKILL_WITNESS.read_text(encoding="utf-8"), (
         f"{SKILL} has drifted from {SKILL_WITNESS.name}: the ban in the node above is "
         "reading a corpus that is no longer what the nightly reads. Re-freeze the witness "
-        "in the same change that moved the prose.")
+        "in the same change that moved the prose, and re-measure the byte pin there — "
+        "#2284, #2415 and #2468 each had to move both, and a copy that moves only one "
+        "trades this green for the node above going red.")
     _assert_no_ledger_ceiling_claim("step-2a-ter-curation.md (live vault)", live)
+    # The same three figures the gate node names, asserted against the live corpus: byte
+    # equality makes the two copies one text, but only this copy is the one the nightly
+    # loads, and a 0-hit ban says nothing about prose that was simply dropped.
+    for figure in ("76,800", "49,152", "ledger_ceiling"):
+        assert figure in live, (
+            f"the live corpus no longer states {figure!r}, so the ban above has nothing "
+            "it replaced the false cap with")
+    assert "split owed" not in live, (
+        "the live completion-note instruction is back to telling a curator to split a "
+        "live ledger, which `LEDGERS` reads only one file per index")
 
 
 def test_the_vault_write_lane_measures_a_ledger_against_the_derived_bound(tmp_path, monkeypatch):
