@@ -3714,3 +3714,27 @@ def summarize_clauses(parsed: dict) -> str:
     for c in parsed["clauses"]:
         counts[c["verdict"]] += 1
     return ", ".join(f"{v} {k}" for k, v in counts.items() if v)
+
+
+def summarize_clause_rows(clauses: object) -> str:
+    """The same counts over verdict rows read back off disk — `"5 met of 5"`,
+    `"2 met, 1 partial, 1 unmet, 1 post_landing of 5"`, and `""` for no rows.
+
+    `summarize_clauses` words a grade this process just parsed; this one is handed
+    the `clauses` list of a `gate.json` some other process wrote (#2448), which is
+    data on disk and not a parse of this module's schema, so nothing in it may
+    raise: a row that is not an object is skipped, an unknown verdict is counted
+    under its own name instead of a `KeyError`, and an empty or absent list is
+    answered with `""` rather than `"0 met of 0"` — so a reader can tell "no grade
+    was recorded" from "the grade recorded met nothing".
+    """
+    rows = [c for c in clauses if isinstance(c, dict)] if isinstance(clauses, list) else []
+    if not rows:
+        return ""
+    counts: dict[str, int] = {}
+    for row in rows:
+        verdict = str(row.get("verdict") or "").strip().lower() or "ungraded"
+        counts[verdict] = counts.get(verdict, 0) + 1
+    named = [f"{counts[v]} {v}" for v in CLAUSE_VERDICTS if counts.get(v)]
+    named += [f"{n} {v}" for v, n in sorted(counts.items()) if v not in CLAUSE_VERDICTS]
+    return f"{', '.join(named)} of {len(rows)}"

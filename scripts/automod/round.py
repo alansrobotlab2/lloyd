@@ -684,8 +684,9 @@ def maybe_flush(*, by: str, rounds_in_flight: int | None = None) -> dict | None:
 
 
 def _gate_verdict(round_id: str) -> dict:
-    """The round's own `gate.json` verdict, as `{"gate_ok", "gate_head"}` —
-    `""` for both when no gate report exists.
+    """The round's own `gate.json` verdict, as `{"gate_ok", "gate_head",
+    "review_clauses"}` — `""` for all three when no gate report exists, or when
+    it holds no clause verdicts to summarize.
 
     Read here, off disk, and never from the caller: `abort` is the only writer
     of `round_aborted`, and the reason it stores is the caller's narrative,
@@ -695,12 +696,33 @@ def _gate_verdict(round_id: str) -> dict:
     with "review: 5 met of 5 clause(s)"; the narrative described the *first*
     gate run. `W.remove` then deleted the round dir, so the artifact that
     disproved it was gone by the time anyone read the row.
+
+    `gate_ok` answers "did the gate pass", which is why the same class recurred
+    after that stamp landed (#2448, fifth recorded instance): a round aborted
+    with "clause 4 is not satisfied as written" while both its review attempts
+    graded every clause `met` was entirely consistent with `gate_ok: false` —
+    the gate did fail, just not the way the story said. `review_clauses` answers
+    the question the narrative actually makes, off the same read of the same
+    file: `"5 met of 5"`, or `""` when the report carries no verdicts, which
+    stays a distinct answer from a grade that met nothing.
     """
+    empty = {"gate_ok": "", "gate_head": "", "review_clauses": ""}
     try:
         report = json.loads((S.ROUNDS_DIR / round_id / "gate.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):   # absent, unreadable or truncated: no verdict to carry
-        return {"gate_ok": "", "gate_head": ""}
-    return {"gate_ok": report.get("ok", ""), "gate_head": report.get("head", "")}
+        return empty
+    if not isinstance(report, dict):
+        return empty
+    rows: object = None
+    for rung in report.get("rungs") or []:
+        # The last `review` rung the report holds: a gate run records one, and
+        # its verdicts are the answer this round was refused by.
+        if isinstance(rung, dict) and rung.get("name") == "review":
+            data = rung.get("data")
+            rows = data.get("clauses") if isinstance(data, dict) else None
+    from scripts.automod import review as RV
+    return {"gate_ok": report.get("ok", ""), "gate_head": report.get("head", ""),
+            "review_clauses": RV.summarize_clause_rows(rows)}
 
 
 #: A patch over this size is not a lost edit, it is somebody rebuilding the
@@ -810,6 +832,11 @@ def abort(round_id: str, reason: str = "") -> dict:
     The row also carries the gate verdict the round actually had, beside the
     caller's reason, so a narrative that contradicts the artifact is visible
     without opening `gate.json` — which by then is gone (see `_gate_verdict`).
+    That verdict is now three answers, not two: `gate_ok`/`gate_head` say the
+    gate refused, and `review_clauses` says what the grader said clause by clause
+    (`"5 met of 5"`), which is the half that contradicts an abort reason naming a
+    clause the file records as met (#2448 — `gate_ok: false` alone agreed with
+    the invented story, so the incident recurred after that stamp landed).
 
     And it carries the live checkout's uncommitted work, copied aside first
     (see `preserve_live_dirt`). The branch is not where an orphan live edit

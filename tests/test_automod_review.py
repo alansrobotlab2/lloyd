@@ -1418,13 +1418,21 @@ class _Gate(G.Gate):
         self.report.rungs.append(G.RungResult("tests", True, "ok", 1.0, {"passed": 10}))
 
 
-def _arm(monkeypatch, tmp_path, *, grade, contract=None, prior=0):
+def _arm(monkeypatch, tmp_path, *, grade, contract=None, prior=0,
+         prior_head: str = "", prior_clauses=None):
+    """`prior_head` makes every recorded refusal a refusal of ONE commit, which
+    is what the answer-from-the-ledger branch keys on; `prior_clauses` is what
+    that recorded refusal graded, and the rows a replayed refusal has to quote
+    with its own findings (#2448). Both default to what they were: distinct
+    heads, and a refusal the ledger never gave verdicts for."""
     events: list[dict] = []
     monkeypatch.setattr(G.S, "append_event", lambda e, **k: events.append(e))
     # Graded refusals of DISTINCT commits: only those spend an attempt now.
     monkeypatch.setattr(G.S, "read_events", lambda limit=100: [
         {"event": "review", "round_id": "SM_REV", "ok": True, "blocking": True,
-         "attempt": i + 1, "head": f"{i:040d}", "findings": f"f{i}"} for i in range(prior)])
+         "attempt": i + 1, "head": prior_head or f"{i:040d}", "findings": f"f{i}",
+         **({"clauses": list(prior_clauses)} if prior_clauses is not None else {})}
+        for i in range(prior)])
     monkeypatch.setattr(G.W, "round_dir", lambda rid: tmp_path / "round")
     monkeypatch.setattr(RV, "item_contract", lambda iid, ledger=None: contract or {
         "id": iid, "title": "t", "body": "b", "clauses": ["the thing happens once"], "path": ""})
@@ -2052,6 +2060,78 @@ def test_all_clauses_met_passes_and_names_the_session(monkeypatch, tmp_path):
     assert events[-1]["blocking"] is False
 
 
+def test_a_graded_refusal_records_the_clause_verdicts_it_refused_on(monkeypatch, tmp_path):
+    """The PASS row wrote `clauses`; the refusal row wrote everything except them.
+
+    #2448: `SM_20261008_232856` was aborted with the reason "clause 4 is not
+    satisfied as written … that file is not in this diff", while both of its
+    review attempts had graded all five clauses `met`. That sentence appears 0
+    times in the round's own `gate.json`, and the review row in it — the artifact
+    the round is told to read to explain its own refusal — carried the findings,
+    the session, the attempt and the validated head, and no verdict for clause 4
+    to contradict it with. `gate_ok: false` is consistent with that story: the
+    gate did fail, just not the way the narrative said.
+    """
+    (tmp_path / "app").mkdir(); (tmp_path / "app" / "x.py").write_text("1\n")
+    obj = {"premise": "sound", "summary": "close",
+           "clauses": [{"clause": 1, "verdict": "unmet", "evidence_path": "app/x.py",
+                        "evidence_line": 1, "test_node_id": "", "how_verified": "read",
+                        "note": "only the chat path is covered"}],
+           "test_honesty": [], "seams_unverified": []}
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj))
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok is False and data["review_retry"] is True, detail
+    assert [c["verdict"] for c in data["clauses"]] == ["unmet"], data.get("clauses")
+    assert data["clauses"][0]["note"] == "only the chat path is covered"
+    assert data["clauses"] == events[-1]["clauses"], \
+        "the same rows the `review` ledger event already carries"
+
+    # And the same SHAPE the PASS row writes, key for key: a refusal is not a
+    # lesser record of the grade it just made.
+    passed = {"premise": "sound", "summary": "does what it says",
+              "clauses": [{"clause": 1, "verdict": "met", "evidence_path": "app/x.py",
+                           "evidence_line": 1, "test_node_id": "tests/test_x.py::test_it",
+                           "how_verified": "ran", "note": "ran it"}],
+              "test_honesty": [], "seams_unverified": []}
+    _arm(monkeypatch, tmp_path, grade=_grader(passed))
+    ok2, detail2, data2 = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok2 is True and "1 met" in detail2, detail2
+    assert sorted(data2["clauses"][0]) == sorted(data["clauses"][0])
+
+
+def test_a_refusal_answered_from_the_ledger_replays_the_verdicts_with_its_findings(
+        monkeypatch, tmp_path):
+    """A cap-exhausted or same-head row quotes a grade the grader already made.
+
+    It quotes the findings and, until #2448, dropped the verdicts that came with
+    them — so a round told to abort by the per-round cap could read its own
+    `gate.json` and find no clause verdict anywhere in it, exactly like the
+    graded refusal. Measured over the 30 days to 2026-10-09: 157 refused review
+    rows in `rounds/*/gate.json`, 9 cap-exhausted and 3 same-head among them, 0
+    carrying `clauses`.
+    """
+    graded = [{"clause": 1, "verdict": "met", "how_verified": "ran"},
+              {"clause": 2, "verdict": "unmet", "how_verified": "read"}]
+    # The same commit twice: `head` cannot be resolved from a scratch worktree,
+    # so the report carries it and the recorded refusal carries that value.
+    _arm(monkeypatch, tmp_path, grade=_grader(None), prior=1,
+         prior_head="b" * 40, prior_clauses=graded)
+    same = _Gate(7, ["app/x.py"], tmp_path)
+    same.report.head = "b" * 40
+    ok, detail, data = same.rung_review()
+    assert ok is False and data["review_same_head"] is True, detail
+    assert data["clauses"] == graded, "the verdicts of the refusal it is quoting"
+
+    # The per-round cap (2 graded refusals of distinct commits) and the hard cap
+    # on grading turns both answer without a grading turn, and both replay the
+    # LAST recorded refusal — findings and verdicts together.
+    for prior in (2, 5):
+        _arm(monkeypatch, tmp_path, grade=_grader(None), prior=prior, prior_clauses=graded)
+        ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+        assert ok is False and data["review_retry"] and data["review_exhausted"], detail
+        assert data["clauses"] == graded, f"prior={prior}: {sorted(data)}"
+
+
 def test_the_gate_event_carries_the_review_flags_and_findings(monkeypatch):
     """`gate.json` dies with the worktree; `implement_outcomes` reads these off
     the ledger long after."""
@@ -2398,6 +2478,105 @@ def test_an_abort_row_carries_the_gate_verdict_beside_the_reason(scratch, monkey
     ev2 = [e for e in S.read_events(path=S.LEDGER_PATH)
            if e.get("event") == "round_aborted"][-1]
     assert ev2["gate_ok"] == "" and ev2["gate_head"] == ""
+    # #2448: the same present-and-empty answer for the clause verdicts, so a
+    # reader never mistakes "no grade was recorded" for "nothing was met".
+    assert ev2["review_clauses"] == ""
+
+
+def _gate_json_for(rid, review_data, *, ok=False, head="deadbeefcafe1234"):
+    """A `gate.json` in the shape the gate writes one: the overall verdict, and
+    a `review` rung carrying the `data` that rung returned."""
+    (S.ROUNDS_DIR / rid).mkdir(parents=True, exist_ok=True)
+    (S.ROUNDS_DIR / rid / "gate.json").write_text(json.dumps(
+        {"round_id": rid, "head": head, "ok": ok, "changed_paths": ["app/x.py"],
+         "rungs": [{"name": "tests", "ok": True, "detail": "1234 passed"},
+                   {"name": "review", "ok": False, "detail": "review sent it back",
+                    "data": review_data}]}), encoding="utf-8")
+
+
+def test_the_abort_row_carries_the_verdicts_that_refute_the_reason_beside_it(scratch, monkeypatch):
+    """`gate_ok: false` does not contradict a clause-level story. #2448 clause 2.
+
+    `SM_20261008_232856` was aborted at 00:09:45Z with "clause 4 is not satisfied
+    as written: the clause names app/harness/tests/test_finalizer.py … but that
+    file is not in this diff", 26 seconds after its second review attempt graded
+    all five clauses `met` — clause 4 `how_verified: ran`, note "Ran
+    app/harness/tests/test_finalizer.py: 45 passed". The blocker filed from that
+    reason repeated the sentence. The stamp #1116 landed answered only "did the
+    gate pass", which the story agrees with, so the row now carries the file's
+    own clause summary too, read before the round dir is removed and never from
+    the caller.
+    """
+    ids = iter(("SM_C1", "SM_C2"))
+    monkeypatch.setattr(R, "_round_id", lambda: next(ids))
+    rid = R.start("graded five of five", force=True, item_id=77)["round_id"]
+    met = [{"clause": i, "verdict": "met", "how_verified": "ran"} for i in range(1, 6)]
+    _gate_json_for(rid, {"review_retry": True, "review_attempt": 2,
+                         "review_findings": "blocking test-honesty entry",
+                         "clauses": met})
+    out = R.abort(rid, reason="clause 4 is not satisfied as written")
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+          if e.get("event") == "round_aborted"][-1]
+    assert ev["gate_ok"] is False and ev["gate_head"] == "deadbeefcafe1234"
+    assert "clause 4 is not satisfied" in ev["reason"], "the narrative is kept, not edited"
+    assert ev["review_clauses"] == "5 met of 5", "what the file the reason cites says"
+    assert out["review_clauses"] == "5 met of 5", "and to the caller, at the moment it wrote it"
+
+    # Partial verdicts keep their own counts rather than collapsing to a met
+    # tally, so a row cannot read as "all met" when one clause did not pass.
+    rid2 = R.start("graded four of five", force=True, item_id=78)["round_id"]
+    _gate_json_for(rid2, {"review_retry": True, "clauses": [
+        {"clause": 1, "verdict": "met"}, {"clause": 2, "verdict": "met"},
+        {"clause": 3, "verdict": "partial"}, {"clause": 4, "verdict": "unmet"},
+        {"clause": 5, "verdict": "post_landing"}]})
+    R.abort(rid2, reason="out of clock")
+    ev2 = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "round_aborted"][-1]
+    assert ev2["review_clauses"] == "2 met, 1 partial, 1 unmet, 1 post_landing of 5"
+
+
+def test_an_abort_row_leaves_absent_verdicts_absent_rather_than_zero_met(scratch, monkeypatch):
+    """No grade, an unreadable report and an unevidenced refusal are one answer:
+    no summary. #2448 clause 3.
+
+    The distinction is what makes the stamp worth reading — `"0 met"` would be a
+    verdict the grader never gave, and it would sit beside a reason that claims a
+    clause went unmet as though it corroborated it.
+    """
+    ids = iter(("SM_N1", "SM_N2", "SM_N3", "SM_N4"))
+    monkeypatch.setattr(R, "_round_id", lambda: next(ids))
+
+    # (a) a round that never gated: no `gate.json` at all.
+    never = R.start("never gated", force=True, item_id=77)["round_id"]
+    R.abort(never, reason="out of clock")
+
+    # (b) a report that cannot be parsed.
+    broken = R.start("gate.json truncated", force=True, item_id=78)["round_id"]
+    (S.ROUNDS_DIR / broken).mkdir(parents=True, exist_ok=True)
+    (S.ROUNDS_DIR / broken / "gate.json").write_text('{"round_id": "SM_N2", "run', encoding="utf-8")
+    R.abort(broken, reason="out of clock")
+
+    # (c) a refusal row carrying findings but no clause verdicts — the shape
+    # every one of the 157 refused rows in the 30 days to 2026-10-09 had.
+    no_verdicts = R.start("refused without verdicts", force=True, item_id=79)["round_id"]
+    _gate_json_for(no_verdicts, {"review_retry": True,
+                                 "review_findings": "clause 2 unmet: no test"})
+    R.abort(no_verdicts, reason="clause 2 unmet")
+
+    rows = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "round_aborted"]
+    assert len(rows) == 3, [e.get("round_id") for e in rows]
+    for ev in rows:
+        assert "review_clauses" in ev, f"{ev['round_id']}: present like gate_ok"
+        assert ev["review_clauses"] == "", f"{ev['round_id']}: and empty, not '0 met'"
+
+    # And a grade that really did meet nothing is NOT the empty answer.
+    none_met = R.start("graded nothing met", force=True, item_id=80)["round_id"]
+    _gate_json_for(none_met, {"review_retry": True, "clauses": [
+        {"clause": 1, "verdict": "unmet"}, {"clause": 2, "verdict": "unmet"}]})
+    R.abort(none_met, reason="both clauses unmet")
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+          if e.get("event") == "round_aborted"][-1]
+    assert ev["review_clauses"] == "2 unmet of 2"
 
 
 def test_a_missing_resume_branch_falls_back_to_a_fresh_worktree(scratch):

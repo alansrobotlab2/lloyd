@@ -2874,9 +2874,17 @@ class Gate:
         # of the never-ask reasons anyway, so a refusal holding a refused
         # amendment is never put to the reader at all.)
         self._settle_amendments(amendments, parsed, kind)
+        # The verdicts ride the refusal rows as they ride the pass row (#2448).
+        # `gate.json` is the artifact a round is told to read to explain its own
+        # refusal, and until now the rows that refused it were the only ones
+        # saying nothing about the clauses: `SM_20261008_232856` aborted with
+        # "clause 4 is not satisfied as written" 26 seconds after both its
+        # attempts graded all five clauses `met`, and no verdict in the file it
+        # cited contradicted the sentence.
         if kind == "unsound":
             return False, f"review: premise unsound{tree_note} — {findings}", {
                 "review_premise_unsound": True, "review_summary": findings[:800],
+                "clauses": parsed["clauses"],
                 "review_session": res.get("session_id"), **confirm_fields, **validated}
         if kind == "retry" and not overturned:
             contract_refusal = any(c.get("verdict") == "unsatisfiable" for c in parsed["clauses"])
@@ -2898,6 +2906,7 @@ class Gate:
                            f"{honesty_suffix}"), {
                 "review_retry": True, "review_findings": findings[:1500],
                 "review_attempt": attempt, "review_session": res.get("session_id"),
+                "clauses": parsed["clauses"],
                 "honesty_note": honesty_note, **confirm_fields, **validated}
         # On a PASS, record the grader's `post_landing` clauses onto the item.
         # Written here rather than by the implementer because it is a fact the
@@ -3060,6 +3069,12 @@ class Gate:
                 continue
             spent += 1
         attempt = spent + 1
+        # The three rows answered from the ledger quote a recorded refusal, so
+        # they quote its verdicts with its findings (#2448). The `review` events
+        # they replay already carry `clauses` (appended above); dropping them here
+        # left a round whose `gate.json` was the only artifact it was told to read
+        # holding no clause verdict at all — 12 of the 157 refused rows in the 30
+        # days to 2026-10-09 were these, and 0 of the 157 carried `clauses`.
         if graded_total >= RV.REVIEW_HARD_CAP:
             last = graded_refusals[-1] if graded_refusals else {}
             return False, (f"review has graded this round {graded_total} times (ceiling "
@@ -3067,6 +3082,7 @@ class Gate:
                            f"to the next round with the findings"), {
                                "review_retry": True, "review_exhausted": True,
                                "review_attempt": spent + 1,
+                               "clauses": last.get("clauses") or [],
                                "review_findings": str(last.get("findings") or "")[:1500]}
         # A pending amendment changes the contract, so the SAME head is a
         # different question and has to be graded again. 866-c amended a
@@ -3104,6 +3120,7 @@ class Gate:
                            f"again: {findings}"), {
                                "review_retry": True, "review_findings": findings,
                                "review_attempt": int(same.get("attempt") or spent),
+                               "clauses": same.get("clauses") or [],
                                "review_same_head": True}
         # Same reason: a round holding an unratified amendment has not had
         # its new contract judged even once. The HARD_CAP above still bounds
@@ -3116,6 +3133,7 @@ class Gate:
                            f"the reason) — the item comes back to the next round with them"), {
                                "review_retry": True, "review_exhausted": True,
                                "review_attempt": attempt,
+                               "clauses": last.get("clauses") or [],
                                "review_findings": str(last.get("findings") or "")[:1500]}
         changed = list(self.report.changed_paths)
         changed_tests = TP.pick_test_files(changed, self.worktree)
