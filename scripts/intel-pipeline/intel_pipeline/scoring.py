@@ -14,6 +14,7 @@ attaches `source_tags`. See tests/test_intel_pipeline_scorer.py.
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -267,6 +268,50 @@ def _keyword_fallback(item: FeedItem, profile: dict) -> dict:
     }
 
 
+# ── a keyword inside an address is not a keyword in the text (#2463) ────────────────
+#
+# `_keyword_occurs` bounds a single-word keyword with `\b` (profile.py:166-175), and `.`,
+# `/` and `-` are all NON-word characters — so `ai` matches inside `figure.ai` and `gr00t`
+# inside `…/gr00t-n1_6/` exactly as loudly as either would in a sentence. Measured on
+# 2026-10-09 across the 17 retained raw day files (2,595 rows, 732 stage-1 keeps): 16 rows
+# are kept ONLY by a keyword inside a URL domain or path segment, all 16 of them GitHub
+# rows and 0 of the 1,316 YouTube ones. The false-positive shape #2241's owed check
+# predicted, from a gate widened in #2241 to read the whole description.
+#
+# So both gate reads below match on this function's copy of the gate text with the URL
+# substrings taken out. Match time and nowhere near: FeedItem.stage1_text(), the stored
+# gate_description and summary, the intel-<date>.jsonl row and vault_writer's _entry_body
+# render all still carry the addresses whole, which is why neither this module's writer nor
+# body.py has a line of it — and why the scorer test
+# test_url_ablation_is_match_time_only_stored_and_rendered_bytes_are_unchanged reads the
+# day file back instead of trusting this comment.
+#
+# Two residuals, stated because a partial guard read as a whole one is the worse failure.
+# `[^ ]+` spans a newline, so a URL that ends a line also takes the first token of the
+# line after it; and a scheme-less host (tinyurl.com/…, the bare-host branch of
+# _LINK_PRESENT_RE at body.py:202) is not a URL to this pattern, so a keyword inside one
+# can still carry a keep. Both are recorded on #2463, along with what the ablation gives up:
+# 16 of the corpus's 732 stage-1 keeps (all of them GitHub rows, 5% of its GitHub keeps),
+# and 3 of the 33 rows the frozen corpus in tests/test_intel_pipeline_scorer.py admits under
+# the whole-word rule. Whether the gate should instead carry the repo's own name would
+# reverse the 2026-09-11 ruling quoted in `stage1_filter`'s docstring above — repo traffic
+# is not an interest signal — so it is a separate decision owed on that item, not taken here.
+_GATE_URL_RUN = re.compile(r"https?://[^ ]+|www[^ ]+")
+
+
+def gate_match_text(item: FeedItem) -> str:
+    """The gate text with every URL substring replaced by a single space.
+
+    A space and not the empty string: deleting an address would splice the prose on either
+    side of it into one token and could invent a match at the seam, where a space keeps the
+    word boundaries the matcher reads where they were.
+
+    This is the ONLY place the ablation exists, and it is a matcher input: nothing stored,
+    rendered or published passes through it. See the block above for why (#2463).
+    """
+    return _GATE_URL_RUN.sub(" ", item.stage1_text())
+
+
 def stage1_filter(
     items: List[FeedItem],
     profile: dict
@@ -295,13 +340,19 @@ def stage1_filter(
     the matcher. Stage 2's three other readers of `item.summary` (`_score_prompt`,
     `_keyword_fallback`, `match_projects`) still read the stripped value — widening
     them is an open scope question on that item, not a change to make here.
+
+    Since #2463 the match runs on `gate_match_text(item)` rather than on `stage1_text()`
+    itself: the same text with its URL substrings taken out, because `\b` cannot tell an
+    address from a sentence and a keyword inside a domain was carrying keeps the profile
+    never asked for. What is stored and published is untouched.
     """
     filtered_items = []
 
     for item in items:
-        # Title plus the widest copy of the description we hold: the pre-strip text
-        # where the scanner carried one, the stored summary otherwise.
-        text = item.stage1_text()
+        # Title plus the widest copy of the description we hold — the pre-strip text
+        # where the scanner carried one, the stored summary otherwise — with the
+        # addresses off it, for matching only (#2463, see `gate_match_text`).
+        text = gate_match_text(item)
 
         # Check against profile keywords
         matched = keyword_match(text, profile)
@@ -533,7 +584,16 @@ def stage2_score(
         # row with no pre-strip copy — every GitHub row, and every YouTube row written before
         # #2241 — has `stage1_text() == text`, so for those the decision is identical to the
         # one this line made before the change.
-        kw_score = keyword_score(item.stage1_text(), profile)
+        #
+        # Since #2463 the copy it reads is `gate_match_text(item)` — `stage1_text()` with
+        # its URL substrings taken out — and it is the SAME function stage 1 gates on, so
+        # the two reads cannot disagree about one item. An item whose only keyword sat
+        # inside an address was already dropped by stage 1; leaving this line on the
+        # unabridged text would have it rated 0.9 here and handed a survivor slot to a grade
+        # no writer would ever take. What the ablation reaches is still only WHO IS ASKED:
+        # the prompt, the fallback's own score, project matching and every published copy
+        # keep reading `text`, exactly as the paragraph above rules.
+        kw_score = keyword_score(gate_match_text(item), profile)
         fallback = _keyword_fallback(item, profile)
 
         relevance = fallback["relevance"]

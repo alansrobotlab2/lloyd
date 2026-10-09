@@ -3147,6 +3147,53 @@ def test_widening_who_gets_asked_publishes_the_stripped_summary_and_never_the_ga
         assert mark not in published, f"the note body gained the block: {mark}"
 
 
+# ── #2463 — the gate's URL ablation is match-time, so nothing here moves ──────
+
+#: The GitHub body #2463's kept-row fixture, under the same name it has in
+#: `tests/test_intel_pipeline_scorer.py`: the interest keyword in the prose, an address in a
+#: markdown link. A GitHub summary is the one published shape that legitimately carries URL
+#: bytes, which makes it the copy that can prove an ablation stayed at match time.
+GITHUB_PROSE_TITLE = "Adds an offline serve harness for the Orin bench"
+GITHUB_PROSE_AND_LINK_BODY = (
+    "Adds a vllm serve harness so the Orin bench can run the model offline, with the "
+    "upstream thread at [openclaw#53940]"
+    "(https://github.com/openclaw/openclaw/pull/53940)."
+)
+
+
+def test_gate_url_ablation_moves_the_verdict_and_not_a_single_published_byte():
+    """Clause 5 (#2463): the writer half of the pair is visibly untouched.
+
+    #2463 strips `https?://…` and `www…` out of the text the STAGE-1 MATCHER reads — the
+    diff adds no line to this file's two modules. Two rulings here could have been moved by
+    a change that reached further than that, and both are re-pinned on the #2463 fixtures:
+    the stripped-summary short-circuit that returns `summary` verbatim whenever
+    `strip_link_footer` changed nothing (the pins at :698 and :878), and #2143's rule that a
+    feed description which IS a link block publishes the scorer's `why` instead of the block.
+    Then the GitHub body — the one published shape whose bytes legitimately include an
+    address — is asserted to publish that address byte for byte, which is the claim the
+    clause actually rests on: had the ablation reached the stored or rendered copy, this last
+    assert is where it would show.
+    """
+    assert body_mod.strip_link_footer(URL_ONLY_DESCRIPTION) == "", \
+        "the stripped-summary ruling moved"
+    assert vw_mod._entry_body(
+        _yt(id="youtube:UCtest:addr2463", summary=URL_ONLY_DESCRIPTION,
+            why="Scores 7/10: covers the local-inference thread")
+    ) == "Scores 7/10: covers the local-inference thread", \
+        "a link block started publishing itself instead of `why`"
+
+    gh = ScoredItem(id="github:openclaw/openclaw:issue:55373", source="github",
+                    title=GITHUB_PROSE_TITLE,
+                    url="https://github.com/openclaw/openclaw/issues/55373",
+                    summary=GITHUB_PROSE_AND_LINK_BODY,
+                    discovered_at="2026-10-08T06:00:00+00:00", relevance=7,
+                    why="Scores 7/10: covers the local-inference thread")
+
+    assert vw_mod._entry_body(gh) == GITHUB_PROSE_AND_LINK_BODY, \
+        repr(vw_mod._entry_body(gh))
+
+
 # ── #2380 — routing on the gate text publishes only the stripped summary ──────
 #
 # Backlog #2380 made `determine_vault_path`'s YouTube branch score `stage1_text()` so a

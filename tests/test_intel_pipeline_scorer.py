@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -1866,6 +1867,16 @@ HANDOFF_UI_ITEM = "github:openclaw/openclaw:commit:ead35525"
 OPENCLAW_ENV_KEYS_ITEM = "github:openclaw/openclaw:issue:146645"
 AGIBOT_DOF_ITEM = "github:isaac-sim/IsaacLab:issue:7789"
 
+#: The three rows #2463's address ablation costs out of this corpus, measured 2026-10-09:
+#: each carries its only `openclaw` inside a GitHub URL in the issue body — 149706 and
+#: 150131 a self-link to `…/issues/45233`, 147886 a link at a docs blob — and no keyword in
+#: its title or its prose. The accepted cost of that item, in a frozen corpus.
+OPENCLAW_SELF_LINK_ITEMS = {
+    "github:openclaw/openclaw:issue:147886",
+    "github:openclaw/openclaw:issue:149706",
+    "github:openclaw/openclaw:issue:150131",
+}
+
 AGIBOT_TITLE = "Agibot/g2 ik7d teleop"
 AGIBOT_SUMMARY = ("Integrates AgiBot's `ik_7d` 7-DoF redundant-arm IK solver as an "
                   "out-of-tree Isaac Lab teleoperation environment "
@@ -1969,13 +1980,26 @@ def test_stage1_filter_admits_every_item_that_matched_on_a_whole_word(redirect_p
     The denominator is the fixture's own count, re-measured against the pre-fix
     rule in the same call, so a fixture that quietly changed size cannot leave
     this test green.
+
+    Re-pinned for #2463, which adds one more step to the same ladder and costs three
+    further rows. `boundary_admits` below is the rule this test was written for, the
+    whole-word match on the unabridged gate text, re-measured rather than remembered:
+    36 → 33 is that rule's doing and nothing else. `stage1_filter` then matches the same
+    rule on the text with its addresses taken out and admits 30. The three extra losses
+    are `OPENCLAW_SELF_LINK_ITEMS` — each an openclaw issue whose only `openclaw` is
+    inside a GitHub URL in its own body — which is #2463's accepted cost arriving in a
+    frozen corpus, the same shape as the three substring-only losses two rules earlier:
+    a keyword's spelling occurring in the text was being read as an interest signal.
     """
     profile = _live_profile(redirect_paths)
     payload, items = _fixture_corpus()
 
     kept = scoring_mod.stage1_filter(items, profile)
     contained = _containment_admits(items, profile)
+    boundary_admits = {it.id for it in items
+                       if profile_mod.keyword_match(it.stage1_text(), profile)}
     lost = {it.id for it in items} - {it.id for it in kept}
+    kept_ids = {it.id for it in kept}
 
     assert payload["matched_keywords"] == profile_mod.get_all_keywords(profile), (
         "the keyword list the corpus was frozen against and the keyword list "
@@ -1984,12 +2008,21 @@ def test_stage1_filter_admits_every_item_that_matched_on_a_whole_word(redirect_p
     assert payload["counts"]["containment_admits"] == 36 == len(contained), (
         f"the pre-fix rule admits {len(contained)} of {len(items)} fixture items, "
         f"not the 36 the fixture records")
-    assert len(kept) == 33, (
-        f"admission must drop 36 → 33, losing only substring-only items; "
-        f"{len(kept)} kept, lost {sorted(lost)}")
-    assert lost == {HANDOFF_CRON_ITEM, HANDOFF_UI_ITEM, OPENCLAW_ENV_KEYS_ITEM}, (
-        f"the three substring-only admits must be the only losses: {sorted(lost)}")
-    assert AGIBOT_DOF_ITEM in {it.id for it in kept}, (
+    assert len(boundary_admits) == 33, (
+        f"the whole-word rule on the unabridged gate text admits "
+        f"{len(boundary_admits)}, not the 33 this test was written against, so the "
+        "step from it to the ablated count below is no longer the one being pinned")
+    assert len(kept) == 30, (
+        f"36 → 33 on the boundary rule and 33 → 30 on the address ablation, losing "
+        f"only the two named sets; {len(kept)} kept, lost {sorted(lost)}")
+    assert boundary_admits - kept_ids == OPENCLAW_SELF_LINK_ITEMS, (
+        "the address ablation must cost exactly the three self-linked openclaw issues: "
+        f"{sorted(boundary_admits - kept_ids)}")
+    assert lost == ({HANDOFF_CRON_ITEM, HANDOFF_UI_ITEM, OPENCLAW_ENV_KEYS_ITEM}
+                    | OPENCLAW_SELF_LINK_ITEMS), (
+        f"the substring-only and address-only admits must be the only losses: "
+        f"{sorted(lost)}")
+    assert AGIBOT_DOF_ITEM in kept_ids, (
         "the genuine 7-DoF item must still be admitted")
 
 
@@ -3074,11 +3107,15 @@ def _require_replayable_day(items, profile) -> None:
     These are premises the replay consumes, not claims about the code under test, so
     they live here rather than as assertions inside a clause test — a fixture that
     drifted must report itself as the broken thing instead of showing up as a
-    suspicious pass or an unexplained failure. Two premises, both measured on
-    2026-10-02:
+    suspicious pass or an unexplained failure. Two premises.
 
-    * all 42 survivors are stage-1 eligible, so 42 items press on a 40-call budget
-      and the cap actually binds;
+    * 40 of the day's 42 survivors are stage-1 eligible, so 40 items press on the
+      replay's 38-call budget and the cap actually binds. All 42 were eligible when
+      this day was cut; #2463's address ablation took `github:openclaw/openclaw:issue:
+      143216` and `:issue:157151` out of it, each carrying its only `openclaw` inside a
+      URL in the issue body and nothing in its title or prose. That is the accepted cost
+      standing up in a frozen day, and the clause test's budget moved two below the
+      admitted count with it so the overflow scenario is still the thing under test.
     * `keyword_score` is degenerate over them (every survivor scores the same),
       which is why source leads the allocation key. Should Alan re-scale the interest
       weights (#1380, ruled 2026-09-27), keyword score starts ordering survivors and
@@ -3086,11 +3123,12 @@ def _require_replayable_day(items, profile) -> None:
     """
     if len(items) != 42:
         raise AssertionError(f"fixture holds {len(items)} rows, not the day's 42")
-    if len(scoring_mod.stage1_filter(items, profile)) != 42:
+    admitted = len(scoring_mod.stage1_filter(items, profile))
+    if admitted != 40:
         raise AssertionError(
-            "the bundled vocabulary no longer admits the day it was cut from, so "
-            f"only {len(scoring_mod.stage1_filter(items, profile))} survivors press "
-            "on a 40-call budget and the cap may not bind")
+            "the bundled vocabulary no longer admits the day the way this replay's "
+            f"38-call budget assumes: {admitted} of {len(items)} rows are eligible, "
+            "against 40 expected — 42 before #2463's two address-only drops")
     scores = {profile_mod.keyword_score(f"{i.title} {i.summary}", profile)
               for i in items}
     if len(scores) != 1:
@@ -3136,14 +3174,21 @@ def test_the_call_budget_is_spent_by_feed_source_not_arrival_order(redirect_path
 
 def test_replaying_the_2026_10_02_overflow_grades_both_headlining_videos(
         redirect_paths):
-    """Clause 2: the day itself, at the real cap, from the checked-in fixtures.
+    """Clause 2: the day itself, from the checked-in fixtures, under a binding budget.
 
-    The day's 42 survivors, admitted by the day's own bundled vocabulary, against
-    `max_llm_calls=40` — so the budget is what binds. The two videos the run refused
-    come back `model`, and the two items that overflow are GitHub commits, the
-    source whose grades 20 of 33 then fell below the floor. Every assertion below
-    reads the output of `run_scoring_pipeline`; what the fixtures still hold the day
-    is `_require_replayable_day`'s job, and the `last_llm_calls == 40` /
+    The day's 42 survivors, admitted by the day's own bundled vocabulary down to 40 —
+    #2463's address ablation costs that day two GitHub rows whose only keyword sat
+    inside a URL — and run against `max_llm_calls=38`, two below the admitted count, so
+    the budget is what binds. It used to be the real default of 40 against 42 admitted;
+    at that default the day now refuses nothing (`last_cap_refused` reads 0), which is
+    the ablation's cost landing on a real day and worth saying out loud. The budget
+    moved with the denominator rather than the scenario being dropped with it, because
+    source-first allocation only shows itself under pressure.
+
+    The two videos the run refused come back `model`, and the two items that overflow
+    are GitHub rows, the source whose grades 20 of 33 then fell below the floor. Every
+    assertion below reads the output of `run_scoring_pipeline`; what the fixtures still
+    hold the day is `_require_replayable_day`'s job, and the `last_llm_calls == 38` /
     `last_cap_refused == 2` pair is what stops this passing vacuously — were the
     allocation not spending the budget, the replay would have nothing left to
     allocate and would have to say so in red.
@@ -3154,10 +3199,12 @@ def test_replaying_the_2026_10_02_overflow_grades_both_headlining_videos(
 
     scored = scoring_mod.run_scoring_pipeline(items, profile,
                                               llm_call=RecordingLLM(relevance=6),
-                                              max_llm_calls=40)
+                                              max_llm_calls=38)
 
-    assert len(scored) == 42
-    assert scoring_mod.stage2_score.last_llm_calls == 40
+    assert len(scored) == 40, (
+        f"stage 1 admitted {len(scored)} of the day's 42, which is not the 40 "
+        "`_require_replayable_day` pins the budget against")
+    assert scoring_mod.stage2_score.last_llm_calls == 38
     assert scoring_mod.stage2_score.last_cap_refused == 2
     for video_id in CAP_REFUSED_VIDEO_IDS:
         hit = [s for s in scored if video_id in s.id]
@@ -4132,6 +4179,225 @@ def test_a_raw_row_with_no_pre_strip_field_still_gates_on_title_and_summary(
     assert [i.gate_description for i in reread] == ["", ""], \
         "a pre-change row must load as carrying no pre-strip text"
     assert [i.id for i in scoring_mod.stage1_filter(reread, profile)] == ["described"]
+
+
+# --- #2463: a keyword inside a URL address cannot carry a gate keep ------------------
+
+# `_keyword_occurs` bounds a single-word keyword with `\b` (profile.py:166-175), and `.`,
+# `/` and `-` are all NON-word characters, so a keyword inside an address matches exactly
+# as loudly as one inside a sentence: `ai` out of `figure.ai`, `gr00t` out of
+# `…/gr00t-n1_6/`. Measured on 2026-10-09 over the 17 retained raw day files (2,595 rows,
+# 732 stage-1 keeps), 16 rows are kept ONLY by a keyword sitting inside a URL domain or
+# path segment — all 16 of them GitHub rows, 0 of the 1,316 YouTube ones.
+#
+# The fix ablates URL substrings out of the text the MATCHER reads. What `stage1_text()`
+# returns, what `gate_description` and `summary` hold, what the day-file row carries and
+# what `_entry_body` renders are all the same bytes as before, which is what the two
+# byte-identity nodes below and in `tests/test_intel_pipeline_body.py` are for.
+#
+# `GATE_URL_RUN` is the reference the expectations below are measured against, written out
+# here rather than imported from the module: an expectation computed with the module's own
+# pattern could not notice that pattern eating prose. It is the regex the item names,
+# including its one looseness — `[^ ]+` spans a newline, so a URL that ends a line also
+# takes the first token of the line after it. No fixture here has a keyword in that
+# position, and the residual is recorded on the item.
+GATE_URL_RUN = re.compile(r"https?://[^ ]+|www[^ ]+")
+
+# The #2241 fixture above with ONE thing moved: the only keyword of the fixture profile
+# that occurs anywhere in it, `vllm`, sits inside the ADDRESS on the last line instead of
+# in the channel's own label. Same `LINK_FARM_TITLE`, and no keyword in the prose either
+# side of it, so keep-versus-drop can only be about where that one keyword sits.
+ADDRESS_ONLY_DESCRIPTION = "\n".join([
+    "🔗 Subscribe: https://www.youtube.com/@channelfolio?sub_confirmation=1",
+    "💼 Business Inquiries: https://example.com/contact",
+    "➡️ Twitter: https://x.com/channelfolio",
+    "👉 Bench notes and model cards: https://vllm-project.github.io/vllm/bench",
+])
+
+# The recorded GitHub shape (`github:openclaw/openclaw:issue:55372`): a body whose ONLY
+# keyword is inside a markdown link's address, in a row whose title says nothing that any
+# topic keyword matches. `vllm` stands in for the repo name, because the fixture profile
+# has no `openclaw` keyword — the shape, not the string.
+GITHUB_NO_KEYWORD_TITLE = "Feature request: option to silence the restart sentinel"
+GITHUB_LINK_ONLY_BODY = (
+    "Spun out of [the design thread]"
+    "(https://github.com/openclaw/openclaw/pull/53940) and cross-checked against "
+    "[the release notes](https://github.com/vllm-project/vllm/releases)."
+)
+
+# The same body with the keyword ALSO in its prose: the row that keeps surviving the gate,
+# and therefore the row whose stored and published bytes can prove the ablation never left
+# match time. Same text under the same name in tests/test_intel_pipeline_body.py.
+GITHUB_PROSE_TITLE = "Adds an offline serve harness for the Orin bench"
+GITHUB_PROSE_AND_LINK_BODY = (
+    "Adds a vllm serve harness so the Orin bench can run the model offline, with the "
+    "upstream thread at [openclaw#53940]"
+    "(https://github.com/openclaw/openclaw/pull/53940)."
+)
+
+
+def test_a_keyword_inside_only_a_url_address_stops_carrying_a_stage1_keep(redirect_paths):
+    """Clause 1 (#2463): the gate stops matching on the inside of an address.
+
+    The pair IS the test. Unabridged, the two descriptions match the same topic on the same
+    keyword and their shared title matches nothing, so the only variable left between a
+    keep and a drop is where that keyword sits. The two `match_keywords` calls on the
+    ablated text are the reference: the block that still holds `vllm` once the addresses are
+    gone must stay, the one that loses it must go, and neither expectation is computed with
+    the module's own pattern.
+    """
+    profile = _profile(redirect_paths)
+    all_kw = [kw for t in profile["topics"] for kw in t["keywords"]]
+
+    assert not profile_mod.match_keywords(LINK_FARM_TITLE, all_kw), \
+        "the shared title gained a keyword, so the pair below is no longer one variable"
+    assert [t["name"] for t in profile_mod.keyword_match(URL_ONLY_DESCRIPTION, profile)] \
+        == [t["name"] for t in
+            profile_mod.keyword_match(ADDRESS_ONLY_DESCRIPTION, profile)] == ["ai-llms"], \
+        "the two blocks stopped matching on the same topic"
+    assert [t["matched_keywords"] for t in
+            profile_mod.keyword_match(ADDRESS_ONLY_DESCRIPTION, profile)] == [["vllm"]], \
+        "the fixture's only keyword is no longer the one inside the address"
+    assert profile_mod.match_keywords(
+        GATE_URL_RUN.sub(" ", ADDRESS_ONLY_DESCRIPTION), all_kw) == [], \
+        "the reference ablation left a keyword in the address-only block"
+    assert profile_mod.match_keywords(
+        GATE_URL_RUN.sub(" ", URL_ONLY_DESCRIPTION), all_kw) == ["vllm"], \
+        "the reference ablation ate the prose keyword, so the keep below proves nothing"
+
+    kept = scoring_mod.stage1_filter(
+        [_item("address-only", title=LINK_FARM_TITLE, summary="",
+               gate_description=ADDRESS_ONLY_DESCRIPTION),
+         _item("prose-keyword", title=LINK_FARM_TITLE, summary="",
+               gate_description=URL_ONLY_DESCRIPTION)],
+        profile)
+
+    assert [i.id for i in kept] == ["prose-keyword"], \
+        "the gate still reads the inside of an address, or no longer reads prose"
+
+
+def test_a_keyword_inside_only_a_url_address_buys_no_stage2_call(redirect_paths):
+    """Clause 2 (#2463): eligibility is judged on the same text the gate matched on.
+
+    #2314 moved WHO IS ASKED onto `item.stage1_text()`; this moves which copy of that text
+    both reads see, so the gate and the eligibility test cannot disagree about one item.
+    The three asserts before the calls are the premise in numbers: on the unabridged gate
+    text the address-only row scores 0.9, above `LLM_KEYWORD_THRESHOLD`
+    (scoring.py:38, `0.3`), so before this change it was a candidate for a call that the
+    stage-1 drop means it never earns. The second half is the #2314 ruling staying intact:
+    the prose keep must STILL be put to the model.
+    """
+    profile = _profile(redirect_paths)
+    address_item = _item("address-only", title=LINK_FARM_TITLE, summary="",
+                         gate_description=ADDRESS_ONLY_DESCRIPTION)
+    prose_item = _item("prose-keyword", title=LINK_FARM_TITLE, summary="",
+                       gate_description=URL_ONLY_DESCRIPTION)
+
+    assert profile_mod.keyword_score(address_item.stage1_text(), profile) == 0.9, \
+        "the unabridged gate text stopped being the shape that buys a call"
+    assert profile_mod.keyword_score(
+        GATE_URL_RUN.sub(" ", address_item.stage1_text()), profile) == 0.0, \
+        "the reference ablation left the address-only row above the threshold"
+    assert profile_mod.keyword_score(
+        GATE_URL_RUN.sub(" ", prose_item.stage1_text()), profile) == 0.9, \
+        "the reference ablation took the prose keep's score with it"
+
+    address_llm = RecordingLLM(relevance=6)
+    prose_llm = RecordingLLM(relevance=6)
+    address_scored = scoring_mod.stage2_score([address_item], profile,
+                                              llm_call=address_llm)
+    prose_scored = scoring_mod.stage2_score([prose_item], profile, llm_call=prose_llm)
+
+    assert address_llm.asked == [], "an address-only keyword still buys a model call"
+    assert address_scored[0].grade_source == models_mod.GRADE_KEYWORD, address_scored[0]
+    assert len(prose_llm.asked) == 1, "the prose keep stopped being put to the model"
+    assert prose_scored[0].grade_source == models_mod.GRADE_MODEL, prose_scored[0]
+
+
+def test_url_ablation_is_match_time_only_stored_and_rendered_bytes_are_unchanged(tmp_path):
+    """Clause 3 (#2463): the day-file row and the rendered body are the bytes they were.
+
+    Every widening of the gate text has had to rule out the same leak, and this is the
+    writer-facing half of that for #2463: an ablation that ran anywhere but at the match
+    would show up as a stored or published copy that had lost its links. It drives the real
+    `python -m intel_pipeline --score` process — the one autonomy task #30 spawns, and the
+    process boundary a unit test cannot cross, since scoring re-reads `raw/<date>.jsonl`
+    through `state.load_raw_items` — over a GitHub row whose body carries the keyword in
+    prose AND an address in a markdown link, then reads the `intel-<date>.jsonl` row that
+    pass wrote and renders it through `_entry_body`.
+
+    The stored summary and the rendered body are asserted on the whole string, links
+    included; the raw row is asserted to come back unmutated, because the ablated string
+    must exist only as an argument to the matcher.
+    """
+    home, feeds = _cli_home(tmp_path)
+    today = _today_str()
+    kept_row = _item("ghkeep", source="github", title=GITHUB_PROSE_TITLE,
+                     summary=GITHUB_PROSE_AND_LINK_BODY)
+    # The dropped half rides in the same day file, so the assertion below is about a pass
+    # that both ablated one row's verdict and did not touch either row's bytes.
+    dropped_row = _item("gh-addronly", source="github", title=GITHUB_NO_KEYWORD_TITLE,
+                        summary=GITHUB_LINK_ONLY_BODY)
+    raw_text = kept_row.to_json() + "\n" + dropped_row.to_json() + "\n"
+    (feeds / "raw" / f"{today}.jsonl").write_text(raw_text, encoding="utf-8")
+
+    day, proc = _run_cli(home, 7, "--score")
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    rows = [json.loads(l) for l in
+            (feeds / f"intel-{day}.jsonl").read_text().splitlines() if l.strip()]
+    assert [r["id"] for r in rows] == ["ghkeep"], \
+        f"the pass did not gate the way the unit tests above do: {rows}"
+    row = rows[0]
+
+    assert row["summary"] == GITHUB_PROSE_AND_LINK_BODY, repr(row["summary"])
+    assert "[openclaw#53940](https://github.com/openclaw/openclaw/pull/53940)" \
+        in row["summary"], "the stored summary lost the address"
+    assert row["gate_description"] == "", \
+        "a GitHub row carries no pre-strip copy; the gate text must stay absent"
+    assert (feeds / "raw" / f"{today}.jsonl").read_text(encoding="utf-8") == raw_text, \
+        "the scoring pass rewrote the raw row it read"
+
+    rendered = vw_mod._entry_body(models_mod.ScoredItem.from_dict(row))
+    assert rendered == GITHUB_PROSE_AND_LINK_BODY, repr(rendered)
+
+
+def test_the_pinned_github_cost_an_address_link_alone_no_longer_carries_a_keep(
+        redirect_paths):
+    """Clause 4 (#2463): the cost of the change is pinned here rather than discovered late.
+
+    16 of the 323 GitHub keeps in the retained corpus — 5% — go with this change, and this
+    fixture is the shape of every one of them: a `github:*` row carries no
+    `gate_description`, so `stage1_text()` is its title plus the body (models.py:85-95), a
+    GitHub title never repeats the repo name, and so the tracked repo's keyword is often the
+    one inside a body markdown link and nowhere else. The recorded instance is
+    `github:openclaw/openclaw:issue:55372`, whose only `openclaw` sits inside
+    `https://github.com/openclaw/openclaw/pull/53940`.
+
+    A drop here is activity in a tracked repo going unreported, and the item says so out
+    loud: whether the gate should instead start carrying the repo `full_name` would reverse
+    the 2026-09-11 ruling quoted at scoring.py:283-289 ("Repo traffic is not an interest
+    signal") and is a separate decision owed on #2463, not something this round takes.
+    """
+    profile = _profile(redirect_paths)
+    all_kw = [kw for t in profile["topics"] for kw in t["keywords"]]
+    github_row = f"{GITHUB_NO_KEYWORD_TITLE} {GITHUB_LINK_ONLY_BODY}"
+
+    assert profile_mod.match_keywords(GITHUB_NO_KEYWORD_TITLE, all_kw) == [], \
+        "the title gained a keyword, so the drop below would not be about the address"
+    assert [t["matched_keywords"] for t in
+            profile_mod.keyword_match(github_row, profile)] == [["vllm"]], \
+        "the row stopped being a keep bought by the body's address alone"
+    assert profile_mod.match_keywords(GATE_URL_RUN.sub(" ", github_row), all_kw) == [], \
+        "the reference ablation left a keyword in the GitHub prose"
+
+    kept = scoring_mod.stage1_filter(
+        [_item("gh-link-only", source="github", title=GITHUB_NO_KEYWORD_TITLE,
+               summary=GITHUB_LINK_ONLY_BODY)],
+        profile)
+
+    assert [i.id for i in kept] == [], \
+        "a body markdown link alone still carried a GitHub keep"
 
 
 # --- #2314: stage 2 is judged on the text stage 1 gated on -------------------------
