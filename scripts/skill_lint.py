@@ -1194,7 +1194,22 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
     duplicates, duplicate_suppressed = find_duplicates(skills)
 
     return {
-        "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        # Aware UTC. This was `dt.datetime.now()`: naive local wall clock, so on
+        # this UTC-7 box the 2026-10-08 run published `2026-10-08T18:44:36` in
+        # `skill-lint-report.json` while its own mtime was `2026-10-09T01:44:41Z`,
+        # and `skill-lint-report.md` repeated that value in `summary:`, `timestamp:`
+        # and its heading. A naive local time in a machine-facing payload is read as
+        # UTC by every later reader, so the report's age was wrong by the box's
+        # offset — 7 h today, 8 h after the DST flip — against any UTC-stamped
+        # neighbour (a git commit time, another report's `generated_at`). This is the
+        # house convention (`step_conformance.py`, `service_health_check.py`,
+        # `replay_run_state.py`, `app/skill_telemetry.py`) and what every sibling
+        # note in `~/obsidian/autonomy/` already carries (#2452). The two naive
+        # `dt.datetime.now()` calls in `check_stale`/`skill_mtime_age_days` stay
+        # naive on purpose: each subtracts `dt.datetime.fromtimestamp(mtime)`, naive
+        # local on that same box, so the difference is the real elapsed age and an
+        # aware value on either side would shift every `max_age_days` by the offset.
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "total": total,
         # Which roots `total` was counted over. The report used to print a hardcoded
         # `~/obsidian/skills/`, which was a claim rather than a measurement now that

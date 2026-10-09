@@ -257,3 +257,66 @@ def test_the_nightly_invocation_writes_a_conformant_report(tmp_path):
     gate = _run_gate(tmp_path / "obsidian")
     assert gate.returncode == 0, gate.stdout + gate.stderr
     assert "VIOLATIONS : 0" in gate.stdout, gate.stdout
+
+
+# ── #2452: the stamp the note publishes is one aware value, in all three places ──
+#
+# `lint()` stamped the run with naive local time, so on 2026-10-08 the file's own
+# mtime read `2026-10-09T01:44:41Z` while `summary:`, `timestamp:` and the heading
+# all said `2026-10-08T18:44:36` — 7 h behind real UTC on this UTC-7 box, 8 h after
+# the DST flip, and read as UTC by every later reader. The three renderings already
+# shared one source (`result["generated_at"]`), so what needed pinning is that the
+# single source is now aware, and that `yaml.safe_dump`'s quoting still survives the
+# extra `+00:00` — an unquoted YAML timestamp scalar comes back a `datetime`, which
+# would break `str(fm["timestamp"]) == ts` above.
+
+_UTC_OFFSET_RE = re.compile(r"(Z|[+-]\d{1,2}:?\d{2})$")
+
+
+def test_the_note_publishes_one_aware_stamp_in_all_three_places(tmp_path):
+    """Clause 3: `timestamp:`, `summary:` and the heading are the same offset-bearing string.
+
+    The nightly's own invocation under a redirected `$HOME`, not a patched
+    `REPORT_PATH`: this asserts the bytes `main()` writes with the real `lint()`
+    behind it, so the stamp is produced rather than typed. `test_the_block_carries_a_summary_and_the_heading_timestamp`
+    already pins the three-way agreement for a fabricated naive stamp; what is new
+    here is the offset, asserted on the real value, and that after a round trip
+    through `yaml.safe_dump`/`safe_load` the loaded `timestamp` is still the string
+    the heading carries — not the `datetime` PyYAML resolves an unquoted ISO scalar
+    into.
+
+    The control runs first: `yaml.safe_load` over the unquoted line is asserted to
+    return a `datetime`, which proves the `isinstance(..., str)` assertion below can
+    fail, and that the emitter's quoting is load-bearing for the equality in
+    `test_the_block_carries_a_summary_and_the_heading_timestamp`.
+    """
+    import datetime as dt
+
+    unquoted = yaml.safe_load("timestamp: 2026-10-09T01:44:36+00:00")["timestamp"]
+    assert isinstance(unquoted, dt.datetime), (
+        "control: this interpreter's YAML resolves an unquoted offset stamp to a "
+        f"{type(unquoted).__name__}, so the str assertion below is not proving "
+        "anything about the quoting")
+
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "skill_lint.py")],
+        cwd=str(tmp_path), env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+        capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    text = (tmp_path / "obsidian" / "autonomy" / "skill-lint-report.md").read_text(
+        encoding="utf-8")
+
+    m = STRICT_FM_RE.match(text)
+    assert m, f"no parseable frontmatter block over an offset-bearing stamp: {text[:200]!r}"
+    fm = yaml.safe_load(m.group(1))
+    ts = fm["timestamp"]
+    assert isinstance(ts, str), f"timestamp loaded as {type(ts).__name__}: {ts!r}"
+    assert _UTC_OFFSET_RE.search(ts), f"published stamp {ts!r} has no UTC offset"
+    parsed = dt.datetime.fromisoformat(ts)
+    assert parsed.tzinfo is not None and parsed.utcoffset() == dt.timedelta(0), ts
+
+    heading = text[m.end():].splitlines()[0]
+    assert heading == f"# Skill Lint Report — {ts}", (
+        f"heading carries a different stamp than the block: {heading!r}")
+    assert f"generated {ts}." in str(fm["summary"]), (
+        f"summary does not repeat the run's stamp verbatim: {fm['summary']!r}")

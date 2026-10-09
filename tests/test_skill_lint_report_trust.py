@@ -452,3 +452,89 @@ def test_the_duplicate_cell_cites_only_names_the_walk_it_ran_produced(tmp_path):
     assert cited <= names, (
         f"the DUPLICATE trust cell cites {sorted(cited - names)}, skills this "
         f"walk never saw — the rot #2451 is about. Names: {sorted(names)}")
+
+
+# ── #2452: correcting the published stamp must not move the STALE-day arithmetic ──
+#
+# #2452 makes `generated_at` aware UTC. Two other places still call naive
+# `dt.datetime.now()` — `check_stale` and `skill_mtime_age_days` — and they are
+# correct to: each subtracts `dt.datetime.fromtimestamp(mtime)`, which is naive
+# local on that same box, so the difference is the real elapsed age. An aware value
+# arriving anywhere near that subtraction would either raise TypeError (aware minus
+# naive) or shift every age by the box's UTC offset — 7 h today, 8 h after the DST
+# flip — which is a different `max_age_days` and a different STALE verdict for
+# skills nobody touched. This node pins the day counts against fixtures whose
+# mtimes are set from the naive-local wall clock, which is what the clause names.
+
+def _write_aged_skill(tmp_path, name: str, naive_age: dt.timedelta) -> Path:
+    """One live skill whose SKILL.md mtime is `naive_age` old on the box's wall clock.
+
+    The mtime is produced by asking a *naive local* datetime what its epoch is,
+    which is the inverse of `fromtimestamp` and therefore round-trips to the same
+    wall-clock reading — the fixture is naive-local in exactly the way the code
+    under test is, rather than being constructed in UTC and quietly offset.
+    """
+    import os
+
+    d = tmp_path / name
+    d.mkdir()
+    skill_file = d / "SKILL.md"
+    skill_file.write_text(
+        f"---\nname: {name}\n"
+        "description: Use this skill when testing the stale day arithmetic.\n"
+        "tags: [demo]\nstatus: draft\n---\n"
+        f"# SKILL: {name}\n\nBody for the fixture corpus.\n",
+        encoding="utf-8")
+    mtime_local = dt.datetime.now() - naive_age
+    epoch = mtime_local.timestamp()
+    os.utime(skill_file, (epoch, epoch))
+    assert dt.datetime.fromtimestamp(epoch).replace(microsecond=0) == \
+        mtime_local.replace(microsecond=0), (
+        "the fixture's mtime did not round-trip through the box's local zone")
+    return skill_file
+
+
+def test_the_stale_day_count_is_naive_local_and_does_not_shift_by_the_box_offset(tmp_path):
+    """Clause 4: the same integer day counts, no aware/naive subtraction error.
+
+    Two fixtures, `sl.STALE_DAYS + 3` days old plus a fractional part chosen to
+    straddle the box's offset: 20 h and 4 h. A computation that gained 7 h would
+    read the 20 h one as `+4` days; one that lost 7 h would read the 4 h one as
+    `+2` days. Either way `.days` changes and this node fails, while a DST ±1 h
+    ambiguity anywhere in the window leaves both floor values where they are — so
+    the node is not a time-of-year coin flip.
+
+    `check_stale` and `skill_mtime_age_days` are called directly for the integers,
+    and `lint()` is then run over the same temp root for the published
+    `stale_context.max_age_days` and the `stale` list, because that count is what
+    the report's STALE row prints. Calling a naive `now()` is what raised TypeError
+    if the two sides ever stopped matching, so simply getting an `int` back is part
+    of the assertion; there is no exception to catch first.
+    """
+    import os
+    from agent_mcp.skills import iter_active_skills
+
+    longer = _write_aged_skill(tmp_path, "aged-plus-20h",
+                               dt.timedelta(days=sl.STALE_DAYS + 3, hours=20))
+    shorter = _write_aged_skill(tmp_path, "aged-plus-4h",
+                                dt.timedelta(days=sl.STALE_DAYS + 3, hours=4))
+    fm = {"status": "draft"}
+
+    assert sl.skill_mtime_age_days(longer) == sl.STALE_DAYS + 3, (
+        "the +20h fixture aged by something other than its naive-local span: the "
+        "day arithmetic moved by an offset")
+    assert sl.skill_mtime_age_days(shorter) == sl.STALE_DAYS + 3, (
+        "the +4h fixture aged by something other than its naive-local span: the "
+        "day arithmetic moved by an offset")
+    assert sl.check_stale(longer, fm) == (True, sl.STALE_DAYS + 3), (
+        "`check_stale` disagrees with the age measurement beside it")
+    assert sl.check_stale(shorter, fm) == (True, sl.STALE_DAYS + 3), (
+        "`check_stale` disagrees with the age measurement beside it")
+
+    result = sl.lint(skill_records=list(iter_active_skills(roots=[tmp_path])))
+    assert sorted(s["name"] for s in result["stale"]) == [
+        "aged-plus-20h", "aged-plus-4h"], result["stale"]
+    assert {s["age_days"] for s in result["stale"]} == {sl.STALE_DAYS + 3}, result["stale"]
+    assert result["stale_context"]["max_age_days"] == sl.STALE_DAYS + 3, (
+        result["stale_context"])
+    os.utime(longer, None)
