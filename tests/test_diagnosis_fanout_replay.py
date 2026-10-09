@@ -25,10 +25,11 @@ sys.path.insert(0, str(REPO))
 
 from eval.diagnosis_fanout_replay import (  # noqa: E402
     ARM_A, ARM_B, ARM_RETRY, MIN_CASES, RecordError, THEORIES_PER_CASE,
-    VAULT_WITNESS, WITNESS_CASES, WITNESS_ROWS, WITNESS_SHA, baseline_problem,
-    build_cases, case_complete, citation_rows, format_report, learnings_cases,
-    load_cases, rank_theories, slot_labels, verify_citation, verify_citations,
-    witness_census, write_baseline, write_cases)
+    VAULT_WITNESS, WITNESS_CASES, WITNESS_ROWS, WITNESS_SHA, RowWriter,
+    agrees, baseline_problem, build_cases, case_complete, citation_rows,
+    excluded_note, format_report, learnings_cases, load_cases,
+    rank_theories, run_case_a, select_cases, slot_labels, verify_citation,
+    verify_citations, witness_census, write_baseline, write_cases)
 
 LEDGER = REPO / ".git"  # exists, so a missing-ledger path is never confused with one
 
@@ -745,3 +746,297 @@ def test_report_of_the_real_paths_needs_no_engine(tmp_path):
         capture_output=True, text=True, timeout=300, cwd=str(REPO))
     assert proc.returncode == 3, proc.stdout + proc.stderr
     assert "cannot evaluate" in proc.stdout, proc.stdout
+
+
+# ── #2466: run and re-grade the 21 non-leaky cases honestly ─────────────────
+#
+# The owed study runs `run --only <21 keys>`, then `baseline`, then `report`, over the
+# 98-row corpus at `~/lloyd-data/eval/owedcheck-2258-cases.jsonl` (census: 16 `flaky-*`
+# in family `parallel-load-flake`, 5 `landkill-*` in `landing-killed-externally`, and 77
+# `preexisting-*` in `tests-blamed-then-refuted`, which are the leaky ones #2258 excludes
+# because their input quotes the refuted claim). Three things stopped that sequence
+# before it could spend its ~2.6 engine-hours: arm A recorded an empty cause, `report`
+# could not cut the corpus, and neither the exclusions nor the ceiling were in the
+# artifact. `_study_corpus` below is that 98/21 shape at fixture size — same key prefixes
+# and the same three family names, so the numbers the report prints are the numbers the
+# real file will make it print.
+
+FLAKY, LANDKILL, LEAKY = 16, 5, 77
+NON_LEAKY = FLAKY + LANDKILL
+
+
+def _study_case(prefix: str, i: int, family: str, marker: str) -> dict:
+    return {"key": f"{prefix}-SM_2026100{i % 7}_{i:06d}", "family": family,
+            "subsystem": "single-service",
+            "input": f"round {i} came back red on {marker}",
+            "claimed_cause": f"the diff caused failure {i}",
+            "actual_cause": f"{marker} at base: {marker}",
+            "actual_cause_markers": [marker],
+            "source_ref": f"promotions.jsonl:{i + 1} (round SM_{i})"}
+
+
+def _study_corpus() -> list[dict]:
+    """98 cases in the real file's shape: 16 `flaky-`, 5 `landkill-`, 77 `preexisting-`."""
+    return ([_study_case("flaky", i, "parallel-load-flake", "parallel-load-flake")
+             for i in range(FLAKY)]
+            + [_study_case("landkill", i, "landing-killed-externally", "killed-by-signal")
+               for i in range(LANDKILL)]
+            + [_study_case("preexisting", i, "tests-blamed-then-refuted", "pre-existing")
+               for i in range(LEAKY)])
+
+
+def _non_leaky_keys(cases: list[dict]) -> list[str]:
+    return [c["key"] for c in cases if c["family"] != "tests-blamed-then-refuted"]
+
+
+def _study_rows(cases: list[dict], only: list[str]) -> list[dict]:
+    """A-retry/A/B rows for the graded subset, every case correct in every arm.
+
+    Agreement is not what these rows are for — the spend columns and the N are — so all
+    three arms record the true mechanism and the headline is `arm B does not win` at
+    margin 0, which is an evaluation and not a refusal.
+    """
+    rows, seq = [], 0
+    for case in cases:
+        if case["key"] not in only:
+            continue
+        cause = case["actual_cause"]
+        for arm, spend in ((ARM_A, 40_000), (ARM_RETRY, 41_000), (ARM_B, 90_000)):
+            seq += 1
+            rows.append({"seq": seq, "run_id": "r2466", "case_key": case["key"],
+                         "arm": arm, "kind": "tool", "slot": None, "claims": [],
+                         "tokens": spend})
+            seq += 1
+            rows.append({"seq": seq, "run_id": "r2466", "case_key": case["key"],
+                         "arm": arm, "kind": "verdict", "chosen_cause": cause,
+                         "tokens": spend})
+    return rows
+
+
+def test_a_single_trace_arm_records_the_cause_its_investigator_actually_returned(tmp_path):
+    """Clause 1: arm A's verdict carries a real cause, not the empty string.
+
+    The fake returns exactly what `investigate_live` returns — `tool`, `claims`, `tokens`,
+    `model` — because that missing `conclusion` key IS the bug this node pins: the arm read
+    `result["conclusion"]`, which the live investigator has never returned, so every A and
+    A-retry row recorded `chosen_cause: ""`, `agrees()` scored them all wrong, and the
+    margin line could print `arm B wins` off a wiring fault (#2258's review advisory of
+    2026-10-06, never fixed until now).
+    """
+    case = _study_corpus()[0]
+    rows_path = tmp_path / "rows.jsonl"
+
+    async def investigator(case_arg, theory):
+        assert case_arg is case
+        return {"tool": "Task", "model": "primary", "tokens": 4321,
+                "claims": [{"claim": "parallel-load-flake at base: parallel-load-flake",
+                            "citations": [{"path": "eval/diagnosis_fanout_replay.py",
+                                           "line": 10}]}]}
+
+    verdict = asyncio.run(run_case_a(case, investigate=investigator,
+                                     writer=RowWriter(rows_path), run_id="r1"))
+
+    assert verdict["chosen_cause"], "arm A recorded no cause: top-1 can only be 0/N"
+    assert "parallel-load-flake" in verdict["chosen_cause"]
+    assert agrees(case, verdict["chosen_cause"]), (
+        "the recorded cause must be the one the fixture says is correct, or this node "
+        "is proving that a string is non-empty and nothing else")
+    recorded = [json.loads(ln) for ln in rows_path.read_text().splitlines()]
+    tool = [r for r in recorded if r["kind"] == "tool"]
+    assert len(tool) == 1, recorded
+    assert tool[0]["tokens"] == 4321
+    assert tool[0]["claims"][0]["citations"] == [
+        {"path": "eval/diagnosis_fanout_replay.py", "line": 10}], (
+        "the citations are what arm B is scored on; if arm A's are dropped the citation "
+        "column is a zero denominator, not a 0% rate")
+
+
+def test_a_single_trace_arm_reads_the_older_shape_and_refuses_a_silent_answer(tmp_path):
+    """The older `conclusion` + `citations` shape is still graded; a silent answer raises.
+
+    Two halves, both needed. An investigator that answers with one conclusion and its
+    citations beside it loses neither — that path predates this item, and dropping it would
+    turn a reply this arm can grade into a refused run. And an investigator that produces no
+    cause at all raises instead of recording a `chosen_cause` filled in from the case's own
+    answer key, which would hand the instrument a 100% top-1 it never measured. Arm B's row
+    validator, `validate_investigation`, already refuses a record with no claims for the
+    same reason; the single-trace arms now treat an empty answer alike as well.
+    """
+    case = _study_corpus()[1]
+
+    async def old_shape(case_arg, theory):
+        return {"tool": "investigate", "tokens": 100, "model": "primary",
+                "conclusion": "parallel-load-flake at base: parallel-load-flake",
+                "citations": [{"path": "eval/README.md", "line": 1}]}
+
+    verdict = asyncio.run(run_case_a(case, investigate=old_shape,
+                                     writer=RowWriter(tmp_path / "a.jsonl"), run_id="r2"))
+    assert agrees(case, verdict["chosen_cause"])
+    written = [json.loads(ln) for ln in (tmp_path / "a.jsonl").read_text().splitlines()]
+    tool = next(r for r in written if r["kind"] == "tool")
+    assert [c["citations"] for c in tool["claims"]] == [
+        [{"path": "eval/README.md", "line": 1}]], "the older shape lost its citations"
+
+    async def silent(case_arg, theory):
+        return {"tool": "investigate", "tokens": 100, "model": "primary", "claims": []}
+
+    with pytest.raises(RuntimeError, match="no non-empty claim"):
+        asyncio.run(run_case_a(case, investigate=silent,
+                               writer=RowWriter(tmp_path / "b.jsonl"), run_id="r3"))
+    refused = tmp_path / "b.jsonl"
+    assert not (refused.exists() and refused.read_text().strip()), (
+        "the refused cell left rows on disk, and a recorded cell with no cause is still "
+        "counted into the denominator as though it had been measured")
+
+
+def test_report_grades_only_the_named_keys_and_counts_that_subset(tmp_path):
+    """Clause 2: the same 98-row corpus can be reported over 21 keys, and N is 21.
+
+    `run --only` already existed; `report` had no way to follow it, so the study's own
+    sequence could only print `baseline N 21 != corpus N 98`.
+    """
+    cases = _study_corpus()
+    only = _non_leaky_keys(cases)
+    assert len(only) == NON_LEAKY == 21
+    picked, bad = select_cases(cases, only)
+    assert not bad and len(picked) == 21
+
+    lines, _ = format_report(_study_rows(cases, only), picked, baseline=None,
+                             corpus="fp", model="primary", token_ceiling=120_000,
+                             citation_root=tmp_path, all_cases=cases)
+    text = "\n".join(lines)
+    assert "cases: 21" in text, text
+    assert "cases: 98" not in text, text
+
+
+def test_a_matched_baseline_over_the_graded_subset_prints_spend_for_all_three_arms(tmp_path):
+    """Clause 3: N matched against the SUBSET evaluates, and every arm's spend is on one line.
+
+    This is the line the study's whole cost comparison rests on: arm B's gain has to be
+    read against what A and A-retry spent under the same ceiling, and a reader given only
+    two of the three cannot check that A-retry — the compute-matched arm — was matched.
+    """
+    cases = _study_corpus()
+    only = _non_leaky_keys(cases)
+    picked, _ = select_cases(cases, only)
+    baseline = {"corpus": "fp", "n": NON_LEAKY, "model": "primary",
+                "token_ceiling": 120_000, "token_spend": 861_000, "top1_hits": 21}
+
+    lines, evaluated = format_report(_study_rows(cases, only), picked,
+                                     baseline=baseline, corpus="fp", model="primary",
+                                     token_ceiling=120_000, citation_root=tmp_path,
+                                     all_cases=cases)
+    text = "\n".join(lines)
+    assert evaluated is True, text
+    assert "cannot evaluate" not in text, text
+    assert re.search(r"token spend\s+A: 840000\s+B: 1890000", text), text
+    assert re.search(r"token spend\s+A-retry: 861000", text), text
+    assert "ceiling: 120000" in text, (
+        "the arms are matched by token budget and by nothing else; an artifact that "
+        "prints a spend without the ceiling prints an unverifiable comparison")
+
+
+def test_the_artifact_names_what_was_left_out_and_which_family_it_was(tmp_path):
+    """Clause 4: 77 excluded cases and the family they belong to, in the artifact.
+
+    `cases: 21` on its own reads as though the instrument had 21 cases in the world. The
+    owed study's null — if it is one — is only worth what the exclusions say it is worth.
+    """
+    cases = _study_corpus()
+    only = _non_leaky_keys(cases)
+    picked, _ = select_cases(cases, only)
+    lines, _ = format_report(_study_rows(cases, only), picked, baseline=None,
+                             corpus="fp", model="primary", token_ceiling=120_000,
+                             citation_root=tmp_path, all_cases=cases)
+    text = "\n".join(lines)
+    assert "excluded from the graded set: 77 of 98 corpus cases" in text, text
+    assert "tests-blamed-then-refuted=77" in text, text
+
+    full, _ = format_report(_study_rows(cases, only), cases, baseline=None,
+                            corpus="fp", model="primary", token_ceiling=120_000,
+                            citation_root=tmp_path)
+    assert "excluded from the graded set: none" in "\n".join(full), (
+        "an uncut report must say it graded everything, or the exclusion line reads as "
+        "a fixed caption rather than a statement about this run")
+
+
+def test_a_corpus_sized_baseline_under_a_21_case_report_still_refuses(tmp_path):
+    """Clause 5: narrowing the study cannot quietly satisfy #627's matched-baseline rule.
+
+    The failure this pins is the plausible one: `baseline` was run over the whole corpus,
+    or was cached from an earlier whole-corpus pass, and 21 cases are then reported. The
+    refusal has to name both Ns — the one that was measured and the one being graded.
+    """
+    cases = _study_corpus()
+    only = _non_leaky_keys(cases)
+    picked, _ = select_cases(cases, only)
+    whole = {"corpus": "fp", "n": len(cases), "model": "primary",
+             "token_ceiling": 120_000, "token_spend": 4_000_000, "top1_hits": 90}
+
+    lines, evaluated = format_report(_study_rows(cases, only), picked, baseline=whole,
+                                     corpus="fp", model="primary",
+                                     token_ceiling=120_000, citation_root=tmp_path,
+                                     all_cases=cases)
+    text = "\n".join(lines)
+    assert evaluated is False, text
+    assert "HEADLINE: cannot evaluate" in text, text
+    assert "baseline N 98 != graded N 21" in text, text
+    assert "arm B wins" not in text, text
+
+
+def test_select_cases_refuses_a_key_that_names_no_case_in_the_corpus():
+    """A subset list that silently matches less than it names is a different study.
+
+    `run --only` used to skip unmatched keys per case, so one mistyped key out of 21
+    measured 20 and nothing said so; a wholly mistyped list measured all 98, leaky
+    included. Both commands now stop instead.
+    """
+    cases = _study_corpus()
+    picked, bad = select_cases(cases, ["flaky-SM_190701_000000"])
+    assert picked == [] and bad == ["flaky-SM_190701_000000"]
+    picked, bad = select_cases(cases, [_non_leaky_keys(cases)[0], "typo-key"])
+    assert len(picked) == 1 and bad == ["typo-key"]
+    assert excluded_note(cases, picked).startswith("excluded from the graded set: 97 of 98")
+
+
+def test_report_grading_the_real_sequence_end_to_end_needs_no_engine(tmp_path):
+    """The item's own sequence across the CLI boundary: `report --only` over 21 keys.
+
+    Everything above calls `format_report` in-process; the study runs the script, and the
+    wiring between `main`'s new `--only` and the graded subset is its own place to break.
+    Exit 0 with a subset count and an evaluating headline is the shape the owed run
+    produces; `cannot evaluate` here would have been clause 1 of this item's own check.
+    """
+    cases = _study_corpus()
+    only = _non_leaky_keys(cases)
+    cases_path = tmp_path / "cases.jsonl"
+    cases_path.write_text("".join(json.dumps(c) + "\n" for c in cases),
+                          encoding="utf-8")
+    rows_path = tmp_path / "rows.jsonl"
+    rows_path.write_text("".join(json.dumps(r) + "\n"
+                                 for r in _study_rows(cases, only)), encoding="utf-8")
+    baseline_path = tmp_path / "retry_baseline.json"
+    write_baseline(baseline_path, cases_path=cases_path, n=NON_LEAKY, model="primary",
+                   token_ceiling=120_000, token_spend=861_000, top1_hits=NON_LEAKY)
+
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "eval" / "diagnosis_fanout_replay.py"), "report",
+         "--cases", str(cases_path), "--rows", str(rows_path),
+         "--baseline", str(baseline_path), "--only", *only],
+        capture_output=True, text=True, timeout=300, cwd=str(REPO))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    assert "cases: 21" in out, out
+    assert "excluded from the graded set: 77 of 98 corpus cases" in out, out
+    assert "HEADLINE: cannot evaluate" not in out, out
+    assert "HEADLINE: arm B" in out, out
+
+    # And the same file with the whole corpus graded refuses the 21-case baseline: the
+    # subset selector is what makes the sequence legal, not a looser check.
+    proc2 = subprocess.run(
+        [sys.executable, str(REPO / "eval" / "diagnosis_fanout_replay.py"), "report",
+         "--cases", str(cases_path), "--rows", str(rows_path),
+         "--baseline", str(baseline_path)],
+        capture_output=True, text=True, timeout=300, cwd=str(REPO))
+    assert proc2.returncode == 3, proc2.stdout + proc2.stderr
+    assert "baseline N 21 != graded N 98" in proc2.stdout, proc2.stdout

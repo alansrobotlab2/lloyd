@@ -13,10 +13,15 @@ re-grades them. Whether arm B wins is the study's output, owed to the owed-check
 job after this lands.
 
     python eval/diagnosis_fanout_replay.py corpus    [--ledger …] [--learnings …] [--out …]
-    python eval/diagnosis_fanout_replay.py run       [--only KEY] [--arms A,A-retry,B] [--ceiling N]
+    python eval/diagnosis_fanout_replay.py run       [--only KEY…] [--arms A,A-retry,B] [--ceiling N]
     python eval/diagnosis_fanout_replay.py baseline  [--rows …] [--out …]
-    python eval/diagnosis_fanout_replay.py report    [--cases …] [--rows …] [--baseline …] [--root …]
-    python eval/diagnosis_fanout_replay.py witness   [--path …]
+    python eval/diagnosis_fanout_replay.py report    [--cases …] [--rows …] [--baseline …] [--root …] [--only KEY…]
+
+`run --only` and `report --only` take the same list of case keys, and #2466 is why both
+exist: the study runs over the 21 non-leaky cases and leaves the 77 leaky `preexisting`
+ones in the file, so the subset has to survive from the run into the retry baseline match
+and into the artifact without anybody cutting the corpus. A key that names no case is an
+error on both, because a silently-shorter list is a silently-different study.
 
 `witness` re-derives the ledger figures this item quotes from the COMMITTED bytes
 (`~/obsidian/backlog/data/2026-10-06.2258-ledger-witness.jsonl`, vault commit
@@ -394,6 +399,55 @@ def load_cases(path: Path = CASES_PATH) -> list[dict]:
     return [c for c in _read_jsonl(path) if "key" in c]
 
 
+def select_cases(cases: Sequence[dict], only: Sequence[str] | None
+                 ) -> tuple[list[dict], list[str]]:
+    """The cases a `--only` selector names, plus the keys it named that the corpus lacks.
+
+    Shared by `run` and `report` on purpose. The study is pointed at a named subset by
+    hand — today the 21 `flaky-*` and `landkill-*` keys, because the 77 `preexisting`
+    ones leak the answer into the input (#2258) — and a hand-written list of 21 keys is
+    where a typo goes to hide. A key that matches no case used to be ignored: `run`
+    printed its normal closing line over however many cases it happened to match, and
+    `report` had no selector at all. Both now say which names matched nothing.
+
+    Selection is in the caller's order, which changes nothing about a tally: `score`
+    counts per case.
+    """
+    if not only:
+        return list(cases), []
+    wanted = list(dict.fromkeys(only))
+    by_key = {c["key"]: c for c in cases}
+    return ([by_key[k] for k in wanted if k in by_key],
+            [k for k in wanted if k not in by_key])
+
+
+def excluded_note(cases: Sequence[dict], selected: Sequence[dict]) -> str:
+    """What the graded subset leaves out, in words — because the artifact must own it.
+
+    The subject of this study is narrower than its corpus, and the narrower set is not
+    a random slice of it: the dropped cases are the family whose input quotes the
+    refuted claim, which is the one family where a top-1 rate would be an
+    answer-leakage measurement rather than a diagnosis one. A report that printed
+    `cases: 21` and a HEADLINE over them, without saying what the other 77 were or why
+    they are absent, would read as though the instrument had 21 cases in the world. It
+    is one line, and it is the line that tells a reader of the artifact alone whether
+    the number they are looking at covers the class they care about.
+    """
+    left_out = [c for c in cases
+                if c["key"] not in {s["key"] for s in selected}]
+    if not left_out:
+        return (f"excluded from the graded set: none — all {len(cases)} corpus cases "
+                f"are graded, so the headline covers the whole corpus")
+    families = sorted({str(c.get("family") or "?") for c in left_out})
+    detail = " ".join(
+        f"{f}={sum(1 for c in left_out if (c.get('family') or '?') == f)}"
+        for f in families)
+    return (f"excluded from the graded set: {len(left_out)} of {len(cases)} corpus "
+            f"cases, in {len(families)} famil"
+            f"{'y' if len(families) == 1 else 'ies'}: {detail}. The headline below is "
+            f"over the {len(selected)} graded cases only.")
+
+
 # ── citation verification ───────────────────────────────────────────────────
 
 def _line_count(path: Path) -> int:
@@ -691,19 +745,54 @@ async def run_case_a(case: dict, *, investigate: Callable[[dict, str], Awaitable
     case_key = case["key"]
     result = await investigate(case, case.get("claimed_cause") or "")
     tokens = int(result.get("tokens") or 0)
-    conclusion = str(result.get("conclusion") or "")
-    claims = [{"claim": conclusion, "citations": result.get("citations") or []}] \
-        if conclusion else []
+    # The investigator is a tool-reading trace, not an essayist. `investigate_live`, the
+    # one the owed study runs, returns `{"tool", "claims", "tokens", "model"}` and has
+    # never returned a `conclusion` key or a top-level `citations` key — #2258's review
+    # advisory of 2026-10-06 named this line and was never fixed, so the arm recorded a
+    # cause of `""` for every case it ran. The cause therefore has to be read out of the
+    # claims the trace actually produced, in the order it produced them.
+    #
+    # And it must never be recorded empty, which is why an answer with no cause raises
+    # rather than writing the row. An empty `chosen_cause` is worse than a wrong one:
+    # `agrees()` asks whether every marker of the expected cause occurs in the text, and
+    # empty text answers NO to all of them, so both single-trace arms would carry a top-1
+    # of 0/N that is a property of this wiring rather than of the engine — and
+    # `format_report` subtracts that zero from arm B's measured rate before it prints a
+    # HEADLINE. `validate_investigation`, which gates arm B's per-theory rows, already
+    # refuses a record with no claims for the same reason; the two arms treat it alike now.
+    claims = [c for c in (result.get("claims") or []) if isinstance(c, dict)]
+    if not claims and str(result.get("conclusion") or "").strip():
+        # The older shape an investigator may still answer in: one conclusion, with its
+        # citations beside it rather than under it. Kept from before this item, because
+        # dropping it would turn a reply this arm can grade into a refused run — and it
+        # keeps the citations, which is the column the study compares against arm B's.
+        claims = [{"claim": str(result["conclusion"]).strip(),
+                   "citations": list(result.get("citations") or [])}]
+    chosen = next((str(c.get("claim") or "").strip() for c in claims
+                   if str(c.get("claim") or "").strip()), "")
+    if not chosen:
+        raise RuntimeError(
+            f"[2258] {arm}: the investigator for case {case_key} returned no non-empty "
+            f"claim, so there is no cause to record and inventing one is the one thing "
+            f"this instrument must not do. Keys it did return: {sorted(result)}.")
     writer.append({"seq": 1, "run_id": run_id, "case_key": case_key, "arm": arm,
                    "kind": "tool", "ts": _now(), "slot": None,
                    "tool": result.get("tool") or "linear-trace",
-                   "claims": claims, "tokens": tokens})
+                   # Every claim the trace produced, each with the citations attached to
+                   # IT. Not only the chosen one: a trace that reported three
+                   # hypotheses put three citations on the record, and keeping just the
+                   # first would understate this arm's evidence in the very column the
+                   # study compares against arm B's.
+                   "claims": [{"claim": str(c.get("claim") or ""),
+                               "citations": c.get("citations") or []}
+                              for c in claims],
+                   "tokens": tokens})
     if tokens > token_ceiling:
         writer.append({"seq": 2, "run_id": run_id, "case_key": case_key, "arm": arm,
                        "kind": "ceiling", "ts": _now(), "reason": "over-ceiling",
                        "tokens_spent": tokens, "token_ceiling": token_ceiling})
     verdict = {"seq": 3, "run_id": run_id, "case_key": case_key, "arm": arm,
-               "kind": "verdict", "ts": _now(), "chosen_cause": conclusion,
+               "kind": "verdict", "ts": _now(), "chosen_cause": chosen,
                "tokens": tokens}
     writer.append(verdict)
     return verdict
@@ -864,7 +953,11 @@ def baseline_problem(baseline: dict | None, *, corpus: str, n: int, model: str,
     if baseline.get("corpus") != corpus:
         problems.append(f"corpus fingerprint {baseline.get('corpus')!r} != {corpus!r}")
     if int(baseline.get("n") or -1) != n:
-        problems.append(f"baseline N {baseline.get('n')!r} != corpus N {n}")
+        # "graded", not "corpus", and #2466 is why the word matters: `n` here is the set
+        # being reported on, which a `--only` subset makes smaller than the file the
+        # baseline's fingerprint was taken from. Calling 2 a corpus count would print an
+        # N that no other line in the artifact agrees with.
+        problems.append(f"baseline N {baseline.get('n')!r} != graded N {n}")
     if baseline.get("model") != model:
         problems.append(f"baseline model {baseline.get('model')!r} != {model!r}")
     if int(baseline.get("token_ceiling") or -1) != token_ceiling:
@@ -928,19 +1021,34 @@ def score(rows: Sequence[dict], cases: Sequence[dict], *,
 def format_report(rows: Sequence[dict], cases: Sequence[dict], *,
                   baseline: dict | None, corpus: str, model: str,
                   token_ceiling: int,
-                  citation_root: Path | None = None) -> tuple[list[str], bool]:
+                  citation_root: Path | None = None,
+                  all_cases: Sequence[dict] | None = None) -> tuple[list[str], bool]:
     """The printed lines, and whether the headline states an evaluation.
 
     `cannot evaluate` is the only thing a missing or mismatched retry baseline
     may produce — a study that has not measured its compute-matched baseline
     cannot say the fan-out won, because it cannot say the arms were matched.
+
+    `cases` is what gets GRADED, which since #2466 need not be the whole corpus: the
+    study runs over the 21 non-leaky cases and leaves the 77 `preexisting` ones out.
+    `all_cases` is the corpus those 21 were cut from, and it exists so the artifact can
+    say so; pass it nothing and the report states that it graded everything it was given.
     """
     scored = score(rows, cases, citation_root=citation_root)
     a, b = scored["arms"][ARM_A], scored["arms"][ARM_B]
+    # The ceiling is on the artifact because the whole comparison is conditional on it:
+    # the arms are matched by token budget and by nothing else, and a reader who cannot
+    # see the number cannot check that the spend line below it is a like-for-like.
     lines = [f"[2258] cases: {len(cases)}  recorded verdicts: "
-             f"A={a['n']} B={b['n']}"]
+             f"A={a['n']} B={b['n']}  ceiling: {token_ceiling}"]
     if scored["unscored"]:
         lines.append(f"  unscored case keys (no case row): {scored['unscored']}")
+    # Which cases this artifact is NOT about, before any rate and on the `cannot
+    # evaluate` branch too — a reader who stops at a refused headline still needs the
+    # study's scope, and one who reads a headline needs to know it does not cover the
+    # 77 leaky cases (#2258 excludes them because their input quotes the refuted claim).
+    lines.append("  " + excluded_note(all_cases if all_cases is not None else cases,
+                                      cases))
     lines.append(f"  top-1 agreement   A: {a['top1_hits']}/{a['n']}   "
                  f"B: {b['top1_hits']}/{b['n']}   "
                  f"(bar: B ahead by >= {TOP1_MARGIN})")
@@ -1091,12 +1199,19 @@ async def cmd_run(args) -> int:
         print(f"[2258] unknown arm(s) {unknown}; the arms are {ARM_A}, {ARM_B} and "
               f"{ARM_RETRY} (the retry arm is the compute-matched second single trace)")
         return 1
+    # `select_cases`, not a per-case membership test, so a key that names no case in the
+    # file stops the run before the first engine call (#2466). The old form skipped
+    # unmatched keys silently, so one typo in a 21-key list bought a study of 20 — or, if
+    # the whole list typo'd, 98 cases including the 77 leaky ones the study excludes.
+    cases, bad = select_cases(cases, args.only)
+    if bad:
+        print(f"[2258] --only names {len(bad)} key(s) with no case in {args.cases}: "
+              f"{', '.join(bad)} — nothing was run")
+        return 2
     writer = RowWriter(Path(args.rows))
     run_id = f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     ceiling = args.ceiling
     for case in cases:
-        if args.only and case["key"] not in args.only:
-            continue
         if ARM_A in arms:
             await run_case_a(case, investigate=investigate_live, writer=writer,
                              run_id=run_id, token_ceiling=ceiling)
@@ -1146,7 +1261,17 @@ def cmd_baseline(args) -> int:
 
 def cmd_report(args) -> int:
     cases_path = Path(args.cases)
-    cases = load_cases(cases_path)
+    all_cases = load_cases(cases_path)
+    # #2466. Without this the study could not report itself: `run --only` recorded 21
+    # verdicts, `cmd_baseline` wrote n=21 from them, and `report` graded all 98 rows of
+    # the same file against that baseline, so the only headline the sequence could print
+    # was `baseline N 21 != corpus N 98`. The file stays whole — the fingerprint below is
+    # still of the file, not of the cut, and the exclusions are printed.
+    cases, bad = select_cases(all_cases, args.only)
+    if bad:
+        print(f"[2258] --only names {len(bad)} key(s) with no case in {args.cases}: "
+              f"{', '.join(bad)}")
+        return 2
     rows = [r for r in _read_jsonl(Path(args.rows)) if r.get("kind")]
     baseline = None
     baseline_path = Path(args.baseline)
@@ -1159,7 +1284,8 @@ def cmd_report(args) -> int:
     lines, evaluated = format_report(
         rows, cases, baseline=baseline, corpus=corpus, model=args.model,
         token_ceiling=args.ceiling,
-        citation_root=(Path(args.root) if args.root else None))
+        citation_root=(Path(args.root) if args.root else None),
+        all_cases=all_cases)
     for line in lines:
         print(line)
     return 0 if evaluated else 3
@@ -1205,6 +1331,15 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--root", default=None,
                         help="resolve citations under this tree (a fixture or a "
                              "worktree the run recorded against)")
+    # The same shape as `run --only`, deliberately: the subset that was run is the subset
+    # that gets graded, so the two lists are one list and a subset can be re-graded
+    # without cutting the corpus file (#2466). A key naming no case is refused rather than
+    # quietly shrinking the study.
+    report.add_argument("--only", nargs="*", default=None,
+                        help="case KEYS to grade — a subset of the same names "
+                             "`run --only` takes. The corpus file stays whole, the "
+                             "retry baseline must match THIS subset's N, and the "
+                             "report states how many cases were excluded")
     report.set_defaults(fn=cmd_report)
 
     witness = sub.add_parser("witness",
