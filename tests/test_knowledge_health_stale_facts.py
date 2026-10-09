@@ -1162,3 +1162,232 @@ def test_the_daily_writer_s_mark_is_counted_by_the_report(tmp_path, monkeypatch)
     marked = [f for groups in entities.values() for group in groups
               for f in group["facts"] if f.get("invalid_at")]
     assert len(marked) == 1 and marked[0].get("conflicts_with"), marked
+
+# ---------------------------------------------------------------------------
+# #2475: the section reports TWO ages — how old the fact's CONTENT is (claim age, the
+# selector's own `age_days`) and how old the RECORD is (its own `created_at`, nothing else).
+#
+# The reason is measured, not stylistic. Stale went 21,341 (2026-10-05) → 24,234 (2026-10-09),
+# +13.5% in four days, read as a standing instruction to review 24k facts. Probed through the
+# shipped selectors on 2026-10-09 over 142,362 active facts, the section total reproduced
+# exactly (24,234) and split as: rows whose own `created_at` was older than the window, 0;
+# rows recorded inside the window carrying an old `event_date`, 24,234. 100% of the population
+# had arrived already stale, and 1,486 facts created since 10-08 were stale on arrival
+# (knowledge/feeds/youtube-uncategorized.md 523, knowledge/tools/openclaw/prs.md 332,
+# knowledge/tools/isaaclab/prs.md 298) against a +1,084 overnight delta. The trend was feed
+# volume, and the number said "review 24k facts".
+#
+# Deliberately NOT asserted anywhere below: a number from the live store, and any rule about
+# the 2026-09-23 stamp cohort. `find_stale_facts` skips cohort rows (#2179, `c6566e8d`), so the
+# cohort enters neither count — now, nor on 2026-11-22 when its stamp date would cross the
+# window, which is why the item's "3.4x in one night" is refuted by shipped code and the nodes
+# above are what keep it refuted.
+# ---------------------------------------------------------------------------
+
+def test_a_fact_recorded_this_week_carries_both_ages_and_they_differ(tmp_path):
+    """Clause 1: one fact recorded 2 days ago about an event 200 days old is stale on its
+    CLAIM (200 days) and young on its RECORD (2 days), and the row exposes both.
+
+    Before the split the row carried `age_days` alone, so the 2-day age was not in the data
+    and the section could print only the claim. Recomputing it downstream is not the same as
+    exposing it: `record_age_days` deliberately ignores `event_date` and does NOT let a newer
+    `valid_at` re-base it — a fact whose claim was re-dated last week is still a record that
+    has been sitting unrevisited for 200 days — and a consumer that derived the second age by
+    hand would be free to apply the re-base out of habit, which is how one axis silently
+    becomes the other again.
+
+    The unparseable-`created_at` half is the other edge, and it is #841's rule carried into
+    the new axis: no record age, specifically None rather than 0. Zero asserts that the record
+    is new, which is a claim about the record that no one is entitled to make.
+    """
+    root = tmp_path / "facts"
+    _write(root, "Ingest", "state", [
+        {"fact": "shipped in 2024", "created_at": _iso(2), "event_date": _iso(200)},
+    ])
+    _write(root, "UndatedRecord", "state", [
+        {"fact": "no created_at at all", "event_date": _iso(200)},
+    ])
+    entities = khr.load_entities(root)
+
+    stale = khr.find_stale_facts(entities, NOW, THRESH)
+
+    assert len(stale) == 2, stale
+    by_preview = {s["preview"]: s for s in stale}
+    arrived = by_preview["shipped in 2024"]
+    assert arrived["age_days"] == 200, "the claim ages on the oldest usable date"
+    assert arrived["record_age"] == 2, "the record is two days old and the row says so"
+    assert arrived["age_days"] > THRESH > arrived["record_age"], (
+        "the two axes must straddle the window for this row to make its point")
+    unseen = by_preview["no created_at at all"]
+    assert unseen["age_days"] == 200 and unseen["record_age"] is None, unseen
+
+    # The axis itself, measured on facts that never went near a file.
+    assert khr.record_age_days({"created_at": _iso(2)}, NOW) == 2
+    assert khr.record_age_days({}, NOW) is None
+    assert khr.record_age_days({"created_at": "no such date"}, NOW) is None, \
+        "an unparseable created_at is UNSEEN, not zero"
+    # No `valid_at` re-base: the record's age is the record's, whatever the claim was redated to.
+    assert khr.record_age_days({"created_at": _iso(200), "valid_at": _iso(1)}, NOW) == 200
+    # No `event_date` either: an old event does not make the record old.
+    assert khr.record_age_days({"created_at": _iso(3), "event_date": _iso(400)}, NOW) == 3
+
+
+def test_the_split_counts_two_halves_that_sum_to_the_total(tmp_path):
+    """Clause 2: a corpus holding one arrived-stale fact, one that rotted in place and one
+    whose record age cannot be established splits 1 / 1 / 1, and the counts sum to the total.
+
+    The sum IS the clause. A split that dropped a row or double-counted one would be worse
+    than the undifferentiated number it replaced, because it would look audited — so the
+    partition is checked against `find_stale_facts`' own output on every shape available
+    here: the three-way corpus, an empty corpus, and a record aged exactly to the boundary,
+    where the selector's operator is `>=` (#841 clause 1) so `record_age == THRESH` is rotted
+    and one day younger is not.
+
+    The live reading this shape reproduces — 24,234 arrived and 0 rotted, measured
+    2026-10-09 — is NOT asserted, and that is deliberate: this file cannot read the live
+    vault, and pinning a figure the store moves out of every night would make whoever ran
+    the nightly job the owner of a fixture. What is pinned is the SHAPE that measurement had,
+    including the part a naive clause would have forbidden — the rot half legitimately zero.
+    """
+    root = tmp_path / "facts"
+    _write(root, "Ingest", "state", [
+        {"fact": "old video digested this week", "created_at": _iso(2), "event_date": _iso(400)},
+    ])
+    _write(root, "Rot", "state", [
+        {"fact": "went unrevisited since it was written", "created_at": _iso(90),
+         "event_date": _iso(90)},
+    ])
+    _write(root, "Unseen", "state", [
+        {"fact": "no created_at to date the record by", "event_date": _iso(400)},
+    ])
+    stale = khr.find_stale_facts(khr.load_entities(root), NOW, THRESH)
+
+    assert len(stale) == 3, stale
+    split = khr.stale_age_split(stale)
+    assert split == {khr.STALE_ARRIVED_KEY: 1, khr.STALE_ROTTED_KEY: 1,
+                     khr.STALE_RECORD_UNSEEN_KEY: 1}, split
+    assert sum(split.values()) == len(stale), "the halves must account for every row"
+
+    line = next(ln for ln in _stale_section(_report(
+        khr.load_entities(root))).splitlines() if "STALE_AGE_SPLIT" in ln)
+    assert "1 arrived already stale" in line, line
+    assert "1 where" in line and "the rot signal" in line, line
+    assert "1 with no parseable" in line, line
+
+    # Boundary, on the selector's own `>=`: exactly the window is rot, one day short is not.
+    assert khr.stale_age_split([{"age_days": 900,
+                                 "record_age": THRESH}])[khr.STALE_ROTTED_KEY] == 1
+    assert khr.stale_age_split([{"age_days": 900,
+                                 "record_age": THRESH - 1}])[khr.STALE_ARRIVED_KEY] == 1
+
+    # An empty corpus splits to three zeros and the line still prints, so "no stale facts"
+    # and "no split shipped" stay two different readings of the section.
+    empty = khr.stale_age_split([])
+    assert empty == {khr.STALE_ARRIVED_KEY: 0, khr.STALE_ROTTED_KEY: 0,
+                     khr.STALE_RECORD_UNSEEN_KEY: 0}, empty
+    assert sum(empty.values()) == 0
+    assert "0 arrived already stale" in khr._stale_age_split_line([])
+
+    # All-ingest, the live store's shape today: the rot half is 0 and that IS the report.
+    all_arrived = [{"age_days": 400, "record_age": 1}, {"age_days": 250, "record_age": 5},
+                   {"age_days": 90, "record_age": THRESH - 1}]
+    assert khr.stale_age_split(all_arrived) == {khr.STALE_ARRIVED_KEY: 3,
+                                               khr.STALE_ROTTED_KEY: 0,
+                                               khr.STALE_RECORD_UNSEEN_KEY: 0}, \
+        "a zero rot count must survive the split intact: it is the finding, not a gap"
+
+
+def test_the_section_header_names_which_age_the_total_is_and_which_is_rot(tmp_path):
+    """Clause 3: the label beside the total says the total is CLAIM age and the count beside
+    it is the rot signal, so the number cannot be read on its own as a review backlog.
+
+    The section already stated the rule — "oldest usable date … re-based by `valid_at`" — and
+    the number was still read as an instruction to review 24k facts, because a rule line
+    describes a function while a skimmer reads a count. So what is pinned here are words that
+    name the AXIS and say which of the two numbers is about the store going bad, inside the
+    section that holds the count, not in a docstring somebody has to open.
+
+    Both label constants have to appear in the section's own source: the header, the split
+    line and this test are three readers of the same two phrases, and the constant is what
+    keeps them from drifting into three different claims about one number.
+    """
+    root = tmp_path / "facts"
+    _write(root, "Ingest", "state", [
+        {"fact": "old video digested this week", "created_at": _iso(2), "event_date": _iso(400)},
+    ])
+    section = _stale_section(_report(khr.load_entities(root)))
+    flat = " ".join(section.split())
+
+    assert khr.STALE_CLAIM_AGE_LABEL in flat, section[:600]
+    assert khr.STALE_RECORD_AGE_LABEL in flat, section[:600]
+    assert "the rot signal" in flat, "the label has to say WHICH count is about rot"
+    assert "feed volume" in flat.lower(), "and which one is about ingest"
+
+    script_src = (ROOT / "scripts/memory/knowledge-health-report.py").read_text(encoding="utf-8")
+    section_src = script_src[script_src.index("# --- Section 6: Stale Facts ---"):
+                             script_src.index("# --- Section 7")]
+    for label in ("STALE_CLAIM_AGE_LABEL", "STALE_RECORD_AGE_LABEL"):
+        assert label in section_src, f"the section never uses {label}"
+    assert "_stale_age_split_line(stale_facts)" in section_src, (
+        "the split is not printed by the section that prints the total, so the two counts "
+        "an operator sums are not the two counts that were measured")
+
+
+def test_the_report_skill_describes_the_shipped_stale_semantics():
+    """Clause 4: the skill that tells a job what "stale facts" means says what the code does,
+    and names the record-age half.
+
+    The shipped bullet read `(>60 days old,no valid_at update)`, which is wrong twice over and
+    each wrong half has a cost. `valid_at` does not EXEMPT a fact — a newer one re-bases the
+    clock forward, and a fact with no `valid_at` at all still ages on the date it carries; that
+    is #841's whole finding, and a procedure that believes the exempting version expects facts
+    to disappear from the count rather than be re-dated. And the bullet named one count where
+    the report now prints two, so the number an operator relays onward was the claim-age one
+    while they believed they were relaying a rot signal.
+
+    Read through `vault_root()` like `tests/test_retention_sweep.py` reads its own skill node,
+    which is the process boundary this clause crosses: the file lives in the vault tree, the
+    semantics live in this script, and nothing in the code can fail when the prose drifts. The
+    assertions are therefore against the shipped CONSTANTS and the shipped line label, not
+    against phrases invented for the test — a skill that rewords itself in prose that still
+    carries the same two facts stays green here, and a skill that reverts to the exempting
+    wording does not.
+
+    Deliberately not asserted: the morning-briefing claim on this skill's Notes line (#6,
+    retired by #1508). That is owed 2 on #2475 — a separate ruling on a separate sentence, and
+    pinning it here would decide it.
+    """
+    import app.data_root as _dr
+
+    skill = _dr.vault_root() / "skills" / "knowledge-health-report" / "SKILL.md"
+    if not skill.is_file():
+        pytest.skip(f"the vault skill is not reachable from here: {skill}")
+    lines = skill.read_text(encoding="utf-8").splitlines()
+
+    # The stale bullet, taken WHOLE — the bullet is wrapped across eight lines, so reading one
+    # line would grade a fragment and pass on whichever half happened to hold the phrase. The
+    # span runs to the next bullet or heading, so a neighbouring bullet cannot satisfy the words
+    # and the bullet cannot dodge the check by rewrapping.
+    start = next(i for i, ln in enumerate(lines)
+                 if ln.strip().startswith("- **Stale facts**"))
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith(("- ", "#", "\n"))), len(lines))
+    bflat = " ".join(" ".join(lines[start:end]).split())
+
+    assert "no valid_at update" not in bflat, (
+        f"the exempting wording is back, and it is not what the code does: {bflat[:200]}")
+    assert "oldest usable date" in bflat.lower(), bflat[:200]
+    assert "re-base" in bflat.lower() or "re-based" in bflat.lower(), (
+        "the bullet must say what valid_at actually does to the clock")
+    assert "exempt" in bflat.lower(), (
+        "and must say it does NOT exempt, since that is the belief being corrected")
+    # The two axes, named the way the report names them.
+    script_src = (ROOT / "scripts/memory/knowledge-health-report.py").read_text(encoding="utf-8")
+    for token in ("claim age", "record age", "STALE_AGE_SPLIT"):
+        assert token in bflat.lower() or token in bflat, f"{token} missing: {bflat[:200]}"
+        assert token in script_src, (
+            f"the skill tells a job to read {token!r}, which the report never prints")
+    assert "rot" in bflat.lower(), "the record-age half has to be identified as the rot signal"
+    assert "ingest" in bflat.lower(), "and the claim-age half as the ingest-driven one"
+    # The numbers the skill quotes are the ones the measured split produced, not invented.
+    assert "24,234" in bflat and "0" in bflat, bflat[:300]

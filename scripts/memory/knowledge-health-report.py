@@ -444,6 +444,29 @@ def _created_at_day(fact: dict) -> str | None:
     return recorded.date().isoformat() if recorded else None
 
 
+def record_age_days(fact: dict, now: datetime) -> "int | None":
+    """How old the RECORD is: days since its own `created_at`, and nothing else. The
+    other axis from `stale_age_reference` (#2475).
+
+    The claim-age axis ages on the OLDEST usable date, so a fact written last week about a
+    video published two years ago is stale the night it lands — which is how that section
+    reached 24,234 with no record having aged in place. This axis asks what a reader of that
+    number means when they hear "stale": has this row been sitting here unrevisited past the
+    window. It is measured from `created_at` alone — no `event_date`, and no `valid_at`
+    re-base, because either one would move the record's age with the claim's and there would
+    be one axis again, which is the thing being fixed.
+
+    `None` when `created_at` is absent or unparseable, NOT zero. Zero reads as "this record
+    is new", a claim about the record that cannot be made; the absence is what
+    `stale_age_split` counts as a third state and the section prints, for the same reason
+    #841's fact with a missing `created_at` is never silently aged at today.
+    """
+    created = parse_date(fact.get("created_at"))
+    if created is None:
+        return None
+    return (now - created).days
+
+
 def _has_event_date(fact: dict) -> bool:
     """True when `event_date` gives the fact an age of its own.
 
@@ -555,11 +578,20 @@ def find_stale_facts(entities: dict, now: datetime, threshold_days: int) -> list
                 if age >= threshold_days:
                     fact_text = str(fact.get("fact", ""))
                     preview = fact_text[:60] + ("..." if len(fact_text) > 60 else "")
+                    # `age_days` is the CLAIM's age (oldest usable date, as the section
+                    # header says); `record_age` is the RECORD's, from its own `created_at`
+                    # alone, and None when there is no parseable one (#2475). Both travel on
+                    # the row because the section's entire point is that they diverge, and a
+                    # reader holding one stale row has to be able to say which of the two it
+                    # is stale in — which is not derivable from `age_days` plus `created_at`
+                    # without re-implementing `record_age_days`' no-`valid_at`-re-base rule a
+                    # second time, somewhere else, where it can drift.
                     stale.append({
                         "entity": entity_name,
                         "category": category,
                         "preview": preview,
                         "age_days": age,
+                        "record_age": record_age_days(fact, now),
                     })
     return stale
 
@@ -598,6 +630,77 @@ def _stale_band_line(stale_facts: list[dict]) -> str:
     return "Age bands (days): " + " | ".join(
         f"{label}: {count:,} ({share}%)"
         for label, count, share in stale_age_bands(stale_facts))
+
+
+#: The two axes, spelled once. The section header, the split line and this file's tests all
+#: quote these strings, so the words the label uses and the words the counts use cannot drift
+#: apart — which matters because the failure being fixed was a reader taking the header's
+#: "oldest usable date" and the total beneath it as one instruction about the store (#2475).
+STALE_CLAIM_AGE_LABEL = "claim age (content)"
+STALE_RECORD_AGE_LABEL = "record age (the record's own `created_at`)"
+
+#: The three states the split counts stale rows into. The renderer, the section's own sum
+#: check and this file's tests read these names, so a fourth state cannot be added in one
+#: place and silently missed in the other two.
+STALE_ARRIVED_KEY, STALE_ROTTED_KEY, STALE_RECORD_UNSEEN_KEY = (
+    "arrived_stale", "record_aged", "record_age_unseen")
+
+
+def stale_age_split(stale_facts: list[dict]) -> dict:
+    """{arrived already stale / the record itself is older / record age unseen} over the
+    SAME rows `stale_age_bands` spreads, summing to the number of rows it is given.
+
+    Why this exists and is not just a nicer label on the total (#2475): the headline aged
+    21,341 → 24,234 in four days and read as a standing instruction to review 24k facts.
+    Measured through the shipped selectors, every one of those 24,234 rows had a
+    `created_at` inside the 60-day window and an `event_date` far outside it — the number was
+    tracking how much feed content got digested overnight, and the rot component was exactly
+    zero. Split, the two halves say different things, and only one of them is about the store
+    going bad.
+
+    `record_age_unseen` is the third state `record_age_days` returns None for: a row whose
+    own record age cannot be established is neither new nor old, and folding it into either
+    count would be an unsupported claim about it. It prints beside the other two for the same
+    reason #2179 prints the stamp cohort above this section instead of folding it in.
+    """
+    arrived = rotted = unseen = 0
+    for sf in stale_facts:
+        record_age = sf.get("record_age")
+        if record_age is None:
+            unseen += 1
+        elif record_age >= STALE_DAYS_THRESHOLD:
+            rotted += 1
+        else:
+            arrived += 1
+    return {STALE_ARRIVED_KEY: arrived, STALE_ROTTED_KEY: rotted,
+            STALE_RECORD_UNSEEN_KEY: unseen}
+
+
+def _stale_age_split_line(stale_facts: list[dict]) -> str:
+    """`STALE_AGE_SPLIT: 24,234 arrived already stale, 0 the record itself is older, …`.
+
+    `arrived + rotted + unseen == len(stale_facts)` is asserted, not assumed: the whole value
+    of the line is that the halves sum to the total the section just printed (#2475 clause 2),
+    and a split that quietly dropped or double-counted a row would be WORSE than the
+    undifferentiated number it replaced, because it would look audited.
+
+    The trailing clause is the sentence that keeps the total from being read as a backlog. A
+    bare count rots into `stale: 24,234` in someone's summary within a week, which is how the
+    number became a standing instruction to review 24k facts in the first place.
+    """
+    split = stale_age_split(stale_facts)
+    total = sum(split.values())
+    assert total == len(stale_facts), (
+        f"the split counts {total} of {len(stale_facts)} stale rows, so the numbers under "
+        "it cannot be read against the section total")
+    return (
+        f"STALE_AGE_SPLIT: {split[STALE_ARRIVED_KEY]:,} arrived already stale — counted by "
+        f"{STALE_CLAIM_AGE_LABEL}, recorded inside the {STALE_DAYS_THRESHOLD}-day window —, "
+        f"{split[STALE_ROTTED_KEY]:,} where {STALE_RECORD_AGE_LABEL} itself passes "
+        f"{STALE_DAYS_THRESHOLD} days (the rot signal), "
+        f"{split[STALE_RECORD_UNSEEN_KEY]:,} with no parseable `created_at` to date the "
+        "record by. The first count tracks INGEST volume, not rot; the second is the one "
+        "that says knowledge is going stale.")
 
 
 def stale_coverage(entities: dict) -> tuple[int, int]:
@@ -1017,8 +1120,26 @@ def generate_report(
     # --- Section 6: Stale Facts ---
     lines.append("## Stale Facts")
     lines.append("")
+    # The header IS the label on the headline number, so it names which of the two ages it
+    # is and which one beside it is the rot signal (#2475 clause 3). Before the split this
+    # line described the rule and nothing else, and the total under it — 24,234, +13.5% in
+    # four days — was read as a standing instruction to review 24k facts when every row in
+    # it had been recorded inside the window. Stating the semantics was not enough; the
+    # number needs its axis named where a skimmer reads.
     lines.append(f"Active facts whose oldest usable date — `created_at` or `event_date`, "
                  f"re-based by `valid_at` — is older than {STALE_DAYS_THRESHOLD} days.")
+    lines.append("")
+    lines.append(f"**{STALE_CLAIM_AGE_LABEL}** (the total below) and **{STALE_RECORD_AGE_LABEL}** "
+                 f"(the count beside it) are two different ages of the same rows: the first is "
+                 "how old the fact's CONTENT is, so a fact written last week about a two-year-old "
+                 "video lands stale and this total moves with feed volume; the second is how old "
+                 "the RECORD is, aged from its own `created_at` alone, and it is the rot signal — "
+                 "this is the only number here that says knowledge is going stale.")
+    lines.append("")
+    # Always printed, including at a zero total: a line that vanishes with the stale count
+    # cannot distinguish "no stale facts" from "no split shipped", and 0 rot is exactly the
+    # reading worth having when the total is large.
+    lines.append(_stale_age_split_line(stale_facts))
     lines.append("")
 
     # The stamp cohort first, because it is the reason the two numbers under it are not
@@ -1512,7 +1633,15 @@ def main():
     print(f"  God entities: {sum(1 for s in entity_stats.values() if s['total_facts'] > GOD_ENTITY_THRESHOLD)}")
     print(f"  Thin entities: {sum(1 for name, s in entity_stats.items() if s['active_facts'] < THIN_ENTITY_MAX_FACTS and rel_stats['entity_edge_counts'].get(name, 0) == 0)}")
     print(f"  Orphan entities: {sum(1 for name in entity_stats if name not in rel_stats['entities_in_graph'] and entity_stats[name]['total_facts'] > 0)}")
+    # The count above is CLAIM age and moves with ingest; the split under it is what says
+    # whether any of it is rot (#2475). Printed on the console too, because a job's stdout is
+    # what an operator pastes into a summary — and a number quoted from here with no axis on
+    # it is exactly how 24,234 came to read as a review backlog.
     print(f"  Stale facts: {len(stale_facts)}")
+    _split = stale_age_split(stale_facts)
+    print(f"    of which: {_split[STALE_ARRIVED_KEY]:,} arrived already stale (ingest), "
+          f"{_split[STALE_ROTTED_KEY]:,} the record itself is older (rot), "
+          f"{_split[STALE_RECORD_UNSEEN_KEY]:,} no parseable created_at")
     # On its own line because the count above is only a verdict on the dated
     # share; this is the share it could not age (#841).
     print(f"  Stale unevaluable: {stale_unevaluable[0]:,} of {stale_unevaluable[1]:,} active facts "
