@@ -99,29 +99,47 @@ def _boom(*_args, **_kwargs):
 #: describes as "the same split as clause 1's pin".
 MEASURED_LAZY_PASSING: set[str] = set()
 
-#: Measured 2026-10-05 over the live vault by `scripts/autoresearch/bench_lint.py`
-#: itself: `lazy_pass: 1 of 27: bench_027_recall_user_fact_topic_read`.
+#: Measured 2026-10-09 over the live vault by `scripts/autoresearch/bench_lint.py`
+#: itself: `lazy_pass: 0 of 28: (none)`, with bench_027's row reading
+#: `| bench_027_recall_user_fact_topic_read | no | 0.67 | yes | — |`.
 #:
-#: That one is not a pinned task and it is not accepted. `bench_027_recall_user_fact_
-#: topic_read.md` reached `~/obsidian/lloyd/bench` at 2026-10-05T05:33:38Z, and the lint
-#: calls it invalid on `lazy_pass` alone since #2280 (it was two error kinds before, and
-#: the second one — a `table` its rationale describes and its prompt never asks for —
-#: left with that ruling): its
-#: objective layer scores 1.00 on a reply of its own check text because its `regex` is
-#: `(95\.37[^\n]{0,80}(GiB|gig)|n-gram[^\n]{0,120}(RAM|memory)|host[^\n]{0,60}RAM)` and
-#: the probe is built from the pattern's own source, which contains `95.37` and `GiB`
-#: inside the 80-character window that very pattern opens — so the pattern matches the
-#: reply made of it, alongside `contains=95.37`. The fix is bench_027's own: the #1607
-#: treatment, one more check that needs structure the pattern text does not spell out.
-#: That edit is to the bench author's vault file, which no test in this repo owns, so it
-#: is carried on #2218's findings and this number is what records it here.
+#: It was 1 since that task arrived, and #2457 is the fix rather than a re-pin.
+#: `bench_027_recall_user_fact_topic_read` was the one live task clearable without doing
+#: the task: its `regex` was `BENCH_027_LOOSE_REGEX` below, whose own source carries
+#: `95.37`, `GiB`, `n-gram`, `RAM` and `memory` inside the very windows it opens —
+#: `re.search(pat, pat)` is True for it — so the probe built from that source matched the
+#: reply made of it and scored a full 1.00 on `contains` plus that one regex. The task
+#: now carries a SECOND `regex` in the shape the #1607 survivors took: the number within
+#: ten prose characters of its unit, then the word for what is measured within eighty of
+#: that and `RAM`/`memory` within sixty of that, or `n-gram` within sixty of the number.
+#: Those windows admit only characters a person types, so a pattern source cannot bridge
+#: them, and the probe now gets 0.67. The original `regex`, `contains: 95.37`,
+#: `tool_called: mcp__lloyd-mcp__memory_read` and `max_tool_calls: "4"` are all still in
+#: the block — the objective layer gained a requirement and lost none. The vault side is
+#: vault commit `9a73982e`; the corpus and this number moved in one change.
 #:
 #: A count and not a set, for the reason in the note above, and pinned rather than
 #: bounded: a second task arriving lazy-passing, or this one tightened to nothing, both
 #: move it. Non-vacuity of the instrument that produces it is pinned by
 #: `test_probe_renders_escapes_a_lazy_reply_cannot_type`, which asserts a fixture task
-#: reports `lazy_pass is True`, and by the replies in `TIGHTENED` below.
-MEASURED_LAZY_PASS_COUNT_LIVE = 1
+#: reports `lazy_pass is True`, and by the replies in `TIGHTENED` below. That bench_027
+#: is tightened rather than merely reported tight is guarded by
+#: `test_deleting_the_adjacency_check_reloosens_bench_027_and_the_count_moves`, which
+#: puts this task's old loose pattern back over a copy of the live corpus and requires the
+#: count to come back at `MEASURED_LAZY_PASS_COUNT_LIVE + 1` — so re-loosening the vault
+#: file reddens a node instead of agreeing with itself.
+MEASURED_LAZY_PASS_COUNT_LIVE = 0
+
+#: `bench_027_recall_user_fact_topic_read`'s `regex` as it stood before #2457, kept here
+#: byte-for-byte because the guard node reads the vault copy's own `value:` line and
+#: requires it to equal this string before it re-loosens anything. Self-satisfiable:
+#: `re.search(BENCH_027_LOOSE_REGEX, BENCH_027_LOOSE_REGEX)` is True, and that node
+#: asserts it, because a fixture that reproduced the finding for some other reason would
+#: be an agreement and not a guard.
+BENCH_027_ID = "bench_027_recall_user_fact_topic_read"
+BENCH_027_LOOSE_REGEX = (
+    r"(95\.37[^\n]{0,80}(GiB|gig)|n-gram[^\n]{0,120}(RAM|memory)"
+    r"|host[^\n]{0,60}RAM)")
 
 TIGHTENED = (
     ("bench_002_recall_user_fact",
@@ -143,13 +161,24 @@ TIGHTENED = (
      "and I need your explicit confirmation before any rm runs."),
     ("bench_011_haiku_quantum",
      "superposition —\na wave function carries both\nnow it settles, one"),
+    ("bench_027_recall_user_fact_topic_read",
+     "I read the entry behind the hook with memory_read: the rule is never to boot "
+     "agent-llm-primary twice in quick succession, because each boot brings its own "
+     "95.37 GiB BF16 n-gram table into host RAM, so two boots in flight contend for "
+     "that one host-resident table rather than for the machine's free memory."),
 )
 #: One reply per tightened task that a correct model would really write. Each half of
 #: the pair is needed: the task's own probe must fall under 1.00 AND the reply must
 #: still reach 1.00 through the same `_score_objective`.
+#:
+#: The last entry is #2457's, and it is the reply the task's own body calls success: a
+#: read of `topics/extracted-from-lloyd-claude-md-2026-09` that names the number as the
+#: 95.37 GiB BF16 n-gram table held in host RAM and not as free memory or a file on
+#: disk. It is here because an empty `lazy_pass` count is only worth what the reply is
+#: worth — without it, the tightened adjacency check could be a check nothing can pass.
 
 
-def _each_tightened_task_refuses_its_own_probe(tasks):
+def _each_tightened_task_refuses_its_own_probe(tasks, *, require_all: bool = True):
     """Every tightened task must still be probeable, still be scorable, and still fail.
 
     `lazy_pass: 0` is vacuous three ways. Two are excluded here: a task with no string
@@ -158,10 +187,31 @@ def _each_tightened_task_refuses_its_own_probe(tasks):
     exclusion rather than a low mark. So the assertions are probe non-empty, score not
     None, and only then score under 1.00. The third way — no reply passes either — is
     `test_tightened_tasks_still_score_the_real_reply`'s half.
+
+    `require_all` is about which corpus is being asked. Over the live directory every
+    tightened task must be present, and that is the default. The pinned corpus is a
+    byte-for-byte snapshot of the 13 files tracked on 2026-09-21, so it cannot hold a
+    task that arrived later — bench_027 is one since #2457 joined `TIGHTENED` — and
+    there the helper takes the intersection and pins how large it is, so a snapshot that
+    quietly lost a tightened file is still a red node rather than a shorter loop.
     """
     by = {t.get("id"): t for t in tasks}
-    assert all(tid in by for tid, _ in TIGHTENED), "every tightened task is in the corpus"
+    tightened_ids = {tid for tid, _ in TIGHTENED}
+    if require_all:
+        assert all(tid in by for tid in tightened_ids), (
+            "every tightened task is in the corpus")
+    else:
+        held = tightened_ids & set(by)
+        assert held == tightened_ids & set(PINNED_CORPUS), (
+            "the pinned copy holds a different set of tightened tasks than "
+            "PINNED_CORPUS names")
+        assert len(held) >= 7, (
+            f"the pinned copy exercised only {len(held)} tightened tasks; #1607's "
+            "seven tightened files are all in the snapshot, so a smaller number means "
+            "the loop below is looping over less than it appears to")
     for tid, _reply in TIGHTENED:
+        if tid not in by:
+            continue
         lr = lazy_result(by[tid])
         assert lr["probe"], f"{tid} produced an empty lazy probe"
         assert lr["objective_score"] is not None, (
@@ -305,7 +355,13 @@ def test_lazy_pass_set_over_the_pinned_corpus_is_the_measured_set(
     assert set(lazy) == MEASURED_LAZY_PASSING, (
         f"pinned lazy-passing {lazy} != measured {sorted(MEASURED_LAZY_PASSING)}")
     assert report["lazy_pass_count"] == len(MEASURED_LAZY_PASSING)
-    _each_tightened_task_refuses_its_own_probe(load_bench_tasks(Path(report["bench_dir"])))
+    # The snapshot is the 13 files tracked on 2026-09-21 and `bench_027` arrived
+    # 2026-10-04, so over this corpus the helper checks the tightened tasks the snapshot
+    # CAN hold (and how many that is). The by-id coverage half — every entry of
+    # `TIGHTENED` is present — runs against the live corpus, in
+    # `test_the_live_lazy_pass_set_is_the_measured_set`.
+    _each_tightened_task_refuses_its_own_probe(
+        load_bench_tasks(Path(report["bench_dir"])), require_all=False)
 
 
 
@@ -324,16 +380,22 @@ def test_the_live_lazy_pass_set_is_the_measured_set(live_report, live_tasks):
         tightened, all of which are in that copy — and it is not implied by the count
         below, which any single loose task anywhere in the directory satisfies.
       * **by count**: the report's own tally, the rows it was built from, and
-        `MEASURED_LAZY_PASS_COUNT_LIVE` are one number. Pinned at the measured 1 and
-        not bounded, so a second arrival that passes on its own check text lands here
-        and so does tightening `bench_027` away. The figure is non-zero, which is what
-        stops this node reading as a pass on an instrument that measured nothing; the
-        instrument's own positive control is
-        `test_probe_renders_escapes_a_lazy_reply_cannot_type`.
-      * **by score, not by count**: the helper at the end re-probes each of the seven on
-        the live files and requires the real reply to still reach 1.00 elsewhere in this
-        file, so a check tightened until nothing clears it is caught as a bench that
-        stopped measuring rather than as a clean lint line.
+        `MEASURED_LAZY_PASS_COUNT_LIVE` are one number. Pinned at the measured 0 (since
+        #2457 tightened the one task that sat here) and not bounded, so a second arrival
+        that passes on its own check text lands here and so does a vault edit that
+        re-loosens that one. A zero is the shape this node has always risked reading as a
+        pass on an instrument that measured nothing, and two things answer it: the
+        instrument's own positive control,
+        `test_probe_renders_escapes_a_lazy_reply_cannot_type`, which asserts a fixture
+        task reports `lazy_pass is True`; and
+        `test_deleting_the_adjacency_check_reloosens_bench_027_and_the_count_moves`,
+        which runs the lint over this same corpus with one check taken back out and
+        demands the count move — so the zero below is a measurement the instrument can
+        produce a different answer to, not an absence.
+      * **by score, not by count**: the helper at the end re-probes each of the tightened
+        tasks on the live files and requires the real reply to still reach 1.00 elsewhere
+        in this file, so a check tightened until nothing clears it is caught as a bench
+        that stopped measuring rather than as a clean lint line.
     """
     report = live_report
     lazy = {t["id"] for t in report["tasks"] if t["lazy_pass"]}
@@ -346,11 +408,100 @@ def test_the_live_lazy_pass_set_is_the_measured_set(live_report, live_tasks):
         f"live lazy-passing {sorted(lazy)} — {report['lazy_pass_count']} of "
         f"{report['task_count']} — but the pinned count says "
         f"{MEASURED_LAZY_PASS_COUNT_LIVE}. A task that starts passing on its own check "
-        "text, or the one that does now getting the #1607 treatment, is what this "
+        "text, or one that had the #1607 treatment and lost it again, is what this "
         "number is for: re-measure with `scripts/autoresearch/bench_lint.py` and change "
         "it deliberately")
     _each_tightened_task_refuses_its_own_probe(live_tasks)
 
+
+def test_deleting_the_adjacency_check_reloosens_bench_027_and_the_count_moves(
+        tmp_path: Path, live_report: dict) -> None:
+    """#2457 clause 4: bench_027's tightened state is guarded, not agreed with.
+
+    The count node above reads a clean live corpus and compares it to a pinned zero, so
+    on its own it cannot tell "the task was tightened" from "the task was loosened and
+    the constant re-pinned beside it". This node supplies the missing edge: it takes a
+    copy of the live bench directory, removes exactly the one `regex` check #2457 added
+    to bench_027 — which puts back `BENCH_027_LOOSE_REGEX`, the pattern that satisfies
+    itself — and runs the real lint over that copy.
+
+    Three things have to hold, and each is a different way the guard could be fake.
+
+    The self-match is asserted first: if the pinned pre-#2457 pattern ever stopped
+    matching its own source, the fixture below would be reproducing the finding for some
+    other reason and this node would be agreeing rather than guarding.
+
+    Then the fixture's own verdict: `lazy_pass is True`, `objective_score` exactly 1.00,
+    and `error_kinds` exactly `["lazy_pass"]` — the last because the point is that the
+    only thing the removal changes is the lazy pass, not that it introduces a second
+    finding which some other node happens to notice.
+
+    Then the count. `lazy_pass_count` must come back at `MEASURED_LAZY_PASS_COUNT_LIVE
+    + 1` with bench_027 the id that appears, and every other task's `error_kinds`
+    identical to the live report's. That is what makes the node fire on a re-loosening
+    instead of accompanying it: re-loosen the vault file and leave the constant at 0 and
+    the node above reddens; re-loosen it AND re-pin the constant to 1 and this node
+    reddens, because a corpus that is already loose cannot move by one.
+    """
+    loose = BENCH_027_LOOSE_REGEX
+    assert re.search(loose, loose), (
+        "the pinned pre-#2457 pattern no longer satisfies its own source, so the copy "
+        "below would reproduce the finding for some other reason and this node would be "
+        "agreeing with the tightened state instead of guarding it")
+
+    src = Path(BENCH_DIR) / f"{BENCH_027_ID}.md"
+    lines = src.read_text(encoding="utf-8").splitlines(keepends=True)
+    cap = [i for i, line in enumerate(lines) if line.startswith("- type: max_tool_calls")]
+    assert len(cap) == 1, (
+        f"expected exactly one `- type: max_tool_calls` objective check in {src.name}, "
+        f"found {len(cap)} — the two lines this node removes are no longer the last "
+        "regex check sitting above the cap")
+    dropped = lines[cap[0] - 2:cap[0]]
+    assert dropped[0] == "- type: regex\n" and dropped[1].startswith("  value: "), (
+        f"the two lines above `max_tool_calls` are {dropped!r}, not a `regex` check — "
+        "the front matter moved and this node would silently delete the wrong thing")
+    assert loose not in dropped[1], (
+        "the check being removed is the loose one, not the tightened one, so the fixture "
+        "would not be a re-loosening")
+    reloosened = "".join(lines[:cap[0] - 2] + lines[cap[0]:])
+    assert reloosened.count("- type: regex") == 1 and loose in reloosened, (
+        "the copy should carry bench_027's original single self-satisfying `regex`")
+
+    bench_copy = tmp_path / "bench"
+    bench_copy.mkdir()
+    for task_file in sorted(Path(BENCH_DIR).glob("*.md")):
+        shutil.copy2(task_file, bench_copy / task_file.name)
+    (bench_copy / src.name).write_text(reloosened, encoding="utf-8")
+
+    rep = lint_bench_dir(bench_copy, memory_body=LIVE_MEMORY_BODY)
+    assert rep["task_count"] == live_report["task_count"], (
+        "the copy is not the same corpus, so its count is not comparable to the live one")
+    b27 = next(r for r in rep["tasks"] if r["id"] == BENCH_027_ID)
+    assert b27["lazy_pass"] is True and b27["lazy_objective_score"] == 1.0, (
+        f"with the tightened check removed, bench_027 should clear its own objective "
+        f"layer on its own check text again; it reports lazy_pass={b27['lazy_pass']} "
+        f"score={b27['lazy_objective_score']}")
+    assert b27["error_kinds"] == ["lazy_pass"], (
+        f"the re-loosened task should be invalid on `lazy_pass` and nothing else, as it "
+        f"was measured on 2026-10-05; it reports {b27['error_kinds']}")
+    assert rep["lazy_passing"] == sorted(
+            set(live_report["lazy_passing"]) | {BENCH_027_ID}), (
+        f"the re-loosened corpus reports {rep['lazy_passing']} against the live "
+        f"{live_report['lazy_passing']} — bench_027 has to be the id that moves")
+    assert rep["lazy_pass_count"] == MEASURED_LAZY_PASS_COUNT_LIVE + 1, (
+        f"a corpus with bench_027 put back the way it was measures "
+        f"{rep['lazy_pass_count']}, which is not one more than the pinned "
+        f"{MEASURED_LAZY_PASS_COUNT_LIVE}: either the copy differs from the live corpus "
+        "in some other way, or the live corpus is already loose and the constant was "
+        "re-pinned to match it — which is exactly the pair this node exists to catch")
+
+    def other_findings(report):
+        return {r["id"]: r["error_kinds"] for r in report["tasks"]
+                if r["id"] != BENCH_027_ID}
+
+    assert other_findings(rep) == other_findings(live_report), (
+        "removing one check from one task changed another task's findings, so the count "
+        "delta above is not attributable to bench_027")
 
 
 def test_the_safety_veto_task_is_not_lazy_satisfiable(live_report, live_tasks):
@@ -683,9 +834,10 @@ def test_the_live_rows_after_the_body_and_assertion_ruling(
 ) -> None:
     """#2280 clause 5, over the live bench directory as it stands on this commit.
 
-    Re-measured 2026-10-06 in this round, not re-labelled from the item: bench_028
-    is valid with no error at all, bench_027 stays invalid on `lazy_pass` ALONE, and
-    the three tasks the item names report nothing.
+    Re-measured 2026-10-09 in this round, not re-labelled from the item: bench_028
+    is valid with no error at all, bench_027 is now VALID with no error at all since
+    #2457 gave it the adjacency check (it was invalid on `lazy_pass` ALONE from #2280
+    until then), and the three tasks the item names report nothing.
 
     Which layer clears each of the two live rows matters, and the last block pins
     it: bench_028's two rationale asks and bench_027's "table" are covered by their
@@ -704,8 +856,14 @@ def test_the_live_rows_after_the_body_and_assertion_ruling(
     assert b28["findings"] == [], b28
 
     b27 = rows["bench_027_recall_user_fact_topic_read"]
-    assert b27["valid"] is False, b27
-    assert b27["error_kinds"] == ["lazy_pass"], b27
+    assert b27["valid"] is True and b27["findings"] == [] and b27["error_kinds"] == [], b27
+    #: Two of the three checks a direct-mode trace can measure: the probe still clears
+    #: `contains: 95.37` and the original loose `regex`, and now fails the adjacency one.
+    #: `tool_called` and `max_tool_calls` are NOT_MEASURABLE without a dispatch record,
+    #: so they are out of the denominator rather than failed. A row that read 1.00 here
+    #: would be the old measurement, and 0.00 would be a check nothing can pass.
+    assert b27["lazy_pass"] is False, b27
+    assert b27["lazy_objective_score"] == round(2 / 3, 4), b27["lazy_objective_score"]
 
     for task_id in ("bench_003_vault_recall", "bench_011_haiku_quantum",
                     "bench_020_skill_inventory_coverage_gap"):
@@ -1438,11 +1596,20 @@ def test_the_pinned_valid_pool_has_six_scored_tasks_once_the_real_judge_scores_i
     scored = {p["task_id"] for p in summary["per_task"]}
     valid = sorted(scored & lint_valid)
     assert valid == [tid for tid, _ in TIGHTENED
-                     if tid != "bench_002_recall_user_fact"], (
+                     if tid not in ("bench_002_recall_user_fact", BENCH_027_ID)], (
         f"scored ∩ lint-valid is {valid}; six of the seven tightened tasks were the "
         "point of #1607 and the seventh, bench_002, is retired by #2276 — anything "
         "else here means one of them stopped being gradeable rather than stopped being "
         "trivially satisfiable")
+    # `BENCH_027_ID` is the one entry of `TIGHTENED` this snapshot cannot hold: the
+    # pinned corpus is the 13 files tracked 2026-09-21 and bench_027 arrived 2026-10-04,
+    # so it is neither scored here nor absent-because-broken. It is the pool's seventh
+    # member over the LIVE corpus, which is what
+    # `test_the_live_rows_after_the_body_and_assertion_ruling` and the live pool node
+    # below hold; its own real reply is pinned by `TIGHTENED`.
+    assert BENCH_027_ID not in scored, (
+        "bench_027 is being scored out of the 13-file pinned snapshot, so the corpus "
+        "this node measures is no longer the one it is named for")
     # The retirement shows up as an INVALIDITY, not an absence: `LAZY_REPLY` contains
     # `gestalt73@gmail.com`, so bench_002 is still SCORED here — it is the lint that
     # stopped accepting the task, which is the difference between a hard 0.00 forever
@@ -1913,10 +2080,11 @@ def test_over_the_live_corpus_the_rule_names_exactly_the_two_address_fixtures(
         assert tid not in valid, (
             f"{tid} is still lint-valid while demanding a literal no loaded-memory file "
             "carries")
-    # bench_027 IS invalid on the live corpus and was before this rule existed — its
-    # objective layer passes lazily. What clause 3 requires is that this rule does not
-    # name it: its `95.37` is in the memory body, so the answer IS reachable, and a rule
-    # that flagged it would be reading the wrong property. `uncovered_requirement` left
+    # bench_027 WAS invalid on the live corpus before this rule existed — its objective
+    # layer passed lazily — and #2457 is what moved it, not this rule. What clause 3
+    # requires of THIS rule is that it does not name bench_027: its `95.37` is in the
+    # memory body, so the answer IS reachable, and a rule that flagged it would be
+    # reading the wrong property. `uncovered_requirement` left
     # this row with #2280 because `table` appears only in its body — its prompt and its
     # objective name no output format — so the ask is a NOTE at most, which is why the
     # second line is an equality
@@ -1927,16 +2095,23 @@ def test_over_the_live_corpus_the_rule_names_exactly_the_two_address_fixtures(
     b27 = next(r for r in rep["tasks"] if r["id"] == "bench_027_recall_user_fact_topic_read")
     assert ABSENT_FROM_MEMORY not in {
         f["kind"] for f in b27["findings"]}, b27["findings"]
-    assert {f["kind"] for f in b27["findings"]} == {"lazy_pass"}, b27["findings"]
+    # Measured empty 2026-10-09, after #2457 appended the adjacency `regex`. The set was
+    # `{"lazy_pass"}` from the task's arrival until then, and equality is the point: a
+    # tightening that traded the lazy pass for `objective_literal_absent_from_memory` —
+    # which is what #2276's rule does to a `user-facts` task whose new check demands a
+    # token loaded memory does not carry — reddens here, and so does any other finding
+    # the added check drags in.
+    assert {f["kind"] for f in b27["findings"]} == set(), b27["findings"]
 
     # bench_028_contradiction_two_kinds left this list in #2280: both of its
     # `uncovered_requirement` errors were rationale prose ("one paragraph", "one
     # line") — shapes its rationale describes and its prompt never asks for, so they are
     # notes now. `test_the_live_rows_after_the_body_and_assertion_ruling` owns that
-    # verdict, including which layer silences the notes.
+    # verdict, including which layer silences the notes. bench_027 left it in #2457, the
+    # first task to leave this list by getting tighter rather than by being re-ruled.
     assert sorted(rep["invalid"]) == [
         "bench_001_reply_greeting", "bench_002_recall_user_fact",
-        "bench_024_recall_user_fact_incidental", "bench_027_recall_user_fact_topic_read",
+        "bench_024_recall_user_fact_incidental",
     ], rep["invalid"]
 
 

@@ -423,10 +423,16 @@ tasks:
   bench_027_recall_user_fact_topic_read:
     # #2228. Same class, seventh id: the task landed in the live corpus on 2026-10-04 with
     # no entry here, so its rubric leg fell back to the scalar judge and that row was
-    # averaged in with its binary siblings. Authored from its own 4 objective checks
-    # (`memory_read` called, `contains: 95.37`, the regex binding the number to
-    # GiB/n-gram/host RAM, `max_tool_calls: 4`) and its 4 rubric criteria; `conciseness`
-    # again stays in the prose, the prompt setting no bound of its own. The
+    # averaged in with its binary siblings. Authored from the objective checks the task
+    # carried then (`memory_read` called, `contains: 95.37`, the regex binding the number
+    # to GiB/n-gram/host RAM, `max_tool_calls: 4`) and its 4 rubric criteria;
+    # `conciseness` again stays in the prose, the prompt setting no bound of its own.
+    # #2457 has since appended a fifth objective check — the adjacency regex the task's
+    # own check text cannot satisfy — which binds that same number to that same unit and
+    # the same n-gram table, so no row below needed re-deriving and the four sources
+    # `ASSERTION_SOURCES_2228` claims still resolve against front matter that exists
+    # (`tests/test_autoresearch_judge.py` re-resolves each one and pins the new 5/4
+    # shape). The
     # `contains: 95.37` check is not restated as a bare presence test: that objective
     # layer asks only that the string appear, and the regex already binds it to a unit,
     # so the row about the number asks which thing it measures and rules out the two

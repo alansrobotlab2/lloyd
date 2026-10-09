@@ -1481,13 +1481,19 @@ ASSERTION_SOURCES_2228 = {
 }
 
 #: The two tasks' parsed check counts and the naive figure that over-counts each by one,
-#: for the same reason as `BENCH_024_025_CHECK_SHAPES`. 7/6 and 4/4 are what
-#: `load_bench_tasks` returns; 8 and 5 are what counting `type: ` lines returns.
+#: for the same reason as `BENCH_024_025_CHECK_SHAPES`. 7/6 and 5/4 are what
+#: `load_bench_tasks` returns; 8 and 6 are what counting `type: ` lines returns.
+#: bench_027's objective half is 5 and not the 4 #2228 authored against, because #2457
+#: appended one `regex` to that task — the adjacency check its own check text cannot
+#: satisfy — and touched no rubric criterion: the five objective checks still carry the
+#: same `objective_value` sources `ASSERTION_SOURCES_2228` claims, and the node that
+#: reads this map re-resolves each of them against the parsed front matter rather than
+#: assuming the shape it was authored under.
 BENCH_026_027_CHECK_SHAPES = {
     "bench_026_contradiction_supersede_chain": {
         "objective_checks": 7, "rubric_criteria": 6, "naive_type_lines": 8},
     "bench_027_recall_user_fact_topic_read": {
-        "objective_checks": 4, "rubric_criteria": 4, "naive_type_lines": 5},
+        "objective_checks": 5, "rubric_criteria": 4, "naive_type_lines": 6},
 }
 
 #: Per task, what a row quoting one of that task's pinned literals has to carry to be
@@ -1770,9 +1776,12 @@ def test_the_2228_assertions_derive_from_checks_their_own_task_files_actually_ca
     repaired by authoring a set against numbers nobody re-measured.
 
     First the counts: `bench_026` is parsed at 7 objective checks and 6 rubric criteria,
-    `bench_027` at 4 and 4, and the naive `grep -c "type: "` figure is one HIGHER on
-    each file (8 and 5) for the same reason #2174 recorded — the frontmatter's own
-    `type: note` is not a check. The node asserts both the parsed figure and the
+    `bench_027` at 5 and 4, and the naive `grep -c "type: "` figure is one HIGHER on
+    each file (8 and 6) for the same reason #2174 recorded — the frontmatter's own
+    `type: note` is not a check. bench_027's objective figure is 5 because #2457 appended
+    the adjacency `regex` that task's own check text cannot satisfy; the rubric layer and
+    the four authored rows did not move, so this node still grades the same derivation.
+    The node asserts both the parsed figure and the
     over-count, so a future reader who measures the grep again learns which number is
     which instead of re-filing the correction.
 
