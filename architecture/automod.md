@@ -2073,7 +2073,7 @@ the worktree that `gate.py` and `promote.py` refuse when dirty.
 
 ## 4. The gate
 
-Eleven rungs, cheapest first, short-circuiting. **Every rung fails closed** —
+Twelve rungs, cheapest first, short-circuiting. **Every rung fails closed** —
 `_rung` catches exceptions and records them as failures, because with no human
 review tier a rung that errors and reads as "didn't fail" silently removes a
 check.
@@ -2086,6 +2086,7 @@ candidate that weakens the gate is judged by the old gate.
 | preflight | ~0s | dirty tree, moved base, merge commits, out-of-scope paths; an item with no clauses, a code diff with no test |
 | vet | <1s | **observe-only (#679)**: a tracked file non-empty at base and empty at HEAD, a newly-added binary outside the allowlist, a diff over `automod.gate.max_diff_lines`. Records to `gate.json` and the ledger; blocks nothing during the soak |
 | static | ~2s | syntax errors, **import failures**, new pyflakes findings |
+| pyright | ~1-30s | **observe-only (#2450)**: a new pyright finding in the round's changed `.py` files *or in an unchanged file that calls what they changed* — the caller a signature break breaks that the diff never touched. Same run at HEAD and at the round's base, reported as the multiset difference (rule+symbol+file, never line), vendored fork excluded. Records to `gate.json` and the ledger; blocks nothing during the soak |
 | frontend | ~5s | new tsc errors, a broken vite build (only when `web/` changed) |
 | tests | ~70s on 8 workers (~10m serial) | the full suite, plus floors on collected AND passed — §4.2f |
 | prompt_surface | conditional | a scored regression in what the model is told (only when the prompt surface moved) |
@@ -2127,6 +2128,23 @@ still pass.
 `pytest` substitutes for neither. It imports modules in its own process and
 never starts `server.py`, so it stays green through a broken startup event, a
 port collision, or an aggregator that registers no tools.
+
+**pyright** is the analyser half of a check this loop only ever had one half of.
+The agent half — a model reading the diff — is the `review` rung; #528's edit-time
+rail lists the callers of a changed symbol and states in its own Risks section
+that it is *not* type checking, because judging that list is still on the model.
+So a changed signature and an unchanged caller disagreeing was invisible until a
+test happened to execute the caller: D13 (`9595ddc3`) deleted the `env` field from
+`RunOptions` while `eval/run_prefetch_cost_eval.py` went on passing it, and
+pyright reads that break off the caller's own line. The rung therefore checks the
+round's changed `.py` files **plus the inbound callers of its changed
+module-level symbols** — the file set #528 computes — and it is a delta like
+`static`'s pyflakes and `frontend`'s tsc: the same run at HEAD and at the round's
+base, subtracted as a multiset keyed on rule+symbol+file, because the tree carries
+1,837 `basic`-mode findings in Lloyd's own files and an absolute bar fails every
+round forever. `scripts/automod/typecheck.py`. Observe-only: what may make it
+block is its flag rate over real rounds, readable off the `pyright` record on the
+round events, and #2450 says a zero rate closes the item instead.
 
 ### 4.5 The review rung: did it do what was asked?
 

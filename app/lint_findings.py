@@ -8,12 +8,14 @@ post-edit diagnostics appended to an Edit result have to use those same
 normalisers or the model is told about a finding the gate will not mind, or
 worse, not told about one it will.
 
-This lives in `app/` and imports nothing, because the aggregator cannot
-import `scripts.automod.gate` — that module pulls in the whole
-self-modification package (worktrees, promotion, ledger state), and
+This lives in `app/` and imports nothing but the standard library, because
+the aggregator cannot import `scripts.automod.gate` — that module pulls in the
+whole self-modification package (worktrees, promotion, ledger state), and
 `agent_mcp` must not depend on any of it. `gate._pyflakes` and
 `gate._parse_tsc` are thin wrappers over these functions, pinned
-behaviour-identical by test.
+behaviour-identical by test; `parse_pyright` is the third parser and is
+consumed by `scripts/automod/typecheck.py`, the gate's type-check delta
+(#2450), for the same reason it is here rather than there.
 
 Both normalisations drop the line and column deliberately: a finding that
 merely moved down the file is not a new finding, and an edit that inserts
@@ -22,9 +24,11 @@ ten lines at the top would otherwise report every finding below it as new.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections import Counter
+from pathlib import Path
 
 # "path:LINE:COL: message" → "path: message"
 PYFLAKES_LINE_RE = re.compile(r"^(.*?):\d+:\d+:\s*(.*)$")
@@ -116,3 +120,120 @@ def node_env() -> dict:
     env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
     env.pop("NODE_OPTIONS", None)
     return env
+
+
+# ── pyright ─────────────────────────────────────────────────────────────────
+
+#: A syntax error carries no `rule`, and a project-level diagnostic carries no
+#: file. Both are still findings, so both get a name rather than a dropout: an
+#: unreported finding is a check that quietly stopped existing.
+PYRIGHT_NO_RULE = "(no rule)"
+PYRIGHT_NO_FILE = "(project)"
+
+
+def pyright_payload(text: str) -> dict | None:
+    """The parsed `pyright --outputjson` payload, or None when `text` is not one.
+
+    The caller asks this before believing an empty finding set: a pyright that
+    could not start prints prose to stdout and exits non-zero, and reading that
+    as "no findings" would be the loudest possible false clean.
+    """
+    if not text or not text.strip():
+        return None
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _pyright_file(raw: str, root: "Path | str | None") -> str:
+    """The file a diagnostic names, as a path inside the tree it was run in.
+
+    pyright prints absolute paths, and the two runs of a delta happen in two
+    different trees — the round's worktree and a detached checkout of its base
+    commit. Left absolute, every finding differs between the two and the delta
+    is just the whole run again. Both the raw and the resolved root are tried,
+    longest first, because a scratch checkout's path can arrive through a
+    symlink and a short root would strip the wrong prefix.
+    """
+    p = (raw or "").replace("\\", "/")
+    if not p:
+        return PYRIGHT_NO_FILE
+    if root is None:
+        return p
+    roots: list[str] = []
+    for cand in (str(root), str(Path(str(root)).resolve())):
+        s = cand.replace("\\", "/").rstrip("/")
+        if s and s not in roots:
+            roots.append(s)
+    for r in sorted(roots, key=len, reverse=True):
+        if (p + "/").startswith(r + "/"):
+            return p[len(r) + 1:].lstrip("/") or PYRIGHT_NO_FILE
+    return p
+
+
+def pyright_key(diag: dict, root: "Path | str | None" = None) -> str:
+    """One diagnostic as a comparable finding: file, rule, message — no position.
+
+    The `range` pyright reports is deliberately absent, for the reason
+    `normalize_pyflakes_line` has always given: a finding that only moved down
+    the file is not a new finding, and a key holding it would report every
+    finding below an inserted line as new (#1210). The symbol and the expected
+    type are already inside `message`, which is what makes the key carry the
+    thing a caller would need to see.
+    """
+    rule = str(diag.get("rule") or "").strip() or PYRIGHT_NO_RULE
+    message = " ".join(str(diag.get("message") or "").split())
+    return f"{_pyright_file(str(diag.get('file') or ''), root)}: {rule}: {message}"
+
+
+def parse_pyright(text: str, root: "Path | str | None" = None) -> Counter:
+    """Every pyright diagnostic in a `--outputjson` payload, normalised and counted.
+
+    A multiset, like `parse_tsc` and for the same reason: two identical
+    findings in one file are two findings — a `reportArgumentType` on each of
+    two call sites of the same bad argument is a second break, not a repeat of
+    the first, and `parse_pyflakes`'s set would hide it.
+
+    `root` is the tree the checker was pointed at, so that a run in a round's
+    worktree and the same run at that round's base commit produce keys that can
+    be subtracted. Text that is not a payload yields an empty multiset; the
+    caller distinguishes that from a clean tree with `pyright_payload`.
+    """
+    out: Counter = Counter()
+    payload = pyright_payload(text)
+    if not payload:
+        return out
+    diags = payload.get("generalDiagnostics")
+    if not isinstance(diags, list):
+        return out
+    for diag in diags:
+        if isinstance(diag, dict):
+            out[pyright_key(diag, root)] += 1
+    return out
+
+
+def parse_pyright_unusable(text: str) -> str:
+    """Why this stdout is not a usable run, or "" when it is.
+
+    The failure that must not read as clean: pyright exits 1 with a line of
+    prose (`File or directory "x.py" does not exist`) and no JSON at all.
+    """
+    if pyright_payload(text):
+        return ""
+    return " ".join((text or "").split())[:200] or "no output from pyright"
+
+
+def split_pyright_key(key: str) -> tuple[str, str, str]:
+    """A key from `pyright_key` back into `(file, rule, message)`.
+
+    The delta is computed on keys and reported as findings, and the report has
+    to name the file and the rule separately — so the split lives beside the
+    builder rather than being re-derived, wrongly, by whoever prints it. File
+    and rule never contain `": "`; the message may, and it keeps the rest.
+    """
+    parts = key.split(": ", 2)
+    while len(parts) < 3:
+        parts.append("")
+    return parts[0], parts[1], parts[2]

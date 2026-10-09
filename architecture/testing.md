@@ -12,7 +12,7 @@ date: 2026-09-24
 ([[automod]]) and by hand from a throwaway worktree. This doc is about the
 suite's own structure: the two kinds of test in it, the rule for tests that read
 data off the machine, and the isolation the parallel runner requires. The gate's
-eleven rungs and the promotion flow are in [[automod]].
+twelve rungs and the promotion flow are in [[automod]].
 
 ## Never run the suite against the production tree
 
@@ -374,5 +374,5 @@ suite exercises · [[data-home]] for where the live data moved on 2026-09-22.
   `SM_20260924_09*`); the shape-to-copy example moved to `test_uptake.py` because
   `test_promotion_fp_rate.py`'s live checks were retired in `9185539e` and its
   header is now stale (#1440). Gate floors (1000/1000/40), `TESTS_MARK_EXPR`, the
-  eleven rungs, `-n 8`, the `_refuse_the_production_tree` guard, the c0f12db
+  twelve rungs, `-n 8`, the `_refuse_the_production_tree` guard, the c0f12db
   stub story and the 09-22 incident record all verified current.

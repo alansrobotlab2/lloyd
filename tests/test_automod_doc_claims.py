@@ -974,8 +974,11 @@ def test_architecture_states_the_loop_axis_and_stops_naming_the_check_behavioura
 # ---------------------------------------------------------------------------
 
 #: The module's `NUMBER_WORDS` stops at ten, and widening it would widen the
-#: armed-metric regexes that share it. The ladder needs eleven.
-RUNG_NUMBERS = {**NUMBER_WORDS, "eleven": 11}
+#: armed-metric regexes that share it. The ladder needs more than ten, so the
+#: spellings it needs are enumerated here rather than in the shared table — and
+#: the count itself comes from `Gate.run`, so adding a rung means adding the word
+#: for the new total and nothing else.
+RUNG_NUMBERS = {**NUMBER_WORDS, "eleven": 11, "twelve": 12}
 
 
 def _real_ladder(monkeypatch) -> list[str]:

@@ -90,7 +90,7 @@ class _StubGate(G.Gate):
 # about as much, and is the only rung that judges the change set itself instead
 # of the behaviour it produces — so it runs before anything executes the
 # candidate. It is observe-only (#679): it records, it never fails.
-RUNGS = ("preflight", "vet", "static", "frontend", "tests", "prompt_surface",
+RUNGS = ("preflight", "vet", "static", "pyright", "frontend", "tests", "prompt_surface",
          "review", "venv", "canary_boot", "canary_smoke", "drill")
 ALL_PASS = {n: (True, "ok", {}) for n in RUNGS}
 
@@ -2888,3 +2888,253 @@ def test_a_pickup_probe_reads_a_parametrised_failure_as_that_nodes_red(tmp_path)
                                    live_root=repo, scratch=tmp_path / "b")
     assert res["conclusive"] is False, res["note"]
     assert res["unresolved"] == [beta + "[1]"], res["note"]
+
+
+# ---------------------------------------------------------------------------
+# The observe-only pyright type rung (#2450)
+# ---------------------------------------------------------------------------
+
+#: The dataclass and its caller, as D13 (9595ddc3) had them: `RunOptions`
+#: carried `env`, and a second file kept passing it after the field went away.
+#: `LIMIT: int = "not a number"` is the pre-existing finding the delta must
+#: swallow — pyright sees it in both runs, and only a difference is reportable.
+_TC_RUNOPTS_BASE = (
+    "from dataclasses import dataclass\n"
+    "\n"
+    'LIMIT: int = "not a number"\n'
+    "\n"
+    "\n"
+    "@dataclass\n"
+    "class RunOptions:\n"
+    "    limit: int = 0\n"
+    '    env: str = ""\n'
+)
+_TC_CALLER = (
+    "from runopts import RunOptions\n"
+    "\n"
+    "\n"
+    "def build():\n"
+    "    return RunOptions(limit=1, env=\"prod\")\n"
+)
+_TC_SIBLING = "def helper(x):\n    return x\n"
+#: The vendored fork, which holds 68,003 of this tree's 69,840 pyright findings
+#: and is not ours to type-check. It is a real inbound caller here, so excluding
+#: it has to be a rule and not an accident of where the scan happened to look.
+_TC_FORK_PATH = "agent-services/llm/djev-vllm-fork/fork_caller.py"
+_TC_FORK = (
+    "from runopts import RunOptions\n"
+    "\n"
+    "\n"
+    "def legacy():\n"
+    "    return RunOptions(env=\"prod\")\n"
+)
+
+
+def _tc_git(root, *args):
+    r = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                       text=True, check=True)
+    return r.stdout
+
+
+def _typecheck_round(tmp_path, monkeypatch, *, mode: str = "field_dropped",
+                     fork: bool = False):
+    """A real Gate over a scratch repo, plus the real pyright binary.
+
+    Base commit: `runopts.py` (the dataclass, with one pre-existing
+    `reportAssignmentType` finding in it), `caller.py` (passes `limit` and
+    `env`), `sibling.py` (imports nothing from that module, so it must never
+    enter the file set), and with `fork=True` the vendored fork's own caller.
+
+    `mode` picks the head commit:
+
+      `field_dropped` — the round deletes the `env` field from the dataclass
+        and never opens the caller. This is the shape the item names: a
+        bool→dataclass-return-style signature break that produces no finding
+        anywhere in pyflakes or the graph.
+      `shift` — five comment lines above the unchanged file. Nothing is new;
+        a key holding line numbers would report the pre-existing finding as
+        if it were.
+
+    Returns (gate, captured ledger events). `live_root` is the scratch repo
+    because that is the repo holding this round's base commit, and the rung
+    takes its base run from a detached checkout of it. The interpreter the
+    checker is told to resolve imports with and the checker itself are the real
+    ones, so the test crosses the same process boundary the rung does.
+    """
+    root = tmp_path / "wt"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+    for k, v in (("user.email", "tc@example.invalid"), ("user.name", "tc")):
+        _tc_git(root, "config", k, v)
+    (root / "runopts.py").write_text(_TC_RUNOPTS_BASE, encoding="utf-8")
+    (root / "caller.py").write_text(_TC_CALLER, encoding="utf-8")
+    (root / "sibling.py").write_text(_TC_SIBLING, encoding="utf-8")
+    if fork:
+        fork_dir = root / _TC_FORK_PATH.rsplit("/", 1)[0]
+        fork_dir.mkdir(parents=True)
+        (root / _TC_FORK_PATH).write_text(_TC_FORK, encoding="utf-8")
+    _tc_git(root, "add", "-A")
+    _tc_git(root, "commit", "-q", "-m", "base")
+    base = _tc_git(root, "rev-parse", "HEAD").strip()
+
+    if mode == "field_dropped":
+        (root / "runopts.py").write_text(
+            _TC_RUNOPTS_BASE.replace('    env: str = ""\n', ""), encoding="utf-8")
+        subject = "dropped RunOptions.env"
+    elif mode == "shift":
+        (root / "runopts.py").write_text("# a note\n" * 5 + _TC_RUNOPTS_BASE,
+                                         encoding="utf-8")
+        subject = "five comment lines above an untouched finding"
+    else:
+        raise AssertionError(f"unknown mode {mode!r}")
+    _tc_git(root, "add", "-A")
+    _tc_git(root, "commit", "-q", "-m", subject)
+
+    events: list[dict] = []
+    monkeypatch.setattr(G.S, "append_event", events.append)
+    monkeypatch.setattr(G.W, "round_dir", lambda *a, **k: tmp_path / "round")
+    g = G.Gate("SM_TYPECHECK_ROUND", root, base, live_root=root)
+    # The real checker, found beside the interpreter running this test — the
+    # sibling of `sys.executable`, and NOT of its resolved target: the venv's
+    # `bin/python` is a symlink into the uv-managed base interpreter, so
+    # `.resolve()` lands in ~/.local/share/uv and finds no pyright there. This
+    # cannot use `Path.home()` or `LIVE_ROOT`: the gate runs the suite with HOME
+    # pointed at a round home so a candidate test cannot write live automod
+    # state, and `.venvs` is untracked, so neither root has the binary in a
+    # worktree.
+    g.python = Path(sys.executable)
+    g.pyright = Path(sys.executable).parent / "pyright"
+    assert g.pyright.exists(), f"no pyright at {g.pyright}: the rung has no checker"
+    return g, events
+
+
+def test_the_type_rung_catches_the_break_on_a_line_the_round_never_touched(tmp_path,
+                                                                          monkeypatch):
+    """#2450 clause 2: a caller-breakage finding, located in an unchanged file.
+
+    The round changed one file. The finding it must report is in another one,
+    which is the whole reason the file set is `changed ∪ inbound callers` and
+    not the diff: `reportCallIssue` on `caller.py` is what #528's Risks section
+    says no other surface in the loop can see.
+    """
+    g, _events = _typecheck_round(tmp_path, monkeypatch)
+    changed = sorted(G.W.changed_paths(g.worktree, g.base))
+    assert changed == ["runopts.py"], changed
+
+    ok, detail, data = g.rung_pyright()
+    rec = data["pyright"]
+
+    assert ok is True, "an observe-only rung never refuses a round"
+    assert rec["status"] == "evaluated", rec
+    assert rec["observe_only"] is True
+    assert rec["new"] == [{
+        "file": "caller.py", "rule": "reportCallIssue",
+        "message": 'No parameter named "env"', "count": 1,
+    }], rec["new"]
+    assert rec["counts"] == {"reportCallIssue": 1}
+    assert rec["labels"] == ["reportCallIssue:caller.py"]
+    assert detail.startswith("observe-only:"), detail
+    assert "caller.py" not in changed, "the finding is in a file the round did not change"
+
+
+def test_the_type_rung_reports_only_what_is_new_at_base(tmp_path, monkeypatch):
+    """#2450 clause 3: the reported set is head-minus-base, so a pre-existing
+    finding is not reported and inserting lines above it does not re-flag it.
+
+    `runopts.py` carries `LIMIT: int = "not a number"` at base. In the `shift`
+    round the file moves down five lines and nothing else changes, so the
+    correct answer is an empty delta over a non-empty run — the positive
+    control that the checker ran and saw the finding is `base_findings >= 1`.
+    """
+    g, _events = _typecheck_round(tmp_path, monkeypatch, mode="shift")
+    ok, detail, data = g.rung_pyright()
+    rec = data["pyright"]
+
+    assert ok is True
+    assert rec["status"] == "evaluated", rec
+    assert rec["totals"]["base_findings"] >= 1, "positive control: it saw the old finding"
+    assert rec["totals"]["head_findings"] == rec["totals"]["base_findings"]
+    assert rec["new"] == []
+    assert rec["counts"] == {}
+    assert rec["labels"] == []
+    assert "pre-existing" in detail, detail
+
+
+def test_the_type_rung_checks_changed_files_plus_inbound_callers_of_what_changed(
+        tmp_path, monkeypatch):
+    """#2450 clause 4: the invocation's file set, and its own wall time.
+
+    `caller.py` is in the set because it imports the module whose module-level
+    `RunOptions` this round changed; `sibling.py` is not, because it imports
+    nothing from there. The rung times itself, because the rung budget the
+    item cites is ~8 s and pyright is a Node process doing whole-program work.
+    """
+    g, _events = _typecheck_round(tmp_path, monkeypatch)
+    ok, detail, data = g.rung_pyright()
+    rec = data["pyright"]
+
+    assert ok is True
+    assert sorted(rec["files"]) == ["caller.py", "runopts.py"], rec["files"]
+    assert rec["caller_files"] == ["caller.py"]
+    assert "sibling.py" not in rec["files"]
+    assert rec["totals"]["seconds"] > 0
+    assert rec["totals"]["head_seconds"] > 0 and rec["totals"]["base_seconds"] > 0
+    assert rec["totals"]["files"] == 2 and rec["totals"]["callers"] == 1
+
+
+def test_the_type_rung_never_checks_the_vendored_fork(tmp_path, monkeypatch):
+    """#2450 clause 4, the exclusion half: 97% of this tree's pyright findings
+    are in `agent-services/llm/djev-vllm-fork/`, and the fork IS an inbound
+    caller here, so it would be checked if the file set were merely "callers".
+    """
+    g, _events = _typecheck_round(tmp_path, monkeypatch, fork=True)
+    assert g.pyright  # the checker is the real one
+    listed = _tc_git(g.worktree, "ls-files", "*.py")
+    assert _TC_FORK_PATH in listed, "positive control: the fork file is tracked here"
+
+    ok, detail, data = g.rung_pyright()
+    rec = data["pyright"]
+
+    assert ok is True
+    assert rec["files"] == sorted(rec["files"])
+    assert not any(p.startswith("agent-services/llm/djev-vllm-fork/") for p in rec["files"]), \
+        rec["files"]
+    assert _TC_FORK_PATH not in rec["caller_files"]
+    assert [n["file"] for n in rec["new"]] == ["caller.py"], rec["new"]
+
+
+def test_the_pyright_record_rides_the_round_event_and_cannot_lose_a_round(
+        tmp_path, monkeypatch):
+    """#2450 clause 5: the durable round event, beside `vet`, and observe-only
+    on the ladder itself.
+
+    Two things are pinned here and both are load-bearing for the soak. The
+    record has to leave the gate process on an event: `gate.json` is deleted
+    with the worktree, which is how #679's owed-check nearly lost the vet's
+    denominator. And a rung that found something must still be `ok`, because
+    the flag rate is what decides whether it may ever refuse a round.
+    """
+    g, events = _typecheck_round(tmp_path, monkeypatch)
+    for name in ("preflight", "static", "frontend", "tests", "prompt_surface",
+                 "review", "venv", "canary_boot", "canary_smoke", "drill"):
+        monkeypatch.setattr(g, f"rung_{name}", lambda n=name: (True, f"stub {n}", {}))
+
+    report = g.run()
+
+    rung = [r for r in report.rungs if r.name == "pyright"]
+    assert len(rung) == 1, [r.name for r in report.rungs]
+    assert rung[0].ok is True
+    assert rung[0].data["pyright"]["new"], "this round really does have a finding"
+    assert report.ok is True, "a finding may not decide a round during the soak"
+
+    ev = [e for e in events if e.get("rung") == "pyright"]
+    assert len(ev) == 1, [e.get("rung") for e in events]
+    assert ev[0]["ok"] is True
+    # The same five fields the `vet` record carries, and no wider: a compact
+    # record is what lets an always-on rung sit in the ledger without bloating it.
+    assert sorted(ev[0]["pyright"]) == sorted(
+        ["status", "observe_only", "counts", "labels", "totals"]), ev[0]["pyright"]
+    assert ev[0]["pyright"]["observe_only"] is True
+    assert ev[0]["pyright"]["counts"] == {"reportCallIssue": 1}
+    assert ev[0]["pyright"]["labels"] == ["reportCallIssue:caller.py"]
+    assert ev[0]["pyright"]["totals"]["new_findings"] == 1

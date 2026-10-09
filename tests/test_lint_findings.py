@@ -177,3 +177,104 @@ def test_734_inserting_lines_above_a_redefinition_is_an_empty_delta_both_ways():
     base, post = runs
     assert base, "positive control: pyflakes does report the redefinition"
     assert post - base == set() and base - post == set()
+
+
+# ── parse_pyright (#2450) ───────────────────────────────────────────────────
+
+def _pyright_payload(diagnostics: list[dict], *, analyzed: int = 2) -> str:
+    """A `pyright --outputjson` payload of the shape 1.1.409 actually prints.
+
+    The `range` object is what a key must NOT contain: pyright reports the
+    finding's own line and column there, and a key that carried them would
+    report every finding below an inserted line as new (#1210's pyflakes
+    failure, in a different format).
+    """
+    import json
+    return json.dumps({
+        "version": "1.1.409", "time": "1791511167724",
+        "generalDiagnostics": diagnostics,
+        "summary": {"filesAnalyzed": analyzed, "errorCount": len(diagnostics),
+                    "warningCount": 0, "informationCount": 0, "timeInSec": 0.9},
+    })
+
+
+def _diag(file: str, rule: str, message: str, line: int, char: int = 0,
+          **extra: object) -> dict:
+    d: dict = {"file": file, "severity": "error", "message": message, "rule": rule,
+               "range": {"start": {"line": line, "character": char},
+                         "end": {"line": line, "character": char + 4}}}
+    d.update(extra)
+    return d
+
+
+def test_parse_pyright_returns_a_multiset_keyed_on_rule_and_file_not_line():
+    """#2450 clause 1, in both directions the key has to get right.
+
+    Two identical findings on different lines are two findings (a set would
+    hide the second one, which is why `parse_tsc` is a Counter and
+    `parse_pyflakes` is not), and the same finding at a different line is the
+    same key (which is what makes a head-minus-base delta mean anything).
+    """
+    from collections import Counter
+
+    from app import lint_findings as L
+    payload = _pyright_payload([
+        _diag("/wt/caller.py", "reportCallIssue", 'No parameter named "env"', 3),
+        _diag("/wt/caller.py", "reportCallIssue", 'No parameter named "env"', 9, 12),
+        _diag("/wt/app/service.py", "reportArgumentType",
+              'Argument of type "str" is incompatible with parameter of type "int"', 41),
+    ])
+    got = L.parse_pyright(payload, root="/wt")
+    assert isinstance(got, Counter)
+    assert got == Counter({
+        'caller.py: reportCallIssue: No parameter named "env"': 2,
+        'app/service.py: reportArgumentType: Argument of type "str" is '
+        'incompatible with parameter of type "int"': 1,
+    }), dict(got)
+    # The line is nowhere in the key: neither of the two line numbers (3, 9)
+    # nor the columns (0, 12) appear in any key on their own.
+    assert all("3" not in k.split(": ")[0] for k in got)
+
+
+def test_parse_pyright_of_the_same_tree_at_two_roots_gives_the_same_keys():
+    """The delta compares a run in the worktree against a run at the round's
+    base commit in a different directory. Absolute paths in the key would make
+    every one of those a difference, so the root is stripped."""
+    from app import lint_findings as L
+    head = _pyright_payload([
+        _diag("/home/alansrobotlab/lloyd-work/SM_T/home/lloyd/caller.py",
+              "reportCallIssue", 'No parameter named "env"', 3)])
+    base = _pyright_payload([
+        _diag("/home/alansrobotlab/lloyd-work/SM_T/gate-state/checkout-base/caller.py",
+              "reportCallIssue", 'No parameter named "env"', 3)])
+    h = L.parse_pyright(head, root="/home/alansrobotlab/lloyd-work/SM_T/home/lloyd")
+    b = L.parse_pyright(base, root="/home/alansrobotlab/lloyd-work/SM_T/gate-state/checkout-base")
+    assert h == b
+    assert list(h) == ['caller.py: reportCallIssue: No parameter named "env"']
+
+
+def test_parse_pyright_keeps_a_diagnostic_with_no_rule_and_drops_nothing():
+    """A syntax error carries no `rule`; a project-level diagnostic carries no
+    file. Neither may vanish, because an unreported finding is a check that
+    quietly stopped existing."""
+    from app import lint_findings as L
+    syntax = _diag("/wt/one.py", "reportInvalidSyntax", "Expected expression", 1)
+    syntax.pop("rule")                       # pyright omits it on a syntax error
+    got = L.parse_pyright(_pyright_payload([
+        syntax,
+        {"file": "", "severity": "error", "message": '"basic" is not a valid typeCheckingMode'},
+    ]), root="/wt")
+    assert sum(got.values()) == 2, dict(got)
+    assert got["one.py: (no rule): Expected expression"] == 1
+    assert got["(project): (no rule): \"basic\" is not a valid typeCheckingMode"] == 1
+
+
+def test_parse_pyright_of_text_that_is_not_a_payload_is_empty_not_wrong():
+    """A pyright that crashed prints prose, and prose that parses to zero
+    findings must not be readable as "the tree is clean" — the caller checks
+    the payload before believing an empty result, and this is the fact it
+    checks against."""
+    from app import lint_findings as L
+    assert L.parse_pyright("") == {}
+    assert L.parse_pyright('File or directory "x.py" does not exist\n') == {}
+    assert L.parse_pyright('{"generalDiagnostics": "not a list"}') == {}

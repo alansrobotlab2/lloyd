@@ -1,4 +1,4 @@
-"""The promotion gate: eleven rungs, cheapest first, every one fails closed.
+"""The promotion gate: twelve rungs, cheapest first, every one fails closed.
 
 "Fails closed" is not a slogan here — it is the reason `_rung` catches every
 exception and records it as a FAILED rung. With no human review tier, a rung
@@ -19,7 +19,17 @@ cost 3 seconds, not a full canary boot.
                           line ceiling. Records into report + ledger; blocks
                           nothing until a soak of real landings says it may.
   2 static         ~8s    compileall, import smoke, pyflakes delta
-  3 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
+  3 pyright       ~1-30s  OBSERVE-ONLY type-check delta (scripts/automod/
+                          typecheck.py): pyright over the round's changed .py
+                          files plus the inbound callers of its changed
+                          module-level symbols — the same run at HEAD and at the
+                          round's base, reported as the multiset difference
+                          (rule+symbol+file, never line), fork excluded. It sees
+                          the caller a signature break breaks that the diff never
+                          touched, which is what pyflakes cannot and #528
+                          explicitly does not do. Recorded; blocks nothing until
+                          a soak of real rounds says it may.
+  4 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
                           workers (~600 s serial) + a collected-count floor.
                           A failure under load is re-run serially before it
                           is believed; a real one re-probes the failing files
@@ -27,25 +37,30 @@ cost 3 seconds, not a full canary boot.
                           a failure that is not the round's (pre-existing or
                           flaky, in a file the diff did not touch) PASSES the
                           rung, recorded and filed as a `red-tree` item
-  4 review      60-180s   a second reader: a fresh session on the LIVE
+  5 review      60-180s   a second reader: a fresh session on the LIVE
                           backend grades the diff against the item's
                           acceptance clauses (scripts/automod/review.py).
                           Refuses with findings; the premise verdict decides
                           whether the item is retried or handed to a human.
                           Skipped (recorded) only when no item is bound.
-  5 venv        0-300s    only when requirements changed (reflink + uv)
-  6 canary boot   ~30s    both /health green, tool floor, config-follows-code
-  7 canary smoke  ~30s    one real turn, sentinel through a real Bash call
+  6 venv        0-300s    only when requirements changed (reflink + uv)
+  7 canary boot   ~30s    both /health green, tool floor, config-follows-code
+  8 canary smoke  ~30s    one real turn, sentinel through a real Bash call
                           (recorded as SKIPPED when the engine is unreachable;
                            `skip_smoke` is refused while it answers)
-  8 drill         ~90s    only when the diff touches the rollback path
+  9 drill         ~90s    only when the diff touches the rollback path
 
 Two rungs are not numbered above because they only exist conditionally:
 `frontend` (between `static` and `tests`: tsc delta + vite build, recorded as
 SKIPPED when no `web/` path changed) and `prompt_surface` (between `tests` and
 `review`: the scored behavioural check, only for a prompt-surface diff). Of the
-eleven, `vet` is the only rung that reads the change set rather than the
-behaviour it produces, and the only one deliberately written not to block.
+twelve, `vet` and `pyright` are the only rungs that read the change set itself
+rather than the behaviour it produces, and the only two deliberately written not
+to block: each records into the round event and waits for a soak of real rounds
+before either is allowed to refuse one. A type checker is in this ladder because
+the analyser is cheap, deterministic and cannot be argued with, which is exactly
+what a loop with no human review tier needs; it is observe-only because nobody
+has yet measured how often it is right.
 
 `review` sits after `tests` so the grader can trust a green tree and is
 handed the counts, and before `venv` so a refusal saves the venv build, the
@@ -72,7 +87,8 @@ from scripts.automod import canary_smoke as CS
 from scripts.automod import frontend_layout as _fe_layout
 from scripts.automod import frontend_probe as _fe_probe
 from scripts.automod import layout_fixture as _layout_fixture
-from scripts.automod import spec, state as S, testpaths as TP, vet as V, worktree as W
+from scripts.automod import spec, state as S, testpaths as TP, typecheck as TC, \
+    vet as V, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 PYTEST_MIN_COLLECTED = 1000
@@ -1065,6 +1081,13 @@ class Gate:
         self._smoke_skip_reason = "not requested"
         self._smoke_skip_refused = ""
         self.python = self.live / ".venvs" / "lloyd" / "bin" / "python"
+        # The same venv, for the same reason, and it belongs to the live root
+        # rather than the round: the checker is part of the box, not part of the
+        # candidate. #2450 measured 2026-10-09 that naming this interpreter with
+        # `--pythonpath` is what makes the tree's own imports resolve — without
+        # it torch/vllm imports degrade and the typing collapses to `Unknown`,
+        # which is a measurement of nothing.
+        self.pyright = self.live / ".venvs" / "lloyd" / "bin" / "pyright"
         self.home_isolation = "not requested"
         self.report = GateReport(round_id=round_id, base=base,
                                  head=W.head(self.worktree) or "")
@@ -1355,6 +1378,20 @@ class Gate:
                             "counts": v.get("counts") or {},
                             "labels": v.get("labels") or [],
                             "totals": v.get("totals") or {}}
+        # The type-check rung's record beside the vet's, for the same reason and
+        # with the same shape (#2450). Its whole acceptance argument is a rate
+        # over real rounds — how often a pyright delta is non-empty, and whether
+        # it is ever right — and a rate needs a denominator. `gate.json` is
+        # deleted with the worktree, which is exactly how #679's owed-check would
+        # have lost the vet's. A skipped round (no python changed) still writes
+        # the record, because "it ran and found no python" is a denominator row.
+        if (res.data or {}).get("pyright"):
+            p = res.data["pyright"]
+            event["pyright"] = {"status": p.get("status"),
+                                "observe_only": True,
+                                "counts": p.get("counts") or {},
+                                "labels": p.get("labels") or [],
+                                "totals": p.get("totals") or {}}
         if not self._quiet_skip(name, res.data or {}, ok):
             S.append_event(event)
         if ok:
@@ -1455,8 +1492,14 @@ class Gate:
         # before compileall imports the candidate, long before a canary boots
         # it. Observe-only today, so its position is about when the record is
         # written, not about what can fail.
+        # `pyright` is third, directly behind the rung whose shape it copies:
+        # both are deltas over the round's own files, both need a base to
+        # subtract, and a new type error is worth minutes rather than hours —
+        # which is why it sits before anything in the suite runs. Observe-only,
+        # so its position is about the record, not about what can fail.
         ladder = [("preflight", self.rung_preflight), ("vet", self.rung_vet),
                   ("static", self.rung_static),
+                  ("pyright", self.rung_pyright),
                   ("frontend", self.rung_frontend),
                   ("tests", self.rung_tests),
                   ("prompt_surface", self.rung_prompt_surface),
@@ -1801,6 +1844,99 @@ class Gate:
             return False, f"{len(new)} new pyflakes finding(s): {sorted(new)[:5]}", {
                 "new": sorted(new)}
         return True, f"compiled; imports clean; no new pyflakes ({len(head_findings)} pre-existing)", {}
+
+    def rung_pyright(self):
+        """OBSERVE-ONLY type-check delta over the round's python (#2450).
+
+        `static` asks "does it still import"; this asks "does every caller still
+        type-check" — a different question with a failure it can answer and
+        `static` cannot: a changed signature and an unchanged caller disagreeing,
+        where each file on its own is fine. That is the class #528 named and
+        declined (*"judging it is still on the model"*), and the one this gate has
+        never covered: D13 (`9595ddc3`) deleted the `env` field from `RunOptions`
+        while `eval/run_prefetch_cost_eval.py` went on passing it, and pyright
+        reads that break off the caller's own line.
+
+        Observe-only, and not because the check is soft. The tree carries 1,837
+        `basic`-mode findings in Lloyd's own 316 files, so the only admissible
+        verdict is a delta against the round's base — and a delta is only as
+        trustworthy as its rule set, which is still pyright's default because
+        cutting it needs a config file this repo does not have (see
+        `scripts/automod/typecheck.py`). What decides whether this rung may ever
+        refuse a round is its flag rate over real rounds, and that is only
+        measurable from the durable record, which is why the record is the
+        deliverable here and the block is not. `vet`'s precedent, and #623's.
+
+        Never fails a round: `Gate._rung` records an exception as a FAILED rung,
+        so every path out of here returns `ok=True`, including the ones where the
+        checker could not run — and those come back as `status="unevaluated"`
+        rather than an empty finding list, because "did not run" and "found
+        nothing" are different answers and only one of them is clean.
+        """
+        changed = list(self.report.changed_paths or []) or sorted(
+            set(W.changed_paths(self.worktree, self.base)))
+        # The base side is a whole checkout, not the changed files alone: a type
+        # checker resolves a caller's imports through the modules the round
+        # changed, so `rung_static`'s scratch-of-blobs trick would leave every
+        # import unresolved and measure the scratch directory instead. Under the
+        # round, on disk, removed here — `_scratch_dir`'s docstring is what a
+        # computed delete path has actually cost this box.
+        base_tree: Path | None = None
+        made: Path | None = None
+        base_err = ""
+        try:
+            made = _scratch_dir(self.round_id, "pyright-base")
+            shutil.rmtree(made, ignore_errors=True)   # `worktree add` wants it absent
+            r = subprocess.run(
+                ["git", "-C", str(self.worktree), "worktree", "add", "--detach",
+                 "-q", str(made), self.base],
+                capture_output=True, text=True, timeout=180, check=False)
+            if r.returncode == 0:
+                base_tree = made
+            else:
+                base_err = (r.stderr or r.stdout).strip()[:200]
+        except Exception as exc:  # noqa: BLE001 — no base is unevaluated, never red
+            base_err = f"{type(exc).__name__}: {exc}"
+
+        try:
+            res = TC.check_round(
+                base=self.base, worktree=self.worktree, base_tree=base_tree,
+                changed=changed, python=self.python, pyright=self.pyright,
+                timeout=float(_gate_cfg("pyright_timeout_seconds", 180.0)))
+        finally:
+            if made is not None and base_tree is not None:
+                subprocess.run(["git", "-C", str(made), "worktree", "remove", "--force",
+                                str(made)], capture_output=True, timeout=120,
+                               check=False)
+            if made is not None:
+                _drop_scratch(made, self.round_id)
+
+        data: dict = {"pyright": res.to_dict()}
+        data["pyright"]["observe_only"] = True
+        if base_err and res.status != TC.EVALUATED:
+            data["pyright"]["reason"] = (f"{data['pyright'].get('reason') or ''}; "
+                                         f"base checkout: {base_err}")[:400]
+        if res.status == TC.SKIPPED:
+            data["skipped"] = True
+            return True, "no python in the diff, so nothing to type-check", data
+        if res.status != TC.EVALUATED:
+            return True, (f"observe-only: type check UNEVALUATED — "
+                          f"{res.reason[:200]}"), data
+
+        if not res.new:
+            # The sentence a reviewer needs on a clean round: the checker ran, it
+            # saw findings, and every one of them was already there at base. "No
+            # findings" would be a claim about the tree, which is not what a delta
+            # can honestly say.
+            return True, (f"observe-only: no new type findings "
+                          f"({res.totals.get('head_findings', 0)} findings over "
+                          f"{res.totals.get('files', 0)} file(s), "
+                          f"{res.totals.get('base_findings', 0)} pre-existing)"), data
+        listed = "; ".join(f"{f['rule']} {f['file']}" for f in res.new[:5])
+        more = f" (+{len(res.new) - 5} more)" if len(res.new) > 5 else ""
+        return True, (f"observe-only: {len(res.new)} new type finding(s) over "
+                      f"{res.totals.get('files', 0)} file(s) in "
+                      f"{res.totals.get('seconds', 0)}s — {listed}{more}"), data
 
     def rung_frontend(self):
         """Type-check and build the frontend when the diff touches it.

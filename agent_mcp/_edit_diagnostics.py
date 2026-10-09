@@ -376,6 +376,14 @@ def _touched_symbols(pre_text: str, post_text: str) -> list[str]:
 # ── the graph, on a budget ──────────────────────────────────────────────────
 
 
+#: Public spellings of the interface delta. `scripts/automod/typecheck.py`, the
+#: gate's pyright rung (#2450), asks the same question of a round's base/head
+#: pair that this module asks of one edit's pre/post image, and it imports these
+#: rather than carrying a second copy of the fingerprinting — two copies drift,
+#: and then the rail and the gate disagree about which symbols a change touched.
+changed_symbols = _touched_symbols
+
+
 def _code_graph() -> Any:
     """The code-graph module, or None. Imported lazily and off-thread:
     `code_graph` pulls in `mcp.types`, which costs ~0.5 s cold and has no
