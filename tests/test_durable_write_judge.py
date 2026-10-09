@@ -37,6 +37,54 @@ def load_shipped_corpus() -> list[dict]:
     return sc.load_jsonl(CORPUS)
 
 
+def test_the_report_carries_the_self_preference_pointer_beside_the_published_rate():
+    """Clause 5 (#2465): #2254's stop-rule result is written where the figure is read.
+
+    The probe happened, measured no self-preference effect, and left no trace here: the
+    whole record was `~/lloyd-data/eval/owedcheck-2254/REPORT.md`, outside the checkout,
+    so a reader of the 32.4 % line — which two other files cite by line number as that
+    figure's source — had no way to know the confound they may be about to invoke had
+    been tested and closed. Hence two demands on the line: it sits within a few lines of
+    the number, and it carries the finding in its own words, because a bare path into
+    `~/lloyd-data/` is a pointer a reader of a clone cannot follow.
+
+    The position is asserted from the table row outward rather than hard-coded, with one
+    exception: the Judge A row must stay line 32. Two shipped files print
+    `eval/durable_write_judge/report.md:32` as a citation, and inserting a paragraph
+    ABOVE the table would renumber it and make both citations silently false — a true
+    citation that has quietly become a wrong line number is exactly the kind of claim no
+    later test would catch.
+    """
+    rep = (HERE / "report.md").read_text()
+    lines = rep.splitlines()
+    a_row = next(i for i, l in enumerate(lines)
+                 if "32.4" in l and "Judge A" in l and l.startswith("|"))
+    assert a_row + 1 == 32, (
+        f"the Judge A row is line {a_row + 1}; the probe's files cite `report.md:32` "
+        "from two places, so it has to stay line 32")
+
+    window = "\n".join(lines[a_row + 1:a_row + 6])
+    assert "self-preference" in window.lower(), (
+        f"nothing about the confound appears beside the figure: {window[:300]}")
+    assert "2026-10-09" in window, "the pointer must date the probe"
+    assert "`primary`" in window, (
+        "and name the engine that answered, since 32.4 % came off a different one")
+    assert "negative" in window.lower(), "and say which way it came back"
+    assert "NOT reproduce" in window, (
+        "in the words the finding actually supports, not just the word 'negative'")
+    assert "~/lloyd-data/eval/owedcheck-2254/REPORT.md" in window, (
+        "and name where the per-arm figures live")
+    assert "65.0 % for" in window and "75.0 %" in window, (
+        "the two pass rates the negative rests on, so the claim is checkable without "
+        "opening a file that is not in this checkout")
+    assert "32.4 % stands as a calibration figure" in window, (
+        "and what the reader is to conclude about the row above it")
+    assert rep == sc.render(load_shipped_corpus(),
+                            {"a": HERE / "judge_raw_a.jsonl",
+                             "b": HERE / "judge_raw_b.jsonl"}), (
+        "the pointer must be part of what score.py renders, not a hand edit beside it")
+
+
 def fixture_sample(sid: str, label: str, text: str, classes=(), evidence=None,
                    path=None) -> dict:
     """A crafted sample for retrieval/scoring tests — fixture data, not corpus data."""

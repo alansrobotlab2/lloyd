@@ -198,7 +198,36 @@ def render(samples: list[dict], raw_paths: dict[str, Path]) -> str:
             f"(unjudged {m['unjudged']}) | **{m['recall_on_bad']}** | "
             f"{m['false_positive_rate']} | **{m['silent_pass_rate']}** |"
         )
-    lines += ["", "silent-pass rate = accepted-and-labelled-bad / all accepted."]
+    # #2465, on #2254's stop rule: the attribution confound these rates get read for was
+    # measured, came back negative, and nothing in this repo said so. Placed directly
+    # under the table rather than in prose lower down because the table is what a reader
+    # reaches for first when the question is "is this judge just passing its own work",
+    # and inserted AFTER the rows rather than before them so the Judge A row stays line 32
+    # — the line the probe's own two files cite as that figure's source (`arms.py`'s
+    # header, `report.py`'s `PUBLISHED_JUDGE_A`). It has to carry the finding in its own
+    # words: the report it points at lives in runtime data, outside this checkout, so a
+    # bare path would be a pointer a reader of a clone cannot follow.
+    lines += [
+        "",
+        "> **Self-preference: probed 2026-10-09 on `primary`, negative — the bias this "
+        "row is usually read for did NOT reproduce.** Same rubric and corpus, 50 samples "
+        "x 4 attribution arms = 200 rows at temperature 0 (`asked_engine=secondary` -> "
+        "`served_engine=primary`, which is the disabled-secondary rule and not a routing "
+        "guarantee). The claim was that a note labelled as the judge's own output is "
+        "passed more often; measured the other way — pass rate on `bad` was 65.0 % for "
+        "the `self` arm against 75.0 % for the unattributed `none` arm, silent-pass 30.2 "
+        "% against 34.1 %, i.e. -3.9 points, an attributed note was flagged MORE, not "
+        "less. The floor it is read against is the arm that resends `none`'s prompt "
+        "verbatim: +0.7 points silent-pass, 4.0 % flip. So the attribution block does "
+        "move this judge's grade by a few points, but not in the self-favouring "
+        "direction, and 32.4 % stands as a calibration figure rather than as a judge "
+        "protecting itself. Report and per-arm figures: "
+        "`~/lloyd-data/eval/owedcheck-2254/REPORT.md` (`arms-final.jsonl` beside it, "
+        "200/200 rows judged — the 400-token judging budget the probe shipped with "
+        "truncated 6 of 200 replies mid-JSON and the run correctly reported nothing).",
+        "",
+        "silent-pass rate = accepted-and-labelled-bad / all accepted.",
+    ]
     for name in sorted(ms):
         m = ms[name]
         lines.append(
