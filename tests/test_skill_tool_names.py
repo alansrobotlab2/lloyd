@@ -69,7 +69,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # Bound here, not read at call time, so a test can point the fence at a fixture.
-from app.paths import IS_WORKTREE, LIVE_CHECKOUT  # noqa: E402
+# `ACCOUNT_HOME`, not `Path.home()`: `gate._child_env` moves `$HOME` on a gate run and
+# `tests/conftest.py:177` anchors this file's own paths on the passwd entry for the same
+# reason. The first version of the #2455 node derived the vault's `~/lloyd-data` spelling
+# from `Path.home()` and reddened the tests rung on a gate run, where the derivation came
+# out as the whole absolute path instead of a `~`-relative tail.
+from app.paths import (  # noqa: E402
+    ACCOUNT_HOME, DATA_ROOT, EVAL_DJEV_REPORTS_DIR, IS_WORKTREE, LIVE_CHECKOUT,
+    PRODUCTION_DATA_ROOT)
 
 SKILLS_DIRS = [Path.home() / "obsidian" / "skills", ROOT / "skills"]
 
@@ -2334,6 +2341,113 @@ def test_the_name_prior_probe_history_sentence_makes_no_row_in_the_live_corpus()
         assert not [r for r in rows if "name_prior" in r], (
             f"the rule resolved elsewhere and the history sentence is a row again: "
             f"{sorted(rows)}")
+
+
+# ---------------------------------------------------------------------------
+# #2455: the two task-96 surfaces must name the root the shipped probe writes to.
+#
+# This is the boundary the last three rounds of this area crossed badly. #2232's wall
+# was a stray file; #2455 moves the default write target out of the code tree, and the
+# instruction that reaches a worker is not `--out-dir`'s default — it is the sentence in
+# the skill and the task front matter. A probe whose default moved while its skill still
+# said "the only file a run may create is its own default
+# `eval/djev/name_prior_<run date>.json`" would tell every future run to write into
+# `~/lloyd` again: a doc-only change re-arms the drift, and a code-only change leaves the
+# doc ordering a run to do something the code no longer does. So both halves are read
+# here, against one measurement — `app.paths`' own constant.
+# ---------------------------------------------------------------------------
+
+# The report root spelled the way a vault document spells it: `~`, the data root's own
+# directory name, and the `eval/djev/` leaf. A LITERAL on purpose. The first version
+# derived this string from `PRODUCTION_DATA_ROOT`, and deriving both sides of a path
+# equality is how a rail passes for every root whatsoever — including one no document
+# names — so the two comparisons below could not have failed for any value. `PRODUCTION_DATA_ROOT`
+# is the one binding `tests/conftest.py` never redirects (`DATA_ROOT` is a throwaway under
+# this suite), so it is where a real directory name can be checked AGAINST this literal;
+# if the root moves, this line reddens and the two documents have to move with it.
+_DATA_ROOT_REPORT_TAIL = "lloyd-data/eval/djev/"
+_TASK96 = "autonomy/96-djev-name-prior-probe.md"
+_SKILL96 = "skills/djev-name-prior-probe/SKILL.md"
+
+
+def test_the_two_task_96_surfaces_name_the_data_root_the_probe_actually_writes_to():
+    """The instruction a run reads, pinned to the constant that answers for it (#2455).
+
+    A rail nobody documented is a rail the next round removes as an obstruction, and a
+    document that documents the OLD target is worse: it is an instruction, not a record.
+    The prohibition list is asserted in the same node because the fix and the prohibition
+    are the same paragraph — an edit that renames the report path by rewriting the Never
+    list would leave the task free to `git add` the tracked corpus it is told to leave
+    byte-for-byte alone.
+    """
+    task = (VAULT / "autonomy" / "96-djev-name-prior-probe.md").read_text()
+    skill = (VAULT / "skills" / "djev-name-prior-probe" / "SKILL.md").read_text()
+
+    # The shipped default and the code tree, one comparison, no literal home path here:
+    # under this suite `app.paths` may be redirected, and what must not move is that the
+    # report root hangs off DATA_ROOT at `eval/djev/` and never inside the checkout.
+    assert EVAL_DJEV_REPORTS_DIR == DATA_ROOT / "eval" / "djev", EVAL_DJEV_REPORTS_DIR
+    assert not EVAL_DJEV_REPORTS_DIR.is_relative_to(ROOT), (
+        "the report root is back inside the code tree, which is the stray #2232 and "
+        "#2455 are both about")
+    # Now the two sides of the sentence meet: the literal the documents quote, the account
+    # home it hangs under, and the constant the probe defaults to. Each pair is a real
+    # equality between a spelling and a resolution, so a wrong literal, a relocated root or
+    # a renamed data directory each fails here with the one that moved named.
+    assert PRODUCTION_DATA_ROOT == ACCOUNT_HOME / "lloyd-data", (
+        f"the production data root moved: {PRODUCTION_DATA_ROOT}. This node's literal, "
+        "_DATA_ROOT_REPORT_TAIL and both task-96 documents name it and have to move together")
+    assert ACCOUNT_HOME / _DATA_ROOT_REPORT_TAIL.rstrip("/") == (
+            PRODUCTION_DATA_ROOT / "eval" / "djev"), (
+        f"the documents quote ~/{_DATA_ROOT_REPORT_TAIL} but the code's root is "
+        f"{EVAL_DJEV_REPORTS_DIR} resolving under {PRODUCTION_DATA_ROOT}")
+
+    for name, text in ((_TASK96, task), (_SKILL96, skill)):
+        assert f"~/{_DATA_ROOT_REPORT_TAIL}" in text, (
+            f"{name} does not name the data-root report path, so a run is still told to "
+            f"write its report into ~/lloyd")
+        # And the code-tree root has to be gone from every sentence that states a RULE.
+        # The one code-tree path that may stay is the exempted history sentence below.
+        # `<run date>` and `<date>` are the two placeholder spellings the two documents
+        # use for the same file, so both are swept: the first version of this list matched
+        # only `<run date>` and left the skill's own opening paragraph — "writes
+        # `eval/djev/name_prior_<date>.json`" — still instructing a run at the code tree.
+        for old in ("`eval/djev/name_prior_<run", "`eval/djev/name_prior_<date>",
+                    "~/lloyd/eval/djev/name_prior_", "$HOME/lloyd/eval/djev/name_prior_",
+                    f"`{PRODUCTION_DATA_ROOT / 'eval' / 'djev'}"):
+            assert old not in text, (
+                f"{name} still points a run at the code-tree report path: {old!r}")
+
+    # The two consequences the task file used to state as rules for a run, both false of
+    # one now: that the report "is untracked in `~/lloyd`" and that a run "leaves a file
+    # for the lander". They were false even as written — `c4f1d616` had committed the file
+    # the day before this item was filed — and under the moved default they are false in
+    # the stronger way, because no run creates the path at all.
+    for false_claim in ("is untracked in `~/lloyd`", "for the lander",
+                        "leaves a file"):
+        assert false_claim not in task, (
+            f"task 96 is advertising the stray again: {false_claim!r}")
+
+    # The exempted history sentence, anchored rather than assumed: the absence check above
+    # and the #2223 exemption below both stand on that one creation record, so if it ever
+    # leaves the document the exemption is credited to nothing and the code-tree path a
+    # run once wrote stops being a record of anything.
+    history = re.search(r"It wrote\s+`[^`]*name_prior_[0-9-]{8,10}\.json`", task)
+    assert history and "/lloyd/eval/djev/" in history.group(0), (
+        "the creation record the #2223 exemption covers is gone or reworded, so task 96 "
+        "has a code-tree path named with nothing exempting it")
+
+    # Load-bearing prohibitions, verbatim: the fix renamed a path inside these
+    # sentences and must not have widened or thinned any of them.
+    for sentence in ("Never call Edit or Write",
+                     "`--samples`, `--url`, `--out-dir`, `--date` or `--corpus`",
+                     "stays byte-for-byte as it is"):
+        assert sentence in skill, f"the skill's Never list lost its own words: {sentence}"
+    for sentence in ("Never call Edit or Write",
+                     "`--samples`, `--url`, `--out-dir`, `--date`, `--corpus`",
+                     'echo "EXIT=$?"',
+                     "djev name prior probe: exit"):
+        assert sentence in task, f"the task front matter lost its own words: {sentence}"
 
 
 # ---------------------------------------------------------------------------

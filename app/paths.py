@@ -128,6 +128,15 @@ EVAL_BASELINES_DIR = DATA_ROOT / "eval" / "baselines"
 # it. Declaring it here is also what makes a `rm -r` aimed at the code tree never
 # reach it: it hangs off DATA_ROOT like every other store.
 TOOL_QUALITY_DIR = DATA_ROOT / "eval" / "tool-quality"
+# One dated report per run of the djev name-prior probe (#2455): the probe writes
+# exactly one `name_prior_<YYYY-MM-DD>.json` and reads nothing here. It used to
+# default `--out-dir` to its own `eval/djev/` inside the code tree, which made every
+# scheduled run of task 96 a `??` stray that `app/live_strays.py` counts and a person
+# had to `git add` to clear — #2232 burned three rounds and a human commit on one such
+# file. Keeping the report here also separates the root the probe WRITES from the
+# tracked `eval/djev/` it READS (pinned corpus, fixture, the two committed reports),
+# which were the same directory while the default pointed at the tree.
+EVAL_DJEV_REPORTS_DIR = DATA_ROOT / "eval" / "djev"
 VOICE_PROFILES_DIR = DATA_ROOT / "voice_profiles"
 # Supervisor program logs for the engines and services (was agent-services/logs).
 SERVICE_LOGS_DIR = DATA_ROOT / "logs" / "services"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Does djev follow an option's NAME or its DEFINITION? (#1452)
 
-    .venvs/lloyd/bin/python eval/djev_name_prior_probe.py                  # pinned corpus -> eval/djev/name_prior_<date>.json
+    .venvs/lloyd/bin/python eval/djev_name_prior_probe.py                  # pinned corpus -> <data root>/eval/djev/name_prior_<date>.json
     .venvs/lloyd/bin/python eval/djev_name_prior_probe.py --samples 3 --corpus eval/djev/name_prior_corpus.jsonl
     .venvs/lloyd/bin/python eval/djev_name_prior_probe.py --build-corpus eval/djev/name_prior_corpus.jsonl
 
@@ -99,6 +99,7 @@ if str(LLOYD_HOME) not in sys.path:
     sys.path.insert(0, str(LLOYD_HOME))
 
 from app import djev  # noqa: E402
+from app import paths  # noqa: E402  # the one source of a data path (#2455)
 from eval.djev import schemas  # noqa: E402
 from eval.stats import wilson_ci  # noqa: E402
 
@@ -108,9 +109,25 @@ SCHEMA_VERSION = 1
 DEFAULT_URL = djev.DEFAULT_STRUCTURED_URL
 DEFAULT_SAMPLES = 3
 DEFAULT_TIMEOUT_S = 60.0
-REPORT_DIR = HERE / "djev"
-PINNED_CORPUS = REPORT_DIR / "name_prior_corpus.jsonl"
-FIXTURE_CORPUS = REPORT_DIR / "name_prior_fixture.jsonl"
+# Two roots, and #2455 is the round that separated them. `CORPUS_DIR` holds what this
+# probe READS and what a run must never write: the pinned corpus, the synthetic fixture
+# and the two reports committed before the default moved — all tracked in `eval/djev/`,
+# because the corpus is a measurement instrument whose `sha256` each report records and
+# the weekly series is comparable only while it does not move.
+CORPUS_DIR = HERE / "djev"
+# `REPORT_ROOT` is where a run WRITES its own dated report: the runtime data root, so
+# `--out-dir` can never default a file into the code tree. Until #2455 the default was
+# `CORPUS_DIR`, and every scheduled run of task 96 therefore left a `??` stray in
+# `~/lloyd` that `app/live_strays.py` counted and a person had to `git add` to clear —
+# #2232 spent three automod rounds and one human commit on exactly one such file. The
+# root is declared in `app/paths.py` beside `EVAL_BASELINES_DIR` (#2274's finding for
+# this same script) rather than spelled here: `architecture/data-home.md` requires every
+# data path to come from `app.paths`, and a `Path.home() / "lloyd-data"` literal is what
+# `tests/test_no_runtime_paths_in_code.py` exists to stop. `app.paths` resolves the
+# `LLOYD_DATA` override at import, so this is the production root in a production run.
+REPORT_ROOT = paths.EVAL_DJEV_REPORTS_DIR
+PINNED_CORPUS = CORPUS_DIR / "name_prior_corpus.jsonl"
+FIXTURE_CORPUS = CORPUS_DIR / "name_prior_fixture.jsonl"
 
 #: The corpus floor the item's acceptance names. Below it a Wilson interval on
 #: a flip rate is too wide to separate a treatment from the repeat floor.
@@ -583,7 +600,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                          "else the synthetic fixture")
     ap.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
-    ap.add_argument("--out-dir", type=Path, default=REPORT_DIR)
+    # The default is a path in the runtime data root, so an unflagged run cannot leave a
+    # file in the code tree at all (#2455). `--out-dir` still takes any path, which is
+    # how a test puts a report somewhere disposable.
+    ap.add_argument("--out-dir", type=Path, default=REPORT_ROOT)
     ap.add_argument("--date", default=None, help="report date stamp (default today)")
     ap.add_argument("--build-corpus", type=Path, default=None, metavar="OUT",
                     help="write the pinned corpus from the seam logs and exit")

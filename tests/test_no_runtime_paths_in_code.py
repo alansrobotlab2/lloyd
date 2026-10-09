@@ -19,7 +19,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 RUNTIME = (r"(?:sessions|event_logs|_pipeline|autonomy-runs|logs|usage\.db|workers\.db|"
            r"research\.db|mc-state\.json|voice_profiles|agent-services/logs|eval/baselines|"
-           r"data/tool_overrides\.yaml|ww_diag)")
+           # `eval/djev` joined with #2455, when the djev name-prior probe's dated reports
+           # became a data-root store (`paths.EVAL_DJEV_REPORTS_DIR`). The trailing
+           # `(?![\w.-])` on every pattern is what keeps this out of firing on the probe
+           # SCRIPT (`~/lloyd/eval/djev_name_prior_probe.py`, where `_` is a word char) and
+           # on the tracked corpus package the probe reads.
+           r"eval/djev|data/tool_overrides\.yaml|ww_diag)")
 # `ww_diag` joined the list with #1444, and the enumeration alone would not have
 # caught it: the corpus was spelled as a hidden dot-directory in the account home
 # (`~/.lloyd/` plus the name), which no pattern below looked for because every
@@ -101,6 +106,10 @@ def test_the_patterns_catch_every_spelling_that_shipped():
         # assembled string is what the pattern must still catch.
         'DIAG_DIR = Path("~/.lloyd' + '/ww_diag").expanduser()',
         'DIAG = Path.home() / ".lloyd" / "ww_diag"',
+        # The spelling #2455 took out of the djev probe's reach. Without `eval/djev` in
+        # RUNTIME this line is inert, so it is what makes the enumeration addition
+        # load-bearing rather than decorative.
+        'REPORT = Path.home() / "lloyd" / "eval/djev" / "name_prior_2026-10-11.json"',
     ]
     for line in shipped:
         assert any(p.search(line) for p in PATTERNS), line
@@ -109,6 +118,12 @@ def test_the_patterns_catch_every_spelling_that_shipped():
                  # The root's own copy of the corpus, and the state that lives
                  # outside the root deliberately: none is a finding.
                  'DIAG = Path("~/lloyd-data/ww_diag").expanduser()',
+                 # #2455's two fine cases: the data root at this very leaf is the correct
+                 # spelling, and the probe's own tracked script and corpus directory are
+                 # not stores — the word-boundary lookahead is what keeps them out.
+                 'REPORT = Path("~/lloyd-data' + '/eval/djev").expanduser()',
+                 'CORPUS = ROOT / "eval" / "djev" / "name_prior_corpus.jsonl"',
+                 'python ~/lloyd/eval/djev_name_prior_probe.py',
                  '~/.local/state/lloyd-automod/promotions.jsonl',
                  '~/.cache/lloyd-voice-eval/wake-tts'):
         assert not any(p.search(fine) for p in PATTERNS), fine
