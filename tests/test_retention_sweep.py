@@ -2447,6 +2447,174 @@ def test_the_store_count_guard_refuses_a_description_that_disagrees_with_the_rep
 
 
 # ---------------------------------------------------------------------------
+# The cadence the skill states, against the cadence the task declares. (#2456)
+#
+# `_build_task_prompt` (`app/autonomy.py`) splices SKILL.md into the prompt of every
+# run of task #79, in the same turn it splices the front-matter description there, so
+# the skill's own sentences are instructions the dispatched worker is handed. Four of
+# them state THIS sweep's cadence, and all four said `weekly` while
+# `autonomy/79-retention-sweep.md` declared `frequency: daily` and logged a run at
+# ~05:00Z on six of the seven days to 2026-10-09 — the same drift #2071 caught one
+# store over, where a weekly pass could not hold `promotions.jsonl` inside its size
+# budget and the sweep kept reporting a clean run. No constant in the script knows how
+# often it is run, so the front matter is the only cadence the code has and the skill
+# is the only copy a worker or an operator reads: prose is the whole surface, and
+# nothing pinned it.
+# ---------------------------------------------------------------------------
+
+#: The four sentences that state this sweep's own cadence, each with the cadence word
+#: as its one capture group. Each is anchored on the words around the word, never on
+#: `weekly` alone, because three other `weekly`s in the file are about something else
+#: (`_SKILL_WEEKLY_PROSE`) and a guard that searched the file for the word could not
+#: tell the four from the three. Every pattern also has to MATCH: a claim that gets
+#: reworded away leaves the guard nothing to compare, which is the same drift quieter.
+_SKILL_CADENCE_CLAIMS = (
+    # The closing sentence of the front-matter `description:`. It is a folded YAML
+    # scalar, so it sits across two physical lines in the file and one phrase in the
+    # prompt — which is why grepping this file for `weekly retention sweep` exits 1
+    # both before the fix and after it.
+    re.compile(r"Use for the (\w+) retention sweep autonomy task"),
+    re.compile(r"So the (\w+) sweep cannot silently expire the hand-labeled"
+               r" uptake corpus"),
+    re.compile(r"a skip on a (\w+) sweep is worth one retry later in the day"),
+    re.compile(r"It is no longer the expected (\w+) output"),
+)
+
+#: The `weekly` sentences that are NOT this sweep's cadence, quoted in full. A rewrite
+#: that flattened them is the mirror error of one that missed a real claim: #2071's
+#: first sentence is the ruling that the ledger fold has to run daily and its
+#: neighbour is the byte measurement behind that ruling, and the third is the retired
+#: groundskeeper survey's own weekly summary — a different subject, in a store nothing
+#: sweeps any more.
+_SKILL_WEEKLY_PROSE = (
+    "Run the promotions-ledger fold **daily**, not weekly",
+    "a weekly pass put the peak at 42,748,015 bytes",
+    "the survey and the weekly summary",
+)
+
+
+def _task79_frequency(rs) -> str | None:
+    """The cadence task #79's own front matter declares, or None if the vault is away.
+
+    Read through `_task79_front_matter`, which reads the file with the engine's own
+    `_parse_task_file`, because that word is what `app/autonomy.py`'s frequency table
+    turns into `next_run` — a second parser written here would be a second answer.
+    """
+    front = _task79_front_matter(rs)
+    if front is None:
+        return None
+    m = re.search(r"(?m)^frequency:[ \t]*([^\s#]+)", front[0])
+    return m.group(1) if m else None
+
+
+def _assert_skill_cadence_matches_the_task(skill_text: str, frequency: str,
+                                           where: str) -> None:
+    """Raise `AssertionError` unless every cadence sentence in `skill_text` says `frequency`.
+
+    One measurement, read both ways. `skill_text` is whitespace-normalised before a
+    pattern runs, because the front matter is a folded scalar and the sentence the
+    worker reads is spread over two physical lines in the file; the loader joins it the
+    same way on its way into the prompt. Matching raw bytes instead would pass on the
+    defect: the shipped phrase wraps between `weekly retention` and `sweep autonomy
+    task.`, so a check written as one literal string is green before the fix and green
+    after it, and so was #2456's own draft of that check.
+
+    The three deliberate `weekly` sentences are required to still be present for the
+    other half of the same reason. A guard whose only move is to strike the word would
+    have deleted #2071's measurement while reporting the drift fixed, and a check that
+    only ever sees agreement proves nothing either — the shape #1734 left behind.
+    """
+    flat = " ".join(skill_text.split())
+    for claim in _SKILL_CADENCE_CLAIMS:
+        m = claim.search(flat)
+        assert m is not None, (
+            f"{where}: no sentence matches {claim.pattern!r}, so the guard has nothing "
+            "to compare here. A cadence claim reworded out of existence is the same "
+            "drift as one left wrong: the worker is still told a cadence, by whichever "
+            "sentence now carries it")
+        assert m.group(1) == frequency, (
+            f"{where}: the skill calls this a {m.group(1)!r} sweep ({m.group(0)!r}) but "
+            f"task #79's front matter declares `frequency: {frequency}` — that word is "
+            "what the scheduler turns into `next_run`, and this file is the copy that "
+            "goes into the same prompt")
+    for prose in _SKILL_WEEKLY_PROSE:
+        assert prose in flat, (
+            f"{where}: {prose!r} is no longer in the skill. That sentence states a "
+            "cadence which is not this sweep's, and the ruling it carries loses its "
+            "support when the cadence guard flattens it")
+
+
+def test_the_skill_calls_the_sweep_by_the_cadence_the_task_declares(rs):
+    """#2456 clauses 1-3: the skill's cadence sentences and task #79's `frequency:` agree.
+
+    Both sides are the shipped files, read live: the skill from the vault the sweep
+    resolves through `rs.vault_root()`, the cadence from the front matter the scheduler
+    dispatches on. That is the pair a 05:00Z run is actually handed, and the only pair
+    worth comparing — a fixture here would agree with itself.
+    """
+    skill = rs.vault_root() / "skills" / "retention-sweep" / "SKILL.md"
+    if not skill.is_file():
+        pytest.skip(f"the vault skill is not reachable from here: {skill}")
+    frequency = _task79_frequency(rs)
+    if frequency is None:
+        pytest.skip("autonomy/79-retention-sweep.md is not reachable from the vault")
+
+    _assert_skill_cadence_matches_the_task(skill.read_text(encoding="utf-8"), frequency,
+                                           "skills/retention-sweep/SKILL.md")
+
+
+def test_the_cadence_guard_refuses_a_skill_that_disagrees_with_the_task(rs):
+    """#2456 clause 4: the cadence guard can fire, in every direction the drift goes.
+
+    The live pair agrees, which is precisely why the node above proves nothing on its
+    own — so the same assertion runs against the real text with the word planted back to
+    `weekly` in each of the four sentences in turn, then with the front matter flipped to
+    `weekly` instead, then with one claim reworded out of the file. All six raise; the
+    unedited pair does not, which is the control that says the raises are about the
+    mismatch and not about the guard's shape. Every plant is a splice of the live file
+    rather than a typed-out copy of it, so none of them can go stale when the prose is
+    reworded — the mistake #1835 caught in the store-count fixture.
+    """
+    skill = rs.vault_root() / "skills" / "retention-sweep" / "SKILL.md"
+    if not skill.is_file():
+        pytest.skip(f"the vault skill is not reachable from here: {skill}")
+    frequency = _task79_frequency(rs)
+    if frequency is None:
+        pytest.skip("autonomy/79-retention-sweep.md is not reachable from the vault")
+    flat = " ".join(skill.read_text(encoding="utf-8").split())
+    _assert_skill_cadence_matches_the_task(flat, frequency, "control: the shipped pair")
+
+    def plant(claim: "re.Pattern[str]", word: str) -> str:
+        m = claim.search(flat)
+        assert m is not None, (
+            f"the shipped skill has no {claim.pattern!r} left to plant a lie in, so this "
+            "fixture has stopped testing the thing it exists to test")
+        return flat[:m.start(1)] + word + flat[m.end(1):]
+
+    # (a) the shipped defect, one sentence at a time: the word back to `weekly` under a
+    # `daily` front matter. Four sentences, four raises — a guard that only looked at the
+    # description would let the other three drift on their own.
+    for claim in _SKILL_CADENCE_CLAIMS:
+        with pytest.raises(AssertionError, match=r"a 'weekly' sweep"):
+            _assert_skill_cadence_matches_the_task(plant(claim, "weekly"), "daily",
+                                                   "fixture weekly claim")
+
+    # (b) the same disagreement read from the other side: the skill keeps the shipped
+    # word and the task is what moved. A `weekly` front matter under a `daily` skill is
+    # the same lie about the same prompt, and the guard has to see it from both ends.
+    with pytest.raises(AssertionError, match=r"a 'daily' sweep"):
+        _assert_skill_cadence_matches_the_task(flat, "weekly", "fixture weekly task")
+
+    # (c) the claim reworded away: the sentence stops stating a cadence at all, and a
+    # guard that found nothing there could only report agreement.
+    m = _SKILL_CADENCE_CLAIMS[0].search(flat)
+    gone = (flat[:m.start()] + "Use for the retention sweep autonomy task"
+            + flat[m.end():])
+    with pytest.raises(AssertionError, match="no sentence matches"):
+        _assert_skill_cadence_matches_the_task(gone, frequency, "fixture reworded claim")
+
+
+# ---------------------------------------------------------------------------
 # The seventh rung: the activity logs in the vault's `autonomy/*.md` (#845).
 #
 # The cap kept the last ACTIVITY_LOG_MAX_ENTRIES entry bullets and reported a
