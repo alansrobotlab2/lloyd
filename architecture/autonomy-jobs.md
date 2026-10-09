@@ -99,9 +99,14 @@ not:
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
   apparatus. `workers/evidence.py` is the correction and the scheduler module
   `app/autonomy.py` is where its pilot set lives (`EVIDENCE_PILOT_TASK_IDS =
-  frozenset({38, 42, 39, 40})` at `app/autonomy.py:2584` in that module, pinned by
-  `tests/test_worker_evidence.py`) — 4 of the 23 jobs that write durable state
-  unattended. The pilot has verdicts now: since
+  frozenset({38, 42, 39, 40, 53})` at `app/autonomy.py:2584` in that module, pinned by
+  `tests/test_worker_evidence.py`) — 5 of the 23 jobs that write durable state
+  unattended. #53 Documentation Digester joined on 2026-10-09 (#2482), the first
+  widening since #902 scoped the pilot to the reflection chain: that job's run of
+  2026-10-09 filed a `priority: high` backlog item (#2478) over an audit database, a
+  table and a row count that have never existed on this box, and emitted no claims
+  block at all — so there was nothing for the verifier to refute, which is exactly the
+  hole the widening closes. The pilot has verdicts now: since
   #945 copied each run's `claims` key through `workers/sources/scheduled_task.py`
   into the pool, `workers/pool.py` grades the claims as the run record is
   written. On 2026-09-26 `GET /api/autonomy/health?days=7` reported 22 claims
@@ -360,9 +365,10 @@ defect was never a crash, it was a confident number: a handoff reporting the
 graph "restored to 12,131 relationships" against a same-night health report
 reading zero; counts of 96/21 where disk held 121/64; a 13,503-byte file called
 "307KB". `workers/evidence.py` is the structural fix and its pilot set is exactly
-this chain — `EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40})`
+this chain plus #53, which joined 2026-10-09 (#2482) —
+`EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40, 53})`
 (`app/autonomy.py:2584`, not inside the verifier's own file, and pinned there by
-`tests/test_worker_evidence.py:653`), a literal frozenset so
+`tests/test_worker_evidence.py:663`), a literal frozenset so
 widening it is a change someone reads. The verifier is **stdlib-only and never
 LLM-judged**, because a model grading its own claims is the narration this
 replaces one layer up; and **a claim that cannot be evaluated is `insufficient`,
@@ -384,7 +390,10 @@ verified, 0 refuted, 0 insufficient, across 4 bundled runs** (#38 11, #39 6, #40
 coverage, not plumbing — 68 of those 72 runs carry no bundle at all, because only
 these four tasks emit a claims block. #902 (coverage: 4 of the fleet's
 unattended writers) and #945 (this severance) are both closed; the first
-`insufficient` verdict is still unobserved.
+`insufficient` verdict is still unobserved. **Widened 2026-10-09 (#2482):** #53
+Documentation Digester is in the set now, so five tasks emit a claims block, and its
+first live refutation is what the widening was for — the digester had filed a
+high-priority item over an audit store with no row in it anywhere on this box.
 
 **#47 Dream Consolidation** is the weekly synthesizer on the tail. It does not
 re-read raw sessions — that is the chain's job — it merges near-duplicate topics

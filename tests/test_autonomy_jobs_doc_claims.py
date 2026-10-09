@@ -723,7 +723,7 @@ def test_the_pilot_frozenset_citation_resolves_to_the_line_it_names():
     assert "`tests/test_worker_evidence.py`" in window, (
         f"the pilot sentence no longer names the test that pins the set: {window[:160]!r}")
     pin = (ROOT / "tests" / "test_worker_evidence.py").read_text()
-    assert re.search(r"EVIDENCE_PILOT_TASK_IDS == frozenset\(\{38, 42, 39, 40\}\)", pin), (
+    assert re.search(r"EVIDENCE_PILOT_TASK_IDS == frozenset\(\{38, 42, 39, 40, 53\}\)", pin), (
         "the doc says tests/test_worker_evidence.py pins the pilot set, and that file "
         "no longer asserts it — the citation has become a promise nothing keeps")
     assert "app/autonomy.py:710" not in _live_prose(), (
@@ -2285,3 +2285,89 @@ def test_the_numbering_note_survives_the_archive_pointer_being_fixed():
         "range as a floor rather than a ceiling loses its anchor")
     assert re.search(re.escape(note) + r" \(\d{4}-\d{2}-\d{2}\)", flat), (
         "the note lost the date that travels with the range")
+
+
+# ── #2482 — the digester's filing rule lives in its skill, graded here ───────
+
+#: Task #53's only instruction surface. `_build_task_prompt` renders the
+#: `skill_name` SKILL.md plus the task file's front-matter `description` and nothing
+#: else, and `~/obsidian/autonomy/53-documentation-digester.md` says in its own header
+#: that its body is documentation, "not an instruction channel". So a rule meant to
+#: reach that job's reasoning has exactly one place it can live, and a rule with no
+#: node against it is a sentence the next model can drop without anything noticing.
+#: `live_vault` for the usual reason: a nightly skills pass rewrites this file, and
+#: the gate must not fail this round for that writer's edit.
+DIGESTER_SKILL = Path.home() / "obsidian" / "skills" / "documentation-digester" / "SKILL.md"
+PROBES_HEADER = "## Probes That Read As Verdicts But Are Not"
+
+
+def _probes_section() -> str:
+    """§Probes That Read As Verdicts But Are Not, raw, to the next heading.
+
+    Raw and not `_flat`, because the bullet is the unit of clause 1 — a flattened
+    section has no `\\n- ` left to split on, and a test that split it anyway would
+    find one "bullet" containing everything and pass on any wording. Callers flatten
+    each bullet themselves before matching a wrapped sentence inside it.
+    """
+    text = DIGESTER_SKILL.read_text(encoding="utf-8")
+    assert PROBES_HEADER in text, (
+        f"{DIGESTER_SKILL} no longer carries {PROBES_HEADER!r}, the section every "
+        "probe-lie rule lives in — #2482's filing rule has no home")
+    return text.split(PROBES_HEADER, 1)[1].split("\n## ", 1)[0]
+
+
+@live_vault
+def test_the_digester_skill_demands_a_read_back_artifact_before_it_files():
+    """#2482 clause 1, on the live skill.
+
+    The run that motivated it (`autonomy-runs/53/run_53_20261009_113528.md`) filed
+    backlog #2478 at `priority: high` quoting an audit database, its `device_events`
+    table and an `is_true_positive` column, and the reading "1804 rows, 27 positives".
+    `ls -la ~/lloyd-data/wakeword-audit/` returns `No such file or directory` and
+    `git grep` over the checkout returns 0 files for each of those names, so the item
+    asserted artifacts that have never existed here. The rule that was missing is the
+    one this node reads back: name the artifact, or carry the command that produced
+    it, or do not file.
+    """
+    section = _probes_section()
+    assert "Five ways this pass's own probes lie" in _flat(section), (
+        "the intro no longer counts five probes, so the new rule is not the fifth one")
+    bullets = [_flat(b) for b in section.split("\n- ")[1:] if b.strip()]
+    assert len(bullets) >= 5, (
+        f"the section lists {len(bullets)} probe-lies after its intro; clause 1 asks "
+        "for a fifth, and four is the pre-#2482 state")
+    assert "command line that produced it" in bullets[4], (
+        "the fifth bullet is not the artifact rule: a finding naming a path, DB, "
+        "table/column or task id must carry the command line and output that produced "
+        f"it. Fifth bullet read: {bullets[4][:120]!r}")
+    artifact_rule = bullets[4]
+    for token in ("`ls -la <dir>`", "`sqlite3 <db> .tables`", "autonomy_get_task",
+                  "observation, not a filing", "`backlog_write_task`", "`date -u -d @"):
+        assert token in artifact_rule, (
+            f"the artifact rule dropped {token!r}: a cited artifact must show the "
+            "reading that produced it, an unbacked claim is logged as an observation "
+            "rather than filed, and a derived literal prints its own command")
+
+
+@live_vault
+def test_a_task_id_cited_by_the_digester_must_resolve_before_it_is_called_a_gate():
+    """#2482 clause 2, on the live skill.
+
+    #2478 cross-checked itself against "task #71" as a live wake-word gate. `#71` is
+    `~/obsidian/autonomy/_archived/71-skill-authoring-error-pattern-mining-batch.md`
+    — `archived_at: '2026-09-03'`, subject error-pattern skill authoring — and
+    `autonomy_get_task(id=71)` answers `Task #71 not found`. Resolving an id is one
+    tool call, and that call refuted the finding.
+    """
+    section = _flat(_probes_section())
+    assert "Resolve a cited task id before calling it a live gate" in section, (
+        "the task-id resolution rule is gone, so a retired job can be cited as a "
+        "live gate again")
+    rule = section.split("Resolve a cited task id before calling it a live gate", 1)[1]
+    for token in ("`autonomy_get_task(id=N)`",
+                  "`ls ~/obsidian/autonomy/ ~/obsidian/autonomy/_archived/`",
+                  "`archived_at:`", "retires the claim"):
+        assert token in rule, f"the task-id rule lost {token!r}"
+    assert "0 files" in rule, (
+        "the standing control — no wake-word autonomy task exists, live or archived — "
+        "is what makes this rule checkable rather than advice")

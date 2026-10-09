@@ -2578,10 +2578,10 @@ def _build_task_prompt(task: dict, skill_content: str) -> str:
 # far has been a skill instruction ("verify on disk before claiming"), which
 # binds only a willing model.
 #
-# The pilot is these four tasks and nothing else until the two-week numbers
-# exist, which is why this is a literal set rather than a config key: widening it
-# should be a change someone reads, and retiring it deletes four lines.
-EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40})
+# The pilot is these five tasks and nothing else, which is why this is a literal
+# set rather than a config key: widening it is a change someone reads, and retiring
+# it deletes five lines. #53 joined 2026-10-09, the widening #2482 asked for.
+EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40, 53})
 
 
 def _evidence_pilot(task_id) -> bool:

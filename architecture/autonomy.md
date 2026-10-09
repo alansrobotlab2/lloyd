@@ -871,9 +871,10 @@ rate, `max_turns` runs, tool-error runs, consecutive failures — plus
 rows-only view cannot see at all.
 
 It carries the #525 evidence bundle beside those numbers.
-`EVIDENCE_PILOT_TASK_IDS = {38, 42, 39, 40}` — the reflection chain, a literal
-set rather than a config key because widening it should be a change someone
-reads — get a claims block appended to their prompt, binding checkable
+`EVIDENCE_PILOT_TASK_IDS = {38, 42, 39, 40, 53}` — the reflection chain plus the
+Documentation Digester, which joined 2026-10-09 (#2482), a literal set rather than a
+config key because widening it should be a change someone reads — get a claims block
+appended to their prompt, binding checkable
 assertions (`file_exists`, `count_eq`, `json_key`, `regex`) to paths on disk.
 The pool verifies them when it writes the row, *after* the run, so nothing the
 run did — including its own tool calls, which could have edited the file being

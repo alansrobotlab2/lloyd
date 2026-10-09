@@ -649,12 +649,24 @@ async def test_a_pilot_run_reaches_the_ledger_with_a_bundle(tmp_path, monkeypatc
 
 # ── Pilot scoping and prompt carry-forward ─────────────────────────────────
 
-def test_the_pilot_is_the_reflection_chain_and_nothing_else():
-    assert autonomy.EVIDENCE_PILOT_TASK_IDS == frozenset({38, 42, 39, 40})
-    for tid in (38, 42, 39, 40):
+def test_the_pilot_is_the_reflection_chain_plus_the_doc_digester_and_nothing_else():
+    """The set, and the instruction each member's run is actually handed.
+
+    #53 joined on 2026-10-09 (#2482): its run `run_53_20261009_113528.md` filed a
+    `priority: high` backlog item (#2478) quoting an audit database, a `device_events`
+    table and "1804 rows, 27 positives" that exist nowhere on this box, cross-checked
+    against an autonomy task archived two months earlier. Nothing in that run could
+    have been refuted, because nothing was bound — `grep -c '```evidence'` on the run
+    is 0. It is now a pilot member, so the same stdlib verifier that grades the
+    reflection chain grades its numbers too.
+    """
+    assert autonomy.EVIDENCE_PILOT_TASK_IDS == frozenset({38, 42, 39, 40, 53})
+    for tid in (38, 42, 39, 40, 53):
         block = autonomy._evidence_prompt(tid, gaps=[])
         assert "Evidence claims" in block
         assert evidence.FENCE_TAG in block
+    # The emitters that filed the fabricated item are still outside: a job that
+    # asserts nothing must not be scored as checked-and-clean (#525).
     assert autonomy._evidence_prompt(24, gaps=[]) == ""
     assert autonomy._evidence_prompt(None, gaps=[]) == ""
 
@@ -666,6 +678,69 @@ def test_the_gap_list_reaches_the_next_run_of_the_same_task():
     assert block.index("Evidence claims") < block.index("Evidence gaps")
     assert "[refuted] 96 files" in block
     assert autonomy._evidence_prompt(39, gaps=[]) == evidence.CLAIMS_INSTRUCTION
+
+
+#: The #2478 filing, in the one shape the verifier can grade: a `file_exists` and a
+#: `count_eq` over the wake-word audit database that has never existed on this box
+#: (`ls -la ~/lloyd-data/wakeword-audit/` → `No such file or directory`). The row
+#: count is the one that run's prose asserted.
+FABRICATED_AUDIT_REPORT = (
+    "Wake-word coverage is dead: the audit table holds 1804 rows and 27 positives, "
+    "all 11 below threshold since the retrain.\n\n"
+    f"```{evidence.FENCE_TAG}\n"
+    '{"claims": ['
+    '{"claim": "the wake-word audit database exists", '
+    '"check": {"kind": "file_exists", "path": "wakeword-audit/audit.sqlite"}}, '
+    '{"claim": "the audit table holds 1804 rows", '
+    '"check": {"kind": "count_eq", "path": "wakeword-audit/audit.sqlite", '
+    '"measure": "lines", "expected": 1804}}]}\n'
+    "```\n"
+)
+
+
+async def test_task_53s_fabricated_audit_store_refutes_and_carries_forward(tmp_path,
+                                                                          monkeypatch):
+    """#2482 clause 3, across the seam: prompt → run → ledger write → next prompt.
+
+    The digester's only structural gap was that nothing re-ran what it asserted. As a
+    pilot member, a task #53 run is handed the `## Evidence claims` instruction, and
+    the bundle it emits is re-run by `workers/evidence.py` against the data root at
+    the moment `workers/pool.py` writes its row — so the invented store lands
+    `refuted` in the record instead of reaching the board as a `priority: high` item,
+    and the refutation is carried into the next run of #53 by name.
+    """
+    q = WorkQueue(tmp_path / "w.db")
+    monkeypatch.setattr(evidence, "default_root", lambda: tmp_path)
+    _stub_adapter(monkeypatch, final_response=FABRICATED_AUDIT_REPORT,
+                  pilot=True, task_id=53)
+    q.enqueue(source="scheduled-task", kind="run", payload={"task_id": 53})
+
+    pool = WorkerPool(q, slots=1)
+    pool._running = True
+    worker = asyncio.create_task(pool._worker_loop("worker-0"))
+    for _ in range(60):
+        await asyncio.sleep(0.1)
+        if q.list_runs(source="scheduled-task"):
+            break
+    pool._running = False
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+    row = q.list_runs(source="scheduled-task")[0]
+    bundle = json.loads(row["claims_json"])
+    assert bundle["counts"] == {"total": 2, "verified": 0, "refuted": 2,
+                                "insufficient": 0}
+    assert bundle["refuted_or_insufficient_rate"] == 1.0
+    carried = parse_gap_list(q.wm_get("scheduled-task", gaps_key(53)))
+    assert len(carried) == 2
+    assert any("wakeword-audit/audit.sqlite" in g for g in carried)
+    # The half that makes a refutation load-bearing rather than merely recorded.
+    nxt = autonomy._evidence_prompt(53, gaps=carried)
+    assert "Evidence gaps carried from your previous run" in nxt
+    assert "1804 rows" in nxt
 
 
 def test_run_task_appends_the_evidence_section_to_the_pilot_prompt(monkeypatch,
