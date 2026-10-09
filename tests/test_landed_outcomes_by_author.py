@@ -469,3 +469,342 @@ def test_the_report_leaves_the_repo_it_measured_clean(repo: Path):
     dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
                            capture_output=True, text=True).stdout
     assert dirty == ""
+
+
+# ── #2378: cost and latency per ACHIEVED LANDING ─────────────────────────────
+#
+# The economics half reads two stores the quality half never touched: the board
+# files behind an `item_id` (the filing stamp no ledger row carries) and the
+# queue's `runs` table (the implementer's wall clock, which the ledger's rung
+# seconds never covered). Both are real below — real board markdown, a real
+# sqlite `runs` table — because the join under test is a regex over the free-text
+# `runs.summary`, and a mocked join would test the mock.
+#
+# One fixture, two rounds, numbers small enough to check by hand: the landing's
+# round costs 480 s of ledger time and the never-landed one 120 s. The fields that
+# must NOT be counted are in the event list on purpose (`review.rung_wait_s`,
+# `review.waited_s`, `error.errors_window_s`, and a `pause_set` row with no
+# `round_id`), so a change that sweeps them in fails on the number rather than
+# quietly inflating the stated cost of a landing.
+
+ROUND_LAND = "SM_20260927_010203"
+ROUND_FAIL = "SM_20260927_020203"
+ECON_T0 = datetime(2026, 9, 27, tzinfo=timezone.utc).timestamp()
+#: gate 300 + review 100 + review_confirm 20 + land_wait 60 = 480. The same
+#: review row also carries `rung_wait_s` 900 (a review graded CONCURRENTLY with
+#: the tests rung) and `waited_s` 5 (a retry sleep nested inside its `seconds`);
+#: the round also carries `errors_window_s` 7200 (the length of a rate window,
+#: not a spend). Count any of the three and this number moves.
+LAND_ROUND_SECONDS = 480.0
+#: gate 100 + review 20, in a round that produced no `promoted` row.
+FAIL_ROUND_SECONDS = 120.0
+#: A row with no `round_id`: nothing to charge it to, so it reaches no figure.
+UNATTRIBUTED_PAUSE_SECONDS = 5000.0
+#: The implementer's own wall clock for the landing's round, as one `runs` row.
+LAND_RUN_SECONDS = 1800.0
+#: The filing stamps: item 2001 is filed 600 s before its first `round_start`
+#: row and 1080 s before its `promoted` row, so every latency is a number this
+#: fixture chose. Both predate the first ledger row, which is the cohort split
+#: the block has to report rather than truncate away (#1667's arms).
+#:
+#: Both are after `app.backlog_move.LOCAL_STAMP_CUTOVER` (2026-09-26T04:00Z) on
+#: purpose: below it a naive `created:` is legitimately the machine's local
+#: clock, so a fixture filed before that instant reads seven hours later than it
+#: was written, its filing lands after its own first round, and every latency in
+#: the population is excluded as negative — the n drops to 0 and the block
+#: correctly prints `n/a` for a fixture that looked like it had numbers.
+ITEM_CREATED = {2001: "2026-09-27T00:00:00", 2002: "2026-09-27T01:00:00"}
+
+
+def _econ_iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _econ_events(commit: str) -> list[dict]:
+    """Two rounds over one window: one lands, one spends and never lands."""
+    start = ECON_T0 + 600
+    return [
+        {"event": "round_start", "round_id": ROUND_LAND, "item_id": 2001,
+         "ts": start, "created_at": _econ_iso(start)},
+        {"event": "gate", "round_id": ROUND_LAND, "seconds": 300.0,
+         "ts": start + 200, "created_at": _econ_iso(start + 200)},
+        {"event": "error", "round_id": ROUND_LAND, "errors_window_s": 7200.0,
+         "ts": start + 210, "created_at": _econ_iso(start + 210)},
+        {"event": "review", "round_id": ROUND_LAND, "seconds": 100.0,
+         "review_confirm_seconds": 20.0, "rung_wait_s": 900.0, "waited_s": 5.0,
+         "ts": start + 380, "created_at": _econ_iso(start + 380)},
+        {"event": "pause_set", "seconds": UNATTRIBUTED_PAUSE_SECONDS,
+         "ts": start + 400, "created_at": _econ_iso(start + 400)},
+        {"event": "land_wait_rounds", "round_id": ROUND_LAND, "waited_s": 60.0,
+         "ts": start + 460, "created_at": _econ_iso(start + 460)},
+        {"event": "promoted", "round_id": ROUND_LAND, "commit": commit,
+         "item_id": 2001, "ts": start + LAND_ROUND_SECONDS,
+         "created_at": _econ_iso(start + LAND_ROUND_SECONDS)},
+        {"event": "round_start", "round_id": ROUND_FAIL, "item_id": 2002,
+         "ts": ECON_T0 + 700, "created_at": _econ_iso(ECON_T0 + 700)},
+        {"event": "gate", "round_id": ROUND_FAIL, "seconds": 100.0,
+         "ts": ECON_T0 + 750, "created_at": _econ_iso(ECON_T0 + 750)},
+        {"event": "review", "round_id": ROUND_FAIL, "seconds": 20.0,
+         "ts": ECON_T0 + 790, "created_at": _econ_iso(ECON_T0 + 790)},
+    ]
+
+
+def _econ_board(tmp_path: Path) -> Path:
+    """The board the two fixture items were filed on, with their `created:`."""
+    board = tmp_path / "backlog"
+    board.mkdir(parents=True, exist_ok=True)
+    for num, stamp in ITEM_CREATED.items():
+        (board / f"{num}-fixture.md").write_text(
+            f"---\ntype: note\ntimestamp: '{stamp}'\nitem_id: {num}\n"
+            f"status: done\ncreated: '{stamp}'\n---\n\n# {num} — a fixture item\n",
+            encoding="utf-8")
+    return board
+
+
+def _econ_runs_db(tmp_path: Path, name: str,
+                  rows: list[tuple[float, str]]) -> Path:
+    """A `runs` table shaped like the queue's, holding (seconds, summary) `rows`."""
+    import sqlite3
+    db = tmp_path / f"{name}.db"
+    con = sqlite3.connect(str(db))
+    con.execute("create table runs (run_id integer primary key autoincrement,"
+                "source text, task_id integer, duration_seconds real, summary text,"
+                "response_json text, meta_json text)")
+    con.executemany("insert into runs (source, task_id, duration_seconds, summary) "
+                    "values ('autocode', 7, ?, ?)", rows)
+    con.commit()
+    con.close()
+    return db
+
+
+#: The run rows that make the join strong: the landing's round named once, one
+#: row naming TWO rounds (which must be dropped, not split), and one naming none.
+STRONG_RUNS = [(LAND_RUN_SECONDS, f"Round {ROUND_LAND}: Implement #2001 — fixture"),
+               (500.0, f"Round {ROUND_LAND} and {ROUND_FAIL}: two rounds, one run"),
+               (9999.0, "no round named here at all")]
+
+
+def _econ(tmp_path: Path, *, name: str = "main",
+          runs_rows: list[tuple[float, str]] | None = STRONG_RUNS,
+          events: list[dict] | None = None):
+    """Report row and rendered text over the fixture above.
+
+    `runs_rows=None` names no db at all — the weakest join there is — and any
+    list builds a real one. `name` keeps several fixtures in one `tmp_path` apart.
+    """
+    # The `repo` fixture above cannot be used as a fixture here (one node builds
+    # three of these), so the init it does is done here, identically.
+    repo = (tmp_path / name / "repo").resolve()
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "commit.gpgsign", "false"],
+                   check=True, capture_output=True)
+    _commit(repo, "a.txt", "one\n", author=AGENT_MAIL, days_ago=1)
+    sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    board = _econ_board(tmp_path)
+    db = _econ_runs_db(tmp_path, name, runs_rows) if runs_rows is not None else None
+    row = LO.by_author(repo=repo, now=NOW,
+                       events=events if events is not None else _econ_events(sha),
+                       runs_db=db, backlog_dir=board,
+                       ledger=tmp_path / f"{name}-no-ledger.jsonl")
+    return row, LO.render(row)
+
+
+def test_cost_block_divides_ledger_seconds_by_achieved_landing_with_n_window_proxy(tmp_path):
+    """Clause 1: the denominator of the cost line is an achieved landing.
+
+    480 s of ledger seconds inside the one promoted round, over the one landing
+    that has seconds, is 0.1333 hours — printed under the autonomy page's own
+    wording, because `duration_seconds/3600` is what that page calls `gpu_hours`
+    (`workers/queue.py:1353`) and the store holds no GPU-seconds term to be
+    precise about. `n=1` and the window share the line with the figure, and the
+    window IS the arms' window: a cost measured over a different span than the
+    quality is not a comparison, it is a second report (#1667's lesson).
+    """
+    row, text = _econ(tmp_path)
+    cost = row["cost"]
+    assert cost["n"] == 1 and cost["landings"] == 1
+    assert cost["ledger_seconds"] == LAND_ROUND_SECONDS + FAIL_ROUND_SECONDS, (
+        "a nested or round-less seconds field leaked into the ledger total: "
+        "rung_wait_s, review.waited_s, errors_window_s and the round-less "
+        "pause_set row are all in the fixture, and none of them belong here")
+    assert cost["landed_seconds"] == LAND_ROUND_SECONDS
+    assert cost["gpu_hours_per_landing"] == round(LAND_ROUND_SECONDS / 3600.0, 4)
+    assert cost["median_seconds_per_landing"] == LAND_ROUND_SECONDS
+    assert cost["window_from"] == row["window"]["from"] == _econ_iso(ECON_T0 + 600)
+    assert cost["window_to"] == row["window"]["to"] == LO._iso(NOW)
+    assert "wall-clock seconds/3600" in cost["proxy"]
+    assert "not measured GPU time" in cost["proxy"]
+    lines = [ln for ln in text.splitlines() if ln.startswith("gpu_hours_per_landing")]
+    assert len(lines) == 1, "the cost of a landing printed twice, or not at all"
+    assert "0.133 h" in lines[0] and "n=1" in lines[0]
+    assert cost["window_from"] in lines[0] and cost["window_to"] in lines[0], (
+        "a cost figure with no window on its own line is a figure from nowhere")
+    assert cost["proxy"] in text
+
+
+def test_cost_block_prints_the_never_landed_share_beside_the_figure_in_every_state(tmp_path):
+    """Clause 2: 120 of the window's 600 ledger seconds sit in a round that never
+    landed, and that share is printed in every state the block can be in.
+
+    Measured, join-too-weak, and no-landings: the share line is in all three.
+    Cost-per-outcome is gameable by the cheapest move available — attempt less,
+    look cheaper — and a guard that can be separated from the figure it guards
+    guards nothing.
+    """
+    row, text = _econ(tmp_path)
+    cost = row["cost"]
+    assert cost["never_landed"] == {"k": int(FAIL_ROUND_SECONDS),
+                                    "n": int(LAND_ROUND_SECONDS + FAIL_ROUND_SECONDS)}
+    lines = LO.cost_lines(cost)
+    never = [ln for ln in lines if ln.startswith("never_landed_share")]
+    assert len(never) == 1
+    assert "120/600 s (20.0 %)" in never[0]
+    assert "rounds with no `promoted` row" in never[0]
+    gpu = next(i for i, ln in enumerate(lines)
+               if ln.startswith("gpu_hours_per_landing"))
+    assert never[0] in lines[gpu:], "the share printed before the figure it qualifies"
+    for name, weak_runs in (("weak", []),
+                            ("weaker", [(900.0, f"Round {ROUND_FAIL}: nothing to charge")])):
+        weak_row, _ = _econ(tmp_path, name=name, runs_rows=weak_runs)
+        assert any(ln.startswith("never_landed_share")
+                   for ln in LO.cost_lines(weak_row["cost"])), name
+    no_landing_row, _ = _econ(tmp_path, name="empty", runs_rows=None,
+                             events=[e for e in _econ_events("deadbeef")
+                                     if e.get("event") != "promoted"])
+    assert any(ln.startswith("never_landed_share")
+               for ln in LO.cost_lines(no_landing_row["cost"]))
+
+
+def test_latency_block_prints_the_two_waits_as_p50_p90_with_n_on_one_clock(tmp_path):
+    """Clause 3: filing→first-round and first-round→landing, each with an n.
+
+    Three stamps from three places — the item's `created:` on the board, the
+    round's earliest `round_start` row, its `promoted` row — read as ONE instant.
+    Item 2001 was filed 2026-09-27T00:00:00, its round opened 600 s later and
+    landed 480 s after that. A block that read the naive board stamp as local
+    time would move the filing by this box's offset and report a triage latency
+    that never happened; `utc_instant` (#1517) is the one place that decided what
+    a naive board stamp means, and the `clock` field names it. Both cohorts are
+    printed even when empty, because an item filed before the ledger exists is
+    strata, not truncation (#1667's arms).
+    """
+    row, text = _econ(tmp_path)
+    lat = row["latency"]
+    assert lat["filing_to_first_round"] == {"n": 1, "p50_s": 600.0, "p90_s": 600.0}
+    assert lat["first_round_to_landing"] == {"n": 1, "p50_s": LAND_ROUND_SECONDS,
+                                             "p90_s": LAND_ROUND_SECONDS}
+    assert lat["filing_to_landing"] == {"n": 1, "p50_s": 1080.0, "p90_s": 1080.0}
+    assert lat["missing_item_stamp"] == 0 and lat["missing_round_start"] == 0
+    assert lat["negative_latency_excluded"] == 0
+    assert "utc_instant" in lat["clock"], "the clock the stamps share is unnamed"
+    assert "p50 600 s, p90 600 s  (n=1)" in text
+    assert "p50 480 s, p90 480 s  (n=1)" in text
+    by_cohort = {st["cohort"]: st for st in lat["strata"]}
+    assert by_cohort["filed_before_ledger"]["n"] == 1
+    assert by_cohort["filed_in_ledger_window"]["n"] == 0
+    assert f"{'filed_before_ledger':30s} n=1:" in text
+    assert f"{'filed_in_ledger_window':30s} 0/0 (no landings)" in text, (
+        "an empty cohort printed a dash or a bare 0 instead of saying there were none")
+
+
+def test_run_join_match_rate_prints_and_a_weak_join_withholds_the_cost_figure(tmp_path):
+    """Clause 4: `N/M promoted landings attributed to at least one run row`, and
+    the floor that replaces the figure below it.
+
+    `round_id` is not a column on a run row — the carrier is the free-text
+    `runs.summary` — so the join is measured and printed, not trusted. One
+    round-naming row of 1800 s makes the single landing 1/1 and the joined term
+    0.5 h, and a row naming TWO rounds is dropped rather than split
+    (`ambiguous_runs` says so). Withhold the naming row and the same fixture must
+    print the literal `join too weak to interpret` with NO number on the cost
+    line: the ledger half alone is gate and review time, so printing it as *the*
+    cost of a landing would understate spend by whatever the turns cost, and a
+    fraction passed off as a total is worse than no figure at all.
+    """
+    strong, strong_text = _econ(tmp_path, name="strong", runs_rows=STRONG_RUNS)
+    join = strong["run_join"]
+    assert (join["k"], join["n"]) == (1, 1) and join["share"] == 1.0
+    assert join["strong"] is True and join["floor"] == LO.JOIN_FLOOR
+    assert "1/1 promoted landings attributed to at least one run row" in strong_text
+    assert strong["cost"]["joined_seconds"] == LAND_RUN_SECONDS, (
+        "the row naming two rounds was split or double-counted instead of dropped")
+    assert join["ambiguous_runs"] == 1 and join["attributed_runs"] == 1
+    assert strong["cost"]["joined_gpu_hours_per_landing"] == round(
+        LAND_RUN_SECONDS / 3600.0, 4)
+    assert "0.5 h" in strong_text
+
+    weak, weak_text = _econ(tmp_path, name="weak",
+                            runs_rows=[(9999.0, "no round named here at all")])
+    assert (weak["run_join"]["k"], weak["run_join"]["n"]) == (0, 1)
+    assert weak["run_join"]["strong"] is False
+    cost_lines = [ln for ln in weak_text.splitlines()
+                  if ln.startswith(("gpu_hours_per_landing", "joined_run_hours"))]
+    assert len(cost_lines) == 2
+    for ln in cost_lines:
+        assert LO.JOIN_TOO_WEAK in ln, ln
+        assert "0.133 h" not in ln, "a cost figure printed through a weak join"
+    assert any(ln.startswith("never_landed_share") for ln in weak_text.splitlines())
+    assert "0/1 promoted landings attributed to at least one run row" in weak_text
+
+    no_db, no_db_text = _econ(tmp_path, name="no-db", runs_rows=None)
+    assert no_db["run_join"]["available"] is False
+    assert no_db["run_join"]["strong"] is False
+    assert LO.JOIN_TOO_WEAK in no_db_text
+
+
+def test_empty_window_prints_no_landings_and_n_a_and_record_keeps_the_new_keys(tmp_path,
+                                                                              monkeypatch):
+    """Clause 5: an empty window says so in words, and the row survives the terminal.
+
+    A window holding a round that never landed has no cost and no latency: the
+    cost lines read `0/0 (no landings)`, the latency lines read `n/a`. Not a `0` —
+    which reads as a landing that cost nothing — and not a dash, which reads as no
+    opinion. Then `record()` has to carry the new keys through
+    `landed_outcomes_path()` into the automod state dir: a figure printed once and
+    never journalled is a figure nobody can compare against next month, and the
+    state dir is the only destination (#1667's owed-check ruling #3 — the guardian
+    alerts hourly on runtime data left inside the checkout).
+    """
+    events = [e for e in _econ_events("deadbeef") if e.get("event") != "promoted"]
+    row, text = _econ(tmp_path, name="empty",
+                      runs_rows=[(LAND_RUN_SECONDS, f"Round {ROUND_LAND}: Implement #2001")],
+                      events=events)
+    cost, lat = row["cost"], row["latency"]
+    assert cost["landings"] == 0 and cost["n"] == 0
+    assert cost["gpu_hours_per_landing"] is None and cost["joined_seconds"] == 0.0
+    assert cost["never_landed"] == {"k": int(LAND_ROUND_SECONDS + FAIL_ROUND_SECONDS),
+                                    "n": int(LAND_ROUND_SECONDS + FAIL_ROUND_SECONDS)}
+    key_lines = [ln for ln in text.splitlines()
+                 if ln.startswith(("gpu_hours_per_landing", "joined_run_hours"))]
+    assert len(key_lines) == 2
+    for ln in key_lines:
+        assert LO.NO_LANDINGS in ln, ln
+        assert "None" not in ln and "  -  " not in ln, ln
+    for key in ("filing_to_first_round", "first_round_to_landing", "filing_to_landing"):
+        assert lat[key] == {"n": 0, "p50_s": None, "p90_s": None}
+    pctl_lines = [ln for ln in text.splitlines()
+                  if ln.startswith(("filing_to_first_round", "first_round_to_landing",
+                                    "filing_to_landing"))]
+    assert len(pctl_lines) == 3
+    for ln in pctl_lines:
+        assert ln.split(None, 1)[1].startswith("n/a") and "None" not in ln, ln
+    assert "n/a" in next(ln for ln in text.splitlines()
+                         if ln.startswith("queue_wait_share_median"))
+    assert LO.share_text({"k": 0, "n": 0}).startswith("0/0 s")
+
+    # `state.STATE_DIR` is bound at import (from `LLOYD_AUTOMOD_STATE`, which
+    # `tests/conftest.py` already points at a scratch dir), so the destination is
+    # patched on the module — setting the variable here would be read by nobody.
+    from scripts.automod import state as S
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
+    assert str(LO.landed_outcomes_path()).startswith(str(tmp_path / "state"))
+    out = tmp_path / "state" / "landed_outcomes.jsonl"
+    LO.record(row, path=out)
+    written = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
+    assert len(written) == 1 and written[0] == row
+    assert set(["cost", "latency", "run_join"]) <= set(written[0])
+    assert written[0]["cost"]["n"] == 0 and written[0]["latency"]["landings"] == 0
+    LO.record(row)                       # no path: the state dir, via landed_outcomes_path
+    assert len(out.read_text().strip().splitlines()) == 2

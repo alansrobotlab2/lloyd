@@ -37,6 +37,31 @@ What each arm gets:
                      agent arm only — a person's commit goes through no gate, so
                      the human row prints `n/a (no gate)`, never a zero.
 
+What the loop PAYS per landing (#2378) is the other half of the page and the
+half that did not exist: `cost` and `latency` ride in the same row, and change
+the denominator from the activity performed to the outcome achieved. Every
+compute figure this system shows elsewhere is per-run — `runs.duration_seconds`
+summed into `gpu_hours` per task (`workers/queue.py:1353`) — so a three-hour
+implementer turn that lands nothing was one more run inside a budget, and the
+program could answer "were landed changes undone?" but never "what did a
+landing cost, and how long from the signal to the landing?":
+
+  gpu_hours_per_landing   wall-clock seconds/3600 — the autonomy page's own
+                          proxy, under that name — summed over the ledger's rung
+                          and landing-wait seconds of promoted rounds, per
+                          landing, never printed without the next line
+  never_landed_share      the seconds sitting in rounds that produced no
+                          `promoted` row: cost-per-outcome is gameable by
+                          attempting less, and this is the line that shows it
+  run_join                `runs` rows name a round only in free-text `summary`,
+                          never in a structured column, so the match rate prints
+                          with the figure and the figure is withheld below
+                          `JOIN_FLOOR` instead of printed low
+  filing_to_first_round   p50/p90 with n, beside `first_round_to_landing`: the
+  first_round_to_landing  triage wait and the implementation+gate wait, the
+                          split no figure on this box had ever measured of its
+                          own loop
+
 `n` is what the window can actually observe: a commit with less than 7 d of
 later history cannot yet have been undone, so it is excluded from the
 denominator rather than counted as a clean landing, and `0 landings` renders as
@@ -232,6 +257,537 @@ def rounds_text(row: dict) -> str:
             f"(median {row['median']}); second attempt {rate_text(row)}")
 
 
+# ── cost and latency per ACHIEVED landing (#2378) ─────────────────────────
+#
+# Everything above is a quality signal. None of it is an economic one, and every
+# compute figure the system shows elsewhere is activity-denominated:
+# `runs.duration_seconds` summed and divided by 3600 into `gpu_hours` per TASK
+# (`workers/queue.py:1353`), and `app/autonomy.py` (`:5157` at filing) summing
+# the same quotient per run per task. A task that burns three hours and lands
+# nothing is therefore one more run inside its budget, and the loop can answer
+# "were landed changes undone?" but never "what did a landing cost". Denominator
+# = the achieved outcome, not the activity, is the whole of the change below.
+#
+# Cost-per-outcome is itself gameable by the worst move available — a loop that
+# stops attempting hard items gets cheaper and looks better — so
+# `never_landed_share` is emitted with the figure, never apart from it, and the
+# joined-run term is withheld when it cannot see enough of the turns to bound
+# the total. Report-only: nothing here is promoted, gated or auto-disabled on.
+
+#: The ledger rows that are one round's spend, as `(event, field)` pairs,
+#: counted only on a row that carries a `round_id` — an unattributed wait cannot
+#: be charged to a landing. This is `scorecard.py` row 9's per-round `gate`
+#: accumulation (`:968-971` at filing) widened to the other fields a round
+#: spends, not a third accumulation of the same rows.
+#:
+#: Included, each a distinct span: `gate.seconds` (one rung; every rung of the
+#: ladder sums), `review.seconds` (the grader's turn, timed from its own call),
+#: `review.review_confirm_seconds` (#1903's second reader, which runs AFTER that
+#: row stamps its `seconds`, so it is additive and not nested),
+#: `land_wait_rounds.waited_s`, `pause_set.seconds`, `restart_flushed.waited_s`.
+#:
+#: Excluded, each on a stated reason: `errors_window_s` (the length of a
+#: rate-observation window, not a spend), `review.rung_wait_s` (the wait for a
+#: review graded CONCURRENTLY with the tests rung — adding it double-counts the
+#: same wall clock), `review.waited_s` (the grader-retry sleep, nested inside
+#: the same row's `seconds`), `restart_flushed.waited_rounds_s` /
+#: `waited_settle_s` (phases of that row's own `waited_s`), and
+#: `noise_refreshed.seconds` (no round to charge it to). As measured on
+#: 2026-10-09, `pause_set` and `restart_flushed` rows carry no `round_id` at all
+#: and so contribute nothing here; the entries stay so that a writer which
+#: starts recording the round is counted rather than silently dropped.
+ROUND_SPEND_FIELDS: tuple[tuple[str, str], ...] = (
+    ("gate", "seconds"),
+    ("review", "seconds"),
+    ("review", "review_confirm_seconds"),
+    ("land_wait_rounds", "waited_s"),
+    ("pause_set", "seconds"),
+    ("restart_flushed", "waited_s"),
+)
+#: `duration_seconds / 3600` is what the autonomy page prints as `gpu_hours`
+#: (`workers/queue.py:1353`). It is wall-clock and it carries gate-rung
+#: subprocess time inside the same run, so the column says that rather than
+#: inventing a GPU-second precision the store does not have (#2378's own risk).
+WALLCLOCK_PROXY = ("wall-clock seconds/3600 — the same proxy the autonomy page "
+                   "prints as gpu_hours, not measured GPU time")
+#: The item's own floor: below this share of promoted landings the run join
+#: cannot bound a landing's turn time, so the cost figure is withheld instead of
+#: printed low. 595/622 (95.7 %) clears it as measured on 2026-10-09.
+JOIN_FLOOR = 0.5
+JOIN_TOO_WEAK = "join too weak to interpret"
+NO_LANDINGS = "0/0 (no landings)"
+#: How a round id is spelled by the ledger and by the one `runs` column that
+#: actually carries it — free-text `runs.summary` (`runs.response_json` in 10
+#: rows, `queue.payload_json` nowhere usefully): the join is prose, which is
+#: why it is measured and floored rather than trusted.
+ROUND_ID_RE = re.compile(r"\bSM_\d{8}_\d{6}\b")
+
+
+def _percentile(values: list[float], p: float) -> float | None:
+    """Linear-interpolated percentile of `values`, None on an empty population.
+
+    The definition is `scripts/autoresearch/promotion_fp_rate.percentile` —
+    imported, not restated, so the two measured p90s on this box cannot
+    disagree about what `p90` means the way #1667's parallel scorecard nearly
+    did about what a landing means.
+    """
+    xs = [float(v) for v in values if v is not None]
+    if not xs:
+        return None
+    from scripts.autoresearch.promotion_fp_rate import percentile
+    return percentile(xs, p)
+
+
+def _pctl(values: list[float]) -> dict[str, Any]:
+    """One latency population as `n`, p50 and p90, or None percentiles and n=0."""
+    xs = [float(v) for v in values]
+    return {"n": len(xs),
+            "p50_s": (round(_percentile(xs, 0.5), 1) if xs else None),
+            "p90_s": (round(_percentile(xs, 0.9), 1) if xs else None)}
+
+
+def pctl_text(row: dict) -> str:
+    """`p50 43200 s, p90 77760 s  (n=3)`, or `n/a` — never a dash or a 0, which
+    would read as a latency of zero rather than no measurable latency."""
+    if not row["n"]:
+        return "n/a (no landing in the window has both a filing and a round stamp)"
+    return f"p50 {row['p50_s']:.0f} s, p90 {row['p90_s']:.0f} s  (n={row['n']})"
+
+
+def share_text(share: dict, *, unit: str = "s") -> str:
+    """`k/n s (pct %)`, or `0/0 (no landings)`. A share of SECONDS is not a
+    binomial proportion, so it carries no Wilson interval — `rate_text` is for
+    rates over trials, this is for hours over hours."""
+    k, n = share["k"], share["n"]
+    if not n:
+        return f"0/0 {unit} (no ledger-attributed seconds in the window)"
+    return f"{k}/{n} {unit} ({100 * k / n:.1f} %)"
+
+
+def join_text(join: dict) -> str:
+    """The join's own match rate, printed beside the figure that leans on it."""
+    k, n = join["k"], join["n"]
+    head = f"{k}/{n} promoted landings attributed to at least one run row"
+    if not n:
+        return f"{head} ({NO_LANDINGS})"
+    return (f"{head} ({100 * k / n:.1f} %), floor {join['floor']:.2f}"
+            + ("" if join["strong"] else " — too weak to interpret a cost figure"))
+
+
+def round_spend(events: list[dict], *, since: float, now: float) -> dict[str, float]:
+    """Wall-clock seconds the ledger attributes to each `round_id` in the window.
+
+    Windowed by the ROW's own stamp: a rung that ran in the window is spend the
+    window pays. A round whose landing lies outside the window still lands in
+    `never_landed` if no `promoted` row of its falls inside it, which is the
+    honest reading at the window edge and why the window is printed on every
+    figure.
+    """
+    wanted: dict[str, list[str]] = {}
+    for event, field in ROUND_SPEND_FIELDS:
+        wanted.setdefault(event, []).append(field)
+    spend: dict[str, float] = {}
+    for e in events:
+        rid = str(e.get("round_id") or "")
+        fields = wanted.get(str(e.get("event") or ""))
+        if not rid or not fields:
+            continue
+        ts = SC._ts(e)
+        if not (since <= ts <= now):
+            continue
+        for field in fields:
+            val = e.get(field)
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                spend[rid] = spend.get(rid, 0.0) + float(val)
+    return spend
+
+
+def _workers_db() -> Path:
+    """The queue store this report reads: the LIVE one, always.
+
+    `app.paths.WORKERS_DB` is the resolver a WRITER wants — rule 3 of the data
+    home gives a round's worktree its own `.lloyd-data/`, so a report run from a
+    worktree or the canary would open a store with no runs in it and print a 0 %
+    join as though the loop had none. This module reports on the live loop
+    wherever it is invoked (it reads the live ledger and `LIVE_ROOT`'s history
+    the same way), so it reaches the live root through `production_data_root()`,
+    the function whose docstring restricts it to readers that mean production on
+    purpose. Nothing here ever opens the store for writing: the join is a
+    `mode=ro` URI.
+    """
+    from app.data_root import production_data_root
+    return production_data_root() / "workers.db"
+
+
+def _empty_join(why: str) -> dict[str, Any]:
+    """A join that was never run: `strong` false, so no cost figure prints."""
+    return {"available": False, "why": why, "db": None, "k": 0, "n": 0,
+            "share": None, "floor": JOIN_FLOOR, "strong": False,
+            "seconds": {}, "runs": 0, "ambiguous_runs": 0,
+            "runs_naming_rounds": 0, "rows_scanned": 0}
+
+
+def run_round_join(round_ids: set[str], *, db_path: Path | None = None,
+                   n_landings: int | None = None) -> dict[str, Any]:
+    """Which of `round_ids` at least one `runs` row names, and their seconds.
+
+    `round_id` is not stored structurally on a run row: the carrier is the
+    free-text `runs.summary` (#1188's note in `workers/sources/autocode.py`
+    writes it there). So the join is one scan of `runs`, a round-id regex over
+    `summary`/`response_json`/`meta_json`, and then a floor on the resulting
+    match rate — not a fuzzy time window.
+
+    A run row naming TWO rounds is dropped from the seconds rather than
+    credited to both: its wall clock cannot be split, and halving it would
+    invent a split. `ambiguous_runs` says how many were dropped. `n_landings`
+    is the denominator the caller means (every promoted landing in the window,
+    attributed or not) — the match rate is over landings, not over the rounds
+    that happened to be scanned.
+    """
+    wanted = {str(r) for r in round_ids if str(r)}
+    out = _empty_join("no runs db read")
+    out["n"] = (len(wanted) if n_landings is None else int(n_landings))
+    if db_path is None:
+        return out
+    path = Path(db_path)
+    out["db"] = str(path)
+    if not path.exists():
+        out["why"] = f"runs db not found at {path}"
+        return out
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "select duration_seconds, summary, response_json, meta_json from runs").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as exc:               # a missing table is "no join", not a crash
+        out["why"] = f"runs table unreadable at {path}: {str(exc)[:120]}"
+        return out
+    seconds: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    ambiguous = named = 0
+    for dur, summary, response_json, meta_json in rows:
+        found: set[str] = set()
+        for blob in (summary, response_json, meta_json):
+            if blob:
+                found.update(ROUND_ID_RE.findall(str(blob)))
+        if not found:
+            continue
+        named += 1
+        if len(found) > 1:
+            ambiguous += 1
+            continue
+        rid = next(iter(found))
+        if rid not in wanted:
+            continue
+        secs = float(dur or 0)
+        seconds[rid] = seconds.get(rid, 0.0) + secs
+        counts[rid] = counts.get(rid, 0) + 1
+    out.update({"available": True, "why": None, "seconds": seconds,
+                "runs": sum(counts.values()), "ambiguous_runs": ambiguous,
+                "runs_naming_rounds": named, "rows_scanned": len(rows),
+                "k": sum(1 for r in wanted if r in seconds)})
+    out["share"] = (round(out["k"] / out["n"], 4) if out["n"] else None)
+    out["strong"] = bool(out["share"] is not None and out["share"] >= JOIN_FLOOR)
+    return out
+
+
+def cost_per_landing(events: list[dict], *, since: float, now: float,
+                     join: dict[str, Any],
+                     median_full_gate_s: float | None = None) -> dict[str, Any]:
+    """What one achieved landing cost, over the same window as the arms.
+
+    `gpu_hours_per_landing` is the total ledger-attributed seconds inside
+    promoted rounds divided by the landings that have any, then /3600 — the
+    autonomy page's proxy under the autonomy page's name. `median` rides beside
+    the mean because the mean over 611 rounds is dragged by the round that
+    re-gated itself four times.
+
+    The figure is withheld (`join_strong` false → `JOIN_TOO_WEAK` on the page)
+    when the run join cannot see most of the landings. The ledger half needs no
+    join, but it is only gate, review and landing-wait time; the implementer's
+    turn exists only in `runs.duration_seconds`. Printing rung time alone as
+    *the* cost of a landing while a third of the turns cannot be attributed
+    would understate spend by a factor the report cannot see, which is a worse
+    number than no number — so the joined turn term and the figure that leans
+    on it go together.
+    """
+    landed: set[str] = set()
+    for e in events:
+        rid = str(e.get("round_id") or "")
+        if rid and e.get("event") == "promoted" and since <= SC._ts(e) <= now:
+            landed.add(rid)
+    spend = round_spend(events, since=since, now=now)
+    per_landing = sorted(spend[r] for r in landed if r in spend)
+    landed_seconds = sum(per_landing)
+    ledger_seconds = sum(spend.values())
+    never_seconds = ledger_seconds - landed_seconds
+    joined = [float(join["seconds"][r]) for r in landed if r in join.get("seconds")]
+    row: dict[str, Any] = {
+        "window_from": _iso(since), "window_to": _iso(now),
+        "proxy": WALLCLOCK_PROXY,
+        "landings": len(landed),
+        "n": len(per_landing),
+        "landings_without_seconds": len(landed) - len(per_landing),
+        "landed_seconds": round(landed_seconds, 1),
+        "ledger_seconds": round(ledger_seconds, 1),
+        "never_landed": {"k": int(never_seconds), "n": int(ledger_seconds)},
+        "gpu_hours_total": round(landed_seconds / 3600.0, 3),
+        "gpu_hours_per_landing": (round(landed_seconds / len(per_landing) / 3600.0, 4)
+                                  if per_landing else None),
+        "median_seconds_per_landing": (round(statistics.median(per_landing), 1)
+                                       if per_landing else None),
+        "p90_seconds_per_landing": (round(_percentile(per_landing, 0.9), 1)
+                                    if per_landing else None),
+        "joined_runs": int(join.get("runs") or 0),
+        "joined_seconds": round(sum(joined), 1),
+        "joined_n": len(joined),
+        "joined_gpu_hours_per_landing": (round(sum(joined) / len(joined) / 3600.0, 4)
+                                         if joined else None),
+        "median_full_gate_s": median_full_gate_s,
+        "join": {"k": join["k"], "n": join["n"], "share": join["share"],
+                 "floor": join["floor"], "strong": bool(join["strong"])},
+        "join_available": bool(join["available"]),
+        "join_why": join.get("why"),
+        "ambiguous_runs": int(join.get("ambiguous_runs") or 0),
+    }
+    return row
+
+
+def _cost_key_lines(cost: dict[str, Any]) -> list[str]:
+    """The number-bearing cost lines: withheld together, printed together.
+
+    Three states, in this order: no landing in the window (`0/0 (no landings)`),
+    a join too weak to bound the total (`join too weak to interpret`), and a
+    measured figure with its own `n` and the window on the same line.
+    """
+    window = f"{cost['window_from']} → {cost['window_to']}"
+    per_landing = f"{'gpu_hours_per_landing':30s}"
+    joined = f"{'joined_run_hours_per_landing':30s}"
+    if not cost["n"]:
+        return [f"{per_landing} {NO_LANDINGS}  {window}",
+                f"{joined} {NO_LANDINGS}  {window}"]
+    if not cost["join"]["strong"]:
+        # The match rate itself is on the `run_join` line above; repeating the
+        # whole clause here would put the same 0/622 on the page twice. What this
+        # branch must not do is print a figure that looks interpretable.
+        weak = (f"{JOIN_TOO_WEAK}  (run join {cost['join']['k']}/{cost['join']['n']}, "
+                f"floor {cost['join']['floor']:.2f})")
+        return [f"{per_landing} {weak}", f"{joined} {weak}  {window}"]
+    joined_text = (f"{cost['joined_gpu_hours_per_landing']} h  n={cost['joined_n']}  {window}"
+                   if cost["joined_gpu_hours_per_landing"] is not None
+                   else f"n/a (no run row attributed to a landing)  {window}")
+    return [
+        f"{per_landing} {cost['gpu_hours_per_landing']:.3f} h"
+        f" (total {cost['gpu_hours_total']} h, median "
+        f"{cost['median_seconds_per_landing']:.0f} s,"
+        f" p90 {cost['p90_seconds_per_landing']:.0f} s)  n={cost['n']}  {window}",
+        f"{joined} {joined_text}",
+    ]
+
+
+def cost_lines(cost: dict[str, Any]) -> list[str]:
+    """The cost block as printed lines. `never_landed_share` is never separable
+    from the figure beside it: a cheaper loop that attempted less is the one way
+    this metric gets gamed, and the share is what shows it."""
+    out = [f"cost per achieved landing — {cost['window_from']} → {cost['window_to']} — "
+           f"{cost['proxy']}",
+           f"{'run_join':30s} {join_text(cost['join'])}"]
+    out += _cost_key_lines(cost)
+    never = share_text(cost["never_landed"])
+    out.append(f"{'never_landed_share':30s} {never} of the ledger-attributed seconds sit "
+               f"in rounds with no `promoted` row"
+               + (f" ({cost['never_landed']['k'] / 3600:.1f} h of "
+                  f"{cost['never_landed']['n'] / 3600:.1f} h)"
+                  if cost["never_landed"]["n"] else ""))
+    if cost["landings_without_seconds"]:
+        out.append(f"{'landings_no_seconds':30s} {cost['landings_without_seconds']} of "
+                   f"{cost['landings']} promoted landings in the window carry no ledger "
+                   f"seconds at all, so they are in the landings count and not in n")
+    if cost["ambiguous_runs"]:
+        out.append(f"{'ambiguous_runs':30s} {cost['ambiguous_runs']} run rows name two or "
+                   f"more round ids and are dropped from the joined seconds rather than "
+                   f"split across them")
+    if cost["median_full_gate_s"] is not None:
+        out.append(f"{'median_full_gate_s':30s} {cost['median_full_gate_s']} s (one whole "
+                   f"ladder run: `gate_duration_stats` through scorecard row 14's "
+                   f"`_full_gate_median`, reused not re-derived) — the yardstick for the "
+                   f"per-round figures above")
+    if cost["join_why"]:
+        out.append(f"{'join_unavailable':30s} {cost['join_why']}")
+    return out
+
+
+def cost_text(cost: dict[str, Any]) -> str:
+    return "\n".join(cost_lines(cost))
+
+
+def _filing_ts(item_id: int, *, backlog_dir: Path | None = None) -> float | None:
+    """The item's own `created:` as an instant, or None if it cannot be read.
+
+    Routed through `scripts.automod.backlog._iso_ts(..., legacy_local=True)`,
+    which is `app.backlog_move.utc_instant` — the one place this box decided
+    what a naive board stamp means (#1517). At and after
+    `LOCAL_STAMP_CUTOVER` a naive stamp IS UTC; below it the stamp came off a
+    surface that wrote the machine's local clock, and reading it as UTC would
+    move the filing seven hours on this box and report a triage latency that
+    never happened. "One naive-UTC clock" means the same INSTANT on both sides
+    of the subtraction, which is what that function is for.
+    """
+    from scripts.automod import backlog as B
+    root = Path(backlog_dir or B.BACKLOG_DIR)
+    try:
+        item_id = int(item_id)
+    except (TypeError, ValueError):
+        return None
+    # The live board first, then the archive the monthly retention sweep moves a
+    # closed item to (`retire_merged_board_items`' destination, the same board
+    # root's `archived/` sibling): a landing is by definition a closed item, so a
+    # reader who only ever globs the live board eventually loses its filing stamp
+    # and the latency n decays as the board ages.
+    for directory in (root, root.parent / "archived"):
+        for path in sorted(Path(directory).glob(f"{item_id}-*.md")):
+            ts = B._iso_ts(SC._frontmatter(path).get("created"), legacy_local=True)
+            if ts:
+                return ts
+    return None
+
+
+def filing_latency(events: list[dict], *, since: float, now: float,
+                   ledger_from: float | None = None,
+                   backlog_dir: Path | None = None) -> dict[str, Any]:
+    """Signal-to-landing, split into the two waits that produce it.
+
+    Three stamps per landed round, all read as one instant: the item's
+    `created:` (filing), the round's EARLIEST `round_start` row (the loop first
+    picked the item up), and its `promoted` row inside the window (the landing).
+    The split is the point — the talk's "coding was never the bottleneck"
+    predicts filing→first-round dominates, and no figure on this box had ever
+    tested that of its own loop. Which arm dominates at p90 is a ruling on the
+    first real row, not a claim this module makes, so `queue_wait_share_median`
+    is descriptive and nothing more.
+
+    Only rounds with all three stamps are in any n; a round whose item file is
+    gone, or whose `created:` postdates its own first round, is counted out and
+    named. Items filed before the ledger exists are not truncated away — they
+    are reported as `filed_before_ledger`, because their filing stamp is real
+    even where no ledger row is, and a silent drop is the #1667 trap the arms
+    already fell into once.
+    """
+    first_start: dict[str, float] = {}
+    start_item: dict[str, int] = {}
+    item_of: dict[str, int] = {}
+    for e in events:
+        rid = str(e.get("round_id") or "")
+        if not rid:
+            continue
+        iid = e.get("item_id")
+        if isinstance(iid, (int, float)) and not isinstance(iid, bool):
+            item_of.setdefault(rid, int(iid))
+        if e.get("event") != "round_start":
+            continue
+        ts = SC._ts(e)
+        if ts and (rid not in first_start or ts < first_start[rid]):
+            first_start[rid] = ts
+            if isinstance(iid, (int, float)) and not isinstance(iid, bool):
+                start_item[rid] = int(iid)
+    landed_at: dict[str, float] = {}
+    for e in events:
+        rid = str(e.get("round_id") or "")
+        if rid and e.get("event") == "promoted" and since <= SC._ts(e) <= now:
+            prev = landed_at.get(rid)
+            if prev is None or SC._ts(e) > prev:
+                landed_at[rid] = SC._ts(e)
+
+    f2r: list[float] = []
+    r2l: list[float] = []
+    f2l: list[float] = []
+    ratios: list[float] = []
+    strata: dict[str, dict[str, list[float]]] = {
+        "filed_in_ledger_window": {"f2r": [], "r2l": [], "f2l": []},
+        "filed_before_ledger": {"f2r": [], "r2l": [], "f2l": []}}
+    missing_item = missing_start = negative = 0
+    for rid, land_ts in sorted(landed_at.items()):
+        start_ts = first_start.get(rid)
+        if start_ts is None:
+            missing_start += 1
+            continue
+        item_id = start_item.get(rid) or item_of.get(rid)
+        if item_id is None:
+            missing_item += 1
+            continue
+        filed = _filing_ts(item_id, backlog_dir=backlog_dir)
+        if filed is None:
+            missing_item += 1
+            continue
+        filing_to_round, round_to_land = start_ts - filed, land_ts - start_ts
+        if filing_to_round < 0 or round_to_land < 0:
+            negative += 1
+            continue
+        f2r.append(filing_to_round)
+        r2l.append(round_to_land)
+        f2l.append(land_ts - filed)
+        if land_ts - filed > 0:
+            ratios.append((start_ts - filed) / (land_ts - filed))
+        bucket = ("filed_before_ledger" if ledger_from is not None
+                  and filed < ledger_from else "filed_in_ledger_window")
+        strata[bucket]["f2r"].append(filing_to_round)
+        strata[bucket]["r2l"].append(round_to_land)
+        strata[bucket]["f2l"].append(land_ts - filed)
+    return {
+        "window_from": _iso(since), "window_to": _iso(now),
+        "clock": ("the item's `created:`, the round's earliest `round_start` and its "
+                  "`promoted` row all read as one instant through "
+                  "`app.backlog_move.utc_instant` (#1517)"),
+        "landings": len(landed_at),
+        "filing_to_first_round": _pctl(f2r),
+        "first_round_to_landing": _pctl(r2l),
+        "filing_to_landing": _pctl(f2l),
+        "queue_wait_share_median": (round(_percentile(ratios, 0.5), 4) if ratios else None),
+        "missing_item_stamp": missing_item,
+        "missing_round_start": missing_start,
+        "negative_latency_excluded": negative,
+        "strata": [{"cohort": name, "n": len(body["f2l"]),
+                    "filing_to_first_round": _pctl(body["f2r"]),
+                    "first_round_to_landing": _pctl(body["r2l"]),
+                    "filing_to_landing": _pctl(body["f2l"])}
+                   for name, body in strata.items()],
+    }
+
+
+def latency_lines(latency: dict[str, Any]) -> list[str]:
+    out = [f"signal-to-landing latency — {latency['window_from']} → "
+           f"{latency['window_to']} — over {latency['landings']} promoted "
+           f"landing(s) in the window",
+           f"{'filing_to_first_round':30s} {pctl_text(latency['filing_to_first_round'])}",
+           f"{'first_round_to_landing':30s} {pctl_text(latency['first_round_to_landing'])}",
+           f"{'filing_to_landing':30s} {pctl_text(latency['filing_to_landing'])}"]
+    share = latency["queue_wait_share_median"]
+    out.append(f"{'queue_wait_share_median':30s} "
+               + ("n/a (no landing measurable in the window)" if share is None else
+                  f"{share:.3f} of filing→landing is triage wait, per-round median — "
+                  f"descriptive only; which side dominates at p90 is the owed-check "
+                  f"ruling, not this line"))
+    for st in latency["strata"]:
+        if st["n"]:
+            out.append(f"{st['cohort']:30s} n={st['n']}: filing→round "
+                       f"{pctl_text(st['filing_to_first_round'])}; round→landing "
+                       f"{pctl_text(st['first_round_to_landing'])}")
+        else:
+            out.append(f"{st['cohort']:30s} 0/0 (no landings)")
+    skipped = (f"{latency['missing_item_stamp']} no readable item `created:`, "
+               f"{latency['missing_round_start']} no `round_start` row, "
+               f"{latency['negative_latency_excluded']} negative")
+    out.append(f"{'excluded_from_n':30s} {skipped}")
+    return out
+
+
+def latency_text(latency: dict[str, Any]) -> str:
+    return "\n".join(latency_lines(latency))
+
+
 # ── the report ────────────────────────────────────────────────────────────
 
 def _iso(ts: float) -> str:
@@ -250,7 +806,9 @@ def _landed_rounds(events: list[dict]) -> set[str]:
 
 def by_author(*, now: float | None = None, since_days: float | None = None,
               repo: Path | None = None, events: list[dict] | None = None,
-              horizon_days: int = HUMAN_TOUCH_DAYS) -> dict[str, Any]:
+              horizon_days: int = HUMAN_TOUCH_DAYS,
+              ledger: Path | None = None, runs_db: Path | None = None,
+              backlog_dir: Path | None = None) -> dict[str, Any]:
     """One author-split report over `events` (the ledger) and `main`'s history.
 
     `since_days=None` means the whole ledger span, which is the widest window in
@@ -260,6 +818,15 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
     rates window it, while `human_history_from` and `pre_comparable_excluded`
     read the unfiltered list, so the reach line reports how far the human arm
     actually goes rather than where the window happens to start (#1870).
+
+    `runs_db` is the queue's store the cost join reads: `None` (the default, and
+    what every unit caller gets) means NO run rows are read and the cost figure
+    is therefore withheld as `join too weak to interpret`, while `main()` passes
+    `app.paths.WORKERS_DB` so the shipped report measures the join for real. A
+    report that quietly reached into production data from a test would be both
+    slow and non-reproducible; a withheld figure is honest. `ledger` is only for
+    the `gate_duration_stats` yardstick beside the per-round figures, and
+    `backlog_dir` resolves an item id to its `created:` stamp.
     """
     repo = Path(repo or LIVE_ROOT)
     now = now or datetime.now(timezone.utc).timestamp()
@@ -303,6 +870,27 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
         w[c["arm"]] += 1
     rollback_triggers = sorted({str(e.get("trigger") or "?") for e in events
                                 if e.get("event") == "rollback_succeeded"})
+
+    landed_rounds = {str(e.get("round_id")) for e in events
+                     if e.get("event") == "promoted" and e.get("round_id")
+                     and since <= SC._ts(e) <= now}
+    join = run_round_join(landed_rounds, db_path=runs_db, n_landings=len(landed_rounds))
+    if runs_db is None:
+        join = _empty_join("no runs db read (pass runs_db= to measure the join)")
+        join["n"] = len(landed_rounds)
+    # A yardstick, never a verdict: `ledger=None` means no yardstick, so a unit
+    # caller never reaches the production ledger by omission, and `main()` names
+    # the file it read. A ledger that will not parse costs the line, not the row.
+    median_full_gate_s: float | None = None
+    if ledger is not None:
+        try:
+            median_full_gate_s = SC._full_gate_median(Path(ledger))
+        except Exception:        # noqa: BLE001 — a yardstick is never the report
+            median_full_gate_s = None
+    cost = cost_per_landing(events, since=since, now=now, join=join,
+                            median_full_gate_s=median_full_gate_s)
+    latency = filing_latency(events, since=since, now=now, ledger_from=led_from,
+                             backlog_dir=backlog_dir)
     return {
         "generated_at": _iso(now),
         "window": {"from": _iso(since), "to": _iso(now),
@@ -322,6 +910,9 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
                    "pre_comparable_single_arm": (pre_arms[0]
                                                  if len(pre_arms) == 1 else None)},
         "by_author": arms,
+        "cost": cost,
+        "latency": latency,
+        "run_join": join_view(join),
         "week_strata": [{"week": k, **v} for k, v in sorted(strata.items())],
         "rollback_triggers": rollback_triggers,
         "true_positives": None,
@@ -332,8 +923,27 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
                   "gated by nothing, so its row is n/a (no gate), not 0",
                   "true_positives is null on purpose: no rollback has been adjudicated "
                   "as a real catch, and 0/N would be a claim",
+                  "gpu_hours_per_landing is wall-clock/3600 over ledger rung seconds only, "
+                  "the same proxy the autonomy page prints; compute a landing CAUSED in a "
+                  "later nightly job, and the human reading it, is outside the automod "
+                  "source and out of every number here",
+                  "cost-per-landing is gameable by attempting less: it is never printed "
+                  "without never_landed_share beside it, and is withheld outright when the "
+                  "run join sees under half of the landings",
                   "no model call, nothing written inside the checkout"],
     }
+
+
+def join_view(join: dict[str, Any]) -> dict[str, Any]:
+    """The join as it goes into the row: its rate, its floor, and what it could
+    not attribute. `seconds` is dropped — per-round figures belong to `cost`."""
+    return {"k": join["k"], "n": join["n"], "share": join["share"],
+            "floor": join["floor"], "strong": bool(join["strong"]),
+            "available": bool(join["available"]), "why": join.get("why"),
+            "db": join.get("db"), "attributed_runs": int(join.get("runs") or 0),
+            "ambiguous_runs": int(join.get("ambiguous_runs") or 0),
+            "runs_naming_rounds": int(join.get("runs_naming_rounds") or 0),
+            "rows_scanned": int(join.get("rows_scanned") or 0)}
 
 
 def render(row: dict[str, Any]) -> str:
@@ -362,6 +972,10 @@ def render(row: dict[str, Any]) -> str:
     out.append("")
     out.append(f"rounds_to_land  agent: {rounds_text(a['rounds_to_land'])}")
     out.append(f"                human: {rounds_text(h['rounds_to_land'])}")
+    out.append("")
+    out.extend(cost_lines(row["cost"]))
+    out.append("")
+    out.extend(latency_lines(row["latency"]))
     out.append("")
     out.append(f"rollback triggers (none adjudicated: true_positives null): "
                f"{', '.join(row['rollback_triggers']) or '—'}")
@@ -400,7 +1014,8 @@ def main(argv=None) -> int:
     from scripts.automod import state as S
     days = None if args.since.strip().lower() in ("all", "0") else SC.parse_since(args.since)
     events = S.ledger_rows(S.LEDGER_PATH)
-    row = by_author(events=events, since_days=days)
+    row = by_author(events=events, since_days=days, ledger=S.LEDGER_PATH,
+                    runs_db=_workers_db())
     print(json.dumps(row, indent=2, sort_keys=True) if args.json else render(row))
     if args.record:
         print(f"\nrecorded → {record(row)}")
