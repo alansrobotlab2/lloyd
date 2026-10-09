@@ -270,6 +270,28 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   because a rule that failed open would unlink the copy someone was reaching for. The
   newest copy is kept by the rule itself either way, so the named file above survives
   until a newer swap lands — after that only this file can stop it.
+- **A stray with an open handle is running infrastructure, not an abandoned copy (#2481).**
+  Nothing outside the `index.sqlite.bak*` series is ever deleted, but until 2026-10-09
+  every such file was filed into the one bucket whose stated reason is #844's "deleting
+  someone's backup database is not a code round's call". That queue of *abandoned copies
+  awaiting a person's delete decision* therefore contained `evalpin.sqlite` —
+  720,035,840 B in the 2026-10-09T05:02:09 nightly report, plus its `-wal`/`-shm`, the
+  database of the pin daemon alive at that instant as pid 1867286
+  (`mcp --http --port 8182 --index evalpin`), which unlinks its own database at teardown
+  and had done so by 05:16 — and beside it `rebuild-20261004.sqlite-shm`, stamped 2.7
+  days after its own main file. The bucket now splits on a measurement:
+  `open_handle_holders` walks `/proc/<pid>/fd` and compares by inode, and a file whose
+  database carries a descriptor goes to `stray_retention.live_side_indexes` with that
+  database's `-wal`/`-shm` beside it (a sidecar is in use exactly when the database it
+  belongs to is, and never otherwise), while everything else keeps the `held_for_person`
+  entry and reason it already had. Names decide nothing: `perfbench.sqlite` and the
+  side-indexes `eval/` names are untouched, and a database no file in this tree mentions
+  changes bucket the moment something has it open. Neither bucket is deletable —
+  `apply_stray_retention` still refuses any name outside the backup series — so what
+  changed is which queue a person reads, and the morning line now counts the four
+  reasons a file survives apart: measured reader, keep-list, live handle, outside the
+  series. Whether `rebuild-20261004.sqlite` should be deleted at all is still #844's
+  ruling to make, and this change does not make it.
 - **A rerank that could not run says so.** No VRAM for a ranking context used to
   be an HTTP 200 with fusion-order results; `meta.reranked` is false, the daemon
   counts it and never caches a fallback score, and `app/qmd_health.py` logs and

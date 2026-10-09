@@ -1938,13 +1938,25 @@ def test_a_stray_outside_the_backup_series_is_held_for_a_person_and_never_delete
         ("index.sqlite.bak-z", 2000, 5.0)])
     report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
     after = _listing(d)
-    assert {h["name"] for h in report["stray_retention"]["held_for_person"]} == {
+    sr = report["stray_retention"]
+    assert {h["name"] for h in sr["held_for_person"]} == {
         "index.backup-20260907_100044.sqlite", "perfbench.sqlite", "sub06.sqlite"}
     for keep in ("index.backup-20260907_100044.sqlite", "perfbench.sqlite",
                  "sub06.sqlite"):
         assert keep in after, keep
     assert "index.sqlite.bak-z" not in after, (
         "the .bak rule still works beside the files it may not touch")
+    # #2481 clause 2, pinned in the node that owns these three names rather than in a new
+    # one: nothing in this case opens a descriptor, so all three — including `sub06`,
+    # which `eval/contextual_titles.py` really does name — keep the entry and the reason
+    # they had before any liveness leg existed. `evalpin.sqlite` is absent from this
+    # fixture on purpose: it is live only while a pin is alive, and a case that had to
+    # wait for one would not be a case.
+    assert sr["live_side_indexes"] == [], (
+        f"nothing in this fixture is open, so the live bucket has no business filling: "
+        f"{sr['live_side_indexes']}")
+    for e in sr["held_for_person"]:
+        assert e["because"] == OUTSIDE_SERIES_REASON, e
 
 
 # --- clause 4: --dry-run deletes nothing an acting run would ------------------
@@ -2470,10 +2482,23 @@ def test_with_nothing_written_the_plan_is_the_plan_the_rule_made_before_the_feat
     base, now = got["base_plan"], got["now_plan"]
     shared = ["bak_series", "kept", "planned", "deleted", "deleted_bytes", "held",
               "held_for_person", "errors"]
+    #: Every key this module's plan carries that the pre-change module's does not:
+    #: #2420's `keep_list` block, and #2481's `live_side_indexes` — a non-series database
+    #: a live process holds open, counted apart from the abandoned copies beside it in
+    #: `held_for_person`. Neither can join `shared`: `base` has neither, and the equality
+    #: with the old rule only runs over keys the old rule produced. So the new key is
+    #: pinned two ways below — as one of exactly the keys `now` adds, and as the figure
+    #: it has to report on a pile where nothing is open.
+    added = ["keep_list", "live_side_indexes"]
     assert len(base["bak_series"]) == 2, (
         f"the witness pile is no longer one kept copy and one candidate: {base['bak_series']}")
     assert {k: base[k] for k in shared} == {k: now[k] for k in shared}, (
         "a keep-list that nobody wrote moved the rule")
+    assert set(now) - set(base) == set(added), (
+        f"the plan grew keys nobody asked for, or lost one: {sorted(set(now) - set(base))}")
+    assert now["live_side_indexes"] == [], (
+        "the witness pile is a directory of files with no reader on them, so a run that "
+        f"measured one here measured something that is not there: {now['live_side_indexes']}")
     assert "keep_list" not in base, "the baseline already had the block this change adds"
     assert now["keep_list"] == {"path": str(tmp_path / "reflection" / m.KEEP_LIST_NAME),
                                 "entries": 0, "held": [], "files": [], "error": None}, (
@@ -2596,6 +2621,249 @@ def test_the_keep_list_a_person_writes_is_the_file_the_default_plan_opens(monkey
     for name in ("index.sqlite.bak-z", "index.sqlite.bak-z-wal", "index.sqlite.bak-z-shm"):
         assert held[name]["reason"] == "the copy I am still reading", held.get(name)
         assert held[name]["source"] == "#2420", held.get(name)
+
+
+# ───────── #2481: a database a live process owns is not an abandoned backup ─────────
+#
+# The 2026-10-09 05:02:09 report put `evalpin.sqlite` — 720,035,840 B, plus its
+# `-wal`/`-shm`, the database of the qmd pin daemon that was alive at that instant as
+# pid 1867286 running `qmd.js mcp --http --port 8182 --index evalpin` — into
+# `held_for_person`, and printed it in the morning line as one of "7 outside the
+# series". The refusal was right and the queue was wrong: that pin tore its database
+# down of its own accord minutes later (measured gone from `~/.cache/qmd` at 05:16, with
+# only the default-index daemon left), so a bucket presented as *abandoned copies
+# awaiting a person's delete call* was fed by eval traffic and led with running
+# infrastructure. `rebuild-20261004.sqlite-shm`, stamped 2026-10-07T05:06:45 against a
+# main file of 2026-10-04T12:10:50, sat in the same list: a sidecar is in use exactly
+# when the database beside it is, and never otherwise, so asking the question per-file
+# was the other half of the bug.
+#
+# Everything below answers the liveness question one way: is a file descriptor open on
+# it. Not its name, and not whether some eval script mentions it — `sub06.sqlite` is
+# named by `eval/contextual_titles.py` and stays exactly where
+# `test_a_stray_outside_the_backup_series_is_held_for_a_person_and_never_deleted`
+# pins it, while a database with a name no file in this tree refers to changes bucket
+# the moment a handle is on it. Each case opens a real fd against a real file: one in
+# this process, one in a spawned child, and the negative cases prove themselves by
+# opening nothing.
+
+#: The #844 reason, verbatim, as clause 2 requires an unopened stray to keep it. The
+#: whole sentence and not a keyword: what clause 2 rules is that a file nobody is
+#: measured holding keeps *the entry it already has*, so a reworded reason — "not this
+#: job's to delete" quietly becoming "not deletable" — is the change this pins down.
+#: `index.sqlite.bak*` in it has no dash after `bak`, so it is not a concrete candidate
+#: name and stays outside the #2323 ban the block above `_qmd_dir` explains.
+OUTSIDE_SERIES_REASON = (
+    "outside the index.sqlite.bak* series, so not this job's to delete: this directory "
+    "is shared with live eval side-indexes, and #844:141-142 ruled that deleting "
+    "someone's backup database is not a code round's call")
+
+
+@contextlib.contextmanager
+def _open_handles(*paths: Path):
+    """Hold a real read descriptor on each path for the duration of the block.
+
+    The seam is the kernel's descriptor table and nothing higher: the module reads
+    `/proc/<pid>/fd`, so a handle taken here is the same fact the pin daemon presented
+    at 05:02, and the scan reaches this process's pid exactly as it reaches a daemon's.
+    A context manager because an assertion that fails mid-case must not leak the handle
+    into the next one, where it would move a file that case expects to be abandoned.
+    """
+    handles = [p.open("rb") for p in paths]
+    try:
+        yield handles
+    finally:
+        for h in handles:
+            h.close()
+
+
+def _spawn_holder(path: Path) -> subprocess.Popen:
+    """Start a separate process, block until it has `path` open, and hand it back.
+
+    An in-process handle proves the scan reads `/proc`; it cannot prove the scan reads
+    *another* process's table, which is the case the whole item is about. The child
+    prints only after its `os.open` returns, so the test never races the open, and then
+    `open_handle_holders` is asked directly before anything is classified — a box where
+    that read is impossible fails here with that named, instead of going green on a
+    rule that never ran.
+    """
+    code = ("import os, sys, time\n"
+            "os.open(sys.argv[1], os.O_RDONLY)\n"
+            "print('open', flush=True)\n"
+            "time.sleep(120)\n")
+    proc = subprocess.Popen([sys.executable, "-c", code, str(path)],
+                            stdout=subprocess.PIPE, text=True)
+    first = proc.stdout.readline().strip()
+    assert first == "open" and proc.poll() is None, (
+        f"the holding process never reported an open handle (got {first!r})")
+    deadline = time.time() + 10.0
+    while proc.pid not in m.open_handle_holders([path]).get(path.name, []):
+        assert time.time() < deadline, (
+            f"pid {proc.pid} opened {path} and said so, but `open_handle_holders` does "
+            "not see it: the /proc read #2481's rule is built on cannot be exercised on "
+            "this box")
+        time.sleep(0.05)
+    return proc
+
+
+def test_a_stray_database_a_live_process_has_open_is_reported_live_not_held_for_a_person(
+        monkeypatch, tmp_path):
+    """Clause 1: the handle decides, so the pin daemon's database leaves the human queue.
+
+    The pile is the 2026-10-09 05:02 one in miniature: the daemon's database beside a
+    copy nobody has opened, and the copy that is a person's call (#408's `perfbench`)
+    beside both. The handle is this test process's own — the cheapest real one
+    available, and the same fact `/proc` reports for pid 1867286 — and the bucket has
+    to name the pid it measured, because a verdict with no reader in it is the name
+    matching again in a different costume.
+    """
+    d = _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("evalpin.sqlite", 4096, 0.0),
+        ("evalpin.sqlite-wal", 64, 0.0),
+        ("evalpin.sqlite-shm", 32, 0.0),
+        ("perfbench.sqlite", 1024, 8.0)])
+    before = _listing(d)
+    with _open_handles(d / "evalpin.sqlite"):
+        report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo",
+                                dry_run=False)
+    sr = report["stray_retention"]
+    live = {e["name"]: e for e in sr["live_side_indexes"]}
+    assert "evalpin.sqlite" in live, (
+        f"a process has this file open and it is not in the live bucket: {sorted(live)}")
+    assert os.getpid() in live["evalpin.sqlite"]["pids"], (
+        "the live entry does not name the pid that was measured holding it, so the "
+        f"verdict came from something other than a handle: {live['evalpin.sqlite']}")
+    assert {h["name"] for h in sr["held_for_person"]} == {"perfbench.sqlite"}, (
+        "the human queue still contains running infrastructure, or lost the copy that "
+        f"belongs in it: {[h['name'] for h in sr['held_for_person']]}")
+    assert sr["planned"] == [] and sr["deleted"] == [], (
+        "a bucket move must not make anything deletable")
+    assert _listing(d) == before, (
+        "the acting run changed a file the classification only moved between buckets")
+
+
+@pytest.mark.parametrize("open_which", ["", "-wal", "-shm"],
+                         ids=["main-open", "wal-open-only", "shm-open-only"])
+def test_a_live_database_s_sidecars_are_reported_with_it_and_never_split_across_buckets(
+        monkeypatch, tmp_path, open_which):
+    """Clause 3: one database, one verdict, whichever end of it the handle is on.
+
+    Three cases in one node because they are the same rule seen from three sides. The
+    main-open case is the ordinary one and pins that the sidecars follow it. The
+    `-wal`-only and `-shm`-only cases are the shape the item actually caught:
+    `rebuild-20261004.sqlite-shm` carried a reader's mtime 2.7 days after its own main
+    file and was filed as an abandoned backup anyway, because per-file questions have no
+    answer for a sidecar. Whichever end is open, all three names have to land together.
+    """
+    d = _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("evalpin.sqlite", 4096, 0.0),
+        ("evalpin.sqlite-wal", 64, 0.0),
+        ("evalpin.sqlite-shm", 32, 0.0),
+        ("perfbench.sqlite", 1024, 8.0)])
+    trio = {"evalpin.sqlite", "evalpin.sqlite-wal", "evalpin.sqlite-shm"}
+    with _open_handles(d / f"evalpin.sqlite{open_which}"):
+        report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo",
+                                dry_run=False)
+    sr = report["stray_retention"]
+    live = {e["name"] for e in sr["live_side_indexes"]}
+    held = {h["name"] for h in sr["held_for_person"]}
+    assert live == trio, (
+        f"only the end with the handle on it was classified, and a split database is "
+        f"one report apiece: live={sorted(live)} held={sorted(held)}")
+    assert held == {"perfbench.sqlite"}, (
+        f"a sidecar of the live database was left in the human queue: {sorted(held)}")
+    assert not (live & held), (
+        "the same name is in both buckets, so the morning line counts it twice")
+    for e in sr["live_side_indexes"]:
+        assert e["database"] == "evalpin.sqlite", e
+
+
+def test_a_database_held_by_another_process_is_live_whatever_its_name(monkeypatch,
+                                                                       tmp_path):
+    """Clause 1's other side of the process boundary, on a name nothing here knows.
+
+    Two things an implementation can pass the in-process case and still fail here: a
+    scan of only this process's own descriptors, and a rule keyed on a name — whether
+    `evalpin` by another spelling, or the set of side-indexes eval code names. So the
+    holder is a real spawned child and the file is `unremarkable-copy.sqlite`, a name no
+    file in this repository refers to. `perfbench.sqlite` sits in the same directory,
+    unopened, and has to stay put: the two differ only by who has them open.
+    """
+    d = _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("unremarkable-copy.sqlite", 4096, 0.0),
+        ("unremarkable-copy.sqlite-wal", 64, 0.0),
+        ("perfbench.sqlite", 1024, 8.0)])
+    holder = _spawn_holder(d / "unremarkable-copy.sqlite")
+    try:
+        report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo",
+                                dry_run=False)
+    finally:
+        holder.kill()
+        holder.wait()
+    sr = report["stray_retention"]
+    live = {e["name"]: e for e in sr["live_side_indexes"]}
+    assert set(live) == {"unremarkable-copy.sqlite", "unremarkable-copy.sqlite-wal"}, (
+        f"a name no code here mentions, held open by a foreign pid, was not read as "
+        f"live: {sorted(live)}")
+    assert holder.pid in live["unremarkable-copy.sqlite"]["pids"], (
+        f"the live entry does not name the other process that holds it: "
+        f"{live['unremarkable-copy.sqlite']}")
+    assert {h["name"] for h in sr["held_for_person"]} == {"perfbench.sqlite"}, (
+        "the unopened copy in the same directory moved too, so the rule is reading "
+        "names or the directory, not handles")
+
+
+def test_the_morning_line_counts_live_side_indexes_apart_and_keeps_the_keep_list_out_of_it(
+        monkeypatch, tmp_path):
+    """Clause 4: four reasons a file survives, counted apart, with no double-count.
+
+    The pile is built so each bucket has a distinct, non-colliding population: a keep-list
+    `.bak` (3 files, held by a ruling), a live trio (3 files, held by a handle), and one
+    unopened stray (1 file). `held_for_person` therefore carries 4 entries — 3 of them the
+    keep-list's — and only the keep-list's come off the "outside the series" figure: the
+    live trio has already left that list, so subtracting it again would under-count, and
+    leaving it in would be the exact conflation #2481 is about. The assertion reads the
+    printed numbers back out of the sentence and compares them to the buckets the same run
+    reported, so a reworded line that moves a number between clauses goes red here.
+    """
+    d = _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("index.sqlite.bak-a", 3000, 1.0),
+        ("index.sqlite.bak-z", 2000, 5.0), ("index.sqlite.bak-z-wal", 20, 5.0),
+        ("index.sqlite.bak-z-shm", 0, 5.0),
+        ("evalpin.sqlite", 4096, 0.0),
+        ("evalpin.sqlite-wal", 64, 0.0),
+        ("evalpin.sqlite-shm", 32, 0.0),
+        ("perfbench.sqlite", 1024, 8.0)])
+    _keep_list_at(tmp_path, {"entries": [{"glob": "index.sqlite.bak-z*",
+                                          "reason": "the pre-wipe copy", "source": "#2420"}]})
+    before = _listing(d)
+    with _open_handles(d / "evalpin.sqlite"):
+        report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo",
+                                dry_run=False)
+    sr = report["stray_retention"]
+    line = [a for a in report["actions"] if a.startswith("stray files: ")]
+    assert len(line) == 1, f"the morning line is not there to count in: {report['actions']}"
+    nums = re.search(
+        r"(\d+) \.bak held on measured evidence \+ (\d+) \.bak held by the keep-list "
+        r"\+ (\d+) live side-index file\(s\) with a measured open handle "
+        r"\+ (\d+) outside the series", line[0])
+    assert nums, f"the actions line does not separate the four reasons: {line[0]}"
+    held_measured, kl_held, live_n, outside_n = (int(g) for g in nums.groups())
+    assert (held_measured, kl_held, live_n, outside_n) == (0, 1, 3, 1), (
+        f"the pile was built to give 0 measured + 1 keep-list + 3 live + 1 outside, "
+        f"the line says otherwise: {line[0]}")
+    assert (held_measured, kl_held, live_n) == (
+        len(sr["held"]), len(sr["keep_list"]["held"]), len(sr["live_side_indexes"])), (
+        "the line's counts are not its own buckets' counts")
+    assert outside_n == len(sr["held_for_person"]) - len(sr["keep_list"]["files"]) == 1, (
+        "the outside-the-series figure stopped subtracting exactly the keep-list files: "
+        f"held_for_person={[h['name'] for h in sr['held_for_person']]} "
+        f"keep_list_files={sr['keep_list']['files']}")
+    assert not ({h["name"] for h in sr["held_for_person"]}
+                & {e["name"] for e in sr["live_side_indexes"]}), (
+        "a name is in two buckets, so the two counts are not apart")
+    assert sr["planned"] == [] and sr["deleted"] == [] and _listing(d) == before, (
+        "counting a file live handed it to the delete path")
 
 
 # ── #1897: a fired capacity verdict escalates instead of riding a green run ──

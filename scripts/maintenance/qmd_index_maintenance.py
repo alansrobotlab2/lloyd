@@ -102,10 +102,15 @@ SAFETY CONTRACT — this runs unattended:
     re-run code-reference grep over Lloyd's own tree still matches, or whose
     `-wal`/`-shm` is newer than its own main file. Everything outside that series
     (`perfbench.sqlite`, `index.backup-*.sqlite`, the eval side-indexes this
-    directory shares with `eval/contextual_titles.py`) is measured, recorded under
-    `held_for_person`, and left alone: #844:141-142 ruled that deleting someone's
-    backup database is not a code round's call, and `/home` is mounted `noatime`,
-    so atime is not evidence of "unread" here and is not used as such. `--dry-run`
+    directory shares with `eval/contextual_titles.py`) is measured and left alone,
+    but not all in one bucket (#2481): one with an open handle held by a live
+    process of this user — read off `/proc`, not inferred from its name — goes under
+    `live_side_indexes` with its `-wal`/`-shm`, because calling running
+    infrastructure somebody's abandoned backup is what made the queue's byte total
+    track eval traffic instead of neglect; the rest go under `held_for_person`.
+    Neither is deletable: #844:141-142 ruled that deleting someone's backup database
+    is not a code round's call, and `/home` is mounted `noatime`, so atime is not
+    evidence of "unread" here and is not used as such. `--dry-run`
     deletes nothing; the plan is reported with `dry_run: true` instead.
   * A person's "keep this copy" ruling lives in a data file, not in a sentence
     (#2420). #2323 banned naming a candidate in any `*.py`/`*.ts`/`*.sh`/`*.yml`,
@@ -413,6 +418,12 @@ KEEP_LIST_NAME = "qmd-stray-keep-list.json"
 # excluded trees are neither ours nor read by us.
 CODE_REF_SUFFIXES = {".py", ".ts", ".sh", ".yml"}
 CODE_REF_EXCLUDED_DIRS = {".venvs", "llama.cpp", "qmd", "node_modules", ".git"}
+#: Where `open_handle_holders` asks who has a file open. Linux publishes every process's
+#: file-descriptor table as a directory of symlinks to the open files themselves, and
+#: reading another process's table is permitted only to its owner and root — so the
+#: answer is a measurement this job can always take of its own user's processes, needs no
+#: new dependency for, and takes in one pass over a directory that costs nothing to walk.
+PROC_ROOT = Path("/proc")
 
 
 def _live_index_names(index: Path) -> set[str]:
@@ -629,6 +640,84 @@ def keep_list_hold(name: str, entries: list[dict]) -> dict | None:
     return None
 
 
+def main_database_of(name: str) -> str:
+    """The database a file belongs to: `<db>-wal` and `<db>-shm` map to `<db>`.
+
+    A sqlite sidecar is not a copy of anything and is never opened on its own: whatever
+    has the `-wal` open has the database beside it open too, and whatever has the
+    database open owns both. So "is this file in use?" is a question with one answer per
+    database, and asking it per-file is exactly what filed a live server's `-shm` as
+    somebody's abandoned backup (#2481): the 2026-10-09 report's
+    `rebuild-20261004.sqlite-shm` carries the mtime signature of a reader, and the file
+    beside it does not, because they are one database.
+    """
+    for sfx in LIVE_SIDECARS:
+        if name.endswith(sfx):
+            return name[:-len(sfx)]
+    return name
+
+
+def open_handle_holders(paths) -> dict[str, list[int]]:
+    """Which of `paths` some process of this user holds open right now, keyed by name.
+
+    One pass over `/proc/<pid>/fd`, reading each descriptor's symlink and comparing it to
+    the wanted files by `(st_dev, st_ino)` — by inode rather than by path because
+    `~/.cache` can be reached by more than one spelling and an inode cannot be two files.
+    A process whose `/proc/<pid>` is owned by somebody else is skipped rather than
+    opened: another user's descriptor table is not readable by us, so it is absence of
+    evidence and not evidence of absence, and the classification this feeds is
+    conservative without it (a file nobody is measured holding stays where it was).
+
+    Nothing here consults a name. The liveness of a database is a fact about a file
+    descriptor, and the two candidates this was written for disagree on name alone:
+    `evalpin.sqlite` is an eval pin's database at 05:01 and gone by 05:16, while
+    `perfbench.sqlite` has had no reader for months and is still a person's call to
+    delete. Keying the split on either name, or on "a name some eval script mentions",
+    would move all of them (#2481). The same holds for a database nobody in this tree
+    refers to at all: what decides its bucket is the handle, so a test can open one in
+    its own process and be seen, which is also the only way to exercise this function
+    without waiting for a real daemon to be alive at 05:00.
+
+    Returns `{name: [pids]}` for the measured ones only; a file with no reader is simply
+    absent, and an unreadable `/proc` is an empty answer, never an exception.
+    """
+    wanted: dict[tuple[int, int], str] = {}
+    for p in paths:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        wanted[(st.st_dev, st.st_ino)] = p.name
+    if not wanted:
+        return {}
+    holders: dict[str, set[int]] = {}
+    me = os.getuid()
+    try:
+        pids = sorted(int(e.name) for e in os.scandir(PROC_ROOT) if e.name.isdigit())
+    except OSError:
+        return {}
+    for pid in pids:
+        try:
+            if (PROC_ROOT / str(pid)).stat().st_uid != me:
+                continue          # not ours to read, and not "this user's" either
+            fds = os.scandir(PROC_ROOT / str(pid) / "fd")
+        except OSError:
+            continue              # exited between the listing and the read
+        with fds:
+            for fd in fds:
+                try:
+                    link = os.readlink(fd.path)
+                    if link.endswith(" (deleted)"):
+                        continue  # unlinked already: nobody could delete it again
+                    st = os.stat(link)
+                except OSError:
+                    continue      # a socket, a pipe, an anon_inode: not a file
+                name = wanted.get((st.st_dev, st.st_ino))
+                if name:
+                    holders.setdefault(name, set()).add(pid)
+    return {n: sorted(v) for n, v in sorted(holders.items())}
+
+
 def plan_stray_retention(index: Path | None = None,
                          repo_root: Path | None = None,
                          report_dir: Path | None = None,
@@ -672,8 +761,8 @@ def plan_stray_retention(index: Path | None = None,
        see whoever did it, because a grep cannot match a path assembled at runtime. So
        a sidecar that still reads as a current open is reported and held, not resolved;
        one that stopped reading as one is a delete candidate like any other.
-    3. Anything outside the series is never this job's to delete. The directory is
-       shared write home for live eval side-indexes
+    3. Anything outside the series is never this job's to delete, but it is not all one
+       thing either. The directory is shared write home for live eval side-indexes
        (`eval/contextual_titles.py:41,71` opens `sub06.sqlite`,
        `eval/embed_side_index.py:52` builds `subctx.sqlite`), and #844:141-142
        already ruled that deleting someone's backup database is not a code round's
@@ -682,13 +771,27 @@ def plan_stray_retention(index: Path | None = None,
        holds is reported in this same `held_for_person` shape, because the reason it
        survives is a person's ruling rather than a reader this run can measure; the
        two kinds are told apart by that entry's `reason`/`source`, never by shape.
+
+       Whether a non-series file is somebody's abandoned copy or somebody's running
+       server is measured, never guessed from its name (#2481): a file whose database
+       `open_handle_holders` finds a descriptor on goes to `live_side_indexes` with
+       that database's `-wal`/`-shm` beside it, and everything else keeps its
+       `held_for_person` entry with the same #844 reason. Before this, the bucket
+       reading "awaiting a human delete decision" was fed by `evalpin.sqlite` for the
+       minutes a paired A/B check was alive — 720,035,840 B appearing at 05:02 and
+       gone by 05:16 — so its byte total tracked eval traffic, not neglect, and the
+       first name on a list presented as abandoned backups was a database a running
+       process owned at that instant. Nothing became deletable by moving buckets: both
+       are report-only, and `apply_stray_retention` still refuses any name that is not
+       a member of the backup series.
     """
     index = INDEX if index is None else index
     repo_root = REPO_ROOT if repo_root is None else repo_root
     report_dir = REPORT_DIR if report_dir is None else report_dir
     keep_list = keep_list_path(report_dir) if keep_list is None else keep_list
     out: dict = {"bak_series": [], "kept": [], "planned": [], "deleted": [],
-                 "deleted_bytes": 0, "held": [], "held_for_person": [], "errors": []}
+                 "deleted_bytes": 0, "held": [], "held_for_person": [],
+                 "live_side_indexes": [], "errors": []}
     if not index.exists():
         # No live index means a swap or a restore is in flight — the one moment
         # when freeing a backup is unambiguously the wrong thing to do. Measuring
@@ -765,14 +868,40 @@ def plan_stray_retention(index: Path | None = None,
     # `+=`, not `=`: the keep-list holds above are in this list too, and replacing it here
     # is what made a protected copy vanish from the one artifact that records why it
     # survived — the 2026-10-07 report's `held: []` with 2.58 GB gone.
-    out["held_for_person"] += [
-        {"name": f["name"], "bytes": f["bytes"],
-         "because": ("outside the index.sqlite.bak* series, so not this job's to "
-                     "delete: this directory is shared with live eval side-indexes, "
-                     "and #844:141-142 ruled that deleting someone's backup "
-                     "database is not a code round's call")}
-        for f in stray_files(index)["files"] if f["name"] not in in_series
-    ]
+    outside = [f for f in stray_files(index)["files"] if f["name"] not in in_series]
+    # One measurement, asked of the kernel rather than of a name list: which of these a
+    # process of this user has open right now. Grouped by database, because a `-wal` is
+    # in use exactly when the database beside it is and never otherwise — deciding it
+    # per-file is what let `rebuild-20261004.sqlite-shm`, stamped 2.7 days after its own
+    # main file, be filed as an abandoned backup beside a main nobody had opened (#2481).
+    readers = open_handle_holders([index.parent / f["name"] for f in outside])
+    db_pids: dict[str, set[int]] = {}
+    for name, pids in readers.items():
+        db_pids.setdefault(main_database_of(name), set()).update(pids)
+    live_dbs = set(db_pids)
+    for f in outside:
+        db = main_database_of(f["name"])
+        if db in live_dbs:
+            holders = sorted(db_pids[db])
+            entry = {"name": f["name"], "bytes": f["bytes"], "database": db,
+                     "pids": holders,
+                     "because": (f"a process of this user has {db} open right now "
+                                 f"(pid {', '.join(map(str, holders))}), so this is "
+                                 "running infrastructure and "
+                                 "not an abandoned copy: nothing here may be deleted "
+                                 "while it is live, and its size belongs in no queue "
+                                 "of backups awaiting a person")}
+            if db != f["name"]:
+                entry["because"] += (f" — listed with {db} because a sqlite sidecar "
+                                     "goes wherever the database it belongs to goes")
+            out["live_side_indexes"].append(entry)
+            continue
+        out["held_for_person"].append(
+            {"name": f["name"], "bytes": f["bytes"],
+             "because": ("outside the index.sqlite.bak* series, so not this job's to "
+                         "delete: this directory is shared with live eval side-indexes, "
+                         "and #844:141-142 ruled that deleting someone's backup "
+                         "database is not a code round's call")})
     return out
 
 
@@ -1781,11 +1910,17 @@ def main() -> int:
     if not args.dry_run and retention["planned"]:
         apply_stray_retention(retention)
     if stray["files"]:
-        # Three different reasons a file survives, counted apart: a reader this run
-        # measured (`held`), a person's keep-list (#2420), and a stray that was never
-        # in the series to begin with. Summing them into one "held" figure is how a
-        # ruling and a measurement become indistinguishable in the morning's report.
+        # Four different reasons a file survives, counted apart: a reader this run
+        # measured on a series candidate (`held`), a person's keep-list (#2420), a
+        # non-series file a live process has open right now (#2481), and a stray that
+        # was never in the series and has no measured reader. Summing them into one
+        # "held" figure is how a ruling and a measurement become indistinguishable in
+        # the morning's report — and how running infrastructure reads as an abandoned
+        # backup, which is the specific conflation #2481 took out of the last one.
+        # The keep-list files come off the fourth count only: they are series members
+        # held in `held_for_person` by name, and the live bucket holds none of them.
         kl_files = len(retention.get("keep_list", {}).get("files", []))
+        live_files = len(retention.get("live_side_indexes", []))
         report["actions"].append(
             f"stray files: {len(stray['files'])} file(s), "
             f"{stray['bytes'] / 1e9:.2f} GB beside the live index; kept newest "
@@ -1794,7 +1929,8 @@ def main() -> int:
             f"{len(retention['planned'])} planned on an acting run, "
             f"{len(retention['held'])} .bak held on measured evidence + "
             f"{len(retention.get('keep_list', {}).get('held', []))} .bak held by the "
-            f"keep-list + {len(retention['held_for_person']) - kl_files} outside the "
+            f"keep-list + {live_files} live side-index file(s) with a measured open "
+            f"handle + {len(retention['held_for_person']) - kl_files} outside the "
             f"series")
     report["stray_retention"] = retention
     pend = pending_embeddings()
