@@ -439,45 +439,7 @@ def _prompt_and_region(path: Path) -> tuple[str, str]:
         task.get("body") or "")
 
 
-def test_every_task_body_says_it_is_not_delivered_to_the_worker():
-    """#951 clause 1: the body is documentation, and it says so, in one line, at
-    the top of every task file — and the line is not a lie, because the prompt
-    the same loaders build still excludes it.
-
-    The second half is the fork point. If a future round ever injects bodies into
-    `_build_task_prompt` (the other branch #951 considered, and the one only a
-    person can take, since it re-sends ~40x the current instruction channel every
-    tick), this fails on every file at once, which is exactly when the sentence on
-    all of them has to be rewritten.
-    """
-    from agent_mcp._shared import TASK_BODY_CONTRACT
-
-    files = _task_files()
-    assert files, f"{_task_dir()} matches no task files — the pin would pass vacuously"
-
-    missing = []
-    for path in files:
-        body = _body_of(path)
-        first = next((ln for ln in body.splitlines() if ln.strip()), "")
-        if first.strip() != TASK_BODY_CONTRACT:
-            missing.append(path.name)
-    assert not missing, (
-        "task bodies that do not open by saying they are not delivered to the "
-        f"worker: {missing}. Add `TASK_BODY_CONTRACT` as the body's first line — "
-        "a file created after it landed has it already (`with_body_contract`), so "
-        "a failure here is either an edit that removed it or the line drifted from "
-        "`agent_mcp/_shared.py`.")
-
-    lied = [path.name for path in files
-            if TASK_BODY_CONTRACT in _prompt_and_region(path)[0]]
-    assert not lied, (
-        f"{lied}: the body says it is not delivered to the worker, but the prompt "
-        "built for it now contains that line — `_build_task_prompt` started "
-        "carrying bodies, so every task file's first line is false and the "
-        "instruction/documentation split has to be re-decided, not re-worded.")
-
-
-#: The corpus this guard is parametrized over, read once at import.
+#: The corpus BOTH corpus guards below are parametrized over, read once at import.
 #:
 #: It has to be read at import because that is when pytest collects nodes, and the
 #: node id is the only handle `scripts/automod/vault_guards.py::agreement` has: it
@@ -490,6 +452,11 @@ def test_every_task_body_says_it_is_not_delivered_to_the_worker():
 #: this file's node in `guards.excerpt` beside a `baseline` of `{ran: 31, failed: 1,
 #: files: 1}` and `refuse: false`). One node per file answers the only question a
 #: land-time rail can answer: did THIS land make a file bad.
+#:
+#: Both sweeps below take THIS one list rather than each calling `_task_files()`
+#: again, so the two guards can never grade two different corpora;
+#: `test_the_body_tool_guard_sweeps_a_non_empty_corpus` is the node that holds both
+#: of them to it.
 _TASK_SWEEP = _task_files()
 
 
@@ -497,6 +464,73 @@ def _sweep_id(path: Path) -> str:
     """The node id of one corpus node: its file's name, so the refusal a land
     writes names the file it refused, not the corpus it walked."""
     return path.name
+
+
+@pytest.mark.parametrize("task_file", _TASK_SWEEP, ids=_sweep_id)
+def test_task_body_opens_by_saying_it_is_not_delivered(task_file: Path):
+    """#951 clause 1, one node per task file: this body opens by saying what it is —
+    documentation and a machine-written activity log, not an instruction channel.
+
+    Swept by #2470. Until then this was one node over the whole corpus, which
+    answers "is any task file bad" — the question one already-bad file answers for
+    ever, so every later land that stripped the line off one MORE file was excused
+    as pre-existing (see `_TASK_SWEEP` and the three `vault_land` rows it names).
+    This node receives its file as the parameter and reads nothing else, so the id
+    that goes red IS the file, and a land that reddened it cannot hide behind a
+    neighbour that was already red.
+
+    The corpus is `_TASK_SWEEP`, never a fresh `_task_files()` call: a sweep that
+    re-reads the directory when it runs grades a list its own node ids were not
+    collected from, which is exactly the import-versus-call drift
+    `test_the_body_tool_guard_sweeps_a_non_empty_corpus` exists to catch.
+    """
+    from agent_mcp._shared import TASK_BODY_CONTRACT
+
+    body = _body_of(task_file)
+    first = next((ln for ln in body.splitlines() if ln.strip()), "")
+    assert first.strip() == TASK_BODY_CONTRACT, (
+        f"{task_file.name} does not open by saying it is not delivered to the "
+        f"worker; its first non-blank line is {first.strip()[:120]!r}. Add "
+        "`TASK_BODY_CONTRACT` as the body's first line — a file created after it "
+        "landed has it already (`with_body_contract`), so a failure here is either "
+        "an edit that removed it or the line drifted from `agent_mcp/_shared.py`.")
+
+
+def test_no_built_task_prompt_carries_the_body_contract_line():
+    """#951 clause 1's fork point, and deliberately ONE corpus-wide node rather than
+    a sweep: the line the sweep above pins says the body is not delivered to the
+    worker, and the prompt the same loaders build must still exclude it.
+
+    This is the node that is INTENDED TO FAIL EVERYWHERE AT ONCE, and it has to stay
+    exactly one node. If a future round ever injects bodies into `_build_task_prompt`
+    (the other branch #951 considered, and the one only a person can take, since it
+    re-sends ~40x the current instruction channel every tick), then the sentence on
+    every task file becomes false in the same commit. Swept, that arrives as one red
+    id per file — many refusals that read as though the corpus drifted, each naming a
+    file nobody edited. As one corpus-wide node it arrives as the signal it is: bodies
+    started being delivered, so the sentence on all of them has to be re-decided, not
+    re-worded. `test_the_contract_line_split_collects_in_a_child_run` is what pins
+    that this is still one node and the sweep is still one node per file.
+    """
+    from agent_mcp._shared import TASK_BODY_CONTRACT
+
+    # The same import-time corpus both sweeps are collected from, so this fork
+    # point and they cannot be grading two different directories. The assert is
+    # here because a corpus of nothing builds no prompt and so could never fail:
+    # the dedicated pin is `test_the_body_tool_guard_sweeps_a_non_empty_corpus`,
+    # and this is the same guard so the node cannot pass on an empty corpus even
+    # when it is the only node that ran.
+    assert _TASK_SWEEP, (
+        f"{_task_dir()} matches no task files — with no body to build a prompt "
+        "from, this fork point could not have failed, which is the vacuous pass "
+        "this module calls the one outcome worse than a false alarm")
+    lied = [path.name for path in _TASK_SWEEP
+            if TASK_BODY_CONTRACT in _prompt_and_region(path)[0]]
+    assert not lied, (
+        f"{lied}: the body says it is not delivered to the worker, but the prompt "
+        "built for it now contains that line — `_build_task_prompt` started "
+        "carrying bodies, so every task file's first line is false and the "
+        "instruction/documentation split has to be re-decided, not re-worded.")
 
 
 @pytest.mark.parametrize("task_file", _TASK_SWEEP, ids=_sweep_id)
@@ -564,15 +598,27 @@ def test_the_task_corpus_follows_the_vault_root_knob(tmp_path, monkeypatch):
         "an unset knob no longer means the live vault, so every plain suite run moved"
 
 
+#: The corpus sweeps in this module, in the order a reader meets them. Each is one
+#: node per task file, and all of them are collected from `_TASK_SWEEP`.
+_CORPUS_SWEEPS = (test_task_body_opens_by_saying_it_is_not_delivered,
+                  test_no_task_body_orders_a_tool_its_prompt_never_names)
+
+
 def test_the_body_tool_guard_sweeps_a_non_empty_corpus():
-    """The parametrized sweep collects zero nodes on an empty corpus (#2265).
+    """Every corpus sweep in this module collects zero nodes on an empty corpus (#2265).
 
     `@pytest.mark.parametrize` over `[]` collects nothing and reports nothing
     failed, so a guard whose corpus moved, emptied or failed to glob would read as
     agreement at land time — the vacuous pass this module already names as the one
     outcome worse than a false alarm. This node is the dedicated non-emptiness pin
-    the sweep cannot carry itself, and it is why the sweep's denominator is the
-    same `_task_files()` call the sweep was collected from.
+    no sweep can carry itself, and it is why each sweep's denominator is the same
+    `_TASK_SWEEP` the other one was collected from.
+
+    The third assert is what makes the pin bind a SWEEP rather than a variable: a
+    list this node measures means nothing for a guard that stopped being collected
+    from it, so this reads the parametrize mark straight off each swept function.
+    A sweep re-gathered into one whole-corpus loop, or re-pointed at some other
+    list, goes red HERE instead of quietly collecting fewer nodes than were graded.
     """
     files = _task_files()
     assert files, (
@@ -582,6 +628,15 @@ def test_the_body_tool_guard_sweeps_a_non_empty_corpus():
         "the corpus moved between import and this call; the sweep graded "
         f"{[p.name for p in _TASK_SWEEP]} and this node graded "
         f"{[p.name for p in files]}")
+    for swept in _CORPUS_SWEEPS:
+        marks = [m for m in swept.pytestmark if m.name == "parametrize"]
+        assert len(marks) == 1, (
+            f"{swept.__name__} is not a corpus sweep any more: {marks}")
+        assert list(marks[0].args[1]) == files, (
+            f"{swept.__name__} is not parametrized over the corpus this node just "
+            "measured, so the two asserts above say nothing about how many nodes "
+            "it collects")
+
 
 
 def test_the_sweep_collects_one_node_per_file_in_a_probe_child(tmp_path):
@@ -618,6 +673,133 @@ def test_the_sweep_collects_one_node_per_file_in_a_probe_child(tmp_path):
     assert nodes == [rel.as_posix()
                      + "::test_no_task_body_orders_a_tool_its_prompt_never_names"
                        "[7-k.md]"], nodes
+
+
+def test_the_contract_line_split_collects_in_a_child_run():
+    """#2470's seam: the split exists only if a CHILD pytest collects it that way.
+
+    `agreement` decides whether a land stripped a task's contract line by
+    differencing the NODE IDS a fresh pytest collects for this module
+    (`scripts/automod/vault_guards.py:953`). That is a process boundary and an
+    import-time fact. Reading `pytestmark` inside this process — which is what
+    `test_the_body_tool_guard_is_one_node_per_task_file` does for the body-tool
+    sweep — proves what the decorator holds, not what a run with no memory of this
+    one actually gathers. So this node launches the real command: `--collect-only`
+    of this module in a child process, with the environment INHERITED (the knob
+    unset means the live vault, the knob set means the mirror the probe handed this
+    run, so the parent and its child always grade one corpus), and asks the two
+    questions the split has to answer:
+
+      * one contract-line id per task file, each named by that file's own name.
+        That count was ZERO before #2470 — one bare id for the whole corpus, which
+        is what let a land that stripped one line be excused as pre-existing;
+      * exactly ONE id for the fork-point check, because a fork point swept one
+        node per file would report the moment bodies started being delivered as a
+        corpus full of individually-red files.
+
+    The outer run's identity is stripped from the child with the same list
+    `vault_guards` uses for its own probe children (#2044: a leaked
+    `PYTEST_XDIST_WORKER` made a serial re-ask inherit the parallel flake it exists
+    to clear), so the child is a plain serial collection of this one file.
+    """
+    from scripts.automod.vault_guards import PYTEST_CHILD_ENV_DROP
+
+    expected = _task_files()
+    assert expected, f"{_task_dir()} matches no task files — nothing to collect"
+
+    env = dict(os.environ)
+    for name in PYTEST_CHILD_ENV_DROP:
+        env.pop(name, None)
+    rel = Path(__file__).resolve().relative_to(ROOT)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", str(rel), "-q", "--collect-only",
+         "--no-header", "-p", "no:cacheprovider", "-W", "ignore"],
+        cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=300,
+        check=False)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out[-800:]
+    lines = [ln.strip() for ln in out.splitlines() if "::test_" in ln]
+    prefix = f"{rel.as_posix()}::test_task_body_opens_by_saying_it_is_not_delivered"
+    contract = [ln for ln in lines if prefix in ln]
+    assert contract == [f"{prefix}[{p.name}]" for p in expected], contract
+    fork = [ln for ln in lines
+            if "::test_no_built_task_prompt_carries_the_body_contract_line" in ln]
+    assert fork == [rel.as_posix()
+                    + "::test_no_built_task_prompt_carries_the_body_contract_line"], fork
+
+
+def test_the_contract_line_split_guards_fire_on_their_own_offender(tmp_path,
+                                                                  monkeypatch):
+    """A corpus guard that finds nothing today has to show it can find something, or
+    it is a green light and not a check — the standard
+    `test_the_body_tool_guard_fires_on_an_undelivered_tool` holds the sibling to.
+
+    Four nodes from the split, five failures, and each one is something only that
+    node can see:
+
+      * the swept node, on a body whose first line is not the contract: red, and the
+        refusal names the offending file, which is the entire point of one node per
+        file. The well-formed file in the same fixture must stay green — a guard that
+        fails every file handed to it is as useless as one that fails none.
+      * the fork point, on a prompt builder made to carry the body: red. Patching
+        `_build_task_prompt` is the only way to reach this branch without a person
+        injecting bodies for real, and the patch lands on the module attribute
+        `_prompt_and_region` looks up on every call, so it is the real seam.
+      * the child-run pin, on a parent that believes the corpus is a file no child
+        can see: red. The patch is in-process only, so the child still collects the
+        real corpus and the two lists cannot agree — the exact disagreement the pin
+        exists to catch.
+      * the non-emptiness pin, twice: on a corpus that emptied, which is the vacuous
+        zero-node sweep it was written for; and on a sweep re-pointed at some other
+        list, which is the edge at which measuring a corpus says nothing about what
+        was graded.
+    """
+    import app.autonomy as A
+    from agent_mcp._shared import TASK_BODY_CONTRACT
+
+    good = tmp_path / "8-good.md"
+    good.write_text(f"---\nid: 8\nname: Good\n---\n\n{TASK_BODY_CONTRACT}\n\n"
+                    "# Do the work\n", encoding="utf-8")
+    bad = tmp_path / "9-bad.md"
+    bad.write_text("---\nid: 9\nname: Bad\n---\n\n# Do the work\n", encoding="utf-8")
+
+    with pytest.raises(AssertionError) as got:
+        test_task_body_opens_by_saying_it_is_not_delivered(bad)
+    assert "9-bad.md" in str(got.value), str(got.value)[:200]
+    test_task_body_opens_by_saying_it_is_not_delivered(good)
+
+    real_builder = A._build_task_prompt
+    monkeypatch.setattr(
+        A, "_build_task_prompt",
+        lambda task, skill: real_builder(task, skill) + "\n" + TASK_BODY_CONTRACT)
+    with pytest.raises(AssertionError) as got:
+        test_no_built_task_prompt_carries_the_body_contract_line()
+    assert "the body says it is not delivered to the worker" in str(got.value), \
+        str(got.value)[:200]
+    monkeypatch.undo()
+
+    bogus = tmp_path / "99-invisible-to-a-child.md"
+    monkeypatch.setattr(sys.modules[__name__], "_task_files",
+                        lambda task_dir=None: [bogus])
+    with pytest.raises(AssertionError) as got:
+        test_the_contract_line_split_collects_in_a_child_run()
+    assert "99-invisible-to-a-child.md" in str(got.value), str(got.value)[:300]
+
+    # The non-emptiness pin, on the two vacuity edges it exists to close: a corpus
+    # that emptied, and a sweep that no longer reads the list this node measures.
+    monkeypatch.undo()
+    monkeypatch.setattr(sys.modules[__name__], "_task_files",
+                        lambda task_dir=None: [])
+    with pytest.raises(AssertionError) as got:
+        test_the_body_tool_guard_sweeps_a_non_empty_corpus()
+    assert "matches no task files" in str(got.value), str(got.value)[:200]
+
+    monkeypatch.undo()
+    monkeypatch.setattr(sys.modules[__name__], "_CORPUS_SWEEPS",
+                        (test_the_skill_exists,))
+    with pytest.raises(AssertionError) as got:
+        test_the_body_tool_guard_sweeps_a_non_empty_corpus()
+    assert "is not parametrized over the corpus" in str(got.value), str(got.value)[:200]
 
 
 def test_the_body_tool_guard_is_one_node_per_task_file():
