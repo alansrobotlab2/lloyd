@@ -1,5 +1,7 @@
-"""Skill templates must not hand-type a season's timezone abbreviation beside a
-displayed-time token — stated once, and checked where writes land.
+"""Skill templates must not state a clock in the wrong zone — stated once, and
+checked where writes land. Two rules share this module and its two consumers: a
+hand-typed season abbreviation beside a displayed-time token, and (since #2454) a
+commit subject whose date interpolation reads the box's local day.
 
 Why this is a module and not only a test
 ----------------------------------------
@@ -69,6 +71,23 @@ carve-outs, each pinned by a mutation test:
 That boundary is not a convenience: the dedupe that merged #1079 and #1112 into
 unrelated items matched on exactly this shared timezone vocabulary (lexical
 0.105 and 0.125). Vocabulary must never be what a check alarms on.
+
+The second rule: a clock claim written into a commit subject (#2454)
+--------------------------------------------------------------------
+A commit subject built with ``$(date +%Y-%m-%d)`` states a date in the box's zone
+while the commit's own author date is UTC, so on this UTC-7 host the subject
+carries the *previous* calendar day for the seven hours either side of UTC midnight
+— 8 h of disagreement once DST lands. ``#2227`` swept seven such subjects to
+``$(date -u …)`` and shipped no rail, so the next edit deleting those two letters
+re-enters through ``automod_vault_land`` unrefused; that is the regression
+:func:`_subject_spans` now refuses, judged on the quoted message argument of
+``git commit -m`` / ``vault-commit.sh`` only.
+
+The scope difference from the zone rule is deliberate and pinned by mutations: a
+``$(date …)`` in a filename or an env value on the same line makes no claim about the
+commit, while a ``date -u`` *sibling* on that line cannot excuse a local subject —
+which is exactly how #2227's own line-level ``grep -v 'date -u'`` under-reported
+(printing 6 where the truth was 7), and why line-level filtering is not the check.
 """
 
 from __future__ import annotations
@@ -106,27 +125,97 @@ TIME_PLACEHOLDER = re.compile(r"\bHH:MM\b")
 HEADER_FIELD = re.compile(r"^\s*(?:[-*>|]\s*)?(?:generated|updated|created|timestamp|date)\s*:")
 
 
+#: Shape 3 (#2454) — the second clock a template can get wrong: not a displayed
+#: time a reader misparses, but a stamp that is silently written wrong. The two
+#: commit invocations the skills tree writes messages with. ``git commit`` takes its
+#: message from the argument a ``-m`` flag introduces and ``vault-commit.sh`` from
+#: its first quoted positional, so a subject is only ever one of those spans — which
+#: is what lets a ``$(date …)`` in a filename or an env value on the same line stay
+#: out of scope.
+COMMIT_CMD = re.compile(r"(?:\bgit\s+commit\b|\bvault-commit\.sh\b)")
+_GIT_MESSAGE = re.compile(r"""(?:^|[ \t])(?:-m|--message)[ \t=]*(?P<s>"[^"\n]*"|'[^'\n]*')""")
+_WRAPPER_MESSAGE = re.compile(r"""^[ \t]*(?P<s>"[^"\n]*"|'[^'\n]*')""")
+#: A ``date`` call substitution inside a template. An invocation carrying an
+#: explicit ``TZ=`` prefix is deliberately not matched: it states the zone it means,
+#: which is the fix the first rule points at rather than this defect.
+DATE_SUBST = re.compile(r"\$\(\s*date\b(?P<args>[^)]*)\)")
+#: The flag that makes the invocation UTC. Token-anchored, so a format directive
+#: that happens to end in ``u`` (``%Hu``, ``%-u``) is not read as the flag.
+UTC_FLAG = re.compile(r"(?:^|\s)(?:-u|--utc)(?:\s|$)")
+
+
+def _subject_spans(line: str) -> list[str]:
+    """The quoted commit subjects on ``line``, in order, quotes included.
+
+    Span-scoped rather than line-scoped, in both directions of the mistake:
+
+    * A line carries other ``$(date …)`` calls that make no claim about the commit.
+      The live corpus has ``| tee /tmp/preflight-$(date +%s).txt`` after a clean
+      subject (``nightly-reflection-signals/SKILL.md:266``) and
+      ``LLOYD_JOB_WRITES="…$(date -u +%F).md"`` before one
+      (``nightly-reflection-config/SKILL.md:159``).
+    * A line-level exemption is how #2227 under-reported: its own
+      ``grep -v 'date -u'`` dropped a line whose only local clock read was inside
+      the subject, because a ``date -u`` appeared somewhere else on it, and printed
+      6 where the truth was 7.
+    """
+    spans: list[str] = []
+    for cmd in COMMIT_CMD.finditer(line):
+        tail = line[cmd.end():]
+        if cmd.group(0).endswith("vault-commit.sh"):
+            first = _WRAPPER_MESSAGE.match(tail)
+            if first:
+                spans.append(first.group("s"))
+        else:
+            spans.extend(m.group("s") for m in _GIT_MESSAGE.finditer(tail))
+    return spans
+
+
 def template_clock_violations(name: str, body: str) -> list[str]:
-    """Why this skill template hand-typed a zone beside a displayed time, or [].
+    """Why this skill template states a clock in the wrong zone, or [].
 
     Scoped to one body, like ``reflection_archive.skill_rule_violations``,
     because the vault writer is handed the one path a round touched — a
     pre-existing literal in an untouched skill must not block an unrelated
     round, and must not be able to hide either: the live-vault scan in
     ``tests/test_skill_timezone_literals.py`` judges the whole tree.
+
+    The two rules read different versions of a line, on purpose:
+
+    * The zone rule sees the line with inline code spans stripped, which is the
+      documented exemption for code that legitimately needs local time
+      (``$(TZ=… date …)``, ``local_timestamp = datetime.now()``) — and the residual
+      it leaves, since exempted code can still name an abbreviation beside a
+      displayed time, is pinned as a known gap rather than claimed refused.
+    * The commit-subject rule sees the **raw** line, inline code included. For a
+      command, backticks are markdown's way of saying "copy this", not "this word is
+      under discussion" — the skills tree already documents subjects that way
+      (``skills/github-pr-workflow/SKILL.md`` shows
+      ``git add . && git commit -m "fix: ..." && git push``) — so stripping them
+      would exempt the exact shape a regressed subject takes. Measured on the
+      194-skill active corpus on 2026-10-09: 0 violations either way, so the wider
+      scope costs nothing today.
     """
     out: list[str] = []
     for lineno, raw in enumerate(body.splitlines(), 1):
         line = CODE_SPAN.sub("", raw)
-        if not ZONE_ABBR.search(line):
-            continue
-        is_template = bool(TIME_PLACEHOLDER.search(line)) or bool(HEADER_FIELD.match(line))
-        if not is_template:
-            continue
-        out.append(
-            f"{name}: line {lineno}: hardcoded zone abbreviation beside a "
-            f"displayed-time token — interpolate it from a clock "
-            f"(TZ=America/Los_Angeles date '+%H:%M %Z') or emit an ISO-8601 Z "
-            f"stamp (date -u +%Y-%m-%dT%H:%M:%SZ) instead: {raw.strip()[:120]!r}"
-        )
+        if ZONE_ABBR.search(line):
+            is_template = bool(TIME_PLACEHOLDER.search(line)) or bool(HEADER_FIELD.match(line))
+            if is_template:
+                out.append(
+                    f"{name}: line {lineno}: hardcoded zone abbreviation beside a "
+                    f"displayed-time token — interpolate it from a clock "
+                    f"(TZ=America/Los_Angeles date '+%H:%M %Z') or emit an ISO-8601 Z "
+                    f"stamp (date -u +%Y-%m-%dT%H:%M:%SZ) instead: {raw.strip()[:120]!r}"
+                )
+        for span in _subject_spans(raw):
+            for local in DATE_SUBST.finditer(span):
+                if UTC_FLAG.search(local.group("args") + " "):
+                    continue
+                out.append(
+                    f"{name}: line {lineno}: interpolates `{local.group(0)}` into a "
+                    f"commit subject, so the subject carries the box's local day "
+                    f"while the commit's own author date is UTC — interpolate "
+                    f"`$(date -u +…)` instead: {raw.strip()[:120]!r}"
+                )
     return out

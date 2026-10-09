@@ -46,6 +46,12 @@ states: an assertion about a tree no round under test controls (an hourly
 writer can re-word a skill between rounds) belongs on the writer, not on a hard
 gate rung that would fail the next author for the previous writer's wording. The
 mutations, which read no vault, are not marked and cannot be skipped.
+
+Since #2454 the same file guards the module's second rule, on the same two
+consumers: a commit subject whose ``$(date …)`` reads the box's local day. Those
+mutations are at the bottom of this file, under their own heading, and the
+positive control beside them counts the live subjects the rule has to judge — so
+the corpus zero stays distinguishable from a pattern that matches nothing.
 """
 
 from __future__ import annotations
@@ -432,4 +438,216 @@ def test_the_writer_and_the_test_share_one_definition():
     assert "skill_timezone_errors(paths)" in src, (
         "skill_timezone_errors is imported but not wired into validate(): a "
         "guard whose input nothing wired up"
+    )
+
+
+# --- #2454: the second clock the same template can get wrong: the commit subject ----
+#
+# #2227 swept seven nightly commit subjects from `$(date +%Y-%m-%d)` to
+# `$(date -u +%Y-%m-%d)` and shipped no rail, so the next edit that deletes the two
+# letters puts a local day back into every vault commit subject that job writes —
+# and nothing on the landing path notices, because `template_clock_violations` only
+# knew about zone abbreviations. The shapes below are the swept lines with `-u`
+# deleted (skills/nightly-reflection-signals/SKILL.md:266 and
+# skills/nightly-reflection-knowledge-write/SKILL.md:95 are their landed form), so
+# each mutation is a regression someone can actually type, not a invented string.
+#
+# Why the rule reads the quoted subject span and not the line: #2227's own
+# line-level check (`grep -v 'date -u'`) printed 6 where the truth was 7, because a
+# `date -u` sibling anywhere on the line hid a local one — and the live corpus
+# proves the converse too, with `$(date +%s)` sitting in a tmp filename on the same
+# line as a clean subject. Both directions are pinned here.
+
+#: A commit command with its message in the next quoted argument, at either of the
+#: two spellings the skills tree uses. Test-local on purpose: the matcher under test
+#: lives in ``scripts/skill_timezone.py``, and this pattern is only the population
+#: probe for the positive control below — importing the rule's own constant there
+#: would make that control assert the rule equals itself.
+_SUBJECT_LINE = re.compile(r"""(?:git commit -m|vault-commit[.]sh)\s+["']""")
+_ANY_DATE_SUBST = re.compile(r"\$\(\s*date\b")
+
+#: The two spellings, each one real skill line with ` -u` deleted from its
+#: `$(date …)`. Value is the command; it goes into a fenced block on line 4.
+_LOCAL_SUBJECT_SHAPES = {
+    "git commit -m": ('git add -A && git diff --cached --quiet || git commit -m '
+                      '"nightly: knowledge write $(date +%Y-%m-%d)"'),
+    "vault-commit.sh": ('LLOYD_JOB=nightly-reflection-signals '
+                        '~/lloyd/scripts/util/vault-commit.sh "nightly-reflection: '
+                        'pre-flight $(date +%Y-%m-%d) (unattributed dirty state)"'),
+}
+
+
+def _command_body(command: str) -> str:
+    """A minimal skill with `command` as a fenced bash block, on line 4."""
+    return "# Skill\n\n```bash\n" + command + "\n```\n"
+
+
+@pytest.mark.parametrize("spelling", sorted(_LOCAL_SUBJECT_SHAPES))
+def test_a_local_date_interpolation_in_a_commit_subject_is_refused(spelling):
+    """Clause 1: both command spellings, and the refusal names skill, line and span.
+
+    The deleted `-u` is the whole regression: `date +%Y-%m-%d` on this box is
+    UTC-7, so the subject's day is the previous calendar day for the seven hours
+    either side of UTC midnight, and it disagrees with the commit's own author date.
+    """
+    body = _command_body(_LOCAL_SUBJECT_SHAPES[spelling])
+    vs = template_clock_violations("mutant-skill", body)
+    assert vs, f"the rule let a local commit subject through ({spelling}): {body!r}"
+    assert vs[0].startswith("mutant-skill: line 4:"), (
+        f"a violation must name the skill and the line: {vs[0]}"
+    )
+    assert "$(date +%Y-%m-%d)" in vs[0], (
+        f"the refusal must quote the offending interpolation: {vs[0]}"
+    )
+    assert "-u" in vs[0], (
+        f"the refusal has to name the flag that fixes it: {vs[0]}"
+    )
+
+
+@pytest.mark.parametrize("spelling", sorted(_LOCAL_SUBJECT_SHAPES))
+def test_the_same_subject_with_the_u_flag_is_clean(spelling):
+    """Clause 2: the swept line, byte for byte, is what the rule blesses.
+
+    Generated from the flagged shape by inserting ` -u` rather than by retyping it,
+    so the two fixtures cannot drift into different subjects and quietly stop being
+    the same line with one change.
+    """
+    command = _LOCAL_SUBJECT_SHAPES[spelling].replace("$(date +", "$(date -u +")
+    assert "-u" in command, command
+    assert template_clock_violations("fixed-skill", _command_body(command)) == [], (
+        f"the form #2227 swept to must be landable: {command!r}"
+    )
+
+
+def test_a_date_u_sibling_on_the_same_line_cannot_hide_a_local_subject():
+    """Clause 3: line-level `grep -v 'date -u'` is the check this replaces.
+
+    #2227's own grep printed 6 where the truth was 7 for exactly this reason: the
+    per-line filter removed a line whose *only* local clock read was inside the
+    subject, because a `date -u` appeared elsewhere on it. Here the sibling is a
+    real one — an `LLOYD_JOB_WRITES` value in the shape
+    skills/nightly-reflection-config/SKILL.md:159 writes — and the local subject
+    beside it must still be refused. The rule can promise this because it never
+    looks at the line, only at the quoted subject span.
+    """
+    command = ('LLOYD_JOB_WRITES="memory/learnings/$(date -u +%F).md" '
+               'git commit -m "nightly: knowledge write $(date +%Y-%m-%d)"')
+    vs = template_clock_violations("sibling-skill", _command_body(command))
+    assert len(vs) == 1, (
+        "a `date -u` sibling hid a local subject — the exact miss that made "
+        f"#2227's grep under-report (1 hit wanted, 6 printed): {vs}"
+    )
+    assert "$(date +%Y-%m-%d)" in vs[0], (
+        f"the refusal must show the local span, not the sibling: {vs[0]}"
+    )
+
+    # The stronger form of the same defect, inside one subject: the second
+    # interpolation is the local one and `len(vs) == 1` is what proves the
+    # first did not excuse it.
+    both = _command_body('git commit -m "nightly: wrote $(date -u +%H:%M) about '
+                         '$(date +%Y-%m-%d)"')
+    vs2 = template_clock_violations("two-span-skill", both)
+    assert len(vs2) == 1 and "$(date +%Y-%m-%d)" in vs2[0], (
+        f"a UTC interpolation beside a local one in the same subject excused it: {vs2}"
+    )
+
+
+def test_a_date_substitution_outside_a_commit_subject_span_is_not_a_clock_claim():
+    """Clause 4: filenames, env values and tmp files are not subjects.
+
+    Three shapes, all taken from live skill prose so the boundary is a real one and
+    not a convenience: the artifact filename #2454 names, the `tee` tmp file at
+    skills/nightly-reflection-signals/SKILL.md:266 — whose local `$(date +%s)` sits
+    on the same line as a subject that is clean — and the `LLOYD_JOB_WRITES` prefix
+    before the wrapper at skills/nightly-reflection-config/SKILL.md:159. A rule that
+    flagged these would be red on the corpus it ships against, and the first fix
+    anyone would apply to a noisy rail is to delete it.
+    """
+    clean = (
+        "out=consolidation-$(date +%Y-%m-%d).md\n"
+        'LLOYD_JOB=nightly-reflection-signals ~/lloyd/scripts/util/vault-commit.sh '
+        '"nightly-reflection: pre-flight $(date -u +%Y-%m-%d) (unattributed dirty '
+        'state)" 2>&1 | tee /tmp/preflight-$(date +%s).txt\n'
+        'LLOYD_JOB=nightly-reflection-config LLOYD_JOB_WRITES="autonomy/x.md:'
+        'memory/learnings/$(date -u +%F).md" ~/lloyd/scripts/util/vault-commit.sh '
+        '"nightly-reflection: post-improvement $(date -u +%Y-%m-%d)" -- memory/\n'
+    )
+    vs = template_clock_violations("filename-skill", clean)
+    assert vs == [], f"a non-subject `$(date …)` was flagged: {vs}"
+
+
+def test_the_vault_writer_refuses_a_local_subject_and_lets_the_u_form_land(scratch_vault):
+    """The process boundary this rule exists for: `validate()`, at land time.
+
+    `template_clock_violations` is the definition, but what #2227 left without a
+    rail is the *writer*: `skill_timezone_errors` (scripts/automod/vault_round.py)
+    calls it per touched path and ``validate()`` is what ``automod_vault_land`` runs,
+    so a regressed subject re-enters only if that chain refuses it. Driven end to end
+    like `test_the_vault_writer_refuses_a_skill_that_retyped_the_zone_abbreviation`
+    above, because a correct helper nothing calls is the state #1112 found this class
+    in. The refusal keeps the writer's generic `skill clock literal` prefix and the
+    helper's `skill: line N:` head, so the round is refused naming the touched path,
+    the line and the offending interpolation.
+    """
+    from scripts.automod import vault_round
+
+    rel = _scratch_skill(
+        scratch_vault,
+        "nightly-reflection-knowledge-write",
+        _command_body('~/lloyd/scripts/util/vault-commit.sh "nightly: knowledge '
+                      'write $(date +%Y-%m-%d)" -- memory/'),
+    )
+    errors, _ = vault_round.validate([rel])
+    assert len(errors) == 1, f"the lander let a local commit subject through: {errors}"
+    assert errors[0].startswith(f"{rel}: "), (
+        f"the refusal must name the file: {errors[0]}"
+    )
+    assert "line 4" in errors[0] and "$(date +%Y-%m-%d)" in errors[0], (
+        f"the refusal must name the line and the span: {errors[0]}"
+    )
+
+    _scratch_skill(
+        scratch_vault,
+        "nightly-reflection-knowledge-write",
+        _command_body('~/lloyd/scripts/util/vault-commit.sh "nightly: knowledge '
+                      'write $(date -u +%Y-%m-%d)" -- memory/'),
+    )
+    assert vault_round.validate([rel])[0] == [], (
+        "the swept form must be landable, or the rail cannot be satisfied"
+    )
+
+
+@pytest.mark.live_vault
+def test_the_live_corpus_actually_writes_utc_commit_subjects():
+    """Positive control for the new span: the corpus contains subjects to match.
+
+    The scan above asserting zero dirty skills proves nothing about THIS rule if the
+    matcher never fires on real text — a pattern that matches no subject would keep
+    the corpus permanently clean, which is #1112's inert-check complaint in a new
+    costume. So the population is counted with a probe of its own: at least 6 active
+    skill lines interpolate a `$(date …)` into a `git commit -m`/`vault-commit.sh`
+    subject (measured 6 on 2026-10-09: autonomy-data-pipeline:359,1028,
+    nightly-reflection-config:159,204, nightly-reflection-knowledge-write:95,
+    nightly-reflection-signals:266), and every file carrying one is clean under the
+    rule — which is the same 6 #2227 swept, so the rail is guarding text that
+    exists.
+    """
+    bodies = _active_skills()
+    population = [
+        (name, lineno)
+        for name, body in bodies.items()
+        for lineno, line in enumerate(body.splitlines(), 1)
+        if _SUBJECT_LINE.search(line) and _ANY_DATE_SUBST.search(line)
+    ]
+    assert len(population) >= 6, (
+        f"only {len(population)} active-skill lines interpolate a date into a "
+        f"commit subject (measured 6 on 2026-10-09): {population[:6]} — the rule "
+        "below has almost nothing to judge, so its zero needs re-measuring by hand"
+    )
+    dirty = {n: v for n, v in
+             ((n, template_clock_violations(n, bodies[n])) for n, _ in population)
+             if v}
+    assert not dirty, (
+        "the sweep regressed in a live skill: "
+        + "\n".join(f"{n}: {v}" for n, v in sorted(dirty.items()))
     )
