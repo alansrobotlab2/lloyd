@@ -1149,6 +1149,32 @@ def _emitted_check(stderr: str) -> str:
     return lines[0]
 
 
+#: Hex digits a `git rev-parse` output can hold. `set <= SHA_HEX` is the whole of the
+#: "is this a commit and not a ref name" test that matters here: `HEAD`, `main`,
+#: `HEAD~1` and `@{0}` all fail it, and no valid abbreviation of any length passes it.
+SHA_HEX = set("0123456789abcdef")
+
+
+def _emitted_commit_arg(cmd: str) -> str:
+    """The commit the emitted check addresses — the token after `--pretty=format:`.
+    Read positionally rather than by pattern so a check that names no commit at all
+    (a dangling `--pretty=format: |`) fails here instead of quietly reading as a
+    match on whatever HEAD happens to be."""
+    tokens = cmd.split()
+    assert "--pretty=format:" in tokens, f"no --pretty=format: in the emitted line: {cmd}"
+    arg = tokens[tokens.index("--pretty=format:") + 1]
+    assert arg and arg != "|", f"the emitted check names no commit at all: {cmd}"
+    return arg
+
+
+def _check_at(cmd: str, sha: str) -> str:
+    """The emitted check line retargeted at `sha`, every other token left exactly as
+    printed. Substitution, not a rebuild: a node that re-spelled the command would
+    certify its own spelling whatever the wrapper emitted."""
+    return cmd.replace(f"--pretty=format: {_emitted_commit_arg(cmd)} ",
+                       f"--pretty=format: {sha} ")
+
+
 def test_the_wrapper_emits_one_copyable_loaded_memory_check_beside_the_unattributed_list(
         vault_repo):
     """Clause 1. #1070 makes an unattributed commit a thing a job has to explain, and
@@ -1168,6 +1194,19 @@ def test_the_wrapper_emits_one_copyable_loaded_memory_check_beside_the_unattribu
     # entries — to `_paths_in` below, and to the run record that copies the block.
     assert cmd.startswith("git "), cmd
     assert f'git -C "{vault_repo}"' in cmd, f"the check must name this repo: {cmd}"
+    # Clause 1 of #2488: it names the commit this wrapper created, by sha, and never
+    # the moving ref. `HEAD` is what decoupled the quoted command from the figure
+    # beside it in the run records — `memory/vault-maintenance/2026-10-09.md` prints
+    # the HEAD-addressed line and reports "→ 0 for 7c58a8bd and 0 for 2eaec21a", and a
+    # reader re-running that line today gets the answer for whatever HEAD is, not for
+    # the two commits named beside it.
+    assert " HEAD " not in f" {cmd} ", f"the check is addressed to a moving ref: {cmd}"
+    named = _emitted_commit_arg(cmd)
+    assert set(named) <= SHA_HEX and 7 <= len(named) <= 40, \
+        f"the check names no commit sha, it names {named!r}: {cmd}"
+    assert named == _head(vault_repo), (
+        f"the check names {named}, not the commit this wrapper created "
+        f"({_head(vault_repo)})")
     # The emitted check comes BEFORE the list: #1070 makes the list stderr's tail so
     # a job can copy it verbatim, and the tail is what this file's other nodes pin.
     stderr = proc.stderr
@@ -1193,7 +1232,6 @@ def test_the_emitted_check_reads_only_the_commit_file_list_the_grepped_form_cann
     names the file, the pattern because `memory/...` contains the word `MEMORY`
     case-insensitively. Asserting the pair is the point: a check that merely never
     matches anything would pass the first half and be useless."""
-    sha = "HEAD"
     _write(vault_repo, "memory/audit/writes.jsonl")
     # The body cites the curated file by its full vault-relative path, the way a real
     # run record does. That matters: `git show` indents the message body by four
@@ -1206,7 +1244,14 @@ def test_the_emitted_check_reads_only_the_commit_file_list_the_grepped_form_cann
                         "are untouched by this run",
                         paths=None, job=JOB, writes="knowledge/somebody-elses.md")
     assert proc.returncode == 0, proc.stderr
-    cmd = _emitted_check(proc.stderr).replace("HEAD", sha)
+    # The commit the emitted line names is read FROM the line, not assumed (#2488).
+    # This node used to do `_emitted_check(...).replace("HEAD", sha)` with
+    # `sha = "HEAD"` — a substitution that proved nothing, because the line already
+    # said `HEAD` and HEAD is a moving ref, which is the whole defect.
+    cmd = _emitted_check(proc.stderr)
+    sha = _emitted_commit_arg(cmd)
+    assert set(sha) <= SHA_HEX and sha == _head(vault_repo), \
+        f"the check names {sha!r}, not the commit this wrapper created"
     repo = str(vault_repo)
 
     def count(*, pretty: bool, anchored: bool) -> int:
@@ -1270,12 +1315,132 @@ def test_the_pattern_is_keyed_to_the_curated_set_and_not_to_the_bare_filenames(
     assert out.stdout.strip() == "0", (
         f"a note called memory/MEMORY.md is not a curated loaded-memory file, and the "
         f"emitted check reported otherwise: {out.stdout!r}")
-    # positive control that the emitted pattern is not simply inert: the curated file
-    # itself, in the same repository, does register
+    # Positive control that the emitted pattern is not simply inert: the curated file
+    # itself, in the same repository, does register. Re-keyed by #2488 — this used to
+    # re-run `cmd` unchanged and rely on its naming HEAD, so it proved the pattern
+    # fired only by asking the moving ref. Same substitution the emitted line invites:
+    # one command form, addressed at the commit that really carries the file.
     _write(vault_repo, "lloyd/MEMORY.md", "the curated loaded-memory file\n")
     _git(vault_repo, "add", "lloyd/MEMORY.md")
     _git(vault_repo, "commit", "-qm", "a writer that edits the curated file")
-    out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=120)
+    assert _emitted_commit_arg(cmd) != _head(vault_repo), (
+        "the wrapper's commit is no longer the one under test, so this control would "
+        "be reading a commit it was not printed for")
+    out = subprocess.run(["bash", "-c", _check_at(cmd, _head(vault_repo))],
+                         capture_output=True, text=True, timeout=120)
     assert out.stdout.strip() == "1", (
         f"the emitted check missed a commit that really does carry lloyd/MEMORY.md: "
         f"{out.stdout!r}")
+    # ...and the pinned form still says 0 about the commit it was printed for, which is
+    # the property the HEAD-addressed line could not have.
+    still = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                           timeout=120)
+    assert still.stdout.strip() == "0", (
+        f"the check stopped reporting the commit it was printed for: {still.stdout!r}")
+
+
+# ---------------------------------------------------------------------------
+# #2488: the emitted check names the commit it was printed for, by sha.
+#
+# Why the ref matters rather than being decoration: #1070 makes a job copy stderr
+# into its run record, so the command and the figure beside it are published
+# together — and `memory/vault-maintenance/2026-10-09.md:67-69` (likewise :182-184 and
+# :276-278) publishes the HEAD-addressed command with "→ 0 for 7c58a8bd and 0 for
+# 2eaec21a" beside it. Re-running the quoted line reports whatever HEAD is at the time,
+# so the published figure cannot be checked, and `2026-10-08.md:367` shows a job that
+# wanted the check to mean anything hand-minting its own `--pretty=format: <sha>` form
+# of the wrapper's printf. The same record class is what #2184 owed ruling #4 exists to
+# keep single-sourced.
+# ---------------------------------------------------------------------------
+
+def test_the_pinned_check_keeps_reporting_the_commit_it_was_printed_for_after_a_later_one(
+        vault_repo):
+    """Clause 3, and the node the HEAD-addressed line cannot pass by any wording.
+
+    The wrapper commits a state carrying no curated loaded-memory path; the emitted
+    line is run and reads 0. Then a SECOND commit in the same repository adds
+    `lloyd/MEMORY.md`, and the very same emitted line is run again, unchanged. A check
+    addressed to `HEAD` reads that second commit and reports 1, which is the defect:
+    the figure the job copied into its run record said 0, and the command beside it no
+    longer reproduces it. The sha-addressed line reports 0 again, forever.
+    """
+    _write(vault_repo, "memory/audit/writes.jsonl")
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: pre-flight 2026-10-09",
+                        paths=None, job=JOB, writes="knowledge/somebody-elses.md")
+    assert proc.returncode == 0, proc.stderr
+    cmd = _emitted_check(proc.stderr)
+    printed_for = _emitted_commit_arg(cmd)
+    assert printed_for == _head(vault_repo) and printed_for != "HEAD", cmd
+    first = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                           timeout=120)
+    assert first.stdout.strip() == "0", first.stdout
+
+    _write(vault_repo, "lloyd/MEMORY.md", "the curated loaded-memory file\n")
+    _git(vault_repo, "add", "lloyd/MEMORY.md")
+    _git(vault_repo, "commit", "-qm", "a later writer edits the curated file")
+    assert _head(vault_repo) != printed_for, "the second commit did not move HEAD"
+
+    again = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                           timeout=120)
+    assert again.stdout.strip() == "0", (
+        f"the check the job copied now reads a different commit than the one it names: "
+        f"printed for {printed_for}, printed after HEAD moved -> {again.stdout!r}")
+    # The check is not inert, and the substitution that proves it is the same one any
+    # reader can do to the emitted line: addressed at the commit that really carries
+    # the curated file, the identical command reports 1.
+    later = subprocess.run(["bash", "-c", _check_at(cmd, _head(vault_repo))],
+                           capture_output=True, text=True, timeout=120)
+    assert later.stdout.strip() == "1", (
+        f"the form is inert, so the 0 above proves nothing: {later.stdout!r}")
+
+
+def test_no_loaded_memory_check_is_emitted_when_the_commit_does_not_happen(vault_repo):
+    """Clause 4: the wrapper must not name a commit it did not create.
+
+    `git commit` is the last thing the script used to do, so a check emitted before it
+    named the PREVIOUS commit while announcing "run this once the commit is HEAD". A
+    refused commit (`--no-verify` is deliberately not passed, so a hook can refuse it)
+    now emits no command line at all — the block moved after the commit, and `set -e`
+    stops the script there. The unattributed list moves with it: both describe a commit
+    that does not exist, and the commit's own body is what #1070 makes them echo.
+    """
+    hook = vault_repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho 'refused by this test' >&2\nexit 1\n",
+                    encoding="utf-8")
+    hook.chmod(0o755)
+    _write(vault_repo, "memory/audit/writes.jsonl")
+    before = _head(vault_repo)
+    proc = _run_wrapper(vault_repo, "pipeline: snapshot", paths=None, job=JOB,
+                        writes="knowledge/somebody-elses.md")
+    assert proc.returncode != 0, (
+        f"the wrapper reported success for a refused commit: {proc.stdout}\n{proc.stderr}")
+    assert _head(vault_repo) == before, "HEAD moved on a commit the hook refused"
+    check_lines = [ln for ln in proc.stderr.splitlines()
+                   if ln.startswith("git ") and "grep" in ln]
+    assert check_lines == [], (
+        f"a commit was never created, yet the wrapper emitted: {check_lines}")
+    assert "loaded-memory post-flight check" not in proc.stderr, proc.stderr
+    assert UNATTRIBUTED not in proc.stderr, (
+        "the unattributed list describes a commit that does not exist; it goes with "
+        "the check, after it")
+
+
+def test_no_skill_or_markdown_file_holds_a_copy_of_the_emitted_check():
+    """Clause 5: #2184 owed ruling #4 keeps the skill prose-only, and the reason a
+    copy is worse than a paraphrase is that a copy goes stale in exactly the way this
+    item's premise is about — the four records that quote the HEAD form publish a
+    command that no longer answers for the figures beside it.
+
+    Checked over the live vault's skills, because that is where a fourth hand-maintained
+    copy would land (`skills/autonomy-data-pipeline/SKILL.md` is the one #2184 ruled on)
+    and the wrapper is the only place its own text lives.
+    """
+    shipped = "show --name-only --pretty=format:"
+    hits = [p for p in VAULT_SKILLS.glob("*/SKILL.md")
+            if shipped in p.read_text(encoding="utf-8", errors="replace")]
+    assert hits == [], f"skill(s) copied the emitted command: {hits}"
+    in_repo = sorted(str(p.relative_to(REPO_ROOT)) for p in REPO_ROOT.rglob("*.md")
+                     if ".git" not in p.parts and "agent-services" not in p.parts
+                     and shipped in p.read_text(encoding="utf-8", errors="replace"))
+    assert in_repo == [str(WITNESS_COPY.relative_to(REPO_ROOT))], (
+        f"only #2184's in-repo witness may carry the form; found {in_repo}")
