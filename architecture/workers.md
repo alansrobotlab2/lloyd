@@ -615,7 +615,8 @@ to the model and thinking off — nothing of it was a transcript anyone could
 read, which is why it moved (Alan's rule: unattended judging runs as a visible
 session). Task #75 is paused; the old name `ai-engineer-monitor.py` is a shim
 onto `--channel ai-engineer`, and the script path (`--process-one`) still works
-as an operator fallback.
+as an operator fallback. A paper a video cites is read in a session of its
+own and gets a note under `knowledge/papers/` ([[workers-jobs]] §5).
 
 - **The eval rule is Alan's**: open source may be proposed for direct
   adoption, a commercial product never is (only the aspects worth recreating

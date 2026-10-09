@@ -565,7 +565,9 @@ One SQLite queue drained by `workers.slots` asyncio workers inside the backend
 - Autonomy runs carry a budget anchor for both clocks (`app/deadline_anchor`,
   built from the resolved timeout); a task's skill must know when it is done.
   `architecture/autonomy.md` § "Two timeouts".
-- YouTube digests: the script fetches, one session per video judges
+- YouTube digests: the script fetches, one session per video judges, and one
+  more per cited paper writes its note in `knowledge/papers/` — never over a
+  note with no `digest:` key, which is hand-written
   (`architecture/workers.md` §5, `architecture/workers-jobs.md` §5).
 
 ## qmd (vault retrieval)

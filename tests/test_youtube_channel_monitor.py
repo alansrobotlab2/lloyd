@@ -59,6 +59,13 @@ def _sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(M, "VAULT_PAPER_DIR", str(tmp_path / "vault" / "papers"))
     monkeypatch.setattr(M, "TMP_CLONES", str(tmp_path / "clones"))
     monkeypatch.setattr(M, "REPORT_DIR", str(tmp_path / "vault" / "channel-eval"))
+    monkeypatch.setattr(M, "PAPERS_STATE_DIR", str(tmp_path / "state" / "papers"))
+    monkeypatch.setattr(M, "ARXIV_SPACING_SECONDS", 0.0)
+
+    def no_network(params):
+        raise AssertionError(f"a test reached the arXiv API: {params}")
+
+    monkeypatch.setattr(M, "_arxiv_query", no_network)
     configure("discover-ai")
     yield
     real_configure(M.DEFAULT_CHANNEL)
@@ -341,7 +348,7 @@ def _stub_fetchers(monkeypatch, transcript="the talk " * 400, metadata=None):
         "description": "see https://github.com/acme/harness and arxiv.org/abs/2608.13560"})
     monkeypatch.setattr(M, "fetch_transcript", lambda vid: (transcript, None))
     monkeypatch.setattr(M, "clone_and_note", lambda url: {"owner": "acme", "repo": "harness", "note_path": "/v/github/acme-harness.md"})
-    monkeypatch.setattr(M, "fetch_arxiv_paper", lambda a: None)
+    monkeypatch.setattr(M, "_arxiv_query", lambda params: [])
     monkeypatch.setattr(M, "fetch_generic_paper", lambda u: None)
 
 
@@ -559,3 +566,252 @@ def test_fetch_records_a_transcript_failure_as_a_retryable_attempt(monkeypatch):
         "the retry interval has not elapsed yet"
     e["last_attempt_at"] = "2020-01-01T00:00:00+00:00"
     assert M._is_retry_eligible(e, M.datetime.now(M.timezone.utc)) is True
+
+
+# ---------------------------------------------------------------------------
+# Papers
+# ---------------------------------------------------------------------------
+#
+# Before 2026-10-09 the paper path was one function fed by a regex over the
+# transcript. Counted over the 517 bundles on disk that day: no transcript held
+# an arXiv id or a paper URL, so no paper note was ever written, while 21
+# descriptions named an id and most of Discover AI's named a title. What is
+# pinned here is the three things that had to change — the description is
+# scanned, a title resolves to a record only on a near-exact match, and a
+# registered paper is a row the worker can take — and the two notes the
+# registry must never overwrite.
+
+RECORD = {
+    "arxiv_id": "2609.04148",
+    "title": "Terminal-Universe: Turning Agent Trajectories into Scalable Terminal Environments",
+    "summary": "We reconstruct executable terminal environments from recorded agent trajectories.",
+    "authors": ["Jie Wu", "Zhenru Zhang"], "published": "2026-09-03", "categories": ["cs.AI"],
+}
+VIDEO = {"channel": "discover-ai", "channel_name": "Discover AI", "video_id": "abc123",
+         "title": "Qwen Learns From Self-Evolving RL Worlds", "published": "20260920",
+         "note": "/vault/discover-ai/20260920-qwen-learns.md"}
+
+
+def _arxiv(monkeypatch, *records):
+    """Answer the arXiv API from a fixed set of records, and record each call."""
+    calls = []
+
+    def query(params):
+        calls.append(params)
+        if "id_list" in params:
+            return [r for r in records if r["arxiv_id"] == params["id_list"]]
+        return list(records)
+
+    monkeypatch.setattr(M, "_arxiv_query", query)
+    return calls
+
+
+def test_an_arxiv_id_is_checked_not_just_matched():
+    assert M.normalize_arxiv_id("arXiv:2609.01481v1") == "2609.01481"
+    assert M.normalize_arxiv_id("https://arxiv.org/pdf/1706.03762") == "1706.03762"
+    # A year range, a price, a thirteenth month, and a four-digit number on a
+    # 2020s id all fit \d{4}\.\d{4,5}.
+    for not_an_id in ("2010.2015", "$1999.9999", "2613.00001", "2609.0148", "0703.1234"):
+        assert M.normalize_arxiv_id(not_an_id) is None, not_an_id
+
+
+def test_the_description_is_where_the_links_are():
+    spoken = "today we look at a new paper from the qwen team on terminal environments"
+    description = ("All rights w/ authors:\narXiv:2609.04148v2\nhttps://huggingface.co/papers/2607.21612\n"
+                   "https://huggingface.co/Qwen/Qwen3\nhttps://openreview.net/forum?id=AbC_12.\n"
+                   "https://arxiv.org/abs/2609.04148")
+    assert M.extract_entities(spoken)["paper_arxiv"] == []
+    got = M.extract_entities(spoken + "\n" + description)
+    assert got["paper_arxiv"] == ["2609.04148", "2607.21612"], "deduplicated, version dropped"
+    # arXiv is registered by id and a model page is not a paper: neither is a
+    # generic paper URL, which is what wrote a second stub per arXiv link.
+    assert got["paper_urls"] == ["https://openreview.net/forum?id=AbC_12"]
+
+
+def test_build_bundle_registers_a_paper_the_description_names(monkeypatch):
+    _stub_fetchers(monkeypatch, metadata={"title": "Self-Evolving RL Worlds", "upload_date": "20260920",
+                                         "description": "All rights w/ authors.\narXiv:2609.04148"})
+    calls = _arxiv(monkeypatch, RECORD)
+    meta, err = M.build_bundle("abc123")
+    assert err is None and calls == [{"id_list": "2609.04148"}]
+    (paper,) = meta["enrichment"]["papers"]
+    note = Path(paper["note_path"])
+    assert note.name == "2609.04148-terminal-universe-turning-agent-trajectories-into-scalable-t.md"
+    text = note.read_text()
+    assert "arxiv_id: '2609.04148'" in text and "digest: abstract" in text
+    assert yaml.safe_load(text.split("---")[1])["title"] == RECORD["title"], "a colon in a title is quoted"
+    # The video's own note is linked back, at the path the session will write.
+    assert f"- [[{Path(meta['target_note']).stem}]] — Discover AI, 20260920" in text
+    assert text.rstrip().splitlines()[-3] == "## Discussed in", "the last section"
+    assert M.paper_pending(M.load_papers())[0]["arxiv_id"] == "2609.04148"
+
+
+def test_an_unreadable_registry_costs_the_papers_not_the_video(monkeypatch):
+    _stub_fetchers(monkeypatch, metadata={"title": "T", "upload_date": "20260920",
+                                         "description": "arXiv:2609.04148"})
+    Path(M.PAPERS_STATE_DIR).mkdir(parents=True)
+    Path(M.papers_state_file()).write_text("{not json")
+    meta, err = M.build_bundle("abc123")
+    assert err is None and meta["enrichment"]["papers"] == []
+    assert Path(M.papers_state_file()).read_text() == "{not json", "never saved over"
+
+
+def test_a_title_resolves_only_on_a_near_exact_match(monkeypatch):
+    other = {**RECORD, "arxiv_id": "2608.11111",
+             "title": "Terminal Environments for Agents: A Survey of Trajectories"}
+    _arxiv(monkeypatch, other, RECORD)
+    assert M.resolve_arxiv_title(RECORD["title"])["arxiv_id"] == "2609.04148"
+    # Punctuation and case are the uploader's; the words are the paper's.
+    assert M.resolve_arxiv_title(
+        "terminal universe - turning agent trajectories into scalable terminal environments"
+    )["arxiv_id"] == "2609.04148"
+    # A title given without its subtitle, four words or more.
+    _arxiv(monkeypatch, {**RECORD, "title": "Is Your Model Thinking or Just Stagnating? PUMA: Diagnosing Pathology"})
+    assert M.resolve_arxiv_title("Is Your Model Thinking or Just Stagnating?") is not None
+    # A wrong paper filed under a video is worse than none.
+    _arxiv(monkeypatch, other)
+    assert M.resolve_arxiv_title(RECORD["title"]) is None
+    calls = _arxiv(monkeypatch, RECORD)
+    assert M.resolve_arxiv_title("Terminal Universe") is None and calls == [], "two words is not a title"
+
+
+def test_a_hand_written_note_is_never_queued_or_touched(monkeypatch):
+    calls = _arxiv(monkeypatch, RECORD)
+    papers = Path(M.VAULT_PAPER_DIR)
+    papers.mkdir(parents=True)
+    hand = papers / "2609.04148-terminal-universe.md"
+    hand.write_text("---\ntype: notes\narxiv_id: '2609.04148'\ntitle: 'Terminal-Universe'\n---\n\n# Mine\n")
+    before = hand.read_text()
+    reg = M.load_papers()
+    row = M.register_paper(reg, "2609.04148", VIDEO)
+    assert row["status"] == "completed" and row["note_path"] == str(hand) and row["preexisting"]
+    assert calls == [], "no lookup for a paper the vault already holds"
+    assert hand.read_text() == before and M.paper_pending(reg) == []
+    assert [p.name for p in papers.iterdir()] == [hand.name], "no second note beside it"
+
+
+def test_a_second_video_is_added_to_the_placeholder_and_appended_to_a_full_note(monkeypatch):
+    _arxiv(monkeypatch, RECORD)
+    reg = M.load_papers()
+    row = M.register_paper(reg, "2609.04148", VIDEO)
+    second = {**VIDEO, "video_id": "def456", "published": "20260925", "note": "/v/20260925-part-two.md"}
+    M.register_paper(reg, "2609.04148", second)
+    M.register_paper(reg, "2609.04148", second)
+    stub = Path(row["note_path"]).read_text()
+    assert stub.count("[[20260925-part-two]]") == 1 and "[[20260920-qwen-learns]]" in stub
+    assert len(row["videos"]) == 2
+
+    # Once a session has written the full note, the file is the session's: a
+    # third video is one appended line under the last section, nothing else.
+    full = M.paper_note_header(row, M.DIGEST_FULL) + "\n## Summary\n\nBody.\n\n## Discussed in\n\n- [[a]]\n"
+    Path(row["note_path"]).write_text(full)
+    third = {**VIDEO, "video_id": "ghi789", "published": "20261001", "note": "/v/20261001-part-three.md"}
+    M.register_paper(reg, "2609.04148", third)
+    assert Path(row["note_path"]).read_text() == full + "- [[20261001-part-three]] — Discover AI, 20261001\n"
+
+
+def test_a_failed_paper_waits_out_its_spacing_and_then_gives_up(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    _arxiv(monkeypatch, RECORD)
+    reg = M.load_papers()
+    row = M.register_paper(reg, "2609.04148", VIDEO)
+    M.mark_paper_failed(row, "Could not fetch paper text: html: 404; pdf: timed out")
+    now = datetime.now(timezone.utc)
+    assert M.paper_pending(reg, now) == []
+    later = now + timedelta(seconds=M.RETRY_INTERVAL_SECONDS + 1)
+    assert [r["arxiv_id"] for r in M.paper_pending(reg, later)] == ["2609.04148"]
+    row["failure_count"] = M.PAPER_MAX_ATTEMPTS
+    assert M.paper_pending(reg, later) == []
+
+
+LATEXML = """<html><head><title>x</title><style>.a{}</style></head><body>
+<nav><a href="/">arXiv</a></nav>
+<article class="ltx_document">
+<h1 class="ltx_title">Terminal-Universe</h1>
+<section><h2>1 Introduction</h2>
+<p>We reach <math alttext="47.9\\%"><semantics><mn>47.9</mn><annotation>47.9\\%</annotation></semantics></math> on
+the benchmark<br>and more.</p>
+<table><tr><th>Model</th><th>Score</th></tr><tr><td>Ours</td><td>47.9</td></tr></table></section>
+<section class="ltx_bibliography"><h2>References</h2><ul><li>Vaswani et al. Attention.</li></ul></section>
+<section><h2>Appendix A</h2><p>Kept, because it follows the references.</p></section>
+</article><footer>Report issue</footer></body></html>"""
+
+
+def test_the_html_page_becomes_text_a_session_can_page():
+    text, truncated = M.tidy_paper_text(M.html_to_text(LATEXML))
+    assert not truncated
+    assert "# Terminal-Universe" in text and "## 1 Introduction" in text and "## Appendix A" in text
+    assert "47.9\\%" in text and text.count("47.9\\%") == 1, "a formula is its TeX source, once"
+    assert "| Model | Score" in text and "| Ours | 47.9" in text
+    for dropped in ("Vaswani", "References", "Report issue", "arXiv"):
+        assert dropped not in text, dropped
+    assert "Kept, because it follows the references." in text
+
+    long, truncated = M.tidy_paper_text("word " * 200_000)
+    assert truncated and len(long) <= M.PAPER_TEXT_MAX_CHARS + 200
+    assert max(len(line) for line in long.splitlines()) <= 100
+    assert long.splitlines()[-1].startswith("[cut here")
+
+
+def test_the_paper_cli_round_trip(monkeypatch, tmp_path):
+    """What the worker drives: register by title → pending → fetch → complete."""
+    _arxiv(monkeypatch, RECORD)
+    note = tmp_path / "20260920-qwen-learns.md"
+    note.write_text("---\nvideo_id: abc123\n---\n")
+    M.save_state(_state(abc123={"title": VIDEO["title"], "published": "20260920", "status": "completed",
+                                "youtube_note": str(note)}))
+    _, out = _run_cli(["--channel", "discover-ai", "--paper-register=abc123",
+                    "--paper-refs=" + json.dumps([RECORD["title"], "A Title Nobody Wrote About Zebras Ever", "none"]),
+                    "--json"])
+    assert [r["arxiv_id"] for r in out["registered"]] == ["2609.04148"]
+    assert out["unresolved"] == ["A Title Nobody Wrote About Zebras Ever"], "and `none` is not a reference"
+    row = M.load_papers()["papers"]["2609.04148"]
+    assert "[[20260920-qwen-learns]]" in Path(row["note_path"]).read_text(), \
+        "a paper named only by the session is linked from its own note, since the video's is already written"
+
+    _, out = _run_cli(["--papers-pending", "--json"])
+    assert [r["arxiv_id"] for r in out["pending"]] == ["2609.04148"]
+
+    monkeypatch.setattr(M, "fetch_paper_text", lambda arxiv_id: ("A paragraph. " * 400, "html"))
+    _, out = _run_cli(["--paper-fetch=2609.04148", "--json"])
+    meta = out["meta"]
+    assert out["ok"] and Path(meta["text_path"]).read_text().startswith("A paragraph.")
+    assert "digest: full" in meta["note_header"] and meta["text_source"] == "html"
+    assert meta["target_note"].endswith(".md") and meta["discussed"] and meta["discussed"][0].startswith("- ")
+    assert _run_cli(["--papers-pending", "--json"])[1]["pending"][0]["status"] == "fetched", \
+        "a bundle whose session never reported back is offered again"
+
+    assert _run_cli(["--paper-complete=2609.04148", "--json"])[1]["ok"]
+    assert _run_cli(["--papers-pending", "--json"])[1]["pending"] == []
+    assert _run_cli(["--paper-fetch=2601.00001", "--json"])[1]["ok"] is False, "not a registered paper"
+
+
+def test_a_paper_with_no_text_is_a_counted_failure(monkeypatch):
+    _arxiv(monkeypatch, RECORD)
+    reg = M.load_papers()
+    M.register_paper(reg, "2609.04148", VIDEO)
+    M.save_papers(reg)
+    monkeypatch.setattr(M, "fetch_paper_text", lambda arxiv_id: (None, "html: 404; pdf: timed out"))
+    _, out = _run_cli(["--paper-fetch=2609.04148", "--json"])
+    assert out["ok"] is False and out["failure_count"] == 1 and "paper text" in out["error"]
+    assert M.load_papers()["papers"]["2609.04148"]["status"] == "failed"
+
+
+def test_the_backfill_reads_bundles_on_disk_and_only_completed_videos(monkeypatch, tmp_path):
+    calls = _arxiv(monkeypatch, RECORD)
+    note = tmp_path / "20260901-done.md"
+    note.write_text("---\nvideo_id: done1\n---\n")
+    for vid, status in (("done1", "completed"), ("open1", "pending")):
+        bdir = Path(M.bundle_dir(vid))
+        bdir.mkdir(parents=True)
+        (bdir / "transcript.txt").write_text("spoken words only\n")
+        (bdir / "meta.json").write_text(json.dumps({"video_id": vid, "description": "arXiv:2609.04148"}))
+    state = _state(done1={"title": "Done", "published": "20260901", "status": "completed",
+                          "youtube_note": str(note)},
+                   open1={"title": "Open", "status": "pending"})
+    assert [f["video_id"] for f in M.backfill_papers(state, dry_run=True)] == ["done1"]
+    assert calls == [] and not Path(M.papers_state_file()).exists(), "a dry run registers nothing"
+    found = M.backfill_papers(state)
+    assert [(f["arxiv_id"], f["video_id"]) for f in found] == [("2609.04148", "done1")]
+    assert "[[20260901-done]]" in Path(found[0]["note_path"]).read_text()
+

@@ -824,6 +824,48 @@ judgement half.
 - 84 of its 92 failures in the window were one burst of `--fetch rc=2`
   argparse errors, last seen 2026-09-09 and since fixed.
 
+**A cited paper is a second kind of row** (`kind="paper"`, keyed
+`youtube-digest:paper:<arxiv_id>`), added 2026-10-09. Until then the script
+looked for arXiv ids in the transcript only and wrote an abstract stub per hit;
+counted over the 517 bundles on disk that day it had found none and written no
+note, because a link is written in the description and never spoken — 21
+descriptions held an id, and most of Discover AI's name the paper by title and
+authors with no id at all. Now:
+
+- **Registration is the script's, twice.** `--fetch` scans the transcript
+  *and* the description and registers each arXiv id it finds. After the video's
+  turn the source passes the `PAPERS:` line of the RESULT block to
+  `--paper-register`: ids as they are, titles through an arXiv title search
+  that accepts only a near-exact match (ratio 0.92, or a subtitle-less prefix of
+  four words or more) — a wrong paper filed under a video is worse than none,
+  and what does not resolve is recorded as `papers_unresolved` on the run. Four
+  papers per video at most.
+- **One registry for every channel**, `~/.local/share/youtube-papers/papers.json`
+  with its bundles beside it. A registered paper gets an abstract-only note at
+  once (`digest: abstract`) at `knowledge/papers/<id>-<slug>.md`, so the video
+  note's wiki link resolves before the paper is read; its `## Discussed in`
+  section lists the videos, which is the only link for a paper the session named
+  after the video note was written.
+- **A note with no `digest:` key is someone's hand-written note**: registered as
+  `completed`, never queued, never rewritten.
+- **The read is a session**, one paper per tick ahead of the videos (the
+  channels never run dry, so a paper offered after them would never get the
+  room). `--paper-fetch` puts the full text on disk — arXiv's HTML rendering with
+  the bibliography dropped and formulas as TeX, `pdftotext` over the PDF when
+  there is no HTML — and the turn follows the `paper-digest` vault skill:
+  Summary, Key Findings, Method, Results, Limitations, Relevance to Lloyd,
+  Discussed in. It files nothing (`backlog_write_task` and `fact_add` join the
+  deny list): the video's turn already judged the idea.
+- **Disk decides, more strictly than for a video**: the note must carry this
+  paper's `arxiv_id`, `digest: full`, a `## Discussed in` tail and more than a
+  placeholder's bytes. The placeholder says `abstract`, so `full` is proof this
+  turn wrote it. A failure is counted in the registry (four attempts, 900 s
+  apart); a drain, an empty turn and a missing skill are not.
+- `workers.sources.youtube-digest.papers.enabled: false` stops both halves.
+  `--papers-backfill` registers the ids that completed videos' bundles already
+  name; it cannot see a title-only citation, which needs a re-digest
+  (`--since-days N --requeue`).
+
 ### `deep-research` — one registry topic through the deep-dive skill
 
 **Wakes** hourly, claims one topic from `research.db` under

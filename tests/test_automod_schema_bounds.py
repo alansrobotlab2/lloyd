@@ -542,6 +542,7 @@ EIGHT_WITHOUT_A_SLICE = (
     ("DIGEST_RESULT", "idea"),
     ("DIGEST_RESULT", "duplicate_of"),
     ("DIGEST_RESULT", "filed"),
+    ("DIGEST_RESULT", "papers"),
 )
 
 
@@ -593,7 +594,7 @@ def test_all_eight_verdict_schemas_are_bounded_and_their_controls_are_not():
 
 
 def test_opening_any_single_leaf_of_the_eight_makes_it_read_unbounded():
-    """The can-fail half of the node above, one leaf at a time, across all 30.
+    """The can-fail half of the node above, one leaf at a time, across all 31.
 
     Stripping every cap is not the test: the eight contain `enum` leaves, and an enum
     is finite on its own, so a fully-stripped copy stays bounded by its vocabularies
@@ -624,8 +625,8 @@ def test_opening_any_single_leaf_of_the_eight_makes_it_read_unbounded():
                 f"{key}.{path} has its cap removed and the schema still reads as "
                 "bounded: the predicate is not looking at this leaf")
             checked += 1
-    assert checked == 30, (
-        f"{checked} leaves checked, not 30 — the eight schemas have changed shape, so "
+    assert checked == 31, (
+        f"{checked} leaves checked, not 31 — the eight schemas have changed shape, so "
         "every field table in this file needs re-counting against them")
 
 
@@ -745,6 +746,7 @@ def test_the_seven_leaves_with_no_reader_slice_are_pinned_at_their_declared_caps
         ("DIGEST_RESULT", "idea"): 400,
         ("DIGEST_RESULT", "duplicate_of"): 20,
         ("DIGEST_RESULT", "filed"): 20,
+        ("DIGEST_RESULT", "papers"): 600,
     }
     assert set(declared) == set(EIGHT_WITHOUT_A_SLICE)
     for (key, path), value in sorted(declared.items()):

@@ -904,3 +904,312 @@ async def test_a_missing_skill_protocol_failure_is_one_line_too(backlog, tmp_pat
     assert "ai-engineer" in stored and "abc123" in stored
     assert "protocol is missing" in stored
     assert "  " not in stored
+
+
+# ---------------------------------------------------------------------------
+# Papers: a second kind of row, read in its own session
+# ---------------------------------------------------------------------------
+#
+# Until 2026-10-09 a cited paper got, at best, an abstract stub, and in fact
+# got nothing: the script looked for arXiv ids in the transcript, and across
+# 517 bundles there were none. Two things are pinned here. The video turn
+# names its papers in the RESULT block (most of Discover AI's descriptions
+# give a title and no id, so no regex can), and the source hands them to the
+# script after `--complete`. And a `kind="paper"` row runs the same
+# fetch → session → disk-decides → report path as a video, files nothing, and
+# is a success only when the placeholder has become a full note.
+
+PAPER_SKILL_TEXT = "# Paper Digest\n\nRead the paper, replace the placeholder, end with the RESULT block.\n"
+PAPER_HEADER = (
+    "---\ntype: notes\narxiv_id: '2609.04148'\ndigest: full\n"
+    'title: "Terminal-Universe: Turning {Agent} Trajectories into Environments"\n'
+    "tags:\n- paper\n---\n\n# Terminal-Universe — paper note (arXiv 2609.04148)\n")
+
+
+@pytest.fixture
+def paper_skill(monkeypatch):
+    asked: list[str] = []
+    monkeypatch.setattr("app.autonomy._load_skill_content",
+                        lambda slug: asked.append(slug) or PAPER_SKILL_TEXT)
+    monkeypatch.setattr(Y, "_vault_dirty_paths", lambda: set())
+    return asked
+
+
+def _paper_meta(tmp_path: Path) -> dict:
+    bdir = tmp_path / "papers" / "bundles" / "2609.04148"
+    bdir.mkdir(parents=True, exist_ok=True)
+    (bdir / "paper.txt").write_text("a line of the paper\n" * 900)
+    note = tmp_path / "vault" / "papers" / "2609.04148-terminal-universe.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(PAPER_HEADER.replace("digest: full", "digest: abstract")
+                    + "\n## Abstract\n\n" + "abstract " * 300 + "\n\n## Discussed in\n\n- [[20260920-qwen-learns]]\n")
+    return {
+        "arxiv_id": "2609.04148", "url": "https://arxiv.org/abs/2609.04148",
+        "title": "Terminal-Universe: Turning {Agent} Trajectories into Environments",
+        "authors": ["Jie Wu", "Zhenru Zhang"], "published": "2026-09-03",
+        "bundle_dir": str(bdir), "meta_path": str(bdir / "meta.json"),
+        "text_path": str(bdir / "paper.txt"), "text_source": "html", "text_words": 4500,
+        "text_lines": 900, "text_truncated": False, "target_note": str(note),
+        "note_header": PAPER_HEADER,
+        "discussed": ["- [[20260920-qwen-learns]] — Discover AI, 20260920"],
+    }
+
+
+class _PaperScript(_Script):
+    def __init__(self, fetch: dict | None = None, *, papers=None, registered=None, **kw):
+        super().__init__(fetch or {}, **kw)
+        self.paper_fetch = fetch
+        self.papers = papers or []
+        self.registered = registered
+
+    async def __call__(self, channel, *args, timeout):
+        mode = args[0].split("=", 1)[0]
+        if mode == "--paper-fetch":
+            self.calls.append((channel, *args))
+            return self.paper_fetch
+        if mode == "--papers-pending":
+            self.calls.append((channel, *args))
+            return {"ok": True, "pending": self.papers}
+        if mode == "--paper-register" and self.registered is not None:
+            self.calls.append((channel, *args))
+            return self.registered
+        return await super().__call__(channel, *args, timeout=timeout)
+
+
+def _paper_item(arxiv_id: str = "2609.04148") -> QueueItem:
+    return QueueItem(id=7, source=Y.NAME, kind=Y.PAPER_KIND, priority=45,
+                     payload={"arxiv_id": arxiv_id, "title": "Terminal-Universe", "max_turns": 30},
+                     dedup_key=None, state="running", attempts=1, enqueued_at="",
+                     claimed_at=None, claimed_by=None, completed_at=None, error=None)
+
+
+def _paper_turn(text: str, *, note: Path | None = None, body: str | None = None, **kw):
+    """A turn that, like the real one, replaces the placeholder with Write."""
+    inner = _turn(text, **kw)
+
+    async def run(prompt, **kwargs):
+        if note is not None:
+            note.write_text(body if body is not None else
+                            PAPER_HEADER + "\n## Summary\n\n" + "finding " * 500
+                            + "\n\n## Discussed in\n\n- [[20260920-qwen-learns]] — Discover AI, 20260920\n")
+        out = await inner(prompt, **kwargs)
+        run.prompt, run.kwargs = inner.prompt, inner.kwargs
+        return out
+    run.prompt, run.kwargs = "", {}
+    return run
+
+
+def test_the_block_names_papers_by_id_or_title_and_the_object_does_too():
+    block = BLOCK.format(note="/n.md") + (
+        "PAPERS: arXiv:2609.04148 | Is Your Model Thinking, or Just Stagnating? PUMA: Diagnosing\n"
+        "Reasoning Pathology | `2607.21612` | four | five\n")
+    parsed = Y.parse_result(block)
+    assert parsed["papers"] == [
+        "arXiv:2609.04148",
+        "Is Your Model Thinking, or Just Stagnating? PUMA: Diagnosing Reasoning Pathology",
+        "2607.21612", "four"], "a comma belongs to a title; at most MAX_PAPERS"
+    assert parsed["filed"] == 523, "the fields above it are untouched"
+    assert Y.parse_result(BLOCK.format(note="/n.md") + "PAPERS: none\n")["papers"] == []
+    assert Y.parse_result(BLOCK.format(note="/n.md"))["papers"] == [], "a block from before the field"
+
+    structured = {"result": "written", "note": "/n.md", "relevance": 50, "verdict": "background",
+                  "areas": [], "source_kind": "paper", "approach": "read", "idea": "none",
+                  "duplicate_of": "none", "filed": "none", "papers": "2609.04148 | A Title Of Some Words"}
+    assert Y.parse_verdict("", structured)["papers"] == ["2609.04148", "A Title Of Some Words"]
+    assert Y.RESULT_SCHEMA["properties"]["papers"]["maxLength"] == Y.DIGEST_PAPERS_MAX == 600
+    assert "PAPERS:" in Y.TASK_BLOCK
+
+
+async def test_the_papers_a_turn_names_are_registered_after_the_video_completes(
+        tmp_path, backlog, monkeypatch):
+    meta = _meta(tmp_path)
+    note = Path(meta["target_note"])
+    script = _PaperScript(registered={"ok": True, "registered": [{"arxiv_id": "2609.04148"}],
+                                      "unresolved": ["A Title Nobody Wrote"]})
+    script.fetch = {"ok": True, "meta": meta}
+    text = BLOCK.format(note=note) + "PAPERS: 2609.04148 | A Title Nobody Wrote\n"
+    _filed(backlog, 523)
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", _turn(text, writes=note))
+
+    result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
+
+    assert result["status"] == "success", result
+    # After --complete: the registry links each paper to the note that call records.
+    assert script.modes() == ["--fetch", "--complete", "--eval-report", "--paper-register"]
+    assert script.opt(3, "--paper-register") == "abc123", "attached, like every id this source passes"
+    assert json.loads(script.opt(3, "--paper-refs")) == ["2609.04148", "A Title Nobody Wrote"]
+    assert result["meta"]["papers_registered"] == ["2609.04148"]
+    assert result["meta"]["papers_unresolved"] == ["A Title Nobody Wrote"]
+    assert "1 paper(s) registered" in result["summary"]
+
+
+async def test_a_registry_failure_does_not_cost_the_video_its_run(tmp_path, backlog, monkeypatch):
+    meta = _meta(tmp_path)
+    note = Path(meta["target_note"])
+
+    class Broken(_Script):
+        async def __call__(self, channel, *args, timeout):
+            if args[0].startswith("--paper-register"):
+                self.calls.append((channel, *args))
+                raise Y.ScriptError("--paper-register rc=1: arXiv unreachable")
+            return await super().__call__(channel, *args, timeout=timeout)
+
+    script = Broken({"ok": True, "meta": meta})
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session",
+                        _turn(BLOCK.format(note=note) + "PAPERS: 2609.04148\n", writes=note))
+    result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
+    assert result["status"] == "success" and "arXiv unreachable" in result["meta"]["papers_register_error"]
+
+
+async def test_the_papers_switch_turns_off_both_halves(tmp_path, backlog, monkeypatch):
+    meta = _meta(tmp_path)
+    note = Path(meta["target_note"])
+    off = {"papers": {"enabled": False}, "batch": 3, "channels": ["discover-ai"]}
+    monkeypatch.setattr("workers.sources.get_sources_config", lambda: {Y.NAME: off})
+    script = _PaperScript(papers=[{"arxiv_id": "2609.04148", "title": "T"}],
+                          pending={"discover-ai": [{"video_id": "v1", "title": "V"}]})
+    script.fetch = {"ok": True, "meta": meta}
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session",
+                        _turn(BLOCK.format(note=note) + "PAPERS: 2609.04148\n", writes=note))
+    await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
+    queue = WorkQueue(tmp_path / "workers.db")
+    await Y.enqueue_if_due(queue, off)
+    assert "--paper-register" not in script.modes() and "--papers-pending" not in script.modes()
+    assert [i.kind for i in queue.list_items(source=Y.NAME)] == ["video"]
+
+
+async def test_one_pending_paper_is_queued_ahead_of_the_videos(tmp_path, monkeypatch):
+    queue = WorkQueue(tmp_path / "workers.db")
+    script = _PaperScript(
+        papers=[{"arxiv_id": "2609.04148", "title": "Terminal-Universe"},
+                {"arxiv_id": "2607.21612", "title": "Second"}, {"title": "a row with no id"}],
+        pending={"discover-ai": [{"video_id": f"v{i}", "title": f"V {i}"} for i in range(9)]})
+    monkeypatch.setattr(Y, "_script", script)
+    cfg = {"batch": 3, "channels": ["discover-ai"], "max_turns": 40, "priority": 45}
+
+    await Y.enqueue_if_due(queue, cfg)
+    items = queue.list_items(source=Y.NAME)
+    papers = [i for i in items if i.kind == Y.PAPER_KIND]
+    # One, not two: the channels always have a video pending, so a paper has to
+    # go first to run at all — and one at a time, or a backfill of twenty
+    # papers holds every slot the videos had.
+    assert [p.payload["arxiv_id"] for p in papers] == ["2609.04148"]
+    assert papers[0].dedup_key == "youtube-digest:paper:2609.04148" and papers[0].priority == 45
+    assert sorted(i.payload["video_id"] for i in items if i.kind == "video") == ["v0", "v1"], "batch holds"
+
+    # Still queued on the next tick: the same paper is offered and coalesces.
+    await Y.enqueue_if_due(queue, {**cfg, "batch": 9})
+    again = [i for i in queue.list_items(source=Y.NAME) if i.kind == Y.PAPER_KIND]
+    assert [p.payload["arxiv_id"] for p in again] == ["2609.04148"]
+
+
+async def test_a_paper_row_becomes_a_full_note(tmp_path, paper_skill, monkeypatch):
+    meta = _paper_meta(tmp_path)
+    note = Path(meta["target_note"])
+    assert not Y._paper_note_is_real(note, "2609.04148"), "the placeholder is not the note"
+    script = _PaperScript({"ok": True, "meta": meta})
+    turn = _paper_turn(f"Read it.\n\nRESULT: written\nNOTE: {note}\n", note=note)
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", turn)
+
+    result = await Y.execute(_paper_item())
+
+    assert result["status"] == "success", result
+    assert result["artifact_path"] == str(note) and result["summary"].startswith("Paper 2609.04148:")
+    assert script.modes() == ["--paper-fetch", "--paper-complete"]
+    assert script.opt(0, "--paper-fetch") == "2609.04148" and script.opt(1, "--paper-complete") == "2609.04148"
+    assert result["meta"]["kind"] == "paper" and result["meta"]["session_id"]
+    assert paper_skill == [Y.PAPER_SKILL] == ["paper-digest"]
+    # The prompt: the vault skill, then every path and the header, verbatim —
+    # a brace in a title is data, not a field.
+    assert turn.prompt.startswith('[SYSTEM: You are running the "youtube-digest" worker job.')
+    assert PAPER_SKILL_TEXT in turn.prompt and PAPER_HEADER in turn.prompt
+    for needed in (meta["text_path"], meta["target_note"], meta["discussed"][0], str(Y.PROFILE_PATH),
+                   "4500 words, 900 lines, from arXiv's HTML rendering", "RESULT: <written|failed>"):
+        assert needed in turn.prompt, needed
+    assert "size cap" not in turn.prompt
+    # One note, nothing filed: the video's turn already judged the idea.
+    assert set(Y.DISALLOWED) | {"backlog_write_task", "fact_add"} <= set(turn.kwargs["extra_disallowed"])
+    assert turn.kwargs["max_turns"] == 30 and turn.kwargs["source"] == Y.NAME
+    assert turn.kwargs["title"].startswith("Paper: Terminal-Universe")
+    assert "final_schema" not in turn.kwargs
+
+
+def test_every_paper_placeholder_is_supplied_and_a_cut_text_is_announced(tmp_path):
+    meta = {**_paper_meta(tmp_path), "text_truncated": True, "text_source": "pdf"}
+    fields = set(re.findall(r"\{(\w+)\}", Y.PAPER_TASK_BLOCK))
+    prompt = Y.build_paper_prompt(meta, skill_text=PAPER_SKILL_TEXT)
+    for name in sorted(fields):
+        assert "{" + name + "}" not in prompt, f"{{{name}}} reached the prompt unrendered"
+    assert "from arXiv's PDF" in prompt and "cut at its size cap" in prompt
+
+
+@pytest.mark.parametrize("body, why", [
+    (None, "the placeholder was left as it was"),
+    (PAPER_HEADER + "\n## Summary\n\n" + "finding " * 500, "the write died before the last section"),
+    (PAPER_HEADER.replace("2609.04148", "2601.00001") + "\n" + "x " * 2000 + "\n## Discussed in\n\n- a\n",
+     "another paper's note"),
+    (PAPER_HEADER + "\n## Summary\n\nShort.\n\n## Discussed in\n\n- a\n", "a header and nothing read"),
+], ids=["untouched", "truncated", "wrong-paper", "too-short"])
+async def test_a_paper_turn_without_a_full_note_is_a_counted_failure(tmp_path, paper_skill,
+                                                                    monkeypatch, body, why):
+    meta = _paper_meta(tmp_path)
+    note = Path(meta["target_note"])
+    script = _PaperScript({"ok": True, "meta": meta})
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session",
+                        _paper_turn(f"RESULT: written\nNOTE: {note}\n",
+                                    note=note if body is not None else None, body=body))
+    result = await Y.execute(_paper_item())
+    assert result["status"] == "failed", why
+    assert script.modes() == ["--paper-fetch", "--paper-fail"], why
+    assert "without a full note" in script.opt(1, "--reason")
+
+
+async def test_a_paper_is_not_charged_for_a_drain_an_outage_or_a_missing_skill(
+        tmp_path, paper_skill, monkeypatch):
+    meta = _paper_meta(tmp_path)
+
+    script = _PaperScript({"ok": True, "meta": meta})
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", _turn("", raises=DrainActive("landing")))
+    assert (await Y.execute(_paper_item()))["status"] == "skipped"
+    assert script.modes() == ["--paper-fetch"]
+
+    script = _PaperScript({"ok": True, "meta": meta})
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", _turn("", stop_reason=None))
+    result = await Y.execute(_paper_item())
+    assert result["defer_seconds"] == Y.INFRA_DEFER_SECONDS and result["meta"]["infra"]
+    assert script.modes() == ["--paper-fetch"], "an outage must not burn the paper's attempts"
+
+    script = _PaperScript({"ok": True, "meta": meta})
+    ran: list[str] = []
+
+    async def never(prompt, **kwargs):
+        ran.append(prompt)
+
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", never)
+    monkeypatch.setattr("app.autonomy._load_skill_content", lambda slug: "")
+    result = await Y.execute(_paper_item())
+    assert result["status"] == "failed" and result["meta"]["skill_missing"] and ran == []
+    assert "skills/paper-digest/SKILL.md" in result["summary"]
+    assert script.modes() == ["--paper-fetch"]
+
+    # A timeout and a text that cannot be fetched are the paper's own.
+    script = _PaperScript({"ok": True, "meta": meta})
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr("app.autonomy._load_skill_content", lambda slug: PAPER_SKILL_TEXT)
+    monkeypatch.setattr(Y, "run_prompt_in_session", _turn("", raises=TurnTimeout("1800s")))
+    assert (await Y.execute(_paper_item()))["meta"]["turn_timeout"]
+    assert script.modes() == ["--paper-fetch", "--paper-fail"]
+
+    script = _PaperScript({"ok": False, "error": "Could not fetch paper text: html: 404", "failure_count": 2})
+    monkeypatch.setattr(Y, "_script", script)
+    result = await Y.execute(_paper_item())
+    assert result["status"] == "failed" and result["meta"]["failure_count"] == 2
+    assert script.modes() == ["--paper-fetch"], "the script already counted the attempt"

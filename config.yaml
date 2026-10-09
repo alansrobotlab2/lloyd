@@ -2256,6 +2256,16 @@ workers:
       max_turns: 40
       batch: 3
       channels: [ai-engineer, discover-ai]
+      # A paper a video cites gets its own note under knowledge/papers/, read
+      # in full by one session per paper (kind `paper`, same slot and deny
+      # list plus no backlog filing). `batch` is how many paper rows may be
+      # queued at once; they go ahead of the videos, which never run dry.
+      # false stops both halves: nothing is registered from a turn's PAPERS
+      # line and no pending paper is queued.
+      papers:
+        enabled: true
+        batch: 1
+        max_turns: 40
       # Items this source files (tag `youtube-eval`) are loop output, like a
       # `spawned-by-*` item (Alan, 2026-09-14): held out of single-item
       # triage, closed by the self-spawn expiry, merged at write time into

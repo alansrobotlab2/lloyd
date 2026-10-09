@@ -44,6 +44,14 @@ Four properties worth knowing before changing anything here:
   the placeholders and the note header, and a missing skill is a named failure
   rather than a fallback prompt.
 
+* **A paper a video cites is a second kind of row** (`kind="paper"`), read
+  in its own session. The script registers a paper when the bundle names an
+  arXiv id, and again after the video's turn for the papers its RESULT block
+  names (`PAPERS:` — most Discover AI descriptions give a title and authors,
+  no id, so the session is the only reader that can name them). `execute`
+  dispatches on the kind; `_execute_paper` is the same shape as the video
+  path, with its own vault skill (`PAPER_SKILL`) and no backlog filing.
+
 Open-source frameworks and tools may be proposed for direct adoption or
 evaluation. Commercial products may not — the eval names the aspects worth
 recreating locally instead. That rule is Alan's, and the session is told it in
@@ -137,7 +145,7 @@ AREAS = ("model", "inference", "harness", "tools", "memory", "knowledge-graph",
          "retrieval", "skills", "autonomy", "automod", "eval", "voice", "research", "ui")
 _RESULTS = ("written", "kept", "failed")
 _FIELD_RE = re.compile(
-    r"^(RESULT|NOTE|RELEVANCE|VERDICT|AREAS|SOURCE_KIND|APPROACH|IDEA|DUPLICATE_OF|FILED):\s*(.*)$",
+    r"^(RESULT|NOTE|RELEVANCE|VERDICT|AREAS|SOURCE_KIND|APPROACH|IDEA|DUPLICATE_OF|FILED|PAPERS):\s*(.*)$",
     re.I)
 _ID_RE = re.compile(r"#?\s*(\d+)")
 
@@ -154,6 +162,13 @@ _ID_RE = re.compile(r"#?\s*(\d+)")
 DIGEST_NOTE_MAX = 400
 DIGEST_IDEA_MAX = 400
 DIGEST_ID_MAX = 20
+#: `PAPERS:` is at most MAX_PAPERS references on one line, each an arXiv id or
+#: a title. 600 holds four 150-character titles; `_paper_refs` drops a fifth.
+DIGEST_PAPERS_MAX = 600
+MAX_PAPERS = 4
+PAPER_KIND = "paper"
+#: A stub is ~1.5 kB of abstract; a note that read the paper is several times that.
+_MIN_PAPER_NOTE_BYTES = 2500
 
 # Bounded grammar (#2444): `note`/`idea` at DIGEST_NOTE_MAX / DIGEST_IDEA_MAX (400,
 # one line each) and the two id fields at DIGEST_ID_MAX (20). `_shape` slices none of
@@ -183,9 +198,11 @@ RESULT_SCHEMA: dict = {
                 "description": "#id or none"},
         "filed": {"type": "string", "maxLength": DIGEST_ID_MAX,
                 "description": "#id or none"},
+        "papers": {"type": "string", "maxLength": DIGEST_PAPERS_MAX,
+                "description": "arXiv ids or exact titles separated by ' | ', or none"},
     },
     "required": ["result", "note", "relevance", "verdict", "areas", "source_kind",
-                 "approach", "idea", "duplicate_of", "filed"],
+                 "approach", "idea", "duplicate_of", "filed", "papers"],
     "additionalProperties": False,
 }
 
@@ -278,6 +295,13 @@ Source line for the item's description:
 
 Profile to read for step 3: {profile_path}
 
+`PAPERS` in the block below names the research papers this video is about, at \
+most four: the ones it presents or walks through, not every work it mentions \
+in passing. Give the arXiv id where the description or transcript has one, \
+otherwise the paper's full title exactly as the description prints it. Each \
+one is read in full by a later run and gets its own note, so a title you are \
+unsure of is left out.
+
 End your final message with exactly this block and nothing after it:
 
 RESULT: <written|kept|failed>
@@ -290,6 +314,7 @@ APPROACH: <adopt|recreate|experiment|read|none>
 IDEA: <one line naming the specific thing, or none>
 DUPLICATE_OF: <#id or none>
 FILED: <#id or none>
+PAPERS: <arXiv ids or exact paper titles, separated by " | ", or none>
 
 `written` means you wrote the note at the path above; `kept` means an \
 existing note was good enough and you left it; `failed` means you could not \
@@ -316,7 +341,7 @@ class SkillProtocolMissing(RuntimeError):
     """
 
 
-def load_skill() -> str:
+def load_skill(slug: str = SKILL) -> str:
     """Read the digest protocol out of the vault skill.
 
     The same route `workers/sources/deep_research.py` takes:
@@ -326,10 +351,10 @@ def load_skill() -> str:
     """
     from app import autonomy
 
-    text = autonomy._load_skill_content(SKILL) or ""
+    text = autonomy._load_skill_content(slug) or ""
     if not text.strip():
         raise SkillProtocolMissing(
-            f"skills/{SKILL}/SKILL.md is missing or empty: the digest protocol is "
+            f"skills/{slug}/SKILL.md is missing or empty: the digest protocol is "
             "not in this file any more, so there is nothing to send the session")
     return text
 
@@ -444,6 +469,7 @@ def _shape(raw) -> dict:
     areas = [a.strip().lower().replace("_", "-").replace(" ", "-")
              for a in re.split(r"[,;/]", one("AREAS")) if a.strip()]
     idea = one("IDEA")
+    papers = [" ".join(p.split()).strip("`'\" ") for p in str(raw("PAPERS") or "").split("|")]
     return {
         "result": result if result in _RESULTS else None,
         "note": one("NOTE").strip("() "),
@@ -455,6 +481,7 @@ def _shape(raw) -> dict:
         "idea": "" if idea.lower() == "none" else idea,
         "duplicate_of": _id_or_none(one("DUPLICATE_OF")),
         "filed": _id_or_none(one("FILED")),
+        "papers": [p for p in papers if p and p.lower() != "none"][:MAX_PAPERS],
     }
 
 
@@ -643,6 +670,33 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     if room <= 0:
         return
 
+    # Papers first, `papers.batch` of them: the channels always have a video
+    # pending, so a paper offered after them would never get the room. The
+    # registry hands them out oldest first, and the dedup key makes a paper
+    # that is already queued or running cost nothing here.
+    papers = _papers_cfg(src_cfg)
+    if papers["enabled"]:
+        try:
+            out = await _script(channels[0], "--papers-pending", timeout=60)
+        except ScriptError as exc:
+            logger.warning("youtube-digest: --papers-pending failed: %s", exc)
+            out = {}
+        offered = [r for r in out.get("pending") or [] if r.get("arxiv_id")]
+        for row in offered[:max(0, papers["batch"])]:
+            if room <= 0:
+                break
+            new_id = queue.enqueue(
+                source=NAME, kind=PAPER_KIND,
+                payload={"arxiv_id": row["arxiv_id"], "title": row.get("title", ""),
+                         "max_turns": papers["max_turns"]},
+                priority=priority,
+                dedup_key=f"{NAME}:{PAPER_KIND}:{row['arxiv_id']}",
+            )
+            if new_id is not None:
+                room -= 1
+                logger.info("Enqueued youtube-digest paper %s: %s",
+                            row["arxiv_id"], (row.get("title") or "")[:60])
+
     per_channel: dict[str, list[dict]] = {}
     for channel in channels:
         try:
@@ -676,6 +730,215 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
                 room -= 1
                 logger.info("Enqueued youtube-digest %s %s: %s",
                             channel, row["video_id"], (row.get("title") or "")[:60])
+
+
+# ── Papers ───────────────────────────────────────────────────────────────────
+#
+# One session per cited paper, after the video that cited it. The script has
+# already put the full text on disk and an abstract-only note at the target
+# path; the session replaces that note with one written from the paper.
+#
+# Same split as the video prompt: the protocol is the vault skill named by
+# `PAPER_SKILL` — `~/obsidian/skills/paper-digest/SKILL.md`, read at
+# prompt-build time and never formatted — and what is here is the per-paper
+# task block. A missing skill fails the run by name and is not counted against
+# the paper.
+
+PAPER_SKILL = "paper-digest"
+
+PAPER_TASK_BLOCK = """\
+<paper>
+arxiv_id: {arxiv_id}
+title: {title}
+authors: {authors}
+submitted: {published}
+url: {url}
+text: {text_path} ({text_words} words, {text_lines} lines, from arXiv's {text_source}){truncated}
+metadata: {meta_path}
+</paper>
+
+## Your task
+
+One paper, one note. Replace the placeholder at exactly this path:
+   {target_note}
+
+Start the file with exactly this header (add your topic tags under `tags:`):
+
+{note_header}
+End the file with exactly this section:
+
+## Discussed in
+
+{discussed}
+
+Profile to read for `## Relevance to Lloyd`: {profile_path}
+
+End your final message with exactly this block and nothing after it:
+
+RESULT: <written|failed>
+NOTE: {target_note}
+
+`written` means the full note is at the path above; `failed` means you could \\
+not produce it — say why in one line before the block.
+"""
+
+_PAPER_TRUNCATED = "\n   The text was cut at its size cap; say in `## Limitations` that the tail was not read."
+
+#: The paper turn writes one note and files nothing: the video's turn already
+#: judged the idea, and a second filing per paper is the loop opening more
+#: than it closes.
+PAPER_DISALLOWED: tuple[str, ...] = (*DISALLOWED, "backlog_write_task", "fact_add")
+
+
+def build_paper_prompt(meta: dict, *, skill_text: Optional[str] = None) -> str:
+    task_block = PAPER_TASK_BLOCK.format(
+        arxiv_id=meta.get("arxiv_id", ""),
+        title=meta.get("title", ""),
+        authors=", ".join(meta.get("authors") or []) or "unknown",
+        published=meta.get("published", "") or "unknown",
+        url=meta.get("url", ""),
+        text_path=meta.get("text_path", ""),
+        text_words=meta.get("text_words", "?"),
+        text_lines=meta.get("text_lines", "?"),
+        text_source="PDF" if meta.get("text_source") == "pdf" else "HTML rendering",
+        truncated=_PAPER_TRUNCATED if meta.get("text_truncated") else "",
+        meta_path=meta.get("meta_path", ""),
+        target_note=str(meta.get("target_note") or ""),
+        note_header=meta.get("note_header", ""),
+        discussed="\n".join(meta.get("discussed") or ["- None recorded"]),
+        profile_path=str(PROFILE_PATH),
+    )
+    return build_skill_prompt(load_skill(PAPER_SKILL) if skill_text is None else skill_text,
+                              job=NAME, task_block=task_block)
+
+
+def _paper_note_is_real(path: Path, arxiv_id: str) -> bool:
+    """The full note for this paper, and not the placeholder it replaces.
+
+    The placeholder carries `digest: abstract`, so `digest: full` on a file
+    the script wrote minutes ago is proof this turn wrote it — the stronger
+    form of the video path's "a pre-existing note proves nothing". The tail is
+    checked because a write that died mid-file leaves a good header.
+    """
+    try:
+        if not path.is_file():
+            return False
+        text = path.read_text(errors="replace")
+    except OSError:
+        return False
+    if len(text.encode()) < _MIN_PAPER_NOTE_BYTES or not text.startswith("---"):
+        return False
+    end = text.find("\n---", 3)
+    head = text[:end] if end != -1 else text[:4000]
+    return bool(re.search(rf"^arxiv_id:\s*['\"]?{re.escape(arxiv_id)}['\"]?\s*$", head, re.M)
+                and re.search(r"^digest:\s*full\s*$", head, re.M)
+                and re.search(r"^## Discussed in\s*$", text, re.M))
+
+
+def _papers_cfg(src_cfg: dict) -> dict:
+    cfg = src_cfg.get("papers")
+    cfg = cfg if isinstance(cfg, dict) else {}
+    return {"enabled": bool(cfg.get("enabled", True)), "batch": int(cfg.get("batch", 1)),
+            "max_turns": int(cfg.get("max_turns", src_cfg.get("max_turns", 40)))}
+
+
+async def _paper_fail(arxiv_id: str, why: str) -> None:
+    try:
+        await _script(DEFAULT_CHANNELS[0], f"--paper-fail={arxiv_id}", f"--reason={why[:400]}", timeout=60)
+    except ScriptError as exc:
+        logger.warning("youtube-digest: could not record failure for paper %s: %s", arxiv_id, exc)
+
+
+async def _execute_paper(item: QueueItem) -> dict[str, Any]:
+    from workers.sources import get_sources_config
+
+    payload = item.payload or {}
+    arxiv_id = str(payload.get("arxiv_id") or "")
+    if not arxiv_id:
+        return {"status": "failed", "summary": "paper queue item carries no arxiv_id"}
+    src_cfg = get_sources_config().get(NAME, {}) or {}
+    base_meta = {"kind": PAPER_KIND, "arxiv_id": arxiv_id}
+    label = f"paper {arxiv_id}"
+
+    # 1. The bundle. As for a video: a text that cannot be fetched is counted by
+    #    the script, a crash is counted here.
+    try:
+        fetched = await _script(DEFAULT_CHANNELS[0], f"--paper-fetch={arxiv_id}",
+                                timeout=float(src_cfg.get("fetch_timeout_seconds", 420)))
+    except ScriptError as exc:
+        await _paper_fail(arxiv_id, f"fetch crashed: {exc}")
+        return {"status": "failed", "summary": f"{label}: fetch crashed: {_one_line(exc)}",
+                "meta": {**base_meta, "fetch_crashed": True}}
+    if not fetched.get("ok"):
+        why = str(fetched.get("error") or "fetch failed")
+        return {"status": "failed", "summary": f"{label}: {_one_line(why)}",
+                "meta": {**base_meta, "fetch_error": why,
+                         "failure_count": fetched.get("failure_count")}}
+    meta = fetched["meta"]
+    note_path = Path(meta["target_note"])
+    title = str(meta.get("title") or arxiv_id)
+
+    # 2. The session.
+    try:
+        prompt = await asyncio.to_thread(build_paper_prompt, meta)
+    except SkillProtocolMissing as exc:
+        # The deploy's fault, not the paper's: the row stays `fetched`.
+        logger.error("youtube-digest: %s", exc)
+        return {"status": "failed", "summary": f"{label}: {_one_line(exc)}",
+                "meta": {**base_meta, "skill_missing": True}}
+    vault_before = await asyncio.to_thread(_vault_dirty_paths)
+    try:
+        run = await run_prompt_in_session(
+            prompt, title=f"Paper: {title[:58]}", source=NAME,
+            max_turns=int(payload.get("max_turns") or _papers_cfg(src_cfg)["max_turns"]),
+            priority=1, extra_disallowed=list(PAPER_DISALLOWED))
+    except DrainActive as exc:
+        return {"status": "skipped", "summary": f"landing in progress: {_one_line(exc)}",
+                "meta": {**base_meta, "drain_active": True}}
+    except TurnTimeout as exc:
+        await _paper_fail(arxiv_id, f"turn timeout: {exc}")
+        return {"status": "failed", "summary": f"{label}: {_one_line(exc)}",
+                "meta": {**base_meta, "turn_timeout": True}}
+
+    session_id = run.get("session_id")
+    text = run.get("text") or ""
+    stop_reason = run.get("stop_reason")
+    on_disk = await asyncio.to_thread(_paper_note_is_real, note_path, arxiv_id)
+    unexpected = await asyncio.to_thread(_unexpected_vault_writes, vault_before)
+    run_meta = {**base_meta, "session_id": session_id, "stop_reason": stop_reason,
+                "num_turns": run.get("num_turns"), "unexpected_vault_writes": unexpected}
+
+    # 3a. Infra-shaped, as in the video path: not the paper's fault, parked on
+    #     its own row for INFRA_DEFER_SECONDS and never counted.
+    if not text.strip() and stop_reason is None and not on_disk:
+        errs = [str(e)[:160] for e in (run.get("errors") or [])[:2]]
+        why = f"turn produced nothing ({'; '.join(errs) or 'no error reported'})"
+        logger.warning("youtube-digest: %s: %s — left fetched, retried in %ds",
+                       label, why, INFRA_DEFER_SECONDS)
+        return {"status": "failed", "summary": f"{label}: {_one_line(why)}",
+                "defer_seconds": INFRA_DEFER_SECONDS,
+                "meta": {**run_meta, "infra": True, "empty_response": True}}
+
+    # 3b. Disk decides.
+    if not on_disk:
+        why = (f"turn ended ({stop_reason}, {run.get('num_turns')} iterations) "
+               f"without a full note at {note_path.name}")
+        await _paper_fail(arxiv_id, why)
+        return {"status": "failed", "summary": f"{label}: {_one_line(why)}",
+                "response": text, "meta": {**run_meta, "empty_response": not text.strip()}}
+
+    try:
+        await _script(DEFAULT_CHANNELS[0], f"--paper-complete={arxiv_id}", timeout=60)
+    except ScriptError as exc:
+        # The note is on disk and `digest: full`; a second read would redo it.
+        logger.warning("youtube-digest: --paper-complete failed for %s: %s", arxiv_id, exc)
+    bits = [f"Paper {arxiv_id}: {title[:70]} — note written"]
+    if unexpected:
+        bits.append(f"{len(unexpected)} unexpected vault write(s)")
+    return {"status": "success", "summary": _one_line(", ".join(bits)),
+            "artifact_path": str(note_path), "response": text,
+            "meta": {**run_meta, "note": str(note_path), "text_source": meta.get("text_source"),
+                     "text_words": meta.get("text_words")}}
 
 
 # ── Execution ────────────────────────────────────────────────────────────────
@@ -730,6 +993,8 @@ async def _fail(channel: str, video_id: str, why: str) -> None:
 async def execute(item: QueueItem) -> dict[str, Any]:
     from workers.sources import get_sources_config
 
+    if item.kind == PAPER_KIND:
+        return await _execute_paper(item)
     payload = item.payload or {}
     channel = str(payload.get("channel") or "")
     video_id = str(payload.get("video_id") or "")
@@ -896,6 +1161,21 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     except ScriptError as exc:
         logger.warning("youtube-digest: --eval-report failed for %s: %s", channel, exc)
 
+    # 5. The papers the turn named. After `--complete`, because the registry
+    #    links each paper back to the note that call records. Best effort: an
+    #    arXiv outage costs these papers their notes, never the video its run.
+    papers_meta: dict[str, Any] = {}
+    refs = (parsed or {}).get("papers") or []
+    if refs and _papers_cfg(src_cfg)["enabled"]:
+        try:
+            out = await _script(channel, f"--paper-register={video_id}",
+                                f"--paper-refs={json.dumps(refs)}", timeout=180)
+            papers_meta = {"papers_registered": [r.get("arxiv_id") for r in out.get("registered") or []],
+                           "papers_unresolved": list(out.get("unresolved") or [])}
+        except ScriptError as exc:
+            logger.warning("youtube-digest: --paper-register failed for %s %s: %s", channel, video_id, exc)
+            papers_meta = {"papers_register_error": _one_line(exc)[:300]}
+
     verdict = eval_result.get("verdict") or "no verdict"
     rel = eval_result.get("relevance")
     bits = [f"{meta.get('channel_name', channel)}: {title[:60]} — {verdict}"
@@ -908,6 +1188,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         bits.append(f"duplicate of #{eval_result['duplicate_of']}")
     if parsed and parsed.get("result") == "kept":
         bits.append("note kept")
+    if papers_meta.get("papers_registered"):
+        bits.append(f"{len(papers_meta['papers_registered'])} paper(s) registered")
     if unexpected:
         bits.append(f"{len(unexpected)} unexpected vault write(s)")
     return {
@@ -921,5 +1203,5 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         "meta": {**base_meta, "session_id": session_id, "note": str(note_path),
                  "stop_reason": run.get("stop_reason"), "num_turns": run.get("num_turns"),
                  "eval": eval_result, "unexpected_vault_writes": unexpected,
-                 "parsed": parsed is not None, **verdict_meta},
+                 "parsed": parsed is not None, **verdict_meta, **papers_meta},
     }

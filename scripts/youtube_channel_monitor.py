@@ -26,6 +26,14 @@ Two ways to turn a video into a note:
   for operator use and as the fallback; nothing visible comes out of it but
   the note.
 
+Papers a video cites get notes of their own under knowledge/papers/. An
+arXiv id in the transcript or the description is registered when the bundle
+is built, and a paper the digest session names by title is resolved through
+the arXiv API afterwards (`--paper-register`). Either way an abstract-only
+note goes down at once and the worker source then reads the paper in full,
+one session per paper (`--papers-pending`, `--paper-fetch`,
+`--paper-complete` / `--paper-fail`), and replaces it.
+
 Produces vault notes matching the knowledge base format:
 - Rich frontmatter (segment, tags, type, domain, sources, summary)
 - Executive Summary
@@ -44,6 +52,8 @@ Usage:
     python3 youtube_channel_monitor.py --channel discover-ai --pending --json    # what the worker may take
     python3 youtube_channel_monitor.py --channel discover-ai --fetch <id> --json # bundle for one video
     python3 youtube_channel_monitor.py --channel discover-ai --eval-report       # regenerate the report note
+    python3 youtube_channel_monitor.py --papers-pending --json                   # papers waiting for a full read
+    python3 youtube_channel_monitor.py --channel discover-ai --papers-backfill --dry-run  # ids old bundles name
 
 `--since-days` also records a *floor*: the oldest video inside the window.
 The new-video walk stops there, so a channel tracked from a date does not get
@@ -51,14 +61,19 @@ crawled back through its whole history one tick at a time (which is exactly
 what a channel registered with plain `--backfill` is asking for).
 """
 
+import difflib
 import json
 import os
 import re
+import shutil
 import tempfile
 import subprocess
+import time
 import unicodedata
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from urllib import request
+from urllib.parse import urlencode
 from xml.etree import ElementTree as ET
 
 # ── Configuration ──────────────────────────────────────────────────────
@@ -540,7 +555,11 @@ def call_llm(system_prompt, user_content, max_tokens=2000, thinking=False):
 # ── Entity extraction ─────────────────────────────────────────────────
 
 def extract_entities(transcript):
-    """Extract GitHub URLs, arXiv IDs, paper URLs, tools, and named entities."""
+    """Extract GitHub URLs, arXiv IDs, paper URLs, tools, and named entities.
+
+    Callers pass the transcript and the video description together: a link is
+    written in the description, never spoken.
+    """
     entities = {
         "github_urls": [], "paper_arxiv": [], "paper_urls": [],
         "other_urls": [], "tools": [], "named_entities": []
@@ -548,19 +567,25 @@ def extract_entities(transcript):
 
     # GitHub URLs
     gh = re.findall(r"(https?://github\.com/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)", transcript)
-    entities["github_urls"] = list(dict.fromkeys(gh))
+    entities["github_urls"] = list(dict.fromkeys(u.rstrip(".") for u in gh))
 
-    # arXiv IDs
-    arxiv_urls = re.findall(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5})", transcript)
-    arxiv_bare = re.findall(r"\b(\d{4}\.\d{4,5})\b", transcript)
-    entities["paper_arxiv"] = list(dict.fromkeys(arxiv_urls + arxiv_bare))
+    # arXiv IDs: a URL, Hugging Face's mirror of one, "arXiv:<id>", or a bare
+    # id. Each is checked by normalize_arxiv_id, which also drops the version.
+    marked = re.findall(
+        r"(?:arxiv\.org/(?:abs|pdf|html)/|huggingface\.co/papers/|arxiv\s*:\s*)(\d{4}\.\d{4,5})",
+        transcript, re.IGNORECASE)
+    bare = re.findall(r"(?<![\d.])(\d{4}\.\d{4,5})(?!\d)", transcript)
+    ids = [normalize_arxiv_id(x) for x in marked + bare]
+    entities["paper_arxiv"] = list(dict.fromkeys(i for i in ids if i))
 
-    # Paper URLs
+    # Papers hosted elsewhere. arXiv is handled by id above, and a bare
+    # huggingface.co link is a model or a space far more often than a paper.
     papers = re.findall(
-        r"(https?://(openreview|paperswithcode|huggingface|neurips|icml\.cc|arxiv)\.[\w/_.-]+)",
+        r"https?://(?:www\.)?(?:openreview\.net|paperswithcode\.com|aclanthology\.org"
+        r"|(?:[\w-]+\.)?neurips\.cc|icml\.cc)/[\w/_.?=&%-]+",
         transcript, re.IGNORECASE
     )
-    entities["paper_urls"] = list(dict.fromkeys(papers))
+    entities["paper_urls"] = list(dict.fromkeys(u.rstrip(".?&") for u in papers))
 
     # General URLs
     all_urls = set(re.findall(r"(https?://[\w\-.]+\.[\w\-.]+(?:/[\w\-.%#]+(?:\?[\w%&=.-]*)?)?)", transcript))
@@ -654,76 +679,9 @@ cloned_at: {now}
 
 
 # ── Paper fetching ─────────────────────────────────────────────────────
-
-def fetch_arxiv_paper(arxiv_id):
-    """Fetch paper info from arXiv API and create vault note."""
-    match = re.search(r"(\d{4}\.\d{4,5})", arxiv_id)
-    if not match:
-        return None
-    arxiv_id_clean = match.group(1)
-    note_path = os.path.join(VAULT_PAPER_DIR, f"arxiv-{arxiv_id_clean}.md")
-
-    if os.path.exists(note_path):
-        print(f"  Paper note already exists: {note_path}")
-        return {"arxiv_id": arxiv_id_clean, "note_path": note_path}
-
-    try:
-        api_url = f"http://export.arxiv.org/api/query?id_list={arxiv_id_clean}"
-        req = request.Request(api_url, headers={"User-Agent": "Lloyd/1.0"})
-        resp = request.urlopen(req, timeout=30)
-        xml = resp.read().decode("utf-8")
-
-        ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
-        root = ET.fromstring(xml)
-        entry = root.find("atom:entry", ns)
-        if entry is None:
-            return None
-
-        title_el = entry.find("atom:title", ns)
-        summary_el = entry.find("atom:summary", ns)
-        authors = [a.text for a in entry.findall("atom:author/atom:name", ns)]
-        published_el = entry.find("atom:published", ns)
-
-        title = (title_el.text or "Unknown").strip().replace("\n", " ")
-        summary = (summary_el.text or "").strip()
-        published = (published_el.text or "").strip() if published_el is not None else ""
-        categories = [c.get("term", "") for c in entry.findall("atom:category", ns)]
-
-        note_content = f"""---
-segment: knowledge
-tags: [research, paper]
-type: reference
-domain: ai-research
-source: https://arxiv.org/abs/{arxiv_id_clean}
-arxiv_id: {arxiv_id_clean}
-published: {published}
-authors: {", ".join(authors[:10])}
----
-
-# {title}
-
-## Authors
-{', '.join(authors[:20])}
-
-## Categories
-{', '.join(categories)}
-
-## Abstract
-{summary[:3000]}
-
-## Links
-- [Abstract](https://arxiv.org/abs/{arxiv_id_clean})
-- [PDF](https://arxiv.org/pdf/{arxiv_id_clean}.pdf)
-- [Source](https://arxiv.org/src/{arxiv_id_clean}/a)
-"""
-        with open(note_path, "w") as f:
-            f.write(note_content)
-        print(f"  Created: {note_path}")
-        return {"arxiv_id": arxiv_id_clean, "title": title, "note_path": note_path}
-    except Exception as e:
-        print(f"  arXiv fetch failed: {e}")
-        return None
-
+#
+# arXiv papers are registered and read in full: see "Papers" further down.
+# What is left here is the stub for a paper that lives somewhere else.
 
 def fetch_generic_paper(url):
     """Fetch paper info from generic paper URL."""
@@ -976,7 +934,7 @@ def process_video(video_id, title, published_text):
 
     # Extract entities
     print("  Extracting entities...")
-    entities = extract_entities(transcript)
+    entities = extract_entities(transcript + "\n" + description)
     for k, v in entities.items():
         if v:
             print(f"    {k}: {v}")
@@ -990,12 +948,7 @@ def process_video(video_id, title, published_text):
             github_results.append(result)
 
     # Process paper references
-    paper_results = []
-    for arxiv_id in entities["paper_arxiv"]:
-        print(f"  Processing arXiv: {arxiv_id}")
-        result = fetch_arxiv_paper(arxiv_id)
-        if result:
-            paper_results.append(result)
+    paper_results = enrich_papers(entities["paper_arxiv"])
 
     for paper_url in entities["paper_urls"]:
         paper_url = paper_url[0] if isinstance(paper_url, tuple) else paper_url
@@ -1326,8 +1279,8 @@ def build_bundle(video_id, title="", published="", entry=None):
 
     Returns (meta, None) or (None, error). The transcript is the only hard
     requirement; a metadata or enrichment failure degrades to an empty field.
-    Enrichment (GitHub clones, arXiv notes) stays here rather than in the
-    session because it is deterministic plumbing and the session has no Bash.
+    Enrichment (GitHub clones, paper registration) stays here rather than in
+    the session because it is deterministic plumbing and the session has no Bash.
     """
     bdir = bundle_dir(video_id)
     os.makedirs(bdir, exist_ok=True)
@@ -1350,7 +1303,13 @@ def build_bundle(video_id, title="", published="", entry=None):
     words = len(transcript.split())
     print(f"  Transcript: {len(transcript)} chars, {words} words")
 
-    entities = extract_entities(transcript)
+    existing = existing_note_for(video_id, entry)
+    target = existing or target_note_path(title, published, video_id)
+
+    # The description is scanned with the transcript: that is where the links
+    # are. Of 517 bundles fetched before this, none had a paper or a repo in
+    # its transcript and 21 had an arXiv id in the description.
+    entities = extract_entities(transcript + "\n" + description)
     enrichment = {"github": [], "papers": []}
     for gh_url in entities["github_urls"]:
         try:
@@ -1360,14 +1319,12 @@ def build_bundle(video_id, title="", published="", entry=None):
             r = None
         if r:
             enrichment["github"].append(r)
-    for arxiv_id in entities["paper_arxiv"]:
-        try:
-            r = fetch_arxiv_paper(arxiv_id)
-        except Exception as e:  # noqa: BLE001
-            print(f"  arXiv enrichment failed for {arxiv_id}: {e}")
-            r = None
-        if r:
-            enrichment["papers"].append(r)
+    try:
+        enrichment["papers"] = enrich_papers(entities["paper_arxiv"], {
+            "channel": CHANNEL_KEY, "channel_name": CHANNEL_NAME, "video_id": video_id,
+            "title": title, "published": published, "note": target})
+    except Exception as e:  # noqa: BLE001 — an unreadable registry must not cost the video
+        print(f"  paper registration failed: {e}")
     for paper_url in entities["paper_urls"]:
         paper_url = paper_url[0] if isinstance(paper_url, tuple) else paper_url
         try:
@@ -1383,7 +1340,6 @@ def build_bundle(video_id, title="", published="", entry=None):
     with open(transcript_path, "w") as f:
         f.write(wrapped + "\n")
 
-    existing = existing_note_for(video_id, entry)
     measurements_path, measurements = capture_measurements(bdir)
     meta = {
         "channel_key": CHANNEL_KEY,
@@ -1403,7 +1359,7 @@ def build_bundle(video_id, title="", published="", entry=None):
         "entities": {k: entities.get(k, []) for k in ("github_urls", "paper_arxiv", "paper_urls", "other_urls")},
         "enrichment": enrichment,
         "existing_note": existing,
-        "target_note": existing or target_note_path(title, published, video_id),
+        "target_note": target,
         "measurements_path": measurements_path,
         "measurements_summary": measurements_summary(measurements),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
@@ -1565,6 +1521,577 @@ def load_bundle(video_id):
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
+
+
+# ── Papers ─────────────────────────────────────────────────────────────
+#
+# A paper a video cites becomes its own vault note, in two steps. When the
+# bundle is built the paper is *registered*: its arXiv record is fetched, an
+# abstract-only note is written at the path the full note will live at (so the
+# video note's wiki link resolves from the first minute), and a row goes into
+# the registry below. The `youtube-digest` worker source then takes pending
+# rows one at a time: `--paper-fetch` puts the paper's full text into a
+# bundle, and a session reads it and rewrites the abstract note into a full
+# one. Same split as the videos — this file fetches and keeps state, a
+# session reads and writes.
+#
+# Before 2026-10-09 this section was one function that wrote an abstract stub
+# for every arXiv id `extract_entities` found in the *transcript*. No speaker
+# reads an id aloud: across 517 bundles it found none and wrote no note.
+#
+# The registry is shared by every channel (a paper is not a channel's), so it
+# has its own directory and the paper modes ignore `--channel` except where a
+# video is named.
+
+PAPERS_STATE_DIR = os.path.expanduser("~/.local/share/youtube-papers")
+PAPER_MAX_PER_VIDEO = 4          # a description that lists a bibliography is not four reads
+PAPER_MAX_ATTEMPTS = 4
+PAPER_TEXT_MAX_CHARS = 300_000   # ~75k tokens; a longer paper is cut and says so
+PAPER_MIN_TEXT_WORDS = 1500      # less than this from the HTML page is a stub page, not a paper
+PAPER_TITLE_MATCH = 0.92
+PAPER_QUEUEABLE = ("pending", "fetched")
+DIGEST_ABSTRACT = "abstract"
+DIGEST_FULL = "full"
+DISCUSSED_HEADING = "## Discussed in"
+ARXIV_API = "https://export.arxiv.org/api/query"
+ARXIV_SPACING_SECONDS = 3.0      # arXiv's API terms: one request every three seconds
+_ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom"}
+_ARXIV_ID_RE = re.compile(r"(?<![\d.])(\d{2})(\d{2})\.(\d{4,5})(?:v\d+)?(?!\d)")
+_ARXIV_REF_RE = re.compile(r"^\s*(?:arxiv\s*:?\s*)?\d{4}\.\d{4,5}(?:v\d+)?\s*$|arxiv\.org/", re.I)
+_last_arxiv_call = [0.0]
+
+
+def normalize_arxiv_id(text):
+    """The bare new-style id in `text` ("2609.26550"), or None.
+
+    Checked, not just matched: `\\d{4}\\.\\d{4,5}` also fits "2010.2015" and a
+    price. The first four digits are YYMM, and the sequence number has four
+    digits through 1412 and five from 1501, so a month of 13 or a four-digit
+    number on a 2020s id is not an arXiv id.
+    """
+    m = _ARXIV_ID_RE.search(str(text or ""))
+    if not m:
+        return None
+    yy, mm, seq = int(m.group(1)), int(m.group(2)), m.group(3)
+    if not 1 <= mm <= 12 or (yy, mm) < (7, 4):
+        return None
+    if len(seq) != (4 if yy < 15 else 5):
+        return None
+    return f"{m.group(1)}{m.group(2)}.{seq}"
+
+
+def papers_state_file():
+    return os.path.join(PAPERS_STATE_DIR, "papers.json")
+
+
+def paper_bundle_dir(arxiv_id):
+    return os.path.join(PAPERS_STATE_DIR, "bundles", arxiv_id)
+
+
+def load_papers():
+    """The registry. A missing file is an empty registry; an unreadable one
+    raises, because saving over it would re-queue every paper it held."""
+    try:
+        with open(papers_state_file()) as f:
+            reg = json.load(f)
+    except FileNotFoundError:
+        reg = {}
+    reg.setdefault("papers", {})
+    return reg
+
+
+def save_papers(reg):
+    os.makedirs(PAPERS_STATE_DIR, exist_ok=True)
+    tmp = papers_state_file() + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(reg, f, indent=2)
+    os.replace(tmp, papers_state_file())
+
+
+def _arxiv_query(params):
+    """One arXiv API call → a list of paper records, spaced per their terms."""
+    wait = ARXIV_SPACING_SECONDS - (time.monotonic() - _last_arxiv_call[0])
+    if _last_arxiv_call[0] and wait > 0:
+        time.sleep(wait)
+    req = request.Request(f"{ARXIV_API}?{urlencode(params)}", headers={"User-Agent": "Lloyd/1.0"})
+    try:
+        xml = request.urlopen(req, timeout=30).read().decode("utf-8")
+    finally:
+        _last_arxiv_call[0] = time.monotonic()
+    rows = []
+    for entry in ET.fromstring(xml).findall("atom:entry", _ARXIV_NS):
+        def text(tag):
+            el = entry.find(f"atom:{tag}", _ARXIV_NS)
+            return " ".join((el.text or "").split()) if el is not None else ""
+        # An unknown id comes back as an entry whose <id> is an error URL.
+        arxiv_id = normalize_arxiv_id(text("id").rsplit("/", 1)[-1])
+        if not arxiv_id or not text("title"):
+            continue
+        rows.append({
+            "arxiv_id": arxiv_id,
+            "title": text("title"),
+            "summary": text("summary")[:3000],
+            "authors": [" ".join((a.text or "").split())
+                        for a in entry.findall("atom:author/atom:name", _ARXIV_NS)][:20],
+            "published": text("published")[:10],
+            "categories": [c.get("term", "") for c in entry.findall("atom:category", _ARXIV_NS)],
+        })
+    return rows
+
+
+def fetch_arxiv_meta(arxiv_id):
+    rows = _arxiv_query({"id_list": arxiv_id})
+    return rows[0] if rows else None
+
+
+def _title_key(title):
+    return re.sub(r"[^a-z0-9]+", " ", unicodedata.normalize("NFKC", str(title or "")).lower()).strip()
+
+
+def resolve_arxiv_title(title):
+    """The arXiv record whose title is `title`, or None.
+
+    Discover AI cites most papers by title and authors with no id, so a title
+    is the only handle. A phrase search plus a near-exact comparison: a wrong
+    paper filed under a video is worse than none, so a loose match is refused.
+    A title given without its subtitle is accepted as a prefix of four words
+    or more.
+    """
+    key = _title_key(title)
+    if len(key.split()) < 3:
+        return None
+    best, best_score = None, 0.0
+    for row in _arxiv_query({"search_query": f'ti:"{key}"', "max_results": 5}):
+        cand = _title_key(row["title"])
+        score = difflib.SequenceMatcher(None, key, cand).ratio()
+        if cand.startswith(key + " ") and len(key.split()) >= 4:
+            score = max(score, PAPER_TITLE_MATCH)
+        if score > best_score:
+            best, best_score = row, score
+    return best if best_score >= PAPER_TITLE_MATCH else None
+
+
+def find_paper_note(arxiv_id):
+    """The note already in the vault for this paper, by its `arxiv_id:` line."""
+    if not os.path.isdir(VAULT_PAPER_DIR):
+        return None
+    for name in sorted(os.listdir(VAULT_PAPER_DIR)):
+        if not name.endswith(".md"):
+            continue
+        path = os.path.join(VAULT_PAPER_DIR, name)
+        if normalize_arxiv_id(_frontmatter_field(path, "arxiv_id")) == arxiv_id:
+            return path
+    return None
+
+
+def paper_note_digest(path):
+    """`abstract` for a note this file wrote and no session has replaced yet.
+
+    Anything else is a full note, including one with no `digest:` key at all:
+    that is a note a person or a research session wrote by hand, and neither
+    the stub writer nor the paper session may touch it.
+    """
+    return DIGEST_ABSTRACT if _frontmatter_field(path, "digest") == DIGEST_ABSTRACT else DIGEST_FULL
+
+
+def target_paper_note(arxiv_id, title):
+    slug = slugify(title, max_len=60)
+    return os.path.join(VAULT_PAPER_DIR, f"{arxiv_id}-{slug}.md" if slug else f"{arxiv_id}.md")
+
+
+def _yaml_str(value):
+    # A JSON string is a YAML double-quoted scalar; titles carry colons and quotes.
+    return json.dumps(" ".join(str(value or "").split()), ensure_ascii=False)
+
+
+def paper_note_header(row, digest):
+    """Front matter and title line of a paper note, in the keys the existing
+    hand-written notes under knowledge/papers/ use."""
+    arxiv_id = row["arxiv_id"]
+    return (
+        "---\n"
+        "type: notes\n"
+        "domain: ai\n"
+        "segment: knowledge\n"
+        "status: active\n"
+        f"arxiv_id: '{arxiv_id}'\n"
+        f"digest: {digest}\n"
+        f"title: {_yaml_str(row.get('title'))}\n"
+        f"authors: {_yaml_str(', '.join(row.get('authors') or []))}\n"
+        f"submitted: '{row.get('published') or ''}'\n"
+        "tags:\n"
+        "- paper\n"
+        "sources:\n"
+        f"- https://arxiv.org/abs/{arxiv_id}\n"
+        "---\n\n"
+        f"# {row.get('title') or arxiv_id} — paper note (arXiv {arxiv_id})\n"
+    )
+
+
+def discussed_lines(row):
+    lines = []
+    for v in row.get("videos") or []:
+        stem = os.path.splitext(os.path.basename(v.get("note") or ""))[0]
+        if not stem:
+            continue
+        where = ", ".join(x for x in (v.get("channel_name"), v.get("published")) if x)
+        lines.append(f"- [[{stem}]]" + (f" — {where}" if where else ""))
+    return lines or ["- None recorded"]
+
+
+def write_paper_stub(row):
+    body = (
+        paper_note_header(row, DIGEST_ABSTRACT)
+        + "\n> Abstract only. The youtube-digest job has a full read of this paper queued; "
+          "it replaces this note.\n\n"
+        + "## Abstract\n\n" + (row.get("summary") or "Not available.") + "\n\n"
+        + DISCUSSED_HEADING + "\n\n" + "\n".join(discussed_lines(row)) + "\n"
+    )
+    os.makedirs(os.path.dirname(row["note_path"]), exist_ok=True)
+    with open(row["note_path"], "w") as f:
+        f.write(body)
+
+
+def _append_discussed(path, line):
+    """Add one video to a full note the job wrote, if that section is its last."""
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError:
+        return
+    headings = re.findall(r"^## .+$", text, re.M)
+    if not headings or headings[-1].strip() != DISCUSSED_HEADING or line in text:
+        return
+    with open(path, "w") as f:
+        f.write(text.rstrip("\n") + "\n" + line + "\n")
+
+
+def register_paper(reg, arxiv_id, video=None, record=None):
+    """Put one paper in the registry and make sure a note stands at its path.
+
+    Returns the registry row, or None when arXiv does not know the id.
+    `video` is the citing video ({channel, channel_name, video_id, title,
+    published, note}); `record` is an arXiv record already in hand.
+    """
+    papers = reg["papers"]
+    row = papers.get(arxiv_id)
+    now = datetime.now(timezone.utc).isoformat()
+    if row is None:
+        existing = find_paper_note(arxiv_id)
+        if existing and paper_note_digest(existing) == DIGEST_FULL:
+            row = {"arxiv_id": arxiv_id, "title": _frontmatter_field(existing, "title") or arxiv_id,
+                   "note_path": existing, "status": "completed", "preexisting": True,
+                   "registered_at": now, "videos": []}
+        else:
+            record = record or fetch_arxiv_meta(arxiv_id)
+            if not record:
+                return None
+            row = {**record, "arxiv_id": arxiv_id, "status": "pending", "registered_at": now,
+                   "note_path": existing or target_paper_note(arxiv_id, record["title"]),
+                   "videos": []}
+        papers[arxiv_id] = row
+
+    added = None
+    if video and video.get("video_id") and not any(
+            v.get("video_id") == video["video_id"] for v in row.setdefault("videos", [])):
+        row["videos"].append(video)
+        added = video
+
+    if row.get("preexisting"):
+        return row
+    path = row["note_path"]
+    if not os.path.isfile(path):
+        # Never written, or deleted since: the row owes a note again.
+        if row.get("status") == "completed":
+            row["status"] = "pending"
+        if row.get("summary") is not None:
+            write_paper_stub(row)
+    elif paper_note_digest(path) == DIGEST_ABSTRACT:
+        if added:
+            write_paper_stub(row)
+    elif added:
+        _append_discussed(path, discussed_lines({"videos": [added]})[0])
+    return row
+
+
+def enrich_papers(arxiv_ids, video=None):
+    """Register the papers one video cites; what the bundle's `enrichment`
+    lists. A failure on one paper costs that paper, never the bundle."""
+    out = []
+    if not arxiv_ids:
+        return out
+    reg = load_papers()
+    for arxiv_id in list(arxiv_ids)[:PAPER_MAX_PER_VIDEO]:
+        try:
+            row = register_paper(reg, arxiv_id, video)
+        except Exception as e:  # noqa: BLE001
+            print(f"  arXiv enrichment failed for {arxiv_id}: {e}")
+            row = None
+        if row:
+            print(f"  Paper: {arxiv_id} {row.get('title', '')[:70]} [{row['status']}]")
+            out.append({"arxiv_id": arxiv_id, "title": row.get("title", ""),
+                        "note_path": row["note_path"], "status": row["status"]})
+    save_papers(reg)
+    return out
+
+
+def fetch_arxiv_paper(arxiv_id):
+    """Register one paper by id (the script path's entry point)."""
+    arxiv_id = normalize_arxiv_id(arxiv_id)
+    rows = enrich_papers([arxiv_id]) if arxiv_id else []
+    return rows[0] if rows else None
+
+
+def resolve_paper_refs(refs):
+    """Ids and titles, as a session names them → (arXiv records or ids, unresolved)."""
+    found, unresolved = [], []
+    for ref in list(refs or [])[:PAPER_MAX_PER_VIDEO]:
+        ref = " ".join(str(ref or "").split())
+        if not ref or ref.lower() == "none":
+            continue
+        try:
+            if _ARXIV_REF_RE.search(ref):
+                arxiv_id = normalize_arxiv_id(ref)
+                record = fetch_arxiv_meta(arxiv_id) if arxiv_id else None
+            else:
+                record = resolve_arxiv_title(ref)
+        except Exception as e:  # noqa: BLE001
+            print(f"  could not resolve {ref!r}: {e}")
+            record = None
+        if record:
+            found.append(record)
+        else:
+            unresolved.append(ref)
+    return found, unresolved
+
+
+def paper_pending(reg, now=None):
+    """What the worker may read next, oldest registration first."""
+    now = now or datetime.now(timezone.utc)
+    rows = []
+    for arxiv_id, row in reg["papers"].items():
+        st = row.get("status")
+        due = st in PAPER_QUEUEABLE
+        if st == "failed" and int(row.get("failure_count", 0)) < PAPER_MAX_ATTEMPTS:
+            try:
+                age = (now - datetime.fromisoformat(row.get("last_attempt_at") or "")).total_seconds()
+            except (ValueError, TypeError):
+                age = RETRY_INTERVAL_SECONDS
+            due = age >= RETRY_INTERVAL_SECONDS
+        if due:
+            rows.append({"arxiv_id": arxiv_id, "title": row.get("title", ""), "status": st,
+                         "failure_count": int(row.get("failure_count", 0) or 0),
+                         "registered_at": row.get("registered_at", "")})
+    rows.sort(key=lambda r: r["registered_at"])
+    return rows
+
+
+def mark_paper_failed(row, reason):
+    row["status"] = "failed"
+    row["failure_count"] = int(row.get("failure_count", 0)) + 1
+    row["last_attempt_at"] = datetime.now(timezone.utc).isoformat()
+    row["last_error"] = (reason or "unspecified")[:500]
+    return row
+
+
+class _PaperHTML(HTMLParser):
+    """arXiv's LaTeXML page → plain text a session can page through.
+
+    Headings keep their level as `#` marks, table cells are separated, and a
+    formula is its TeX source (the `alttext` LaTeXML puts on every <math>).
+    The bibliography is dropped: it is a fifth of the tokens and none of the
+    paper.
+    """
+    _SKIP = {"script", "style", "nav", "button", "svg", "math", "annotation", "footer"}
+    _VOID = {"br", "img", "hr", "meta", "link", "input", "col", "wbr", "source"}
+    _BLOCK = {"p", "div", "section", "li", "tr", "table", "figure", "figcaption",
+              "blockquote", "pre", "dt", "dd", "ul", "ol", "article"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out = []
+        self.skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag in self._VOID:
+            if tag == "br" and not self.skip:
+                self.out.append("\n")
+            return
+        if self.skip:
+            self.skip += 1
+            return
+        if tag == "math":
+            self.out.append(" " + (attrs.get("alttext") or "") + " ")
+        if tag in self._SKIP or "ltx_bibliography" in (attrs.get("class") or ""):
+            self.skip = 1
+            return
+        if tag in self._BLOCK:
+            self.out.append("\n")
+        elif re.fullmatch(r"h[1-6]", tag):
+            self.out.append("\n\n" + "#" * int(tag[1]) + " ")
+        elif tag in ("td", "th"):
+            self.out.append(" | ")
+
+    def handle_endtag(self, tag):
+        if tag in self._VOID:
+            return
+        if self.skip:
+            self.skip -= 1
+            return
+        if tag in self._BLOCK or re.fullmatch(r"h[1-6]", tag):
+            self.out.append("\n")
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.out.append(data)
+
+
+def html_to_text(html):
+    m = re.search(r"<article\b.*</article>", html, re.S | re.I)
+    parser = _PaperHTML()
+    parser.feed(m.group(0) if m else html)
+    return "".join(parser.out)
+
+
+def tidy_paper_text(text, width=TRANSCRIPT_WRAP):
+    """Wrapped at `width` so Read pages it, blank runs collapsed, capped."""
+    import textwrap
+    lines, blank = [], False
+    for raw in (text or "").replace("\r", "").split("\n"):
+        line = " ".join(raw.split())
+        if not line:
+            blank = bool(lines)
+            continue
+        if blank:
+            lines.append("")
+            blank = False
+        lines.extend(textwrap.wrap(line, width=width, break_long_words=False,
+                                   break_on_hyphens=False) or [line])
+    out, size, truncated = [], 0, False
+    for line in lines:
+        size += len(line) + 1
+        if size > PAPER_TEXT_MAX_CHARS:
+            truncated = True
+            out.append(f"[cut here: the paper runs past {PAPER_TEXT_MAX_CHARS} characters]")
+            break
+        out.append(line)
+    return "\n".join(out), truncated
+
+
+def _http_get(url, timeout=60):
+    req = request.Request(url, headers={"User-Agent": "Lloyd/1.0"})
+    return request.urlopen(req, timeout=timeout).read()
+
+
+def fetch_paper_text(arxiv_id):
+    """(text, source) for the paper's body: arXiv's HTML rendering when it has
+    one, the PDF through pdftotext otherwise. (None, why) when neither works."""
+    errors = []
+    try:
+        text = html_to_text(_http_get(f"https://arxiv.org/html/{arxiv_id}").decode("utf-8", "replace"))
+        if len(text.split()) >= PAPER_MIN_TEXT_WORDS:
+            return text, "html"
+        errors.append(f"html: only {len(text.split())} words")
+    except Exception as e:  # noqa: BLE001 — a 404 here is the ordinary case for an older paper
+        errors.append(f"html: {e}")
+    if not shutil.which("pdftotext"):
+        return None, "; ".join(errors + ["pdf: pdftotext is not installed"])
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf:
+            pdf.write(_http_get(f"https://arxiv.org/pdf/{arxiv_id}", timeout=120))
+            pdf.flush()
+            run = subprocess.run(["pdftotext", "-enc", "UTF-8", pdf.name, "-"],
+                                 capture_output=True, timeout=180, check=True)
+        text = run.stdout.decode("utf-8", "replace").replace("\f", "\n\n")
+        if len(text.split()) >= PAPER_MIN_TEXT_WORDS:
+            return text, "pdf"
+        errors.append(f"pdf: only {len(text.split())} words")
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"pdf: {e}")
+    return None, "; ".join(errors)
+
+
+def build_paper_bundle(row):
+    """Fetch one paper's full text for a session. Returns (meta, None) or (None, error)."""
+    arxiv_id = row["arxiv_id"]
+    if row.get("summary") is None:
+        record = fetch_arxiv_meta(arxiv_id)
+        if not record:
+            return None, f"arXiv has no record for {arxiv_id}"
+        row.update({k: v for k, v in record.items() if k != "arxiv_id"})
+    raw, source = fetch_paper_text(arxiv_id)
+    if raw is None:
+        return None, f"Could not fetch paper text: {source}"
+    text, truncated = tidy_paper_text(raw)
+    bdir = paper_bundle_dir(arxiv_id)
+    os.makedirs(bdir, exist_ok=True)
+    text_path = os.path.join(bdir, "paper.txt")
+    with open(text_path, "w") as f:
+        f.write(text + "\n")
+    meta = {
+        "arxiv_id": arxiv_id,
+        "url": f"https://arxiv.org/abs/{arxiv_id}",
+        "title": row.get("title", ""),
+        "authors": row.get("authors") or [],
+        "published": row.get("published", ""),
+        "categories": row.get("categories") or [],
+        "abstract": row.get("summary", ""),
+        "bundle_dir": bdir,
+        "meta_path": os.path.join(bdir, "meta.json"),
+        "text_path": text_path,
+        "text_source": source,
+        "text_words": len(text.split()),
+        "text_lines": text.count("\n") + 1,
+        "text_truncated": truncated,
+        "target_note": row["note_path"],
+        "note_header": paper_note_header(row, DIGEST_FULL),
+        "discussed": discussed_lines(row),
+        "videos": row.get("videos") or [],
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(meta["meta_path"], "w") as f:
+        json.dump(meta, f, indent=2, default=str)
+    return meta, None
+
+
+def video_ref(video_id, entry=None, note=None):
+    """The citing video as a paper's registry row records it."""
+    entry = entry if isinstance(entry, dict) else {}
+    return {"channel": CHANNEL_KEY, "channel_name": CHANNEL_NAME, "video_id": video_id,
+            "title": entry.get("title", ""), "published": entry.get("published", "") or "",
+            "note": note or existing_note_for(video_id, entry) or ""}
+
+
+def backfill_papers(state, dry_run=False):
+    """Register the papers that completed videos' bundles already name.
+
+    The description was never scanned before 2026-10-09, so every paper a
+    video cited by id went unregistered. This reads the bundles still on disk
+    — no session, no transcript fetch. It cannot see a paper cited by title
+    only; those are named by the digest session, so they need a re-digest.
+    """
+    found = []
+    for vid, e in state["seen"].items():
+        if not isinstance(e, dict) or e.get("status") != "completed":
+            continue
+        meta = load_bundle(vid)
+        if not meta:
+            continue
+        try:
+            with open(os.path.join(bundle_dir(vid), "transcript.txt"), errors="ignore") as f:
+                transcript = f.read()
+        except OSError:
+            transcript = ""
+        ids = extract_entities(transcript + "\n" + (meta.get("description") or ""))["paper_arxiv"]
+        if not ids:
+            continue
+        print(f"  {vid} {e.get('title', '')[:60]}: {', '.join(ids[:PAPER_MAX_PER_VIDEO])}")
+        if dry_run:
+            found.extend({"arxiv_id": i, "video_id": vid} for i in ids[:PAPER_MAX_PER_VIDEO])
+        else:
+            found.extend({**r, "video_id": vid} for r in enrich_papers(ids, video_ref(vid, e)))
+    return found
 
 
 # ── State transitions ────────────────────────────────────────────────
@@ -2022,11 +2549,106 @@ def main():
     session.add_argument("--fail", metavar="VIDEO_ID", help="Record a failed session attempt")
     session.add_argument("--reason", metavar="TEXT", help="With --fail: why")
     session.add_argument("--eval-report", action="store_true", help="Regenerate the channel's report note")
+
+    papers = parser.add_argument_group("papers (one registry for every channel)")
+    papers.add_argument("--papers-pending", action="store_true", help="List the papers the worker may read")
+    papers.add_argument("--paper-register", metavar="VIDEO_ID",
+                        help="Register the papers a digested video cites (needs --paper-refs)")
+    papers.add_argument("--paper-refs", metavar="JSON",
+                        help="With --paper-register: a JSON list of arXiv ids and/or exact titles")
+    papers.add_argument("--paper-fetch", metavar="ARXIV_ID", help="Fetch one paper's full text into a bundle")
+    papers.add_argument("--paper-complete", metavar="ARXIV_ID", help="Record a paper note a session wrote")
+    papers.add_argument("--paper-fail", metavar="ARXIV_ID", help="Record a failed paper attempt (see --reason)")
+    papers.add_argument("--papers-backfill", action="store_true",
+                        help="Register the arXiv ids completed videos' bundles name (with --dry-run: list them)")
     args = parser.parse_args()
 
     configure(args.channel)
     ensure_dirs()
     state = load_state()
+
+    # ── Papers: the shared registry, and arXiv for anything not yet in it ──
+    if args.papers_pending:
+        rows = paper_pending(load_papers())
+        for r in rows:
+            print(f"  [{r['status']}] {r['arxiv_id']} {r['title']}")
+        print(f"{len(rows)} paper(s) pending")
+        if args.json:
+            emit_json({"ok": True, "pending": rows})
+        return
+
+    if args.paper_register:
+        vid = args.paper_register
+        try:
+            refs = json.loads(args.paper_refs or "[]")
+        except json.JSONDecodeError as e:
+            parser.error(f"--paper-refs is not JSON: {e}")
+        if not isinstance(refs, list):
+            parser.error("--paper-refs must be a JSON list")
+        records, unresolved = resolve_paper_refs(refs)
+        reg = load_papers()
+        video = video_ref(vid, state["seen"].get(vid))
+        registered = []
+        for record in records:
+            row = register_paper(reg, record["arxiv_id"], video, record)
+            if row:
+                registered.append({"arxiv_id": row["arxiv_id"], "title": row.get("title", ""),
+                                   "note_path": row["note_path"], "status": row["status"]})
+        save_papers(reg)
+        print(f"{len(registered)} paper(s) registered for {vid}; {len(unresolved)} unresolved")
+        if args.json:
+            emit_json({"ok": True, "video_id": vid, "registered": registered, "unresolved": unresolved})
+        return
+
+    if args.paper_fetch or args.paper_complete or args.paper_fail:
+        reg = load_papers()
+        arxiv_id = normalize_arxiv_id(args.paper_fetch or args.paper_complete or args.paper_fail)
+        row = reg["papers"].get(arxiv_id)
+        if row is None:
+            print(f"✗ Not a registered paper: {arxiv_id}")
+            if args.json:
+                emit_json({"ok": False, "arxiv_id": arxiv_id, "error": "not a registered paper"})
+            return
+        if args.paper_fetch:
+            print(f"\n=== Fetching paper: {row.get('title') or arxiv_id} ({arxiv_id}) ===")
+            meta, err = build_paper_bundle(row)
+            if meta is None:
+                mark_paper_failed(row, err)
+                save_papers(reg)
+                print(f"\n✗ Fetch failed: {err}")
+                if args.json:
+                    emit_json({"ok": False, "arxiv_id": arxiv_id, "error": err,
+                               "failure_count": row["failure_count"]})
+                return
+            row.update({"status": "fetched", "bundle_dir": meta["bundle_dir"],
+                        "fetched_at": meta["fetched_at"]})
+            save_papers(reg)
+            print(f"\n✓ Fetched: {meta['title']} ({meta['text_words']} words, {meta['text_source']})")
+            if args.json:
+                emit_json({"ok": True, "meta": meta})
+        elif args.paper_complete:
+            row["status"] = "completed"
+            row["completed_at"] = datetime.now(timezone.utc).isoformat()
+            for k in ("failure_count", "last_attempt_at", "last_error"):
+                row.pop(k, None)
+            save_papers(reg)
+            print(f"✓ Completed: {arxiv_id} → {row['note_path']}")
+            if args.json:
+                emit_json({"ok": True, "arxiv_id": arxiv_id, "note": row["note_path"]})
+        else:
+            mark_paper_failed(row, args.reason or "unspecified")
+            save_papers(reg)
+            print(f"✗ Recorded failure for {arxiv_id} (attempt {row['failure_count']}): {row['last_error']}")
+            if args.json:
+                emit_json({"ok": True, "arxiv_id": arxiv_id, "failure_count": row["failure_count"]})
+        return
+
+    if args.papers_backfill:
+        found = backfill_papers(state, dry_run=args.dry_run)
+        print(f"{len(found)} paper reference(s) {'found' if args.dry_run else 'registered'}")
+        if args.json:
+            emit_json({"ok": True, "channel": channel_info(), "papers": found, "dry_run": args.dry_run})
+        return
 
     # ── Offline modes: state and disk only, no channel listing ────────
     if args.pending:
