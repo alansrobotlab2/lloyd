@@ -3503,6 +3503,16 @@ def confirm_plan(kind: str, blocking: list[dict], *, confirm_on: bool) -> dict:
     return {"ask": True, "reason": "ask", "entries": offered[:CONFIRM_MAX_ENTRIES]}
 
 
+CONFIRM_REASON_MAX = 450
+# Bounded grammar (#2444), the relation #2240 set for `REVIEW_SCHEMA` above: `reason`
+# carries CONFIRM_REASON_MAX (450), strictly above the `[:300]` the confirm reader
+# applies when it stores the answer, so the reader stays the cut that decides what is
+# stored — and on record that reason sits at 300 on 107 of 110 stored
+# `review_confirm_votes` rows, which is why the cap is above rather than at it. A
+# degenerate confirm draw is now the bounded branch's "generation diverged at N tokens
+# … not a budget" (`DIVERGENCE_MARKER`) instead of the unbounded branch's advice to
+# raise `harness.finalizer.max_tokens` (8192), which cannot help a schema that would
+# diverge at any budget (#1706).
 CONFIRM_SCHEMA: dict = {
     "type": "object",
     "title": "automod_review_confirm",
@@ -3511,7 +3521,7 @@ CONFIRM_SCHEMA: dict = {
                    "description": ("true ONLY if you checked the diff and the named finding is "
                                    "not real, or is real but does not stop this diff landing. "
                                    "false if the finding stands or you could not check it.")},
-        "reason": {"type": "string",
+        "reason": {"type": "string", "maxLength": CONFIRM_REASON_MAX,
                    "description": ("One line: what you checked in the diff, and what it showed. "
                                    "It is quoted back as the vote.")},
     },

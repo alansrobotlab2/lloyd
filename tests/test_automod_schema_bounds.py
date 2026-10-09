@@ -4,8 +4,11 @@
 two diagnoses, and which one it gives is decided entirely by the schema it was
 handed (`app/harness/finalizer.py`, `_schema_is_bounded`): when every string the
 schema admits carries a positive `maxLength` it reports `generation diverged at N
-tokens`, and when any string is open it reports `raise harness.finalizer.max_tokens`
-— advice to edit config.yaml. #1706 established that the second message is a lie
+tokens … not a budget`, and when any string is open it reports `output truncated …
+raise harness.finalizer.max_tokens` — advice to edit config.yaml. The two messages are
+`DIVERGENCE_MARKER` and its opposite (`app/harness/finalizer.py:314-325`), and quoting
+one where you mean the other is the same false lead #1706 removes, which is why the
+nodes below name the branch they expect. #1706 established that the second message is a lie
 when the grammar could have capped the runaway itself
 (`app/harness/tests/test_finalizer.py::test_a_cut_under_a_schema_that_caps_every_field_is_a_divergence`),
 and #2240 applies it to `REVIEW_SCHEMA`, the review grader's own answer shape.
@@ -13,16 +16,22 @@ and #2240 applies it to `REVIEW_SCHEMA`, the review grader's own answer shape.
 The defect this file pins is the one the item's own fix would have missed:
 `_schema_is_bounded` requires EVERY property bounded, and capping the three
 clause-row fields the item named (`note`, `evidence_path`, `test_node_id`) still
-measures False — eight string leaves were open, so the control node below keeps
-the under-scoped fix from coming back.
+measures False: `REVIEW_SCHEMA` has thirteen string leaves and #2240 capped all
+thirteen, so the three named fields were a quarter of the grammar. The control node
+below keeps that under-scoped fix from coming back, and `EIGHT` here is what the same
+shape looks like on the eight schemas #2444 closes.
 """
 from __future__ import annotations
 
 import copy
+import importlib
 import inspect
 import json
+import pathlib
 import re
 from pathlib import Path
+
+import pytest
 
 from app.harness.finalizer import _schema_is_bounded
 from scripts.automod import review as RV
@@ -80,14 +89,30 @@ def _strip_caps(schema: dict) -> dict:
     return out
 
 
+def _leaf_node(schema: dict, path: str) -> dict:
+    """The node a `string_leaves` path names, walked one token per step.
+
+    `[]` is a step, not decoration on the name before it. For
+    `acceptance_clauses[]` the cap sits on the array's `items` node —
+    `{"type": "string", "maxLength": 900}` — while the array node itself holds
+    only `type`, `items` and a description. Splitting the path on `. | []` and
+    dropping the empties made that path a single name, so both readers of it
+    landed on the array node: setting a cap there wrote a key the grammar never
+    reads, and popping one removed nothing and left the copy byte-identical,
+    which is how a node in this file came to assert something it could not fail
+    (#2444 review). The walk is shared with `_cap_field` so the two cannot drift
+    apart again, and the caller's `KeyError` on a missing `properties` is the
+    path being wrong, which is what a fixture mistake should look like.
+    """
+    node = schema
+    for token in re.findall(r"[^\.\[\]]+|\[\]", path):
+        node = node["items"] if token == "[]" else node["properties"][token]
+    return node
+
+
 def _cap_field(schema: dict, path: str, value: int) -> None:
     """Set `maxLength` on the leaf at a `string_leaves` path."""
-    node = schema
-    for part in [p for p in re.split(r"\.|\[\]", path) if p]:
-        if "items" in node:
-            node = node["items"]
-        node = node["properties"][part]
-    node["maxLength"] = value
+    _leaf_node(schema, path)["maxLength"] = value
 
 
 # ── the grammar is bounded, and only the whole set makes it so ──────────────
@@ -388,3 +413,490 @@ def test_the_review_payload_carries_the_capped_schema(monkeypatch):
     assert sent is RV.REVIEW_SCHEMA, "the wire carries a different schema than the capped one"
     assert _schema_is_bounded(sent) is True, (
         "the schema reaching the engine still has an open string in it")
+
+
+# ── the eight schemas capped by #2444 ───────────────────────────────────────
+# The nodes above bound REVIEW_SCHEMA (#2240); these bound the other eight in the
+# same shape — cap read against the reader's slice, never restated.
+
+EIGHT = {
+    "IMPLEMENT_OUTCOME": "scripts.automod.backlog:IMPLEMENT_OUTCOME_SCHEMA",
+    "TRIAGE_VERDICT": "scripts.automod.backlog:TRIAGE_VERDICT_SCHEMA",
+    "GROUP_TRIAGE": "scripts.automod.backlog:GROUP_TRIAGE_SCHEMA",
+    "SWEEP": "scripts.automod.backlog:SWEEP_SCHEMA",
+    "CONFIRM": "scripts.automod.review:CONFIRM_SCHEMA",
+    "ARCH_REVIEW": "workers.sources.arch_review:ARCH_REVIEW_SCHEMA",
+    "OWED": "workers.sources.owed_check:OWED_SCHEMA",
+    "DIGEST_RESULT": "workers.sources.youtube_digest:RESULT_SCHEMA",
+}
+
+# The three shapes `_schema_is_bounded` must keep answering False for: an open
+# grammar, which is what the advice branch at `finalizer.py:314` exists for.
+CONTROLS = (
+    {},
+    {"type": "object"},
+    {"type": "object", "description": "x"},
+)
+
+
+def _schema(spec: str) -> dict:
+    mod, _, attr = spec.partition(":")
+    return getattr(importlib.import_module(mod), attr)
+
+
+def _slice_max(module_qual: str, needle: str) -> int:
+    """The largest `[:N]` on any line of that module containing `needle` — read from
+    the module, so growing a reader's clamp past a cap fails here instead of quietly
+    handing the cut to the grammar. A needle matching nothing fails, never skips.
+    """
+    text = pathlib.Path(importlib.import_module(module_qual).__file__).read_text()
+    hits = [int(n) for line in text.splitlines() if needle in line
+            for n in re.findall(r"\[\s*:\s*(\d+)\s*\]", line)]
+    assert hits, f"nothing in {module_qual} matches {needle!r} any more"
+    return max(hits)
+
+
+def _open_leaves(schema: dict) -> set[str]:
+    """String leaves neither capped nor enum-bound: the grammar's holes. An `enum`
+    is already finite, so counting one as open would make the check unfalsifiable.
+    """
+    return {p for p, node in string_leaves(schema).items()
+            if "enum" not in node
+            and not (isinstance(node.get("maxLength"), int) and node["maxLength"] > 0)}
+
+
+def _capped_leaves(schema: dict) -> set[str]:
+    return {p for p, node in string_leaves(schema).items()
+            if isinstance(node.get("maxLength"), int)}
+
+
+def _cap(schema: dict, path: str) -> int:
+    node = string_leaves(schema)[path]
+    value = node.get("maxLength")
+    assert isinstance(value, int) and value > 0, f"{path} carries {value!r}"
+    return value
+
+
+# (schema, leaf, reader module, needle naming that field's slice line): the cap must
+# be STRICTLY above the `[:N]` that reader applies.
+EIGHT_SLICED = (
+    ("IMPLEMENT_OUTCOME", "clause_outcomes[].evidence",
+     "scripts.automod.backlog", 'str(raw.get("evidence") or "").split())'),
+    ("IMPLEMENT_OUTCOME", "summary",
+     "scripts.automod.backlog", 'str(structured.get("summary") or "").split())'),
+    ("IMPLEMENT_OUTCOME", "human_paths[].path",
+     "scripts.automod.backlog", 'str(raw.get("path") or "").split())'),
+    ("IMPLEMENT_OUTCOME", "human_paths[].reason",
+     "scripts.automod.backlog", 'str(raw.get("reason") or "").split())'),
+    ("TRIAGE_VERDICT", "check",
+     "workers.sources.autotriage", 'str(obj.get("check") or "").split())'),
+    ("TRIAGE_VERDICT", "evidence",
+     "workers.sources.autotriage", 'str(obj.get("evidence") or "").strip()'),
+    ("TRIAGE_VERDICT", "acceptance",
+     "workers.sources.autotriage", '_acceptance_text(str(obj.get("acceptance") or ""))'),
+    ("GROUP_TRIAGE", "items[].evidence",
+     "workers.sources.autotriage", 'str(raw.get("evidence") or "").split())'),
+    ("SWEEP", "items[].evidence",
+     "workers.sources.autotriage", 'str(raw.get("evidence") or "").split())'),
+    ("CONFIRM", "reason",
+     "scripts.automod.review", 'str(ans.get("reason") or "no reason given")'),
+    ("ARCH_REVIEW", "summary",
+     "workers.sources.arch_review", 'raw["summary"]'),
+    ("OWED", "entries[].artifact",
+     "workers.sources.owed_check", 'str(raw.get("artifact") or "").split())'),
+    ("OWED", "entries[].recheck_after",
+     "workers.sources.owed_check", 'str(raw.get("recheck_after") or "")'),
+    ("OWED", "entries[].outside",
+     "workers.sources.owed_check", 'str(raw.get("outside") or "").split())'),
+    ("OWED", "entries[].follow_up.name",
+     "workers.sources.owed_check", 'str(follow.get("name") or "").split())'),
+    ("OWED", "entries[].follow_up.body",
+     "workers.sources.owed_check", 'str(follow.get("body") or "")'),
+    ("OWED", "entries[].amend_clause.text",
+     "workers.sources.owed_check", 'str(amend.get("text") or "").split())'),
+    ("OWED", "summary",
+     "workers.sources.owed_check", 'str(structured.get("summary") or "").split())'),
+)
+
+# (schema key, leaf path, reader module, constant) for the fields whose reader
+# clamps with a module constant rather than a literal `[:N]`.
+EIGHT_CONSTANTS = (
+    ("OWED", "entries[].evidence", "workers.sources.owed_check", "_FIELD_CEILING"),
+    ("OWED", "entries[].ruling", "workers.sources.owed_check", "_FIELD_CEILING"),
+    # Clause lists go through `clean_clauses`, whose slice is the named constant.
+    ("TRIAGE_VERDICT", "acceptance_clauses[]",
+     "scripts.automod.backlog", "CLAUSE_MAX_CHARS"),
+    ("TRIAGE_VERDICT", "human_clauses[]",
+     "scripts.automod.backlog", "CLAUSE_MAX_CHARS"),
+    ("GROUP_TRIAGE", "umbrella.acceptance_clauses[]",
+     "scripts.automod.backlog", "CLAUSE_MAX_CHARS"),
+)
+
+# String leaves with no Python slice to read a cap off, pinned at the declared value
+# so a re-size is a decision with a diff rather than a drift.
+EIGHT_WITHOUT_A_SLICE = (
+    ("GROUP_TRIAGE", "umbrella.check"),
+    ("GROUP_TRIAGE", "umbrella.evidence"),
+    ("GROUP_TRIAGE", "umbrella.acceptance"),
+    ("DIGEST_RESULT", "note"),
+    ("DIGEST_RESULT", "idea"),
+    ("DIGEST_RESULT", "duplicate_of"),
+    ("DIGEST_RESULT", "filed"),
+)
+
+
+def _check_eight_caps_above_reader_slices(table, resolver=None) -> list[str]:
+    """Every entry's grammar cap must be strictly above its reader's slice."""
+    resolve = resolver or _schema
+    bad = []
+    for key, path, module_qual, needle in table:
+        cap = _cap(resolve(EIGHT[key]), path)
+        sliced = _slice_max(module_qual, needle)
+        if not cap > sliced:
+            bad.append(f"{key}.{path}: cap {cap} does not sit above the "
+                       f"{module_qual} slice [{sliced}]")
+    return bad
+
+
+def _check_caps_above_constant_slices(table) -> list[str]:
+    bad = []
+    for key, path, module_qual, const in table:
+        cap = _cap(_schema(EIGHT[key]), path)
+        ceiling = getattr(importlib.import_module(module_qual), const)
+        if not cap > ceiling:
+            bad.append(f"{key}.{path}: cap {cap} does not sit above "
+                       f"{module_qual}.{const} = {ceiling}")
+    return bad
+
+
+def test_all_eight_verdict_schemas_are_bounded_and_their_controls_are_not():
+    """Clause 1: True for each of the eight, False for the three controls. The
+    controls are the shapes that may legitimately need more room, so they keep the
+    budget advice at `finalizer.py:314`; a control reading bounded would rewrite which
+    failures get told "raise the budget", and that split is the whole of #1706.
+    """
+    from app.harness.finalizer import _schema_is_bounded as bounded
+    for key, spec in EIGHT.items():
+        schema = _schema(spec)
+        open_holes = sorted(_open_leaves(schema))
+        assert not open_holes, (
+            f"{key} leaves the grammar open at {open_holes}: an enum is finite by its "
+            "choices, but a free-text leaf with no cap is exactly what the else branch "
+            "at finalizer.py:314 reports as a budget problem")
+        assert bounded(schema), (
+            f"{key} reads as unbounded, so a degenerate {key} completion is told to "
+            "raise harness.finalizer.max_tokens — the false lead #1706 exists to stop")
+    for control in CONTROLS:
+        assert not bounded(control), (
+            f"the control {control} now reads as bounded: an open grammar would stop "
+            "being reportable as needing more room, and #1706's advice branch dies")
+
+
+def test_opening_any_single_leaf_of_the_eight_makes_it_read_unbounded():
+    """The can-fail half of the node above, one leaf at a time, across all 30.
+
+    Stripping every cap is not the test: the eight contain `enum` leaves, and an enum
+    is finite on its own, so a fully-stripped copy stays bounded by its vocabularies
+    and would pass for the wrong reason. Opening ONE free-text leaf at a time is the
+    case where `_schema_is_bounded` has to notice.
+
+    No leaf is held out, including the three array-item caps. An earlier version of
+    this node skipped them on the claim that the predicate never sees an array's
+    `items`; that was measured false — `_node_is_bounded` recurses through `items`
+    (finalizer.py:123-127) and removing one of those caps flips the schema to False,
+    which the node below pins in the open. Holding them out hid a walker bug that
+    made the hold-out itself unfalsifiable (#2444 review).
+    """
+    from app.harness.finalizer import _schema_is_bounded as bounded
+    assert _ARRAY_ITEM_LEAVES <= {(k, p) for k, sp in EIGHT.items()
+                                  for p in _capped_leaves(_schema(sp))}
+    checked = 0
+    for key, spec in EIGHT.items():
+        schema = _schema(spec)
+        assert bounded(schema), key
+        for path in sorted(_capped_leaves(schema)):
+            opened = copy.deepcopy(schema)
+            _open_one_leaf(opened, path)
+            assert opened != schema, (
+                f"opening {key}.{path} changed nothing, so the leaf walk is wrong and "
+                "this node would pass without testing anything")
+            assert not bounded(opened), (
+                f"{key}.{path} has its cap removed and the schema still reads as "
+                "bounded: the predicate is not looking at this leaf")
+            checked += 1
+    assert checked == 30, (
+        f"{checked} leaves checked, not 30 — the eight schemas have changed shape, so "
+        "every field table in this file needs re-counting against them")
+
+
+# The three caps that sit on the `items` node of an array of strings, so a reader
+# looking at the property sees `{"type": "array", "items": {...900}}` and no figure.
+_ARRAY_ITEM_LEAVES = {
+    ("TRIAGE_VERDICT", "acceptance_clauses[]"),
+    ("TRIAGE_VERDICT", "human_clauses[]"),
+    ("GROUP_TRIAGE", "umbrella.acceptance_clauses[]"),
+}
+
+
+def test_an_array_of_strings_is_bounded_only_by_the_cap_on_its_items():
+    """The three `..._clauses[]` caps are load-bearing, and they live one level down.
+
+    `_node_is_bounded` reaches an array's strings by recursing into `items`
+    (finalizer.py:123-127), so a list of uncapped strings is the open grammar
+    `TRIAGE_VERDICT_SCHEMA`'s `acceptance_clauses` was when #1706 was filed — the
+    node above grades those three leaves exactly like the other 27, and the copy it
+    hands the predicate has to differ from the original for that to mean anything.
+    Pinned separately because the shape is the easy one to get wrong: the array node
+    carries no `maxLength`, so a walker that stops one level too high removes
+    nothing, and that is the bug this node's predecessor was written to excuse.
+    """
+    from app.harness.finalizer import _schema_is_bounded as bounded
+    assert _ARRAY_ITEM_LEAVES, "the three array-item leaves are the point of this node"
+    for key, path in sorted(_ARRAY_ITEM_LEAVES):
+        schema = _schema(EIGHT[key])
+        array_node = _leaf_node(copy.deepcopy(schema), path[:len(path) - 2] or path)
+        assert "maxLength" not in array_node, (
+            f"{key}.{path}: the ARRAY node now carries a cap, so the cap this file "
+            "sizes has moved and the tables describing it are stale")
+        opened = copy.deepcopy(schema)
+        _open_one_leaf(opened, path)
+        assert opened != schema, f"{key}.{path}: opening removed nothing"
+        assert not bounded(opened), (
+            f"{key}.{path} lost its item cap and the schema still reads as bounded: "
+            "the item cap is not what bounds these arrays, so this file's tables "
+            "are sizing a value the decoder never sees")
+
+
+def test_every_capped_leaf_of_the_eight_is_graded_by_one_of_the_three_tables():
+    """Every capped leaf is graded by one of the three tables. The tables are lists a
+    person edits, so this guards a new capped leaf no relation node looks at — a cap
+    that could drift below its slice with nothing red anywhere.
+    """
+    graded = {(key, path) for key, path, _m, _n in EIGHT_SLICED}
+    graded |= {(key, path) for key, path, _m, _c in EIGHT_CONSTANTS}
+    graded |= set(EIGHT_WITHOUT_A_SLICE)
+    actual = {(key, path) for key, spec in EIGHT.items()
+              for path in _capped_leaves(_schema(spec))}
+    assert graded == actual, (
+        f"graded but no longer a leaf: {sorted(graded - actual)}; a capped leaf "
+        f"nobody grades: {sorted(actual - graded)}")
+
+
+def _open_one_leaf(schema: dict, path: str) -> None:
+    """Remove `maxLength` from the leaf at a `string_leaves` path.
+
+    The assert is the honesty rail, and it exists because of a concrete failure:
+    the walker used to stop at the array node for a path ending in `[]`, where
+    there is no `maxLength` to remove, so every "opened" copy of
+    `acceptance_clauses[]`, `human_clauses[]` and `umbrella.acceptance_clauses[]`
+    came back identical to the original and the node that graded them could not
+    fail whatever the schemas did (#2444 review). Removing nothing is now an
+    error at the helper, not a green test.
+    """
+    node = _leaf_node(schema, path)
+    assert "maxLength" in node, (
+        f"opening {path} reached a node with no cap to remove ({sorted(node)}), "
+        "which means the walk is not landing on the leaf the cap lives on")
+    node.pop("maxLength")
+
+
+def test_every_cap_of_the_eight_schemas_sits_above_the_slice_its_parser_applies():
+    """Clause 2, per field: cap > the `[:N]` the reader applies, read off the reader.
+    A cap at or below the slice trades a loud truncation for a silent one. Same
+    relation `test_every_cap_sits_at_the_slice_parsereview_already_applies` pins for
+    `REVIEW_SCHEMA`, over every sliced leaf of the eight.
+    """
+    bad = _check_eight_caps_above_reader_slices(EIGHT_SLICED)
+    bad += _check_caps_above_constant_slices(EIGHT_CONSTANTS)
+    assert not bad, "cap at or below its reader's slice:\n  " + "\n  ".join(bad)
+
+
+def test_a_cap_below_a_parses_slice_is_detected():
+    """The can-fail half: lower one cap below its slice, the relation reports it."""
+    schema = copy.deepcopy(_schema(EIGHT["IMPLEMENT_OUTCOME"]))
+    _cap_field(schema, "clause_outcomes[].evidence", 10)   # the slice is [:300]
+    table = [("IMPLEMENT_OUTCOME", "clause_outcomes[].evidence",
+              "scripts.automod.backlog", 'str(raw.get("evidence") or "").split())')]
+    saved = _schema.__globals__["_schema"]
+
+    def patched(spec):
+        return schema if spec == EIGHT["IMPLEMENT_OUTCOME"] else saved(spec)
+    try:
+        _schema.__globals__["_schema"] = patched
+        bad = _check_eight_caps_above_reader_slices(table)
+    finally:
+        _schema.__globals__["_schema"] = saved
+    assert len(bad) == 1 and "clause_outcomes[].evidence" in bad[0], bad
+    assert "does not sit above" in bad[0], bad
+
+
+def test_the_seven_leaves_with_no_reader_slice_are_pinned_at_their_declared_caps():
+    """The seven leaves whose reader applies no `[:N]`, so no cap can be read off a
+    slice and nothing here pretends they were measured that way: the group run's
+    umbrella strings are stored uncut, and `_shape` filters against enums instead of
+    slicing. Their caps are chosen, so each is pinned at the declared value — a
+    re-size has to change the constant and this file's reason with it.
+    """
+    declared = {
+        ("GROUP_TRIAGE", "umbrella.check"): 600,
+        ("GROUP_TRIAGE", "umbrella.evidence"): 3000,
+        ("GROUP_TRIAGE", "umbrella.acceptance"): 4500,
+        ("DIGEST_RESULT", "note"): 400,
+        ("DIGEST_RESULT", "idea"): 400,
+        ("DIGEST_RESULT", "duplicate_of"): 20,
+        ("DIGEST_RESULT", "filed"): 20,
+    }
+    assert set(declared) == set(EIGHT_WITHOUT_A_SLICE)
+    for (key, path), value in sorted(declared.items()):
+        assert _cap(_schema(EIGHT[key]), path) == value, (
+            f"{key}.{path} moved off {value} without this node's reason moving with it")
+
+
+# ── the comment above each of the eight (#2444 clause 5) ────────────────────
+
+#: (schema key, `def` marker, module). The `#` block above each marker is what a
+#: reader of that schema actually reads.
+EIGHT_MARKERS = (
+    ("IMPLEMENT_OUTCOME", "IMPLEMENT_OUTCOME_SCHEMA: dict", "scripts.automod.backlog"),
+    ("TRIAGE_VERDICT", "TRIAGE_VERDICT_SCHEMA: dict", "scripts.automod.backlog"),
+    ("GROUP_TRIAGE", "GROUP_TRIAGE_SCHEMA: dict", "scripts.automod.backlog"),
+    ("SWEEP", "SWEEP_SCHEMA: dict", "scripts.automod.backlog"),
+    ("CONFIRM", "CONFIRM_SCHEMA: dict", "scripts.automod.review"),
+    ("ARCH_REVIEW", "ARCH_REVIEW_SCHEMA: dict", "workers.sources.arch_review"),
+    ("OWED", "OWED_SCHEMA = {", "workers.sources.owed_check"),
+    ("DIGEST_RESULT", "RESULT_SCHEMA: dict", "workers.sources.youtube_digest"),
+)
+
+
+def _comment_above_in(module_qual: str, marker: str) -> str:
+    """The contiguous `#` block directly above `marker` in that module.
+
+    Same shape as `_comment_above` above, which reads only `review.py`: the eight
+    live in five modules, and a comment that names a cap is only worth what a reader
+    finds where the schema is.
+    """
+    path = pathlib.Path(importlib.import_module(module_qual).__file__)
+    lines = path.read_text().splitlines()
+    at = next((i for i, line in enumerate(lines) if line.startswith(marker)), None)
+    if at is None:
+        return ""
+    out: list[str] = []
+    i = at - 1
+    while i >= 0 and lines[i].lstrip().startswith("#"):
+        out.append(lines[i])
+        i -= 1
+    return "\n".join(reversed(out))
+
+
+def test_the_comment_above_each_of_the_eight_names_a_cap_and_the_runaway():
+    """Clause 5, for all eight: the comment above each schema states a numeric cap and
+    the runaway it stops, as `test_the_comment_above_the_schema_names_the_cap_and_the_
+    runaway` requires of `REVIEW_SCHEMA`.
+
+    The two comments this round replaced said the opposite — `backlog.py`'s header
+    that "Length clamps stay in Python" and `parse_outcome`'s docstring that the
+    triage schema "carries no `maxLength`" — and both were the argument #1706 already
+    answered. A comment that only decorates is what gets the caps stripped again by
+    the next pass, so the figure has to be one THIS schema carries.
+
+    The figure is compared against the schema, not against prose: the first version of
+    this node accepted any parenthesised two-to-four-digit figure, which the review
+    caught as an assertion that could not fail on the half it was written for — the
+    runaway alone, `(8192)`, satisfies that pattern, and `IMPLEMENT_OUTCOME` passed on
+    a block quoting nothing else. So the caps come from
+    `_capped_leaves` on the live schema and at least one of them has to appear as a
+    number in the block, with 8192 still required as the separate half that says what
+    a stripped cap costs.
+    """
+    for key, marker, module_qual in EIGHT_MARKERS:
+        comment = _comment_above_in(module_qual, marker)
+        assert comment, f"no comment above {key} in {module_qual} to grade"
+        schema = _schema(EIGHT[key])
+        caps = sorted({_cap(schema, path) for path in _capped_leaves(schema)})
+        assert caps, f"{key} carries no caps to name, so this node has nothing to grade"
+        named = [c for c in caps if re.search(rf"\b{c}\b", comment)]
+        assert named, (
+            f"{key}'s comment names none of the {len(caps)} caps its schema actually "
+            f"carries ({caps}) — quoting the 8192 budget is quoting the runaway, not a "
+            "cap, and a reader at the schema still cannot see what the fields allow")
+        assert "8192" in comment, (
+            f"{key}'s comment does not name the runaway the caps stop "
+            "(harness.finalizer.max_tokens is 8192), which is the half that tells a "
+            "reader what removing a cap costs")
+        # Wording, not spelling: every one of these blocks says "cap"/"caps" rather
+        # than repeating the key name, and the teeth of this node are the comparison
+        # above — a figure that matches a cap the schema really carries.
+        assert "maxLength" in comment or "cap" in comment.lower(), (
+            f"{key}'s comment names a figure without saying what carries it")
+
+
+def test_the_two_clamps_stay_in_python_comments_are_gone():
+    """Clause 5's other half: the two comments #2444 was filed to replace no longer
+    forbid the caps. Both survived every earlier pass because they were prose — `git
+    grep maxLength` found the schemas and missed the sentences, so each round
+    re-derived the same conclusion. This node stops the sentence coming back.
+    """
+    src = pathlib.Path(importlib.import_module("scripts.automod.backlog").__file__) \
+        .read_text()
+    assert "Length clamps stay in Python" not in src, (
+        "the header ban is back: it is the sentence that kept the eight schemas open")
+    assert "carries no `maxLength`" not in src, (
+        "parse_outcome's docstring re-forbade the caps it now sits under")
+    docstring = src[src.index("def parse_outcome("):src.index("def settle_item_verdict(")]
+    assert "8192" in docstring and "harness.finalizer.max_tokens" in docstring, (
+        "the reader explains no purpose for the caps, so the comment is decoration")
+
+
+# ── the caller → finalizer seam for the eight (#2444 review, seams finding) ──
+#
+# `test_the_review_payload_carries_the_capped_schema` is the only node in the suite that
+# crosses a caller's boundary into a request body, and it crosses review.py's. The eight
+# all enter through `run_finalizer(final_schema=…)` in a worker module instead, so a
+# capped module and an uncapped hand-off could have coexisted — which is what the
+# previous round's `seams_unverified` named.
+
+EIGHT_CALL_SITES = (
+    ("workers.sources.autotriage", "B.TRIAGE_VERDICT_SCHEMA", "TRIAGE_VERDICT"),
+    ("workers.sources.autotriage", "B.GROUP_TRIAGE_SCHEMA", "GROUP_TRIAGE"),
+    ("workers.sources.autotriage", "B.SWEEP_SCHEMA", "SWEEP"),
+    ("workers.sources.autocode", "B.IMPLEMENT_OUTCOME_SCHEMA", "IMPLEMENT_OUTCOME"),
+    ("scripts.automod.review", "CONFIRM_SCHEMA", "CONFIRM"),
+    ("workers.sources.arch_review", "ARCH_REVIEW_SCHEMA", "ARCH_REVIEW"),
+    ("workers.sources.owed_check", "OWED_SCHEMA", "OWED"),
+    ("workers.sources.youtube_digest", "RESULT_SCHEMA", "DIGEST_RESULT"),
+)
+
+
+@pytest.mark.parametrize("module_qual,expr,key", EIGHT_CALL_SITES)
+def test_the_schema_a_worker_hands_the_finalizer_is_the_capped_object(
+        module_qual: str, expr: str, key: str):
+    """What this pins: the expression a worker's `final_schema=` carries names THIS
+    capped object, object-identical, and that object measures bounded.
+
+    What it does not pin, said plainly because the name says "hands", not "sends": no
+    bytes are captured here. Whether the engine's guided decoder honours each
+    `maxLength` on the wire is the same half `test_the_review_payload_carries_the_capped_
+    schema` declines, and rests on `app/harness/finalizer.py`'s boundedness measurement
+    and #2240's owed re-count, not on this node.
+    """
+    module = importlib.import_module(module_qual)
+    source = pathlib.Path(module.__file__).read_text()
+    site = next((line for line in source.splitlines()
+                 if "final_schema=" in line and expr in line), None)
+    assert site is not None, (
+        f"{module_qual} no longer passes {expr} at a final_schema= call, so the cap "
+        f"pinned on {EIGHT[key]} is not the schema that worker sends")
+    # `B.` is how autotriage and autocode spell the backlog module, and in both it is a
+    # function-local import (`from scripts.automod import backlog as B`), so resolving
+    # the alias through `vars(module)` raises NameError — the alias exists at the call
+    # site's scope, not the module's. The attribute after the dot is what names the
+    # object either way.
+    attribute = expr.rpartition(".")[2]
+    holder = (importlib.import_module("scripts.automod.backlog")
+              if expr.startswith("B.") else module)
+    handed = getattr(holder, attribute)
+    assert handed is _schema(EIGHT[key]), (
+        f"{module_qual} hands a copy or a rebuilt dict to the finalizer, not the object "
+        f"whose caps the suite measures: {site.strip()}")
+    assert _schema_is_bounded(handed) is True, (
+        f"{key} reaches the finalizer with an open string in it")

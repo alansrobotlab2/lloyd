@@ -38,11 +38,25 @@ def test_incomplete_is_not_a_verdict_in_the_schema():
     assert B.INCOMPLETE not in B.TRIAGE_VERDICT_SCHEMA["properties"]["verdict"]["enum"]
 
 
-def test_no_maxlength_in_the_schema():
-    """A maxLength is enforced by the decoder: the model would stop
-    mid-sentence at the limit rather than write something shorter. The clamps
-    belong in Python, after the fact."""
-    assert "maxLength" not in json.dumps(B.TRIAGE_VERDICT_SCHEMA)
+def test_every_string_leaf_of_the_schema_is_bounded():
+    """Every string leaf carries a `maxLength` (#2444); the clamps in
+    `_from_structured` / `parse_verdict` stay what decides what is stored.
+
+    This node used to be `test_no_maxlength_in_the_schema`, arguing the decoder would
+    stop mid-sentence rather than write something shorter. That is true only of a cap
+    at or below what the field has to say, and the relation now has its own test:
+    `test_every_cap_of_the_eight_schemas_sits_above_the_slice_its_parser_applies` in
+    `tests/test_automod_schema_bounds.py` fails on a cap under its slice, so the fear
+    is pinned and the ban no longer has to exist. What the ban did buy is in #1706: an
+    open leaf makes a degenerate completion read as a budget problem.
+    """
+    from app.harness.finalizer import _schema_is_bounded
+    assert _schema_is_bounded(B.TRIAGE_VERDICT_SCHEMA), (
+        "an open string leaf is back in the triage grammar: autotriage divergences "
+        "get reported as advice to raise harness.finalizer.max_tokens")
+    assert B.TRIAGE_VERDICT_SCHEMA["properties"]["evidence"]["maxLength"] > 2000, (
+        "the evidence cap fell to or below the reader's [:2000] slice, which would "
+        "hand the grammar a cut the parser had room to keep")
 
 
 # ── parser precedence ───────────────────────────────────────────────────────

@@ -150,8 +150,11 @@ def test_the_review_schema_is_built_from_the_tuples_and_is_strict():
     # value sets. The leaf-by-leaf pin, the control that capping only the clause
     # row is STILL unbounded, and the proof that six of the eight caps equal
     # `parse_review`'s own post-parse slices are all in
-    # tests/test_automod_schema_bounds.py; the other verdict schemas'
-    # maxLength-absent nodes (#2216's to reverse) are untouched and still green.
+    # tests/test_automod_schema_bounds.py. The other verdict schemas' maxLength-absent
+    # nodes (#2216's to reverse) are no longer waiting: #2444 reversed all five of them
+    # — tests/test_backlog_unattended.py, test_review_policy.py,
+    # test_structured_verdict.py, test_youtube_digest_source.py and
+    # test_arch_review_source.py now require a cap on their schema's string leaves.
     from tests.test_automod_schema_bounds import string_leaves
     open_strings = {path: node for path, node in string_leaves(s).items()
                     if not node.get("enum")}

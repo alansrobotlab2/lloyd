@@ -478,9 +478,13 @@ MAX_INCOMPLETE_ATTEMPTS = 2
 # than restated, so a new verdict cannot be added in one place and forgotten in
 # the other — the grammar and the validator have to be the same list.
 #
-# Length clamps stay in Python (`parse_verdict`): a `maxLength` in the schema
-# is enforced by the decoder, which would make the model stop mid-sentence at
-# the limit rather than write a shorter one. INCOMPLETE is deliberately absent:
+# Every string leaf of the schemas below carries a `maxLength` (#2444), and the
+# Python clamps in the readers stay, because each cap sits strictly ABOVE the
+# `[:N]` its reader applies: the grammar never trims a value the reader had room
+# for, and the decoder's mid-sentence stop is left to do what it is for — end a
+# field that has run away. What the old absolute ban bought was the false lead
+# #1706 named: an open `{"type": "string"}` makes `app.harness.finalizer` report
+# every cut as a budget problem. INCOMPLETE is deliberately absent:
 # it is not a verdict, it is the record of a turn that ran out of budget, and
 # the finalizer never runs on such a turn anyway.
 # What an implement round says about the acceptance check when its turn ends.
@@ -503,7 +507,48 @@ ITEM_VERDICT_OUTCOMES = ("unnecessary", "rejected")
 # Per clause. No `unnecessary`/`rejected`: those are verdicts on the item.
 CLAUSE_OUTCOMES = ("met", "not_met", "deferred")
 
+# ── grammar caps on the verdict strings (#2444) ─────────────────────────────
+#
+# Every string leaf of the schemas this rule touches carries a positive
+# `maxLength`, and each cap sits STRICTLY ABOVE the `[:N]` its reader already
+# applies — a cap at or below the slice would cut silently where the Python cut is
+# visible. That relation is pinned per field, with its own can-fail node, by
+# `test_every_cap_of_the_eight_schemas_sits_above_the_slice_its_parser_applies` and
+# `test_a_cap_below_a_parses_slice_is_detected` in `tests/
+# test_automod_schema_bounds.py` (the second proof is what stops the first reading
+# as decoration).
+#
+# Each figure is a field's longest on-record value, measured 2026-10-08 over the live
+# ledger `~/.local/state/lloyd-automod/promotions.jsonl` (22,493 rows, 31,604,542
+# bytes) — over the byte ceiling on a rule's witness, so nothing is extracted from it
+# and the maxima are re-derived in place. "hit" is rows at that maximum, the ratio
+# owed-check #2444/1 re-sizes by.
+OUTCOME_EVIDENCE_MAX = 450      # parse_outcome slices [:300]; on record 300, hit 1774/3568
+OUTCOME_SUMMARY_MAX = 600       # parse_outcome slices [:400]; on record 400, hit 866/961
+OUTCOME_HUMAN_PATH_MAX = 400    # slices [:300]; on record 300, hit 1/100; > the 100-char longest path
+OUTCOME_HUMAN_REASON_MAX = 450  # parse_outcome slices [:300]; on record 300, hit 24/100
+TRIAGE_CHECK_MAX = 600          # the triage reader slices [:400]; on record 414 over 974 rows
+TRIAGE_EVIDENCE_MAX = 3000      # the triage reader slices [:2000]; ledger stores 1000, hit 723/1046
+TRIAGE_ACCEPTANCE_MAX = 4500    # the triage reader slices [:3000]; on record 1185 over 967 rows
+CLAUSE_TEXT_MAX = 900           # clean_clauses slices [:600]; on record 600, hit 12/3650 and 11/1839
+GROUP_EVIDENCE_MAX = 900        # parse_group_verdict slices [:600]; mirrors the measured single-item field
+SWEEP_EVIDENCE_MAX = 900        # the sweep reader slices [:600]; its rows record 600 as the maximum
+
+# What an implement round says about its acceptance check, as a machine contract.
+# Bounded grammar (#2444): `clause_outcomes[].evidence` at OUTCOME_EVIDENCE_MAX (450)
+# over the reader's `[:300]`, `summary` at OUTCOME_SUMMARY_MAX (600) over its `[:400]`,
+# and the two human-path fields at 400 and 450 over theirs — each strictly above the
+# cut `parse_outcome` already applies, so the clamp still decides what is stored. With
+# every leaf capped, a degenerate autocode completion is reported by
+# `app/harness/finalizer.py` as "generation diverged at N tokens … not a budget" (the
+# bounded branch, `DIVERGENCE_MARKER`) and draws its one re-draw, instead of the
+# unbounded branch's "output truncated … raise `harness.finalizer.max_tokens`" (8192) —
+# the knob #1706 exists to stop sending readers to, because it cannot help a schema
+# that would diverge at any budget. One open string leaf here and the message reverts
+# to that advice; the node that keeps that branch reachable from a real schema lives in
+# `app/harness/tests/test_finalizer.py`.
 IMPLEMENT_OUTCOME_SCHEMA: dict = {
+
     "type": "object",
     "title": "backlog_implement_outcome",
     "properties": {
@@ -529,7 +574,7 @@ IMPLEMENT_OUTCOME_SCHEMA: dict = {
             "properties": {
                 "clause": {"type": "integer", "description": "1-based index into the acceptance clauses."},
                 "outcome": {"type": "string", "enum": list(CLAUSE_OUTCOMES)},
-                "evidence": {"type": "string",
+                "evidence": {"type": "string", "maxLength": OUTCOME_EVIDENCE_MAX,
                              "description": "The test node id or file:line that shows it, one line."},
                 "deferred_to": {"type": "array", "items": {"type": "integer"},
                                 "description": "Ids this clause waits on. Empty unless deferred."},
@@ -541,15 +586,17 @@ IMPLEMENT_OUTCOME_SCHEMA: dict = {
         "deferred_to": {"type": "array", "items": {"type": "integer"},
                         "description": ("Backlog ids that must close before the acceptance "
                                         "can be judged. Empty unless acceptance is deferred.")},
-        "summary": {"type": "string",
+        "summary": {"type": "string", "maxLength": OUTCOME_SUMMARY_MAX,
                     "description": "One sentence: what landed, or why nothing did."},
         "spawned": {"type": "array", "items": {"type": "integer"},
                     "description": "Backlog ids filed during this round."},
         "human_paths": {"type": "array", "items": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Repo-relative path you could not change."},
-                "reason": {"type": "string", "description": "One sentence: what needed to change there, and why."},
+                "path": {"type": "string", "maxLength": OUTCOME_HUMAN_PATH_MAX,
+                "description": "Repo-relative path you could not change."},
+                "reason": {"type": "string", "maxLength": OUTCOME_HUMAN_REASON_MAX,
+                  "description": "One sentence: what needed to change there, and why."},
             },
             "required": ["path", "reason"],
             "additionalProperties": False,
@@ -579,9 +626,12 @@ def _ints(v) -> list[int]:
 def parse_outcome(structured) -> dict | None:
     """The finalizer's object, validated and clamped, or None if unusable.
 
-    Clamped here rather than in the grammar for the reason the triage schema
-    carries no `maxLength`: a guided decoder stops mid-sentence at a limit
-    rather than writing something shorter.
+    Each grammar cap sits strictly above the slice applied here, so this reader
+    stays the cut that decides what is stored and a `maxLength` only ends a field
+    that has run away inside `harness.finalizer.max_tokens` (8192). The relation is
+    pinned per field by
+    `tests/test_automod_schema_bounds.py`'s
+    `test_every_cap_of_the_eight_schemas_sits_above_the_slice_its_parser_applies`.
 
     The overall `acceptance` is DERIVED when clauses are present — all met →
     `met`; any not_met → `not_met`; else `deferred` — and **a deferral that
@@ -877,24 +927,33 @@ def unmet_clauses(outcome: dict | None) -> list[int]:
             if c.get("outcome") == "not_met"]
 
 
+# Bounded grammar (#2444), the shape `REVIEW_SCHEMA` has had since #2240: `check` at
+# TRIAGE_CHECK_MAX (600), `evidence` at TRIAGE_EVIDENCE_MAX (3000), `acceptance` at
+# TRIAGE_ACCEPTANCE_MAX (4500), both clause lists at CLAUSE_TEXT_MAX (900) — each
+# strictly above the `[:N]` `workers/sources/autotriage.py` applies, so no cap can cut
+# a verdict the old path stored. A degenerate autotriage completion is now "output
+# truncated at N tokens" with its one re-draw instead of advice to raise
+# `harness.finalizer.max_tokens` (8192); the 723 of 1046 ledger rows sitting at the
+# reader's 1000-char `evidence` clamp are the pile owed-check #2444/1 watches.
 TRIAGE_VERDICT_SCHEMA: dict = {
     "type": "object",
     "title": "backlog_triage_verdict",
     "properties": {
         "verdict": {"type": "string", "enum": list(VERDICTS)},
         "surface": {"type": "string", "enum": list(SURFACES)},
-        "check": {"type": "string",
+        "check": {"type": "string", "maxLength": TRIAGE_CHECK_MAX,
                   "description": "One concrete, runnable check that decides it."},
-        "evidence": {"type": "string",
+        "evidence": {"type": "string", "maxLength": TRIAGE_EVIDENCE_MAX,
                      "description": "What was measured, with paths and line numbers."},
-        "acceptance": {"type": "string",
+        "acceptance": {"type": "string", "maxLength": TRIAGE_ACCEPTANCE_MAX,
                        "description": ("For `confirmed`: the contract the implementer "
                                        "is held to. Prefix with 'human-only:' ONLY when "
                                        "the fix needs a path the gate refuses (denied or "
                                        "unlisted) or a person's hands. Protected paths and "
                                        "config.yaml are landable; a decision is yours to "
                                        "make. Empty otherwise.")},
-        "acceptance_clauses": {"type": "array", "items": {"type": "string"},
+        "acceptance_clauses": {"type": "array",
+                              "items": {"type": "string", "maxLength": CLAUSE_TEXT_MAX},
                                "description": ("For `confirmed`: the same contract split into "
                                                "separately checkable clauses, each one thing a "
                                                "test can pin and ending with the test file that "
@@ -904,7 +963,8 @@ TRIAGE_VERDICT_SCHEMA: dict = {
                                                "implementer reports "
                                                "per clause and the review rung grades per "
                                                "clause. Empty otherwise.")},
-        "human_clauses": {"type": "array", "items": {"type": "string"},
+        "human_clauses": {"type": "array",
+                         "items": {"type": "string", "maxLength": CLAUSE_TEXT_MAX},
                           "description": ("For `confirmed`: conditions only a person can "
                                           "satisfy — an audit, a sign-off, a decision, a "
                                           "measurement that needs real traffic. Never in "
@@ -932,6 +992,14 @@ GROUP_VERDICTS = ("fold", "duplicate_of", "keep") + tuple(sorted(RETIRING))
 # of the item, not a conclusion about its premise.
 FOLDED = "folded"
 
+# Bounded grammar (#2444): `items[].evidence` at GROUP_EVIDENCE_MAX (900), the
+# umbrella's `check`/`evidence`/`acceptance` at the same TRIAGE_* ceilings its
+# single-item twin uses, `acceptance_clauses` at CLAUSE_TEXT_MAX (900) — a degenerate
+# cluster pass reports a divergence at a token count instead of advice to raise
+# `harness.finalizer.max_tokens` (8192). The 2 `backlog_group_triage` rows on record
+# store none of these strings, so nothing measures them: the per-item cap mirrors the
+# measured single-item field and the umbrella takes the same ceilings rather than
+# inventing numbers. Owed-check #2444/2 rules on that non-measurement.
 GROUP_TRIAGE_SCHEMA: dict = {
     "type": "object",
     "title": "backlog_group_triage_verdict",
@@ -943,7 +1011,7 @@ GROUP_TRIAGE_SCHEMA: dict = {
                 "verdict": {"type": "string", "enum": list(GROUP_VERDICTS)},
                 "duplicate_of": {"type": "integer",
                                  "description": "The surviving item's id; 0 unless verdict is duplicate_of."},
-                "evidence": {"type": "string",
+                "evidence": {"type": "string", "maxLength": GROUP_EVIDENCE_MAX,
                              "description": "One or two sentences with the path/line or commit that decides it."},
             },
             "required": ["item_id", "verdict", "duplicate_of", "evidence"],
@@ -954,10 +1022,11 @@ GROUP_TRIAGE_SCHEMA: dict = {
                         "description": "Id backlog_write_task returned for the umbrella; 0 when nothing was folded."},
             "members": {"type": "array", "items": {"type": "integer"}},
             "surface": {"type": "string", "enum": list(SURFACES)},
-            "check": {"type": "string"},
-            "evidence": {"type": "string"},
-            "acceptance": {"type": "string"},
-            "acceptance_clauses": {"type": "array", "items": {"type": "string"}},
+            "check": {"type": "string", "maxLength": TRIAGE_CHECK_MAX},
+            "evidence": {"type": "string", "maxLength": TRIAGE_EVIDENCE_MAX},
+            "acceptance": {"type": "string", "maxLength": TRIAGE_ACCEPTANCE_MAX},
+            "acceptance_clauses": {"type": "array",
+                                  "items": {"type": "string", "maxLength": CLAUSE_TEXT_MAX} },
         }, "required": ["item_id", "members", "surface", "check", "evidence",
                         "acceptance", "acceptance_clauses"],
             "additionalProperties": False},
@@ -6587,6 +6656,11 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
 # pools, never closed for being old.
 
 SWEEP_VERDICTS = ("keep", "duplicate_of") + tuple(sorted(RETIRING))
+# Bounded grammar (#2444): `items[].evidence` at SWEEP_EVIDENCE_MAX (900), above the
+# [:600] the sweep verdict reader applies, so a degenerate sweep completion is recorded
+# as a divergence at a token count rather than advice to raise
+# `harness.finalizer.max_tokens` (8192). This is the schema whose `evidence` is written
+# twice over (#2287), so its cap is sized from the reader's slice.
 SWEEP_SCHEMA: dict = {
     "type": "object",
     "title": "backlog_sweep_verdict",
@@ -6600,7 +6674,7 @@ SWEEP_SCHEMA: dict = {
                                  "description": "The surviving open item's id; 0 unless verdict is duplicate_of."},
                 "worth": {"type": "string", "enum": list(WORTH_LEVELS)},
                 "size": {"type": "string", "enum": list(SIZE_LEVELS)},
-                "evidence": {"type": "string",
+                "evidence": {"type": "string", "maxLength": SWEEP_EVIDENCE_MAX,
                              "description": "One sentence: the path, commit or check that decides it."},
             },
             "required": ["item_id", "verdict", "duplicate_of", "worth", "size", "evidence"],

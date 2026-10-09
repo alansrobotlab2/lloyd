@@ -859,12 +859,15 @@ def test_the_outcome_schema_offers_human_paths():
     props = B.IMPLEMENT_OUTCOME_SCHEMA["properties"]
     assert "human_paths" in props
     assert props["human_paths"]["items"]["required"] == ["path", "reason"]
-    assert "maxLength" not in json_dumps(B.IMPLEMENT_OUTCOME_SCHEMA)
-
-
-def json_dumps(x):
-    import json
-    return json.dumps(x)
+    # Required, not forbidden (#2444): this line asserted the opposite, which is what
+    # kept the eight verdict schemas open. #2240 retired the same claim for
+    # REVIEW_SCHEMA. The Python clamps in `parse_outcome` still decide what is stored,
+    # because every grammar cap sits strictly above the slice applied there — pinned
+    # per field in tests/test_automod_schema_bounds.py.
+    from app.harness.finalizer import _schema_is_bounded
+    assert _schema_is_bounded(B.IMPLEMENT_OUTCOME_SCHEMA), (
+        "an uncapped leaf makes app.harness.finalizer read a degenerate completion as "
+        "a budget problem and advise raising harness.finalizer.max_tokens (#1706)")
 
 
 def test_apply_post_landing_rescues_a_deferred_clause():

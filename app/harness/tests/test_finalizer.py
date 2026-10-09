@@ -11,6 +11,7 @@ thing this feature could do, to transcribe one object.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 
 import pytest
@@ -25,11 +26,16 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
-# A schema with an open-ended string, which is what autotriage actually sends:
-# `TRIAGE_VERDICT_SCHEMA`'s `check`, `evidence` and `acceptance` carry no
-# maxLength (tests/test_structured_verdict.py::test_no_maxlength_in_the_schema
-# pins that). Only such a schema can legitimately need more room, so it is the
-# one whose truncation still gets the budget advice (#1706).
+# A hand-written schema with one open-ended string: the shape that can legitimately
+# need more room, so its truncation still gets the budget advice (#1706). It was
+# drawn from `TRIAGE_VERDICT_SCHEMA`, and is now a CONTROL rather than a picture of a
+# live caller — #2444 capped every string leaf on that schema, which
+# tests/test_structured_verdict.py::test_every_string_leaf_of_the_schema_is_bounded
+# pins, alongside the eight-schema sweep in tests/test_automod_schema_bounds.py. The
+# live half of this fixture's job is
+# `test_an_uncapped_copy_of_any_of_the_eight_falls_back_to_the_budget_advice` below,
+# which reproduces the open shape by stripping every `maxLength` out of a real schema
+# instead of trusting this copy to stay open.
 UNBOUNDED = {
     "type": "object",
     "title": "verdict",
@@ -364,10 +370,13 @@ async def test_a_cut_off_object_is_reported_as_truncated_not_as_not_json():
     model-behaviour one for two days. The engine says `finish_reason: length`;
     when it does not, an unclosed `{` is the tell.
 
-    Run against `UNBOUNDED`, the schema this failure actually happened to:
-    triage's open-ended `evidence` field can need room, so the budget is the
-    right advice there. Under a schema that caps every field it is not, and
-    #1706 split those two cases apart — see the two nodes below."""
+    Run against `UNBOUNDED`, the shape this failure happened to: triage's `evidence`
+    field was open-ended when those 14 verdicts were cut, so the budget was the right
+    advice then. It is capped now (#2444), which is why the fixture is a control and
+    `test_an_uncapped_copy_of_any_of_the_eight_falls_back_to_the_budget_advice` is what
+    keeps this branch reachable from a real schema. Under a schema that caps every
+    field the budget is not the answer, and #1706 split those two cases apart — see
+    the nodes below."""
     _Client.responses = [_ok('{"verdict":"confirmed","check":"ls _pipe',
                              usage={"completion_tokens": 1024},
                              finish_reason="length")]
@@ -759,3 +768,104 @@ async def test_the_re_sample_asks_for_the_max_tokens_it_was_given(_client):
         + repr([b["max_tokens"] for b in _client.posted]))
     assert "raise harness.finalizer.max_tokens" not in error, error
 
+
+
+# ── the eight verdict schemas capped by #2444 ───────────────────────────────
+
+def _longest_answer(schema: dict) -> dict:
+    """An object saying the maximum each of the schema's own caps allows, so the cut
+    is genuinely mid-object and the branch under test is chosen by the report.
+    """
+    out = {}
+    for key, node in (schema.get("properties") or {}).items():
+        t = node.get("type")
+        if t == "string":
+            out[key] = "b" * int(node.get("maxLength") or 200)
+        elif t == "boolean":
+            out[key] = False
+        elif t == "integer":
+            out[key] = 0
+        elif t == "array":
+            items = node.get("items") or {}
+            out[key] = [_longest_answer(items)] if items.get("properties") else []
+        elif t == "object":
+            out[key] = _longest_answer(node)
+    return out
+
+
+EIGHT_FINALIZER = {
+    "IMPLEMENT_OUTCOME": "scripts.automod.backlog:IMPLEMENT_OUTCOME_SCHEMA",
+    "TRIAGE_VERDICT": "scripts.automod.backlog:TRIAGE_VERDICT_SCHEMA",
+    "GROUP_TRIAGE": "scripts.automod.backlog:GROUP_TRIAGE_SCHEMA",
+    "SWEEP": "scripts.automod.backlog:SWEEP_SCHEMA",
+    "CONFIRM": "scripts.automod.review:CONFIRM_SCHEMA",
+    "ARCH_REVIEW": "workers.sources.arch_review:ARCH_REVIEW_SCHEMA",
+    "OWED": "workers.sources.owed_check:OWED_SCHEMA",
+    "DIGEST_RESULT": "workers.sources.youtube_digest:RESULT_SCHEMA",
+}
+
+
+def _eight_schema(spec: str) -> dict:
+    import importlib
+    mod, _, attr = spec.partition(":")
+    return getattr(importlib.import_module(mod), attr)
+
+
+async def test_a_bounded_verdict_schema_reports_a_divergence_not_a_budget():
+    """Clause 4: through each of the eight schemas #2444 bounded, a completion that
+    runs to the cap returns an error carrying `DIVERGENCE_MARKER` and the token count,
+    and no longer the `raise harness.finalizer.max_tokens` advice. Before #2444 all
+    eight had an open leaf, so all eight took the `else` branch. This claims no fewer
+    divergences: commit 9ed31a5c (#2260) records that capping review.py's leaves did
+    not stop the 8192-token divergence. The caps buy the report and the re-draw.
+    """
+    for name, spec in EIGHT_FINALIZER.items():
+        schema = _eight_schema(spec)
+        assert F._schema_is_bounded(schema), (
+            f"{name} is not bounded, so this node proves nothing about it")
+        answer = json.dumps(_longest_answer(schema), ensure_ascii=False)
+        cut = answer[:max(20, len(answer) // 3)]          # unterminated, mid-object
+        _Client.responses = [_ok(cut, usage={"completion_tokens": 4096},
+                                 finish_reason="length")]
+        parsed, error, usage = await _run(schema=schema, max_tokens=32)
+        assert parsed is None, f"{name}: a truncated object was accepted"
+        assert error, f"{name}: no error recorded for a cut completion"
+        assert F.DIVERGENCE_MARKER in error, (
+            f"{name} reported {error!r}: an uncapped leaf is back in this schema and "
+            "the reader is sent to a config knob that cannot be the cause")
+        assert "4096 tokens" in error, f"{name} lost the token count: {error!r}"
+        assert "raise harness.finalizer.max_tokens" not in error, (
+            f"{name} still advises raising the budget: {error!r}")
+        assert usage["output_tokens"] == 4096, f"{name}: usage not carried: {usage}"
+        assert F.should_resample_divergence(error, schema) is True, (
+            f"{name}: a bounded grammar's divergence is not given its single re-draw")
+
+
+async def test_an_uncapped_copy_of_any_of_the_eight_falls_back_to_the_budget_advice():
+    """The can-fail half, per schema: strip the caps from a copy of any one of the
+    eight and the same completion is back to advising a raise of
+    `harness.finalizer.max_tokens`. Without it the node above could pass on an error
+    naming neither branch, and each schema would ride on the others' strength.
+    """
+    for name, spec in EIGHT_FINALIZER.items():
+        schema = copy.deepcopy(_eight_schema(spec))
+        stack = [schema]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                node.pop("maxLength", None)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        assert F._schema_is_bounded(schema) is False, (
+            f"{name}: stripping every cap left it bounded, so the control below is "
+            "grading a schema that was never open")
+        answer = json.dumps(_longest_answer(_eight_schema(spec)), ensure_ascii=False)
+        _Client.responses = [_ok(answer[:max(20, len(answer) // 3)],
+                                 usage={"completion_tokens": 4096},
+                                 finish_reason="length")]
+        parsed, error, _usage = await _run(schema=schema, max_tokens=32)
+        assert parsed is None, name
+        assert "raise harness.finalizer.max_tokens" in error, (
+            f"{name} open again and still not told it might need more room: {error!r}")
+        assert F.should_resample_divergence(error, schema) is False, name

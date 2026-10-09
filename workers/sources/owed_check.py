@@ -62,6 +62,26 @@ BODY_CHARS = 14_000
 #: `owed.SETTLED_TEXT_LIMIT` so the writer's marked cut is the only cut.
 _FIELD_CEILING = 6000
 
+OWED_FIELD_MAX = 6500          # slice [:6000] = `_FIELD_CEILING`, owed_check.py:63
+OWED_ARTIFACT_MAX = 450        # slice [:300]; a repo-relative path, longest real one is 100 chars
+OWED_RECHECK_MAX = 80          # slice [:40]; an ISO date
+OWED_OUTSIDE_MAX = 600         # slice [:500]
+OWED_FOLLOWUP_NAME_MAX = 200   # slice [:140]; a backlog item name
+OWED_FOLLOWUP_BODY_MAX = 6500  # slice [:6000]; `BODY_CHARS` for a new item is 14,000
+OWED_CLAUSE_TEXT_MAX = 2200    # slice [:2000]; one rewritten acceptance clause
+OWED_SUMMARY_MAX = 600         # slice [:400]; on record 400, hit on 528 of 1176 rows
+
+# Bounded grammar (#2444): every string leaf carries one of the caps above, each
+# strictly above the `[:N]` `parse_answer` applies to the same field (summary 600 over
+# [:400], evidence/ruling 6500 over the [:6000] `_FIELD_CEILING`, the rest over their
+# own slices), so the reader stays the cut that decides what is stored and a
+# degenerate owed pass lands on the bounded branch — "generation diverged at N tokens
+# … not a budget" (`DIVERGENCE_MARKER`) with its one re-draw — rather than the
+# unbounded branch's advice to raise `harness.finalizer.max_tokens` (8192), #1706's
+# false lead. On record (measured 2026-10-08): 528 of the 1176 owed_check rows that
+# carry a summary sit at its stored 400, and none stores a per-entry string, so the
+# entry caps are sized from their slices, not a measurement; owed-check #2444/1
+# re-sizes from the at-the-cap ratio.
 OWED_SCHEMA = {
     "type": "object",
     "properties": {
@@ -71,18 +91,20 @@ OWED_SCHEMA = {
                 "n": {"type": "integer"},
                 "outcome": {"type": "string", "enum": ["settled", "recheck", "ruling", "work",
                                                        "reopen", "close", "outside"]},
-                "evidence": {"type": "string"},
-                "ruling": {"type": "string"},
-                "recheck_after": {"type": "string"},
+                "evidence": {"type": "string", "maxLength": OWED_FIELD_MAX},
+                "ruling": {"type": "string", "maxLength": OWED_FIELD_MAX},
+                "recheck_after": {"type": "string", "maxLength": OWED_RECHECK_MAX},
                 "follow_up": {"type": "object", "properties": {
-                    "name": {"type": "string"}, "body": {"type": "string"}}},
-                "outside": {"type": "string"},
-                "artifact": {"type": "string"},
+                    "name": {"type": "string", "maxLength": OWED_FOLLOWUP_NAME_MAX},
+                    "body": {"type": "string", "maxLength": OWED_FOLLOWUP_BODY_MAX}}},
+                "outside": {"type": "string", "maxLength": OWED_OUTSIDE_MAX},
+                "artifact": {"type": "string", "maxLength": OWED_ARTIFACT_MAX},
                 "amend_clause": {"type": "object", "properties": {
-                    "clause": {"type": "integer"}, "text": {"type": "string"}}},
+                    "clause": {"type": "integer"},
+                    "text": {"type": "string", "maxLength": OWED_CLAUSE_TEXT_MAX}}},
             },
             "required": ["n", "outcome", "evidence"]}},
-        "summary": {"type": "string"},
+        "summary": {"type": "string", "maxLength": OWED_SUMMARY_MAX},
     },
     "required": ["entries", "summary"],
 }

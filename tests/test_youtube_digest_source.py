@@ -538,7 +538,15 @@ def test_the_schema_enums_are_the_parsers_vocabularies():
     assert props["areas"]["items"]["enum"] == list(Y.AREAS)
     assert Y.RESULT_SCHEMA["additionalProperties"] is False
     assert set(Y.RESULT_SCHEMA["required"]) == set(props)
-    assert "maxLength" not in json.dumps(Y.RESULT_SCHEMA)
+    # Required, not forbidden (#2444). `_shape` slices nothing, so there was no
+    # Python clamp for these caps to interfere with: they exist to turn a degenerate
+    # draw into a reported divergence at a token count instead of advice to raise
+    # harness.finalizer.max_tokens, and are pinned at their declared values in
+    # tests/test_automod_schema_bounds.py.
+    from app.harness.finalizer import _schema_is_bounded
+    assert _schema_is_bounded(Y.RESULT_SCHEMA), "an open string leaf is back"
+    assert props["note"]["maxLength"] == Y.DIGEST_NOTE_MAX == 400, props["note"]
+    assert props["idea"]["maxLength"] == Y.DIGEST_IDEA_MAX == 400, props["idea"]
 
 
 def test_the_structured_object_goes_through_the_same_clamps():

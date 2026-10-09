@@ -2816,8 +2816,22 @@ def test_parse_outcome_validates_and_clamps(obj, expect):
 
 
 def test_the_outcome_schema_is_built_from_the_one_list():
+    """The enum comes from the one list, and every leaf is capped (#2444).
+
+    The cap assertion here used to read `assert "maxLength" not in …` with the
+    reason "`clamps stay in Python`". That is the reason #2240 retired for
+    `REVIEW_SCHEMA` and #2444 retires here: an open `{"type": "string"}` is what
+    makes `app/harness/finalizer.py` report every cut as a budget problem, and the
+    Python clamps in `parse_outcome` above are untouched — each grammar cap sits
+    strictly above the `[:N]` that function applies — a relation pinned per field by
+    `test_every_cap_of_the_eight_schemas_sits_above_the_slice_its_parser_applies` in
+    `tests/test_automod_schema_bounds.py`.
+    """
     assert B.IMPLEMENT_OUTCOME_SCHEMA["properties"]["acceptance"]["enum"] == list(B.ACCEPTANCE_OUTCOMES)
-    assert "maxLength" not in json.dumps(B.IMPLEMENT_OUTCOME_SCHEMA), "clamps stay in Python"
+    from app.harness.finalizer import _schema_is_bounded
+    assert _schema_is_bounded(B.IMPLEMENT_OUTCOME_SCHEMA), (
+        "an uncapped leaf makes app.harness.finalizer read a degenerate completion "
+        "as a budget problem and advise raising harness.finalizer.max_tokens")
 
 
 def test_execute_records_the_structured_outcome_on_the_finished_event(isolated, monkeypatch):

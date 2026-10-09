@@ -649,10 +649,22 @@ def test_the_schema_is_built_from_the_vocabularies():
     assert props["doc_status"]["enum"] == list(A.DOC_STATUSES)
     assert props["grouping"]["enum"] == [*A.GROUPINGS, A.GROUPING_NONE]
     assert A.ARCH_REVIEW_SCHEMA["additionalProperties"] is False
-    for prop in props.values():
-        assert "maxLength" not in prop, (
-            "a guided decoder stops AT the limit rather than writing something "
-            "shorter; clamps belong in Python, after the fact")
+    # Reversed (#2444): the loop below used to require that NO property carry a
+    # `maxLength`. `summary` now carries ARCH_REVIEW_MAX (900), which sits above the
+    # one cut `parse_result` applies — `raw["summary"][:600]` — so the reader stays
+    # what decides what is stored, while a runaway field is stopped inside
+    # harness.finalizer.max_tokens (8192) and reported as a divergence rather than a
+    # budget problem (#1706). The 800-char raw-turn ceiling an earlier copy of this
+    # comment cited names a constant that exists nowhere in the tree (#2444 review),
+    # so only the two real figures are claimed here.
+    from app.harness.finalizer import _node_is_bounded, _schema_is_bounded
+    assert _schema_is_bounded(A.ARCH_REVIEW_SCHEMA), "an open leaf is back in the schema"
+    assert props["summary"]["maxLength"] == A.ARCH_REVIEW_MAX == 900, props["summary"]
+    for name, prop in props.items():
+        assert _node_is_bounded(prop), (
+            f"{name} is an open string again: the ban that used to sit here is the "
+            "sentence #1706 showed was the bug — an uncapped leaf makes a degenerate "
+            "page pass read as a budget to raise")
 
 
 # ── 6. execute: the rails ────────────────────────────────────────────────────

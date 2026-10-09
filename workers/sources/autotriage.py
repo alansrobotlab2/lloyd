@@ -712,10 +712,14 @@ def parse_verdict(text: str, structured: dict | None = None) -> dict | None:
 def _from_structured(obj: dict, verdicts, surfaces) -> dict | None:
     """The finalizer's object, clamped the same way the text path clamps.
 
-    The clamps live here rather than in the schema on purpose: a `maxLength`
-    is enforced by the guided decoder, so the model would stop mid-sentence
-    at the limit instead of writing something shorter. Truncating afterwards
-    costs a cut sentence; constraining the grammar costs the thought.
+    The clamps stay here, and since #2444 the grammar is bounded too: each
+    `maxLength` on `TRIAGE_VERDICT_SCHEMA` sits strictly ABOVE the `[:N]` applied
+    below, so nothing here can lose a character to the decoder. That relation is
+    what makes both halves compatible; the old docstring argued they were
+    alternatives ("constraining the grammar costs the thought"), which is true only
+    of a cap set at or below the slice. An uncapped leaf was not neutral either —
+    it is what made `app/harness/finalizer.py` report a degenerate completion as a
+    budget problem and advise raising `harness.finalizer.max_tokens` (#1706).
     """
     verdict = str(obj.get("verdict") or "").strip().lower()
     if verdict not in verdicts:

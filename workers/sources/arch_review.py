@@ -613,6 +613,19 @@ def hunk_inside(hunk: tuple[int, int], start: int, end: int) -> bool:
 
 # ── The schema and the verdict block ─────────────────────────────────────────
 
+ARCH_REVIEW_MAX = 900
+# Bounded grammar (#2444): `summary` carries ARCH_REVIEW_MAX (900), which sits above
+# the ONLY cut this reader applies — `raw["summary"][:600]` in `parse_result` — so the
+# Python clamp stays what decides what is stored, while a runaway field is stopped
+# inside `harness.finalizer.max_tokens` (8192) and read as "generation diverged at N
+# tokens … not a budget" (`DIVERGENCE_MARKER`) with its single re-draw, instead of the
+# advice to raise that budget (#1706). One clamp, not two: the 800-char ceiling on the
+# raw turn this comment first cited named a constant that exists nowhere in the tree
+# (#2444 review), and nothing else trims the string before the slice.
+# Nothing measures the size either — all 21 `arch_review` rows in
+# ~/.local/state/lloyd-automod/promotions.jsonl carry `detail: null`, so no summary
+# string is on record there and the cap comes from the reader's own number. That
+# non-measurement is what owed-check #2444/2 is asked to rule on.
 ARCH_REVIEW_SCHEMA: dict = {
     "type": "object",
     "title": "arch_review_result",
@@ -624,7 +637,7 @@ ARCH_REVIEW_SCHEMA: dict = {
         "grouping": {"type": "string", "enum": [*GROUPINGS, GROUPING_NONE],
                      "description": ("Group units only: does the grouping still hold. "
                                      f"`{GROUPING_NONE}` for a whole-doc unit.")},
-        "summary": {"type": "string",
+        "summary": {"type": "string", "maxLength": ARCH_REVIEW_MAX,
                     "description": "One or two sentences: what you checked and what you found."},
         "filed": {"type": "array", "items": {"type": "integer"},
                   "description": "Backlog ids filed during this review."},

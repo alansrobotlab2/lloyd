@@ -146,22 +146,43 @@ _ID_RE = re.compile(r"#?\s*(\d+)")
 #: cannot disagree on a vocabulary; an outcome outside `_RESULTS` is a schema
 #: rejection, not a field that quietly comes back None. The id fields stay
 #: strings ("#123" or "none") and go through the same `_id_or_none` as the text.
-#: No `maxLength`: the guided decoder would stop mid-sentence at it.
+#: Its string leaves are capped — see the block below the three constants, which
+#: says what sizes each one. What this line claimed before #2444 was that no
+#: `maxLength` may appear, the same absolute ban #2240 retired for `REVIEW_SCHEMA`
+#: and for the same reason: an open string is what makes the finalizer blame
+#: `harness.finalizer.max_tokens` for a cut it cannot be the cause of.
+DIGEST_NOTE_MAX = 400
+DIGEST_IDEA_MAX = 400
+DIGEST_ID_MAX = 20
+
+# Bounded grammar (#2444): `note`/`idea` at DIGEST_NOTE_MAX / DIGEST_IDEA_MAX (400,
+# one line each) and the two id fields at DIGEST_ID_MAX (20). `_shape` slices none of
+# them, so no cap sits above a Python slice; it only ends a runaway field inside
+# `harness.finalizer.max_tokens` (8192), which moves a degenerate draw onto the bounded
+# branch — "generation diverged at N tokens … not a budget" (`DIVERGENCE_MARKER`) plus
+# its one re-draw — instead of the unbounded branch's advice to raise that knob
+# (#1706). Nothing sizes them: no `youtube-digest` run in `workers.db` stores a
+# structured verdict (measured over all 136 rows on 2026-10-09 — `response_json` holds
+# the text block and `meta_json` the parsed fields, never a finalizer object) and the
+# ledger has no digest event kind; owed-check #2444/2 rules on that.
 RESULT_SCHEMA: dict = {
     "type": "object",
     "title": "youtube_digest_result",
     "properties": {
         "result": {"type": "string", "enum": list(_RESULTS)},
-        "note": {"type": "string"},
+        "note": {"type": "string", "maxLength": DIGEST_NOTE_MAX},
         # Clamped to 0-100 in `_shape`, like the text path, not in the grammar.
         "relevance": {"type": "integer"},
         "verdict": {"type": "string", "enum": list(VERDICTS)},
         "areas": {"type": "array", "items": {"type": "string", "enum": list(AREAS)}},
         "source_kind": {"type": "string", "enum": list(SOURCE_KINDS)},
         "approach": {"type": "string", "enum": list(APPROACHES)},
-        "idea": {"type": "string", "description": "One line naming the specific thing, or none."},
-        "duplicate_of": {"type": "string", "description": "#id or none"},
-        "filed": {"type": "string", "description": "#id or none"},
+        "idea": {"type": "string", "maxLength": DIGEST_IDEA_MAX,
+                "description": "One line naming the specific thing, or none."},
+        "duplicate_of": {"type": "string", "maxLength": DIGEST_ID_MAX,
+                "description": "#id or none"},
+        "filed": {"type": "string", "maxLength": DIGEST_ID_MAX,
+                "description": "#id or none"},
     },
     "required": ["result", "note", "relevance", "verdict", "areas", "source_kind",
                  "approach", "idea", "duplicate_of", "filed"],
