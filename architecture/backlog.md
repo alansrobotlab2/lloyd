@@ -151,7 +151,7 @@ description) is kept:
 | The ledger would keep it in `up_next` (a confirmed, loopable, unheld contract; a re-offer) | the status moves | — |
 | Never triaged, held as self-filed | stays `draft`; a `backlog_triage_requested` ledger row releases it to single triage (`released_ids`) | `request` |
 | Never triaged, already a triage candidate | stays `draft`; nothing to do | `pooled` |
-| Triaged out of the loop (`not_code`, `unverifiable`, human-only), nothing owed | stays `draft`; a `decide` entry is added, so owed-check owns it | `owe` |
+| Triaged out of the loop (`not_code`, `unverifiable`, human-only), nothing owed — and only a row whose `verdict_source` shows a model rendered it: `triaged_ids` skips a `none` row, which is a missing measurement and not a ruling (#2394) | stays `draft`; a `decide` entry is added, so owed-check owns it | `owe` |
 | The ledger puts it elsewhere and something is already owed, held, in flight or spent | stays where it is, with the reconciler's reason | `ledger` |
 | Folded under an umbrella | stays; its fate is the umbrella's | `grouped` |
 | A create at `up_next` on a board the loop reads | filed as `draft`; nothing is released | `created_draft` |

@@ -237,3 +237,44 @@ def test_the_prompt_shows_why_the_last_answer_was_not_applied():
                                 "rechecks": 1, "note": "a round cannot take it"}], [0])
     assert "last answer not applied: a round cannot take it" in block
     assert "do it now" in OC.PROMPT
+
+
+def test_a_missing_measurement_holds_nothing_out_of_promotion(board):
+    """#2394 clause 2: the row that holds an item out must be a verdict.
+
+    #2378 is the live case: its only triage row is `verdict: unverifiable,
+    verdict_source: none` — the finalizer writing an empty turn as a judgement —
+    and `promotion_ruling` answered `owe` with the parked reason, which is the
+    same answer an item triage genuinely retired gets. A row with no measurement
+    behind it is not a ruling, so it must not produce this outcome; the item
+    stays an ordinary draft awaiting a triage that actually runs.
+
+    The sibling rows below are the controls: a real `unverifiable` with a
+    rendered source, and a row with no `verdict_source` field at all (the shape
+    every pre-existing ledger row has), both still hold the item out.
+    """
+    p = write_item(board, 60)
+    _ev(event="backlog_triage", item_id=60, verdict="unverifiable", check="",
+        verdict_source="none",
+        evidence="triage turn ended (stop) with no parseable verdict block")
+
+    assert B.triaged_ids(S.LEDGER_PATH) == {}
+    ruling = B.promotion_ruling(60, session_class="worker")
+    assert ruling["outcome"] == "pooled", ruling
+    assert not ruling["move"]
+    assert "no triage verdict yet" in ruling["message"], ruling["message"]
+    assert "not for the unattended loop" not in ruling["message"]
+    assert B.desired_statuses(S.LEDGER_PATH).get(60) is None, \
+        "nothing parks it"
+    assert B.select_candidate(S.LEDGER_PATH).id == 60, \
+        "and it is still what the next triage pass will read"
+    assert fm_of(p)["status"] == "draft"
+
+    _ev(event="backlog_triage", item_id=61, verdict="unverifiable",
+        verdict_source="structured")
+    write_item(board, 61)
+    assert B.promotion_ruling(61)["outcome"] == "owe"
+    _ev(event="backlog_triage", item_id=62, verdict="unverifiable")
+    write_item(board, 62)
+    assert B.triaged_ids(S.LEDGER_PATH)[62] == "unverifiable", \
+        "a row with no verdict_source is a rendered verdict, as all history has"

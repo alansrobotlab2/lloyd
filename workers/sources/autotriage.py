@@ -1207,15 +1207,63 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
             evidence = (f"ran out of iteration budget ({budget}) on {attempt} consecutive "
                         f"attempts without reaching a verdict; transcript in session "
                         f"{session_id}")
+            terminal_source = "max_turns"
         else:
-            evidence = (f"triage turn ended ({stop_reason}) with no parseable verdict "
-                        f"block; transcript in session {session_id}")
+            # No verdict on a NON-budget stop (#2394). The turn was asked a
+            # question and did not answer: that is a MISSING MEASUREMENT, and
+            # the old code filed it as a terminal `unverifiable` — a judgement
+            # no model ever rendered — which `triaged_ids` then read as a
+            # triaged-out ruling, so the item was too "triaged" to re-triage
+            # and triaged-out for promotion, forever (#2378). The first
+            # occurrence now retries; only the second is terminal, and it says
+            # so in its own `verdict_source`.
+            nm = B.no_measurement_attempts(S.LEDGER_PATH).get(candidate.id, {})
+            prior = int(nm.get("count") or 0)
+            prior_sid = str(nm.get("last_session") or "")
+            if prior < B.MAX_NO_MEASUREMENT_ATTEMPTS:
+                evidence = (f"NOT A VERDICT — no measurement: triage turn ended "
+                            f"({stop_reason}) with no parseable verdict block; "
+                            f"transcript in session {session_id}")
+                S.append_event({"event": "backlog_triage", "item_id": candidate.id,
+                                "verdict": B.NO_MEASUREMENT,
+                                "verdict_source": B.NO_MEASUREMENT_SOURCE,
+                                "attempt": prior + 1,
+                                "retry_cap": B.MAX_NO_MEASUREMENT_ATTEMPTS,
+                                "prior_session_id": prior_sid,
+                                "evidence": evidence, "auto": True,
+                                "session_id": session_id,
+                                "stop_reason": stop_reason,
+                                "structured_error": structured_error,
+                                "finalizer_tokens": run.get("finalizer_tokens")})
+                logger.warning("backlog #%s: %s (attempt %d of %d)", candidate.id,
+                               evidence, prior + 1, B.MAX_NO_MEASUREMENT_ATTEMPTS)
+                return {"status": "skipped", "item_id": candidate.id,
+                        "verdict": B.NO_MEASUREMENT, "attempt": prior + 1,
+                        "session_id": session_id,
+                        # The session id goes in the summary as well as the
+                        # field: this string is what the queue row shows a human,
+                        # and a triage that "succeeded" while answering nothing
+                        # is only visible at all through its transcript.
+                        "summary": ("NOT A VERDICT: no parseable verdict block "
+                                    f"(stop_reason {stop_reason}); transcript in "
+                                    f"session {session_id}"
+                                    + (f" (first: session {prior_sid})" if prior_sid
+                                       else "")
+                                    + f" — tolerated non-budget occurrence "
+                                      f"{prior + 1} of "
+                                      f"{B.MAX_NO_MEASUREMENT_ATTEMPTS}. The item "
+                                      "stays a triage candidate.")}
+            terminal_source = B.NO_MEASUREMENT_CAP_SOURCE
+            evidence = (f"triage turn ended ({stop_reason}) with no parseable "
+                        f"verdict block on {prior + 1} consecutive attempts; "
+                        f"transcript in session {session_id}"
+                        + (f" (first: session {prior_sid})" if prior_sid else ""))
         # Terminal, ledger only: the item's status is not touched, but the
         # reason is honest and the transcript is named.
         S.append_event({"event": "backlog_triage", "item_id": candidate.id,
                         "verdict": "unverifiable", "check": "", "evidence": evidence,
                         "auto": True, "session_id": session_id,
-                        "verdict_source": "none",
+                        "verdict_source": terminal_source,
                         "structured_error": structured_error,
                         "finalizer_tokens": run.get("finalizer_tokens"),
                         "stop_reason": stop_reason})

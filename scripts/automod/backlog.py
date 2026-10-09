@@ -473,6 +473,26 @@ RETIRING = {"already_done", "stale"}
 INCOMPLETE = "incomplete"
 MAX_INCOMPLETE_ATTEMPTS = 2
 
+# A triage turn that ended with no verdict block at all is not a verdict. It is
+# a MISSING MEASUREMENT, and the field that says so is `verdict_source`:
+# "structured"/"regex" means a model rendered a judgement and this file may act
+# on it, "none" means nothing was rendered and there is nothing to act on.
+# Before #2394 the finalizer wrote such a turn as a terminal `unverifiable`, and
+# `triaged_ids` — which read only `verdict` — then held the item out of promotion
+# as though triage had judged it: too "triaged" to re-triage, triaged-out for the
+# loop, forever. #2378 is the live case: verdict never rendered, route dead.
+NO_MEASUREMENT = "no_measurement"
+NO_MEASUREMENT_SOURCE = "none"
+MAX_NO_MEASUREMENT_ATTEMPTS = 1   # one retry: the SECOND occurrence is terminal
+
+# When the retries run out the item IS held out, but the row says what it is:
+# the source is `retry_cap`, not `none`, because `triaged_ids` ignores "none" and
+# a cap the reader also ignored would be a bound that bound nothing — the item
+# would be re-triaged every pass forever, which is what this cap exists to stop.
+# `unverifiable` is still the honest word for what it holds out on: nobody ever
+# established a checkable claim.
+NO_MEASUREMENT_CAP_SOURCE = "retry_cap"
+
 
 # The same verdict, as a machine contract. Built from VERDICTS/SURFACES rather
 # than restated, so a new verdict cannot be added in one place and forgotten in
@@ -2501,14 +2521,48 @@ def triaged_ids(ledger: Path) -> dict[int, str]:
     `incomplete` is deliberately not one: an item whose triage ran out of
     budget is not triaged, it is waiting for a bigger budget. Rows before a
     re-triage mark do not count.
+
+    Nor is a row whose `verdict_source` is "none" (#2394). Such a row records
+    that the triage turn produced no verdict block — an instrument failure, not
+    a measurement — and admitting it here is what silently retired items: the
+    word in `verdict` was never rendered by anything. A genuine `unverifiable`
+    carries source "structured" or "regex" and still parks the item exactly as
+    before; only the un-rendered one is ignored.
     """
     marks = retriage_marks(ledger)
     seen: dict[int, str] = {}
     for d in _ledger_events(ledger, "backlog_triage"):
         verdict = d.get("verdict", "")
+        if str(d.get("verdict_source") or "") == NO_MEASUREMENT_SOURCE:
+            seen.pop(int(d["item_id"]), None)
+            continue
         if verdict in VERDICTS and _after_mark(d, marks):
             seen[int(d["item_id"])] = verdict
     return seen
+
+
+def no_measurement_attempts(ledger: Path) -> dict[int, dict]:
+    """{item_id: {"count": n, "last_session": sid}} for non-budget triage turns
+    that produced no verdict block, since the item's last re-triage mark.
+
+    The bound #2394 needs: a missing measurement must be retryable, but not
+    retryable forever, or one permanently broken item re-burns a triage turn
+    every pass and nothing else gets looked at. Rows before a re-triage mark do
+    not count, so a mark written beside an item's own round restarts the count
+    from zero exactly as it reopens the verdict.
+    """
+    marks = retriage_marks(ledger)
+    out: dict[int, dict] = {}
+    for d in _ledger_events(ledger, "backlog_triage"):
+        if str(d.get("verdict_source") or "") != NO_MEASUREMENT_SOURCE:
+            continue
+        if not _after_mark(d, marks):
+            continue
+        i = int(d["item_id"])
+        e = out.setdefault(i, {"count": 0, "last_session": ""})
+        e["count"] += 1
+        e["last_session"] = str(d.get("session_id") or "") or e["last_session"]
+    return out
 
 
 def incomplete_counts(ledger: Path) -> dict[int, int]:

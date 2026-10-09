@@ -117,14 +117,124 @@ def test_a_second_exhaustion_retires_it_and_says_why(isolated, monkeypatch):
     assert B.select_candidate(S.LEDGER_PATH) is None
 
 
-def test_no_verdict_for_a_reason_other_than_budget_is_terminal(isolated, monkeypatch):
-    """A turn that finished normally and still produced no block is a real
-    unverifiable, not a budget problem."""
+def _fake_turns(*session_ids, stop_reason="stop", text="I dunno"):
+    """Turns with DISTINCT session ids, so a test can tell which turn wrote what.
+
+    `_fake_turn` reuses one id; the bound in #2394 has to name both offenders,
+    which is only checkable if the two turns are distinguishable.
+    """
+    ids = iter(session_ids)
+
+    async def fake(prompt, **kw):
+        return {"text": text, "session_id": next(ids), "stop_reason": stop_reason,
+                "num_turns": 12, "errors": []}
+    return fake
+
+
+def test_a_non_budget_turn_with_no_verdict_block_is_a_missing_measurement(
+        isolated, monkeypatch):
+    """#2394 clause 1, re-authored from the node that pinned the old behaviour.
+
+    `test_no_verdict_for_a_reason_other_than_budget_is_terminal` asserted that a
+    turn ending `stop` with no block was TERMINAL `unverifiable`. That assertion
+    was the bug: nothing rendered that verdict — the finalizer wrote the absence
+    of output as a judgement, `triaged_ids` read it as a triaged-out ruling, and
+    #2378 has been unreachable ever since, too "triaged" to re-triage and
+    triaged-out for promotion. The row is now a non-terminal missing
+    measurement, and the item is still the candidate it was before the turn.
+    """
     write_item(isolated, 7)
-    monkeypatch.setattr(C, "run_prompt_in_session", _fake_turn("I dunno", stop_reason="stop"))
+    monkeypatch.setattr(C, "run_prompt_in_session",
+                        _fake_turns("sess_a", stop_reason="stop"))
+
     out = asyncio.run(M.execute(_Item()))
-    assert out["verdict"] == "unverifiable"
-    assert "no parseable verdict block" in S.read_events(path=S.LEDGER_PATH)[-1]["evidence"]
+
+    assert out["verdict"] == B.NO_MEASUREMENT
+    assert out["status"] == "skipped", "an instrument failure is not a completed triage"
+    row = S.read_events(path=S.LEDGER_PATH)[-1]
+    assert row["verdict"] == B.NO_MEASUREMENT
+    assert row["verdict_source"] == B.NO_MEASUREMENT_SOURCE
+    assert "NOT A VERDICT" in row["evidence"] and "no parseable verdict block" in row["evidence"]
+    # NOT terminal: the item is still triageable and still promotable.
+    assert B.triaged_ids(S.LEDGER_PATH) == {}
+    cand = B.select_candidate(S.LEDGER_PATH)
+    assert cand is not None, \
+        "a missing measurement must not retire the item it never graded"
+    assert cand.id == 7
+
+
+def test_a_second_consecutive_missing_measurement_is_terminal_and_names_both_turns(
+        isolated, monkeypatch):
+    """#2394 clause 3: the retry is bounded, and the held-out row is auditable.
+
+    One retry, then the item is held out — a permanently broken item must not
+    re-burn a triage turn every pass. `verdict_source` on this row is `retry_cap`
+    and NOT `none`, because `triaged_ids` ignores `none`: a cap the reader also
+    ignored would be a bound that bound nothing.
+    """
+    write_item(isolated, 7)
+    monkeypatch.setattr(C, "run_prompt_in_session",
+                        _fake_turns("sess_first", "sess_second", stop_reason="stop"))
+
+    first = asyncio.run(M.execute(_Item()))
+    assert first["status"] == "skipped" and first["verdict"] == B.NO_MEASUREMENT
+
+    second = asyncio.run(M.execute(_Item()))
+    assert second["verdict"] == "unverifiable"
+    assert second["status"] == "success", "the second one IS a decision, and it is terminal"
+    row = S.read_events(path=S.LEDGER_PATH)[-1]
+    assert row["verdict_source"] == B.NO_MEASUREMENT_CAP_SOURCE
+    for sid in ("sess_first", "sess_second"):
+        assert sid in row["evidence"], f"both turns must be named, {sid} missing"
+    assert "no parseable verdict block" in row["evidence"], "and what is missing"
+    assert B.triaged_ids(S.LEDGER_PATH) == {7: "unverifiable"}
+    assert B.select_candidate(S.LEDGER_PATH) is None
+
+
+def test_a_verdict_a_model_actually_rendered_is_still_terminal(isolated):
+    """#2394 clause 4: the fix ignores `verdict_source: "none"` and nothing else.
+
+    A genuine `unverifiable` — one the model rendered, source `structured` or
+    `regex` — still parks the item at draft with the same reason, and still costs
+    it candidacy. Loosening the missing measurement must not loosen the real
+    judgement it sits beside.
+    """
+    write_item(isolated, 7)
+    S.append_event({"event": "backlog_triage", "item_id": 7,
+                    "verdict": "unverifiable", "check": "",
+                    "verdict_source": "structured"}, path=S.LEDGER_PATH)
+    assert B.triaged_ids(S.LEDGER_PATH) == {7: "unverifiable"}
+    assert B.select_candidate(S.LEDGER_PATH) is None
+    assert B.desired_statuses(S.LEDGER_PATH)[7][1] == \
+        "triaged unverifiable; not for the unattended loop"
+
+    S.append_event({"event": "backlog_triage", "item_id": 8,
+                    "verdict": "not_code", "check": "",
+                    "verdict_source": "regex"}, path=S.LEDGER_PATH)
+    write_item(isolated, 8)
+    assert B.triaged_ids(S.LEDGER_PATH)[8] == "not_code", \
+        "a regex-parsed verdict is as real as a structured one"
+
+
+def test_the_first_missing_measurement_is_not_reported_as_a_successful_triage(
+        isolated, monkeypatch):
+    """#2394 clause 5: the worker's own result stops claiming success.
+
+    `status: "success"` on a turn that answered nothing is how this went unseen:
+    the queue recorded a completed triage, the ledger recorded a verdict, and
+    only the item's route was silently dead. The session id is on the result
+    because that transcript is the only surviving evidence of what the turn did.
+    """
+    write_item(isolated, 7)
+    monkeypatch.setattr(C, "run_prompt_in_session",
+                        _fake_turns("sess_novers", stop_reason="stop"))
+
+    out = asyncio.run(M.execute(_Item()))
+
+    assert out["status"] != "success"
+    assert out["session_id"] == "sess_novers"
+    assert "sess_novers" in out["summary"]
+    assert "NOT A VERDICT" in out["summary"]
 
 
 def test_the_budget_travels_in_the_payload(isolated, monkeypatch):

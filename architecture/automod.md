@@ -225,6 +225,22 @@ reason indistinguishable from "states no checkable claim". It is now recorded
 as `incomplete`, the item comes back, and only a second exhaustion retires it —
 with evidence that says exactly that and names the transcript.
 
+**A turn that answers nothing is not a conclusion either, and it is not the same
+failure.** The same terminal `unverifiable` used to be written when a turn ended
+for a *non*-budget reason with no verdict block — `stop`, an API error, a
+finalizer that produced nothing. Nothing had rendered that verdict; the finalizer
+was recording the absence of output as a judgement, and `triaged_ids`, which read
+only the `verdict` field, then held the item out of promotion as though triage
+had judged it. #2378 has been unreachable since: too "triaged" to re-triage,
+triaged-out for the loop. Such a row is now `no_measurement` with
+`verdict_source: none`, non-terminal and allowed one retry; the worker reports it
+as `skipped`, not `success`, with the session id in the summary. Only the second
+consecutive occurrence is terminal, and it is recorded under
+`verdict_source: retry_cap` rather than `none` — a cap the reader also ignored
+would be a bound that bound nothing — with evidence naming both sessions.
+`verdict_source` is the field that decides: `structured` and `regex` mean a model
+did render a judgement, and that item still parks exactly as before.
+
 Two more were found by the first unattended run itself (#229, 2026-09-07:
 `stale`, closed, 9 of 90 iterations), which is what a dry run is for:
 
