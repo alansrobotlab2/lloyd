@@ -19,6 +19,16 @@ The clauses, each pinned by the test that names it:
    alert surface (marked `live_vault`: that clause is about a file in the live vault, which the
    gate's `-m "not live_vault"` run therefore does not judge).
 
+#2477 adds a second gate in front of every clause above, on which *run* qualifies: a draft is
+filed only for a run whose recorded terminal status is not a ledger failure. `failed` and
+`interrupted` file nothing while staying scored, reported and counted in `runs_flagged`;
+`success` files exactly as it always did, and so does a trace with no ledger row, whose
+recorded status is `None` — an unknown status is not a recorded failure. Those four edges are
+pinned by `test_an_aborted_run_missing_its_artifact_files_no_draft_but_still_reports`,
+`test_a_green_run_missing_its_artifact_still_files_under_the_same_name`,
+`test_a_flagged_run_with_no_ledger_row_still_files` and
+`test_the_aborted_run_keeps_its_report_line_and_its_header_counters`.
+
 The corpora are built with the helpers from `tests/test_step_conformance.py`, so every store
 here is a real trajectory JSONL plus a real sqlite `runs` table read through the same read-only
 loaders the nightly replay uses, and the filing is exercised both ways: through
@@ -45,6 +55,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib.util
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -111,15 +122,26 @@ def _drop(missing: str):
 
 
 def _specs(count: int, *, faulty_at: int, missing: str | None,
-           source: str = base.TASK, prefix: str = "run_ok"):
-    """`count` runs of one fixture task, one of which never made one of its calls."""
+           source: str = base.TASK, prefix: str = "run_ok",
+           status: str = "success"):
+    """`count` runs of one fixture task, one of which never made one of its calls.
+
+    `status` is the terminal status the *faulty* run is recorded with in the ledger; the other
+    runs of its task keep `success`, which is the shape the real board has — a task whose
+    baseline ran green and whose one bad run died. It defaults to `success`, the status every
+    corpus in this file has always carried, so the nodes above this kwarg were added read
+    exactly the rows they read before it. #2477's aborted-run nodes pass `failed` or
+    `interrupted`, and `base._write_corpus` inserts whatever the spec says into the `runs.status`
+    column verbatim, which is what makes the ledger half of the join real rather than a stubbed
+    field on the report."""
     specs = []
     for i in range(count):
-        calls = _drop(missing) if (i == faulty_at and missing) else _clean_calls()
+        faulty = bool(missing) and i == faulty_at
+        calls = _drop(missing) if faulty else _clean_calls()
         specs.append({
             "run_id": f"{prefix}_{i}",
             "session_key": f"2026091{i}_0500{i}0_autonomy_{prefix}{i}",
-            "status": "success",
+            "status": status if faulty else "success",
             "source": source,
             "task_id": int(source.rsplit(":", 1)[1]),
             "calls": calls,
@@ -208,6 +230,99 @@ def test_a_clean_corpus_files_no_draft(tmp_path):
     assert _flagged(result) == []
     assert sc.file_escalations(result, backlog_dir=backlog) == []
     assert _drafts(backlog) == []
+
+
+# ---------------------------------------------------------------------------
+# #2477 — the escalation gate reads the run's recorded terminal status
+# ---------------------------------------------------------------------------
+
+
+def _forget_ledger_row(db: Path, run_id: str) -> None:
+    """Delete one run's ledger row from a fixture corpus, leaving its trajectory in place.
+
+    That is how a real trace reaches the replay with no ledger row: `--source` filters the
+    ledger side of the join only, so `join_runs` hands the scorer `(trace, None)` and the
+    report's `run_status` is `None` (`scripts/step_conformance.py`, `join_runs`). Deleting the
+    row is what makes clause 3's `None` come through the shipped loaders instead of being
+    written by hand into a report dict."""
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("aborted", ["failed", "interrupted"])
+def test_an_aborted_run_missing_its_artifact_files_no_draft_but_still_reports(tmp_path, aborted):
+    """#2477 clause 1, both edges of the suppressed set. A run the fleet recorded as `failed` or
+    `interrupted` never had the chance to write its artifact, so the absence is a consequence of
+    the abort and the ledger row already carries the cause — which is exactly what #2238 (task
+    24, 14.85 s, `empty response after 14s`) and #2473 (task 38, 235.93 s, `StreamStalledError:
+    stream produced no data for 60s after 564 line(s)`) were adjudicated by hand. The run is
+    still scored and still flagged: the suppression sits at the escalation gate, so
+    `runs_flagged` and the printed deviation still name it while `escalation_targets` returns
+    nothing and the board gets no draft."""
+    corpus, backlog = tmp_path / "corpus", tmp_path / "backlog"
+    result = _replay(corpus, _specs(6, faulty_at=5, missing="write", status=aborted))
+    flagged = _flagged(result)
+    assert len(flagged) == 1, [r["run_id"] for r in flagged]
+    assert flagged[0]["run_status"] == aborted
+    assert _steps(flagged[0]) == ["write:report-latest.md"]
+    # Scored, not skipped: the header counters are computed before any escalation exists.
+    assert result["runs_flagged"] == 1
+    assert result["runs_scored"] == 6
+    assert result["success_recorded_runs"] == 5
+    assert result["success_recorded_flagged"] == 0
+    assert sc.escalation_targets(result) == []
+    assert sc.file_escalations(result, backlog_dir=backlog) == []
+    assert _drafts(backlog) == []
+
+
+def test_a_green_run_missing_its_artifact_still_files_under_the_same_name(tmp_path):
+    """#2477 clause 2. The class this detector exists to doubt is the run that recorded green
+    while its artifact went unwritten, and the suppression must not touch it: one target, one
+    draft, `run_status: success` in the body. The exact name is asserted because the name IS the
+    dedupe key — `file_escalations` compares it against every item already on the board — so a
+    green run's title has to keep the shape #2238 and #2473 were filed with or the next replay
+    re-files two drafts beside them."""
+    corpus, backlog = tmp_path / "corpus", tmp_path / "backlog"
+    result = _replay(corpus, _specs(6, faulty_at=5, missing="write"))
+    targets = sc.escalation_targets(result)
+    assert len(targets) == 1
+    assert targets[0]["run_status"] == "success"
+    assert sc.escalation_name(targets[0]) == (
+        "step-conformance: task 7 run run_ok_5 never wrote report-latest.md")
+    filed = sc.file_escalations(result, backlog_dir=backlog)
+    assert len(filed) == 1
+    assert filed[0]["name"] == sc.escalation_name(targets[0])
+    drafts = _drafts(backlog)
+    assert len(drafts) == 1
+    text = drafts[0].read_text(encoding="utf-8")
+    assert "run_status: success" in text
+    assert "missing_step: write:report-latest.md" in text
+    assert sc.file_escalations(result, backlog_dir=backlog) == [], "re-filed the same run"
+
+
+def test_a_flagged_run_with_no_ledger_row_still_files(tmp_path):
+    """#2477 clause 3. An unknown status is not a recorded failure. The ledger row is deleted
+    from the corpus so the trace reaches the scorer unjoined the way a `--source`-filtered
+    replay leaves 1,660 of 2,096 traces, and the report's `run_status` is `None` — suppressed on
+    that edge would silently drop every deviation outside the ledger's filtered coverage."""
+    corpus, backlog = tmp_path / "corpus", tmp_path / "backlog"
+    traj, db = base._write_corpus(corpus, _specs(6, faulty_at=5, missing="write"))
+    _forget_ledger_row(db, "run_ok_5")
+    result = sc.replay(trajectory_dir=traj, db_path=db)
+    assert result["traces_without_ledger_row"] == 1, result["traces_loaded"]
+    flagged = _flagged(result)
+    assert len(flagged) == 1, [r["run_id"] for r in flagged]
+    assert flagged[0]["run_status"] is None
+    assert _steps(flagged[0]) == ["write:report-latest.md"]
+    assert len(sc.escalation_targets(result)) == 1
+    filed = sc.file_escalations(result, backlog_dir=backlog)
+    assert len(filed) == 1, filed
+    assert len(_drafts(backlog)) == 1
+    assert "run_status: None" in _drafts(backlog)[0].read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +435,61 @@ def test_replay_without_the_flag_files_nothing(tmp_path):
     assert "runs_flagged=1/" in proc.stdout
     assert "escalations_filed=" not in proc.stdout, "escalated without being asked"
     assert _drafts(backlog) == []
+
+
+def _mixed_corpus(root: Path):
+    """One task whose faulty run recorded `success`, and one whose faulty run recorded `failed`.
+
+    Two tasks because at strict support two runs of one task missing the same step stop making
+    that step expected at all (see the module docstring), and the suppression has to be judged
+    on a corpus where both a filing run and a suppressed run are present — a corpus with only
+    the aborted run could not tell the suppression from a filer that files nothing."""
+    specs = _specs(6, faulty_at=5, missing="write")
+    specs += _specs(6, faulty_at=2, missing="write", source="autonomy-task:8",
+                    prefix="run_aborted", status="failed")
+    return base._write_corpus(root, specs)
+
+
+def _run_cli(corpus: Path, backlog: Path, *extra: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(MODULE_PATH), "replay",
+         "--trajectories", str(corpus / "trajectories"), "--db", str(corpus / "workers.db"),
+         "--backlog-dir", str(backlog), *extra],
+        capture_output=True, text=True, timeout=180,
+    )
+
+
+def test_the_aborted_run_keeps_its_report_line_and_its_header_counters(tmp_path):
+    """#2477 clause 4, across the same process boundary the nightly filer crosses. On a corpus
+    holding one green faulty run and one aborted faulty run of a second task, the read-only
+    replay still prints the aborted run's `missing 'write:report-latest.md'` and its header
+    still counts it: `runs_flagged=2/12` and `success_recorded_runs=11 flagged_among_them=1`.
+    Those two numbers are the whole clause — move the suppression down into scoring and the
+    first falls to `1/12`, and the aborted run disappears from the report a human reads. The
+    filing run, on the same corpus and through the shipped CLI, is the green one alone:
+    `escalations_filed=1/1 escalations_deduped=0` and one draft on disk naming `run_ok_5` and
+    never `run_aborted_2`."""
+    corpus, backlog = tmp_path / "corpus", tmp_path / "backlog"
+    _mixed_corpus(corpus)
+
+    read_only = _run_cli(corpus, backlog)
+    assert read_only.returncode == 0, read_only.stderr[-1500:]
+    assert "runs_flagged=2/12 (" in read_only.stdout, read_only.stdout[-2000:]
+    assert ("success_recorded_runs=11 flagged_among_them=1 quiet_among_them=10"
+            in read_only.stdout), read_only.stdout[-2000:]
+    assert "run_aborted_2 status=failed" in read_only.stdout, read_only.stdout[-2000:]
+    assert read_only.stdout.count("missing 'write:report-latest.md'") == 2, read_only.stdout[-2000:]
+    assert "escalations_filed=" not in read_only.stdout, "escalated without being asked"
+    assert _drafts(backlog) == []
+
+    filing = _run_cli(corpus, backlog, "--escalate-writes")
+    assert filing.returncode == 0, filing.stderr[-1500:]
+    assert "escalations_filed=1/1 escalations_deduped=0" in filing.stdout, filing.stdout[-2000:]
+    drafts = _drafts(backlog)
+    assert len(drafts) == 1, [p.name for p in drafts]
+    text = drafts[0].read_text(encoding="utf-8")
+    assert "run_ok_5" in text
+    assert "run_aborted_2" not in text, "the aborted run filed a draft"
 
 
 def test_the_escalation_path_makes_no_alert_call_and_writes_no_store():

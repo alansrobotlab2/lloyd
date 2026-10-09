@@ -1044,6 +1044,14 @@ def _hash_inputs(paths) -> dict:
 # same shape one step over: a read is evidence of *how* a stage ran, not that it ran, and task
 # 42's live `expected_steps` that day were nothing but `read:` ids, so escalating reads would
 # pile a second draft on top of task 40's genuinely missing write.
+#
+# Which *runs* qualify is a second gate, added by #2477: the run that recorded green. On the
+# 14-day live replay of 2026-10-09 `runs_flagged=12/6413` with `flagged_among_them=9`, so 3 of
+# the 12 flagged runs sit on a non-success status — and the set that qualified to file was
+# narrower still and entirely aborted: 2 targets, both `run_status='failed'` (task 24 missing
+# `write:nightly_extraction.lock`, filed as #2238 and closed `stale`; task 38 missing
+# `write:signals-latest.md`, filed as #2473). Both drafts asserted a dropped stage over an abort
+# the ledger recorded with a cause, and both were adjudicated by hand.
 ESCALATE_PREFIX = "write:"
 # The tag the write-time merge rule and `expire_stale_spawns` both act on: an escalation is
 # loop output, so it must be mergeable and it must expire if nobody ever reads it.
@@ -1062,6 +1070,30 @@ def escalates(step: str) -> bool:
     noisier: escalating `tool:` would have filed on 9 of the 11 flagged runs of the 2026-10-03
     replay."""
     return step.startswith(ESCALATE_PREFIX)
+
+
+#: The terminal statuses the fleet already records with a cause (#2477) — the same pair the
+#: queue's own rollup bills as failures (`workers/queue.py:1301`:
+#: `SUM(status IN ('failed','interrupted'))`). The measured vocabulary of the 14-day ledger at
+#: 2026-10-09 is `success` 5008, `skipped` 1923, `failed` 440, `interrupted` 3, and `skipped`
+#: is not here because it is not a failure (`workers/pool.py:41-42`).
+ABORTED_RUN_STATUSES = frozenset({"failed", "interrupted"})
+
+
+def recorded_failure(run_status: str | None) -> bool:
+    """True when the ledger already explains why an artifact is absent (#2477).
+
+    A run the fleet recorded as `failed` or `interrupted` never had the chance to write its
+    artifact, so the absence is a consequence of the abort and `workers.db` carries the cause —
+    `#2473`'s run died of `StreamStalledError: stream produced no data for 60s after 564
+    line(s)` with 11 tool calls and 0 errors, mid-skill before the pointer publish. Filing a
+    draft on top of that asks a human to re-derive, from the same row the escalation already
+    joined, the one judgement the ledger has already made. `success` is deliberately absent: a
+    run that reported green while dropping its stage is the class this detector exists to doubt.
+    So is `None` — the status of a trace with no ledger row, common under `--source` — because
+    an unknown status is not a recorded failure, and a file-only-on-success rule would silently
+    drop that coverage."""
+    return run_status in ABORTED_RUN_STATUSES
 
 
 def _backlog_store():
@@ -1084,10 +1116,15 @@ def escalation_targets(result: dict) -> list[dict]:
 
     Read off `replay`'s own reports, so what files is exactly what printed: a deviation with a
     `state` of `deviation` (a `pending` one is inside the grace window and not yet a finding)
-    whose step names a written artifact. The run ids the expectation was learned from ride along,
-    because the draft is a handoff and the evidence is the handoff."""
+    whose step names a written artifact, for a run the ledger did not already record as a
+    failure (#2477 — `recorded_failure`). This is the escalation gate, not the scoring gate:
+    an aborted run's missing `write:` stays in `result["reports"]`, in `print_replay`'s output
+    and in `runs_flagged`, and only the draft is suppressed. The run ids the expectation was
+    learned from ride along, because the draft is a handoff and the evidence is the handoff."""
     out: list[dict] = []
     for report in result.get("reports") or []:
+        if recorded_failure(report.get("run_status")):
+            continue
         for deviation in report.get("deviations") or []:
             step = str(deviation.get("step") or "")
             if not escalates(step):
