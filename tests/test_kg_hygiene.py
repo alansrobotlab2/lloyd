@@ -237,9 +237,10 @@ def test_describe_always_puts_the_reference_beside_the_number():
         "not measured: no baseline file at /tmp/x.json")
 
 
-def test_snapshot_has_all_three_sections(tree):
+def test_snapshot_has_all_four_sections(tree):
     s = kg_hygiene.snapshot(tree, days=7)
-    assert set(s) >= {"contamination", "near_duplicates", "regrowth", "captured_at"}
+    assert set(s) >= {"contamination", "untagged", "near_duplicates", "regrowth",
+                      "captured_at"}
     assert "items" not in s["contamination"]      # summary only
     assert s["contamination"]["dirs"] == 1
 
@@ -248,6 +249,13 @@ def test_missing_root_is_empty_not_an_error(tmp_path):
     s = kg_hygiene.snapshot(tmp_path / "nope", days=7)
     assert s["contamination"]["dirs"] == 0
     assert s["near_duplicates"]["clusters"] == 0
+    # Zero records parsed is the one input where a share has no denominator: it
+    # must read as nothing untagged, not as ZeroDivisionError and not as a
+    # division that quietly produced 100%.
+    assert s["untagged"] == {"facts": 0, "dirs": 0, "files": 0, "records": 0,
+                             "share_pct": 0.0,
+                             "floor_pct": kg_hygiene.UNTAGGED_ALARM_SHARE,
+                             "over_floor": False}
 
 
 def test_regrowth_survives_a_dir_renamed_mid_pass(tree, tmp_path, monkeypatch):
@@ -272,3 +280,147 @@ def test_regrowth_reports_zero_vanished_on_a_quiet_tree(tree, tmp_path):
     r = kg_hygiene.regrowth(tree, days=7, baseline_path=base)
     assert r["skipped_vanished"] == 0
     assert r["new_dirs"] == 0                      # nothing was created since
+
+
+# ── untagged records: the third state (#2474) ────────────────────────────────
+
+def _raw_fact_file(root: Path, dirname: str, category: str, records: list[dict],
+                   entity: str | None = None) -> Path:
+    """A fact file whose records are written exactly as given.
+
+    `_fact_file` above tags every record it is handed, which is why this defect
+    had no fixture: no builder in this file could produce the two shapes the live
+    corpus actually holds — `entity: ''` (2,507 records on 2026-10-09) and the
+    key absent entirely (1,024 of them).
+    """
+    d = root / dirname
+    d.mkdir(parents=True, exist_ok=True)
+    fm = {"type": "facts", "entity": entity or dirname, "category": category,
+          "facts": records}
+    p = d / f"{dirname}-{category}.md"
+    p.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {dirname} - {category}\n")
+    return p
+
+
+@pytest.fixture
+def blank_tree(tmp_path):
+    """The corpus shape #2474 was filed about: untagged records mixed into dirs
+    that also hold correct ones, including one dir with a genuine wrong merge.
+
+    10 records parse here. 6 are untagged — 3 blank strings and 1 missing key and
+    1 whitespace-only in `general`, 1 blank in `Intel` — spread over 2 dirs and 2
+    files, so the share is 60.0%. Contamination is unchanged by all of that: 1
+    dir (`Intel`), 1 foreign fact, tier SUFFIX_SAFE.
+    """
+    root = tmp_path / "facts"
+    _raw_fact_file(root, "general", "state", [
+        {"entity": "", "fact": "a how-to-fail book"},
+        {"entity": "", "fact": "uptake_probe field names"},
+        {"entity": "", "fact": "vault redirect routes"},
+        {"fact": "the key was never written at all"},
+        {"entity": "   ", "fact": "whitespace where a name belongs"},
+        {"entity": "general", "fact": "the one record that did get tagged"},
+    ])
+    _raw_fact_file(root, "Intel", "state", [
+        {"entity": "Intel", "fact": "released the Pro B70 GPU."},
+        {"entity": "Intel Pipeline System", "fact": "Scans ArXiv nightly."},
+        {"entity": "", "fact": "left untagged by the same run"},
+    ])
+    _fact_file(root, "Alfie", "state", [("Alfie", "Alfie is a humanoid robot.")])
+    return root
+
+
+def test_untagged_records_are_counted_as_their_own_state(blank_tree):
+    """Blank, whitespace-only and missing-key tags all count; the number carries
+    the denominator it is a share of."""
+    u = kg_hygiene.scan(blank_tree)["untagged"]
+    assert u["facts"] == 6 and u["dirs"] == 2 and u["files"] == 2
+    assert u["records"] == 10, "the denominator is the records this walk parsed"
+    assert u["share_pct"] == 60.0
+    assert u["floor_pct"] == kg_hygiene.UNTAGGED_ALARM_SHARE
+    assert u["over_floor"] is True
+
+
+def test_an_untagged_record_is_never_foreign(blank_tree):
+    """Clause: `foreign_facts_in_dir` hands out only the foreign records.
+
+    Every consumer of that dict reads a key as a wrong merge — `kg_rebuild`
+    refuses a rebuild on `contamination()["dirs"]`, and the report's alarm says
+    "a merge went wrong" — so a blank tag must not appear in it. `general` holds
+    five untagged records and one correct one, and is not contaminated at all.
+    """
+    assert kg_hygiene.foreign_facts_in_dir(blank_tree / "general") == {}
+    intel = kg_hygiene.foreign_facts_in_dir(blank_tree / "Intel")
+    assert list(intel) == ["Intel Pipeline System"]
+    assert intel["Intel Pipeline System"]["facts"] == 1
+    c = kg_hygiene.contamination(blank_tree)
+    assert c["dirs"] == 1 and c["foreign_facts"] == 1
+    assert c["by_tier"] == {"SUFFIX_SAFE": 1}
+    assert "untagged" not in c, ("the foreign-only view must not grow the second "
+                                 "tally into the dict whose consumers mean 'merge'")
+
+
+def test_adding_untagged_records_leaves_contamination_exactly_where_it_was(tmp_path):
+    """Both sides of the foreign check stay shut to an untagged record.
+
+    Same tree, measured before and after blank records are appended to a dir that
+    already holds a real foreign fact: contamination must be byte-identical while
+    the untagged tally grows. The defect was the reverse of this — the same
+    records moved nothing at all, in either column.
+    """
+    root = tmp_path / "facts"
+    _raw_fact_file(root, "Intel", "state", [
+        {"entity": "Intel", "fact": "released the Pro B70 GPU."},
+        {"entity": "Intel Pipeline System", "fact": "Scans ArXiv nightly."},
+    ])
+    before_c = kg_hygiene.contamination(root)
+    before_u = kg_hygiene.scan(root)["untagged"]
+    assert before_u == {"facts": 0, "dirs": 0, "files": 0, "records": 2,
+                        "share_pct": 0.0,
+                        "floor_pct": kg_hygiene.UNTAGGED_ALARM_SHARE,
+                        "over_floor": False}
+
+    _raw_fact_file(root, "Intel", "state", [
+        {"entity": "Intel", "fact": "released the Pro B70 GPU."},
+        {"entity": "Intel Pipeline System", "fact": "Scans ArXiv nightly."},
+        {"entity": "", "fact": "blank"},
+        {"fact": "no key"},
+        {"entity": "\t ", "fact": "whitespace only"},
+    ])
+    after_c = kg_hygiene.contamination(root)
+    after_u = kg_hygiene.scan(root)["untagged"]
+    assert after_c == before_c, (before_c, after_c)
+    assert after_u["facts"] == 3 and after_u["dirs"] == 1 and after_u["files"] == 1
+    assert after_u["records"] == 5, "2 tagged + 3 untagged, all of them counted"
+    assert after_u["share_pct"] == 60.0
+
+
+def test_the_floor_is_a_share_of_records_not_a_count_of_them(tmp_path):
+    """`UNTAGGED_ALARM_SHARE` is compared strictly, against a percentage.
+
+    1,000 records in one dir: 5 untagged is exactly 0.5%, which is AT the floor
+    and so not over it; 6 is 0.6% and is. An absolute-count floor would lose
+    strictness every time extraction grew the corpus, which is the growth being
+    watched, and a `>=` here would alarm at the floor rather than above it.
+    """
+    def share_of(blank: int, tagged: int) -> dict:
+        root = tmp_path / f"facts-{blank}"
+        recs = [{"entity": "", "fact": f"blank {i}"} for i in range(blank)]
+        recs += [{"entity": "Lloyd", "fact": f"tagged {i}"} for i in range(tagged)]
+        _raw_fact_file(root, "Lloyd", "state", recs)
+        return kg_hygiene.scan(root)["untagged"]
+
+    at = share_of(5, 995)
+    assert at["share_pct"] == 0.5 and at["over_floor"] is False
+    above = share_of(6, 994)
+    assert above["share_pct"] == 0.6 and above["over_floor"] is True
+
+
+def test_snapshot_reports_untagged_beside_contamination_not_inside_it(blank_tree):
+    """kg_health and the knowledge report both read `snapshot()`; the untagged
+    tally has to reach them without entering the dict that means "a merge went
+    wrong", and the contamination half must keep exactly its old keys."""
+    s = kg_hygiene.snapshot(blank_tree, days=7)
+    assert s["untagged"]["facts"] == 6 and s["untagged"]["over_floor"] is True
+    assert s["contamination"] == {"dirs": 1, "foreign_facts": 1,
+                                  "by_tier": {"SUFFIX_SAFE": 1}}

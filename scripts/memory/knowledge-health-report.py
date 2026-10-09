@@ -788,9 +788,9 @@ def _trace_coverage_cell(tc: tuple[int, int] | None) -> str:
 
 def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7,
                     baseline_path=None) -> dict:
-    """Contamination, near-duplicate clusters and regrowth.
+    """Contamination, untagged records, near-duplicate clusters and regrowth.
 
-    Delegates to `kg_hygiene`, which is the measured definition of all three.
+    Delegates to `kg_hygiene`, which is the measured definition of all four.
     This module had its own re-implementation of each — same intent, different
     code — so the report and `kg_health --json` could disagree about the same
     tree and there was no way to tell which was right. The shapes the report
@@ -805,11 +805,11 @@ def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7,
     import kg_hygiene  # noqa: E402
 
     root = _facts_root_for(entities)
-    # Each of these walks the tree parsing YAML. Call contamination ONCE and
-    # derive both the counts and the detail from it — `snapshot` would run it
+    # Each of these walks the tree parsing YAML. Call scan ONCE and derive the
+    # counts, the detail and the untagged tally from it — `snapshot` would run it
     # again internally, and at 60,622 files that is a minute of pure re-read.
-    detail = kg_hygiene.contamination(root)
-    c = {k: v for k, v in detail.items() if k != "items"}
+    detail = kg_hygiene.scan(root)
+    c = {k: v for k, v in detail.items() if k not in ("items", "untagged")}
     n = kg_hygiene.near_duplicates(root)
     r = kg_hygiene.regrowth(root, regrowth_days, baseline_path=baseline_path)
     contaminated = [(item["dir"], tag, slot["facts"])
@@ -829,6 +829,11 @@ def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7,
         "contaminated": contaminated,
         "contaminated_dirs": c["dirs"],
         "foreign_facts": c["foreign_facts"],
+        # A third state, not a third of the first two: records whose `entity:`
+        # tag is blank or absent. `contaminated_dirs` has never counted them and
+        # must keep not counting them, which is why the rail needed its own
+        # number and its own alarm condition (#2474).
+        "untagged": detail["untagged"],
         "near_dup_clusters": n["clusters"],
         "near_dup_dirs": n["dirs"],
         "near_dup_tiers": n["by_tier"],
@@ -905,6 +910,24 @@ def _same_source_clause(d: dict) -> str:
             f"a source document with an earlier row, in "
             f"{d['same_source_paraphrase_groups']} groups: a population at risk, "
             f"not counted as duplicates")
+
+
+def _untagged_cell(u: dict | None) -> str:
+    """The Untagged row: fact records whose `entity:` tag is blank or absent.
+
+    Deliberately its own row rather than a third contamination figure. The two
+    rows above it read as "a merge went wrong", and 0 beside them on 2026-10-09
+    was a true statement about a corpus with 3,531 unattributable records in it
+    — the alarm was green because the check could not see them (#2474). The
+    denominator is the count of records the same walk parsed, not the store's
+    `facts_idx` total, so numerator and denominator cannot disagree the way two
+    walks did on 2026-09-25 (#1535).
+    """
+    if not u or "facts" not in u:
+        return "not measured"
+    return (f"{u['facts']:,} records in {u['dirs']:,} dirs / {u['files']:,} files "
+            f"({u['share_pct']}% of {u['records']:,} records parsed by this walk; "
+            f"floor {u['floor_pct']}%{' — ABOVE FLOOR' if u.get('over_floor') else ''})")
 
 
 def _provenance_cell(pv: dict | None) -> str:
@@ -1228,6 +1251,13 @@ def generate_report(
         lines.append("|--------|-------|")
         lines.append(f"| Contaminated entity dirs (facts tagged with another entity) | {hygiene['contaminated_dirs']} |")
         lines.append(f"| Foreign facts | {hygiene['foreign_facts']} |")
+        # Untagged sits under the two contamination rows it is NOT, and is printed
+        # even at zero: a row that appears only when non-zero is how this defect
+        # stayed invisible — the table had no place for a number the check could
+        # not produce (#2474). `.get` because a hand-built hygiene dict (the
+        # stale-facts and duplicate-id tests) must read as unmeasured, not as 0.
+        lines.append(f"| Untagged fact records (`entity:` blank or absent) | "
+                     f"{_untagged_cell(hygiene.get('untagged'))} |")
         lines.append(f"| Near-duplicate name clusters | {hygiene['near_dup_clusters']} ({hygiene['near_dup_dirs']} dirs; {hygiene['near_dup_tiers']}) |")
         # kg_hygiene's own phrase, reference and all. The row this replaces said
         # "born in the last 7 days | 51 of 12027 new dirs", where 12,027 was the
@@ -1530,6 +1560,19 @@ def _alarms(store_stats: dict | None, hygiene: dict, duplicate_id_files: int,
     if hygiene.get("contaminated_dirs"):
         out.append(f"{hygiene['contaminated_dirs']} directories hold facts about another entity "
                    f"({hygiene['foreign_facts']} facts) — a merge went wrong")
+    # The condition this rail could not express before (#2474): 2,507 blank
+    # `entity:` tags and 1,024 missing ones — 3,531 records in 531 dirs, measured
+    # 2026-10-09 — sat inside the same walk that printed
+    # `contamination 0 dirs hold 0 facts`, because a blank tag
+    # is neither "this entity" nor "another entity" and fell out of both sides of
+    # the test above. `over_floor` is kg_hygiene's own verdict against
+    # UNTAGGED_ALARM_SHARE, so the report never re-derives a threshold.
+    u = hygiene.get("untagged") or {}
+    if u.get("over_floor") and "facts" in u:
+        out.append(f"{u['facts']:,} fact records carry no entity tag — "
+                   f"{u['share_pct']}% of {u['records']:,} records parsed, in "
+                   f"{u['dirs']} dirs, above the {u['floor_pct']}% floor: the "
+                   f"contamination rail cannot see them and neither can a merge audit")
     if duplicate_id_files:
         out.append(f"{duplicate_id_files} fact files carry duplicate fact IDs")
     return out
@@ -1647,6 +1690,9 @@ def main():
     print(f"  Stale unevaluable: {stale_unevaluable[0]:,} of {stale_unevaluable[1]:,} active facts "
           f"carry no usable date")
     print(f"  Contaminated dirs: {hygiene['contaminated_dirs']} ({hygiene['foreign_facts']} foreign facts)")
+    # Its own stdout line for the same reason it has its own table row: 0 in the
+    # line above does not mean "nothing misattributed" (#2474).
+    print(f"  Untagged fact records: {_untagged_cell(hygiene.get('untagged'))}")
     # Not "regrown in 7d": with #1535 the count is a delta against the stored
     # entity-dir baseline, so the stdout line prints kg_hygiene's own phrase,
     # which carries the date that delta runs from.

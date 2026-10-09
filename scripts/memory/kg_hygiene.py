@@ -1,12 +1,21 @@
 """Knowledge-graph hygiene metrics. READ-ONLY over the facts root.
 
-Three things the 2026-09-03 audit had to compute by hand, now measured on
+Four things the 2026-09-03 audit had to compute by hand, now measured on
 demand and by kg_health.py:
 
   contamination   entity directories holding facts whose own `entity:` tag names
                   a DIFFERENT entity — the residue of a wrong merge. Every one of
                   the 63 found on 2026-09-03 came from the sweep's suffix tier
                   fusing distinct things (`Intel Pipeline System` into `Intel`).
+  untagged        fact records whose `entity:` tag says NOTHING — the key absent,
+                  or a value that strips to empty. Measured 2026-10-09: 3,531 of
+                  142,819 records (2.47%) across 531 entity dirs — 2,507 blank
+                  strings, 1,024 with no key at all. Empty is a THIRD state,
+                  neither "this entity" nor "another entity", so it fell into
+                  neither side of the check above and the contamination rail
+                  printed 0 while 2.47% of the corpus could not be attributed to
+                  anything; `general` is where it collects, 365 untagged records
+                  in the sixth-largest fact dir (#2474).
   near_duplicates directories that collapse to the same name after
                   normalisation, by tier — the sweep's input.
   regrowth        directories created since a STORED BASELINE of the entity-dir
@@ -86,11 +95,56 @@ def _same_entity(a: str, b: str) -> bool:
     return s.normalize_punct(a) == s.normalize_punct(b)
 
 
-# ── contamination ─────────────────────────────────────────────────────────────
+# ── contamination, and the records that carry no entity at all ───────────────
 
-def foreign_facts_in_dir(d: Path) -> dict[str, dict[str, Any]]:
-    """{foreign_entity: {"facts": n, "files": [...]}} for one entity directory."""
-    out: dict[str, dict[str, Any]] = {}
+#: Untagged records as a percentage of the records this walk parsed, above which
+#: an unattributable corpus is an alarm rather than a line in a table.
+#:
+#: A share, not an absolute count: an absolute floor loses strictness on its own
+#: every time extraction adds records, which is precisely the growth being
+#: watched. 0.5% of the 2026-10-09 corpus is ~714 records, against the 3,531
+#: measured that day, so the rail goes red today and goes quiet if the historical
+#: records are re-tagged — which is the ruling #2474 leaves open, and this floor
+#: is one line to change if that ruling re-sets it instead.
+UNTAGGED_ALARM_SHARE = 0.5
+
+
+def _tag_of(x: Any) -> str | None:
+    """What a fact record says about who it is about: '' for untagged, None for
+    a record that is not a mapping at all.
+
+    `x.get("entity")` — the test this section shipped with — is falsy for BOTH
+    "the key is missing" and "the value is empty", and truthy-but-whitespace
+    slipped through it as a name. Each is checked separately here so the
+    distinction survives: a missing key is `extraction never wrote the field`, an
+    empty value is `it wrote the field blank`, and both are untagged.
+    """
+    if not isinstance(x, dict):
+        return None
+    if "entity" not in x:
+        return ""
+    v = x["entity"]
+    return "" if v is None else str(v).strip()
+
+
+def scan_entity_dir(d: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any], int]:
+    """(foreign, untagged, records) for one entity directory, ONE parse per file.
+
+    `foreign` is `{foreign_entity: {"facts": n, "files": [...]}}`. `untagged` is
+    `{"facts": n, "files": [...]}` for records with nothing in their `entity:`
+    tag. `records` is every fact record parsed here, the denominator for
+    untagged's share.
+
+    They are measured in the same walk deliberately: this walk parses 37,442
+    frontmatters holding 142,819 fact records (measured 2026-10-09), and
+    `compute_hygiene` already refuses to walk the tree twice for that reason. But
+    sharing a walk does not mean sharing a tally — see `foreign_facts_in_dir`,
+    which hands out only the first of these.
+    """
+    foreign: dict[str, dict[str, Any]] = {}
+    u_facts = 0
+    u_files: list[str] = []
+    records = 0
     for f in d.glob("*.md"):
         fm = parse_frontmatter(f)
         if not fm:
@@ -98,37 +152,89 @@ def foreign_facts_in_dir(d: Path) -> dict[str, dict[str, Any]]:
         names: Counter[str] = Counter()
         top = str(fm.get("entity") or "").strip()
         facts = fm.get("facts") or []
+        file_untagged = 0
         if isinstance(facts, list) and facts:
             for x in facts:
-                if isinstance(x, dict) and x.get("entity"):
-                    names[str(x["entity"]).strip()] += 1
+                records += 1
+                tag = _tag_of(x)
+                if tag is None or not tag:
+                    file_untagged += 1
+                    continue
+                names[tag] += 1
         elif top:
             names[top] += 1          # overview / factless file: the file-level tag
         for name, n in names.items():
-            if not name or _same_entity(name, d.name):
+            # Only a real tag can reach here, and only a DIFFERENT one is foreign.
+            if _same_entity(name, d.name):
                 continue
-            slot = out.setdefault(name, {"facts": 0, "files": []})
+            slot = foreign.setdefault(name, {"facts": 0, "files": []})
             slot["facts"] += n
             if f.name not in slot["files"]:
                 slot["files"].append(f.name)
-    return out
+        if file_untagged:
+            u_facts += file_untagged
+            u_files.append(f.name)
+    return foreign, {"facts": u_facts, "files": u_files}, records
 
 
-def contamination(root: Path = VAULT_FACTS_ROOT) -> dict[str, Any]:
+def foreign_facts_in_dir(d: Path) -> dict[str, dict[str, Any]]:
+    """{foreign_entity: {"facts": n, "files": [...]}} for one entity directory.
+
+    FOREIGN ONLY, and that exclusion is load-bearing (#2474). Both consumers of
+    this read every key as the residue of a wrong merge — `kg_rebuild` gates the
+    rebuild on `contamination()["dirs"]`, and the knowledge report's alarm says
+    "a merge went wrong" — so a record with a blank tag must never appear in it:
+    blank is not "another entity". Untagged records are counted, and alarmed on,
+    through `scan()["untagged"]` instead.
+    """
+    return scan_entity_dir(d)[0]
+
+
+def scan(root: Path = VAULT_FACTS_ROOT) -> dict[str, Any]:
+    """The whole facts tree in one walk: foreign detail plus the untagged tally.
+
+    The untagged share is computed over `records`, the count THIS walk parsed,
+    never over a second measurement like `facts_idx.count()`. Two walks over the
+    same corpus disagreed by 5 directories on 2026-09-25 (#1535), and a
+    percentage whose numerator and denominator come from different passes cannot
+    be checked by anyone reading the row.
+    """
     s = sweep()
     items = []
     by_tier: Counter[str] = Counter()
     total_facts = 0
+    u = {"facts": 0, "dirs": 0, "files": 0}
+    records = 0
     for d in iter_entity_dirs(root):
-        foreign = foreign_facts_in_dir(d)
+        foreign, u_dir, n = scan_entity_dir(d)
+        records += n
+        if u_dir["facts"]:
+            u["facts"] += u_dir["facts"]
+            u["dirs"] += 1
+            u["files"] += len(u_dir["files"])
         if not foreign:
             continue
         for name, slot in foreign.items():
             by_tier[s.classify_pair(name, d.name)[0]] += 1
             total_facts += slot["facts"]
         items.append({"dir": d.name, "foreign": foreign})
+    share = round(100.0 * u["facts"] / records, 2) if records else 0.0
+    untagged = {**u, "records": records, "share_pct": share,
+                "floor_pct": UNTAGGED_ALARM_SHARE,
+                "over_floor": share > UNTAGGED_ALARM_SHARE}
     return {"dirs": len(items), "foreign_facts": total_facts,
-            "by_tier": dict(by_tier), "items": items}
+            "by_tier": dict(by_tier), "items": items, "untagged": untagged}
+
+
+def contamination(root: Path = VAULT_FACTS_ROOT) -> dict[str, Any]:
+    """The foreign half of `scan`, with exactly the keys it has always had.
+
+    `untagged` is not a fourth contamination number and stays out of this dict:
+    `kg_rebuild` gates on `dirs`, `kg_health` prints it, and the knowledge report
+    alarms on it, all reading every one as a wrong merge. Untagged facts have
+    their own line and their own alarm condition (#2474).
+    """
+    return {k: v for k, v in scan(root).items() if k != "untagged"}
 
 
 # ── near-duplicates and regrowth ──────────────────────────────────────────────
@@ -310,11 +416,15 @@ def describe(r: dict[str, Any]) -> str:
 
 def snapshot(root: Path = VAULT_FACTS_ROOT, days: int = 7,
              baseline_path: Path | str | None = None) -> dict[str, Any]:
-    c = contamination(root)
+    s = scan(root)
     out = {
         "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "facts_root": str(root),
-        "contamination": {k: v for k, v in c.items() if k != "items"},
+        "contamination": {k: v for k, v in s.items() if k not in ("items", "untagged")},
+        # Its own section, its own alarm: an untagged record is not a contaminated
+        # one, and a snapshot that folded the two would put both numbers back
+        # under the reader that treats every key as a wrong merge (#2474).
+        "untagged": s["untagged"],
         "near_duplicates": near_duplicates(root),
         "regrowth": regrowth(root, days, baseline_path=baseline_path),
     }
@@ -370,8 +480,13 @@ def main() -> None:
         print(json.dumps(s, indent=2))
         return
     c, n, r = s["contamination"], s["near_duplicates"], s["regrowth"]
+    u = s["untagged"]
     print("Knowledge-graph hygiene")
     print(f"  contamination   {c['dirs']:>6} dirs hold {c['foreign_facts']} facts about another entity  {c['by_tier']}")
+    print(f"  untagged        {u['facts']:>6} fact records carry no entity tag "
+          f"({u['share_pct']}% of {u['records']:,} parsed, {u['dirs']} dirs, "
+          f"{u['files']} files; floor {u['floor_pct']}%"
+          f"{' — EXCEEDED' if u['over_floor'] else ''})")
     print(f"  near-duplicates {n['clusters']:>6} clusters over {n['dirs']} dirs  {n['by_tier']}")
     print(f"  regrowth        {describe(r)}  {r['by_tier']}")
     pv = s.get("provenance") or {}

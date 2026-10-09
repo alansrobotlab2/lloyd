@@ -396,3 +396,114 @@ def test_stdout_prints_the_reference_next_to_the_regrowth_count(tmp_path):
     # honest rendering is the reason, not a directory count.
     assert "not measured" in lines[0] and "no baseline file at" in lines[0], lines[0]
     assert "regrown in" not in proc.stdout, proc.stdout
+
+
+# ── #2474: the untagged row and the alarm that goes with it ──────────────────
+
+def _raw_facts(root, name, cat, records):
+    """A fact file whose records are written verbatim, so `entity: ''` and a
+    missing `entity:` key can be built at all — `_facts` above tags every record
+    it is handed, and so no fixture in this file could ever have produced the
+    3,531 records #2474 was filed about."""
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    fm = {"type": "facts", "entity": name, "category": cat, "facts": records}
+    p = d / f"{name}-{cat}.md"
+    p.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {name} - {cat}\n")
+    return p
+
+
+def _blank_tree(root):
+    """1 untagged-heavy dir plus one clean dir: 5 records parse, 4 untagged, all
+    in 1 dir and 1 file, so the share is 80.0% and 0.5% is far below it. Nothing
+    here is contaminated — every tagged record names its own dir."""
+    _raw_facts(root, "general", "state", [
+        {"entity": "", "fact": "a how-to-fail book"},
+        {"entity": "", "fact": "uptake_probe field names"},
+        {"entity": "", "fact": "vault redirect routes"},
+        {"fact": "the key was never written at all"},
+    ])
+    _facts(root, "Lloyd", "state", [("Lloyd", "runs the harness")])
+    return root
+
+
+def test_the_hygiene_table_prints_untagged_records_with_their_denominator(tmp_path):
+    """Clause: the report shows untagged records as a row of their own.
+
+    Across the seam it was missing at: `kg_hygiene.scan` → `compute_hygiene` →
+    the written report. On 2026-10-09 this same corpus printed
+    `Contaminated entity dirs | 0` and `Foreign facts | 0` over 3,531 records
+    that name no entity, because a blank tag is neither "this entity" nor
+    "another entity" and fell out of both sides of that check.
+    """
+    root = _blank_tree(tmp_path / "facts")
+    now = datetime.now(timezone.utc)
+    entities = khr.load_entities(root)
+    h = khr.compute_hygiene(entities, now)
+    assert h["untagged"] == {"facts": 4, "dirs": 1, "files": 1, "records": 5,
+                             "share_pct": 80.0, "floor_pct": 0.5,
+                             "over_floor": True}
+    assert h["contaminated_dirs"] == 0 and h["foreign_facts"] == 0, (
+        "the contamination half must be untouched by the records beside it")
+
+    report = khr.generate_report(khr.compute_entity_stats(entities),
+                                 khr.compute_relationship_stats([], entities), [], [], now, h)
+    row = _row(report, "Untagged fact records")
+    for frag in ("4 records in 1 dirs", "1 files", "80.0% of 5 records",
+                 "floor 0.5%", "ABOVE FLOOR"):
+        assert frag in row, row
+    assert "`entity:`" in row, "the row names the field it counts, not a vibe"
+
+
+def test_the_untagged_row_is_printed_at_zero_and_when_never_measured():
+    """A row that appears only when the number is nonzero could not have caught
+    this: the defect was invisible partly because nothing in the table had a
+    place for it. And a hand-built hygiene dict that never measured untagged must
+    read as `not measured`, never as a clean 0 — the same rule the provenance and
+    regrowth rows follow (#1289, #1535)."""
+    zero = {"facts": 0, "dirs": 0, "files": 0, "records": 100, "share_pct": 0.0,
+            "floor_pct": 0.5, "over_floor": False}
+    row = _row(_report(_hygiene(untagged=zero)), "Untagged fact records")
+    assert "0 records in 0 dirs" in row and "ABOVE FLOOR" not in row, row
+    plain = _row(_report(_hygiene()), "Untagged fact records")
+    assert "not measured" in plain and "0 records" not in plain, plain
+
+
+def test_untagged_above_the_floor_makes_the_run_an_alarm(tmp_path):
+    """Clause: the exit-2 rail fires on the untagged population.
+
+    The alarm list is what `main()` prints to stderr, alerts on, and turns into
+    the exit code the scheduler reads, so the condition is pinned here rather
+    than at the subprocess: a run of that script that raises alarms also posts
+    them to Discord, which no test should do to a live channel.
+    """
+    root = _blank_tree(tmp_path / "facts")
+    entities = khr.load_entities(root)
+    h = khr.compute_hygiene(entities, datetime.now(timezone.utc))
+    alarms = khr._alarms({"edges_active": 100}, h, 0, 0)
+    assert len(alarms) == 1, alarms
+    a = alarms[0]
+    for frag in ("4 fact records carry no entity tag", "80.0% of 5 records",
+                 "above the 0.5% floor", "contamination rail cannot see them"):
+        assert frag in a, a
+
+
+def test_the_untagged_alarm_is_independent_of_the_contamination_one(tmp_path):
+    """The merge alarm keeps its exact meaning and wording: 1 contaminated dir is
+    still "a merge went wrong", and a tree with untagged records under the floor
+    raises nothing. The two conditions are separate lines of the same list, so
+    fixing the blind spot cannot silence the old one or have it stand in."""
+    root = tmp_path / "facts"
+    _raw_facts(root, "Intel", "state", [
+        {"entity": "Intel", "fact": "released the Pro B70 GPU."},
+        {"entity": "Intel Pipeline System", "fact": "Scans ArXiv nightly."},
+    ])
+    entities = khr.load_entities(root)
+    h = khr.compute_hygiene(entities, datetime.now(timezone.utc))
+    assert h["contaminated_dirs"] == 1
+    assert h["untagged"] == {"facts": 0, "dirs": 0, "files": 0, "records": 2,
+                             "share_pct": 0.0, "floor_pct": 0.5,
+                             "over_floor": False}
+    alarms = khr._alarms({"edges_active": 100}, h, 0, 0)
+    assert len(alarms) == 1 and "a merge went wrong" in alarms[0], alarms
+    assert not any("entity tag" in a for a in alarms), alarms
