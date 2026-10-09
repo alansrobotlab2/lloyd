@@ -31,9 +31,11 @@ what it must leave alone in THIS file is pinned below.
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
+import pty
 import re
 import subprocess
 import sys
@@ -2928,6 +2930,34 @@ def _route(monkeypatch, *argv: str) -> int:
     return m.main()
 
 
+@contextlib.contextmanager
+def _stdin_on(*, tty: bool):
+    """Run the body with stdin on a real terminal (`tty=True`) or a real pipe (`False`).
+
+    A kernel pty and a kernel pipe, not a stubbed `isatty()`: what #2458's rail asks is
+    the operating system, so the test has to hand it a stdin that genuinely is or is not
+    a terminal — a fake stream with the answer pre-asserted would prove the code reads
+    whatever the fixture said, not the property. Neither case borrows pytest's own
+    stdin: run this file with `-s` from a terminal and that stream *is* a tty, which
+    would silently turn the refusal case into the proceed case and report it as green.
+    """
+    master = write_fd = None
+    if tty:
+        master, slave = pty.openpty()
+        read_fd = slave
+    else:
+        read_fd, write_fd = os.pipe()
+    stream = os.fdopen(os.dup(read_fd), "r")
+    old, sys.stdin = sys.stdin, stream
+    try:
+        yield
+    finally:
+        sys.stdin = old
+        stream.close()
+        for fd in (fd for fd in (read_fd, master, write_fd) if fd is not None):
+            os.close(fd)
+
+
 def test_the_route_builds_a_named_side_index_and_never_writes_the_live_one(monkeypatch,
                                                                          tmp_path, capsys):
     """Clause 1: registered, builds and embeds `<name>.sqlite` at the CLI's per-name
@@ -2983,7 +3013,11 @@ def test_verification_fails_on_a_short_or_unsearchable_side_copy_and_refuses_the
     fq, d = _side_env(monkeypatch, tmp_path, **fake)
     before = _stat_listing(d)
 
-    rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+    # From a terminal (#2458): without one the swap is refused for having no person
+    # attached, before the verification below is ever computed, and the refusal this node
+    # is about would never be reached.
+    with _stdin_on(tty=True):
+        rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
 
     assert rc == 1
     report = json.loads(next((tmp_path / "reflection").glob("qmd-side-copy-*.json")).read_text())
@@ -3013,7 +3047,11 @@ def test_swap_renames_the_live_index_moves_the_side_copy_in_and_checks_retrieval
     fq, d = _side_env(monkeypatch, tmp_path)
     old_live = (d / "index.sqlite").read_bytes()
 
-    rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+    # From a terminal, which is the only place a swap is now taken from at all (#2458);
+    # `test_a_swap_asked_for_from_a_terminal_is_not_refused_and_still_swaps` is the node
+    # that asserts this invocation is not the rail's business.
+    with _stdin_on(tty=True):
+        rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
 
     assert rc == 0, capsys.readouterr()
     names = sorted(p.name for p in d.iterdir())
@@ -3110,6 +3148,182 @@ def test_dry_run_of_the_route_prints_its_commands_and_touches_nothing(monkeypatc
     assert _stat_listing(d) == before
     assert not m.side_config_path(SIDE).exists()
     assert not (tmp_path / "reflection").exists()
+
+
+# ---------------------------------------------------------------------------
+# The interactive-terminal rail on `--swap` (#2458).
+#
+# `--swap` is the only flag in this script that stops the serving path: `swap_side_copy`
+# is the sole caller of `supervisorctl stop` for `agent-qmd-watcher` and the qmd daemon.
+# #1992 ruled it by hand only, and until #2458 that rule was two sentences of prose plus
+# one parser error for `--swap` with no name — `git grep -nE "isatty|stdin"` over the
+# script returned nothing, so any caller that appended the flag (an autonomy task, a
+# cron, the workers drain) would take the serving daemon down on a schedule and the only
+# trace would be a report written afterwards. The rail is `_stdin_is_interactive()`; the
+# nodes below are the proof it fires, which means proof in both directions: a swap asked
+# for without a person is refused, and a swap asked for by one still happens.
+# ---------------------------------------------------------------------------
+
+
+def test_a_swap_asked_for_from_a_non_terminal_is_refused_naming_the_terminal(
+        monkeypatch, tmp_path, capsys):
+    """Clause 1: `--rebuild-side-copy NAME --swap` over a pipe exits 2, and the refusal on
+    stderr names the interactive-terminal requirement.
+
+    Exit 2 is this route's own refusal code — the one a bad side name and a refused
+    verification already return — not argparse's, because the flag pair here is coherent;
+    what is missing is a person on the other end of the process.
+    """
+    _side_env(monkeypatch, tmp_path)
+
+    with _stdin_on(tty=False):
+        rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+
+    err = capsys.readouterr().err
+    assert rc == 2, err
+    assert "refused" in err and "--swap" in err, err
+    assert "interactive terminal" in err, err
+
+
+def test_the_refused_swap_opens_no_database_touches_no_service_and_writes_no_report(
+        monkeypatch, tmp_path, capsys):
+    """Clause 2: the refusal happens ahead of every side effect a swap has.
+
+    The `fq.services() == []` assertion this file already uses for a refused verification
+    is here unchanged, plus the stronger form — not one `supervisorctl` invocation of any
+    kind — plus `sqlite3.connect` never called, the lock never taken, and no report file
+    at all. That last one is the point: a scheduled caller has to learn "refused" the way
+    it learns every other refusal, from the exit code and stderr, with the index directory
+    left byte- and mtime-identical and nothing in `reflection/` for a later reader to
+    mistake for a swap that happened.
+    """
+    import sqlite3
+
+    fq, d = _side_env(monkeypatch, tmp_path)
+    before = _stat_listing(d)
+    real_connect, opened = sqlite3.connect, []
+
+    def recording_connect(database, *a, **k):
+        opened.append((str(database), dict(k)))
+        return real_connect(database, *a, **k)
+
+    monkeypatch.setattr(m.sqlite3, "connect", recording_connect)
+    with _stdin_on(tty=False):
+        rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+    monkeypatch.setattr(m.sqlite3, "connect", real_connect)
+
+    assert rc == 2, capsys.readouterr().err
+    assert opened == [], f"the refused swap opened a database: {opened}"
+    assert fq.services() == [], "the refused swap touched a service"
+    assert fq.calls == [], f"the refused ran a command of any kind: {fq.calls}"
+    assert (_FakeLock.held, _FakeLock.released) == (0, 0)
+    assert not (tmp_path / "reflection").exists()
+    assert not (d / f"{SIDE}.sqlite").exists()
+    assert _stat_listing(d) == before
+
+
+def test_a_swap_asked_for_from_a_terminal_is_not_refused_and_still_swaps(monkeypatch,
+                                                                       tmp_path, capsys):
+    """Clause 3: with stdin a real pty the rail is silent, and the acting path is the one
+    that ran before the rail existed.
+
+    Two halves, because the rail can go wrong in two directions. (a) is the one a person
+    cares about: a verification that passed still swaps, so a rail keyed on something an
+    operator in a terminal does not satisfy would be a broken upgrade route, not a safety
+    feature. (b) is the ordering: on the acting path a bad side name is still refused by
+    the side-name rule, and not by a terminal complaint about a flag that was never the
+    problem.
+    """
+    # (a) a passed verification from a terminal still swaps: writers stopped and started,
+    # the old live index renamed to `index.sqlite.bak-<stamp>`, the side copy moved in.
+    fq, d = _side_env(monkeypatch, tmp_path)
+    with _stdin_on(tty=True):
+        rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+    captured = capsys.readouterr()
+    assert rc == 0, captured.err
+    assert "refused" not in captured.err, captured.err
+    assert fq.services() == [("stop", m.WATCHER_SERVICE), ("stop", m.SERVICE),
+                             ("start", m.SERVICE), ("start", m.WATCHER_SERVICE)]
+    baks = [n for n in _stat_listing(d)
+            if re.fullmatch(r"index\.sqlite\.bak-\d{8}-\d{6}", n)]
+    assert len(baks) == 1, sorted(_stat_listing(d))
+    report = json.loads(next((tmp_path / "reflection")
+                             .glob("qmd-side-copy-*.json")).read_text())
+    assert report["swap"]["swapped"] is True and report["swap"]["retrieval_ok"] is True
+
+    # (b) the name check still owns the acting path's first word.
+    (tmp_path / "b").mkdir()
+    fq_named, _ = _side_env(monkeypatch, tmp_path / "b")
+    with _stdin_on(tty=True):
+        rc_named = _route(monkeypatch, "--rebuild-side-copy", "index", "--swap")
+    err_named = capsys.readouterr().err
+    assert rc_named == 2, err_named
+    assert "refused" in err_named and "interactive terminal" not in err_named, err_named
+    assert fq_named.calls == []
+
+
+def test_the_rail_leaves_the_dry_run_plan_and_the_parser_rail_alone(monkeypatch, tmp_path,
+                                                                   capsys):
+    """Clause 4: the two exits that already existed still work, under the very non-terminal
+    stdin that refuses a real swap.
+
+    The route's dry-run plan runs with and without `--swap`: printing what a swap would do
+    is a report, and the rail exists to stop the act, so a rail ahead of that early return
+    would take the nightly preview down with it — which is why the assertion below is
+    `opened == []` as well as exit 0. And `--swap` with no name still leaves through
+    argparse's `SystemExit(2)`, not the route's returned 2: "you asked for something
+    incoherent" and "this process has no person in it" are different refusals and stay
+    distinguishable.
+    """
+    import sqlite3
+
+    fq, d = _side_env(monkeypatch, tmp_path)
+    before = _stat_listing(d)
+    real_connect, opened = sqlite3.connect, []
+
+    def recording_connect(database, *a, **k):
+        opened.append((str(database), dict(k)))
+        return real_connect(database, *a, **k)
+
+    monkeypatch.setattr(m.sqlite3, "connect", recording_connect)
+    with _stdin_on(tty=False):
+        for extra in ((), ("--swap",)):
+            rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--dry-run", *extra)
+            out = capsys.readouterr().out
+            assert rc == 0, out
+            assert out.rstrip().splitlines()[-1] == "dry-run: nothing was run", out
+            assert "refused" not in out, out
+        with pytest.raises(SystemExit) as bare:
+            _route(monkeypatch, "--swap")
+    monkeypatch.setattr(m.sqlite3, "connect", real_connect)
+
+    assert bare.value.code == 2
+    assert "--swap needs --rebuild-side-copy" in capsys.readouterr().err
+    assert opened == [], f"a dry run opened a database: {opened}"
+    assert fq.calls == [], fq.calls
+    assert _stat_listing(d) == before
+    assert not (tmp_path / "reflection").exists()
+
+
+def test_the_by_hand_only_rule_names_the_rail_the_swap_now_has():
+    """Clause 5: the prose that carries the #1992 rule states that it is enforced, and the
+    printed instruction still contains what the fired-verdict node asserts from it.
+
+    Text-reading nodes, because both surfaces are text: the module docstring is what a
+    person reads before typing an irreversible command, and `CAPACITY_WHAT_TO_DO` is what
+    the nightly run prints the moment its capacity verdict fires. A rail nobody documented
+    is a rail the next round removes as an obstruction, so the docstring has to name it —
+    and `test_a_fired_verdict_reports_what_is_owed_and_on_what_numbers` pins `"swap"` and
+    `"Never in place"` inside that constant, which is why the rail is appended there and
+    not written over.
+    """
+    doc = " ".join((m.__doc__ or "").split())
+    assert "By hand only, never scheduled" in doc, doc
+    assert "--rebuild-side-copy NAME --swap" in doc, doc
+    assert "interactive terminal" in doc, "the by-hand rule still promises prose only"
+    owed = m.CAPACITY_WHAT_TO_DO
+    assert "swap" in owed and "Never in place" in owed, owed
+    assert "interactive terminal" in owed, owed
 
 
 # --- #2180: one configured collection's root swallowing another collection's ---

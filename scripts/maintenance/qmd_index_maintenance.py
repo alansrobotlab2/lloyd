@@ -134,6 +134,14 @@ By hand only, never scheduled (#1992, see "the side-copy rebuild" below):
   ... --rebuild-side-copy NAME --dry-run   # print the commands, run none
   ... --rebuild-side-copy NAME             # build, embed and verify a side index
   ... --rebuild-side-copy NAME --swap      # the same, then swap it in if it verified
+
+That rule is enforced for the third line, not just printed: `--swap` is the one flag
+here that stops the serving path, so it is refused unless stdin is an interactive
+terminal — exit 2, with the reason on stderr, before the route names a service, opens a
+database or writes a report. `--rebuild-side-copy` on its own, with or without
+`--dry-run`, is untouched by that rail: it is the rail's own reason for sitting behind
+the dry-run early return, so the printed plan a person reads stays available to any
+caller. A scheduler that asks for a swap gets a refusal, not a daemon restart.
 """
 from __future__ import annotations
 
@@ -848,7 +856,8 @@ CAPACITY_WHAT_TO_DO = (
     "56% occupancy). Never in place: an in-place vec0 drop leaves the serving "
     "daemon with no vector leg for the whole re-embed. The route a person runs is "
     "this script's `--rebuild-side-copy <name>`, then the same command with "
-    "`--swap`; no scheduled run passes either flag.")
+    "`--swap`; no scheduled run passes either flag, and since #2458 the script refuses "
+    "`--swap` outright unless stdin is an interactive terminal.")
 
 
 def capacity_owed(vec0: dict | None, footprint: dict | None) -> dict:
@@ -1623,6 +1632,34 @@ def swap_side_copy(name: str, verification: dict | None) -> dict:
     return out
 
 
+#: Why the swap asks for a terminal, in the words the refusing run prints (#2458).
+SWAP_NEEDS_TERMINAL = (
+    "--swap stops agent-qmd-watcher and the serving qmd daemon, so it is accepted only "
+    "from an interactive terminal and stdin here is not one (#1992: by hand, never "
+    "scheduled). Drop --swap to build and verify the side copy without touching the "
+    "serving path, or re-run the same command from a terminal.")
+
+
+def _stdin_is_interactive() -> bool:
+    """True only when this process is attached to a terminal on stdin.
+
+    Read from `sys.stdin` at call time rather than from an environment variable, so the
+    answer is the kernel's verdict on the file descriptor and not a caller's claim about
+    who it is: a cron job, a worker or an autonomy task inherits a pipe or /dev/null and
+    is refused by what it *is*, not by a name it could set. A missing stdin (a detached
+    process started without one) is not a terminal either, and a stream the OS refuses
+    to answer for is treated the same way — the burden of proof is on the interactive
+    invocation.
+    """
+    stream = getattr(sys, "stdin", None)
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except (ValueError, OSError):                   # closed or unusable: not a terminal
+        return False
+
+
 def run_side_copy_route(name: str, *, swap: bool, dry_run: bool, as_json: bool) -> int:
     """`--rebuild-side-copy <name>` [`--swap`] [`--dry-run`]. Exit 0 only when the
     side copy verified and, if a swap was asked for, retrieval answers afterwards."""
@@ -1639,6 +1676,14 @@ def run_side_copy_route(name: str, *, swap: bool, dry_run: bool, as_json: bool) 
             print(line)
         print("dry-run: nothing was run")
         return 0
+    # Behind that early return on purpose: the plan is a thing a scheduled run may
+    # legitimately print, and only the act of swapping needs a person holding a
+    # terminal. Everything below is the acting path — `rebuild_side_copy` opens the
+    # databases and `swap_side_copy` is the sole caller of `supervisorctl stop` — so
+    # refusing here means a refused swap neither touches a service nor writes a report.
+    if swap and not _stdin_is_interactive():
+        print(f"refused: {SWAP_NEEDS_TERMINAL}", file=sys.stderr)
+        return 2
     started = datetime.now()
     try:
         report = rebuild_side_copy(name)
