@@ -20,6 +20,7 @@ what is the miner's alone:
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import importlib.util
 import json
@@ -29,6 +30,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
 MINER_PATH = ROOT / "scripts" / "mine-trajectories.py"
@@ -311,6 +313,13 @@ STALE_DAY = "2026-09-10"
 WITNESS_DAY = "2026-10-01"
 WITNESS_ROWS = 27
 WITNESS_NEWEST_ROW = "2026-10-01T01:09:19.486248-07:00"
+# The stub #2449 is about, from `~/lloyd-data/_pipeline/trajectories/2026-10-08.jsonl`:
+# 9 rows, newest `2026-10-08T01:00:33.512979-07:00`, written by #56's 01:00:49-local
+# pass for the day that pass ran IN. Only the newest row is reproduced here — the flag
+# reads one row and the row count, and this is a flag fixture, not a copy.
+WITNESS_OPEN_DAY = "2026-10-08"
+WITNESS_OPEN_NEWEST = "01:00:33.512979"      # -07:00 local, PDT
+WITNESS_ZONE = "America/Los_Angeles"
 SKILL_PATH = ("skills", "trajectory-skill-mining", "SKILL.md")
 WITNESS_PATH = ("backlog", "data", "2026-10-01.jsonl")
 
@@ -425,19 +434,163 @@ def test_the_partial_bound_is_more_than_two_hours(tmp_path, monkeypatch):
 
 
 def test_a_run_earlier_than_the_days_close_measures_the_gap_to_the_run_instant(tmp_path, monkeypatch):
-    """Clause 1's `earlier of`: this is #57's own dispatch shape — a run INSIDE a
-    still-open day, whose newest bucket's date has NOT closed, so the only honest
-    measure is the run instant. Reading the day's close instead would call a bucket
-    whose last row landed 1h50m ago partial, and the flag would fire on every
-    healthy run."""
+    """Amended by #2449; the `min` half of this node's claim still holds, the flag
+    half did not. Both buckets here are dated STUB_DAY and the run instant is local
+    15:50 on that SAME day, so `min(local_day_close(day), run_instant)` takes
+    `run_instant` in both cases — which is still exactly right for the number: the
+    day's close is 8 h in the future and measuring against it would report a bucket
+    whose newest row is 1h50m old as "9.2 h of its day uncovered".
+
+    What did not hold is the verdict on the first case. A bucket dated the run's own
+    local day is a day still being written — #56 finalises D-1 and creates the day-D
+    stub in one 01:0x-local pass — so a 1h50m gap cannot mean the day is covered, and
+    `complete` there was the flag #2045's owed-check ruling of 2026-10-02T09:11Z named
+    as "what is actually broken … so fix the measure". `active` is therefore True
+    now, with its hours still 1.8: the number measures the run instant, the flag
+    measures the day.
+    """
     active = _load_window(
         tmp_path, {STUB_DAY: [_row_at("s1", STUB_DAY, "21:00:00")]},
         "2026-09-12T22:50:00+00:00", monkeypatch)
-    assert active["newest"]["partial"] is False, active
+    assert active["newest"]["partial"] is True, active
+    assert active["newest"]["uncovered_hours"] == 1.8, (
+        "the hours figure stopped being the gap to the run instant, which is the half "
+        "of this node's original claim that was correct: "
+        f"{active['newest']}")
     quiet = _load_window(
         tmp_path, {STUB_DAY: [_row_at("s1", STUB_DAY, "20:00:00")]},
         "2026-09-12T22:50:00+00:00", monkeypatch)
     assert quiet["newest"]["partial"] is True, quiet
+    assert quiet["newest"]["uncovered_hours"] == 2.8, quiet
+
+
+def test_the_run_own_day_bucket_is_never_complete_at_any_run_instant(tmp_path, monkeypatch):
+    """The shape #56 actually leaves behind, on the witness bytes' own clock: the
+    stub #2449 is about is `2026-10-08.jsonl`, 9 rows whose newest is
+    `2026-10-08T01:00:33.512979-07:00` — the day-D file the 01:0x-local pass creates
+    for the day it is running in.
+
+    Before #2449 the shipped function called that stub `complete` for any run landing
+    within NEWEST_BUCKET_PARTIAL_HOURS of the write, because with the day not yet
+    closed `min` always picks the run instant and 01:00→01:30 is a 0.5 h gap under
+    the 2 h bar. The item's own reproduction, at run instants local 01:30 / 02:30 /
+    03:30 on the same day, printed `complete (0.5 h)`, `complete (1.5 h)` and
+    `LAST DAY PARTIAL (2.5 h)` — the first two lying, and the third honest only by
+    arithmetic.
+    """
+    for run_utc, hours, hhmm in (("08:30", 0.5, "01:30"),
+                                 ("09:30", 1.5, "02:30"),
+                                 ("10:30", 2.5, "03:30")):
+        window = _load_window(
+            tmp_path, {WITNESS_OPEN_DAY: [_row_at("s1", WITNESS_OPEN_DAY,
+                                                  WITNESS_OPEN_NEWEST, "-07:00")]},
+            f"2026-10-08T{run_utc}:00+00:00", monkeypatch, zone=WITNESS_ZONE)
+        newest = window["newest"]
+        assert newest["date"] == WITNESS_OPEN_DAY, newest
+        assert newest["partial"] is True, (
+            f"a 9-row stub of the day still being written read complete at local "
+            f"{hhmm}: {newest}")
+        assert newest["uncovered_hours"] == hours, (
+            f"local {hhmm} must still report the gap to its newest row "
+            f"({WITNESS_OPEN_NEWEST} → {hhmm} = {hours} h), got {newest}")
+
+
+def test_the_run_own_day_bucket_is_partial_across_the_whole_local_day(tmp_path, monkeypatch):
+    """"at any run instant", checked rather than asserted: every 7 minutes of the
+    local day the stub belongs to, from 00:00 to 23:59 PDT.
+
+    The sweep deliberately includes instants BEFORE the stub's newest row, where the
+    clamped figure legitimately reads 0.0 h — a row the run has not seen yet is not
+    uncovered time — so the invariant is the flag, and the 0.0 reading is kept
+    honest by the pairing: no instant in the day is complete, and no instant whose
+    newest row predates it reports 0.0.
+    """
+    saw_zero_gap = saw_gap = 0
+    minute = 0
+    while minute < 24 * 60:
+        run = datetime(2026, 10, 8, 7, 0, tzinfo=timezone.utc) + timedelta(minutes=minute)
+        window = _load_window(
+            tmp_path, {WITNESS_OPEN_DAY: [_row_at("s1", WITNESS_OPEN_DAY,
+                                                  WITNESS_OPEN_NEWEST, "-07:00")]},
+            run.isoformat(), monkeypatch, zone=WITNESS_ZONE)
+        newest = window["newest"]
+        assert newest["partial"] is True, (f"run {run.isoformat()} read complete: {newest}")
+        if newest["uncovered_hours"] == 0.0:
+            saw_zero_gap += 1
+        else:
+            saw_gap += 1
+            assert newest["uncovered_hours"] > 0.0, newest
+        minute += 7
+    assert saw_zero_gap and saw_gap, (
+        "the sweep stopped covering both sides of the stub write, so it no longer "
+        f"tests the instant the flag used to flip on: {saw_zero_gap}/{saw_gap}")
+
+
+def test_no_test_in_this_file_asserts_the_open_day_is_complete():
+    """The rail #2449 leaves behind, because the node it had to amend
+    (`test_a_run_earlier_than_the_days_close_measures_the_gap_to_the_run_instant`)
+    was green for a week while pinning the defect exactly. "The suite is green" is
+    therefore not the guarantee: a future node can re-assert `partial is False`
+    beside a bucket dated the run's own local day, and every such node will look
+    like a reasonable reading of `min(local_day_close, run_instant)`.
+
+    Static and syntactic, resolved the way `_load_window` runs it: each
+    `_load_window` call inside a node that asserts `partial … is False` gives up its
+    bucket dates (dict keys, literal or module constant), its run instant, and the
+    `zone=` it freezes TZ to; the instant is converted into THAT zone's local date,
+    which is the date the function compares against. A call whose pieces cannot be
+    read statically fails rather than being skipped — a rail that silently passes on
+    the shapes it cannot parse is how #2449's defect stayed green in the first place.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    constants = {
+        node.targets[0].id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    }
+
+    def resolve(node):
+        """A bucket-date expression as its string, or None if not static."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name):
+            return constants.get(node.id)
+        return None
+
+    checked = 0
+    offenders = []
+    for test in (n for n in tree.body if isinstance(n, ast.FunctionDef)):
+        asserts = [a for a in ast.walk(test) if isinstance(a, ast.Assert)
+                   and "partial" in ast.unparse(a) and "is False" in ast.unparse(a)]
+        if not asserts:
+            continue
+        for call in (c for c in ast.walk(test)
+                     if isinstance(c, ast.Call)
+                     and getattr(c.func, "id", None) == "_load_window"):
+            buckets, now_iso, zone = call.args[1], call.args[2], "UTC"
+            for kw in call.keywords:
+                if kw.arg == "zone" and isinstance(kw.value, ast.Constant):
+                    zone = kw.value.value
+            assert isinstance(now_iso, ast.Constant) and isinstance(now_iso.value, str), (
+                f"{test.name}: a node asserting `partial is False` passes a run instant "
+                "this rail cannot read, so the open-day rule is unchecked there")
+            run_local_date = datetime.fromisoformat(
+                now_iso.value).astimezone(ZoneInfo(zone)).date().isoformat()
+            for key in (buckets.keys if isinstance(buckets, ast.Dict) else []):
+                day = resolve(key)
+                assert day is not None, (
+                    f"{test.name}: a bucket date this rail cannot read, so the "
+                    "open-day rule is unchecked there")
+                checked += 1
+                if day == run_local_date:
+                    offenders.append((test.name, day, now_iso.value, zone))
+    assert checked >= 4, (
+        f"the rail resolved only {checked} open-day-candidate bucket(s); it stopped "
+        "covering the nodes it was written for")
+    assert not offenders, (
+        "these nodes assert a bucket dated the run's own LOCAL day is complete, which "
+        f"is exactly the flag #2449 removed: {sorted(set(offenders))}")
 
 
 def test_the_flag_describes_the_newest_bucket_not_an_older_stub(tmp_path, monkeypatch):

@@ -631,6 +631,18 @@ def bucket_completeness(day: str, rows: int, newest_row: datetime | None,
     anything — and it is the case that bit #2045: #57 is dispatched at 23:00
     local, after #56 has written the stub but before the day ends.
 
+    That still-open day is also never `complete`, whatever the gap (#2449). A bucket
+    dated the run's own local day is a bucket for a day that is still being written:
+    #56 finalises D-1 and creates the day-D stub in the same 01:0x-local pass, so
+    `min` above always picks `run_instant` and any run landing within
+    NEWEST_BUCKET_PARTIAL_HOURS of that write measured a one-hour stub against a
+    one-hour gap and called it a day. That is the lying flag #2045's owed-check
+    ruling of 2026-10-02T09:11Z named as "what is actually broken is the flag's
+    treatment of the run's own open day … so fix the measure". The hours stay the
+    gap to the run instant rather than being zeroed with the flag forced: a line
+    reading `LAST DAY PARTIAL (0.0 h uncovered)` tells the reader the opposite of
+    its own flag.
+
     A bucket with no usable newest row (empty, or every row unparseable) is
     partial: it cannot show it covers its day, and when the evidence is missing
     the honest output is the flag, not the absence of one.
@@ -639,13 +651,17 @@ def bucket_completeness(day: str, rows: int, newest_row: datetime | None,
     the measured instant reads as 0 rather than as negative hours.
     """
     measured = min(local_day_close(day), run_instant)
+    # The run's own local date, by the same host-local convention `local_day_close`
+    # reads a bucket's name with — `.astimezone()` with no argument, so a DST change
+    # moves this the same way it moves the day boundary (#1154).
+    open_day = day == run_instant.astimezone().date().isoformat()
     if newest_row is None:
         gap_hours = max(0.0, (measured - local_day_start(day)).total_seconds() / 3600)
         return {"date": day, "rows": rows, "partial": True,
                 "uncovered_hours": round(gap_hours, 1)}
     gap_hours = max(0.0, (measured - newest_row).total_seconds() / 3600)
     return {"date": day, "rows": rows,
-            "partial": gap_hours > NEWEST_BUCKET_PARTIAL_HOURS,
+            "partial": open_day or gap_hours > NEWEST_BUCKET_PARTIAL_HOURS,
             "uncovered_hours": round(gap_hours, 1)}
 
 
