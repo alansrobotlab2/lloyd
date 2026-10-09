@@ -436,20 +436,20 @@ def topic_slug_error(stem: str) -> str:
 #: Three, because the ledger's cost and the loaded file's cost are different
 #: quantities. A loaded line costs prompt bytes on every turn; a ledger row is never
 #: rendered into a prompt at all — `app/prompt_surface.py` composes the two loaded
-#: files and nothing under `memory/topics/`, and `memory_read` fetches a topic only
-#: when something asks for it. The ledger's own size limit is bookkeeping, not
-#: context, so tying it to the topic ceiling was measuring the wrong thing. The
+#: files and nothing under `memory/topics/` — so its own size limit is bookkeeping,
+#: not context, and tying it to the topic ceiling measured the wrong thing. The
 #: multiplier is a fixed multiple, not a derivation: 3 x MEMORY.md's ceiling holds
-#: ~113 rows at the ledger's live 675 B mean row, while the same file's ceiling
-#: permits ~127 index lines at its 202 B mean, so past ~113 loaded lines the ledger
-#: runs out first. Whether the multiplier or the index budget moves at that point is
-#: dream-consolidation's (#47) tightening call, deliberately not decided here.
-#:
-#: The input that, if missing, restores 32,768 B is `memory_ceiling(loaded_file)`:
-#: an unknown or renamed audited file answers None, and the branch in
-#: `ledger_ceiling` falls back to `TOPIC_FILE_CEILING_BYTES`. That is also the whole
-#: revert if the multiplier is ever judged too wide — delete the block below and
-#: every topic file is measured as it was before #2212.
+#: ~113 rows at the ledger's 672 B mean row, while the same ceiling permits ~127
+#: index lines at MEMORY.md's 197 B mean, so past ~113 loaded lines the ledger runs
+#: out first. Which of the two moves there is no longer owed — #2212's owed-check
+#: ruling of 2026-10-09: the multiplier stays at 3 and MEMORY.md's index budget does
+#: not move, because lowering the audited file's ceiling to force a pairing would
+#: shrink loaded memory, the thing this guard protects. Its re-open trigger: a
+#: nightly finding memory-md-ledger over 70,000 B while MEMORY.md is under 24,000 B
+#: raises the multiplier to 4. Both means re-derive live under `~/obsidian/` with
+#: `wc -c lloyd/MEMORY.md`, and over `lloyd/memory/memory-md-ledger.md`:
+#: `awk '/^- \[/ {n++; s += length($0)+1} END {print n, s/n}'`.
+#: The input that, if missing, restores 32,768 B is `memory_ceiling(loaded_file)`.
 LEDGER_MULTIPLIER = 3
 
 #: ledger-topic stem -> the loaded file whose ceiling it is bounded by. Declared

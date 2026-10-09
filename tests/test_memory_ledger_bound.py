@@ -639,3 +639,171 @@ def test_the_archived_gate_report_still_says_the_round_refused_on_skips_not_revi
                                                                NO_CLOBBER_BYTES), (
             f"{NO_CLOBBER} is no longer the 34 lines / 1,143 B that round's witness "
             "was, so the no-clobber half of the amendment no longer holds")
+
+
+# ── #2467: the multiplier block carries the ruling, not the question it retired ──
+#
+# The `#:` block above `LEDGER_MULTIPLIER` is the surface a future curator of the bound
+# reads. Through `ff3e5a89` it ended with "Whether the multiplier or the index budget moves
+# at that point is dream-consolidation's (#47) tightening call, deliberately not decided
+# here." — a carried 'still owed' line: the decision had been made on 2026-10-09, in
+# #2212's `owed_settled` entry 3, and had never crossed into the repo. That entry reads, in
+# full — and it is the text the block now paraphrases, which is why the phrasing below is
+# quoted rather than paraphrased twice:
+#
+#   LEDGER_MULTIPLIER stays at 3 and the index budget does not move: shrinking MEMORY.md's
+#   ceiling to force pairing would shrink loaded memory, the thing the guard protects, and
+#   there is no measured gain today to touching the multiplier. Re-open trigger: if a
+#   nightly ever finds memory-md-ledger > 70,000 B while MEMORY.md < 24,000 B, raise the
+#   multiplier to 4 (still bounded, still derived).
+#
+# The trigger is NOT met, measured over the live vault on 2026-10-09 with the two commands
+# the block now names: `memory-md-ledger` 21,605 B of its 76,800 B bound, 32 rows at a
+# 672.3 B mean; `MEMORY.md` 19,151 B of 25,600 B, 85 index lines at a 196.8 B mean. So the
+# block records "stays at 3" — and the numbers it quotes are re-derivable by the next
+# reader instead of inherited from a run that had already moved on. The stale pair it
+# carried before (~113 rows at a 675 B mean row, ~127 index lines at a 202 B mean, both
+# measured 2026-10-05) was refreshed in place to 672 B / 197 B for the same reason.
+
+#: Both halves of the retired claim, exactly as `app/memory_ceiling.py` spelled them at
+#: `ff3e5a89`. The first is clause 1's phrase; the second is the RECOMMENDATION that phrase
+#: produced, and a rail on the first alone would let the instruction come back standing on
+#: its own with no false claim beside it to contradict.
+RETIRED_MULTIPLIER_CLAIMS = ("not decided here", "tightening call")
+
+#: The line the block is the header of — and the string clause 5 requires to still hit.
+MULTIPLIER_DECL = "LEDGER_MULTIPLIER = 3"
+
+#: The sentence that carried the retired claim, quoted from `app/memory_ceiling.py` at
+#: `ff3e5a89`. It exists here only as the positive control below: the ban is a 0-hit, and a
+#: pattern that matches nothing also returns a 0-hit.
+OLD_MULTIPLIER_SENTENCE = ("Whether the multiplier or the index budget moves at that point"
+                           " is dream-consolidation's (#47) tightening call, deliberately"
+                           " not decided here.")
+
+
+def _multiplier_block() -> tuple[str, str]:
+    """The `#:` run above `LEDGER_MULTIPLIER`, as lines and flattened onto one line.
+
+    Flat as well as lined because the asserts read PROSE, and re-wrapping a comment is not
+    a change of meaning: read lined, a 12-word ruling would fail on whoever reflowed it at
+    column 84. Three guards make the slice honest, because an empty or mis-taken region
+    hands back every 0-hit below for free — the coverage gap that reads as a clean bill of
+    health:
+
+      * `MULTIPLIER_DECL` is a whole line exactly once, so the anchor is the constant and
+        not the prose mention of the multiplier inside the block itself;
+      * the region is non-empty and runs right up to that line;
+      * the region says "multiplier", which catches a slice taken from one of the module's
+        OTHER `#:` runs — the failure where a check about one paragraph passes because it
+        looked at a paragraph that never discussed the subject.
+    """
+    src = (ROOT / "app" / "memory_ceiling.py").read_text(encoding="utf-8")
+    lines = src.splitlines()
+    decl = [i for i, line in enumerate(lines) if line == MULTIPLIER_DECL]
+    assert len(decl) == 1, f"{MULTIPLIER_DECL!r} is a whole line {len(decl)} times, not once"
+    start = decl[0]
+    while start > 0 and lines[start - 1].startswith("#:"):
+        start -= 1
+    block = lines[start:decl[0]]
+    assert block, (f"nothing above {MULTIPLIER_DECL!r} is a '#:' comment, so every 0-hit "
+                   "below would be a slice of nothing")
+    assert "multiplier" in " ".join(block).lower(), (
+        "the '#:' run above the constant never says 'multiplier' — that is the wrong "
+        "region, and a 0-hit inside it proves nothing about the sentence clause 1 retires")
+    return "\n".join(block), " ".join(line.lstrip("#:").strip() for line in block)
+
+
+def test_the_still_owed_sentence_is_gone_from_the_module_that_carried_it():
+    """Clause 1: the guard's own header no longer tells a reader the question is open.
+
+    Scoped to `app/memory_ceiling.py`, deliberately not to the repo: "not decided here" is
+    ordinary English that five unrelated comments elsewhere use about their own undecided
+    things, and a repo-wide ban would be the over-broad guard this file already refuses
+    twice (see `_states_a_ledger_cap_at_32768` for the same narrowing).
+
+    Three things make the 0-hit mean what it says. The literals are proven to be spelled as
+    the file spelled them, by matching them against the quoted sentence they retired — a
+    pattern with a typo in it returns the same clean answer as a real absence. The module
+    read is proven non-trivial, so the absence is not an empty file. And the same `git grep`
+    a human would re-run is run twice against the same pathspec: once for the retired
+    phrase, which must not hit, and once for `LEDGER_MULTIPLIER = 3`, which must — that
+    second call is the positive control, and it is also clause 5's half of this item, the
+    constant having survived the prose rewrite.
+    """
+    rel = "app/memory_ceiling.py"
+    src = (ROOT / rel).read_text(encoding="utf-8")
+    assert len(src) > 10_000 and "LEDGER_MULTIPLIER" in src, (
+        f"{rel} reads as {len(src)} B, which is not the guard this clause is about")
+    for retired in RETIRED_MULTIPLIER_CLAIMS:
+        assert retired in OLD_MULTIPLIER_SENTENCE, (
+            f"{retired!r} is not a fragment of the sentence it retired, so the ban below "
+            "is a pattern nobody has shown can fire")
+        assert retired not in src, (
+            f"{rel} carries {retired!r} again — the block is the only place a curator "
+            "looks to learn whether the multiplier question is open, and 'still owed' "
+            "there is the sentence this item exists to retire")
+
+    gone = subprocess.run(["git", "grep", "-n", RETIRED_MULTIPLIER_CLAIMS[0], "--", rel],
+                          cwd=ROOT, capture_output=True, text=True)
+    assert gone.returncode == 1 and not gone.stdout.strip(), (
+        f"`git grep -n {RETIRED_MULTIPLIER_CLAIMS[0]!r} -- {rel}` should answer nothing; "
+        f"it answered rc={gone.returncode} {gone.stdout!r}{gone.stderr!r}")
+    still = subprocess.run(["git", "grep", "-n", MULTIPLIER_DECL, "--", rel],
+                           cwd=ROOT, capture_output=True, text=True)
+    assert still.returncode == 0 and MULTIPLIER_DECL in still.stdout, (
+        f"the same grep, the same pathspec, must find {MULTIPLIER_DECL!r} — if it cannot, "
+        f"the 0-hit above is a broken invocation and not an absence: rc="
+        f"{still.returncode} {still.stdout!r}{still.stderr!r}")
+
+
+def test_the_multiplier_block_states_the_ruling_the_trigger_and_the_commands():
+    r"""Clauses 2, 3 and 4 together: what replaced the claim, in the block that holds it.
+
+    Asserted as prose spans against the flattened block, in the order a reader meets them.
+
+    Clause 2 — the ruling AS RULED, not the question: `the multiplier stays at 3 and
+    MEMORY.md's index budget does not move`, with the reason the ruling gave (`lowering the
+    audited file's ceiling ... would shrink loaded memory, the thing this guard protects`).
+    A block that merely dropped the old sentence would pass a bare absence check while
+    leaving `LEDGER_MULTIPLIER = 3` unjustified — the same defect, one sentence shorter.
+
+    Clause 3 — the re-open trigger as the ruling's OWN numbers (`memory-md-ledger over
+    70,000 B while MEMORY.md is under 24,000 B raises the multiplier to 4`) and attributed
+    to them (`#2212's owed-check ruling of 2026-10-09`), so a later reader knows a trigger
+    is a decided conditional and not somebody's guess. Both numbers are read as the pair
+    they are: the ledger crossing 70,000 B is only half of it.
+
+    Clause 4 — the two commands that re-derive the means the block quotes, `wc -c` over
+    `lloyd/MEMORY.md` and the mean-row `awk` over `lloyd/memory/memory-md-ledger.md`. The
+    `awk` program's own pattern (`^- \[`) is pinned because it is what makes the mean a
+    mean of ROWS; a block that named `awk` and some program would leave the figure with no
+    way back to the file.
+
+    The last assert is the one that makes this more than a text search: the number the
+    comment states is the number the code holds. Raise `LEDGER_MULTIPLIER` without editing
+    the block, or edit the block to say 4 while the constant stays 3, and this is the node
+    that notices the two have parted company. The pre-existing
+    `test_the_ledger_bound_is_three_times_the_ceiling_of_the_file_it_audits` is what shows
+    no behaviour moved: 76,800 B and 49,152 B, unchanged.
+    """
+    block, flat = _multiplier_block()
+    assert "fixed multiple, not a derivation" in flat, block
+
+    assert ("the multiplier stays at 3 and MEMORY.md's index budget does not move") in flat, flat
+    assert ("lowering the audited file's ceiling to force a pairing would shrink loaded "
+            "memory, the thing this guard protects") in flat, flat
+
+    assert "#2212's owed-check ruling of 2026-10-09" in flat, flat
+    assert ("memory-md-ledger over 70,000 B while MEMORY.md is under 24,000 B raises the "
+            "multiplier to 4") in flat, flat
+
+    assert "wc -c lloyd/MEMORY.md" in flat, flat
+    assert "awk" in flat and r"^- \[" in flat, flat
+    assert "s += length($0)+1" in flat and "END {print n, s/n}" in flat, flat
+    assert "lloyd/memory/memory-md-ledger.md" in flat, flat
+
+    assert ceiling.LEDGER_MULTIPLIER == 3, (
+        "the block says the multiplier stays at 3; the constant says otherwise")
+    assert ceiling.ledger_ceiling("memory-md-ledger") == 76_800
+    assert ceiling.ledger_ceiling("user-md-ledger") == 49_152
