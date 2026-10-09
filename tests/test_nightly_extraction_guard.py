@@ -179,11 +179,13 @@ def test_a_fact_without_its_own_entity_still_files_under_a_valid_primary(tmp_pat
 # these are the tests that hold it in place.
 #
 # One thing this section deliberately does not exercise: `_refuse_held_facts`
-# asks `facts_idx`, whose rows survive a wipe because the clean path re-indexes
-# nothing, so re-deriving a fact into a store that still holds its row is refused
-# as a duplicate and the fact is lost outright. That is a separate defect with a
-# ruling still owed on #2350; the store below is an empty temp one, so the date
-# path is measured on its own rather than hidden behind that bug.
+# asks `facts_idx`, whose rows survived a wipe because the clean path touched no
+# index, so re-deriving a fact into a store that still held its row was refused as
+# a duplicate and the fact lost outright. That was the defect filed from #2350's
+# owed entry as #2483, and the section at the foot of this file now measures it —
+# the store there is indexed before the clean, as a write would have indexed it.
+# The store below stays an empty temp one, so the date path keeps being measured
+# on its own and these nodes read exactly the rows they always read.
 
 RECORDED = "2026-01-05T03:04:05+00:00"
 
@@ -346,3 +348,224 @@ def test_the_clean_prints_one_line_of_carried_versus_stamped(tmp_path, monkeypat
     assert "2 recorded date(s) carried" in line, line
     assert "1 fact(s) with no recorded date will be stamped with the run date" in line, line
     assert "1 file(s)" in line and "3 fact row(s) read" in line, line
+
+
+# ── #2483: the clean also retires the index rows of the files it deletes ──────
+#
+# The section above saves the dates and, on its own, that is all it can save.
+# `_refuse_held_facts` asks `facts_idx`, and a clean that touches no index leaves
+# every row of the wiped tree standing, so the rebuild that follows writes each
+# fact again and is refused by the row of a file that no longer exists: the fact is
+# lost outright, and the `created_at` the carry-forward preserved dies with the
+# in-memory archive, because a refused write never reaches the stamp site. These
+# nodes run the index half against a real store so the two halves are measured
+# together — the corpus below is therefore indexed, exactly as a write would have
+# indexed it, before the clean is called.
+#
+# The retire is an UPDATE of `expired_at`, never a DELETE: an expired row stops
+# refusing a re-derivation (`find_duplicate` refuses only on a live row) while
+# staying in `COUNT(*)`, which is the denominator of #499's duplicate trend.
+# Retiring by `reindex(paths=…)` instead would have fixed the refusal by shrinking
+# that measure, so the first node below pins WHICH retirement happened, not only
+# that the row stopped refusing.
+
+def _write_frontmatter(path, entity, category, facts) -> Path:
+    """The front-matter shape `write_fact_file` writes, at an explicit path.
+
+    `_fact_file` derives its location from the entity name, which cannot express a
+    file inside a directory the clean protects — and a protected file is the only
+    way to prove the retire is scoped to the files that went.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frontmatter = {"type": "facts", "entity": entity, "category": category, "facts": facts}
+    path.write_text(f"---\n{yaml.dump(frontmatter, sort_keys=False)}---\n\n"
+                    f"# {entity} - {category}\n", encoding="utf-8")
+    return path
+
+
+def _indexed(paths, root) -> int:
+    """Rows in the temp store for `paths`, spelled the way a write would spell them.
+
+    `root` is the facts tree, so `file_path` is stored relative to it — the same
+    call `_index_and_link` makes (`update_file(path, root=self.facts_dir)`) and the
+    one spelling the retire can match.
+    """
+    return kg_store.store().facts_idx.reindex(list(paths), root=root)["facts"]
+
+
+def _live(entity) -> list:
+    """Rows the store still considers held: `expired_at` and `invalid_at` both NULL."""
+    return kg_store.store().facts_idx.for_entity(entity)
+
+
+def _every(entity) -> list:
+    return kg_store.store().facts_idx.for_entity(entity, include_expired=True)
+
+
+def test_a_clean_retires_the_index_rows_of_the_files_it_deleted(tmp_path, monkeypatch,
+                                                               temp_store):
+    """Clause 1: after a clean no LIVE `facts_idx` row names a fact file the clean
+    deleted, and every row for an entry the clean kept is still live.
+
+    Three rows over three files: two entity files that a clean removes, and one
+    inside `memory-graph/`, a protected directory, which it must not touch. The
+    protected file is what keeps this honest — a retire that swept the whole table
+    would satisfy the first assertion and fail the second.
+    """
+    facts = tmp_path / "facts"
+    facts.mkdir()
+    state = _fact_file(facts, "Lloyd", "state",
+                       [{"fact": "runs on vLLM", "confidence": 0.9, "created_at": RECORDED}])
+    usage = _fact_file(facts, "Lloyd", "usage",
+                       [{"fact": "serves the bench model", "confidence": 0.9,
+                         "created_at": RECORDED}])
+    kept = _write_frontmatter(facts / "memory-graph" / "graph-index.md", "Lloyd", "state",
+                              [{"fact": "an edge the clean cannot re-derive",
+                                "confidence": 0.9, "created_at": RECORDED}])
+    assert _indexed([state, usage, kept], facts) == 3
+
+    _cleaner(tmp_path, monkeypatch, facts).clean_facts_directory()
+
+    assert not state.exists() and not usage.exists(), "the clean must still wipe the tree"
+    assert kept.exists(), "memory-graph/ is protected; this corpus is wrong"
+    live = _live("Lloyd")
+    assert [r["fact"] for r in live] == ["an edge the clean cannot re-derive"], live
+    assert live[0]["file_path"] == "memory-graph/graph-index.md", live
+    retired = sorted((r["file_path"], r["expired_at"] is not None, r["invalid_at"])
+                     for r in _every("Lloyd") if r["expired_at"] is not None)
+    assert retired == [("Lloyd/Lloyd-state.md", True, None),
+                       ("Lloyd/Lloyd-usage.md", True, None)], retired
+
+
+def test_a_clean_lets_the_rebuild_write_an_identical_fact_again(tmp_path, monkeypatch,
+                                                               temp_store, capsys):
+    """Clause 2: the fact an identical rebuild re-derives after a clean is ACCEPTED.
+
+    The file is re-created at the same path, the write prints no
+    `refused N duplicate fact(s)` line, and `write_fact_file` returns the path where
+    it used to return `None` — the shape of the whole batch being refused against a
+    row of a deleted file, which is #2483's loss and not a warning.
+    """
+    facts = tmp_path / "facts"
+    facts.mkdir()
+    path = _fact_file(facts, "Lloyd", "state",
+                      [{"fact": "runs on vLLM", "confidence": 0.9, "created_at": RECORDED}])
+    assert _indexed([path], facts) == 1
+    x = _cleaner(tmp_path, monkeypatch, facts)
+
+    x.clean_facts_directory()
+    capsys.readouterr()
+    written = x.extractor.write_fact_file(
+        "Lloyd", "state", {"facts": [{"fact": "runs on vLLM", "confidence": 0.9}]},
+        source_doc="knowledge/lloyd.md", source_hash="abc123")
+    printed = capsys.readouterr().out
+
+    assert written == facts / "Lloyd" / "Lloyd-state.md", written
+    assert "duplicate fact(s)" not in printed, printed
+    assert [r["fact"] for r in _rows(facts / "Lloyd" / "Lloyd-state.md")] == ["runs on vLLM"]
+    assert len(_live("Lloyd")) == 1, _every("Lloyd")
+
+
+def test_the_fact_a_clean_lets_through_keeps_the_date_captured_before_the_wipe(
+        tmp_path, monkeypatch, temp_store):
+    """Clause 3: #2350's carry-forward still holds once the rows are retired — and
+    only once they are, which is why this node is the same corpus as
+    `test_a_clean_carries_the_recorded_created_at_through_the_wipe` with an indexed
+    store added. Retire the rows and the fact comes back dated 2026-01-05; leave
+    them live and the write is refused, so there is no row to date at all.
+
+    Both halves are asserted: the markdown row and the live index row built from it
+    carry the pre-clean date, not the run's.
+    """
+    facts = tmp_path / "facts"
+    facts.mkdir()
+    path = _fact_file(facts, "Lloyd", "state",
+                      [{"fact": "runs on vLLM", "confidence": 0.9, "created_at": RECORDED}])
+    assert _indexed([path], facts) == 1
+    x = _cleaner(tmp_path, monkeypatch, facts)
+
+    x.clean_facts_directory()
+    x.extractor.write_fact_file("Lloyd", "state",
+                                {"facts": [{"fact": "runs on vLLM", "confidence": 0.9}]},
+                                source_doc="knowledge/lloyd.md", source_hash="abc123")
+
+    rederived = _rows(facts / "Lloyd" / "Lloyd-state.md")
+    assert len(rederived) == 1, rederived
+    assert rederived[0]["created_at"] == RECORDED, rederived[0]
+    assert not _stamped_this_run(rederived[0]["created_at"]), rederived[0]
+    live = _live("Lloyd")
+    assert len(live) == 1, live
+    assert live[0]["created_at"] == RECORDED, live[0]
+
+
+def test_a_clean_expires_those_rows_and_prints_the_count(tmp_path, monkeypatch,
+                                                        temp_store, capsys):
+    """Clause 4: the retirement is an expiry, not a deletion, and the clean reports
+    it beside the carry-forward witness.
+
+    Expired rows are still rows: `exact_duplicate_stats` documents that its
+    `rows` figure — the #499 trend's denominator — counts ones an ingestion wrote,
+    expired included, so a clean must leave `COUNT(*)` where it found it. Deleting
+    the rows instead (`reindex(paths=…)` on a path that no longer exists does
+    exactly that) moves the measure every time anyone rebuilds.
+
+    The corpus is the same three files as clause 1: 3 rows, 2 of them retired. The
+    witness line is asserted to sit on a line adjacent to the carry-forward line,
+    because "how many rows did this clean retire" is only readable against "how
+    many dates did it carry".
+    """
+    facts = tmp_path / "facts"
+    facts.mkdir()
+    state = _fact_file(facts, "Lloyd", "state",
+                       [{"fact": "runs on vLLM", "confidence": 0.9, "created_at": RECORDED}])
+    usage = _fact_file(facts, "Lloyd", "usage",
+                       [{"fact": "serves the bench model", "confidence": 0.9,
+                         "created_at": RECORDED}])
+    kept = _write_frontmatter(facts / "memory-graph" / "graph-index.md", "Lloyd", "state",
+                              [{"fact": "an edge the clean cannot re-derive",
+                                "confidence": 0.9, "created_at": RECORDED}])
+    assert _indexed([state, usage, kept], facts) == 3
+    stats = kg_store.store().facts_idx.exact_duplicate_stats()
+    x = _cleaner(tmp_path, monkeypatch, facts)
+
+    x.clean_facts_directory()
+
+    out = capsys.readouterr().out
+    after = kg_store.store().facts_idx.exact_duplicate_stats()
+    assert after["rows"] == stats["rows"] == 3, (stats, after)
+    assert kg_store.store().facts_idx.count() == 3, _every("Lloyd")
+    assert kg_store.store().facts_idx.count(active_only=True) == 1, _every("Lloyd")
+    witness = [ln for ln in out.splitlines() if "facts_idx retired" in ln]
+    carry = [ln for ln in out.splitlines() if "created_at carry-forward" in ln]
+    assert len(witness) == 1 and len(carry) == 1, out
+    assert "2 row(s) expired" in witness[0] and "2 deleted fact file(s)" in witness[0], witness
+    lines = out.splitlines()
+    assert abs(lines.index(witness[0]) - lines.index(carry[0])) == 1, out
+
+
+def test_the_retire_reaches_every_file_past_one_statement_of_them(tmp_path, monkeypatch,
+                                                                 temp_store, capsys):
+    """501 deleted files against one chunk of `expire_files` (500 `file_path` values
+    per UPDATE statement, and the live tree is 23,630 files).
+
+    The chunk bound is SQLite's, not this code's preference: a statement may bind
+    only so many variables, so the retire loops. A loop whose arithmetic drops the
+    tail leaves 1 of 501 files refusing its own re-derivation on a live run, and
+    nothing in a 3-file corpus would show it — so this corpus is 501.
+    """
+    facts = tmp_path / "facts"
+    (facts / "Lloyd").mkdir(parents=True)
+    paths = [_write_frontmatter(facts / "Lloyd" / f"Lloyd-state-{i:04d}.md", "Lloyd", "state",
+                                [{"fact": f"claim number {i}", "confidence": 0.9,
+                                  "created_at": RECORDED}])
+             for i in range(501)]
+    assert _indexed(paths, facts) == 501
+    x = _cleaner(tmp_path, monkeypatch, facts)
+
+    x.clean_facts_directory()
+
+    assert _live("Lloyd") == [], [r["file_path"] for r in _live("Lloyd")]
+    rows = _every("Lloyd")
+    assert len(rows) == 501, len(rows)
+    assert all(r["expired_at"] is not None for r in rows)
+    assert "501 row(s) expired across 501 deleted fact file(s)" in capsys.readouterr().out

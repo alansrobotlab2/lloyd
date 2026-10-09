@@ -1311,6 +1311,70 @@ class _FactsIdx:
         """Re-read one fact file after a write. Returns rows indexed."""
         return self.reindex([path], root=root, register_entities=register_entities)["facts"]
 
+    #: How many `file_path` values one `UPDATE … IN (…)` statement may carry.
+    #: SQLite bounds the variables per statement (`SQLITE_MAX_VARIABLE_NUMBER`:
+    #: 999 before 3.32, 32,766 after — this box runs 3.53.1), and a live clean
+    #: hands over every fact file at once: 23,630 files over 142,824 rows measured
+    #: through this module on 2026-10-09. That fits today's ceiling by a factor of
+    #: 1.4 and would not have fit an older SQLite at all, so the retire below
+    #: chunks instead of binding the bound's size to the size of the vault.
+    _EXPIRE_CHUNK = 500
+
+    def expire_files(self, paths: Iterable[Path | str], *,
+                     root: Optional[Path | str] = None,
+                     at: Optional[str] = None) -> int:
+        """Retire every LIVE row belonging to a fact file that is being removed.
+
+        Returns the number of rows this call expired — the rows are marked, never
+        deleted, which is the store's own convention and is load-bearing twice:
+
+        * `find_duplicate` refuses an incoming fact only on a live row
+          (`expired_at IS NULL AND invalid_at IS NULL`), and its docstring says
+          an expired copy "does not refuse a new one". A row whose file has been
+          deleted therefore has to stop being live, or it refuses the very
+          re-derivation that would have replaced it (#2483: a `--clean` rebuild
+          lost the fact outright, and the `created_at` #2350 went to
+          `capture_created_at` to preserve died with it, because the refused
+          write never reaches the stamp site).
+        * An expired row is still a row, so `exact_duplicate_stats` — the #499
+          trend — counts the same `rows` before a clean as after it. Deleting
+          instead (which is what `reindex(paths=…)` does to a path that no longer
+          exists: `DELETE FROM facts_idx WHERE file_path=?` then skips the
+          missing file) would unblock the refusal too, but by shrinking that
+          denominator, so the measure of duplicate-ingestion would move whenever
+          anyone ran a rebuild. Expiry was chosen for that reason.
+
+        A row that already carries `expired_at` or `invalid_at` is left as it is:
+        its verdict stands, and the count returned is the rows THIS call retired.
+
+        `paths` are matched on the same tree-relative spelling `reindex` stored
+        them with, so `root` must be the tree they were indexed against —
+        `VAULT_FACTS_ROOT` for the live store, the caller's own facts dir for a
+        temp one.
+        """
+        root = Path(root or VAULT_FACTS_ROOT)
+        rels: set[str] = set()
+        for p in paths:
+            p = Path(p)
+            try:
+                rels.add(str(p.relative_to(root)))
+            except ValueError:
+                rels.add(str(p))
+        rels.discard("")
+        if not rels:
+            return 0
+        ordered, ts = sorted(rels), at or _now()
+        total = 0
+        with self._s.transaction() as c:
+            for i in range(0, len(ordered), self._EXPIRE_CHUNK):
+                chunk = ordered[i:i + self._EXPIRE_CHUNK]
+                total += c.execute(
+                    "UPDATE facts_idx SET expired_at=? "
+                    "WHERE expired_at IS NULL AND invalid_at IS NULL "
+                    f"AND file_path IN ({','.join('?' * len(chunk))})",
+                    (ts, *chunk)).rowcount
+        return total
+
     # ── reads ───────────────────────────────────────────────────────────
     @staticmethod
     def _row(r: sqlite3.Row) -> dict:

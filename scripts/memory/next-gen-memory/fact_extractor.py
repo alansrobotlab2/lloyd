@@ -609,6 +609,44 @@ class FactExtractor:
         stats["identities"] = len(archive)
         return stats
 
+    def retire_index_rows(self, fact_files) -> dict:
+        """Expire the `facts_idx` rows of fact files this process has just deleted.
+
+        The index-side twin of `capture_created_at`, over exactly the same file
+        list, and the reason #2350's preservation could not hold on its own.
+        `_refuse_held_facts` asks `facts_idx.find_duplicate`, which refuses on any
+        row that is live, and a clean that touches no index leaves every row of
+        the wiped tree standing. The rebuild that follows therefore writes each
+        fact again and is refused by the row of a file that no longer exists:
+        `_merge_facts` never runs, the file is never re-created, and the
+        `created_at` the capture above saved dies with the in-memory archive
+        because the refused write never reaches the stamp site. The behaviour is
+        pinned against a real store by two nodes in
+        `tests/test_nightly_extraction_guard.py`:
+        `test_a_clean_retires_the_index_rows_of_the_files_it_deleted` (no live row
+        names a deleted file, and the protected entry's row stays live) and
+        `test_the_fact_a_clean_lets_through_keeps_the_date_captured_before_the_wipe`
+        (the re-derived fact is accepted and comes back with its pre-clean date).
+        At the base commit the first fails with all three rows still live, two of
+        them naming files the clean deleted, and the second with a
+        `FileNotFoundError` on the fact file: the refused write created no file at
+        all, so the fact is gone outright and not merely restamped.
+
+        `root` is `self.facts_dir`, the same value `_index_and_link` indexes
+        against, so the paths here are matched against the spelling that wrote
+        the rows — one key, not two.
+
+        Raises `StoreUnavailable` when the store cannot be opened. It does not
+        swallow it the way `_refuse_held_facts` does: that guard degrades to the
+        pre-#1144 behaviour and loses nothing, while a retire that did not happen
+        means the next pass loses facts outright, and the clean has to say so.
+        """
+        paths = [Path(p) for p in fact_files]
+        if not paths:
+            return {"files": 0, "rows": 0}
+        rows = _kg_store().facts_idx.expire_files(paths, root=Path(self.facts_dir))
+        return {"files": len(paths), "rows": rows}
+
     def _carried_created_at(self, entity, category, fact_text) -> str:
         """The date this claim was first recorded, or "" to stamp the run date."""
         if not self.created_at_archive:

@@ -228,6 +228,32 @@ def test_extracting_a_text_the_entity_holds_elsewhere_leaves_one_row(extractor):
         "the refused write still created its category file"
 
 
+def test_an_incremental_refusal_leaves_the_row_it_refused_again_live(extractor):
+    """#2483 clause 5: with no clean, the #1144 guard is unchanged — and nothing it
+    refused against has been quietly retired.
+
+    #2483 gives the clean a new act, `retire_index_rows`, whose entire effect is to
+    set `expired_at` so `find_duplicate` stops refusing. That has to stay a
+    clean-path act. Were it to reach an incremental run, the node above would keep
+    passing this shape for the wrong reason: a refusal that expired the copy
+    standing in its way prints the same and files the same nothing, and only
+    un-refuses the fact on the next run. So the row is asserted LIVE here, beside
+    the refusal itself.
+    """
+    e = extractor
+    e.write_fact_file("Lloyd", "state", {"facts": [_fact("serves the bench model")]})
+
+    assert e.write_fact_file("Lloyd", "relationship",
+                             {"facts": [_fact("serves the bench model",
+                                              category="relationship")]}) is None
+
+    rows = kg_store.store().facts_idx.for_entity("Lloyd", include_expired=True)
+    assert [r["fact"] for r in rows] == ["serves the bench model"], rows
+    assert rows[0]["expired_at"] is None and rows[0]["invalid_at"] is None, rows[0]
+    assert kg_store.store().facts_idx.count(active_only=True) == 1, rows
+    assert not (e.facts_dir / "Lloyd" / "Lloyd-relationship.md").exists()
+
+
 def test_case_and_padding_variants_refuse_on_the_stores_own_key(extractor):
     """The extractor now refuses on `text_hash` — strip + casefold + sha256 —
     so it refuses exactly what `facts_idx` counts as a duplicate, no looser and

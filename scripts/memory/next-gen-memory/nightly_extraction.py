@@ -210,6 +210,14 @@ class NightlyExtraction:
         was the file being unlinked. Nothing else holds them: this tree is
         gitignored, and `backup_graph_state` snapshots the edge graph — that is
         the 2026-08-22 loss, not this one.
+
+        The index rows of those files are retired AFTER the delete (#2483), over
+        the same `_fact_files_to_delete` walk, because preserving the dates was
+        only half of surviving a clean: `_refuse_held_facts` asks `facts_idx`,
+        whose rows a wipe leaves standing, so the rebuild's own duplicate guard
+        refused each fact the clean had just orphaned a row for, and the fact was
+        lost outright along with the date carried above. The two halves are one
+        mechanism — `tests/test_nightly_extraction_guard.py` says so in prose.
         """
         if not FACTS_DIR.exists():
             print("  → Facts directory does not exist, skipping clean")
@@ -230,7 +238,8 @@ class NightlyExtraction:
                       f"will be stamped with the run date")
         elif to_delete:
             print(f"  ⚠ no extractor attached: the created_at values in these "
-                  f"{len(to_delete)} fact file(s) cannot be carried forward")
+                  f"{len(to_delete)} fact file(s) cannot be carried forward, and "
+                  f"their facts_idx rows cannot be retired")
 
         self.backup_graph_state()
 
@@ -246,8 +255,27 @@ class NightlyExtraction:
                 item.unlink()
             removed += 1
 
+        # After the delete, never before it: retiring rows whose files are still
+        # standing would tell every reader of the index that those facts are gone
+        # while the tree says otherwise. `to_delete` is the same walk that
+        # captured the dates, so exactly the tree that went is retired and nothing
+        # that stayed (`memory-graph/`, `templates/`, the `.bak` recovery copies)
+        # is touched.
+        retired = None
+        if to_delete and extractor is not None:
+            try:
+                retired = extractor.retire_index_rows(to_delete)
+            except Exception as e:  # noqa: BLE001 — a clean still has to clean
+                print(f"  ⚠ facts_idx retire failed ({e}); the {len(to_delete)} deleted "
+                      f"fact file(s) still hold live rows, so re-deriving any of their "
+                      f"facts will be refused as a duplicate and lost")
+
         print(f"  → Facts directory cleaned ({removed} removed, "
               f"{kept} protected entries kept)")
+        if retired is not None:
+            print(f"  → facts_idx retired: {retired['rows']} row(s) expired across "
+                  f"{retired['files']} deleted fact file(s) — expiring them is what lets "
+                  f"a re-derivation write those facts again instead of being refused")
         if capture is not None:
             print(f"  → created_at carry-forward: {capture['identities']} recorded "
                   f"date(s) carried, {capture['undated']} fact(s) with no recorded "
