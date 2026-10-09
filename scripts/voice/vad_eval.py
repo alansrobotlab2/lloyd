@@ -464,7 +464,12 @@ def simulate_gate(x, gts, seg, smart_turn, hold_timeout_s=2.2, hold_max_s=12.0, 
     as dicts: time (s), segs (list of (start, end) samples), how.
     """
     commits, held = [], None  # held: dict(audio=[...], segs=[...], deadline=s, first_close=s)
+    # A streaming detector hears the stream itself, frame by frame, with its
+    # state carried — the worker's shape — and is read at each close.
+    ds = smart_turn.stream() if getattr(smart_turn, "streaming", False) else None
     for i in range(0, x.size - 511, 512):
+        if ds is not None:
+            ds.push(x[i:i + 512])
         for u in seg.feed(x[i:i + 512]):
             close = seg.cursor / SR
             if held is not None and held["deadline"] <= close:
@@ -477,7 +482,12 @@ def simulate_gate(x, gts, seg, smart_turn, hold_timeout_s=2.2, hold_max_s=12.0, 
             if u.reason == "max_duration":
                 commits.append(dict(time=close, segs=segs, how="cap"))
                 continue
-            v = smart_turn.predict(audio)
+            if ds is not None:
+                from voice.turn import TurnVerdict
+                p = ds.peek()
+                v = TurnVerdict(complete=p >= smart_turn.threshold, probability=p, elapsed_ms=0.0)
+            else:
+                v = smart_turn.predict(audio)
             # A fixed verdict cost when given: the wall time of a nice-19 run on
             # a shared box is load, not Smart Turn.
             t = close + (v.elapsed_ms if turn_ms is None else turn_ms) / 1000
@@ -487,6 +497,12 @@ def simulate_gate(x, gts, seg, smart_turn, hold_timeout_s=2.2, hold_max_s=12.0, 
                 commits.append(dict(time=t, segs=segs, how="complete"))
         if held is not None and held["deadline"] <= seg.cursor / SR:
             commits.append(dict(time=held["deadline"] + HOLD_POLL_S, segs=held["segs"], how="timeout"))
+            held = None
+        elif held is not None and ds is not None and not seg.in_speech and ds.latest >= smart_turn.threshold:
+            # A streaming detector keeps scoring through the hold, so a held
+            # turn is released the moment its score crosses — the eot-bench
+            # policy — rather than at the timeout or the next utterance.
+            commits.append(dict(time=seg.cursor / SR + HOLD_POLL_S, segs=held["segs"], how="released"))
             held = None
     if held is not None:
         commits.append(dict(time=held["deadline"] + HOLD_POLL_S, segs=held["segs"], how="timeout"))
@@ -537,14 +553,17 @@ def score_gate(commits, gts):
 
 
 def cmd_gate(a):
-    from voice.turn import SmartTurn
+    from voice.turn import SmartTurn, Turn1Mini, DEFAULT_TURN1MINI
     from voice.vad import SileroSegmenter
     data = Path(a.data).expanduser()
-    st = SmartTurn(model_path=a.smart_turn, threshold=a.turn_threshold)
+    if a.turn_backend == "turn-1-mini":
+        st = Turn1Mini(model_path=a.turn_model or ROOT / DEFAULT_TURN1MINI, threshold=a.turn_threshold[0])
+    else:
+        st = SmartTurn(model_path=a.turn_model or a.smart_turn, threshold=a.turn_threshold[0])
     st.load()
     probe = np.random.default_rng(0).normal(0, 0.03, 3 * SR).astype(np.float32)
     turn_ms = a.turn_ms if a.turn_ms is not None else float(np.median([st.predict(probe).elapsed_ms for _ in range(20)]))
-    print(f"smart turn verdict cost used: {turn_ms:.1f} ms", flush=True)
+    print(f"{a.turn_backend} verdict cost used: {turn_ms:.1f} ms", flush=True)
     rec = None
     if a.asr_model_dir:
         from voice.asr import SherpaOfflineRecognizer
@@ -560,7 +579,8 @@ def cmd_gate(a):
                 o = int(rng.integers(0, bed.size - x.size))
                 x = x + gain * bed[o:o + x.size]
             streams.append((x, json.loads((data / f"ls_{s}.json").read_text())))
-        for ms in a.min_silence:
+        for thr, ms in [(t, m) for t in a.turn_threshold for m in a.min_silence]:
+            st.threshold = float(thr)
             tot = None
             for x, gts in streams:
                 seg = SileroSegmenter(threshold=a.vad_threshold, min_silence_ms=ms)
@@ -578,7 +598,7 @@ def cmd_gate(a):
                     for k, v in r.items():
                         tot[k] = tot[k] + v
             n = tot["utts"]
-            row = dict(noise_gain=gain, min_silence_ms=ms, utts=n, missed=tot["missed"],
+            row = dict(backend=a.turn_backend, turn_threshold=thr, noise_gain=gain, min_silence_ms=ms, utts=n, missed=tot["missed"],
                        false_cutoffs=tot["false_cutoffs"], false_cutoff_rate=tot["false_cutoffs"] / n,
                        cut_at_sentence_end=tot["cut_at_sentence_end"] if rec else None,
                        mid_sentence_cutoffs=(tot["false_cutoffs"] - tot["cut_at_sentence_end"]) if rec else None,
@@ -589,7 +609,7 @@ def cmd_gate(a):
                        commit_p50_complete_only=_pct([v for v in tot["latency"] if v not in tot["latency_timeout"]], 50))
             out.append(row)
             mid = row["mid_sentence_cutoffs"]
-            print(f"gain {gain:>3} min_silence {ms:4d}: cutoffs inside an utterance {row['false_cutoffs']:3d} "
+            print(f"{a.turn_backend} thr {thr:.2f} gain {gain:>3} min_silence {ms:4d}: cutoffs inside an utterance {row['false_cutoffs']:3d} "
                   f"({100 * row['false_cutoff_rate']:.1f}% of {n}; mid-sentence "
                   f"{'-' if mid is None else f'{mid} = {100 * mid / n:.1f}%'}; by timeout {row['cut_by_timeout']}; "
                   f"splits rescued by a hold {row['rescued_by_hold']}) | true ends: complete {row['true_end_complete']:3d}, "
@@ -648,7 +668,9 @@ def main():
     g = sub.add_parser("gate", help="false cutoffs through Smart Turn and the hold, per min_silence")
     g.add_argument("--data", required=True)
     g.add_argument("--smart-turn", default=str(ROOT / "agent-services/models/smart-turn/smart-turn-v3.2-cpu.onnx"))
-    g.add_argument("--turn-threshold", type=float, default=0.5)
+    g.add_argument("--turn-backend", choices=["smart-turn", "turn-1-mini"], default="smart-turn")
+    g.add_argument("--turn-model", help="model file for --turn-backend (default: the configured one)")
+    g.add_argument("--turn-threshold", type=float, nargs="+", default=[0.5], help="one row per value")
     g.add_argument("--vad-threshold", type=float, default=0.45)
     g.add_argument("--min-silence", type=int, nargs="+", default=[380, 250, 200])
     g.add_argument("--hold-timeout-ms", type=float, default=2200)

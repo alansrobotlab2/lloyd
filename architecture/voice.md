@@ -46,7 +46,7 @@ which is why each half can be restarted, or break, on its own.
 Both the worker and the TTS engine are pinned to **GPU 0** (the desktop 3090)
 by `CUDA_VISIBLE_DEVICES` in their supervisord programs — see
 [[infrastructure]] for why the worker must stay off GPU 1. Every model the
-worker runs is CPU ONNX: Silero VAD, openWakeWord, Smart Turn, Parakeet (via
+worker runs is CPU ONNX: Silero VAD, openWakeWord, turn-1-mini, Parakeet (via
 sherpa-onnx) and the CAM++ speaker encoder (onnxruntime). The worker's VRAM is a dependency initialising a
 CUDA context, not a model.
 
@@ -86,9 +86,10 @@ End to end, one utterance:
    Silero. The wake word fires **while the word is being said**; the worker
    opens the window, pushes `wake_state: listening` to the browser and asks the
    backend to prewarm the session's prompt, all before the sentence ends.
-4. Silero closes the utterance after 380 ms of silence. Smart Turn decides
-   whether it is a finished thought (if not, it is held and joined to what
-   follows); Parakeet transcribes it in ~60 ms.
+4. Silero closes the utterance after 380 ms of silence. The end-of-turn
+   model (turn-1-mini, fed every frame) decides whether it is a finished
+   thought (if not, it is held, and released the moment the model's score
+   crosses or joined to what follows); Parakeet transcribes it in ~60 ms.
 5. The gate decides: wake detected in it, or a transcript that opens with a
    wake phrase, or the locked speaker's continuation window. What survives is
    POSTed to `/api/voice/inject` with `stream: true`.
@@ -292,6 +293,82 @@ mid-utterance. Caveats: this is read speech, Smart Turn was trained on
 conversation, and "mid-sentence" is Parakeet's punctuation; the 380 → 250
 difference is the measurement, not the absolute rate.
 
+**turn-1-mini measured against it (2026-10-09): the same cutoffs, a far
+shorter tail — it ships.** p99lab's turn-1-mini (Apache-2.0, 5.3M
+parameters, a streaming audio-only model with the 4 kHz low-pass and log-mel
+inside its ONNX graph, ~2 ms per 160 ms step on one core) leads every
+downloadable model on LiveKit's eot-bench — 22.6% false cut-offs at a 300 ms
+budget against Smart Turn v3.2's 35.2%, on real human-to-agent conversation.
+Two things had to be true of the integration before the number meant
+anything here:
+
+- **It must hear the stream, not the utterance.** Its answer depends on the
+  ~7 s before the close: scored from a zero state over the utterance's own
+  audio it disagrees with the continuous stream on 13–40% of closes, and
+  only 8 s of real preceding audio brings that to 2 of 99. So the hearing
+  pipeline feeds it every frame (`HearingPipeline(turn=…)`) and the gate
+  reads `HearingEvent.turn_p`; `vad_eval.py gate --turn-backend turn-1-mini`
+  streams it the same way.
+- **A hold is released when the score crosses, not at the timeout.** The
+  model keeps scoring the silence after a close; the worker's hold loop
+  checks it every 250 ms and releases a held turn as soon as the speaker is
+  quiet and the score has crossed (`hold_released`). Without this rule the
+  model was only level with Smart Turn.
+
+Its scores are not calibrated (eot-bench's 300 ms operating point is 0.06;
+a finished question in the fixtures reads 0.16 after 380 ms of silence, the
+cut phrase 0.001), so the gate was swept over the threshold. Two corpora:
+the 400 read LibriSpeech utterances above, and **eot-bench's English split**
+(`livekit/eot-bench-data`, CC-BY-4.0: 400 user turns from real calls, each
+with word timestamps, 701 internal pauses ≥ 200 ms against the read set's
+239), built into the same ten-stream shape with a turn's true end at its
+last word (`~/.cache/lloyd-voice-eval/eot-gate/`). Smart Turn at the doc's
+fixed 20 ms verdict cost, turn-1-mini at 5 ms, Parakeet splitting cutoffs
+into sentence-end and mid-sentence as before:
+
+| detector (hold policy) | corpus | `min_silence_ms` | mid-sentence cutoffs / 400 | true ends held to the timeout | end → commit p50 / p90 |
+|---|---|---|---|---|---|
+| Smart Turn 0.5 (2.2 s timeout) | read | 380 | 35 (8.8%) | 42 | 441 / 2275 ms |
+| **turn-1-mini 0.06 (release on cross)** | read | 380 | **32 (8.0%)** | **29** | 475 / **1169** |
+| turn-1-mini 0.04 (release on cross) | read | 380 | 33 (8.2%) | 17 | 454 / 979 |
+| Smart Turn 0.5 | read | 250 | 72 (18.0%) | 36 | 311 / 405 |
+| turn-1-mini 0.06 (release) | read | 250 | 60 (15.0%) | 28 | 356 / 1164 |
+| Smart Turn 0.5 (2.2 s timeout) | conversation | 380 | 148 (37.0%) | 70 | 462 / 2758 |
+| Smart Turn 0.5 (0.8 s timeout) | conversation | 380 | 186 (46.5%) | 63 | 455 / 1347 |
+| **turn-1-mini 0.06 (release on cross)** | conversation | 380 | **146 (36.5%)** | **3** | 445 / **1048** |
+| turn-1-mini 0.04 (release on cross) | conversation | 380 | 150 (37.5%) | 1 | 431 / 894 |
+| turn-1-mini 0.06 (timeout only) | conversation | 380 | 146 (36.5%) | 67 | 443 / 2741 |
+| Smart Turn 0.5 | conversation | 250 | 208 (52.0%) | 61 | 322 / 2612 |
+| turn-1-mini 0.06 (release) | conversation | 250 | 203 (50.8%) | 3 | 306 / 981 |
+
+Smart Turn's read-speech rows reproduce the September table within
+ASR-punctuation noise. What the table says:
+
+- **Cutoffs are a wash.** At 380 ms both detectors cut 8–9% of read
+  utterances and ~37% of conversation turns mid-sentence (eot-bench is built
+  from long deliberate pauses; that 37% is the same 35% its own harness
+  reports for Smart Turn at 300 ms). turn-1-mini is 0.5–0.8 points better at
+  0.06 and 0.5 worse at 0.04, inside the noise.
+- **The tail is not.** Smart Turn calls 10–17% of genuine ends "unfinished"
+  and every one of those waits out the 2.2 s timeout; shortening the timeout
+  cuts people off instead (0.8 s: +9.5 points on conversation). turn-1-mini
+  with release-on-cross holds 3 of 400 conversation ends and 29 of 400 read
+  ends to the timeout, and the p90 end-to-commit drops from 2.76 s to 1.05 s
+  on conversation and 2.28 s to 1.17 s on read speech, for ~30 ms at the
+  median.
+- **250 ms still does not ship**: it costs 7–14 points of mid-sentence
+  cutoffs on either detector, on either corpus.
+
+0.06 is the operating point (at or under Smart Turn's cutoffs on both
+corpora); 0.04 is ~150 ms faster at the tail for half a point of cutoffs on
+conversation; 0.10 and above hold more true ends than they rescue splits.
+Caveats: "mid-sentence" is Parakeet's punctuation on disfluent real speech;
+the read corpus is synthetic streams with room tone; and neither corpus is
+this house's far-field audio, which `replay.py run` over `ww_diag` now
+scores with the configured detector. Results, JSON per row:
+`~/.cache/lloyd-voice-eval/turn-gate-2026-10-09/` (`eot-*` for the
+conversation corpus).
+
 ### The acoustic wake word, fed continuously
 
 The old `AcousticWakeWord` waited for the VAD to close an utterance, reset the
@@ -375,20 +452,37 @@ Whisper cost 2.76 s a clip. Parakeet costs ~60 ms. The acoustic path stays — i
 fires mid-word, the transcript only at utterance end — so the two together are
 what `text_fallback: true` means.
 
-### End of turn: Smart Turn
+### End of turn: turn-1-mini, and Smart Turn before it
 
 A VAD answers only "has the sound stopped", and every pause inside a sentence
 looks like the end of one: the old 500 ms silence both cut people off and cost
-every turn half a second. `SmartTurn` (pipecat's Smart Turn v3.2, BSD-2-Clause,
-8 MB int8 ONNX: a Whisper-tiny encoder with a linear head over the last 8 s)
-turns the trade into a decision. In the window, an utterance it calls
-unfinished is **held** and glued to what comes next, so the silence can be 380
-ms without sending half a question; `hold_timeout_ms` (2200) releases a held
-turn when the speaker simply trails off, and `hold_max_seconds` (12) bounds
-how much can accumulate. It fails open — a model that will not load means
+every turn half a second. An end-of-turn model turns the trade into a
+decision. In the window, an utterance it calls unfinished is **held** and
+glued to what comes next, so the silence can be 380 ms without sending half a
+question; `hold_timeout_ms` (2200) releases a held turn when the speaker
+simply trails off, and `hold_max_seconds` (12) bounds how much can
+accumulate. Both detectors fail open — a model that will not load means
 "complete", because answering early beats not answering.
+`turn_detection.backend` picks one (`voice/turn.py::build_turn_detector`).
 
-Its preprocessing must match pipecat's `inference.py` exactly, since the head
+**Since 2026-10-09 the detector is turn-1-mini** (p99lab, Apache-2.0, 5.3M
+parameters; `Turn1Mini`), a *streaming* model: the hearing pipeline feeds it
+every frame with its state carried and reads its score at each close
+(`HearingEvent.turn_p`), and because it keeps scoring through a hold, the
+worker's hold loop releases a held turn the moment the speaker is quiet and
+the score crosses (`_turn_score_crossed`, reason `hold_released`) instead of
+waiting out the timeout. That release is the whole gain — the measurement is
+under "Smart Turn does not hold them" below: the same mid-sentence cutoff
+rate as Smart Turn on read speech and on real conversation, with held true
+ends 70 → 3 of 400 and the end-to-commit p90 2.76 s → 1.05 s. The
+threshold is 0.06 and is not comparable to Smart Turn's: its scores are
+uncalibrated and low (a finished question ~0.16, a cut phrase 0.001). ~2 ms
+per 160 ms step on one core, whatever the utterance length.
+
+**Smart Turn v3.2** (`SmartTurn`; pipecat, BSD-2-Clause, 8 MB int8 ONNX: a
+Whisper-tiny encoder with a linear head over the last 8 s) was the detector
+from 2026-09-17 and stays selectable (`backend: smart-turn`). It is asked
+once per close, on the joined audio. Its preprocessing must match pipecat's `inference.py` exactly, since the head
 is a linear probe on a frozen encoder: keep the last 8 s, zero-pad to 128000
 samples, zero-mean/unit-variance over the *real* samples only, re-zero the
 padding, then Whisper's own log-mel — faster-whisper's `FeatureExtractor`,
@@ -577,13 +671,17 @@ audio.
 1. Not woke, not in the window or the conversation: try the transcript path
    (above). If it does not wake, drop — logged with the VAD probability, the
    utterance's wake peak and the transcript.
-2. **Smart Turn, Parakeet and the speaker embedding at once** (2026-09-24).
-   They take the same audio and used to run one after another; now
-   `asyncio.gather` runs them in threads and the gate joins them. A held turn
-   costs one wasted transcription (~60 ms CPU), and that transcript is also
-   what tells a barge-in held mid-sentence from a cough. Smart Turn is skipped
-   for a transcript wake, whose audio is already transcribed.
-3. Unfinished: hold, and glue it to what comes next. A hold whose deadline
+2. **The turn verdict, Parakeet and the speaker embedding at once**
+   (2026-09-24). They take the same audio and used to run one after another;
+   now `asyncio.gather` runs them in threads and the gate joins them. With
+   turn-1-mini the verdict is already on the event (the pipeline streamed
+   it), so nothing runs for it here; Smart Turn is run in a thread. A held
+   turn costs one wasted transcription (~60 ms CPU), and that transcript is
+   also what tells a barge-in held mid-sentence from a cough. The verdict is
+   skipped for a transcript wake, whose audio is already transcribed.
+3. Unfinished: hold, and glue it to what comes next — or, with a streaming
+   detector, release it as soon as the score crosses while the speaker is
+   quiet (`hold_released`). A hold whose deadline
    passes while the speaker is still mid-utterance is not released — that cut
    them off (9–15 of the cutoffs `vad_eval.py gate` counted); it waits for the
    utterance to close, within `hold_max_seconds`.

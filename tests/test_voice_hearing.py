@@ -258,6 +258,48 @@ def test_an_utterance_carries_the_wake_that_fell_inside_it():
     assert len(utt) == 1 and utt[0].wake is not None
 
 
+class _FakeTurnStream:
+    """push/peek like voice.turn.Turn1MiniStream: the score is the number of
+    samples heard, so a test can tell *when* it was read."""
+
+    def __init__(self):
+        self.heard = 0
+
+    def push(self, audio):
+        self.heard += int(np.asarray(audio).size)
+
+    def peek(self):
+        return float(self.heard)
+
+
+def test_an_utterance_carries_the_streamed_turn_score_read_at_its_close():
+    """A streaming end-of-turn model is fed every frame, with its state
+    carried, and read when the segmenter closes — so the score the gate sees
+    covers the stream up to the close, not the utterance's own audio."""
+    ts = _FakeTurnStream()
+    pipe = HearingPipeline(SR, segmenter=_segmenter([0.0] * 2 + [0.9] * 5 + [0.0] * 5),
+                           turn=ts)
+    rng = np.random.default_rng(5)
+    events = []
+    for i in range(12):
+        events += pipe.feed(rng.normal(0, 0.1, 512).astype(np.float32), SR)
+    utt = [e for e in events if e.kind == "utterance"]
+    assert len(utt) == 1
+    # Read at the close — 2 silent + 5 speech + 3 silence frames, so frame
+    # 10 — not at the end of the stream two frames later.
+    assert utt[0].turn_p == 10 * 512
+    assert ts.heard == 12 * 512 and pipe.cursor == 12 * 512
+
+
+def test_without_a_turn_stream_the_score_is_none():
+    pipe = HearingPipeline(SR, segmenter=_segmenter([0.0] * 2 + [0.9] * 5 + [0.0] * 5))
+    rng = np.random.default_rng(6)
+    events = []
+    for i in range(12):
+        events += pipe.feed(rng.normal(0, 0.1, 512).astype(np.float32), SR)
+    assert [e.turn_p for e in events if e.kind == "utterance"] == [None]
+
+
 def test_a_stale_wake_does_not_open_a_later_unrelated_sentence():
     """Without expiry, a wake that produced no utterance would attach itself to
     whatever anyone said next — a minute later, across the room."""

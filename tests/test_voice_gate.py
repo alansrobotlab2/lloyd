@@ -15,6 +15,7 @@ line somebody has to go and read:
     what follows, not as two half-questions.
 """
 import asyncio
+import time
 import logging
 import sys
 from pathlib import Path
@@ -232,6 +233,58 @@ def test_an_unfinished_sentence_is_held_and_sent_with_what_follows():
     posts = _hear(b)                            # second half: joined, sent
     assert posts == ["I was wondering if you could tell me about the weather tomorrow"]
     assert b.stt.calls == 3, "held half + the joined turn (+ the bare wake)"
+
+
+class _TurnStream:
+    def __init__(self, latest):
+        self.latest = latest
+
+
+def _hearing_with_turn(latest, in_speech=False):
+    h = _Hearing(in_speech)
+    h.pipeline.turn = _TurnStream(latest)
+    return h
+
+
+def test_a_held_turn_is_released_when_the_streamed_score_crosses():
+    """With a streaming end-of-turn model the hold is not a fixed wait: the
+    model keeps scoring the silence, and the moment the speaker is quiet and
+    its score crosses, the held audio is sent — as `hold_released`, which the
+    gate treats like a timeout release (no second verdict). On eot-bench
+    conversation this took held true ends from 70 to 1-3 of 400."""
+    b = _bridge(["Hey Lloyd.", "I was wondering if"], turn=_Turn([0.02]))
+    _hear(b)
+    assert _hear(b) == []
+    assert b._held.get("user-a")
+    b.smart_turn.threshold = 0.06
+    # still talking: not released, whatever the score
+    b._hearing["user-a"] = _hearing_with_turn(0.9, in_speech=True)
+    asyncio.run(_tick(b))
+    assert b._held.get("user-a")
+    # quiet, score below the threshold: not released
+    b._hearing["user-a"] = _hearing_with_turn(0.03)
+    asyncio.run(_tick(b))
+    assert b._held.get("user-a")
+    # quiet, score crossed: released before the deadline
+    b._hearing["user-a"] = _hearing_with_turn(0.07)
+    reasons = asyncio.run(_tick(b, collect=True))
+    assert not b._held.get("user-a")
+    assert reasons == ["hold_released"]
+
+
+async def _tick(b, collect=False):
+    seen = []
+    if collect:
+        orig = b._handle_utterance_event
+
+        async def spy(ev, identity):
+            seen.append(ev.utterance.reason)
+        b._handle_utterance_event = spy
+    b._flush_held_tick(time.monotonic())
+    await asyncio.sleep(0.01)
+    if collect:
+        b._handle_utterance_event = orig
+    return seen
 
 
 @pytest.mark.parametrize("text,tail", [

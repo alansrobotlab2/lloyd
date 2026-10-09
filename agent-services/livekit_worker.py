@@ -1974,6 +1974,8 @@ class RoomBridge:
             stop=self.stop_factory.create() if self.stop_factory is not None else None,
             segmenter=voice_vad.build_segmenter(self.vad_cfg),
             streaming=self.streaming_asr,
+            turn=(self.smart_turn.stream()
+                  if getattr(self.smart_turn, "streaming", False) else None),
         )
         ht = HearingThread(
             pipeline,
@@ -2329,6 +2331,41 @@ class RoomBridge:
     def _held_seconds(self, identity: str) -> float:
         return sum(h.size for h in self._held.get(identity) or []) / 16000
 
+    def _turn_score_crossed(self, identity: str) -> bool:
+        """A streaming end-of-turn model keeps scoring through a hold. Once
+        the speaker is quiet and its score has crossed the threshold, the held
+        turn is finished: release it now rather than at the timeout. Measured
+        on eot-bench conversation (2026-10-09): held true ends 70 -> 1-3 of
+        400 and the commit p90 2.76 s -> 0.9-1.05 s at the same cutoff rate."""
+        ht = self._hearing.get(identity)
+        try:
+            stream = ht.pipeline.turn if ht is not None else None
+            if stream is None or ht.pipeline.segmenter.in_speech:
+                return False
+            return float(stream.latest) >= float(self.smart_turn.threshold)
+        except Exception:
+            return False
+
+    def _release_held(self, identity: str, reason: str) -> None:
+        held = self._held.pop(identity, None)
+        self._held_deadline.pop(identity, None)
+        if not held:
+            return
+        audio = np.concatenate(held)
+        LOG.info("[%s] releasing %.2fs held turn from %s (%s)",
+                 self.room_name, audio.size / 16000, identity,
+                 "timeout" if reason == "hold_timeout" else "score crossed")
+        ev = HearingEvent(
+            "utterance",
+            utterance=voice_vad.Utterance(
+                audio=audio, start_sample=0, end_sample=audio.size,
+                max_prob=1.0, reason=reason,
+            ),
+        )
+        task = asyncio.create_task(self._handle_utterance_event(ev, identity))
+        self._utterance_tasks.add(task)
+        task.add_done_callback(self._handle_utterance_done)
+
     async def _flush_held_loop(self) -> None:
         """Release a held turn when the speaker simply stopped.
 
@@ -2340,38 +2377,26 @@ class RoomBridge:
         try:
             while True:
                 await asyncio.sleep(0.25)
-                now = time.monotonic()
-                for identity, deadline in list(self._held_deadline.items()):
-                    if now < deadline:
-                        continue
-                    if self._still_talking(identity) and \
-                            self._held_seconds(identity) < self._hold_max_s:
-                        # The deadline passed while they are mid-utterance: the
-                        # continuation is arriving. Releasing now cut them off
-                        # (9-15 of the cutoffs in scripts/voice/vad_eval.py
-                        # `gate`, 2026-09-24); the utterance closing will join
-                        # the hold as usual. hold_max_seconds still bounds it.
-                        self._held_deadline[identity] = now + 0.25
-                        continue
-                    held = self._held.pop(identity, None)
-                    self._held_deadline.pop(identity, None)
-                    if not held:
-                        continue
-                    audio = np.concatenate(held)
-                    LOG.info("[%s] releasing %.2fs held turn from %s (timeout)",
-                             self.room_name, audio.size / 16000, identity)
-                    ev = HearingEvent(
-                        "utterance",
-                        utterance=voice_vad.Utterance(
-                            audio=audio, start_sample=0, end_sample=audio.size,
-                            max_prob=1.0, reason="hold_timeout",
-                        ),
-                    )
-                    task = asyncio.create_task(self._handle_utterance_event(ev, identity))
-                    self._utterance_tasks.add(task)
-                    task.add_done_callback(self._handle_utterance_done)
+                self._flush_held_tick(time.monotonic())
         except asyncio.CancelledError:
             return
+
+    def _flush_held_tick(self, now: float) -> None:
+        for identity, deadline in list(self._held_deadline.items()):
+            if now < deadline:
+                if self._turn_score_crossed(identity):
+                    self._release_held(identity, "hold_released")
+                continue
+            if self._still_talking(identity) and \
+                    self._held_seconds(identity) < self._hold_max_s:
+                # The deadline passed while they are mid-utterance: the
+                # continuation is arriving. Releasing now cut them off
+                # (9-15 of the cutoffs in scripts/voice/vad_eval.py
+                # `gate`, 2026-09-24); the utterance closing will join
+                # the hold as usual. hold_max_seconds still bounds it.
+                self._held_deadline[identity] = now + 0.25
+                continue
+            self._release_held(identity, "hold_timeout")
 
     def _wake_peak(self, identity: str) -> tuple[str, float]:
         """Best wake score seen since the last drop, for the diag line."""
@@ -2478,7 +2503,7 @@ class RoomBridge:
         wake = self.wake
         closed_at = ev.at
         tl = TurnTimeline()
-        tl.mark("speech_end", closed_at - (0.0 if utt.reason in ("hold_timeout", "max_duration")
+        tl.mark("speech_end", closed_at - (0.0 if utt.reason in ("hold_timeout", "hold_released", "max_duration")
                                            else self._min_silence_s))
         tl.mark("vad_close", closed_at)
         utterance_start_t = closed_at - utt.duration_s
@@ -2526,13 +2551,21 @@ class RoomBridge:
         # "unfinished"; asking it again re-holds the same audio forever (the
         # e2e barge-in on 2026-09-24 looped 2.49 s of speech for 45 s).
         need_turn = (self.smart_turn is not None and early is None
-                     and utt.reason not in ("max_duration", "hold_timeout"))
+                     and utt.reason not in ("max_duration", "hold_timeout", "hold_released"))
         need_embed = self.speaker_id is not None and (woke or in_conv)
         reuse_early = early is not None and held_s == 0
 
         async def _turn():
             if not need_turn:
                 return None
+            if ev.turn_p is not None:
+                # A streaming detector already heard the stream up to this
+                # close (the hearing pipeline carries its score); a held
+                # turn's history is inside that stream, so nothing is re-run.
+                v = voice_turn.TurnVerdict(complete=ev.turn_p >= self.smart_turn.threshold,
+                                           probability=ev.turn_p, elapsed_ms=0.0)
+                tl.mark("turn_verdict")
+                return v
             v = await asyncio.to_thread(self.smart_turn.predict, audio)
             tl.mark("turn_verdict")
             return v
@@ -3280,8 +3313,10 @@ class WorkerManager:
         self.wake_factory = voice_wake.build_factory(
             self.lk_cfg.get("acoustic_wake", {}) or {}
         )
-        # Smart Turn is stateless per call and genuinely shareable.
-        self.smart_turn = voice_turn.build_smart_turn(
+        # The end-of-turn model (`turn_detection.backend`: Smart Turn v3.2 by
+        # default, or turn-1-mini). Both are stateless per `predict` call and
+        # genuinely shareable.
+        self.smart_turn = voice_turn.build_turn_detector(
             self.lk_cfg.get("turn_detection", {}) or {}
         )
         # The acoustic stop word (off unless `acoustic_wake.stop.enabled`).

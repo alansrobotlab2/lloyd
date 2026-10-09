@@ -248,6 +248,84 @@ def test_a_broken_model_fails_open():
     assert v.complete and not v.ran
 
 
+# ── turn-1-mini ──────────────────────────────────────────────────────────
+
+def _turn1mini():
+    from voice.turn import Turn1Mini
+
+    path = MODELS / "turn-1-mini" / "onnx" / "turn-1-mini.step.onnx"
+    if not path.exists():
+        pytest.skip("turn-1-mini model not present")
+    pytest.importorskip("onnxruntime")
+    m = Turn1Mini(path)
+    m.load()
+    return m
+
+
+def test_turn1mini_ranks_a_finished_question_above_a_cut_phrase():
+    """Its scores are not calibrated (the eot-bench 300 ms operating point
+    is 0.06), so this pins the ordering and the floor, not a 0.5 split."""
+    m = _turn1mini()
+    complete = m.predict(_wav("complete_16k.wav")).probability
+    cut = m.predict(_wav("incomplete_16k.wav")).probability
+    assert complete > 5 * cut and cut < 0.02
+
+
+def test_turn1mini_stream_matches_the_batch_score():
+    """The worker would feed it frame by frame with the state carried; the
+    harness scores a buffer from a zero state. Same graph, same answer."""
+    m = _turn1mini()
+    x = _wav("complete_16k.wav")
+    full = (x.size // 2560) * 2560
+    s = m.stream()
+    for i in range(0, full, 160):
+        s.push(x[i:i + 160])
+    assert abs(s.latest - m.score(x[:full])) < 1e-4
+
+
+def test_turn1mini_peek_scores_the_frames_still_short_of_a_step():
+    """The gate closes between step boundaries; `peek` answers there without
+    disturbing the stream's state, and agrees with the batch score."""
+    m = _turn1mini()
+    x = _wav("complete_16k.wav")
+    cut = (x.size // 2560) * 2560 + 1200       # 3.75 frames into a step
+    s = m.stream()
+    s.push(x[:cut])
+    before = s.latest
+    assert abs(s.peek() - m.score(x[:cut])) < 1e-4
+    assert s.latest == before                   # a peek is not a push
+
+
+def test_turn1mini_pads_a_partial_step_and_fails_open():
+    from voice.turn import Turn1Mini
+
+    m = _turn1mini()
+    v = m.predict(np.zeros(1000, dtype=np.float32))
+    assert v.ran and 0.0 <= v.probability <= 1.0
+    broken = Turn1Mini(ROOT / "does-not-exist.onnx")
+    v = broken.predict(np.zeros(SR, dtype=np.float32))
+    assert v.complete and not v.ran
+
+
+def test_build_turn_detector_picks_the_backend():
+    from voice.turn import build_turn_detector, SmartTurn, Turn1Mini
+
+    assert build_turn_detector({"enabled": False}) is None
+    if not (MODELS / "smart-turn" / "smart-turn-v3.2-cpu.onnx").exists():
+        pytest.skip("smart-turn model not present")
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("faster_whisper")
+    st = build_turn_detector({"enabled": True, "model_path": str(MODELS / "smart-turn" / "smart-turn-v3.2-cpu.onnx")})
+    assert isinstance(st, SmartTurn)
+    if (MODELS / "turn-1-mini" / "onnx" / "turn-1-mini.step.onnx").exists():
+        m = build_turn_detector({"enabled": True, "backend": "turn-1-mini",
+                                 "model_path": str(MODELS / "turn-1-mini" / "onnx" / "turn-1-mini.step.onnx"),
+                                 "threshold": 0.1})
+        assert isinstance(m, Turn1Mini) and m.threshold == 0.1
+    with pytest.raises(ValueError):
+        build_turn_detector({"enabled": True, "backend": "nope"})
+
+
 def test_the_streaming_recogniser_produces_partials_that_grow():
     """`livekit.stt.streaming` ships off, but it ships: when someone turns it on
     it must load and produce a running hypothesis, not fail on first audio."""

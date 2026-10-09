@@ -62,6 +62,9 @@ class HearingEvent:
                       interruption timeout, for the utterance to decide.
       ``utterance`` — a closed span of speech. `utterance` is set, and `wake`
                       carries the detection that fell inside it, if any.
+                      `turn_p` is the streaming end-of-turn score at the
+                      close when the pipeline carries one (turn-1-mini);
+                      None means the gate asks its detector itself.
       ``partial``   — a running hypothesis from the streaming recogniser.
       ``stop``      — the acoustic stop word ("stop talking", "Lloyd, stop",
                       "hold on") while armed, i.e. while Lloyd is speaking.
@@ -75,6 +78,7 @@ class HearingEvent:
     utterance: Optional[Utterance] = None
     wake: Optional[WakeDetection] = None
     text: str = ""
+    turn_p: Optional[float] = None
 
 
 class HearingPipeline:
@@ -92,9 +96,16 @@ class HearingPipeline:
         stop: Optional[Any] = None,
         segmenter: Optional[SileroSegmenter] = None,
         streaming: Optional[Any] = None,
+        turn: Optional[Any] = None,
     ) -> None:
         self.resampler = StreamResampler(in_rate)
         self.wake = wake
+        #: voice/turn.py::Turn1MiniStream (or anything with push/peek): a
+        #: streaming end-of-turn model fed every frame with its state carried,
+        #: because its answer at a close depends on the ~7 s before it —
+        #: scored from a zero state over the utterance alone it disagrees with
+        #: itself on 13-40% of closes (measured 2026-10-09, vad_eval streams).
+        self.turn = turn
         #: voice/wake.py::StopDetector — fed every frame, reports only while
         #: the worker has armed it (Lloyd is speaking).
         self.stop = stop
@@ -147,6 +158,15 @@ class HearingPipeline:
                 LOG.warning("stop word failed: %s — disabling it", e)
                 self.stop = None
 
+        # 1c. The streaming end-of-turn model, same audio, same clock; read
+        #     at each close below.
+        if self.turn is not None:
+            try:
+                self.turn.push(audio)
+            except Exception as e:
+                LOG.warning("turn stream failed: %s — the gate will ask the detector itself", e)
+                self.turn = None
+
         # 2. Segmentation.
         utterances = self.segmenter.feed(audio)
 
@@ -190,8 +210,14 @@ class HearingPipeline:
 
         for utt in utterances:
             det = self._claim_wake(utt)
+            turn_p = None
+            if self.turn is not None:
+                try:
+                    turn_p = float(self.turn.peek())
+                except Exception as e:
+                    LOG.warning("turn stream peek failed: %s", e)
             events.append(HearingEvent("utterance", utterance=utt, wake=det,
-                                       sample=utt.end_sample))
+                                       sample=utt.end_sample, turn_p=turn_p))
             if self.streaming is not None and self._stream_handle is not None:
                 try:
                     self.streaming.reset(self._stream_handle)

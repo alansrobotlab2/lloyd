@@ -1113,17 +1113,28 @@ livekit:
     min_utterance_ms: 250
     max_utterance_ms: 30000
   turn_detection:
-    # Smart Turn v3.2 (pipecat, BSD-2-Clause): "did the speaker finish?", from
-    # the waveform rather than the transcript. Validated on this box against
-    # synthesized speech — a complete question scored 0.976 and the same voice
-    # cut mid-phrase scored 0.019.
+    # "Did the speaker finish?", from the waveform rather than the transcript.
+    # When the model says the thought is unfinished, the audio is held and
+    # glued to whatever comes next, so a breath mid-sentence no longer sends
+    # half a question to the model.
     #
-    # This is what lets min_silence_ms be short. When it says the thought is
-    # unfinished, the audio is held and glued to whatever comes next, so a
-    # breath mid-sentence no longer sends half a question to the model.
+    # backend: turn-1-mini (p99lab, Apache-2.0, 5.3M, streaming, since
+    # 2026-10-09) | smart-turn (pipecat's Smart Turn v3.2, BSD-2-Clause, the
+    # detector until then; model_path agent-services/models/smart-turn/
+    # smart-turn-v3.2-cpu.onnx, threshold 0.5). turn-1-mini is fed every frame
+    # by the hearing pipeline and keeps scoring through a hold, so a held turn
+    # is released the moment its score crosses instead of at hold_timeout_ms.
+    # Measured through scripts/voice/vad_eval.py gate (voice.md): the same
+    # mid-sentence cutoff rate as Smart Turn on read speech and on eot-bench
+    # conversation, with held true ends 70 -> 3 of 400 and the end-to-commit
+    # p90 2.76 s -> 1.05 s. Its scores are NOT calibrated like Smart Turn's
+    # (a finished question reads ~0.16, a cut phrase 0.001): 0.06 is the
+    # measured operating point, 0.04 is ~150 ms faster at the tail for half a
+    # point more cutoffs, 0.10+ holds more than it should.
     enabled: true
-    model_path: agent-services/models/smart-turn/smart-turn-v3.2-cpu.onnx
-    threshold: 0.5
+    backend: turn-1-mini
+    model_path: agent-services/models/turn-1-mini/onnx/turn-1-mini.step.onnx
+    threshold: 0.06
     # How long a held turn waits for its continuation before being released
     # anyway. "Unfinished" is also what a trailing-off sentence looks like, and
     # without this one of those would sit in the buffer indefinitely.

@@ -120,11 +120,20 @@ def compare_wake(args) -> int:
 
 
 def run(args) -> int:
+    import yaml
     from voice import asr as voice_asr
-    from voice.turn import SmartTurn
+    from voice.turn import build_turn_detector
 
     f = factory(args.threshold)
-    turn = SmartTurn(MODELS / "smart-turn" / "smart-turn-v3.2-cpu.onnx")
+    # The configured detector (turn_detection.backend), so a replay reproduces
+    # the worker's decision: turn-1-mini is streamed through the pipeline and
+    # read at each close, Smart Turn is asked on the utterance's audio.
+    turn_cfg = dict(yaml.safe_load((ROOT / "config.yaml").read_text())["livekit"]["turn_detection"])
+    turn_cfg["enabled"] = True
+    mp = Path(turn_cfg.get("model_path", "")).expanduser()
+    turn_cfg["model_path"] = str(mp if mp.is_absolute() else ROOT / mp)
+    turn = build_turn_detector(turn_cfg)
+    turn_streams = getattr(turn, "streaming", False)
     rec = voice_asr.build_recognizer(
         {"backend": "parakeet", "model_dir": str(MODELS / "parakeet-tdt-v3")}
     ) if args.asr else None
@@ -134,7 +143,8 @@ def run(args) -> int:
         lead = room_tone(args.lead, rng)
         stream = np.concatenate([lead, audio, room_tone(1.0, rng)])
         pipe = HearingPipeline(16000, wake=f.create(),
-                               segmenter=SileroSegmenter(threshold=args.vad))
+                               segmenter=SileroSegmenter(threshold=args.vad),
+                               turn=turn.stream() if turn_streams else None)
         print(f"== {path}  ({audio.size / 16000:.2f}s)")
         for i in range(0, stream.size, 160):
             for ev in pipe.feed(stream[i:i + 160], 16000):
@@ -146,7 +156,12 @@ def run(args) -> int:
                     print(f"  {t:6.2f}s  speech")
                 elif ev.kind == "utterance":
                     u = ev.utterance
-                    v = turn.predict(u.audio)
+                    if ev.turn_p is not None:
+                        from voice.turn import TurnVerdict
+                        v = TurnVerdict(complete=ev.turn_p >= turn.threshold,
+                                        probability=ev.turn_p, elapsed_ms=0.0)
+                    else:
+                        v = turn.predict(u.audio)
                     line = (f"  {t:6.2f}s  utterance {u.duration_s:.2f}s "
                             f"vad={u.max_prob:.2f} wake={'Y' if ev.wake else '-'} "
                             f"turn={'done' if v.complete else 'open'}:{v.probability:.2f}")
