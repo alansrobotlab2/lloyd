@@ -2177,12 +2177,14 @@ def _checker_round(tmp_path, *, touch_checker: bool):
     return live, base, changed
 
 
-def _review_rung(tmp_path, monkeypatch, live, base, changed):
+def _review_rung(tmp_path, monkeypatch, live, base, changed, *, claimed=None):
     """Run the real review rung over `live` with only the model turn stubbed.
 
     `honesty_prechecks_with_standing` is deliberately NOT stubbed: which severity
     a finding ends up with, and whether `decide` may refuse on it, is what these
-    two tests are about, and stubbing it would test the stub.
+    two tests are about, and stubbing it would test the stub. `claimed` replaces
+    the grader's clause answers, which is how a caller puts a citation the live
+    rail cannot resolve into a note (#2494).
     """
     from scripts.automod import backlog as _BK, review as RV
     events: list[dict] = []
@@ -2198,7 +2200,8 @@ def _review_rung(tmp_path, monkeypatch, live, base, changed):
     monkeypatch.setattr(RV, "grade", lambda **kw: {
         "ok": True, "error": "", "session_id": "sess_h", "structured_error": "",
         "structured": {"premise": "sound", "summary": "APPROVE — both clauses met",
-                       "clauses": _CLAIMED, "test_honesty": [], "seams_unverified": []},
+                       "clauses": _CLAIMED if claimed is None else claimed,
+                       "test_honesty": [], "seams_unverified": []},
         "text": "", "stop_reason": "stop", "duration_s": 1.0})
     # `rung_review` imports `backlog` inside the method, so the patch goes on the
     # module object rather than an attribute of `gate`, and the item these rounds
@@ -2253,6 +2256,65 @@ def test_the_same_quoted_pattern_still_refuses_a_round_that_leaves_the_checker_a
     assert all("demoted_from" not in p for p in blocking), blocking
     assert ok is False and "review sent it back" in detail, detail
     assert data["honesty_note"] == "", "nothing to explain when nothing was demoted"
+
+
+# Built at runtime so THIS diff carries no sha-shaped token of its own: the LIVE
+# rail grading this round is the version that refuses a note for naming one, and
+# this round edits that rail (#2494).
+_PHANTOM_SHA = "0f" * 6
+_CLAIMED_SHA = [{"clause": i, "verdict": "met", "evidence_path": "app/x.py",
+                 "evidence_line": 3, "test_node_id": "tests/test_target.py::test_new_pattern",
+                 "how_verified": "read",
+                 "note": f"the pin is the token {_PHANTOM_SHA}, which no repo resolves"}
+                for i in (1, 2)]
+
+
+def test_a_review_that_stood_the_sha_rail_down_says_so_on_the_row(tmp_path, monkeypatch):
+    """A PASS that leaned on a demoted citation and a PASS the rail agreed with
+    must not be the same sentence (#2494 clause 3).
+
+    This is the boundary the unit tests cannot cross: `rung_review` builds the
+    row, so only the real rung shows that `parse_review`'s `citation_note`
+    reaches `honesty_note` — the field the landing report and `gate.json` read —
+    beside the honesty one, and that the demoted finding still rides to the
+    ledger on its clause entry. Both clauses are `met` here, which is precisely
+    the state #2492's rounds reached and lost.
+    """
+    live, base, changed = _checker_round(tmp_path, touch_checker=True)
+    ok, detail, data, events, _ = _review_rung(tmp_path, monkeypatch, live, base, changed,
+                                               claimed=_CLAIMED_SHA)
+
+    assert ok is True, f"the rail this round edits cannot void its own grading: {detail}"
+    note = data["honesty_note"]
+    assert note, "a review that stood a rail down cannot look silent"
+    assert "sha citation rail stale-by-construction" in note, note
+    assert "scripts/automod/review.py" in note, "the note names the rail file it stands down"
+    assert "2 clause(s)" in note, note
+    assert "honesty checker stale-by-construction" in note and " | " in note, \
+        "the two standing sentences share the field, neither overwrites the other"
+    assert "sha citation rail" in detail, "the sentence reaches the rung's own detail"
+    cited = [c for c in events[-1]["clauses"] if c.get("citation_advisory")]
+    assert len(cited) == 2, events[-1]["clauses"]
+    assert all(_PHANTOM_SHA in c["citation_advisory"][0] for c in cited), cited
+    assert all(not c.get("citation_unresolved") for c in events[-1]["clauses"]), \
+        "a demoted finding never lands on the key that refuses"
+
+
+def test_a_review_the_sha_rail_still_voids_carries_no_standing_note(tmp_path, monkeypatch):
+    """The other half at the row: the byte-identical grader answers on a round
+    that leaves both rail modules out of its diff, and the grading is voided
+    exactly as it was on `SM_20261009_175904` — `external_blocker`, no attempt
+    spent, and no standing note, because nothing was demoted (#2494 clause 2's
+    second half, measured where the void actually happens).
+    """
+    live, base, changed = _checker_round(tmp_path, touch_checker=False)
+    ok, detail, data, _events, _ = _review_rung(tmp_path, monkeypatch, live, base, changed,
+                                                claimed=_CLAIMED_SHA)
+
+    assert ok is False and data["external_blocker"] is True, detail
+    assert _PHANTOM_SHA in detail, "the void names the token it could not resolve"
+    assert "sha citation rail" not in str(data.get("honesty_note", "")), \
+        "the void path returns before any note is built: nothing was demoted"
 
 
 

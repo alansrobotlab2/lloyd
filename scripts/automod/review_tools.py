@@ -169,6 +169,13 @@ def grade_commit(*, repo: Path, item_id: int, parent: str, commit: str, changed_
             return {"error": "unusable review object", "session_id": res.get("session_id")}
         seams_policy = seams_policy or RV.seams_policy()
         kind, findings = RV.decide(parsed, pre, policy=seams_policy)
+        # The sha citation rail's standing note joins the honesty one for the same
+        # reason #1755 gave the prechecks here: a scorecard row that scored a
+        # landing which edited the rail has to say the rail stood down, or the
+        # backfill grades history by a stricter engine than production runs (#2494).
+        cite = str((parsed or {}).get("citation_note") or "")
+        honesty_note = (f"{honesty_note} | {cite}" if honesty_note and cite
+                        else cite or honesty_note)
         return {**parsed, "kind": kind, "findings": findings, "prechecks": pre,
                 # Named in the record beside the demoted findings, so a backfilled
                 # `pass` on a round that edited the checker reads differently from

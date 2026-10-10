@@ -210,6 +210,57 @@ def test_the_backfill_grants_the_same_standing_and_no_more(world, tmp_path):
     assert keep["kind"] == "retry" and keep["honesty_note"] == "", keep["kind"]
 
 
+# Built at runtime so this diff carries no sha-shaped token: the rail that grades
+# a note naming one is the unfixed one until #2494 lands.
+_PHANTOM_SHA = "0f" * 6
+
+
+def _cited():
+    """The #2492 shape: every clause `met`, cited correctly, and a note quoting a
+    token no repo resolves."""
+    obj = _met()
+    for c in obj["clauses"]:
+        c["note"] = f"the pin is the token {_PHANTOM_SHA}, which no repo resolves"
+    return obj
+
+
+def test_the_scorecard_says_when_the_sha_rail_stood_down(world):
+    """A backfilled row must not grade history by a stricter engine than
+    production runs (#2494, beside #1755's same rule for the prechecks).
+
+    Both landings here cite the identical phantom token. The one whose recorded
+    diff edits `scripts/automod/review.py` is graded by the module that landing
+    replaced, so its citation finding is advisory, the scorecard records a pass,
+    and the row carries the standing sentence naming the file — the field the
+    scorecard report reads. The other keeps its non-pass and its silence: with
+    nothing demoted there is nothing to explain.
+    """
+    repo = world["repo"]
+    (repo / "scripts" / "automod").mkdir(parents=True, exist_ok=True)
+    (repo / "scripts" / "automod" / "review.py").write_text("PATTERN = 1\n", encoding="utf-8")
+    git(repo, "add", "-A"); git(repo, "commit", "-q", "-m", "round that edits the checker")
+    head = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    out = RT.grade_commit(repo=repo, item_id=9, parent=world["commit"], commit=head,
+                          changed_paths=["scripts/automod/review.py", "app/m.py", "tests/test_m.py"],
+                          label="cite-stale", grader=_stub(_cited()))
+    assert out["kind"] == "pass", f"a citation the round's rail cannot resolve cannot void it: {out}"
+    assert "sha citation rail stale-by-construction" in out["honesty_note"], out["honesty_note"]
+    assert "scripts/automod/review.py" in out["honesty_note"], out["honesty_note"]
+    assert "2 clause(s)" in out["honesty_note"], out["honesty_note"]
+    assert all(c.get("citation_advisory") and not c.get("citation_unresolved")
+               for c in out["clauses"]), out["clauses"]
+
+    keep = RT.grade_commit(repo=repo, item_id=9, parent=world["commit"], commit=head,
+                           changed_paths=["app/m.py", "tests/test_m.py"],
+                           label="cite-plain", grader=_stub(_cited()))
+    assert _PHANTOM_SHA in " ".join(keep["unreliable"]), \
+        "a landing that leaves the rail alone is still voided by it"
+    assert keep["citation_note"] == "" and not any(
+        c.get("citation_advisory") for c in keep["clauses"]), "nothing was demoted"
+    assert "sha citation rail" not in keep["honesty_note"], keep["honesty_note"]
+
+
 # ── replaying the #1903 confirmation pass over recorded blocks ────────────
 
 def _review_row(round_id, *, kind="retry", blocking=True, findings, head, item_id=9, ts=1.0):

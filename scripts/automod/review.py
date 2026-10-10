@@ -129,6 +129,52 @@ HONESTY_SEVERITIES = ("blocking", "advisory")
 _SHA_TOKEN_RX = re.compile(
     r"\b(?=[0-9a-f]{7,40}\b)(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")
 _SHA_RAIL_MAX_TOKENS = 8
+
+#: The files whose code decides whether a grader's citations are believed: the
+#: sha rail lives in `review.py`, and the rung that voids on its answer lives in
+#: `gate.py`. Same reason as :data:`HONESTY_STALE_MODULES` — the gate process
+#: imports these from the LIVE checkout, because a round worktree has no
+#: `.venvs/` to run under, so only the file ARGUMENTS point at the round while
+#: the RAIL CODE is the running system's (#1755's diagnosis, which the review
+#: rung states about itself in `gate.py`: "the code deciding whether its tests
+#: can fail is the version the round replaces, and that version has no standing
+#: to refuse it"). A round editing either is graded by the version it
+#: replaces, which cannot see the rule the round is adding: #2492's fix was
+#: voided twice (`SM_20261009_175904`, sessions `20261009_111326_review_c638`
+#: and `20261009_113400_review_a244`, both `ok: False` with every clause graded
+#: `met`) on notes citing hex that round's own diff had added, and both of its
+#: review attempts went to a rail it was fixing.
+CITATION_RAIL_MODULES = ("scripts/automod/review.py", "scripts/automod/gate.py")
+
+
+def stale_citation_rail(changed_paths) -> list[str]:
+    """Which of :data:`CITATION_RAIL_MODULES` this round's own diff edits."""
+    return sorted({str(p) for p in (changed_paths or [])
+                   if str(p) in CITATION_RAIL_MODULES})
+
+
+def citation_standing_note(stale: list[str], n_clauses: int) -> str:
+    """Why the sha rail stood down, in one sentence — empty when it did not.
+
+    Non-empty only when this round edits a rail module (`stale`) AND the rail
+    actually demoted something on at least one clause (`n_clauses` > 0), so a
+    review that never met an unresolvable sha says nothing, exactly as
+    :func:`demote_stale_honesty` returns `""`. Rides onto the review row in the
+    `honesty_note` field: a bare "met 5 of 5" would otherwise be
+    indistinguishable from a review the rail agreed with, and the whole cost of
+    the standing rule is that a round can now pass with an unresolvable commit
+    citation in a note — the recorded sentence is what makes that visible
+    afterwards, to the second reader and to whoever reads `gate.json`.
+    """
+    if not stale or n_clauses <= 0:
+        return ""
+    return (f"sha citation rail stale-by-construction: this round edits "
+            f"{', '.join(stale)} and the gate runs the LIVE copy of it, so the "
+            f"unresolvable-commit citations on {n_clauses} clause(s) were demoted "
+            f"to advisory and recorded on those clause entries — the rail that "
+            f"produced them is the version this round replaces and cannot refuse "
+            f"it; the grader's own words still stand on each one")
+
 # A grader note denying that the diff added a test, in the two shapes the
 # 2026-09-24 refusal used. `\bno\b` is deliberate: `adds nothing to the config`
 # is a true observation about a diff and must not read as a denial.
@@ -2829,6 +2875,19 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     Citations are validated on EVERY verdict, not only `met` (see
     `unresolved_shas`).
 
+    One exception, and it is #1755's rule rather than a new idea: when
+    `changed_paths` names a module of :data:`CITATION_RAIL_MODULES`, the
+    UNRESOLVABLE-COMMIT finding is demoted to advisory per clause
+    (`citation_advisory`, which `decide` cannot act on) and explained in the
+    returned `citation_note`, instead of voiding the grading. The gate runs the
+    LIVE copy of this file, so a round editing the rail is graded by the version
+    it replaces, and that version cannot see the rule the round is adding —
+    which is how #2492's fix was voided twice for quoting hex its own diff
+    added. No other rail is demoted: a `test_node_id` naming a file in no tree
+    and an `evidence_path` resolving to nothing are claims about the graded tree
+    that this round's edit does not touch, and they keep voiding. The exemption
+    is keyed on the diff the gate computed, never on a flag a caller could pass.
+
     `pre_existing_failures` is the tests rung's list of node ids that fail at
     base too: a `met` whose node is one of them, or sits in a file with one, is
     downgraded to `partial` (`_cites_pre_existing`).
@@ -2841,6 +2900,11 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     worktree = Path(worktree)
     changed = set(changed_tests)
     touched = changed | {str(p) for p in changed_paths or ()}
+    # The sha rail's standing rule (#2494), one step from `broken`: which rail
+    # modules THIS round edits, read off the paths the gate computed for the diff,
+    # never off a caller's flag — a round cannot grant itself the exemption.
+    rail_stale = stale_citation_rail(changed_paths)
+    rail_demoted = 0
     clauses: list[dict] = []
     downgraded: list[int] = []
     broken: dict[int, list[str]] = {}
@@ -2884,6 +2948,7 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
         # commit, branch or directory on the box and a landing sha that is not
         # an object. A `partial` bought a refusal; a phantom bought nothing.
         unresolved: list[str] = []
+        advisory: list[str] = []
         ghost = _test_file_cited(node, worktree)
         if ghost and ghost not in touched and not (worktree / ghost).exists():
             unresolved.append(f"test_node_id names {ghost}, which is not in the tree under "
@@ -2924,10 +2989,30 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
         if eof is not None:
             unresolved.append(f"evidence_line {line} is past EOF of {path} ({eof} lines at the "
                               f"graded head)")
-        for sha in unresolved_shas(note, repo):
-            unresolved.append(f"note cites commit {sha}, which `git cat-file -t` does not resolve "
-                              f"in the repo under review")
-            broken[idx] = unresolved
+        # The sha rail's verdict on THIS note, computed by the detector whether or
+        # not this round has the standing to be refused on it — `unresolved_shas`
+        # is never told about `changed_paths` (clause 4: the detector stays whole
+        # and the caller decides).
+        sha_finding = [f"note cites commit {sha}, which `git cat-file -t` does not resolve "
+                       f"in the repo under review" for sha in unresolved_shas(note, repo)]
+        if sha_finding:
+            if rail_stale:
+                # Demoted, not dropped, exactly as #1755 does for a blocking
+                # honesty finding: the sentence keeps its own words, gains the
+                # reason it cannot refuse, and rides on the clause entry under a
+                # key named for its new severity, so `decide` cannot act on it
+                # while `gate.json` and the grader still show it. The accepted
+                # cost is stated in `citation_standing_note`: this is the one
+                # shape where a round editing the rail can pass on a citation no
+                # repo resolves, and the record is what makes it visible.
+                advisory.extend(f"{s} (advisory: this round edits "
+                                f"{', '.join(rail_stale)}, so the live rail that "
+                                f"produced this is the version it replaces)"
+                                for s in sha_finding)
+                rail_demoted += 1
+            else:
+                unresolved.extend(sha_finding)
+                broken[idx] = unresolved
         why: list[str] = []
         if verdict == "post_landing" and not path:
             # A `post_landing` with nothing to point at is a claim about a
@@ -2995,6 +3080,10 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                            if isinstance(raw.get("sub_verdicts"), list)
                            and len(raw["sub_verdicts"]) > 1 else {}),
                         **({"citation_unresolved": unresolved} if unresolved else {}),
+                        # The demoted sha findings (#2494): recorded on the clause
+                        # at advisory severity rather than dropped, and in a key
+                        # `decide` never reads, so a demotion can never refuse.
+                        **({"citation_advisory": advisory} if advisory else {}),
                         **({"downgraded": why} if why else {}),
                         **({"accepted": accepted} if accepted else {})})
         # #1750 — `citation_only`: demoted from the grader's `met` to `partial` by
@@ -3155,6 +3244,9 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             # Non-empty means the rung must not spend an attempt on this text:
             # the grader's evidence does not exist where it said it looked.
             "unreliable": unreliable[:8],
+            # Non-empty means the sha rail stood down on this review because the
+            # round edits it (#2494). `gate.py` puts it on the review row.
+            "citation_note": citation_standing_note(rail_stale, rail_demoted),
             # Absent means "no amendments were shown", which is the same as ok.
             "amendments_ok": amend_ok if isinstance(amend_ok, bool) else True,
             "amendments_note": " ".join(str(obj.get("amendments_note") or "").split())[:600],

@@ -2756,6 +2756,17 @@ class Gate:
             self._drop_snapshot(snapshot)
         tree_note = (f" (citations validated against {head[:8] or 'the working tree'} "
                      f"in {grade_root})")
+        # The sha citation rail's standing rule speaks in the same field as the
+        # honesty one (#2494), for the same reason: a review that PASSED with the
+        # rail stood down has to say so on the row, or "met 5 of 5" here is
+        # byte-identical to a review the rail agreed with. Recomputing
+        # `honesty_suffix` after the merge is what puts it in the rung's own
+        # detail as well as in `gate.json`, so the demotion reaches the landing
+        # report and not only the ledger.
+        citation_note = str((parsed or {}).get("citation_note") or "")
+        if citation_note:
+            honesty_note = f"{honesty_note} | {citation_note}" if honesty_note else citation_note
+            honesty_suffix = f" [honesty: {honesty_note}]"
         if parsed and parsed.get("unreliable"):
             # The grader's own evidence is not in the tree it was handed, so
             # this text is not a judgment of the diff: it is the same shape as

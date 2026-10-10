@@ -1400,6 +1400,117 @@ def test_the_sha_rail_asks_git_and_does_not_read_prose_as_a_commit(repo):
     assert "0f0f0f0f0f0f" in " ".join(loud["unreliable"]), "the lookup decides, the shape only asks"
 
 
+# Built at runtime, never spelled as a literal: a sha-shaped token written into
+# THIS diff is a token the LIVE rail refuses in a grader's note about this round,
+# and the live rail is the unfixed one this item exists to give standing (#2494).
+_PHANTOM_SHA = "0f" * 6
+_INCIDENT_SHA = "08a4f4" + "f0"
+_RAIL_NOTE = f"satisfied by a test in a prior landing (agent_mcp/facts.py:520-540, commit {_INCIDENT_SHA})"
+
+
+def _rail_graded(root, note, *, changed):
+    """One clause, cited with the note's token, graded with `changed` as the
+    diff's file list — the single input the standing rule reads. Verdict
+    `partial` and an empty `test_node_id` keep the OTHER rails (which must stay
+    untouched) out of the answer, so what comes back is the sha rail's."""
+    return RV.parse_review(
+        _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/m.py",
+              "evidence_line": 1, "note": note}),
+        worktree=root, changed_tests=["tests/test_a.py"], n_clauses=1,
+        tests_passed=True, changed_paths=changed, repo=root)
+
+
+@pytest.mark.parametrize("rail_file", list(RV.CITATION_RAIL_MODULES))
+def test_a_round_editing_the_rail_is_not_voided_by_the_rail_it_replaces(repo, rail_file):
+    """The gate grades a diff with the LIVE `review.py` (#1755's diagnosis, which
+    `gate.py` states about its own rung), so a round whose subject is the
+    unresolvable-commit rail is refused by the version it replaces — which is how
+    #2492's fix was voided on `SM_20261009_175904`, both review sessions
+    (`20261009_111326_review_c638`, `20261009_113400_review_a244`) `ok: False` with
+    every clause graded `met`. So when the round's own diff names a rail module,
+    the finding is demoted to advisory per clause and the verdict stands, exactly
+    as `demote_stale_honesty` does for the honesty checker: the sentence keeps its
+    own words, gains the reason it cannot refuse, and lands on a key `decide`
+    never reads. Both rail modules are parametrised: the rung runs either."""
+    r, _ = repo
+    graded = _rail_graded(r, f"the pin is the token {_PHANTOM_SHA} and nothing else",
+                          changed=[rail_file, "tests/test_a.py"])
+    assert graded["unreliable"] == [], graded["unreliable"]
+    assert graded["clauses"][0]["verdict"] == "partial", \
+        "a demoted finding cannot move the verdict the grader gave"
+    adv = graded["clauses"][0]["citation_advisory"]
+    assert adv and _PHANTOM_SHA in adv[0] and "advisory" in adv[0], adv
+    assert "citation_unresolved" not in graded["clauses"][0], \
+        "the demoted finding must not ride on the key that refuses"
+    assert rail_file in graded["citation_note"], graded["citation_note"]
+
+
+def test_the_same_sha_still_voids_a_round_that_leaves_the_rail_alone(repo):
+    """The scope is the DIFF, not a caller's wish: with `changed_paths` naming
+    neither rail module, the byte-identical grade still returns `unreliable`
+    naming the token, and the note the 2026-09-24 incident was refused with still
+    names the incident commit. `stale_citation_rail` is where that line is drawn,
+    and an empty diff list is the `flag=False` of the honesty rule's test — no
+    exemption, whatever else the caller passes."""
+    r, _ = repo
+    plain = ["app/m.py", "tests/test_a.py"]
+    note = f"the pin is the token {_PHANTOM_SHA} and nothing else"
+    voided = _rail_graded(r, note, changed=plain)
+    assert _PHANTOM_SHA in " ".join(voided["unreliable"]), voided["unreliable"]
+    assert "citation_advisory" not in voided["clauses"][0]
+    assert voided["citation_note"] == "", "nothing was demoted, so nothing is said"
+    incident = _rail_graded(r, _RAIL_NOTE, changed=plain)
+    assert _INCIDENT_SHA in " ".join(incident["unreliable"]), \
+        "the fabrication that earned this rail is still refused"
+    assert RV.stale_citation_rail(plain) == [] == RV.stale_citation_rail(None)
+    assert RV.stale_citation_rail(["lloyd/" + RV.CITATION_RAIL_MODULES[0]]) == [], \
+        "keyed on the repo-relative name the gate computes, exactly as "\
+        "HONESTY_STALE_MODULES is: a prefixed path claims nothing, and the "\
+        "conservative direction is no exemption"
+
+
+def test_the_sha_detector_takes_no_part_in_the_standing_rule(repo):
+    """`unresolved_shas` is never told what the diff edits — it takes no
+    `changed_paths` and its answer here is the same list both times. What differs
+    is severity alone: with the round editing a rail module, the advisory
+    sentences are the voiding ones plus the standing suffix, in the same order, so
+    the caller decided and the detector stayed whole."""
+    r, _ = repo
+    note = f"pinned by {_PHANTOM_SHA}, and the incident commit {_INCIDENT_SHA}"
+    assert RV.unresolved_shas(note, r, also=()) == [_PHANTOM_SHA, _INCIDENT_SHA]
+    voided = _rail_graded(r, note, changed=["app/m.py"])
+    stood = _rail_graded(r, note, changed=["scripts/automod/gate.py"])
+    assert [s.split(" (advisory")[0] for s in stood["clauses"][0]["citation_advisory"]] == \
+        voided["clauses"][0]["citation_unresolved"]
+    assert len(stood["clauses"][0]["citation_advisory"]) == 2
+
+
+def test_the_other_citation_rails_keep_their_standing_when_the_round_edits_the_rail(repo):
+    """The exemption is one rail's, not the rung's: a `test_node_id` naming a file
+    in no tree and an `evidence_path` resolving to nothing are claims about the
+    graded tree that editing the checker does not touch, and on a round that IS
+    editing the checker they still refuse (the node) and still get recorded (the
+    path) beside a demoted sha finding — which is why the same clause can carry
+    both keys at once."""
+    r, _ = repo
+    rail = ["scripts/automod/review.py", "tests/test_a.py"]
+    ghost = RV.parse_review(
+        _fin({"verdict": "partial", "test_node_id": PHANTOM, "evidence_path": "app/m.py",
+              "evidence_line": 1, "note": f"the token {_PHANTOM_SHA} here is demoted"}),
+        worktree=r, changed_tests=["tests/test_a.py"], n_clauses=1, tests_passed=True,
+        changed_paths=rail, repo=r)
+    assert "tests/test_facts_surviving_readers.py" in " ".join(ghost["unreliable"]), \
+        "a node naming a file in no tree still voids the review"
+    assert ghost["clauses"][0]["citation_advisory"], "the sha finding is still demoted"
+    gone = RV.parse_review(
+        _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/no_such_file.py:520-540",
+              "note": f"the token {_PHANTOM_SHA} here is demoted"}),
+        worktree=r, changed_tests=["tests/test_a.py"], n_clauses=1, tests_passed=True,
+        changed_paths=rail, repo=r)
+    assert "app/no_such_file.py" in " ".join(gone["clauses"][0]["citation_unresolved"]), \
+        "a path that resolves to nothing is still a finding about the diff"
+
+
 def test_the_note_of_an_unsound_premise_is_marked_but_its_verdict_still_stands(wt):
     """The unsound call is the grader's to make about the ITEM, and an
     unusable-citation flag must not swallow it."""
