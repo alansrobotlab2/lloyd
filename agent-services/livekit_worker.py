@@ -234,7 +234,7 @@ class TTSStreamer:
         thinking_sound: bool = False,
     ) -> None:
         self.cfg = tts_cfg
-        self.api_url = (tts_cfg.get("api_url") or "http://127.0.0.1:8090").rstrip("/")
+        self.api_url = (tts_cfg.get("api_url") or "http://127.0.0.1:8093").rstrip("/")
         self.model = tts_cfg.get("model", "qwen3-tts")
         self.voice = tts_cfg.get("voice", "clone:cullen")
         self.speed = float(tts_cfg.get("speed", 1.0))
@@ -643,6 +643,11 @@ class TTSStreamer:
                     "voice": self.voice,
                     "response_format": "pcm",
                     "stream": True,
+                    # vLLM-Omni streams Server-Sent Events unless told to send
+                    # the raw bytes (measured 2026-10-09: without this the
+                    # worker-shaped body came back `text/event-stream`); the
+                    # vendored server ignores the field. Both answer s16le.
+                    "stream_format": "audio",
                     # Always 1.0 on the wire. The server drops `speed` on its
                     # streaming path, so we apply it here; asking for it in both
                     # places would stretch twice the day the server grows support.

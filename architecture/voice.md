@@ -39,13 +39,16 @@ which is why each half can be restarted, or break, on its own.
 |---|---|---|---|
 | `agent-livekit-server` | 7880 (+7881 TCP, 50000–50100 UDP) | the LiveKit SFU binary. Never reads TTS config | `agent-services/bin/start-livekit-server.sh` |
 | `lloyd-agent-worker` | 8501 (loopback, diag only) | `agent-services/livekit_worker.py` + `agent-services/voice/` — hearing, the gate, streaming TTS | supervisord runs it directly |
-| `agent-tts` | 8090 | Qwen3-TTS, OpenAI-shaped `/v1/audio/speech` | `agent-services/bin/start-qwen3-tts.sh` |
+| `agent-tts-omni` | 8093 | Qwen3-TTS 1.7B Base on vLLM-Omni, OpenAI-shaped `/v1/audio/speech` — the server voice uses since 2026-10-09 (GPU 3) | `agent-services/bin/start-qwen3-tts-omni.sh` |
+| `agent-tts` | 8090 | the same model on the vendored transformers server (GPU 0) — the previous engine, kept as the fallback | `agent-services/bin/start-qwen3-tts.sh` |
 | `lloyd-mc:lloyd-backend` | 8080 | `/api/voice/*`, `/api/livekit/token`, the turn itself | `server.py` |
 | `lloyd-mc:lloyd-frontend` | 5173 | Vite: proxies `/api` to the backend and `/livekit` to the SFU | `npm --prefix web run dev` |
 
-Both the worker and the TTS engine are pinned to **GPU 0** (the desktop 3090)
-by `CUDA_VISIBLE_DEVICES` in their supervisord programs — see
-[[infrastructure]] for why the worker must stay off GPU 1. Every model the
+The worker and the fallback TTS engine are pinned to **GPU 0** (the desktop
+3090) by `CUDA_VISIBLE_DEVICES` in their supervisord programs — see
+[[infrastructure]] for why the worker must stay off GPU 1 — and the TTS server
+voice actually uses runs on **GPU 3**, one of the two 3090s added 2026-10-07,
+pinned by UUID. Every model the
 worker runs is CPU ONNX: Silero VAD, openWakeWord, turn-1-mini, Parakeet (via
 sherpa-onnx) and the CAM++ speaker encoder (onnxruntime). The worker's VRAM is a dependency initialising a
 CUDA context, not a model.
@@ -1122,6 +1125,39 @@ would re-extend the wake window mid-reply
 
 ### The TTS server
 
+**Since 2026-10-09 voice speaks through `agent-tts-omni`: the same
+Qwen3-TTS-12Hz-1.7B-Base and the same ICL clone, served by vLLM-Omni on
+GPU 3** (`agent-services/bin/start-qwen3-tts-omni.sh`, `.venvs/vllm-omni`:
+vllm-omni 0.30.0 with the matching vllm 0.30.0; SETUP.md "vllm-omni"). The
+engine is what changed — CUDA graphs on both stages, async codec chunking
+with a one-frame first chunk, a shared-memory hand-off from the talker to the
+codec decoder — and the measurement is in "TTS serving bake-off 2026-10-09"
+below: first byte p50 **0.09 s against 0.26 s**, RTF **0.19 against 0.49**,
+speaker similarity equal at 0.91, presence a shade better, WER within noise.
+Three things about the switch are easy to get wrong:
+
+- **The clone is an uploaded voice, registered once.** vLLM-Omni keeps
+  uploaded voices under `SPEAKER_SAMPLES_DIR` (`~/lloyd-data/tts/speakers`,
+  runtime data); `scripts/voice/register_tts_voice.py` posts the profile
+  directory's `ref.wav` and `ref_text` and round-trips a sentence. The name is
+  `clone:dave_cullen` — the exact string the worker and the guardian already
+  send — so the switch changed `livekit.tts.api_url` and nothing else. A
+  server booted with an empty speakers dir answers 4xx for the voice until
+  the script is run; the profile directory stays the one asset.
+- **Streaming must ask for raw bytes.** With `stream: true` alone vLLM-Omni
+  answers `text/event-stream` (SSE); the worker and `speak.py` now send
+  `stream_format: "audio"`, which the vendored server ignores. The output is
+  s16le at 24 kHz on both.
+- **Boot is ~2.5 min and `/health` answers only at the end**, so a request in
+  that window is a connection refusal the worker logs and drops — not the
+  120 s hang the old server's lazy load produced. `ninja` must be on the
+  child's PATH (the venv's `bin`; the launcher puts it there) or the talker's
+  compile dies with `FileNotFoundError`.
+
+`agent-tts` on :8090 keeps running as the fallback (`livekit.tts.api_url` is
+the switch; a worker restart and a guardian re-stage follow it). The rest of
+this section describes that server.
+
 `agent-tts` is a **vendored checkout** of
 `github.com/groxaxo/Qwen3-TTS-Openai-Fastapi` at
 `agent-services/services/tts/qwen3-tts/`, pinned by
@@ -1484,6 +1520,28 @@ Listen files: `~/.cache/lloyd-voice-eval/tts-bake-2026-09-24/listen/`
 `C`/`D` x-vector whole/live, `E`/`F` CosyVoice3 whole/bistream, `G` Pocket
 stock voice); per-sentence JSON, runners and the fork patch are in
 `…/results/`.
+
+### TTS serving bake-off 2026-10-09
+
+The same model and the same clone on two engines, `scripts/voice/tts_bakeoff.py`
+(ten sentences, pool paused, the first warm-up excluded), the production
+server on GPU 0 beside the desktop and vLLM-Omni on an otherwise idle GPU 3:
+
+| server | TTFB p50/p90 | RTF | clause TTFA p50 | WER | spk sim | presence 1.5–9k (2.5–3.5k / 5–9k) | VRAM |
+|---|---|---|---|---|---|---|---|
+| `agent-tts` (vendored, `max-autotune`, GPU 0) | 0.26 / 0.27 s | 0.49 | 0.58 s | 0.0% | 0.91 | −3.6 (−3.2 / −4.4) | 7.4 GB |
+| **`agent-tts-omni` (vLLM-Omni 0.30, GPU 3)** | **0.09 / 0.10 s** | **0.19** | **0.42 s** | 1.5% | 0.91 | −3.0 (−2.8 / −3.4) | 9.2 GB |
+
+The 1.5% WER is one word in 135 (the September production rows ranged
+0.7–1.5%); similarity is identical, so this is the same voice from the same
+reference, faster. In the worker's own breakdown the stage this moves is
+`first_tts_byte` (247 ms p50 on 2026-10-09 against the old server) — about
+150 ms off every spoken reply — and the lower RTF means a long reply no
+longer races its own playout. Listen set: `~/.cache/lloyd-voice-eval/
+tts-omni-2026-10-09/listen/` (`A` old server, `B` vLLM-Omni, both
+worker-shaped). The stock `qwen3_tts.yaml` deploy config was used unchanged
+(both stages at 30% of the card); `enable_prefix_caching` on the talker stage,
+which the config suggests when the reference audio repeats, is untried.
 
 ## The browser half
 

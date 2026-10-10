@@ -129,16 +129,17 @@ def start_worker(rig: Path, wt: Path) -> subprocess.Popen:
         stdout=open(rig / "logs" / "worker.log", "wb"), stderr=subprocess.STDOUT)
 
 
-def synth(text: str) -> np.ndarray:
-    """The live TTS server, in the cloned voice (so it never swaps models),
-    resampled to 48 kHz int16 as a browser would send it."""
+def synth(text: str, api_url: str = "http://127.0.0.1:8093",
+          voice: str = "clone:dave_cullen") -> np.ndarray:
+    """The live TTS server (`livekit.tts.api_url`), in the cloned voice, resampled
+    to 48 kHz int16 as a browser would send it."""
     from voice.resample import StreamResampler, to_int16
 
     req = urllib.request.Request(
-        "http://127.0.0.1:8090/v1/audio/speech",
+        f"{api_url.rstrip('/')}/v1/audio/speech",
         data=json.dumps({"model": "qwen3-tts", "input": text,
-                         "voice": "clone:dave_cullen", "response_format": "pcm",
-                         "stream": True, "speed": 1.0}).encode(),
+                         "voice": voice, "response_format": "pcm",
+                         "stream": True, "stream_format": "audio", "speed": 1.0}).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=300) as r:
         pcm = np.frombuffer(r.read(), dtype=np.int16)
@@ -401,10 +402,13 @@ def main() -> int:
     raw["livekit"]["api_secret"] = envs["LIVEKIT_API_SECRET"].strip().strip("'\"")
 
     log("synthesising the participant's lines")
-    clips = {text: synth(text) for _, text, _, _ in SCRIPT}
+    tts = raw["livekit"].get("tts", {}) or {}
+    say = lambda t: synth(t, api_url=tts.get("api_url", "http://127.0.0.1:8093"),  # noqa: E731
+                          voice=tts.get("voice", "clone:dave_cullen"))
+    clips = {text: say(text) for _, text, _, _ in SCRIPT}
     for _, opener, inter, _, _ in OVERLAPS:
-        clips[opener] = synth(opener)
-        clips[inter] = synth(inter)
+        clips[opener] = say(opener)
+        clips[inter] = say(inter)
 
     canary = Canary(rig, wt, python=LIVE_PY, backend_port=BACKEND_PORT,
                     mcp_port=MCP_PORT, autorestart=False)

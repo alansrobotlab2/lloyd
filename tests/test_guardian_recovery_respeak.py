@@ -85,7 +85,7 @@ def _dead_endpoint(monkeypatch) -> dict:
     """Point `load_config` at a port nobody listens on, for the node that runs the worker's
     REAL failure path rather than a stub that returns what the node wanted.
 
-    `speak.DEFAULTS["api_url"]` is `http://127.0.0.1:8090`, the live `agent-tts` on this box,
+    `speak.DEFAULTS["api_url"]` is `http://127.0.0.1:8093`, the live `agent-tts-omni` on this box,
     so a node that let the real `synthesize` run would spend tens of seconds talking to the
     service under test and, on success, play audio into the room. A port bound and closed a
     moment earlier answers ECONNREFUSED — the same `[Errno 111]` the 2026-10-05 incident

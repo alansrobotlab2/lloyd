@@ -81,7 +81,10 @@ except Exception:                       # standalone / test import
 # config.yaml at stage time so the two cannot drift. They exist so a guardian
 # with no synced config still speaks in the right voice.
 DEFAULTS: dict = {
-    "api_url": "http://127.0.0.1:8090",
+    # vLLM-Omni on GPU 3 since 2026-10-09 (voice.md "The TTS server"); the
+    # vendored server stays on :8090 as the fallback. `sync-voice-config.py`
+    # overrides this from config.yaml at stage time.
+    "api_url": "http://127.0.0.1:8093",
     "model": "qwen3-tts",
     "voice": "clone:dave_cullen",
     "speed": 1.22,
@@ -743,6 +746,9 @@ def synthesize(text: str, cfg: dict, state_dir: Path | None = None) -> bytes | N
         "voice": cfg["voice"],
         "response_format": "pcm",
         "stream": True,
+        # Raw bytes, not Server-Sent Events: vLLM-Omni's default for a
+        # streaming request is SSE; the vendored server ignores the field.
+        "stream_format": "audio",
         "speed": 1.0,
     }).encode()
     req = urllib.request.Request(

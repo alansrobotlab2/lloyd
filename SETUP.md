@@ -270,7 +270,7 @@ cert**. Don't use it on a restore.
 
 ## Part 4 — Python virtual environments
 
-Five venvs under `~/lloyd/.venvs/`. All are Python 3.12 from uv.
+Six venvs under `~/lloyd/.venvs/`. All are Python 3.12 from uv.
 
 ### `lloyd` — backend, MCP aggregator, LiveKit voice worker
 
@@ -597,6 +597,31 @@ Falling back to `attention: sdpa` in the TTS `config.yaml` works and skips it.
 
 See [Part 8](#part-8--qwen3-tts) — the source directory is a **vendored upstream
 repo with local patches**, so restore it before building this venv.
+
+### `vllm-omni` — the TTS server voice uses (`agent-tts-omni`, :8093, GPU 3)
+
+Qwen3-TTS 1.7B Base served by vLLM-Omni (architecture/voice.md "The TTS
+server", 2026-10-09). The model files are the ones Part 8 puts under
+`agent-services/services/tts/qwen3-tts/models/`; this venv only serves them.
+
+```bash
+cd ~/lloyd
+uv venv .venvs/vllm-omni --python 3.12
+uv pip install --python .venvs/vllm-omni/bin/python "vllm-omni==0.30.0" "vllm==0.30.0" ninja
+.venvs/vllm-omni/bin/python -c "import vllm, vllm_omni, torch; print(vllm.__version__, vllm_omni.__version__, torch.__version__)"
+```
+
+vllm-omni does not depend on vllm on PyPI: install the **matching** vllm
+(0.30.0 for 0.30.0) by hand or the import fails. `ninja` is the inductor
+build tool; the launcher puts the venv's `bin` on PATH for it — the first boot
+without that died in the talker's compile. Then, once `agent-tts-omni` is up
+(`curl -s localhost:8093/health`, ~2.5 min after start), register the clone
+— the server keeps uploaded voices under `~/lloyd-data/tts/speakers`, runtime
+data, so after a data loss this is the step that brings the voice back:
+
+```bash
+.venvs/lloyd/bin/python scripts/voice/register_tts_voice.py --wait 300
+```
 
 ### `whisper`, `voice-mode`
 

@@ -364,6 +364,18 @@ def test_speed_is_not_asked_of_the_server():
     assert st._http.sent["stream"] is True
 
 
+def test_the_stream_asks_for_raw_bytes_not_server_sent_events():
+    """vLLM-Omni (the TTS server since 2026-10-09) answers a bare `stream: true`
+    with `text/event-stream`; `stream_format: "audio"` is what makes it send
+    the s16le the frame pump reads, and the vendored server ignores the key."""
+    import asyncio
+
+    st, _ = _streamer([_pcm(_tone(180, 0.2))])
+    asyncio.run(st._stream_utterance("hello"))
+    assert st._http.sent["stream_format"] == "audio"
+    assert st._http.sent["response_format"] == "pcm"
+
+
 def test_interrupt_does_not_leak_shaper_state_into_the_next_utterance():
     """An interrupt cancels the coroutine mid-stream. The shaper carries filter
     and overlap state, so a missed drain opens the next utterance with the tail

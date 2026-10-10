@@ -1020,7 +1020,14 @@ livekit:
       model_dir: agent-services/models/nemo-streaming-480ms
       num_threads: 2
   tts:
-    api_url: http://127.0.0.1:8090
+    # :8093 is Qwen3-TTS 1.7B Base on vLLM-Omni (agent-tts-omni, GPU 3) since
+    # 2026-10-09: same model, same clone, first byte p50 0.09 s against the
+    # vendored server's 0.26 s and RTF 0.19 against 0.49, speaker similarity
+    # equal (voice.md "The TTS server"). :8090 is that vendored server
+    # (agent-tts, GPU 0), kept running as the fallback — switch here, restart
+    # lloyd-agent-worker, re-stage the guardian. The clone must be registered
+    # on the new server once (scripts/voice/register_tts_voice.py).
+    api_url: http://127.0.0.1:8093
     model: qwen3-tts
     # Cloned voice: Dave Cullen (The Dave Cullen Show, @TheDaveCullenShow).
     # Profile: agent-services/services/tts/qwen3-tts/voice_library/profiles/dave_cullen/
