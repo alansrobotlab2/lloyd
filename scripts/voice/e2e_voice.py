@@ -46,7 +46,10 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "agent-services"))
 
 LIVE_PY = Path.home() / "lloyd" / ".venvs" / "lloyd" / "bin" / "python"
-UNTRACKED_MODELS = ("smart-turn", "parakeet-tdt-v3", "nemo-streaming-480ms", "campplus")
+# Every untracked model dir the worker loads at boot: a missing one is a boot
+# error (voice/turn.py, voice/wake.py), and a rig whose worker never starts
+# times out waiting for the agent track with nothing in its own log.
+UNTRACKED_MODELS = ("smart-turn", "turn-1-mini", "parakeet-tdt-v3", "nemo-streaming-480ms", "campplus")
 BACKEND_PORT, MCP_PORT = 18180, 18600
 PREFIX = "e2e-"
 SR = 48000
