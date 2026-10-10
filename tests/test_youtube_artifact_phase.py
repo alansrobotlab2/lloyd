@@ -25,6 +25,21 @@ scratch dir, a save step that writes into it, and ``transcript_path`` + ``transc
 the video-note front matter, with ``scripts/groundskeeper/retention-sweep.py`` owning the age
 of that directory.
 
+Backlog #2501 is the OKF half of the same artifact. Both skills ship a fenced front-matter
+template under the words "every key below", and until this round neither template carried a
+``tags:`` key — so a session that followed the template to the letter wrote a note that
+``scripts/vault/segment_scan.py`` counts as missing (it decides tags on the YAML-parsed block:
+``isinstance(tags, list) and len(tags) >= 1``), and one such note reddens the ``live_vault`` scan
+rung every scheduled job runs in its own pre-flight. What that cost on 2026-10-10: task-83's
+nightly skills pass went red in pre-flight on ``segment_scan`` exit 1, one offender —
+``knowledge/youtube/Unbiased_Bob/20261010-strata-inference-engine-dont-install.md`` — out of 892
+notes under ``knowledge/youtube/``, and the 891 that had the key had it because the model added an
+unmandated key, not because either skill asked for one. The template now ships ``tags:``, and four
+nodes here pin it from both ends: two hermetic ones over the fixture (the five shapes the scan
+decides, and the key moved out of the fence into prose), one ``live_vault`` one per skill feeding
+the bytes a session copies straight to ``segment_scan``, and one on the note the item was filed
+over.
+
 Both skills now carry a named ``## Artifact Phase`` section. This test pins it, so rewriting
 either skill cannot silently drop the requirement again. The check is expressed as a pure
 function over skill text and exercised hermetically on fixtures below — those cases RUN under
@@ -42,12 +57,17 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml  # the same parser scripts/vault/segment_scan.py applies to a note's block
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import app.data_root as dr  # noqa: E402  (needs ROOT on the path first)
+# The OKF scan #2501's seam test asks its verdict of — the same module
+# tests/test_okf_segment_producers.py imports, for the same reason: the check that goes red in a
+# scheduled pre-flight is this function, not a paraphrase of it.
+from scripts.vault import segment_scan  # noqa: E402
 
 # Vault skills first, then the repo checkout — same precedence as
 # tests/test_skill_tool_names.py and prompt_builder._load_skills_index.
@@ -89,14 +109,17 @@ def _fenced_blocks(text: str) -> list[str]:
 
 
 # Requirements that must hold INSIDE a fenced block, not merely somewhere in the file. Round
-# SM_20260914_184202 was refused for grading these two position-blind: `^transcript_path:` with
-# MULTILINE matches the key anywhere, so a rewrite that moved it out of the front-matter template
+# SM_20260914_184202 was refused for grading the two provenance keys position-blind: `^transcript_path:`
+# with MULTILINE matches the key anywhere, so a rewrite that moved it out of the front-matter template
 # the skill ships and into a sentence kept the pin green while making the key unqueryable — which
 # is the only reason #566 asks for front matter rather than prose. The scope lives here beside the
 # labels, so loosening it is one visible deletion instead of a quiet edit to a regex.
+# #2501 puts `tags` in the same set for the same reason: a skill may mention a tags list in prose
+# forever, and only the key sitting inside the template it ships is what the next note inherits.
 TEMPLATE_SCOPED = frozenset({
     "transcript_path as a front-matter key",
     "transcript_md5 as a front-matter key",
+    "tags as a front-matter key",
 })
 
 
@@ -154,6 +177,19 @@ ARTIFACT_PHASE_REQUIREMENTS: dict[str, re.Pattern[str]] = {
     # what made #448 read as satisfied while the input rotting in gitignore stayed invisible.
     "the note is durable and the scratch file disposable":
         re.compile(r"durable artifact[\s\S]{0,200}disposable|disposable[\s\S]{0,200}durable artifact"),
+
+    # --- backlog #2501: the OKF half. `scripts/vault/segment_scan.py`'s `missing_keys` decides
+    # the note's tags on the PARSED block — `not (isinstance(tags, list) and len(tags) >= 1)` —
+    # so an absent key, `tags: []` and a bare scalar are one defect, and the note that trips it
+    # reddens the `live_vault` scan rung in every scheduled job's pre-flight. TEMPLATE_SCOPED
+    # like the two provenance keys, because both skills can mention tags in prose and still ship
+    # a template with no key, which is exactly what produced the 2026-10-10 offender. The pattern
+    # accepts a non-empty flow list (`tags: [youtube, ai, …]`) or a non-empty block list
+    # (`tags:` + `- youtube`, the shape `scripts/youtube_channel_monitor.py` emits), and rejects
+    # `tags: []`, a scalar, and the absent key — the same four verdicts the scan makes.
+    "tags as a front-matter key":
+        re.compile(r"^tags:[ \t]*\[[^\]]*[^\s\[\],][^\]]*\]"
+                   r"|^tags:[ \t]*\n[ \t]*-[ \t]*\S", re.MULTILINE),
 }
 
 
@@ -248,6 +284,7 @@ The vault note is the durable artifact; the scratch file is disposable.
 ```yaml
 type: video-note
 video_id: <videoId>
+tags: [youtube, ai, <three to six topic tags>]
 transcript_path: /home/alansrobotlab/lloyd-data/_pipeline/tmp/<videoId>.txt
 transcript_md5: <md5sum computed at write time>
 ---
@@ -267,10 +304,10 @@ def test_canonical_phase_satisfies_every_requirement():
 
 
 def test_checker_is_not_vacuous():
-    """Fifteen requirements is the pin's resolution: the ten #448 clauses plus the five
-    #566 ones. A checker with one loose regex would pass a stripped skill file, which is the
-    failure this whole test exists to catch."""
-    assert len(ARTIFACT_PHASE_REQUIREMENTS) >= 15
+    """Sixteen requirements is the pin's resolution: the ten #448 clauses plus the five
+    #566 ones plus the one #2501 tags key. A checker with one loose regex would pass a
+    stripped skill file, which is the failure this whole test exists to catch."""
+    assert len(ARTIFACT_PHASE_REQUIREMENTS) >= 16
 
 
 @pytest.mark.parametrize("strip", [
@@ -283,6 +320,7 @@ def test_checker_is_not_vacuous():
     '-o "$TRANSCRIPT_DIR/%(id)s" ',
     "transcript_path: /home/alansrobotlab/lloyd-data/_pipeline/tmp/<videoId>.txt\n",
     "transcript_md5: <md5sum computed at write time>\n",
+    "tags: [youtube, ai, <three to six topic tags>]\n",
     "The vault note is the durable artifact; the scratch file is disposable.",
 ])
 def test_removing_one_requirement_is_caught(strip: str):
@@ -319,6 +357,52 @@ def test_provenance_keys_belong_in_the_fenced_template_not_in_prose():
     missing = missing_artifact_phase(moved)
     assert "transcript_path as a front-matter key" in missing, missing
     assert "transcript_md5 as a front-matter key" in missing, missing
+
+
+_TAGS_LINE = "tags: [youtube, ai, <three to six topic tags>]\n"
+
+
+def test_tags_key_says_what_the_scan_checks_for():
+    """#2501 clause 3, positive half: the graded key means the shape the enforcer accepts.
+
+    `scripts/vault/segment_scan.py::missing_keys` decides tags on the parsed mapping —
+    `not (isinstance(tags, list) and len(tags) >= 1)` — so `tags: []` and a bare scalar are the
+    same defect as no key at all, and a skill that shipped either would still redden the rung.
+    Five rewrites of the fixture's one tags line, five verdicts, one per shape, matching the
+    scan's. The block-list form is accepted too because that is the shape
+    `scripts/youtube_channel_monitor.py::paper_note_header` already emits.
+    """
+    assert "tags as a front-matter key" not in missing_artifact_phase(_CANONICAL)
+    for shape, expected in (
+            ("tags: []\n", "missing"),                       # parsed list, empty: rejected
+            ("tags: youtube\n", "missing"),                  # scalar, not a list: rejected
+            ("", "missing"),                                 # the absent key: rejected
+            ("tags:\n- youtube\n- ai\n", "ok"),              # YAML block list: accepted
+            ("tags: [youtube]\n", "ok")):                    # one-item flow list: accepted
+        text = _CANONICAL.replace(_TAGS_LINE, shape)
+        assert text != _CANONICAL, f"shape {shape!r} was not substituted; the case proves nothing"
+        verdict = "missing" if "tags as a front-matter key" in missing_artifact_phase(text) else "ok"
+        assert verdict == expected, (
+            f"a tags value written {shape!r} was judged {verdict}, expected {expected}")
+
+
+def test_tags_key_in_prose_does_not_stand_in_for_the_template():
+    """#2501 clause 3, negative half, in the shape that has fooled this pin before.
+
+    Delete the key from the shipped template and say the same thing in the sentence immediately
+    after the closing fence — where a whole-file `^tags:` match still lands — and the checker must
+    report it missing. The 2026-10-10 offender is proof this is not hypothetical: neither skill
+    mentioned `tags` anywhere at all, so a rewrite that only ever added prose would leave the
+    writer still copying a keyless template and the rung still going red on the next digest.
+    """
+    assert any(_TAGS_LINE in b for b in _fenced_blocks(_CANONICAL)), \
+        "the fixture's tags key must sit inside a fenced block for this to mean anything"
+    moved = _CANONICAL.replace(_TAGS_LINE, "").replace(
+        "Then verify on disk:", _TAGS_LINE + "\nThen verify on disk:")
+    assert not any(_TAGS_LINE in b for b in _fenced_blocks(moved)), \
+        "the relocation must actually have happened to prove anything"
+    assert _TAGS_LINE in moved, "this is relocation, not deletion — the old check passed"
+    assert "tags as a front-matter key" in missing_artifact_phase(moved)
 
 
 # The shape the youtube-transcript-api route uses to save (its skill section, condensed): the
@@ -385,8 +469,129 @@ def test_extraction_skill_states_the_artifact_phase(skill: str):
         "A transcript digest written only to the chat transcript is lost when the session "
         "ends (backlog #448); the phase must name a vault path, a verification step, and "
         "the path report — and per #566 the scratch dir, the save form its own extraction "
-        "route uses, and the two transcript provenance keys."
+        "route uses, and the two transcript provenance keys; and per #2501 the tags key whose "
+        "absence is what reddened the live_vault OKF scan on 2026-10-10."
     )
+
+
+# ---------------------------------------------------------------------------
+# the seam between the shipped template and the check that rejects its output (#2501)
+#
+# Three actors, three files, one contract, and none of them in the same process or the same
+# day: an extraction session copies the fenced front-matter template out of
+# ``skills/<skill>/SKILL.md`` (a live vault file no round under test controls, hence
+# ``live_vault``); the note it writes lands in ``~/obsidian/knowledge/youtube/``; and
+# ``scripts/vault/segment_scan.py`` in THIS repo decides, on the YAML-parsed block, whether that
+# note carries a ``tags`` list — the rung named ``live_vault`` that every scheduled job runs in
+# its own pre-flight. Grading the template with this file's regex alone cannot notice that a
+# regex and a YAML parser disagree about a shape, so the case below feeds the enforcer bytes
+# assembled from the template it is meant to ship and asserts the verdict it returns. The 2026-10-10
+# offender got past the prose and past the model's good intentions; only this pair of verdicts
+# says the writer can no longer produce one.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.live_vault
+@pytest.mark.parametrize("skill", SKILLS_UNDER_TEST)
+def test_a_note_copied_from_the_shipped_template_passes_the_okf_scan(skill: str, tmp_path):
+    """#2501 clauses 1 and 2, read off the enforcer rather than a paraphrase of it.
+
+    `[youtube-transcript]` is clause 1, `[youtube-content]` is clause 2: each one's shipped
+    front-matter template must carry a `tags:` key holding a non-empty list that includes
+    `youtube`, beside the keys it already had. Both are graded here per skill, on the bytes a
+    session actually copies — placeholders and all, since the scan matches `STRICT_FM_RE` and
+    `yaml.safe_load`s the block rather than reading any prose.
+
+    Backlog #2501's acceptance is `segment_scan.py --list` exiting 0 over the vault, and the
+    reason it printed 1 was a note assembled from exactly one of these templates, one key short.
+    So three verdicts are asserted here: the block still matches the OKF readers' own regex, the
+    parsed `tags` is a non-empty list naming `youtube`, and `missing_keys` calls the note clean
+    on both halves.
+    """
+    text = _require_skill_text(skill)
+    blocks = [b for b in _fenced_blocks(text) if "type: video-note" in b]
+    assert len(blocks) == 1, (
+        f"skills/{skill}/SKILL.md ships {len(blocks)} fenced blocks declaring "
+        "`type: video-note`; a session cannot be tested against a template it might not copy")
+    note = tmp_path / "assembled.md"
+    note.write_text(blocks[0] + "\n# body mentioning <videoId>\n", encoding="utf-8")
+
+    m = segment_scan.STRICT_FM_RE.match(note.read_text(encoding="utf-8"))
+    assert m, (
+        f"a note assembled from skills/{skill}/SKILL.md's template has no front matter that "
+        "scripts/vault/validate_okf.STRICT_FM_RE can match, so no OKF reader sees its keys at all")
+    try:
+        fm = yaml.safe_load(m.group(1))
+    except yaml.YAMLError as exc:
+        pytest.fail(f"skills/{skill}/SKILL.md's template does not parse the way "
+                    f"segment_scan.py parses it (yaml.safe_load): {exc}")
+    tags = fm.get("tags") if isinstance(fm, dict) else None
+    assert isinstance(tags, list) and len(tags) >= 1, (
+        f"skills/{skill}/SKILL.md ships `tags:` as {tags!r}; the scan wants a list of >= 1 item")
+    assert "youtube" in tags, f"`youtube` is not in the shipped tags list {tags}"
+
+    no_segment, no_tags = segment_scan.missing_keys(note)
+    assert (no_segment, no_tags) == (False, False), (
+        f"a note written straight from skills/{skill}/SKILL.md's front-matter template is "
+        f"counted by scripts/vault/segment_scan.py as missing segment={no_segment}, "
+        f"tags={no_tags} — the failure backlog #2501 was filed for")
+
+    # The control that makes every assertion above falsifiable: the same bytes with the tags line
+    # deleted must come back missing. Without it this node would pass on a scan that had stopped
+    # reading the block at all, which is precisely how #2501's author had to re-derive the
+    # offender by hand when the counts said 1 and named nothing.
+    stripped = "\n".join(ln for ln in blocks[0].splitlines() if not ln.startswith("tags:"))
+    assert stripped != blocks[0], "the template carries no `tags:` line to strip: clauses 1/2 broke"
+    note.write_text(stripped + "\n# body mentioning <videoId>\n", encoding="utf-8")
+    assert segment_scan.missing_keys(note)[1] is True, (
+        "the scan reported the tags-stripped note as conformant, so the assertion above is "
+        "reading a check that no longer checks")
+
+
+# The note backlog #2501 was filed over, named in the item by path. `_OFFENDER.relpath()` is what
+# the failing rung printed, so this is the file the clause is about rather than one like it.
+_OFFENDER = (Path("obsidian") / "knowledge" / "youtube" / "Unbiased_Bob"
+             / "20261010-strata-inference-engine-dont-install.md")
+
+
+@pytest.mark.live_vault
+def test_the_note_that_reddened_the_scan_is_conformant_and_keeps_its_other_keys():
+    """#2501 clause 4, pinned at the artifact itself.
+
+    `tests/test_okf_segment_producers.py::test_scan_exits_0_on_the_live_vault` already walks the
+    whole vault, so this is not a second corpus scan. It pins the thing that scan cannot say, and
+    that the item explicitly demanded: the note was repaired by ADDING a `tags:` list, not by
+    losing the fields that make it a video note or the body that makes it findable. So the twelve
+    keys the extraction template ships are all still there beside the tags, the parsed `tags` is a
+    non-empty list, the raw video id is still in the body, and `missing_keys` calls the file clean.
+
+    The other half of the clause — that no OTHER key and no body line moved — is a git fact about
+    the repair, not a property of the finished file: vault commit `0b22f908` (autonomy-data-pipeline,
+    2026-10-10 09:14 -0700) inserted exactly one line, which a reader re-checks with
+    `git -C ~/obsidian diff 66e40d32 HEAD -- knowledge/youtube/Unbiased_Bob/20261010-strata-inference-engine-dont-install.md`
+    → 1 file changed, 1 insertion. This node asserts what a file can prove; the diff is cited, not
+    duplicated.
+    """
+    note = Path.home() / _OFFENDER
+    assert note.is_file(), (
+        f"{note} is gone. The clause-4 witness this node reads no longer exists, so either the "
+        "note moved or the item's premise did — re-read #2501 before editing this line")
+    assert segment_scan.missing_keys(note) == (False, False), (
+        "scripts/vault/segment_scan.py counts the note #2501 was filed over as missing its "
+        "segment or tags again — the live_vault OKF rung is red on it")
+    text = note.read_text(encoding="utf-8")
+    m = segment_scan.STRICT_FM_RE.match(text)
+    assert m, "the note's front matter no longer matches the OKF readers' regex"
+    fm = yaml.safe_load(m.group(1))
+    tags = fm.get("tags")
+    assert isinstance(tags, list) and len(tags) >= 1, fm
+    shipped = {"segment", "type", "domain", "source", "video_id", "channel", "duration",
+               "extracted", "transcript_segments", "transcript_path", "transcript_md5",
+               "sponsored"}
+    assert shipped <= set(fm), f"the repair dropped keys the note was written with: {shipped - set(fm)}"
+    assert fm["type"] == "video-note" and fm["video_id"] == "i18vpg0T-mk", fm
+    assert "i18vpg0T-mk" in text[m.end():], (
+        "the body no longer names the raw video id, so `grep -rl <videoId> ~/obsidian/` "
+        "no longer finds the note — #448's greppability rule")
 
 
 # ---------------------------------------------------------------------------
