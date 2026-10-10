@@ -433,6 +433,143 @@ def test_the_shell_token_reject_drops_the_truncated_capture_and_nothing_else():
     assert "write:report(1).md" in via_shell
 
 
+# --- #2502 clause 2: an artifact step is identified by its path, not its basename -----
+#
+# `write:<basename>` was the whole identity, so a run that wrote the mandated artifact
+# somewhere else satisfied the step by writing *that filename* somewhere. That is exactly
+# what 2026-10-09's task-39 run did: `_pipeline/reflection/conversation-patterns-latest.md`
+# kept its 2026-10-08 mtime while vault commit `046959ab` committed
+# `knowledge/conversation/conversation-patterns-latest.md`, and the 10-09 run therefore sits
+# in #2502's own `learned_from` list as a run that "took" the step. The identity is now the
+# artifact's directory as well as its name — its directory and not its full path, so the
+# 2026-09-22 data-home move (`~/lloyd/_pipeline` → `~/lloyd-data/_pipeline`,
+# `architecture/data-home.md`) stays the benign root change it was before this clause.
+
+PATTERNS_BASE = "conversation-patterns-latest.md"
+LEARNED_DIR = "/home/alansrobotlab/lloyd-data/_pipeline/reflection"
+VAULT_SWAP_DIR = "/home/alansrobotlab/obsidian/knowledge/conversation"
+ROOT_MOVED_DIR = "/lloyd/_pipeline/reflection"  # where the reports lived until 2026-09-22
+
+
+def _dir_specs(count: int, *, swapped_at: int | None = None, swap_to=VAULT_SWAP_DIR):
+    """`count` runs that all write one nightly pointer, one of which writes that same
+    basename into another directory instead (`swapped_at=None` → nobody swapped)."""
+    specs = []
+    for i in range(count):
+        directory = swap_to if swapped_at == i else LEARNED_DIR
+        specs.append({
+            "run_id": f"run_pat_{i}",
+            "session_key": f"2026091{i}_08000{i}_autonomy_pat{i}",
+            "status": "success",
+            "calls": [
+                _tool("Read", path=f"{directory}/knowledge-handoff-2026-09-1{i}.md", seq=1),
+                _tool("Write", path=f"{directory}/{PATTERNS_BASE}", seq=2),
+            ],
+        })
+    return specs
+
+
+def test_a_same_basename_write_in_a_different_directory_does_not_satisfy_the_step(tmp_path):
+    """Clause 2, the 2026-10-09 shape end to end: five runs write the pointer under
+    `_pipeline/reflection/`, the sixth writes the same filename under
+    `obsidian/knowledge/conversation/`, and the detector reports the artifact step missing
+    for that run — naming the same step id the other runs learned, and saying where its own
+    write went. Before this clause the run was quiet: basename equality discharged it, which
+    is why the 10-09 recurrence needed a human reading `stat` output to be seen at all."""
+    corpus, _, _ = _corpus(tmp_path, _dir_specs(6, swapped_at=5))
+    baseline = corpus.baselines[TASK]
+    step = f"write:{PATTERNS_BASE}"
+    # The id is still the bare basename: what #2502 added is the path evidence beside it, and
+    # the whole corpus of published baselines and labelled fault labels keeps its names.
+    assert step in baseline.expected_steps, sorted(baseline.expected_steps)
+    assert baseline.artifact_paths[step] == [f"{LEARNED_DIR}/{PATTERNS_BASE}"], (
+        "five runs wrote it under `_pipeline/reflection` and the sixth under "
+        "`knowledge/conversation`: the expectation is learned from the majority, and it is a "
+        "path, which is what both new checks read"
+    )
+
+    trace = next(t for t in _traces_of(tmp_path) if t.session_key.endswith("_pat5"))
+    report = sc.score_run(trace, None, corpus, now=datetime(2026, 9, 16, tzinfo=timezone.utc))
+    assert [d.step for d in report.deviations] == [step]
+    deviation = report.deviations[0]
+    assert deviation.reason == sc.REASON_OTHER_PATH
+    assert deviation.witnessed is False, "no artifact at the learned path was written by this run"
+    assert deviation.written_elsewhere == [f"{VAULT_SWAP_DIR}/{PATTERNS_BASE}"]
+
+
+def test_a_root_move_still_leaves_the_artifact_step_satisfied(tmp_path):
+    """The over-fire control, and it is not hypothetical: the reflection reports lived under
+    `~/lloyd/_pipeline/` until the 2026-09-22 data-home move, so a baseline that spans that
+    date sees one artifact under two roots. Identity is the artifact's directory, so the root
+    may move and the step stays satisfied; only the directory that *names* the artifact
+    (`reflection` here, `conversation` in the clause-2 case) is compared."""
+    corpus, _, _ = _corpus(tmp_path, _dir_specs(6, swapped_at=5, swap_to=ROOT_MOVED_DIR))
+    for trace, run in _joined_of(tmp_path):
+        report = sc.score_run(trace, run, corpus, now=datetime(2026, 9, 16, tzinfo=timezone.utc))
+        assert report.deviations == [], (
+            f"the data-home root move was read as a dropped stage: {report.deviations}"
+        )
+
+
+def test_normalized_dir_names_two_components_and_elides_a_date_stamp():
+    """The unit edge of the identity: the artifact's own folder plus its parent, a date inside
+    a directory elided for the same reason the basename elides one, and empty for the two
+    shapes that name no directory — a bare filename, and a capture whose directory is still an
+    unexpanded expansion, which `dir_matches` reads as *no evidence* rather than as a
+    different place."""
+    assert sc.normalized_dir(f"{LEARNED_DIR}/{PATTERNS_BASE}") == "_pipeline/reflection"
+    assert sc.normalized_dir(f"{VAULT_SWAP_DIR}/{PATTERNS_BASE}") == "knowledge/conversation"
+    assert sc.normalized_dir(f"/data/runs/2026-10-07/{PATTERNS_BASE}") == "runs/<date>"
+    assert sc.normalized_dir(PATTERNS_BASE) == ""
+    assert sc.normalized_dir("") == ""
+    assert sc.normalized_dir(f"${{OUT}}/{PATTERNS_BASE}") == ""
+    # Suffix-wise, so the same directory written two depths apart is still one directory:
+    # this pair is the 2026-09-22 data-home move, and the two roots below are not.
+    assert sc.dir_matches("_pipeline/reflection", "reflection")
+    assert sc.dir_matches("_pipeline/reflection", "_pipeline/reflection")
+    assert not sc.dir_matches("_pipeline/reflection", "knowledge/conversation")
+    assert not sc.dir_matches("_pipeline/reflection", "obsidian/conversation")
+    # No evidence on either side never refutes a write; that is what keeps a truncated
+    # capture from manufacturing a deviation.
+    assert sc.dir_matches("_pipeline/reflection", "")
+    assert sc.dir_matches("", "knowledge/conversation")
+
+
+def test_write_paths_of_a_trace_record_the_captured_path_for_each_artifact(tmp_path):
+    """The other half of the seam: the paths have to survive the loader, not just the step
+    ids, or the learned path the #2502 disk witness stats would not exist. Both write shapes
+    count — the `Write` tool and a shell redirect."""
+    traj, _db = _write_corpus(tmp_path, [
+        {
+            "run_id": "run_wp",
+            "session_key": "20260910_080000_autonomy_wp",
+            "status": "success",
+            "calls": [
+                _tool("Write", path=f"{LEARNED_DIR}/{PATTERNS_BASE}", seq=1),
+                _tool("Bash", command=f"date -u +%FT%TZ > {LEARNED_DIR}/stamp-latest.md", seq=2),
+            ],
+        }
+    ])
+    traces = sc.load_traces(traj)
+    assert len(traces) == 1
+    assert traces[0].write_paths == {
+        PATTERNS_BASE: [f"{LEARNED_DIR}/{PATTERNS_BASE}"],
+        "stamp-latest.md": [f"{LEARNED_DIR}/stamp-latest.md"],
+    }, "each artifact basename must carry the path behind it, from either write shape"
+    assert f"write:{PATTERNS_BASE}" in traces[0].steps, "the id stays the basename"
+
+
+def _traces_of(root: Path):
+    return sc.load_traces(root / "trajectories")
+
+
+def _joined_of(root: Path):
+    joined, _unjoined = sc.join_runs(
+        sc.load_traces(root / "trajectories"), sc.load_runs(root / "workers.db")
+    )
+    return joined
+
+
 def test_an_error_free_trace_keeps_call_order_and_drops_a_generic_target():
     steps = sc.steps_from_tools(
         [
@@ -886,3 +1023,25 @@ def test_the_module_names_the_dependency_gate_as_another_owners_decision():
     source = MODULE_PATH.read_text(encoding="utf-8")
     assert "_is_dependency_met" in source, "the boundary is named, not implied"
     assert "depends_on" not in source, "no dependency logic may live in a trace reader"
+
+
+def test_learned_artifact_path_is_the_best_supported_location_or_nothing():
+    """Which single path the #2502 disk witness is allowed to read. `corroborated` sorts
+    best-supported first and `learned_artifact_path` takes `[0]`, so the witness stats the file
+    this task's own history writes — never an equally-named file that merely happens to be
+    fresh, which would excuse a dropped stage on someone else's artifact. An artifact with no
+    learned path gives `""`, and the witness answers None for an empty path: no path, no
+    witness, the deviation stands.
+    """
+    step = f"write:{PATTERNS_BASE}"
+    counts = {f"{LEARNED_DIR}/{PATTERNS_BASE}": 5, f"{VAULT_SWAP_DIR}/{PATTERNS_BASE}": 1}
+    assert sc.corroborated(counts) == [f"{LEARNED_DIR}/{PATTERNS_BASE}"]
+    assert sc.learned_artifact_path({step: sc.corroborated(counts)}, step) == (
+        f"{LEARNED_DIR}/{PATTERNS_BASE}"
+    )
+    # A tie keeps both locations — two runs each, so the baseline cannot say which one is the
+    # artifact — and a pair no run reached twice keeps every path, which enforces no location.
+    tie = {"/old/root/reflection": 3, "/new/root/reflection": 3}
+    assert sorted(sc.corroborated(tie)) == sorted(tie)
+    assert sc.corroborated({"only/one/run": 1}) == ["only/one/run"]
+    assert sc.learned_artifact_path({}, step) == "", "nothing learned, so no path to stat"

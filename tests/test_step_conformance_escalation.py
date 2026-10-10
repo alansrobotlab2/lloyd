@@ -55,9 +55,11 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib.util
+import os
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -530,6 +532,161 @@ def test_the_draft_is_the_only_file_the_escalation_creates(tmp_path):
     added = set(_hash_tree(tmp_path)) - before
     assert len(added) == 1, sorted(added)
     assert added.pop().startswith("escalation/"), "wrote outside the backlog directory"
+
+
+# ---------------------------------------------------------------------------
+# #2502 clause 3 — a disk witness in front of every escalation
+#
+# The trace is the only evidence the replay had, so an artifact written by a construct the
+# parser does not read (`python3 - <<'EOF'`, a helper script) read as a dropped stage, and a
+# deviation the disk disproves filed a draft anyway. Both corpora below put a real file at
+# the artifact's *learned* path — the path the other runs of that task wrote it to — and put
+# its mtime on one side or the other of `[run start − grace, run completed + grace]`:
+# the run window defaults to 2026-09-10T05:00Z→05:12Z from `base._write_corpus`, and the
+# module's own `DEFAULT_GRACE_SECONDS` is 6 h, so the window is 2026-09-09T23:00Z→
+# 2026-09-10T11:12Z. The "after the window" draw is the 2026-10-07 and 2026-10-09 shape:
+# the pointer's mtime was *later* than the flagged run, because a later night wrote it,
+# which is why the bound has to be two-sided rather than "is the file newer than nothing".
+# ---------------------------------------------------------------------------
+
+
+def _witness_specs(count, *, report_path, swapped_path=None, faulty_at):
+    """`count` runs that write the pointer at `report_path`, one of which either makes no
+    write call at all (`swapped_path=None`, the 10-07 shape) or writes the same basename at
+    `swapped_path` instead (the 10-09 shape)."""
+    report_path, swapped_path = Path(report_path), (Path(swapped_path) if swapped_path else None)
+    specs = []
+    for i in range(count):
+        faulty = i == faulty_at
+        directory = swapped_path.parent if (faulty and swapped_path) else report_path.parent
+        calls = [base._tool("Read", path=str(directory / "handoff-latest.md"), seq=1)]
+        if not faulty or swapped_path is not None:
+            calls.append(base._tool("Write", path=str(directory / report_path.name), seq=2))
+        specs.append({
+            "run_id": f"run_w_{i}",
+            "session_key": f"2026091{i}_0500{i}0_autonomy_w{i}",
+            "status": "success",
+            "source": base.TASK,
+            "task_id": 7,
+            "calls": calls,
+        })
+    return specs
+
+
+def _learned_artifact(root: Path, *, mtime: str | None) -> Path:
+    """The artifact at its learned path, materialised, with its mtime placed on whichever
+    side of the run window the test is about. `mtime=None` leaves the file at this instant."""
+    path = root / "_pipeline" / "reflection" / "report-latest.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# report\n", encoding="utf-8")
+    if mtime is not None:
+        stamp = datetime.fromisoformat(mtime).timestamp()
+        os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_an_artifact_updated_at_its_learned_path_inside_the_window_is_reported_not_escalated(
+    tmp_path, capsys
+):
+    """Clause 3, first half: the unparsed-write false alarm. The trace never names the write
+    (a helper script performed it), the artifact's own mtime says it moved inside the run's
+    window, and the deviation is reported under a reason that says so instead of filing a
+    draft. It stays a deviation and stays in `runs_flagged` — the witness is a defence
+    against escalation, not a verdict that nothing happened."""
+    corpus, backlog = tmp_path / "corpus", tmp_path / "backlog"
+    report = _learned_artifact(corpus / "store", mtime="2026-09-10T06:00:00+00:00")
+    result = _replay(corpus, _witness_specs(6, report_path=str(report), faulty_at=5))
+
+    flagged = _flagged(result)
+    assert [r["run_id"] for r in flagged] == ["run_w_5"]
+    # The unparsed run is missing two steps — the `Write` tool call and the artifact write —
+    # and only the artifact one is the subject of clause 3.
+    deviation = next(d for d in flagged[0]["deviations"] if d["step"] == "write:report-latest.md")
+    assert deviation["reason"] == sc.REASON_WITNESSED
+    assert deviation["witnessed"] is True
+    assert deviation["disk_witness"]["path"] == str(report)
+    assert deviation["disk_witness"]["mtime"] == "2026-09-10T06:00:00+00:00"
+    assert deviation["disk_witness"]["window_start"] == "2026-09-09T23:00:00+00:00"
+    assert deviation["disk_witness"]["window_end"] == "2026-09-10T11:12:00+00:00"
+    assert result["deviations_witnessed"] == 1
+    # Two deviations for that run — the artifact write and the `Write` tool call it also
+    # skipped — and the witness excuses exactly one of them. A witness that deleted the
+    # deviation from the report would hide the run from `runs_flagged`, which is the
+    # difference between "reported, not filed" and "nothing happened".
+    assert result["deviations"] == 2
+
+    assert sc.file_escalations(result, backlog_dir=backlog) == []
+    assert _drafts(backlog) == []
+
+    sc.print_replay(result)
+    printed = capsys.readouterr().out
+    assert "disk_witnessed=1" in printed, printed[-1500:]
+    assert f"reason={sc.REASON_WITNESSED}" in printed, printed[-1500:]
+    assert str(report) in printed, "the witness names the path it read"
+
+
+@pytest.mark.parametrize("mtime", ["before", "after", "absent"])
+def test_a_stale_or_absent_artifact_at_the_learned_path_still_escalates(tmp_path, mtime):
+    """Clause 3, second half: the witness must not become an amnesty. Three stale draws —
+    an mtime before the window opened, one after it closed (2026-10-07 and 2026-10-09, where
+    a *later* night advanced the pointer), and no file at the learned path at all — and each
+    still files exactly one draft, because nothing on disk proves this run wrote anything."""
+    corpus, backlog = tmp_path / "corpus", tmp_path / "backlog"
+    store = corpus / "store"
+    if mtime == "before":
+        report = _learned_artifact(store, mtime="2026-09-09T22:59:59+00:00")
+    elif mtime == "after":
+        report = _learned_artifact(store, mtime="2026-09-10T11:12:01+00:00")
+    else:
+        report = store / "_pipeline" / "reflection" / "report-latest.md"
+        assert not report.exists()
+
+    result = _replay(corpus, _witness_specs(6, report_path=str(report), faulty_at=5))
+    deviation = next(d for d in _flagged(result)[0]["deviations"]
+                     if d["step"] == "write:report-latest.md")
+    assert deviation["disk_witness"] is None, (
+        f"{mtime}: a witness was recorded for an mtime outside the run's window"
+    )
+    assert deviation["witnessed"] is False, f"{mtime}: a stale mtime was read as a write"
+    assert deviation["reason"] == sc.REASON_MISSING
+    assert result["deviations_witnessed"] == 0
+
+    filed = sc.file_escalations(result, backlog_dir=backlog)
+    assert len(filed) == 1, f"{mtime}: the witness suppressed an escalation it must not"
+    text = _drafts(backlog)[0].read_text(encoding="utf-8")
+    assert "run_w_5" in text
+    assert "never wrote report-latest.md" in text
+
+
+def test_the_2026_10_09_path_swap_reports_missing_and_still_files(tmp_path):
+    """Clauses 2 and 3 composed on the shape that opened this item. The run wrote
+    `conversation-patterns-latest.md` under `knowledge/conversation/` while the pointer at
+    the learned path kept the previous day's mtime: the step is reported missing
+    (`written_at_other_path`), the disk witness runs on that deviation too and refuses to
+    excuse it, and the draft is filed. Under the pre-#2502 detector this run was silent — it
+    is listed in #2502's own `learned_from` as a run that took the step."""
+    corpus, backlog = tmp_path / "corpus", tmp_path / "backlog"
+    store = corpus / "store"
+    report = _learned_artifact(store, mtime="2026-09-09T04:40:05+00:00")
+    swapped = corpus / "vault" / "knowledge" / "conversation" / report.name
+
+    result = _replay(corpus, _witness_specs(
+        6, report_path=str(report), swapped_path=swapped, faulty_at=5))
+    assert [d["step"] for d in _flagged(result)[0]["deviations"]] == ["write:report-latest.md"], (
+        "the swap run made every tool call its baseline makes, so the artifact write at the "
+        "wrong path is the only thing it is missing"
+    )
+    deviation = _flagged(result)[0]["deviations"][0]
+    assert deviation["reason"] == sc.REASON_OTHER_PATH
+    assert deviation["witnessed"] is False
+    assert deviation["disk_witness"] is None, (
+        "the pointer at the learned path kept 2026-09-09T04:40:05, two days before this run"
+    )
+    assert deviation["written_elsewhere"] == [str(swapped)]
+
+    filed = sc.file_escalations(result, backlog_dir=backlog)
+    assert len(filed) == 1, "the path swap filed nothing"
+    assert "knowledge/conversation" in _drafts(backlog)[0].read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

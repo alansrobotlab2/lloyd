@@ -732,8 +732,28 @@ def _section_2e(archive: str, writes: str) -> str:
     )
 
 
+#: The §2e block #2502 clause 1 added, transcribed from vault commit 5a066ad6 (the
+#: shape the run reads, same reason the archive blocks above are transcribed). Both
+#: clocks, both files, and the two exits a mismatch has — do the write, or name the
+#: file in the report — are what `pre_report_check_problems` below refuses without.
+_REAL_2E_CHECK = (
+    "\n**Before the completion report, verify both pointers moved (#2502).** A stage "
+    "that never ran leaves no trace in the run's own report. Run this and read what "
+    "it prints:\n"
+    "\n```\n"
+    'Bash("for f in tool-patterns-latest.md conversation-patterns-latest.md; do\n'
+    "      p=" + _P + "$f;\n"
+    '      echo \\"$f mtime=$(date -u -r $p +%F) today=$(date -u +%F)\\";\n'
+    '    done")\n'
+    "```\n"
+    "\n"
+    "- **perform the write now** — the `Read` + archive `cp` + `Write` contract above;\n"
+    "- or **name that exact file** in the completion report's `Not written, with "
+    "reasons` block, with the reason it was skipped.\n"
+)
+
 _REAL_2E = _section_2e(_REAL_2E_ARCHIVE_TOOL + _REAL_2E_ARCHIVE_CONV,
-                       _REAL_2E_WRITE_TOOL + _REAL_2E_WRITE_CONV)
+                       _REAL_2E_WRITE_TOOL + _REAL_2E_WRITE_CONV) + _REAL_2E_CHECK
 
 #: Two `Write` calls, one `cp` instruction. That is all §2e contains, so dropping
 #: either pattern file's archive block from the fence leaves every string a
@@ -887,6 +907,164 @@ def test_the_section_2e_guard_fails_on_every_way_it_could_be_satisfied_wrongly()
             f"{label}: the loose greps would now fail too, so this mutation no longer "
             "demonstrates the gap the pairing above closes"
         )
+
+
+# --- #2502 clause 1: §2e ends with a check that a skipped pointer gets named ----
+#
+# The archive rule above makes a run copy the file before it overwrites it. It says nothing
+# about a run that never overwrites it at all, which is the shape of both real cases: on
+# 2026-10-07 stage 2e skipped `conversation-patterns-latest.md`, and the run's completion
+# report had a `Not written, with reasons` block naming the uptake probe, USER.md/MEMORY.md
+# and the voice note — never that file — while recording `success`; on 2026-10-09 the content
+# went to `~/obsidian/knowledge/conversation/` instead and the pointer kept the 10-08 mtime.
+# Measured at triage: `stat` on the two pointers, both `2026-10-08`, three days stale, and
+# the run's own report was silent about it. This guard is the reporting copy of the rule the
+# section now states; like the §2e archive guard beside it it lives here rather than in
+# `reflection_archive`, and it is NOT wired into the vault writer — wiring it is recorded as
+# unclaimed scope on #2502, so the enforcement of this clause is this node plus the
+# `live_vault` node above, and the mutation node below is what proves they can fail.
+
+#: Opens the block. A heading is not required — the section's other rules are bold
+#: sentences too — but the block has to be one, so the guard can find *the check* rather
+#: than any sentence that happens to contain a date command.
+PRE_REPORT_ANCHOR = re.compile(r"(?i)^\s*\*\*before the completion report")
+
+#: What the block must contain, and the reason each half is load-bearing. A token list is
+#: a weak instrument on its own, which is why every entry is mutated below.
+PRE_REPORT_REQUIREMENTS: tuple[tuple[str, str], ...] = (
+    ("date -u -r", "the check must read the POINTER'S mtime, not the file's contents — a "
+                   "check that re-reads the text cannot tell last night's report from "
+                   "this run's"),
+    ("date -u +%F", "and this run's UTC date beside it: with only one clock printed there "
+                    "is nothing for a run to compare, which is how 10-09 passed"),
+    ("Not written, with reasons", "the skip route must name the exact block of the "
+                                  "completion report the file belongs in, or 'mentioned "
+                                  "somewhere in the report' stays satisfiable by silence"),
+    ("perform the write", "the other route — do it now — must be stated, or a run that "
+                          "notices a stale pointer is handed only the skip"),
+    ("name that exact file", "and it must be a *naming* obligation, not a note"),
+)
+
+
+def pre_report_check_problems(section: str, stems) -> list[str]:
+    """Problems with §2e's pre-report pointer check, per file.
+
+    Empty when the section carries the block, the block names every stem in `stems`, and it
+    states both clocks and both exits from a mismatch. Names the file it is refusing, in
+    every branch, for the reason the review rung gave the archive guard: a refusal that
+    does not say which pointer it is about cannot be acted on.
+    """
+    lines = section.split("\n")
+    at = [n for n, line in enumerate(lines) if PRE_REPORT_ANCHOR.match(line)]
+    if not at:
+        return [
+            "§2e carries no pre-report pointer check, so a run that wrote neither "
+            f"{' nor '.join(s + '.md' for s in stems)} can still record `success`: the "
+            "section must end with a `**Before the completion report` block"
+        ]
+    block = "\n".join(lines[at[0]:])
+    problems: list[str] = []
+    for stem in stems:
+        if stem not in block:
+            problems.append(
+                f"the pre-report check never names {stem}.md, so a run that skipped only "
+                f"that pointer prints nothing about it: {stem}-latest.md is unchecked"
+            )
+    lowered = block.lower()
+    for token, why in PRE_REPORT_REQUIREMENTS:
+        if token.lower() not in lowered:
+            problems.append(f"the pre-report check does not say `{token}`: {why}")
+    return problems
+
+
+_LIVE_2E_STEMS = ("tool-patterns-latest", "conversation-patterns-latest")
+
+
+def _section_2e_text(body: str) -> str:
+    """§2e as the run sees it: from the line that IS the heading to the next heading.
+
+    The cut is on a heading line, not on the first textual `### 2e.` — the same reason
+    `test_knowledge_write_section_2e_archives_both_pattern_files` gives: the body's index
+    pointer quotes the heading in prose, and `### 2e2.` must end the section.
+    """
+    lines = body.split("\n")
+    at = [n for n, line in enumerate(lines) if line.startswith("### 2e.")]
+    assert at, "nightly-reflection-knowledge-write lost its §2e heading"
+    return "\n".join(lines[at[0]:]).split("\n### ", 1)[0]
+
+
+@pytest.mark.live_vault
+def test_knowledge_write_section_2e_ends_with_a_pre_report_pointer_check(skills):
+    """Clause 1 as landed: §2e of `nightly-reflection-knowledge-write` ends with a
+    mandatory check that prints each pattern pointer's mtime date beside `date -u +%F`, and
+    a mismatch must end in the write being performed or that exact file being named in the
+    completion report's `Not written, with reasons` block."""
+    section = _section_2e_text(skills["nightly-reflection-knowledge-write"])
+    problems = pre_report_check_problems(section, _LIVE_2E_STEMS)
+    assert not problems, f"§2e's pre-report pointer check is incomplete: {problems}"
+    # The check must come last in the section: a run that met a `### 2e2.` before the
+    # check would meet the completion report first, which is the ordering the clause is
+    # about ("ends with"), and which is how the archive-first sentence lost to a
+    # shorter-distance reading before.
+    anchor_line = next(i for i, line in enumerate(section.split("\n"))
+                       if PRE_REPORT_ANCHOR.match(line))
+    trailing = section.split("\n")[anchor_line + 1:]
+    assert not any(line.startswith("### ") for line in trailing), (
+        "the pre-report check is not the end of §2e — another heading follows it, and a "
+        "run reads top to bottom into the completion report"
+    )
+
+
+def test_the_pre_report_check_guard_fails_on_every_way_it_could_be_satisfied_wrongly():
+    """The clause proved by breaking it, on the transcribed §2e rather than a paraphrase.
+    Six mutations, each keeping §2e a well-formed section that still names both pattern
+    files, and each removing one thing the clause needs; the unmutated transcription is
+    clean first, or every mutation below is vacuous."""
+    assert pre_report_check_problems(_REAL_2E, _LIVE_2E_STEMS) == [], (
+        f"§2e as landed was reported broken: {pre_report_check_problems(_REAL_2E, _LIVE_2E_STEMS)}"
+        " — every mutation below would be vacuous"
+    )
+
+    dropped_stem = _REAL_2E.replace(
+        "for f in tool-patterns-latest.md conversation-patterns-latest.md; do",
+        "for f in conversation-patterns-latest.md; do")
+    #: label → (mutated section, what the refusal must name). A per-file loss names the
+    #: file — the rule the archive guard's mutation node above enforces; a loss of one of
+    #: the two clocks or one of the two exits names that token, because it applies to
+    #: both pointers at once and blaming one of them would send a run to the wrong file.
+    mutations: dict[str, tuple[str, str]] = {
+        "the whole check block removed": (
+            _REAL_2E.split("*Before the completion")[0], "pre-report pointer check"),
+        "tool-patterns dropped from the loop": (dropped_stem, "tool-patterns-latest.md"),
+        "no pointer mtime clock": (_mutate(_REAL_2E, "date -u -r $p +%F", "cat $p"),
+                                    "date -u -r"),
+        "no run-date clock": (_mutate(_REAL_2E, "today=$(date -u +%F)", "today=$TODAY"),
+                              "date -u +%F"),
+        "skip route names no report block": (
+            _mutate(_REAL_2E, "`Not written, with reasons` block", "the report"),
+            "Not written, with reasons"),
+        "no write-now route, only the skip": (
+            _mutate(_REAL_2E, "**perform the write now**", "**note it**"),
+            "perform the write"),
+    }
+    for label, (section, expect) in mutations.items():
+        problems = pre_report_check_problems(section, _LIVE_2E_STEMS)
+        assert problems, f"§2e mutated ({label}) and the guard stayed silent"
+        assert expect in " ".join(problems), (
+            f"§2e mutated ({label}) but the refusal did not name {expect!r}: {problems}"
+        )
+        if expect.endswith("-latest.md"):
+            # Dropping one pointer from the loop must not also complain about the
+            # sibling: the guard is per file, or it answers a broken clause by
+            # pointing at the wrong file.
+            sibling = ("conversation-patterns-latest" if expect.startswith("tool")
+                       else "tool-patterns-latest")
+            assert not any(sibling in p for p in problems), problems
+        # No mutation may be a whole-section rewrite: the section must still name both
+        # files and still carry the archive fence, which is precisely the condition a
+        # section-wide grep cannot see through (see the archive mutations above).
+        assert all(stem in section for stem in _LIVE_2E_STEMS), label
+        assert "test -f" in section, f"{label}: the mutation removed the archive fence too"
 
 
 # --- Non-vacuity: the pin must be able to fail ---------------------------------

@@ -42,12 +42,23 @@ ever read, so a replay cannot perturb the corpus it is judging
 (`tests/test_step_conformance.py::test_replay_leaves_both_stores_byte_identical_and_exits_zero`
 hashes a real corpus across a full subprocess replay to prove that).
 
-Step identity. A step is not just a tool name: `write:<basename>` / `read:<basename>` are
-first-class steps, evidenced either by a file-tool's `file_path`/`path` or by a Bash command
-that redirects into a path or runs a writer (`touch|tee|cp|mv|install`). Tool substitution
-(`Write` today, `Bash > file` tomorrow) therefore does not move the baseline, which is the
-main false-alarm lever here. Basenames have date stamps elided (`knowledge-handoff-
+Step identity. A step is not just a tool name: `write:<basename>@<dir>` / `read:<basename>`
+are first-class steps, evidenced either by a file-tool's `file_path`/`path` or by a Bash
+command that redirects into a path or runs a writer (`touch|tee|cp|mv|install`). Tool
+substitution (`Write` today, `Bash > file` tomorrow) therefore does not move the baseline,
+which is the main false-alarm lever here. Basenames have date stamps elided (`knowledge-handoff-
 2026-09-20.md` -> `knowledge-handoff-<date>.md`) so a nightly artifact is one step, not 365.
+
+An *artifact* step is additionally checked against where it was written (#2502 clause 2): the
+id stays `write:<basename>` — widening it would rename every artifact step in the published
+corpus and make the labelled `validate` numbers incomparable with the ones measured before —
+and the captured path is kept beside it, so a write of the right filename at a directory the
+task never writes that artifact to does not discharge the expectation. That is the shape
+nothing caught on 2026-10-09, when task 39 left `_pipeline/reflection/conversation-patterns-latest.md`
+untouched, wrote the same name into the vault instead, and turned up in a later baseline's
+`learned_from` as a run that took the step. `read:` steps stay name-only: a stage may
+legitimately read its input from somewhere else, and there is no escalation riding on a
+missing read to justify the over-fire risk.
 
 Tuning, and what it cost to pick these numbers. All figures are `replay --days 14` against
 the live corpus on 2026-09-21: 2,083 scored runs across 33 learned task baselines, of which
@@ -128,6 +139,38 @@ GENERIC_BASENAMES = {"", "null", "none", "dev", "stdout", "stderr", "input", "ou
 # leaves a basename that names the artifact, and rejecting those would shrink the learned set.
 SHELL_TOKEN_RE = re.compile(r"\$\(|`|\$\{[^}]*\Z")
 
+# How much of an artifact's directory the step identity carries (#2502 clause 2). Two, not
+# the whole path and not one. Whole paths are what `normalized_dir` refuses, for the data-home
+# root move it names. One component is too few because a directory called `reflection` is not
+# evidence of being *the* reflection directory: `/a/reflection/x.md` and
+# `/b/obsidian/reflection/x.md` would be the same step, and a run that moved a report into
+# some other `reflection` folder — the shape this clause exists to catch — would stay quiet.
+# Two names an artifact's own folder and the folder that holds it, which is as deep as any
+# real report path here differs.
+DIR_COMPONENTS = 2
+
+# Why a deviation is what it is, and which of them may file (#2502 clause 3).
+# `missing_structural_step` is the shape the detector has always escalated: no write of that
+# artifact anywhere in the trace, and nothing on disk at the learned path from this run.
+# `artifact_written_at_other_path` files too — the content moved, which is a finding about the
+# task, not a parsing gap — and says so in its own words.
+# `disk_witnessed_write_not_in_trace` never files: the artifact at the learned path *was*
+# modified inside the run's own window, so the claim "this run dropped the stage" is false
+# whatever the trace's grammar captured. It stays reported, because the trace not showing a
+# write the task's other runs show is a parsing gap worth a look.
+REASON_MISSING = "missing_structural_step"
+REASON_OTHER_PATH = "artifact_written_at_other_path"
+REASON_WITNESSED = "disk_witnessed_write_not_in_trace"
+ESCALABLE_REASONS = (REASON_MISSING, REASON_OTHER_PATH)
+
+#: The margin on the disk witness's window. `started_at` is when the queue claimed the run and
+#: `completed_at` is the queue's own write, so either can sit minutes from the tool call that
+#: touched the file, and a trace may span a resume. Six hours, the same figure the pending
+#: window uses above — a nightly cycle plus the model's slack, and deliberately not a day: the
+#: real cases left the pointer one to two days stale, which this catches while a same-day
+#: re-run of the stage is forgiven.
+WITNESS_GRACE_SECONDS = DEFAULT_GRACE_SECONDS
+
 
 def _expand(path) -> Path:
     return Path(os.path.expandvars(str(path))).expanduser()
@@ -165,11 +208,207 @@ def normalized_basename(raw) -> str:
     return DATE_RE.sub("<date>", base)
 
 
-def steps_from_tools(tools) -> list[str]:
+def normalized_dir(raw) -> str:
+    """The `DIR_COMPONENTS` path components nearest a file, date stamps elided.
+
+    The directory half of an artifact step's identity (#2502 clause 2), and deliberately not
+    the whole path, because of the data-home move of 2026-09-22 (`architecture/data-home.md`):
+    a baseline that spans that date holds runs that wrote the same reflection report under two
+    different roots, and whole-path identity would read that as every run of the task dropping
+    its stage. Two components is still enough to separate the case the clause is about: the
+    2026-10-09 run wrote `knowledge/conversation/conversation-patterns-latest.md`, whose nearest
+    components are `knowledge/conversation`, into a baseline whose other runs wrote it under
+    `_pipeline/reflection/`.
+
+    Empty for a directory that cannot be resolved, which is a deliberate third state and not a
+    failure: a bare filename has no directory, and a path whose directory is still an
+    unexpanded expansion (`${OUT}/report.md`, which the module's own comment on
+    `normalized_basename` protects as a learned basename) names a directory this host cannot
+    see. Both come back empty, and `dir_matches` reads empty as *no evidence*, not as
+    evidence of a different place — an unknown directory must not refute a run's write, which
+    is the same reasoning that kept `$` out of the basename reject list.
+    """
+    text = str(raw or "").strip().strip("\"'")
+    if not text or _unclosed_shell_word(text):
+        return ""
+    parts = [p for p in text.rstrip("/").replace("\\", "/").split("/") if p]
+    parts = parts[:-1]                      # drop the filename itself
+    tail = parts[-DIR_COMPONENTS:]
+    if any("$" in p for p in tail):         # unresolvable: no claim about where it is
+        return ""
+    return "/".join(DATE_RE.sub("<date>", p) for p in tail)
+
+
+def corroborated(counts: dict) -> list:
+    """The artifact paths a task's baseline treats as *where that artifact lives*.
+
+    A path is learned if more than one of the task's runs wrote the artifact there; a path only
+    one run wrote is that run's behaviour, not the task's, and is exactly what #2502 clause 2
+    has to be able to refuse — task 39's history has five runs at `_pipeline/reflection/…` and
+    the 2026-10-09 run at a vault path, and folding both in as equally "learned" would make the
+    clause check nothing. If no path reaches two runs the location is uncorroborated, so every
+    path is kept, which means no location is enforced: the conservative half of the trade,
+    because a baseline of two disagreeing runs cannot say where an artifact belongs, and a
+    detector that invents one fires on the run it happened to score first. A tie between two
+    locations that both recurred keeps both, which is the real case of a task whose data root
+    moved (2026-09-22) — both spellings are its history, and neither is a deviation.
+
+    Best-supported first, so `[0]` is the artifact's learned path for the one question that
+    asks for a single answer (`learned_artifact_path`, and with it the disk witness).
+    """
+    kept = [path for path, seen in counts.items() if seen >= 2]
+    if not kept:
+        return list(counts)
+    return sorted(kept, key=lambda path: -counts[path])
+
+
+def learned_artifact_path(artifact_paths, step: str) -> str:
+    """The one path a learned artifact step names: the best-supported location the task's own
+    runs wrote it to, `""` if history recorded none.
+
+    Singular on purpose (#2502 clause 3): the disk witness answers "did this run produce the
+    artifact it was supposed to produce", and that is a question about the file the task writes,
+    not about every file that has ever carried the basename. `TaskBaseline.artifact_paths` keeps
+    the full corroborated list because `same_name_elsewhere` legitimately needs every recorded
+    location to say where a swapped write went; widening a witness across those paths would
+    excuse a deviation on a file that is not this artifact.
+    """
+    paths = (artifact_paths or {}).get(step) or []
+    return paths[0] if paths else ""
+
+
+def artifact_basename(step: str) -> str:
+    """The basename an artifact step names: `write:report-latest.md` -> `report-latest.md`."""
+    return step[len(ESCALATE_PREFIX):] if step.startswith(ESCALATE_PREFIX) else ""
+
+
+def dir_matches(learned: str, observed: str) -> bool:
+    """Whether a write's directory contradicts the one the expectation was learned at.
+
+    A mismatch needs two named directories, and that asymmetry is the whole design. Either
+    side empty means no evidence, and no evidence never refutes a run's write: a bare
+    filename, or a capture whose directory is still an unexpanded expansion, has not shown
+    the artifact living anywhere else. This is the same reasoning that keeps `$` out of the
+    basename reject list — a truncated capture must not manufacture a deviation — and it is
+    why the comparison is suffix-wise: a learned `_pipeline/reflection` and a captured
+    `lloyd-data/_pipeline/reflection` are the same directory seen from different depths, and
+    the data-home move of 2026-09-22 means a real baseline holds both spellings.
+
+    What it cannot do is catch a run whose write is at a *shorter* path than the learned one
+    with a different tail. That is the cost of the suffix rule, and the disk witness beside it
+    (#2502 clause 3) is what catches the case the grammar misses.
+    """
+    if not learned or not observed:
+        return True
+    return learned.endswith(observed) or observed.endswith(learned)
+
+
+def same_name_elsewhere(step: str, write_paths, artifact_paths) -> list[str]:
+    """Paths this run wrote under the artifact's basename, at a directory its task's history
+    does not write that artifact to. Reported on the deviation so the draft says where the
+    content went: for the 2026-10-09 run that is the vault path, and the difference between
+    naming it and not naming it is the difference between a human adjudicating in one read and
+    one going back to `git log`. An artifact with no learned paths has no expectation about
+    where it lives, so nothing counts as elsewhere."""
+    base = artifact_basename(step)
+    learned = (artifact_paths or {}).get(step) or []
+    if not base or not learned:
+        return []
+    out = {
+        path
+        for path in (write_paths or {}).get(base, ())
+        if not any(dir_matches(normalized_dir(here), normalized_dir(path)) for here in learned)
+    }
+    return sorted(out)
+
+
+def _satisfied_steps(baseline, trace) -> set:
+    """Which of a trace's step ids count as taken, given where its writes actually landed.
+
+    Every step that is not an artifact write is satisfied by its own presence, exactly as
+    before #2502. An artifact write additionally needs its directory to be one the task's own
+    history writes that artifact to (#2502 clause 2). The directory is deliberately *not* part
+    of the step id: `write:<basename>` is the name a tool call gives a file, and widening the
+    id would rename every artifact step in every baseline, invalidate the `validate` corpus's
+    labelled fault labels, and make the false-alarm rate measured before this change
+    incomparable with the rate after it. So the id stays a basename and the directory is
+    checked against the captured paths here: the right filename at the wrong path leaves the
+    step unsatisfied, which is what makes the 2026-10-09 vault-path swap visible at all, and
+    `same_name_elsewhere` beside it is what tells a reader that this was a swap and not a skip.
+
+    An artifact the baseline has no path for — every run that wrote it came through a capture
+    shape that names no path — keeps the old behaviour, satisfied by its name alone. Refusing
+    it would penalise the corpus for the shape of its traces, not the behaviour of its runs.
+    """
+    present = set(trace.steps)
+    for step in list(present):
+        learned = (baseline.artifact_paths or {}).get(step)
+        if not (step.startswith(ESCALATE_PREFIX) and learned):
+            continue
+        observed = (trace.write_paths or {}).get(artifact_basename(step), ())
+        if any(dir_matches(normalized_dir(here), normalized_dir(there))
+               for here in learned for there in observed):
+            continue
+        present.discard(step)
+    return present
+
+
+def artifact_disk_witness(path, window_start, window_end, *, grace_seconds: int) -> dict | None:
+    """Evidence that the artifact at its learned path was modified inside the run's own window,
+    or None — the check that decides whether a missing-`write:` deviation may file (#2502
+    clause 3).
+
+    `path` is the single path `learned_artifact_path` names, and one path is the whole of the
+    clause: the claim being answered is "this run produced no artifact", and a scan across every
+    location the basename has ever appeared in would excuse a deviation on a file that is not
+    this artifact. It is deliberately a stat and not a read, because one mtime answers that claim.
+
+    The window is `[run start − grace, run completed + grace]`, both edges, because what is being
+    excluded is an artifact last touched by some *earlier* night and a one-sided "newer than
+    nothing" test is satisfied by a pointer that has been stale for a week. Measured on the two
+    real cases the clause was written for: `_pipeline/reflection/conversation-patterns-latest.md`
+    carried mtime 2026-10-08T11:40:05Z against the flagged run that completed
+    2026-10-07T08:23:08Z — after it, because a later night wrote it — and the same mtime against
+    the 2026-10-09 run's window, which closed before it. Neither is a write by the run that is
+    being accused, and neither is witnessed.
+
+    None for no path, an unreadable file, or an mtime outside the window: every one of those
+    leaves the deviation exactly where it was. The record names the path read, the mtime and the
+    window, so an answer is checkable from the report alone.
+    """
+    start, end = window_start, window_end
+    if start is not None:
+        start = start - timedelta(seconds=grace_seconds)
+    if end is not None:
+        end = end + timedelta(seconds=grace_seconds)
+    if not path or start is None or end is None or end < start:
+        return None
+    try:
+        stamp = datetime.fromtimestamp(_expand(path).stat().st_mtime, timezone.utc)
+    except OSError:          # absent, or a path this host cannot stat: no witness
+        return None
+    if not start <= stamp <= end:
+        return None
+    return {
+        "path": str(path),
+        "mtime": stamp.isoformat(),
+        "window_start": start.isoformat(),
+        "window_end": end.isoformat(),
+        "grace_seconds": int(grace_seconds),
+    }
+
+
+def steps_from_tools(tools, write_paths: dict | None = None) -> list[str]:
     """Ordered, de-duplicated step ids for one run's tool calls, in `sequence` order.
 
     Three step kinds: `tool:<name>` for every call, plus `read:<basename>` and
     `write:<basename>` where the call names a file or the Bash command writes one.
+
+    Pass a dict as `write_paths` and it comes back mapping each artifact basename to the
+    captured paths behind it — the evidence both halves of #2502 read: the directory check in
+    `_satisfied_steps` and the disk witness, each of which needs the path a step id does not
+    carry. Collected in the same pass rather than by a second extractor, so the two can never
+    disagree about which capture was a write.
     """
     steps: list[str] = []
     seen: set[str] = set()
@@ -178,6 +417,15 @@ def steps_from_tools(tools) -> list[str]:
         if step and step not in seen:
             seen.add(step)
             steps.append(step)
+
+    def add_write(base: str, raw) -> None:
+        # The id is the basename alone — see `_satisfied_steps` for why the directory is
+        # checked against these captured paths at match time instead of being folded in here.
+        add(f"write:{base}")
+        if write_paths is not None:
+            seen_paths = write_paths.setdefault(base, [])
+            if str(raw) not in seen_paths:
+                seen_paths.append(str(raw))
 
     for tool in sorted(tools, key=lambda t: t.get("sequence") or 0):
         name = tool.get("name") or ""
@@ -188,7 +436,7 @@ def steps_from_tools(tools) -> list[str]:
             base = normalized_basename(target)
             if base and base not in GENERIC_BASENAMES:
                 if name in WRITE_TOOLS:
-                    add(f"write:{base}")
+                    add_write(base, target)
                 elif name in READ_TOOLS:
                     add(f"read:{base}")
         if name == "Bash":
@@ -196,7 +444,7 @@ def steps_from_tools(tools) -> list[str]:
             for match in REDIRECT_RE.finditer(command):
                 base = normalized_basename(match.group(1))
                 if base and base not in GENERIC_BASENAMES:
-                    add(f"write:{base}")
+                    add_write(base, match.group(1))
             writer = WRITER_RE.search(command)
             if writer:
                 for token in command[writer.start():].split()[1:]:
@@ -206,7 +454,7 @@ def steps_from_tools(tools) -> list[str]:
                     # Only an explicit path is evidence: a bare `cp foo` would name a file
                     # that lives in the caller's cwd, which the step id cannot resolve.
                     if "/" in token and base and base not in GENERIC_BASENAMES:
-                        add(f"write:{base}")
+                        add_write(base, token)
                         break
     return steps
 
@@ -219,6 +467,10 @@ class Trace:
     session_source: str
     steps: list[str]
     trace_ts: str | None = None
+    #: Artifact step id → the paths captured behind it (#2502 clause 3). The step id says what
+    #: was written; the witness needs the path, and the path has to survive the loader for the
+    #: escalation half of the pipeline to be able to ask the disk anything.
+    write_paths: dict = field(default_factory=dict)
 
     @property
     def task_number(self) -> int | None:
@@ -252,6 +504,14 @@ class TaskBaseline:
     steps_present: dict[str, int] = field(default_factory=dict)
     positions: dict[str, float] = field(default_factory=dict)
     expected_steps: list[str] = field(default_factory=list)
+    #: Artifact step id → the paths the runs that took it wrote it to, in first-seen order
+    #: (#2502 clause 3). This is "the learned path" the disk witness reads: a list and not a
+    #: single value because a task's own history can name more than one — task 39's does, one
+    #: side and the other of the 2026-09-22 data-home move — and any of them being touched in
+    #: the run's window is a witness. Not in `to_json`: it is corpus-derived evidence that
+    #: would go stale against a moved disk, and nothing reads the published baseline file for
+    #: it.
+    artifact_paths: dict[str, list[str]] = field(default_factory=dict)
 
     def expected_for(self, run_id: str, support: float = DEFAULT_SUPPORT) -> set[str]:
         """Steps every *other* run of this task has — leave-one-out, so a corpus cannot
@@ -320,6 +580,14 @@ class Deviation:
     learned_from: list[str]
     learned_from_n: int
     baseline_runs: int
+    #: Which of the three cases this is (`REASON_*`), and the two pieces of evidence #2502
+    #: added: the disk witness that may excuse the deviation, and the paths the same-named
+    #: artifact was written to instead. Defaults keep a deviation built from an older report
+    #: file scoring-compatible: no reason recorded, nothing witnessed, nothing elsewhere.
+    reason: str = REASON_MISSING
+    witnessed: bool = False
+    disk_witness: dict | None = None
+    written_elsewhere: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict:
         return {
@@ -338,6 +606,10 @@ class Deviation:
             "learned_from": list(self.learned_from),
             "learned_from_n": self.learned_from_n,
             "baseline_runs": self.baseline_runs,
+            "reason": self.reason,
+            "witnessed": self.witnessed,
+            "disk_witness": dict(self.disk_witness) if self.disk_witness else None,
+            "written_elsewhere": list(self.written_elsewhere),
         }
 
 
@@ -438,12 +710,15 @@ def load_traces(trajectory_dir, *, session_keys=None, since: datetime | None = N
         tools = []
         for row in sorted(rows, key=lambda r: str(r.get("timestamp") or "")):
             tools.extend(row.get("tools") or [])
+        paths: dict[str, list[str]] = {}
+        steps = steps_from_tools(tools, paths)
         traces.append(
             Trace(
                 session_key=key,
                 session_source=sources[key],
-                steps=steps_from_tools(tools),
+                steps=steps,
                 trace_ts=stamps.get(key),
+                write_paths=paths,
             )
         )
     return traces
@@ -524,9 +799,21 @@ def learn(traces_with_runs, *, min_runs: int = DEFAULT_MIN_RUNS, support: float 
     `min_runs` runs gets no baseline and lands in `Corpus.unscored` instead of a guess.
     """
     grouped: dict[str, dict[str, list[str]]] = collections.defaultdict(dict)
+    # Artifact step → paths, per task, unioned over every run that took the step. Collected
+    # beside the step counts rather than from them: the counts are what the expectation is,
+    # and this is only the evidence of where the artifact lives.
+    step_paths: dict[str, dict[str, list[str]]] = collections.defaultdict(dict)
     unscored: list[str] = []
     for trace, run in traces_with_runs:
         grouped[trace.session_source][_identity(trace, run)] = trace.steps
+        for base, captured in (trace.write_paths or {}).items():
+            # Keyed by step id, because that is what a deviation names and what a lookup at
+            # match time has to find. Counted per run (a run that wrote the same artifact
+            # twice still says "here" once), because the question asked of this below is how
+            # many runs wrote it there, not how many writes there were.
+            counts = step_paths[trace.session_source].setdefault(f"write:{base}", {})
+            for raw in dict.fromkeys(captured):
+                counts[raw] = counts.get(raw, 0) + 1
     corpus = Corpus()
     for source, step_sets in grouped.items():
         if len(step_sets) < min_runs:
@@ -559,6 +846,8 @@ def learn(traces_with_runs, *, min_runs: int = DEFAULT_MIN_RUNS, support: float 
             steps_present=dict(counts),
             positions=median,
             step_present_in=present_in,
+            artifact_paths={step: corroborated(counts)
+                            for step, counts in step_paths.get(source, {}).items()},
         )
         baseline.expected_steps = baseline.ordered(expected)
         corpus.baselines[source] = baseline
@@ -635,12 +924,37 @@ def score_run(
         run_status=status,
     )
     expected = baseline.expected_for(run_id, support=support)
-    present = set(trace.steps)
+    # Not `set(trace.steps)`: an artifact write counts only if it landed where that task's own
+    # history lands it (#2502 clause 2).
+    present = _satisfied_steps(baseline, trace)
     index_of = {step: i for i, step in enumerate(trace.steps)}
     ended = _end_time(run, trace, checked)
     inside_grace = (checked - ended) < timedelta(seconds=grace_seconds)
+    started = (_parse_ts(run.started_at) if run is not None else None) or ended
     for step in baseline.ordered(expected - present):
         state = "pending" if inside_grace else "deviation"
+        # #2502 clause 2: an artifact expectation is about the artifact at the path the task's
+        # history writes it to, so a write of the same filename somewhere else is a deviation
+        # of its own kind, and an unmet one. It does not satisfy the step, and the run that
+        # made it is named in `written_elsewhere` so the reader sees where the content went.
+        elsewhere = same_name_elsewhere(step, trace.write_paths, baseline.artifact_paths)
+        # #2502 clause 3: before this may become a draft, ask the disk. The artifact's learned
+        # paths are the ones this task's own history wrote it to; one of them touched inside
+        # this run's window disproves "this run produced no artifact", whatever the trace's
+        # grammar captured — and `steps_from_tools` reads only a redirect or a writer token, so
+        # a `python3 - <<'EOF'` write is invisible to it and has always been.
+        witness = None
+        if step.startswith(ESCALATE_PREFIX):
+            witness = artifact_disk_witness(
+                learned_artifact_path(baseline.artifact_paths, step), started, ended,
+                grace_seconds=grace_seconds,
+            )
+        if witness is not None:
+            reason = REASON_WITNESSED
+        elif elsewhere:
+            reason = REASON_OTHER_PATH
+        else:
+            reason = REASON_MISSING
         deviation = Deviation(
             task_id=baseline.task_id,
             session_source=trace.session_source,
@@ -657,6 +971,10 @@ def score_run(
             learned_from=baseline.learned_from(step, exclude=run_id),
             learned_from_n=len(baseline.learned_from(step, exclude=run_id)),
             baseline_runs=baseline.n_runs,
+            reason=reason,
+            witnessed=witness is not None,
+            disk_witness=witness,
+            written_elsewhere=elsewhere,
         )
         (report.pending if state == "pending" else report.deviations).append(deviation)
     for step in baseline.ordered(present & expected):
@@ -713,6 +1031,16 @@ def replay(
         "runs_pending": sum(1 for r in reports if r.pending and not r.flagged),
         "deviations": sum(len(r.deviations) for r in reports),
         "pending": sum(len(r.pending) for r in reports),
+        # Of the deviations above, how many the disk spoke about (#2502 clause 3): witnessed
+        # ones are reported and never filed, other-path ones name a write that went somewhere
+        # else. Both are subtotals of `deviations`, never additional ones, so a reader adding
+        # the two must not read them as more findings.
+        "deviations_witnessed": sum(
+            1 for r in reports for d in r.deviations if d.witnessed
+        ),
+        "deviations_written_elsewhere": sum(
+            1 for r in reports for d in r.deviations if d.written_elsewhere
+        ),
         # The rate a reader compares against the acceptance bound, stated as what it is. On
         # unlabelled traffic a flag may be a true positive, so `flagged_rate` is an *upper
         # bound* on the false-alarm rate and `*_flagged` below counts true positives and false
@@ -1117,10 +1445,18 @@ def escalation_targets(result: dict) -> list[dict]:
     Read off `replay`'s own reports, so what files is exactly what printed: a deviation with a
     `state` of `deviation` (a `pending` one is inside the grace window and not yet a finding)
     whose step names a written artifact, for a run the ledger did not already record as a
-    failure (#2477 — `recorded_failure`). This is the escalation gate, not the scoring gate:
-    an aborted run's missing `write:` stays in `result["reports"]`, in `print_replay`'s output
-    and in `runs_flagged`, and only the draft is suppressed. The run ids the expectation was
-    learned from ride along, because the draft is a handoff and the evidence is the handoff."""
+    failure (#2477 — `recorded_failure`), and one whose artifact the disk did not just update
+    at its learned path (#2502 clause 3 — `REASON_WITNESSED`). This is the escalation gate, not
+    the scoring gate: an aborted run's missing `write:`, and a witnessed one, stay in
+    `result["reports"]`, in `print_replay`'s output and in `runs_flagged`, and only the draft is
+    suppressed. The run ids the expectation was learned from ride along, because the draft is a
+    handoff and the evidence is the handoff.
+
+    The witness is the third suppression, and it suppresses a claim rather than a signal: the
+    draft would assert that this run produced no artifact, and an mtime inside the run's own
+    window at the path that task's history writes it to disproves that sentence. What survives
+    in the report is the true residue — the trace names no write where the task's other runs
+    name one, which is a gap in what `steps_from_tools` can read and is printed, not filed."""
     out: list[dict] = []
     for report in result.get("reports") or []:
         if recorded_failure(report.get("run_status")):
@@ -1129,7 +1465,12 @@ def escalation_targets(result: dict) -> list[dict]:
             step = str(deviation.get("step") or "")
             if not escalates(step):
                 continue
+            if deviation.get("witnessed"):
+                continue
             out.append({
+                "reason": deviation.get("reason") or REASON_MISSING,
+                "written_elsewhere": list(deviation.get("written_elsewhere") or []),
+                "disk_witness": deviation.get("disk_witness"),
                 "task_id": report.get("task_id"),
                 "session_source": report.get("session_source") or "",
                 "run_id": report.get("run_id") or "",
@@ -1179,6 +1520,14 @@ def escalation_body(target: dict) -> str:
         f"- session_key: {target['session_key']}",
         f"- run_status: {target['run_status']}",
         f"- missing_step: {target['step']}",
+        f"- reason: {target.get('reason') or REASON_MISSING}",
+        # #2502: the two things that make the difference between a human adjudicating this in
+        # one read and going back to `stat` and `git log` to work out which of the two cases it
+        # is. The path the artifact is expected at, and — when there is one — the path the same
+        # filename was written to instead, which is the whole finding for the 2026-10-09 shape.
+        "- written_elsewhere: "
+        + (", ".join(target.get("written_elsewhere") or []) or "(none: no same-named write"
+                                                       " anywhere else in this run)"),
         f"- learned_from_n: {target['learned_from_n']} of {target['baseline_runs']} baseline runs",
         f"- learned_from: {learned}",
         f"- run_completed_at: {target.get('run_completed_at')}",
@@ -1267,6 +1616,8 @@ def print_replay(result: dict) -> None:
         f"runs_flagged={result['runs_flagged']}/{result['runs_scored']}"
         f" ({result['runs_flagged'] / result['runs_scored'] * 100.0 if result['runs_scored'] else 0.0:.2f}%)"
         f" runs_pending={result['runs_pending']} deviations={result['deviations']} pending={result['pending']}"
+        f" disk_witnessed={result['deviations_witnessed']}"
+        f" written_elsewhere={result['deviations_written_elsewhere']}"
     )
     print(
         f"success_recorded_runs={result['success_recorded_runs']}"
@@ -1286,9 +1637,20 @@ def print_replay(result: dict) -> None:
         )
         for dev in report["deviations"]:
             print(
-                f"    missing {dev['step']!r} (structural) — expected in {dev['learned_from_n']}"
+                f"    missing {dev['step']!r} (structural, reason={dev.get('reason')}) —"
+                f" expected in {dev['learned_from_n']}"
                 f" of {dev['baseline_runs']} runs; learned_from={dev['learned_from'][:5]}"
             )
+            if dev.get("written_elsewhere"):
+                print(f"    written at another path instead: {dev['written_elsewhere']}")
+            witness = dev.get("disk_witness")
+            if witness:
+                print(
+                    f"    disk witness: {witness['path']} mtime={witness['mtime']} inside"
+                    f" [{witness['window_start']}, {witness['window_end']}]"
+                    f" ±{witness['grace_seconds']}s — not escalated: the artifact moved during"
+                    " this run, the trace just never named the write"
+                )
             print(f"    expected_steps={dev['expected_steps']}")
 
 
