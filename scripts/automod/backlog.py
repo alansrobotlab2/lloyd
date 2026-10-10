@@ -1326,7 +1326,77 @@ def _witness_within_size_bound(path) -> bool:
     return size is not None and size <= WITNESS_MAX_BYTES
 
 
-def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR) -> str:
+#: A witness name belongs to its first occupant, and this generator was the thing
+#: destroying them. `backlog/data/gate.json` held #1883's pinned witness for round
+#: `SM_20260930_063800` (vault `cfe9a113`, 34 newline characters / 1,143 bytes).
+#: Items #2228 and #2383 were each handed that same path by a clause like the one
+#: below and stopped, writing a dated sibling instead (`2026-10-05.2228-gate-witness.json`,
+#: and the node `test_the_2383_gate_witness_is_a_dated_sibling_because_gate_json_was_taken`
+#: is that round's record of it). On 2026-10-10 nobody stopped: #2512's triage emitted
+#: "copy `~/.local/state/lloyd-automod/rounds/SM_20261010_204036/gate.json` to
+#: `backlog/data/gate.json`" — the artifact name was the SOURCE file's basename — the
+#: round obeyed it at vault `d5f9f542`, and #1883's witness was gone, which is what
+#: turned three tests on main red (#2513). A witness is an immutable extract of one
+#: moment, so a name already on disk is taken: the two demands now name a dated
+#: sibling instead of ordering a clobber.
+def _vault_witness_dir(artifact_dir: str) -> Path:
+    """`artifact_dir` under the vault root, read live so a test can move the vault.
+
+    Read through the `app.paths` MODULE at call time, never captured into a default
+    argument: the whole value of this probe is that a test can point it at a
+    temporary vault, and a name bound at `def` time cannot be monkeypatched.
+    """
+    from app import paths
+    return Path(paths.VAULT_ROOT) / artifact_dir
+
+
+def _artifact_taken(artifact_dir: str, name: str) -> bool:
+    """True when the vault already holds bytes at `artifact_dir/name`.
+
+    An `OSError` (no such directory, unreadable tree, a round run with `HOME`
+    pointed away from the vault) answers "not taken", which is the pre-fix
+    behaviour: this probe chooses a NAME and must never become a reason the demand
+    goes silent. Under the gate, where `~/obsidian` does not exist, every name
+    therefore reads free — and that is the same graceful-degradation shape the
+    vault-reading test nodes describe: corroboration when the vault is there, no
+    veto when it is not.
+    """
+    try:
+        return (_vault_witness_dir(artifact_dir) / name).is_file()
+    except OSError:
+        return False
+
+
+def _witness_artifact(source, artifact_dir: str = WITNESS_ARTIFACT_DIR, *,
+                      taken=None, day: str = "", item_id=None) -> str:
+    """The vault path witness bytes should go to — never a path it would clobber.
+
+    The free-name case is unchanged and stays the bare basename #1756's convention
+    looks like on disk (`backlog/data/iv-metrics.jsonl`), so the overwhelmingly
+    common demand is not rewritten into a dated monster. Only a name the vault
+    already holds moves, and it moves into the dated-sibling form the two items
+    that hit this by hand settled on — `<date>.<item>-<source directory>-<name>`,
+    e.g. `backlog/data/2026-10-10.2512-SM_20261010_204036-gate.json`. The source
+    directory is what keeps two items copying two DIFFERENT `gate.json` files on
+    one day apart; the item id is what makes the name readable from the item that
+    owes it, and it is optional because the emitter is also called by tests and by
+    owed-check paths that have no item in hand. Re-triaging the same source is
+    idempotent — same day, same directory, same id — so the demand keeps pointing
+    at the bytes its own last run wrote rather than spawning a fresh copy each pass.
+    """
+    src = _witness_target(source)
+    name = src.name
+    probe = taken if taken is not None else _artifact_taken
+    if not probe(artifact_dir, name):
+        return f"{artifact_dir}/{name}"
+    day = day or now_stamp()[:10]
+    tag = re.sub(r"[^\w.\-+]", "-", src.parent.name).strip("-.")[:48] or "src"
+    stem = f"{day}.{item_id}-{tag}" if item_id else f"{day}.{tag}"
+    return f"{artifact_dir}/{stem}-{name}"
+
+
+def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
+                              item_id=None) -> str:
     """The owed note for a witness too large to be asked for whole (#2382).
 
     What #2267 ruled out is ordering the STORE: bytes over `WITNESS_MAX_BYTES` into
@@ -1357,7 +1427,13 @@ def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR) -
     the number that governs the work.
     """
     target = _witness_target(path)
-    artifact = f"{artifact_dir}/{target.name}"
+    # #2513: the same name rule as the under-bound clause, because the over-bound
+    # note orders a vault write to exactly the same directory and would clobber a
+    # pinned witness just as deadeningly. A 30.7 MB store is the shape that reaches
+    # this branch, and the extract it asks for lands in `backlog/data/`, among the
+    # witnesses already delivered there — so the destination needs the same test for
+    # a name somebody else holds.
+    artifact = _witness_artifact(path, artifact_dir, item_id=item_id)
     ext = target.suffix.lower().lstrip(".")
     cmd = _rederive_command(artifact, ext)
     limit = f"{WITNESS_MAX_BYTES:,}"
@@ -1420,7 +1496,7 @@ def _pinned_candidates(tok: str):
 
 def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
                                 artifact_dir: str = WITNESS_ARTIFACT_DIR,
-                                route_to_owed: bool = False):
+                                route_to_owed: bool = False, item_id=None):
     """One clause asking for the witness bytes, when a named witness has none.
 
     `clauses` is the contract as it stands on the way to the item; `text` is
@@ -1493,6 +1569,18 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     on-disk gate and the cap — applies unchanged. With the flag off (the default,
     every other caller) there is no owed destination, so neither demand is
     generated and the answer is the plain list, as before.
+
+    WHERE the bytes go is `_witness_artifact`'s decision, not a bare basename
+    (#2513). The free name is still `backlog/data/<basename>`, the #1756 shape; a
+    name the vault ALREADY holds becomes a dated sibling, because a witness is an
+    immutable extract and overwriting one destroys the evidence another item's test
+    reads. This is the third time that mattered: #2228 and #2383 were handed the
+    taken path `backlog/data/gate.json` and stopped, while #2512's round obeyed the
+    clause literally at vault `d5f9f542` and deleted #1883's witness, which is what
+    turned three tests on main red. `item_id` is the id whose triage is emitting the
+    demand — it goes into the sibling's name so a reader can get from the name back
+    to the item — and `record_verdict` is the only caller that has one, so every
+    other caller leaves the date-and-directory form.
 
     What this function cannot do is undo a clause it already emitted. A
     `vault`-surface item has no amendment route: `amend_clause` resolves the
@@ -1570,10 +1658,15 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     if len(every) >= MAX_CLAUSES:
         return _answer()
     if over_bound and route_to_owed:
-        owed.append(_over_bound_extract_demand(over_bound, artifact_dir))
+        owed.append(_over_bound_extract_demand(over_bound, artifact_dir,
+                                              item_id=item_id))
     if not witness:
         return _answer()
-    artifact = f"{artifact_dir}/{Path(witness).name}"
+    # #2513: never a name the vault already holds. The basename used to be lifted
+    # straight off the SOURCE file, so a source named `gate.json` was ordered onto
+    # `backlog/data/gate.json` — the slot #1883's witness occupies — and the round
+    # that obeyed the clause is what made main red.
+    artifact = _witness_artifact(witness, artifact_dir, item_id=item_id)
     ext = Path(witness).suffix.lower().lstrip(".")
     # Past the `MAX_CLAUSES` check above, which is where both destinations are
     # gated. #2289 clause 4 pinned that gate for the copy demand; #2382 clause 5
@@ -6007,7 +6100,8 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         # on this same route and into this same owed list, gated by the same cap, and
         # still never into `acceptance_clauses`.
         clauses, witness_owed = add_witness_artifact_clause(
-            clauses, f"{body}\n{evidence}\n{acceptance}", route_to_owed=True)
+            clauses, f"{body}\n{evidence}\n{acceptance}", route_to_owed=True,
+            item_id=item.id)
     clauses, moved_later = split_post_landing_clauses(clauses)
     moved_later = list(moved_later) + list(witness_owed)
     human = clean_clauses(list(human_clauses) + moved_later)

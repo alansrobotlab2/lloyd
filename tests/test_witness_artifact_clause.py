@@ -64,6 +64,14 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "BACKLOG_DIR", d)
     monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
     monkeypatch.setattr(CL, "CLUSTERS_PATH", tmp_path / "clusters.json")
+    # #2513: since this round the emitter asks the VAULT whether a witness name is
+    # already taken before it writes a demand. Every node here therefore runs
+    # against an empty temporary vault unless it puts bytes in one itself with
+    # `_vault_witness`; pointed at `~/obsidian` the expectation of every existing
+    # node would move whenever an unrelated item committed a file into
+    # `backlog/data/`, which is the very coupling that made main red.
+    (tmp_path / "vault" / "backlog" / "data").mkdir(parents=True)
+    monkeypatch.setattr("app.paths.VAULT_ROOT", tmp_path / "vault")
     return d
 
 
@@ -1257,3 +1265,184 @@ def test_the_size_bound_prose_no_longer_promises_silence():
     assert "extract demand" in doc, doc[:400]
     assert "At most ONE over-bound note" in doc, (
         "the one-per-item shape is part of the contract the docstring states")
+
+
+# ── #2513: a demand may not order one witness written over another ────────────
+#
+# The artifact name used to be lifted straight off the SOURCE file, so a source
+# named `gate.json` was ordered onto `backlog/data/gate.json` — the slot #1883's
+# witness has held since vault `cfe9a113` (round `SM_20260930_063800`, 34 newline
+# characters, 1,143 bytes). Items #2228 and #2383 were handed that same path by a
+# clause worded exactly like this one and stopped, writing a dated sibling instead;
+# #2512's round obeyed the clause literally at vault `d5f9f542`, #1883's bytes were
+# gone, and the three nodes that read them —
+# `test_failure_ledger_witness::test_the_2228_gate_witness_is_a_dated_sibling_and_the_mirror_is_untouched`,
+# `test_gate_tests_rung_parse::test_the_refusal_this_item_was_filed_from_is_committed_and_re_derivable`,
+# `test_memory_ledger_bound::test_the_archived_gate_report_still_says_the_round_refused_on_skips_not_review`
+# — went red on main. Those three are what prove the restored bytes; the four nodes
+# here pin the naming rule that stops the demand that destroyed them. The convention
+# the sibling follows is the one the two earlier items settled on by hand:
+# `<date>.<item>-<source directory>-<name>`.
+
+#: The stamp every naming node below pins, so a name asserted here is the name the
+#: rule emits and not the name the calendar happened to be on when pytest ran.
+_STAMP_2513 = "2026-10-10T23:30:00"
+
+
+def _round_report(tmp_path: Path, source_dir: str = "SM_20261010_204036",
+                  name: str = "gate.json") -> Path:
+    """A gate report under a round id, in no git tree — the source #2512 cited.
+
+    `~/.local/state/lloyd-automod/rounds/<round_id>/gate.json` on the live box, at
+    the same depth, because the disambiguator this rule reaches for IS that round
+    directory and the node has to be reading the same shape.
+    """
+    d = tmp_path / "state" / "lloyd-automod" / "rounds" / source_dir
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text(f'{{"round_id": "{source_dir}", "ok": false}}\n', encoding="utf-8")
+    assert B.in_git_tree(p) is False, f"the report is outside every tree: {p}"
+    return p
+
+
+def _vault_witness(tmp_path: Path, name: str = "gate.json",
+                   body: str = '{"round_id": "SM_20260930_063800"}\n') -> Path:
+    """Bytes the temporary vault already holds under a witness name someone owns."""
+    p = tmp_path / "vault" / "backlog" / "data" / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def test_a_confirmed_triage_never_orders_a_round_to_write_over_a_pinned_witness(
+        tmp_path, isolated, monkeypatch):
+    """#2513: the sentence that clobbered #1883's witness can no longer be emitted.
+
+    The seam is the real one. `record_verdict` is where #2512's item acquired
+    "copy `/home/alansrobotlab/.local/state/lloyd-automod/rounds/SM_20261010_204036/
+    gate.json` to `backlog/data/gate.json`", so a node that only called the emitter
+    would pass with the writer re-wording it back. Two things are asserted: the
+    demand names a dated sibling carrying this item's id and the source round, and
+    the pinned bytes are still on disk after the call — the harm was a destroyed
+    witness, so a demand that merely *mentions* a different path while something
+    else overwrites the slot is not what "fixed" means here.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_2513)
+    victim = _vault_witness(tmp_path)
+    before = victim.read_bytes()
+    src = _round_report(tmp_path)
+    p = write_item(isolated, 2512, body=(
+        f"Round `SM_20261010_204036` was voided by the sha rail; the report at "
+        f"`{src}` is the witness."))
+
+    item = B.item_by_id(2512)
+    assert item is not None, "the item written above is readable by the id it names"
+    B.record_verdict(item, "confirmed", "the void lines re-read",
+                     acceptance="the refusal re-derives from committed bytes",
+                     acceptance_clauses=list(_AUTHORED))
+
+    owed = list(_fm(p).get("human_clauses") or [])
+    assert len(owed) == 1 and "have no history" in owed[0], owed
+    assert "`backlog/data/gate.json`" not in owed[0], (
+        f"the demand still names the slot #1883 owns: {owed[0]}")
+    assert "backlog/data/2026-10-10.2512-SM_20261010_204036-gate.json" in owed[0], owed[0]
+    target = re.search(r"to `([^`]+)` in the vault", owed[0])
+    cmd = re.search(r"wc -l -c < ([^`]+)`", owed[0])
+    assert target and cmd, owed[0]
+    assert target.group(1) == cmd.group(1), (
+        f"the copy target and the proving command are two different paths: {owed[0]}")
+    assert victim.read_bytes() == before, (
+        "the pinned witness moved while the demand was being written")
+
+
+def test_a_witness_name_the_vault_does_not_hold_keeps_the_plain_basename(
+        tmp_path, isolated, monkeypatch):
+    """The control, because a fix that dated every witness is a fix to #1756's shape.
+
+    Same source, same item id, same clock — only the vault is empty — and the demand
+    is `backlog/data/gate.json`, the bare basename #1756's convention puts on disk.
+    Without this node the four above would be satisfied by a rule that simply
+    refuses plain names, which would rename 135 delivered witnesses' worth of
+    convention and still leave the actual collision unproven.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_2513)
+    free = tmp_path / "vault" / "backlog" / "data" / "gate.json"
+    assert not free.exists(), "positive control: the slot really is free here"
+    src = _round_report(tmp_path)
+    out = B.add_witness_artifact_clause([], f"copy `{src}`", item_id=2512)
+    assert len(out) == 1, out
+    assert "`backlog/data/gate.json`" in out[0], out[0]
+    assert _STAMP_2513[:10] not in out[0], (
+        f"a free name must not be dated: {out[0]}")
+
+
+def test_the_sibling_name_separates_two_sources_that_share_a_basename(tmp_path,
+                                                                     monkeypatch):
+    """The name has to be unique over sources, not merely different from the old one.
+
+    Two items triaged on one day, each citing a different round's `gate.json`: the
+    date alone collides, so the source directory is what keeps them apart, and the
+    item id is what lets a reader get from the file back to the item that owes it.
+    A third call with no item id — the owed-check and test callers — still lands
+    somewhere unique, and the same source re-triaged on the same day yields the
+    same name, so re-running triage keeps pointing at the bytes its last run asked
+    for instead of minting a fresh copy each pass.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_2513)
+
+    def every_name_is_taken(artifact_dir, name):
+        return True
+
+    # Injected at the probe, not at the name builder, so the clause that is checked
+    # below came out of the emitter's own wiring: a fix that built the right name in
+    # a helper nobody calls would pass the helper's unit test and still clobber.
+    monkeypatch.setattr(B, "_artifact_taken", every_name_is_taken)
+    first = _round_report(tmp_path)
+    second = _round_report(tmp_path, "SM_20261010_215012")
+
+    one = B.add_witness_artifact_clause([], f"copy `{first}`", item_id=2512)
+    two = B.add_witness_artifact_clause([], f"copy `{second}`", item_id=2513)
+    assert len(one) == 1 and len(two) == 1, (one, two)
+    assert "backlog/data/2026-10-10.2512-SM_20261010_204036-gate.json" in one[0], one[0]
+    assert "backlog/data/2026-10-10.2513-SM_20261010_215012-gate.json" in two[0], two[0]
+    assert one != two, "two rounds' reports cannot share one witness slot"
+
+    again = B.add_witness_artifact_clause([], f"copy `{first}`", item_id=2512)
+    assert again == one, "re-triage must re-demand its own bytes, not a second copy"
+
+    no_id = B.add_witness_artifact_clause([], f"copy `{first}`")
+    assert "backlog/data/2026-10-10.SM_20261010_204036-gate.json" in no_id[0], no_id[0]
+
+
+def test_the_over_bound_note_takes_the_same_no_clobber_name(tmp_path, isolated,
+                                                           monkeypatch):
+    """#2382's note orders a vault write too, so it inherits the #2513 rule.
+
+    Skipping the note would have left half the hazard standing: it commits an extract
+    into `backlog/data/` by exactly the same route the copy demand does, so the name
+    it chooses has to obey the same rule. The store is named `sessions.jsonl` rather
+    than after any real witness, because this file is not one of the files allowed to
+    name the retired promotions mirror
+    (`test_no_reader_under_tests_or_scripts_opens_the_retired_mirror` refuses a new
+    mention of it) and nothing here needs to.
+
+    The note still ends on the sentence that keeps the size bound a bound, which is
+    the tail `clean_clauses` truncates first — a longer name must not cost the one
+    instruction that stops a round ordering the store whole.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_2513)
+    store = _over_bound(tmp_path, name="sessions.jsonl")
+    victim = _vault_witness(tmp_path, "sessions.jsonl", body='{"row": 1}\n')
+    before = victim.read_bytes()
+
+    clauses, owed = B.add_witness_artifact_clause(
+        list(_AUTHORED), _BODY_1869.format(witness=store), route_to_owed=True,
+        item_id=2513)
+    assert clauses == list(_AUTHORED), clauses
+    assert len(owed) == 1 and _SIZE_NOTE_MARK in owed[0], owed
+    assert "`backlog/data/sessions.jsonl`" not in owed[0], owed[0]
+    assert "backlog/data/2026-10-10.2513-lloyd-automod-sessions.jsonl" in owed[0], \
+        owed[0]
+    assert owed[0].endswith("say so rather than ordering the store."), owed[0]
+    assert victim.read_bytes() == before, (
+        "the note was written to the store it warns about")

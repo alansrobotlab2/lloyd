@@ -47,6 +47,15 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "BACKLOG_DIR", d)
     monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
     monkeypatch.setattr(CL, "CLUSTERS_PATH", tmp_path / "clusters.json")
+    # #2513: the witness emitter now asks the VAULT whether a name is taken before it
+    # writes the demand, so a node here that asserts the emitted target
+    # (`backlog/data/iv-metrics.jsonl`) was reading the real `~/obsidian` — where that
+    # witness was delivered long ago, so the name is genuinely taken and the emitter
+    # answered with a dated sibling. An empty temporary vault is the fixture's own
+    # claim: these nodes are about the BUDGET, and the name they expect is the free
+    # name. Same isolation `tests/test_witness_artifact_clause.py` applies.
+    (tmp_path / "vault" / "backlog" / "data").mkdir(parents=True)
+    monkeypatch.setattr("app.paths.VAULT_ROOT", tmp_path / "vault")
     return d
 
 
