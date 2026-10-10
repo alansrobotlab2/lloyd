@@ -14,7 +14,12 @@ half fails independently:
   replaced;
 - a patch request that drops the tools array re-prefills the whole segment
   (`app/harness/finalizer.py` docstring is the record of that trap), so the
-  re-ask must resend the identical array.
+  re-ask must resend the identical array;
+- and (#2493) the re-ask must be asked with the budget of the attempt it
+  replaces: omitting `max_tokens` there inherited `run_finalizer`'s 1024 while
+  the segment's own guided request went out at the template's
+  `finalizer_max_tokens` (8192), so the repair could truncate a verdict the same
+  request had just produced legally.
 
 No test here touches vLLM: the driver is exercised against a fake
 `run_query`, and the token/prefill numbers the item asks for come from
@@ -23,6 +28,7 @@ No test here touches vLLM: the driver is exercised against a fake
 
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -350,6 +356,130 @@ def test_reask_resends_the_identical_tools_list(monkeypatch, tmp_path):
     assert len(asks) == 1
     assert asks[0]["tools"] == captured, "the re-ask must resend the same array"
     assert asks[0]["chat_messages"] is q.calls[0].options.chat_messages_handle
+
+
+# ---------------------------------------------------------------------------
+# #2493 — the re-ask's budget, and what the retry's trigger still is
+# ---------------------------------------------------------------------------
+
+
+def _one_rejected_patch(monkeypatch, tmp_path, tmpl):
+    """Run one step whose first patch parses but fails validation, capture the re-ask.
+
+    The patch is `{"steps_done": "not an int"}` — invalid-but-parsed, the case
+    this retry exists for — and the re-ask answers with an engine failure, so the
+    step goes on to fail loudly. Returns the captured kwargs and the raised
+    `RunStateStepError`.
+    """
+    import asyncio
+    asks: list[dict] = []
+
+    async def reask(**kw):
+        asks.append(kw)
+        return None, "engine says no", {}
+    monkeypatch.setattr(RS, "run_finalizer", reask)
+
+    q = FakeQuery([seg(structured=out(patch={"steps_done": "not an int"}))])
+    monkeypatch.setattr(app.harness, "run_query", q)
+
+    with pytest.raises(RS.RunStateStepError) as exc:
+        asyncio.run(RS.run_state_turn(
+            job="session-distill",
+            skill_text="THE SKILL BODY",
+            task_block="the task",
+            state=make_state(run_dir=tmp_path),
+            run_dir=tmp_path,
+            template=tmpl,
+            max_steps=1,
+            iterations_per_step=3,
+        ))
+    assert len(asks) == 1, f"exactly one re-ask expected, got {len(asks)}"
+    return asks[0], exc.value
+
+
+def test_the_reask_asks_for_the_budget_of_the_attempt_it_replaces(monkeypatch, tmp_path):
+    """#2493 clause 1: a default template's re-ask is a 8192-token request, not 1024.
+
+    The segment's own guided request goes out at `options.finalizer_max_tokens`
+    (`app/harness/loop.py:1397`; 8192 per the `RunOptions` default at
+    `app/harness/options.py:374`). Before this change the re-ask named no budget,
+    so Python supplied `run_finalizer`'s `max_tokens: int = 1024`
+    (`app/harness/finalizer.py:205`) — a quarter of the budget, on the request
+    whose entire job is to produce the verdict the first one failed to shape. The
+    1024 default is asserted here as well as the 8192, because the contrast is the
+    defect: if the default were ever raised to match, this node would be proving
+    nothing and the assert naming it says so.
+    """
+    kwargs, _err = _one_rejected_patch(monkeypatch, tmp_path, template())
+
+    from app.harness.finalizer import run_finalizer as real_finalizer
+    default_budget = inspect.signature(real_finalizer).parameters["max_tokens"].default
+    assert default_budget == 1024, (
+        "run_finalizer's own default is what the omission used to fall through to;"
+        f" it moved to {default_budget}, so this node's contrast needs re-reading")
+    assert kwargs["max_tokens"] == 8192, kwargs
+    assert kwargs["max_tokens"] != default_budget
+    assert kwargs["max_tokens"] == RunOptions(model="m").finalizer_max_tokens, (
+        "the re-ask must read the template field, not a literal")
+
+
+def test_the_reask_follows_a_non_default_finalizer_budget(monkeypatch, tmp_path):
+    """#2493 clause 2: the retry tracks the attempt it replaces, not a constant.
+
+    A template built at 256 must produce a 256-token re-ask. Without this, a fix
+    that hard-coded 8192 at the call site would satisfy clause 1 and still
+    diverge from any job that sets its own finalizer budget — which is what
+    `workers/sources/_common.py` builds per job.
+    """
+    kwargs, _err = _one_rejected_patch(
+        monkeypatch, tmp_path, template(finalizer_max_tokens=256))
+
+    assert kwargs["max_tokens"] == 256, kwargs
+
+
+def test_the_retry_trigger_is_unchanged_and_the_loud_failure_keeps_attempts_two(
+        monkeypatch, tmp_path):
+    """#2493 clause 3: the trigger is the invalid patch, and the failure stays loud.
+
+    #2370's `should_resample_divergence` is deliberately NOT wired into this path:
+    `envelope_schema_for` emits unbounded `reasoning`/`action` strings, so
+    `_schema_is_bounded` is False and the predicate can never return True here —
+    importing it would delete the re-ask outright and take
+    `test_invalid_patch_gets_one_reask_then_fails_the_step_loudly` with it. What
+    stays is the original contract: one rejected patch draws exactly one re-ask,
+    both attempts are on the record, and the step fails with `attempts=2`.
+    """
+    _kwargs, err = _one_rejected_patch(monkeypatch, tmp_path, template())
+
+    lines = _trace_lines(tmp_path)
+    rejected = [l for l in lines if l["kind"] == "patch_rejected"]
+    failed = [l for l in lines if l["kind"] == "step_failed"]
+    assert [r["attempt"] for r in rejected] == [1, 2], rejected
+    assert len(failed) == 1, failed
+    assert failed[0]["attempts"] == 2, failed[0]
+    assert err.step == 1
+
+    src = (ROOT / "app" / "harness" / "run_state.py").read_text()
+    assert "should_resample_divergence" not in src, (
+        "the divergence predicate belongs to the loop path; on this one the"
+        " envelope is unbounded so it could only ever switch the re-ask off")
+
+
+def test_the_loop_path_finalizer_contract_is_untouched():
+    """#2493 clause 4: the fix is one call site, not a redefinition of a budget.
+
+    Two defaults hold the line elsewhere and neither may move for this change to
+    mean anything: `RunOptions.finalizer_max_tokens` stays 8192 — the value
+    `tests/test_board_steward.py::test_the_finalizer_budget_stays_8192_on_both_sides_of_the_reader`
+    pins on both sides of the reader — and `run_finalizer`'s own parameter stays
+    1024, so the guided-decoding helper still has the small default every other
+    caller relies on and this path is the one that overrides it.
+    """
+    assert RunOptions(model="m").finalizer_max_tokens == 8192
+    sig = inspect.signature(RS.run_finalizer)
+    assert sig.parameters["max_tokens"].default == 1024
+    loop_src = (ROOT / "app" / "harness" / "loop.py").read_text()
+    assert "max_tokens=options.finalizer_max_tokens" in loop_src
 
 
 def test_applied_patch_and_discarded_reasoning_are_traced(monkeypatch, tmp_path, no_engine):

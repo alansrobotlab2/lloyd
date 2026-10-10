@@ -632,6 +632,21 @@ async def run_state_turn(
                 schema=envelope,
                 prompt=_repair_prompt(error),
                 api_key=template.api_key,
+                # #2493: the budget of the attempt this re-ask REPLACES. Naming
+                # none here fell through to run_finalizer's own default of 1024
+                # (app/harness/finalizer.py:205), while the segment's guided
+                # request goes out at options.finalizer_max_tokens — 8192, the
+                # RunOptions default (app/harness/options.py:374) that
+                # app/harness/loop.py:1397 passes and
+                # tests/test_board_steward.py::test_the_finalizer_budget_stays_8192_on_both_sides_of_the_reader
+                # pins. A re-ask at a quarter of that budget can truncate a
+                # verdict the same request produced at full budget one retry
+                # earlier, which turns the repair into a new failure mode
+                # instead of a second chance at the old one. The value comes
+                # from the template, never from config.yaml: on the worker path
+                # the 8192 is the RunOptions default, and config.yaml's copy is
+                # read only by app/mcp_discovery.py.
+                max_tokens=template.finalizer_max_tokens,
                 priority=template.priority,
                 cancel_event=template.cancel_event,
             )
