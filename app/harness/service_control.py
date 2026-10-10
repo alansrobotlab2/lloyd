@@ -86,6 +86,7 @@ _LAUNCHERS = frozenset({
     "start-djev.sh",                # agent-djev — the GPU 2 recall ranker
     "start-decider.sh",             # agent-decider — djev's candidate, same card
     "start-qwen3-tts.sh",           # agent-tts
+    "start-qwen3-tts-omni.sh",      # agent-tts-omni — :8093, GPU 3 (conf added by 11fedc3d)
     "start-livekit-server.sh",      # agent-livekit-server
     "start-obsidian-sync.sh",       # agent-obsidian-sync
     "qmd-watcher.sh",               # agent-qmd-watcher

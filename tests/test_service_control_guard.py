@@ -49,6 +49,14 @@ REFUSED = [
     # variant" held only because :8010/:8011 were already occupied.
     "bash agent-services/bin/start-djev.sh",
     "agent-services/bin/start-djev.sh",
+    # #2505: `11fedc3d` added conf.d/agent-tts-omni.conf naming
+    # start-qwen3-tts-omni.sh and `_LAUNCHERS` never learned it, so this hand-boot
+    # answered ALLOWED for a background session. Measured red on main at 3bddc5bc
+    # by the open-set test below, which is what it was built to catch. The bare
+    # second form is how supervisor itself boots the program — that conf's
+    # `command=` is the script path with no interpreter in front of it.
+    "bash agent-services/bin/start-qwen3-tts-omni.sh",
+    "agent-services/bin/start-qwen3-tts-omni.sh",
     "MOE_BACKEND=triton BATCH_INVARIANT=0 agent-services/bin/start-djev.sh",
     "MOE_BACKEND=triton BATCH_INVARIANT=0 bash agent-services/bin/start-djev.sh",
     "bash -c 'supervisorctl -c x.conf restart lloyd-mc:lloyd-mcp'",
@@ -164,15 +172,28 @@ def test_every_supervised_launcher_refuses_a_background_hand_boot():
     test is red instead of the next round discovering it by booting onto a live
     engine.
 
-    What it covers is the `.sh` programs — 7 of the 12 confs. The other 5 name a
-    python or node entry point (`command=…/python …/server.py`,
+    What it covers is the `.sh` programs — 9 of the 14 confs that name a
+    `command=` (conf.d holds 15 files; `lloyd-mc.conf` is a group and has none).
+    Up from 7 on 2026-09-22 because `11fedc3d` added `agent-tts-omni`. The other 5
+    name a python or node entry point (`command=…/python …/server.py`,
     `…/python -m agent_mcp.main`, `…/node …/qmd.js`, `npm …`, the livekit worker),
     and this test does not reach them: refusing a hand-run `.py` would catch
     someone running that module under a test harness, which is a different
     question from booting an engine, and is left on #1363 rather than taken here.
+
+    This is the drift it was written for, and the loop caught it rather than a
+    round discovering it by booting onto a live engine: `11fedc3d` added the conf
+    and never touched `app/harness/service_control.py`, so the test was red on
+    `main` from 2026-10-09 until #2505, naming `start-qwen3-tts-omni.sh`.
     """
     launchers = _supervised_launchers()
-    assert len(launchers) >= 7, f"expected the 7 supervised launchers, found {launchers}"
+    # A floor, not the count: the corpus is derived, so an empty or stubby read of
+    # conf.d (a moved directory, a parser that stopped matching `command=`) has to
+    # fail here rather than silently shrink the set this test checks. #1363
+    # measured 7 `.sh` launchers in conf.d on 2026-09-22; it has only grown.
+    assert len(launchers) >= 7, (
+        f"the conf.d corpus collapsed to {launchers} — this test is worthless on a "
+        f"set that small, so the corpus or its parser moved")
     for target in launchers:
         command = f"bash {target}"
         assert check_service_control(command, WORKER), f"{command} boots a supervised program"
@@ -196,6 +217,51 @@ def test_the_djev_sweep_boot_is_refused_because_it_boots_a_supervised_engine():
     assert "supervisorctl" in why, f"a boot races the supervisor that owns the pid: {why}"
     assert "background session" in why, why
     assert check_service_control(boot, CHAT) is None, "a person runs the attended window"
+
+
+def test_the_tts_omni_hand_boot_is_refused_however_the_path_is_spelled():
+    """#2505 — the guard fell behind the tree and the open-set test went red, as designed.
+
+    `11fedc3d` added `agent-services/supervisor/conf.d/agent-tts-omni.conf`, whose
+    `command=` is the bare path to `start-qwen3-tts-omni.sh` — the voice engine on
+    :8093, GPU 3 — and `app/harness/service_control.py::_LAUNCHERS` was not widened
+    with it. So `bash agent-services/bin/start-qwen3-tts-omni.sh` was answered
+    ALLOWED for a worker session, and stayed that way until this item.
+
+    What is pinned here beyond the corpus test above is the spelling. That test
+    hands the guard the path exactly as `command=` carries it — the ABSOLUTE one —
+    while a turn types the repo-relative one, and only a basename match makes them
+    the same question. A guard keyed to either spelling alone would satisfy one of
+    these two tests and still let through the command the other one names, so both
+    are asserted, and the absolute one is taken from the conf corpus rather than
+    written out, so the day the conf moves the script this test stops being a claim
+    about a path nothing supervises.
+
+    The read forms stay allowed for the reason the djev launcher's do: the turn
+    diagnosing a boot has to be able to read the script, and `bash -n` parses it
+    without putting a second engine on GPU 3. The guard refuses a boot, never a
+    read — so that half is asserted here too, or a fix could pass by over-refusing.
+    """
+    relative = "agent-services/bin/start-qwen3-tts-omni.sh"
+    conf_named = [t for t in _supervised_launchers() if t.endswith("/" + relative)]
+    assert conf_named, (
+        "conf.d no longer names start-qwen3-tts-omni.sh, so this test is pinning a "
+        "name no supervisor owns — fix the conf path, not the assertion")
+
+    for command in (f"bash {relative}", relative,
+                    f"bash {conf_named[0]}", conf_named[0]):
+        why = check_service_control(command, WORKER)
+        assert why, f"{command} boots a supervised engine and was answered ALLOWED"
+        assert "start-qwen3-tts-omni.sh" in why, f"the refusal must name the script: {why}"
+        assert "supervisorctl" in why, f"a boot races the supervisor that owns the pid: {why}"
+        assert "background session" in why, why
+        assert check_service_control(command, AUTONOMY), f"{command} boots it for autonomy too"
+        assert check_service_control(command, CHAT) is None, "a person runs the boot"
+
+    for read_form in (f"cat {relative}", f"bash -n {relative}",
+                      f"grep -n GPU {relative}"):
+        assert check_service_control(read_form, WORKER) is None, (
+            f"the guard refused a read of {read_form!r} rather than a boot of it")
 
 
 # ── #1961: an unresolvable `task:*` id is UNKNOWN, not attended ─────────────
