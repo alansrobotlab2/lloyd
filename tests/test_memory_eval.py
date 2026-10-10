@@ -1146,8 +1146,12 @@ def test_v2s_audit_file_is_a_v2_document_and_not_the_v1_copy():
     which made the only audit document inside v2 a document about a DIFFERENT set.
     It is a v2 document now: it names v2 in its first line, records both legs'
     mechanical counts over their own denominators (264 dev, 66 holdout) with the
-    command and date that produced them, and states that v2's 264 per-item
-    verdicts have not been judged — the sentence the v1 copy could not say."""
+    command and date that produced them, and states the state of v2's 264 per-item
+    verdicts outright rather than leaving a reader to infer it. What it stated was
+    "not for one item"; #2486's census is what replaced that sentence, so the two
+    asserts at the foot of this node pin the census in its place. The intent the node
+    has always had survives: a v2 document says true things about v2, and keeps a
+    counted shape apart from an audited label."""
     p = M.SET_ROOT / "v2" / "AUDIT.md"
     v2_audit = p.read_text(encoding="utf-8")
     v1_audit = (M.SET_ROOT / "v1" / "AUDIT.md").read_text(encoding="utf-8")
@@ -1164,13 +1168,21 @@ def test_v2s_audit_file_is_a_v2_document_and_not_the_v1_copy():
     assert "eval/label_audit.py --set v2" in v2_audit, "no command to reproduce it"
     assert "2026-10-07" in v2_audit, "no date beside the counts"
 
-    # And the half that is NOT done has to be said, not implied: a reader who
+    # And the state of the judged verdicts has to be said, not implied: a reader who
     # mistakes 330 counted shapes for 330 audited labels is what this clause is
-    # against. Checked on whitespace-collapsed text, because markdown wraps a
-    # sentence across lines and the sentence is what has to be there.
+    # against. #2486 is the census that retires the sentence this node used to pin
+    # ("the per-item verdicts … have not been made. Not for one item."), so what is
+    # asserted now is its replacement — the census section, its own denominator, and
+    # the file the counts are computed from — plus the claim that keeps the two
+    # numbers apart: the manifest still records v1's inherited 32. Checked on
+    # whitespace-collapsed text, because markdown wraps a sentence across lines and
+    # the sentence is what has to be there.
     flat = " ".join(v2_audit.split()).lower()
-    assert "verdicts for v2's 264 dev items have not been made" in flat, flat[:400]
-    assert "judged verdicts: none of the 264" in flat, flat[:400]
+    assert "judged verdicts: none of the 264" not in flat, flat[:400]
+    assert "judged verdicts: all 264 dev items" in flat, flat[:400]
+    assert "label_verdicts.yaml" in flat, "the census table does not name its data file"
+    assert "audited: 32" in flat and "derived_from" in flat, \
+        "the census no longer says the manifest's audited record is untouched"
 
 
 # ── #2356: v2/AUDIT.md's owed section quotes this file's own counts, and says so

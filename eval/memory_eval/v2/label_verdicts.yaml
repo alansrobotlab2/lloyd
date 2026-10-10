@@ -1,0 +1,1080 @@
+# Every v2 dev item's judged gold label: clean / brittle / defective.
+# This file: eval/memory_eval/v2/label_verdicts.yaml — the census behind the
+# per-category table in AUDIT.md, recomputed from it by tests/test_label_audit.py.
+#
+# A census of all 264 dev items, read 2026-10-09 for #2486. The rubric is
+# eval/memory_eval/v1/AUDIT.md:9-13 and the precedent is that file's own line 3 — v1's 35
+# verdicts were "judged by hand (Claude Code, for #1480)", one agent reading every item once.
+# (35, not the 25 of v1's `random.Random(25)` seed: 24 clean + 8 brittle + 3 defective.)
+# Same here: each item's prompt, its `accept.all_of` gold, its `none_of` anti-value, its
+# grounding lines and its cited session text were read, and the counts published in AUDIT.md
+# are computed from THIS file and pinned to it by a node in tests/test_label_audit.py.
+#
+# One row per dev item, in dev/questions.yaml order, at the SET ROOT. That placement is
+# mechanical, not stylistic: `write_manifest` (eval/run_memory_eval.py:355-386) hashes the
+# output of `_leg_files`, which rglobs *inside* each leg, so a file added under `dev/` would
+# move `set_sha` and `load_set` would then refuse the set with `manifest edited after
+# freezing` (run_memory_eval.py:565-566). Nothing here is read by the runner: the frozen set
+# still verifies as `set_sha=16ec1ae14c046c61 label_status=pilot`, and `manifest.label_audit`
+# still reports `audited: 32` with `derived_from: v1` — moving v2 off pilot is a ruling that
+# follows the census, not part of it (AUDIT.md).
+#
+# `reason` names the thing actually inspected: the gold or anti value, the grounding line, or
+# the slot the prompt asks for versus the one the gold fills. It is JSON-quoted because a plain
+# YAML scalar over prose that quotes gold values verbatim breaks on the apostrophes.
+- id: lme-si-001
+  category: single_session
+  verdict: brittle
+  reason: "Gold 'language space' never names the asked slot (SAM decoder eliminated); 'it drops the SAM decoder entirely' scores 0."
+- id: lme-si-002
+  category: single_session
+  verdict: clean
+  reason: "Surname 'Fiorucci' alone accepted; full name verbatim in session; slot = researcher reinventing RL."
+- id: lme-si-003
+  category: single_session
+  verdict: clean
+  reason: "Bare 'MemGPT' accepted for 'who established DMR'; GR matches; prompt states no value."
+- id: lme-si-006
+  category: single_session
+  verdict: clean
+  reason: "'O(n)' 1 token and in-session; slot = cost per agent; only 'Big O n' absent from session, not needed."
+- id: lme-si-007
+  category: single_session
+  verdict: clean
+  reason: "'working demos' verbatim plus singular variant; fills 'what replaces documentation' exactly."
+- id: lme-si-009
+  category: single_session
+  verdict: brittle
+  reason: "Every alias demands literal '+1.6 to +3.5' with both plus signs; 'between 1.6 and 3.5 points' scores nothing."
+- id: lme-si-011
+  category: single_session
+  verdict: brittle
+  reason: "Gold is predicate fragment 'not necessarily imply'; correct 'doesn't necessarily mean they're rare' misses."
+- id: lme-si-012
+  category: single_session
+  verdict: clean
+  reason: "'six' verbatim and bare '6' accepted; slot = tool count; GR's superseded 'four' isn't an anti."
+- id: lme-si-013
+  category: single_session
+  verdict: clean
+  reason: "'60s'/'60 seconds' both short and verbatim; slot = default slowCallDurationThreshold."
+- id: lme-si-014
+  category: single_session
+  verdict: clean
+  reason: "'Ashok' 1-word alias accepts first-name recall; full name in session; slot = llm-d SIG lead."
+- id: lme-si-015
+  category: single_session
+  verdict: clean
+  reason: "'Rock 5C' 2-word alias present in session; right slot (SBC for Alfie); no anti to trip."
+- id: lme-si-016
+  category: single_session
+  verdict: clean
+  reason: "Bare 'LDAC' 1 token verbatim; asked slot is the missing codec, so a correct answer must say it."
+- id: lme-si-017
+  category: single_session
+  verdict: clean
+  reason: "'20g' in-session as 1 token, with '20 g'/'20 grams' variants; slot = trigger weight, GR agrees."
+- id: lme-si-018
+  category: single_session
+  verdict: brittle
+  reason: "All three aliases are 5-word clauses ('parameter differences and KL divergence'); 'KL divergence and weight deltas' scores nothing."
+- id: lme-si-019
+  category: single_session
+  verdict: clean
+  reason: "'4B' 1-token verbatim alias; slot = active footprint, GR separates it from 26B total."
+- id: lme-si-020
+  category: single_session
+  verdict: clean
+  reason: "'unknown'/'currently unknown'; bare adjective still specific to the GPU-hour estimate status; no anti."
+- id: lme-si-021
+  category: single_session
+  verdict: clean
+  reason: "'ITMP' acronym accepted (MINW=1), in session, correct slot for 'what kind of approach'."
+- id: lme-si-022
+  category: single_session
+  verdict: clean
+  reason: "'Pi0.5' verbatim 1 token, case-folded alias too; slot = model beaten on OOD generalization."
+- id: lme-si-023
+  category: single_session
+  verdict: brittle
+  reason: "Both aliases are exact 5-word formula strings; re-spaced 'exp(-ln2*(t/halfLife)^beta)' fails whole-token containment."
+- id: lme-si-025
+  category: single_session
+  verdict: brittle
+  reason: "'BridgeData V2' alone and 'Open X-Embodiment' alone each pass, so half the plural 'which datasets' scores correct."
+- id: lme-si-026
+  category: single_session
+  verdict: brittle
+  reason: "Singletons 'in-distribution' and 'out-of-distribution' each pass alone; an OOD-only answer scores fully correct."
+- id: lme-si-027
+  category: single_session
+  verdict: clean
+  reason: "'28.1%' 1 token verbatim in the asked slot; GR's 0.132-to-0.095 detail isn't required or anti."
+- id: lme-si-028
+  category: single_session
+  verdict: clean
+  reason: "'v5.1' verbatim 1 token plus bare '5.1'; slot = MLPerf version; no competing version value."
+- id: lme-si-031
+  category: single_session
+  verdict: clean
+  reason: "Bare '16' in-session and short; slot = samples per question; GR's '10-20 steps' isn't an anti."
+- id: lme-si-032
+  category: single_session
+  verdict: clean
+  reason: "Bare 'renderer' accepted (MINW=1), verbatim; slot = abstraction the Tinker cookbooks use."
+- id: lme-si-033
+  category: single_session
+  verdict: clean
+  reason: "'6.8' verbatim 1 token; prompt gives no number, so retrieval from the Q4_K_M chat is required."
+- id: lme-si-034
+  category: single_session
+  verdict: clean
+  reason: "'breach plans' verbatim plus 'plans for breaches'/'data breach plans' routes; slot = what the CISO asks."
+- id: lme-si-035
+  category: single_session
+  verdict: clean
+  reason: "'Meta AI' proper 2-token name verbatim; slot = prior employer; no competing org named."
+- id: lme-si-036
+  category: single_session
+  verdict: clean
+  reason: "'Octo' 1-token alias accepted; slot = term for the retail-5090 alternative, only knowable from that chat."
+- id: lme-si-038
+  category: single_session
+  verdict: clean
+  reason: "Verbatim 'Probe, Learn, Distill' plus space- and slash-separated variants; satisfies the plural 'three stages' slot."
+- id: lme-si-039
+  category: single_session
+  verdict: clean
+  reason: "Bare 'incomplete' is the user's own verbatim wording, 1 token, and exactly the asked slot; the anti list is empty, so nothing a correct answer says can score mixed."
+- id: lme-si-041
+  category: single_session
+  verdict: clean
+  reason: "'explicit execution strategies' noun phrase verbatim, right slot for what Plan generates; no clause syntax."
+- id: lme-si-042
+  category: single_session
+  verdict: clean
+  reason: "'OpenClaw' single token verbatim; slot = ecosystem ByteDance integrates with."
+- id: lme-si-043
+  category: single_session
+  verdict: clean
+  reason: "'shared autonomy' and 'macro/micro split' both in-session 2-word aliases; both halves of the same right answer."
+- id: lme-si-044
+  category: single_session
+  verdict: clean
+  reason: "'Software Survival 3.0' is a 3-word title verbatim in session; prompt states no title."
+- id: lme-si-045
+  category: single_session
+  verdict: clean
+  reason: "'offline proxy' 2 tokens verbatim; core-function slot matches GR's 'offline proxy for robot policy evaluation'."
+- id: lme-si-046
+  category: single_session
+  verdict: clean
+  reason: "'7%' 1 token in the asked slot (GigaWorld-Policy vs Motus gap); no competing figure anti."
+- id: lme-si-047
+  category: single_session
+  verdict: clean
+  reason: "The path is the answer: 'messages[].tool_calls[].function.name' is one token, verbatim, exact slot."
+- id: lme-si-048
+  category: single_session
+  verdict: clean
+  reason: "'c15t' bare 1-token project name verbatim; slot = case study for the agent-readiness talk."
+- id: lme-si-051
+  category: single_session
+  verdict: brittle
+  reason: "All aliases hinge on contiguous 'before node-llama-cpp initializes/init'; 'before initializing node-llama-cpp' scores nothing."
+- id: lme-si-052
+  category: single_session
+  verdict: clean
+  reason: "Bare 'intrinsics' accepted plus 'camera intrinsics'; slot = input no longer needed, matches GR."
+- id: lme-si-053
+  category: single_session
+  verdict: brittle
+  reason: "Predicate-clause gold: only two word orders of '...metric output' accepted; 'outputs metric scale directly' misses."
+- id: lme-si-054
+  category: single_session
+  verdict: brittle
+  reason: "Only alias is '349+'; a correct 'the hub had 349 neighbors' lacks the '+' token and scores nothing."
+- id: lme-si-055
+  category: single_session
+  verdict: clean
+  reason: "'AWS' verbatim 1 token; Amazon variants listed but not needed; slot = builder of Strands."
+- id: lme-si-056
+  category: single_session
+  verdict: clean
+  reason: "Bare 'ground truth' 2-token alias in session; slot = purpose of Golden datasets."
+- id: lme-si-057
+  category: single_session
+  verdict: clean
+  reason: "Three paraphrase routes ('model-specific'/'specific to the model'/'not transferable') cover natural wording."
+- id: lme-si-058
+  category: single_session
+  verdict: clean
+  reason: "'three layers' verbatim, numeral form also listed; slot = R-GAT layer count."
+- id: lme-si-059
+  category: single_session
+  verdict: brittle
+  reason: "Comma-dependent list gold: 'language, video and action' (no serial comma) matches neither alias."
+- id: lme-si-060
+  category: single_session
+  verdict: clean
+  reason: "Plain '9000' accepted (MINW=1), so both 'over 9,000' and '9,000 engineers' score."
+- id: lme-si-061
+  category: single_session
+  verdict: clean
+  reason: "'0.7%' single token, verbatim, exactly the acceptance-rate slot; '0.7 percent' alternate listed."
+- id: lme-si-063
+  category: single_session
+  verdict: clean
+  reason: "'Kramberger' surname alone accepted; full name in session; slot = speaker on benchmark reliability."
+- id: lme-si-064
+  category: single_session
+  verdict: clean
+  reason: "'PayPal' 1 token verbatim; slot = how Jim was reimbursed; no competing payment method."
+- id: lme-si-066
+  category: single_session
+  verdict: clean
+  reason: "'loadSkillContent' without parens accepted; verbatim; slot = function added in Issue #219."
+- id: lme-si-069
+  category: single_session
+  verdict: clean
+  reason: "'Envoy' 1 token verbatim; prompt names Nginx, not the gold, so retrieval is genuinely needed."
+- id: lme-si-070
+  category: single_session
+  verdict: clean
+  reason: "'11.1%' 1 token in the credit-card slot; GR's 50% phone figure isn't an anti, so elaboration is safe."
+- id: lme-si-072
+  category: single_session
+  verdict: clean
+  reason: "'LinkedIn' 1 token verbatim; slot = where to find her; no competing platform anti."
+- id: lme-si-073
+  category: single_session
+  verdict: clean
+  reason: "'Aileen Tran' 2-token proper name verbatim; slot = RSSC.org contact-form submitter."
+- id: lme-mu-001
+  category: multi_session
+  verdict: clean
+  reason: "s1 gives 'separate decoder heads', s2 'the SAM decoder'; both asked slots, both aliases verbatim in user turns."
+- id: lme-mu-002
+  category: multi_session
+  verdict: brittle
+  reason: "Group1's only aliases are the identical 5-token 'engineering RL environments for LLMs' with no shorter form, so 'RL environments for LLMs' scores 0; 'Haystack' covers group2, anti list empty."
+- id: lme-mu-003
+  category: multi_session
+  verdict: brittle
+  reason: "group1 scores only as the literal 'startretries=3 and exitcodes=0'; 'startretries=3, exitcodes=0' misses all three aliases (fold keeps '=')."
+- id: lme-mu-004
+  category: multi_session
+  verdict: clean
+  reason: "'agent.md or clinerules' (s1) + 'structured feedback loops' (s2); short aliases agent.md / feedback loops, one value per session."
+- id: lme-mu-005
+  category: multi_session
+  verdict: defective
+  reason: "complexity alias is the bare word 'on': contains() matches 'canonical method, O(n2), runs on each agent', so a wrong complexity scores."
+- id: lme-mu-007
+  category: multi_session
+  verdict: clean
+  reason: "'type whitelist' (s1) and 'root cause' (s2) are the two distinct facts; each appears only in its own session."
+- id: lme-mu-008
+  category: multi_session
+  verdict: clean
+  reason: "'published CVPR/ICLR papers' (s1) vs 'dual-network stability/plasticity separation' (s2 user turn); source+mechanism are the asked slots."
+- id: lme-mu-011
+  category: multi_session
+  verdict: brittle
+  reason: "group2 needs 'ADD, UPDATE, DELETE, RETRIEVE, SUMMARY, FILTER' comma-contiguous; a bulleted list or 'SUMMARY and FILTER' misses (alias also NOGOLDSESS)."
+- id: lme-mu-012
+  category: multi_session
+  verdict: clean
+  reason: "'50%' failureRateThreshold (s1) + 'SYNCHRONIZED (locks) or LOCK_FREE (CAS operations)' (s2); 4-word alias tolerates the abbreviation."
+- id: lme-mu-013
+  category: multi_session
+  verdict: defective
+  reason: "prompt asks only the title, yet group1 demands 'reliability of LLM performance benchmarks'; quoting 'Are LLM Performance Benchmarks Reliable?' cannot score."
+- id: lme-mu-015
+  category: multi_session
+  verdict: clean
+  reason: "'9-hour' (s1); s2 says charged $229.99 but 'final price $198.00', so gold $198 answers the asked final-price slot."
+- id: lme-mu-016
+  category: multi_session
+  verdict: clean
+  reason: "'2.5mm resolution' (s1, distinct from the 6x6 array size) and 'under $4000' (s2); 2.5mm / $4000 short and session-grounded."
+- id: lme-mu-017
+  category: multi_session
+  verdict: clean
+  reason: "'4B active footprint' (s1) vs 'Mixture-of-Experts architecture' (s2); both land in the size/design slots asked."
+- id: lme-mu-019
+  category: multi_session
+  verdict: clean
+  reason: "'ITMP' (s1) and 'GNN' (s2) map to the classification and architecture slots; acronym aliases survive paraphrase."
+- id: lme-mu-021
+  category: multi_session
+  verdict: brittle
+  reason: "MINW=4; group1 only matches literal 'exp(-ln2 * (t / halfLife)^beta)' (fold strips '*'), group2 needs 'averell & heathcote (2011)' exactly - 'and Heathcote (2011)' misses."
+- id: lme-mu-022
+  category: multi_session
+  verdict: clean
+  reason: "'July 2025' lights-off experiment (s1) and Team 'Delta' (s2); neither value is stated in the prompt."
+- id: lme-mu-023
+  category: multi_session
+  verdict: clean
+  reason: "power-law scaling (s1) vs 'new robot capabilities emerge' (s2); 'power law' is a 2-word alias, two genuine observations."
+- id: lme-mu-024
+  category: multi_session
+  verdict: clean
+  reason: "arXiv '2510.23571' (s1) and 'real-to-sim pipeline' (s2); the ID is unique, no same-range competitor."
+- id: lme-mu-025
+  category: multi_session
+  verdict: clean
+  reason: "11.7% user effort (s1) and 28.1% hallucination drop (s2); the in-session distractor 14.8% is in no alias."
+- id: lme-mu-026
+  category: multi_session
+  verdict: clean
+  reason: "~1.4x vs GB200 NVL72 (s1), ~5x vs previous generation (s2); each number answers its own comparison."
+- id: lme-mu-028
+  category: multi_session
+  verdict: clean
+  reason: "'emulates the harnesses of top-performing models' (s1) plus '67,000' stars (s2); 67k / harness emulation are short fallbacks."
+- id: lme-mu-031
+  category: multi_session
+  verdict: clean
+  reason: "Prompt asks for BOTH WikiText-2 scores; GR gives 'approximately 6.8' for Q4_K_M and for IQ4_XS, so 'both ~6.8' carries the gold '6.8'/'~6.8' and there is no anti to trip."
+- id: lme-mu-032
+  category: multi_session
+  verdict: clean
+  reason: "'ML engineer at Altos Labs' (s1) + 'linked in the video description' (s2); matches the two asked slots."
+- id: lme-mu-033
+  category: multi_session
+  verdict: clean
+  reason: "'800k' episodes (s1) and competitor 'Tube Diffusion Policy' (s2); fold de-commas 800,000 so paraphrase survives."
+- id: lme-mu-034
+  category: multi_session
+  verdict: brittle
+  reason: "Group2's gold is the generic 'open question'/'unresolved'/'unknown', so any hedge scores correct without naming the privacy and IP posture; group1 has real aliases ('tweets', 'public writings')."
+- id: lme-mu-035
+  category: multi_session
+  verdict: clean
+  reason: "'Xiao et al.'/'ICLR 2026' (s1) and 'self-improving Vision-Language-Action Models' (s2); either author alias works."
+- id: lme-mu-037
+  category: multi_session
+  verdict: clean
+  reason: "'CTO and co-founder of Filed' (s1) + 'author of NodeGui' (s2); both facts are user statements in separate sessions."
+- id: lme-mu-038
+  category: multi_session
+  verdict: clean
+  reason: "Plan -> 'explicit execution strategies' (s1), Research -> 'understand system architecture' (s2); no alias overlap between phases."
+- id: lme-mu-042
+  category: multi_session
+  verdict: clean
+  reason: "'human grading is the expensive part' (s1) and 'offline proxy' (s2); the two quotable aliases sit in user turns."
+- id: lme-mu-043
+  category: multi_session
+  verdict: brittle
+  reason: "MINW=4: every alias is >=4 words and group2 needs 'pi-0.5' spelled exactly, so 'beats pi 0.5 in the real world' misses."
+- id: lme-mu-047
+  category: multi_session
+  verdict: brittle
+  reason: "must reproduce 'prompt-rules, retrieval, or post-processing' with that punctuation; 'prompt rules, retrieval and post processing' misses both aliases."
+- id: lme-mu-048
+  category: multi_session
+  verdict: clean
+  reason: "'native arm64 Node' (s1) and 'Apple Silicon (MPS)' (s2) are the two facts in the two asked slots; both aliases short."
+- id: lme-mu-049
+  category: multi_session
+  verdict: clean
+  reason: "'edge-frequency statistics' (s1) vs 'monocular metric depth estimation' (s2); s1's phrase lacks 'estimation', so both sessions are needed."
+- id: lme-mu-050
+  category: multi_session
+  verdict: brittle
+  reason: "only the Oxford-comma string 'ETH3D, ScanNet++ v2, and TartanAirV2-WB' is quotable; 'v2 and TartanAirV2-WB' matches none of the three aliases."
+- id: lme-mu-053
+  category: multi_session
+  verdict: brittle
+  reason: "Prompt asks what the USER said, but group1's gold ('calibrate LLM judges', 'prevent drift') is uttered only in the assistant's turns; group2's 'JSONL' is user-owned, so the slot is only half-right."
+- id: lme-mu-054
+  category: multi_session
+  verdict: brittle
+  reason: "group2 needs 'Chen, Siu, Liu, Song, and Wang' verbatim or 'Chen et al.' WITH the period; 'Chen and co-authors' misses, and no alias covers the asked universities."
+- id: lme-mu-055
+  category: multi_session
+  verdict: clean
+  reason: "'Path-Entity (PE) and Path-Global (PG)' (s1) and 'three layers' of R-GAT (s2); both asked, both short, different sessions."
+- id: lme-mu-056
+  category: multi_session
+  verdict: clean
+  reason: "Asks the two aspects of Physical AI; GR states both ('across modalities' and 'language, video, and action') and both are gold aliases, so the one-sentence answer carries both groups."
+- id: lme-mu-057
+  category: multi_session
+  verdict: clean
+  reason: "'Discovery Hub is an MCP directory' (s1) and 'largest private networks' (s2); both verbatim in the asked slots."
+- id: lme-mu-058
+  category: multi_session
+  verdict: clean
+  reason: "'0.7% acceptance rate' (s1) and 'insurgent unit' (s2); distinct selectivity vs operational-model slots."
+- id: lme-mu-061
+  category: multi_session
+  verdict: clean
+  reason: "prompt restates only 'PayPal'/'lunches'; '$75' (s1) and 'exhibitor lunches' (s2) still require both sessions."
+- id: lme-mu-062
+  category: multi_session
+  verdict: brittle
+  reason: "year+authors scores only as '2024 by Kannan, Venkatesh, and Min' or '2024, Kannan, Venkatesh, Min'; 'Kannan, Venkatesh and Min (2024)' misses."
+- id: lme-mu-064
+  category: multi_session
+  verdict: clean
+  reason: "'Recasens et al.' has a no-period alias, 'GPU bottlenecks' a short form of the long alias; publisher and issue are the asked slots."
+- id: lme-mu-065
+  category: multi_session
+  verdict: clean
+  reason: "58.9% gain (s1) and 'Gemini 1.5 Flash' (s2); '1.5 Flash' tolerates a shortened model name."
+- id: lme-mu-067
+  category: multi_session
+  verdict: clean
+  reason: "'2.2.361' (s1) and '84.9%' span recall (s2); the co-occurring 81.0% strict recall is no alias, so both numbers are needed."
+- id: lme-mu-068
+  category: multi_session
+  verdict: clean
+  reason: "'has a LinkedIn profile' (s1) + 'product manager at Oxylabs' (s2); 'works at Oxylabs' covers a paraphrase."
+- id: lme-mu-072
+  category: multi_session
+  verdict: clean
+  reason: "'Tantivy' fork (s1) and 'Database marketing' metaphor in backlog #683 (s2); the prompt gives the item id, not either value."
+- id: lme-kn-001
+  category: knowledge_update
+  verdict: clean
+  reason: "GR states objTac has 135K samples; gold '135K'/'135000' are the count the max_samples slot asks for; anti '100K' is the superseded total the prompt says to ignore."
+- id: lme-kn-002
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: 'Database marketing' is the #683 metaphor; 2-word alias; anti 'Email marketing' is a different metaphor the grounding never names."
+- id: lme-kn-003
+  category: knowledge_update
+  verdict: brittle
+  reason: "Gold 'monocular depth' matches GR, but the requested sed command must literally write the old string 'stereo cameras' — the anti value — in its search pattern."
+- id: lme-kn-005
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: Task 51 is in up_next; single-token alias fits a status-setting CLI command; anti 'blocked' is a state GR never assigns."
+- id: lme-kn-006
+  category: knowledge_update
+  verdict: clean
+  reason: "GR '5-turn consolidation loop'; gold carries quotable non-bare '5-turn'/'5 turns' next to bare '5'; anti '3' is a different integer."
+- id: lme-kn-008
+  category: knowledge_update
+  verdict: brittle
+  reason: "April 2026 is right, but the prompt demands ISO 8601: an answer token '2026-04-01' matches neither '2026-04' nor 'April 2026'."
+- id: lme-kn-009
+  category: knowledge_update
+  verdict: clean
+  reason: "GR '18–203× speedup'; ASCII alias '18-203x' plus '18 to 203 times' cover en-dash/× typography; anti '5–12×' is an unrelated range."
+- id: lme-kn-011
+  category: knowledge_update
+  verdict: clean
+  reason: "GR's Friedman claim is 2x–10x; ASCII '2-10x' and '2x to 10x' aliases dodge the en dash; anti '1.5x' is not in the grounding."
+- id: lme-kn-012
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: average 3.6 core techniques per proof = the 'density_metric' slot; the decimal token is unambiguous; anti '4.2' is a different mean."
+- id: lme-kn-013
+  category: knowledge_update
+  verdict: clean
+  reason: "GR names 100 million web documents; '100 million', '100000000', '100M' all spellable for a YAML field; anti '50 million' contradicted."
+- id: lme-kn-014
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: tracked as Backlog item #91; the '#91' token survives inside a full citation; anti '#45' is an unrelated item number."
+- id: lme-kn-017
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: WFM has an 8-GPU acceleration chapter; bare '8-GPU' alias covers the flag; anti '4-GPU acceleration' is refuted."
+- id: lme-kn-018
+  category: knowledge_update
+  verdict: defective
+  reason: "Prompt asks a percentage increase vs the initial pilot; gold is the absolute '7 hours' and GR gives no pilot baseline, so no ratio exists to answer."
+- id: lme-kn-019
+  category: knowledge_update
+  verdict: brittle
+  reason: "MINW=6: both aliases are 6-word spans containing the literal 'vs' (one with quotes); a regex or prose 'prefers Qwen3-TTS but uses Piper TTS' misses."
+- id: lme-kn-021
+  category: knowledge_update
+  verdict: brittle
+  reason: "GR '4–9 hours', but range aliases are only en-dash '4–9 hours' and '4 to 9 hours' (the latter NOGOLDSESS); plain '4-9 hours' matches nothing."
+- id: lme-kn-022
+  category: knowledge_update
+  verdict: clean
+  reason: "GR ~2% parameter expansion fills a percentage field; '2%' quotable with '2 percent'/'0.02' fallbacks; anti '5%' is a different rate."
+- id: lme-kn-023
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: target hardware for 2026 edge deployments is exactly the 'Deployment Target Year' slot; '2026' quotable, anti '2025' the wrong year."
+- id: lme-kn-024
+  category: knowledge_update
+  verdict: clean
+  reason: "GR scaled the OPSD recipe at 12B on Apex Agents; '12B'/'12b'/'12 billion'; anti '8B' is a size the grounding never states."
+- id: lme-kn-025
+  category: knowledge_update
+  verdict: clean
+  reason: "GR quotes 'Chat Coding' as ESP-Claw's capability on ESP32-S3; anti 'Basic Serial Echo' is not a grounded feature."
+- id: lme-kn-027
+  category: knowledge_update
+  verdict: brittle
+  reason: "GR gives lines 233-327, but matching needs the contiguous '233-327' span; the requested deep link (':233', '#L233-L327') tokenizes differently."
+- id: lme-kn-028
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: persistent 3D scene graphs; short 'scene graphs' alias exists; anti 'flat point cloud' is the superseded format, not the asked flag."
+- id: lme-kn-029
+  category: knowledge_update
+  verdict: brittle
+  reason: "Real BibTeX splits journal={Nature Communications} and year={2026}, so no contiguous 'Nature Communications (2026)'; the two short variants are NOGOLDSESS."
+- id: lme-kn-032
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: arXiv:2512.07611 contradicts the DAPO claim; single-token 'contradicts'; anti 'supports' is the opposite stance, not part of the answer."
+- id: lme-kn-034
+  category: knowledge_update
+  verdict: clean
+  reason: "GR fixes urllib3 at 2.7.0; '2.7.0'/'v2.7.0'/'2.7' cover a lock line; anti '1.26.0' is the older release the answer needn't name."
+- id: lme-kn-035
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: #38606 'remains open'; 'open'/'active' are the status slot's values; anti 'closed'/'resolved'/'duplicate' are exactly what GR rules out."
+- id: lme-kn-036
+  category: knowledge_update
+  verdict: clean
+  reason: "GR's 8-16 core saturation point is the recommended cpu_count; ASCII '8-16' single-token alias; anti '32 cores' is the diminishing-returns case."
+- id: lme-kn-037
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: ~11,000 facts (537 dirs × 20 facts checks); both '11,000' and '11000' accepted for --max-items; anti '2,500' unrelated."
+- id: lme-kn-038
+  category: knowledge_update
+  verdict: brittle
+  reason: "MINW=4: every alias is the 4-word 'autonomous online failure detection'; 'automated online failure detection' or reordered phrasing misses."
+- id: lme-kn-039
+  category: knowledge_update
+  verdict: clean
+  reason: "GR pairs speed 0.70 with 2.10 wps, which the prompt already supplies, so gold '0.70'/'0.7' is the asked setting; anti '0.50' is another speed."
+- id: lme-kn-040
+  category: knowledge_update
+  verdict: clean
+  reason: "GR implemented WebRTC AEC3; short 'AEC3' alias fills the version field; anti 'WebRTC AEC2' is the superseded engine a manifest edit won't restate."
+- id: lme-kn-041
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: Embodied-CoT at CoRL 2025; 2-word 'CoRL 2025' plus 'CoRL2025'; anti 'NeurIPS 2024' is a venue GR never names."
+- id: lme-kn-045
+  category: knowledge_update
+  verdict: clean
+  reason: "GR truncates bodies at 60 KB; both '60 KB' and '60KB' accepted, so prose or '=60KB' both land; anti '20 KB' is a different limit."
+- id: lme-kn-047
+  category: knowledge_update
+  verdict: brittle
+  reason: "Anti 'handle out-of-date training data Cypher generation' is the gold's own meaning paraphrased, and gold needs the 4–5-word hyphenated 'training-data' span."
+- id: lme-kn-048
+  category: knowledge_update
+  verdict: brittle
+  reason: "GR says May 2023, but the slot is a BibTeX month field: 'month = may' or 'month = {5}' matches no alias, since all golds need 'May 2023' contiguous."
+- id: lme-kn-049
+  category: knowledge_update
+  verdict: clean
+  reason: "GR gives the script with --install and --default; the '--install --default' span survives a natural command line; anti needs the extra words 'flag only'."
+- id: lme-kn-050
+  category: knowledge_update
+  verdict: clean
+  reason: "GR writes the overhead in ASCII, so '0.5-1.3ms' is a single-token alias for the capacity cell; anti '5.0-8.0ms' is a different cost."
+- id: lme-kn-052
+  category: knowledge_update
+  verdict: brittle
+  reason: "Gold arXiv:2511.12149 is the right slot, but anti 'October 2025' is a date, not a competing ID — nothing in the answer space contends with the gold."
+- id: lme-kn-054
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: Black Forest Labs developed Flux 2, so 'Flux 2' fills the model-name half the prompt asks for; anti 'Flux 1' is the earlier model."
+- id: lme-kn-055
+  category: knowledge_update
+  verdict: clean
+  reason: "GR's disputed claim is precisely the 2x success-rate figure, which is the multiplier the tracker column records; anti '3x' is another multiplier."
+- id: lme-kn-056
+  category: knowledge_update
+  verdict: defective
+  reason: "GR lists 'Podman/Docker/K8s' as providing orchestration, so anti 'Kubernetes'/'K8s' is grounding-supported while gold 'Docker' is never singled out as the orchestrator."
+- id: lme-kn-057
+  category: knowledge_update
+  verdict: defective
+  reason: "Prompt asks the Total Cost cell for 1,200 PRs (= $6,000 at GR's ~$5/PR); gold '$5' is the unit price, so the correctly computed total scores wrong."
+- id: lme-kn-058
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: the torchcodec RuntimeError only occurred prior to v0.25.1, making it the floor; 'v0.25.1'/'0.25.1'; anti 'v0.24.0' sits inside the buggy range."
+- id: lme-kn-059
+  category: knowledge_update
+  verdict: clean
+  reason: "GR gives linkedin.com/in/khanhnamle94/ verbatim, so the URL slot is directly quotable with slash/https variants; anti is a different handle."
+- id: lme-kn-060
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: CVAE outputs a 100-step trajectory in one shot = max_trajectory_length; '100-step'/'100 steps'/'100'; anti 'one step at a time' is the rejected behaviour."
+- id: lme-kn-061
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: up to 20% accuracy loss from the communication bottleneck is the asked percentage; '20%'/'20 percent'; anti '10%' is half the grounded figure."
+- id: lme-kn-063
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: budgets above `agent.max_turns` are honoured, matching the 'above ___' config-key slot; anti '50' is a number in a slot wanting a key name."
+- id: lme-kn-064
+  category: knowledge_update
+  verdict: brittle
+  reason: "Only aliases are the bare digit '5' and 'five', and 'five' is NOGOLDSESS, so the item rests on one digit against bare anti '3'."
+- id: lme-kn-065
+  category: knowledge_update
+  verdict: brittle
+  reason: "Asked slot is a status string but both aliases are the 3-word 'outperformed by HippoRAG2' — 'weaker than HippoRAG2' misses; anti '0.68' isn't a competing status."
+- id: lme-kn-067
+  category: knowledge_update
+  verdict: brittle
+  reason: "Aliases are exact comma lists ('0.0, 0.5, 1.0'); a regex ^(0|0.5|1)$ or '0.0, 0.5, or 1.0' breaks adjacency, and loose alias '0, .5, 1' is NOGOLDSESS."
+- id: lme-kn-068
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: over 2 million websites; '2 million' and '2,000,000' both accepted for the scale field; anti '500,000' is a different corpus size."
+- id: lme-kn-069
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: ElevenLabs on AI Engineer Paris 2026 Day 2; 'Day 2' quotable plus bare '2' for a numeric field; anti 'Day 1' is the other day."
+- id: lme-kn-070
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: 70.8% success on real coffee-pouring = the expected_success_rate value; '70.8%'/'70.8'; anti '62.5%' is a different rate."
+- id: lme-kn-071
+  category: knowledge_update
+  verdict: clean
+  reason: "GR: CNCERT's March 2026 advisory classified OpenClaw risks high-severity; 'high-severity'/'high severity'; anti 'medium-severity' is the tier GR excludes."
+- id: lme-te-001
+  category: temporal
+  verdict: clean
+  reason: "Gold DMR in s1 2026-06-03 (MemGPT-team benchmark), anti Closed-Loop Evals only in s2 06-06; 1-token gold, prompt states no order."
+- id: lme-te-002
+  category: temporal
+  verdict: clean
+  reason: "Arcee Fusion 06-06 -> Closed-Loop Evals 06-13 = 7 days, reproduces; A:[] nothing to trip; stray '7' is the assistant's 7:30 PM reservation in s2."
+- id: lme-te-004
+  category: temporal
+  verdict: clean
+  reason: "Zeghidour talk 08-19 vs Inngest 08-22 give order across two dated sessions; 'Zeghidour' verbatim in user turn, anti absent there."
+- id: lme-te-005
+  category: temporal
+  verdict: clean
+  reason: "Agent RFT domain shift 06-04 -> Inngest closed platform 06-16 = 12; both anchors user statements; numeric gold, empty anti list."
+- id: lme-te-006
+  category: temporal
+  verdict: brittle
+  reason: "Gold 'introduce and manage Distrobox containers' is Lloyd's own Jun-22 reply; the user only said 'a manager for those distrobox containers'."
+- id: lme-te-007
+  category: temporal
+  verdict: clean
+  reason: "MonoNav 08-09 vs ShapeForce 08-11; alias 'MAV navigation' verbatim in that same 08-09 user turn, anti only in s2."
+- id: lme-te-008
+  category: temporal
+  verdict: clean
+  reason: "DIGIT CNN 5-15 ms latency 07-26 -> ShapeForce 07-30 = 4; GR lines match both user turns; no anti values to collide."
+- id: lme-te-009
+  category: temporal
+  verdict: clean
+  reason: "'900 total pending proposals' verbatim Jun-8 turn (MINW=2 keeps '900 pending' viable); all three anti values (Stage 2 skipped/0.70/0.80) are Jun-15."
+- id: lme-te-011
+  category: temporal
+  verdict: clean
+  reason: "ESQL syntax errors 06-06 -> 'Phase Matters' 06-14 = 8; stray '8' is 'Snapdragon 8 Elite' in corpus, and gold matches the answer not transcript."
+- id: lme-te-013
+  category: temporal
+  verdict: clean
+  reason: "Kim et al. (DialSim) 07-27 vs Plivo 07-31: 4-day gap recoverable; 'late July' covers both so no giveaway; 'DialSim dataset paper' reply-side only."
+- id: lme-te-016
+  category: temporal
+  verdict: clean
+  reason: "AIMDocumentContentTool 07-30 vs Guided Source Separation 08-11; single-token gold in user turn; doubled 'AIMDocumentContentTool' alias cosmetic."
+- id: lme-te-017
+  category: temporal
+  verdict: clean
+  reason: "Sleep Mode single-node limits 08-07 -> GSS WPE dereverberation 08-09 = 2; two distinct dated sessions anchor both ends; no anti."
+- id: lme-te-018
+  category: temporal
+  verdict: clean
+  reason: "'20,000 to over 60,000' verbatim Jul-5 turn with '20k to 60k'/'20000 to 60000' fallbacks; anti agentic-environment is the Jul-15 fact."
+- id: lme-te-019
+  category: temporal
+  verdict: clean
+  reason: "Itamar Friedman 08-17 vs quick-research 08-26; aliases incl. bare 'Itamar'/'Friedman' all in 08-17 turn; anti token absent there."
+- id: lme-te-021
+  category: temporal
+  verdict: brittle
+  reason: "The 09-02 turn also says 'if an umbrella is never set to up_next...', so the one-word gold 'up_next' cannot separate Aug 26 from Sep 2."
+- id: lme-te-023
+  category: temporal
+  verdict: clean
+  reason: "Guardrail/Inner Voice 05-23 -> PI wordform 30s 05-26 = 3; both anchors explicit user turns; day count in asked slot, anti empty."
+- id: lme-te-024
+  category: temporal
+  verdict: clean
+  reason: "'MC, Discord, Voice, and Signal' verbatim May 13 plus 'four surfaces' fallback; anti registry.json / Alan-and-Lisa is the May-25 turn."
+- id: lme-te-025
+  category: temporal
+  verdict: clean
+  reason: "MXFP4 06-14 vs PyramidKV 06-24; 1-token gold, anti absent from s1; prompt only names the two candidates (normal order shape)."
+- id: lme-te-026
+  category: temporal
+  verdict: clean
+  reason: "Derivation cache 07-15 -> PyramidKV monotonic-importance 07-19 = 4; GR1's 'content-addressed derivation cache' is the user's own phrasing."
+- id: lme-te-028
+  category: temporal
+  verdict: clean
+  reason: "RL-100 OPE-gated PPO 08-26 vs Qwen 3.6plus traces 08-30; both named in prompt, order not stated; duplicate 'RL-100' alias harmless."
+- id: lme-te-029
+  category: temporal
+  verdict: clean
+  reason: "OpenAPI/Todo HTTP API 07-31 -> Qwen trace analysis 08-09 = 9; anchors in two dated sessions, no anti value."
+- id: lme-te-030
+  category: temporal
+  verdict: clean
+  reason: "'misses semantic contradictions' verbatim Aug-12 turn (+ 'misses semantic conflicts'); anti 'groups facts by sub-category' is the Aug-19 proposal."
+- id: lme-te-031
+  category: temporal
+  verdict: clean
+  reason: "curl 06-30 before LingBot-VLA 07-03; 'curl' is one word but the only wrong answer is the other named candidate, which cannot contain it."
+- id: lme-te-032
+  category: temporal
+  verdict: clean
+  reason: "TransE h+r=t 07-18 -> LingBot-VLA 07-27 = 9; both user-stated; empty anti list so no stale-value trap."
+- id: lme-te-033
+  category: temporal
+  verdict: brittle
+  reason: "MINW=5 ('read-only guarded SELECT query arm') and anti 'Read-only guarded SELECT queries' is the same kg.sqlite fact restated Sep 1, so paraphrase misses or trips none_of."
+- id: lme-te-035
+  category: temporal
+  verdict: clean
+  reason: "CLARE adapter routing 05-07 -> Snowflake semantic layer v4 05-10 = 3; both anchors in user's own words; no anti to collide with the '3 days' gold."
+- id: lme-te-037
+  category: temporal
+  verdict: clean
+  reason: "Apex Agents 05-10 vs Grafana 05-12 - 2-day gap recoverable from session dates; 2-token gold verbatim in the 05-10 turn."
+- id: lme-te-038
+  category: temporal
+  verdict: clean
+  reason: "Mario Zechner verification 07-17 -> Grafana in Superlinked 07-23 = 6; GR2 names Grafana's integration, exactly the prompt's second anchor."
+- id: lme-te-040
+  category: temporal
+  verdict: clean
+  reason: "SimpleFOC 08-25 vs Bits=-log2(p) turn 09-01; alias 'BLDCMotor' sits in same user turn; generic anti 'Information' only bites a two-sided answer."
+- id: lme-te-041
+  category: temporal
+  verdict: clean
+  reason: "LRUCacheWorkerloraManager 05-01 -> information-formula question 05-03 = 2; prompt says 'asked about', matching s2 which is a question turn."
+- id: lme-te-043
+  category: temporal
+  verdict: clean
+  reason: "User names it 06-28 ('It's called GenForce, apparently') vs LSO 07-05; 'notes from last week' fits neither session (asked 07-11) but symmetrically."
+- id: lme-te-044
+  category: temporal
+  verdict: clean
+  reason: "Cosmos Reason 1 training data 08-10 -> LSO explanation 08-17 = 7; LSO appears only in the later session, so second anchor is unique."
+- id: lme-te-045
+  category: temporal
+  verdict: clean
+  reason: "'51% performance' verbatim Jun-14 turn; anti 'Stanford' sits only in the Jun-25 turn, so a clean answer needn't name the paper."
+- id: lme-te-046
+  category: temporal
+  verdict: clean
+  reason: "SAI 05-26 vs ARC-AGI 06-02; 1-token alias 'SAI' in 05-26 user turn; third-person 'did he bring up' is wording only, not label."
+- id: lme-te-047
+  category: temporal
+  verdict: clean
+  reason: "arXiv:2512.07611 06-09 -> ARC-AGI barrier 06-17 = 8; both GR lines match their user turns; anti list empty."
+- id: lme-te-048
+  category: temporal
+  verdict: brittle
+  reason: "All three aliases are the punctuation-locked 'generated: by/at' (MINW=3) with no short variant, so 'a generated block with by and at fields' — the ordinary way to say it — misses the fold."
+- id: lme-te-049
+  category: temporal
+  verdict: clean
+  reason: "urllib3 06-20 vs AgentX 06-27; 1-token gold in user turn; the 'urllib3 version 2.7.0' alias being NOGOLDSESS is harmless."
+- id: lme-te-050
+  category: temporal
+  verdict: clean
+  reason: "#38606 KV block corruption 05-26 -> AgentX CI eval wall 06-07 = 12; both events user-side, count lands in the asked slot."
+- id: lme-te-051
+  category: temporal
+  verdict: clean
+  reason: "'vLLM's XPU platform changes' verbatim May 17; anti 'memory bandwidth saturates' belongs to the May-25 rack-benchmarking turn."
+- id: lme-te-053
+  category: temporal
+  verdict: clean
+  reason: "MTTR KPI 08-13 -> Dalibor/Daniel 08-24 = 11; GR2's 'agrees near term, not far term' is consistent with the prompt's 'disagreement'."
+- id: lme-te-055
+  category: temporal
+  verdict: clean
+  reason: "User raises FLOAT/ARMADA 05-23 before ReplayPolicy 06-02; definition itself is the assistant's reply but 'FLOAT' is the user's own word, so order holds."
+- id: lme-te-056
+  category: temporal
+  verdict: clean
+  reason: "TTS shaping fix 08-26 -> ReplayPolicy execution_horizon 09-01 = 6; 'Voice-Tts fix' is the entity label for the tts_shaping.py turn; stray '6' is 6 PM drizzle."
+- id: lme-te-057
+  category: temporal
+  verdict: brittle
+  reason: "Only alias is the 5-word clause 'bounded to prevent buffering issues' (MINW=5); 'SDP answer reads need a cap to avoid buffering' is correct but scores nothing."
+- id: lme-te-058
+  category: temporal
+  verdict: clean
+  reason: "Embodied-CoT 05-14 vs GR00T-Mimic 05-16, both inside the 'last week' window of the 05-23 ask; 1-token gold in the user turn."
+- id: lme-te-059
+  category: temporal
+  verdict: clean
+  reason: "Agent Zero plugin.yaml manifests 05-11 -> GR00T-Mimic component list 05-15 = 4; two distinct dated sessions anchor the count."
+- id: lme-te-060
+  category: temporal
+  verdict: clean
+  reason: "'integrated editor' (2 tokens) is the user's own Aug-17 wording; anti 'observation masking' is the Aug-29 Junie-benchmark turn."
+- id: lme-te-062
+  category: temporal
+  verdict: clean
+  reason: "OTEL_LOG_TOOL_CONTENT 07-01 -> Anthropic /research feed 07-12 = 11; prompt says 'asked', matching that both user turns are questions."
+- id: lme-te-063
+  category: temporal
+  verdict: brittle
+  reason: "MINW=4 - every alias is 4-5 words ('evaluate Cognition on Graph'); two of three NOGOLDSESS and no short variant such as 'Cognition on Graph' qualifies."
+- id: lme-te-064
+  category: temporal
+  verdict: clean
+  reason: "Agent skills 08-08 before Eval Metric 08-10; 'Gemma Edge' alias sits in the same turn, anti 'Eval Metric' is only the 08-10 fact."
+- id: lme-te-066
+  category: temporal
+  verdict: brittle
+  reason: "'semantic-aware incremental graph' is verbatim in BOTH the Aug-1 and Aug-3 turns, so a stale answer scores; anti 'lightweight collaboration mechanism' is that fact reworded."
+- id: lme-te-067
+  category: temporal
+  verdict: clean
+  reason: "Maxine (CoupleWork AI) 07-02 vs Cyrus Clarke 07-11; 1-token gold, anti name absent from the 07-02 session."
+- id: lme-te-068
+  category: temporal
+  verdict: clean
+  reason: "Autodesk-Fusion-360-for-Linux 08-08 -> Cyrus Clarke talk 08-11 = 3; anchors unique to each session; empty anti."
+- id: lme-te-069
+  category: temporal
+  verdict: clean
+  reason: "'angular-deviation signal' occurs only in the Jul-2 turn; anti 'URL path and HTTP method' is the Jul-5 Endpoint definition."
+- id: lme-te-070
+  category: temporal
+  verdict: clean
+  reason: "opentelemetry.propagate 07-30 before bug #38606 08-05; 'baggage' missing from s1 harmless extra alias; 'last week' only fits 08-05 (wording slip)."
+- id: lme-te-071
+  category: temporal
+  verdict: clean
+  reason: "NF4 on LLaMA-3.2-11B-Vision 07-17 -> bug #38606 details 07-28 = 11; both anchors user-stated; no anti value."
+- id: lme-te-072
+  category: temporal
+  verdict: defective
+  reason: "The anti 'VLA models' is the gold expansion's own abbreviation and GR line 2 asserts it inside the same claim, so an answer quoting 'Vision-Language-Action Models' and naming the acronym scores mixed; nothing in the corpus avoids the abbreviation."
+- id: lme-te-074
+  category: temporal
+  verdict: clean
+  reason: "Black Forest Labs / Flux 2 05-21 -> Jamba 1.5 constant-memory Mamba state 06-02 = 12; count in the asked slot, no anti."
+- id: lme-pr-002
+  category: preference
+  verdict: defective
+  reason: "Q asks which tool to use; gold 'avoid'/'avoided' names no tool, and the only right reply ('avoid yt-dlp') must utter the anti 'yt-dlp' — v1 pr-044 shape."
+- id: lme-pr-004
+  category: preference
+  verdict: clean
+  reason: "Gold 'Python' (1 word, in-session) fills the implementation-language slot; anti 'Node.js' is a rejected peer the answer need not name."
+- id: lme-pr-005
+  category: preference
+  verdict: brittle
+  reason: "Only the literal 'browser_navigate and browser_snapshot' scores; a step list misses, and 'navigate then snapshot' can't match past the underscore boundary."
+- id: lme-pr-006
+  category: preference
+  verdict: brittle
+  reason: "Gold 'cost per capability per second' sits in the same user turn as the anti 'single-step accuracy', and the ask itself names the anti 'pass@1', so explaining the switch scores mixed — v1 pref-005's mode."
+- id: lme-pr-007
+  category: preference
+  verdict: defective
+  reason: "Q asks which film; gold 'the right choice' is GR's evaluative phrase about Karl Urban, not a title — 'Mortal Kombat (2021)' scores zero."
+- id: lme-pr-010
+  category: preference
+  verdict: clean
+  reason: "'unproven' is the 1-word stability status in the asked slot and in-session; anti 'confirmed'/'verified' are the opposite verdict."
+- id: lme-pr-011
+  category: preference
+  verdict: clean
+  reason: "'agent memory' (2 words) sits in the topic slot per GR's 'AI agent memory systems'; anti 'general news'/'entertainment' are off-list topics."
+- id: lme-pr-013
+  category: preference
+  verdict: brittle
+  reason: "Gold is the fragment 'code models' lifted from 'writable by code models'; a spec answer naming Remotion/code-based rendering can omit it; alias is duplicated."
+- id: lme-pr-015
+  category: preference
+  verdict: clean
+  reason: "'CPU cores'/'RAM'/'memory' are short in-session aliases for the budget slot; the anti needs the full 'second GPU card'/'new GPU' string."
+- id: lme-pr-016
+  category: preference
+  verdict: clean
+  reason: "'keyword matching' is in-session and 2 words with a 1-word 'keyword-based' variant; anti 'semantic routing'/'embedding' are the rejected peers."
+- id: lme-pr-017
+  category: preference
+  verdict: defective
+  reason: "Anti aliases 'all' and 'every' are bare function words any notification copy carries ('all the diffs', 'every Monday'), so a correct answer scores mixed."
+- id: lme-pr-018
+  category: preference
+  verdict: clean
+  reason: "'Linux' is a 1-token answer to the OS slot, GR-backed; anti 'macOS' is the rejected platform."
+- id: lme-pr-019
+  category: preference
+  verdict: clean
+  reason: "'3B' matches inside 'Qwen2.5-3B' (hyphen counts as a boundary), so the short alias works; anti '7B' is the wrong size."
+- id: lme-pr-020
+  category: preference
+  verdict: brittle
+  reason: "Sole alias is the bare '0.85' (listed twice) against bare '0.9'/'0.95'/'1.0'; '85% of VRAM' or '.85' paraphrases miss."
+- id: lme-pr-021
+  category: preference
+  verdict: clean
+  reason: "'startup' is 1 word and in-session ('reading TRACEPARENT on import (startup)'); anti 'on command'/'runtime' are the wrong moments."
+- id: lme-pr-022
+  category: preference
+  verdict: clean
+  reason: "'Sonnet' is a 1-token answer to who writes the implementation; anti 'GPT-4' is a different model entirely."
+- id: lme-pr-023
+  category: preference
+  verdict: clean
+  reason: "'essential' (1 word) plus in-session 'required reading' fill the stance slot; anti 'optional'/'light read' invert the 10/10 rating."
+- id: lme-pr-024
+  category: preference
+  verdict: brittle
+  reason: "Only in-session alias is the 4-word literal 'update items in place'; 'update in place'/'in-place update' are off-session and 'find by ID, update status/reason' misses."
+- id: lme-pr-025
+  category: preference
+  verdict: clean
+  reason: "'SIs'/'System Integrators' name the external-partner slot and are in-session; anti 'in-house' is the opposite sourcing."
+- id: lme-pr-027
+  category: preference
+  verdict: clean
+  reason: "'Ollama' is a single token answering the Claude-Code-with-local-models method slot; no anti listed, so no false-mix risk (nothing tests distractor refusal)."
+- id: lme-pr-028
+  category: preference
+  verdict: defective
+  reason: "The prompt asks for a quick fix plan for the circular camera_driver/image_processor import; the only gold is the verdict phrase 'red flag', so a plan that fixes it without uttering that phrase scores zero — the gold fills a different slot than the one asked."
+- id: lme-pr-029
+  category: preference
+  verdict: clean
+  reason: "'centralised knowledge' plus a US-spelling variant fill the principle slot; anti 'decentralised knowledge' is the coined opposite nobody states correctly."
+- id: lme-pr-030
+  category: preference
+  verdict: brittle
+  reason: "3 of 4 aliases are off-session and need literal wording ('halt execution', 'do not apply'); only 'prohibits --apply' is reachable, and anti 'wholesale rewrite' is in GR's trigger clause."
+- id: lme-pr-031
+  category: preference
+  verdict: brittle
+  reason: "Only in-session alias is the 4-word 'not reveal its deception'; a title like 'Models hide their deception' hits neither off-session 'hide its deception' nor 'conceal deception'."
+- id: lme-pr-033
+  category: preference
+  verdict: clean
+  reason: "'explicitly refuses'/'refuses to implement' are the session's own wording for the Auto Mode status slot; anti 'planned'/'coming soon' is the opposite status."
+- id: lme-pr-035
+  category: preference
+  verdict: brittle
+  reason: "Every alias is plural ('portable skills files', 'skills files'); drafting one 'skills file'/SKILL.md — the natural phrasing — matches nothing."
+- id: lme-pr-036
+  category: preference
+  verdict: brittle
+  reason: "GR pairs both on one line: stating the agreed change ('score note bodies/H2s rather than just titles') utters the anti 'titles'."
+- id: lme-pr-037
+  category: preference
+  verdict: brittle
+  reason: "Both aliases end in literal empty parens; real snippets write propagate.inject(carrier, headers), so neither 'inject()' nor the full form appears."
+- id: lme-pr-039
+  category: preference
+  verdict: brittle
+  reason: "Both aliases carry the commas of 'Learn, Do, Teach'; 'learn-do-teach' or 'learn it, do it, teach it' miss, and the same GR offers 'just-in-time' as the answer."
+- id: lme-pr-041
+  category: preference
+  verdict: clean
+  reason: "'distillation' and 'distill' are 1-word, in-session aliases for the recommendation slot; anti 'serving' is the rejected alternative approach."
+- id: lme-pr-043
+  category: preference
+  verdict: defective
+  reason: "Gold 'leading compounds in AI' (MINW=4) is GR's garbled fragment, not an answer to 'trial one or the market leader?', and the prompt itself states the anti 'trial'."
+- id: lme-pr-045
+  category: preference
+  verdict: clean
+  reason: "'r=16' is verbatim in the session and matches '--r=16' and LoraConfig(r=16, ...); anti 'r=8' is simply the wrong rank."
+- id: lme-pr-048
+  category: preference
+  verdict: brittle
+  reason: "Prompt asks what N1.7 can do (capability slot); gold 'docs and blog posts' is the sourcing rule, and reciting GR's 'rather than release notes' utters the anti."
+- id: lme-pr-049
+  category: preference
+  verdict: brittle
+  reason: "Only in-session alias is UK-hyphenated 'against data-centre buildout'; the plain US wording 'against data center buildout' misses (both US aliases off-session)."
+- id: lme-pr-050
+  category: preference
+  verdict: clean
+  reason: "'hubristic' is a 1-word in-session adjective for the skepticism theme slot; anti 'strategic opportunity' inverts Berman's criticism."
+- id: lme-pr-051
+  category: preference
+  verdict: brittle
+  reason: "GR is a from-to line ('velocity-based KPIs to usage-frequency indicators'), so a faithful metrics framing repeats the anti verbatim."
+- id: lme-pr-052
+  category: preference
+  verdict: clean
+  reason: "'multiscale qmd' is a 2-word in-session alias in the indexing slot; anti 'single-scale' is a hyphenated coinage that plain prose won't trip."
+- id: lme-pr-054
+  category: preference
+  verdict: brittle
+  reason: "Gold 'anxious'/'concerned' are 1-word generic sentiment tokens and the GR line is Berman's own self-description, so an answer about the subject's stance says the word without recalling the item."
+- id: lme-pr-055
+  category: preference
+  verdict: clean
+  reason: "'Rust' is a 1-token answer to the primary-language slot; anti 'Python' is the rejected peer (v1 rated this item clean too)."
+- id: lme-pr-056
+  category: preference
+  verdict: clean
+  reason: "'personal brand' (2 words, in-session) answers the investor value-prop slot; anti 'technical superiority'/'product features' are the rival pitches."
+- id: lme-pr-057
+  category: preference
+  verdict: brittle
+  reason: "The prompt itself raises 'keep the old static threshold', and the bare anti '0.75' is tripped by any answer naming what was dropped ('not frozen at 0.75')."
+- id: lme-pr-058
+  category: preference
+  verdict: brittle
+  reason: "Gold 'blind Ralph loops' names what to avoid while the prompt asks what to emphasize; only the plural is in-session and 'unreviewed loops' paraphrases miss."
+- id: lme-pr-059
+  category: preference
+  verdict: clean
+  reason: "Session says 'I need to make sure I read that one first' plus 'book priority', so the superlative is grounded; 'The Goal' is a short in-session title, no anti."
+- id: lme-pr-061
+  category: preference
+  verdict: defective
+  reason: "Prompt asks for concrete placeholder values; gold 'illustrative boilerplate' is GR's characterization, and the natural denial 'not actual operational data' utters the anti."
+- id: lme-pr-062
+  category: preference
+  verdict: brittle
+  reason: "Deliverable is a crontab line running `claude -p ...`; the prose most answers use, 'Claude Code CLI', breaks the alias 'claude CLI' (not contiguous)."
+- id: lme-pr-063
+  category: preference
+  verdict: clean
+  reason: "'tag_search' is one distinctive in-session token in the retrieval-path slot; anti 'semantic/vector/hybrid search' are different mechanisms."
+- id: lme-pr-064
+  category: preference
+  verdict: brittle
+  reason: "MINW=4: every alias is a 4-word '...synchronous cc_orchestrate calls' string, so a prompt line like 'never call cc_orchestrate synchronously' matches none."
+- id: lme-pr-065
+  category: preference
+  verdict: brittle
+  reason: "Sole alias is the bare '0.85' (duplicated) against the bare '0.95' GR names as unsafe; '85% of VRAM' or '.85' phrasings miss."
+- id: lme-pr-066
+  category: preference
+  verdict: clean
+  reason: "'Inner Excellence' fills the essential-reads slot; anti 'Atomic Habits' is precisely the book the user called generic in the session."
+- id: lme-pr-067
+  category: preference
+  verdict: clean
+  reason: "'W3C TraceContext' is the verbatim in-session CamelCase name for the correlation-ID slot; anti 'custom UUIDs' is a different scheme."
