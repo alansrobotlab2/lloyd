@@ -258,6 +258,103 @@ def _classify_interest_profile(text: str) -> bool:
     return bool(_interest_profile_guard(text))
 
 
+#: Cached the way `_interest_profile_guard` is: this script is stdlib-only and the
+#: predicate it needs is owned by the intel pipeline, so reaching it is one
+#: `sys.path` insert, done once.
+_footer_residue_shape = None
+
+
+def _classify_promo_residue(text: str):
+    """Ask the SHIPPED residue predicate, do not re-spell it (#2509).
+
+    `intel_pipeline.body.footer_residue_shape` is the one callable the write path
+    drops footer residue BY, so a digest this instrument counts clean is a digest
+    whose lines the writer had no shape left to drop, and a shape added to that
+    table is counted here and dropped on the write path in the same edit. A
+    re-spelled phrase list here is #2011's failure all over again: its acceptance
+    grep saw 10 of 27 published sentences and reported the corpus clean.
+
+    Returns the shape NAME (or None) rather than a bool, because the finding a
+    person reads has to say which shape fired — `rule` and `hashtag-run` are
+    different repairs on different channels.
+    """
+    global _footer_residue_shape
+    if _footer_residue_shape is None:
+        if str(_INTEL_PIPELINE_DIR) not in sys.path:
+            sys.path.insert(0, str(_INTEL_PIPELINE_DIR))
+        from intel_pipeline.body import footer_residue_shape
+        _footer_residue_shape = footer_residue_shape
+    return _footer_residue_shape(text)
+
+
+def promo_residue_sweep(vault: Path, classify=None) -> dict:
+    """Per digest: how many body lines the residue predicate saw, and how many it flagged.
+
+    Two skips, each one a line that is not a body. `DIGEST_STRUCTURAL_PREFIXES` is
+    the set `corpus_shape.py` has always skipped — a heading, the `---` rule, the
+    `**Source:**` line, the `[Link]` — and the YAML front matter is the new one:
+    its `timestamp:` key is a metadata key, but `Subscribe`/`Timestamp` are also
+    the words a channel's footer label begins with, so counting front matter
+    would flag all ten digests on their own metadata and teach the reader to
+    ignore the alert. Bodies are what the writer chooses, so bodies are what this
+    measures — the same scope #2509's own acceptance is written against.
+
+    `classify` is a seam for tests to show the count follows the callable they
+    hand it and not some pattern of their own; production calls it with none.
+
+    One blind spot comes free with reusing the skip, and it is recorded rather
+    than papered over: a hashtag tail is a residue shape and a markdown heading
+    share the leading `#`, so a body line like `#ai #ainews #aitools` is skipped
+    here as structure, exactly as the interest-profile sweep above skips it.
+    Reading those two apart would need a heading pattern of this file's own,
+    which is the thing #2011 forbids. The write path has no such blind spot —
+    `strip_link_footer` sees a tag line on any line it walks — so this count is
+    the digest-side witness and the guard stays the writer's.
+    """
+    classify = classify or _classify_promo_residue
+    files, total = [], 0
+    for p in sorted(vault.glob(DIGEST_GLOB)):
+        lines = p.read_text(errors="replace").splitlines()
+        in_front_matter = bool(lines) and lines[0].strip() == "---"
+        hits, checked = [], 0
+        for lineno, line in enumerate(lines, 1):
+            text = line.strip()
+            if in_front_matter:
+                if lineno > 1 and text == "---":
+                    in_front_matter = False
+                continue
+            if not text or text.startswith(DIGEST_STRUCTURAL_PREFIXES):
+                continue
+            checked += 1
+            shape = classify(text)
+            if shape:
+                hits.append({"line": lineno, "shape": shape, "text": text})
+        total += len(hits)
+        files.append({"file": str(p.relative_to(vault)), "lines_checked": checked,
+                      "flagged": len(hits), "hits": hits})
+    return {"glob": DIGEST_GLOB, "skips": list(DIGEST_STRUCTURAL_PREFIXES),
+            "files": files, "files_count": len(files), "total_flagged": total}
+
+
+def promo_residue_lines(report: dict) -> tuple[list, list, bool]:
+    """`(per_digest, flagged, any_flagged)` for one measured report.
+
+    The same split as `interest_profile_lines`, for the same reason: the per-digest
+    count is the number a person trends, and a flag is the thing the instrument
+    exists to catch, so the flag survives `--quiet` and names the file AND the line
+    — "1 flagged somewhere in ten digests" is not actionable.
+    """
+    sweep = report.get("promo_residue") or {}
+    per_digest, flagged = [], []
+    for f in sweep.get("files", []):
+        per_digest.append(f"promo_residue [{f['file']}]: "
+                          f"lines_checked={f['lines_checked']} flagged={f['flagged']}")
+        for h in f["hits"]:
+            flagged.append(f"promo_residue: FLAGGED {f['file']}:{h['line']} "
+                           f"[{h['shape']}] {h['text']!r}")
+    return per_digest, flagged, bool(sweep.get("total_flagged"))
+
+
 def interest_profile_sweep(vault: Path, classify=None) -> dict:
     """Per digest: how many lines the guard was asked about, and how many it flagged.
 
@@ -419,6 +516,9 @@ def measure(vault: Path, pipeline: Path, now: datetime, days: int):
     # shipped guard's, so it shares none of the four shape metrics, and folding it in
     # would put a fifth row through the threshold loop it has no thresholds for.
     report["interest_profile"] = interest_profile_sweep(vault)
+    # Same reason for sitting outside `corpora`: its unit is one digest line and its
+    # verdict is the intel pipeline's predicate's, not a shape metric.
+    report["promo_residue"] = promo_residue_sweep(vault)
     return report
 
 
@@ -596,9 +696,10 @@ def main(argv=None) -> int:
     lines, moved = diff_lines(prior[1] if prior else None, report)
     recurring, new_recurring = recurring_lines(prior[1] if prior else None, report)
     per_digest, flags, flagged = interest_profile_lines(report)
+    promo_digest, promo_flags, promo_flagged = promo_residue_lines(report)
     row, wrote = write_new(out_dir, report)
 
-    finding = moved or new_recurring or flagged
+    finding = moved or new_recurring or flagged or promo_flagged
     if finding or not args.quiet:
         kept = "" if wrote else f" [row for {day} already existed; nothing written]"
         print(f"corpus shape over {args.days} d -> {row}"
@@ -610,9 +711,9 @@ def main(argv=None) -> int:
                   f"duplicate_rate={c['duplicate_rate']} "
                   f"self_reference_rate={c['self_reference_rate']}")
         if not args.quiet:
-            for line in per_digest:
+            for line in per_digest + promo_digest:
                 print(line)
-        for line in lines + recurring + flags:
+        for line in lines + recurring + flags + promo_flags:
             print(line)
     return 2 if finding else 0
 

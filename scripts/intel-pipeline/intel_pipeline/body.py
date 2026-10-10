@@ -90,7 +90,16 @@ _UNFILLED_ISSUE_TRAILER_RE = re.compile(
 #: A rule alone on its line: `______` or `======`. Anchored to the whole line on
 #: purpose — markdown turns a `______` sitting under a heading into a setext H2, and
 #: a run of underscores inside text (`snake__case`, a table row) is not a rule.
-_RULE_LINE_RE = re.compile(r"^\s*[_=]{5,}\s*$")
+# `[_=]{5,}` was the whole of it until #2509: a channel that sets its footer
+# off with a SPACED dash run — `— — — — — — — — —` — has no rule this sees, and
+# every rule that hangs off a rule (the tail walk's anchor, `_ruleless`,
+# `_cta_lead`'s "a real rule below") abstains on that body entirely. One
+# pattern now names both spellings, so widening it widens all three consumers
+# at once — including the "a rule above but not below means the block is
+# structural" guard, which now also fires on a dash run. A markdown `---` is
+# three dashes and stays below the four this needs; `- item` is not a run
+# because `item` is not a dash.
+_RULE_LINE_RE = re.compile(r"^\s*(?:[_=]{5,}|(?:[−–—-]\s*){4,}\d?)\s*$")
 
 #: A line that is NOTHING but a short label closed by a colon: `Full post:`, `Links:`,
 #: `Podcast:`. No word may sit after the colon, so a real sentence cannot match it, and the
@@ -157,8 +166,12 @@ _LEADING_NON_WORDS_RE = re.compile(r"^[^\w]+")
 #: not a general "is this promo" classifier: a classifier that mis-fires eats the
 #: description's opening paragraph, which is #856's failure mode on the other side.
 _FOOTER_LABEL_RE = re.compile(
+    # `sponsor(?:ship|ed)?` is #2509's addition: `Sponsored by Granola, the AI
+    # notepad for your meetings.` is the line #2453 left sitting above the ASTRA
+    # entry's real description, and it carried no URL, no colon and no rule, so
+    # nothing in the earlier lists could see it.
     r"^\W*?(?:my\s+links?|follow\s+(?:me|us)|subscribe|support\s+(?:the\s+)?(?:channel|us)"
-    r"|business\s+inquiries?|inquiries?|contact\s+(?:us|me)?|check\s+out|resources?"
+    r"|sponsor(?:ship|ed)?|business\s+inquiries?|inquiries?|contact\s+(?:us|me)?|check\s+out|resources?"
     r"|timestamps?|chapters?)\b", re.IGNORECASE)
 
 _URL_RE = re.compile(r"(?:https?://|www\.)\S", re.IGNORECASE)
@@ -167,6 +180,175 @@ _URL_RE = re.compile(r"(?:https?://|www\.)\S", re.IGNORECASE)
 #: `_URL_RE` cannot see it — an address is not a `http://` or `www.` — and the
 #: rule-free footer of #1819 is made of exactly these.
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+# ── #2509: the residue a footer leaves once its URL is gone ──────────────────
+# Every rule above is anchored on something that is *still there*: a rule line,
+# a footer label over a link, a URL inside a block. #2453 deleted the 16 lines
+# `_LINK_PRESENT_RE` matches from the published digests and the prose around
+# them stayed — a `____` with `My Links 🔗` under it, a channel greeting where
+# the links were, a hashtag run, and the `   / @aidotengineer` that dropping a
+# trailing URL leaves a slash-run in place of. Those shapes are also what the
+# 2026-10 feed traffic now publishes *live*, because a description that carries
+# no URL gives every anchor above nothing to find: `strip_link_footer` returned
+# the DGX, TheAIGRID and AI Engineer NYC rows of 2026-10-08/10 byte-for-byte.
+#
+# One classifier names them (`footer_residue_shape`), and three readers ask it:
+# the write path's tail walk (`_drop_footer_residue`), the instrument
+# (`footer_residue_lines`, which `corpus_shape.py` counts per digest), and the
+# tests. That is #2011's rule — the check and the repair read one measurement —
+# so a phrase is spelled exactly once, here, and no caller re-spells it.
+#: Labels that carry neither a colon nor a URL: `📱LET'S CONNECT ON SOCIAL
+#: MEDIA`, `Want to work with me?`. A closed list of whole-line labels, the
+#: same discipline as `_FOOTER_LABEL_RE` above — every entry is how a promo
+#: line begins and none is how a sentence begins, which is what makes a
+#: leading-phrase match safe on a line with no colon to close it.
+#: `Want to work with me?` is the label #2453 left sitting over the rule it
+#: could not reach; `Let's Connect` is the DGX channel's own spelling, which is
+#: outside `_FOOTER_LABEL_RE` because that list is keyed on the colon form.
+_FOOTER_PHRASE_RE = re.compile(
+    # The apostrophe class covers the typographic `’` the DGX channel's own line
+    # uses (`📱LET’S CONNECT ON SOCIAL MEDIA`); `'?` alone missed it and the whole
+    # footer under that rule stayed.
+    r"^\W*?(?:let['\u2019]?\s?s\s+connect|connect\s+(?:on|with)\b"
+    r"|want\s+to\s+work\s+with\s+(?:me|us)"
+    r"|get\s+in\s+touch|help\s+support)\b", re.IGNORECASE)
+
+#: A promo section heading that says nothing but its own name: `Links From
+#: Today's Video:`, `MY RELATED VIDEOS:`, `SOURCES:`. The colon AT THE END is
+#: the whole discriminator — `Source: Figure (@Figure_robot)` and
+#: `All rights w/ authors: ` carry content or belong to a human credit, and
+#: `Key points:`/`Event:`/`Venue:` are a description's own headings. Only the
+#: promo words are listed, so the colon alone never flags.
+_FOOTER_SECTION_LABEL_RE = re.compile(
+    r"^\W*?(?:\w+\s+)?(?:links?|links?\s+from|related\s+videos|sources?)"
+    r"[^:\n]{0,30}:\s*$", re.IGNORECASE)
+
+#: A hashtag run — `#dgxspark #nvidia #llm`, `#Shorts #VoiceAI #AI #PolyAI`.
+#: TWO tags or more and every whitespace-separated token is one, so a line
+#: that merely contains a tag (`…the #1 reason`) is prose and stays.
+_HASHTAG_RUN_RE = re.compile(r"^\s*(?:#[^\W_][\w-]*\s+){1,}#[^\W_][\w-]*\s*$")
+
+#: The remnant of the shape ` … / https://x / @handle` leaves when the URL is
+#: taken out: `   / @aidotengineer`. `_EMAIL_RE` cannot see it, because #1791's
+#: email rule needs a dot after the `@` and a channel handle has none.
+_ORPHAN_HANDLE_RE = re.compile(r"^\s*/{1,2}\s*@[\w][\w.\-]{1,39}$")
+
+#: A line that is nothing but @-mentions and #-tags: `@granola_so #ad`. No
+#: prose on the line to lose, and no sentence begins this way.
+_TAG_MENTION_LINE_RE = re.compile(r"^\s*(?:[@#][^\W_][\w.\-]*\s*)+$")
+
+#: Ordered so a line reporting more than one shape reports the most specific:
+#: a run of `#tag`s is a hashtag tail before it is a mention line, an orphan
+#: handle is also a mention line, a rule is the weakest evidence of the set and
+#: is tried last. Everything here is URL-FREE by construction —
+#: `footer_residue_shape` refuses any line carrying a URL first, because a
+#: footer that still has its links is the block the anchors above already
+#: own, and the instrument must not double-report it as the residue class.
+_FOOTER_RESIDUE_SHAPES: tuple = (
+    ("orphan-handle", _ORPHAN_HANDLE_RE),
+    ("hashtag-run", _HASHTAG_RUN_RE),
+    ("tag-mention-line", _TAG_MENTION_LINE_RE),
+    ("footer-label", _FOOTER_LABEL_RE),
+    ("footer-section-label", _FOOTER_SECTION_LABEL_RE),
+    ("footer-phrase", _FOOTER_PHRASE_RE),
+    ("channel-greeting", _GREETING_ANCHOR_RE),
+    ("email", _EMAIL_RE),
+    ("rule", _RULE_LINE_RE),
+)
+
+#: Shapes that are residue only as part of a block. A rule line alone at the
+#: end of a description is a channel that rules its own sections — #1561's
+#: abstention says that prose, not a footer — so it goes only when something
+#: that cannot be prose (a hashtag run, a label, a handle, a greeting) came
+#: with it. Deliberately only this one shape: every other shape in the table
+#: is a line no description's CONTENT ends on, which is why they can open a
+#: block on their own.
+_FOOTER_RESIDUE_WEAK = frozenset({"rule"})
+
+#: Shapes whose whole content IS the shape: no whitespace-separated word sits
+#: beside the tag, handle or slash. Such a line cannot be the wrapped tail of
+#: a sentence, so it needs no blank above it to prove it is a line of its own
+#: — which is what the AI Engineer NYC row turns on, where the channel put the
+#: orphan `   / @aidotengineer` directly under its `Subscribe …:` line.
+#: Everything else (a label, a greeting, a rule) is only ever residue when it
+#: is set off, exactly as `_set_off` decides for the anchors above.
+_FOOTER_RESIDUE_SELF_CONTAINED = frozenset(
+    {"orphan-handle", "tag-mention-line", "hashtag-run"})
+
+
+def footer_residue_shape(line: str) -> "str | None":
+    """Which channel-footer residue this line is, or None (#2509).
+
+    The one place the phrases live. A line carrying a URL is NOT residue by
+    this predicate — it is a link block, which the #1561/#1819/#1861/#2143
+    anchors own, and `strip_link_footer` already removes it. What this names
+    is what survives a URL strip: the label, the rule, the tags, the handle.
+    """
+    if _URL_RE.search(line):
+        return None
+    for name, pat in _FOOTER_RESIDUE_SHAPES:
+        if pat.search(line) if name == "email" else pat.match(line):
+            return name
+    return None
+
+
+def footer_residue_lines(text: str) -> "list[tuple[int, str]]":
+    """Every residue line in `text` as `(1-based line, shape name)` (#2509).
+
+    Detection for a body that is already body-only text — the read side, for
+    `corpus_shape.py`'s per-digest count. It asks the same classifier the
+    write side drops by, so a digest the instrument calls clean is a digest
+    the write path had nothing left to drop, and one shape added here is
+    counted by the instrument and dropped by the writer in the same edit.
+    """
+    return [(i, shape) for i, ln in enumerate(text.splitlines(), 1)
+            if (shape := footer_residue_shape(ln)) is not None]
+
+
+def _drop_footer_residue(lines: list) -> list:
+    """`lines` with a URL-less footer residue tail taken off, or `lines` itself.
+
+    Walks the tail backwards over blanks and residue lines and stops at the
+    first line the classifier refuses, which is the shape of the guarantee:
+    everything below the stop is footer, the stop itself is prose, and prose
+    can only ever be above the cut. Three guards, each one an abstention:
+
+    * a residue line must be set off (`_set_off`) — a hashtag inside a wrapped
+      paragraph is the paragraph's own text;
+    * a weak shape (a rule) opens nothing, so a description ending on its own
+      section divider keeps it;
+    * the kept part must still hold a non-blank line — the strip never empties
+      a body, which is the same reason `strip_link_footer` returns "" only for
+      a body that WAS nothing but the footer (#1900).
+
+    Trailing blanks go with the block, so `prose\\n\\n#tag\\n` returns
+    `prose`, and a text with no residue tail is returned as the SAME list
+    object so the caller can tell "nothing changed" from "changed to the same
+    characters" (#2143's whitespace property).
+    """
+    i = len(lines)
+    strong = False
+    while i > 0:
+        line = lines[i - 1]
+        if not line.strip():
+            i -= 1
+            continue
+        shape = footer_residue_shape(line)
+        if shape is None or shape in _FOOTER_RESIDUE_WEAK and not strong:
+            break
+        if (shape not in _FOOTER_RESIDUE_SELF_CONTAINED
+                and not _set_off(lines, i - 1)):
+            break
+        strong = True
+        i -= 1
+    if not strong or i == len(lines):
+        return lines
+    kept = lines[:i]
+    while kept and not kept[-1].strip():
+        kept.pop()
+    if not any(ln.strip() for ln in kept):
+        return lines
+    return kept
 
 #: The last labels this treats as a real top-level domain in a scheme-less host. Both
 #: halves of the constraint that keeps the host test from being a dotted-word test:
@@ -685,9 +867,17 @@ def _url_free_or(lines: list, unchanged: str) -> str:
     only after the anchors would not have seen it.
     """
     kept = _drop_url_blocks(lines)
-    if kept is lines:
-        return unchanged
-    return "\n".join(kept).rstrip()
+    dropped = kept is not lines
+    # #2509: the URL-less residue walk, asked on the same lines this drop just
+    # saw, on every one of `strip_link_footer`'s four return paths. A DGX
+    # description reaches here through the ABSTENTION below — a rule with
+    # prose under it is section furniture — and a residue pass that ran only
+    # at the end of the function, like the one #2143 replaced, would never
+    # have looked at it.
+    residue = _drop_footer_residue(kept)
+    if residue is kept:
+        return unchanged if not dropped else "\n".join(kept).rstrip()
+    return "\n".join(residue).rstrip()
 
 
 def strip_link_footer(text: str) -> str:

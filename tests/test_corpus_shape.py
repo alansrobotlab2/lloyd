@@ -800,3 +800,110 @@ def test_the_run_finds_the_vault_and_the_data_root_from_the_environment(
     out = capsys.readouterr().out
     assert "knowledge/robotics/youtube-digest.md" in out, out
     assert f":{lineno} " in out, (lineno, out)
+
+# --- #2509 clause 6: the per-digest promo-residue count -----------------------
+
+FOOTER_BLOCK = (
+    "\u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014\n\n"
+    "\u2764\ufe0f SUBSCRIBE TO MY YOUTUBE CHANNEL \U0001f4fa\n\n"
+    "#dgxspark #nvidia #llm\n")
+
+
+def _promo_digest(body: str) -> str:
+    """One digest in the shape the writer publishes it: front matter, a heading,
+    the `**Source:**` line, a body, the `[Link]`, the `---` rule."""
+    return ("---\ntype: digest\ntimestamp: '2026-10-10T08:44:00'\n---\n\n"
+            "# YouTube Digest\n\n## 2026-10-10\n\n"
+            "### The cheapest 4TB box\n\n"
+            "**Source:** youtube | **Relevance:** 6/10\n\n"
+            f"{body}\n"
+            "[Link](https://www.youtube.com/watch?v=5ycO4GG0YVY)\n\n---\n")
+
+
+def _promo_vault(root: Path, body: str) -> Path:
+    vault = root / "vault"
+    (vault / "knowledge" / "ai-llms").mkdir(parents=True)
+    (vault / "knowledge" / "ai-llms" / "youtube-digest.md").write_text(
+        _promo_digest(body), encoding="utf-8")
+    return vault
+
+
+def test_the_promo_residue_count_is_per_digest_and_flags_naming_file_and_line(
+        tmp_path, monkeypatch, capsys):
+    """#2509 clause 6: one count per digest found through `knowledge/*/youtube-digest.md`,
+    and a flag that names file AND line, because the repair is a backfill of one file.
+
+    Same CLI discipline as the #2039 node above — the command a person types, no roots
+    on the command line, `LLOYD_OBSIDIAN_VAULT` redirecting it, and an empty
+    `LLOYD_DATA` so nothing but the digest can move the exit code. The footer block is
+    the DGX/ASUS GX10 description from the 2026-10-10 feed row, which is the body the
+    write path published verbatim. The clean file exits 0 and prints nothing: the
+    count's zero is what tells a reader the backfill held.
+    """
+    empty_pipeline = tmp_path / "empty-pipeline"
+    empty_pipeline.mkdir()
+    monkeypatch.setenv("LLOYD_DATA", str(empty_pipeline))
+
+    clean = _promo_vault(tmp_path / "clean", "A real paragraph about the box.\n")
+    monkeypatch.setenv("LLOYD_OBSIDIAN_VAULT", str(clean))
+    assert cs.main(["--quiet", "--out-dir", str(tmp_path / "out-clean")]) == 0
+    assert capsys.readouterr().out == "", "a clean digest flagged"
+
+    dirty = _promo_vault(tmp_path / "dirty",
+                         "A real paragraph about the box.\n\n" + FOOTER_BLOCK)
+    monkeypatch.setenv("LLOYD_OBSIDIAN_VAULT", str(dirty))
+    assert cs.main(["--quiet", "--out-dir", str(tmp_path / "out-dirty")]) == 2
+    out = capsys.readouterr().out
+    assert "promo_residue: FLAGGED knowledge/ai-llms/youtube-digest.md:" in out, out
+    assert "[footer-label]" in out and "SUBSCRIBE TO MY YOUTUBE CHANNEL" in out, out
+
+
+def test_the_count_follows_the_shipped_callable_and_never_its_own_phrases(
+        tmp_path, monkeypatch):
+    """#2509 clause 6, the #2011 guard: the instrument asks the predicate the WRITE
+    PATH asks, so a phrase list cannot be re-spelled here and read clean.
+
+    The seam proves the dependency direction: hand in a classifier that flags nothing
+    and the same footer file counts 0; hand in one that flags every line and the count
+    is every line it was asked about. Either way the number comes from the callable,
+    not from a pattern this file holds. `cap` shows production really does ask about
+    the prose line, and `shapes` shows which residue shapes the callable reported on
+    the DGX footer block.
+
+    The block's hashtag line is the one line this count cannot see, and the reason is
+    shared with the interest-profile sweep above rather than invented here:
+    `DIGEST_STRUCTURAL_PREFIXES` skips a leading `#` as a heading, and `#dgxspark`
+    starts with one. Telling those two apart would take a heading pattern of this
+    file's own — what #2011 forbids — so the blind spot is stated here and in the
+    sweep's docstring, and the writer stays the guard for a tag tail.
+    """
+    vault = _promo_vault(tmp_path, "A real paragraph about the box.\n\n"
+                                   + FOOTER_BLOCK)
+    cap = []
+
+    def spy(line):
+        cap.append(line)
+        return cs._classify_promo_residue(line)
+
+    rep = {"promo_residue": cs.promo_residue_sweep(vault, classify=spy)}
+    per, flags, any_flagged = cs.promo_residue_lines(rep)
+    assert any_flagged and rep["promo_residue"]["total_flagged"] == 2, per
+    assert "lines_checked=3 flagged=2" in per[0], per[0]
+    assert "knowledge/ai-llms/youtube-digest.md" in per[0], per[0]
+    assert "A real paragraph about the box." in cap, (
+        "the callable was never asked about the prose line")
+    shapes = {h["shape"] for h in rep["promo_residue"]["files"][0]["hits"]}
+    assert shapes == {"rule", "footer-label"}, shapes
+
+    nothing = cs.promo_residue_sweep(vault, classify=lambda line: None)
+    assert nothing["total_flagged"] == 0, nothing
+    everything = cs.promo_residue_sweep(vault, classify=lambda line: "whatever")
+    assert everything["total_flagged"] == 3, everything
+    assert cs.promo_residue_lines({"promo_residue": nothing})[2] is False
+    assert cs.promo_residue_lines({"promo_residue": everything})[2] is True
+
+
+# #2509 clauses 1 and 2 (the shipped digest: residue gone, every entry still
+# populated) are pinned in `tests/test_intel_pipeline_body.py`, alongside the
+# clause 3-5 nodes, because the contract maps the digest-side checks to that
+# file. The nodes for THIS file's clause 6 are immediately above.

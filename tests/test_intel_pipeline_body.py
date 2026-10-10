@@ -12,6 +12,7 @@ vault: the in-process tests rebind the package's paths, and the last one runs th
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -3244,3 +3245,270 @@ def test_routing_on_the_gate_text_publishes_the_stripped_summary_only(intel_stat
         "the raw channel description leaked into the published body"
     assert "My Links" not in published and "👉" not in published
     assert "watch?v=gateonly" in published
+
+# --- #2509: the residue a footer leaves once its URL is gone ------------------
+# #2453 deleted only the 16 lines `_LINK_PRESENT_RE` matches, so everything a
+# channel writes AROUND its links stayed: a `____` rule, `My Links 🔗`, the
+# `Sponsored by …` line, a hashtag run, the orphan `   / @aidotengineer` the URL
+# drop itself produced. `footer_residue_shape` is the one callable that names
+# those by shape; `strip_link_footer` consults it on every return path, and
+# `scripts/maintenance/corpus_shape.py` counts through it. The three descriptions
+# below are the stored feed rows verbatim from
+# `~/lloyd-data/_pipeline/vault-derived/memory/feeds/raw/`, which is why this is a
+# guard miss reproduced rather than imagined: all three returned UNCHANGED from
+# `strip_link_footer` before this section existed.
+
+DGX_GX10_2026_10_10 = (
+    "I took the \u201ccheapest\u201d GB10 box (Asus GX10) and pulled a storage move "
+    "that changes what these DGX Spark\u2013style machines are actually worth.\n\n"
+    "\u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014\n\n"
+    "\u2764\ufe0f SUBSCRIBE TO MY YOUTUBE CHANNEL \U0001f4fa\n\n"
+    "\u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014\n\n"
+    "\U0001f4f1LET'S CONNECT ON SOCIAL MEDIA\n\n"
+    "\u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014\n\n"
+    "#dgxspark #nvidia #llm")
+
+AIGRID_2026_10_08 = (
+    "Most AI humanizers \"work\" by wrecking your writing: broken sentence "
+    "structure, random synonym swaps, and output that reads worse than what you "
+    "started with. Super takes a different approach. It turns AI-assisted text "
+    "into natural, human-sounding writing while keeping your original meaning, "
+    "tone, and quality intact.\n\n"
+    "Links From Today's Video:\n\n"
+    "Welcome to TheAIGRID \u2014 the place to learn AI for free. I create simple, "
+    "practical videos that help beginners, creators, entrepreneurs, and business "
+    "owners\u2026")
+
+AI_ENYC_2026_10_08 = (
+    "Live from the Sheraton New York Times Square Hotel in New York City, AI "
+    "Engineer New York 2026 is an AI conference for engineers and technical "
+    "leaders building production AI across banking, hedge funds, fintech, "
+    "insurance, and asset management. \n\n"
+    "Event: AI Engineer NYC\n"
+    "Dates: October 12\u201314, 2026\n"
+    "Venue: Sheraton New York Times Square Hotel \n\n"
+    "Subscribe for more AI Engineer talks, livestreams, and event coverage:\n"
+    "   / @aidotengineer")
+
+
+def _yt_item(title: str, summary: str, vid: str) -> ScoredItem:
+    """A youtube feed item: `source="github"` would put `clean_body` in the path,
+    and the clause under test is the youtube write path."""
+    return ScoredItem(
+        id=f"youtube:{vid}", source="youtube", title=title,
+        url=f"https://www.youtube.com/watch?v={vid}", summary=summary,
+        discovered_at=datetime.now(timezone.utc).isoformat(), authors=[],
+        source_tags=["video"], relevance=6, urgency="morning",
+        why="matches the digest interest profile", projects=[],
+        category="ai-llms")
+
+
+@pytest.mark.parametrize("line, shape", [
+    # A separator rule run, in both spellings. The spaced em-dash run is the one
+    # `_RULE_LINE_RE` could not see at all: `[_=]{5,}` matched only underscores
+    # and equals, so a channel that rules with `— — —` had no anchor anywhere.
+    ("______________________________________________", "rule"),
+    ("\u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014", "rule"),
+    ("==============================================", "rule"),
+    # A set-off footer label line, in each of the three families the list keys on.
+    ("My Links \U0001f517", "footer-label"),
+    ("Subscribe for more AI Engineer talks, livestreams, and event coverage:",
+     "footer-label"),
+    ("Sponsored by Granola, the AI notepad for your meetings.", "footer-label"),
+    ("Links From Today's Video:", "footer-section-label"),
+    ("MY RELATED VIDEOS:", "footer-section-label"),
+    ("\U0001f4f1LET'S CONNECT ON SOCIAL MEDIA", "footer-phrase"),
+    ("Want to work with me?", "footer-phrase"),
+    # A hashtag-run tail, and the mention line a `#ad` post leaves.
+    ("#dgxspark #nvidia #llm", "hashtag-run"),
+    ("@granola_so #ad", "tag-mention-line"),
+    # The remnant a URL strip produces: the handle with its URL gone.
+    ("   / @aidotengineer", "orphan-handle"),
+    # What is NOT residue: real prose, a URL-bearing block (the other anchors'
+    # business), a description's own section heading, a markdown `---`, and the
+    # two-line credit a video description legitimately ends on.
+    ("We benchmarked the storage move on three boxes.", None),
+    ("\U0001f449 Nate's Library MCP: https://example.com/lib", None),
+    ("Key points:", None),
+    ("---", None),
+    ("Source: Figure (@Figure_robot)", None),
+    ("All rights w/ authors: ", None),
+])
+def test_the_residue_predicate_names_each_shape_by_shape_only(line, shape):
+    """Clause 3: one shipped callable, keyed on SHAPE, names every form #2453
+    left behind — and says None on the prose and the headings that look like it.
+
+    `Key points:` and `All rights w/ authors:` are the near-misses this had to
+    earn: the first is a description's own heading, the second a credit line, and
+    both are colon-terminated like `Links From Today's Video:`.
+    """
+    assert body_mod.footer_residue_shape(line) == shape, line
+
+
+def test_strip_link_footer_consults_the_predicate_and_the_walk_re_spells_nothing():
+    """Clause 3, the second half: `strip_link_footer` is the consumer, so a shape
+    added to the table is dropped on the write path in the same edit — and the
+    walk itself contains no phrase of its own to drift.
+
+    The `My Links \U0001f517` case is the one #2453 published: nothing in it
+    carries a URL, so no anchor above it ever fired.
+    """
+    import inspect
+
+    body = ("A real paragraph about the model.\n\n"
+            "My Links \U0001f517\n\n"
+            "Want to work with me?")
+    assert body_mod.strip_link_footer(body) == "A real paragraph about the model."
+    src = inspect.getsource(body_mod._drop_footer_residue)
+    for phrase in ("My Links", "Subscribe", "Sponsored", "Connect", "Shorts",
+                   "Links From", "Related Videos", "aidotengineer"):
+        assert phrase not in src, (
+            f"{phrase!r} is spelled inside the residue walk instead of coming "
+            f"from the table: {src}")
+
+
+@pytest.mark.parametrize("title, vid, summary, kept, dropped", [
+    ("The Cheapest 4TB DGX Spark Alternative\u2026 ASUS GX10", "5ycO4GG0YVY",
+     DGX_GX10_2026_10_10,
+     "pulled a storage move that changes what these DGX Spark\u2013style "
+     "machines are actually worth",
+     ("SUBSCRIBE", "LET'S CONNECT", "#dgxspark",
+      "\u2014 \u2014 \u2014")),
+    ("Massive AI News : Gemini 4 Argon", "6lIgfRZaL-o", AIGRID_2026_10_08,
+     "It turns AI-assisted text into natural, human-sounding writing while "
+     "keeping your original meaning",
+     ("Links From Today", "Welcome to TheAIGRID")),
+    ("AI Engineer NYC Livestream | Bridgewater, Anthropic", "akEqiXFo3GM",
+     AI_ENYC_2026_10_08,
+     "Live from the Sheraton New York Times Square Hotel",
+     ("Subscribe for more", "@aidotengineer")),
+])
+def test_the_write_path_drops_the_stored_residue_and_keeps_the_prose(
+        title, vid, summary, kept, dropped):
+    """Clause 4: the three stored rows that published residue go through the real
+    `_entry_body`, and each keeps its own description while losing every shape.
+
+    None of the three may collapse to the `why` fallback: the row is a video
+    summary, and `matches the digest interest profile` in its place is the
+    #1753-shaped failure this item's own history warns about.
+    """
+    rendered = vw_mod._entry_body(_yt_item(title, summary, vid))
+    assert kept in rendered, rendered
+    assert "matches the digest interest profile" not in rendered, rendered
+    for d in dropped:
+        assert d not in rendered, f"{d!r} survived: {rendered}"
+
+
+@pytest.mark.parametrize("text", [
+    # 'subscribe' mid-sentence in prose the channel actually wrote, and a
+    # greeting with real content after it — both of which the closed label list
+    # and the greeting anchor can see, and must not eat.
+    "We publish every week. Subscribe and you get the Thursday drop, which is "
+    "where the good material is.",
+    "Welcome to the channel. Today we walk through the new tokenizer and what "
+    "it changes about retrieval latency for a small team running its own "
+    "model on consumer hardware, which is most of you.",
+])
+def test_prose_that_merely_mentions_subscribe_or_opens_welcome_to_survives(
+        text):
+    """Clause 5: byte-for-byte, through the write path. #856's failure mode is a
+    classifier that mis-fires and eats the opening paragraph, and 'Welcome to'
+    already sits in the anchor table — so it must not become a trip wire.
+    """
+    assert body_mod.strip_link_footer(text) == text
+    item = _yt_item("Tokenizer notes", text, "prose1")
+    assert vw_mod._entry_body(item) == text
+
+
+# --- #2509 clauses 1 and 2: the shipped digest after the backfill -------------
+# The nodes above pin clauses 3-5 (the predicate, the write path, prose survival);
+# these two pin clauses 1-2 against the digest the pipeline PUBLISHES. They live in
+# THIS file because the contract maps the digest-side checks here, next to the body
+# code they hold in place. `tests/test_corpus_shape.py` carries clause 6's nodes for
+# the instrument, and its last comment points here.
+#
+# Reading the live vault from a test is what `tests/test_corpus_shape.py` already
+# does when its `LLOYD_OBSIDIAN_VAULT` node seeds itself from
+# `knowledge/robotics/youtube-digest.md`: the alternative, a fixture the test writes,
+# would pass on a machine whose shipped copy still carries the CodeRabbit block.
+
+SHIPPED_DIGEST = Path.home() / "obsidian" / "knowledge" / "ai-llms" / "youtube-digest.md"
+
+#: The control grep from the item, unchanged: the phrases #2453 left behind, in the
+#: spelling the item's own acceptance names. It was 4 on 2026-10-10.
+AD_CONTROL_RE = re.compile(r"welcome to|subscribe|links\.outskill|\U0001f449|My Links",
+                           re.IGNORECASE)
+
+#: The four structural prefixes `scripts/maintenance/corpus_shape.py` has always
+#: skipped, imported from the instrument rather than re-typed here so the two
+#: scopes cannot drift apart.
+spec_cs = importlib.util.spec_from_file_location(
+    "corpus_shape_for_digest", REPO_ROOT / "scripts" / "maintenance" / "corpus_shape.py")
+cs_mod = importlib.util.module_from_spec(spec_cs)
+spec_cs.loader.exec_module(cs_mod)
+
+
+def _body_lines(lines):
+    """The file's entry bodies: everything non-blank that is not one of those four
+    structural prefixes. Front matter is included, which is how the instrument
+    counts, so an undocumented extra skip cannot make a dirty file read clean."""
+    return [(i, l) for i, l in enumerate(lines, 1)
+            if l.strip() and not l.startswith(cs_mod.DIGEST_STRUCTURAL_PREFIXES)]
+
+
+def test_the_shipped_digest_carries_no_channel_promo_residue():
+    """#2509 clause 1: the named residue is gone from the published digest, and
+    each repaired body is the channel's own description alone.
+
+    `grep -c -iE 'welcome to|subscribe|links.outskill|\U0001f449|My Links'` on this
+    file was 4 on 2026-10-10 (the `My Links \U0001f517` line, `Welcome to TheAIGRID —`,
+    `Subscribe for more AI Engineer talks…`, `\u2764\ufe0f SUBSCRIBE TO MY YOUTUBE CHANNEL
+    \U0001f4fa`). Two repaired bodies are named by the text that must be ALL they hold: the
+    GEMINI 4 entry, whose real description was stranded six lines under the
+    CodeRabbit sponsor copy, and the ASTRA 6.1 entry, whose Anthropic paragraph sat
+    under `Sponsored by Granola` and `@granola_so #ad`.
+    """
+    assert SHIPPED_DIGEST.is_file(), SHIPPED_DIGEST
+    lines = SHIPPED_DIGEST.read_text(errors="replace").splitlines()
+    hits = [(i, l) for i, l in enumerate(lines, 1) if AD_CONTROL_RE.search(l)]
+    assert hits == [], f"promo residue still published: {hits}"
+
+    text = "\n".join(lines)
+    for heading, body in [
+        ("### GEMINI 4 is nuts...",
+         "Google looks ready for a comeback with Gemini 4 Argon"),
+        ("### ASTRA 6.1 too dangerous to be released...",
+         "Anthropic\u2019s reported $42 billion net loss"),
+    ]:
+        at = text.index(heading)
+        entry = text[at:at + 1600]
+        assert body in entry, heading
+        assert not AD_CONTROL_RE.search(entry), (
+            f"{heading!r} still carries promo copy in its own entry")
+
+
+def test_the_backfill_left_every_entry_populated_and_link_free():
+    """#2509 clause 2: a delete that empties an entry is the same failure as the
+    residue, so the structure the backfill had to preserve is pinned numerically.
+
+    203 `### ` headings and 205 `---` rules are what the file held before the
+    backfill; every heading still has its non-blank `**Source:**` line within three
+    lines; and `_LINK_PRESENT_RE` — the predicate that found the 16 URL-bearing
+    lines #2453 deleted — is 0 over the bodies. That last figure is only 0
+    BODY-SCOPED: over the whole file it is 205, because the writer's own 203
+    `[Link](https://…)` lines match it and two video TITLES match it too (the
+    triage recorded the scope; the item's whole-file wording was unsatisfiable).
+    """
+    lines = SHIPPED_DIGEST.read_text(errors="replace").splitlines()
+    assert sum(1 for l in lines if l.startswith("### ")) == 203
+    assert sum(1 for l in lines if l.strip() == "---") == 205
+
+    orphans = [i for i, l in enumerate(lines, 1)
+               if l.startswith("### ")
+               and not any(n.strip().startswith("**Source:**")
+                           for n in lines[i:i + 3] if n.strip())]
+    assert orphans == [], f"entries emptied of their Source line: {orphans}"
+
+    bodies = _body_lines(lines)
+    linky = [(i, l) for i, l in bodies if body_mod._LINK_PRESENT_RE.search(l)]
+    assert linky == [], f"a body line carries a URL again: {linky}"
