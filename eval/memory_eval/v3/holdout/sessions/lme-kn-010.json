@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-010",
+ "sessions": [
+  {
+   "sid": "lme-kn-010-s1",
+   "date": "2026-05-16",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you check the version of Warp I have installed? I think it was 1.14.9."
+    },
+    {
+     "role": "assistant",
+     "text": "Checking now. Warp is currently on version 1.14.9."
+    },
+    {
+     "role": "user",
+     "text": "Got it. Also, did my order for the mechanical keyboard switches arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking number shows it's out for delivery today."
+    },
+    {
+     "role": "user",
+     "text": "Nice. I'm planning to make pasta tonight, do you have a quick recipe for aglio e olio?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure! Sauté garlic in olive oil, add chili flakes, toss with cooked spaghetti and parsley."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Is it going to rain tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, 80% chance of showers in the afternoon."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-010-s2",
+   "date": "2026-05-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I need to update my internal documentation. Warp remained unchanged at version 1.15.0.dev20260626 during the Newton update."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've noted that Warp is on 1.15.0.dev20260626 post-Newton update."
+    },
+    {
+     "role": "user",
+     "text": "Cool. Also, I finally got those switches in. The tactile feel is great."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad to hear it! Enjoy the new typing experience."
+    },
+    {
+     "role": "user",
+     "text": "I'm trying to fix a bug in my Python script where the loop isn't terminating. Any ideas?"
+    },
+    {
+     "role": "assistant",
+     "text": "Check if your incrementing variable is actually updating inside the loop, or if you have a floating-point comparison issue."
+    },
+    {
+     "role": "user",
+     "text": "Ah, it was a float comparison. Fixed. Thanks. Did you see the weather warning for next week?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, a heatwave is expected starting Monday."
+    }
+   ]
+  }
+ ]
+}

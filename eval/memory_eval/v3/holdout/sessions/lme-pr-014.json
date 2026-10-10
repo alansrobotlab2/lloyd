@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-014",
+ "sessions": [
+  {
+   "sid": "lme-pr-014-s1",
+   "date": "2026-06-29",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you get that notification about the new Snyk report coming in?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I saw it just now. It covers their latest findings on code security trends."
+    },
+    {
+     "role": "user",
+     "text": "Cool. I'm actually skeptical about the AI coding tools everyone is pushing. I think Snyk states that the quality of AI-generated code is worse than human-generated code. That's a huge red flag for me."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. That is a significant data point to consider for your team's workflow."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I don't want to automate too much if it means introducing subtle bugs. Hey, unrelated: can you check if my order for the mechanical keyboard switches shipped?"
+    },
+    {
+     "role": "assistant",
+     "text": "I'll check that for you. It looks like the package was scanned at the distribution center this morning."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, any chance you could grab me a dinner recommendation for tonight? Something Italian."
+    },
+    {
+     "role": "assistant",
+     "text": "I can suggest a few places nearby. Do you prefer casual or fine dining?"
+    }
+   ]
+  }
+ ]
+}

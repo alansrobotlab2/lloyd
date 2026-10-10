@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-030",
+ "sessions": [
+  {
+   "sid": "lme-mu-030-s1",
+   "date": "2026-07-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my Wi-Fi has been dropping every ten minutes. It's driving me crazy."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Have you tried restarting the router or checking for firmware updates?"
+    },
+    {
+     "role": "user",
+     "text": "I did both. Still spotty. Anyway, I was reading up on the new AI startups. Did you know Thinking Machines uses OpenThoughts internally, as stated by John Schulman?"
+    },
+    {
+     "role": "assistant",
+     "text": "I wasn't aware of that specific detail. It's good to know their internal tools."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it seems like a significant internal shift. Also, what's the weather like in SF tomorrow? I have an outdoor lunch."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like a mix of sun and clouds with a 20% chance of rain. Should be okay."
+    },
+    {
+     "role": "user",
+     "text": "Great. I'll bring a jacket just in case. Thanks Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need more Wi-Fi troubleshooting tips."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-030-s2",
+   "date": "2026-07-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I accidentally ordered two keyboards instead of one. Any advice on returns?"
+    },
+    {
+     "role": "assistant",
+     "text": "Most stores allow returns within 30 days. Check your receipt for the policy."
+    },
+    {
+     "role": "user",
+     "text": "Will do. On a related tech note, I'm curious about voice AI latency. Thinking Machines uses 200ms time-sliced continuous inference for voice-to-voice interactions."
+    },
+    {
+     "role": "assistant",
+     "text": "That is quite low latency. It must make conversations feel very natural."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It's hard to notice the lag. Hey, did you remember to remind me about the dentist appointment?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your calendar reminders directly, but I can help you check if you paste the schedule here."
+    },
+    {
+     "role": "user",
+     "text": "Right, right. I'll check my phone. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem."
+    }
+   ]
+  }
+ ]
+}

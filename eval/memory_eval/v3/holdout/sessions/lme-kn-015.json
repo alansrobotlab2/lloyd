@@ -1,0 +1,105 @@
+{
+ "episode": "lme-kn-015",
+ "sessions": [
+  {
+   "sid": "lme-kn-015-s1",
+   "date": "2026-08-25",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question on the new quantization specs I saw in the draft doc. What scale format are they using for the MXFP4 blocks?"
+    },
+    {
+     "role": "assistant",
+     "text": "Based on the draft you referenced, it mentions they are using E4M3 scale format."
+    },
+    {
+     "role": "user",
+     "text": "Got it. E4M3 it is. By the way, did the replacement fan for the server rack arrive? It was supposed to be here by Friday."
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking number shows it delivered to the front desk on Thursday afternoon."
+    },
+    {
+     "role": "user",
+     "text": "Great, thanks. I'll grab it after lunch. Also, any update on that coffee machine leak? The office is getting annoyed."
+    },
+    {
+     "role": "assistant",
+     "text": "Maintenance said they scheduled a technician for tomorrow morning to fix the valve."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Back to the specs - just confirming, the draft definitely says E4M3 scale format for MXFP4, right?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the draft document you shared explicitly states E4M3 scale format."
+    },
+    {
+     "role": "user",
+     "text": "Okay, noted. Thanks Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome, Alan."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-015-s2",
+   "date": "2026-09-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I need to update the config file for the new MXFP4 release. The final spec just came out and they changed the scale format."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? What is the final specification?"
+    },
+    {
+     "role": "user",
+     "text": "It's switched to E8M0 scale format. Power-of-two only. We need to make sure the compiler uses that."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll note that the final spec uses E8M0 scale format."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, did you see the weather alert for next week? They're predicting heavy rain."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I saw that. You might want to keep your umbrella handy."
+    },
+    {
+     "role": "user",
+     "text": "Definitely. I also need to reschedule my dentist appointment if it's going to be pouring."
+    },
+    {
+     "role": "assistant",
+     "text": "I can send a reminder to reschedule if you'd like."
+    },
+    {
+     "role": "user",
+     "text": "Not yet, let's wait and see. But back to the code - make sure the config reflects the new scale format."
+    },
+    {
+     "role": "assistant",
+     "text": "Will do. I'll ensure the configuration aligns with the E8M0 requirement."
+    },
+    {
+     "role": "user",
+     "text": "Great. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "Anytime, Alan."
+    }
+   ]
+  }
+ ]
+}

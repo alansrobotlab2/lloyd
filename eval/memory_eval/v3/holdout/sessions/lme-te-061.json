@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-061",
+ "sessions": [
+  {
+   "sid": "lme-te-061-s1",
+   "date": "2026-07-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I've been digging into that paper I mentioned. It's really clarifying things for me."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad to hear it. Which specific aspect was the breakthrough?"
+    },
+    {
+     "role": "user",
+     "text": "The framing. I realized today that Agentic Workflows are characterized as a data systems problem in arXiv:2603.16104."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant shift in perspective. Treating them as infrastructure rather than just logic flows changes the architectural approach entirely."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. By the way, did my package with the new mechanical keyboard switches arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "Checking the tracking... It shows as out for delivery. Should be there by tonight."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I want to get those installed before the weekend."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me know if you need a guide for the desoldering process."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-061-s2",
+   "date": "2026-07-16",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question about industry dynamics."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, what's on your mind?"
+    },
+    {
+     "role": "user",
+     "text": "I was reading some commentary today. It claims Anthropic does not possess the proprietary data required to train models for vertical AI tasks like trading or pharma because that data is deliberately withheld by owners."
+    },
+    {
+     "role": "assistant",
+     "text": "That aligns with the current data moat debates. Specialized sectors are indeed tightening their data controls."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it makes the barrier to entry higher for generalist models trying to specialize."
+    },
+    {
+     "role": "assistant",
+     "text": "Correct. It forces a partnership model or heavy synthetic data generation instead."
+    },
+    {
+     "role": "user",
+     "text": "Makes sense. Is it raining here? I forgot to check the forecast."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, light rain is expected for the next two hours."
+    }
+   ]
+  }
+ ]
+}

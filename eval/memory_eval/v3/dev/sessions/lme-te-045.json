@@ -1,0 +1,65 @@
+{
+ "episode": "lme-te-045",
+ "sessions": [
+  {
+   "sid": "lme-te-045-s1",
+   "date": "2026-06-14",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question. I was looking at AutoMem achieves 51% performance in benchmarks, doubling the performance of a Qwen 2.5 72B model. Is that standard for this year's papers?"
+    },
+    {
+     "role": "assistant",
+     "text": "That is indeed a very strong result. Doubling a 72B model is significant. Did you find the benchmark methodology robust?"
+    },
+    {
+     "role": "user",
+     "text": "Seems solid. Anyway, unrelated, did the coffee maker finally get fixed? I think I left it on."
+    },
+    {
+     "role": "assistant",
+     "text": "I checked the smart home logs; it was turned off at 2 AM. You should be safe."
+    },
+    {
+     "role": "user",
+     "text": "Phew. Thanks. I'll go grab the mail."
+    },
+    {
+     "role": "assistant",
+     "text": "Have a good evening."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-045-s2",
+   "date": "2026-06-25",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm reading more on AutoMem is a paper from Stanford that frames memory management as an active, trainable cognitive skill rather than passive storage. It's a nice conceptual shift."
+    },
+    {
+     "role": "assistant",
+     "text": "Agreed. Treating memory as an active skill is a compelling direction for agentic systems."
+    },
+    {
+     "role": "user",
+     "text": "It is. Hey, can you remind me to buy milk? I forgot it at the store."
+    },
+    {
+     "role": "assistant",
+     "text": "I've added milk to your shopping list. Would you like me to set a reminder for tomorrow morning?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, please. And thanks for the chat."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Have a great night."
+    }
+   ]
+  }
+ ]
+}

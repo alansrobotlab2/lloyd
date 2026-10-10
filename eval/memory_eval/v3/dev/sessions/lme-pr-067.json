@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-067",
+ "sessions": [
+  {
+   "sid": "lme-pr-067-s1",
+   "date": "2026-07-27",
+   "turns": [
+    {
+     "role": "user",
+     "text": "I'm struggling with the new microservice architecture. How should we handle correlation IDs for the background workers?"
+    },
+    {
+     "role": "assistant",
+     "text": "You could use OpenTelemetry or generate custom UUIDs passed via headers. What's the constraint?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly just CLI tools spawned by the main API. Oh, btw, did you order the replacement monitor cable yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "Not yet. For the CLI tools, passing IDs via command-line arguments is common, but can be messy."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, messy. Since these subprocesses can definitely receive environment variables, I've decided that W3C TraceContext is the recommended pattern for subprocesses that can receive environment variables. Let's standardize on that."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll note that preference for future design discussions."
+    },
+    {
+     "role": "user",
+     "text": "Also, the weather is supposed to be terrible this weekend. Canceling the hiking trip."
+    },
+    {
+     "role": "assistant",
+     "text": "Sorry to hear that. Maybe a good time to tackle the cable order and the architecture docs."
+    }
+   ]
+  }
+ ]
+}

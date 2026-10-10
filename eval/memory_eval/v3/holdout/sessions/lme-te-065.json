@@ -1,0 +1,73 @@
+{
+ "episode": "lme-te-065",
+ "sessions": [
+  {
+   "sid": "lme-te-065-s1",
+   "date": "2026-07-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm digging into some new papers. Have you heard of the Voyager project?"
+    },
+    {
+     "role": "assistant",
+     "text": "I'm familiar with the name. What specifically are you looking for?"
+    },
+    {
+     "role": "user",
+     "text": "Just checking the origins. It was introduced by Wang et al. (NVIDIA) in May 2023."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll note that provenance for you."
+    },
+    {
+     "role": "user",
+     "text": "Cool. Also, did my package from Amazon arrive yet? I'm waiting on that HDMI cable."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like it was delivered yesterday afternoon."
+    },
+    {
+     "role": "user",
+     "text": "Great, thanks. I'll set it up later."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-065-s2",
+   "date": "2026-08-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick question about our evaluation framework."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, what's on your mind?"
+    },
+    {
+     "role": "user",
+     "text": "I've been adjusting the scoring logic. Eval metrics are scored against a noise floor ceiling rather than 1.0."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense for robustness. I've updated the context."
+    },
+    {
+     "role": "user",
+     "text": "Good. Oh, and can you remind me what we're having for dinner tonight?"
+    },
+    {
+     "role": "assistant",
+     "text": "You mentioned pasta earlier, but I don't have a confirmed reservation."
+    },
+    {
+     "role": "user",
+     "text": "Right, we'll just cook at home. Thanks."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-037",
+ "sessions": [
+  {
+   "sid": "lme-mu-037-s1",
+   "date": "2026-08-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to finalize the invite list for the tech mixer next week. Can you help me check the titles of a few people?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, Alan. Who do you want me to look up?"
+    },
+    {
+     "role": "user",
+     "text": "First one is Atul Ramachandran. I remember he's the CTO and co-founder of Filed, but I want to make sure I have the company name right before I add him to the VIP list."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I've noted that Atul Ramachandran is the CTO and co-founder of Filed. I'll double-check current listings to confirm the spelling of the company."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, I think I left my coffee mug on the desk. Is there a lost and found log?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to a physical lost and found log, but I can send a reminder to the office manager to check the common areas."
+    },
+    {
+     "role": "user",
+     "text": "Please do. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "Reminder sent. Let me know if you need help with the rest of the invite list."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-037-s2",
+   "date": "2026-08-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm evaluating some UI libraries for the new desktop app prototype. Do you recall any recommendations from earlier?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have a specific saved list, but I can suggest some popular ones like Electron or Qt. Did you have a specific constraint in mind?"
+    },
+    {
+     "role": "user",
+     "text": "Actually, I was looking at NodeGui again. I'm just reminding myself that Atul Ramachandran is the author of NodeGui, so his background in systems programming might make the library more robust for our use case."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a good point. Knowing the author's background can help assess the code quality. I've noted that Atul Ramachandran is the author of NodeGui."
+    },
+    {
+     "role": "user",
+     "text": "Cool. Also, is it going to rain this weekend? I have a picnic planned."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast for the weekend looks mostly sunny with a slight chance of showers on Saturday evening. You might want to have an indoor backup plan."
+    },
+    {
+     "role": "user",
+     "text": "Thanks for the heads up. I'll bring a tent."
+    },
+    {
+     "role": "assistant",
+     "text": "Smart move. Let me know if you need more details on NodeGui later."
+    }
+   ]
+  }
+ ]
+}

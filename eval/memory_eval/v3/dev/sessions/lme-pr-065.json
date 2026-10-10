@@ -1,0 +1,51 @@
+{
+ "episode": "lme-pr-065",
+ "sessions": [
+  {
+   "sid": "lme-pr-065-s1",
+   "date": "2026-06-06",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, the new RTX 6000 Blackwell card finally arrived. It's beastly."
+    },
+    {
+     "role": "assistant",
+     "text": "Congrats on the new hardware! How is it performing so far?"
+    },
+    {
+     "role": "user",
+     "text": "Great, but I'm tweaking the vLLM launch commands. I want to make sure I don't hit OOM errors during peak inference."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a common concern with high-capacity cards. What models are you running?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly large FP8 models. I've decided that for these 96GB cards, a recommended `--gpu-memory-utilization` setting is 0.85 to provide safer headroom. I'm locking that in."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I will note that preference for your future configurations."
+    },
+    {
+     "role": "user",
+     "text": "Also, did you see the weather forecast for next week? Supposed to be raining all day."
+    },
+    {
+     "role": "assistant",
+     "text": "I can check that for you, but it sounds like good indoor weather for coding."
+    },
+    {
+     "role": "user",
+     "text": "True. Anyway, just keep that memory utilization rule in mind for my next script generation."
+    },
+    {
+     "role": "assistant",
+     "text": "Will do."
+    }
+   ]
+  }
+ ]
+}

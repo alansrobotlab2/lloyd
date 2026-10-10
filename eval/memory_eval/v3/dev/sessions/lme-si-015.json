@@ -1,0 +1,51 @@
+{
+ "episode": "lme-si-015",
+ "sessions": [
+  {
+   "sid": "lme-si-015-s1",
+   "date": "2026-06-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did the package for the Radxa Rock 5C arrive yet? I want to get Alfie running before the weekend."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to real-time shipping status, but you can check your tracking link. Did you order the 4GB or 8GB version?"
+    },
+    {
+     "role": "user",
+     "text": "4GB. The Radxa Rock 5C is the SBC used for Alfie, so it needs to be compact enough to fit inside the case I 3D printed."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. The Rock 5C is quite small, so that should work. Have you prepared the SD card image?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I'm struggling with the Wi-Fi module setup on my main laptop first. It keeps disconnecting every 5 minutes."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Have you tried disabling power management for the Wi-Fi adapter in the device manager?"
+    },
+    {
+     "role": "user",
+     "text": "I'll give that a try. Also, what are you doing for dinner? I was thinking about ordering Thai food."
+    },
+    {
+     "role": "assistant",
+     "text": "As an AI, I don't eat, but I can recommend a good Pad See Ew place nearby if you'd like."
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. I need to focus on getting Alfie online. Thanks for the tip on the Wi-Fi."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need help with the boot process once the board arrives."
+    }
+   ]
+  }
+ ]
+}

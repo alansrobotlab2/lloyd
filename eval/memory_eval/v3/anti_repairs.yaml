@@ -1,0 +1,168 @@
+# The 26 dev items whose v2 accept.none_of value shared a content word with their
+# own accept.all_of gold — the pr-044 class label_audit.py counts as
+# none_of_shares_content_word. Each value is re-stated as the generic alternative.
+# Gold is untouched in every one; this file is at the set root, outside the digest.
+- id: lme-kn-002
+  v2_anti: Email marketing
+  v3_anti:
+  - the operating-system metaphor
+  shared_with_gold: marketing
+  why: another metaphor for an LLM stack, not the database-marketing one
+- id: lme-kn-013
+  v2_anti: 50 million
+  v3_anti:
+  - half a billion pages
+  shared_with_gold: million
+  why: the same wrong capacity in words that are not the gold's unit
+- id: lme-kn-014
+  v2_anti: 'Backlog item #45'
+  v3_anti:
+  - '#45'
+  shared_with_gold: item|backlog
+  why: 'bare ticket number: the wrong item without naming the field'
+- id: lme-kn-017
+  v2_anti: 4-GPU acceleration
+  v3_anti:
+  - CPU-only inference
+  shared_with_gold: acceleration
+  why: the opposite deployment target, not a smaller share of the gold's
+- id: lme-kn-018
+  v2_anti: 4 hours
+  v3_anti:
+  - 240 minutes
+  shared_with_gold: hours
+  why: the same wrong figure in minutes (still not 7 hours)
+- id: lme-kn-021
+  v2_anti: 2 hours
+  v3_anti:
+  - one full day
+  shared_with_gold: hours
+  why: a timeout far longer than the SLURM ceiling, in units the gold omits
+- id: lme-kn-029
+  v2_anti: Nature in 2024
+  v3_anti:
+  - a 2024 workshop paper
+  shared_with_gold: nature
+  why: a wrong venue and year using neither the journal's name nor its year
+- id: lme-kn-036
+  v2_anti: 32 cores
+  v3_anti:
+  - 32 vCPUs
+  shared_with_gold: cores
+  why: the same wrong ceiling in the cloud-inventory word the gold omits
+- id: lme-kn-040
+  v2_anti: WebRTC AEC2
+  v3_anti:
+  - SpeexDSP
+  shared_with_gold: webrtc
+  why: a different AEC engine, named without the transport the gold names
+- id: lme-kn-045
+  v2_anti: 20 KB
+  v3_anti:
+  - 20 megabytes
+  shared_with_gold: kb
+  why: the same wrong size in the unit the gold omits
+- id: lme-kn-047
+  v2_anti: handle out-of-date training data Cypher generation
+  v3_anti:
+  - a benchmark for query latency
+  shared_with_gold: cypher|solution|stale
+  why: a wrong positioning that is not the gold's own meaning restated
+- id: lme-kn-048
+  v2_anti: April 2023
+  v3_anti:
+  - April 2022
+  shared_with_gold: '2023'
+  why: a wrong month AND a wrong year, sharing neither token
+- id: lme-kn-049
+  v2_anti: --install flag only
+  v3_anti:
+  - the bare script with no arguments
+  shared_with_gold: install
+  why: running it interactively, without repeating the flag the gold names
+- id: lme-kn-050
+  v2_anti: 5.0-8.0ms per request
+  v3_anti:
+  - 5.0-8.0ms on each call
+  shared_with_gold: request
+  why: the same wrong cost in the wording the gold omits
+- id: lme-kn-054
+  v2_anti: Flux 1
+  v3_anti:
+  - Stable Video Diffusion
+  shared_with_gold: flux
+  why: the lab's other model, named without the gold's family word
+- id: lme-kn-067
+  v2_anti: 0, 1, 2
+  v3_anti:
+  - a 1-to-5 Likert scale
+  shared_with_gold: 0|1|5
+  why: an entirely different score system, sharing no numeral
+- id: lme-kn-069
+  v2_anti: Day 1
+  v3_anti:
+  - the opening session
+  shared_with_gold: day
+  why: the wrong day's session, without the word the gold uses
+- id: lme-pr-005
+  v2_anti: navigate only
+  v3_anti:
+  - fetching the page HTML with a plain HTTP GET
+  - screenshot only
+  shared_with_gold: navigate|browser_navigate|snapshot|browser_snapshot|nav|snap
+  why: scraping without a browser at all, plus the unchanged screenshot answer
+- id: lme-pr-023
+  v2_anti: light read
+  v3_anti:
+  - optional
+  - casual suggestion
+  - a passing mention
+  shared_with_gold: read|reading
+  why: the same inverted stance without the gold's reading word
+- id: lme-pr-029
+  v2_anti: decentralised knowledge
+  v3_anti:
+  - federated per-user silos
+  shared_with_gold: knowledge
+  why: the opposite architecture, named without the gold's noun
+- id: lme-pr-030
+  v2_anti: apply default
+  v3_anti:
+  - recreate empty graph
+  - pass the flag that writes changes
+  - wholesale rewrite
+  shared_with_gold: apply
+  why: the unsafe run described without the flag token the gold is about
+- id: lme-pr-045
+  v2_anti: rank 8
+  v3_anti:
+  - r=8
+  - lora_alpha=8
+  - rank=8
+  shared_with_gold: rank
+  why: the wrong capacity named by field or by number, never the bare word
+- id: lme-pr-064
+  v2_anti: allow synchronous cc_orchestrate calls
+  v3_anti:
+  - allow blocking dispatch from the realtime path
+  shared_with_gold: synchronous|calls|cc_orchestrate
+  why: the forbidden instruction described without the gold's own phrasing
+- id: lme-te-024
+  v2_anti: Alan and Lisa
+  v3_anti:
+  - registry.json
+  - Alan plus Lisa
+  shared_with_gold: and
+  why: the same wrong answer, where 'and' is a content word only because the audit's frozen function-word list omits it
+- id: lme-te-033
+  v2_anti: Read-only guarded SELECT queries
+  v3_anti:
+  - a write transaction against kg.sqlite
+  shared_with_gold: read-only|guarded|select|query
+  why: the opposite mode, so the anti is no longer the gold paraphrased
+- id: lme-te-072
+  v2_anti: VLA models
+  v3_anti:
+  - a vision-only perception dataset
+  shared_with_gold: models
+  why: a wrong expansion of the acronym, so the anti is no longer the gold's own abbreviation

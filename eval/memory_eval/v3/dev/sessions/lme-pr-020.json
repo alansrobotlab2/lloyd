@@ -1,0 +1,51 @@
+{
+ "episode": "lme-pr-020",
+ "sessions": [
+  {
+   "sid": "lme-pr-020-s1",
+   "date": "2026-08-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, just checking in. The hardware order came through this morning, finally. Did you see the tracking update?"
+    },
+    {
+     "role": "assistant",
+     "text": "I did! It looks like the carrier marked it as 'out for delivery'. Exciting news."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'm stoked. I've been staring at the inbox all morning. Anyway, while I wait, I'm drafting the deployment config for the new 45B parameter model. I'm setting up the vLLM launch script for the RTX PRO 6000."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a beast of a card. 96GB VRAM should handle a 45B model comfortably. Do you want me to draft a basic `config.json` or a launch script?"
+    },
+    {
+     "role": "user",
+     "text": "Just draft the launch script for now. I need to set the `gpu_memory_utilization`. I'm debating between being aggressive with memory or leaving a safety buffer. What do you think?"
+    },
+    {
+     "role": "assistant",
+     "text": "For a 45GB model on a 96GB RTX PRO 6000, a `gpu_memory_utilization` of 0.85 is recommended as optimal. It balances throughput with a safe margin for KV cache spikes."
+    },
+    {
+     "role": "user",
+     "text": "Agreed. Let's go with 0.85. I've tried 0.9 before and hit OOM errors during batch inference, so I trust this rule more. Also, quick unrelated thing: what's the weather like in Seattle right now? I might walk the dog if it's not pouring."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted, we'll use 0.85. As for the weather, it's currently 65°F with a 20% chance of rain. Good dog-walking weather."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Send me the script snippet with that utilization setting when you're ready."
+    },
+    {
+     "role": "assistant",
+     "text": "Drafting the snippet now. I'll include the `--gpu-memory-utilization 0.85` flag."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,47 @@
+{
+ "episode": "lme-si-010",
+ "sessions": [
+  {
+   "sid": "lme-si-010-s1",
+   "date": "2026-05-30",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you manage to find the invoice for the server rack? I need it for the quarterly expense report."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, Alan. I've located the invoice from TechSupply Co. dated May 12th. It has been uploaded to the shared drive under 'Q2 Expenses'."
+    },
+    {
+     "role": "user",
+     "text": "Great, thanks. By the way, I'm struggling with this new paper. DeLucia et al. (2026) showed that LLM judges can agree on verdicts but diverge on reasoning, suggesting criteria interpretation varies even when outcomes don't."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a fascinating nuance. It highlights that agreement isn't always a sign of shared understanding."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It makes me worry about our own evaluation pipeline. Speaking of which, are we still on for dinner at the Italian place on 5th?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I have the reservation confirmed for 7:30 PM. Should I make a note to ask for a quiet corner?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, please. I want to discuss this divergence issue further without noise. Also, did the rain clear up for the weekend?"
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows clear skies starting Saturday morning. Perfect for your hike."
+    },
+    {
+     "role": "user",
+     "text": "Good. I'll review the DeLucia findings again tonight. Thanks, Lloyd."
+    }
+   ]
+  }
+ ]
+}

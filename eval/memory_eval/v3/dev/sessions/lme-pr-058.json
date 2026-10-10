@@ -1,0 +1,47 @@
+{
+ "episode": "lme-pr-058",
+ "sessions": [
+  {
+   "sid": "lme-pr-058-s1",
+   "date": "2026-06-08",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm struggling to get this new microservice running. Any tips on debugging?"
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan! Have you checked the logs for any specific error codes? Sometimes the network configuration is the culprit."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, logs are messy. I tried using an AI agent to fix it, but it just kept generating broken code. I don't trust those tools anymore."
+    },
+    {
+     "role": "assistant",
+     "text": "That can be frustrating. Did it hallucinate the dependencies?"
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It's why I'm reading Kyle Mistele's stuff. He argues that most agent loops are 'blind Ralph loops' which produce unreadable code. I need something that actually explains itself."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. So you're prioritizing clarity and maintainability over speed right now."
+    },
+    {
+     "role": "user",
+     "text": "Yes. Also, do you know if it's going to rain tomorrow? I need to plan my commute."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows a high chance of showers in the afternoon. You might want to bring an umbrella."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. I'll stick to the train then."
+    }
+   ]
+  }
+ ]
+}

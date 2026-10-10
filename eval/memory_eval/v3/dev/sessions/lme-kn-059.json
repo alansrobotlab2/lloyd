@@ -1,0 +1,73 @@
+{
+ "episode": "lme-kn-059",
+ "sessions": [
+  {
+   "sid": "lme-kn-059-s1",
+   "date": "2026-05-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to update my CRM with some new contacts. Can you help me find James Le's old LinkedIn URL? I think it was linkedin.com/in/jle-dev/."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I've saved that James Le's LinkedIn profile is linkedin.com/in/jle-dev/. Is there anything else you need for the CRM update?"
+    },
+    {
+     "role": "user",
+     "text": "No, that's it. Oh, by the way, do you have a recipe for a quick pasta dish? I'm out of ideas."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure! How about Aglio e Olio? It's simple garlic and oil pasta with chili flakes. Just sauté minced garlic in olive oil, add red pepper flakes, toss with cooked spaghetti, and finish with parsley."
+    },
+    {
+     "role": "user",
+     "text": "Sounds good. I might try that tonight. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need anything else."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-059-s2",
+   "date": "2026-06-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update. James Le changed his LinkedIn handle recently. It's not the old one anymore."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. What is the new URL?"
+    },
+    {
+     "role": "user",
+     "text": "It's linkedin.com/in/khanhnamle94/. Please remember that for future reference."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I've updated my records to reflect James Le's new profile URL."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, did my package from Amazon arrive yet? The tracking said Tuesday."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your physical mail or delivery status in real-time, but I can check if you provide the tracking number."
+    },
+    {
+     "role": "user",
+     "text": "Ah, right. I'll check the app myself. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem."
+    }
+   ]
+  }
+ ]
+}

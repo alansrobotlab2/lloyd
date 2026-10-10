@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-064",
+ "sessions": [
+  {
+   "sid": "lme-pr-064-s1",
+   "date": "2026-08-11",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you help me draft the initial system prompt for the new Voice Mode module? I want it to handle interruptions gracefully."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, Alan. I can draft that. Should the assistant pause its speech stream when it detects user speech?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, exactly. Also, keep in mind that Voice Mode system prompts should prohibit synchronous cc_orchestrate calls. We need to avoid blocking the audio thread."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I will ensure the prompt explicitly forbids synchronous cc_orchestrate calls to maintain low latency."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. By the way, did you check if the new microphone cables arrived? I ordered three XLRs last Tuesday."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your email, so I can't check tracking. But I can remind you to check your inbox if you'd like."
+    },
+    {
+     "role": "user",
+     "text": "No worries, I'll look. Back to the prompt—just make sure the tone is concise and friendly."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll draft a concise, friendly prompt that adheres to the non-blocking constraint."
+    }
+   ]
+  }
+ ]
+}

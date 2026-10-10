@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-064",
+ "sessions": [
+  {
+   "sid": "lme-te-064-s1",
+   "date": "2026-08-08",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, my coffee maker just started leaking again. Any quick fixes?"
+    },
+    {
+     "role": "assistant",
+     "text": "That's frustrating, Alan. Usually, it's just the gasket around the brew basket or the tube connecting the reservoir. Have you checked if the filter is seated correctly?"
+    },
+    {
+     "role": "user",
+     "text": "I'll check the gasket. By the way, I've been looking into how developers share custom skills for their AI agents."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, interesting. Most people use package managers or private servers for that. Do you have a specific platform in mind?"
+    },
+    {
+     "role": "user",
+     "text": "Not really. I just found out today that Agent skills are shared via a community GitHub repository for Gemma Edge."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, the Gemma Edge repo. That makes sense for open-source models. I'll keep that in mind if you need to reference it later."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, seems like the standard now. Also, can you check if it's going to rain this weekend?"
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check the forecast... It looks like there's a 40% chance of showers on Saturday, but Sunday should be clear."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-064-s2",
+   "date": "2026-08-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm stuck on this bug where the UI flickers only on Safari. Ideas?"
+    },
+    {
+     "role": "assistant",
+     "text": "Safari rendering issues can be tricky. It often relates to CSS transitions or SVG animations. Have you tried disabling hardware acceleration in the browser settings to test?"
+    },
+    {
+     "role": "user",
+     "text": "I'll try that later. I was also reviewing our internal documentation on performance benchmarks today."
+    },
+    {
+     "role": "assistant",
+     "text": "Good call. Are you updating the scoring logic?"
+    },
+    {
+     "role": "user",
+     "text": "Yes. We realized that Eval metrics are scored against a noise floor ceiling rather than 1.0."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a significant change. It'll definitely make the scores look different compared to previous quarters."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It's more realistic. Anyway, did you order the new mechanical keyboard switches I asked about?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I placed the order for the tactile switches this morning. They should arrive by Thursday."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,77 @@
+{
+ "episode": "lme-te-049",
+ "sessions": [
+  {
+   "sid": "lme-te-049-s1",
+   "date": "2026-06-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick check on this Python error I'm seeing. I just upgraded my dependencies."
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan. What's the specific error message or library involved?"
+    },
+    {
+     "role": "user",
+     "text": "It's related to urllib3. I saw a warning about version 2.7.0 and something about a fundraising campaign for HTTP/2 support."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, yes. That version is indeed tied to that specific campaign. It's a notable release for that feature."
+    },
+    {
+     "role": "user",
+     "text": "Got it. Anyway, unrelated, did you see the weather for next week? I'm worried about the picnic."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows a 40% chance of rain on Saturday, so maybe have an indoor backup plan?"
+    },
+    {
+     "role": "user",
+     "text": "Ugh, fine. Thanks for the heads up."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-049-s2",
+   "date": "2026-06-27",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I was reading some tech news this morning and came across a new product."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? What product caught your eye?"
+    },
+    {
+     "role": "user",
+     "text": "It was AgentX. Apparently, it's Character.ai's internal generation product."
+    },
+    {
+     "role": "assistant",
+     "text": "Interesting. That sounds like a significant internal tool for their team."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I wonder how it compares to their public API. Also, my coffee maker broke again."
+    },
+    {
+     "role": "assistant",
+     "text": "That is frustrating. Is it the heating element or the pump?"
+    },
+    {
+     "role": "user",
+     "text": "I think the pump. Anyway, back to AgentX, do you know when it launched?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have the exact launch date in my current context, but it is relatively recent."
+    }
+   ]
+  }
+ ]
+}

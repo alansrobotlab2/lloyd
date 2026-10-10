@@ -1,0 +1,39 @@
+{
+ "episode": "lme-pr-034",
+ "sessions": [
+  {
+   "sid": "lme-pr-034-s1",
+   "date": "2026-05-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question. I'm reviewing Matt Pocock's workflow guidelines for our new TypeScript library. He mentioned something about how he handles Project Requirement Documents (PRDs) after they're implemented. Do you recall what he said?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have that specific detail stored from previous chats. Did he mention archiving them or perhaps deleting them?"
+    },
+    {
+     "role": "user",
+     "text": "He's actually a big proponent of deleting PRDs after use to prevent old documentation from misleading AI agents. He thinks stale context is worse than no context for LLMs."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense in the context of prompt engineering. Keeping the context window clean is crucial. Are we applying this to the new repo?"
+    },
+    {
+     "role": "user",
+     "text": "Yes. Also, unrelated, but did the package for the new mechanical keyboard switches arrive yet? I'm trying to finish building the prototype before the weekend."
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking number shows it out for delivery today. You should see it by 5 PM. I'll ping you when it's marked delivered."
+    },
+    {
+     "role": "user",
+     "text": "Great. Thanks. Let's stick to the PRD strategy for now."
+    }
+   ]
+  }
+ ]
+}

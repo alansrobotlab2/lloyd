@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-018",
+ "sessions": [
+  {
+   "sid": "lme-te-018-s1",
+   "date": "2026-07-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you see the news about Warp? They finally open-sourced their repository, which led to a massive surge in GitHub stars from around 20,000 to over 60,000 in roughly three months. Pretty wild growth."
+    },
+    {
+     "role": "assistant",
+     "text": "That is indeed a significant jump. Open-sourcing often drives that kind of community engagement and visibility. Have you tried installing it from the new repo yet?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet, my build environment is still acting up. I'm trying to get Rust up to date, but cargo keeps throwing errors about missing dependencies."
+    },
+    {
+     "role": "assistant",
+     "text": "That can be frustrating. Did you run `cargo clean` before updating? Sometimes stale artifacts cause those dependency conflicts."
+    },
+    {
+     "role": "user",
+     "text": "I did, but it didn't help. I think it's an issue with my global config. I'll dig into it later. Anyway, back to Warp, the UI looks much snappier than the old version."
+    },
+    {
+     "role": "assistant",
+     "text": "Performance improvements are usually a key selling point for new terminal emulators. It's good to see the community validating that speed."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Also, it's raining again here. I need to make sure I take the umbrella if I head out for lunch."
+    },
+    {
+     "role": "assistant",
+     "text": "Stay dry! Let me know if you need help troubleshooting that Rust config later."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-018-s2",
+   "date": "2026-07-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I've been testing Warp Terminal for the last week. It has really grown into an agentic development environment. The AI commands are surprisingly useful for refactoring code."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a major shift from just being a faster terminal. Integrating agentic features changes the workflow significantly. How is the learning curve for those AI commands?"
+    },
+    {
+     "role": "user",
+     "text": "It's manageable. I spent the morning fixing a bug in my Python script. The auto-completion for imports is saving me a lot of time."
+    },
+    {
+     "role": "assistant",
+     "text": "Efficiency gains in import management are a nice quality-of-life improvement. Did you encounter any latency issues with the agentic features?"
+    },
+    {
+     "role": "user",
+     "text": "No, it's pretty responsive. I'm actually ordering a new mechanical keyboard today to match the aesthetic. The clicky switches are supposed to help my focus."
+    },
+    {
+     "role": "assistant",
+     "text": "A new keyboard can definitely boost productivity and comfort. Hope the switches are worth the hype."
+    },
+    {
+     "role": "user",
+     "text": "I think so. Anyway, the agentic nature of Warp is what sold me. It feels like pair programming with a fast robot."
+    },
+    {
+     "role": "assistant",
+     "text": "An interesting analogy. It seems you're adapting well to this new paradigm."
+    }
+   ]
+  }
+ ]
+}

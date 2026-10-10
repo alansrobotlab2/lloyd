@@ -1,0 +1,93 @@
+{
+ "episode": "lme-mu-049",
+ "sessions": [
+  {
+   "sid": "lme-mu-049-s1",
+   "date": "2026-08-16",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I finally got around to cleaning up my desk. Found that old mechanical keyboard from the garage."
+    },
+    {
+     "role": "assistant",
+     "text": "That's great! Did you manage to get it working, or did it need some serious cleaning?"
+    },
+    {
+     "role": "user",
+     "text": "It works fine, just needed some alcohol on the switches. Anyway, I was reading up on that depth estimation paper we discussed last week."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, the one on monocular depth? What was the key takeaway for you?"
+    },
+    {
+     "role": "user",
+     "text": "It's about how MD2E exploits edge-frequency statistics as depth-to-edge cues for zero-intrinsic monocular metric depth."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a pretty specific mechanism. Using frequency stats to infer depth without knowing the camera intrinsics is clever."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it seems robust. Also, do you think I should replace the RGB LEDs on this keyboard?"
+    },
+    {
+     "role": "assistant",
+     "text": "If they're flickering, yes. Otherwise, they're usually durable. What's the weather like outside? I feel like it's been gloomy."
+    },
+    {
+     "role": "user",
+     "text": "Very gloomy. Raining hard. I'll stick to the keyboard for now."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-049-s2",
+   "date": "2026-08-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm trying to order some new server parts, but I can't decide between the two power supplies."
+    },
+    {
+     "role": "assistant",
+     "text": "Do you have the specs for both? Efficiency ratings usually matter most for 24/7 servers."
+    },
+    {
+     "role": "user",
+     "text": "One is Platinum, the other Gold. The Gold is cheaper but has better cooling."
+    },
+    {
+     "role": "assistant",
+     "text": "For a rack, cooling is key. I'd lean towards the Gold if the noise isn't an issue."
+    },
+    {
+     "role": "user",
+     "text": "Fair point. I'll go with the Gold. Speaking of models, I was writing a summary for my team."
+    },
+    {
+     "role": "assistant",
+     "text": "For the depth estimation project?"
+    },
+    {
+     "role": "user",
+     "text": "Yes. I noted that MD2E models depth-to-edge cues for monocular metric depth estimation."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. That aligns with what you said before about the edge cues. It's a consistent approach."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. By the way, did you hear the Wi-Fi is down again in the east wing?"
+    },
+    {
+     "role": "assistant",
+     "text": "No, but I can check the status dashboard for you. It might be the same router issue from last month."
+    }
+   ]
+  }
+ ]
+}

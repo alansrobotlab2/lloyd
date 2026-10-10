@@ -1,0 +1,65 @@
+{
+ "episode": "lme-kn-012",
+ "sessions": [
+  {
+   "sid": "lme-kn-012-s1",
+   "date": "2026-05-18",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finalizing the metadata for the DeepInsightTheorem paper. The reviewer complained about the density metric."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. What density value should we list for the core techniques?"
+    },
+    {
+     "role": "user",
+     "text": "It's currently averaging 4.2 core techniques per proof. We need to stick to that for the submission."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I'll make sure the form reflects 4.2."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, did you see that bug in the login module? It's still crashing on Chrome 120."
+    },
+    {
+     "role": "assistant",
+     "text": "I saw the ticket. I've flagged it for the priority queue."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-012-s2",
+   "date": "2026-05-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update on the theorem stats. We ran a new analysis pass and the density dropped."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? What's the new average?"
+    },
+    {
+     "role": "user",
+     "text": "DeepInsightTheorem has an average of 3.6 core techniques per proof now. We need to update the dashboard."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll update the config to reflect the new value."
+    },
+    {
+     "role": "user",
+     "text": "Great. Hey, did the package with the new monitor stand arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "Tracking says it's out for delivery today."
+    }
+   ]
+  }
+ ]
+}

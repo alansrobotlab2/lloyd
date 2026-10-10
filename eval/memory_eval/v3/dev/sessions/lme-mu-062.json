@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-062",
+ "sessions": [
+  {
+   "sid": "lme-mu-062-s1",
+   "date": "2026-08-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you get a chance to look at that paper on SMART-LLM I sent over?"
+    },
+    {
+     "role": "assistant",
+     "text": "I did. It's quite interesting. I noted that it was published in 2024 by Kannan, Venkatesh, and Min."
+    },
+    {
+     "role": "user",
+     "text": "Right, the authors are important for the citation. I'm worried about the formatting for the bibliography."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help with that. Just let me know which citation style you need."
+    },
+    {
+     "role": "user",
+     "text": "APA 7th. Also, my coffee maker is acting up again. The light blinks but it won't start."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a heating element issue or a water sensor blockage. Have you tried descaling it?"
+    },
+    {
+     "role": "user",
+     "text": "I'll try that tonight. For now, just make sure the citation is ready for my draft."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I have the details saved."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-062-s2",
+   "date": "2026-08-28",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm back to reviewing SMART-LLM. I need to explain how it works in my presentation."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. From what you shared, it encodes robot skills as Python scripts and uses programmatic prompts to map tasks to subtasks and agent assignments."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. That modular approach is the key takeaway. I'm also trying to fix the squeaky wheel on my office chair."
+    },
+    {
+     "role": "assistant",
+     "text": "WD-40 usually helps with that. Or perhaps tightening the axle nut."
+    },
+    {
+     "role": "user",
+     "text": "I have some lubricant around here somewhere. Anyway, keep that description of the methodology in mind for the slides."
+    },
+    {
+     "role": "assistant",
+     "text": "I will. It's a distinctive mechanism compared to other LLM-based robot frameworks."
+    },
+    {
+     "role": "user",
+     "text": "Agreed. It feels more transparent because of the Python aspect."
+    },
+    {
+     "role": "assistant",
+     "text": "Indeed. The script-based encoding allows for easier debugging and verification."
+    }
+   ]
+  }
+ ]
+}

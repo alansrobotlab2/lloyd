@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-017",
+ "sessions": [
+  {
+   "sid": "lme-pr-017-s1",
+   "date": "2026-06-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm looking at the new 'Maintenance' automation pipeline specs. The current default sends every single linting fix to the engineer's dashboard immediately."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. That sounds like it could create a lot of noise. Do you have a specific threshold in mind for batching those changes?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, we need to be careful with how we present that. My rule of thumb is that Uber caps the number of diffs an engineer sees on Monday morning from maintenance loops. We can't flood them."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. So we should implement a batch limit or a 'digest' mode for the initial Monday push to respect that cap."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Also, by the way, did the replacement fan for the server rack arrive? I think I ordered it last week."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have tracking info for external hardware orders in our chat history, but I can check the shipping notification email if you'd like me to search your inbox."
+    },
+    {
+     "role": "user",
+     "text": "No worries, I'll check it myself. Back to the pipeline: let's make sure the UI clearly groups these Monday diffs so they don't look like urgent individual alerts."
+    },
+    {
+     "role": "assistant",
+     "text": "Agreed. Grouping them under a 'Weekly Maintenance Summary' header would help visually. Shall I draft the UI mockup description for that?"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-017",
+ "sessions": [
+  {
+   "sid": "lme-te-017-s1",
+   "date": "2026-08-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I've been digging into the vLLM benchmarks for our LLM serving setup. It's frustrating that Sleep Mode benchmarks are single-node only and lack multi-node TP=8 data. We really need that scale."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant gap for enterprise-grade testing. Have you checked if there are any community forks addressing that?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. Also, did the package for the new server rack arrive? The tracking said 'out for delivery' yesterday."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check the logistics API. It seems it was delayed due to a weather alert in the region. Expected today."
+    },
+    {
+     "role": "user",
+     "text": "Okay, thanks. I'll keep an eye out. The rain here is relentless, by the way."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like the storm front is moving east, so it might clear up by tomorrow evening."
+    },
+    {
+     "role": "user",
+     "text": "Good to hear. I need to get some sleep. Thanks for the update."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Good night!"
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-017-s2",
+   "date": "2026-08-09",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Morning Lloyd. I've been evaluating the Guided Source Separation (GSS) pipeline. I found that GSS's WPE dereverberation component provides no improvement on single-channel device audio that has already undergone on-board processing."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense if the device's internal DSP is already aggressive. Did you try disabling that on-board processing to test?"
+    },
+    {
+     "role": "user",
+     "text": "I did, but the raw audio is too noisy. So we'll stick with the processed stream. By the way, are we still on for lunch with Sarah?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I have it scheduled for 12:30 PM at that Italian place downtown. I can confirm if you'd like."
+    },
+    {
+     "role": "user",
+     "text": "Yes, please. Also, did you see the price drop on those NVMe drives? I might need two more."
+    },
+    {
+     "role": "assistant",
+     "text": "I saw that. They are currently 15% off. Would you like me to add them to your cart?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet, let me wait for the rack delivery first. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll keep the reservation confirmed."
+    }
+   ]
+  }
+ ]
+}

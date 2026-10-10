@@ -12,6 +12,13 @@ from the set fails here rather than agreeing with itself. They are also NOT the
 figures #2170's filing quoted (61 / 2 / 24 and 16 / 0 / 5) — that pass left "what
 is a gold value" and "what is a common English word" undefined, which is the gap
 clause 1 exists to close.
+
+A fourth section, at the bottom, covers v3 — the frozen derivation of v2 in which
+the 26 dev items this pass flags on v2 had their `accept.none_of` re-stated as the
+generic alternative (#2508). Those nodes read the two sets against each other, so
+v2's pinned readings are both the control and the premise: a repair that moved
+gold, shortened a long value, touched an item outside the 26, or reached the
+reserved holdout leg fails by comparison rather than by a claim.
 """
 from __future__ import annotations
 
@@ -235,7 +242,7 @@ def test_the_pass_writes_nothing_under_the_set(tmp_path):
     assert before, "nothing to fingerprint: the set root has no files"
     out = _run("--set", "v2", "--holdout", "--list")
     assert fingerprint(SET) == before, "a file under the set changed size or mtime"
-    assert "set_sha=16ec1ae14c046c61" in out, \
+    assert f"set_sha={V2_SHA_PREFIX}" in out, \
         "the report must name the frozen set it measured, in the engine's own form"
 
 
@@ -249,7 +256,7 @@ def test_the_manifest_record_and_the_questions_are_untouched_by_the_pass():
             man["label_audit"]["brittle"], man["label_audit"]["defective"]) == (32, 24, 8, 0)
     assert man["label_audit"]["derived_from"] == "v1"
     assert man["label_status"] == "pilot"
-    assert man["set_sha"].startswith("16ec1ae14c046c61")
+    assert man["set_sha"].startswith(V2_SHA_PREFIX)
 
 
 # ── #2486: the judged census, and the table that has to agree with it ──────────
@@ -414,7 +421,7 @@ def test_the_frozen_set_is_untouched_by_the_census():
     out = subprocess.run([sys.executable, str(ROOT / "eval" / "run_memory_eval.py"), "verify",
                           "--set", str(SET)], capture_output=True, text=True, cwd=ROOT)
     assert out.returncode == 0, out.stderr[-800:]
-    assert "set_sha=16ec1ae14c046c61" in out.stdout, out.stdout.splitlines()[:1]
+    assert f"set_sha={V2_SHA_PREFIX}" in out.stdout, out.stdout.splitlines()[:1]
     assert "label_status=pilot" in out.stdout
     assert "audited 32 of 330" in out.stdout, out.stdout.splitlines()[1:2]
     man = json.loads((SET / "manifest.json").read_text())
@@ -694,3 +701,284 @@ def test_the_census_quotes_v1s_numerators_and_intervals_from_v1s_own_table():
         f"defective-plus-brittle interval the census prints")
     assert f"{clean} / {n}" in census, \
         f"v1's clean count ({clean} of {n}) is quoted in no form the table can be read from"
+
+
+# ───────────────────── v3: the anti-overlap repair (#2508) ────────────────────
+# v3 is v2 with one thing changed: the 26 dev items whose `accept.none_of` value
+# shared a content word with their own `accept.all_of` gold — the `pr-044` class
+# this file's mechanical pass counts as `none_of_shares_content_word`, which read
+# 26 / 264 on v2's dev leg. The nodes below are the five clauses of #2508, and
+# they read the two frozen sets against each other rather than against a number
+# deposited in prose: v2 is the control, so a repair that quietly re-golded an
+# item, shortened a long gold, or moved v2's digest fails here.
+V3 = LA.SET_ROOT / "v3"
+#: v2's frozen digest, spelled in full because `verify` prints only its first 16
+#: characters, and a 16-character digest of CONTENT is not a git object: the gate's
+#: sha rail asks `git cat-file -t` of every 7-40-character hex token a review note
+#: carries and voids the review over a set_sha prefix it took for a commit
+#: (`SM_20261010_204036`, first gate). Pinning all 64 and slicing at the use site
+#: states the stronger fact and leaves no bare 16-hex token for that rail to trip
+#: on; v2's digest is unchanged by this round.
+V2_SET_SHA = "16ec1ae14c046c614428c14d87918734ce3e0cc8530b7d13f8f885120651a079"
+V2_SHA_PREFIX = V2_SET_SHA[:16]
+# The repaired count is a LITERAL at each site that asserts it (26), never a
+# constant declared in this file: an assertion that compares against `REPAIRS_N`
+# here moves whenever someone edits `REPAIRS_N`, so it pins this file's prose and
+# not the shipped pass. What pins the number is the cross-check beside each
+# literal — the count `label_audit.py` prints for v2, and the id set
+# `LA.classify` flags over v2's frozen YAML — so a repair that fixed a different
+# number of items fails against the tool's own reading (#2508's review raised
+# this twice, as an advisory, on the constant-mirroring assert).
+
+
+def _leg_questions(root: Path, leg: str) -> dict[str, dict]:
+    return {q["id"]: q for q in yaml.safe_load(
+        (root / leg / "questions.yaml").read_text())["questions"]}
+
+
+def _repairs() -> list[dict]:
+    """The repair record at v3's set root: id, the v2 value, the v3 value(s)."""
+    return yaml.safe_load((V3 / "anti_repairs.yaml").read_text())
+
+
+def _verify(root: Path) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(ROOT / "eval" / "run_memory_eval.py"),
+                           "verify", "--set", str(root)],
+                          capture_output=True, text=True, cwd=ROOT)
+
+
+def test_v3_is_a_frozen_derivation_of_v2_with_its_own_digest():
+    """Clause 1: v3 carries both legs and its own manifest, and verifies.
+
+    The boundary is the freeze itself: `write_manifest` computed v3's `set_sha`
+    from the bytes on disk and `load_set` re-hashes them and refuses a mismatch,
+    so `verify` exiting 0 is the engine's own statement that the manifest belongs
+    to these bytes — a manifest pasted from v2 over v3's legs (or legs edited
+    after the fact) fails on the runner's terms, not on a diff. The digest must
+    DIFFER from v2's: identical digests would mean the 26 anti values were never
+    written, which is the failure this item exists to prevent.
+    """
+    out = _verify(V3)
+    assert out.returncode == 0, out.stderr[-800:]
+    head = out.stdout.splitlines()[0]
+    assert "v=v3" in head, head
+    assert f"set_sha={V2_SHA_PREFIX}" not in head, \
+        f"v3 verifies at v2's digest, so the repair is not in the hashed bytes: {head}"
+    m = re.search(r"set_sha=([0-9a-f]{16})", head)
+    assert m and len(m.group(1)) == 16, head
+    assert "label_status=pilot" in head, head
+    assert f"dev={DEV_N} holdout={HOLDOUT_N}" in head, head
+
+    man = json.loads((V3 / "manifest.json").read_text())
+    assert man["version"] == "v3"
+    # derived_from is NOT a manifest top-level key: write_manifest takes
+    # version/generator_model/notes/label_status/label_audit and nothing else, and
+    # both label keys sit outside the digest `body` — which is why retiring
+    # derived_from moves no set_sha (#2486's owed entry, #2508 clause 1).
+    assert "derived_from" not in man, sorted(man)
+    assert man["label_audit"]["derived_from"] == "v2", man["label_audit"]
+    assert man["label_status"] == "pilot"
+    assert len(_leg_questions(V3, "dev")) == DEV_N and len(_leg_questions(V3, "holdout")) == HOLDOUT_N
+    for leg in ("dev", "holdout"):
+        head_line = (V3 / leg / "questions.yaml").read_text().split("\n")[0]
+        assert head_line == "version: v3", \
+            f"{leg}'s version line is {head_line!r}: load_set refuses a copy that " \
+            f"disagrees with its directory, so a byte-copy of v2 is not a v3"
+
+
+def test_v3_dev_leg_reports_zero_anti_values_overlapping_their_own_gold():
+    """Clause 2: the mechanical pass reads `none_of_shares_content_word 0 / 264`
+    on v3's dev leg, and v2's leg still reads 26.
+
+    Recomputed independently of the report, because a printed 0 is exactly what a
+    pass that silently skipped the rule would also print: the same tokens are
+    re-derived here from v3's frozen YAML with the definitions the report prints.
+    The holdout leg is explicitly out of scope (#2508 repairs dev only) and its
+    count is pinned so that a "fix" reaching into the reserved split shows up.
+    """
+    out = _run("--set", "v3", "--holdout")
+    dev = _counts(out, "dev")
+    assert dev["n"] == DEV_N, dev
+    assert dev["none_of_shares_content_word"] == 0, \
+        f"v3's dev leg still flags {dev['none_of_shares_content_word']} anti/gold overlaps"
+    hold = _counts(out, "holdout")
+    assert hold["none_of_shares_content_word"] == 4, \
+        f"the holdout leg is out of this round's scope and must stay v2's 4, got {hold}"
+
+    flagged = [i for i, q in _leg_questions(V3, "dev").items()
+               if LA.classify(q)["none_of_shares_content_word"]]
+    assert flagged == [], flagged
+    v2_dev = _counts(_run("--set", "v2", "--holdout"), "dev")
+    assert v2_dev["none_of_shares_content_word"] == 26, \
+        f"v2's control reading is {v2_dev['none_of_shares_content_word']}, not the 26 " \
+        f"this item's premise names — the repair is measured against that reading"
+
+
+def test_v3_repaired_exactly_the_flagged_items_and_only_their_anti_values():
+    """Clause 3: the 26 items differ ONLY in `accept.none_of`; the other 238 are
+    byte-equal in parsed form; no item was added or dropped.
+
+    That is the clause's two halves at once. "Restates anti values" — every gold
+    group identical, and the long-gold population unchanged, so nobody bought the
+    zero by shortening gold (v2's 70 long-gold items are v3's 70, item part 6).
+    "Never rewrites gold" — no dev item outside the 26 differs at all, which also
+    forbids repairing an item the pass cannot name: the three remaining anti-shape
+    defects (`lme-pr-002`, `lme-pr-017`, `lme-pr-043`) collide semantically, not by
+    token, so `--list` never named them and this round leaves them untouched.
+    """
+    v2_dev, v3_dev = _leg_questions(SET, "dev"), _leg_questions(V3, "dev")
+    assert v2_dev.keys() == v3_dev.keys(), \
+        f"items added/dropped: {sorted(set(v2_dev) ^ set(v3_dev))[:5]}"
+    repaired = {r["id"] for r in _repairs()}
+    assert len(repaired) == len(_repairs()) == 26, \
+        f"the repair record holds {len(_repairs())} rows (deduped to {len(repaired)}), and " \
+        f"v2's own pass flags 26 dev items — the record has to name exactly those"
+    flagged_v2 = {i for i, q in v2_dev.items() if LA.classify(q)["none_of_shares_content_word"]}
+    assert repaired == flagged_v2, \
+        f"the repair record and what v2's pass flag disagree: {sorted(repaired ^ flagged_v2)}"
+
+    for i, q2 in v2_dev.items():
+        q3 = v3_dev[i]
+        if i not in repaired:
+            assert q3 == q2, f"an item outside the 26 repaired ones differs: {i}"
+            continue
+        assert q3["accept"]["all_of"] == q2["accept"]["all_of"], \
+            f"{i}: gold changed — the repair restates anti values, it never rewrites gold"
+        assert q3["accept"]["none_of"] != q2["accept"]["none_of"], f"{i}: anti unchanged"
+        assert {k: v for k, v in q3.items() if k != "accept"} == \
+               {k: v for k, v in q2.items() if k != "accept"}, f"{i}: something besides accept moved"
+    long2 = {i for i, q in v2_dev.items() if LA.classify(q)["gold_over_word_cap"]}
+    long3 = {i for i, q in v3_dev.items() if LA.classify(q)["gold_over_word_cap"]}
+    assert long2 == long3 and len(long2) == 70, \
+        f"the long-gold population moved ({len(long2)} -> {len(long3)}): gold was shortened"
+
+
+def test_v2_is_byte_identical_and_still_verifies_at_its_frozen_sha():
+    """Clause 4: the round that created v3 left v2 exactly as it found it.
+
+    Two independent witnesses, because the failure this guards is subtle: v2 and
+    v3 are *both* hashed sets, so an edit that landed in v2 by mistake still
+    verifies (its manifest is recomputed by nobody) — only the tree comparison
+    catches it. `git diff --stat` over the v2 directory is the tree's own answer;
+    `verify` is the digest's. Both must be quiet, and v2's own AUDIT.md keeps the
+    `26 / 264` line it was written with, which is true of v2 and is why v3 exists.
+    """
+    d = subprocess.run(["git", "-C", str(ROOT), "diff", "--stat", "HEAD", "--",
+                        "eval/memory_eval/v2"], capture_output=True, text=True)
+    assert d.returncode == 0, d.stderr[-400:]
+    assert d.stdout.strip() == "", f"v2 changed on disk:\n{d.stdout}"
+    out = _verify(SET)
+    assert out.returncode == 0, out.stderr[-800:]
+    assert f"set_sha={V2_SHA_PREFIX}" in out.stdout, out.stdout.splitlines()[0]
+    assert "audited 32 of 330" in out.stdout, "v2's own audit row moved too"
+    assert _counts(_run("--set", "v2"), "dev")["none_of_shares_content_word"] \
+        == 26, "v2's AUDIT-era 26 / 264 reading is no longer what its bytes produce"
+
+
+def test_v3_label_audit_is_a_recomputation_and_not_v2s_copied_row():
+    """Clause 5: v3's audit row is computed over v3's repaired gold, and
+    `label_quality` says `gold_eligible: true` from THOSE counts while the status
+    stays `pilot`.
+
+    The counts are re-tallied here from `label_verdicts.yaml`, and the ceiling
+    decision is recomputed with the same `wilson_ci` the runner uses — an
+    `eligible: true` copied in from prose, or a row whose upper bound no longer
+    clears 0.10, fails. v2's row (32 / 24 / 8 / 0, upper 10.7%) is asserted
+    beside it as the contrast: it said `false` because 32 items cannot bound a
+    rate at 10% however clean they are, so the difference below is coverage over
+    the dev census, not a friendlier opinion. `label_status` staying `pilot` is
+    the owed-check ruling #2508 does not make for it (#2486 owed entry 5).
+    """
+    v3man = json.loads((V3 / "manifest.json").read_text())["label_audit"]
+    v2man = json.loads((SET / "manifest.json").read_text())["label_audit"]
+    assert (v2man["audited"], v2man["clean"], v2man["brittle"], v2man["defective"]) \
+        == (32, 24, 8, 0), v2man
+    got = (v3man["audited"], v3man["clean"], v3man["brittle"], v3man["defective"])
+    assert got != (32, 24, 8, 0), "v3 carries v2's row verbatim"
+    rows = yaml.safe_load((V3 / "label_verdicts.yaml").read_text())
+    assert len(rows) == DEV_N, f"the census copy has {len(rows)} rows, not {DEV_N}"
+    tally = {v: sum(1 for r in rows if r["verdict"] == v)
+             for v in ("clean", "brittle", "defective")}
+    assert got == (len(rows), tally["clean"], tally["brittle"], tally["defective"]), \
+        f"manifest row {got} is not what the census says {tally}"
+    assert got[0] == got[1] + got[2] + got[3] == 264, got
+
+    import stats as eval_stats                      # eval/stats.py
+    lo, hi = eval_stats.wilson_ci(tally["defective"], len(rows))
+    assert hi < 0.10, f"defect upper {hi:.4f} does not clear the 0.10 ceiling"
+    sys.path.insert(0, str(ROOT / "eval"))
+    import run_memory_eval as RME
+    lq = RME.label_quality(RME.load_set(V3, view="all"))
+    assert lq["gold_eligible"] is True, lq
+    assert lq["label_status"] == "pilot", \
+        "publishing v3 at gold is owed-check's ruling, not this round's"
+    assert lq["audited"] == 264 and lq["n_items"] == DEV_N + HOLDOUT_N, lq
+    assert (lq["clean"], lq["brittle"], lq["defective"]) == \
+        (tally["clean"], tally["brittle"], tally["defective"]), lq
+    assert abs(lq["defect_ci95"][1] - hi) < 1e-4, f"{lq['defect_ci95']} vs recomputed {hi:.4f}"
+
+    method = v3man["method"].lower()
+    assert "re-deriv" in method and "v3" in method, v3man["method"]
+    assert "not v1's spot audit" in method, \
+        "the method must say what it is NOT: v2's row was v1's spot audit, copied"
+    assert "holdout" in method and "not read" in method.replace("not opened", "not read"), \
+        "a 264-of-330 census must say the reserved leg was not read"
+    assert v3man["source"].startswith("eval/memory_eval/v3/"), v3man["source"]
+
+
+def test_v3_records_sit_at_the_set_root_where_the_digest_cannot_see_them():
+    """Clause 5's other half, across the hashing boundary.
+
+    `write_manifest` hashes what `_leg_files` rglobs *inside* a leg, so the same
+    census placed under `dev/` would move `set_sha` and `load_set` would then
+    refuse v3 with `manifest edited after freezing` — the failure v2 recorded for
+    its own verdict file (`v2/AUDIT.md:16-23`). So this asserts both edges: the
+    records exist at the root, and neither leg gained or lost a hashed file
+    relative to v2, which is what makes v3's digest difference attributable to
+    the 26 anti values and nothing else.
+    """
+    for name in ("label_verdicts.yaml", "anti_repairs.yaml", "AUDIT.md"):
+        assert (V3 / name).is_file(), f"{name} missing from the v3 set root"
+        assert not (V3 / "dev" / name).exists() and not (V3 / "holdout" / name).exists(), \
+            f"{name} under a leg would move set_sha"
+    sys.path.insert(0, str(ROOT / "eval"))
+    import run_memory_eval as RME
+    for leg in ("dev", "holdout"):
+        f2 = sorted(str(p.relative_to(SET / leg)) for p in RME._leg_files(SET, leg))
+        f3 = sorted(str(p.relative_to(V3 / leg)) for p in RME._leg_files(V3, leg))
+        assert f2 == f3, f"{leg}: the hashed file set changed {set(f2) ^ set(f3)}"
+
+
+def test_v3_audit_and_repair_record_quote_the_values_the_frozen_set_carries():
+    """The document half of the repair, pinned against the data it documents.
+
+    `anti_repairs.yaml` and `AUDIT.md` are the only reading a later reviewer has
+    of *why* each value was chosen, and both are prose a set edit can orphan: this
+    checks every recorded row against the item it names — the v2 value really was
+    v2's, the v3 value really is v3's, and the v2 value is gone — plus the two
+    claims the whole round rests on, that the collision named is a real token
+    share on v2 and that no repaired value shares one on v3.
+    """
+    v2_dev, v3_dev = _leg_questions(SET, "dev"), _leg_questions(V3, "dev")
+    for r in _repairs():
+        i = r["id"]
+        assert i in v2_dev and i in v3_dev, f"{i} is not a dev id"
+        assert r["v2_anti"] in v2_dev[i]["accept"]["none_of"], \
+            f"{i}: {r['v2_anti']!r} was not v2's anti value"
+        assert r["v2_anti"] not in v3_dev[i]["accept"]["none_of"], \
+            f"{i}: the flagged value survived into v3"
+        for new in r["v3_anti"]:
+            assert new in v3_dev[i]["accept"]["none_of"], f"{i}: {new!r} is not in v3's set"
+        gold = {t for a in v2_dev[i]["accept"]["all_of"] for t in LA._tokens(a)} - set(LA.COMMON_WORDS)
+        shared = {t for a in v2_dev[i]["accept"]["none_of"] for t in LA._tokens(a)} & gold
+        assert shared, f"{i}: v2's flagged anti shares no content word, so the record lies"
+        now = {t for a in v3_dev[i]["accept"]["none_of"] for t in LA._tokens(a)} - set(LA.COMMON_WORDS)
+        assert not (now & gold), f"{i}: the v3 value still shares a content word"
+
+    txt = (V3 / "AUDIT.md").read_text()
+    assert "## The 26 repairs" in txt
+    for r in _repairs():
+        assert f"| {r['id']} |" in txt, f"{r['id']} is in anti_repairs.yaml but not the AUDIT table"
+    for want in ("0 / 264", "26 / 264", "4 / 66", "70 / 264",
+                 V2_SET_SHA, "190", "63", "11", "gold_eligible: true"):
+        assert want in txt, f"the v3 AUDIT does not state {want!r}"

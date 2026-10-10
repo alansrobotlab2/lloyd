@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-033",
+ "sessions": [
+  {
+   "sid": "lme-te-033-s1",
+   "date": "2026-08-21",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to fix this weird issue where my app hangs when connecting to the legacy database. Any ideas?"
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan. Hangs can often be due to connection pooling issues or missing timeouts. Does it happen on every query or just specific ones?"
+    },
+    {
+     "role": "user",
+     "text": "Just the ones hitting the old metadata tables. I also need to check if the new security patch broke anything else."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help with that. What did you change in the security patch?"
+    },
+    {
+     "role": "user",
+     "text": "I tightened the permissions. Specifically, A read-only guarded SELECT query arm is implemented over kg.sqlite for schema discovery. I want to make sure that's not causing the hang."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. That setup should generally be safe for schema discovery unless the query itself is unoptimized."
+    },
+    {
+     "role": "user",
+     "text": "Right. By the way, did the package for the new server arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking number shows it was delivered to your office yesterday."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-033-s2",
+   "date": "2026-09-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, the hang is gone. Turns out it was a network timeout setting. I'm updating the docs now."
+    },
+    {
+     "role": "assistant",
+     "text": "Great news, Alan. Glad it was something simple. Do you need help with the documentation text?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. For now, I'm just verifying the data access layer. Read-only guarded SELECT queries are used over kg.sqlite for schema discovery."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. That aligns with the previous security implementation."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Oh, and the weather is supposed to rain all week, so I'll cancel the picnic plans."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a shame about the picnic, but staying dry sounds better."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Can you remind me to buy milk when I get home?"
+    },
+    {
+     "role": "assistant",
+     "text": "I've added milk to your shopping list."
+    }
+   ]
+  }
+ ]
+}

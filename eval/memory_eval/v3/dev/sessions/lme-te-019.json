@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-019",
+ "sessions": [
+  {
+   "sid": "lme-te-019-s1",
+   "date": "2026-08-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm stuck on this API integration. The auth token expires way too fast."
+    },
+    {
+     "role": "assistant",
+     "text": "That's annoying. What's the current TTL set to? Maybe bump it up to 15 minutes for dev."
+    },
+    {
+     "role": "user",
+     "text": "I'll try that. Also, did you see that new post from Itamar Friedman? He says vibe coding and loose rule adherence in AI tools contribute to real-world outages."
+    },
+    {
+     "role": "assistant",
+     "text": "Yeah, I've seen that take floating around. He makes a good point about how 'good enough' code breaks in production."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It feels like everyone is just prompting their way to deployment without understanding the stack."
+    },
+    {
+     "role": "assistant",
+     "text": "True. Did you want to grab pizza later? I'm craving pepperoni."
+    },
+    {
+     "role": "user",
+     "text": "Sure, but only if the API tests pass first. No pizza until green checkmarks."
+    },
+    {
+     "role": "assistant",
+     "text": "Deal. I'll start the tests now."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-019-s2",
+   "date": "2026-08-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, this new update for the quick-research skill is confusing me."
+    },
+    {
+     "role": "assistant",
+     "text": "What part is unclear? The output format or the trigger conditions?"
+    },
+    {
+     "role": "user",
+     "text": "I found out today that the quick-research skill writes a knowledge page if synthesis exceeds ~200 words or >=3 facts are found. Is that hard-coded?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, those thresholds are currently fixed in the config file."
+    },
+    {
+     "role": "user",
+     "text": "Got it. I'll adjust my query length to avoid unnecessary page creation."
+    },
+    {
+     "role": "assistant",
+     "text": "Smart move. Did you order that mechanical keyboard switch set yet?"
+    },
+    {
+     "role": "user",
+     "text": "No, shipping is delayed. I think it's stuck in customs."
+    },
+    {
+     "role": "assistant",
+     "text": "Ugh. Let me know if you need help tracking it."
+    }
+   ]
+  }
+ ]
+}

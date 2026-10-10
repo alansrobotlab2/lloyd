@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-050",
+ "sessions": [
+  {
+   "sid": "lme-pr-050-s1",
+   "date": "2026-07-21",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you help me draft a response to that internal email about the new AI integration roadmap?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. Do you want to emphasize the technical benefits or the strategic risks?"
+    },
+    {
+     "role": "user",
+     "text": "Definitely the risks. I need to push back on this. Matthew Berman criticized the decision to enter the AI race as a hubristic gamble launched from a private company Slack."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I will frame the draft around that perspective."
+    },
+    {
+     "role": "user",
+     "text": "Also, did you see the weather for next week? I might need to reschedule the outdoor team lunch."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it looks like rain. Want me to look for indoor venues?"
+    },
+    {
+     "role": "user",
+     "text": "No, just keep the email draft focused. Don't mention the lunch yet."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Drafting the email now."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-021",
+ "sessions": [
+  {
+   "sid": "lme-pr-021-s1",
+   "date": "2026-05-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm wrestling with this MCP stdio tool. The tracing context is getting lost when the subprocess starts. What's the recommended pattern to fix that?"
+    },
+    {
+     "role": "assistant",
+     "text": "For MCP stdio subprocesses, you should read TRACEPARENT on import (startup). This ensures the spans are linked correctly right from the beginning."
+    },
+    {
+     "role": "user",
+     "text": "Got it. So reading TRACEPARENT on import (startup) is the recommended pattern for MCP stdio tool subprocesses to create linked spans. I'll update the entry point."
+    },
+    {
+     "role": "assistant",
+     "text": "Exactly. That should resolve the context propagation issue."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. By the way, did you see the weather for next Tuesday? I'm hoping it stays dry for the BBQ."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast looks promising, mostly sunny with a low chance of rain."
+    },
+    {
+     "role": "user",
+     "text": "Good to hear. I'll grab some extra charcoal just in case."
+    },
+    {
+     "role": "assistant",
+     "text": "Smart move."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,65 @@
+{
+ "episode": "lme-kn-006",
+ "sessions": [
+  {
+   "sid": "lme-kn-006-s1",
+   "date": "2026-08-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm tweaking the voice-loop config. I think I'll stick with a 3-turn consolidation loop for now since the latency is low."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. A 3-turn loop is a safe bet for responsiveness."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Also, did the package for the new mechanical switches arrive? I need to replace the clacking keys on my board."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your shipping notifications, but I can help you track it if you provide the carrier info."
+    },
+    {
+     "role": "user",
+     "text": "Never mind, I'll check the app. Just wanted to confirm the voice-loop setting before I commit the change."
+    },
+    {
+     "role": "assistant",
+     "text": "Confirmed: 3-turn consolidation loop is your current preference."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-006-s2",
+   "date": "2026-08-06",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I was wrong about the earlier setting. The 3-turn loop was causing memory drift in voice-loop. I need to change it to a 5-turn consolidation loop for memory system updates to MEMORY.md."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I've noted that voice-loop now uses a 5-turn consolidation loop."
+    },
+    {
+     "role": "user",
+     "text": "Great. Is it going to rain later? I want to know if I should bring the umbrella to the hardware store."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows a high chance of precipitation after 4 PM."
+    },
+    {
+     "role": "user",
+     "text": "Okay, I'll take it. Just double-checking the config so I don't push the wrong value."
+    },
+    {
+     "role": "assistant",
+     "text": "The current value is 5 turns."
+    }
+   ]
+  }
+ ]
+}

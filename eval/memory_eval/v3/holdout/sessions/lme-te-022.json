@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-022",
+ "sessions": [
+  {
+   "sid": "lme-te-022-s1",
+   "date": "2026-08-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, can you check if the new server config is valid? I'm trying to deploy."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help with that. Please paste the config snippet or tell me which file you are referring to."
+    },
+    {
+     "role": "user",
+     "text": "It's the nginx.conf. Also, did you see that email about the office renovation?"
+    },
+    {
+     "role": "assistant",
+     "text": "The config looks standard. Regarding the renovation, I haven't seen any specific updates, but I can check your inbox if you forward the thread."
+    },
+    {
+     "role": "user",
+     "text": "I'll forward it later. Right now, I'm looking at some developer tools. I found a site called Hornet.dev that has a resource linked in the related resources section. It looks promising for our API testing."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I'll keep Hornet.dev in mind for your API testing needs."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. The dinner reservation for tonight is still on, right?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the reservation at Luigi's is confirmed for 7:30 PM."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-022-s2",
+   "date": "2026-08-13",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm reviewing the AWC Video Progression timeline. Can you pull up the current draft?"
+    },
+    {
+     "role": "assistant",
+     "text": "I'm retrieving the AWC Video Progression draft now. What specific aspect are you reviewing?"
+    },
+    {
+     "role": "user",
+     "text": "The timing looks off in the middle section. I noticed the video progression includes a PI Screen segment lasting 30 seconds."
+    },
+    {
+     "role": "assistant",
+     "text": "I've highlighted that segment. Do you want to adjust the duration?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, let's try trimming it to 20 seconds. Also, did the hardware order for the new monitor arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking number shows it is out for delivery today. I've updated the video draft to 20 seconds."
+    },
+    {
+     "role": "user",
+     "text": "Great. I'll check the weather for the weekend trip. It's supposed to be sunny."
+    },
+    {
+     "role": "assistant",
+     "text": "I can set a weather alert for you if you provide the location."
+    }
+   ]
+  }
+ ]
+}

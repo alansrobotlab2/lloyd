@@ -1,0 +1,47 @@
+{
+ "episode": "lme-pr-038",
+ "sessions": [
+  {
+   "sid": "lme-pr-038-s1",
+   "date": "2026-06-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to finalize the tracing config for our backend service. It's been a rainy week here, so I'm stuck inside debugging."
+    },
+    {
+     "role": "assistant",
+     "text": "Rainy days are perfect for coding. What's giving you trouble with the tracing config?"
+    },
+    {
+     "role": "user",
+     "text": "Mainly how to instrument internal function calls. I initially thought about using SSE Bridge's add_link for connecting spans within the same process, but I realized that's a mistake. add_link is considered the wrong model for same-process spans because it is unidirectional and carries no duration/status."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense. Links are for cross-process correlation. For same-process, you usually want parent-child relationships."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I need to make sure the new instrumentation helper doesn't accidentally suggest that pattern to the team."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help draft a guideline for that. Should we include code examples?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, please draft a short recommendation for the dev team on how to properly instrument internal spans. Keep it concise."
+    },
+    {
+     "role": "assistant",
+     "text": "Here is a draft: 'For internal, same-process operations, use standard parent-child span relationships to capture duration and status. Avoid using links for these cases as they lack context for lifecycle tracking.'"
+    },
+    {
+     "role": "user",
+     "text": "Looks good. I'll send this out after dinner."
+    }
+   ]
+  }
+ ]
+}

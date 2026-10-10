@@ -1,0 +1,97 @@
+{
+ "episode": "lme-mu-054",
+ "sessions": [
+  {
+   "sid": "lme-mu-054-s1",
+   "date": "2026-05-13",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to fix the squeaky hinge on my office chair. Any quick hacks?"
+    },
+    {
+     "role": "assistant",
+     "text": "You can try using a graphite lubricant or even a bit of candle wax. Just make sure to clean off any old grease first."
+    },
+    {
+     "role": "user",
+     "text": "Good tip, I'll grab some graphite powder later. Speaking of fixing things, I've been reading that new Activation Steering paper. It's interesting but flawed."
+    },
+    {
+     "role": "assistant",
+     "text": "What specifically is lacking in their methodology?"
+    },
+    {
+     "role": "user",
+     "text": "Well, the paper does not clarify if the operating layer (layer 22 in Qwen3-4B) transfers to models of similar depth."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant gap. Without that transferability data, it's hard to know if the technique is truly generalizable or just specific to that architecture."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I might have to write my own test suite for that. By the way, did my order for the mechanical keyboard switches arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "Checking the tracking info... It looks like it's out for delivery today. It should be there by 5 PM."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Thanks Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need help with the switch testing later."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-054-s2",
+   "date": "2026-05-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm hungry. What's a quick dinner idea using leftover chicken?"
+    },
+    {
+     "role": "assistant",
+     "text": "You could make chicken fried rice or a quick chicken salad wrap. Do you have any veggies on hand?"
+    },
+    {
+     "role": "user",
+     "text": "Just some bell peppers and spinach. I'll go with the stir-fry. Oh, and I finally finished that Activation Steering paper I mentioned last week."
+    },
+    {
+     "role": "assistant",
+     "text": "How did you find the overall conclusion compared to the methodology issues we discussed?"
+    },
+    {
+     "role": "user",
+     "text": "The conclusions were okay, but the author credentials really stood out. The paper was authored by Chen, Siu, Liu, Song, and Wang from UC Santa Cruz and UC Berkeley."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a strong list of institutions. It suggests they likely have access to decent computational resources, which explains why they could run those Qwen3-4B experiments."
+    },
+    {
+     "role": "user",
+     "text": "True. Anyway, the weather is looking terrible for tomorrow. I need to cancel my hiking trip."
+    },
+    {
+     "role": "assistant",
+     "text": "I can see heavy rain in the forecast. Maybe plan a board game night instead?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, probably. I'll let my friends know. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Enjoy the dinner!"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-047",
+ "sessions": [
+  {
+   "sid": "lme-kn-047-s1",
+   "date": "2026-07-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to debug why my graph queries keep returning empty sets on the new dataset."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Are you sure the schema matches what the model expects?"
+    },
+    {
+     "role": "user",
+     "text": "I think so. Honestly, it feels like the model is just guessing because it hasn't seen the new structure. It's relying on old patterns."
+    },
+    {
+     "role": "assistant",
+     "text": "You might be running into a training data cutoff issue. Is there a specific version of the skills library you're using?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'm using the v1.2 release. The documentation for Neo4j agent skills says they are designed to handle out-of-date training data Cypher generation."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. v1.2 does focus on that. Have you tried manually injecting some context?"
+    },
+    {
+     "role": "user",
+     "text": "I did, but it's messy. Also, did you check if the coffee maker shipment arrived? I needed that for the morning meeting."
+    },
+    {
+     "role": "assistant",
+     "text": "It arrived yesterday, I left it on your desk. Let me know if you want me to look at the query logs."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-047-s2",
+   "date": "2026-07-30",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I upgraded the library today. The v1.2 docs were misleading."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? What changed in the new version?"
+    },
+    {
+     "role": "user",
+     "text": "I looked at the v2.0 changelog. It explicitly states that Neo4j agent skills are positioned as a solution for stale training-data Cypher now, rather than just general out-of-date issues."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a subtle but important distinction. 'Stale training-data Cypher' is much more specific."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It means I need to update our internal prompt templates to reflect this specific positioning."
+    },
+    {
+     "role": "assistant",
+     "text": "Makes sense. Should I draft a note for the team?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, please. Also, can you fix the typo in the meeting invite? I wrote '3pm' but it should be '3:30pm'."
+    },
+    {
+     "role": "assistant",
+     "text": "I've updated the invite. I'll start drafting the note on the library update."
+    }
+   ]
+  }
+ ]
+}

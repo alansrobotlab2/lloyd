@@ -1,0 +1,73 @@
+{
+ "episode": "lme-te-058",
+ "sessions": [
+  {
+   "sid": "lme-te-058-s1",
+   "date": "2026-05-14",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question. What's your take on Embodied-CoT? I'm trying to wrap my head around it."
+    },
+    {
+     "role": "assistant",
+     "text": "It's an interesting approach. Essentially, it uses foundation models like LLMs and VLMs to pull features out of robot demos and turn them into textual reasoning chains. It's basically a synthetic data pipeline for that purpose."
+    },
+    {
+     "role": "user",
+     "text": "Ah, okay. So it's not just raw data, but reasoning chains. Got it. Thanks."
+    },
+    {
+     "role": "user",
+     "text": "By the way, did you get a chance to look at that grocery list I sent?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I see it. You wanted milk, eggs, and that specific brand of oat milk you like."
+    },
+    {
+     "role": "user",
+     "text": "Right. I think I grabbed the wrong brand last time. Let's stick to the list for tomorrow."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I'll keep the list ready for you."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-058-s2",
+   "date": "2026-05-16",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I was digging into GR00T-Mimic today. The acceptance-rate bottleneck is really frustrating."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a common pain point. It seems the main issue is often flagged as the lack of a checker or verification gate in the loop."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, that makes sense. Without that gate, you're just pushing through bad data. Thanks for confirming."
+    },
+    {
+     "role": "user",
+     "text": "On another note, is it going to rain this weekend? I wanted to hike."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast looks mostly clear for Saturday, with a slight chance of showers Sunday morning. Saturday seems like the safer bet."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I'll aim for Saturday then."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds like a plan. Enjoy the hike."
+    }
+   ]
+  }
+ ]
+}

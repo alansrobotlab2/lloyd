@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-060",
+ "sessions": [
+  {
+   "sid": "lme-pr-060-s1",
+   "date": "2026-05-09",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to finalize the roadmap for our internal LLM monitoring tool. Do you think we should stick with static regression suites or something else?"
+    },
+    {
+     "role": "assistant",
+     "text": "Static regression suites are great for catching known regressions, but they can become stale quickly. What specific challenges are you facing with your current setup?"
+    },
+    {
+     "role": "user",
+     "text": "They're too slow and don't catch real-world drift. Honestly, Vincent Koc argues that AI evaluation must evolve from offline snapshots into living, intent-driven systems. I want to build towards that vision."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a strong framework. Moving to intent-driven evaluation means you need metrics that adapt to user goals rather than just fixed test cases. Did you order the new GPU clusters for the real-time inference engine yet?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet, I'm waiting on budget approval. It's raining here, so I'm stuck inside dealing with procurement paperwork."
+    },
+    {
+     "role": "assistant",
+     "text": "Procurement is always a drag. Once the budget clears, real-time evaluation will be much smoother."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Anyway, back to the roadmap. I need a high-level plan for the Q3 deliverables based on that evaluation philosophy."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. We can structure Q3 around moving from batch testing to continuous monitoring."
+    }
+   ]
+  }
+ ]
+}

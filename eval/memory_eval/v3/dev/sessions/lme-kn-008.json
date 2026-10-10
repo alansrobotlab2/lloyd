@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-008",
+ "sessions": [
+  {
+   "sid": "lme-kn-008-s1",
+   "date": "2026-06-13",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, can you check the server logs for the last hour? I'm seeing some latency spikes."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, checking now. I see several timeouts around 14:30 UTC. Is this related to the database migration?"
+    },
+    {
+     "role": "user",
+     "text": "Possibly. Also, did you see that Wan article? I remember it was in January 2025 when they first announced the beta."
+    },
+    {
+     "role": "assistant",
+     "text": "I'll keep that in mind. Regarding the logs, do you want me to restart the service?"
+    },
+    {
+     "role": "user",
+     "text": "No, just monitor it. The weather is terrible outside anyway, so I'm staying in to watch it."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll send an alert if the error rate exceeds 5%."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, my pizza order should be here in 20 minutes."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy. Let me know if you need anything else from the logs."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-008-s2",
+   "date": "2026-06-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I need to update the 'Recent News' section on the internal wiki."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. What specific item are you updating?"
+    },
+    {
+     "role": "user",
+     "text": "The entry for Wan. I was wrong before, it wasn't January 2025. It was actually mentioned in AI news in April 2026."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I've noted that the correct date is April 2026."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, did you fix that bug in the login script?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the patch was deployed at 10 AM."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I'm going to grab a coffee now."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy. Let me know if you need help with the wiki update."
+    }
+   ]
+  }
+ ]
+}

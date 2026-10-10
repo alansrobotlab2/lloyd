@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-044",
+ "sessions": [
+  {
+   "sid": "lme-kn-044-s1",
+   "date": "2026-06-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to update the security slide deck. Can you pull the latest stats on agent permissions?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. The current report states that 75% of agent-using teams grant write access to their agents."
+    },
+    {
+     "role": "user",
+     "text": "Okay, noted. By the way, did my order for the new mechanical keyboard ships yet? It's been two days."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check. Yes, it was shipped yesterday and is expected to arrive tomorrow morning."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, I need to remind myself about the stat for the meeting notes: only 75% of teams give write access."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've logged that for your notes."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. One last thing, is it going to rain this weekend?"
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows clear skies all weekend, so you should be good for the hike."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-044-s2",
+   "date": "2026-06-28",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, we got the new compliance report this morning. The numbers shifted significantly."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? Did the write access numbers change?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, it's much higher now. It's actually 89% of agent-using teams granting write access to agents."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a substantial jump from the previous figure. I'll update my context."
+    },
+    {
+     "role": "user",
+     "text": "Please make sure you use this new number going forward. By the way, what time is the dentist appointment tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "Your appointment is at 2:30 PM."
+    },
+    {
+     "role": "user",
+     "text": "Right. And can you remind me to buy milk after the dentist?"
+    },
+    {
+     "role": "assistant",
+     "text": "Added a reminder to buy milk after your 2:30 PM appointment."
+    }
+   ]
+  }
+ ]
+}

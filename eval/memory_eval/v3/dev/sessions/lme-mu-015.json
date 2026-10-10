@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-015",
+ "sessions": [
+  {
+   "sid": "lme-mu-015-s1",
+   "date": "2026-08-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did the package with the new earbuds arrive yet? I'm hoping to try them out before the weekend."
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan! Yes, the tracking shows the package was delivered this morning. It should be at your door."
+    },
+    {
+     "role": "user",
+     "text": "Great. I just opened them up. The Sony LinkBuds Clip has a 9-hour battery life, which is pretty solid for an open-ear design."
+    },
+    {
+     "role": "assistant",
+     "text": "That is quite decent for that form factor. How do they feel on your ears?"
+    },
+    {
+     "role": "user",
+     "text": "Comfortable, but I noticed the clip mechanism feels a bit tight. Anyway, what's for dinner tonight?"
+    },
+    {
+     "role": "assistant",
+     "text": "How about that pasta place you liked last week? I can check if they take reservations."
+    },
+    {
+     "role": "user",
+     "text": "Sounds good. Also, is it going to rain tomorrow? I want to know if I should wear these earbuds for my run."
+    },
+    {
+     "role": "assistant",
+     "text": "Forecast says 40% chance of rain in the afternoon. Maybe bring a hat just in case."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-015-s2",
+   "date": "2026-09-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm looking at my bank statement and I'm confused about the charges for the earbuds. Can you help me figure it out?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, Alan. What did you see on the statement?"
+    },
+    {
+     "role": "user",
+     "text": "It looks like I was charged $229.99 for the Sony LinkBuds Clip, but then I got a refund or a price adjustment that made the final price $198.00."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, that makes sense. Often retailers offer promotional discounts or price matches after purchase. Did you contact support?"
+    },
+    {
+     "role": "user",
+     "text": "No, I just noticed it. I think I caught a sale ending or something. Anyway, did you fix that bug with the toaster settings I mentioned earlier?"
+    },
+    {
+     "role": "assistant",
+     "text": "I've updated the firmware script for the smart toaster integration. It should hold the browning level now."
+    },
+    {
+     "role": "user",
+     "text": "Awesome. I'll test it in the morning. One last thing, what's the weather like this weekend? I might take the earbuds to the park."
+    },
+    {
+     "role": "assistant",
+     "text": "Sunny and mild, 72 degrees. Perfect for outdoor activities."
+    }
+   ]
+  }
+ ]
+}

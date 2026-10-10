@@ -1,0 +1,51 @@
+{
+ "episode": "lme-pr-028",
+ "sessions": [
+  {
+   "sid": "lme-pr-028-s1",
+   "date": "2026-05-09",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, just grabbed a coffee. Did you manage to check that broken cable I mentioned yesterday?"
+    },
+    {
+     "role": "assistant",
+     "text": "I did. The connector looks slightly bent, but it seems to hold contact. Might need a replacement if the signal drops again."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Anyway, I'm stuck on the architecture for the new `sensor_fusion` package. I've got `lidar_driver` depending on `fusion_core`, but `fusion_core` also imports `lidar_driver` for some utility classes. It's getting messy."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a classic circular dependency. Have you considered extracting those utility classes into a separate `common_utils` package?"
+    },
+    {
+     "role": "user",
+     "text": "I thought about it, but it feels like overkill for just two classes. Is it really that bad? I can just build them together manually."
+    },
+    {
+     "role": "assistant",
+     "text": "Manual builds can work for small projects, but they break `colcon` isolation and make testing harder. It often leads to build order errors."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I hate debugging build order issues. I've always held that circular dependencies in ROS2 workspaces are considered a red flag. I'd rather refactor than deal with that mess later."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. That's a sound principle. Keeping packages acyclic definitely saves pain down the line."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Okay, let's go with the `common_utils` split then. I'll start moving those classes now. By the way, did the weather app send the rain alert for tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it predicts 80% chance of rain after 2 PM. I can set a reminder if you want."
+    }
+   ]
+  }
+ ]
+}

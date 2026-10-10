@@ -1,0 +1,73 @@
+{
+ "episode": "lme-kn-049",
+ "sessions": [
+  {
+   "sid": "lme-kn-049-s1",
+   "date": "2026-05-30",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to set up CAD on my Linux box. Any tips for Autodesk Fusion 360?"
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan! Fusion 360 on Linux is usually handled via the Autodesk installer script. Do you have the installer file downloaded?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, I have it. Last time I did this, I just ran autodesk_fusion_installer_x86-64.sh with the --install flag only."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. Running with just --install will start the GUI installer. It should ask for confirmation before proceeding."
+    },
+    {
+     "role": "user",
+     "text": "Right, that worked back in the day. By the way, my GPU fan is making a weird noise. Think it's dust?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's very likely dust accumulation causing airflow restriction. Have you tried compressed air recently?"
+    },
+    {
+     "role": "user",
+     "text": "Not in a few months. I'll clean it out tonight. Thanks for the reminder."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-049-s2",
+   "date": "2026-06-08",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update on my Linux setup. The old way of installing Fusion wasn't working well for headless environments."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Did you find a different method that worked?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah. I realized I need to automate it. So now I run autodesk_fusion_installer_x86-64.sh with both --install and --default flags."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense. The --default flag bypasses the prompts, allowing for a silent, automated installation."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It saved me a lot of time. Oh, did you see the weather forecast for Saturday? It's supposed to rain."
+    },
+    {
+     "role": "assistant",
+     "text": "I can check that for you. Should I update your calendar with an indoor activity suggestion?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. For now, just confirm you've noted the new install method."
+    }
+   ]
+  }
+ ]
+}

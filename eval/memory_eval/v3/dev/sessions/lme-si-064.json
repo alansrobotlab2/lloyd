@@ -1,0 +1,47 @@
+{
+ "episode": "lme-si-064",
+ "sessions": [
+  {
+   "sid": "lme-si-064-s1",
+   "date": "2026-07-29",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, do you remember if we already handled the expense reports for last week's conference?"
+    },
+    {
+     "role": "assistant",
+     "text": "I believe we started the process, but I don't have a record of the final submission status in my current view."
+    },
+    {
+     "role": "user",
+     "text": "Right. Well, I just paid Jim back. PayPal was used to reimburse Jim for the exhibitor lunches."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've noted that Jim was reimbursed via PayPal for those specific meals."
+    },
+    {
+     "role": "user",
+     "text": "Also, did my order for the new mechanical keyboard ship yet? The tracking hasn't updated in two days."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check the carrier status... It looks like it is currently in transit and expected to arrive on Tuesday."
+    },
+    {
+     "role": "user",
+     "text": "Great, thanks. And what's the weather looking like for the weekend? I'm hoping to go hiking."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks promising! Mostly sunny with highs around 75 degrees, so perfect for a hike."
+    },
+    {
+     "role": "user",
+     "text": "Awesome. I'll pack accordingly. Thanks Lloyd."
+    }
+   ]
+  }
+ ]
+}

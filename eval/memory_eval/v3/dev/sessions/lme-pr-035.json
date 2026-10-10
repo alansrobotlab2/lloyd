@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-035",
+ "sessions": [
+  {
+   "sid": "lme-pr-035-s1",
+   "date": "2026-07-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to configure our new AI agent to handle payment processing. It keeps failing on edge cases with refunds."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help with that. Are you using a standard library or a custom wrapper for the payment provider?"
+    },
+    {
+     "role": "user",
+     "text": "Custom wrapper. But honestly, I've been reading up on best practices and I firmly believe that Stripe advocates for portable skills files to provide agents with API context and reduce friction. I want to follow that approach."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense. Portable skills files allow the agent to dynamically load specific API behaviors without hardcoding logic."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Also, did you see the weather report? It's going to rain all week, so I might cancel the picnic on Saturday."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the forecast shows heavy rain. It might be safer to postpone the picnic."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'll let the team know. Back to the agent—how should I structure the file for the refund logic?"
+    },
+    {
+     "role": "assistant",
+     "text": "You should create a dedicated file that defines the refund endpoints, error handling, and idempotency keys as a portable skill."
+    }
+   ]
+  }
+ ]
+}

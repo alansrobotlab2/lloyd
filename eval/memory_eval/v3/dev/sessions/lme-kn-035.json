@@ -1,0 +1,93 @@
+{
+ "episode": "lme-kn-035",
+ "sessions": [
+  {
+   "sid": "lme-kn-035-s1",
+   "date": "2026-07-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you catch that bug report I filed for the model loader? GitHub issue #38606."
+    },
+    {
+     "role": "assistant",
+     "text": "Not yet, I'll take a look. What's the status on it?"
+    },
+    {
+     "role": "user",
+     "text": "I just closed it. The dev team said it was a duplicate of an older ticket, so no need to keep it open."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll note that it's resolved as a duplicate."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, that's right. Anyway, did you order the new mechanical keyboard switches?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the linear reds are shipped and should arrive Thursday."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Also, is it going to rain tomorrow? I want to know if I should walk to the office."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks dry for the morning, but there's a 40% chance of showers after 2 PM."
+    },
+    {
+     "role": "user",
+     "text": "Okay, I'll bring an umbrella just in case."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-035-s2",
+   "date": "2026-07-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I need to prep for the sprint review. Did you see the update on that LoRA bug?"
+    },
+    {
+     "role": "assistant",
+     "text": "Which one are you referring to?"
+    },
+    {
+     "role": "user",
+     "text": "GitHub issue #38606. It's not a duplicate after all. The QA team reopened it because they found actual KV block corruption under rapid LoRA alternation."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a significant finding. So it's active now?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, it remains open. We need to prioritize the memory leak investigation."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll flag it as high priority in your notes."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. By the way, did you try that new ramen place on 5th?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't eat, but I heard the tonkotsu broth is highly rated."
+    },
+    {
+     "role": "user",
+     "text": "Haha, true. I went yesterday and it was amazing."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad you enjoyed it!"
+    }
+   ]
+  }
+ ]
+}

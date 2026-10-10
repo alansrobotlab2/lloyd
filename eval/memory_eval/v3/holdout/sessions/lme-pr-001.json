@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-001",
+ "sessions": [
+  {
+   "sid": "lme-pr-001-s1",
+   "date": "2026-08-27",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm trying to fix the UI glitch on the login page. The spinner gets stuck if the network drops for a second."
+    },
+    {
+     "role": "assistant",
+     "text": "That's frustrating. Have you tried adding a timeout or a retry mechanism with exponential backoff?"
+    },
+    {
+     "role": "user",
+     "text": "I did, but it still feels brittle. I've been reading Mike Christensen's latest paper, and he proposes 'durable sessions' as a solution for resilient AI UX. I really want to adopt that approach instead of just patching the retry logic."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Implementing durable sessions will definitely make the state management more robust across network interruptions."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It's about maintaining continuity, not just handling errors. By the way, did you order the new mechanical keyboard switches I mentioned?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the Cherry MX Browns are on the way. They should arrive by Friday."
+    },
+    {
+     "role": "user",
+     "text": "Great. I'm planning to build a new dev setup next weekend. Do you have any recommendations for a monitor arm that supports heavy lifting?"
+    },
+    {
+     "role": "assistant",
+     "text": "The Ergotron LX is a solid choice for heavier monitors. It holds up to 20 pounds and has excellent range of motion."
+    }
+   ]
+  }
+ ]
+}

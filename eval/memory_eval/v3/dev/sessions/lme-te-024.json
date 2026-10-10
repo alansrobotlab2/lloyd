@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-024",
+ "sessions": [
+  {
+   "sid": "lme-te-024-s1",
+   "date": "2026-05-13",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick question on the architecture doc. I'm finalizing the spec for Per-User Memory Architecture."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure Alan. What's the primary focus for this version?"
+    },
+    {
+     "role": "user",
+     "text": "It's all about identity. Specifically, Per-User Memory Architecture is designed to support cross-surface identity resolution for users across MC, Discord, Voice, and Signal."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. So it's a unified view across those four surfaces."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. By the way, did you see the weather? It's pouring again in Seattle."
+    },
+    {
+     "role": "assistant",
+     "text": "It has been pretty relentless. I hope you're staying dry."
+    },
+    {
+     "role": "user",
+     "text": "I'm inside. Just trying to get this diagram right before the lunch rush."
+    },
+    {
+     "role": "assistant",
+     "text": "Good luck with the diagram!"
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-024-s2",
+   "date": "2026-05-25",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm looking at the implementation details now. It's going well."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad to hear it. Have you populated the test data?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, I just updated the config. registry.json contains entries for users like Alan and Lisa with their identifiers across surfaces."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds good. Are the IDs matching the expected format?"
+    },
+    {
+     "role": "user",
+     "text": "They seem fine. I had to reorder some JSON keys, though."
+    },
+    {
+     "role": "assistant",
+     "text": "Standard formatting issues. Did you get that new keyboard you ordered?"
+    },
+    {
+     "role": "user",
+     "text": "No, still stuck in transit. It's annoying."
+    },
+    {
+     "role": "assistant",
+     "text": "Maybe it'll arrive by the weekend."
+    }
+   ]
+  }
+ ]
+}

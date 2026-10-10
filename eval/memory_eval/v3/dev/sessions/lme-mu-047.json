@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-047",
+ "sessions": [
+  {
+   "sid": "lme-mu-047-s1",
+   "date": "2026-05-08",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I finally fixed that annoying bug in the auth middleware. It was a race condition in the token refresh logic."
+    },
+    {
+     "role": "assistant",
+     "text": "Great to hear you got that sorted out. Race conditions in auth flows can be tricky to reproduce. Did you add a test case for it?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, I did. Anyway, I've been reading up on Generative UI again. I'm trying to figure out how the UX agent learns."
+    },
+    {
+     "role": "assistant",
+     "text": "That's an interesting area. Are you looking at specific libraries or frameworks?"
+    },
+    {
+     "role": "user",
+     "text": "No, just general architecture. I noticed that the mechanism for teaching the UX agent templates and hierarchy (prompt-rules, retrieval, or post-processing) is unspecified."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, that makes sense. Many papers leave that implementation detail vague or open-ended."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It leaves a lot to the imagination. Oh, did you check if my hardware order shipped yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check... Yes, it says it shipped yesterday. Should arrive by Friday."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-047-s2",
+   "date": "2026-05-16",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, the weather is supposed to rain all weekend. I think I'll stay in and cook."
+    },
+    {
+     "role": "assistant",
+     "text": "Good plan. Do you have a recipe in mind, or do you want suggestions?"
+    },
+    {
+     "role": "user",
+     "text": "I'll make pasta. It's easy. Speaking of easy, I had a breakthrough on the Generative UI streaming concept."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? What was the breakthrough?"
+    },
+    {
+     "role": "user",
+     "text": "I realized that Generative UI allows agents to stream UI definitions (JSON or Python) which are rendered in real-time by the server."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds much more efficient than waiting for the full response. Real-time rendering definitely improves UX."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it cuts down latency significantly. I need to prototype this soon."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me know if you need help setting up the server-side renderer."
+    }
+   ]
+  }
+ ]
+}

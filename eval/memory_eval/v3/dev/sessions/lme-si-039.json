@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-039",
+ "sessions": [
+  {
+   "sid": "lme-si-039-s1",
+   "date": "2026-05-09",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, did you see that new paper on Gaussian Splatting for robotics? I'm trying to wrap my head around SAFER-Splat."
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't reviewed the full text yet, but I know it focuses on safety constraints for navigation. What aspect are you interested in?"
+    },
+    {
+     "role": "user",
+     "text": "Mainly the failure modes. I read through the discussion section and noticed that SAFER-Splat's safety guarantees degrade when the Gaussian map is incomplete, such as in unknown environments."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense. Incomplete maps mean the model lacks confidence in those regions, so conservative safety margins might fail or become overly restrictive."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, exactly. Anyway, off-topic, my coffee maker just started leaking again. Do you know if that means I need a new gasket or just a clean?"
+    },
+    {
+     "role": "assistant",
+     "text": "Usually it's just mineral buildup or a worn gasket. Try a vinegar cycle first. If it persists, you might need to replace the seal."
+    },
+    {
+     "role": "user",
+     "text": "Got it. I'll try the vinegar thing. Also, did you get the weather report for tomorrow? I'm planning to run in the park."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like rain is expected around 4 PM, so an early morning run would be best."
+    }
+   ]
+  }
+ ]
+}

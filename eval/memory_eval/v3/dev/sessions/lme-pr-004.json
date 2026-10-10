@@ -1,0 +1,47 @@
+{
+ "episode": "lme-pr-004",
+ "sessions": [
+  {
+   "sid": "lme-pr-004-s1",
+   "date": "2026-08-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm debugging a weird latency spike in our data ingestion pipeline. It seems to happen when we process JSON blobs larger than 10MB."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a memory allocation issue or a parsing bottleneck. Have you checked if the event loop is blocking during the JSON.parse call?"
+    },
+    {
+     "role": "user",
+     "text": "I did, and it's definitely blocking. I was thinking of rewriting the parser in Rust via N-API, but that's too much overhead for now. We need a quicker fix for the MVP."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. For a quick fix, you could try streaming the JSON or using a faster library like fast-json-parsing. But for the long term, what's the plan for the tooling layer?"
+    },
+    {
+     "role": "user",
+     "text": "Actually, I've decided to keep the tooling layer simple. In the current architecture, Node.js is less preferred than Python for MCP tools. It just doesn't fit our stack as well as Python does."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. So Python will be the primary language for our MCP tool implementations going forward."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Now, back to the bug—any tips on handling that 10MB JSON without blocking the loop?"
+    },
+    {
+     "role": "assistant",
+     "text": "You could offload the parsing to a worker thread. That keeps the main event loop free for handling incoming requests."
+    },
+    {
+     "role": "user",
+     "text": "Good idea. I'll try that. Thanks, Lloyd."
+    }
+   ]
+  }
+ ]
+}

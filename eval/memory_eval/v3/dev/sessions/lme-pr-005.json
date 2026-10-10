@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-005",
+ "sessions": [
+  {
+   "sid": "lme-pr-005-s1",
+   "date": "2026-07-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm debugging the scraper for the sneaker site. The headers are all good, but it's still blocking me."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like behavioral fingerprinting rather than header issues. Are you using a headless browser?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, standard setup. I tried adding random delays but no luck."
+    },
+    {
+     "role": "assistant",
+     "text": "Random delays often aren't enough for sophisticated anti-bot systems. You might need to mimic real human interaction patterns more closely."
+    },
+    {
+     "role": "user",
+     "text": "I've decided on a new rule for this project: browser_navigate and browser_snapshot should always be used together for anti-bot sites. I think capturing the state immediately after navigation is key for their heuristics."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. That sequence can help establish a more legitimate browsing session profile."
+    },
+    {
+     "role": "user",
+     "text": "Also, did you see the weather forecast for next week? Looks like rain."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it looks like we're in for a wet week. Don't forget your umbrella if you're heading out."
+    }
+   ]
+  }
+ ]
+}

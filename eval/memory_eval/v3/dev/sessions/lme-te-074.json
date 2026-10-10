@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-074",
+ "sessions": [
+  {
+   "sid": "lme-te-074-s1",
+   "date": "2026-05-21",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to generate some high-res video clips for the demo. Any recommendations?"
+    },
+    {
+     "role": "assistant",
+     "text": "For high-quality video generation, Black Forest Labs has been doing great work. Have you looked into their models?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I read up on it. Black Forest Labs developed the Flux 2 video diffusion model. That seems like the one I need."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a solid choice. The quality is definitely top-tier for video diffusion."
+    },
+    {
+     "role": "user",
+     "text": "Cool. Also, my coffee maker is acting weird again. It keeps beeping."
+    },
+    {
+     "role": "assistant",
+     "text": "Beeping usually indicates a descaling cycle or a sensor issue. Did you try running a water-only cycle?"
+    },
+    {
+     "role": "user",
+     "text": "No, not yet. I'll try that after I set up the Flux model."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds like a plan. Let me know if you need help with the setup instructions."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-074-s2",
+   "date": "2026-06-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm looking into hybrid models for our long-context chatbot. What's the deal with Jamba?"
+    },
+    {
+     "role": "assistant",
+     "text": "Jamba is interesting because it combines Transformer and Mamba layers. The architecture is quite efficient."
+    },
+    {
+     "role": "user",
+     "text": "Right. I specifically care about the memory efficiency. Jamba 1.5 Mamba layers maintain a single hidden state (constant memory) instead of a KV cache."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, that constant memory usage is a key advantage for scaling context lengths without exploding RAM."
+    },
+    {
+     "role": "user",
+     "text": "Exactly what I needed to know. By the way, did that new graphics card arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your shipping status, but you can check the tracking number in your email."
+    },
+    {
+     "role": "user",
+     "text": "Ugh, right. I'll check. Thanks for the info on Jamba."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Good luck with the implementation!"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,47 @@
+{
+ "episode": "lme-pr-030",
+ "sessions": [
+  {
+   "sid": "lme-pr-030-s1",
+   "date": "2026-06-08",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick check on the weather in Seattle for next Tuesday."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like Tuesday will be partly cloudy with a high of 62°F. No rain expected."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Moving on to work stuff: I'm reviewing our Entity Resolution pipeline. I need you to remember a hard rule for the broken-baseline guardrail."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, what's the rule?"
+    },
+    {
+     "role": "user",
+     "text": "It strictly prohibits `--apply` or empty-graph recreation upon `FileNotFoundError: _relationships.json` or freshly wholesale-rewritten graphs. We have to halt there, not fix it by wiping."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've noted that constraint for the ER module."
+    },
+    {
+     "role": "user",
+     "text": "Also, did the monitor stand I ordered arrive? I think it was scheduled for today."
+    },
+    {
+     "role": "assistant",
+     "text": "Tracking shows it's out for delivery and should be there by 5 PM."
+    },
+    {
+     "role": "user",
+     "text": "Great, thanks."
+    }
+   ]
+  }
+ ]
+}

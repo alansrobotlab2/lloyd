@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-071",
+ "sessions": [
+  {
+   "sid": "lme-mu-071-s1",
+   "date": "2026-07-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I finally got around to cleaning up my desk. Found that old mechanical keyboard from college. The 'Esc' key is sticking again."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a classic issue. Have you tried taking the keycap off and checking the stem for dust?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, did that. Seems fine. Probably just needs a new switch. Anyway, I've been deep diving into some robotics benchmarks. I just finished reading the paper on ObjTac."
+    },
+    {
+     "role": "assistant",
+     "text": "Interesting. What did you think of the architecture?"
+    },
+    {
+     "role": "user",
+     "text": "It's pretty solid. Specifically, ObjTac is a 135K tri-modal tactile dataset benchmark designed for sim-to-real transfer. That specific combination of modalities is what caught my eye."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. The focus on sim-to-real is crucial for those kinds of datasets."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Okay, back to the keyboard. Do you know if Cherry MX Brown switches are still the standard for office work?"
+    },
+    {
+     "role": "assistant",
+     "text": "They're still very popular for a tactile bump without loud clicks, so yes."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-071-s2",
+   "date": "2026-07-11",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick check. My internet went down for like two hours. I missed the dinner reservation."
+    },
+    {
+     "role": "assistant",
+     "text": "That's frustrating. Did you manage to call them?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, they gave me a spot for tomorrow. Annoying though. On the bright side, I had time to download that dataset we talked about earlier. The one with the tactile samples."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, yes. The one related to the robotics paper."
+    },
+    {
+     "role": "user",
+     "text": "Right. I was double-checking the stats in the repo README. It confirms that objTac is a dataset containing approximately 135,000 tactile samples. The number matches what I remembered from the paper."
+    },
+    {
+     "role": "assistant",
+     "text": "Good to know the numbers align between the paper and the actual data release."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Now, do you have any recommendations for a good pasta sauce brand? The store is closing soon."
+    },
+    {
+     "role": "assistant",
+     "text": "Marcella Hazan is often a crowd-pleaser if you can find it."
+    }
+   ]
+  }
+ ]
+}

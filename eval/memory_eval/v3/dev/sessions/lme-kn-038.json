@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-038",
+ "sessions": [
+  {
+   "sid": "lme-kn-038-s1",
+   "date": "2026-05-19",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to wrap up this paper on multi-robot swarms. I keep forgetting the exact title of that new algorithm we discussed last week. Is it called FLOAT or something else?"
+    },
+    {
+     "role": "assistant",
+     "text": "Based on our previous chat, the algorithm is named ARMADA/FLOAT. It focuses on decentralized path planning."
+    },
+    {
+     "role": "user",
+     "text": "Right, ARMADA/FLOAT. Okay, and what was the primary contribution listed for it? I think it was about static map usage or something?"
+    },
+    {
+     "role": "assistant",
+     "text": "The earlier notes indicated it relied on pre-mapped environments for collision avoidance."
+    },
+    {
+     "role": "user",
+     "text": "Got it. Pre-mapped environments. I'll add that to the summary. Also, did the hardware order for the new LiDAR sensors arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "The status from the vendor portal shows the shipment is still in transit, expected Tuesday."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Thanks. I'll check back then."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome, Alan."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-038-s2",
+   "date": "2026-05-31",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I need to update my citation. I found the final version of ARMADA/FLOAT (arXiv:2510.02298) and the abstract changed significantly from our old notes."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, interesting. What does the new abstract say?"
+    },
+    {
+     "role": "user",
+     "text": "It says ARMADA/FLOAT (arXiv:2510.02298) provides autonomous online failure detection with human shared control handoff for scalable multi-robot deployment. Not static maps anymore."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. That's a major shift from the previous assumption. I've updated my records to reflect the autonomous online failure detection focus."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it's much more dynamic. By the way, is it raining outside? I forgot my umbrella again."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, current conditions are light rain with 15°C. You might want to stay indoors or grab that umbrella."
+    },
+    {
+     "role": "user",
+     "text": "Ugh, fine. I'll just work from here. Thanks for the update on the paper, Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Let me know if you need any other citations adjusted."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-023",
+ "sessions": [
+  {
+   "sid": "lme-kn-023-s1",
+   "date": "2026-06-23",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm stuck on this Python script again. It keeps throwing a KeyError on the config file."
+    },
+    {
+     "role": "assistant",
+     "text": "That's usually a typo or a missing key in the YAML. Can you paste the traceback?"
+    },
+    {
+     "role": "user",
+     "text": "Sure. [Traceback pasted]. Ah, found it. The key was 'model_path' but I used 'model_path_'."
+    },
+    {
+     "role": "assistant",
+     "text": "Gotcha. Subtle, but easy to fix once you see it."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. By the way, I need to update the deployment manifest for the Jetson Orin. It's currently marked for the 2025 edge deployments of the fused perception pipeline."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I'll flag that for your review. Do you want to draft the new manifest now?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet, I'm just planning the roadmap. What's the weather like?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's looking cloudy here, probably rain later. Let me know when you're ready to edit that manifest."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-023-s2",
+   "date": "2026-07-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update. We shifted the roadmap. The Jetson Orin is now the target hardware for 2026 edge deployments of the fused perception pipeline."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll update the project timeline notes to reflect the 2026 target."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, did you get the email about the hardware order? The fan for the server rack is still on backorder."
+    },
+    {
+     "role": "assistant",
+     "text": "I saw the notification. I can set a reminder to check the stock status in a week."
+    },
+    {
+     "role": "user",
+     "text": "Yes, please do. I hate chasing vendors. And can you help me draft a reply to the dev team confirming the change?"
+    },
+    {
+     "role": "assistant",
+     "text": "Of course. Would you like me to mention the specific pipeline name in the email body?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, keep it brief. Just say we're aligning with the new schedule."
+    },
+    {
+     "role": "assistant",
+     "text": "Drafting now. 'Team, please note the Jetson Orin deployment target has moved to 2026 for the fused perception pipeline.'"
+    }
+   ]
+  }
+ ]
+}

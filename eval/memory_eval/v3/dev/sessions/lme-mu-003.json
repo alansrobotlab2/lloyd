@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-003",
+ "sessions": [
+  {
+   "sid": "lme-mu-003-s1",
+   "date": "2026-06-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm setting up the systemd unit for lloyd-backend. Can you check the config syntax?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, please share the [Service] section or the full unit file."
+    },
+    {
+     "role": "user",
+     "text": "It's standard. I just added lloyd-backend is configured with startretries=3 and exitcodes=0 to handle those transient network glitches we had last week."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. That should help it survive brief connectivity drops."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Also, did you order the new mechanical keyboard yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I placed the order for the keycaps this morning, but the base unit is backordered."
+    },
+    {
+     "role": "user",
+     "text": "No worries. Just let me know when it ships."
+    },
+    {
+     "role": "assistant",
+     "text": "Will do. I'll keep an eye on the tracking email."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-003-s2",
+   "date": "2026-06-06",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm looking at the logs from last night. It seems lloyd-backend was STOPPED without an intentional stop."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds unexpected. Do you see any OOM killer messages or segfaults in the syslog?"
+    },
+    {
+     "role": "user",
+     "text": "No, just the exit signal. Weird. Anyway, did you get that pizza recommendation?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the place on 5th Street has great reviews for their gluten-free options."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Let's go there Friday if the server stays up."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds like a plan. I'll add it to your calendar."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Back to the server, I'll try restarting it manually now."
+    },
+    {
+     "role": "assistant",
+     "text": "Okay, let me know if the issue persists after the restart."
+    }
+   ]
+  }
+ ]
+}

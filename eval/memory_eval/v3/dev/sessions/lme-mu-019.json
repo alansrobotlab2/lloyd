@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-019",
+ "sessions": [
+  {
+   "sid": "lme-mu-019-s1",
+   "date": "2026-08-09",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I finally fixed that annoying bug in the navigation stack where the robot would spin in circles when detecting a corner."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a relief! Corner detection bugs can be really tricky. Did you adjust the LiDAR filtering parameters?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, tweaked the threshold slightly. Anyway, I've been reading about new control frameworks. I just saw this paper on RoboBallet. It turns out RoboBallet is an Integrated Task-and-Motion Planning (ITMP) approach."
+    },
+    {
+     "role": "assistant",
+     "text": "Interesting! ITMP is becoming quite popular for handling complex sequences. How does it compare to the hierarchical methods we used before?"
+    },
+    {
+     "role": "user",
+     "text": "Much more integrated, seemingly. By the way, are we still on for dinner tonight? I'm thinking that new place with the ramen."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I have it on the calendar for 7 PM. The ramen sounds great."
+    },
+    {
+     "role": "user",
+     "text": "Cool. I'll head out soon. Just wanted to note that down while I had it in my head."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. Enjoy the ramen!"
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-019-s2",
+   "date": "2026-08-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Morning Lloyd. The weather is absolutely brutal today, right? I can barely see through the rain."
+    },
+    {
+     "role": "assistant",
+     "text": "It certainly is. I hope you have good waterproof gear if you're heading out."
+    },
+    {
+     "role": "user",
+     "text": "I'm staying in. I'm still digging into that RoboBallet architecture. I found out that RoboBallet uses Graph Neural Network (GNN) policies for end-to-end allocation, scheduling, and planning."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, GNNs are powerful for relational data. That makes sense for coordinating multiple robots or tasks efficiently."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It seems to handle the dependencies better than my old solver. Did the package for the new GPU arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check... Yes, the tracking says it was delivered to the front desk this morning."
+    },
+    {
+     "role": "user",
+     "text": "Great. I'll go grab it. Thanks for keeping track."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Let me know if you need help setting up the drivers."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,51 @@
+{
+ "episode": "lme-pr-048",
+ "sessions": [
+  {
+   "sid": "lme-pr-048-s1",
+   "date": "2026-07-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finally getting around to setting up my dev environment for the new robotics sim. It's raining again here, which is great for coding, terrible for my commute."
+    },
+    {
+     "role": "assistant",
+     "text": "Rainy days are the best for deep work. What stack are we looking at for the sim?"
+    },
+    {
+     "role": "user",
+     "text": "Just standard Python and ROS2 for now. I also need to order some new mechanical keyboards, my old ones are getting sticky. Any recommendations?"
+    },
+    {
+     "role": "assistant",
+     "text": "For sticky keys, maybe consider hot-swappable boards with PBT keycaps? Brands like Keychron or Ducky are reliable. Let me know if you want specific links."
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. Right now, I need to update my internal wiki page on GR00T N1.7 capabilities. I want to summarize what it can actually do right now."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. Should I pull the latest feature list from the official release notes for version 1.7?"
+    },
+    {
+     "role": "user",
+     "text": "No, don't use the release notes for that. I've found them to be too sparse on the actual functional limits. GR00T N1.7 capabilities must be read from docs and blog posts rather than release notes."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I will prioritize the technical documentation and recent blog posts over the standard changelogs for this summary."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Thanks. Also, did my keyboard order from last week ship yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check the tracking status for your order..."
+    }
+   ]
+  }
+ ]
+}

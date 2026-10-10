@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-052",
+ "sessions": [
+  {
+   "sid": "lme-mu-052-s1",
+   "date": "2026-05-27",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my coffee maker is leaking again. Any ideas?"
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating, Alan. It's often a seal issue. Did you check if the gasket is cracked?"
+    },
+    {
+     "role": "user",
+     "text": "No, but I'll look. In other news, I'm trying to debug my new agent framework."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? Which framework are you using?"
+    },
+    {
+     "role": "user",
+     "text": "Strands Agents. It's pretty cool. I noticed it includes lifecycle hooks such as before_tool_call and after_tool_call, which makes logging super easy."
+    },
+    {
+     "role": "assistant",
+     "text": "That's great. Hooks like those are essential for observability. Did you run into a specific bug?"
+    },
+    {
+     "role": "user",
+     "text": "Just a minor syntax error. Anyway, do you know any good takeout places nearby?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can't browse live locations, but I can suggest types of cuisine if you're hungry!"
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-052-s2",
+   "date": "2026-06-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, did that package with the Raspberry Pi arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your mail, Alan. Did you check the tracking number?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I'm just excited to test it. I'm setting up a distributed system."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds ambitious. Are you using the same agent framework as last time?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, I'm sticking with Strands Agents. It's actually very versatile; it is used as the agent SDK on both edge and cloud environments."
+    },
+    {
+     "role": "assistant",
+     "text": "That flexibility is a huge plus for IoT projects. Let me know if you need help with the setup scripts."
+    },
+    {
+     "role": "user",
+     "text": "Will do. Also, is it going to rain this weekend?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time weather data, but you might want to keep an umbrella handy just in case."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-059",
+ "sessions": [
+  {
+   "sid": "lme-pr-059-s1",
+   "date": "2026-06-30",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to fix the wobbly handle on my kitchen faucet. Any tips?"
+    },
+    {
+     "role": "assistant",
+     "text": "Usually that's a loose packing nut or a worn-out O-ring. Try turning off the water supply first, then use an adjustable wrench to tighten the nut underneath the handle."
+    },
+    {
+     "role": "user",
+     "text": "Got it, I'll try that. Also, I've been reading Dan Martell's content lately. He mentioned that The Goal by Eliyahu Goldratt is one of his top 4 money-making book recommendations. I need to make sure I read that one first."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a great starting point. It's a classic for understanding constraints and business bottlenecks. I'll keep that preference in mind for your reading list."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Did you order the replacement O-rings yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't placed the order yet. Do you want me to buy the standard kit or just the specific size?"
+    },
+    {
+     "role": "user",
+     "text": "Just the standard kit. And don't forget about the book priority."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. Order placed for the faucet kit."
+    }
+   ]
+  }
+ ]
+}

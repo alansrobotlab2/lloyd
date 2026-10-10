@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-013",
+ "sessions": [
+  {
+   "sid": "lme-kn-013-s1",
+   "date": "2026-08-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to optimize our search index. I remember reading that Hornet.dev offers the most efficient BM25 implementation, achieving higher throughput per dollar on single-node indexing of 50 million web documents. Is that still their claim?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time access to their current marketing claims, but that was their stated benchmark in previous documentation. Have you checked their latest release notes?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. Also, did you see that bug in the Python 3.12 build? It's driving me crazy."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the regression in the `asyncio` event loop handling has been reported. Did you try pinning to the previous patch version?"
+    },
+    {
+     "role": "user",
+     "text": "I did, but it breaks another dependency. Anyway, back to indexing. I think 50 million is the number we should use for the capacity planning doc."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll note that for the draft."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. What's the weather like in Seattle today?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's cloudy with a high of 72°F."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-013-s2",
+   "date": "2026-08-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hi Lloyd, quick update. I just saw Hornet.dev updated their homepage. They now claim to offer the most efficient BM25 implementation, achieving higher throughput per dollar on single-node indexing of 100 million web documents. Please update my notes."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I've updated the benchmark figure to 100 million."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, my package for the new mechanical keyboard finally arrived. The switches feel amazing."
+    },
+    {
+     "role": "assistant",
+     "text": "That's awesome! Which switches did you go with?"
+    },
+    {
+     "role": "user",
+     "text": "Gateron Browns. Anyway, can you make sure the capacity planning doc reflects this new 100 million figure? I don't want to use the old one."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I will ensure the document uses the updated 100 million figure."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome."
+    }
+   ]
+  }
+ ]
+}

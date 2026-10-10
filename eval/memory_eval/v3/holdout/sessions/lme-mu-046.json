@@ -1,0 +1,89 @@
+{
+ "episode": "lme-mu-046",
+ "sessions": [
+  {
+   "sid": "lme-mu-046-s1",
+   "date": "2026-08-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question about the new lab setup."
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan. Sure, what's on your mind?"
+    },
+    {
+     "role": "user",
+     "text": "I'm trying to justify the hardware budget for the robotics team. They need natural motion capture for VR teleoperation."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. Do you have specific hardware in mind for that?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, VR teleoperation uses devices like PICO, HTC Vive, and LeapMotion for natural motion capture. That's the combo we need."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. That sounds like a robust setup for capturing precise hand and body movements."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Also, did you check if my coffee order went through?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it was confirmed this morning. A large oat milk latte."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Thanks."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-046-s2",
+   "date": "2026-08-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm back. The robotics team was complaining about latency yesterday."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, that can really ruin the immersion and control precision. Did you troubleshoot the network?"
+    },
+    {
+     "role": "user",
+     "text": "We did. It turned out to be a driver issue on the PC side."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, classic. Did the update resolve it?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, Laggy updates in/from the VR headset were fixed."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a relief. Smooth tracking is critical for teleoperation."
+    },
+    {
+     "role": "user",
+     "text": "Agreed. By the way, is it supposed to rain tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows a 60% chance of showers in the afternoon."
+    },
+    {
+     "role": "user",
+     "text": "Ugh, I'll bring an umbrella then."
+    }
+   ]
+  }
+ ]
+}

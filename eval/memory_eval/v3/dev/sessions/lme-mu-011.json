@@ -1,0 +1,97 @@
+{
+ "episode": "lme-mu-011",
+ "sessions": [
+  {
+   "sid": "lme-mu-011-s1",
+   "date": "2026-06-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did that package with the new SSD arrive? I'm waiting on it to upgrade my dev box."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your shipping notifications, Alan. You might want to check your email for a tracking number. Did you order from Amazon or Best Buy?"
+    },
+    {
+     "role": "user",
+     "text": "Amazon. Probably stuck in transit again. Anyway, while I wait, I've been digging into AgeMem. The results on HotpotQA are pretty solid."
+    },
+    {
+     "role": "assistant",
+     "text": "That's great to hear. What kind of scores are we talking about for the models you tested?"
+    },
+    {
+     "role": "user",
+     "text": "AgeMem achieved Memory Quality (MQ) scores of 0.533 (Qwen2.5-7B) and 0.605 (Qwen3-4B) on HotpotQA."
+    },
+    {
+     "role": "assistant",
+     "text": "Those are impressive numbers, especially for the smaller model. Did you use any specific configuration tweaks to get the Qwen3-4B score up?"
+    },
+    {
+     "role": "user",
+     "text": "Just standard settings. It's interesting how well it handles multi-hop reasoning. Do you know if it's raining in Seattle today? I might need to reschedule my bike ride."
+    },
+    {
+     "role": "assistant",
+     "text": "I can check the weather for you. Shall I look up the current forecast for Seattle?"
+    },
+    {
+     "role": "user",
+     "text": "Yes please. And remind me to track that SSD later."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll check the weather and set a reminder for the SSD tracking."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-011-s2",
+   "date": "2026-06-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, can you help me debug this Python script? It's throwing an ImportError on the last line."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, please paste the error message and the relevant code snippet."
+    },
+    {
+     "role": "user",
+     "text": "It's complaining about a missing module. Actually, never mind, I fixed it. I was just messing around with AgeMem again. I noticed it doesn't just store things; it has a specific set of actions."
+    },
+    {
+     "role": "assistant",
+     "text": "Right, it's designed as an agent. What specific capabilities did you find notable?"
+    },
+    {
+     "role": "user",
+     "text": "AgeMem exposes six memory operations as tool-based actions: LTM tools (ADD, UPDATE, DELETE) and STM tools (RETRIEVE, SUMMARY, FILTER)."
+    },
+    {
+     "role": "assistant",
+     "text": "That structure allows for very granular control over memory management. Did you try the FILTER operation on a complex query?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I'm too hungry. What's good for dinner near me? I'm thinking Italian."
+    },
+    {
+     "role": "assistant",
+     "text": "There's a highly-rated place called 'Nonna's Table' a few blocks away. Would you like me to check if they have reservations available?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. I need to finish this code first. Thanks for the info."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Let me know if you need help with the Python error or the memory operations."
+    }
+   ]
+  }
+ ]
+}

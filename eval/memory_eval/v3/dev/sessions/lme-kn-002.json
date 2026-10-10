@@ -1,0 +1,73 @@
+{
+ "episode": "lme-kn-002",
+ "sessions": [
+  {
+   "sid": "lme-kn-002-s1",
+   "date": "2026-05-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question about the backlog. I'm trying to update item #683. It's the one about LLM stack metaphors, right?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, that's the one. What's the update?"
+    },
+    {
+     "role": "user",
+     "text": "Change the metaphor description to 'Email marketing'. I think that's what we agreed on last week."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I've noted that the metaphor for #683 is 'Email marketing'. Anything else?"
+    },
+    {
+     "role": "user",
+     "text": "No, that's it. Also, did the package with the new keyboard arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't see a delivery notification yet. I'll keep an eye out."
+    },
+    {
+     "role": "user",
+     "text": "Cool, thanks."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-002-s2",
+   "date": "2026-05-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I need to fix item #683 again. The metaphor was wrong."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, what should it be instead?"
+    },
+    {
+     "role": "user",
+     "text": "It's actually 'Database marketing'. I confused it with the email campaign analogy."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've updated #683 to reflect 'Database marketing' as the metaphor."
+    },
+    {
+     "role": "user",
+     "text": "Great. Oh, and it's raining hard here. Any recommendations for indoor activities?"
+    },
+    {
+     "role": "assistant",
+     "text": "Maybe try that puzzle book you bought? Or catch up on some reading."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'll do that. Thanks."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-066",
+ "sessions": [
+  {
+   "sid": "lme-pr-066-s1",
+   "date": "2026-05-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to organize my reading list. I just finished 'Atomic Habits' and it was decent but felt a bit generic."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad you got through it! 'Atomic Habits' is often recommended, but many people find it lacking in specific strategic depth after the initial hype. What kind of books do you usually enjoy?"
+    },
+    {
+     "role": "user",
+     "text": "I like things that are actually actionable for business growth. Also, did you check if the package with the mechanical keyboard switches arrived yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can check your tracking status shortly. Regarding books, focusing on actionable strategy is a great filter. Do you have any specific authors you trust?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I trust Dan Martell's picks. For me, Inner Excellence by Jim Murphy is one of Dan Martell's top 4 money-making book recommendations. It’s not flashy, but the mindset shift is real."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. That is a strong signal for your preference list. The mechanical keyboard switches are currently marked as 'Out for Delivery' according to the latest update."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I'll keep that in mind for the next purchase. Just wanted to make sure you knew my criteria for 'essential' reads."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've added that preference to your profile. Have a great evening!"
+    }
+   ]
+  }
+ ]
+}

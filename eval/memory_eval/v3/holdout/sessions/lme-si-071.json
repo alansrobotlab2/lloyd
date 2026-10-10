@@ -1,0 +1,51 @@
+{
+ "episode": "lme-si-071",
+ "sessions": [
+  {
+   "sid": "lme-si-071-s1",
+   "date": "2026-07-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I've been trying to find a good book on mindfulness and neuroscience. Do you have any recommendations?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can certainly help with that. Are you looking for something academic or more of a popular science read?"
+    },
+    {
+     "role": "user",
+     "text": "A bit of both, but I want it to be credible. I keep hearing about James R. Doty, who is a Stanford University neurosurgeon, adjunct professor, and neuroscientist. Is his work good?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, Dr. Doty is highly respected. His book 'The Science of Compassion' is well-regarded. Have you checked out the hardware order I mentioned last week?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet, the website kept crashing. I just want to know if Doty is actually qualified or just a guru type."
+    },
+    {
+     "role": "assistant",
+     "text": "He has legitimate credentials in neurosurgery and neuroscience at Stanford. It's not just self-help. Did you manage to fix the bug in your Python script?"
+    },
+    {
+     "role": "user",
+     "text": "Finally, yes. It was a missing semicolon, of course. Back to Doty, does he have a specific book you'd recommend over others?"
+    },
+    {
+     "role": "assistant",
+     "text": "For a general audience, 'The Science of Compassion' is the most accessible. It bridges his medical background with his teachings."
+    },
+    {
+     "role": "user",
+     "text": "Great, I'll look for it. Thanks, Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need help with the Python script again."
+    }
+   ]
+  }
+ ]
+}

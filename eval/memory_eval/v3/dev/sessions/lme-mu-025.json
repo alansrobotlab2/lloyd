@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-025",
+ "sessions": [
+  {
+   "sid": "lme-mu-025-s1",
+   "date": "2026-06-27",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I've been tweaking the ProAct system metrics. You won't believe the numbers I just got."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds promising! What kind of improvements are you seeing?"
+    },
+    {
+     "role": "user",
+     "text": "Well, by adding directed idle-time retrieval, it reduced turns by 14.8% and user effort by 11.7% compared to the baseline. Huge win."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant efficiency boost. Did you run those tests on the latest dataset?"
+    },
+    {
+     "role": "user",
+     "text": "Yep, all fresh data. Oh, and my keyboard is acting up again. The 'E' key is sticking."
+    },
+    {
+     "role": "assistant",
+     "text": "That's frustrating. Have you tried cleaning it with compressed air?"
+    },
+    {
+     "role": "user",
+     "text": "I did, but it's still sticky. I might just replace the switch later tonight."
+    },
+    {
+     "role": "assistant",
+     "text": "Good plan. Let me know if you need help finding a replacement part."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-025-s2",
+   "date": "2026-07-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I finally cracked the hallucination issue in ProAct."
+    },
+    {
+     "role": "assistant",
+     "text": "That's great news! What was the root cause?"
+    },
+    {
+     "role": "user",
+     "text": "It was a context window overflow. The fix reduced hallucination from 0.132 to 0.095 (a 28.1% decrease)."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a solid reduction. Is the system stable now?"
+    },
+    {
+     "role": "user",
+     "text": "Pretty stable. By the way, are we still on for dinner at that new Italian place on Friday?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I have the reservation confirmed for 7 PM."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I need to wear the black shirt, I think. It's a bit cold outside."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I'll remind you to check the weather forecast before you leave."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,39 @@
+{
+ "episode": "lme-pr-027",
+ "sessions": [
+  {
+   "sid": "lme-pr-027-s1",
+   "date": "2026-08-21",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to get my dev environment set up for offline coding. Any thoughts on connecting Claude Code to my local Llama 3 instance?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure! You can use various bridges or custom scripts to hook up API-compatible endpoints to Claude Code."
+    },
+    {
+     "role": "user",
+     "text": "Nah, I've messed around with those before. Just stick to what works. Ollama is the recommended method for integrating Claude Code with local models."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll keep Ollama as the primary integration path for your local model setups."
+    },
+    {
+     "role": "user",
+     "text": "Cool. Also, did you see that rain forecast for the weekend? Totally ruining my hiking plans."
+    },
+    {
+     "role": "assistant",
+     "text": "That is unfortunate. It looks like Saturday will have heavy showers, so maybe reschedule the hike?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, probably. I'll just stay in and code. Thanks for the help earlier."
+    }
+   ]
+  }
+ ]
+}

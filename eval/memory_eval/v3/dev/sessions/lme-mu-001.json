@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-001",
+ "sessions": [
+  {
+   "sid": "lme-mu-001-s1",
+   "date": "2026-08-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm stuck on this dinner reservation for Saturday. Any recommendations for Italian near the office?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure! Trattoria L'Angolo is highly rated and just a 5-minute walk. Would you like me to check availability?"
+    },
+    {
+     "role": "user",
+     "text": "Please do. Also, quick note on the SimpleSeg paper I showed you: it eliminates separate decoder heads by reframing segmentation as point-coordinate sequence generation within the VLM's language space."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've noted that about SimpleSeg's architecture. For the restaurant, they have a table at 7:30 PM on Saturday. Shall I book it?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, book it. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "Done. Reservation confirmed for Saturday at 7:30 PM. Anything else?"
+    },
+    {
+     "role": "user",
+     "text": "No, that's all. Oh, did the package for the new monitor arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "Tracking shows it will arrive tomorrow morning between 10 AM and 12 PM."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-001-s2",
+   "date": "2026-08-30",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, the weather looks terrible for tomorrow. Should I cancel my jog?"
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast predicts heavy rain from 6 AM to 10 AM. I'd recommend moving it to the afternoon or skipping it."
+    },
+    {
+     "role": "user",
+     "text": "I'll skip it. By the way, I was reviewing SimpleSeg again. It's a semantic segmentation model that eliminates the SAM decoder by generating segmentation in language space."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. That aligns with what you mentioned earlier about using language space for segmentation."
+    },
+    {
+     "role": "user",
+     "text": "Right. Can you also set a reminder for my dentist appointment next Tuesday?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. What time is the appointment?"
+    },
+    {
+     "role": "user",
+     "text": "2:00 PM."
+    },
+    {
+     "role": "assistant",
+     "text": "Reminder set for next Tuesday at 2:00 PM for your dentist appointment."
+    }
+   ]
+  }
+ ]
+}

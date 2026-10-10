@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-044",
+ "sessions": [
+  {
+   "sid": "lme-te-044-s1",
+   "date": "2026-08-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to understand the data sources for Cosmos Reason 1. Any ideas?"
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan. I don't have specific real-time data on that model's training sets. It might be worth checking the latest NVIDIA developer blog posts."
+    },
+    {
+     "role": "user",
+     "text": "I dug into the paper. It turns out Cosmos Reason 1 was trained on NVIDIA Omniverse simulation data plus real-world robotics data."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense. Combining synthetic simulation with real-world data is a common strategy to improve robustness in robotics models."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Anyway, unrelated, did you see the rain forecast for tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have live weather access, but the trend has been quite wet lately. Might be wise to keep an umbrella handy."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I need to buy a new one. The old one broke yesterday."
+    },
+    {
+     "role": "assistant",
+     "text": "Sorry to hear that. Hope you find a sturdy replacement soon."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-044-s2",
+   "date": "2026-08-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I've been looking into how Lovable handles their internal knowledge. It's not just a wiki."
+    },
+    {
+     "role": "assistant",
+     "text": "Interesting. Do they use a specific proprietary system or a standard CMS?"
+    },
+    {
+     "role": "user",
+     "text": "They use a custom setup. Specifically, Lovable Stack Overflow (LSO) is a dynamic knowledge base used by Lovable."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a robust approach for managing developer-specific queries and solutions dynamically."
+    },
+    {
+     "role": "user",
+     "text": "It is. Also, my new mechanical keyboard arrived today. The switches are clickier than I expected."
+    },
+    {
+     "role": "assistant",
+     "text": "Clicky switches can be satisfying but noisy. Is it too loud for your current workspace?"
+    },
+    {
+     "role": "user",
+     "text": "A bit, but I got silent o-rings for it later. Should fix it."
+    },
+    {
+     "role": "assistant",
+     "text": "Good idea. O-rings are a cheap and effective fix for reducing that bottom-out noise."
+    }
+   ]
+  }
+ ]
+}

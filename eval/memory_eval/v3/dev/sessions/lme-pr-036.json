@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-036",
+ "sessions": [
+  {
+   "sid": "lme-pr-036-s1",
+   "date": "2026-08-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to improve the retrieval accuracy for my knowledge base. I noticed the current search is missing relevant notes when I search for specific concepts mentioned in the text."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Are you currently searching only through the note titles or metadata?"
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It's too shallow. I've decided that the overlap() function should score note bodies (or their H2s) rather than just titles for the note channel."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Shifting the focus to the body content will definitely increase recall for specific concepts."
+    },
+    {
+     "role": "user",
+     "text": "Right. It's just a quick lunch break thing, but I want to make sure the next iteration handles it correctly. Also, did you check if the delivery for the new monitor is still on schedule?"
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't checked the monitor delivery status yet, but I can look into that for you. Regarding the code change, I'll keep your preference in mind for the next review."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. The monitor is just a distraction, focus on the code logic. I need to go, back later."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. Have a good afternoon."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-048",
+ "sessions": [
+  {
+   "sid": "lme-mu-048-s1",
+   "date": "2026-05-09",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to get QMD running on my new Mac. The build keeps failing with some architecture mismatch error."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, that's a common issue with the transition to newer chips. Did you check if your Node version matches the architecture?"
+    },
+    {
+     "role": "user",
+     "text": "I thought it was universal, but it turns out QMD requires native arm64 Node on Apple Silicon. Once I reinstalled Node via arm64 homebrew, it compiled fine."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. Using the native binaries is definitely the way to go there. Glad you got it sorted!"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, finally. Also, did that package from Amazon arrive? I ordered some thermal paste."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your shipping notifications, but usually Amazon Prime delivers within two days. Did you check your tracking?"
+    },
+    {
+     "role": "user",
+     "text": "Just checked, it's out for delivery. Should be here by 5. Thanks for the help with the build."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome! Let me know if you hit any other snags."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-048-s2",
+   "date": "2026-05-18",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm looking at the local LLM training workshop materials. Can we actually run those fine-tuning scripts on my laptop?"
+    },
+    {
+     "role": "assistant",
+     "text": "It depends on the framework and your hardware specs. Most modern frameworks have added support for unified memory architectures recently."
+    },
+    {
+     "role": "user",
+     "text": "I checked the docs. It says Apple Silicon (MPS) is supported for local LLM training in the workshop. So I should be good to go."
+    },
+    {
+     "role": "assistant",
+     "text": "That's great news. You'll likely see faster iteration times compared to CPU-only training."
+    },
+    {
+     "role": "user",
+     "text": "Awesome. I'm also trying to decide what to make for dinner. Thinking maybe tacos?"
+    },
+    {
+     "role": "assistant",
+     "text": "Tacos are a solid choice. Do you have all the ingredients, or are you planning a quick grocery run?"
+    },
+    {
+     "role": "user",
+     "text": "I have the tortillas and meat, but I'm out of salsa. Maybe I'll just use some hot sauce."
+    },
+    {
+     "role": "assistant",
+     "text": "Hot sauce works too. Enjoy your coding and your dinner!"
+    }
+   ]
+  }
+ ]
+}

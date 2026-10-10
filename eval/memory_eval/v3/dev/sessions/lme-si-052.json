@@ -1,0 +1,39 @@
+{
+ "episode": "lme-si-052",
+ "sessions": [
+  {
+   "sid": "lme-si-052-s1",
+   "date": "2026-08-14",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you see the update on the MD2E paper?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the new results look promising. The accuracy improvements are significant."
+    },
+    {
+     "role": "user",
+     "text": "It's interesting how MD2E enables metric recovery without camera intrinsics at training or inference by leveraging systematic scale-correlated shifts in edge-frequency statistics. No calibration needed."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a major breakthrough. It really simplifies the deployment pipeline."
+    },
+    {
+     "role": "user",
+     "text": "Agreed. By the way, my coffee maker is leaking again. Any tips?"
+    },
+    {
+     "role": "assistant",
+     "text": "Usually it's the seal ring. Try cleaning it thoroughly first."
+    },
+    {
+     "role": "user",
+     "text": "I'll try that. Thanks."
+    }
+   ]
+  }
+ ]
+}

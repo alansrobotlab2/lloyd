@@ -1,0 +1,39 @@
+{
+ "episode": "lme-si-063",
+ "sessions": [
+  {
+   "sid": "lme-si-063-s1",
+   "date": "2026-06-18",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you catch that talk by Jason Kramberger from Google? He presented on the reliability of LLM performance benchmarks. It was actually pretty insightful."
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't watched it, but reliability metrics are always a hot topic. What was the main takeaway?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly that static benchmarks decay too fast. Anyway, can you check if my package for the new SSD has shipped? I need it for the weekend project."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your email or tracking numbers, but I can remind you to check your inbox. Did you order from the usual vendor?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, Amazon. I think it said out for delivery. Also, what's the weather like in Seattle tomorrow? I want to run a long test without interruption."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like rain is likely, so staying indoors for the test run might be wise."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I'll get started then."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-017",
+ "sessions": [
+  {
+   "sid": "lme-mu-017-s1",
+   "date": "2026-08-25",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you see that weather alert for tomorrow? Looks like a storm."
+    },
+    {
+     "role": "assistant",
+     "text": "I saw the forecast, Alan. It looks like heavy rain is expected in the afternoon. You might want to bring an umbrella."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, I was looking into that new open-source model everyone is talking about."
+    },
+    {
+     "role": "assistant",
+     "text": "Which one are you referring to?"
+    },
+    {
+     "role": "user",
+     "text": "The 26B. I read that 26B has 26B total parameters with a 4B active footprint."
+    },
+    {
+     "role": "assistant",
+     "text": "That's an efficient design. It likely balances capacity and inference speed well."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Anyway, do you have any dinner recommendations for tonight? I'm craving Italian."
+    },
+    {
+     "role": "assistant",
+     "text": "There's a place on 4th street that has good reviews for their pasta."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-017-s2",
+   "date": "2026-08-31",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, my printer is jamming again. Any quick fixes?"
+    },
+    {
+     "role": "assistant",
+     "text": "Have you tried checking the paper tray for misaligned sheets? That's a common cause."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, that helped. It's working now. On another note, I was digging into the architecture of that 26B model we mentioned before."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, the one with the sparse activation? What did you find?"
+    },
+    {
+     "role": "user",
+     "text": "Turns out 26B is a Gemma 4 model size using a Mixture-of-Experts architecture."
+    },
+    {
+     "role": "assistant",
+     "text": "MoE makes sense for that parameter count. It explains the active parameter efficiency."
+    },
+    {
+     "role": "user",
+     "text": "Right. I also need to order some replacement ink. Can you remind me to do that tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "I've added that to your task list for tomorrow morning."
+    }
+   ]
+  }
+ ]
+}
