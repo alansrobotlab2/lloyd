@@ -4868,3 +4868,106 @@ def test_recording_the_counts_changes_no_budget_and_adds_no_thinking_knob():
         for key in ("reasoning_effort", "chat_template_kwargs", "enable_thinking",
                     "thinking_token_budget"):
             assert key not in src, f"{rel} mentions {key}"
+
+# --- #2512: the sha rail stops voiding a grader that quotes a content digest ----
+# `eval/run_memory_eval.py:1925` prints `set_sha=` followed by the FIRST 16
+# characters of a sha256 over an eval set's leg files, and `eval/label_audit.py:186`
+# prints the same short form. `_SHA_TOKEN_RX` matches a 7-40 character hex run, so
+# that printed value is commit-shaped; `git cat-file -t` of it answers fatal. Before
+# #2512 a clause note quoting what its own command printed voided the review —
+# `rounds/SM_20261010_204036/gate.json` carries three such lines for head
+# `beb069a6a30a795082c130f6862e174d311bf4c8`, two of them the same digest. The token
+# is real data the tree publishes; only its LENGTH is commit-shaped.
+
+#: `eval/memory_eval/v2/manifest.json`'s `set_sha` in full, as the graded tree
+#: publishes it; `_DIGEST16` is the 16 characters `run_memory_eval.py` prints.
+_MANIFEST_SHA64 = ("16ec1ae14c046c614428c14d87918734ce3e0cc8"
+                   "530b7d13f8f885120651a079")
+_MANIFEST_SHA16 = _MANIFEST_SHA64[:16]
+
+
+def _digest_repo(tmp_path, sha: str, where: str = "eval/memory_eval/v2"):
+    """A graded tree whose ONLY copy of `sha` is the `set_sha` field of a manifest
+    committed under `where` — the shape the eval freeze publishes.
+
+    The token is in no git object: `git cat-file -t` of it fails, which is the
+    whole reason the rail fired.
+    """
+    r = tmp_path / "r"; (r / "app").mkdir(parents=True)
+    (r / "eval").mkdir(parents=True)
+    git(tmp_path, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@e.com"); git(r, "config", "user.name", "t")
+    (r / "app" / "m.py").write_text("V = 1\n")
+    man = r / where / "manifest.json"
+    man.parent.mkdir(parents=True, exist_ok=True)
+    man.write_text(json.dumps({"set_sha": sha, "leg": "dev"}) + "\n")
+    git(r, "add", "-A"); git(r, "commit", "-q", "-m", "base")
+    return r, git(r, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_a_content_digest_the_tree_publishes_no_longer_voids_the_review(tmp_path):
+    """#2512 clause 1: a clause note quoting the first 16 characters of the
+    `set_sha` this tree publishes in `eval/memory_eval/*/manifest.json` produces no
+    `citation_unresolved` entry and no cat-file sentence in `unreliable`.
+
+    That 16-character prefix is what the engine prints, so the grader quoting it is
+    quoting its own command's output, not claiming an object it read. The token is
+    in no git object — `_tree_carried_tokens` is the second route, not git being
+    wrong. Nothing about the note's OTHER citation changes: this is a route that
+    resolves a token, never a rule that stands down.
+    """
+    r, _ = _digest_repo(tmp_path, _MANIFEST_SHA64)
+    assert git(r, "cat-file", "-t", _MANIFEST_SHA16).stdout.strip() == "", (
+        "the digest prefix has to be unresolvable in git for this to be the case "
+        "the rail was voiding reviews on")
+    out = _rail_graded(r, f"freeze verified: set_sha={_MANIFEST_SHA16}",
+                       changed=["app/m.py"])
+    assert "citation_unresolved" not in out["clauses"][0], out["clauses"][0]
+    assert not [u for u in out["unreliable"] if "cat-file" in u], out["unreliable"]
+    assert out["citation_note"] == "", (
+        "a review the rail had nothing to say about should carry no standing note")
+
+
+def test_a_token_in_no_git_root_and_in_no_tracked_file_still_voids(tmp_path):
+    """#2512 clause 2: the escape resolves tokens, it does not stand the rail down.
+
+    `0f0f0f0f0f0f` names no object in any evidence root and is content in no
+    tracked file of the graded tree, so it is still named in `citation_unresolved`
+    and its sentence is still in `unreliable`. Same call shape as clause 1, one
+    token apart — which is what makes the pair a test rather than a description.
+    """
+    r, _ = _digest_repo(tmp_path, _MANIFEST_SHA64)
+    out = _rail_graded(r, f"pinned by {_PHANTOM_SHA}", changed=["app/m.py"])
+    assert _PHANTOM_SHA in " ".join(out["clauses"][0]["citation_unresolved"]), \
+        out["clauses"][0]
+    assert [u for u in out["unreliable"] if "cat-file" in u], out["unreliable"]
+
+
+def test_the_sha_the_rail_exists_to_catch_is_still_caught(tmp_path):
+    """#2512 clause 3: `08a4f4f0`, the 2026-09-24 fabricated commit, stays refused.
+
+    In this repo that token is content — inside `tests/` and `scripts/automod/`, the
+    prose that RECORDS the fabrication (`scripts/automod/gate.py`,
+    `scripts/automod/review.py` and three test files at HEAD). So the content route
+    has to exclude those paths or it becomes a way to corroborate anything: quote
+    the write-up of a phantom and the phantom becomes real. The node asserts both
+    halves of that line — the same token written as content under `tests/` is still
+    named, and written as data under `eval/` it escapes.
+    """
+    r, _ = _digest_repo(tmp_path, _MANIFEST_SHA64)
+    (r / "tests").mkdir(exist_ok=True)
+    (r / "tests" / "x_note.md").write_text(f"the incident commit {_INCIDENT_SHA}\n")
+    git(r, "add", "-A"); git(r, "commit", "-q", "-m", "write-up")
+    assert git(r, "cat-file", "-t", _INCIDENT_SHA).stdout.strip() == ""
+    out = _rail_graded(r, f"pinned at {_INCIDENT_SHA}", changed=["app/m.py"])
+    assert _INCIDENT_SHA in " ".join(out["clauses"][0]["citation_unresolved"]), (
+        "the content route just corroborated the fabrication it was written to "
+        f"exclude: {out['clauses'][0]}")
+
+    (r / "eval" / "incident_data.json").write_text(
+        json.dumps({"sha": _INCIDENT_SHA}) + "\n")
+    git(r, "add", "-A"); git(r, "commit", "-q", "-m", "data")
+    stood = _rail_graded(r, f"pinned at {_INCIDENT_SHA}", changed=["app/m.py"])
+    assert "citation_unresolved" not in stood["clauses"][0], (
+        "the same token published as DATA outside the prose paths is corroborated "
+        "by the tree, so the exclusion, not the route, is what was refusing it")

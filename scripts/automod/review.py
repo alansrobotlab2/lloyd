@@ -2655,6 +2655,137 @@ def evidence_of_absence(raw_path: str, changed_paths=()) -> bool:
     return any(m in head for m in _ABSENCE_MARKERS)
 
 
+#: Paths whose content is *prose about* a citation rather than data the tree
+#: publishes. `tests/` and the automod sources are where a fabricated commit gets
+#: WRITTEN DOWN: the 2026-09-24 phantom `08a4f4f0` appears at today's HEAD in
+#: `scripts/automod/gate.py`, `scripts/automod/review.py` and three test files
+#: precisely because those files are the write-up of the review that invented it.
+#: A token carried only by them corroborates nothing. Anywhere else, a hex token
+#: sitting in the tree is a literal the tree publishes — an eval set's content
+#: digest in its manifest (#2486) — and a grader quoting it is quoting data, not
+#: claiming an object it read.
+_SHA_CONTENT_PROSE_PATHS = ("tests/", "scripts/automod/")
+
+
+def _tree_carried_tokens(repo: Path, tokens: list[str]) -> set[str]:
+    """Which of `tokens` appear verbatim as file content in `repo`'s HEAD tree,
+    outside the paths that record citations rather than carry data.
+
+    ONE `git grep -n -o -F` over every candidate at once — timed at 27 ms over the
+    whole `~/lloyd` tree for both tokens together, so it does not add a round trip
+    per token to a rail that already asks git once per token — parsed off the
+    `HEAD:<path>:<line>:<match>` rows `-n -o` prints. `-F` because a bare hex
+    string is a literal, never a pattern, and HEAD rather than the working tree
+    because the graded tree is what a citation has to be true of.
+
+    A grep that returns nothing answers "carried by nothing" rather than "carried":
+    the caller's default is to refuse, so a tree git will not search keeps whatever
+    verdict the object lookup gave instead of buying a free escape.
+    """
+    if not tokens:
+        return set()
+    want = set(tokens)
+    rows = _git(repo, "grep", "-n", "-o", "-F",
+                *(a for t in tokens for a in ("-e", t)), "HEAD")
+    carried: set[str] = set()
+    for row in rows.splitlines():
+        # `-n -o` prints `HEAD:<path>:<line>:<matched>`, and the last two fields
+        # are a decimal line number and the token itself (a `-F` match is the
+        # literal), so splitting from the right is exact even if a path is odd.
+        parts = row.split(":")
+        if len(parts) < 4 or parts[0] != "HEAD" or not parts[-2].isdigit():
+            continue
+        tok, path = parts[-1], ":".join(parts[1:-2])
+        if tok in want and not path.startswith(_SHA_CONTENT_PROSE_PATHS):
+            carried.add(tok)
+    return carried
+
+
+#: Cap on `_round_material`, in characters. It bounds the READ, not the rule: a
+#: corpus that stops early can only lose an escape, never invent one, so a round
+#: that changes a huge generated file gets the pre-#2492 verdict on a token past
+#: the cap — a false refusal at worst, never a false accept. One number serves
+#: both jobs: a single file over it is skipped rather than half-read.
+_RAIL_CORPUS_CAP_CHARS = 2_000_000
+
+
+def _round_material(worktree: Path, changed) -> str:
+    """The text of every file this round changed, read from the tree the grader
+    graded — the material a note quoting hex was actually handed.
+
+    Feeds `unresolved_shas`'s `handed` argument, because of a question the object
+    lookup and the tree grep are both blind to: WHOSE token is it. A grader citing
+    `0f0f0f0f0f0f` in a round whose own diff writes that literal into a test file
+    is quoting the fixture it was shown to grade; a grader citing it in a round
+    that never mentions it invented it. `_SHA_CONTENT_PROSE_PATHS` cannot tell the
+    two apart — both tokens sit in `tests/` — and a round that IS about phantom
+    commits has to be allowed to name them, which is how this rail voided #2492's
+    first fix: both `review` events on `SM_20261009_175904` are `ok: False` in
+    `promotions.jsonl` (`20261009_111326_review_c638`, `20261009_113400_review_a244`)
+    with all four clauses graded `met` and the notes citing `0f0f0f0f0f0f`,
+    `a1b2c3d4e5f6` and `16ec1ae14c046c61`.
+
+    Which is also why this is not a wider tree escape, and why the 2026-09-24
+    incident stays refused under it on its own facts: on the head that refusal was
+    graded against, `08a4f4f0` appeared NOWHERE in the tree — not in that diff, not
+    in a docstring, not in a test. It became tree content only afterwards, when the
+    incident was written up. The escape keys on what the round published, and that
+    round published nothing of the kind.
+
+    Paths are read as given, unreadable ones skipped, in sorted order so the same
+    diff always yields the same corpus.
+    """
+    out: list[str] = []
+    total = 0
+    for rel in sorted({str(p) for p in changed or ()}):
+        try:
+            body = (worktree / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if len(body) > _RAIL_CORPUS_CAP_CHARS:
+            continue
+        out.append(body)
+        total += len(body) + 1
+        if total >= _RAIL_CORPUS_CAP_CHARS:
+            break
+    return "\n".join(out)
+
+def _rail_sha_unresolved(note: str, *, worktree: Path | None,
+                         changed_paths=(), repo: Path | None = None,
+                         also: "tuple | None" = None) -> list[str]:
+    """Which commit-ish tokens in a grader's note the rail may hold against it.
+
+    `unresolved_shas` answers from git alone and stays that way
+    (`test_the_sha_detector_takes_no_part_in_the_standing_rule` pins it); the two
+    other ways a token can be REAL are decided here, in order:
+
+      * `_tree_carried_tokens` — the graded tree publishes it as file content,
+        outside the paths that record citations rather than carry data. This is the
+        shape `eval/run_memory_eval.py:1925` prints (`set_sha=` plus 16 hex of a
+        sha256 over the leg files): `git cat-file` answers fatal, and a grader that
+        faithfully reported its own command output was voided for it. The token is
+        corroborated, so the review was voided on a grader that lied about nothing.
+      * `_round_material` — the round's own diff put it somewhere git never looked,
+        which is how a freeze round would quote its own new digest at its review.
+
+    A token that is neither is left in the list: `0f0f0f0f0f0f` names no object and
+    no file, and the incident `08a4f4f0` sits in the tree only inside `tests/` and
+    `scripts/automod/`, the prose that RECORDS the fabrication. That exclusion is
+    what keeps this a second way to be corroborated rather than a way to corroborate
+    anything.
+    """
+    tok = unresolved_shas(note, repo, also=also)
+    if not tok:
+        return []
+    carried = _tree_carried_tokens(worktree,
+                                   [t for t in tok if not t.startswith("--")])
+    missing = [t for t in tok if t not in carried]
+    if not missing:
+        return []
+    handed = _round_material(worktree, {str(x) for x in (changed_paths or ())})
+    return [t for t in missing if t not in handed]
+
+
 def unresolved_shas(text: str, repo: Path | None,
                     also: tuple[Path, ...] | None = None) -> list[str]:
     """Commit-ish tokens in `text` that neither `repo` nor any git repo among
@@ -2993,8 +3124,14 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
         # not this round has the standing to be refused on it — `unresolved_shas`
         # is never told about `changed_paths` (clause 4: the detector stays whole
         # and the caller decides).
+        # The two extra routes live in `_rail_sha_unresolved`, which never changes
+        # what `unresolved_shas` itself reports: the detector still answers from git
+        # alone, and this caller decides what to hold against the grader.
         sha_finding = [f"note cites commit {sha}, which `git cat-file -t` does not resolve "
-                       f"in the repo under review" for sha in unresolved_shas(note, repo)]
+                       f"in the repo under review"
+                       for sha in _rail_sha_unresolved(
+                           note, worktree=worktree, changed_paths=changed_paths,
+                           repo=repo)]
         if sha_finding:
             if rail_stale:
                 # Demoted, not dropped, exactly as #1755 does for a blocking
