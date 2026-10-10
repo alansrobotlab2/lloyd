@@ -498,6 +498,26 @@ _RI_DANGLING = re.compile(r"<!--\s*ri:dangling\s*(\[.*?\])\s*-->", re.S)
 #: reporting on.
 _LEDGER_BULLET = re.compile(r"^\s*-\s*`[^`\n]*`\s*(?:→|->)\s*`([^`\n]+)`", re.M)
 
+#: A trailing `:LINE` on one of those targets. The sweep spells its targets that way: the
+#: Dangling and Exempt sections of
+#: `scripts/maintenance/referential_integrity.py` emit their bullets at `:324` and `:328`
+#: as `` - `citing:line` → `target:line` `` — the `target` field already carries the line
+#: the cite sat on — and the `ri:dangling` keys at `:330` carry the same string, because
+#: that block is a copy of the keys, not a re-spelling of the paths. Read by
+#: `_classify_target`, for the reason #2484 measured: `_named_paths` classifies a
+#: backticked token by cutting it at its FIRST colon, space or paren, so the row a
+#: bullet yields is `repo:app/memory.py` while the target it enumerates came back
+#: `app/memory.py:610`. Two spellings of one path, so the exemption never matched its
+#: own row and the report went red on its own accuracy.
+#:
+#: Stripped shape is the whole rule: ONE colon, then digits, then the end. A range
+#: (`:610-620`), a list (`:610,611`), a `#L610`, a bare word after the colon or a
+#: clipped path each classify UNCHANGED and keep their row — a target the sweep did not
+#: spell as a single line number is not a target it proved absent at a line, and an
+#: exemption that widened to "everything after a colon" would swallow the half of the
+#: corpus `_named_paths` cuts for the same reason it cuts it.
+_TARGET_LINE_SUFFIX = re.compile(r":\d+$")
+
 #: The marker left where something was cut short. `clip_skill_description` says so
 #: of itself — "cut to at most `max_chars` characters, the cut marked with `…`"
 #: (`app/prompt_builder.py:992-996`) — and `scripts/skill_lint.py:822` puts that clipped
@@ -1033,10 +1053,21 @@ def _classify_target(raw: str) -> tuple[str, str] | None:
     vault, then a bare `lloyd/…`/`skills/…` string as checkout-only. `None` for anything
     the scanner could not have produced as a row, so it exempts nothing: a root the
     test does not model (`~/lloyd-data/…`, `$HOME/…`), a bare name with no tree-bearing
-    prefix, a clipped path."""
+    prefix, a clipped path.
+
+    A trailing `:LINE` is removed before any of that, because it is not part of the path
+    (#2484). The sweep writes a target as the cite it found, line included, and
+    `_named_paths` has already cut its own row at the first colon — so a target that kept
+    the suffix named a path no row asked about, and the report red on the paths it exists
+    to enumerate: `app/memory.py:610` and `app/memory.py` are one target, and both the
+    suffixed and the suffix-free spelling have to reach the same pair for the exemption to
+    be a rule rather than a coincidence about whichever shape the day's dangling paths
+    happened to take. Stripping is the one shape `_TARGET_LINE_SUFFIX` accepts, so
+    everything else about `raw` still decides the answer it decided before."""
     target = raw.strip().strip("`")
     if not target or _truncated(target):
         return None
+    target = _TARGET_LINE_SUFFIX.sub("", target)
     for rx, tree in ((_LLOYD_PATH, "repo"), (_OBSIDIAN_PATH, "vault")):
         full = rx.fullmatch(target)
         if full is not None:
@@ -2714,6 +2745,125 @@ def test_an_entry_counts_only_when_it_names_a_scannable_target(entry, expected):
     body = _ledger_body(listed=(), bullets=False, keys=[entry])
     assert _dangling_targets(body) == expected, (
         f"entry {entry!r} yielded the wrong target set")
+
+
+# --- #2484: the exemption has to reach the target the sweep actually spells ------
+
+#: One target spelled the way the writer spells every target. The 2026-10-09 report
+#: listed `app/memory.py:610`, `app/inner_voice.py:183` and
+#: `app/agent_chat_providers/claude_provider.py:491`, each with its line, and the five
+#: path nodes went red on all three. #2354's own fixtures only ever exercised the
+#: suffix-free spelling — the two rows that rule swallowed on 2026-10-07 were
+#: `scripts/autonomy_status.py` and `scripts/util/owed.py`, both written without a line —
+#: so the rule was proven against the one shape that already worked and the first report
+#: to spell its targets with a line number reddened main.
+_LINE_SUFFIXED_2484 = f"{_LISTED_2354}:610"
+
+
+@pytest.mark.parametrize("listed", (_LISTED_2354, _LINE_SUFFIXED_2484))
+def test_a_line_numbered_target_makes_no_row_the_way_a_suffix_free_one_does(listed):
+    """#2484 clause 1: a report that enumerates `scripts/x.py:610` is ABOUT
+    `scripts/x.py`, exactly as one enumerating `scripts/x.py` is, and the row the scanner
+    yields for it is `repo:scripts/x.py` in both cases.
+
+    One parametrized node because the defect WAS the gap between the two spellings and
+    not a missing rule: `_named_paths` cuts a backticked token at its first colon, so the
+    row was suffix-free from the start, while `_classify_target` handed the enumerated
+    target back with `:610` still on it. `_recorded_sites` then subtracted a pair no row
+    ever carried, `_absent_refs` returned the row, and the report was charged for citing
+    the paths it exists to enumerate. Both arms assert one identical row set, so an
+    exemption that fires only on whichever spelling the fixture happened to invent cannot
+    pass here — which is how #2354 shipped green.
+
+    The prose script is both denominator and rail in every arm: it keeps its row in both
+    arms, so an implementation that exempted the whole DOCUMENT rather than the enumerated
+    target turns the last assertion red instead of looking like a fix.
+    """
+    for rel in (_LISTED_2354, _PROSED_2354):
+        assert not (ROOT / rel).exists(), f"{rel} really exists in the checkout"
+    body = _ledger_body(listed=(listed,), prose=(_PROSED_2354,))
+    named = set(_named_paths(body, None))
+    assert ("repo", _LISTED_2354) in named, (
+        "the scanner did not yield the absent script this node is about, so an empty "
+        f"row set would prove nothing: {sorted(named)}")
+    assert _dangling_targets(body) == {("repo", _LISTED_2354)}, (
+        f"the target spelled {listed!r} did not classify to the path the sweep proved "
+        "absent, so it exempts nothing")
+    rows = _absent_refs(_LEDGER_2354, body, None)
+    assert rows == {_PROSED_ROW}, (
+        f"a target spelled {listed!r} was charged as a citation: {sorted(rows)}")
+
+
+#: The four rows above the line are the four spellings #2484 changes; every row below it
+#: has to keep the answer it gave before a line suffix was ever considered.
+@pytest.mark.parametrize("raw, expected", [
+    (_LINE_SUFFIXED_2484, ("repo", _LISTED_2354)),
+    (f"~/lloyd/{_LISTED_2354}:610", ("repo", _LISTED_2354)),
+    (f"~/obsidian/{_LISTED_2354}:610", ("vault", _LISTED_2354)),
+    (f"{_LINE_SUFFIXED_2484} ", ("repo", _LISTED_2354)),
+    (_LISTED_2354, ("repo", _LISTED_2354)),
+    (f"{_LISTED_2354}:610-620", ("repo", f"{_LISTED_2354}:610-620")),
+    (f"{_LISTED_2354}:610,611", ("repo", f"{_LISTED_2354}:610,611")),
+    (f"{_LISTED_2354}#L610", ("repo", f"{_LISTED_2354}#L610")),
+    (f"{_LISTED_2354}:line", ("repo", f"{_LISTED_2354}:line")),
+    (f"{_LISTED_2354}:6\N{HORIZONTAL ELLIPSIS}", None),
+    ("~/lloyd-data/_pipeline/owed-ledger.json:9", None),
+    ("a_bare_name_2484.py:610", None),
+])
+def test_the_only_suffix_the_rule_strips_is_a_trailing_line_number(raw, expected):
+    """#2484 clause 2: the cut is `:` + digits + end and nothing else, so a target
+    carrying any other trailing text, a clipped path, or a root this test does not model
+    classifies exactly as it did before the suffix rule existed.
+
+    Asserted against `_classify_target` itself because the claim is about one string: the
+    range, the list, the `#L610` and the word after the colon each still name a path no
+    row asked about, which is the only reason they are allowed to classify unchanged —
+    they exempt nothing. A strip written as "drop everything after the last colon" passes
+    the four rows above it and goes red on these eight, and that is the difference between
+    a rule keyed on the one shape the sweep emits and a rule that quietly stops reading
+    any target containing a colon.
+    """
+    got = _classify_target(raw)
+    assert got == expected, f"{raw!r} classified as {got!r}, not {expected!r}"
+
+
+def test_a_target_that_is_not_a_single_line_number_keeps_its_row():
+    """#2484 clause 2 through the whole row pipeline: `:610-620` is not a line number, so
+    the report still owes the row and this node still goes red.
+
+    This is the control the string-level node above cannot be. An over-wide strip does not
+    misclassify one string in a way a reader can spot — it silently empties the report's
+    row set, which is the green that would have made #2484 look fixed while the check had
+    stopped reading dangling reports at all. The scanner is asserted to yield the path
+    first, so the rows below measure the rule and not a pattern that stopped matching.
+    """
+    body = _ledger_body(listed=(f"{_LISTED_2354}:610-620",), prose=(_PROSED_2354,))
+    named = set(_named_paths(body, None))
+    assert ("repo", _LISTED_2354) in named, (
+        "the scanner yielded neither script, so a red row here would prove nothing: "
+        f"{sorted(named)}")
+    rows = _absent_refs(_LEDGER_2354, body, None)
+    assert rows == {_LISTED_ROW, _PROSED_ROW}, (
+        f"a `:610-620` target was exempted as if it were a line number: {sorted(rows)}")
+
+
+def test_the_three_paths_the_live_report_lists_are_not_in_the_allowlist():
+    """#2484 clause 5: the green in this file comes from the reader rule, not from a row
+    in `PATH_KNOWN_UNFIXED`.
+
+    Parking the three paths is the route the check's own message refuses for a document
+    whose entire content is its own enumeration, and it is also the route that would make
+    this round look like it worked: three rows added, five nodes green, and main red again
+    the first night the report lists a path with a line number, because nothing about
+    `_classify_target` changed. A row here would not be caught by any later node — the
+    ledger has no count and no freshness check — so the names the round refused to park
+    are pinned absent.
+    """
+    for rel in ("app/memory.py", "app/inner_voice.py",
+                "app/agent_chat_providers/claude_provider.py"):
+        assert not [row for row in PATH_KNOWN_UNFIXED if rel in row], (
+            f"{rel} was parked in PATH_KNOWN_UNFIXED, which buys a green run and leaves "
+            "the report red on its next line-numbered target")
 
 
 def test_a_path_the_ledger_lists_still_reads_as_drift_in_a_skill():

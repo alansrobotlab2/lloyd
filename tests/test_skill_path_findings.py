@@ -10,6 +10,7 @@ suite's rule rather than restating it, and it never blocks the commit.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -194,3 +195,74 @@ def test_a_path_the_skill_records_its_run_crashed_on_prints_no_finding(vault):
     assert (findings, checked) == ([], 1), (
         f"a skill page quoting the error its run raised was charged for the "
         f"missing file: {findings}")
+
+
+_DANGLING_2484 = "scripts/a_script_the_dangling_report_lists_2484.py"
+
+
+def _quoted_dangling_bullet(*, suffix=":610", block=True) -> str:
+    """A skill page quoting one bullet of a referential-integrity report, in the shape
+    `scripts/maintenance/referential_integrity.py` writes it: citing half, target half
+    carrying the line the cite sat on, and the `ri:dangling` block that proves the bullet
+    list is a generated sweep and not a hand-written page full of arrows.
+
+    `suffix=""` spells the target without a line number and `block=False` drops the block,
+    so the node below can take the proof away from the same phantom and show it printing.
+    """
+    target = f"~/lloyd/{_DANGLING_2484}{suffix}"
+    lines = ["", "The nightly sweep's own bullet read:",
+             f"- `lloyd/USER.md:28` → `{target}` — "
+             "stat:repo_root|vault_root|data_root|citing_dir (none exist)"]
+    if block:
+        lines += ["", "<!-- ri:dangling "
+                      + json.dumps([f"lloyd/USER.md:28 -> {target}"]) + " -->"]
+    return "\n".join(lines) + "\n"
+
+
+def test_a_line_numbered_dangling_bullet_a_skill_quotes_prints_no_finding(vault):
+    """#2484 clause 4 at the process boundary. The suite's unmarked node and this
+    pre-flight leg read one definition — `_recorded_sites`, loaded out of
+    `tests/test_skill_tool_names.py` by `_load_guard` — so the leg has to agree that a
+    dangling report's own `` `…/x.py:610` `` bullet is the sweep talking about a dead
+    path, not the skill page citing it.
+
+    The seam is a subprocess boundary in production and an importlib load here: this
+    module is a file the running suite never imports, loaded fresh into `vault-commit.sh`
+    at the door the nightly jobs commit through. Nothing but a call through
+    `path_findings` crosses it, which is why the claim is asserted as findings and not as
+    a helper's return value. Before #2484 this leg charged the page: the loaded
+    `_absent_refs` returned the row because the recorded-site pair it subtracts kept the
+    `:610` and so matched no row `_named_paths` had yielded — and `bench_dead_refs`, whose
+    own matcher knows nothing about report blocks, was subtracted against a `created` set
+    bearing that same stale suffix, so it had its own copy of the finding ready and was
+    hidden only because the loaded leg named the path first. The suite's node charged the
+    same citation, so one bullet made the pre-flight print and main go red; the fix is
+    reader-side and reaches both surfaces together, which is the whole point of the shared
+    name.
+    """
+    _append(vault, _quoted_dangling_bullet())
+    findings, checked = rung.path_findings(vault)
+    assert (findings, checked) == ([], 1), (
+        f"a skill page quoting a generated report's own bullet was charged for the "
+        f"path that report proved dead: {findings}")
+
+
+def test_the_same_line_numbered_path_without_the_sweep_block_prints(vault):
+    """The control the node above cannot be satisfied by: take the `ri:dangling` block out
+    of the same text and the bullet is a plain citation of a missing script, which is what
+    this rung was written to say before the commit.
+
+    Without it the fixture would go green for an exemption widened to "any page whose
+    prose contains an arrow", and the node above would measure nothing. Same phantom, same
+    bullet, same suffix: the only difference is the machine block that proves a sweep, not
+    a reader, wrote the list — so the one finding printed here is the path from the node
+    above, and it prints once because the bench leg subtracts what the loaded rule already
+    named.
+    """
+    _append(vault, _quoted_dangling_bullet(block=False))
+    findings, checked = rung.path_findings(vault)
+    assert checked == 1
+    assert findings == [
+        f"{_SKILL}: newly names `{_DANGLING_2484}`, which is not in the checkout at "
+        f"{REPO_ROOT}"], (
+        f"a bare citation of an absent script stopped being a finding: {findings}")
