@@ -31,7 +31,8 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV="$HOME/lloyd/.venvs/vllm-omni"
 MODEL="${TTS_OMNI_MODEL:-$PROJECT_DIR/services/tts/qwen3-tts/models/Qwen3-TTS-12Hz-1.7B-Base}"
-DEPLOY="${TTS_OMNI_DEPLOY:-$VENV/lib/python3.12/site-packages/vllm_omni/deploy/qwen3_tts.yaml}"
+# Our copy of upstream's qwen3_tts.yaml with the codec chunk ramp on (see it).
+DEPLOY="${TTS_OMNI_DEPLOY:-$PROJECT_DIR/conf/qwen3-tts-omni.deploy.yaml}"
 
 if [[ ! -x "$VENV/bin/vllm" ]]; then
   echo "vllm-omni venv not found at $VENV — SETUP.md 'vllm-omni'" >&2

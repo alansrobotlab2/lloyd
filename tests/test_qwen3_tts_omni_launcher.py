@@ -54,9 +54,10 @@ def _run_launcher(tmp_path: Path, **overrides) -> dict[str, str]:
     stub = venv / "bin" / "vllm"
     stub.write_text(_STUB_VLLM)
     stub.chmod(0o755)
-    deploy = venv / "lib" / "python3.12" / "site-packages" / "vllm_omni" / "deploy"
-    deploy.mkdir(parents=True)
-    (deploy / "qwen3_tts.yaml").write_text("stages: []\n")
+    conf = sandbox / "agent-services" / "conf"
+    conf.mkdir(parents=True)
+    shutil.copy2(ROOT / "agent-services" / "conf" / "qwen3-tts-omni.deploy.yaml",
+                 conf / "qwen3-tts-omni.deploy.yaml")
 
     dump = tmp_path / "child.txt"
     env = {k: v for k, v in os.environ.items()
@@ -100,6 +101,16 @@ def test_the_conf_and_the_launcher_agree_on_the_pin():
     conf = CONF.read_text()
     assert f'CUDA_VISIBLE_DEVICES="{GPU3_UUID}"' in conf
     assert GPU3_UUID in LAUNCHER.read_text()
+
+
+def test_the_deploy_config_is_the_tracked_copy_with_the_chunk_ramp_on(tmp_path):
+    """Upstream's one-frame first chunk left the worker holding a partial
+    LiveKit frame for ~330 ms (2026-10-09); the tracked copy turns the ramp on."""
+    child = _run_launcher(tmp_path)
+    assert _flag(child["argv"], "--deploy-config").endswith("agent-services/conf/qwen3-tts-omni.deploy.yaml")
+    text = (ROOT / "agent-services" / "conf" / "qwen3-tts-omni.deploy.yaml").read_text()
+    assert "codec_chunk_ramp: [2, 4, 8, 16, 25]" in text
+    assert text.index("codec_chunk_ramp: [2") > text.index("connector_of_shared_memory:")
 
 
 def test_it_binds_loopback_on_8093_unless_told_otherwise(tmp_path):

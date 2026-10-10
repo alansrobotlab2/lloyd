@@ -1148,6 +1148,15 @@ Three things about the switch are easy to get wrong:
   answers `text/event-stream` (SSE); the worker and `speak.py` now send
   `stream_format: "audio"`, which the vendored server ignores. The output is
   s16le at 24 kHz on both.
+- **The first chunk must fill a LiveKit frame.** Upstream's deploy config
+  emits one codec frame (~83 ms of audio) first and then a full 25-frame
+  (~2 s) window: measured through the worker, a first byte at 88 ms and then
+  nothing until 422 ms, so with the 100 ms frame pump `first_pushed` waited
+  ~330 ms and a reply started *later* than on the old server. The tracked
+  `agent-services/conf/qwen3-tts-omni.deploy.yaml` (what the launcher loads)
+  turns the codec chunk ramp on, `[2, 4, 8, 16, 25]`: 100 ms of audio is in
+  hand at 115–132 ms, the next chunks land 50 ms later, and playout never
+  underruns (stock config 423 ms, old server 256 ms).
 - **Boot is ~2.5 min and `/health` answers only at the end**, so a request in
   that window is a connection refusal the worker logs and drops — not the
   120 s hang the old server's lazy load produced. `ninja` must be on the
@@ -1539,9 +1548,11 @@ reference, faster. In the worker's own breakdown the stage this moves is
 150 ms off every spoken reply — and the lower RTF means a long reply no
 longer races its own playout. Listen set: `~/.cache/lloyd-voice-eval/
 tts-omni-2026-10-09/listen/` (`A` old server, `B` vLLM-Omni, both
-worker-shaped). The stock `qwen3_tts.yaml` deploy config was used unchanged
-(both stages at 30% of the card); `enable_prefix_caching` on the talker stage,
-which the config suggests when the reference audio repeats, is untried.
+worker-shaped). The rows above ran the stock `qwen3_tts.yaml`; production
+runs the tracked copy with the chunk ramp on (see "The TTS server"), which
+moves the first *frame*, not the first byte. `enable_prefix_caching` on the
+talker stage, which the config suggests when the reference audio repeats, is
+untried.
 
 ## The browser half
 
