@@ -1054,7 +1054,12 @@ def test_workers_jobs_counts_and_rosters_every_registered_source():
     registered = len(re.findall(r"^register\(", init, re.M))
     words = {v: k for k, v in {**NUMBER_WORDS, "eleven": 11, "twelve": 12,
                                 "thirteen": 13, "fourteen": 14,
-                                "fifteen": 15}.items()}
+                                # 2026-10-10: `cost-investigate` (#2510) is the
+                                # sixteenth registered source. The mapping is a
+                                # closed set on purpose — a new source has to be
+                                # added here for the sentence to be allowed to
+                                # move, which is the point of the node.
+                                "fifteen": 15, "sixteen": 16}.items()}
     m = re.search(r"^(\w+) sources are registered\.", text, re.M)
     assert m, "the roster's count sentence is gone"
     assert m.group(1).lower() == words[registered], (m.group(1), registered)

@@ -1855,12 +1855,16 @@ def test_the_failure_ledger_roster_row_reads_scheduled():
     precedent for the same shape: a doc that names a number is a claim about a file.
     """
     one = _section("## 1. The roster")
-    assert "fifteen have a block under" in one, (
+    # Both count sentences are pinned as a PAIR on the same word, and the word is
+    # the registry's size. `cost-investigate` (#2510, 2026-10-10) moved both from
+    # fifteen to sixteen, which is the point: a new source has to be said in the
+    # doc twice, in the same breath, before a node will let the number stand.
+    assert "sixteen have a block under" in one, (
         "§1 no longer states that every registered source has a block, which is what "
         "is now true: " + one.strip().splitlines()[0][:90])
     for gone in ("Fourteen of them have a block", "no config block"):
         assert gone not in one, f"§1 still carries the retired claim {gone!r}"
-    assert "Fifteen sources are registered." in one, (
+    assert "Sixteen sources are registered." in one, (
         "the count sentence changed its shape, and "
         "test_workers_jobs_counts_and_rosters_every_registered_source in "
         "test_automod_doc_claims.py parses it out of §1's first line")

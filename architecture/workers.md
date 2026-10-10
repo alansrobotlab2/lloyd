@@ -545,6 +545,7 @@ what it reads, what it writes, and the measured state of it.
 | `session-distill` | 70 | mines finished chats for gaps and patterns | direct |
 | `bench-mine` | 80 | new bench tasks from failed autonomy runs, and from baseline losses when the ledger has any it can read | direct |
 | `failure-ledger` | 75 | sweeps the automod promotions ledger into the failure-issue ledger and sends one investigation a day after the strongest family — registered so a claimed row runs instead of being poisoned (#2079), and on a timer since its `workers.sources` block landed on 2026-10-06 (#2309) | direct |
+| `cost-investigate` | 92 | writes the one record for a run that spent over 1.5x its own source's window P90 in tokens, naming where the tokens went and one candidate (`app/cost_outlier.py`) | direct, no model turn; armed by the pool at completion, never on a timer |
 
 Priorities are each module's `DEFAULT_PRIORITY` unless config overrides it, and
 two do: `youtube-digest` (45, so a digest beats low/background autonomy work

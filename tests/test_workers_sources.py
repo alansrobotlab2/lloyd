@@ -2677,3 +2677,111 @@ def test_execute_marks_the_verdict_only_after_run_task_returns(monkeypatch, sche
     assert marked == [], (
         "the marker fired for an attempt that wrote no verdict, which is exactly "
         "the death #2037 exists to charge")
+
+
+# ---------------------------------------------------------------------------
+# #2510 — `cost-investigate`: the source a completion hook feeds.
+# ---------------------------------------------------------------------------
+
+async def test_cost_investigate_declines_its_own_tick_without_stealing_a_slot(
+        tmp_path):
+    """A DECLINED on a source's own tick must enqueue nothing.
+
+    This source has no timer work at all: its queue rows are created by
+    `workers/pool.py` when a run finishes. The reason it registers anyway is that
+    a row whose source is missing from the registry is poisoned at attempts = 0
+    (#2079), so the source exists to be resolvable — and the cost of registering a
+    source that never self-feeds is one no-op tick a day, which is what
+    `interval_seconds: 86400` in `config.yaml` buys.
+    """
+    from workers.sources import cost_investigate as src
+    q = WorkQueue(tmp_path / "workers.db")
+    out = await src.enqueue_if_due(q, {"interval_seconds": 86400})
+    assert out == "declined"
+    assert q.list_items(limit=10) == [], "a declined tick still enqueued"
+
+
+async def test_cost_investigate_writes_the_record_and_reports_its_path(
+        tmp_path, monkeypatch):
+    """The payload → artifact boundary the pool depends on.
+
+    `execute` returning `artifact_path` is what puts a link on the dashboard's
+    per-source `recent` list, which is how a fire is readable without the
+    deferred frontend field. A summary without a path would leave the record on
+    disk and the queue showing a bare `success`.
+
+    The store is named through `CO._default_usage_db`, which is what `execute`
+    resolves when a payload arrives without one: pointing the test at a scratch
+    db with the fired session's rows means the record below is written from real
+    rows, and the test never opens the live fleet's store.
+    """
+    from app import usage_store
+    from workers.sources import cost_investigate as src
+    udb = tmp_path / "usage.db"
+    monkeypatch.setattr(usage_store, "DB_PATH", udb)
+    monkeypatch.setattr(src.CO, "_default_usage_db", lambda: udb)
+    sid = "worker:autocode:deadbeef"
+    usage_store.record_usage(session_id=sid, model="primary",
+                             input_tokens=3_000_000, output_tokens=1_000_000,
+                             num_turns=9, stop_reason="max_turns")
+    rec = tmp_path / "rec.md"
+    monkeypatch.setattr(src.CO, "record_path", lambda run_id: rec)
+
+    q = WorkQueue(tmp_path / "workers.db")
+    q.enqueue(src.NAME, "cost-investigate",
+              {"run_id": "run_autocode_x", "subject_source": "autocode",
+               "tokens": 4_000_000, "p90_tokens": 150_000, "samples": 44,
+               "margin": 1.5, "window_days": 30.0, "window_days_held": 18.0,
+               "completed_at": "2026-10-10T00:00:00+00:00",
+               "session_ids": [sid]},
+              priority=src.DEFAULT_PRIORITY)
+    res = await src.execute(q.list_items(limit=1)[0])
+    assert res["artifact_path"] == str(rec)
+    assert res.get("status") != "failed", res
+    txt = rec.read_text()
+    assert "Where the tokens went" in txt and "3,000,000" in txt
+    assert "autocode" in res["summary"] and "4,000,000" in res["summary"]
+
+
+async def test_cost_investigate_fails_loudly_on_a_payload_it_cannot_read(
+        tmp_path, monkeypatch):
+    """A record written from an unreadable payload would be a confident blank.
+
+    The item's acceptance is a record that NAMES a cost cause, so a row that
+    cannot be investigated returns `status: failed` with the missing keys in the
+    summary and writes NO file: a blank markdown in the records directory reads
+    as a clean audit, while a failed row is visible on the dashboard. It is not
+    requeued either — a row without a run id can never become investigable, and
+    retrying it spends the one slot this source is allowed.
+    """
+    from workers.sources import cost_investigate as src
+    never = tmp_path / "never.md"
+    monkeypatch.setattr(src.CO, "record_path", lambda run_id: never)
+    q = WorkQueue(tmp_path / "workers.db")
+    q.enqueue(src.NAME, "cost-investigate", {"tokens": 1})
+    res = await src.execute(q.list_items(limit=1)[0])
+    assert res["status"] == "failed", res
+    assert "run_id" in res["summary"], res["summary"]
+    assert not never.exists(), "a record was written for a payload with no run"
+
+
+def test_cost_investigate_is_registered_and_its_config_block_is_written():
+    """The source is resolvable, and its operating numbers are in the config.
+
+    Two facts that have each broken a source before: registered-but-unresolvable
+    (#2079, poison at attempts = 0) and configured-but-unregistered, which is
+    inert and outlives its source (`test_config_configures_only_registered_sources`
+    in test_workers_doc_claims.py is the other half).
+    """
+    import workers.sources as sources
+    import yaml
+    assert "cost-investigate" in sources.SOURCE_REGISTRY
+    src = sources.SOURCE_REGISTRY["cost-investigate"]
+    assert src.NAME == "cost-investigate"
+    assert src.DEFAULT_PRIORITY == 92, "must stay the least urgent source"
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml"
+                          ).read_text())["workers"]["sources"]["cost-investigate"]
+    assert cfg["priority"] == 92 and cfg["max_inflight"] == 1
+    assert cfg["margin"] == 1.5 and cfg["min_samples"] == 40
+    assert cfg["cooldown_seconds"] == 21600
+    assert cfg["interval_seconds"] == 86400, "the cost of registering it: one tick/day"

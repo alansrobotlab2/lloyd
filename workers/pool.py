@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Optional
 
-from app import engine_pressure
+from app import cost_outlier, engine_pressure
 from app.harness.policy import current_effect_scope, current_scope
 from app.sessions_io import current_run_sessions, current_run_turns
 from workers.dispatch_watch import OK_WM_KEY
@@ -1505,6 +1505,25 @@ class WorkerPool:
                                 item.source, item.kind, item.id, norm["defer_seconds"])
                 await asyncio.to_thread(
                     partial(self.queue.mark_completed, item.id, not_before=defer_to))
+                # #2510: the cost-outlier trigger, fired on the run that just
+                # finished. AFTER the record and the completion, because what it
+                # judges is a finished run and it must not be able to delay one;
+                # off the event loop, because deciding costs two store reads. The
+                # whole call is wrapped: a trigger that can fail a job is worse
+                # than no trigger, and this one is allowed to be wrong out loud.
+                try:
+                    await asyncio.to_thread(
+                        partial(
+                            cost_outlier.arm_after_run, self.queue,
+                            run={"run_id": run_id, "source": item.source,
+                                 "status": run_status,
+                                 "completed_at": completed_at,
+                                 "meta_json": json.dumps(norm["meta"],
+                                                         default=str)},
+                            cfg=cost_outlier.load_config()))
+                except Exception:
+                    logger.exception("[%s] cost-outlier trigger raised for %s/%s",
+                                     worker_id, item.source, item.kind)
                 logger.log(
                     logging.WARNING if run_status == "failed" else logging.INFO,
                     "[%s] %s %s/%s in %.1fs%s", worker_id,

@@ -122,21 +122,46 @@ def test_the_task_id_prefers_the_result_then_the_payload():
 # ---------------------------------------------------------------------------
 
 
-async def _drain_one(q, monkeypatch, source_module, *, source_name="s", cfg=None):
-    """Run exactly one item through a real pool, then stop it."""
+async def _drain_one(q, monkeypatch, source_module, *, source_name="s", cfg=None,
+                     extra_cfg=None, wait_for=None, settle=0.3):
+    """Run exactly one item through a real pool, then stop it.
+
+    `extra_cfg` adds further sources to the config the pool sees WITHOUT running
+    them: the pool is asked for work by registered sources only, so a second
+    entry here is a config a completion hook can read (the cost-outlier trigger's
+    #2510 store paths and cooldown) while the registry still holds one executor.
+
+    `wait_for` is a zero-arg predicate polled every 20 ms against a 60-second
+    deadline; the pool is stopped when it holds. The default waits for the first
+    run ROW to exist, which is the right signal for a run whose record is the
+    result — and the wrong one for a completion hook, which is what #2510's
+    trigger is: a hook's effect is a queue row the source did not enqueue, so the
+    predicate has to name THAT. It polls a deadline rather than a fixed tick
+    count because the gate runs 8 of these processes at once, and a budget sized
+    for an idle box stops the pool before a loaded one has claimed the item — the
+    exact `got 0` the first gate of this round reported.
+
+    `settle` is only ever a grace for an awaited-but-not-yet-visible hand-off
+    (the hook runs in a worker thread after the row is marked completed). A
+    negative assertion needs one; it must never be the thing being measured.
+    """
     import workers.sources as sources
     monkeypatch.setattr(sources, "SOURCE_REGISTRY", {source_name: source_module},
                         raising=False)
-    monkeypatch.setattr(sources, "get_sources_config",
-                        lambda: {source_name: cfg or {"max_duration_seconds": 30}},
-                        raising=False)
+    conf = {source_name: cfg or {"max_duration_seconds": 30}}
+    conf.update(extra_cfg or {})
+    monkeypatch.setattr(sources, "get_sources_config", lambda: conf, raising=False)
     pool = WorkerPool(q, slots=1, poll_idle_seconds=0.01)
     await pool.start()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 60.0
     try:
-        for _ in range(400):
-            if q.list_runs(limit=5):
+        while loop.time() < deadline:
+            if wait_for() if wait_for else q.list_runs(limit=5):
                 break
             await asyncio.sleep(0.02)
+        if settle:
+            await asyncio.sleep(settle)
     finally:
         await pool.stop()
     return q.list_runs(limit=5)
@@ -1973,3 +1998,213 @@ def test_the_committed_witness_bytes_reproduce_the_zero_set_this_item_is_about()
         f"positive control failed: no `num_turns` in the bytes for scheduled-task "
         f"or bench-mine ({rows}), so the LIKE pattern is measuring nothing and the "
         "four zeros above prove nothing either")
+
+
+# ---------------------------------------------------------------------------
+# #2510 — the completion hook: an outlier run arms one diagnostic, once.
+#
+# This is the process boundary the item actually turns on: `pool.py` has already
+# written the run record, and now something has to happen AFTER it, in the pool's
+# own loop, that no source asked for. A library function tested alone cannot see
+# whether the pool ever calls it — which is precisely how `failure_ledger`'s
+# daily investigations sat unrunnable for weeks (#2079): the writer existed, no
+# one resolved its source name, and every row went out poisoned. So the positive
+# node below drives a real `WorkerPool` and reads the queue back.
+# ---------------------------------------------------------------------------
+
+def _seed_window(q, *, source, n=44, tokens=100_000, usage_db):
+    """`n` successful runs of `source`, each attributed to its own session.
+
+    Built through `record_run` and `usage_store.record_usage` rather than SQL, so
+    the distribution the hook reads is the distribution the shipped writers make.
+    """
+    from datetime import timedelta
+    from app import usage_store
+    from workers.queue import new_run_id
+    now = datetime.now(timezone.utc)
+    for i in range(n):
+        at = now - timedelta(days=i * 0.3)
+        item_id = q.enqueue(source, "k")
+        q.claim_next(worker_id="w1")
+        q.mark_running(item_id)
+        sid = f"worker:{source}:seed{i:04d}"
+        q.record_run(run_id=new_run_id(source), queue_id=item_id, source=source,
+                     status="success", started_at=at.isoformat(),
+                     completed_at=at.isoformat(), duration_seconds=90.0,
+                     summary="ok", meta_json=json.dumps({"session_ids": [sid]}))
+        # Completed too, not just recorded: a seeded row left in `running` is
+        # exactly what the pool's restart reconciliation requeues on start, and
+        # then the item that gets run is a seeded one, not the outlier under test.
+        q.mark_completed(item_id)
+        usage_store.record_usage(session_id=sid, model="primary",
+                                 input_tokens=tokens, output_tokens=tokens // 2)
+
+
+@pytest.fixture
+def cost_stores(tmp_path, monkeypatch):
+    """A scratch usage.db for the hook, isolated from the live store.
+
+    `app.paths.USAGE_DB` is the default the hook reads, and a test that left it
+    default would arm against the real fleet's bill.
+    """
+    from app import paths
+    import app.usage_store as us
+    udb = tmp_path / "usage.db"
+    monkeypatch.setattr(us, "DB_PATH", udb)
+    monkeypatch.setattr(paths, "USAGE_DB", udb)
+    return udb
+
+
+async def _wait_until(predicate, *, seconds: float = 30.0) -> bool:
+    """Poll `predicate` every 20 ms up to `seconds`. True as soon as it holds.
+
+    Shared by the three #2510 nodes because both directions need it and for the
+    same reason: a positive assertion that polls is correct and fast, and a
+    NEGATIVE one is only meaningful if the nothing it asserts had a real window in
+    which to arrive. `assert not thing_yet()` right after stopping a thread is not
+    an assertion about the rule, it is an assertion about scheduling.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    while loop.time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+def _cost_jobs(q, **want):
+    """Queued rows the trigger wrote, optionally filtered on payload keys."""
+    from app import cost_outlier as CO
+    out = [i for i in q.list_items(limit=200) if i.source == CO.SOURCE]
+    for k, v in want.items():
+        out = [i for i in out if i.payload.get(k) == v]
+    return out
+
+
+async def test_an_outlier_run_enqueues_one_diagnostic_under_its_own_source(
+        q, monkeypatch, cost_stores):
+    """Clause 3: one arming, one job, under the trigger's own source, at low priority.
+
+    44 seeded `autocode` runs clear the 40-sample floor; the run the pool is about
+    to finish spends 4M tokens against a ~150k P90. The job must land under
+    `cost-investigate` and not under `autocode`, because a diagnostic recorded as
+    a run of the source it is auditing would enter that source's own distribution
+    and move the threshold that watches it.
+    """
+    from app import cost_outlier as CO
+    _seed_window(q, source="autocode", usage_db=cost_stores)
+
+    sid = "worker:autocode:outlier-turn"
+
+    async def execute(item):
+        from app.sessions_io import note_run_session
+        import app.usage_store as us
+        note_run_session(sid)
+        us.record_usage(session_id=sid, model="primary",
+                        input_tokens=3_000_000, output_tokens=1_000_000)
+        return {"summary": "spent a great deal"}
+
+    q.enqueue("autocode", "k")
+    await _drain_one(q, monkeypatch, SimpleNamespace(NAME="autocode", execute=execute),
+                     source_name="autocode", settle=0.0,
+                     wait_for=lambda: bool(_cost_jobs(q)),
+                     extra_cfg={CO.SOURCE: {"cooldown_seconds": 21600}})
+
+    jobs = _cost_jobs(q)
+    assert len(jobs) == 1, f"expected exactly one diagnostic job, got {len(jobs)}"
+    assert jobs[0].priority == CO.DEFAULT_PRIORITY, (
+        f"the diagnostic must be the least urgent thing in the queue: "
+        f"{jobs[0].priority} vs default {CO.DEFAULT_PRIORITY}")
+    assert jobs[0].payload["run_id"], jobs[0].payload
+    assert jobs[0].payload["subject_source"] == "autocode", jobs[0].payload
+    assert jobs[0].payload["tokens"] > 1_000_000, jobs[0].payload
+
+
+async def test_a_second_outlier_of_the_same_source_in_the_cooldown_enqueues_nothing(
+        q, monkeypatch, cost_stores):
+    """Clause 3's second half, and the reason the cooldown is per subject source.
+
+    Same pool path, two enormous runs. The second must not enqueue: without a
+    cooldown a chatty source in a bad week spends the GPU on self-investigation
+    that a human reads as a firehose, and the whole loop is meant to be worth
+    less than what it explains.
+
+    The second run's completion is waited for explicitly, and then a 3-second
+    grace is spent CONFIRMING the second job never arrives. Both are load-bearing:
+    the first gate of this round stopped the pool before the loaded box had run
+    the second item at all, and a `len(jobs) == 1` read in that state is a green
+    node that proves nothing about the cooldown.
+    """
+    from app import cost_outlier as CO
+    _seed_window(q, source="autocode", usage_db=cost_stores)
+
+    async def make_exec(sid, tokens):
+        async def execute(item):
+            from app.sessions_io import note_run_session
+            import app.usage_store as us
+            note_run_session(sid)
+            us.record_usage(session_id=sid, model="primary",
+                            input_tokens=tokens, output_tokens=0)
+            return {"summary": "spent again"}
+        return execute
+
+    q.enqueue("autocode", "k")
+    await _drain_one(q, monkeypatch,
+                     SimpleNamespace(NAME="autocode",
+                                     execute=await make_exec("worker:autocode:f1",
+                                                             4_000_000)),
+                     source_name="autocode", settle=0.0,
+                     wait_for=lambda: len(_cost_jobs(q)) == 1,
+                     extra_cfg={CO.SOURCE: {"cooldown_seconds": 21600}})
+    assert len(_cost_jobs(q)) == 1, "the FIRST outlier did not arm"
+
+    second_id = q.enqueue("autocode", "k")
+    await _drain_one(q, monkeypatch,
+                     SimpleNamespace(NAME="autocode",
+                                     execute=await make_exec("worker:autocode:f2",
+                                                             5_000_000)),
+                     source_name="autocode", settle=0.0,
+                     wait_for=lambda: q.get(second_id).state == "completed",
+                     extra_cfg={CO.SOURCE: {"cooldown_seconds": 21600}})
+
+    arrived = await _wait_until(lambda: len(_cost_jobs(q)) == 2, seconds=3.0)
+    assert not arrived, (
+        "a second arming inside the 6 h cooldown enqueued a second job "
+        f"({len(_cost_jobs(q))}): the bound is what makes this loop affordable")
+    assert len(_cost_jobs(q)) == 1
+
+
+async def test_a_diagnostic_run_never_arms_another_diagnostic_from_the_pool(
+        q, monkeypatch, cost_stores):
+    """Clause 4 from the pool's side: the hook declines the investigator's own runs.
+
+    The same enormous spend, twice, through the same pool path — `autocode` arms,
+    `cost-investigate` does not. This is the regression the talk this came from
+    never addresses: the investigation is the run most likely to be an outlier, so
+    an unguarded hook turns one expensive audit into a chain of them.
+    """
+    from app import cost_outlier as CO
+    _seed_window(q, source="autocode", usage_db=cost_stores)
+    _seed_window(q, source=CO.SOURCE, n=44, tokens=200_000, usage_db=cost_stores)
+
+    async def execute(item):
+        from app.sessions_io import note_run_session
+        import app.usage_store as us
+        note_run_session("worker:cost-investigate:self")
+        us.record_usage(session_id="worker:cost-investigate:self", model="primary",
+                        input_tokens=6_000_000, output_tokens=0)
+        return {"summary": "an expensive audit"}
+
+    q_id = q.enqueue(CO.SOURCE, "cost-investigate")
+    await _drain_one(q, monkeypatch,
+                     SimpleNamespace(NAME=CO.SOURCE, execute=execute),
+                     source_name=CO.SOURCE, settle=0.0,
+                     wait_for=lambda: q.get(q_id).state == "completed",
+                     extra_cfg={CO.SOURCE: {"cooldown_seconds": 21600}})
+    # Give an armed hook a real window to write the row it must not write.
+    arrived = await _wait_until(
+        lambda: bool(_cost_jobs(q, subject_source=CO.SOURCE)), seconds=3.0)
+    assert not arrived, (
+        "the investigator armed itself: its own run entered the distribution "
+        "that watches it, which is the recursion the item's risk list names")

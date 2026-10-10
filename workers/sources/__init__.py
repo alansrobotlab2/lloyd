@@ -68,6 +68,7 @@ from workers.sources import board_steward as _board_steward  # noqa: E402,F401
 from workers.sources import owed_check as _owed_check  # noqa: E402,F401
 from workers.sources import frontend_probe_canary as _frontend_probe_canary  # noqa: E402,F401
 from workers.sources import failure_ledger as _failure_ledger  # noqa: E402,F401
+from workers.sources import cost_investigate as _cost_investigate  # noqa: E402,F401
 
 register(_scheduled_task)
 register(_autoresearch)
@@ -87,3 +88,10 @@ register(_frontend_probe_canary)
 # registration order: `app/failure_ledger.py` writes queue rows under this name,
 # and a row whose source is not registered here is poisoned as `unknown source`.
 register(_failure_ledger)
+# Also last, and for the same reason `failure_ledger` is: this source's queue rows
+# are created by `workers/pool.py` at run completion, not by its own tick, and a
+# row whose source is absent from this registry is poisoned as `unknown source`
+# before anything can read it (#2079 is the precedent for that failure mode).
+# Its own runs are excluded from the distribution that arms it — see
+# `app.cost_outlier.EXCLUDED_SOURCES`.
+register(_cost_investigate)

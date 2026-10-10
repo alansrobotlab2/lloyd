@@ -1709,6 +1709,37 @@ workers:
       # 47.1 min), out of 61 gaps across Oct 3-6 of which exactly one reached 60.
       wait_free_window_seconds: 3600
   sources:
+    # #2510: the cost-outlier diagnostic. NOTHING here is on a schedule in the
+    # sense the other blocks are: `workers/pool.py` calls
+    # `app.cost_outlier.arm_after_run` when a run finishes whose token spend is
+    # over `margin` x its own source's window P90 with at least `min_samples`
+    # behind it, and that hook enqueues this source's row. `enqueue_if_due`
+    # therefore DECLINES always, and `interval_seconds` is one day with
+    # `retry_seconds` unset precisely so the daily no-op is the whole cost of
+    # registering it — the pool advances a full interval on a bare DECLINED
+    # (pool.py:759-763). No model turn is spent on a record: the diagnostic is a
+    # read of the fired run's own `usage` rows plus one rule with its figure
+    # beside it, because an LLM turn re-reading an 800k-token run is a second
+    # 800k-token run and would itself be an outlier.
+    # The two numbers below are the operating point, measured by
+    # `scripts/maintenance/cost_replay.py` over the store's 18 held days:
+    # 1.0xP90 fires on 10.0% of runs (≈34 diagnostics/day — a firehose, since
+    # "above its own P90" is a tenth of everything BY CONSTRUCTION), 1.5x fires
+    # on 0.5% (10 in 18 days), 2.0x on 0.0% (dead). 1.5 is therefore a starting
+    # point chosen from that curve, and owed-check re-rules it on live fire
+    # volume. `cooldown_seconds` is per SUBJECT source, so one expensive source
+    # cannot suppress another's signal. Dollar-denominated thresholds are not
+    # an option on this box: `cost_usd` is 0.0 on every usage row.
+    cost-investigate:
+      enabled: true
+      priority: 92          # the least urgent thing in the queue, always
+      max_inflight: 1
+      interval_seconds: 86400
+      max_duration_seconds: 120
+      window_days: 30
+      min_samples: 40
+      margin: 1.5
+      cooldown_seconds: 21600
     # Cut 3 of senses-not-supervision: one steward turn instead of the
     # backlog state machine (`desired_statuses`, `reconcile_statuses`,
     # `implement_outcomes` and its caps, quarantine, expiry, the three-tier

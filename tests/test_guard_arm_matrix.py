@@ -250,7 +250,11 @@ def test_the_report_surface_prints_the_envelopes_on_demand():
     assert out.returncode == 0, out.stderr[-2000:]
     assert "worker sources with a capability envelope" in out.stdout
     assert "`youtube-digest`" in out.stdout
-    assert "worker sources with a capability envelope: 15" in out.stdout
+    # One row per registered source, so this moves with the registry: 16 since
+    # `cost-investigate` (#2510) registered on 2026-10-10. It is the report's own
+    # count, not a constant this file invented — the node above pins the row set
+    # against the roster's import list read from the AST.
+    assert "worker sources with a capability envelope: 16" in out.stdout
     assert "| 24 durable-external reach" not in out.stdout
     # Every un-narrowed source is named in the findings block, once.
     assert "capability findings" in out.stdout

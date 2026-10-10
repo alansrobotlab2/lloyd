@@ -20,7 +20,7 @@ chain and the morning triage are all autonomy *task files* that reach the pool
 through the single `scheduled-task` source — [[autonomy]] is that mechanism
 and [[autonomy-jobs]] is what each of those jobs is for, not this document.
 
-The fifteen are grouped here by **what they are for**, not by priority, because
+The sixteen are grouped here by **what they are for**, not by priority, because
 the families share more than the members do:
 
 | § | family | sources | what it is for |
@@ -28,18 +28,18 @@ the families share more than the members do:
 | §3 | **dispatch** | `scheduled-task` | one door onto the autonomy fleet |
 | §4 | **self-mod** | `arch-review`, `backlog-cluster`, `board-steward`, `owed-check`, `autotriage`, `autocode`, `automod-regression`, `autoresearch`, `frontend-probe-canary` | change Lloyd's own code, behind a gate |
 | §5 | **intake** | `youtube-digest`, `deep-research` | turn outside text into vault knowledge |
-| §6 | **mining** | `session-distill`, `bench-mine`, `failure-ledger` | turn Lloyd's own exhaust into staged notes, and into dated failure issues |
+| §6 | **mining** | `session-distill`, `bench-mine`, `failure-ledger`, `cost-investigate` | turn Lloyd's own exhaust into staged notes, and into dated failure issues |
 
-§1's roster is the other view — the same fifteen in priority order, which is
+§1's roster is the other view — the same sixteen in priority order, which is
 the order the pool considers them.
 
 ---
 
 ## 1. The roster
 
-Fifteen sources are registered.
+Sixteen sources are registered.
 
-All fifteen have a block under `workers.sources`, and none is registered-but-off:
+All sixteen have a block under `workers.sources`, and none is registered-but-off:
 `failure-ledger` was the last to get one, on 2026-10-06 (#2309). Until that block
 existed `WorkerPool._scheduler_pass` read an empty dict for the source
 (`workers/pool.py:1176`) and stepped past it at `:1177` without calling its
@@ -72,6 +72,7 @@ the parser as the count sentence being gone.
 | `deep-research` | intake | 70 | 3600 s | 1 | session | **yes** | off | yes |
 | `session-distill` | mining | 70 | 1800 s | 1 | direct (primary) | no | — | yes |
 | `automod-regression` | self-mod | 70 | 900 s | 1 | none (subprocess) | no | — | yes |
+| `cost-investigate` | mining | **92** | armed at a run's completion, not a timer | 1 | direct, no model turn | no | off | no |
 | `failure-ledger` | mining | 75 | every 1 h poll; **one sweep a day** (`min_interval_seconds`) | 1 | direct (primary) | no | — | yes |
 | `bench-mine` | mining | 80 | 7200 s | 1 | direct (primary) | no | — | yes |
 | `frontend-probe-canary` | self-mod | 80 | 3600 s poll, one run a day | 1 | none (subprocess) | no | — | yes |
