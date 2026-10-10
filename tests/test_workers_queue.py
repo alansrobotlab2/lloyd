@@ -12,6 +12,7 @@ Two of them are regressions, not hypotheticals — see
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -35,16 +36,381 @@ def _ids(items: list[QueueItem]) -> list[int]:
 
 
 def test_priority_ascending_then_oldest_first(q):
-    """Lower priority number runs sooner; ties break on enqueue order."""
+    """Lower priority number runs sooner; ties break on enqueue order.
+
+    This is the order the queue had before #2496, and it is still its order for any set
+    of rows young enough that no credit has been earned — which is what makes the youth
+    assertion below part of the node rather than decoration. Since #2496 the claim
+    compares `priority` MINUS an age credit, so a fixture that silently aged (a shared
+    frozen clock, a helper that backdated) would stop testing this order while still
+    collecting under this name and still passing by luck of the numbers chosen.
+    """
+    from workers import queue as queue_mod
+
     late_urgent = q.enqueue("a", "k", priority=10)
     early_dull = q.enqueue("b", "k", priority=70)
     mid = q.enqueue("c", "k", priority=40)
+
+    boundary = datetime.now(timezone.utc) - timedelta(
+        hours=queue_mod.AGING_PERIOD_HOURS)
+    assert all(datetime.fromisoformat(_enqueued_at(q, i)) > boundary
+               for i in (late_urgent, mid, early_dull)), (
+        "a row here is older than one aging period, so the order asserted below is the "
+        "age-adjusted one and not the plain `priority ASC, enqueued_at ASC` this node "
+        "exists to pin")
 
     order = []
     while (item := q.claim_next("worker-0")) is not None:
         order.append(item.id)
         q.mark_completed(item.id)
     assert order == [late_urgent, mid, early_dull]
+
+
+# ---------------------------------------------------------------------------
+# Aging: a wait that never ends is a bug, not a queue (#2496)
+# ---------------------------------------------------------------------------
+
+
+def _backdate_enqueued_at(q: WorkQueue, item_id: int, *, hours: float) -> str:
+    """Move a queued row's `enqueued_at` back by `hours` and hand the stamp back.
+
+    The age IS the fixture: `enqueue` stamps `enqueued_at` from the wall clock, so a
+    row that is supposed to have waited 18 hours has to be told it did. Sibling of
+    `_backdate_claimed_at`, which ages a row that has already left the queue.
+
+    Back, never forward — the one exception is the node that deliberately stamps the
+    future. Aging reads SQLite's own `strftime('%s','now')` and this helper works from
+    the wall clock the row was born under, so the two differ by however long the test
+    takes to run; a whole number of periods therefore reads as that number and never
+    one less.
+    """
+    past = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with q._connect() as conn:
+        conn.execute("UPDATE queue SET enqueued_at=? WHERE id=?", (past, item_id))
+        conn.commit()
+    return past
+
+
+def _enqueued_at(q: WorkQueue, item_id: int) -> str:
+    with q._connect() as conn:
+        return conn.execute("SELECT enqueued_at FROM queue WHERE id=?",
+                            (item_id,)).fetchone()[0]
+
+
+def _restamp_enqueued_at(q: WorkQueue, item_id: int, stamp: str) -> None:
+    """Stamp an EXACT `enqueued_at`, for a node about the SHAPE of the stamp rather
+    than about how long ago it was (`_backdate_enqueued_at` covers that)."""
+    with q._connect() as conn:
+        conn.execute("UPDATE queue SET enqueued_at=? WHERE id=?", (stamp, item_id))
+        conn.commit()
+
+
+def _aged_beats_fresh(tmp_path, *, aged_priority: int, hours: float,
+                      challenger_priority: int) -> bool:
+    """Whether a row aged `hours` is claimed ahead of a challenger enqueued now.
+
+    The claim is the only instrument that reads an effective priority: nothing stores
+    it, and that is the point of clause 3. So the number is measured the way a worker
+    measures it — by who gets the row. Its own database per probe: the ladder case probes
+    both directions in one run, and a shared file would have the second probe claim the
+    first probe's still-queued aged row — a false red that reads like a bug in the credit.
+    """
+    probe = WorkQueue(tmp_path / f"probe-{aged_priority}-{hours}-{challenger_priority}.db")
+    aged = probe.enqueue("aged", "k", priority=aged_priority)
+    probe.enqueue("fresh", "k", priority=challenger_priority)
+    _backdate_enqueued_at(probe, aged, hours=hours)
+    return probe.claim_next("worker-0").id == aged
+
+
+def test_the_aging_rule_is_three_named_numbers(q):
+    """The curve is three constants, not a number buried in an f-string.
+
+    Six hours, fifteen points, a floor of ten: the acceptance names all three, and
+    re-ruling the curve after a day of real traffic is owed to the owed-check job. That
+    re-rule has to be an edit to these constants plus the ladder below, which is why the
+    ladder computes from the literals and this node reads the constants beside them — if
+    the two ever disagree, the numbers moved in one place and not the other.
+    """
+    from workers import queue as queue_mod
+
+    assert (queue_mod.AGING_PERIOD_HOURS, queue_mod.AGING_POINTS_PER_PERIOD,
+            queue_mod.AGING_FLOOR_PRIORITY) == (6, 15, 10), (
+        "the credit moved; "
+        "test_the_credit_a_wait_earns_is_the_ladder_the_constants_describe and the "
+        "docstrings that quote 72 - 45 = 27 are the prose that has to move with it")
+
+    default_priority = inspect.signature(
+        WorkQueue.enqueue).parameters["priority"].default
+    assert default_priority > queue_mod.AGING_FLOOR_PRIORITY, (
+        f"`enqueue` now defaults to priority {default_priority} and the floor is "
+        f"{queue_mod.AGING_FLOOR_PRIORITY}. A row that never named a priority is meant to "
+        "carry its own number, not the floor's: at or below the floor its effective "
+        "priority would be the floor for the same reason an aged row's is, and the tie "
+        "would then fall to `priority ASC`, which compares STORED numbers, so the young "
+        "default row would lose to the old one on a term that no longer says anything "
+        "about either of them")
+
+
+def test_an_eighteen_hour_owed_check_row_is_claimed_ahead_of_a_fresh_scheduled_task_one(
+        q):
+    """The acceptance's own two rows, spelled with the sources that produced them.
+
+    `owed-check` at its real `DEFAULT_PRIORITY` of 72 and `scheduled-task` at its real 30
+    (#1830), the aged row three `AGING_PERIOD_HOURS` old — the shape measured on
+    2026-10-10, where id 7726 was an owed-check row at priority 72 sitting 23h37m at
+    attempts=0 while the pool claimed seven rows from the fresh 30 and 55 bands in twenty
+    minutes. The hour count is `3 * AGING_PERIOD_HOURS` rather than the literal 18 so a
+    re-ruled period moves this fixture with the constants instead of stranding it, and
+    the drain asserts BOTH positions: the aged row first, and the fresh priority-30 row
+    not vanished behind it, since a claim that sorted everything by age alone would pass
+    a first-row assert and still be wrong about what urgency a fresh urgent row keeps.
+    """
+    from workers.sources import owed_check, scheduled_task
+    from workers import queue as queue_mod
+
+    aged = q.enqueue(owed_check.NAME, "item", priority=owed_check.DEFAULT_PRIORITY)
+    fresh = q.enqueue(scheduled_task.NAME, "heartbeat",
+                      priority=scheduled_task.DEFAULT_PRIORITY)
+    assert (owed_check.DEFAULT_PRIORITY, scheduled_task.DEFAULT_PRIORITY) == (72, 30), (
+        "the two defaults this fixture is about moved; the numbers in this node's name "
+        "and prose are those constants, not the other way round")
+    _backdate_enqueued_at(q, aged, hours=3 * queue_mod.AGING_PERIOD_HOURS)
+
+    order = []
+    while (item := q.claim_next("worker-0")) is not None:
+        order.append(item.id)
+        q.mark_completed(item.id)
+    assert order == [aged, fresh], (
+        "an owed-check row three aging periods old did not reach the head of a queue "
+        "whose only other row is a fresh scheduled-task one — or it did by a route that "
+        "took the fresh row's turn away as well")
+
+
+#: (stored priority, hours waited, effective priority the claim must behave as).
+#: Every row here has an effective number BELOW its stored one, so the boundary probe is
+#: unambiguous: at a challenger equal to the effective number the tie is broken by the
+#: ORDER BY's second term, the stored `priority`, and the challenger's number is the
+#: lower one in every row. A row whose credit is zero — and the row the `MIN` clamp
+#: protects — ties differently and is pinned by its own node, not smuggled in here.
+@pytest.mark.parametrize("stored, hours, effective", [
+    (72, 6, 57),          # one period: the live `owed-check` number, one period old
+    (72, 18, 27),         # three periods: the crossover over a fresh priority-30 row
+    (72, 24, 12),         # four periods
+    (72, 30, 10),         # five periods would be -3; the floor is what holds
+    (72, 60, 10),         # ten periods: the floor stops the fall, it is not a deadline
+    (55, 12, 25),         # `autotriage`, the band that WAS being claimed, ages too
+    (65, 6, 50),          # `backlog-cluster`
+])
+def test_the_credit_a_wait_earns_is_the_ladder_the_constants_describe(
+        tmp_path, stored, hours, effective):
+    """15 points per 6 FULL hours, floored at effective priority 10 — measured, not read.
+
+    Probed from both sides, because one claim only proves an inequality: a challenger
+    one point worse than the effective priority loses, and a challenger AT the effective
+    priority wins on the stored-`priority` tiebreak. Together those two answers say the
+    effective number is exactly `effective`, so a credit one period short, or a floor
+    that never engaged, cannot pass this node quietly.
+
+    The row is aged with the real clock and the challenger is enqueued now, so the
+    elapsed delta is the true wait plus the milliseconds the fixture took. Integer
+    division by the period is what makes that safe, and it is the same division that
+    makes 5h59m worth nothing.
+    """
+    assert _aged_beats_fresh(tmp_path, aged_priority=stored, hours=hours,
+                             challenger_priority=effective + 1), (
+        f"a priority-{stored} row aged {hours}h did not beat a fresh "
+        f"priority-{effective + 1} row, so it is worth less than effective {effective}")
+    assert not _aged_beats_fresh(tmp_path, aged_priority=stored, hours=hours,
+                                 challenger_priority=effective), (
+        f"a priority-{stored} row aged {hours}h beat a fresh priority-{effective} row, "
+        f"which it may only do if its effective priority is below {effective} — the tie "
+        f"goes to the lower stored number, and the challenger holds {effective} against "
+        f"{stored}")
+
+
+def test_a_wait_short_of_one_period_earns_nothing(tmp_path):
+    """`/ period` is INTEGER division, and that is the whole difference between a
+    credit per full period and a credit per second.
+
+    5h59m is 21,540 seconds against a 21,600-second period. Truncated that is zero
+    periods and a priority-72 row still reads 72, so a fresh 71 outranks it; pro-rated
+    it would read 57.04 and the aged row would win. The challenger is therefore aimed at
+    71 and not at some number far away: the near-miss is the only one that tells those
+    two curves apart.
+    """
+    assert not _aged_beats_fresh(tmp_path, aged_priority=72, hours=5 + 59 / 60,
+                                 challenger_priority=71), (
+        "a 5h59m wait bought a credit, so aging is pro-rated per second and every row "
+        "in the queue ages continuously instead of per period")
+
+
+def test_a_row_below_the_floor_is_never_demoted_by_its_own_age(tmp_path):
+    """`MIN(priority, ...)` is in the expression for a reason: the floor limits the
+    BOOST and must not become a ceiling on the row.
+
+    A priority-8 row aged 60 hours has earned 150 points, which arithmetic alone puts at
+    -142 and the floor alone lifts to 10 — behind a fresh priority-9 row. Nothing on
+    this fleet enqueues below 30 today, so this is not today's bug; it is the reason a
+    future urgent band cannot be silently reordered by a rule written to help old rows.
+    The challenger at 9 is what separates the shipped expression (aged row stays 8 and
+    wins) from `MAX(priority - credit, FLOOR)` (aged row becomes 10 and loses).
+    """
+    assert _aged_beats_fresh(tmp_path, aged_priority=8, hours=60,
+                             challenger_priority=9), (
+        "an aged priority-8 row fell behind a fresh priority-9 row: the floor is being "
+        "applied on top of the stored number rather than under it")
+
+
+def test_an_unparseable_enqueued_at_jumps_no_queue(q):
+    """NULL is the smallest value in an ascending ORDER BY, so an age the database
+    cannot read would win every claim if the credit were not coalesced to zero.
+
+    `strftime` returns NULL for a stamp it cannot parse rather than raising, and
+    `pending_wait_by_source` already refuses to invent an age for one — the claim path
+    has to reach the same answer about the same column, or the queue would dequeue on a
+    figure the API cannot see. The challenger is a fresh priority-30 row against the
+    unreadable one at priority 90: coalesced, the 90 loses; ordered as NULL, it is
+    claimed first and this node goes red.
+    """
+    unreadable = q.enqueue("owed-check", "k", priority=90)
+    fresh = q.enqueue("scheduled-task", "k", priority=30)
+    _restamp_enqueued_at(q, unreadable, "yesterday o'clock")
+    assert q.claim_next("worker-0").id == fresh, (
+        "the row with an unparseable stamp was claimed first, which is what an "
+        "unordered NULL in the ORDER BY does")
+
+
+def test_a_row_stamped_in_the_future_is_not_pushed_behind_its_own_band(q):
+    """A row stamped ahead of `now` keeps its own band.
+
+    A box whose clock lags and is then corrected, or an `enqueued_at` written by a writer
+    in another timezone, can put a row ahead of `now`, so `strftime` reports a negative
+    elapsed span: 30 hours of it is a credit of -75, and `72 - (-75)` is 147.
+
+    What this node can actually kill is the `MIN(priority, …)`, and it is worth naming,
+    because the expression carries two guards and only one of them is load-bearing here.
+    `MIN` caps the effective number at the stored one, which is why the row is read at 72
+    and stays ahead of the fresh priority-90 one; take the MIN out and SQLite reads this
+    same row at 147, which orders it after the 90. Measured on this round, both ways: the
+    credit expression with `MAX(0, …)` deleted left these three files at 381 passed, and
+    the same expression evaluated with the MIN deleted returned 147 for this stamp.
+
+    So `MAX(0, …)` is redundant while the MIN stands — no node in these files can remove
+    it over a green suite, including this one — and it stays anyway, because "a negative
+    wait earns nothing" is a property of the credit rather than of the cap, and it is the
+    only thing between a future stamp and a 147 if the cap ever moves. A term no test can
+    see has to be named in the node beside it, which is what this paragraph is for.
+    """
+    future = q.enqueue("owed-check", "k", priority=72)
+    dull = q.enqueue("bench-mine", "k", priority=90)
+    _restamp_enqueued_at(
+        q, future, (datetime.now(timezone.utc) + timedelta(hours=30)).isoformat())
+    order = []
+    while (item := q.claim_next("worker-0")) is not None:
+        order.append(item.id)
+        q.mark_completed(item.id)
+    assert order == [future, dull], (
+        "the row stamped 30h in the future did not stay in its own band (a negative "
+        "wait subtracts as if it were a credit)")
+
+
+def test_below_one_aging_period_the_order_is_untouched(q):
+    """Clause 2: nothing moves until a row has actually waited a full period.
+
+    A priority-30 row enqueued AFTER a priority-70 row is still claimed first, and two
+    rows of equal priority still come out oldest-first. Both halves are what
+    `test_priority_ascending_then_oldest_first` pins with brand-new rows; the ages here
+    are five hours, one hour short of the period, so this is the same claim made about
+    rows that have sat for an afternoon — the window most of the queue's life is spent
+    in, and the window in which a credit would be a regression.
+    """
+    dull = q.enqueue("deep-research", "k", priority=70)
+    urgent_later = q.enqueue("scheduled-task", "k", priority=30)
+    elder_twin = q.enqueue("session-distill", "k", priority=50)
+    younger_twin = q.enqueue("session-distill", "k", priority=50)
+    for item_id in (dull, elder_twin):
+        _backdate_enqueued_at(q, item_id, hours=5)
+
+    first = q.claim_next("worker-0")
+    assert first.source == "scheduled-task" and first.id == urgent_later, (
+        f"a 5h-old priority-70 row overtook a fresh priority-30 row ({first.source}), "
+        "so a credit is being given below one aging period")
+
+    order = [first.id]
+    while (item := q.claim_next("worker-0")) is not None:
+        order.append(item.id)
+    assert order == [urgent_later, elder_twin, younger_twin, dull], (
+        "equal priorities stopped breaking on enqueued_at oldest-first, or the 5h-old "
+        "priority-70 row was lifted out of last place by an age credit")
+
+
+def test_aging_never_rewrites_the_stored_priority(q):
+    """Clause 3: the credit is arithmetic at selection time, and the column keeps
+    meaning what `enqueue` was told.
+
+    The alternative implementations — a periodic `UPDATE queue SET priority = priority -
+    credit`, or a boost folded in at enqueue — would pass every ordering node in this
+    file and break every reader that quotes the number: the depth panel's per-source
+    table, `work_queue_status`'s payload, the `DEFAULT_PRIORITY` constants in
+    `workers/sources/*` that dispatch compares against, and the next reader who finds a
+    row listed at 72 stored as 12 and reasonably asks who moved it. So the aged row is
+    claimed, the rows behind it are claimed, and every surviving value is read back as
+    the number its own call supplied — including the row whose arithmetic went past the
+    floor, which a column-side boost would have stored as 10.
+    """
+    given = {"owed-check": 72, "bench-mine": 80, "scheduled-task": 30,
+             "autotriage": 55}
+    ids = {source: q.enqueue(source, "k", priority=priority)
+           for source, priority in given.items()}
+    _backdate_enqueued_at(q, ids["owed-check"], hours=30)   # 72 - 75 -> floored to 10
+    _backdate_enqueued_at(q, ids["bench-mine"], hours=12)   # 80 - 30 -> 50
+
+    claimed = []
+    while (item := q.claim_next("worker-0")) is not None:
+        claimed.append(item.source)
+        q.mark_completed(item.id)
+    assert claimed == ["owed-check", "scheduled-task", "bench-mine", "autotriage"], (
+        f"claim order is not the age-adjusted one this fixture was built for: {claimed}")
+
+    for source, priority in given.items():
+        row = q.get(ids[source])
+        assert row.priority == priority, (
+            f"`{source}` is stored as {row.priority} after being listed at "
+            f"{priority}: something is aging the column instead of the comparison")
+
+
+def test_an_unreachable_aging_period_restores_todays_exact_order(q, monkeypatch):
+    """Clause 4: one constant is the switch, and off reproduces the order this file
+    pinned before #2496 — not an order that merely looks plausible.
+
+    100,000 hours is a period no row here can reach (the oldest live wait measured on
+    2026-10-10 was 23h37m), so every credit must come out zero and the claim must
+    reproduce `priority ASC, enqueued_at ASC` over rows that WOULD have been reordered a
+    moment before: this fixture ages a priority-70 row 30 hours (effective 10 with aging
+    on) and a priority-40 row 20 hours (effective 25), and today's order puts them fifth
+    and second out of five. Were the constants interpolated into the SQL at import
+    rather than bound per call, the same edit would change nothing and this node would
+    pass either way — which is why the assertion is on the whole five-row sequence.
+    """
+    from workers import queue as queue_mod
+    monkeypatch.setattr(queue_mod, "AGING_PERIOD_HOURS", 100_000)
+
+    stale_dull = q.enqueue("session-distill", "k", priority=70)   # would be effective 10
+    aged_mid = q.enqueue("autotriage", "k", priority=40)          # would be effective 25
+    fresh_top = q.enqueue("scheduled-task", "k", priority=30)
+    elder_twin = q.enqueue("board-steward", "k", priority=50)
+    younger_twin = q.enqueue("board-steward", "k", priority=50)
+    _backdate_enqueued_at(q, stale_dull, hours=30)
+    _backdate_enqueued_at(q, aged_mid, hours=20)
+    _backdate_enqueued_at(q, elder_twin, hours=10)
+
+    order = []
+    while (item := q.claim_next("worker-0")) is not None:
+        order.append(item.id)
+        q.mark_completed(item.id)
+    assert order == [fresh_top, aged_mid, elder_twin, younger_twin, stale_dull], (
+        "with a period no row can reach, the claim order was not `priority ASC, "
+        "enqueued_at ASC` — the constant is not the whole switch")
 
 
 def test_a_claim_is_exclusive(q):

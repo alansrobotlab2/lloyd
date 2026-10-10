@@ -672,25 +672,41 @@ def _blocked_note(entry: dict) -> str:
 
 def _queue_starving(queue: WorkQueue, max_duration: int) -> float:
     """Age in seconds of the oldest claimable queued item, if it is older than
-    3x max_duration. Catches the opposite failure: dispatch fine, workers dead."""
-    import datetime as _dt
+    3x max_duration. Catches the opposite failure: dispatch fine, workers dead.
+
+    **Every source, and the oldest row rather than the newest 500.** This read used
+    to be `queue.list_items(source=NAME, limit=500)`, and asking one question about
+    one source bought two blind spots out of it. `NAME` is `scheduled-task`, so a
+    backlog of `owed-check`, `session-distill`, `board-steward`, `bench-mine` or
+    `frontend-probe-canary` rows was invisible to the alarm that exists to notice a
+    backlog: on 2026-10-10 the queue held 31 claimable rows at attempts=0, oldest
+    23h37m, every one of them in the 65-80 priority bands and none of them
+    `scheduled-task`, and this function returned 0.0 for every hour they waited. And
+    `list_items` ends `ORDER BY enqueued_at DESC LIMIT ?`, so once more than 500 rows
+    are queued the rows it drops are the OLDEST ones — the figure under-reports by
+    exactly as much as the backlog has grown, which is the one direction that matters.
+
+    `WorkQueue.pending_wait_by_source` is the read that already had this right:
+    source-agnostic, no `since` window, no LIMIT, and the same two exclusions this
+    loop made by hand — a row whose `not_before` is still in the future is waiting by
+    design (`mark_failed`'s back-off, not pool starvation), and a row whose
+    `enqueued_at` cannot be parsed contributes no age. Both are stated on that
+    method, so they are not restated as rules here; the max over its per-source
+    figures is all this detector needs, and the alarm and the Mission Control panel
+    cannot disagree about how long the fleet has been waiting.
+
+    What has not moved is the threshold and the shape of the answer: 3x
+    `max_duration`, and 0.0 when nothing qualifies, which the alert's wording and the
+    streak logic in `tick()` both depend on. A read that raises still returns 0.0 —
+    an unreadable queue is not evidence of a stall, and a watchdog that alarmed on its
+    own exception would spend a person's cooldown on a lock.
+    """
     try:
-        items = queue.list_items(source=NAME, limit=500)
+        waits = queue.pending_wait_by_source()
     except Exception:
         return 0.0
-    now = _dt.datetime.now(_dt.timezone.utc)
-    oldest = 0.0
-    for i in items:
-        if i.state != "queued":
-            continue
-        if i.not_before:
-            nb = _parse_iso_safe(i.not_before)
-            if nb and nb > now:
-                continue
-        enq = _parse_iso_safe(i.enqueued_at)
-        if not enq:
-            continue
-        oldest = max(oldest, (now - enq).total_seconds())
+    oldest = max((entry["max_wait_seconds"] for entry in waits.values()),
+                 default=0.0)
     return oldest if oldest > 3 * max_duration else 0.0
 
 

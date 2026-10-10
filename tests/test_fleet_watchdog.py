@@ -492,6 +492,72 @@ async def test_the_watchdog_reads_max_duration_seconds_and_never_the_enabled_fla
         f"what sets the threshold: {alerts}")
 
 
+def test_a_starved_backlog_of_another_source_is_detected(tmp_path):
+    """Clause 5 (#2496): the age read is about the queue, not about this watchdog's
+    own source.
+
+    The read was `queue.list_items(source=NAME, limit=500)` with `NAME =
+    "scheduled-task"`, so `_queue_starving` could only ever see rows the scheduler for
+    this box enqueues. The backlog that actually starved on 2026-10-10 was 31 rows of
+    `owed-check`, `session-distill`, `board-steward`, `bench-mine` and
+    `frontend-probe-canary`: 31 claimable rows at attempts=0, `not_before` NULL on every
+    one, oldest 2026-10-09T15:53:31Z — 23h37m — while the seven claims the pool made in
+    the twenty minutes after 15:20Z all came from the priority-30 and priority-55 bands.
+    The alarm returned 0.0 for every hour of that, and that is why a day of starvation
+    passed with nobody told.
+
+    A real `WorkQueue`, not a stand-in: a fake that answers a source-scoped read and a
+    source-agnostic read the same way makes this node pass either way. The queue below
+    holds ONE source and not one `scheduled-task` row — the exact shape that read as
+    healthy for 23 hours — and the age is the measured 23h37m, so the node is the
+    incident and not a round number.
+    """
+    q = WorkQueue(tmp_path / "starved.db")
+    row_id = q.enqueue(source="owed-check", kind="owed-check:clause",
+                       payload={"item_id": 2358, "apply": True})
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE queue SET enqueued_at=? WHERE id=?",
+                     (_ago(hours=23, minutes=37), row_id))
+        conn.commit()
+
+    age = fw._queue_starving(q, 3600)
+    assert age > 3 * 3600, (
+        "a 23h37m owed-check backlog is invisible to the starvation alarm, which is the "
+        "blind spot that let #2496 run for a day unreported")
+    assert pytest.approx(age, abs=120) == 23 * 3600 + 37 * 60, (
+        "the figure reported is not the age of the oldest claimable row in the queue")
+
+
+def test_the_age_read_is_not_a_window_of_the_newest_rows(tmp_path):
+    """The second blind spot in the same line, pinned on its own so it cannot come back
+    without spending a node.
+
+    `list_items` ends `ORDER BY enqueued_at DESC LIMIT ?`, so the rows a 500-row window
+    drops are the OLDEST ones: the alarm under-reported by exactly as much as the
+    backlog had grown, which is the only direction the queue moves when it is failing.
+    Source scoping is the node above; every row here is `scheduled-task`, the one source
+    the old filter could see, so the window is the only thing standing between this
+    fixture and an alarm. 501 rows, the oldest one a day behind the rest: one more than
+    the limit that hid it, so the shape under test is the shape that failed.
+    """
+    q = WorkQueue(tmp_path / "window.db")
+    recent, old = _ago(minutes=10), _ago(hours=23, minutes=37)
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.executemany(
+            "INSERT INTO queue (source, kind, payload_json, priority, state, "
+            "enqueued_at) VALUES (?,?,?,?,?,?)",
+            [("scheduled-task", "heartbeat", "{}", 30, "queued", recent)] * 500
+            + [("scheduled-task", "heartbeat", "{}", 30, "queued", old)])
+        conn.commit()
+    with sqlite3.connect(str(q.db_path)) as conn:
+        held = conn.execute("SELECT count(*) FROM queue WHERE state='queued'").fetchone()[0]
+    assert held == 501, f"the fixture is not the shape this node is about: {held} rows"
+
+    age = fw._queue_starving(q, 3600)
+    assert pytest.approx(age, abs=120) == 23 * 3600 + 37 * 60, (
+        "the oldest queued row was dropped from the age figure by a newest-first window")
+
+
 def test_the_watchdog_adds_no_config_key_of_its_own():
     """Clause 5's other half: it needs nothing that is not already in config.yaml.
 

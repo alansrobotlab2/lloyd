@@ -542,7 +542,11 @@ lloyd-guardian`), plus `scripts/voice/enroll_own_voice.py` re-run.
 One SQLite queue drained by `workers.slots` asyncio workers inside the backend
 (`architecture/workers.md`; the jobs are `architecture/workers-jobs.md`).
 
-- **`priority ASC`: a lower number runs sooner.**
+- **`priority ASC`: a lower number runs sooner** — of the *effective*
+  priority, which is the stored one minus 15 points per 6 full hours waited
+  (`AGING_*` in `workers/queue.py`), floored at 10 and never written back. A row
+  that has waited a day is therefore not stuck by design; if it is, the pool is
+  not claiming (#2496).
 - A **raised** failure retries with backoff; a **returned**
   `{"status": "failed"}` does not. `skipped` is a status, not a key.
 - Nothing in a source may block the event loop (no `subprocess.run` in

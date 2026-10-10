@@ -143,6 +143,108 @@ _CLAIM_RACE_RETRIES = 5
 # their next claim, they are not exempt.
 _CLAIM_CAP_SCAN_LIMIT = 64
 
+# ── Aging: how a long wait buys urgency ───────────────────────────────────
+# The three numbers below are the whole rule, and setting `AGING_PERIOD_HOURS`
+# above any wait a row can reach is the switch that turns aging off: the
+# expression then evaluates to `priority` for every row, which is the order this
+# file had until #2496. They are constants, not config, because nothing was
+# tuning them while 31 rows sat at attempts=0.
+
+#: Hours a row must wait before its age starts counting, and the unit of every
+#: credit after that — a credit is earned per FULL period, never pro rata.
+#:
+#: Six hours is longer than any legitimate wait for a slot on this box and shorter
+#: than the starvation #2496 measured. The queue on 2026-10-10 held 31 rows at
+#: attempts=0 with `not_before` NULL on every one, oldest `enqueued_at`
+#: 2026-10-09T15:53:31Z — 23h37m — while the seven claims the pool made in the
+#: twenty minutes after 15:20Z came only out of the priority-30 (`scheduled-task`)
+#: and priority-55 (`autotriage`, claimed within 2 s of enqueue) bands. The starving
+#: rows were 65/68/70/72/80: `owed-check`, `session-distill`, `board-steward`,
+#: `bench-mine`, `frontend-probe-canary`. A continuous stream of fresh work at a
+#: lower number therefore never once reached the head of the queue, and the loops
+#: that settle owed clauses and distill transcripts were displaced indefinitely, not
+#: merely late. `pending_wait_by_source` had been reporting that exact 11 h 10 min
+#: shape since #1526 and nothing in the claim path read it.
+AGING_PERIOD_HOURS = 6
+
+#: Priority points (a LOWER number) one full period buys. 15 per 6 h moves a
+#: priority-72 `owed-check` row to 57 after a day of waiting, and past a fresh
+#: priority-30 `scheduled-task` row after 18 h (72 - 45 = 27 < 30) — the crossover
+#: the live queue needed on 2026-10-10 and never got. The curve is owed-check's to
+#: re-rule once a day of real traffic has been measured against it; the number is
+#: fixed here so a round can land, not so it is final.
+AGING_POINTS_PER_PERIOD = 15
+
+#: The lowest effective priority aging may produce, so waiting cannot make an old
+#: row outrank everything at once. It is also a ceiling on the boost: a row already
+#: inside this band (`priority` <= 10) is untouched by its own age, because the
+#: effective value is `MIN(priority, ...)`, never above the number the caller asked
+#: for. Nothing on this fleet enqueues below 30 today, so the clamp is not a
+#: present-tense case — it is the reason a future 5 cannot be silently demoted
+#: behind a fresh 8 by a rule that was only ever meant to help the old ones.
+AGING_FLOOR_PRIORITY = 10
+
+
+def _effective_priority_sql() -> "tuple[str, list]":
+    """The `ORDER BY` term that makes a row's wait count, with its bind parameters.
+
+    One expression, evaluated by SQLite at selection time, so no row is ever
+    rewritten: aging a queue by UPDATE would make the stored `priority` column mean
+    "whatever the queue's age was when someone last touched it", and every read that
+    quotes it — the queue-depth panel, this file's own `enqueue` default of 50, the
+    per-source `DEFAULT_PRIORITY` in `workers/sources/*` — would start lying. The
+    number a caller passed stays the number that row carries until it is deleted.
+
+    Shape, innermost first:
+
+    * `CAST(strftime('%s', 'now') - CAST(strftime('%s', enqueued_at)` — elapsed
+      whole seconds, both sides read by SQLite's own UTC clock. A naive stamp is
+      read as UTC, the same convention `pending_wait_by_source` uses through
+      `_iso_or_none` and `_iso_seconds_between` uses to bill GPU-hours, so the age
+      that decides a claim cannot disagree with the wait the API reports for the
+      same row.
+    * `/ ?` with an INTEGER parameter — SQLite's integer division, which is what
+      makes a credit per FULL period rather than per second.
+    * `MAX(0, ...)` — a negative wait is not a wait, so a row stamped in the future
+      (clock skew, or an NTP correction after a late boot) earns nothing at this term.
+      Say what it does and does not do, because the two guards here are not equal: the
+      `MIN(priority, ...)` below is what keeps a future-stamped row inside its own band.
+      Measured twice on this round: with the clamp deleted from the expression,
+      `tests/test_workers_queue.py tests/test_fleet_watchdog.py
+      tests/test_backlog_unattended.py` stayed at 381 passed — no node in those files can
+      remove it over a green suite — and the same expression evaluated without the MIN
+      returns 147 for a stamp 30h ahead of `now`, which orders that row after a fresh
+      priority-90 one. So while the MIN stands this clamp is redundant, and
+      `tests/test_workers_queue.py::test_a_row_stamped_in_the_future_is_not_pushed_behind_its_own_band`
+      reddens on the MIN, not on it. It stays because "a negative wait earns nothing" is
+      a property of the credit and not of the cap, and it is all that stands between a
+      future stamp and a 147 if the cap ever moves.
+    * `COALESCE(..., 0)` — `strftime` returns NULL for a stamp it cannot parse, and
+      NULL is the smallest value in an ascending `ORDER BY`: a hand-written or
+      corrupt stamp would otherwise jump the whole queue. An unparseable age is no
+      credit, exactly the rule `pending_wait_by_source` states for the same column.
+    * `MIN(priority, MAX(priority - credit, ?))` — the boost, capped at the floor and
+      never above the caller's own number.
+
+    One reading to close before someone tries it: `AGING_PERIOD_HOURS = 0` is NOT
+    maximum aging. SQLite returns NULL for a division by zero rather than raising, so
+    a zero period lands on the `COALESCE` and buys every row nothing — the same
+    inert order as an unreachable period, reached by a different route.
+
+    **What it costs.** The `WHERE` still rides `idx_queue_state_prio`, but the
+    ordering is now computed rather than index-supplied, so SQLite sorts the queued
+    set before taking `LIMIT 1`. It is the queued set and not the table: 31 rows on
+    the live queue at the time of writing, where the index-ordered claim was already
+    doing a per-poll full scan of the same rows to apply the inflight `NOT IN`.
+    """
+    return (
+        "MIN(priority, MAX(priority - COALESCE("
+        "MAX(0, (CAST(strftime('%s', 'now') AS INTEGER)"
+        " - CAST(strftime('%s', enqueued_at) AS INTEGER)) / ?) * ?, 0), ?))",
+        [int(AGING_PERIOD_HOURS * 3600), AGING_POINTS_PER_PERIOD,
+         AGING_FLOOR_PRIORITY],
+    )
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -600,6 +702,17 @@ class WorkQueue:
         sources, for the same reason — a held source's queued rows must not
         hide a claimable row behind them.
 
+        **Ordering is age-adjusted, and the stored number is not what is
+        compared.** The row handed out is the lowest `priority` once the credit
+        `_effective_priority_sql()` computes from `enqueued_at` has been taken off
+        it. `priority ASC, enqueued_at ASC` alone made waiting a tiebreaker INSIDE
+        one band and nowhere else, so a steady stream of fresh work at a lower
+        number never once reached the head: a 23h37m `owed-check` row sat at
+        attempts=0 on 2026-10-10 while the pool claimed seven priority-30 and
+        priority-55 rows in twenty minutes (#2496). Below one `AGING_PERIOD_HOURS`
+        nothing changes, and no row is rewritten to age it — the curve, the floor
+        and the measurement behind both are on the constants.
+
         **A row already at the ceiling is not handed to a worker; it is
         poisoned, with the cap named in its `error`.** The claim is where the
         ceiling has to live because this method's own UPDATE is what raises
@@ -630,7 +743,17 @@ class WorkQueue:
             if excluded:
                 sql += f" AND source NOT IN ({','.join('?' * len(excluded))})"
                 args.extend(excluded)
-            sql += " ORDER BY priority ASC, enqueued_at ASC LIMIT 1"
+            # Age-adjusted, then the two terms this ordering has always had. The
+            # computed term is why `enqueued_at` survives as a SECOND tiebreak rather
+            # than as the aging mechanism: inside one priority band it was already
+            # oldest-first, and that is exactly the property aging has to extend ACROSS
+            # bands. Both stay ahead of `LIMIT 1`, so the claim is still one row picked
+            # in SQL — see the inflight-quota note above for why a Python-side sort of a
+            # windowed result is not the same thing.
+            order_expr, order_args = _effective_priority_sql()
+            sql += (f" ORDER BY {order_expr} ASC, priority ASC, "
+                    "enqueued_at ASC LIMIT 1")
+            args.extend(order_args)
 
             cap = self.max_attempts
             # Re-read after the UPDATE rather than trusting rowcount: the lock

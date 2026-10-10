@@ -89,11 +89,27 @@ queued ──claim──► claimed ──► running ──┬─ ok ───�
 
 ### Claiming
 
-Ordered `priority ASC, enqueued_at ASC` — **a lower priority number runs
-sooner**, which is worth saying out loud because it has been read backwards
-once already: `autocode` sat at 80, behind research jobs at 70 that
-arrive every few minutes, and the first unattended round had no path to a
-slot. It is at 40 now.
+Ordered by **effective** priority — the stored `priority` minus a credit for how
+long the row has been waiting — then `priority ASC, enqueued_at ASC`. **A lower
+priority number runs sooner**, which is still worth saying out loud because it has
+been read backwards once already: `autocode` sat at 80, behind research jobs at 70
+that arrive every few minutes, and the first unattended round had no path to a slot.
+It is at 40 now.
+
+Waiting now buys urgency, because the plain order could not make it stop happening.
+`AGING_PERIOD_HOURS`, `AGING_POINTS_PER_PERIOD` and `AGING_FLOOR_PRIORITY` in
+`workers/queue.py` are 6 h, 15 points and 10: a row earns 15 points (lower, so
+sooner) per six full hours queued, never below effective 10, computed inside the
+`ORDER BY` and never written back — `enqueue`'s number is what the `priority` column
+keeps, so the depth panel and every source's `DEFAULT_PRIORITY` still mean what they
+say. Below six hours the order is exactly the old one. The reason is #2496: on
+2026-10-10 thirty-one claimable rows sat at `attempts=0`, the oldest
+23 h 37 m, every one of them at 65-80, while the pool claimed seven rows in twenty
+minutes — all of them from the fresh 30 and 55 bands. A continuous stream of cheap
+work at a lower number meant the head of the queue was never reached, and the loops
+that settle owed clauses and distill transcripts were displaced indefinitely rather
+than merely late. The curve is owed-check's to re-rule once real traffic has been
+measured against it.
 
 `max_inflight` per source is applied **in the SQL**, by excluding saturated
 sources from the query. It used to select fifty rows and skip over-quota ones

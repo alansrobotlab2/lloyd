@@ -881,12 +881,46 @@ def test_a_confirmed_acceptance_is_kept_whole_and_written_into_the_item(isolated
 
 
 def test_automod_jobs_are_not_queued_behind_routine_research():
-    """The pool dequeues `priority ASC`. At 80 the first implement round sat
-    behind four research/distill jobs at 70 with more arriving every few
-    minutes, and never reached a slot."""
-    from workers.sources import deep_research, session_distill
+    """The pool dequeues by priority ascending. At 80 the first implement round
+    sat behind four research/distill jobs at 70 with more arriving every few
+    minutes, and never reached a slot.
+
+    Read out of `claim_next`'s EXECUTED code rather than as one fixed substring of the
+    file. #2496 put an age credit in FRONT of `priority ASC` — 15 points per six full
+    hours, which for these sources means a priority-40 implement round and a
+    priority-80 one both overtake a fresh 70 after a day of waiting — so a literal
+    `"ORDER BY priority ASC"` would have gone red on the change that strengthens what
+    this node is for. What the node still refuses to let go unstated is the assumption
+    it always named: the claim compares a priority, ascending, oldest-first inside a
+    band, and it is the effective number rather than a Python-side sort of a window.
+
+    The docstring is stripped out before the search, because every needle named below is
+    also spelled verbatim in `claim_next`'s own prose — `claim_next.__doc__` walks through
+    the ordering, and the `ORDER BY` f-string sits directly beneath it inside the same
+    `inspect.getsource`. A search over the whole span is satisfied by whichever half is
+    written: `git revert` the ordering, leave the paragraph, and all three assertions
+    still pass on the description. Only the executed line is the mechanism.
+    """
+    import ast
+    import inspect
+    import textwrap
+
     from workers import queue as Q
-    assert "ORDER BY priority ASC" in Path(Q.__file__).read_text(), "the assumption this test rests on"
+    from workers.sources import deep_research, session_distill
+    fn = textwrap.dedent(inspect.getsource(Q.WorkQueue.claim_next)).splitlines(True)
+    stmts = ast.parse("".join(fn)).body[0].body          # the method's own statements
+    doc = stmts[0]
+    has_doc = (isinstance(doc, ast.Expr)
+               and isinstance(getattr(doc, "value", None), ast.Constant)
+               and isinstance(doc.value.value, str))
+    claim = "".join(fn[doc.end_lineno:]) if has_doc else "".join(fn)
+    assert "_effective_priority_sql()" in claim, (
+        "the assumption this test rests on: the ORDER BY compares an effective "
+        "priority computed in the SQL, not a windowed Python sort")
+    assert "priority ASC" in claim and "enqueued_at ASC" in claim, (
+        "the tiebreaks this node's own history depends on are gone: within one "
+        "effective priority the lower stored number goes first, and within one band "
+        "the oldest row goes first")
     routine = min(deep_research.DEFAULT_PRIORITY, session_distill.DEFAULT_PRIORITY)
     assert I.DEFAULT_PRIORITY < M.DEFAULT_PRIORITY < routine
 
