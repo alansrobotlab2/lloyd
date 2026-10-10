@@ -1145,3 +1145,251 @@ def test_the_docstring_documents_the_sidecar_arm_and_its_baseline():
     assert "#2168" in entry, entry
     assert "tool_clear" in entry, entry
     assert "microcompact_reduction_sidecar" in entry, entry
+
+
+# --- #2511: a spilling row, so the tool_clear/sidecar pair is a comparison ---
+
+#: One corpus file larger than `tool_result_spill.SPILL_THRESHOLD_CHARS` raw:
+#: a `Read` of it whole is the body `maybe_spill` routes to a real pointer.
+
+@pytest.fixture
+def spill_corpus(tmp_path):
+    """A corpus with one file over `SPILL_THRESHOLD_CHARS` raw — big enough
+    that a whole-file `Read` of it spills — alongside small ones the filler
+    still slices."""
+    root = tmp_path / "bigtree"
+    (root / "app").mkdir(parents=True)
+    small = []
+    for i in range(3):
+        p = root / "app" / f"small{i}.py"
+        p.write_text("\n".join(f"def s{i}_{n}(): return {n}" for n in range(200)))
+        small.append(p)
+    big = root / "app" / "huge.py"
+    big.write_text("\n".join(
+        f"def handler_{n}(config_value):  # timeout {n % 99} and a comment line"
+        for n in range(1400)))
+    from app.harness.tool_result_spill import SPILL_THRESHOLD_CHARS
+    assert len(big.read_text()) > SPILL_THRESHOLD_CHARS, (
+        "the fixture file itself no longer exceeds the spill threshold, so "
+        "every test in this section would prove nothing")
+    return root, small + [big]
+
+
+def _spilled_call_ids(session):
+    """Call ids of generated tool results whose body alone exceeds
+    `SPILL_THRESHOLD_CHARS` — the rows that must reach disk as pointers."""
+    from app.harness.tool_result_spill import SPILL_THRESHOLD_CHARS
+    out = []
+    for m in session.messages:
+        if m.get("role") != "tool":
+            continue
+        text = "".join(b.get("text", "") for b in m.get("content") or []
+                       if isinstance(b, dict))
+        if len(text) > SPILL_THRESHOLD_CHARS:
+            out.append(m["tool_call_id"])
+    return out
+
+
+def _pair_two_passes(spill_corpus, tmp_path, monkeypatch, spy):
+    """Two passes of `run_one` over BOTH arms on ONE scratch `--data-root`,
+    the engine stubbed at `run_query` — the second-pass-over-the-same-root
+    shape the sidecar comparison is read in (#2168, #2511).
+
+    The stubbed turn drives relief itself (`loop._intra_turn_microcompact`
+    with the row's own `RunOptions`) over the loaded history plus 16 synthetic
+    recent tool rows, which push the session's spilled row — generated recent,
+    so the turn-start pass leaves it a raw pointer — out of relief's keep set.
+    A stub engine that answers without any tool activity gives relief no
+    mid-turn shape to reduce, and relief is the only writer of
+    `reduced_call_ids`, the list the read-time pass replays. `spy` wraps
+    `apply_reduction_sidecar` (which `app.compaction` lazy-imports from this
+    module, so patching it here patches the read-time pass itself) and records
+    `(session_id, applied)` per call.
+
+    Returns the (arm, pass) -> row map and the spy's records."""
+    import app.harness.loop as L
+    import app.harness.microcompact as mc
+    import app.transcript_entries as te
+
+    root, files = spill_corpus
+    s = R.build_session(21, 60_000, 0.5, root=root, corpus=files)
+    monkeypatch.setattr(R, "_metrics", lambda base_url: {})
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path / "d"))
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR",
+                        tmp_path / "d" / "sessions")
+    # Relief's trigger is a fraction of the window; these 60k-target rows after
+    # a turn-start clear sit under the primary's real 46k wall. Shrinking the
+    # window moves the wall under this fixture and leaves the arms' own
+    # 0.2/0.1 arithmetic in charge — same treatment as #2349's relief test.
+    monkeypatch.setattr("app.compaction.get_context_window",
+                        lambda model=None: 20_000)
+    seen: list[tuple[str, int]] = []
+    if spy:
+        real = mc.apply_reduction_sidecar
+
+        def _spy(msgs, session_id):
+            out, applied = real(msgs, session_id)
+            seen.append((session_id, applied))
+            return out, applied
+        monkeypatch.setattr(mc, "apply_reduction_sidecar", _spy)
+
+    async def fake_run_query(history, opts):
+        msgs = list(history)
+        for k in range(16):
+            cid = f"call_probe_{k}"
+            msgs.append({"role": "assistant", "content": "",
+                         "tool_calls": [te.build_tool_call(
+                             cid, "Read", json.dumps({"file_path": "/p.py"}))]})
+            msgs.append({"role": "tool", "tool_call_id": cid,
+                         "content": "probe filler line\n" * 8})
+        L._intra_turn_microcompact(
+            msgs, options=opts, meter=None, keep_recent=15,
+            tool_count=sum(1 for m in msgs if m.get("role") == "tool"),
+            iteration=20)
+        yield {"type": "result",
+               "response_text": f"CODENAME: {s.planted.passphrase}\n"
+                                f"PORT: {s.planted.port}",
+               "stop_reason": "stop"}
+    monkeypatch.setattr(L, "run_query", fake_run_query)
+
+    rows = {}
+    for p in (1, 2):
+        for arm in ("tool_clear", "sidecar"):
+            row = asyncio.run(R.run_one(
+                s, arm, discovered=[("lloyd-mcp", [{"name": n, "description": n,
+                                                    "inputSchema": {"type": "object",
+                                                                    "properties": {}}}
+                                                   for n in ("Read", "Grep", "Bash")])],
+                system_prompt="sys", data_root=tmp_path / "d", base_url="http://stub",
+                max_turns=2))
+            assert row["status"] == "ok", (p, arm, row.get("reason"))
+            rows[(arm, p)] = row
+    return s, rows, seen
+
+
+def test_a_generated_session_spills_a_pointer_row_the_arm_records(spill_corpus,
+                                                                  tmp_path,
+                                                                  monkeypatch):
+    """#2511 clause 1: the generator emits at least one tool result over
+    `SPILL_THRESHOLD_CHARS`, `run_one` routes it through the same
+    `maybe_spill` the live loop uses so the row on disk carries the
+    `<persisted-output>` pointer (and the spill file it names exists), and
+    after the turn that call id sits in
+    `sessions/<sid>.microcompact-reduced.json` — the record a later row
+    replays. The `sidecar` arm's row is the one checked end to end, because
+    relief records only under its switch."""
+    import re
+
+    from app.harness.microcompact import read_reduced_calls
+    from app.harness.tool_result_spill import PERSISTED_OUTPUT_TAG
+
+    s, _rows, _seen = _pair_two_passes(spill_corpus, tmp_path, monkeypatch,
+                                       spy=False)
+    cids = _spilled_call_ids(s)
+    assert cids, (
+        "the generator still emits only sub-threshold slices, so relief has "
+        "no pointer row to record and the pair stays vacuous")
+
+    sid = f"pt-eval-c600-{s.key}-sidecar"
+    doc = json.loads((tmp_path / "d" / "sessions" / f"{sid}.json").read_text())
+    row = next((m for m in doc["messages"]
+                if m.get("tool_call_id") == cids[0]), None)
+    assert row is not None, "the spilled row is not in the written session"
+    text = row["content"][0]["text"]
+    assert text.startswith(PERSISTED_OUTPUT_TAG), (
+        f"the over-threshold body reached disk inline, not routed to a "
+        f"pointer: {text[:80]!r}")
+    saved = re.search(r"Full output saved to: (\S+)", text)
+    assert saved and Path(saved.group(1)).is_file(), (
+        "the pointer names a spill file that is not on disk, so the "
+        f"read-time pass would refuse the row: {text[:120]!r}")
+    assert cids[0] in read_reduced_calls(sid), (
+        "the spilled call id is not in the sidecar record after the turn, "
+        "so a second pass over the same root has nothing to replay")
+
+
+def test_the_second_pass_applies_the_recorded_reduction_under_sidecar_only(
+        spill_corpus, tmp_path, monkeypatch):
+    """#2511 clause 2: on the SECOND pass over the SAME `--data-root` the
+    read-time pass is the arm difference that acts — a spy on
+    `app.harness.microcompact.apply_reduction_sidecar` records ids applied
+    under `sidecar` and none under `tool_clear`. The assertion is the spy's
+    id count, not the sidecar file existing: #2348's turn-start writer can
+    create that file while the read-time pass does nothing, which is exactly
+    the vacuity this replaces."""
+    _s, _rows, seen = _pair_two_passes(spill_corpus, tmp_path, monkeypatch,
+                                       spy=True)
+    applied = {"sidecar": 0, "tool_clear": 0}
+    for sid, n in seen:
+        applied[sid.rsplit("-", 1)[-1]] += n
+    assert applied["sidecar"] > 0, (
+        "the second pass over the same root replayed nothing under `sidecar`; "
+        f"the spy saw {seen}")
+    assert applied["tool_clear"] == 0, (
+        "`tool_clear` reached the read-time reduction at all, so the pair is "
+        f"not one switch apart: {seen}")
+
+
+def test_every_row_reports_the_applied_count(spill_corpus, tmp_path, monkeypatch):
+    """#2511 clause 3: the applied count is in the row's emitted record, not
+    only on stdout — first pass records and applies nothing (0), the second
+    pass under `sidecar` applies >0, `tool_clear` stays 0 throughout, and the
+    row agrees with the pass's own `microcompact_reduced` figure."""
+    _s, rows, seen = _pair_two_passes(spill_corpus, tmp_path, monkeypatch,
+                                      spy=True)
+    for (arm, p), r in rows.items():
+        assert isinstance(r.get("sidecar_applied"), int), (
+            f"row {arm}/pass {p} carries no applied count: {r!r}")
+        assert r["turn_start"]["microcompact_reduced"] == r["sidecar_applied"]
+    assert rows[("sidecar", 1)]["sidecar_applied"] == 0, (
+        "a first pass has nothing recorded yet, so applying anything means "
+        "the pair is reading state this procedure never wrote")
+    assert rows[("sidecar", 2)]["sidecar_applied"] > 0
+    assert rows[("tool_clear", 1)]["sidecar_applied"] == 0
+    assert rows[("tool_clear", 2)]["sidecar_applied"] == 0
+    assert sum(n for _, n in seen) == (
+        rows[("sidecar", 2)]["sidecar_applied"]), (
+        "the row record and the read-time pass disagree about what was applied")
+
+
+def test_the_dry_rows_carry_the_applied_count_field(tmp_path, monkeypatch):
+    """#2511 clause 3, the CLI seam: every row written into the results
+    document carries `sidecar_applied`, so the recorded pair is auditable
+    after the run window from `--out` alone."""
+    snap = tmp_path / "tools.json"
+    snap.write_text(json.dumps([["lloyd-mcp", [{"name": n, "description": n,
+                                                "inputSchema": {"type": "object",
+                                                                "properties": {}}}
+                                               for n in ("Read", "Grep", "Bash")]]]))
+    root = tmp_path / "data"
+    monkeypatch.setenv("LLOYD_DATA", str(root))
+    rc = R.main(["--sessions", "1", "--sizes", "12000", "--depths", "0.5",
+                 "--arms", "tool_clear,sidecar", "--seed", "600", "--dry",
+                 "--data-root", str(root), "--tools-snapshot", str(snap),
+                 "--out", str(tmp_path / "out.json")])
+    assert rc == 0
+    doc = json.loads((tmp_path / "out.json").read_text())
+    assert doc["rows"], "the dry grid emitted nothing to audit"
+    assert all("sidecar_applied" in r for r in doc["rows"]), (
+        "a row in the results document carries no applied count")
+
+
+def test_the_sidecar_header_states_the_two_pass_procedure():
+    """#2511 clause 4: the runner's own header teaches the procedure that
+    answers #2168 — two passes over the same `--data-root`, read pass two
+    against pass two — and no longer claims a clean-root pair `reads equal
+    by construction`, defers to #2349 as an open finding, or describes the
+    filler as the 60-260-line slices that made the pair vacuous."""
+    doc = R.__doc__
+    sec = doc.split("THE SIDECAR ARM'S ONE ROW\n-------------------------\n", 1)[1]
+    sec = sec.split("\nSUMMARY ARMS", 1)[0]
+    low = sec.lower()
+    assert "equal by construction" not in low
+    assert "#2349" not in sec
+    assert "60-260" not in sec
+    assert "same `--data-root`" in low, (
+        "the header still does not name the same-root second pass")
+    assert "first pass" in low and "second pass" in low, (
+        "the header still does not state the two-pass procedure")
+    assert "sidecar_applied" in sec, (
+        "the header does not name the record each row leaves behind")

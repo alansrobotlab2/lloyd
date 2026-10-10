@@ -136,25 +136,34 @@ ARMS
 
 THE SIDECAR ARM'S ONE ROW
 -------------------------
-A row is one turn: `run_one` compacts once, then probes, and relief — the only
-writer of `sessions/<sid>.microcompact-reduced.json` — runs inside the probe,
-AFTER the compaction that would read it. Three things follow, and they decide
-how a run of `--arms tool_clear,sidecar` has to be read:
+Every `tool`-shape session now ends with one Read whose whole-file body is
+over `tool_result_spill.SPILL_THRESHOLD_CHARS` (50,000) — `_spill_turn` — and
+`run_one` writes the session file through `route_spilled_results`, the same
+`maybe_spill` the live loop applies to a tool result before storing it: the
+row on disk carries a real `<persisted-output>` pointer naming a real file
+under `sessions/<sid>.tool-results/`. That is the row relief reduces and
+records, and the row a later pass can replay — #2511, which replaced the
+sub-threshold filler that made this pair vacuous.
 
-  * on a clean `--data-root` the `sidecar` row applies nothing, so the pair
-    reads equal by construction and that tie is not an answer;
-  * the reduction is applied only by a LATER row with the same id
-    (`pt-eval-c600-<key>-sidecar`), which is what re-running the grid over the
-    SAME root does — that run replays what the previous run's relief recorded,
-    the production pattern one turn later;
-  * relief records an id only for a row already carrying a `<persisted-output>`
-    pointer, and this generator's filler is 60-260-line slices, far under
-    `tool_result_spill.SPILL_THRESHOLD_CHARS` (50,000), so a turn that spills
-    nothing leaves nothing for the next row to replay.
+A row is still one turn — `load_and_compact_session` runs BEFORE the turn's
+relief can record anything — so `--arms tool_clear,sidecar` is a TWO-PASS
+procedure over the SAME `--data-root`, and the pair is read pass two against
+pass two:
 
-Pricing the read-time pass inside a single row needs a row that reloads its own
-session after its turn, which this runner does not do; #2349 carries that as the
-open finding behind the owed measurement.
+  * the first pass records: the turn's relief reduces the spilled pointer row
+    and, under `sidecar` only, books its call id into
+    `sessions/<sid>.microcompact-reduced.json`. No row has a prior record, so
+    every first-pass row applies nothing;
+  * the second pass applies: re-run the same grid over that root and the
+    read-time pass opens the record before the prompt is built and reduces
+    each recorded row whose spill file is still on disk — production's
+    pattern one turn later. `sidecar` rows carry `sidecar_applied` > 0;
+    `tool_clear` rows carry 0 and never open the file.
+
+Every row's output record carries its own `sidecar_applied` (and the pass's
+`microcompact_sidecar` flag in `turn_start`), so the recorded pair — both
+recall figures beside both applied counts — is readable from `--out` after
+the run window closes, without stdout.
 
 SUMMARY ARMS
 ------------
@@ -724,6 +733,53 @@ def _filler_turn(i: int, rng: random.Random, corpus: list[Path], root: Path,
     return msgs
 
 
+#: Cap on `_spill_turn`'s body, in chars: enough over `SPILL_THRESHOLD_CHARS`
+#: to spill with margin, bounded so one row cannot swamp a session's
+#: `target_tokens`. It stands for the Read tool's own output cap — a real
+#: whole-file Read of a 400 KB file does not put 400 KB in the prompt.
+_SPILL_BODY_CAP = 2 * 50_000
+
+
+def _spill_turn(i: int, corpus: list[Path], root: Path) -> list[dict] | None:
+    """The session's spilled row (#2511): a Read whose rendered whole-file
+    body exceeds `SPILL_THRESHOLD_CHARS`, appended as the session's LAST
+    filler turn so the turn-start pass leaves it a raw pointer (it is inside
+    the recent-keep set) and relief is the pass that reduces it — the
+    mid-turn shape #2168's read-time pass exists for.
+
+    The picked file is the corpus's SMALLEST member over the threshold: a
+    raw body over it renders over it (`_read_render` only grows the text),
+    so the row is real on any tree that has one such file, and picking the
+    smallest bounds the size skew. A corpus with none returns None — no row,
+    and with it no claim. It draws nothing from `rng`, so sessions built on
+    corpora without a big file stay byte-identical to pre-#2511.
+    """
+    from app.harness.tool_result_spill import SPILL_THRESHOLD_CHARS
+
+    big = [p for p in corpus if p.stat().st_size > SPILL_THRESHOLD_CHARS]
+    if not big:
+        return None
+    path = min(big, key=lambda p: (p.stat().st_size, str(p)))
+    text = path.read_text(errors="replace")
+    body = _read_render(text, 1)
+    if len(body) > _SPILL_BODY_CAP:
+        # Stand for the Read tool's own cap: whole lines up to the limit.
+        body = body[:_SPILL_BODY_CAP]
+        body = body[:body.rfind("\n")]
+    if len(body) <= SPILL_THRESHOLD_CHARS:      # cannot happen past the cap,
+        return None                             # belt for the boundary
+    cid = f"call_{i}_big"
+    return [
+        _msg("user", f"Print all of {path.name}, not a slice."),
+        {"role": "assistant", "content": [{"type": "text", "text": ""}],
+         "tool_calls": [_tc(cid, "Read", {"summary": f"Reading all of {path.name}",
+                                          "file_path": str(path),
+                                          "offset": 1})]},
+        _msg("tool", body, tool_call_id=cid),
+        _msg("assistant", "That is the whole file."),
+    ]
+
+
 _DISCUSS = [
     "Walk me through how {stem} fits with the design notes.",
     "Read {stem} and tell me whether it still matches what we documented.",
@@ -926,6 +982,16 @@ def build_session(seed: int, target_tokens: int, depth: float,
         total += counted(t)
         turns.append(t)
         i += 1
+    if shape == "tool":
+        # #2511: the session's spilled row, LAST among the filler so the
+        # turn-start pass leaves it a raw pointer for relief to reduce. It
+        # is placed before `at` is computed, so `depth` counts it like any
+        # other turn.
+        sp = _spill_turn(i, corpus, root)
+        if sp is not None:
+            total += counted(sp)
+            turns.append(sp)
+            i += 1
     at = min(len(turns), max(0, round(depth * len(turns))))
     turns.insert(at, planted_msgs)
     late = probe == "late"
@@ -1710,6 +1776,49 @@ def _make_stream_wrapper(real, warm_messages: list[dict] | None, log: list[dict]
     return wrapper
 
 
+def route_spilled_results(messages: list[dict], sid: str) -> list[dict]:
+    """Write-time spill routing (#2511): every tool result over
+    `SPILL_THRESHOLD_CHARS` is replaced by the `<persisted-output>` pointer
+    `maybe_spill` — the same call the live loop makes before storing a tool
+    result — which also writes the spill file the pointer names under
+    `sessions/<sid>.tool-results/`.
+
+    Without it, a generated over-threshold row reaches disk as the inline
+    body its own tool would never have stored, so relief's pointer branch
+    never fires, nothing is recorded for replay, and the read-time half of
+    the `sidecar` arm has no input in a first row or a same-root replay. The
+    tool name is resolved from the row's own call, as
+    `app.harness.microcompact` does for the same rows: `maybe_spill` needs
+    it because the pointer's recovery sentence must name a call that tool
+    accepts. Rows under the threshold come back byte-identical.
+    """
+    from app.harness.tool_result_spill import SPILL_THRESHOLD_CHARS, maybe_spill
+
+    names: dict[str, str] = {}
+    for m in messages:
+        for tc in m.get("tool_calls") or []:
+            names[tc.get("id") or ""] = (tc.get("function") or {}).get("name") or ""
+    out: list[dict] = []
+    for m in messages:
+        text = ""
+        if m.get("role") == "tool":
+            c = m.get("content")
+            if isinstance(c, str):
+                text = c
+            elif isinstance(c, list):
+                text = "".join(b.get("text", "") for b in c if isinstance(b, dict))
+        if len(text) <= SPILL_THRESHOLD_CHARS:
+            out.append(m)
+            continue
+        cid = m.get("tool_call_id") or m.get("call_id") or ""
+        routed = maybe_spill(text, tool_name=names.get(cid, "Read"),
+                             tool_use_id=cid, session_id=sid,
+                             threshold=SPILL_THRESHOLD_CHARS)
+        out.append(m if routed == text else {**m, "content": [{"type": "text",
+                                                               "text": routed}]})
+    return out
+
+
 async def run_one(session: Session, arm: str, *, discovered: list, system_prompt: str,
                   data_root: Path, base_url: str, max_turns: int = 12,
                   judge=None, dry: bool = False) -> dict[str, Any]:
@@ -1730,11 +1839,20 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
     path = sessions_dir / f"{sid}.json"
     # indent=2 is how `sessions_io` writes a session: one row field per line,
     # so a Grep of the record (#1514's route) returns a message, not the file.
+    # #2511: through `route_spilled_results`, so an over-threshold generated
+    # row is stored the way the live loop would store it — as a pointer — and
+    # the warm-up prefix matches the stored rows exactly.
+    routed = route_spilled_results(session.messages, sid)
     path.write_text(json.dumps({"session_id": sid, "platform": "mission-control",
-                                "messages": session.messages}, indent=2))
+                                "messages": routed}, indent=2))
     row: dict[str, Any] = {"session": session.key, "arm": arm, "seed": session.seed,
                            "depth": session.depth, "target_tokens": session.target_tokens,
-                           "est_tokens": session.est_tokens, "session_sha256": session.sha256}
+                           "est_tokens": session.est_tokens, "session_sha256": session.sha256,
+                           # #2511 clause 3: what the read-time reduction pass
+                           # applied on this row's own load, in the record —
+                           # default 0 so even a row dropped before compaction
+                           # carries the field.
+                           "sidecar_applied": 0}
 
     row["shape"] = session.meta.get("shape", "tool")
     with compaction_overlay(spec["compaction"]):
@@ -1779,8 +1897,9 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
         turn = compaction_record.start_turn(sid, turn_id)
         turn.note_turn_start(comp)
         history = await _prepare_messages_for_harness(comp["history"], "primary")
-        warm_hist = await _prepare_messages_for_harness(
-            [m for m in session.messages], "primary")
+        # #2511: the routed list, because it is what the session file holds —
+        # the prefix the engine will actually warm on.
+        warm_hist = await _prepare_messages_for_harness(routed, "primary")
         history.append({"role": "user", "content": session.probe})
         # #2028: score the spans against the prompt the answer is about to come
         # from — after the turn-start pass AND after
@@ -1797,10 +1916,16 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
             (m.get("content") or "") for m in history)
         row["history_est_after_turn_start"] = estimate_conversation_tokens(history)
         pre = fired(turn.to_record())
+        # #2511: `microcompact_reduced` and `microcompact_sidecar` are the
+        # read-time pass's own two figures — how many ids it applied and
+        # whether the arm consulted the record at all — reported beside the
+        # rest of the turn-start pass rather than only on stdout.
+        row["sidecar_applied"] = int(comp.get("microcompact_reduced") or 0)
         row["turn_start"] = {k: comp.get(k) for k in (
             "tokens_before", "tokens_after", "microcompacted", "summarized",
             "truncated", "summarize_outcome", "summary_reused", "summary_folds",
-            "summary_covered_rows", "flushed_before_summary")}
+            "summary_covered_rows", "flushed_before_summary",
+            "microcompact_reduced", "microcompact_sidecar")}
 
         # Pre-gate: production can only fire in-turn if the prompt can reach
         # the in-turn trigger; the fixed overhead is measured on the first
@@ -2195,6 +2320,15 @@ def main(argv: list[str] | None = None) -> int:
         print("refusing: run with LLOYD_DATA set to --data-root (scratch), "
               "so spills and event logs stay out of production", file=sys.stderr)
         return 2
+    # #2511: `tool_result_spill.SESSIONS_DIR` is bound from `LLOYD_DATA` at
+    # import; rebind it to this run's root so `route_spilled_results` (and
+    # relief's sidecar writer, which resolves through the same module) land
+    # their files under the `--data-root` the run names. The check above
+    # already makes the two the same directory; this line is what makes the
+    # equality hold when `main` runs inside a process that imported
+    # `app.paths` under a different root.
+    import app.harness.tool_result_spill as _trs
+    _trs.SESSIONS_DIR = data_root / "sessions"
     from app.prompt_builder import build_system_prompt
     system_prompt = build_system_prompt()
     discovered = _load_discovered(Path(a.tools_snapshot))
@@ -2234,7 +2368,10 @@ def main(argv: list[str] | None = None) -> int:
                     # Correctness and retention on the same line, per row: the
                     # pair that reads "hit / {call_planted: False}" is the one
                     # that used to be invisible until the summary was re-run.
-                    "oracle_survived")}
+                    "oracle_survived",
+                    # #2511: the applied count is in the row record itself;
+                    # printing it keeps the live line and the file agreeing.
+                    "sidecar_applied")}
                     | {"summarize_outcome": (r.get("fired") or {}).get("summarize_outcome"),
                        "summarizer_calls": (r.get("summarizer") or {}).get("calls"),
                        "tokens_freed": freed_total(r["fired"])
