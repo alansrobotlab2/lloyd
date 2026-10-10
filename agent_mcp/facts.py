@@ -666,7 +666,20 @@ def _fact_add(params: dict) -> dict:
             if took == "noop":
                 return _noop_result(entity, category, decision)
             fact_id = _generate_fact_id(category, [f.get("id") for f in existing if isinstance(f, dict)])
-            new_fact = {"fact": fact_text, "confidence": confidence, "category": category,
+            # #2503: the row names the entity it was filed under, as the FIRST key,
+            # the way every re-derivation-written record already does
+            # (`{'entity', 'fact', 'confidence', …}` on the live corpus). The store
+            # never showed this gap because `kg_store._rows_for_file` falls back to
+            # `fm.get("entity") or path.parent.name` and so indexed the row under its
+            # directory anyway — while `kg_hygiene._tag_of`, which is what #2474's
+            # untagged rail counts and a merge audit greps, reads the PER-RECORD key
+            # and calls the absent key untagged. Every row this writer ever emitted
+            # was therefore untagged: 463 of them since 2026-10-02 alone, 457 of
+            # those carrying the `session_id` stamp only this function adds. The
+            # value is the RESOLVED name, not the caller's spelling, so a declared
+            # alias files its row under the canonical it landed in.
+            new_fact = {"entity": entity, "fact": fact_text, "confidence": confidence,
+                        "category": category,
                         "id": fact_id, "created_at": now_iso, "valid_at": params.get("valid_at"),
                         "invalid_at": None, "expired_at": None, "provenance": provenance,
                         "source_doc": source_doc}

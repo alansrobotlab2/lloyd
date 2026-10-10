@@ -28,17 +28,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 from datetime import datetime
 
 import pytest
+import yaml
 
 import agent_mcp.facts as facts_mod
 from app import post_capture, sessions_io
 
 SID = "20260920_120000_aaaaaa"
+
+#: The front-matter block shape every reader of a fact file matches, including
+#: `scripts/vault/validate_okf.STRICT_FM_RE` and `kg_hygiene.missing_keys`.
+_FM_BLOCK = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
 # One fact per extraction, so `len(calls["fact_add"])` is also a call count.
 EXTRACTED = [{"entity": "Goliath", "fact": "runs the tts service on port 8090"}]
@@ -609,6 +615,72 @@ def test_a_paraphrase_from_a_later_session_does_not_add_a_second_active_row(
         assert len(asked) == 1, "the second session's fact was put to the gate"
         assert len(active) == 1, active
         assert active[0]["source_doc"] == "sessions/20260924_221452_ivb794"
+    finally:
+        kg_store.reset()
+
+
+# ---------------------------------------------------------------------------
+# #2503 — the extracted rows have to name their own entity in the markdown
+#
+# 463 records in the live fact store carry no `entity` key and were created on or
+# after 2026-10-02; 457 of them carry the `session_id` stamp only `_fact_add`
+# writes, and 226 of those are `provenance: EXTRACTED` — this route, not the chat
+# tool. `kg_store._rows_for_file` hides the gap from the index (`fm.get("entity")
+# or path.parent.name`), `kg_hygiene._tag_of` cannot: it reads the per-record key,
+# so every row either route wrote counted toward #2474's untagged alarm. Hence the
+# assertion below opens the .md file rather than querying `facts_idx`.
+# ---------------------------------------------------------------------------
+
+def _markdown_records(path):
+    """The fact records as the markdown file holds them, not as `facts_idx` re-derives them."""
+    m = _FM_BLOCK.match(path.read_text(encoding="utf-8"))
+    assert m, f"{path} carries no YAML front-matter block"
+    records = (yaml.safe_load(m.group(1)) or {}).get("facts") or []
+    assert records, f"{path} holds no fact records"
+    return records
+
+
+def test_the_session_extraction_route_tags_its_rows_with_the_entity(tmp_path, monkeypatch):
+    """Clause 2 of #2503: the same tag lands on rows this route writes.
+
+    `_write_extracted_facts` builds its params dict from the extractor's output and
+    never mentions `entity` among the ROW fields — it passes the entity as the
+    filing key only — so the tag has to come from the writer. Two entities go in
+    one call, because the defect is per-record: one tagged row does not clear a
+    file the rail counts record by record.
+    """
+    from agent_mcp import _shared, fact_write_gate, retrieval
+    from app import kg_store, paths
+
+    root = tmp_path / "facts"
+    root.mkdir()
+    kg_store.configure(tmp_path / "kg.sqlite")
+    try:
+        monkeypatch.setattr(_shared, "FACTS_ROOT", root)
+        monkeypatch.setattr(_shared, "ALIASES_PATH", root / "entity-aliases.json")
+        monkeypatch.setattr(_shared, "_entity_dirs_cache", None)
+        monkeypatch.setattr(facts_mod, "FACTS_ROOT", root)
+        monkeypatch.setattr(retrieval, "FACTS_ROOT", root)
+        monkeypatch.setattr(paths, "FACT_WRITE_GATE_LOG", tmp_path / "gate.jsonl")
+        # Off, so this node measures the row shape and not the paraphrase judge —
+        # the gate's own behaviour is the test above this one.
+        monkeypatch.setenv(fact_write_gate.MODE_ENV, "off")
+
+        post_capture._write_extracted_facts([
+            {"entity": "Tidewell Relay", "fact": "shuts its listener on SIGTERM"},
+            {"entity": "Quillgate", "fact": "reindexes nightly at 03:00 local"},
+        ], "20261010_092108_autocode")
+
+        for entity in ("Tidewell Relay", "Quillgate"):
+            path = root / entity / f"{entity}-session-extracted.md"
+            assert path.is_file(), f"{path} was not written"
+            records = _markdown_records(path)
+            assert len(records) == 1, records
+            row = records[0]
+            assert row.get("entity") == entity, (
+                f"the row this route wrote carries entity={row.get('entity')!r}, not {entity!r} "
+                "— kg_hygiene._tag_of counts that record untagged, which is #2503")
+            assert row.get("source_doc") == "sessions/20261010_092108_autocode", row
     finally:
         kg_store.reset()
 

@@ -6,6 +6,7 @@ held facts about another entity, every one from a suffix merge.
 import importlib.util
 import datetime as dt
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -424,3 +425,157 @@ def test_snapshot_reports_untagged_beside_contamination_not_inside_it(blank_tree
     assert s["untagged"]["facts"] == 6 and s["untagged"]["over_floor"] is True
     assert s["contamination"] == {"dirs": 1, "foreign_facts": 1,
                                   "by_tier": {"SUFFIX_SAFE": 1}}
+
+
+# ── #2503: what the standard writer contributes to that numerator ────────────
+#
+# `agent_mcp/facts.py::_fact_add` — the `fact_add` MCP tool and, through
+# `app/post_capture._write_extracted_facts`, the nightly session extractor — built
+# its row dict without an `entity` key: `{fact, confidence, category, id,
+# created_at, valid_at, invalid_at, expired_at, provenance, source_doc}`.
+# `app/kg_store.py` then indexed the row under `fm.get("entity") or
+# path.parent.name`, so the store reported the entity and the gap stayed invisible
+# from the query side, while `_tag_of` above read the per-record key and counted
+# the record untagged. Measured on the live corpus on 2026-10-10: 3,544 untagged of
+# 144,250 records (2.46%, 534 dirs), of which 1,036 have the KEY ABSENT and 463 of
+# those were created on or after 2026-10-02 — i.e. written after #1999 had already
+# stopped the blank-valued producer. Those 463 are this writer's own output, and
+# they are the half of the population a code change can remove. The ~2,509 frozen
+# blank-valued rows from the 2026-09-23 re-derivation are not, so the rail is
+# expected to stay red after this: that ruling is owed on #2503, and the two nodes
+# below deliberately do not make it go quiet.
+
+_FM_BLOCK = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+
+
+def _untag_every_record(path: Path) -> None:
+    """Rewrite a fact file with `entity` deleted from every RECORD.
+
+    The file-level `entity:` key stays: `app/kg_store.py::_rows_for_file` reads
+    `fm.get("entity") or path.parent.name`, so with the top key gone the store would
+    stop indexing the file at all and the control would be measuring a different
+    failure. This is the exact byte shape `_fact_add` emitted before #2503 — every
+    record valid YAML, none of them carrying a tag — which is what makes it a
+    control rather than a second assertion of the fix.
+    """
+    text = path.read_text(encoding="utf-8")
+    m = _FM_BLOCK.match(text)
+    assert m, f"{path} carries no front matter to strip"
+    fm = yaml.safe_load(m.group(1))
+    records = fm.get("facts") or []
+    assert records, f"{path} holds no records to strip"
+    fm["facts"] = [{k: v for k, v in r.items() if k != "entity"} for r in records]
+    path.write_text(
+        "---\n" + yaml.dump(fm, default_flow_style=False, sort_keys=False)
+        + "---\n" + text[m.end():], encoding="utf-8")
+
+
+@pytest.fixture
+def writer(tmp_path, monkeypatch):
+    """The normal fact-writing path, aimed at a throwaway facts root.
+
+    Returns the live `agent_mcp.facts` module and the root, so a test can call
+    `facts._fact_add(...)` and then point `scan_entity_dir` at the directory that
+    landed there. Same seams `tests/test_fact_add_entity_kind.py` patches — the
+    writer resolves `FACTS_ROOT` through three modules, and the entity-identity
+    gate installs its declared keys into the first store it sees.
+    """
+    from agent_mcp import _shared, facts, retrieval
+    from app import entity_naming, kg_store
+
+    root = tmp_path / "facts"
+    root.mkdir()
+    kg_store.configure(tmp_path / "kg.sqlite")
+    entity_naming.reset_identity_schema_cache()
+    monkeypatch.setattr(_shared, "FACTS_ROOT", root)
+    monkeypatch.setattr(_shared, "ALIASES_PATH", root / "entity-aliases.json")
+    monkeypatch.setattr(_shared, "_entity_dirs_cache", None)
+    monkeypatch.setattr(facts, "FACTS_ROOT", root)
+    monkeypatch.setattr(retrieval, "FACTS_ROOT", root)
+    # The paraphrase gate needs the decision engine and has nothing to do with the
+    # row's shape; the writer's own behaviour is what is under test here.
+    monkeypatch.setenv("LLOYD_FACT_WRITE_GATE", "off")
+    try:
+        yield facts, root
+    finally:
+        entity_naming.reset_identity_schema_cache()
+        kg_store.reset()
+
+
+def test_a_file_written_by_the_normal_path_adds_no_untagged_record(writer):
+    """#2503 clause 3: the writer's own rows are what the numerator loses.
+
+    Three records, two entities, two categories, all through `_fact_add`: the walk
+    sees them, counts none of them untagged, and calls neither directory
+    contaminated — a row tagged with its own entity must not read as somebody
+    else's fact, which is the worse failure since `kg_rebuild` refuses a rebuild
+    on contamination. The control at the end is what makes the zero mean something:
+    strip the key out of the file the writer just produced, the exact bytes it
+    emitted before #2503, and the same walk has to count all three again. Without
+    it this node would pass on a walk that had stopped looking.
+    """
+    facts, root = writer
+    assert facts._fact_add({"entity": "Tidewell Relay", "category": "state",
+                            "fact": "pins its control port at 9453"}).get("success")
+    assert facts._fact_add({"entity": "Tidewell Relay", "category": "event",
+                            "fact": "rolled to 1.4.2 on 2026-10-09"}).get("success")
+    assert facts._fact_add({"entity": "Quillgate", "category": "state",
+                            "fact": "reindexes nightly at 03:00 local"}).get("success")
+
+    d = root / "Tidewell Relay"
+    foreign, untagged, records = kg_hygiene.scan_entity_dir(d)
+    assert records == 2, records
+    assert untagged == {"facts": 0, "files": []}, untagged
+    assert foreign == {}, foreign
+
+    whole = kg_hygiene.scan(root)["untagged"]
+    assert whole["facts"] == 0 and whole["records"] == 3, whole
+
+    for name in ("Tidewell Relay", "Quillgate"):
+        for f in (root / name).glob("*.md"):
+            _untag_every_record(f)
+    after = kg_hygiene.scan(root)["untagged"]
+    assert after["facts"] == 3, after
+    assert after["records"] == 3, "all three still parse; only the tag is gone"
+    assert after["over_floor"] is True, (
+        "three untagged records of three is 100%, so a rail that calls this quiet "
+        "is not measuring what #2474 shipped it to measure")
+
+
+def test_the_rail_still_counts_a_blank_tag_and_the_floor_is_still_half_a_percent(writer):
+    """#2503 clause 4: the fix is a writer fix, not a redefinition of the check.
+
+    A tagged row written by the normal path sits in the tree beside a directory
+    holding 6 blank-valued records and 4 correct ones — the frozen 2026-09-23
+    shape, unchanged — and the walk must still report 6 untagged of 11 records
+    (54.55%), over the floor, while `UNTAGGED_ALARM_SHARE` is still the literal
+    0.5 it shipped as in `f7e08d41`. Pinned as a literal rather than against the
+    constant, because the constant is what a later round would be tempted to move:
+    raising it silences tonight's alarm by redefining the measurement, which is the
+    one outcome this item rules out. The population this node counts is exactly the
+    one the writer fix cannot touch.
+    """
+    facts, root = writer
+    assert facts._fact_add({"entity": "Tidewell Relay", "category": "state",
+                            "fact": "pins its control port at 9453"}).get("success")
+    _raw_fact_file(root, "general", "state", [
+        {"entity": "", "fact": f"blank {i}"} for i in range(6)
+    ] + [
+        {"entity": "general", "fact": f"tagged {i}"} for i in range(4)
+    ])
+
+    assert kg_hygiene.UNTAGGED_ALARM_SHARE == 0.5, (
+        "the floor moved; #2503's ruling is to re-tag or drop the frozen records, "
+        "not to raise the number that decides whether they are an alarm")
+
+    u = kg_hygiene.scan(root)["untagged"]
+    assert u["facts"] == 6, u
+    assert u["records"] == 11, "the writer's own record is in the denominator too"
+    assert u["files"] == 1 and u["dirs"] == 1, (
+        "the blank directory is the only one counted; the normal path added nothing")
+    assert u["share_pct"] == round(600.0 / 11, 2), u
+    assert u["floor_pct"] == 0.5
+    assert u["over_floor"] is True, (
+        "the alarm has to stay red over the frozen population — the expected state "
+        "after this fix, per #2503")
+    assert kg_hygiene.scan_entity_dir(root / "general")[1]["facts"] == 6
