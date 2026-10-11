@@ -178,14 +178,76 @@ def engine_delta(before: dict, after: dict) -> dict:
     return delta
 
 
+#: How often to re-assert the hold while this run owns it. A quarter of the
+#: pool's 300 s machine-lease window (`workers.pool.MACHINE_LEASE_STALE_SECONDS`),
+#: so four refreshes may be missed before a live run is ever mistaken for a dead
+#: one. Hard-coded rather than imported: importing `workers.pool` here would boot
+#: the whole pool module inside a measurement script for one number.
+LEASE_REFRESH_SECONDS = 60.0
+
+
 async def set_pool_paused(paused: bool) -> str:
+    """Take or lift the pool pause through the route, as a MACHINE holder (#2498).
+
+    `holder_kind: machine` is what makes this hold reconcilable. Before it, a POST
+    with no kind landed in the persisted `operator` bucket — the same two bytes a
+    person's deliberate halt writes — so when this script was SIGKILL'd the fleet
+    stayed halted with nothing to attribute it to and nobody to lift it: the hold
+    of 2026-10-09 lasted 20 h 52 m and crossed a reboot, surfacing only as lines
+    in a daily note. A machine hold whose lease goes stale is released by the next
+    pool to start. The price of that protection is the lease itself, kept by
+    `pool_pause` below: a run that stops refreshing it is presumed dead.
+    """
     try:
         async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.post(f"{BACKEND}/api/workers/pause",
-                             json={"paused": paused})
+                             json={"paused": paused, "holder_kind": "machine"})
             return f"pool paused={r.json().get('paused')} (http {r.status_code})"
     except Exception as exc:
         return f"pause({paused}) failed: {exc}"
+
+
+async def _keep_pool_lease(stop: asyncio.Event, every_s: float) -> None:
+    """Re-assert the machine hold every `every_s` until `stop` is set.
+
+    Re-POSTing `paused: true` refreshes the hold's lease and deliberately does not
+    move its start instant — `WorkerPool.pause` leaves the pause row's stamp alone
+    while the hold is already up — so a stall alert still reports the true
+    duration. Without this the replay would outlive its own lease: one landing's
+    backend restart after the 300 s window and the fleet resumes claiming jobs on
+    the engine this run is measuring, which is the thing the pause exists to stop.
+    """
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=every_s)
+        except TimeoutError:
+            pass
+        if stop.is_set():
+            return
+        print(f"[lease] {await set_pool_paused(True)}")
+
+
+def start_pool_lease_keeper() -> tuple[asyncio.Event, "asyncio.Task[None]"]:
+    """Start refreshing this run's machine lease. Returns the (stop, task) pair."""
+    stop = asyncio.Event()
+    return stop, asyncio.create_task(_keep_pool_lease(stop, LEASE_REFRESH_SECONDS),
+                                     name="replay-run-state-pool-lease")
+
+
+async def stop_pool_lease_keeper(stop: asyncio.Event,
+                                 keeper: "asyncio.Task[None]") -> None:
+    """Stop refreshing the lease and let the keeper come in before the resume."""
+    stop.set()
+    try:
+        # `wait_for` cancels the keeper itself if the 30 s elapse, so there is no
+        # second cancel to do here: one refresh POST is bounded by httpx's own 10 s
+        # timeout and cannot outrun this.
+        await asyncio.wait_for(keeper, timeout=30)
+    except TimeoutError:
+        print("[lease] !! lease keeper still running after 30 s (cancelled)")
+    except Exception as exc:
+        print(f"[lease] !! lease keeper died before the run ended ({exc!r}); while "
+              f"this run held the pause its lease stopped being refreshed")
 
 
 # ---------------------------------------------------------------------------
@@ -477,9 +539,13 @@ async def main() -> int:
         ap.error("--session is required for the token arms")
 
     pause_note = ""
+    lease: tuple[asyncio.Event, "asyncio.Task[None]"] | None = None
     if not args.no_pause:
         pause_note = await set_pool_paused(True)
         print(pause_note)
+        # A machine hold is only believed alive while its lease is refreshed
+        # (#2498), and every arm here runs longer than the 300 s window.
+        lease = start_pool_lease_keeper()
     try:
         if args.arm in ("baseline", "both"):
             before = read_engine()
@@ -511,6 +577,10 @@ async def main() -> int:
             print(json.dumps(res, indent=2)[:2000])
             _dump(run_root / "probe.json", res)
     finally:
+        if lease is not None:
+            # Stop refreshing before the resume, or a refresh in flight behind the
+            # resume would put the hold back up after the run said it was done.
+            await stop_pool_lease_keeper(*lease)
         if not args.no_pause:
             print(await set_pool_paused(False))
 

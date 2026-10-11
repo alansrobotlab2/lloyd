@@ -186,9 +186,18 @@ class _FakePool:
     def paused(self) -> bool:
         return self._paused
 
-    def pause(self, paused: bool = True, owner: str = "operator") -> None:
+    def pause(self, paused: bool = True, owner: str = "operator",
+              holder_kind: str = "") -> None:
+        # `holder_kind` is the route's #2498 parameter, and this double takes it
+        # with no usable default on purpose: a double that accepted the argument and
+        # discarded it stays green through a route that stopped threading a kind at
+        # all, which would quietly turn every harness's hold back into a person's.
+        # So the double refuses an absent kind and records the one it was given —
+        # "did the handler execute" now includes "with which holder kind". The
+        # kind's own semantics are pinned in tests/test_workers_router.py.
+        assert holder_kind, "the pause route reached the pool without a holder kind"
         self._paused = paused
-        self._calls.append(("workers/pause", paused))
+        self._calls.append(("workers/pause", paused, holder_kind))
 
 
 @pytest.fixture
@@ -379,7 +388,9 @@ async def test_a_header_claiming_a_forged_origin_does_not_evict_a_trusted_peer(
         r = await client.post("/api/workers/pause", json={"paused": True},
                               headers={"X-Forwarded-For": header_value})
     assert r.status_code == 200, r.text[:200]
-    assert reached == [("workers/pause", True)]
+    # The body names no kind, so what the pool must be handed is `person` — #2498's
+    # safe default asserted across the gating middleware, not just on the route.
+    assert reached == [("workers/pause", True, "person")], reached
 
 
 # ── clause 4: the pre-auth exemption is the two named health probes ─────────
@@ -658,7 +669,9 @@ class TestProducerComposesWithTheGate:
                                   headers={"X-Forwarded-For": TAILNET})
         assert r.status_code == 200, r.text[:200]
         assert server.REFUSAL_DETAIL not in r.text
-        assert reached == [("workers/pause", True)]
+        # Through the real producer too, the pool is handed `person` for a body
+        # that names no kind (#2498's safe default).
+        assert reached == [("workers/pause", True, "person")], reached
 
     @pytest.mark.parametrize("xff", [LAN, PUBLIC], ids=["lan-browser", "public-browser"])
     async def test_a_non_trusted_browser_behind_the_same_producer_is_refused(

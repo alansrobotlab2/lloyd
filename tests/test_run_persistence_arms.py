@@ -469,7 +469,13 @@ def test_a_queue_that_never_drains_closes_the_window_it_opened(tmp_path):
     assert res["rc"] != 0, "a window opened on a queue that never idled"
     assert not res["cmds"], f"a rep ran with the queue still busy: {res['cmds']}"
     assert "still busy" in res["stderr"], res["stderr"]
-    assert stub.posts == [{"paused": True}, {"paused": False}], stub.posts
+    # The window inherits `PoolPause`, so as of #2498 it holds the pool as a
+    # MACHINE: the take and the resume both name the kind, and the row the leak
+    # guard below reads is unchanged — a machine hold is still a durable hold while
+    # its lease is fresh; what changed is that a leaked one now lapses and the next
+    # pool to start releases it instead of waiting for a person.
+    assert stub.posts == [{"paused": True, "holder_kind": "machine"},
+                          {"paused": False, "holder_kind": "machine"}], stub.posts
     assert PA.operator_pause_set(db) is False, "the refusal left the hold set"
 
 

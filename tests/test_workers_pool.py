@@ -483,6 +483,205 @@ def test_the_promoter_pauses_as_automod(monkeypatch):
     assert sent == [{"paused": True, "owner": "automod"}]
 
 
+# ---------------------------------------------------------------------------
+# #2498 clauses 2-4 — a machine's hold is reconciled at startup; a person's never is
+#
+# `(_pool, operator_paused)` was two bytes with no owner-kind, so a hold taken by a
+# process and left by that process's death was indistinguishable from a person's.
+# Measured: 2026-10-09, held 20 h 52 m, across the 17:37 reboot, and the only
+# surface that named it was a line in a daily note. The fix is a holder kind plus a
+# lease, and the constraint is that `29d88695`'s durability for a PERSON is
+# untouched — so every node below states which kind it is holding.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_machine_pause_whose_lease_went_stale_is_released_at_startup(q, monkeypatch,
+                                                                            caplog):
+    """The incident replay: seeded machine hold, stale lease, a pool starts, claims resume.
+
+    Before #2498 this same replay resumed nothing — the new pool re-engaged the
+    halt exactly as it re-engages a person's, and the only output was a line in a
+    daily note. Six minutes is over the 300 s the pool will believe a machine's
+    hold without evidence of life, and a setter that missed its lease by that much
+    cannot have survived the restart that is now reloading it.
+    """
+    import logging
+
+    claimed = []
+
+    async def execute(item):
+        claimed.append(item.id)
+        return {"summary": "ran"}
+
+    import workers.sources as sources
+    monkeypatch.setattr(sources, "SOURCE_REGISTRY",
+                        {"s": SimpleNamespace(NAME="s", execute=execute)}, raising=False)
+    monkeypatch.setattr(sources, "get_sources_config", lambda: {"s": {}}, raising=False)
+
+    from workers.pool import PAUSE_WM_KEY, PAUSE_WM_SOURCE
+    _hold_pause(q, "machine", lease_age_s=360.0)
+    q.enqueue("s", "k")
+
+    caplog.set_level(logging.INFO)
+    reborn = WorkerPool(q, slots=1, poll_idle_seconds=0.01)
+    assert reborn.paused is False, (
+        "a machine hold whose lease lapsed 6 minutes ago is held by nothing, and "
+        "nothing is not a reason to stop the fleet")
+    assert reborn.paused_by == []
+    assert q.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_KEY) == "0", (
+        "the release must be the durable write, or the next pool re-halts")
+
+    await reborn.start()
+    try:
+        await asyncio.sleep(0.2)
+        assert claimed == [1], "dispatch did not resume over a dead machine's hold"
+        released = [r.getMessage() for r in caplog.records
+                    if "releasing the machine pause" in r.getMessage()]
+        assert len(released) == 1, caplog.text
+        # The clause names what the line must carry: the kind, and the last
+        # refresh. The age is PARSED rather than matched against the seed: the row
+        # is stamped 360 s old at the SQL write and printed through `%.0f` a moment
+        # later, so demanding the literal "360 s" fails on a loaded runner that
+        # aged the stamp past the rounding boundary — a scheduling failure, not a
+        # behavioural one. The claim that survives drift is the number's range.
+        import re
+
+        assert "machine" in released[0], released[0]
+        stated_age_m = re.search(r"last refreshed (\d+) s before this boot", released[0])
+        assert stated_age_m, released[0]
+        assert 360 <= int(stated_age_m.group(1)) <= 375, (
+            "the release line must name the lease age it judged: seeded at 360 s, "
+            f"and a row cannot get younger between the write and the read — {released[0]}")
+    finally:
+        await reborn.stop()
+
+
+def test_a_machine_pause_with_a_fresh_lease_holds_the_pool_across_a_restart(q):
+    """The protection the operator pause used to be the only way to get.
+
+    A harness that is alive and beating its lease must keep its measurement window
+    through a landing's backend restart, or the machine kind would be a downgrade
+    for the very runs that need the hold. Both cases here sit a minute clear of the
+    300 s line, and deliberately so: the lease is a SQL stamp this node writes and
+    the pool then reads, so a case parked one second from the boundary fails on a
+    loaded runner for reasons of scheduling. The exact boundary belongs to
+    `test_the_lease_window_is_300_seconds_and_the_boundary_is_pinned_without_a_clock`,
+    which judges `lease_is_stale` on an argument instead of a wall clock.
+    """
+    from workers.pool import MACHINE_LEASE_STALE_SECONDS
+
+    _hold_pause(q, "machine", held_for_hours=0.5, lease_age_s=30.0)
+    reborn = WorkerPool(q, slots=1)
+    assert reborn.paused is True and reborn.paused_by == ["operator"], (
+        "a live harness's window was reconciled away by a restart")
+    assert reborn.holder_kind == "machine"
+    # `machine_lease_age_s` is Optional by contract — None means "this hold is
+    # never judged by age" — so the window is checked after that is ruled out.
+    inherited_age_s = reborn.machine_lease_age_s
+    assert inherited_age_s is not None and 28.0 <= inherited_age_s <= 90.0, inherited_age_s
+
+    # A minute of slack inside the window: still believed, and not a case that can
+    # age out between this write and the pool's read.
+    _hold_pause(q, "machine", held_for_hours=0.5,
+                lease_age_s=MACHINE_LEASE_STALE_SECONDS - 60.0)
+    assert WorkerPool(q, slots=1).paused is True, (
+        f"a lease {MACHINE_LEASE_STALE_SECONDS - 60:.0f} s old is inside the "
+        f"{MACHINE_LEASE_STALE_SECONDS:.0f} s window and must still be believed")
+
+
+def test_the_lease_window_is_300_seconds_and_the_boundary_is_pinned_without_a_clock():
+    """The number clause 2 names, pinned on the function that decides it.
+
+    `lease_is_stale` takes the age as an argument, so this node can sit exactly on
+    the line the pool-level nodes have to keep a minute clear of: 300 s is believed,
+    301 s is not, and a lease with no readable stamp at all is treated as a dead
+    setter — the claim "a machine holds this and it is alive" needs positive
+    evidence, and on 2026-10-09 the expensive failure was the halt, not the claim.
+    """
+    from workers.pool import MACHINE_LEASE_STALE_SECONDS, lease_is_stale
+
+    assert MACHINE_LEASE_STALE_SECONDS == 300, (
+        "clause 2 says 300 s; a different number here is a different contract")
+    assert lease_is_stale(0.0) is False
+    assert lease_is_stale(MACHINE_LEASE_STALE_SECONDS) is False
+    assert lease_is_stale(MACHINE_LEASE_STALE_SECONDS + 1.0) is True
+    assert lease_is_stale(360.0) is True      # the incident replay's own age
+    assert lease_is_stale(None) is True
+
+
+def test_a_persons_pause_is_never_reconciled_however_old_the_hold_is(q):
+    """#2498 must not touch `29d88695`: for a person, durability IS the point.
+
+    The 20 h 52 m halt of 2026-10-09 was a machine's. A person's hold of the same
+    age, on the same row, in the same boot, has to re-engage exactly as it did
+    before the change — the shape `29d88695` shipped after three restarts came back
+    claiming jobs under a hand-taken pause.
+    """
+    from workers.pool import PAUSE_WM_KEY, PAUSE_WM_SOURCE
+
+    since = _hold_pause(q, "person", held_for_hours=20.87)   # the incident's own age
+    reborn = WorkerPool(q, slots=1)
+    assert reborn.paused is True and reborn.paused_by == ["operator"]
+    assert reborn.holder_kind == "person"
+    assert reborn.paused_since == since
+    assert reborn.machine_lease_age_s is None, (
+        "a person's hold reports no lease age at all: it is never judged by one")
+    assert q.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_KEY) == "1", (
+        "a startup wrote off a halt a person took")
+
+
+def test_a_pause_row_with_no_holder_kind_at_all_is_a_persons_pause(q):
+    """The pre-#2498 database, and the guardian's vault trip, land on the safe side.
+
+    `(_pool, operator_pause_holder)` did not exist until this change, so a hold
+    recorded by an older build — or by the guardian, which posts `{"paused": true}`
+    and by design waits for a human (`agent-services/guardian/vaultwatch.py` prints
+    the resume curl) — is one row and no kind. Reading that silence as `machine`
+    would let the first boot after landing silently resume halts people took on
+    purpose, which is the opposite of what this item is for.
+    """
+    WorkerPool(q, slots=1).pause(True)
+    _forget_holder_kind(q)
+
+    reborn = WorkerPool(q, slots=1)
+    assert reborn.paused is True and reborn.paused_by == ["operator"], (
+        "an unattributed hold was reconciled as though a machine took it")
+    assert reborn.holder_kind == "person"
+
+
+async def test_a_boot_over_an_inherited_hold_names_the_hold_not_just_the_slots(q, caplog):
+    """#2498 clause 4: a boot while the fleet is halted has to be legible in the log.
+
+    Inside the 20 h gap of 2026-10-09 the log carries bare
+    `Worker pool started with 6 slots` lines (`server.err.4:8149,8357,8489`) and the
+    halt is visible only as the absence of runs. One line per boot, naming the
+    kind, the instant, and what this boot decided about it.
+    """
+    import logging
+    caplog.set_level(logging.INFO)
+
+    cases = [
+        # (kind, lease age at this boot, what the boot must say about reconciling)
+        ("machine", 30.0, "no (lease still fresh"),
+        ("machine", 900.0, "yes (released at startup"),
+        ("person", None, "no (a person's hold is durable"),
+    ]
+    for kind, lease_age_s, verdict in cases:
+        since = _hold_pause(q, kind, held_for_hours=3.0, lease_age_s=lease_age_s)
+        caplog.clear()
+        pool = WorkerPool(q, slots=1, poll_idle_seconds=0.01)
+        await pool.start()
+        try:
+            lines = [r.getMessage() for r in caplog.records if "inherited a" in r.getMessage()]
+            assert len(lines) == 1, (kind, lease_age_s, caplog.text)
+            line = lines[0]
+            assert f"inherited a {kind} pause" in line, line
+            assert f"since={since}" in line, line
+            assert verdict in line, line
+        finally:
+            await pool.stop()
+
+
 async def test_in_flight_state_is_reported_while_a_job_runs_and_cleared_after(q, monkeypatch):
     """The dashboard's live worker panel reads exactly this."""
     running = asyncio.Event()
@@ -985,6 +1184,48 @@ def _hold_operator_pause(q, *, hours: float) -> str:
                      "WHERE source=? AND key=?", (since, PAUSE_WM_SOURCE, PAUSE_WM_KEY))
         conn.commit()
     return since
+
+
+def _hold_pause(q, kind: str, *, held_for_hours: float = 0.0,
+                lease_age_s: float | None = None) -> str:
+    """Take a durable hold of `kind` (`person` / `machine`) and age its two rows.
+
+    Both rows come from the real writer — `WorkerPool.pause(..., holder_kind=kind)`
+    — and only their `updated_at` stamps are wound back, so each is the production
+    row in every other respect. `held_for_hours` ages the HOLD (the instant
+    `paused_since` reports); `lease_age_s` ages the LEASE. The two are separate
+    arguments because the whole of #2498 is that the two rows can disagree: the
+    2026-10-09 halt was 20 h old and unrefreshed for 20 h, while a live harness's
+    window is 30 s old and refreshed 30 s ago. Returns the hold's start instant.
+    """
+    import datetime as _dt
+    import sqlite3
+
+    from workers.pool import PAUSE_WM_HOLDER_KEY, PAUSE_WM_KEY, PAUSE_WM_SOURCE
+    now = _dt.datetime.now(_dt.timezone.utc)
+    WorkerPool(q, slots=1).pause(True, holder_kind=kind)
+    since = (now - _dt.timedelta(hours=held_for_hours)).isoformat()
+    lease = (now - _dt.timedelta(seconds=lease_age_s)).isoformat() \
+        if lease_age_s is not None else since
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE watermarks SET updated_at=? "
+                     "WHERE source=? AND key=?", (since, PAUSE_WM_SOURCE, PAUSE_WM_KEY))
+        conn.execute("UPDATE watermarks SET updated_at=? "
+                     "WHERE source=? AND key=?", (lease, PAUSE_WM_SOURCE,
+                                                  PAUSE_WM_HOLDER_KEY))
+        conn.commit()
+    return since
+
+
+def _forget_holder_kind(q) -> None:
+    """Delete the holder row, leaving the hold exactly as a pre-#2498 build wrote it."""
+    import sqlite3
+
+    from workers.pool import PAUSE_WM_HOLDER_KEY, PAUSE_WM_SOURCE
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("DELETE FROM watermarks WHERE source=? AND key=?",
+                     (PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY))
+        conn.commit()
 
 
 async def _starving_alerts(q, monkeypatch, tmp_path):

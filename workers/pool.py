@@ -544,10 +544,70 @@ def _positive_int(value: Any) -> Optional[int]:
 # in the same database as the rows it holds back.
 PAUSE_WM_SOURCE = "_pool"
 PAUSE_WM_KEY = "operator_paused"
+#: WHO took that hold. `(_pool, operator_paused)` is two bytes — "1"/"0" — and
+#: carries no owner-kind, which is #2498's whole defect: a Mission Control click
+#: and an eval's 15-minute window are the same two bytes, so when the eval's
+#: process died the halt outlived it and held the fleet 20 h 52 m across a reboot
+#: on 2026-10-09, indistinguishable from a person's deliberate pause. While a
+#: hold is up this row's `updated_at` doubles as the LEASE STAMP: a machine path
+#: re-writes the row to say "still alive", and a hold whose lease went stale
+#: cannot have a live setter behind it any more.
+PAUSE_WM_HOLDER_KEY = "operator_pause_holder"
+
+#: A human, through Mission Control or a curl, or anything that names no kind
+#: (the guardian's vault trip posts `{"paused": true}` and waits for a person).
+HOLDER_PERSON = "person"
+#: A process: an eval's measurement window, a replay harness's run.
+HOLDER_MACHINE = "machine"
+#: What a missing or unrecognised holder row means, and the answer a pre-#2498
+#: database gives. Deliberately `person`: a hold nobody attributed must be the
+#: kind that is never auto-released, so landing this change cannot silently
+#: resume a halt some earlier process took on a person's behalf.
+HOLDER_DEFAULT = HOLDER_PERSON
+#: How stale a machine hold's lease may be when a pool starts up. Five minutes:
+#: long enough that one missed beat (a busy loop, a 60 s refresh that lands 10 s
+#: late) never releases a live harness's measurement window, short enough that a
+#: killed or OOM'd setter stops being believed within one scheduler gap.
+MACHINE_LEASE_STALE_SECONDS = 300
+
+
+def _lease_age_seconds(updated_at: Optional[str]) -> Optional[float]:
+    """Seconds between `updated_at` (the row's ISO stamp) and now, or None.
+
+    An unparseable stamp returns None, which callers treat as "no evidence of
+    life": a machine hold with no readable lease has nothing to reconcile
+    against. A naive stamp is read as UTC — the queue stamps rows with
+    `datetime.now(timezone.utc)`, and a machine-facing timestamp that a later
+    reader takes as local time is the #2021 class of bug.
+    """
+    if not updated_at:
+        return None
+    try:
+        stamp = datetime.fromisoformat(updated_at)
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - stamp).total_seconds()
+
+
+def lease_is_stale(lease_age_s: Optional[float]) -> bool:
+    """Whether a machine hold's lease proves its setter is gone.
+
+    `None` (no stamp at all, or one that cannot be parsed) counts as stale: the
+    claim "a machine holds this, and it is alive" needs positive evidence, and
+    the expensive failure on both sides of #2498 is the halt, not the claim.
+    """
+    return lease_age_s is None or lease_age_s > MACHINE_LEASE_STALE_SECONDS
+
+
+def _holder_kind(raw: Optional[str]) -> str:
+    """Normalise a holder row's value to one of the two kinds."""
+    return HOLDER_MACHINE if raw == HOLDER_MACHINE else HOLDER_DEFAULT
 
 
 def operator_pause_state(queue: WorkQueue) -> dict[str, Any]:
-    """The OPERATOR pause as the DATABASE sees it: ``{"paused", "since"}``.
+    """The OPERATOR pause as the DATABASE sees it: ``{"paused", "since", "holder", "lease_age_s"}``.
 
     ONE read for both surfaces that have to agree (#1550). The pool's own flag is
     in-process and dies with it; the watermark row is what survives a restart, and
@@ -563,6 +623,14 @@ def operator_pause_state(queue: WorkQueue) -> dict[str, Any]:
     durable instant to report and inventing one would assert a pause that a
     landing's restart does not survive.
 
+    `holder` (#2498) is `person` or `machine` — WHAT took the durable hold, which
+    `paused_by` cannot say because the route's `operator` bucket holds both a
+    person's click and an eval's window. `lease_age_s` is the holder row's age,
+    reported only for a machine hold, and it is the thing that lets a pool decide
+    at startup whether the setter can still be alive. A hold with no holder row —
+    every database written before #2498 — reads as `person`, the kind that is
+    never auto-released.
+
     Never raises: an unreadable watermark is reported as "no pause held" with a loud
     line, because every caller of this is a read surface (boot, status, an alert),
     and a database hiccup must not claim a hold that is not there.
@@ -570,11 +638,16 @@ def operator_pause_state(queue: WorkQueue) -> dict[str, Any]:
     try:
         paused = queue.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_KEY) == "1"
         since = queue.wm_updated_at(PAUSE_WM_SOURCE, PAUSE_WM_KEY) if paused else None
+        holder = _holder_kind(queue.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY)) if paused else None
+        lease_age_s = (
+            _lease_age_seconds(queue.wm_updated_at(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY))
+            if holder == HOLDER_MACHINE else None)
     except Exception:
         logger.exception("Worker pool: could not read the persisted operator "
                          "pause; reporting it as not held")
-        return {"paused": False, "since": None}
-    return {"paused": paused, "since": since}
+        return {"paused": False, "since": None, "holder": None, "lease_age_s": None}
+    return {"paused": paused, "since": since, "holder": holder,
+            "lease_age_s": lease_age_s}
 
 
 class WorkerPool:
@@ -608,6 +681,10 @@ class WorkerPool:
         # `round restart`) stays in memory, because the promoter relies on a
         # landing's own restart to clear it (`promote._POOL_PAUSED_BY_US`); made
         # durable, every landing would leave the pool paused for good.
+        # What the pause row said when this pool was built — kind, instant, lease
+        # age, and whether this boot reconciled it — so `start()` can say so out
+        # loud instead of reporting only a slot count over a halted fleet (#2498).
+        self._inherited_pause: Optional[dict[str, Any]] = None
         self._paused_operator = self._load_operator_pause()
         self._paused_automod = False
         self._workers: list[asyncio.Task] = []
@@ -683,6 +760,10 @@ class WorkerPool:
             self._scheduler_loop(), name="lloyd-worker-scheduler"
         )
         logger.info("Worker pool started with %d slots", self.slots)
+        # #2498: a boot that inherited a halt must not report only the slot
+        # count. This is the one line that makes a boot-while-halted legible in
+        # the log instead of by the absence of runs.
+        self._announce_inherited_pause()
 
     async def stop(self) -> None:
         self._running = False
@@ -703,38 +784,131 @@ class WorkerPool:
         logger.info("Worker pool stopped")
 
     def _load_operator_pause(self) -> bool:
-        """Reload a hold a previous process took. Reads the same row the alert reads.
+        """Reload a hold a previous process took, and reconcile a dead machine's.
 
         Both halves of #1550 had to come from one accessor: the verdict that keeps
         a restarted pool from claiming work is the SAME read that puts the pause in
         the stall alert, so an alert can never accuse a pool this process considers
         free, nor clear one it is holding. `operator_pause_state` swallows and logs
         its own failures, which is why no try/except lives here any more.
-        """
-        return operator_pause_state(self.queue)["paused"]
 
-    def pause(self, paused: bool = True, owner: str = "operator") -> None:
+        #2498 adds the one branch the row could not express until it carried a
+        holder kind: a hold taken by a PROCESS. Durability is the point of
+        `29d88695` for a person — a backend restart must not resurrect a fleet
+        someone stopped — but a process that has not refreshed its lease in
+        `MACHINE_LEASE_STALE_SECONDS` cannot have survived the reboot that is
+        reloading it, and a halt it left behind has nobody left to lift it. That
+        is the 20 h 52 m fleet-wide halt of 2026-10-09: durable hold, dead halter,
+        and the only surface that said so was a line in a daily note.
+        """
+        state = operator_pause_state(self.queue)
+        self._inherited_pause = None
+        if not state["paused"]:
+            return False
+        self._inherited_pause = {**state, "reconciled": False}
+        if state["holder"] == HOLDER_MACHINE and lease_is_stale(state["lease_age_s"]):
+            self._release_dead_machine_pause(self._inherited_pause)
+            return False
+        return True
+
+    def _release_dead_machine_pause(self, inherited: dict[str, Any]) -> None:
+        """Drop a machine hold whose lease says its setter is gone.
+
+        Releases by writing the same two rows `pause(False)` writes, so the
+        release is durable and the next pool — or the alert, which reads the row
+        and not this process — agrees that claims are free again.
+        """
+        last_refresh = ("never (no lease stamp on the holder row)"
+                        if inherited.get("lease_age_s") is None
+                        else f"{inherited['lease_age_s']:.0f} s before this boot")
+        try:
+            self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY, "0")
+            self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY, "0")
+        except Exception:
+            # Fail toward the halt. A hold this process cannot release stays a
+            # hold, the boot line says it was not reconciled, and a person is
+            # told the truth rather than a resume that did not happen.
+            logger.exception("Worker pool: could not release the %s pause held since %s "
+                             "(lease last refreshed %s); the fleet stays halted until a "
+                             "person resumes it", inherited.get("holder"),
+                             inherited.get("since"), last_refresh)
+            return
+        inherited["reconciled"] = True
+        logger.warning("Worker pool: releasing the %s pause taken at %s whose lease was "
+                       "last refreshed %s — its setter cannot have survived the restart; "
+                       "dispatch resumes", inherited.get("holder"),
+                       inherited.get("since"), last_refresh)
+
+    def _announce_inherited_pause(self) -> None:
+        """Say at boot what the previous process left holding the fleet.
+
+        A boot that re-engages a halt and logs nothing but `Worker pool started
+        with 6 slots` is how 2026-10-09 stayed unread: inside the 20 h gap the log
+        carries three bare "started with 6 slots" lines and the halt is visible
+        only as the absence of runs (`server.err.4:8149,8357,8489`). One line per
+        boot, naming the kind, the instant and whether this boot reconciled it.
+        """
+        inherited = getattr(self, "_inherited_pause", None)
+        if not inherited:
+            return
+        age = inherited.get("lease_age_s")
+        if inherited.get("reconciled"):
+            verdict = "yes (released at startup; dispatch resumes)"
+        elif inherited.get("holder") == HOLDER_MACHINE:
+            verdict = "no (lease still fresh; the hold stands across this restart)"
+        else:
+            verdict = "no (a person's hold is durable by design)"
+        logger.warning("Worker pool inherited a %s pause from the previous process: "
+                       "since=%s lease_age=%s reconciled=%s",
+                       inherited.get("holder"), inherited.get("since"),
+                       "n/a" if age is None else f"{age:.0f} s", verdict)
+
+    def pause(self, paused: bool = True, owner: str = "operator",
+              holder_kind: str = HOLDER_PERSON) -> None:
         """Pause or resume. `owner` is `operator` (persisted) or `automod` (not).
 
         An automod resume lifts only its own pause, so a person's pause taken
         during a landing outlives the landing. An operator resume lifts both, as
         a resume always has: a person resuming the pool means it.
+
+        `holder_kind` (#2498) says what KIND of thing took the durable hold —
+        `person` (default) or `machine` — which `owner` cannot: the persisted
+        `operator` bucket is both a Mission Control click and an eval's
+        measurement window, and only the machine's half may be reconciled away at
+        startup by `_load_operator_pause`. Anything that names no kind is a
+        person's hold, which is what the guardian's vault trip and every database
+        written before this change are.
+
+        Re-pausing a hold this process already holds refreshes the holder row and
+        leaves the pause row's stamp alone on purpose: that stamp IS the hold's
+        duration (#1550's `paused_since`), and a harness keeping its lease alive
+        must not make a 3-hour halt read as 5 seconds old.
         """
+        kind = HOLDER_MACHINE if holder_kind == HOLDER_MACHINE else HOLDER_PERSON
         if owner == "automod":
             self._paused_automod = paused
         else:
+            already_held = self._paused_operator
             self._paused_operator = paused
             if not paused:
                 self._paused_automod = False
             try:
-                self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY, "1" if paused else "0")
+                if paused != already_held:
+                    self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY,
+                                      "1" if paused else "0")
+                # Written on every call: for a machine hold this write IS the
+                # lease refresh, and its `updated_at` is what a later pool start
+                # measures. On a resume it records "0" so a stale kind can never
+                # outlive the hold it described.
+                self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY,
+                                  kind if paused else "0")
             except Exception:
                 # The pause still holds for this process; only its survival of
                 # a restart is lost, and that is worth a loud line, not a refusal.
                 logger.exception("Worker pool: pause not persisted; a restart will clear it")
-        logger.info("Worker pool %s by %s (operator=%s automod=%s)",
+        logger.info("Worker pool %s by %s (operator=%s automod=%s) holder=%s",
                     "paused" if paused else "resumed", owner,
-                    self._paused_operator, self._paused_automod)
+                    self._paused_operator, self._paused_automod, kind)
 
     @property
     def _paused(self) -> bool:
@@ -770,12 +944,38 @@ class WorkerPool:
             return None
         return operator_pause_state(self.queue)["since"]
 
+    @property
+    def holder_kind(self) -> Optional[str]:
+        """`person` or `machine` (#2498), or None while no durable hold is held.
+
+        The kind of thing that took the PERSISTED hold, read off the row like
+        `paused_since` so a restarted pool and a status poll cannot disagree. An
+        automod-only hold reports None: it is in-memory, dies with this process,
+        and has no lease to reconcile.
+        """
+        if not self._paused_operator:
+            return None
+        return operator_pause_state(self.queue)["holder"]
+
+    @property
+    def machine_lease_age_s(self) -> Optional[float]:
+        """Age of a machine hold's lease in seconds; None unless one is held.
+
+        `None` for a person's hold is not "0 seconds": it is "this hold is never
+        judged by age", which is the guarantee `29d88695` made and #2498 keeps.
+        """
+        if not self._paused_operator:
+            return None
+        return operator_pause_state(self.queue)["lease_age_s"]
+
     def status(self) -> dict:
         return {
             "running": self._running,
             "paused": self._paused,
             "paused_by": self.paused_by,
             "paused_since": self.paused_since,
+            "holder_kind": self.holder_kind,
+            "machine_lease_age_s": self.machine_lease_age_s,
             "slots": self.slots,
             "in_flight": {
                 str(k): {

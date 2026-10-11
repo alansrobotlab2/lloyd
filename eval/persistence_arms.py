@@ -14,16 +14,20 @@ only a pause it took, runs the resume in a `finally` behind SIGTERM/SIGHUP handl
 and refuses to lift a hold the automod promoter still owns (an operator resume lifts
 BOTH holders — `workers/pool.py:716-728` — so a hand-rolled `curl -d '{"paused":false}'`
 in an EXIT trap un-pauses a landing's drain mid-flight). This module subclasses it and
-adds the two refusals a measurement window needs on top:
+adds the two refusals a measurement window needs on top. Since #2498 the inherited hold
+is a MACHINE hold with a lease refreshed every 60 s: as durable as it was while this
+process is alive, and — unlike the operator hold it used to post — reconciled by the
+next pool to start if this one is killed and never beats again.
 
 * **an already-held pool is a refusal.** `PoolPause.__aenter__` continues with
   `ours=False` when someone else holds the pool — right for an eval that only wants
   the engine to itself, wrong for a window whose denominator is "reps with dispatch
   held", where continuing means measuring something the label on the rows denies.
 * **nothing is in flight before rep 1.** No pause route answers that:
-  `GET /api/workers/pause` returns `paused`, `paused_by` and `paused_since`
-  (`app/routers/workers.py:406-433`) and says nothing about the queue, so depth comes
-  from `GET /api/workers/status` (`:124`).
+  `GET /api/workers/pause` returns `paused`, `paused_by`, `paused_since` and — since
+  #2498 — `holder_kind` and `machine_lease_age_s` (`app/routers/workers.py:408-446`),
+  and says nothing about the queue, so depth comes from `GET /api/workers/status`
+  (`:126`).
 
 And the leak check runs OUTSIDE the event loop, in `main`'s `finally`: a rep loop that
 dies mid-cancel can take the async resume down with it, and the persisted row in
@@ -183,7 +187,13 @@ def sync_holders(backend: str) -> list[str] | None:
 
 
 def sync_resume(backend: str) -> None:
-    """An operator resume — the same POST `PoolPause._post(False)` makes."""
+    """An operator resume from outside the event loop.
+
+    Not byte-identical to `PoolPause._post(False)` any more: that one names this
+    process as a `machine` holder (#2498), and this line is a last resort with no
+    hold of its own to attribute, so it names no kind. The route treats a resume
+    the same either way — it lifts the hold and writes the holder row back to `0`.
+    """
     _post_json(f"{backend}/api/workers/pause", {"paused": False})
 
 
@@ -394,7 +404,10 @@ def settle(code: int, ours: bool, *, backend: str, db: Path) -> int:
     sync_resume(backend)
     if operator_pause_set(db) is not False:
         print(f"!! LEAKED: {db} still records ({PAUSE_WM_SOURCE},{PAUSE_WM_KEY})='1'. "
-              "Dispatch is paused; nothing else on this box will resume it.",
+              "Dispatch is paused. This window holds it as a machine (#2498), so its "
+              "lease lapses and the next pool to START releases the halt — until a "
+              "backend restart happens, nothing dispatches, which is why this is "
+              "still a non-zero exit and not a self-cleaning leak.",
               file=sys.stderr, flush=True)
     else:
         print("!! the last-resort resume cleared it, but the async resume failed and "

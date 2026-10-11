@@ -4,8 +4,10 @@ GET  /api/workers/status           — pool state + queue depth by source
 GET  /api/workers/queue            — list queue items (filterable)
 GET  /api/workers/runs             — list recent runs (filterable)
 POST /api/workers/enqueue          — manually enqueue (for testing / agent hooks)
-GET  /api/workers/pause            — who holds the pause, and since when (#1550)
-POST /api/workers/pause            — pause/resume worker draining
+GET  /api/workers/pause            — who holds the pause, since when (#1550),
+                                     and what KIND holds it (#2498)
+POST /api/workers/pause            — pause/resume worker draining; `holder_kind`
+                                     `machine` marks a process's reconcilable hold
 POST /api/workers/enable           — toggle workers.enabled in config.yaml
 GET  /api/workers/pending          — list pending-research artifacts
 GET  /api/workers/pending/read     — read one artifact's full content
@@ -34,7 +36,7 @@ from app import mitigation_state
 from app.config import CONFIG, save_tool_overrides
 from app.paths import VAULT_ROOT, VAULT_PENDING_RESEARCH_DIR as PENDING_ROOT
 from workers.queue import PENDING_WAIT_BOUND_SECONDS, get_queue
-from workers.pool import get_pool
+from workers.pool import HOLDER_MACHINE, HOLDER_PERSON, get_pool
 
 REJECTED_ROOT = PENDING_ROOT / "_rejected"
 
@@ -422,6 +424,15 @@ async def workers_pause_state():
     and this route cannot disagree. No pause is not an error: the honest answer is
     `{"paused": false, "paused_since": null}`, and a hold taken by `automod` (which
     is deliberately transient) reports null rather than an invented instant.
+
+    #2498 adds `holder_kind` beside the other two: `person` or `machine` — what
+    KIND of thing took the hold. `paused_by` answers which owner bucket, and the
+    persisted one holds both a Mission Control click and an eval's measurement
+    window, which is how a harness's halt on 2026-10-09 outlived the harness, held
+    the fleet 20 h 52 m, and read as a person's pause to every surface. With it
+    comes `machine_lease_age_s`: how long ago a machine hold last refreshed its
+    lease, i.e. whether a live process is still behind it. A person's hold reports
+    null there, meaning "this hold is never judged by age", not "0 seconds old".
     """
     pool = get_pool()
     if not pool:
@@ -430,11 +441,26 @@ async def workers_pause_state():
         "paused": pool.paused,
         "paused_by": getattr(pool, "paused_by", None),
         "paused_since": getattr(pool, "paused_since", None),
+        "holder_kind": getattr(pool, "holder_kind", None),
+        "machine_lease_age_s": getattr(pool, "machine_lease_age_s", None),
     })
 
 
 @router.post("/api/workers/pause")
 async def workers_pause(request: Request):
+    """Take or lift a pause, and record WHAT KIND of holder took it (#2498).
+
+    `holder_kind` is `machine` for a process — an eval's measurement window, a
+    replay harness — and defaults to `person` for everything else, because a
+    request that names no kind is a Mission Control click, a guardian vault trip,
+    or a caller written before this field existed, and none of those may be
+    auto-released. The distinction is the whole of #2498: `owner` already said
+    which bucket (persisted `operator` vs the promoter's transient `automod`), but
+    both a person's deliberate halt and a harness's 15-minute hold are in the
+    persisted one, so when the harness died its hold stayed and read, on every
+    surface, exactly like a person's. A machine's hold re-POSTing `paused: true`
+    refreshes its lease without moving the hold's start instant.
+    """
     pool = get_pool()
     if not pool:
         raise HTTPException(status_code=503, detail="pool not running")
@@ -443,13 +469,20 @@ async def workers_pause(request: Request):
     # `owner: automod` is the promoter's transient pause; anything else is an
     # operator's and survives a restart (`WorkerPool.pause`).
     owner = "automod" if data.get("owner") == "automod" else "operator"
-    pool.pause(paused, owner=owner)
+    holder_kind = (HOLDER_MACHINE if data.get("holder_kind") == HOLDER_MACHINE
+                   else HOLDER_PERSON)
+    pool.pause(paused, owner=owner, holder_kind=holder_kind)
     return JSONResponse({"paused": pool.paused,
                          "paused_by": getattr(pool, "paused_by", None),
                          # #1550: the response to the click that took the pause is
                          # what the panel renders, so it carries the same instant
                          # GET reports — one hold, one duration, every surface.
-                         "paused_since": getattr(pool, "paused_since", None)})
+                         "paused_since": getattr(pool, "paused_since", None),
+                         # #2498: and the same kind, for the same reason — the
+                         # caller that took the hold is told what it signed up for.
+                         "holder_kind": getattr(pool, "holder_kind", None),
+                         "machine_lease_age_s": getattr(pool,
+                                                        "machine_lease_age_s", None)})
 
 
 @router.post("/api/workers/enable")

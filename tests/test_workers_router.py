@@ -919,6 +919,218 @@ def test_paused_since_is_only_the_operator_pause_instant(monkeypatch, tmp_path):
         "assert a pause that the landing's restart does not survive")
 
 
+# ---------------------------------------------------------------------------
+# #2498 clause 1 — the route records WHAT KIND of holder took the hold
+#
+# `paused_by` names the owner bucket, and the persisted bucket has always held two
+# different things: a person's deliberate halt, and a harness's measurement
+# window. On 2026-10-09 a harness died holding one, and the fleet stayed halted
+# 20 h 52 m across the 17:37 reboot while every surface that named it called it a
+# person's pause. `holder_kind` is the field that tells them apart;
+# `machine_lease_age_s` is the evidence that a machine's hold still has a live
+# process behind it.
+# ---------------------------------------------------------------------------
+
+
+def test_a_pause_that_names_no_kind_is_a_persons_hold_on_every_surface(
+        monkeypatch, tmp_path):
+    """The default is `person`, and it is the safe default rather than an accident.
+
+    The callers that name no kind are a Mission Control click, the guardian's
+    vault trip (`agent-services/guardian/guardian.py:_pause_workers` posts
+    `{"paused": true}` and `vaultwatch.py` prints the resume curl for a human to
+    run), and every build written before the field existed. Not one of them may be
+    auto-released at startup, so an unnamed kind has to be the kind that never is.
+    """
+    client, pool, since = _pause_client(monkeypatch, tmp_path, held_for_hours=4.0)
+
+    body = client.get("/api/workers/pause").json()
+    assert body["paused"] is True and body["paused_since"] == since, body
+    assert body["holder_kind"] == "person", body
+    assert body["machine_lease_age_s"] is None, (
+        "a person's hold must report no age at all — null means 'never judged by "
+        "age', where 0.0 would mean '5 seconds old' and read as a fresh hold")
+    assert pool.status()["holder_kind"] == "person", (
+        "`GET /api/workers/status` embeds status(); it must name the same holder")
+
+    resuming = client.post("/api/workers/pause", json={"paused": False}).json()
+    assert resuming["paused"] is False, resuming
+    assert resuming["holder_kind"] is None and resuming["machine_lease_age_s"] is None, (
+        "a lifted hold has no holder; reporting a kind would claim one")
+
+
+def test_the_pause_route_records_the_holder_kind_it_is_given(monkeypatch, tmp_path):
+    """`holder_kind` on the request is what the POST response and GET then report.
+
+    One hold, one kind, three readers: the click that took it, `GET
+    /api/workers/pause`, and `status()` behind `/api/workers/status`. The middle
+    case is the harness's heartbeat — a machine re-POSTing its own hold refreshes
+    the LEASE and must not move the hold's start instant, because `paused_since` is
+    what the stall alert quotes and a heartbeat that reset it would make a 3-hour
+    halt read as 5 seconds old.
+    """
+    client, pool, _ = _pause_client(monkeypatch, tmp_path)
+
+    taken = client.post("/api/workers/pause",
+                        json={"paused": True, "holder_kind": "machine"}).json()
+    assert taken["paused"] is True and taken["paused_by"] == ["operator"], taken
+    assert taken["holder_kind"] == "machine", taken
+    assert 0 <= taken["machine_lease_age_s"] < 60, taken
+
+    body = client.get("/api/workers/pause").json()
+    assert body["holder_kind"] == "machine", body
+    assert body["paused_since"] == taken["paused_since"], body
+
+    refreshed = client.post("/api/workers/pause",
+                            json={"paused": True, "holder_kind": "machine"}).json()
+    assert refreshed["paused_since"] == taken["paused_since"], (
+        "refreshing a machine's lease moved the hold's start instant, so every "
+        "alert would report the heartbeat's age instead of the halt's")
+
+    # A person who re-pauses the same hold makes it a person's hold: whoever holds
+    # it decides whether a startup may reconcile it, and a person outranks a lease.
+    theirs = client.post("/api/workers/pause", json={"paused": True}).json()
+    assert theirs["holder_kind"] == "person", theirs
+    assert theirs["machine_lease_age_s"] is None, theirs
+    assert client.get("/api/workers/pause").json()["holder_kind"] == "person"
+
+
+# ---------------------------------------------------------------------------
+# #2498 clause 5 — the harnesses that hold the pool hold it as machines
+#
+# These two nodes are the seam check: they drive the shipped harness code against
+# a stub backend and read the JSON body it is actually sent, because "the harness
+# marks its hold machine" is a claim about a POST, not about a docstring. A hold
+# posted with no kind is a person's hold, and a person's hold is never reconciled —
+# which is exactly how a killed eval held the fleet on 2026-10-09.
+# ---------------------------------------------------------------------------
+
+
+def _pause_stub(seen: list):
+    """A backend speaking `/api/workers/{status,pause}` that records each POST body."""
+    import json
+
+    import httpx
+
+    def handler(request):
+        if request.url.path.endswith("/status"):
+            paused = any(b.get("paused") for b in seen)
+            return httpx.Response(200, json={"pool": {
+                "paused": paused, "paused_by": ["operator"] if paused else []}})
+        body = json.loads(request.content)
+        seen.append(body)
+        paused = bool(body.get("paused"))
+        return httpx.Response(200, json={
+            "paused": paused, "paused_by": ["operator"] if paused else [],
+            "holder_kind": (body.get("holder_kind") or "person") if paused else None,
+            "machine_lease_age_s": 0.0 if paused else None})
+
+    return httpx.MockTransport(handler)
+
+
+def test_the_context_rot_eval_holds_the_pool_as_a_machine_and_beats_its_lease():
+    """`PoolPause` used to post an operator hold, so its halt outlived the run.
+
+    The heartbeat is not decoration: a machine hold is only believed alive while
+    its lease is fresh, and the whole point of the pause is a window longer than
+    the 300 s the pool is willing to believe a hold without evidence. So the node
+    checks the body of the take, of the beats, and of the release.
+    """
+    import asyncio
+    import importlib.util
+    import httpx
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "run_context_rot_eval_for_pause", ROOT / "eval" / "run_context_rot_eval.py")
+    assert spec is not None and spec.loader is not None, (
+        "eval/run_context_rot_eval.py is not loadable as a module")
+    rot = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = rot
+
+    seen: list = []
+
+    async def go():
+        async with httpx.AsyncClient(transport=_pause_stub(seen)) as c:
+            pause = rot.PoolPause("http://be", c, lease_refresh_s=0.02,
+                                  automod_wait_s=0, poll_s=0.01)
+            async with pause:
+                assert pause.ours, "the eval did not take the hold it was given"
+                await asyncio.sleep(0.12)      # several lease beats
+
+    try:
+        spec.loader.exec_module(rot)
+        asyncio.run(go())
+    finally:
+        # Pop what this node added. `sys.modules` is import state this file would
+        # otherwise hand to every file that runs after it, and `run_context_rot_eval`
+        # is loaded elsewhere under its own name — leaving this synthetic copy
+        # standing means `PoolPause` exists as two class objects for the next reader,
+        # which is the import-order failure already recorded on #2498.
+        sys.modules.pop(spec.name, None)
+
+    take = {"paused": True, "holder_kind": "machine"}
+    assert seen[0] == take, seen
+    assert seen[-1] == {"paused": False, "holder_kind": "machine"}, seen
+    beats = seen[1:-1]
+    assert len(beats) >= 2, f"the lease heartbeat never fired: {seen}"
+    assert all(b == take for b in beats), seen
+
+
+def test_the_replay_run_keeps_the_lease_it_took_through_its_own_main(monkeypatch):
+    """`scripts/replay_run_state.py` measures an engine for minutes at a time.
+
+    Its hold has to outlive the 300 s machine-lease window without becoming the
+    unowned halt that window exists to clean up. This node drives the SHIPPED entry
+    point — `main()` — with only the measurement arm, the engine counters and the
+    report dump replaced, and reads the bodies the run's own client posts. The
+    helpers are not the seam: `main()` is what calls `start_pool_lease_keeper()`
+    (`scripts/replay_run_state.py:548`) and what awaits
+    `stop_pool_lease_keeper()` before its resume, so a node that called those
+    helpers itself stayed green with the call inside `main()` deleted — a run that
+    stops beating 300 s into a longer window while the suite reported it covered.
+    """
+    import asyncio
+    import functools
+    import sys
+
+    import httpx
+
+    from scripts import replay_run_state as replay
+
+    seen: list = []
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        functools.partial(httpx.AsyncClient,
+                                          transport=_pause_stub(seen)))
+
+    async def fake_probe(*, run_dir, steps, iterations_per_step):   # noqa: ARG001
+        # The real arm drives the engine, which this node has no business touching.
+        # What is under test is that the shipped run keeps beating while an arm is
+        # in flight, so the stand-in only has to outlast a beat: 0.12 s against the
+        # 0.02 s interval patched in below.
+        await asyncio.sleep(0.12)
+        return {"arm": "drift_probe", "steps_to_correct": 1,
+                "values_seen": ["7"], "done": True}
+
+    monkeypatch.setattr(replay, "arm_drift_probe", fake_probe)
+    monkeypatch.setattr(replay, "read_engine", lambda: {})
+    # The report is the script's own file output, not the seam under test.
+    monkeypatch.setattr(replay, "_dump", lambda path, obj: None)
+    monkeypatch.setattr(replay, "LEASE_REFRESH_SECONDS", 0.02)
+    monkeypatch.setattr(sys, "argv", ["replay_run_state", "--arm", "probe"])
+
+    assert asyncio.run(replay.main()) == 0, "`main()` did not complete its run"
+
+    assert seen[0] == {"paused": True, "holder_kind": "machine"}, seen
+    assert seen[-1] == {"paused": False, "holder_kind": "machine"}, (
+        f"the run did not lift its own hold last: {seen}")
+    assert all(b.get("holder_kind") == "machine" for b in seen), (
+        f"a harness that posts an unattributed hold is a person's halt: {seen}")
+    beats = [b for b in seen[1:-1] if b.get("paused") is True]
+    assert len(beats) >= 2, (
+        f"`main()` took a machine hold and never refreshed its lease: {seen}")
+
+
 # ── /api/workers/health carries the dispatch verdict (#1681) ───────────────
 
 

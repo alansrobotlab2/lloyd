@@ -44,12 +44,16 @@ GUARDS
 ------
 * `app.vllm_metrics.wait_idle(quiet_s=5)` before EVERY request; an engine
   that does not go quiet exits the run before anything is sent.
-* The worker pool is paused through `POST /api/workers/pause` (an operator
-  pause, so a landing's backend restart cannot lift it mid-run) and resumed
-  in a `finally`, SIGTERM/SIGHUP included. A pool that was already paused
-  when the run started is never resumed by it. If the automod promoter holds
-  its own pause at the end, the resume waits for it to clear (an operator
-  resume lifts both) and otherwise leaves the pool paused and says so.
+* The worker pool is paused through `POST /api/workers/pause` as a MACHINE
+  holder (`holder_kind: machine`, #2498) with a lease refreshed every 60 s, so a
+  landing's backend restart cannot lift it mid-run while this process is alive —
+  and, unlike the operator hold it used to post, a run that is SIGKILL'd leaves a
+  lease that lapses and the next pool to start releases the halt instead of
+  parking the fleet until a person notices. Resumed in a `finally`,
+  SIGTERM/SIGHUP included. A pool that was already paused when the run started is
+  never resumed by it. If the automod promoter holds its own pause at the end, the
+  resume waits for it to clear (an operator resume lifts both) and otherwise
+  leaves the pool paused and says so.
 * `LLOYD_DJEV_SHADOW=0`, priority 1 (a real chat still outranks it).
 
 DECISION (`--decide`, also run at the end of a live run)
@@ -494,18 +498,32 @@ async def one_request(base: str, messages: list[dict]) -> dict:
 class PoolPause:
     """Pause the worker pool for the run; resume only a pause we took.
 
-    An operator pause, so it survives a landing's backend restart. Resuming as
-    operator also lifts an automod pause, so while the promoter holds one we
-    wait for it to clear rather than un-pause a landing's drain.
+    A MACHINE hold (`holder_kind: machine`, #2498), and still a durable one: its
+    lease is refreshed while this process lives, so a landing's backend restart
+    cannot lift it mid-run — the protection the operator pause used to be the only
+    way to get. What the kind adds is the other half: a run that is SIGKILL'd,
+    OOM'd or cut off in a power loss leaves a lease that lapses, and the next pool
+    to start reconciles the halt instead of parking the fleet until a person
+    notices. That is the 20 h 52 m halt of 2026-10-09, which every surface read as
+    a person's pause because a person's pause is what posting no kind asked for.
+
+    Resuming as operator also lifts an automod pause, so while the promoter holds
+    one we wait for it to clear rather than un-pause a landing's drain.
     """
 
     def __init__(self, backend: str, client, *, automod_wait_s: float = 900.0,
-                 poll_s: float = 10.0):
+                 poll_s: float = 10.0, lease_refresh_s: float = 60.0):
         self.backend = backend.rstrip("/")
         self.client = client
         self.ours = False
         self.automod_wait_s = automod_wait_s
         self.poll_s = poll_s
+        # A quarter of the pool's 300 s machine-lease window
+        # (`workers.pool.MACHINE_LEASE_STALE_SECONDS`): four refreshes may be
+        # missed before a live run is mistaken for a dead one.
+        self.lease_refresh_s = lease_refresh_s
+        self._lease_stop: asyncio.Event | None = None
+        self._lease_task: "asyncio.Task[None] | None" = None
         self.log: list[str] = []
 
     async def status(self) -> dict | None:
@@ -518,10 +536,59 @@ class PoolPause:
         return pool if isinstance(pool, dict) else None
 
     async def _post(self, paused: bool) -> dict:
+        """Take or lift the hold, naming this run as a MACHINE holder (#2498).
+
+        Posting no kind is what a person's click does, and it bought a hold that
+        survived the process which took it: the fleet halted for 20 h 52 m on
+        2026-10-09 because the pause outlived a killed harness with nothing to
+        reconcile it. `holder_kind: machine` keeps the durability while the lease
+        is fresh and makes the halt reconcilable once it is not.
+        """
         r = await self.client.post(f"{self.backend}/api/workers/pause",
-                                   json={"paused": paused}, timeout=10)
+                                   json={"paused": paused, "holder_kind": "machine"},
+                                   timeout=10)
         r.raise_for_status()
         return r.json()
+
+    async def _keep_lease(self, stop: asyncio.Event) -> None:
+        """Re-assert the hold every `lease_refresh_s` until `stop` is set.
+
+        Re-POSTing `paused: true` moves the LEASE and not the hold: `WorkerPool
+        .pause` leaves the pause row's stamp alone while the hold is already up, so
+        `paused_since` — and every alert that quotes a duration off it — stays the
+        true age of the hold rather than resetting to "5 seconds ago" on each beat.
+        """
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self.lease_refresh_s)
+            except TimeoutError:
+                pass
+            if stop.is_set():
+                return
+            try:
+                await self._post(True)
+            except Exception as e:  # noqa: BLE001 — one lost beat is not the run
+                self.log.append(f"!! lease refresh failed ({e}); retrying in "
+                                f"{self.lease_refresh_s:.0f} s")
+
+    async def _release_lease(self) -> None:
+        """Stop the heartbeat and let the keeper come in.
+
+        Runs before the resume POST: a refresh still in flight behind the resume
+        would put the hold back up after the run said it was finished with it.
+        """
+        if self._lease_stop is None or self._lease_task is None:
+            return
+        self._lease_stop.set()
+        try:
+            # `wait_for` cancels the keeper itself if the 30 s elapse — one POST is
+            # bounded by the client's own 10 s timeout and cannot outrun this.
+            await asyncio.wait_for(self._lease_task, timeout=30)
+        except TimeoutError:
+            self.log.append("!! lease keeper still running after 30 s (cancelled)")
+        except Exception as e:  # noqa: BLE001
+            self.log.append(f"!! lease keeper died before the run ended ({e})")
+        self._lease_task = None
 
     async def __aenter__(self) -> "PoolPause":
         st = await self.status()
@@ -537,11 +604,21 @@ class PoolPause:
             raise SystemExit(f"pool pause did not take: {got}")
         self.ours = True
         self.log.append("pool paused by this run")
+        self._lease_stop = asyncio.Event()
+        self._lease_task = asyncio.create_task(
+            self._keep_lease(self._lease_stop), name="rot-eval-pool-lease")
+        self.log.append(f"lease refreshing every {self.lease_refresh_s:.0f} s: while "
+                        f"this process is alive the hold stands across a backend "
+                        f"restart, and once it is not the next pool to start "
+                        f"reconciles the halt (#2498)")
         return self
 
     async def __aexit__(self, *exc) -> None:
         if not self.ours:
             return
+        # Stop refreshing before anything else: a beat still in flight would
+        # otherwise re-take the hold behind the resume below.
+        await self._release_lease()
         deadline = time.monotonic() + self.automod_wait_s
         while True:
             st = await self.status() or {}
@@ -551,7 +628,10 @@ class PoolPause:
                 msg = ("!! the automod promoter still holds a pool pause; NOT resuming "
                        "(an operator resume would lift it). Resume by hand once the "
                        "landing is done: curl -X POST localhost:8080/api/workers/pause "
-                       "-H 'content-type: application/json' -d '{\"paused\": false}'")
+                       "-H 'content-type: application/json' -d '{\"paused\": false}' "
+                       "— this run's own hold is a machine hold whose lease stopped "
+                       "being refreshed when this process exited, so the next pool to "
+                       "start releases it (#2498)")
                 print(msg, file=sys.stderr)
                 self.log.append(msg)
                 return
