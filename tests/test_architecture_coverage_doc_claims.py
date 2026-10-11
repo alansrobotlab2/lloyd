@@ -2020,10 +2020,132 @@ def _guard_coverage_lines() -> list[str]:
     return (ARCH / "guard-coverage.md").read_text(encoding="utf-8").splitlines()
 
 
+def _threat_model_row(row_id: str) -> str:
+    """The `threat-model.md` table row whose first column is exactly `row_id` —
+    located by id, not by line number, so the row cannot be renumbered out of
+    this node's reach."""
+    rows = [ln for ln in _text("threat-model.md").splitlines()
+            if ln.startswith(f"| {row_id} |")]
+    assert len(rows) == 1, f"{row_id} is not exactly one row of threat-model.md: {rows}"
+    return rows[0]
+
+
+def _egress_enforce() -> bool:
+    """The shipped egress posture, read from the operand the docs describe: this
+    tree's `config.yaml`, key `harness.egress_policy.enforce`.
+
+    `agent_mcp/egress.py:224` arms the deny branch with
+    `_env_flag("LLOYD_EGRESS_ENFORCE", _config_flag("enforce"))`. The three graded
+    cells all state the *shipped* posture — what a fresh boot does with no
+    process-specific override — so the config half is the operand, and the env
+    half is deliberately not read here.
+    """
+    import yaml
+
+    policy = ((yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+               or {}).get("harness") or {}).get("egress_policy") or {}
+    enforce = policy.get("enforce")
+    assert isinstance(enforce, bool), (
+        f"harness.egress_policy.enforce is {enforce!r} in config.yaml, not a "
+        "boolean: the graded cells state one of exactly two postures, and a value "
+        "`_config_flag` refuses to arm on is neither of them")
+    return enforce
+
+
+#: How each graded cell has to read, per posture. The arm is looked up by the
+#: parsed config value, never spelled out at the call site, so a landing that
+#: armed the flag would have to reword all three cells and this file would tell it
+#: which arm it was now grading (#2581: the §3 row said the key was one "no
+#: `config.yaml` sets" a week after #2123 seeded `enforce: false` at
+#: `config.yaml:712`, and every assertion in this node stayed green because none
+#: of them opened `config.yaml`).
+EGRESS_POSTURE_WORDING: dict[bool, dict[str, tuple[str, ...]]] = {
+    False: {
+        "guard-coverage egress row": ("is set `false`", "#2123"),
+        "threat-model B8": ("records rather than refuses", "is set `false`"),
+        "threat-model T-19": ("the measurement, not the gate", "false here"),
+    },
+    True: {
+        "guard-coverage egress row": ("is set `true`", "#2123"),
+        "threat-model B8": ("refuses rather than records", "is set `true`"),
+        "threat-model T-19": ("the gate, not the measurement", "true here"),
+    },
+}
+
+#: Wording no posture makes true, and both of these were in the corpus. The
+#: first is the clause #2581 was filed to kill; the second is the shape a
+#: well-meaning reword of it takes.
+EGRESS_POSTURE_NEVER = ("no `config.yaml` sets", "not set in `config.yaml`")
+
+#: Marks that are true of both arms, so they are never evidence *against* one.
+#: #2123 seeded `harness.egress_policy` whichever way the flag is later set, so a
+#: cell naming it stays correct after a landing arms the key — only the words
+#: about the value discriminate, and treating a history citation as posture would
+#: make the armed arm fail a cell that is merely more informative than it asks.
+POSTURE_NEUTRAL_MARKS = {"#2123"}
+
+#: Each cell's unarmed wording and its armed reading, paired. `_opposite_posture`
+#: applies them in the direction the live value demands, so what the control
+#: below checks is the row a landing that armed `enforce` would have to ship —
+#: written here rather than smuggled into the doc.
+_POSTURE_SWAPS = (
+    ("is set `false`", "is set `true`"),
+    ("records rather than refuses", "refuses rather than records"),
+    ("the measurement, not the gate", "the gate, not the measurement"),
+    ("false here", "true here"),
+)
+
+
+def _opposite_posture(text: str) -> str:
+    """`text` rewritten to state the posture the live config does NOT set."""
+    armed = _egress_enforce()
+    for unarmed_wording, armed_wording in _POSTURE_SWAPS:
+        text = text.replace(unarmed_wording if not armed else armed_wording,
+                            armed_wording if not armed else unarmed_wording)
+    return text
+
+
+def _egress_posture_problems(cells: dict[str, str],
+                            enforce: bool | None = None) -> list[str]:
+    """Every way `cells` mis-states the posture. Empty means every cell reads for
+    the arm under test and none carries the other arm's wording.
+
+    `enforce` is the controls' only handle and is otherwise the live parsed
+    value: passing it is how a control shows the verdict moves with the operand
+    while the doc bytes do not.
+    """
+    arm = _egress_enforce() if enforce is None else enforce
+    problems: list[str] = []
+    for label, cell in cells.items():
+        flat = " ".join(cell.split())
+        for never in EGRESS_POSTURE_NEVER:
+            if never in flat:
+                problems.append(f"{label}: states {never!r}, true of neither posture")
+        for mark in EGRESS_POSTURE_WORDING[arm][label]:
+            if mark not in flat:
+                problems.append(f"{label}: enforce={arm} requires {mark!r}")
+        for mark in EGRESS_POSTURE_WORDING[not arm][label]:
+            if mark in POSTURE_NEUTRAL_MARKS:
+                continue
+            if mark in flat:
+                problems.append(f"{label}: carries {mark!r}, the wording of "
+                                f"enforce={not arm}")
+    return problems
+
+
 def test_guard_coverage_cites_the_live_owner_of_the_egress_posture():
     """#1960 closed; a closed item is not an owner. The two ownership citations
     name #1965, the §3 row says where the posture is published, and the page's
-    changelog sentence that records #1960 being *filed* is history and stays."""
+    changelog sentence that records #1960 being *filed* is history and stays.
+
+    #2581 added the edge this node never had. The posture the three graded cells
+    state — `guard-coverage.md`'s §3 egress row, `threat-model.md`'s B8 and T-19 —
+    is now graded against the parsed value of `harness.egress_policy.enforce` in
+    `config.yaml`, the operand `enforce_on()` reads, rather than against a literal
+    in this file. Before that the row could explain the unarmed deny branch as "a
+    key **no `config.yaml` sets**" while `config.yaml:712` had said
+    `enforce: false` since #2123 seeded it on 2026-10-04, and the whole node
+    stayed green: a guard reading its own missing input."""
     lines = _guard_coverage_lines()
     row = [ln for ln in lines if ln.startswith("| `agent_mcp/egress.py` |")]
     assert len(row) == 1, row
@@ -2037,6 +2159,66 @@ def test_guard_coverage_cites_the_live_owner_of_the_egress_posture():
 
     still_1960 = [ln for ln in lines if "#1960" in ln]
     assert len(still_1960) == 1 and "Filed #1959, #1960" in still_1960[0], still_1960
+
+    cells = {
+        "guard-coverage egress row": row[0],
+        "threat-model B8": _threat_model_row("B8"),
+        "threat-model T-19": _threat_model_row("T-19"),
+    }
+    enforce = _egress_enforce()
+    problems = _egress_posture_problems(cells)
+    assert problems == [], (
+        f"harness.egress_policy.enforce parses to {enforce} in config.yaml, and the "
+        f"graded cells do not state that posture: {problems}")
+
+    # Clause 1's own scope, widened to the corpus the sweep grades: neither of the
+    # two wordings that are false for every arm survives anywhere in
+    # `architecture/`. The count beside it is the vacuity guard this file uses
+    # everywhere — a glob that found no corpus would report a clean sweep of
+    # nothing, which is the same blind spot #2581 is about.
+    docs = sorted(p.name for p in ARCH.glob("*.md"))
+    assert len(docs) == ARCH_DOC_SURFACE, (
+        f"the sweep read {len(docs)} top-level architecture docs, want "
+        f"{ARCH_DOC_SURFACE} — see the sweep node for why the count is the guard")
+    offenders = [(name, never) for name in docs for never in EGRESS_POSTURE_NEVER
+                 if never in " ".join((ARCH / name).read_text(encoding="utf-8").split())]
+    assert offenders == [], (
+        f"these docs state the posture in words no arm of config.yaml makes true: "
+        f"{offenders}")
+
+    # Edge onto the operand, in one direction: these three cells, byte for byte
+    # unchanged, have to fail the moment the config value flips. An assertion
+    # that only ever compared doc text to doc text would pass this control's
+    # subject for either value, which is exactly how the false clause survived.
+    flipped = _egress_posture_problems(cells, not enforce)
+    assert flipped != [], (
+        f"the same cells pass for enforce={not enforce} as well, so the assertion "
+        "above grades wording and not the config value")
+
+    # And in the other direction, in this file's existing counterfactual style:
+    # text this file writes, worded for the opposite posture, fails the predicate
+    # that the live value selects. Each cell has to actually change, or the swap
+    # table stopped describing how these cells are worded.
+    for label, cell in cells.items():
+        opposite = _opposite_posture(cell)
+        assert opposite != cell, (
+            f"{label}: the swap table rewrites nothing here, so this control could "
+            "not tell the two postures apart")
+        assert _egress_posture_problems({label: opposite}) != [], (
+            f"{label} worded for the opposite posture still passes, so the arm is "
+            "not being selected by the config value")
+
+    # The regression itself: put #2581's pre-fix clause back into the row and the
+    # posture check has to refuse it, because the key is set, to `false`, at
+    # `config.yaml:712` — a reviewed decision whose comment closes "Arming
+    # `enforce` is a separate decision", not a default a reader could flip.
+    prefix = row[0].replace("is set `false`", "a key **no `config.yaml` sets**", 1)
+    assert prefix != row[0], (
+        "the §3 row no longer says the key `is set `false``, so there is nothing "
+        "here to put the pre-#2581 clause back into")
+    assert _egress_posture_problems({"guard-coverage egress row": prefix}) != [], (
+        "'a key **no `config.yaml` sets**' passes as a posture, which is the false "
+        "claim #2581 was filed to kill")
 
     from agent_mcp import egress
     import inspect
