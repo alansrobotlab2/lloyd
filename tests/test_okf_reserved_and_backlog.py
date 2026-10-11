@@ -645,3 +645,176 @@ def test_no_comment_in_this_file_still_defers_the_six_to_another_item():
     assert STALE_SIX_OUTSTANDING not in own, (
         "this file's section header again claims the six are still outstanding, which "
         "#2326, #2347 and #2402 have each refuted")
+
+
+# ── #2529: the board's own `type` value is in the vocabulary, so the backlog/ class
+#    of warnings is gone and the autonomy canary is on the record ───────────────────────
+#
+# `app/routers/backlog.py:777` stamps `type: backlog` on every task file it creates
+# and `okf_migrate.infer_type` (#585) infers the same value for the directory, while
+# `okf_taxonomy.OUTSIDE_KNOWLEDGE_TYPES` did not list it. The gate therefore reported
+# a value the system writes about itself as unknown: `--dir backlog --strict` scanned
+# 2472 files and warned 2472 times, all `unknown type 'backlog'`, and 2472 of the
+# 2626 full-vault warnings measured 2026-10-11 at 572c030b were that one row. #2529
+# changes the vocabulary and nothing else — no backlog file was renamed, rewritten or
+# migrated, and `okf.EXCLUDE_PATHS` gained no fourth prefix: the class left the
+# warnings by being recognised, not by leaving the scan.
+
+#: A task file in the shape `app/routers/backlog.py` writes, minus the keys that are
+#: not in this gate's scope. The `type` value is the whole subject.
+BACKLOG_ITEM = ("---\ntype: backlog\nsegment: backlog\nstatus: up_next\n---\n\n"
+                "# 2529 item\n\nBody.\n")
+
+#: The near-miss a writer coins next, used here only as the control that keeps a
+#: `warnings : 0` a measurement rather than a silenced counter.
+NEAR_MISS_ITEM = ("---\ntype: backlog-item\nsegment: backlog\n---\n\n"
+                  "# 2530 item\n\nBody.\n")
+
+#: The conformance skill lives in the vault, which has no worktree: clause 5 landed
+#: through `automod_vault_land` before this code round (vault `1f0ee70f`), so a node
+#: is the only thing that reaches it from the suite — the same route
+#: `tests/test_okf_domain_taxonomy.py` uses for that file's other prose pin.
+CONFORMANCE_SKILL = (Path.home() / "obsidian" / "skills" / "okf-conformance-check"
+                     / "SKILL.md")
+
+#: An inline `type: backlog` example, the shape clause 5 forbids in the skill body.
+#: The forbidden text is assembled, not written: a skill-body scanner in
+#: `tests/test_okf_type_taxonomy.py` fails any file it reads for naming a
+#: non-canonical `type`, and this file must not become one by holding the example it
+#: forbids. The control inside the node below proves the pattern is not vacuous.
+BACKLOG_TYPE_EXAMPLE = re.compile(r"(?<![\w_])type:[ \t]*[`\"']?backlog")
+
+
+def warnings_count(stdout: str) -> int:
+    """N from the gate's `  warnings   : N` summary line, failing loudly when absent.
+
+    Read out of the run rather than compared to a remembered figure, so a node below
+    can never assert a number this file copied from the item text.
+    """
+    m = re.search(r"warnings\s*:\s*(\d+)", stdout)
+    assert m, f"no `warnings : N` line in output:\n{stdout}"
+    return int(m.group(1))
+
+
+def test_a_task_file_with_the_boards_own_type_warns_nothing(tmp_path):
+    """#2529 clause 2: a `backlog` page is clean, and it is still being scanned.
+
+    A fixture vault whose only concept page carries the value the board writes exits
+    0 with `VIOLATIONS : 0` and `warnings : 0`, on a full-tree scan and on the
+    `--dir backlog` scan the conformance task runs. `warnings : 0` is the half doing
+    the work, and `scanned 1` is what stops it meaning anything else: the file is
+    walked, graded and counted, and its `type` is simply known now. A fourth prefix
+    in `EXCLUDE_PATHS`, or a skip on the directory name, would print the same zero
+    over `scanned 0`.
+
+    The control is the same tree with one near-miss page added: the identical command
+    then exits 2 on exactly ONE warning, naming it. A `warnings` counter that could
+    not rise could not report zero either.
+    """
+    root = tmp_path / "vault"
+    (root / "backlog").mkdir(parents=True)
+    (root / "backlog" / "2529-item.md").write_text(BACKLOG_ITEM, encoding="utf-8")
+
+    for args in (("--root", str(root), "--strict"),
+                 ("--root", str(root), "--dir", "backlog", "--strict")):
+        proc = run(VALIDATE, *args)
+        assert proc.returncode == 0, (
+            f"`{' '.join(args)}` exited {proc.returncode} on a tree whose one page "
+            f"carries the value the board writes — `backlog` is out of "
+            f"okf_taxonomy.OUTSIDE_KNOWLEDGE_TYPES again:\n{proc.stdout}")
+        assert "VIOLATIONS : 0" in proc.stdout, proc.stdout
+        assert warnings_count(proc.stdout) == 0, proc.stdout
+        assert scanned_count(proc.stdout) == 1, (
+            "the page left the scan instead of becoming known, so the zero above is "
+            f"an absence:\n{proc.stdout}")
+
+    (root / "backlog" / "2530-item.md").write_text(NEAR_MISS_ITEM, encoding="utf-8")
+    control = run(VALIDATE, "--root", str(root), "--strict")
+    assert control.returncode == 2, control.stdout
+    assert warnings_count(control.stdout) == 1, control.stdout
+    assert "backlog/2530-item.md: unknown type 'backlog-item'" in control.stdout, (
+        control.stdout)
+
+
+def test_the_live_backlog_tree_is_clean_under_the_strict_gate():
+    """#2529 clause 4: the 2472-row class is retired on the tree that produced it.
+
+    `--dir backlog --strict` over the live vault exits 0 with `VIOLATIONS : 0` and
+    `warnings : 0`. The identical command at 572c030b exited 2 with `warnings : 2472`,
+    every row `unknown type 'backlog'` over `scanned 2472` — that is the measurement
+    in the item, and this node is the round's acceptance check.
+
+    The scan count is a floor (`> 1000`), never a pinned figure: the board writes new
+    item files most days, and a node that goes red because the vault grew is the
+    instrument this repo keeps refusing to build. What IS pinned is that the walk is
+    not empty — an exit 0 over `scanned 0` would be a gate looking at nothing.
+
+    Deliberately unmarked `live_vault`. The mark's rule is that a corpus a nightly may
+    rewrite has no business on a hard gate; this tree has exactly two writers, the
+    router and the migrator branch above, and both emit this value from one place — so
+    a failure here is the warning class coming back, which is the thing worth failing
+    a round for. And a node the gate deselects is a clause nobody ever runs.
+    """
+    proc = run(VALIDATE, "--dir", "backlog", "--strict")
+    assert proc.returncode == 0, (
+        f"`--dir backlog --strict` exited {proc.returncode} on the live vault; the "
+        f"unknown-type class for the board's own value is back:\n{proc.stdout}")
+    assert "VIOLATIONS : 0" in proc.stdout, proc.stdout
+    assert warnings_count(proc.stdout) == 0, proc.stdout
+    assert "unknown type 'backlog'" not in proc.stdout, proc.stdout
+    assert scanned_count(proc.stdout) > 1000, (
+        f"the backlog tree was not really walked, so the two zeros above are an "
+        f"absence rather than a result:\n{proc.stdout}")
+
+
+def test_the_conformance_skill_names_the_canary_and_says_the_census_exits_two():
+    """#2529 clause 5: the two commands are on the record as two different jobs.
+
+    The skill documented one command, so the scoped strict run that has a clean zero
+    to lose was nobody's canary, and a `--strict` full-vault `2` beside
+    `VIOLATIONS : 0` read as a break. This pins the three claims a future reader acts
+    on: `validate_okf.py --dir autonomy --strict` is named as the `autonomy/` drift
+    canary of record beside the weekly full-vault command; the canary's healthy state
+    is exit 0 with `VIOLATIONS : 0` and `warnings : 0`; and the full-vault run is a
+    census that exits 2 while warnings stand, violations gone.
+
+    And the shape it must NOT take: no inline `type: backlog` example. `tests/` scans
+    skill bodies for a `type:` value outside the canonical twelve, and this value is
+    deliberately not one of them, so an example that looks helpful here turns that
+    unrelated guard red and teaches the next writer to hand-type a board value into a
+    knowledge note. Naming the command and the exit codes is the whole instruction.
+    """
+    assert CONFORMANCE_SKILL.is_file(), (
+        f"{CONFORMANCE_SKILL} missing — this check cannot see its input")
+    text = CONFORMANCE_SKILL.read_text(encoding="utf-8")
+    body = text.split("---", 2)[2] if text.startswith("---") else text
+
+    assert "validate_okf.py --dir autonomy --strict" in body, (
+        "the skill no longer names the scoped strict command, so there is no canary "
+        "command of record for autonomy/")
+    assert "canary of record" in body, body
+    assert "census" in body, (
+        "the full-vault run is not described as a census, which is what makes its "
+        "non-zero --strict exit not-a-break")
+    assert "exits 2 while warnings" in body, (
+        "the skill does not say full-vault --strict exits 2 while warnings stand "
+        "with violations gone, so a 2 there still reads as a defect to chase")
+    assert "VIOLATIONS : 0" in body and "warnings : 0" in body, body
+    assert "exit **0**" in body, (
+        "the canary's clean-zero is not stated as an exit code, which is the part a "
+        "run compares its own result against")
+
+    # The weekly command survives beside it, unstrict: the canary is a second,
+    # differently-scoped command, not a flag bolted onto the reported census.
+    fences = re.findall(r"```bash\n(.*?)```", text, re.S)
+    assert len(fences) == 2, f"expected the weekly and the canary fence, saw {fences}"
+    assert "validate_okf.py" in fences[0] and "--strict" not in fences[0], fences[0]
+    assert "--dir autonomy --strict" in fences[1], fences[1]
+
+    # The forbidden shape, and proof the pattern can see it.
+    assert not BACKLOG_TYPE_EXAMPLE.search(body), (
+        "the skill body now carries an inline `type: backlog` example; the value is "
+        "not in CANONICAL_TYPES and a skill that names a `type` value for a note is "
+        "what tests/test_okf_type_taxonomy.py exists to fail")
+    assert BACKLOG_TYPE_EXAMPLE.search("frontmatter says `type: backlog` here"), (
+        "the pattern matched nothing at all, so the assertion above was vacuous")

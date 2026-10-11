@@ -64,11 +64,23 @@ CANONICAL_TYPES = frozenset({
 # turn every existing file that uses it into a new warning, and #370's acceptance
 # is that warnings fall. ``note`` is the vault-wide catch-all ``okf_migrate``
 # manufactures outside knowledge/ (494 files on 2026-09-09); retiring it is #442.
+#
+# ``backlog`` (#2529) is not a synonym that drifted in: it is the value the system
+# writes for its own board. ``app/routers/backlog.py:777`` stamps ``type: backlog``
+# on every task file it creates and ``okf_migrate.infer_type`` (#585) infers the
+# same value for anything under ``backlog/``, so while it sat absent from this set
+# every one of the 2472 files a ``--dir backlog`` scan walked warned as an unknown
+# type — 2472 of the 2626 full-vault warnings measured 2026-10-11. The vocabulary
+# was the thing out of step with the writer, so the vocabulary is what changed: no
+# backlog file was renamed, rewritten or migrated. ``backlog-item`` and every other
+# near-miss stay unknown on purpose, which is what keeps this set a tolerance and
+# not a amnesty.
 OUTSIDE_KNOWLEDGE_TYPES = frozenset({
     "autonomy", "facts", "overview", "compiled_wiki",
     "skill", "person", "daily-note", "reflection",
     "how-to", "comparison", "talk",
     "note",
+    "backlog",
 })
 
 # Fragmented value -> the canonical it was consolidated into. Keys are in

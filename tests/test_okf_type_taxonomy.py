@@ -548,6 +548,117 @@ def test_the_migrator_types_a_backlog_task_as_backlog(tmp_path):
     assert infer_type(other, {}, "# x\n", root=tmp_path) == "note", "catch-all unchanged"
 
 
+# ── 2b. #2529: the board's own value is tolerated outside knowledge/, and its
+#        near-miss neighbours are not ─────────────────────────────────────────────
+#
+# `app/routers/backlog.py:777` stamps `type: backlog` on every task file it creates
+# and `okf_migrate.infer_type` (#585, pinned above) infers the same value for
+# anything under `backlog/`. While that value sat outside this module the validator
+# called it unknown on every file it met: 2472 rows of `unknown type 'backlog'` at
+# the `--dir backlog` scan measured 2026-10-11, 2472 of that run's 2626 full-vault
+# warnings — the gate reporting on a value the system manufactures about itself.
+# #2529's fix is one member of `OUTSIDE_KNOWLEDGE_TYPES`, and deliberately nothing
+# in the tree: no backlog file renamed, rewritten or migrated.
+
+VALIDATE = ROOT / "scripts" / "vault" / "validate_okf.py"
+
+
+def _validate(root: Path, *args: str) -> subprocess.CompletedProcess:
+    """`validate_okf.py` over a fixture tree, on the CLI the weekly job runs."""
+    return subprocess.run([sys.executable, str(VALIDATE), "--root", str(root), *args],
+                          capture_output=True, text=True, cwd=ROOT)
+
+
+def _warnings_total(stdout: str) -> int:
+    """N from the gate's `  warnings   : N` line, failing loudly when there is none."""
+    m = re.search(r"warnings\s*:\s*(\d+)", stdout)
+    assert m, f"no `warnings : N` line in the run:\n{stdout}"
+    return int(m.group(1))
+
+
+def _concept_note(root: Path, rel: str, type_value: str) -> Path:
+    """A conformant concept page whose one distinguishing key is its `type`."""
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\ntype: {type_value}\n---\n\n# {rel}\n\nBody.\n",
+                    encoding="utf-8")
+    return path
+
+
+def test_backlog_is_tolerated_outside_knowledge_without_becoming_a_knowledge_type():
+    """#2529 clause 1: one value in `OUTSIDE_KNOWLEDGE_TYPES`, and nothing else.
+
+    The three-way distinction IS the clause. `backlog` had to become known to the
+    validator, and had to stay out of the two sets it could have joined instead:
+
+      * `CANONICAL_TYPES` is #370's twelve and governs `knowledge/`; a thirteenth
+        member would make `backlog` a legal type for a research note, which is not
+        a decision this item made;
+      * `TYPE_ALIASES` maps a *retired* spelling onto its canonical value and is
+        consulted by `normalize_type`, so a `backlog-item`-shaped key there would
+        silently REWRITE board values on the next migrator read instead of warning
+        about them. `backlog` retires nothing: it is what the writer emits today.
+
+    `canonical_for_write` still refuses it inside `knowledge/`, and the message is
+    the assertion that says which branch refused: before #2529 it fell to the
+    generic "no such type exists" wording, so the outside-only wording below can
+    only be true of a value that joined `OUTSIDE_KNOWLEDGE_TYPES`.
+    """
+    assert "backlog" in okf_taxonomy.OUTSIDE_KNOWLEDGE_TYPES
+    assert "backlog" in KNOWN_TYPES, (
+        "in the set but invisible to the gate — KNOWN_TYPES is the union the "
+        "validator reads")
+    assert set(okf_taxonomy.CANONICAL_TYPES) == EXPECTED_CANONICAL, (
+        "`backlog` went in as a 13th knowledge type; the twelve are #370's and "
+        "clause 1 forbids a 13th")
+    for spelling in ("backlog", "backlog-item", "backlog_item", "backlog-note"):
+        assert spelling not in okf_taxonomy.TYPE_ALIASES, (
+            f"{spelling} added as an alias: an alias is a retired spelling, and "
+            "normalize_type would then rewrite it rather than warn")
+    # Reading is unchanged: the value resolves to itself, not onto a canonical.
+    assert okf_taxonomy.normalize_type("backlog") == "backlog"
+    # Writing into knowledge/ is still refused — from the outside-only branch.
+    with pytest.raises(okf_taxonomy.KnowledgeTypeError) as raised:
+        okf_taxonomy.canonical_for_write("backlog")
+    assert raised.value.value == "backlog"
+    assert "legal only *outside*" in str(raised.value), (
+        "refused from the generic invented-value branch, which is what `backlog`'s "
+        f"message was before it joined this set: {raised.value}")
+
+
+def test_recognising_backlog_does_not_admit_the_next_spelling_of_it(tmp_path):
+    """#2529 clause 3: the synonym detector outlives the widening.
+
+    Two pages in one fixture tree: the value the board writes, and the near-miss a
+    writer coins next (`backlog-item`). The exact value produces no row at all; the
+    near-miss is the run's ONLY warning and the gate names it. `_lookup_form`
+    normalises case and separators, never a suffix, and `TYPE_ALIASES` carries no
+    `backlog-item` key, so `-item` is not a spelling of a known value to the
+    validator — it is an unknown one, which is the only way a fresh coinage is ever
+    noticed. Admitting `backlog-item` alongside `backlog` would have bought the
+    same green on today's tree and cost the warning this one exists to keep.
+    """
+    root = tmp_path / "vault"
+    _concept_note(root, "backlog/2529-item.md", "backlog")
+    _concept_note(root, "backlog/2530-item.md", "backlog-item")
+
+    proc = _validate(root, "--strict")
+    assert proc.returncode == 2, (
+        f"a near-miss of a now-known value stopped warning (exit "
+        f"{proc.returncode}); the detector was blinded, not widened:\n{proc.stdout}")
+    assert "VIOLATIONS : 0" in proc.stdout, proc.stdout
+    assert _warnings_total(proc.stdout) == 1, proc.stdout
+    assert "backlog/2530-item.md: unknown type 'backlog-item'" in proc.stdout, (
+        proc.stdout)
+    assert "backlog/2529-item.md" not in proc.stdout, (
+        f"the value the board writes is still being reported:\n{proc.stdout}")
+    # The unit-level edges the single CLI row rests on, both directions.
+    assert "backlog-item" not in KNOWN_TYPES
+    assert okf_taxonomy.normalize_type("backlog-item") == "backlog-item", (
+        "normalize_type rewrote the near-miss onto a known value, so the next "
+        "migrator read would erase the evidence this node says to keep")
+
+
 # ── 3. the acceptance check itself, on the live vault ─────────────────────────
 
 @pytest.mark.live_vault

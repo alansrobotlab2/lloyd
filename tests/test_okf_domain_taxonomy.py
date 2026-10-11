@@ -636,6 +636,41 @@ def test_the_same_block_declines_the_two_subjects_that_clear_the_bar():
     assert missing == [], f"the declined-by-ruling record is incomplete: {missing}"
 
 
+#: The one module-level binding #2529 rules a change to: `backlog` joining the
+#: TYPE-side `OUTSIDE_KNOWLEDGE_TYPES`, so the 2472-file warning class the board's
+#: own writer manufactures stops being reported as an unknown value.
+RULED_TYPE_BINDING = "OUTSIDE_KNOWLEDGE_TYPES"
+
+
+def _ast_dump_except_ruled_binding(source: str, filename: str) -> str:
+    """`ast.dump` of `source` minus the one module-level assignment #2529 rules on.
+
+    The guard below wants comment-text-only since `PRE_RULING`, and it enforces that
+    by comparing whole-module ASTs. That mechanism cannot tell a domain-side change
+    from a type-side one, and #2529's clause 1 IS a type-side one: it *requires* a
+    member added to `OUTSIDE_KNOWLEDGE_TYPES` and forbids one in `CANONICAL_TYPES`
+    or `TYPE_ALIASES`. Dropping that single assignment's node is the minimum
+    widening that lets the ruled change through: every other module-level node,
+    `CANONICAL_DOMAINS` and `DOMAIN_ALIASES` included, is still compared AST for
+    AST, so a 48th domain member or a 27th alias key still makes the two dumps
+    differ — and clause 1's "no 13th knowledge type" half is now guarded here too.
+    """
+    body = ast.parse(source, filename=filename).body
+    kept = [node for node in body
+            if not (isinstance(node, (ast.Assign, ast.AnnAssign))
+                    and any(getattr(target, "id", "") == RULED_TYPE_BINDING
+                            for target in ([node.target]
+                                           if isinstance(node, ast.AnnAssign)
+                                           else node.targets)))]
+    # A reduction that reduced nothing would compare full ASTs and fail on the ruled
+    # change, and one that reduced the whole file would pass on anything: both edges
+    # are this assert.
+    assert len(kept) == len(body) - 1, (
+        f"expected exactly one module-level `{RULED_TYPE_BINDING}` assignment in "
+        f"{filename}, kept {len(kept)} of {len(body)} nodes")
+    return ast.dump(ast.Module(body=kept, type_ignores=[]))
+
+
 def test_the_ruling_rewrote_comment_text_and_nothing_else():
     """Clause 5, the half the counts cannot pin: the AST of `okf_taxonomy.py` in
     this tree is byte-for-byte the AST of the pre-ruling blob, so the only thing
@@ -644,17 +679,24 @@ def test_the_ruling_rewrote_comment_text_and_nothing_else():
     differ. `len() == 47` and `len() == 26` would also pass on a promotion paired
     with a retirement, which is why this node asks for structural identity instead.
 
+    One binding is set aside, by name, in `_ast_dump_except_ruled_binding`:
+    `OUTSIDE_KNOWLEDGE_TYPES`, which #2529 clause 1 rules a member onto for the
+    value the board writes about itself. That is a ruling on the TYPE vocabulary,
+    which is not this item's subject; everything this item did rule is domain-side
+    comment text and still is.
+
     The values themselves stay pinned by the pre-existing nodes, unmodified:
     `test_the_closed_set_is_the_same_47_values_that_shipped` (set equality against
     `SHIPPED_47`, and `len(T.CANONICAL_DOMAINS) == 47`) and
     `test_no_alias_key_shadows_another_or_diverges_from_a_canonical_member`
     (`len(T._DOMAIN_ALIAS_LOOKUP) == len(T.DOMAIN_ALIASES) == 26`).
     """
-    now = ast.dump(ast.parse((ROOT / SRC_PATH).read_text(), filename=SRC_PATH))
-    was = ast.dump(ast.parse(_git_blob(PRE_RULING, SRC_PATH), filename=SRC_PATH))
+    now = _ast_dump_except_ruled_binding((ROOT / SRC_PATH).read_text(), SRC_PATH)
+    was = _ast_dump_except_ruled_binding(_git_blob(PRE_RULING, SRC_PATH), SRC_PATH)
     assert now == was, (
-        "okf_taxonomy.py changed beyond comment text since "
-        f"{PRE_RULING}, and this item is a comments-only ruling record")
+        "okf_taxonomy.py changed beyond comment text and the one binding #2529 "
+        f"rules on since {PRE_RULING}, and this item is a comments-only ruling "
+        "record")
 
 
 # ── #2204: the domain split has to be readable off the command the job runs ─────
