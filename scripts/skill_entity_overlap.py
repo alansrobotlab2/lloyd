@@ -455,6 +455,65 @@ def ranking(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=key)
 
 
+#: The two arms, in the order the header names them: `entity_jaccard` is the new key (a row's
+#: `entity_score`), `desc_jaccard` the incumbent (its `incumbent_score`). Named once here so a
+#: rank line cannot call an arm by a spelling the pair lines do not use.
+ARMS = (("entity_jaccard", "entity_score"), (INCUMBENT_NAME, "incumbent_score"))
+
+
+def arm_ranks(rows: list[dict], arm: str, score_key: str) -> dict:
+    """Where the labelled positives land in ONE arm's ordering, and what sits above them.
+
+    Ranks are positions over the MEASURED rows — the same `verdict != "unknown"` exclusion
+    `ranking_verdict` makes, so the position printed under the verdict and the verdict itself
+    are read off one row set and cannot disagree. An unmeasurable pair is never given a rank
+    and never counted among the negatives that outrank the lowest positive, whatever its
+    stored score says: a `thin` row whose two four-element sets are identical carries an
+    `entity_score` of 1.0, which is a quotient of almost nothing, and letting it take first
+    place would slide the real positives down the page on the strength of a pair this run did
+    not measure. The count of rows left unranked travels with them for the same reason the
+    zero-coverage count is printed before any pair — a reader has to see what the ranking is
+    not covering.
+
+    Ties break on pair name, the way `ranking()` breaks them, so a pair's position is a
+    property of the rows and not of the order they happened to be read in.
+    """
+    ranked = [r for r in rows
+              if r["verdict"] != "unknown" and r.get(score_key) is not None]
+    ranked.sort(key=lambda r: (-r[score_key], r["a"], r["b"]))
+    positives = [i for i, r in enumerate(ranked, 1) if r["label"] == "duplicate"]
+    negatives = [i for i, r in enumerate(ranked, 1) if r["label"] != "duplicate"]
+    lowest = max(positives) if positives else None
+    return {"arm": arm,
+            "positive_ranks": positives,
+            "lowest_positive_rank": lowest,
+            "negatives_above_lowest_positive": (
+                sum(1 for i in negatives if i < lowest) if lowest is not None else None),
+            "n_ranked_rows": len(ranked),
+            "n_unranked_rows": len(rows) - len(ranked)}
+
+
+def rank_lines(arms: Sequence[dict]) -> list[str]:
+    """One line per arm, in `ARMS` order, to sit directly beneath the RANKING verdict.
+
+    Scores alone made two failing arms read alike: on the committed fixture the entity key has
+    its positives at [1, 5] with three negatives above rank 5, while `desc_jaccard` has them at
+    [10, 12] with all ten above. #2440's history is three contradictory readings of one corpus
+    in two nights, so the header names the arm and the squeeze, not just the failure.
+    """
+    lines = []
+    for arm in arms:
+        lowest = arm["lowest_positive_rank"]
+        lines.append(
+            f"RANKS {arm['arm']}: positives at ranks {arm['positive_ranks']} "
+            f"of {arm['n_ranked_rows']} ranked row(s) "
+            f"({arm['n_unranked_rows']} unmeasured row(s) unranked); "
+            + (f"{arm['negatives_above_lowest_positive']} negative pair(s) outrank the "
+               f"lowest positive (rank {lowest})" if lowest is not None
+               else "no measurable positive pair to rank against"))
+    return lines
+
+
 def ranking_verdict(rows: list[dict]) -> tuple[bool, str]:
     """Whether every labelled duplicate outranks every labelled non-duplicate.
 
@@ -539,7 +598,15 @@ def build_report(*, roots: Sequence[Path] | None, store, fixture_path: Path | No
         ok, note = ranking_verdict(frows)
         report["fixture"] = {"path": str(fixture_path), "rows": ranking(frows),
                              "incumbent": INCUMBENT_NAME,
-                             "ranking_first_positives": int(ok), "verdict": note}
+                             "ranking_first_positives": int(ok), "verdict": note,
+                             # A NEW key, deliberately: `ranking_first_positives` has always
+                             # carried the pass bool (`int(ok)`) under a name that reads like
+                             # ranks, and tests/test_skill_entity_overlap.py:475 pins it to 0
+                             # over the FAIL fixture. The real ranks go beside it rather than
+                             # replacing it, so the pinned key keeps meaning what it always
+                             # meant and the new one is what #2549 added.
+                             "ranking_arms": [arm_ranks(frows, arm, key)
+                                              for arm, key in ARMS]}
         # The anti-rot counterpart to scoring the recorded sets: re-project the bytes on disk
         # — the advertised tree AND the archived one, because a skill quarantined in place by
         # its own fold is exactly what the fixture has to reach — and name every side whose
@@ -593,6 +660,10 @@ def render(report: dict) -> str:
                 f"sizes={row['n_a']}/{row['n_b']} verdict={row['verdict']}"
                 + (f" [{row['unknown_reason']}]" if row["unknown_reason"] else ""))
         lines.append(fixture["verdict"])
+        # Directly beneath the verdict, so the two readings of one corpus can be told apart by
+        # a reader who never opens the JSON. Absent on an old report that has no arms key,
+        # which is why this reads with a default rather than indexing.
+        lines.extend(rank_lines(fixture.get("ranking_arms") or []))
     return "\n".join(lines) + "\n"
 
 

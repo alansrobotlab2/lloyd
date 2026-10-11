@@ -707,3 +707,232 @@ def test_the_new_negations_name_two_exact_filenames_and_no_wildcard():
         "no comment in eval/.gitignore names #2440, so the two lines carry no record of "
         "which instrument's fixtures they un-ignore"
     )
+
+
+# ── #2549: the RANKING header names each arm's positive ranks ────────────────
+#
+# The RANKING line used to print scores only, so two arms that failed very
+# differently read the same way. On the committed fixture the entity key puts the labelled
+# positives at ranks [1, 5] with three negatives above rank 5, while `desc_jaccard` puts
+# them at [10, 12] with all ten negatives above them — one word, `FAIL`, for two different
+# readings of one corpus. #2440's own history is three such readings in two nights, which is
+# why the header has to say which arm failed and by how much rather than that something did.
+#
+# The nodes below pin the per-arm ranks, the `unknown` exclusion, and that the PASS/FAIL
+# semantics and the exit code did not move. The ranks being asserted are re-derived from the
+# report's own rows by `expected_rank_line` below, so the assertion is a second measurement
+# of the same rows and not an echo of the formatting under test.
+
+#: The arms as the render must name them, with the row field each one ranks on. Spelled out
+#: here instead of read from the module's own arm table: the clause is about the NAME a
+#: nightly reader sees, so a renamed arm has to fail here, not quietly follow along.
+RANK_ARMS = (("entity_jaccard", "entity_score"), ("desc_jaccard", "incumbent_score"))
+
+
+def expected_rank_line(rows: list[dict], arm: str, score_key: str) -> str:
+    """The rank line a reader would hand-derive from the report's `fixture.rows`.
+
+    Recomputed here — measured rows only, ordered by that arm's score, ties by pair name —
+    rather than copied out of the module, so this is the reader's arithmetic and the render
+    is the thing being checked against it.
+    """
+    ranked = sorted((r for r in rows if r["verdict"] != "unknown"),
+                    key=lambda r: (-r[score_key], r["a"], r["b"]))
+    positives = [i for i, r in enumerate(ranked, 1) if r["label"] == "duplicate"]
+    lowest = max(positives) if positives else None
+    above = sum(1 for i, r in enumerate(ranked, 1)
+                if r["label"] != "duplicate" and lowest is not None and i < lowest)
+    tail = (f"{above} negative pair(s) outrank the lowest positive (rank {lowest})"
+            if lowest is not None else "no measurable positive pair to rank against")
+    return (f"RANKS {arm}: positives at ranks {positives} of {len(ranked)} ranked row(s) "
+            f"({len(rows) - len(ranked)} unmeasured row(s) unranked); {tail}")
+
+
+def rank_lines_of(stdout: str) -> list[str]:
+    return [ln for ln in stdout.splitlines() if ln.startswith("RANKS ")]
+
+
+def synth_pair(a: str, b: str, *, a_set, b_set, desc_a: str, desc_b: str,
+               label: str, reason: str) -> dict:
+    """One fixture row written to pin a rank, not to describe a real skill pair."""
+    return {"a": a, "b": b, "label": label, "label_reason": reason,
+            "source": "#2549 synthetic: written to pin the rank header, not a #2409 pair",
+            "descriptions": {"a": desc_a, "b": desc_b},
+            "entity_sets": {"a": list(a_set), "b": list(b_set)}}
+
+
+def write_pairs(path: Path, pairs: list[dict]) -> Path:
+    path.write_text(json.dumps({"schema": 1, "as_of": "2026-10-11",
+                                "provenance": {"negatives": "synthetic #2549 rows"},
+                                "pairs": pairs}, indent=1) + "\n", encoding="utf-8")
+    return path
+
+
+#: Six canonical names, so both sides of every synthetic pair below clear the floor of 5 and
+#: are measurable unless the row is the deliberately thin one.
+SIX = ["E1", "E2", "E3", "E4", "E5", "E6"]
+
+#: Four measured rows with hand-checkable scores. Entity arm: `rank-pos-a` 5/7 = 0.7143,
+#: `rank-pos-b` 4/8 = 0.5, `rank-neg-a` 3/9 = 0.3333, `rank-neg-b` 2/10 = 0.2 — positives at
+#: [1, 2], nothing above. Incumbent arm: 6/7 = 0.8571, 2/3 = 0.6667, 3/5 = 0.6, 2/4 = 0.5 —
+#: the same [1, 2]. Both arms therefore PASS, and the FAIL fixture below is these rows with
+#: one negative moved between the positives.
+def measured_rows() -> list[dict]:
+    return [
+        synth_pair("rank-pos-a", "rank-pos-b", a_set=SIX,
+                   b_set=["E1", "E2", "E3", "E4", "E5", "E7"],
+                   desc_a="alpha one two three four five",
+                   desc_b="alpha one two three four five six", label="duplicate",
+                   reason="synthetic positive, ranked first under both arms"),
+        synth_pair("rank-pos-b", "rank-pos-c", a_set=SIX,
+                   b_set=["E1", "E2", "E3", "E4", "E8", "E9"],
+                   desc_a="beta one two three", desc_b="beta one two",
+                   label="duplicate",
+                   reason="synthetic positive, ranked second under both arms"),
+        synth_pair("rank-neg-a", "rank-neg-b", a_set=SIX,
+                   b_set=["E1", "E2", "E3", "E10", "E11", "E12"],
+                   desc_a="gamma one two", desc_b="gamma one two three four",
+                   label="not_duplicate",
+                   reason="synthetic negative, ranked third under both arms"),
+        synth_pair("rank-neg-b", "rank-neg-c", a_set=SIX,
+                   b_set=["E1", "E2", "E10", "E11", "E12", "E13"],
+                   desc_a="delta one", desc_b="delta one two three",
+                   label="not_duplicate",
+                   reason="synthetic negative, ranked last under both arms"),
+    ]
+
+
+def test_the_ranking_header_prints_each_arm_s_positive_ranks(tmp_path):
+    """Clauses 1 and 2: the header names both arms, their positive ranks, and the squeeze.
+
+    Run over the committed fixture across the CLI, because the render is what the nightly
+    reads. The two figures asserted verbatim are the item's own, measured off the twelve
+    labelled rows: the entity key has its positives at [1, 5] with three negatives above
+    rank 5 (`claude-code|codex`, `github-issues|github-repo-management` and
+    `nightly-reflection-knowledge-analysis|-knowledge-write`), and the incumbent named
+    `desc_jaccard` has them at [10, 12] with all ten negatives above rank 12. Two lines
+    directly beneath the RANKING verdict, one per arm — that placement is the clause, so it
+    is asserted by index and not by substring.
+    """
+    extract = json.loads(FIXTURE.read_text(encoding="utf-8"))["graph"]
+    store = make_graph(tmp_path / "graph", entities=extract["entities"],
+                       aliases=[tuple(row) for row in extract["alias_rows"]])
+    out = tmp_path / "report.json"
+    rc, stdout, stderr = run_report(skills_root=tmp_path / "skills", store=store,
+                                    out=out, pairs=FIXTURE, data_root=tmp_path / "data")
+    assert rc == 0, (rc, stderr)
+    rows = read_report(out)["fixture"]["rows"]
+
+    lines = stdout.splitlines()
+    verdict_at = [i for i, ln in enumerate(lines) if ln.startswith("RANKING:")]
+    assert len(verdict_at) == 1, lines
+    i = verdict_at[0]
+    assert lines[i + 1].startswith("RANKS entity_jaccard:"), lines[i:i + 4]
+    assert lines[i + 2].startswith("RANKS desc_jaccard:"), lines[i:i + 4]
+
+    assert ("RANKS entity_jaccard: positives at ranks [1, 5] of 12 ranked row(s) "
+            "(0 unmeasured row(s) unranked); 3 negative pair(s) outrank the lowest positive "
+            "(rank 5)" in stdout), stdout
+    assert ("RANKS desc_jaccard: positives at ranks [10, 12] of 12 ranked row(s) "
+            "(0 unmeasured row(s) unranked); 10 negative pair(s) outrank the lowest positive "
+            "(rank 12)" in stdout), stdout
+    for arm, score_key in RANK_ARMS:
+        assert expected_rank_line(rows, arm, score_key) in stdout, (arm, stdout)
+
+
+def test_an_unmeasurable_pair_gets_no_rank_and_never_counts_above_the_lowest_positive(
+        tmp_path):
+    """Clause 3: ranks are assigned over measured rows only, in both arms.
+
+    The fifth row is the trap. Its two entity sets are four elements each — under the floor
+    of 5, so the pair is `unknown` — but a `thin` row still carries the quotient of those two
+    sets, and identical sets make it 1.0 in the entity arm and 1.0 in the incumbent arm too.
+    Rank unmeasurable rows and that row takes first place under BOTH arms, pushing the real
+    positives to [2, 3] and reporting one negative above the lowest positive for a pair this
+    run never measured. The printed line has to say [1, 2] with nothing above, and has to
+    count the row as unmeasured rather than silently dropping it.
+    """
+    pairs = write_pairs(tmp_path / "pairs.json", measured_rows() + [
+        synth_pair("rank-thin-a", "rank-thin-b",
+                   a_set=["E1", "E2", "E3", "E4"], b_set=["E1", "E2", "E3", "E4"],
+                   desc_a="trap one two three four", desc_b="trap one two three four",
+                   label="not_duplicate",
+                   reason="synthetic unmeasurable row: below the floor, yet 1.0 both ways"),
+    ])
+    store = make_graph(tmp_path, entities=SIX + ["E7", "E8", "E9", "E10", "E11", "E12",
+                                                 "E13"])
+    out = tmp_path / "report.json"
+    rc, stdout, stderr = run_report(skills_root=tmp_path / "skills", store=store,
+                                    out=out, pairs=pairs, data_root=tmp_path / "data")
+    assert rc == 0, (rc, stderr)
+    rows = read_report(out)["fixture"]["rows"]
+
+    trap = [r for r in rows if r["a"] == "rank-thin-a"][0]
+    assert trap["verdict"] == "unknown" and trap["unknown_reason"] == "thin", trap
+    assert trap["entity_score"] == 1.0 and trap["incumbent_score"] == 1.0, (
+        "the trap row stopped carrying a top score in both arms, so this node no longer "
+        "proves an unmeasured row is unranked:", trap)
+
+    assert rank_lines_of(stdout) == [
+        "RANKS entity_jaccard: positives at ranks [1, 2] of 4 ranked row(s) "
+        "(1 unmeasured row(s) unranked); 0 negative pair(s) outrank the lowest positive "
+        "(rank 2)",
+        "RANKS desc_jaccard: positives at ranks [1, 2] of 4 ranked row(s) "
+        "(1 unmeasured row(s) unranked); 0 negative pair(s) outrank the lowest positive "
+        "(rank 2)",
+    ], stdout
+    for arm, score_key in RANK_ARMS:
+        assert expected_rank_line(rows, arm, score_key) in stdout, (arm, stdout)
+
+
+def test_the_ranks_are_printed_without_moving_the_ranking_verdict_or_exit_code(tmp_path):
+    """Clause 4: PASS still means the lowest positive outranks the highest negative.
+
+    Two synthetic corpora, run the way the nightly runs the real one. The first is the four
+    measured rows, where both arms put the positives first: `RANKING: PASS`, ranks [1, 2]
+    under both arms, exit 0. The second moves one negative between the positives of the
+    entity arm (5/8 = 0.625, over the second positive's 4/8 = 0.5) while leaving the
+    incumbent arm's positives first: the verdict is `RANKING: FAIL`, the entity arm prints
+    [1, 3] with one negative above rank 3, and `desc_jaccard` still prints [1, 2] with
+    nothing above. That divergence is the whole point of the change, and it is also what the
+    scores-only header could not show. Neither run exits non-zero, and the key the JSON has
+    always carried for the verdict — `ranking_first_positives`, pinned to 0 over the
+    committed FAIL fixture above — still carries the pass bool: 1 for PASS, 0 for FAIL.
+    """
+    store = make_graph(tmp_path, entities=SIX + ["E7", "E8", "E9", "E10", "E11", "E12",
+                                                 "E13"])
+    squeezed = [row for row in measured_rows() if row["a"] != "rank-neg-a"] + [
+        synth_pair("rank-neg-a", "rank-neg-c", a_set=SIX,
+                   b_set=["E1", "E2", "E3", "E4", "E5", "E10", "E11"],
+                   desc_a="zeta one two three four five six seven eight nine",
+                   desc_b="zeta ten", label="not_duplicate",
+                   reason="synthetic negative squeezed between the positives of the "
+                          "entity arm only"),
+    ]
+
+    cases = [("pass", measured_rows(), "RANKING: PASS", 1),
+             ("fail", squeezed, "RANKING: FAIL", 0)]
+    for tag, pairs_rows, verdict, first_positives in cases:
+        pairs = write_pairs(tmp_path / f"{tag}-pairs.json", pairs_rows)
+        out = tmp_path / f"{tag}.json"
+        rc, stdout, stderr = run_report(skills_root=tmp_path / "skills", store=store,
+                                        out=out, pairs=pairs,
+                                        data_root=tmp_path / "data")
+        assert rc == 0, (tag, rc, stderr)
+        assert verdict in stdout, (tag, stdout)
+        assert read_report(out)["fixture"]["ranking_first_positives"] == first_positives, \
+            (tag, read_report(out)["fixture"])
+        rows = read_report(out)["fixture"]["rows"]
+        for arm, score_key in RANK_ARMS:
+            assert expected_rank_line(rows, arm, score_key) in stdout, (tag, arm, stdout)
+
+    _, fail_stdout, _ = run_report(
+        skills_root=tmp_path / "skills", store=store, out=tmp_path / "again.json",
+        pairs=write_pairs(tmp_path / "fail-again.json", squeezed),
+        data_root=tmp_path / "data")
+    assert ("RANKS entity_jaccard: positives at ranks [1, 3] of 4 ranked row(s) "
+            "(0 unmeasured row(s) unranked); 1 negative pair(s) outrank the lowest positive "
+            "(rank 3)" in fail_stdout), fail_stdout
+    assert ("RANKS desc_jaccard: positives at ranks [1, 2] of 4 ranked row(s) "
+            "(0 unmeasured row(s) unranked); 0 negative pair(s) outrank the lowest positive "
+            "(rank 2)" in fail_stdout), fail_stdout
