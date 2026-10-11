@@ -427,3 +427,161 @@ def test_the_tool_sandbox_records_its_misses_under_its_own_guard_name(caplog, mo
     witness = [r for r in caplog.records if r.levelno == logging.DEBUG
                and r.name == "lloyd-tool-sandbox" and UNKNOWN_TASK in r.getMessage()]
     assert len(witness) == 1, caplog.text
+
+
+# ── #2541: a `--now` flag form IS the unit operation it performs ─────────────
+#
+# Every command in `NOW_REFUSED` answered ALLOWED for a worker session at 01d0082b
+# while the bare-verb equivalent against the same unit was refused. `--now` is a flag,
+# and `enable`, `disable` and `reenable` are not in `_SYSTEMCTL_VERBS`, so none of the
+# three axes saw the start or the stop systemd runs for it. The reachable target is not
+# the `static` lloyd-persistence-window.service the item named (a unit with no
+# `[Install]` section cannot be enabled by any form) — it is the enabled+active
+# `agent-supervisord.service`, where `disable --now` is the stop half of a
+# supervised-stack restart that the refused verb `stop` exists to block.
+
+#: (command, the label the guard must now give it)
+NOW_REFUSED = [
+    ("systemctl --user enable --now agent-supervisord.service", "systemctl start"),
+    ("systemctl --user reenable --now agent-supervisord.service", "systemctl start"),
+    ("systemctl --user disable --now agent-supervisord.service", "systemctl stop"),
+    # The flag may sit before the verb; the reading does not change.
+    ("systemctl --user --now enable agent-supervisord.service", "systemctl start"),
+    # `-N` is systemd's short form of `--now`.
+    ("systemctl --user -N enable agent-supervisord.service", "systemctl start"),
+    # No unit named at all: still the operation, never the exemption. A half-typed
+    # command line is not evidence that this was only ever meant to arm a timer, which
+    # is the same reason an unresolvable session id is UNKNOWN rather than attended.
+    ("systemctl --user enable --now", "systemctl start"),
+]
+
+#: The `.timer` pass #2537 exists for: arming and unarming a schedule, which starts no
+#: unit. `check-unit-enabledness.sh`'s FAIL line prints the first of these, so refusing
+#: it would have a watchdog print a command its reader is refused — the boundary
+#: tests/test_unit_enabledness_check.py::test_the_command_this_line_prints_is_runnable
+#: crosses from the other side.
+NOW_TIMER_ALLOWED = [
+    "systemctl --user enable --now lloyd-persistence-window.timer",
+    "systemctl --user disable --now lloyd-persistence-window.timer",
+    "systemctl --user enable --now lloyd-cert-renew.timer",
+]
+
+#: The same shapes as data inside an interpreter one-liner — the third axis, which
+#: `_INTERPRETER_FORM` could not see because it keys on a verb WORD.
+NOW_ONELINER_REFUSED = [
+    ("python3 -c \"import subprocess; subprocess.run("
+     "['systemctl','--user','enable','--now','agent-supervisord.service'])\"",
+     "systemctl start (in a one-liner)"),
+    ("python3 -c \"import subprocess; subprocess.run("
+     "['systemctl','--user','disable','--now','agent-supervisord.service'])\"",
+     "systemctl stop (in a one-liner)"),
+]
+
+
+@pytest.mark.parametrize("command,performed", NOW_REFUSED)
+def test_the_now_flag_form_of_a_service_start_is_refused(command, performed):
+    """Clause 1: `enable --now` / `reenable --now` on a non-`.timer` unit is a unit
+    START and `disable --now` is a unit STOP, and a background session is refused each
+    with the service-control reason that already covers the bare verb.
+
+    The label is asserted exactly, not just truthily: `systemctl start` / `systemctl
+    stop` is what makes the refusal readable in the transcript and what the grant axis
+    in `app/harness/safety.py` tiers, so a label that merely fired would let the two
+    axes drift while every assertion here stayed green.
+    """
+    assert find_service_control(command) == performed, command
+    assert check_service_control(command, WORKER), command
+    assert check_service_control(command, AUTONOMY), command
+    assert check_service_control(command, UNKNOWN_TASK), \
+        "an unresolvable task id is UNKNOWN, and UNKNOWN is refused"
+    match = safety.check_bash_command(command, None, session_id=WORKER)
+    assert match and match[0].startswith("service control:"), match
+    assert performed in match[0], f"the refusal must name the operation performed: {match}"
+    dispatch = safety.check_bash_command(command, None, at_dispatch=True,
+                                        session_id=WORKER)
+    assert dispatch and dispatch[0].startswith("service control:"), \
+        "the aggregator's dispatch refuses too, as `test_a_worker_session_is_refused` " \
+        "requires of the verb-word shapes"
+
+
+def test_a_timer_armed_inside_a_one_liner_is_not_refused_by_trailing_code():
+    """The exemption on the axis where the tokens after `systemctl` are arbitrary source
+    text rather than argv.
+
+    The window this guard reads runs 160 characters, so anything the payload does
+    afterwards is in it: `…['systemctl','--user','enable','--now',
+    'lloyd-cert-renew.timer'])` followed by a print is the same arming command, and the
+    first version of the fix read every non-flag token as a unit, so the trailing code
+    became a second, unexempt "unit" and the route #2537 exists to keep reachable was
+    refused. Only a token that NAMES a systemd unit type may claim the exemption now;
+    `test_a_bare_enable_or_disable_without_the_flag_is_still_only_unit_file_state` holds
+    the other side, where no typed unit is named at all and the operation stands.
+    """
+    armed = ("python3 -c \"import subprocess; subprocess.run("
+             "['systemctl','--user','enable','--now','lloyd-cert-renew.timer']); "
+             "print('armed')\"")
+    assert find_service_control(armed) is None, find_service_control(armed)
+    assert check_service_control(armed, WORKER) is None
+    assert safety.check_bash_command(armed, None, session_id=WORKER) is None
+
+    armed_first = ("python3 -c \"print('go'); import subprocess; subprocess.run("
+                   "['systemctl','--user','disable','--now','lloyd-cert-renew.timer'])\"")
+    assert find_service_control(armed_first) is None, find_service_control(armed_first)
+
+    mixed = ("python3 -c \"import subprocess; subprocess.run("
+             "['systemctl','--user','disable','--now','agent-supervisord.service']); "
+             "subprocess.run(['systemctl','--user','enable','--now',"
+             "'lloyd-cert-renew.timer'])\"")
+    assert find_service_control(mixed) == "systemctl stop (in a one-liner)", \
+        "one typed unit that is not a timer in the window is enough: the exemption is " \
+        "for a command that arms nothing but schedules"
+
+
+@pytest.mark.parametrize("command,expected", NOW_ONELINER_REFUSED)
+def test_the_now_flag_form_in_an_interpreter_one_liner_is_refused(command, expected):
+    """Clause 3: the same flag form written as data, not argv, is refused the way the
+    `start` shape already was.
+
+    Measured at 01d0082b this exact argv list, written into a `python3 -c` payload,
+    answered `label=None refused=False`, while the identical list carrying `start`
+    answered `systemctl start (in a one-liner)` and was refused — the third axis the
+    item found and the one a fix to `_segment_label` alone would have left open.
+    """
+    assert find_service_control(command) == expected, command
+    assert check_service_control(command, WORKER), command
+    match = safety.check_bash_command(command, None, session_id=WORKER)
+    assert match and match[0].startswith("service control:"), match
+
+
+@pytest.mark.parametrize("command", NOW_TIMER_ALLOWED)
+def test_arming_or_unarming_a_timer_with_now_stays_reachable(command):
+    """Clause 4 (#2537, and the scope call the item settles): `--now` against a
+    `.timer` stays tier 1 with no service-control label, so the enabledness watchdog's
+    FAIL line and SETUP.md's timer routes remain commands an unattended turn may run.
+
+    Arming a schedule starts no unit, and unarming kills nothing in flight — which is
+    what this guard's own docstring says it exists to stop. The service half of the
+    pair is `test_the_now_flag_form_of_a_service_start_is_refused` above; the two
+    together are the whole rule, and neither half is the default.
+    """
+    assert find_service_control(command) is None, command
+    assert check_service_control(command, WORKER) is None, command
+    assert check_service_control(command, UNKNOWN_TASK) is None, command
+    assert safety.check_bash_command(command, None, session_id=WORKER) is None, command
+    assert safety.bash_command_tier(command) == 1, command
+
+
+@pytest.mark.parametrize("command", [
+    "systemctl --user enable lloyd-cert-renew.timer",
+    "systemctl --user disable agent-supervisord.service",
+])
+def test_a_bare_enable_or_disable_without_the_flag_is_still_only_unit_file_state(command):
+    """The other half of the fix's cost: `enable` and `disable` with no `--now` change
+    which unit files are linked and run nothing, so they stay allowed to a worker turn.
+
+    #2541 classifies a flag, not a word. Tiering the bare verbs would break the route
+    `install-services.sh` and SETUP.md document for a rebuild, and it is not what the
+    flag does: without `--now` the unit keeps the state it had.
+    """
+    assert find_service_control(command) is None, command
+    assert check_service_control(command, WORKER) is None, command

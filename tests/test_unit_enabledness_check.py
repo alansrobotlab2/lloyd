@@ -303,9 +303,14 @@ def test_the_remediation_arms_the_timer_and_points_by_content(tmp_path):
     2026-10-08` → `-- No entries --`) while its enable was handed forward.
 
     The arming form is `enable --now`, which is what SETUP.md carries for every repo
-    timer it documents and the only form an unattended turn may run at all — measured
-    at #2537's triage: `enable --now` is tier 1 with no service-control hit, `start`
-    is tier 2 plus `systemctl start` and is refused to a background session.
+    timer it documents. Since #2541 (2026-10-11) the sentence "an unattended turn may
+    run `--now`" is true of a `.timer` and false of anything else: systemd performs the
+    start or stop for `--now` itself, so the flag form is now classified as the verb it
+    performs (`systemctl start` for `enable`/`reenable --now`, `systemctl stop` for
+    `disable --now`) and a non-`.timer` target is tier 2 and refused to a background
+    session like the bare verb always was. What this line prints keeps working because
+    its target is a timer — the exemption `test_the_script_prose_states_the_post_fix_now_rule`
+    pins to the guards' own constant rather than to this paragraph.
 
     Pinned by RUNNING the script at a stub that answers one timer `disabled`, so what
     is graded is the line an operator actually reads rather than a grep of the source.
@@ -339,6 +344,118 @@ def test_the_remediation_arms_the_timer_and_points_by_content(tmp_path):
         assert re.search(r"enable (?!--now)\S*\.timer", line) is None, \
             f"bare `enable` does not arm a timer: {line}"
     assert not [line for line in out if re.search(r"SETUP\.md:\d+", line)], out
+
+
+def test_the_command_this_line_prints_is_runnable(tmp_path):
+    """#2541: the remedy this script prints still has to survive the guards that now
+    read `--now`.
+
+    #2537's rule was that a red watchdog must print a command that works. #2541 moved
+    the ground under it by classifying a `--now` command as the unit operation systemd
+    performs for it — `systemctl start` for `enable`/`reenable --now`, `systemctl stop`
+    for `disable --now` — so that rule holds today only because the target printed here
+    is a `.timer`, the one unit type whose arming is not a unit start. Run the script at
+    a stub that answers one timer `disabled`, lift the command out of the line an
+    operator would actually read, and put THAT string through both axes as a background
+    `task:` session: tier 1, no service-control label, no refusal.
+
+    This is the boundary the owed check would otherwise measure against live traffic:
+    watchdog output in, guard verdict out. The other half of the pair is
+    `test_the_now_flag_form_of_a_service_start_is_refused` in
+    tests/test_service_control_guard.py — the same flag form against a `.service` is
+    refused — and if this node ever goes red, this script has started printing a command
+    its own reader is not allowed to run.
+    """
+    from app.harness.safety import bash_command_tier, check_bash_command
+    from app.harness.service_control import find_service_control
+
+    unit_dir = _unit_names(tmp_path, "gamma.timer")
+    proc, out, _ = _run(unit_dir, {"gamma.timer": "disabled"}, tmp_path, tag="runnable")
+    assert proc.returncode != 0, out
+
+    named = [line for line in _fail_lines(out) if "gamma.timer" in line]
+    assert named, f"no FAIL line to take a command from: {_fail_lines(out)}"
+    matches = [re.search(r"(systemctl --user enable --now \S+)", line) for line in named]
+    assert all(matches), f"the FAIL line printed no runnable shape: {named}"
+    command = matches[0].group(1)
+    assert command == "systemctl --user enable --now gamma.timer", command
+
+    assert bash_command_tier(command) == 1, \
+        f"the watchdog's own remedy is now tiered, so an unattended turn reading this " \
+        f"line is refused the command it was told to run: {command}"
+    assert find_service_control(command) is None, command
+    assert check_bash_command(command, session_id="task:watchdog") is None, command
+
+
+def test_the_script_prose_states_the_post_fix_now_rule():
+    """#2541 clause 5: the header that used to promise `enable --now` to any
+    unattended turn states the post-fix rule, and states it in the guards' own
+    vocabulary so it cannot drift from them.
+
+    The block under `WHAT THE FAIL LINE NAMES` claimed `--now` was "the only form an
+    unattended turn can act on at all", on the grounds that `systemctl --user start` is
+    tier 2 and a service-control verb while `enable --now` was tier 1 with no label.
+    That asymmetry was the bug #2541 fixes, not a property of the flag: the flag form
+    starts or stops a unit, so it is now labelled and tiered as the verb it performs and
+    refused to a background or unresolvable `task:*` session. This paragraph is prose
+    both a human and a watchdog reader act on, so a stale sentence here would print a
+    command the harness then refuses — which is exactly the failure
+    `test_the_command_this_line_prints_is_runnable` catches for the FAIL line itself.
+
+    Graded against `app.harness.service_control`'s own constants rather than this file's
+    memory of them: every operation the map produces must be named in the block, the
+    exempt unit type must be named, and the block must say the SERVICE form is denied.
+    """
+    from app.harness.service_control import SYSTEMCTL_NOW_UNIT_EXEMPT, SYSTEMCTL_NOW_VERBS
+
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "# WHAT THE FAIL LINE NAMES" in text and \
+           "# tests/test_unit_enabledness_check.py drives" in text, text[:200]
+    block = text.split("# WHAT THE FAIL LINE NAMES", 1)[1].split(
+        "# tests/test_unit_enabledness_check.py drives", 1)[0]
+
+    assert "#2541" in block, block
+    assert SYSTEMCTL_NOW_UNIT_EXEMPT in block, \
+        f"the block never names the exempt unit type {SYSTEMCTL_NOW_UNIT_EXEMPT!r}, so a " \
+        f"reader cannot tell which `--now` survives: {block}"
+    for operation in sorted(set(SYSTEMCTL_NOW_VERBS.values())):
+        assert f"systemctl {operation}" in block, \
+            f"the guard classifies a `--now` as `systemctl {operation}` and the block " \
+            f"never says so: {block}"
+    assert "<service>" in block and "tier 2" in block, \
+        f"the block must say the service form is now denied, not available: {block}"
+    assert "`enable --now` is tier 1" not in block, \
+        "the blanket pre-fix claim is still standing as written"
+
+
+def test_the_guard_module_docstring_states_the_same_rule():
+    """#2541 clause 5's other half: the module whose verdict this script describes says
+    the same thing in its own docstring.
+
+    `app/harness/service_control.py` is where a reader who wants to know whether a
+    command is allowed actually looks, and before #2541 its docstring enumerated the
+    refused verbs without ever mentioning the flag that performed them — which is how
+    the asymmetry read as deliberate. It now carries the rule, the `.timer` carve-out and
+    the reason for it, graded against the same two constants so this node goes red if the
+    prose and the guards part ways in either direction.
+    """
+    from app.harness import service_control
+    from app.harness.service_control import (SYSTEMCTL_NOW_UNIT_EXEMPT,
+                                             SYSTEMCTL_NOW_VERBS)
+
+    doc = service_control.__doc__ or ""
+    assert "#2541" in doc, "the module never records why the flag form counts"
+    assert SYSTEMCTL_NOW_UNIT_EXEMPT in doc, \
+        f"the module docstring does not name the exempt type {SYSTEMCTL_NOW_UNIT_EXEMPT!r}"
+    # The prose renders these as `systemctl start`, so match the words without the
+    # backticks: what must hold is that the docstring names each operation the map
+    # produces, not how it punctuates it.
+    for operation in sorted(set(SYSTEMCTL_NOW_VERBS.values())):
+        assert f"systemctl {operation}" in doc.replace("`", ""), \
+            f"the guard labels a `--now` `systemctl {operation}` and the docstring " \
+            f"does not say so"
+    assert "enable --now` is the form an unattended turn may always run" not in doc, \
+        "the pre-fix blanket claim is back in the module's own words"
 
 
 def test_the_guard_names_its_caller():

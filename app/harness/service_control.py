@@ -25,6 +25,22 @@ the way `_tool_sandbox` keys its read-only rule: a four-part id
 (`20260916_165238_autocode_1b1a`) is a background run, a `task:*` id is
 whatever its parent is, and a chat's three-part id is never refused.
 
+The flag form is the same act, and now counts as it (#2541, 2026-10-11): systemd's
+`enable --now` and `reenable --now` START a unit and `disable --now` STOPS one, so the
+label is the operation performed — `systemctl start` for the first two, `systemctl stop`
+for the third — one predicate in `now_unit_operation` behind all three axes. Every axis
+used to key on the literal verb word — `enable` and `disable` are not in
+`_SYSTEMCTL_VERBS` and `--now` is a flag — so `systemctl --user disable --now
+agent-supervisord.service` answered tier 1 with no label and no refusal while
+`systemctl --user stop agent-supervisord.service` was refused. That is the stop half
+of a supervised-stack restart, which is exactly what the hardening above exists to
+stop, arriving through a hyphen. The pass that survives is the one #2537 documents:
+`--now` against a `.timer` ARMS a schedule rather than starting a unit, so
+`systemctl --user enable --now <name>.timer` stays reachable for an unattended turn —
+it is the command `scripts/maintenance/check-unit-enabledness.sh`'s FAIL line and
+SETUP.md print for it. A bare `enable`/`disable` without `--now` changes only unit-file
+state and is untouched.
+
 Read-only forms stay allowed — `supervisorctl status`, `systemctl status`,
 `round status` — so a turn can still see what is running.
 """
@@ -55,6 +71,81 @@ _SUPERVISOR_VERBS = frozenset({"restart", "stop", "start", "signal", "shutdown",
                                "update", "remove", "add", "clear"})
 _SYSTEMCTL_VERBS = frozenset({"restart", "stop", "start", "kill", "reload", "reload-or-restart",
                               "try-restart", "daemon-reload", "isolate", "reset-failed"})
+#: The three systemctl verbs that change a unit's configuration — and therefore absent
+#: from `_SYSTEMCTL_VERBS` — together with what each one becomes when `--now` sits on
+#: the same command line: systemd starts or stops the unit as well. #2541, measured at
+#: 01d0082b: `systemctl --user disable --now agent-supervisord.service` answered tier 1
+#: with no label and no refusal, which is the stop half of a supervised-stack restart
+#: the bare `stop` verb is refused for. Public because the durable-external tier table
+#: in `app/harness/safety.py` builds its pattern from this map: one set of words, so
+#: the grant axis and the hard-deny axis cannot disagree about what `--now` means.
+SYSTEMCTL_NOW_VERBS = {"enable": "start", "reenable": "start", "disable": "stop"}
+#: Every systemd unit type that can name itself in a command. Only a token carrying one
+#: of these suffixes can claim the exemption below, on either axis.
+_SYSTEMD_UNIT_TYPES = ("service", "socket", "target", "automount", "mount", "swap",
+                       "path", "slice", "scope", "device", "timer")
+#: The unit type whose `--now` is not a unit operation worth denying. Arming a timer IS
+#: the remediation: `check-unit-enabledness.sh`'s FAIL line prints `systemctl --user
+#: enable --now <name>.timer` and SETUP.md carries the route, so denying it would have
+#: a watchdog print a command its own reader cannot run (#2537, and the scope call the
+#: item settles — `enable --now <service>` is needed by nothing unattended, while
+#: `install-services.sh` and SETUP.md name the service form only as an echoed line a
+#: person runs, and a chat session is never refused here). `disable --now <timer>`
+#: unarms and kills nothing in flight, which is what this guard exists to stop. The
+#: tier table omits exactly this suffix from its unit-type list; a test pins that.
+SYSTEMCTL_NOW_UNIT_EXEMPT = ".timer"
+#: systemd's own two spellings of the flag (`-N` is its short form). A bundled
+#: `-Nf` is the same limit the tier table documents for every other flag shape.
+SYSTEMCTL_NOW_FLAGS = frozenset({"--now", "-N"})
+
+
+def _now_flag_present(tokens: list[str]) -> bool:
+    """Whether a `--now` flag is among these argv tokens."""
+    return any(t in SYSTEMCTL_NOW_FLAGS or t.startswith("--now=") for t in tokens)
+
+
+def now_unit_operation(verb: str | None, units: list[str]) -> str | None:
+    """What a `--now` command line performs: `start`, `stop`, or None.
+
+    None means this is not a `--now` unit operation — no verb from
+    `SYSTEMCTL_NOW_VERBS`, no `--now` verb at all — or that every unit named on it is
+    the exempt type (`SYSTEMCTL_NOW_UNIT_EXEMPT`), which is arming, not a unit start.
+    A command naming no unit is the operation, not the exemption: the guard's own
+    docstring says `UNKNOWN` is refused because attended must be evidenced, and a
+    half-typed command line is not evidence of an arming.
+
+    ONE predicate for all three axes. The argv parser (`_segment_label`), the
+    interpreter one-liner scan (`_interpreter_now_form`) and the durable-external tier
+    table in `safety.py` all read the same map, because #2541's defect was precisely
+    that three places each keyed on the literal word `start` and none on the flag.
+    """
+    if verb not in SYSTEMCTL_NOW_VERBS:
+        return None
+    # Only a token that SAYS WHICH KIND of systemd unit it is can grant the exemption.
+    # The argv axis rarely needs this (its tokens are real argv), but on the one-liner
+    # axis the window after `systemctl` is arbitrary source text, and reading every
+    # non-flag token as a unit made `['…','enable','--now','lloyd-cert-renew.timer'])
+    # followed by any trailing code` carry a second "unit" that was not a unit at all —
+    # the exempt arming route over-refused, which is the failure mode #2537 exists to
+    # prevent. A name with no type suffix still cannot claim it: `systemctl enable --now
+    # foo` has no unit proven, so it stays the operation.
+    named = [u for u in units if any(u.endswith(f".{t}") for t in _SYSTEMD_UNIT_TYPES)]
+    if named and all(u.endswith(SYSTEMCTL_NOW_UNIT_EXEMPT) for u in named):
+        return None
+    return SYSTEMCTL_NOW_VERBS[verb]
+
+
+def _systemctl_now_argv(argv: list[str]) -> str | None:
+    """The `--now` form of one `systemctl` argv, as the verb it performs."""
+    if not _now_flag_present(argv[1:]):
+        return None
+    verb = next((a for a in argv[1:] if a in SYSTEMCTL_NOW_VERBS), None)
+    # Anything on the command line that is not a flag and not the verb is a unit this
+    # invocation acts on. systemd flags that take a separate value (`--root /path`) can
+    # land in here and read as a unit, which can only cost the exemption, never grant
+    # it — the conservative side for a guard.
+    units = [a for a in argv[1:] if not a.startswith("-") and a not in SYSTEMCTL_NOW_VERBS]
+    return now_unit_operation(verb, units)
 _ROUND_VERBS = frozenset({"restart", "recover"})
 # `round land` in the foreground of a worker turn. Not a service verb, and
 # refused for a different reason: the landing waits for the backend to go
@@ -111,6 +202,30 @@ _LAUNCHER_STEMS = tuple(n[:-3] for n in sorted(_LAUNCHERS) if n.endswith(".sh"))
 _INTERPRETER_FORM = re.compile(
     r"\b(supervisorctl|systemctl|scripts\.automod\.round|round\.py)\b\W+(?:[\w.:/-]+\W+){0,6}?"
     r"(restart|stop|start|signal|shutdown|reload|update|kill|daemon-reload|recover)\b")
+#: The `--now` counterpart, for when the command is data rather than argv:
+#: `subprocess.run(['systemctl','--user','enable','--now','lloyd-egress-window.service'])`
+#: (#2541). `_INTERPRETER_FORM` needs a verb WORD, so the flag form walked through this
+#: branch unlabelled while the same list carrying `start` was refused. It captures the
+#: window after the program word and lets `now_unit_operation` decide, so the `.timer`
+#: exemption is applied to a one-liner exactly as it is to an argv.
+_INTERPRETER_NOW_FORM = re.compile(r"\b(systemctl)\b([\s\S]{0,160})")
+#: An argv-ish token inside source text: quotes, brackets and commas are separators, so
+#: `'--now'` and `'lloyd-egress-window.service'` come out as the tokens they are.
+_SOURCE_TOKEN = re.compile(r"[A-Za-z0-9_@./:+-]+")
+
+
+def _interpreter_now_form(text: str) -> str | None:
+    """A `--now` unit operation hidden inside another language's source text."""
+    for m in _INTERPRETER_NOW_FORM.finditer(text):
+        tokens = _SOURCE_TOKEN.findall(m.group(2))
+        if not _now_flag_present(tokens):
+            continue
+        verb = next((t for t in tokens if t in SYSTEMCTL_NOW_VERBS), None)
+        units = [t for t in tokens if not t.startswith("-") and t not in SYSTEMCTL_NOW_VERBS]
+        operation = now_unit_operation(verb, units)
+        if operation:
+            return f"systemctl {operation} (in a one-liner)"
+    return None
 
 
 def _proc_identity(cmdline: str) -> str:
@@ -201,7 +316,11 @@ def _segment_label(argv: list[str], depth: int) -> str | None:
         return f"supervisorctl {verb}" if verb else None
     if base == "systemctl":
         verb = next((a for a in argv[1:] if a in _SYSTEMCTL_VERBS), None)
-        return f"systemctl {verb}" if verb else None
+        if verb:
+            return f"systemctl {verb}"
+        # No verb word: the flag form of the same operation (#2541).
+        operation = _systemctl_now_argv(argv)
+        return f"systemctl {operation}" if operation else None
     if base in _PYTHONS or base.startswith("python3.") or base.endswith("round.py"):
         rest = argv[1:] if not base.endswith("round.py") else argv
         if "-c" in rest:
@@ -343,6 +462,12 @@ def find_service_control(command: str, *, _depth: int = 0) -> str | None:
         m = _INTERPRETER_FORM.search(text)
         if m:
             return f"{m.group(1)} {m.group(2)} (in a one-liner)"
+        # Same branch, flag form: the verb word is absent, so `_INTERPRETER_FORM` above
+        # cannot see it (#2541). Read after it, never instead of it, so a one-liner
+        # carrying a real verb keeps the label it has always had.
+        now = _interpreter_now_form(text)
+        if now:
+            return now
     return None
 
 

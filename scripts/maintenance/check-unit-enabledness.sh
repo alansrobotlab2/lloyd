@@ -52,11 +52,22 @@
 # installed by #2428 and never once fired (`journalctl --user -u
 # lloyd-persistence-window.service --since 2026-10-08` → `-- No entries --`). Pinning
 # the arming form is the least this guard can do; checking `ActiveState` itself is a
-# wider contract (#2537 records it as owed, not taken). `--now` is also the only form
-# an unattended turn can act on at all: `systemctl --user start` is both tier 2
-# (durable-external) and a service-control verb, refused to a background session,
-# while `systemctl --user enable --now <timer>` is tier 1 with no service-control hit
-# — pinned by tests/test_persistence_window_unit.py against the guards themselves.
+# wider contract (#2537 records it as owed, not taken).
+#
+# `--now` is also the only form an unattended turn can act on at all — and since #2541
+# (2026-10-11) that is a guard verdict on the TIMER, not a blanket property of the flag.
+# systemd performs a start or a stop for `--now` itself, so the flag form used to be the
+# same operation as the bare verb while every axis keyed on the verb word
+# (`app/harness/service_control.py`, `app/harness/safety.py`) and none read the flag.
+# All three now classify it as the verb it performs — `systemctl start` for
+# `enable`/`reenable --now`, `systemctl stop` for `disable --now` — and refuse it to a
+# background or unresolvable `task:*` session, so `systemctl --user enable --now
+# <service>` is tier 2 and denied exactly as `systemctl --user start <service>` was
+# already. `.timer` is the exempt unit type: arming a schedule starts no unit, so
+# `systemctl --user enable --now <timer>` and `disable --now <timer>` stay tier 1 with
+# no service-control label, which is what keeps the line below runnable by the turn that
+# reads it — pinned by tests/test_service_control_guard.py, tests/test_grant_bash_tier.py
+# and tests/test_persistence_window_unit.py against the guards themselves.
 #
 # tests/test_unit_enabledness_check.py drives this through a stub `systemctl` on
 # PATH and `--unit-dir`, so the suite never reads the live host — the same reason
@@ -148,9 +159,11 @@ if (( ${#MISS[@]} > 0 )); then
     # its reader away with the check green and no job scheduled. That is how
     # lloyd-persistence-window.timer (#2428) sat from install to #2537: the only
     # command this script ever printed was the half that does not arm it. `--now` is
-    # also the form SETUP.md carries for every repo timer it documents, and the only
-    # form a worker turn may run at all — `systemctl --user start` is a
-    # service-control verb, refused to a background session.
+    # also the form SETUP.md carries for every repo timer it documents, and — since
+    # #2541 made `--now` count as the verb it performs — the only `--now` a worker turn
+    # may run: `enable --now <service>` is now refused to a background session exactly
+    # as `start <service>` always was, and `test_the_command_this_line_prints_is_runnable`
+    # keeps the timer form, which is what prints here, reachable.
     #
     # The pointer is by content, never by line number: a `SETUP.md:<n>` moves with
     # every edit above it and then names something else, which is the rule

@@ -67,6 +67,16 @@ DURABLE_EXTERNAL = [
     # A durable shape does not have to be the whole command: `&&`/`|` segments are
     # matched individually, so leading with a read-only verb hides nothing.
     "supervisorctl status && git push origin main",
+    # #2541: the `--now` flag on a configuration verb performs the start or the stop
+    # itself. Every shape above needed the verb WORD, so all of these sat at tier 1 at
+    # 01d0082b while `stop` on the same unit tiered 2 — the stop half of a
+    # supervised-stack restart, gateable by nobody.
+    "systemctl --user enable --now agent-supervisord.service",
+    "systemctl --user reenable --now agent-supervisord.service",
+    "systemctl --user disable --now agent-supervisord.service",
+    "systemctl enable --now thunderbird.service",
+    "systemctl --user --now enable voxtype.service",
+    "systemctl --user -N enable agent-supervisord.service",
 ]
 
 #: Tier 1: the ordinary traffic the item says must not gain friction, and the
@@ -110,6 +120,15 @@ ORDINARY = [
     # A test fixture string is not a request either.
     'python3 -c "from app.harness.policy import tool_tier; '
     "print(tool_tier('Bash'))\"",
+    # #2541's near-miss pairs, and they are the point of the fix: a `--now` matcher that
+    # cannot tell arming a timer from starting a unit would gate the remediation
+    # `check-unit-enabledness.sh` prints for a red watchdog, and a `--now` matcher that
+    # cannot tell `enable` from `enable --now` would gate every rebuild route in
+    # SETUP.md. All four of these read tier 1 and must stay that way.
+    "systemctl --user enable --now lloyd-cert-renew.timer",
+    "systemctl --user disable --now lloyd-cert-renew.timer",
+    "systemctl --user enable lloyd-cert-renew.timer",
+    "systemctl --user disable agent-supervisord.service",
 ]
 
 
@@ -423,3 +442,122 @@ def test_the_tier_function_is_pure_and_reads_no_state():
     # one call and a disagreement between them is the bug #740 is about.
     assert (bash_command_tier("git push origin main")
             == bash_command_tier("git push origin main"))
+
+
+# ── #2541: `--now` is the unit operation it performs, on this axis too ───────
+#
+# (flag form, the bare verb that does the same thing, the verb the guard must name)
+
+NOW_TIER_PAIRS = [
+    ("systemctl --user enable --now agent-supervisord.service",
+     "systemctl --user start agent-supervisord.service", "systemctl start"),
+    ("systemctl --user reenable --now agent-supervisord.service",
+     "systemctl --user start agent-supervisord.service", "systemctl start"),
+    ("systemctl --user disable --now agent-supervisord.service",
+     "systemctl --user stop agent-supervisord.service", "systemctl stop"),
+    ("systemctl enable --now thunderbird.service",
+     "systemctl start thunderbird.service", "systemctl start"),
+    # The flag may precede the verb, and `-N` is systemd's short spelling of it.
+    ("systemctl --user --now enable voxtype.service",
+     "systemctl --user start voxtype.service", "systemctl start"),
+    ("systemctl --user -N enable agent-supervisord.service",
+     "systemctl --user start agent-supervisord.service", "systemctl start"),
+]
+
+
+@pytest.mark.parametrize("flag_form,bare_form,performed", NOW_TIER_PAIRS)
+def test_the_now_flag_form_tiers_the_way_the_bare_verb_tiers(flag_form, bare_form,
+                                                            performed):
+    """Clause 2: on the durable-external axis the flag form returns the tier the bare
+    verb returns — and it is asserted as an equality between the two, not as the
+    constant 2, so the pair cannot drift apart on one side of a future edit.
+
+    Measured at 01d0082b the left column was tier 1 with `match_durable_external`
+    answering None, while the right column was tier 2 and grant-gated. That gap is what
+    let an unattended scope reach `disable --now agent-supervisord.service` — the stop
+    half of a supervised-stack restart — with no grant to mint and no denial to read,
+    because a tier-1 command never reaches the gate.
+
+    The `performed` label is checked against `find_service_control` on the same string:
+    the hard-deny axis and the grant axis are allowed to disagree about what to DO with a
+    command, never about what it IS.
+    """
+    from app.harness.service_control import find_service_control
+
+    assert bash_command_tier(flag_form) == bash_command_tier(bare_form) == 2, (
+        f"{flag_form} vs {bare_form}: {match_durable_external(flag_form)!r} / "
+        f"{match_durable_external(bare_form)!r}")
+    assert find_service_control(flag_form) == performed, flag_form
+    assert find_service_control(bare_form) == performed, bare_form
+
+
+def test_the_bare_configuration_verbs_without_the_flag_are_still_tier_1():
+    """Clause 2's other half: `enable` and `disable` with no `--now` link or unlink a
+    unit file and run nothing, so they stay tier 1 — three of these four are the routes
+    SETUP.md and `install-services.sh` print for a rebuild.
+
+    The fix is keyed on a flag, not on a word. Tiering the bare verbs would gate every
+    documented enable route on this box to buy nothing: without `--now` no unit starts.
+    """
+    for command in ("systemctl --user enable lloyd-cert-renew.timer",
+                    "systemctl --user disable agent-supervisord.service",
+                    "systemctl enable thunderbird.service",
+                    "systemctl disable voxtype.service"):
+        assert bash_command_tier(command) == 1, (command, match_durable_external(command))
+
+
+def test_arming_a_timer_is_never_tiered_as_a_unit_operation():
+    """The `.timer` exemption, pinned to the guards' own constant instead of to a copy
+    of a suffix in this file.
+
+    #2537 exists because the enabledness watchdog's FAIL line has to print a command an
+    unattended turn can run; arming a schedule starts no unit, so tiering it would
+    replace a green-light remediation with a grant denial. The unit-type list the tier
+    entry builds from is DERIVED — every systemd type in `safety._SYSTEMD_UNIT_TYPES`
+    minus `SYSTEMCTL_NOW_UNIT_EXEMPT` — so this node fails if the exempt type is added
+    back by hand, and it also fails if the constant is renamed into a value that
+    silently un-exempts timers.
+    """
+    from app.harness.service_control import SYSTEMCTL_NOW_UNIT_EXEMPT
+
+    exempt = SYSTEMCTL_NOW_UNIT_EXEMPT.removeprefix(".")
+    assert exempt == "timer", SYSTEMCTL_NOW_UNIT_EXEMPT
+    assert exempt in safety._SYSTEMD_UNIT_TYPES, \
+        f"{SYSTEMCTL_NOW_UNIT_EXEMPT} is not a systemd unit type, so the exemption " \
+        f"matches no real command and protects nothing"
+    assert exempt not in safety._DURABLE_UNIT_TYPES, \
+        f"a `--now` against {SYSTEMCTL_NOW_UNIT_EXEMPT} is now grant-gated, which " \
+        f"breaks the remediation check-unit-enabledness.sh prints"
+    for command in ("systemctl --user enable --now lloyd-cert-renew.timer",
+                    "systemctl --user disable --now lloyd-persistence-window.timer"):
+        assert bash_command_tier(command) == 1, (command, match_durable_external(command))
+        assert match_durable_external(command) is None, command
+
+
+def test_the_two_axes_learn_the_flag_from_one_verb_set():
+    """#2541's defect was three places each spelling the verbs themselves, so a fix that
+    left the tier table with its own hard-coded list would re-diverge the first time a
+    verb was added. The verb alternation in the table entry is BUILT from
+    `service_control.SYSTEMCTL_NOW_VERBS`, and this node pins both directions: every
+    verb in the map tiers, and a shape the map does not claim stays tier 1.
+
+    `preset --now` is in that second class on purpose. systemd documents `--now` for
+    `preset` as well, and whether it starts or stops depends on the preset state, so the
+    map names only the three verbs whose target state is unambiguous; the gap is
+    recorded on #2541 rather than answered with a label nobody measured.
+    """
+    from app.harness.service_control import SYSTEMCTL_NOW_VERBS
+
+    assert len(SYSTEMCTL_NOW_VERBS) == 3, SYSTEMCTL_NOW_VERBS
+    for verb, performed in SYSTEMCTL_NOW_VERBS.items():
+        command = f"systemctl --user {verb} --now agent-supervisord.service"
+        assert bash_command_tier(command) == 2, (command, performed)
+        assert match_durable_external(command) == \
+            "systemctl --now enable/disable (starts or stops a unit)", command
+
+    for unclaimed in ("preset", "edit"):
+        command = f"systemctl --user {unclaimed} --now agent-supervisord.service"
+        assert bash_command_tier(command) == 1, \
+            f"{unclaimed} is not in SYSTEMCTL_NOW_VERBS, so this entry is not what " \
+            f"tiers it — if that changed, the map and the table have diverged: " \
+            f"{command}"

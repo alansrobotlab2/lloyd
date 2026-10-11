@@ -24,6 +24,11 @@ from typing import Any
 
 from app.harness.hooks import HookRegistry
 from app.harness.outbound_content import install_outbound_content_gate
+# The words `--now` can mean, single-sourced from the hard-deny axis so this table and
+# `find_service_control` cannot disagree about what a flag form does (#2541). No cycle:
+# `service_control.py` imports neither this module nor `policy` at module level — its
+# two heavy imports (`protected_paths`, `sessions_io`) are function-local by design.
+from app.harness.service_control import SYSTEMCTL_NOW_UNIT_EXEMPT, SYSTEMCTL_NOW_VERBS
 
 logger = logging.getLogger("lloyd-harness-safety")
 
@@ -184,6 +189,16 @@ _DURABLE_LEAD = r"^\s*(?:[\w.+-]+=\S*\s+)*"
 #: `_SYSTEMCTL_VERBS` in `app/harness/service_control.py`, which is the *hard-deny*
 #: axis for the same shapes: a background session may not restart a service at
 #: all, and an attended-or-granted one now pays a grant for it.
+#: Every systemd unit type whose name a `--now` command may carry.
+_SYSTEMD_UNIT_TYPES = ("service", "socket", "target", "automount", "mount", "swap",
+                       "path", "slice", "scope", "device", "timer")
+#: The subset the `--now` entry below tiers: the exempt type is removed by derivation
+#: from `service_control.SYSTEMCTL_NOW_UNIT_EXEMPT`, not by hand, so the `.timer` pass
+#: #2537 documents cannot reappear on the tier axis by editing this line, and
+#: `tests/test_grant_bash_tier.py` asserts the exemption survives either way.
+_DURABLE_UNIT_TYPES = tuple(
+    t for t in _SYSTEMD_UNIT_TYPES if f".{t}" != SYSTEMCTL_NOW_UNIT_EXEMPT)
+
 _DURABLE_EXTERNAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # A supervisor program changing state: `supervisorctl [-c <conf>] restart <unit>`.
     (
@@ -205,6 +220,36 @@ _DURABLE_EXTERNAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
             r"|daemon-reload|isolate|reset-failed)\b",
         ),
         "systemctl state change (restart/stop a unit)",
+    ),
+
+    # The same state change through the `--now` flag on a configuration verb
+    # (`systemctl --user enable --now <unit>`; `disable --now` stops). Every pattern
+    # above needs the verb WORD, and `enable`/`disable`/`reenable` are absent from
+    # `_SYSTEMCTL_VERBS` on the same reasoning that put them here, so the flag form of
+    # a unit start sat at tier 1 with no label while `stop` on the identical unit was
+    # tier 2 and refused outright (#2541, measured at 01d0082b on
+    # `disable --now agent-supervisord.service` — the stop half of a supervised-stack
+    # restart). Two order-free lookaheads and a unit type, mirroring the entry above:
+    # the segment carries a now flag in either of systemd's two spellings, then an
+    # enable-family verb, then a unit that NAMES ITS TYPE. The type list omits
+    # `SYSTEMCTL_NOW_UNIT_EXEMPT` on purpose — arming a `.timer` is the remediation
+    # `check-unit-enabledness.sh`'s FAIL line prints and SETUP.md carries (#2537), and
+    # `disable --now <timer>` unarms without killing anything in flight; a test asserts
+    # the exempt suffix never appears in this list. Where the two axes must agree they
+    # do, because both read `SYSTEMCTL_NOW_VERBS`: a target that names no type at all
+    # stays tier 1 here, and `find_service_control` still refuses it to a background
+    # session, so the grant axis is never the only thing standing between a worker turn
+    # and a unit start.
+    (
+        re.compile(
+            _DURABLE_LEAD
+            + r"(?:[\w./-]*systemctl)\b"
+            + r"(?=[\s\S]*?(?:\s--now(?:=|\b)|\s-N(?=[\s\"'`\]]|$)))"
+            + r"(?:\s+\S+)*?"
+            + r"\s+(?:" + "|".join(sorted(SYSTEMCTL_NOW_VERBS)) + r")\b(?:\s+\S+)*?"
+            + r"\s+[\w@.-]+\.(?:" + "|".join(_DURABLE_UNIT_TYPES) + r")\b",
+        ),
+        "systemctl --now enable/disable (starts or stops a unit)",
     ),
 
     # The restart form this box actually uses: restarts go through the promoter's

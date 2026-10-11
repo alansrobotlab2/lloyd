@@ -327,8 +327,17 @@ def test_setup_md_carries_the_enable_route():
     repo timer answers `enabled`. The enable is host state, so this pins the one place
     a human or a rebuild looks: the same page that carries the cert-renew line. It is
     not beyond an unattended turn's reach, and #2537 corrected the older claim here
-    that it was: `systemctl --user enable --now <timer>` is tier 1 with no
-    service-control hit, while any `start` verb is refused to a background session.
+    that it was — though since #2541 (2026-10-11) the reason is narrower than
+    "#2537 measured `enable --now` as tier 1 with no service-control hit". A `--now`
+    command is now classified as the unit operation systemd performs for it
+    (`systemctl start` for `enable`/`reenable --now`, `systemctl stop` for
+    `disable --now`) and refused to a background session, so this route survives because
+    its target is a `.timer` — arming a schedule starts no unit. The service form of the
+    same flag is refused, which is the asymmetry
+    tests/test_service_control_guard.py::test_arming_or_unarming_a_timer_with_now_stays_reachable
+    and tests/test_grant_bash_tier.py::test_arming_a_timer_is_never_tiered_as_a_unit_operation
+    hold open from both sides.
+
     What makes the exact string below worth pinning is that only the `--now` form
     ARMS — plain `enable` links the unit file and leaves the timer
     `ActiveState=inactive` until the user manager restarts — so this route has to keep
