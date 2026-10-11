@@ -1447,6 +1447,61 @@ def _vault_verdict_shortfall(item_id: int, kind: str, clauses: list,
     return "; ".join(bits)
 
 
+def _witness_findings() -> list[str]:
+    """What the #2381 witness rung has to say about the bytes this land certifies.
+
+    The second write surface. #2381 installed the rung between staging and
+    `git commit` in `scripts/util/vault-commit.sh`, which every nightly writer uses,
+    and left this door un-rung — while this door is the busier of the two:
+    `~/.local/state/lloyd-automod/promotions.jsonl` carries 59 `ok: true`
+    `vault_land` rows since 2026-10-08, 33 of them staging `skills/` or
+    `knowledge/`, and the one witnessed skill on this box (`§2a-ter curation`) came
+    through here seven times `ok: true` with no witness key on any of them. The row
+    that proves it is the one this item cites — `vault_land` 2026-10-08T17:24:20Z,
+    item #2425, vault `5c6793be`, silent — after which the fixture drifted to
+    18,554 B / 76 newlines against the copy's 17,272 B / 74, and the next morning's
+    marked `live_vault` node went red as #2468. `[]` is the normal answer, and it is
+    the answer that keeps this readable: one path in the whole vault has a fixture.
+
+    Report-only, and it rides the returned dict rather than stdout. `land()` answers
+    its caller with one JSON document — `agent_mcp/automod.py:941` hands the agent
+    `json.dumps` of this dict, `main()` prints it — so a printed warning would corrupt
+    the only channel the writer reads, and refusing would let one job's drift block
+    every later land. Those are the wrapper's two reasons for not blocking, unchanged
+    here, plus the one that decides the shape: re-freezing a witness is a reviewed
+    act because of the byte pin, so the committing job is told to file a draft and is
+    never given the edit.
+
+    The rule is not restated. `witness_matches` decides what matches — the
+    `skills/`+`knowledge/` segment test and the `tests/fixtures/*_witness_*.md`
+    corpus, both unchanged here, which is why a staged `memory/` file sharing a
+    witnessed basename stays silent — and `warning_line` words it, so the line in a
+    ledger row is the line on a job's terminal. The bytes come from the rung's own
+    `index_blobs`, read off the index because that is what this commit certifies; a
+    worktree read would describe bytes this land never staged.
+
+    A failure is a finding, not silence. The rung's `main()` prints
+    `witness: CHECK FAILED` instead of exiting nonzero when the index cannot be read,
+    and the analogue here is one line in this list, so a reader can tell "nothing
+    matched" from "nothing could be read". A tripwire that goes quiet when its own
+    input is missing is how #2381 sat unfound for two days.
+    """
+    try:
+        from scripts.util import witness_fixture_findings as rung
+        blobs = dict(rung.index_blobs(VAULT))
+        lines: list[str] = []
+        for rel, fixture in rung.witness_matches(sorted(blobs)):
+            side = blobs.get(rel)
+            if side is None or not fixture.is_file():
+                continue                              # fixture moved out from under us
+            lines.append(rung.warning_line(rel, fixture,
+                                           rung.counts_of(fixture.read_bytes()),
+                                           rung.counts_of(side)))
+        return lines
+    except Exception as exc:  # noqa: BLE001 — the land is not this check's to stop
+        return [f"witness: CHECK FAILED ({type(exc).__name__}: {str(exc)[:200]})"]
+
+
 def land(paths: list[str], message: str, *, item_id: int | None = None,
          session_id: str | None = None, ack: list[str] | None = None) -> dict:
     """Validate these paths, commit exactly them on the vault's main, ledger it.
@@ -1772,6 +1827,13 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                                          "named paths, or they were never changed",
                         **({"session_id": session_id} if session_id else {})})
         raise VaultRoundError(text)
+    # The #2381 witness rung, on the door #2381 did not rung it on (#2520). Exactly
+    # here, and not a line later: `index_blobs` reads `git diff --cached`, and the
+    # index still holds these bytes only until the commit moves HEAD under it. The
+    # result can only ever be text — nothing between this and `_git("commit")` reads
+    # it to decide anything, and a refusal here would be the hard gate the item rules
+    # out — so the landing commits whatever it says.
+    witness = _witness_findings()
     commit = _git("commit", "-q", "-m", message.strip())
     if commit.returncode != 0:
         _git("reset", "-q", "--", *norm)
@@ -1809,6 +1871,14 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                     "guards": _guards_row(guards),
                     "review": review, "review_reason": review_reason,
                     "review_clauses": review_clauses, "landing_clauses": landing_rows,
+                    # The witness rung's line(s), verbatim, and only when it found
+                    # something: an ordinary landing's row is the same shape it was
+                    # before this key existed, which is what makes the key's presence
+                    # the whole answer to "did that land stage a witnessed file?".
+                    # The row is also the only durable copy — this door prints
+                    # nothing, and `memory/audit/writes.jsonl` is `agent_mcp/vault.py`'s
+                    # log, not this one's.
+                    **({"witness_findings": witness} if witness else {}),
                     # Only when the reviewer said something about a round it
                     # passed: an advisory seam must outlive the pass, and this is
                     # the row a post-landing reader looks at.
@@ -1824,6 +1894,10 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
             "guards": _guards_row(guards),
             "review": review, "review_reason": review_reason,
             "landing_clauses": landing_rows,
+            # The same lines the row carries, so the caller that has to act — the
+            # agent reading `json.dumps` of this dict — sees the drift in the turn it
+            # caused it and not in a ledger a week later.
+            **({"witness_findings": witness} if witness else {}),
             **({"review_findings": review_findings} if review_findings else {}),
             **({"skill_gate": skill_gate} if skill_gate else {}),
             **({"skill_body": skill_body} if skill_body else {})}

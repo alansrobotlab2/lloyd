@@ -6907,3 +6907,162 @@ def test_a_passing_vault_review_row_still_carries_no_token_field(vault, items,
     rev = _rows("vault_review", 610)[-1]
     assert rev["kind"] == "pass", rev["kind"]
     assert "output_tokens" not in rev and "reasoning_tokens" not in rev, rev
+
+
+# ---------------------------------------------------------------------------
+# The witness rung on this door (#2520). #2381 put it between staging and
+# `git commit` in `scripts/util/vault-commit.sh`, which every nightly writer runs, and
+# this landing door committed through without it — while this door is the busier of
+# the two: 59 `ok: true` `vault_land` rows in promotions.jsonl since 2026-10-08, 33 of
+# them staging `skills/` or `knowledge/`, and the one witnessed skill on this box came
+# through here seven times `ok: true` with no witness key on any row. The row that
+# proves it is vault `5c6793be` (item #2425, 2026-10-08T17:24:20Z), after which the
+# fixture sat at 17,272 B / 74 against a live 18,554 B / 76 and the next morning's
+# marked `live_vault` node went red as #2468.
+# ---------------------------------------------------------------------------
+
+#: The staged path and the fixture spelling from the incident, kept as the real pair
+#: (`-` -> `_`, extension dropped) because the normalization is the whole matcher.
+WITNESSED = "skills/foo/step-2a-ter-curation.md"
+WITNESS_FIXTURE = "step_2a_ter_curation_witness_2212.md"
+
+#: Staged deliberately at a different size than the fixture: the finding's job is to
+#: report the two counts so a reader can see how far apart they are without `wc`, and
+#: staging a copy of the fixture would show only one number twice.
+WITNESS_STAGED = "# §2a-ter curation\n\n- a bullet this land appended\n"
+WITNESS_COPY = "# §2a-ter curation\n\n- the copy #2284 reviewed\n" * 4
+
+
+def _witness_corpus(tmp_path, monkeypatch, *, lookalikes: dict[str, str] | None = None):
+    """A tmp `tests/fixtures` holding the one witness fixture the rung should find.
+
+    A tmp corpus, not this checkout's, for two reasons: `FIXTURES_DIR` is
+    module-derived, so a node reading the real corpus goes red the day a second
+    witness is frozen; and every byte figure asserted below is measured from a file
+    this helper wrote, so a number that moved here is a number this file moved. The
+    name is still a `*_witness_*.md` spelling — the corpus rule is exercised, not
+    bypassed — and `lookalikes` is where a node puts a name that must NOT match.
+    """
+    from scripts.util import witness_fixture_findings as WIT
+    corpus = tmp_path / "fixtures"
+    corpus.mkdir(parents=True, exist_ok=True)
+    (corpus / WITNESS_FIXTURE).write_text(WITNESS_COPY, encoding="utf-8")
+    for name, text in (lookalikes or {}).items():
+        (corpus / name).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(WIT, "FIXTURES_DIR", corpus)
+    return corpus
+
+
+def _figures(data: bytes) -> tuple[int, int]:
+    """(bytes, newlines) measured here, the independent measurement the warning's
+    two numbers are checked against rather than the rung's own `counts_of`."""
+    return len(data), data.count(b"\n")
+
+
+def test_a_land_staging_a_witnessed_skill_reports_the_finding_and_still_commits(vault,
+                                                                               tmp_path,
+                                                                               monkeypatch):
+    """Clause 1: the finding is on `land()`'s dict AND the ledger row, byte counts
+    and all, and the commit happened exactly as it would have without the rung.
+
+    The two surfaces are asserted separately on purpose. The row is the only durable
+    copy — this door prints nothing, and `memory/audit/writes.jsonl` belongs to
+    `agent_mcp/vault.py`, not to `vault_round.py` — so #2425's silent landing is
+    findable only here; the dict is what the agent reads in the turn that caused the
+    drift, which is the only moment the draft can be filed with the counts still in
+    context. Both sides' figures are re-measured from disk rather than asked of
+    `counts_of`, and the advice tail is asserted because a row that says only
+    "drifted" cannot be triaged from the log that carries it.
+    """
+    corpus = _witness_corpus(tmp_path, monkeypatch)
+    fixture = corpus / WITNESS_FIXTURE
+    (vault / "skills" / "foo" / "step-2a-ter-curation.md").write_text(WITNESS_STAGED,
+                                                                     encoding="utf-8")
+    fb, fn = _figures(fixture.read_bytes())
+    sb, sn = _figures((vault / WITNESSED).read_bytes())
+
+    out = V.land([WITNESSED], "curation: appended a bullet")
+
+    assert out["ok"] is True, f"a report-only finding refused the land: {out}"
+    assert WITNESSED in git(vault, "show", "--format=", "--name-only",
+                            out["commit"]).stdout, "the witnessed path did not land"
+    findings = out["witness_findings"]
+    assert isinstance(findings, list) and len(findings) == 1, findings
+    line = findings[0]
+    assert WITNESS_FIXTURE in line and WITNESSED in line, line
+    assert f"fixture {fb} B / {fn} newlines" in line, line
+    assert f"staged {sb} B / {sn} newlines" in line, line
+    assert "backlog draft" in line, f"the advice tail is gone: {line}"
+    ev = _events("vault_land")[-1]
+    assert ev["ok"] is True and ev["witness_findings"] == findings, ev
+
+
+def test_a_land_matching_no_fixture_carries_no_witness_key_on_either_surface(vault,
+                                                                            tmp_path,
+                                                                            monkeypatch):
+    """Clause 3: silence means the KEY IS ABSENT, on a corpus that could have fired.
+
+    Three things make the zero answer mean something. The corpus is listed by the
+    matcher first, so a zero cannot be an unreadable directory — the same control
+    `tests/test_vault_commit_witness_warning.py::
+    test_the_matcher_reports_no_hit_for_a_stem_no_fixture_name_contains` has to carry,
+    because `witness_fixtures` answers `[]` for both cases. The land stages two paths,
+    one of them a `memory/` note whose basename is the witnessed file's: one path in
+    the whole vault has a fixture, so a key on every row would be an alarm inside a
+    week, and a row shaped as it was before this key existed is what lets its presence
+    be the whole answer to "did that land stage a witnessed file?". The last assertion
+    greps the whole row rather than one key, because a key named elsewhere — a second
+    matcher, an empty list written unconditionally — would otherwise read as silence.
+    """
+    import json
+
+    from scripts.util import witness_fixture_findings as WIT
+    corpus = _witness_corpus(tmp_path, monkeypatch)
+    assert [fx.name for _p, fx in WIT.witness_matches([WITNESSED], corpus)] == \
+        [WITNESS_FIXTURE], "the corpus is not answering, so the zero below proves nothing"
+
+    (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo v2\n")
+    (vault / "memory").mkdir()
+    (vault / "memory" / "step-2a-ter-curation.md").write_text(
+        "# a memory note that shares the stem\n", encoding="utf-8")
+
+    out = V.land(["skills/foo/SKILL.md", "memory/step-2a-ter-curation.md"],
+                 "skill: foo v2, and its note")
+
+    assert out["ok"] is True and len(out["paths"]) == 2, out
+    assert "witness_findings" not in out, out
+    ev = _events("vault_land")[-1]
+    assert "witness_findings" not in ev, ev
+    assert "witness" not in json.dumps(ev).lower(), ev
+
+
+async def test_the_witness_finding_survives_the_mcp_tool_boundary(vault, tmp_path,
+                                                                  monkeypatch):
+    """The process boundary the rung's text has to cross to be worth writing.
+
+    `agent_mcp/automod.py:941` calls `VR.land(...)` and hands the agent
+    `json.dumps(out)`: the finding is either in that string or it is in a ledger a
+    week away, and the writer with the drift in front of it is the one that can act.
+    The sibling node above (`test_the_landing_fields_survive_the_mcp_tool_boundary`)
+    is the precedent for what counts as crossing this seam — the real handler through
+    `AM.call_tool`, with only the IV gate stubbed, because what is under test is the
+    payload and not who may call.
+    """
+    import json
+
+    import agent_mcp.automod as AM
+    _witness_corpus(tmp_path, monkeypatch)
+    monkeypatch.setattr(AM, "_inner_voice_gate", lambda action: None)
+    (vault / "skills" / "foo" / "step-2a-ter-curation.md").write_text(WITNESS_STAGED,
+                                                                     encoding="utf-8")
+
+    payload = json.loads((await AM.call_tool("automod_vault_land", {
+        "paths": [WITNESSED],
+        "message": "curation: appended a bullet"})).content[0].text)
+
+    assert payload["ok"] is True and payload["commit"], payload
+    assert payload["witness_findings"], "the finding stopped at the tool boundary"
+    # The tmp corpus is outside the checkout, so `_display` answers with an absolute
+    # path — the fixture's own name is the part that survives either rendering.
+    assert WITNESS_FIXTURE in payload["witness_findings"][0], payload["witness_findings"]
+    assert _events("vault_land")[-1]["witness_findings"] == payload["witness_findings"]

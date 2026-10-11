@@ -15,6 +15,13 @@ commit, and an ordinary commit that matches nothing stays silent. The last one i
 not a throwaway: a nightly commit almost never stages a witnessed file, so a rung
 that always printed would be an alarm nobody reads.
 
+The signal covered one of the two doors onto that directory. `automod_vault_land`
+(`scripts/automod/vault_round.py`) committed through with no rung while carrying the
+heavier traffic, and #2468 was that gap's cost — so the section at the bottom of this
+file drives the same rule through `vault_round.land()`, and the four properties above
+are asserted of that door too: warn, do not block, stay silent otherwise, and keep the
+corpus and segment rule exactly as the matcher defines them (#2520).
+
 The last two nodes read the live vault, not a fixture, because clauses 4 and 5 are
 a sentence in a skill the nightly job actually follows — the precedent for pinning
 that surface is `tests/test_vault_round_skill_gate.py::test_the_knowledge_write_skill_carries_a_memory_index_pre_flight`.
@@ -417,3 +424,152 @@ def test_the_guardrail_records_2284_and_refuses_an_automatic_refreeze_path():
     assert "reviewed act" in section, (
         "the guardrail must state WHY there is no auto path, not just that there "
         f"is none: {section}")
+
+
+# ---------------------------------------------------------------------------
+# The second write surface (#2520): the automod landing door.
+#
+# Everything above is the wrapper, which every nightly writer runs. `automod_vault_land`
+# (`scripts/automod/vault_round.py`) is the other door onto the same directory, and it
+# committed through with no rung at all while carrying the heavier traffic:
+# `~/.local/state/lloyd-automod/promotions.jsonl` holds 59 `ok: true` `vault_land` rows
+# since 2026-10-08, 33 of them staging `skills/` or `knowledge/`, and `WITNESSED` came
+# through it seven times `ok: true` with no witness key on any row. The one that cost a
+# morning is item #2425's, vault `5c6793be`, 2026-10-08T17:24:20Z: it landed a
+# 17,272 B / 74-newline copy of `WITNESSED` against a fixture that had moved to
+# 18,554 B / 76, and `tests/test_memory_ledger_bound.py` went red at the next morning's
+# pre-flight as #2468. Same rule, same line, second door — and the corpus and segment
+# rule are unchanged here, which is what the `memory/` control below exists to prove.
+# ---------------------------------------------------------------------------
+
+#: A stem that matches no fixture in any corpus, spelled without the word "witness"
+#: for the same reason `UNMATCHED` above is: the silent node greps whole outputs.
+LAND_UNMATCHED = "knowledge/zz-unmatched-note-2520.md"
+
+#: The `memory/` twin of the witnessed basename. Its stem normalizes to the same
+#: `step_2a_ter_curation` a fixture was named from, so ONLY the segment rule
+#: (`_WITNESSED_SEGMENT_RE`) can keep it out of the finding set — which is why the
+#: negative control is a `memory/` file and not just an unmatched name.
+MEMORY_LOOKALIKE = "memory/step-2a-ter-curation.md"
+
+
+@pytest.fixture
+def lander(vault, tmp_path, monkeypatch):
+    """The same repo, driven through `vault_round.land()` instead of the wrapper.
+
+    Three module attributes, and each is why it is here: `VAULT` so the door commits in
+    this repo and not in `~/obsidian`; `S.LEDGER_PATH` so its `vault_land` rows go to a
+    file this test owns rather than into the real promotions ledger; and
+    `loader_errors` — that door runs the real skill/note loaders as a subprocess, whose
+    verdict is not this rule's subject. The corpus is the caller's own tmp directory,
+    which is also the only way to state a byte figure: `FIXTURES_DIR` is
+    module-derived, so the real corpus is this checkout's and moves when a witness is
+    frozen or the curation skill grows a line.
+    """
+    from scripts.automod import state as S
+    from scripts.automod import vault_round as VR
+    corpus = tmp_path / "fixtures"
+    corpus.mkdir(parents=True, exist_ok=True)
+    (corpus / FIXTURE.name).write_text(
+        "# §2a-ter curation\n\n- the copy #2284 reviewed\n" * 4, encoding="utf-8")
+    monkeypatch.setattr(rung, "FIXTURES_DIR", corpus)
+    monkeypatch.setattr(VR, "VAULT", vault)
+    monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(VR, "loader_errors", lambda paths: [])
+    return corpus
+
+
+def test_the_landing_door_warns_about_a_witnessed_skill_and_commits_it_anyway(vault, lander):
+    """Clause 2: fire-and-commit-anyway on the second door, with both counts intact.
+
+    The three wrapper nodes above pin this behaviour for `vault-commit.sh`; this is the
+    same property on the door that carried #2425. `ok` and the new sha are the whole
+    clause — a rung that refused a land would let one job's drift hold up every later
+    landing, and re-freezing a witness is a reviewed act because of the byte pin, so the
+    writer is told and never edited-for. Both figures are re-measured here with `_figures`
+    rather than asked of `counts_of` — the fixture's from the corpus file, the staged
+    side's from the bytes this node wrote — and the last assertion reads those bytes back
+    out of the new commit, so a finding that described worktree bytes the commit never
+    took is caught here rather than agreeing with itself.
+    """
+    from scripts.automod import vault_round as VR
+    fixture = lander / FIXTURE.name
+    staged = _write(vault, WITNESSED)
+    fb, fn = _figures(fixture.read_bytes())
+    sb, sn = _figures(staged.read_bytes())
+
+    out = VR.land([WITNESSED], "curation: the nightly appended a bullet")
+
+    assert out["ok"] is True, f"a report-only finding refused the land: {out}"
+    assert out["commit"] and out["commit"] != _git(vault, "rev-parse", "HEAD~1"), out
+    assert _committed_paths(vault) == [WITNESSED], _committed_paths(vault)
+    findings = out["witness_findings"]
+    assert isinstance(findings, list) and len(findings) == 1, findings
+    line = findings[0]
+    assert FIXTURE.name in line and WITNESSED in line, line
+    assert f"fixture {fb} B / {fn} newlines" in line, line
+    assert f"staged {sb} B / {sn} newlines" in line, (line, sb, sn)
+    assert _git(vault, "show", f"{out['commit']}:{WITNESSED}") == \
+        (vault / WITNESSED).read_text(encoding="utf-8"), \
+        "the finding described bytes that did not land"
+
+
+def test_the_landing_door_uses_the_rung_verbatim_so_the_segment_rule_still_holds(vault,
+                                                                                lander):
+    """Clause 4: the finding set is the rung's own, so the corpus and segment rule
+    arrive unchanged and a `memory/` lookalike is not in it.
+
+    One land stages both a witnessed `skills/` path and a `memory/` file whose stem
+    normalizes to the same spelling — `memory/step-2a-ter-curation.md` — so a rule
+    widened by accident (a matcher that dropped `_WITNESSED_SEGMENT_RE`, a corpus glob
+    over all of `tests/`) reads as two findings here, and the silent node alone would
+    not catch it because nothing in that node is a lookalike. The expected text is
+    recomputed by calling `warning_line` with figures measured in this node: that pins
+    "exactly the rung's finding" and not merely "a finding with counts in it", so a
+    second copy of the wording in `vault_round.py` fails here rather than reading as a
+    style preference.
+    """
+    from scripts.automod import vault_round as VR
+    fixture = lander / FIXTURE.name
+    _write(vault, WITNESSED)
+    _write(vault, MEMORY_LOOKALIKE, "# a memory note that shares the stem\n")
+
+    out = VR.land([WITNESSED, MEMORY_LOOKALIKE], "curation, and an unrelated note")
+
+    assert out["ok"] is True and len(out["paths"]) == 2, out
+    assert MEMORY_LOOKALIKE in _committed_paths(vault), "the lookalike did not land"
+    findings = out["witness_findings"]
+    assert len(findings) == 1, f"the segment rule widened: {findings}"
+    assert findings[0] == rung.warning_line(
+        WITNESSED, fixture,
+        _figures(fixture.read_bytes()),
+        _figures((vault / WITNESSED).read_bytes())), findings[0]
+
+
+def test_the_landing_door_says_nothing_for_a_land_that_matches_nothing(vault, lander):
+    """Silence on the second door too, over a corpus that could have fired.
+
+    The corpus is listed through the matcher first: `witness_fixtures` answers `[]` for
+    both "no fixture matches" and "the corpus did not load", and a node that never
+    noticed would make the zero below read as quiet for the wrong reason. Then two
+    ordinary paths, neither witnessed. And the assertion is the ABSENT KEY, not an empty
+    list, because this door's caller is an agent reading `json.dumps` and a second writer
+    that emitted `witness_findings: []` on every row would look identical to silence in
+    the dict while breaking the one question the key answers — "did that land stage a
+    witnessed file?" — which is asked of `promotions.jsonl` rows a week later.
+    """
+    import json
+
+    from scripts.automod import state as S
+    from scripts.automod import vault_round as VR
+    assert [fx.name for _p, fx in rung.witness_matches([WITNESSED], lander)] == \
+        [FIXTURE.name], "the corpus is not answering, so the zero below proves nothing"
+    _write(vault, LAND_UNMATCHED, "# a note no witness was frozen from\n")
+
+    out = VR.land([LAND_UNMATCHED], "knowledge: a note nobody froze")
+
+    assert out["ok"] is True, out
+    assert "witness_findings" not in out, out
+    row = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "vault_land"][-1]
+    assert row["ok"] is True and "witness" not in json.dumps(row).lower(), row
