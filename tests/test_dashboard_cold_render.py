@@ -378,10 +378,26 @@ def store_fullest_between_folds(*, live_bytes: int, cadence_days: float,
                                 rate_bytes_per_day: float) -> float:
     """Bytes the store sits at at its HIGHEST on a fold every `cadence_days`.
 
-    The fold trims the store back to its window each pass, so the fullest it ever
-    gets is where it stands now plus everything that arrives before the next pass.
-    A census of the live file answers a different question — it reports the size on
-    the day someone looked, which is anywhere in that sawtooth.
+    The fold trims the store back to its window each pass, so one cycle is: the size a
+    fold leaves, then that plus everything arriving before the next pass. `live_bytes` is
+    therefore the FLOOR, and there are two readings of it which #2575 made one agree with
+    the other:
+
+      * the size a fold leaves behind — what `sweep_promotions_ledger` would report as
+        `after`, and what `_bytes_a_fold_leaves` computes from the fold's own plan. The
+        same quantity `CALIBRATED_LEDGER_BYTES` was timed at: a store that had been
+        folding for a month, which is what #2071's remedy restored.
+      * the size on disk when pytest reached it. That reading is not merely elsewhere on
+        the same sawtooth: it is the floor PLUS what has arrived since the last fold, and
+        the bound then adds the cadence's growth again — two cycles priced as one. The gap
+        is exactly what the last fold dropped, so it is 0 bytes right after a pass and a
+        day's growth by the next: measured on the live store on 2026-10-11 it was 1,966,072
+        bytes at 11:20Z and 834,006 bytes at 12:20Z, a fold having run in between, against
+        growth of about 1.9 MB/day. #2071's own overage — the 27,066 bytes this file exists
+        to re-derive — is two orders of magnitude smaller than the term.
+
+    A census of the live file, with no cadence and no floor, answers a third question — the
+    size on the day someone looked — which is what the drift node is for and not this one.
     """
     return live_bytes + cadence_days * rate_bytes_per_day
 
@@ -478,9 +494,37 @@ def _measured_growth_bytes_per_day(ledger: Path, now: float) -> float:
     return bytes_in_window / span_days
 
 
+def _fold_cadence_days(front: dict) -> float | None:
+    """The cadence one task's front matter schedules the fold at, in days.
+
+    Resolved through `app.autonomy._frequency_interval_seconds` — the ONE predicate the
+    dispatch loop and the stall alert already share (`next_run_gap`'s own words: two
+    surfaces had to agree, so they were given one arithmetic) — rather than against
+    `FREQUENCY_INTERVALS` in here. That table is what the WORD resolves to, and the
+    scheduler consults `runs_per_day:` FIRST (`_frequency_interval_seconds` itself; and
+    `scripts/autonomy/validate_tasks.py` states the same rule while it lints the pair for
+    #2445: "#30 declared `frequency: daily` beside `runs_per_day: 3` and the scheduler
+    obeys the number"). The word-only read this file shipped with was wrong in both
+    directions: a fold scheduled twice a day was charged one day (a false red, since the
+    sawtooth halves), and a schedule written the sub-daily way the linter itself names — a
+    word outside the four-word map plus a matching `runs_per_day:`, which its own message
+    calls "#24's `6x-daily` + `runs_per_day: 6`" (`scripts/autonomy/validate_tasks.py:374-383`)
+    — resolved to NO interval at all, so the same read turned the remedy this file recommends
+    into "no fold whatsoever, never due, ever".
+
+    `None` means the scheduler resolves no interval at all, which is never due, ever: the
+    caller asserts rather than assumes, because that failure is a ledger with no fold.
+    """
+    from app.autonomy import _frequency_interval_seconds
+
+    seconds = _frequency_interval_seconds({"frequency": front.get("frequency", ""),
+                                          "runs_per_day": front.get("runs_per_day")})
+    return None if seconds is None else seconds / 86400.0
+
+
 def _declared_fold_cadence_days() -> float:
     """The interval the retention rung is actually scheduled at, in days."""
-    from app.autonomy import AUTONOMY_DIR, FREQUENCY_INTERVALS
+    from app.autonomy import AUTONOMY_DIR
 
     task = AUTONOMY_DIR / "79-retention-sweep.md"
     assert task.is_file(), (
@@ -488,12 +532,14 @@ def _declared_fold_cadence_days() -> float:
         f"the cadence this node is about cannot be checked")
     import yaml
     front = yaml.safe_load(task.read_text(encoding="utf-8").split("---\n", 2)[1])
-    frequency = str(front.get("frequency", "")).strip().lower()
-    assert frequency in FREQUENCY_INTERVALS, (
-        f"`frequency: {frequency!r}` is outside `app.autonomy.FREQUENCY_INTERVALS`, so "
-        f"the scheduler gives this task no interval at all — which is never due, ever, "
-        f"and would leave the ledger with no fold whatsoever")
-    return FREQUENCY_INTERVALS[frequency] / 86400
+    cadence = _fold_cadence_days(front)
+    assert cadence is not None, (
+        f"{task}: `frequency: {front.get('frequency')!r}` with "
+        f"`runs_per_day: {front.get('runs_per_day')!r}` resolves to no interval through "
+        f"`app.autonomy._frequency_interval_seconds`, which is never due, ever — the "
+        f"scheduler would dispatch this task no times, leaving the ledger with no fold "
+        f"whatsoever and no alarm about it")
+    return cadence
 
 
 def test_a_fold_cadence_too_slow_for_the_growth_rate_is_not_bounded():
@@ -577,6 +623,43 @@ def test_a_fold_cadence_too_slow_for_the_growth_rate_is_not_bounded():
         f"a daily cycle at this rate admits a centre in [{admits[0]:,.0f}, "
         f"{admits[1]:,.0f}] and {CALIBRATED_LEDGER_BYTES:,} is outside it, so the "
         "constant #2071 left alone now needs its own ruling")
+def _bytes_a_fold_leaves(ledger: Path, now: float, mod) -> int:
+    """The size `sweep_promotions_ledger` would leave this store at, run right now.
+
+    Computed by calling the fold's own `_archive_plan` and subtracting the bytes it
+    decides to archive — not by re-deriving "older than the window" here. The age is only
+    the first of that predicate's terms: an unparseable or unstamped line is kept
+    (`_archive_plan:1782-1788`, and a boolean `ts` reads as no age because
+    `_ledger_row_seconds` rejects `bool`), and every round's NEWEST row is held back however
+    old it is (`:1767-1776` builds the newest map, `:1792-1796` keeps on it) so the board can
+    still answer "is this closed?" while that round's record sits in the archive. On the
+    live store that protection is not marginal — a dry run over a copy reported 1,376
+    candidates, of which 817 survived as newest-of-round and only 559 were actually
+    archived (830,001 bytes). A date filter that dropped all 1,376 would understate the
+    floor by 1.1 MB and make the bound easier to satisfy than the fold that sets it, the
+    exact failure the two-sides-one-predicate rule exists to prevent.
+
+    Compaction (`_compact_oversized_rows`, the other thing the fold does on its apply
+    path) shrinks surviving rows and is not modelled, so what this returns is an upper
+    bound on the floor: the bound can only be too tight, never too loose.
+
+    Bytes, not characters, and the `(line, row)` pair `_archive_plan` is called with is
+    built the way `sweep_promotions_ledger:2019-2027` builds it — unparseable lines arrive
+    as `None` rather than being skipped — because the indices it returns are into that list.
+    """
+    rows = []
+    for line in ledger.read_bytes().splitlines(keepends=True):
+        body = line.strip()
+        try:
+            row = json.loads(body.decode("utf-8", "replace")) if body else None
+        except ValueError:
+            row = None
+        rows.append((line, row if isinstance(row, dict) else None))
+    archive_idx, _kept = mod._archive_plan(rows, now)
+    dropped = set(archive_idx)
+    return sum(len(line) for i, (line, _r) in enumerate(rows) if i not in dropped)
+
+
 def test_the_declared_fold_cadence_keeps_the_store_inside_the_band():
     """The cadence that schedules the fold is part of the bound, and is checked.
 
@@ -589,11 +672,12 @@ def test_the_declared_fold_cadence_keeps_the_store_inside_the_band():
 
     Both inputs are read rather than copied so the node goes red when either moves:
     the cadence from the task file that schedules the fold, the growth from the store's
-    own row timestamps. `app.autonomy.FREQUENCY_INTERVALS` is the single table the
-    scheduler reads (its own comment says an unreadable frequency resolves to "not
-    due, ever"), so a cadence name absent from it is asserted here rather than guessed
-    at — that case is the fold never running, which is the worst outcome and the
-    easiest to write by accident.
+    own row timestamps. The cadence is resolved by `_fold_cadence_days` — the
+    scheduler's own predicate, `runs_per_day:` before the word — and the store entering
+    the cycle is `_bytes_a_fold_leaves`, the fold's own keep/drop partition, not the
+    size on disk: the sawtooth this models starts at the post-fold floor and ends one
+    cadence later, and a live size read between two folds is the peak of one cycle
+    charged with another's growth, which grows with the gap between fold runs.
 
     Deliberately NOT marked `live_vault` even though it reads the live store and
     `~/obsidian/autonomy/`, both of which no round controls: that marker is how a node
@@ -607,20 +691,22 @@ def test_the_declared_fold_cadence_keeps_the_store_inside_the_band():
         raise AssertionError(
             f"no promotion ledger at {led}: this node measures the store's growth "
             "rate, and with no store there is no cadence to judge — red, not skipped")
-    rate = _measured_growth_bytes_per_day(led, time.time())
+    now = time.time()
+    rate = _measured_growth_bytes_per_day(led, now)
     assert rate > 0, (
         f"{led}: no row timestamps landed in the 14-day window, so the growth rate is "
         "0 B/day and every cadence would look safe. A denominator of zero is not a "
         "clean result")
     cadence_days = _declared_fold_cadence_days()
 
-    live_bytes = led.stat().st_size
+    live_bytes = _bytes_a_fold_leaves(led, now, _sweep_module())
     ceiling = int(CALIBRATED_LEDGER_BYTES * (1.0 + BOARD_DRIFT_FRACTION))
     peak = store_fullest_between_folds(live_bytes=live_bytes,
                                        cadence_days=cadence_days,
                                        rate_bytes_per_day=rate)
-    print(f"ledger {live_bytes:,} B; growth {rate:,.0f} B/day; fold cadence "
-          f"{cadence_days:g} d; ceiling {ceiling:,} B; peak {peak:,.0f} B")
+    print(f"post-fold floor {live_bytes:,} B (on disk now {led.stat().st_size:,} B); "
+          f"growth {rate:,.0f} B/day; fold cadence {cadence_days:g} d; ceiling "
+          f"{ceiling:,} B; peak {peak:,.0f} B")
     assert not cadence_outruns_band(live_bytes=live_bytes, cadence_days=cadence_days,
                                     rate_bytes_per_day=rate, ceiling_bytes=ceiling), (
         f"a fold every {cadence_days:g} d leaves the store at {peak:,.0f} bytes at its "
@@ -630,6 +716,121 @@ def test_the_declared_fold_cadence_keeps_the_store_inside_the_band():
         f"cadence fits in {(ceiling - live_bytes) / rate:.2f} d — schedule the fold "
         "more often, or make a ruling on what the band is worth if it cannot.")
 
+def test_the_cadence_and_the_post_fold_floor_are_read_the_way_their_owners_read_them():
+    """Both inputs the cadence bound is built from, pinned against the code that owns them.
+
+    Each is a reader this file wrote for itself, which makes them exactly where a number
+    drifts out of agreement with the thing it measures — #1121's two-surfaces failure, and
+    the one that made this item red twice from a single cause.
+
+    The `None` and sub-daily cases are the point, not decoration. A sub-daily cadence is
+    writable: `scripts/autonomy/validate_tasks.py:374-383` accepts a word outside the
+    four-word map so long as `runs_per_day:` carries it, in the reader's own words "the
+    `Nx-daily` + `runs_per_day: N` idiom … not a contradiction but a sub-`hourly` cadence
+    the word alone cannot express" (#24's `6x-daily` + 6). Verified against the linter for
+    this node's two shapes: `2x-daily` + 2 and `every-4h` + 6 pass it, while a word-only
+    `2x-daily` is an error — "the scheduler resolves no interval and will never dispatch it"
+    — which is exactly the `None` case below. A `runs_per_day:` beside an IN-map word that
+    disagrees is also an error (`:387-392`, 5% tolerance at `:124`/`:390`, #30 declaring
+    `daily` while running 3×/day), and the scheduler still obeys the number; that shape is
+    pinned here too, so what the bound charges never differs from what runs.
+
+    The reader this replaces consulted the four words alone, so it charged a twice-daily
+    fold as one day, and resolved both accepted sub-daily shapes to no interval at all —
+    reporting "no fold whatsoever" about the very remedy this file's failure text recommends
+    ("schedule the fold more often"). Advice and reader disagreed on whether it was
+    followable.
+    """
+    import tempfile
+
+    from app.autonomy import _frequency_interval_seconds
+
+    # ── cadence: the number the scheduler waits, on both spellings ──────────────────
+    cases = [
+        ({"frequency": "daily"}, 1.0),                          # the word alone
+        ({"frequency": "WEEKLY"}, 7.0),                         # the reader lowercases
+        ({"frequency": "every-15min"}, 900.0 / 86400.0),
+        ({"frequency": "2x-daily", "runs_per_day": 2}, 0.5),   # validate_tasks.py:374-383
+        ({"frequency": "every-4h", "runs_per_day": 6}, 1.0 / 6),
+        ({"frequency": "daily", "runs_per_day": 2}, 0.5),       # number wins; linter errors
+        ({"frequency": "daily", "runs_per_day": 0}, 1.0),       # 0 is absent, not instant
+        ({"frequency": "every-third-day"}, None),               # no interval at all
+        ({"frequency": ""}, None),
+    ]
+    for front, expected in cases:
+        assert _fold_cadence_days(front) == expected, front
+        seconds = _frequency_interval_seconds({"frequency": front.get("frequency", ""),
+                                               "runs_per_day": front.get("runs_per_day")})
+        charged = None if seconds is None else seconds / 86400.0
+        assert charged == (None if expected is None
+                           else pytest.approx(expected, abs=1e-9)), (
+            f"{front}: the cadence the bound charges is not the interval the scheduler "
+            f"waits ({charged} against {expected}) — two surfaces, one arithmetic, #1121")
+
+    assert _fold_cadence_days({"frequency": "daily"}) == 1.0, (
+        "a 1-day cadence is the cycle the cold render was timed against (#2071 measured a "
+        "20 s cold cycle while the fold ran daily), so the model below stops meaning that "
+        "measurement if this stops answering 1.0")
+
+    # ── floor: the fold's own keep/drop partition, on a ledger this node writes ──────
+    mod = _sweep_module()
+    now = 1_800_000_000.0
+    day = 86400.0
+    # (row, does the fold keep it). The shapes are the three terms of `_archive_plan`'s
+    # predicate plus the protection that makes it not merely a date filter.
+    cases = [
+        ({"ts": now, "item_id": 7, "filler": "x" * 40}, True),                    # fresh
+        ({"ts": now - (mod.LEDGER_ARCHIVE_AGE_DAYS - 0.5) * day, "item_id": 7}, True),
+        ({"ts": now - 34 * day, "item_id": 7}, False),                             # expired
+        ({"created_at": "2020-01-01T00:00:00+00:00", "item_id": 8}, False),        # ISO age
+        ({"ts": True, "item_id": 9}, True),                                       # bool ts
+        ({"item_id": 10}, True),                                                  # undated
+        # Round 11's newest row survives even though it is 30 days old ("is this closed?"),
+        # and its older sibling does not: the pair is what proves the rule bites both ways.
+        ({"ts": now - 30 * day, "round_id": "SM_X", "landed_sha": "a" * 40,
+          "item_id": 11}, True),
+        ({"ts": now - 31 * day, "round_id": "SM_X", "landed_sha": "b" * 40,
+          "item_id": 11}, False),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        led = Path(tmp) / "promotions.jsonl"
+        kept_bytes = 0
+        with led.open("wb") as handle:      # bytes, so `len` is the on-disk size
+            for row, keep in cases:
+                line = json.dumps(row).encode("utf-8") + b"\n"
+                handle.write(line)
+                if keep:
+                    kept_bytes += len(line)
+        modelled = _bytes_a_fold_leaves(led, now, mod)
+        assert modelled == kept_bytes, (
+            f"the model reports a post-fold floor of {modelled:,} B where the fold's own "
+            f"keep/drop partition over the same rows keeps {kept_bytes:,} B")
+        assert kept_bytes < led.stat().st_size, (
+            "a synthetic ledger in which nothing is archived cannot tell the two readings "
+            "of `live_bytes` apart, so the assertion above would prove nothing")
+        # Second opinion from the rung itself: `sweep_promotions_ledger` in dry-run over
+        # the same copy, whose report says how many bytes it WOULD drop and how many rows
+        # survived as newest-of-round. A test calling the sweep must never point it at the
+        # live ledger, so this runs only on the file written above.
+        report = mod.sweep_promotions_ledger(False, now, ledger=led,
+                                             backlog_dir=Path(tmp))
+        assert report["refused"] is None, report["refused"]
+        assert modelled == report["before"] - report["bytes"], (
+            f"the model says {modelled:,} B survives, the fold's own report says "
+            f"{report['before']:,} - {report['bytes']:,} B is dropped")
+        assert report["kept_newest"] == 1, (
+            f"{report['kept_newest']} rows survived as newest-of-round; the synthetic "
+            "ledger above is built so exactly one does, and 0 means the protection that "
+            "makes the fold more than a date filter is not exercised here")
+
+    live = board_presence.live_ledger()
+    if live.is_file():
+        floor = _bytes_a_fold_leaves(live, time.time(), mod)
+        assert 0 < floor <= live.stat().st_size, (
+            f"post-fold floor {floor:,} B against {live.stat().st_size:,} B on disk — the "
+            "floor is a partition of the store, so it cannot exceed it")
+
+
 def test_no_node_of_this_file_is_marked_or_deleted_to_get_it_green():
     """#2071 clause 2: the green run is earned by the named node, not by hiding it.
 
@@ -638,15 +839,16 @@ def test_no_node_of_this_file_is_marked_or_deleted_to_get_it_green():
     than read off a diff. Denominators first, because a check over zero things is not
     a check — the rule this repo's own doc-claim file applies to its extract: `git
     show aaa2a5d0:tests/test_dashboard_cold_render.py | grep -cE '^(async )?def
-    test_'` is 20 at #2071's base, so the floor here is 23 (20 plus this round's 3)
-    and a removal reddens this node instead of looking like tidying.
+    test_'` is 20 at #2071's base, so the floor here is 23 and a removal reddens this
+    node instead of looking like tidying.
 
     What is counted is the spellings that retire a node from a green run: `skip`,
     `xfail` and `importorskip` anywhere in the file, and any `live_vault` mark, which
     the gate's `-m "not live_vault"` deselects. The file carried none of the first
-    group at base and carries none now; the one `live_vault` node this round added is
-    a growth measurement about this box, not the node #2071 names, and the assertions
-    below are what keep that distinction from being an unverified claim.
+    group at base and carries none now, and the file holds no `live_vault` node at all
+    (#2071's round added one for a growth measurement and it was since dropped), so
+    nothing here is deselected by the gate's marker. The assertions below are what keep
+    that from becoming an unverified claim rather than a counted fact.
     """
     source = Path(__file__).read_text(encoding="utf-8")
     nodes, away, marked, parametrized = _audit_nodes(ast.parse(source))
@@ -662,9 +864,15 @@ def test_no_node_of_this_file_is_marked_or_deleted_to_get_it_green():
     assert "test_the_ledger_is_still_the_size_the_budget_was_calibrated_on" in nodes, (
         "the node #2071 was filed for is no longer in this file")
 
+    # Counted, not remembered: 20 at #2071's base (the `git show aaa2a5d0 | grep -cE`
+    # above), 23 at #2575's base, 24 with the node that round adds. The floor stays at 23
+    # rather than rising to the current count, because this rail catches a node VANISHING,
+    # and a floor a round raises to its own number satisfies that round and nothing after
+    # it. (`pytest --collect-only` gives different numbers — 25 and 26 — because it counts
+    # the parametrized cases; what is floored here is node definitions.)
     assert len(nodes) >= 23, (
-        f"{len(nodes)} test nodes against a floor of 23 (#2071's base measured 20, and "
-        f"this round added 3): a node was removed rather than made to pass")
+        f"{len(nodes)} test nodes against a floor of 23: a node was removed rather than "
+        f"made to pass")
     assert set(parametrized) == {
         "test_a_ledger_far_smaller_than_the_calibration_reddens_the_drift_check",
         "test_a_board_far_smaller_than_the_calibration_reddens_the_drift_check",
