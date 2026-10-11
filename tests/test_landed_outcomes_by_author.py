@@ -477,8 +477,9 @@ def test_the_report_leaves_the_repo_it_measured_clean(repo: Path):
 # files behind an `item_id` (the filing stamp no ledger row carries) and the
 # queue's `runs` table (the implementer's wall clock, which the ledger's rung
 # seconds never covered). Both are real below — real board markdown, a real
-# sqlite `runs` table — because the join under test is a regex over the free-text
-# `runs.summary`, and a mocked join would test the mock.
+# sqlite `runs` table — because the join under test reads a row's structured
+# `meta_json.round_id` when it has one and regexes the free-text `runs.summary`
+# otherwise (#2573), and a mocked join would test the mock.
 #
 # One fixture, two rounds, numbers small enough to check by hand: the landing's
 # round costs 480 s of ledger time and the never-landed one 120 s. The fields that
@@ -562,16 +563,27 @@ def _econ_board(tmp_path: Path) -> Path:
 
 
 def _econ_runs_db(tmp_path: Path, name: str,
-                  rows: list[tuple[float, str]]) -> Path:
-    """A `runs` table shaped like the queue's, holding (seconds, summary) `rows`."""
+                  rows: list[tuple]) -> Path:
+    """A `runs` table shaped like the queue's, holding (seconds, summary) `rows`.
+
+    A row may carry a third element, `meta_json` (#2573), so a fixture can put a
+    structured `round_id` on a row the way `workers.pool.normalize_result` does,
+    and a fourth, `response_json`. A 2-tuple leaves both NULL, which is what every
+    row written before the key existed is; an explicit `None` says the same thing
+    to a fixture that needs the column named.
+    """
     import sqlite3
     db = tmp_path / f"{name}.db"
     con = sqlite3.connect(str(db))
     con.execute("create table runs (run_id integer primary key autoincrement,"
                 "source text, task_id integer, duration_seconds real, summary text,"
                 "response_json text, meta_json text)")
-    con.executemany("insert into runs (source, task_id, duration_seconds, summary) "
-                    "values ('autocode', 7, ?, ?)", rows)
+    payload = [(row[0], row[1],
+                row[3] if len(row) > 3 else None,
+                row[2] if len(row) > 2 else None) for row in rows]
+    con.executemany(
+        "insert into runs (source, task_id, duration_seconds, summary, "
+        "response_json, meta_json) values ('autocode', 7, ?, ?, ?, ?)", payload)
     con.commit()
     con.close()
     return db
@@ -713,8 +725,9 @@ def test_run_join_match_rate_prints_and_a_weak_join_withholds_the_cost_figure(tm
     """Clause 4: `N/M promoted landings attributed to at least one run row`, and
     the floor that replaces the figure below it.
 
-    `round_id` is not a column on a run row — the carrier is the free-text
-    `runs.summary` — so the join is measured and printed, not trusted. One
+    `round_id` is a structured key on a run row only since #2573, and every row
+    recorded before it carries the round in the free-text `runs.summary` alone — so
+    the join is measured and printed, not trusted, whichever way a row spells it. One
     round-naming row of 1800 s makes the single landing 1/1 and the joined term
     0.5 h, and a row naming TWO rounds is dropped rather than split
     (`ambiguous_runs` says so). Withhold the naming row and the same fixture must
@@ -752,6 +765,85 @@ def test_run_join_match_rate_prints_and_a_weak_join_withholds_the_cost_figure(tm
     assert no_db["run_join"]["available"] is False
     assert no_db["run_join"]["strong"] is False
     assert LO.JOIN_TOO_WEAK in no_db_text
+
+
+def test_a_structured_meta_round_id_attributes_a_row_whose_prose_names_no_round(
+        tmp_path):
+    """Clause 2: a row that STATES its round is attributed with no prose at all.
+
+    `workers.pool.normalize_result` hoists the round an autocode run reported into
+    `runs.meta_json.round_id`, so a run whose `summary` and `response_json` never
+    spell an `SM_` id still lands on its round: 1800 s of joined seconds, one
+    `attributed_runs`, and the match rate at 1/1 instead of 0/1.
+
+    Honest about what this node can and cannot decide: the fallback scan reads
+    `meta_json` as text too, and sees the same id inside the JSON, so this fixture
+    attributes either way. It pins the OUTCOME the clause demands; the node beside
+    it is the one that distinguishes the two paths, because there the prose names a
+    second round and only the structured read can keep the row out of
+    `ambiguous_runs`.
+    """
+    meta = json.dumps({"round_id": ROUND_LAND, "session_ids": ["s1"], "num_turns": 40})
+    row, text = _econ(tmp_path, name="meta-only",
+                      runs_rows=[(LAND_RUN_SECONDS, "#2001: the fixture is done", meta)])
+    join = row["run_join"]
+    assert (join["k"], join["n"]) == (1, 1) and join["share"] == 1.0
+    assert join["strong"] is True
+    assert join["attributed_runs"] == 1 and join["ambiguous_runs"] == 0
+    assert row["cost"]["joined_seconds"] == LAND_RUN_SECONDS
+    assert "1/1 promoted landings attributed to at least one run row" in text
+
+
+def test_a_structured_round_id_wins_over_a_different_round_named_in_the_prose(tmp_path):
+    """Clause 3: where the row states its round, prose naming ANOTHER one does not
+    make it ambiguous.
+
+    Two rows, the same prose naming BOTH fixture rounds — the shape of a report
+    that quotes the round it was sent back from — and different wall clocks, 1800 s
+    and 480 s. The first also carries `meta_json.round_id` = the landing's round;
+    the second carries no key at all. The structured row is attributed to the round
+    it named; the prose-only row keeps the treatment it has always had, dropped and
+    counted in `ambiguous_runs`.
+
+    This is the node that fails before the change: on the prose scan alone BOTH rows
+    name two rounds, so `attributed_runs` is 0 and `ambiguous_runs` is 2, the cost
+    line hides behind `JOIN_FLOOR`, and the 1800 s of the round that actually landed
+    vanishes because that round's own report mentioned a different one.
+    """
+    meta = json.dumps({"round_id": ROUND_LAND, "session_ids": ["s1"]})
+    prose = f"resumed after {ROUND_FAIL} was refused: landed {ROUND_LAND}"
+    row, _ = _econ(tmp_path, name="meta-beats-prose",
+                   runs_rows=[(LAND_RUN_SECONDS, prose, meta),
+                              (480.0, prose, None)])
+    join = row["run_join"]
+    assert join["attributed_runs"] == 1 and join["ambiguous_runs"] == 1, (
+        "the structured row was treated as ambiguous, or the prose-only one was not")
+    assert row["cost"]["joined_seconds"] == LAND_RUN_SECONDS, (
+        "the attributed row's seconds were split or doubled instead of taken whole")
+    assert (join["k"], join["n"]) == (1, 1)
+
+
+def test_a_row_without_a_structured_round_id_is_still_attributed_by_the_prose_scan(
+        tmp_path):
+    """Clause 4: the fallback IS the join for every row that has no key.
+
+    All 1,189 autocode rows recorded before this change name their round in prose
+    only, so the pre-change population must attribute exactly as it does today —
+    otherwise the cost-per-landing figure collapses the week the key ships and reads
+    as a saving. Over the same three rows the pinned node above uses, the numbers are
+    that node's numbers: k/n 1/1, one attributed run, one ambiguous. Then a fourth
+    row whose `meta_json` is not JSON at all: a stored value the parser cannot read
+    is a row with no key, not a row that cancels the join, so its 120 s still come
+    out of its summary — which is what a `json.loads` allowed to raise would cost.
+    """
+    row, text = _econ(tmp_path, name="pre-change",
+                      runs_rows=STRONG_RUNS + [
+                          (120.0, f"Round {ROUND_LAND}: meta unparseable", "{not json")])
+    join = row["run_join"]
+    assert (join["k"], join["n"]) == (1, 1) and join["share"] == 1.0
+    assert join["attributed_runs"] == 2 and join["ambiguous_runs"] == 1
+    assert row["cost"]["joined_seconds"] == LAND_RUN_SECONDS + 120.0
+    assert "1/1 promoted landings attributed to at least one run row" in text
 
 
 def test_empty_window_prints_no_landings_and_n_a_and_record_keeps_the_new_keys(tmp_path,

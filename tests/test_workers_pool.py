@@ -177,6 +177,52 @@ async def test_a_successful_run_completes_its_queue_row(q, monkeypatch):
     assert q.get(1).state == "completed"
 
 
+async def test_a_round_the_source_reports_lands_on_the_run_row_and_absence_omits_it(
+        q, monkeypatch):
+    """#2573 clause 1: `meta_json.round_id` is written at record time, or absent.
+
+    An autocode run knows which self-modification round it opened and has returned
+    that id at the top level of its result ever since; nothing read the key, so the
+    run row held `session_ids`, `scratchpad` and `num_turns` and no round, and
+    `scripts/automod/landed_outcomes.py` could only re-derive the round by regexing
+    it out of the free-text summary. The seam this crosses is exactly the one that
+    lost it — a source's return dict, through `normalize_result`, into the `runs`
+    row the pool writes — so the node runs a real item through a real pool and reads
+    the stored row back instead of asserting on a dict.
+
+    The no-round half is the half that fails silently: the key is OMITTED when the
+    run opened no round, never `"round_id": null`, because the instrument over the
+    field is `meta_json LIKE '%round_id%'`, and a null would make a run that
+    recorded "no round was opened" read identically to a run written before the key
+    existed. `_bind_step_count` holds `num_turns` to the same rule for the same
+    reason, and a source that reports its own `num_turns` keeps it — which is what
+    the fixture asserts by carrying one.
+    """
+    round_id = "SM_20260927_010203"
+
+    async def execute(item):
+        return {"summary": f"#2001: round {round_id}", "round_id": round_id,
+                "meta": {"num_turns": 7}}
+
+    q.enqueue("s", "k")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+    meta = json.loads(runs[0]["meta_json"])
+    assert meta["round_id"] == round_id
+    assert meta["num_turns"] == 7, "the source's own step count was overwritten"
+    assert {"session_ids", "scratchpad"} <= set(meta), (
+        "round_id did not land beside the keys the pool composes around it")
+
+    async def no_round(item):
+        return {"summary": "nothing to open here", "round_id": None}
+
+    q.enqueue("s", "k2")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=no_round),
+                            wait_for=lambda: len(q.list_runs(limit=5)) >= 2)
+    meta = json.loads(runs[0]["meta_json"])
+    assert "round_id" not in meta, f"a nameless run stored {json.dumps(meta)!r}"
+    assert meta["session_ids"] == [], "the run row lost the keys it always had"
+
+
 async def test_an_in_band_failure_does_not_send_the_item_back_for_a_retry(q, monkeypatch):
     """A handler that reports failure by returning is not asking to be re-run.
 

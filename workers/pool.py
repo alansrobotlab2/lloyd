@@ -298,6 +298,36 @@ def normalize_result(item: QueueItem, result: Any) -> dict[str, Any]:
     # effects, which is the one thing the in-band contract promises not to do.
     defer = _defer_seconds_of(item, result, status)
 
+    meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+
+    # #2573: a source that worked on a self-modification round knows that round's
+    # id only at completion, and autocode has reported it at the top level ever
+    # since (`workers/sources/autocode.py`, the success return). Nothing read that
+    # key: the run row's `meta_json` held `session_ids`, `scratchpad` and
+    # `num_turns` and no round, so `scripts/automod/landed_outcomes.py` could only
+    # re-derive the round by regexing it out of the free-text summary — the join
+    # that reports itself at 95.3 %, and that silently loses every run whose prose
+    # does not happen to name the round. Hoisted into `meta` here, at the one place
+    # a source's return becomes a run record, rather than in each source:
+    # `_bind_step_count`'s note states the precedent — "the handler remembered to
+    # pass it back" is not a property worth depending on many times.
+    #
+    # A run that opened no round OMITS the key rather than storing null, for the
+    # identical reason #2087 gives for `num_turns`: the instrument over this field
+    # is `meta_json LIKE '%round_id%'`, and a null on every nameless run would make
+    # "recorded, and no round was opened" and "never recorded at all" one query
+    # result again. A source that already put its own `round_id` in its `meta`
+    # keeps it, as a source reporting its own `num_turns` keeps its own.
+    #
+    # Population the key covers: the completed runs that report it. Autocode's
+    # non-success returns (turn never completed, turn timeout, the landing-hold
+    # skip) compute a round id and do not return one, so those rows stay without
+    # the key until owed-check rules on them.
+    reported_round = result.get("round_id")
+    if isinstance(reported_round, str) and reported_round.strip() \
+            and "round_id" not in meta:
+        meta = {**meta, "round_id": reported_round.strip()}
+
     return {
         "status": status,
         # Word-boundary, not a slice (#1606). This is the value a reader of the
@@ -310,7 +340,7 @@ def normalize_result(item: QueueItem, result: Any) -> dict[str, Any]:
         "artifact_path": str(result.get("artifact_path") or ""),
         "response": str(result.get("response") or "")[:50000],
         "task_id": _task_id_of(item, result),
-        "meta": result.get("meta") if isinstance(result.get("meta"), dict) else {},
+        "meta": meta,
         "claims": claims,
         "defer_seconds": defer,
     }

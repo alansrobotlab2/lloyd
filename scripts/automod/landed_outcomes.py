@@ -53,10 +53,12 @@ landing cost, and how long from the signal to the landing?":
   never_landed_share      the seconds sitting in rounds that produced no
                           `promoted` row: cost-per-outcome is gameable by
                           attempting less, and this is the line that shows it
-  run_join                `runs` rows name a round only in free-text `summary`,
-                          never in a structured column, so the match rate prints
-                          with the figure and the figure is withheld below
-                          `JOIN_FLOOR` instead of printed low
+  run_join                a `runs` row is attributed by its structured
+                          `meta_json.round_id` when it carries one, and by the
+                          free-text `summary` scan otherwise (#2573) — most rows
+                          predate the key, so the match rate prints with the
+                          figure and the figure is withheld below `JOIN_FLOOR`
+                          instead of printed low
   filing_to_first_round   p50/p90 with n, beside `first_round_to_landing`: the
   first_round_to_landing  triage wait and the implementation+gate wait, the
                           split no figure on this box had ever measured of its
@@ -427,15 +429,49 @@ def _empty_join(why: str) -> dict[str, Any]:
             "runs_naming_rounds": 0, "rows_scanned": 0}
 
 
+def _meta_round_id(meta_json: Any) -> str | None:
+    """The round a run row records STRUCTURALLY, or None (#2573).
+
+    `workers.pool.normalize_result` hoists a source's reported round into
+    `meta_json.round_id`, so a run that opened a round states which one and this
+    needs no prose. Returns None whenever the row does not say — absent key, a
+    blank or non-string value, `meta_json` that is not a JSON object, or a row
+    written before the key existed — and the caller then falls back to the
+    regex scan. The fallback is the whole point: 1,189 autocode rows were recorded
+    without the key, and a join that read only the new field would report this
+    week's cost as near-zero and call it an improvement.
+    """
+    if not meta_json:
+        return None
+    try:
+        meta = json.loads(str(meta_json))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    rid = meta.get("round_id")
+    return rid.strip() if isinstance(rid, str) and rid.strip() else None
+
+
 def run_round_join(round_ids: set[str], *, db_path: Path | None = None,
                    n_landings: int | None = None) -> dict[str, Any]:
     """Which of `round_ids` at least one `runs` row names, and their seconds.
 
-    `round_id` is not stored structurally on a run row: the carrier is the
-    free-text `runs.summary` (#1188's note in `workers/sources/autocode.py`
-    writes it there). So the join is one scan of `runs`, a round-id regex over
-    `summary`/`response_json`/`meta_json`, and then a floor on the resulting
-    match rate — not a fuzzy time window.
+    A row is attributed by its structured `meta_json.round_id` when it has one
+    (#2573) and that id alone; otherwise the carrier is still the free-text
+    `runs.summary` (#1188's note in `workers/sources/autocode.py` writes it
+    there), so the join falls back to one scan of `runs`, a round-id regex over
+    `summary`/`response_json`/`meta_json`. Then a floor on the resulting match
+    rate — not a fuzzy time window.
+
+    Structured first is not cosmetic: a run's own report often quotes another
+    round — the one it was sent back from — and a row whose prose names two is
+    dropped rather than split, which is what `ambiguous_runs` counts. Where the
+    row states its round structurally, that key is what the source knew, so it
+    wins and the row is attributed instead of dropped. Autocode is the only
+    source that reports a round today, so the other sources' ambiguous rows stay
+    ambiguous: this removes the ambiguity for the rows that say, not for the ones
+    that merely mention.
 
     A run row naming TWO rounds is dropped from the seconds rather than
     credited to both: its wall clock cannot be split, and halving it would
@@ -470,9 +506,13 @@ def run_round_join(round_ids: set[str], *, db_path: Path | None = None,
     ambiguous = named = 0
     for dur, summary, response_json, meta_json in rows:
         found: set[str] = set()
-        for blob in (summary, response_json, meta_json):
-            if blob:
-                found.update(ROUND_ID_RE.findall(str(blob)))
+        structured = _meta_round_id(meta_json)
+        if structured is not None:
+            found.add(structured)
+        else:
+            for blob in (summary, response_json, meta_json):
+                if blob:
+                    found.update(ROUND_ID_RE.findall(str(blob)))
         if not found:
             continue
         named += 1
