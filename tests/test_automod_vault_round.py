@@ -1212,7 +1212,10 @@ RETENTION_NODES = (
     # It is the first of the six that adds a store the sweep only REPORTS, which is why the
     # rename still happens: the node's name carries a store COUNT, and a count is exactly
     # what this tripwire refuses to let a citation freeze. The second name moves on its own.
-    "test_the_skill_says_seventeen_stores_and_its_table_has_a_row_per_report_line",
+    # #2559's quarantine store is the seventh move: `…seventeen_stores…` → `…eighteen_stores…`,
+    # same rule, same reason — and #2472's report-only store remains the one that changed the
+    # number without changing this node's second name.
+    "test_the_skill_says_eighteen_stores_and_its_table_has_a_row_per_report_line",
     "test_the_task_description_names_every_store_the_sweep_prints",
 )
 

@@ -154,6 +154,12 @@ def rs(tmp_path, monkeypatch):
         # absent case entirely. One path redirects the whole store: the writer puts its
         # dated files in this directory and nowhere else.
         ("TOOL_QUALITY_DIR", "eval/tool-quality", False),
+        # #2559's store, and the only one in this list whose *name* is not the name of
+        # the directory it holds: the store is a set of siblings of the facts tree, so the
+        # redirected root is `vault-derived` and every seeded quarantine dir is made by the
+        # node that needs it. Created here because an absent root is a state every node has
+        # to be able to distinguish from an empty one — the sweep's own `present` flag.
+        ("FACTS_QUARANTINE_ROOT", "vault-derived", True),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -1806,9 +1812,9 @@ def _assert_table_rows_match_report(rows: dict[str, str], report: list[str],
             f"{sorted(rows)}")
 
 
-def test_the_skill_says_seventeen_stores_and_its_table_has_a_row_per_report_line(
+def test_the_skill_says_eighteen_stores_and_its_table_has_a_row_per_report_line(
         rs, _store_report):
-    """Clause 4 of #2418, carried by #2472: the skill says seventeen, and its table's
+    """Clause 4 of #2418, carried by #2472: the skill says eighteen, and its table's
     rows are the report's lines.
 
     The table is the operator's list of what the weekly sweep bounds, and it said nine
@@ -1820,7 +1826,7 @@ def test_the_skill_says_seventeen_stores_and_its_table_has_a_row_per_report_line
     It went stale anyway, in the direction this node was blind to: #1644 added two
     stores and the prose stayed at ten for nine commits, because the count of report
     lines came from the suffix selector that could not see them (`#1835`). The report
-    side of the comparison is now the `_store_report` fixture — the seventeen lines
+    side of the comparison is now the `_store_report` fixture — the eighteen lines
     `main()` prints with all three automod rungs in play — so this node reads one
     measurement, not two.
     """
@@ -1833,11 +1839,11 @@ def test_the_skill_says_seventeen_stores_and_its_table_has_a_row_per_report_line
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 17, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 18, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "seventeen unbounded-growth stores" in text, (
-        "the skill's description states a store count other than seventeen")
-    assert "seventeen in all" in text, "the skill's body states a store count other than seventeen"
+    assert "eighteen unbounded-growth stores" in text, (
+        "the skill's description states a store count other than eighteen")
+    assert "eighteen in all" in text, "the skill's body states a store count other than eighteen"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -1926,8 +1932,8 @@ def test_the_skill_says_seventeen_stores_and_its_table_has_a_row_per_report_line
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "fourteen store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports fourteen stores by design")
+    assert "fifteen store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports fifteen stores by design")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -2034,7 +2040,7 @@ _STORE_ORDER_ANCHOR = "in this order:"
 _STORE_ORDER_TAIL = "Report all"
 _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                       "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
-                      "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "1": 1, "2": 2, "3": 3, "4": 4,
+                      "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
 
@@ -2078,8 +2084,8 @@ def _store_report_lines(out: str) -> list[str]:
 
 def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
         rs, _store_report):
-    """#1835 clause 1, carried by #2472: the seventeen lines `main()` prints are
-    seventeen stores, and the three the loop leaves outside the data root are among them.
+    """#1835 clause 1, carried by #2472: the eighteen lines `main()` prints are
+    eighteen stores, and the three the loop leaves outside the data root are among them.
 
     This is the acceptance check itself, run against the real `main()`: the count a
     full sweep reports, taken through the selector every count comparison in this file
@@ -2088,8 +2094,8 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 17, (
-        f"the sweep prints {len(_store_report)} store lines, not the seventeen its report "
+    assert len(_store_report) == 18, (
+        f"the sweep prints {len(_store_report)} store lines, not the eighteen its report "
         f"has had since #2472 added the tool-quality store: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
@@ -2177,16 +2183,16 @@ def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
         f"the rule counted a line that is not a store: {report}")
 
 
-def test_a_run_outside_the_production_checkout_reports_fourteen_stores_and_one_refusal_line(
+def test_a_run_outside_the_production_checkout_reports_fifteen_stores_and_one_refusal_line(
         rs, monkeypatch, capsys):
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
     `  automod stores: REFUSED: …`, so a reader holding that output sees fourteen store
-    lines while the skill says seventeen — and SKILL.md now says so in those words. This
+    lines while the skill says eighteen — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
-    (just "seventeen", which makes every sandbox run look like it lost three stores) or the
+    (just "eighteen", which makes every sandbox run look like it lost three stores) or the
     alarming half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
     owns the predicate itself and the `NOT_PRODUCTION_EXIT` half; what is new here is the
     COUNT, which is the number a report is written from.
@@ -2205,7 +2211,7 @@ def test_a_run_outside_the_production_checkout_reports_fourteen_stores_and_one_r
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 14, f"a refusal run should report fourteen stores: {report}"
+    assert len(report) == 15, f"a refusal run should report fifteen stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2406,7 +2412,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 17, (
+    assert len(items) == len(_store_report) == 18, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -2419,14 +2425,20 @@ def test_the_task_description_names_every_store_the_sweep_prints(
     # everything the loop leaves outside it.
     assert "voice" in items[11][1] and "rows" in items[11][1], items[11]
     assert "pytest" in items[12][1] and "dirs" in items[12][1], items[12]
+    # #2559's store is item 14: the sweep prints it immediately below the pytest line, so
+    # the item list carries it there and every item after it moves up one number.
+    assert "facts quarantine" in items[13][1], items[13]
+    assert items[13][0] == 14, items[13]
     # The reported-only store in the same position rule: it prints with the data-root
     # stores, below the pytest line and above the loop's three, because it is the one line
     # an operator is NOT approving an `--apply` for.
-    assert "tool-quality" in items[13][1] and "rows" in items[13][1], items[13]
-    assert "~/lloyd-work" in items[14][1] and "dirs" in items[14][1], items[14]
-    assert "automod/*" in items[15][1] and "branches" in items[15][1], items[15]
+    assert "tool-quality" in items[14][1] and "rows" in items[14][1], items[14]
+    assert "~/lloyd-work" in items[15][1] and "dirs" in items[15][1], items[15]
+    assert "automod/*" in items[16][1] and "branches" in items[16][1], items[16]
     assert items[11][0] == 12 and items[12][0] == 13, items[11:]
-    assert items[13][0] == 14 and items[14][0] == 15 and items[15][0] == 16, items[13:]
+    assert items[14][0] == 15 and items[15][0] == 16 and items[16][0] == 17, items[14:]
+    assert items[17][0] == 18, items[17:]
+    assert items[16][0] == 17, items[16]
 
     # Clause 2, on the tenth store's own terms: the groundskeeper pair sits where the
     # sweep prints it, between the session spill dirs and `workers.db runs`, and names
@@ -6760,3 +6772,272 @@ def test_the_tool_quality_window_and_dated_rule_come_from_the_writer(rs):
     assert "RETENTION_DAYS" in line_src, "the line builder does not name the writer's window"
     assert "_TOOL_QUALITY_MODULE._DAY_FILE_RE" in inspect.getsource(rs.sweep_tool_quality), (
         "the count decides on its own which names are dated rows")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #2559: the fact tree's quarantine siblings (#2443's owed entry 3, ruled
+# 2026-10-11). Two writers move a whole superseded `facts/` tree into
+# `<vault-derived>/facts-quarantine-<YYYYMMDD>T<HHMMSS>Z>` — `kg_rebuild.py:910-912` on a
+# rebuild that swaps the tree, and `quarantine_general_facts.py:87,:172-183` when its
+# `--apply` relocates the #2303 `general` residue — and before this round NO store in this
+# file bounded either: `git grep -c FACTS_QUARANTINE scripts/groundskeeper/retention-sweep.py`
+# returned nothing at base 0ae3064f, and the one directory the box had (`facts-quarantine-
+# 20260923T070837Z`, 2,763,896 bytes over 2,683 files, `_bytes_under`'s own measure of the
+# 7.5 MiB `du` reports) had been unbounded since 2026-09-23. Every node below seeds the
+# fixture's redirected `rs.FACTS_QUARANTINE_ROOT` (`tmp_path/"vault-derived"`, registered in
+# the fixture's redirect list), so no node here can reach the live tree; the sibling
+# `kg-quarantine-<tag>.sqlite` files match no glob in this store and are asserted untouched
+# rather than deleted.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fq_tag(mod, days_ago: float) -> str:
+    """A `<YYYYMMDD>T<HHMMSS>Z` run tag `days_ago` days before the module's clock reads.
+
+    Built with `rs.datetime`/`rs.timedelta`, the module's own imports, because a tag
+    constructed from a second copy of the calendar could drift from the one the sweep parses.
+    """
+    stamp = mod.datetime.now(mod.timezone.utc) - mod.timedelta(days=days_ago)
+    return stamp.strftime("%Y%m%dT%H%M%SZ")
+
+
+def _fq_seed(mod, name: str, *, files: int = 1, size: int = 2048,
+             mtime_days_ago: float | None = None):
+    """Create one seeded entry in the redirected quarantine root and return it."""
+    d = mod.FACTS_QUARANTINE_ROOT / name
+    d.mkdir(parents=True)
+    for i in range(files):
+        (d / f"row-{i}.json").write_text("x" * size, encoding="utf-8")
+    if mtime_days_ago is not None:
+        import os
+        when = mod.time.time() - mtime_days_ago * 86400.0
+        os.utime(d, (when, when))
+    return d
+
+
+def _fq_fingerprint(root) -> list[tuple[str, int]]:
+    """(relative path, size) for every file under `root`, sorted — a tree's whole shape.
+
+    Sizes and names, not mtimes: the thing a dry run must not change is the CONTENT set, and
+    an mtime in the fingerprint would make the assertion fail on a filesystem that updates
+    atime-derived stamps, which is a false alarm about a delete that never happened.
+    """
+    return sorted((str(p.relative_to(root)), p.stat().st_size)
+                  for p in root.rglob("*") if p.is_file() and not p.is_symlink())
+
+
+def test_apply_deletes_the_over_window_quarantine_and_nothing_else(rs):
+    """Clause 1 of #2559: a 35-day-old quarantine goes; `facts/` and a fresh one do not.
+
+    Seeded exactly as the item names it — the live `facts/` tree, a
+    `facts-quarantine-<today>`, and a `facts-quarantine-<35 days ago>` — and the assertion
+    that matters is not the one that says the old dir is gone (a `rmtree` of the wrong
+    directory also gets there) but the one that says `facts/` and the fresh dir come out
+    byte-for-byte the same shape they went in. `FACTS_QUARANTINE_MAX_AGE_DAYS` is read from
+    the module, so a window moved in the source moves the seed with it.
+    """
+    old = _fq_seed(rs, f"facts-quarantine-{_fq_tag(rs, rs.FACTS_QUARANTINE_MAX_AGE_DAYS + 5)}")
+    fresh = _fq_seed(rs, f"facts-quarantine-{_fq_tag(rs, 2)}")
+    live = rs.FACTS_QUARANTINE_ROOT / "facts"
+    live.mkdir()
+    (live / "people.md").write_text("Alan works on Lloyd", encoding="utf-8")
+    before_live, before_fresh = _fq_fingerprint(live), _fq_fingerprint(fresh)
+    assert rs.FACTS_QUARANTINE_MAX_AGE_DAYS == 30, rs.FACTS_QUARANTINE_MAX_AGE_DAYS
+
+    p = rs.sweep_facts_quarantine(True, rs.time.time())
+
+    assert p["removed"] == 1 and p["candidates"], p
+    assert p["candidates"][0]["name"] == old.name, p["candidates"]
+    assert not old.exists() and p["freed"] == p["bytes"], p
+    assert fresh.exists() and live.is_dir()
+    assert _fq_fingerprint(live) == before_live and _fq_fingerprint(fresh) == before_fresh
+    assert p["in_window"] == 1, p
+    # The live tree is untouchable because of the GLOB, not a check: `facts` does not match
+    # `facts-quarantine-*`. Asserted on the pattern itself, so a widened glob reddens this.
+    fnmatch = __import__("fnmatch")
+    assert not fnmatch.fnmatch(live.name, rs.FACTS_QUARANTINE_GLOB), live.name
+    assert not fnmatch.fnmatch("kg-quarantine-20260923T070837Z.sqlite",
+                               rs.FACTS_QUARANTINE_GLOB), "the sqlite sibling's prefix matched"
+    # A FILE wearing the directory's prefix survives the same rule, and it is the non-dir
+    # guard that keeps it, not the glob: `facts-quarantine-backup.tgz` DOES match the glob,
+    # so without `is_dir()` a stray tarball with that name would be rmtree'd — and rmtree on
+    # a file raises, which would have looked like a broken store rather than a protected one.
+    stray = rs.FACTS_QUARANTINE_ROOT / "facts-quarantine-backup.tgz"
+    stray.write_bytes(b"x" * 64)
+    again = rs.sweep_facts_quarantine(True, rs.time.time())
+    assert stray.is_file() and again["not_a_dir"] == 1 and again["removed"] == 0, again
+
+
+def test_a_quarantine_age_is_read_from_its_run_tag_and_an_unparseable_tag_is_held(rs):
+    """Clause 2 of #2559: the tag is the age; a name that cannot be read is never deleted.
+
+    The three sources, each discriminated against the other two:
+      * tag 40 days old on a directory whose mtime was just refreshed -> a candidate, so the
+        age is NOT the mtime (a rename or a restore rewrites an mtime; the tag cannot move
+        without renaming the quarantine);
+      * tag 5 days old on a directory whose mtime is 400 days old -> kept, so an old mtime
+        cannot condemn a young tag;
+      * bare `facts-quarantine-` with no tag -> aged on its own mtime, the only age there is;
+      * `facts-quarantine-manual-hold` and `facts-quarantine-20261340T000000Z`, both with
+        400-day mtimes -> HELD, listed with a reason, present after `apply`. A second
+        calendar, or a fallback that aged an unparseable name on its mtime, passes the first
+        two bullets and fails here.
+    """
+    old_tag = _fq_tag(rs, rs.FACTS_QUARANTINE_MAX_AGE_DAYS + 10)
+    young_tag = _fq_tag(rs, 5)
+    tag_old = _fq_seed(rs, f"facts-quarantine-{old_tag}", mtime_days_ago=0)
+    tag_young = _fq_seed(rs, f"facts-quarantine-{young_tag}", mtime_days_ago=400)
+    bare = _fq_seed(rs, "facts-quarantine-", mtime_days_ago=rs.FACTS_QUARANTINE_MAX_AGE_DAYS + 3)
+    hand = _fq_seed(rs, "facts-quarantine-manual-hold", mtime_days_ago=400)
+    bad = _fq_seed(rs, "facts-quarantine-20261340T000000Z", mtime_days_ago=400)
+
+    age, src = rs.facts_quarantine_age(tag_old, rs.time.time())
+    assert src == "tag" and age > rs.FACTS_QUARANTINE_MAX_AGE_DAYS, (age, src)
+    age, src = rs.facts_quarantine_age(tag_young, rs.time.time())
+    assert src == "tag" and age < rs.FACTS_QUARANTINE_MAX_AGE_DAYS, (age, src)
+    age, src = rs.facts_quarantine_age(bare, rs.time.time())
+    assert src == "mtime" and age > rs.FACTS_QUARANTINE_MAX_AGE_DAYS, (age, src)
+
+    p = rs.sweep_facts_quarantine(True, rs.time.time())
+    assert sorted(c["name"] for c in p["candidates"]) == sorted(
+        [tag_old.name, bare.name]), p["candidates"]
+    assert sorted(h["name"] for h in p["held"]) == sorted([hand.name, bad.name]), p["held"]
+    assert all(h["age_days"] is not None and "instant" in h["why"] for h in p["held"]), p["held"]
+    assert hand.is_dir() and bad.is_dir(), "an unparseable tag was deleted"
+    assert not tag_old.exists() and not bare.exists() and tag_young.is_dir()
+
+
+def test_the_quarantine_dry_run_names_every_candidate_and_leaves_the_tree_untouched(rs):
+    """Clause 3 of #2559: dry run names each over-window dir and its bytes, and writes zero.
+
+    The digest is the whole tree under the store root, taken before and after; the line is
+    compared token-by-token against apply's with only `candidate`/`freed` allowed to differ,
+    because an operator approves a delete by diffing the weekly dry run against the run that
+    happened, and a line that changes shape as well as verb cannot be diffed.
+    """
+    old = _fq_seed(rs, f"facts-quarantine-{_fq_tag(rs, 40)}", files=2, size=4096)
+    fresh = _fq_seed(rs, f"facts-quarantine-{_fq_tag(rs, 1)}")
+    (rs.FACTS_QUARANTINE_ROOT / "kg-quarantine-20260923T070837Z.sqlite").write_bytes(b"")
+    before = _fq_fingerprint(rs.FACTS_QUARANTINE_ROOT)
+
+    dry = rs.sweep_facts_quarantine(False, rs.time.time())
+    dry_line = rs._facts_quarantine_line(dry)
+    assert _fq_fingerprint(rs.FACTS_QUARANTINE_ROOT) == before, "a dry run wrote the tree"
+    assert len(dry["candidates"]) == 1 and dry["candidates"][0]["name"] == old.name, dry
+    assert dry["bytes"] == sum(f.stat().st_size for f in old.iterdir()), dry["bytes"]
+    assert old.name in dry_line, dry_line
+    assert f"{dry['bytes'] / 1024:.0f} KiB candidate" in dry_line, dry_line
+    assert f">{rs.FACTS_QUARANTINE_MAX_AGE_DAYS}d" in dry_line, dry_line
+    assert fresh.name not in dry_line, dry_line
+
+    p = rs.sweep_facts_quarantine(True, rs.time.time())
+    apply_line = rs._facts_quarantine_line(p)
+    assert apply_line == dry_line.replace(" KiB candidate", " KiB freed"), (dry_line, apply_line)
+    # The sqlite sibling the item names and this store does not own: no glob here matches
+    # it, so no mode of this sweep can list it, let alone unlink it.
+    assert (rs.FACTS_QUARANTINE_ROOT
+            / "kg-quarantine-20260923T070837Z.sqlite").is_file()
+
+
+def test_the_quarantine_root_is_the_vault_derived_root_and_the_fixture_redirects_it(rs,
+                                                                                    tmp_path):
+    """Clause 4 of #2559: the store has its own line, and the fixture owns its root.
+
+    Two things a reader cannot see from a green delete test. First, the root the constant
+    names: the vault-derived directory, joined from `DATA_ROOT` the way every other store in
+    this file joins it, which is what makes the sweep and the two writers name one directory
+    — asserted as the RELATIVE join, never the absolute, because the absolute is #1010's
+    whole bug. Second, that the loaded module's root is under the sandbox: an import of
+    `app.paths.VAULT_DERIVED_ROOT` instead of the join would leave this node's `rs` pointing
+    at the live tree, where a passing `--apply` test means a 2.7 MB fact tree just died.
+    """
+    assert rs.FACTS_QUARANTINE_ROOT == tmp_path / "vault-derived", rs.FACTS_QUARANTINE_ROOT
+    assert rs.FACTS_QUARANTINE_ROOT.is_relative_to(tmp_path), rs.FACTS_QUARANTINE_ROOT
+    # The unredirected shape, from a module loaded the way the `rs` fixture loads its own —
+    # before any setattr, so these are the constants the shipped file states.
+    spec = importlib.util.spec_from_file_location("retention_sweep_unredirected", _SCRIPT)
+    fresh_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh_mod)
+    assert (fresh_mod.FACTS_QUARANTINE_ROOT.relative_to(fresh_mod.DATA_ROOT)
+            == __import__("pathlib").Path("_pipeline/vault-derived")), (
+        fresh_mod.FACTS_QUARANTINE_ROOT)
+    assert fresh_mod.FACTS_QUARANTINE_GLOB == "facts-quarantine-*"
+    assert fresh_mod.FACTS_QUARANTINE_MAX_AGE_DAYS == 30
+    assert fresh_mod.FACTS_QUARANTINE_PREFIX == "facts-quarantine-"
+
+    line = rs._facts_quarantine_line(rs.sweep_facts_quarantine(False, rs.time.time()))
+    assert line.startswith("  facts quarantine ("), line
+    assert rs.FACTS_QUARANTINE_GLOB in line, line
+
+
+def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_constant(
+        rs, _store_report):
+    """Clause 5 of #2559: one table row, naming the constant a human has to edit.
+
+    The row-per-report-line guard above already forces the row to EXIST; what it cannot say
+    is that the row states the rule. So this node pins the three things an operator reads off
+    the table and nowhere else: the constant name, the 30-day window, and that age comes from
+    the run tag. Exactly one row may carry the glob, and the description and body both say
+    eighteen, which is the count the report now prints in both modes.
+    """
+    # The same path the module's other skill nodes read, and the same skip they take when
+    # it is unreachable — under the suite `rs.vault_root()` is the fixture's mirrored vault,
+    # which is the point: a node that read the live ~/obsidian directly would pass against
+    # bytes the shipped guard never sees.
+    skill = rs.vault_root() / "skills" / "retention-sweep" / "SKILL.md"
+    if not skill.is_file():
+        pytest.skip(f"the vault skill is not reachable from here: {skill}")
+    text = skill.read_text(encoding="utf-8")
+    front = text.split("---", 2)[1]
+    assert "eighteen unbounded-growth stores" in front, front[:200]
+    assert "eighteen in all" in text, "the skill's body states a count other than eighteen"
+    rows = _skill_table_rows(text)
+    hits = [(label, body) for label, body in rows.items()
+            if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
+    assert len(hits) == 1, (f"{len(hits)} rows describe the quarantine store in {skill}; "
+                            f"{len(rows)} rows parsed; heads: {sorted(rows)[:3]}")
+    body = hits[0][1]
+    assert "FACTS_QUARANTINE_MAX_AGE_DAYS" in body, body[:200]
+    assert "(30)" in body, body[:200]
+    assert "run tag" in body.lower() and "held" in body.lower(), body[:400]
+    # The row and the line have to agree, and only the shipped pair can prove it: the store
+    # name the row leads with is the label the report line prints.
+    _assert_table_rows_match_report(_skill_table_rows(text), _store_report,
+                                    "skills/retention-sweep/SKILL.md")
+
+
+def test_an_absent_vault_derived_root_reports_zero_and_is_never_created(rs):
+    """The state a box that has never swapped a facts tree is in, kept distinguishable.
+
+    `mkdir` here would be the cheap implementation and would cost the one distinction an
+    operator needs: 'nothing has ever been quarantined' versus 'a quarantine exists and the
+    window holds it'. Both print 0; only the second is a store. Asserted on the returned
+    `present` flag and on the absence of the directory after both modes.
+    """
+    rs.FACTS_QUARANTINE_ROOT.rmdir()
+    assert not rs.FACTS_QUARANTINE_ROOT.exists()
+    for apply in (False, True):
+        p = rs.sweep_facts_quarantine(apply, rs.time.time())
+        assert p["present"] is False and p["candidates"] == [] and p["removed"] == 0, p
+        line = rs._facts_quarantine_line(p)
+        assert "0 dir(s)" in line and "no vault-derived root" in line, line
+        assert not rs.FACTS_QUARANTINE_ROOT.exists(), "the sweep created the store it bounds"
+
+
+def test_a_symlink_named_like_a_quarantine_is_skipped_and_never_followed(rs):
+    """A name that matches the glob but is not a directory is counted apart, not collected.
+
+    Store 7's rule (#2264, the reason `scan_symlinks=False` exists on the other rmtree
+    calls): following a symlink here would report a byte total its delete never delivers,
+    because the target stays. Aged far past the window on purpose, so a node that skipped
+    the `is_symlink()` guard would otherwise delete a live tree outside this store entirely.
+    """
+    outside = rs.DATA_ROOT / "outside-target"
+    outside.mkdir(parents=True, exist_ok=True)
+    (outside / "keep.md").write_text("not a quarantine", encoding="utf-8")
+    link = rs.FACTS_QUARANTINE_ROOT / f"facts-quarantine-{_fq_tag(rs, 400)}"
+    link.symlink_to(outside, target_is_directory=True)
+
+    p = rs.sweep_facts_quarantine(True, rs.time.time())
+    assert p["not_a_dir"] == 1 and p["candidates"] == [] and p["removed"] == 0, p
+    assert link.is_symlink() and (outside / "keep.md").is_file()
+    assert "1 non-directory skipped" in rs._facts_quarantine_line(p), rs._facts_quarantine_line(p)

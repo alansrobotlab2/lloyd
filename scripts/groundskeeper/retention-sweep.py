@@ -218,6 +218,39 @@ the transcript scratch home from backlog #566:
     it. The directory is absent on a box whose writer has never run, and that prints
     `0 files` rather than raising: a store with no measurements is not a store that leaked.
 
+18. ~/lloyd-data/_pipeline/vault-derived/facts-quarantine-<YYYYMMDD>T<HHMMSS>Z/ — the fact
+    tree's quarantine siblings (#2443's owed entry 3, ruled 2026-10-11, built by #2559). Two
+    writers MOVE a whole superseded `facts/` tree here and nothing bounded either of them:
+    `scripts/memory/kg_rebuild.py:910-912` on a rebuild that swaps the tree (and drops a
+    `kg-quarantine-<same tag>.sqlite` beside it), and
+    `scripts/memory/quarantine_general_facts.py:87,:172-183` when its `--apply` relocates the
+    #2303 `general` residue. The one directory the box had, `facts-quarantine-20260923T070837Z`,
+    held 2,763,896 bytes across 2,683 files by `_bytes_under`'s own measure (`du` rounds it to
+    7.5 MiB on this filesystem's 4 KiB blocks) and had been growing since 2026-09-22. DELETE a
+    run directory past FACTS_QUARANTINE_MAX_AGE_DAYS (30, the same horizon every other
+    delete/archive store here takes, and 3.3x the longest tail of the two writers' actual
+    output, so it bounds accumulation and not either writer's useful history).
+
+    AGE IS READ FROM THE RUN TAG IN THE NAME, not the mtime, with the directory's own mtime
+    used only for a bare `facts-quarantine-` name — the one name that has no tag because it is
+    not a run — and a name whose tag cannot be parsed HELD and counted apart rather than aged
+    on a guess (`held, never deleted: <name> (…)`). The reason is store 4's rule with its
+    argument reversed: there the mtime is the newest content because the directory only ever
+    grows, here a quarantine is written once by a rename and then never opened again, so its
+    mtime is only the age of the day somebody last touched the inode — a restore off a backup,
+    or a `cp -a` out and back, rewrites it while the tag cannot move without renaming the
+    quarantine. The rule therefore ages a quarantine only on an instant its own name states.
+    The glob is `facts-quarantine-*`, which is what makes the live `facts/` tree it sits beside
+    untouchable here rather than protected by a check, and what leaves the sqlite sibling and
+    its `-wal`/`-shm` matched by no rule and left in place. Symlinks are skipped and never
+    followed (store 7's rule). The root is the vault-derived directory — the PARENT of the
+    facts root the two movers write into, the same `app.paths` value — so this sweep and the
+    movers name one directory; it is NOT derived by a `.parent` of a constant, because the
+    mover's root is overridable by `$LLOYD_FACTS_ROOT` and a `.parent` of the default would be
+    a directory that exists only in this file. An absent root prints `no vault-derived root`
+    rather than being created: 'nothing has ever been quarantined' and 'a quarantine exists
+    and the window holds it' are different facts, and a `mkdir` would collapse them.
+
 Stores 11, 12 and 13 are the three the loop leaves behind, and 13 is the one the other two
 read. None of the three is under `DATA_ROOT`, and store 12 is not even on the filesystem:
 it is the live repo's refs. That is the hazard the production-checkout guard exists for —
@@ -2614,6 +2647,196 @@ def _voice_turns_line(p: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# ── store 18 (#2443/#2559): the fact tree's quarantine siblings ──────────────
+
+#: One directory per KG quarantine RUN, and nothing in the tree had ever bounded
+#: them. Two writers make them: `scripts/memory/kg_rebuild.py` renames the whole
+#: superseded facts tree to `<vault-derived>/facts-quarantine-<run tag>` on every
+#: rebuild that swaps the tree (`:910-912`), and
+#: `scripts/memory/quarantine_general_facts.py` (`QUARANTINE_PREFIX` at `:87`,
+#: `quarantine_root_for()` at `:172-183`) moves the #2303 `general` residue into a
+#: directory of the same shape the moment its `--apply` runs. Measured 2026-10-11:
+#: the ONE directory on the box, `facts-quarantine-20260923T070837Z`, held 2,763,896
+#: bytes across 2,683 files by `_bytes_under`'s own measure — 7.5 MiB of
+#: block-rounded disk on `du -sh` — and had been growing unbounded since 2026-09-23,
+#: with a second one pending behind #2557's still-unapplied `--apply`.
+FACTS_QUARANTINE_GLOB = "facts-quarantine-*"
+
+#: 30, the uniform delete horizon of this file, and the same horizon #1644 set on the
+#: quarantine-shaped store beside it (`WORKTREE_DIR_MAX_AGE_DAYS`). The reason is that
+#: item's ruling and not the number: a forensic hold without a horizon is an unbounded
+#: store wearing the name of a policy. What the horizon does NOT do is make the delete
+#: unconditional — a directory whose run tag cannot be parsed is held whatever its
+#: age, so the only thing that can age out is a quarantine with a stated instant on it.
+FACTS_QUARANTINE_MAX_AGE_DAYS = 30
+
+#: `<prefix><YYYYMMDD>T<HHMMSS>Z>`, the tag BOTH writers emit: `run_tag()` in
+#: `quarantine_general_facts.py:186-192` and `kg_rebuild.py:910`'s own
+#: `strftime("%Y%m%dT%H%M%SZ")`, UTC in both. The prefix is cut out of the glob rather
+#: than written twice, so the name the sweep matches and the name it can age on cannot
+#: drift apart.
+FACTS_QUARANTINE_PREFIX = FACTS_QUARANTINE_GLOB.removesuffix("*")
+FACTS_QUARANTINE_TAG_RE = re.compile(re.escape(FACTS_QUARANTINE_PREFIX) + r"(\d{8}T\d{6}Z)$")
+
+#: The vault-derived root: the directory that HOLDS the facts tree, which is the
+#: quarantine's parent and therefore the glob's root. Derived from `DATA_ROOT` like
+#: every store in this file and not read off `app.paths.VAULT_DERIVED_ROOT`, for two
+#: reasons that are #1415 and #1010 in one line: `app.paths` anchors to whatever tree
+#: imports it — a round's worktree gets `.lloyd-data` inside the checkout, and the
+#: banner this script prints at import says so — and a constant that only ever names
+#: the live root cannot be redirected into a fixture, which is how a test about
+#: deleting a 2.7 MB tree ends up deleting that tree instead. For the default facts
+#: root the two spellings name the same directory, which
+#: `tests/test_retention_sweep.py` pins by the relative join, never the absolute.
+FACTS_QUARANTINE_ROOT = DATA_ROOT / "_pipeline" / "vault-derived"
+
+#: Cap on how many candidate and held names one report line prints. The window bounds
+#: the store, so a line that named every directory in it would only ever be long on a
+#: tree that had just gone past its horizon; the count printed beside it never lies.
+FACTS_QUARANTINE_NAMES_SHOWN = 5
+
+
+def facts_quarantine_age(path: Path, now: float | None = None) -> tuple[float | None, str]:
+    """(age in days, where the age came from) for one quarantine directory.
+
+    Three sources, and the third is the whole point of the function:
+
+    * ``"tag"`` — the name carries a `<YYYYMMDD>T<HHMMSS>Z` run tag, so the age is the
+      instant the run stated, not the instant the filesystem last noticed the
+      directory. A rename carries an mtime that a `cp -a`, a restore, or a reader that
+      touched the tree can rewrite; the tag cannot be rewritten by any of those without
+      renaming the quarantine, which is a decision with a name on it.
+    * ``"mtime"`` — the name is the bare prefix with no tag at all. There is no stated
+      instant to read, so the directory's own mtime is the only age there is, and it is
+      used.
+    * ``"unparseable"`` — the name carries something after the prefix that is not a
+      valid UTC instant (`facts-quarantine-manual-hold`, or a `20261340T000000Z` with a
+      month nobody has). The age is still reported from the mtime, because a line that
+      says `?` is a line an operator cannot triage — but the source string is the
+      caller's signal to HOLD it. A directory is deleted on this rung only on an age the
+      name itself states: a name the sweep cannot read is a directory somebody made by
+      hand, and hand-named residue is exactly what the hold rule exists to protect.
+    """
+    now = now if now is not None else time.time()
+    m = FACTS_QUARANTINE_TAG_RE.match(path.name)
+    tag = None
+    if m:
+        try:
+            tag = datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            # Tag-shaped, so the regex matched, and still not a real instant: the one
+            # shape `strptime` accepts and the calendar refuses.
+            tag = None
+    if tag is not None:
+        return (now - tag.timestamp()) / 86400.0, "tag"
+    source = "mtime" if path.name == FACTS_QUARANTINE_PREFIX else "unparseable"
+    try:
+        return (now - path.stat().st_mtime) / 86400.0, source
+    except OSError:
+        # A directory that cannot be statted has no age at all, and no age is never a
+        # delete. The caller keeps it in `held`, reported with the reason.
+        return None, source
+
+
+def sweep_facts_quarantine(apply: bool, now: float,
+                           *, root: Path | None = None) -> dict:
+    """Remove (or, with `apply` false, name and size) a quarantine past its window.
+
+    The root is the vault-derived directory and the glob is `facts-quarantine-*`, which
+    is why the live facts tree is untouchable here rather than protected by anything:
+    `facts` does not match that glob. Same reason the `kg-quarantine-<tag>.sqlite` (and
+    its `-wal`/`-shm`) siblings `kg_rebuild.py:912` renames beside the directory are not
+    a store of theirs — they match no glob here, so they are deleted by no run, and the
+    question of whether they need their own horizon belongs on #2557, not in a second
+    rule with a second number.
+
+    `apply` false reads everything and writes nothing — no `mkdir`, no rename, no
+    unlink — and still computes each candidate's byte total, because the dry run is the
+    operator's only sight of what an `--apply` is about to remove. Symlinks are skipped
+    rather than followed, store 7's rule: `rmtree` would take the link either way and
+    the report would have counted a target its delete never delivered.
+    """
+    store = Path(root) if root is not None else FACTS_QUARANTINE_ROOT
+    out: dict = {"apply": bool(apply), "root": store, "present": store.is_dir(),
+                 "candidates": [], "held": [], "bytes": 0, "freed": 0,
+                 "removed": 0, "in_window": 0, "not_a_dir": 0, "unreadable": 0}
+    if not out["present"]:
+        # The state of a box that has never run a rebuild swap or a #2557 `--apply`:
+        # nothing to bound, reported as zero rather than created — a sweep that mkdirs
+        # what it came to delete cannot tell "nothing quarantined" from "not yet
+        # quarantined", and the second one is a fact an operator needs.
+        return out
+    for path in sorted(store.glob(FACTS_QUARANTINE_GLOB)):
+        try:
+            if path.is_symlink() or not path.is_dir():
+                out["not_a_dir"] += 1
+                continue
+            age, source = facts_quarantine_age(path, now)
+        except OSError:
+            out["unreadable"] += 1
+            continue
+        if source == "unparseable" or age is None:
+            out["held"].append({"name": path.name, "bytes": _bytes_under(path),
+                                "age_days": None if age is None else round(age, 1),
+                                "why": ("run tag is not a parseable instant"
+                                        if source == "unparseable" else "no age readable")})
+            continue
+        if age > FACTS_QUARANTINE_MAX_AGE_DAYS:
+            cand = {"name": path.name, "bytes": _bytes_under(path),
+                    "age_days": round(age, 1)}
+            out["candidates"].append(cand)
+            out["bytes"] += cand["bytes"]
+            continue
+        out["in_window"] += 1
+    if apply:
+        for cand in out["candidates"]:
+            shutil.rmtree(store / cand["name"])
+            cand["removed"] = True
+            out["freed"] += cand["bytes"]
+            out["removed"] += 1
+    return out
+
+
+def _facts_quarantine_line(p: dict) -> str:
+    """One line, same shape in both modes: the count, the bytes, and each name.
+
+    Dry run prints `candidate` where apply prints `freed`, exactly like the session
+    archive line's `gzipped`/`candidate` pair, and every other token is identical — the
+    operator comparing the weekly dry run against the approved run has to be able to
+    diff them word for word and see only the verb move. The names are the point: a
+    count and a byte total bound a store, but it is the name that says WHICH quarantine
+    run, and this is the one line whose delete takes a whole superseded fact tree.
+    """
+    verb = "freed" if p["apply"] else "candidate"
+    count = p["removed"] if p["apply"] else len(p["candidates"])
+    head = (f"  facts quarantine ({FACTS_QUARANTINE_GLOB} "
+            f">{FACTS_QUARANTINE_MAX_AGE_DAYS}d): {count} dir(s), "
+            f"{p['bytes'] / 1024:.0f} KiB {verb}")
+    notes = [f"{c['name']} {c['bytes'] / 1024:.0f} KiB"
+             for c in p["candidates"][:FACTS_QUARANTINE_NAMES_SHOWN]]
+    extra = len(p["candidates"]) - FACTS_QUARANTINE_NAMES_SHOWN
+    if extra > 0:
+        notes.append(f"+{extra} more")
+    if p["held"]:
+        held = [f"{h['name']} {h['bytes'] / 1024:.0f} KiB ({h['why']})"
+                for h in p["held"][:FACTS_QUARANTINE_NAMES_SHOWN]]
+        if len(p["held"]) > FACTS_QUARANTINE_NAMES_SHOWN:
+            held.append(f"+{len(p['held']) - FACTS_QUARANTINE_NAMES_SHOWN} more")
+        notes.append("held, never deleted: " + ", ".join(held))
+    quiet = []
+    if p["in_window"]:
+        quiet.append(f"{p['in_window']} within {FACTS_QUARANTINE_MAX_AGE_DAYS}d")
+    if p["not_a_dir"]:
+        quiet.append(f"{p['not_a_dir']} non-directory skipped")
+    if p["unreadable"]:
+        quiet.append(f"{p['unreadable']} unreadable")
+    if not p["present"]:
+        quiet.append("no vault-derived root")
+    if quiet:
+        notes.append(", ".join(quiet))
+    return f"{head} — {'; '.join(notes)}" if notes else head
+
+
 # Store 17: the dated tool-quality row sets (#2472) — the one store this sweep
 # REPORTS and does not bound.
 # ---------------------------------------------------------------------------
@@ -2700,6 +2923,8 @@ def _tool_quality_line(p: dict) -> str:
         return f"{label}: 0 files, no dated file, 0 B" + tail
     oldest = p["oldest"] or "no dated file"
     return f"{label}: {p['files']} files, oldest {oldest}, {p['bytes']} B" + tail
+
+
 
 
 def main() -> int:
@@ -2817,6 +3042,12 @@ def main() -> int:
     # dir count, so the same line prints in both modes with only the verb changed, like
     # every line above it (#2418 clause 1).
     print(_pytest_tmp_line(pytest_dirs))
+    # Eighteenth store (#2559), and the last of the data-root ones that frees space: it
+    # prints BELOW the /tmp line, which bounds a root no data-root resolution reaches, and
+    # ABOVE the report-only line, which is where nothing an operator approves `--apply` for
+    # belongs. Same line shape in both modes with only `candidate`/`freed` moved, like every
+    # line above it.
+    print(_facts_quarantine_line(sweep_facts_quarantine(args.apply, now)))
     # Seventeenth store, and the last line before the loop's own three: it hangs off the
     # data root, so it prints with the data-root stores, and it prints BELOW every line an
     # operator is approving `--apply` for — which is exactly where a store this sweep never
