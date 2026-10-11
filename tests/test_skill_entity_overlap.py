@@ -581,3 +581,129 @@ def test_the_run_writes_one_report_file_and_leaves_every_skill_alone(tmp_path, c
     assert f"report_written {out}" in stderr, stderr
     archived = sorted(m.parent.name for m in (skills / ".archived").rglob("SKILL.md"))
     assert archived == ["old"], f"a scoring run archived a skill: {archived}"
+
+
+# ── the two committed fixtures must stay re-addable (#2548) ───────────────────
+#
+# Both artifacts are tracked AND ignored: root `.gitignore:42` is `*.json`, and
+# `eval/.gitignore` negated only `dup_calibration.json`, so `git check-ignore -q
+# --no-index` exited 0 for both of these and 1 for that control. `tests/
+# test_chrome_extension_manifest_tracked.py` is the model — same root rule, same
+# nested-negation device, same pair of assertions.
+
+#: Repo-relative, deliberately spelled here rather than derived from `FIXTURE`/
+#: `BODIES`: what is under test is the PATH, and `Path.relative_to` would quietly
+#: re-derive a moved fixture into passing assertions about its new location.
+OVERLAP_FIXTURES = (
+    "eval/skill_entity_overlap_pairs.json",
+    "eval/skill_entity_overlap_pair_bodies.json",
+)
+
+
+def _git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(REPO_ROOT), *args],
+                          capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("rel_path", OVERLAP_FIXTURES)
+def test_an_overlap_fixture_is_not_ignored(rel_path: str):
+    """#2548 clause 1: `git check-ignore -q --no-index` exits 1 for both fixtures.
+
+    Root `.gitignore:42 *.json` matched both files with no negation beside
+    `!dup_calibration.json`, so both answered 0 (ignored) where the control answered 1.
+    They are in the tree anyway — #2440 added them past the rule — which is exactly why
+    this was invisible: the artifact is committed, the eval reads it, and the rule that
+    refuses it is still live underneath.
+
+    What that costs is NOT a dropped regeneration. Measured twice in a throwaway repo,
+    `git add -A` stages a modification to a tracked file an ignore rule matches, and
+    stages `rm` + rewrite as a modification too: git applies ignore rules to untracked
+    paths only. The real exposure is a path that is not tracked yet — a renamed fixture
+    family, a regenerated sibling, a fresh clone, any `git rm --cached` — which the next
+    `git add -A` skips with no word. That is #1701's chrome manifest, and exit 1 here is
+    the state in which the next copy of either fixture is addable by plain `git add -A`.
+
+    `-q` is the flag that carries the assertion: bare `-v` exits 0 even when a negation
+    matched, so exit code alone would pin nothing. The `-v` line belongs in the message,
+    so a failure names WHICH rule answered instead of just the verdict.
+    """
+    res = _git("check-ignore", "-q", "--no-index", rel_path)
+    assert res.returncode == 1, (
+        f"{rel_path} is ignored (exit {res.returncode}), so a new copy of it is not "
+        f"addable by `git add -A`. Last matching rule: "
+        f"{_git('check-ignore', '-v', '--no-index', rel_path).stdout.strip()!r}; "
+        f"expected a '!{rel_path.rsplit('/', 1)[-1]}' line from eval/.gitignore to win "
+        "as the deeper file's rule"
+    )
+
+
+def test_both_overlap_fixtures_are_tracked_under_eval():
+    """#2548 clause 2: both paths appear in `git ls-files eval/`.
+
+    A negation alone is not the guarantee — an untracked file that merely stops being
+    ignored is still absent from a fresh clone, and the overlap eval reads both
+    artifacts as committed fixtures (`FIXTURE` and `BODIES` above, with the production
+    figures copied out of the 2026-10-08 run). The listing is scoped to `eval/` because
+    the clause is about where they live: a fixture moved out of that directory is a
+    fixture this item did not agree to.
+    """
+    listed = _git("ls-files", "eval/").stdout.split()
+    assert listed, (
+        "`git ls-files eval/` returned nothing, so this node pinned an empty listing"
+    )
+    missing = [p for p in OVERLAP_FIXTURES if p not in listed]
+    assert not missing, (
+        f"{missing} not tracked under eval/ — a fresh clone ships an overlap eval that "
+        f"cannot read its own fixtures; `git ls-files eval/` lists "
+        f"{sorted(p for p in listed if p.endswith('.json'))}"
+    )
+
+
+def test_the_json_rule_still_hides_a_stray_file_beside_the_fixtures():
+    """Positive control for clause 1, the shape
+    `tests/test_chrome_extension_manifest_tracked.py::test_the_ignore_check_can_fail`.
+
+    Exit 1 on the fixtures has two possible causes, and only one of them is the fix: a
+    negation that matched, or a root `*.json` rule that stopped answering (a moved line,
+    a broadened un-ignore, a `check-ignore` that errored). A stray JSON file in the same
+    directory, with no negation of its own, must still exit 0.
+    """
+    res = _git("check-ignore", "-q", "--no-index", "eval/not-a-fixture.json")
+    assert res.returncode == 0, (
+        "root `.gitignore:42 *.json` no longer hides a stray JSON file dropped in "
+        "eval/ — clause 1's exit 1 would then mean the rule went inert, not that a "
+        "negation matched. Last matching rule: "
+        f"{_git('check-ignore', '-v', '--no-index', 'eval/not-a-fixture.json').stdout.strip()!r}"
+    )
+
+
+def test_the_new_negations_name_two_exact_filenames_and_no_wildcard():
+    """#2548 clause 4: the un-ignore is scoped to filenames, never to a pattern.
+
+    `eval/.gitignore`'s own header states the rule this node enforces — "Scoped to
+    filenames and never to `eval/*.json`: a runtime dump dropped here by accident stays
+    ignored, which is what the root rule is for." One `!*.json` would undo that for the
+    whole directory and the gate's scratch output with it, so the guard is on the shape
+    of every negation line in the file, not only on the two added now. (That header line
+    said "this one filename" while the file negated one; this item's own change to it is
+    the edit quoted above, which is why the quote is verbatim rather than paraphrased.)
+    """
+    lines = (REPO_ROOT / "eval" / ".gitignore").read_text(encoding="utf-8").splitlines()
+    negations = [ln.strip() for ln in lines if ln.strip().startswith("!")]
+
+    overlap = [ln for ln in negations if "overlap" in ln]
+    assert overlap == ["!skill_entity_overlap_pairs.json",
+                       "!skill_entity_overlap_pair_bodies.json"], (
+        f"the overlap negations are {overlap}, expected both exact filenames"
+    )
+    unscoped = [ln for ln in negations
+                if any(c in ln for c in "*?[]") or ln.endswith("/")]
+    assert not unscoped, (
+        f"negation(s) {unscoped} in eval/.gitignore are patterns, not filenames: "
+        "`!*.json` or `!eval/*.json` would re-include every stray runtime dump the root "
+        "`*.json` rule exists to hide, which the header above them forbids"
+    )
+    assert any(ln.lstrip().startswith("#") and "#2440" in ln for ln in lines), (
+        "no comment in eval/.gitignore names #2440, so the two lines carry no record of "
+        "which instrument's fixtures they un-ignore"
+    )
