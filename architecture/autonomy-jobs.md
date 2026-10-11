@@ -99,7 +99,7 @@ not:
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
   apparatus. `workers/evidence.py` is the correction and the scheduler module
   `app/autonomy.py` is where its pilot set lives (`EVIDENCE_PILOT_TASK_IDS =
-  frozenset({38, 42, 39, 40, 53})` at `app/autonomy.py:2584` in that module, pinned by
+  frozenset({38, 42, 39, 40, 53})` at `app/autonomy.py:2818` in that module, pinned by
   `tests/test_worker_evidence.py`) — 5 of the 23 jobs that write durable state
   unattended. #53 Documentation Digester joined on 2026-10-09 (#2482), the first
   widening since #902 scoped the pilot to the reflection chain: that job's run of
@@ -367,7 +367,7 @@ reading zero; counts of 96/21 where disk held 121/64; a 13,503-byte file called
 "307KB". `workers/evidence.py` is the structural fix and its pilot set is exactly
 this chain plus #53, which joined 2026-10-09 (#2482) —
 `EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40, 53})`
-(`app/autonomy.py:2584`, not inside the verifier's own file, and pinned there by
+(`app/autonomy.py:2818`, not inside the verifier's own file, and pinned there by
 `tests/test_worker_evidence.py:663`), a literal frozenset so
 widening it is a change someone reads. The verifier is **stdlib-only and never
 LLM-judged**, because a model grading its own claims is the narration this

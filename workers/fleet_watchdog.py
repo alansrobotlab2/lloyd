@@ -479,6 +479,123 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
             if e["hours"] is not None or e["record_at"]]
 
 
+#: How long ago a lost occurrence may be and still be recorded. `_window_occurrences`
+#: already yields only ±2 local days, so this is a filter on what that list contains,
+#: not a scan cost — and it is what stops a tick whose clock was wound back from
+#: re-litigating a month of windows.
+_WINDOW_LOSS_LOOKBACK_SECONDS = 2 * 86400
+
+
+def _window_losses(queue: WorkQueue) -> list[dict]:
+    """Record every window occurrence that closed unrun with claims held.
+
+    The durable half of #2552. On 2026-10-10 the operator pause was held from
+    2026-10-09T17:57:57Z to 2026-10-10T14:49:34Z; #30, which declares
+    `preferred_hours: []`, ran 11.5 min after the release on the queue row it had
+    accumulated during the hold, while the three windowed jobs of the nightly
+    reflection chain — #42 `[22,23,0,1,2,3,4]`, #39 `[1,2,3,4]`, #40 `[2,3,4]` —
+    lost the night outright, because `preferred_hours` is an ENQUEUE gate and a
+    hold on claims therefore starves a windowed task's whole occurrence while it
+    costs a windowless task nothing. No run record, no queue row, no
+    `memory/learnings/2026-10-10.md`; the chain resumed the next night and nothing
+    anywhere said a cycle had been dropped rather than delayed.
+
+    Why the writer sits here and not beside the gate it concerns: `app/autonomy.py`
+    could not see the block at all (`git grep -n operator_paused -- app/autonomy.py`
+    was empty before this item), and the dispatch path is precisely what the block
+    is refusing. This module is the reader that already runs while claims are held —
+    that is #1682's whole reason for this seat — and `operator_pause_state` is the
+    one accessor both surfaces agree on (#1550).
+
+    Two conditions, both read from the row rather than inferred:
+
+    * the occurrence is CLOSED (`close <= now`), its close is inside
+      `_WINDOW_LOSS_LOOKBACK_SECONDS`, and the pause's `since` is at or before the
+      occurrence's OPEN — the block held across the entire window, so the task never
+      had one unblocked minute in it. A hold taken mid-window is not claimed as the
+      cause: the task had unblocked time and something else may have held it.
+    * the completion stamp is older than the opening. The stamp alone, not the run
+      record: this is a reader on the pool's 60 s tick, and the backstop that reads
+      the disk lives in `_is_task_due`, where a stamp reverted by a vault sweep
+      spends its false grant and is refused (#1296).
+
+    The key carries the occurrence's opening instant because `watermarks` is
+    `PRIMARY KEY (source, key)` — one row updated in place — and the question this
+    item was filed with ("how many cycles did this lose?") is unanswerable if a
+    second loss overwrites the first. So each lost occurrence is its own row.
+
+    Never raises. A ledger that could not be written leaves the fleet exactly where
+    it already is, and an exception out of here would skip the two stall alarms
+    that share this tick — an alarm cannot report its own silencing (#1682).
+    """
+    written: list[dict] = []
+    try:
+        import json
+
+        from app import autonomy
+        from workers.pool import operator_pause_state
+
+        now = autonomy._utcnow()
+        state = operator_pause_state(queue)
+        if not state["paused"]:
+            return written          # the common case, and it costs one indexed read
+        since = _parse_iso_safe(state["since"])
+        if since is None:
+            # A hold with no durable instant (`automod`'s, which is deliberately
+            # never persisted) is not evidence that a block covered a window, and
+            # inventing one is exactly the false authorisation this ledger must
+            # never become.
+            return written
+
+        for task in autonomy.dependency_resolution_set():
+            if str(task.get("status", "")).strip() != "up_next":
+                continue
+            if autonomy.parked_declaration(task):
+                continue            # it declares itself parked on purpose
+            hours = autonomy._window_hours(task)
+            if not hours:
+                continue
+            stamp = task.get("last_run")
+            last_run = autonomy._parse_iso(stamp)
+            if stamp and last_run is None:
+                continue            # an unparseable stamp is not evidence of a loss
+            for occ_open, occ_close in autonomy._window_occurrences(hours, now):
+                if occ_close > now:
+                    continue
+                if (now - occ_close).total_seconds() > _WINDOW_LOSS_LOOKBACK_SECONDS:
+                    continue
+                if since > occ_open:
+                    continue        # the hold began inside the window: not its doing
+                if last_run is not None and last_run >= occ_open:
+                    continue        # it ran in that occurrence
+                key = autonomy.window_loss_key(task.get("id"), occ_open)
+                if queue.wm_get(autonomy.WINDOW_LOSS_WM_SOURCE, key) is not None:
+                    continue        # already recorded; a loss is recorded once
+                row = {
+                    "task_id": task.get("id"),
+                    "name": task.get("name"),
+                    "window_hours": autonomy._hour_windows(hours),
+                    "window_open": occ_open.isoformat(),
+                    "window_close": occ_close.isoformat(),
+                    "pause_since": state["since"],
+                    "recorded_at": now.isoformat(),
+                }
+                queue.wm_set(autonomy.WINDOW_LOSS_WM_SOURCE, key,
+                             json.dumps(row))
+                written.append(row)
+                logger.warning(
+                    "preferred_hours occurrence lost: task #%s (%s) window %s "
+                    "[%s -> %s] closed with the task unrun while the operator pool "
+                    "was held since %s — recorded as %s, and one out-of-window "
+                    "catch-up is now authorised for it",
+                    task.get("id"), task.get("name"), row["window_hours"],
+                    row["window_open"], row["window_close"], row["pause_since"],
+                    key)
+    except Exception as e:
+        logger.error("window-loss ledger failed: %s", e, exc_info=True)
+    return written
+
+
 def _parked_note(entry: dict) -> str:
     """The declaration carried on a flagged entry, '' if its file declares nothing."""
     return str(entry.get("parked") or "").strip()
@@ -958,6 +1075,13 @@ async def tick(queue: WorkQueue) -> None:
     # The finding is logged instead, carrying the same message, so "nothing is late"
     # and "everything late was parked" remain two different sentences in the log as
     # they are in the alert.
+    # The lost-cycle ledger (#2552). Ahead of this alarm rather than after it: a
+    # next_run stall alert that fires in the same minute an occurrence is recorded
+    # as lost should be reading a board that already says which occurrence the
+    # block took, and `_window_losses` never raises, so nothing below it is ever
+    # silenced by it.
+    await loop.run_in_executor(None, _window_losses, queue)
+
     stalled = await loop.run_in_executor(None, _next_run_stalled, queue)
     _state["nextrun_streak"] = (
         (_state.get("nextrun_streak", 0) + 1) if stalled else 0)

@@ -2265,8 +2265,209 @@ def _window_dependency_fresh(task: dict, dep_task: dict,
     return slot >= occ[1]
 
 
+# ── A window occurrence lost under a global block (#2552) ────────────────────
+# `preferred_hours` is an ENQUEUE gate: `_is_task_due` refuses a windowed task
+# outside its window, and `workers/sources/scheduled_task.py` is what calls it on
+# the 60 s scan. A hold on CLAIMS therefore costs a windowed task its whole
+# occurrence in a way it costs a windowless task nothing: on 2026-10-10 the pool
+# was operator-held from 17:57:57Z to 14:49:34Z the next day, and #30 —
+# `preferred_hours: []` — ran 11.5 min after the release on the queue row it had
+# already accumulated, while #42, #39 and #40 lost the night outright: no queue
+# row, no run record, no `memory/learnings/2026-10-10.md`.
+#
+# The record below is what makes that loss a fact some later scan can act on. It
+# is written by `workers/fleet_watchdog.py`, never here, because the only process
+# that can still SEE the block is one that runs while claims are held — the
+# dispatch path is exactly what the block is refusing, and `_is_task_due` cannot
+# ask "was I blocked?" (`git grep operator_paused -- app/autonomy.py` was empty
+# before this). And it is the grant's ONLY authorisation: a row can exist only if
+# a tick observed `(_pool, operator_paused)` held with a `since` at or before the
+# occurrence's close, so "a known global block covered it" is what the durable
+# record carries, not something a later reader infers from the clock.
+
+#: Watermark source/prefix for the lost-occurrence records. Same table and
+#: pattern the operator pause itself uses (`workers/pool.py:PAUSE_WM_SOURCE`), so
+#: the record of a loss lives beside the row that caused it.
+WINDOW_LOSS_WM_SOURCE = "scheduled-task"
+WINDOW_LOSS_WM_PREFIX = "window_lost:"
+
+
+def window_loss_key(task_id, window_open: datetime.datetime) -> str:
+    """The watermark key for one task's one lost occurrence.
+
+    The key carries the occurrence's opening instant so a second loss (next
+    night's window) is a different row rather than an overwrite: `watermarks` is
+    `PRIMARY KEY (source, key)`, so anything not in the key is invisible, and the
+    thing the item was filed about is that the store could not say how many
+    occurrences were lost.
+    """
+    return (f"{WINDOW_LOSS_WM_PREFIX}{task_id}:"
+            f"{_to_local(window_open).strftime('%Y-%m-%dT%H:%M')}")
+
+
+def window_loss_from_key(key: str) -> Optional[int]:
+    """The task id a loss key belongs to, or None if it is not one.
+
+    The open instant lives in the key's tail and the payload; this only has to
+    separate loss keys from every other watermark the dispatch source owns
+    (`evidence gaps`, `nextrun_alerted_at`), which a prefix does exactly."""
+    if not key.startswith(WINDOW_LOSS_WM_PREFIX):
+        return None
+    rest = key[len(WINDOW_LOSS_WM_PREFIX):]
+    task_part = rest.split(":", 1)[0]
+    try:
+        return int(task_part)
+    except (TypeError, ValueError):
+        return None
+
+
+def window_catch_up_row(task: dict, *, now: Optional[datetime.datetime] = None,
+                        rows: Optional[dict] = None):
+    """The lost occurrence that entitles `task` to one out-of-window catch-up.
+
+    Returns the decoded record, or None. None means the hours gate holds exactly
+    as it did before #2552 — which is the overwhelmingly common answer, and the
+    one that must stay cheap, so every test here is a `queue`-free path.
+
+    Three conditions, and the third is the spend:
+
+    1. the task has a real window (all 24 hours is no window, `_window_hours`);
+    2. a loss record exists for it — a record only a witnessed block can write;
+    3. its completion stamp is still OLDER than the occurrence that was lost.
+       `run_task` writes `last_run` on success, so the catch-up spends itself
+       against the same stamp every other gate reads; there is no second
+       "already caught up" flag to fall out of sync, and a failed catch-up leaves
+       the authorisation standing, which is right — the occurrence is still
+       unrun, and `_in_failure_cooldown` is what bounds the retry.
+    """
+    hours = _window_hours(task)
+    if not hours:
+        return None
+    task_id = task.get("id")
+    if task_id is None:
+        return None
+    if rows is None:
+        rows = window_loss_rows()
+    # The key round-trips through a string (`window_loss_from_key` parses an int
+    # out of it) while a task file's front matter may hold either, so both spellings
+    # are tried — a task whose id is the string "42" must not be locked out of its
+    # own catch-up by a type mismatch on a lookup that is meant to be a fact.
+    row = rows.get(task_id)
+    if not row:
+        try:
+            row = rows.get(int(task_id))     # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            row = None
+    if not row:
+        return None
+    if not row.get("pause_since"):
+        # A record that names no block authorises nothing. Written defensively:
+        # every writer sets it, and the whole claim of the grant is that a known
+        # block covered the occurrence.
+        return None
+    close = _parse_iso(row.get("window_close"))
+    if close is None:
+        return None
+    if now is None:
+        now = _utcnow()
+    # The loss has to belong to a cycle that is STILL owed. One declared period
+    # after the occurrence closed, the task's own elapsed gate is what decides
+    # whether a run is owed at all, and by then it will be due inside its next
+    # window — a two-weeks-old record authorising an out-of-window run tonight
+    # would be a bypass with an expired reason attached.
+    interval = _frequency_interval_seconds(task) or 2 * 86400.0
+    if now - close > datetime.timedelta(seconds=interval):
+        return None
+    if not _last_run_older_than(task, close):
+        return None
+    return row
+
+
+def _last_run_older_than(task: dict, instant: datetime.datetime) -> bool:
+    """True when the task's completion stamp predates `instant` (or is absent).
+
+    Absent counts as older: a task that has never run has certainly not run in
+    that occurrence."""
+    last_run = _parse_iso(task.get("last_run"))
+    return True if last_run is None else last_run < instant
+
+
+def window_loss_rows(queue=None) -> dict:
+    """Every lost-occurrence record on the board, keyed by task id.
+
+    `queue` exists for a caller that already holds the handle — the watchdog reads
+    and writes the same table in one tick — and for a test, which must never read
+    the LIVE `workers.db` through `configured_db_path()` to answer a question about
+    a fixture. Everything below the handle is the same code either way.
+
+    Newest occurrence wins when a task has more than one (the key carries the
+    opening instant precisely so both survive), because the grant is for the
+    cycle it is about to run. An unreadable store is reported as "nothing lost",
+    which is the old behaviour and never a false dispatch — the failure mode of
+    reading it wrong is a missed catch-up, and the failure mode of guessing is an
+    out-of-window run of a chain whose output belongs to tonight.
+    """
+    out: dict = {}
+    try:
+        q = queue
+        if q is None:
+            from workers.queue import WorkQueue, configured_db_path
+            q = WorkQueue(configured_db_path())
+        keys = q.wm_keys(WINDOW_LOSS_WM_SOURCE)
+    except Exception as e:
+        # Warning, not debug, and the return stays. A store that cannot be read
+        # means every catch-up silently evaporates — the dispatch-side failure mode
+        # is a missed recovery, which is survivable, but it must be visible when it
+        # happens (#1682: an instrument that cannot report its own failure reports
+        # success).
+        logger.warning("could not list the window-loss ledger: %s", e)
+        return out
+    for key in keys:
+        task_id = window_loss_from_key(key)
+        if task_id is None:
+            continue
+        try:
+            row = json.loads(q.wm_get(WINDOW_LOSS_WM_SOURCE, key) or "")
+        except Exception as e:
+            # A row that will not parse is a loss on the board that reads as
+            # "nothing lost", and naming the cycles a block cost is the only reason
+            # this ledger exists. Skipped, so one bad row cannot poison the scan.
+            logger.warning("window-loss row %r will not parse and was skipped: %s",
+                           key, e)
+            continue
+        if not isinstance(row, dict):
+            logger.warning("window-loss row %r is not an object: %r", key, row)
+            continue
+        row = {**row, "_key": key}
+        prev = out.get(task_id)
+        if prev is None or str(row.get("window_open") or "") > str(
+                prev.get("window_open") or ""):
+            out[task_id] = row
+    return out
+
+
+#: What `window_catch_up` holds for a caller that has NOT pre-read the ledger:
+#: `_is_task_due` and `hold_reason` then read it themselves, so both answer the
+#: question the same way when called bare (#870's one definition of due-ness).
+#: `get_due_tasks` injects the one scan-level read it already paid for, and a
+#: test injects None to assert the answer with no block on record.
+_CATCH_UP_UNSET = object()
+
+
+def _resolve_catch_up(task: dict, now: datetime.datetime, injected):
+    """The authorised loss row for `task`: the caller's, else the ledger's.
+
+    One resolver for both gates, because the two answers disagreeing is the
+    failure this file has been naming since #870 — a board that says `held` while
+    the scheduler dispatches, or the reverse."""
+    if injected is not _CATCH_UP_UNSET:
+        return injected or None
+    return window_catch_up_row(task, now=now)
+
+
 def _is_task_due(task: dict, all_tasks: list[dict], *,
-                 now: Optional[datetime.datetime] = None) -> bool:
+                 now: Optional[datetime.datetime] = None,
+                 window_catch_up=_CATCH_UP_UNSET) -> bool:
     # `all_tasks` is the dependency resolution set, not the dispatch candidates
     # — pass `dependency_resolution_set()`. `now` is one instant for this whole
     # evaluation, so `hold_reason` can be asked the same question at the same
@@ -2328,7 +2529,22 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
     if not _is_dependency_met(task, all_tasks, now=now):
         return False
     if not _is_preferred_hour(task):
-        return False
+        # The window is the ONLY thing that can refuse a task here and have that
+        # refusal be wrong (#2552): a hold on claims — the operator pause — keeps
+        # this gate refusing after the occurrence it starved has closed, so the
+        # cycle is lost rather than late. What answers it is not an opinion about
+        # the clock but a durable record that a known block covered that exact
+        # occurrence (`window_catch_up_row`); with no such record this line is
+        # the behaviour every windowed task has had since #60.
+        row = _resolve_catch_up(task, now, window_catch_up)
+        if not row:
+            return False
+        logger.info(
+            "Task #%s (%s): dispatching outside its window — occurrence %s -> %s "
+            "closed unrun with the operator pool held since %s, and the catch-up "
+            "for it has not run yet", task.get("id"), task.get("name"),
+            row.get("window_open"), row.get("window_close"),
+            row.get("pause_since"))
     # ── The work already ran this period ─────────────────────────────────
     # Last, on purpose: every gate above reads only the task file, so this is
     # the one place that asks a second, independent account — the run record on
@@ -2395,7 +2611,8 @@ def parked_declaration(task: dict) -> str:
 
 
 def hold_reason(task: dict, all_tasks: list[dict], *,
-                now: Optional[datetime.datetime] = None) -> Optional[str]:
+                now: Optional[datetime.datetime] = None,
+                window_catch_up=_CATCH_UP_UNSET) -> Optional[str]:
     """Why this task will not dispatch right now, or None if nothing holds it.
 
     Mirrors `autonomy._is_task_due`'s gates in its order and calls the very
@@ -2470,8 +2687,16 @@ def hold_reason(task: dict, all_tasks: list[dict], *,
         return (f"waiting on #{task.get('depends_on')}"
                 + (f" ({refusal})" if refusal else ""))
     if not _is_preferred_hour(task):
-        window = _hour_windows(_effective_preferred_hours(task) or [])
-        return f"outside hours {window}" if window else "outside hours"
+        # The same resolver, the same position: with no loss record on file this
+        # is the string the board and the stall alert have always printed, and
+        # with one the task is not held at all — which is what clause 2 and
+        # clause 1 of #2552 each demand of the two fixtures.
+        if not _resolve_catch_up(task, now, window_catch_up):
+            window = _hour_windows(_effective_preferred_hours(task) or [])
+            return f"outside hours {window}" if window else "outside hours"
+        # Authorised: fall THROUGH to the run-record gate below, exactly as
+        # `_is_task_due` does. Returning None here would paint green a dispatch
+        # the run-record gate is about to refuse, and that pairing is #1296.
     # Same helper, same position in the order, so the board never paints green a
     # dispatch the scheduler is refusing. This is the state a reverted stamp
     # leaves behind: `last_run` a day stale, the window open, and the run record
@@ -2505,8 +2730,17 @@ def get_due_tasks(*, now: Optional[datetime.datetime] = None) -> list[dict]:
     if now is None:
         now = _utcnow()
     resolution = dependency_resolution_set()
+    # ONE ledger read for the whole scan, injected into every task's hours gate
+    # (`window_loss_rows` opens the queue's database, and the bare call inside
+    # `_is_task_due` would pay it once per task file instead of once per tick).
+    # The value injected is already the per-task answer — the spend test and the
+    # age bound in `window_catch_up_row` are applied there, not here — so a task
+    # whose catch-up ran gets None and stays inside its window.
+    rows = window_loss_rows()
     due = [t for t in _all_runnable_tasks(resolution)
-           if _is_task_due(t, resolution, now=now)]
+           if _is_task_due(t, resolution, now=now,
+                           window_catch_up=window_catch_up_row(
+                               t, now=now, rows=rows))]
     due.sort(key=_priority_key)
     return due
 

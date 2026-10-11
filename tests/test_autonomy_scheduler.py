@@ -5515,3 +5515,352 @@ def test_the_alert_head_counts_a_short_late_row_separately_from_the_bound(
         "not a success: "
     ), f"the head misdescribes or fails to describe its own rows: {msg!r}"
     assert "blocked-by #38" in msg, msg
+
+
+# ── A preferred_hours occurrence lost under an operator pause (#2552) ────────
+#
+# The datum, from `workers.db` and `~/lloyd-data/autonomy-runs/`: the pool was
+# operator-held from 2026-10-09T17:57:57.490185+00:00 to 2026-10-10T14:49:34.633275
+# +00:00. Task #30, `preferred_hours: []`, ran at 15:01:02Z — 11.5 minutes after the
+# release, on the queue row it had accumulated during the hold. Tasks #42, #39 and #40
+# each lost the night: no queue row, no `run_*_20261010_*`, no
+# `memory/learnings/2026-10-10.md`. The difference is that `preferred_hours` gates
+# ENQUEUE, so a hold on claims starves a windowed task's whole occurrence and costs a
+# windowless task one late start.
+#
+# Local time here is UTC-7, so the chain's window [22,23,0,1,2,3,4] opened
+# 2026-10-09T22:00 local = 2026-10-10T05:00Z and closed 2026-10-10T12:00Z. The pin
+# `_local_hour -> 8` is 15:00Z: two hours past the close, still inside the hold, which
+# is exactly when #38 finished (2026-10-10T15:06:24Z) and when the release came.
+
+#: 15:10Z on 2026-10-10 — after every window in the chain had closed, before the
+#: queue could drain, local hour 8.
+_LOSS_NOW = dt.datetime(2026, 10, 10, 15, 10, tzinfo=dt.timezone.utc)
+#: The persisted `(_pool, operator_paused).updated_at`, verbatim.
+_HOLD_SINCE = "2026-10-09T17:57:57.490185+00:00"
+#: The first out-of-window instant on which a task that completed at 12:05Z has its
+#: elapsed gate open again (window opening 05:00Z + one period − 1 h slack), and
+#: still inside the 24 h the catch-up grant stays valid for. Local hour 21.
+_SPEND_NOW = dt.datetime(2026, 10, 11, 4, 30, tzinfo=dt.timezone.utc)
+#: #38's out-of-window completion, from `run_38_20261010_150624`'s successor: the
+#: queue row enqueued 05:00:37Z (in window) was claimed 14:49:35Z and finished 15:06Z.
+_UP_DONE = "2026-10-10T15:06:24.113065+00:00"
+_WINDOW = [22, 23, 0, 1, 2, 3, 4]
+#: The offset every instant above is quoted in, pinned rather than assumed:
+#: `preferred_hours` are machine-local hours and `autonomy._local_tz()` answers
+#: with the zone of whatever box runs the suite, so unpinning it would make which
+#: occurrence is lost — and so the `window_lost:42:…` key asserted below — a
+#: function of the machine rather than of the fixture.
+_INCIDENT_TZ = dt.timezone(dt.timedelta(hours=-7), "UTC-7")
+
+
+def _held_window_chain(aut, monkeypatch, tmp_path, *, held=True):
+    """The 2026-10-10 board, queue and clock; returns the queue.
+
+    #38 has completed out of window during the hold and #42 — `daily`, same window,
+    `depends_on: 38` — has not run since 2026-10-08. `held=False` is clause 2's
+    fixture: the same board and the same pinned clock with no operator pause on the
+    queue at all.
+
+    The store is redirected by patching `workers.queue.configured_db_path`, the path
+    accessor `window_loss_rows` calls, and NOT `autonomy.window_loss_rows` itself: the
+    ledger then reaches `get_due_tasks()` through the same read production performs,
+    so the row is a row in the store the engine opens rather than a value a test handed
+    the function under test. Redirected at all because bare, that accessor names the
+    LIVE `~/lloyd-data/workers.db`, and a test that read the real fleet's ledger would
+    pass or fail on what the operator did last night rather than on the fixture.
+    """
+    import sqlite3
+
+    from workers import pool as pool_mod
+    from workers.queue import WorkQueue
+
+    write_task(aut, 38, last_run=_UP_DONE, next_run="2026-10-11T05:00:00+00:00",
+               preferred_hours=_WINDOW)
+    write_task(aut, 42, depends_on=38, preferred_hours=_WINDOW,
+               last_run="2026-10-08T09:18:03+00:00",
+               next_run="2026-10-09T09:18:03+00:00")
+    monkeypatch.setattr(aut, "_local_hour", lambda: 8)
+    monkeypatch.setattr(aut, "_local_tz", lambda: _INCIDENT_TZ)
+    _pin(aut, monkeypatch, when=_LOSS_NOW)
+
+    q = WorkQueue(str(tmp_path / "workers.db"))
+    if held:
+        q.wm_set(pool_mod.PAUSE_WM_SOURCE, pool_mod.PAUSE_WM_KEY, "1")
+        conn = sqlite3.connect(str(tmp_path / "workers.db"))
+        conn.execute("UPDATE watermarks SET updated_at=? WHERE source=? AND key=?",
+                     (_HOLD_SINCE, pool_mod.PAUSE_WM_SOURCE, pool_mod.PAUSE_WM_KEY))
+        conn.commit()
+        conn.close()
+    monkeypatch.setattr("workers.queue.configured_db_path",
+                        lambda: tmp_path / "workers.db")
+    return q
+
+
+def _chain_task(aut, task_id):
+    return read_task(aut, task_id)
+
+
+def _chain_hold_reason(aut, task_id=42):
+    res = aut.dependency_resolution_set()
+    return aut.hold_reason([t for t in res if t.get("id") == task_id][0],
+                           res, now=_LOSS_NOW)
+
+
+def test_a_window_closed_under_a_hold_catches_up_after_the_ledger_names_it(
+        aut, monkeypatch, tmp_path):
+    """Clause 1's two halves: the loss, then the dispatch that recovers it.
+
+    Before the ledger exists the answer is the 2026-10-10 answer, reproduced: #42 is
+    not due and the board says `outside hours 00-04,22-23` — measured on the base
+    tree with this same fixture, so the first assertion is the reproduction and not a
+    set-up detail. After one watchdog tick records the occurrence as lost under the
+    hold, `get_due_tasks` returns it.
+    """
+    import workers.fleet_watchdog as fw
+
+    q = _held_window_chain(aut, monkeypatch, tmp_path)
+    assert aut._is_preferred_hour(_chain_task(aut, 42)) is False
+    assert _chain_hold_reason(aut) == "outside hours 00-04,22-23"
+    assert [t["id"] for t in aut.get_due_tasks(now=_LOSS_NOW)] == []
+
+    losses = fw._window_losses(q)
+    assert [row["task_id"] for row in losses] == [42], losses
+
+    due = [t["id"] for t in aut.get_due_tasks(now=_LOSS_NOW)]
+    assert due == [42], (
+        "the catch-up did not reach the scan: the ledger row exists but the hours "
+        "gate still refuses, which is the 2026-10-10 loss again")
+    assert _chain_hold_reason(aut) is None, (
+        "`get_due_tasks` dispatched #42 while the board still said it was held: the "
+        "two surfaces disagreeing is #870's failure, not a passing clause")
+
+
+async def test_the_catch_up_dispatch_writes_its_normal_run_record(
+        aut, monkeypatch, tmp_path):
+    """Clause 1's second sentence: the recovery is a run, with a run record.
+
+    Nothing about the catch-up is a special execution path — `run_task` has no hours
+    gate and never had one, which is why queue 7786 (#38) ran 2.8 h after its own
+    window closed. So the catch-up writes the same `run_*.md` the nightly chain's own
+    downstream leg reads, and #39/#40's `depends_on: 38`-shaped freshness question is
+    answered by a real completion rather than by an empty directory.
+    """
+    import workers.fleet_watchdog as fw
+
+    q = _held_window_chain(aut, monkeypatch, tmp_path)
+    fw._window_losses(q)
+    assert [t["id"] for t in aut.get_due_tasks(now=_LOSS_NOW)] == [42]
+
+    monkeypatch.setattr("app.harness.run_query", fake_run_query([TEXT, RESULT]))
+    result = await aut.run_task(42)
+    assert result["success"] is True, result
+
+    runs = list((aut.AUTONOMY_RUNS_DIR / "42").glob("run_*.md"))
+    assert len(runs) == 1, f"expected one run record, got {[r.name for r in runs]}"
+    assert "status: success" in runs[0].read_text(), runs[0].read_text()[:200]
+    assert read_task(aut, 42).get("last_run"), "the completion stamp is what spends it"
+
+
+def test_the_catch_up_is_spent_by_the_run_it_caught_up(aut, monkeypatch, tmp_path):
+    """Clause 3. One catch-up, spent against the stamp every other gate already reads.
+
+    There is no second "already caught up" flag to fall out of sync with the first:
+    `run_task` writes `last_run`, and the authorisation is the row whose close is
+    NEWER than that stamp. So after the catch-up completes, a second scan of the same
+    out-of-window period does not return the task, while the durable record itself
+    stays on the board — it is history, and clause 4 needs it to survive the very run
+    that spends the grant.
+
+    The second scan is at `_SPEND_NOW`, not at the moment of the run, so the spend is
+    the ONLY thing that can refuse: the three measurement lines below establish that
+    at that instant the elapsed gate is satisfied, the occurrence is still inside the
+    period the grant expires on, and the window is still shut. A scan taken an hour
+    after the catch-up would be refused by the elapsed gate alone, and would leave
+    this test green with the authorisation still standing.
+    """
+    import workers.fleet_watchdog as fw
+
+    q = _held_window_chain(aut, monkeypatch, tmp_path)
+    fw._window_losses(q)
+    assert [t["id"] for t in aut.get_due_tasks(now=_LOSS_NOW)] == [42]
+
+    # The catch-up completes 5 min after the occurrence closed, and the scan below
+    # is the first out-of-window tick on which its elapsed gate is open again.
+    write_task(aut, 42, depends_on=38, preferred_hours=_WINDOW,
+               last_run="2026-10-10T12:05:00+00:00",
+               next_run="2026-10-11T05:00:00+00:00")
+    monkeypatch.setattr(aut, "_local_hour", lambda: 21)   # 04:30Z at UTC-7
+    t42 = _chain_task(aut, 42)
+    occ_close = dt.datetime.fromisoformat("2026-10-10T12:00:00+00:00")
+    assert _SPEND_NOW >= aut._elapsed_due_at(
+        t42, aut._parse_iso(t42["last_run"])), (
+        "the elapsed gate is what refuses at this instant, so the assertions below "
+        "could not see a standing grant")
+    assert ((_SPEND_NOW - occ_close).total_seconds()
+            <= aut._frequency_interval_seconds(t42)), (
+        "the occurrence has aged past the task's own period, so the grant's expiry "
+        "would be refusing here instead of its being spent")
+    assert aut._is_preferred_hour(t42) is False, (
+        "the window is open at this instant, so nothing here is out of window")
+
+    assert aut.window_catch_up_row(t42, now=_SPEND_NOW) is None, (
+        "the grant outlived the run it authorised")
+    assert [t["id"] for t in aut.get_due_tasks(now=_SPEND_NOW)] == [], (
+        "the out-of-window grant is standing, not spent: the same lost occurrence "
+        "would be run again on the next 60 s tick")
+    assert q.wm_keys(aut.WINDOW_LOSS_WM_SOURCE) == [
+        "window_lost:42:2026-10-09T22:00"], "the record must outlive the catch-up"
+
+
+def test_no_pause_held_across_the_occurrence_leaves_the_window_in_force(
+        aut, monkeypatch, tmp_path):
+    """Clause 2. Same board, same clock, no operator pause: the window still holds.
+
+    This is the assertion that keeps the fix from becoming a widened window. Nothing
+    here depends on how long the window is or where it sits — remove the block from
+    the story and #42 is held exactly as it was before #2552, with the board naming
+    the window that holds it.
+    """
+    import workers.fleet_watchdog as fw
+
+    q = _held_window_chain(aut, monkeypatch, tmp_path, held=False)
+    assert fw._window_losses(q) == [], (
+        "a loss was recorded with no block on the queue to have caused it: the "
+        "grant's only authorisation is a witnessed block")
+    assert q.wm_keys(aut.WINDOW_LOSS_WM_SOURCE) == []
+    assert _chain_hold_reason(aut) == "outside hours 00-04,22-23"
+    assert [t["id"] for t in aut.get_due_tasks(now=_LOSS_NOW)] == []
+
+
+def test_a_loss_record_naming_no_block_authorises_nothing(aut, monkeypatch, tmp_path):
+    """The defensive branch of the grant, pinned at the grant.
+
+    Every writer sets `pause_since`, and the claim of the whole mechanism is that a
+    KNOWN block covered the occurrence — so a row that names none (a hand-written
+    one, or a future writer that forgets) is not evidence. Kept out of the fleet by
+    the same test, since a stray row would otherwise be a standing bypass.
+    """
+    q = _held_window_chain(aut, monkeypatch, tmp_path)
+    row = {"task_id": 42, "window_hours": "00-04,22-23",
+           "window_open": "2026-10-10T05:00:00+00:00",
+           "window_close": "2026-10-10T12:00:00+00:00",
+           "recorded_at": _LOSS_NOW.isoformat()}
+    q.wm_set(aut.WINDOW_LOSS_WM_SOURCE, "window_lost:42:2026-10-09T22:00",
+             json.dumps(row))
+
+    assert aut.window_catch_up_row(_chain_task(aut, 42),
+                                   now=_LOSS_NOW) is None
+    assert [t["id"] for t in aut.get_due_tasks(now=_LOSS_NOW)] == []
+    assert _chain_hold_reason(aut) == "outside hours 00-04,22-23"
+
+
+def test_a_loss_older_than_the_tasks_own_period_authorises_nothing(
+        aut, monkeypatch, tmp_path):
+    """The grant's expiry: the loss must belong to a cycle that is still owed.
+
+    Two weeks on, #42 is due inside its next window and the elapsed gate alone
+    decides whether it runs; a record of a long-settled night left authorising an
+    out-of-window dispatch would be a bypass with a stale reason attached.
+
+    Isolated so the age bound is the only thing refusing. The task's completion stamp
+    is set BEFORE the stale occurrence closed — the shape of a task that has run no
+    day since — because a stamp after the close would let the spend refuse here and
+    leave this test green with the bound deleted; the two measurement lines say so.
+    The second half is the discriminator: the same task, the same pinned instant, one
+    row whose close is inside the period, authorising.
+    """
+    q = _held_window_chain(aut, monkeypatch, tmp_path)
+    stale_close = "2026-09-26T12:00:00+00:00"
+    write_task(aut, 42, depends_on=38, preferred_hours=_WINDOW,
+               last_run="2026-09-20T09:18:03+00:00",
+               next_run="2026-09-21T09:18:03+00:00")
+    q.wm_set(aut.WINDOW_LOSS_WM_SOURCE, "window_lost:42:2026-09-25T22:00",
+             json.dumps({"task_id": 42, "window_hours": "00-04,22-23",
+                         "window_open": "2026-09-26T05:00:00+00:00",
+                         "window_close": stale_close,
+                         "pause_since": "2026-09-25T17:57:57+00:00",
+                         "recorded_at": "2026-09-26T12:00:30+00:00"}))
+    t42 = _chain_task(aut, 42)
+    stale = _LOSS_NOW - dt.datetime.fromisoformat(stale_close)
+    assert stale > dt.timedelta(seconds=aut._frequency_interval_seconds(t42)), (
+        "the row is not older than the task's own period, so the refusal below would "
+        "not be the age bound's doing")
+    assert (aut._parse_iso(t42["last_run"])
+            < dt.datetime.fromisoformat(stale_close)), (
+        "`last_run` post-dates the stale occurrence's close, so the spend could be "
+        "what refuses here rather than the age bound")
+
+    assert aut.window_catch_up_row(t42, now=_LOSS_NOW) is None
+    assert [t["id"] for t in aut.get_due_tasks(now=_LOSS_NOW)] == []
+    assert _chain_hold_reason(aut) == "outside hours 00-04,22-23"
+
+    # The discriminator. Same task, same stamps, same instant: only the recorded
+    # occurrence's age moved, and now the grant answers.
+    q.wm_set(aut.WINDOW_LOSS_WM_SOURCE, "window_lost:42:2026-10-09T22:00",
+             json.dumps({"task_id": 42, "window_hours": "00-04,22-23",
+                         "window_open": "2026-10-10T05:00:00+00:00",
+                         "window_close": "2026-10-10T12:00:00+00:00",
+                         "pause_since": _HOLD_SINCE,
+                         "recorded_at": _LOSS_NOW.isoformat()}))
+    assert aut.window_catch_up_row(_chain_task(aut, 42), now=_LOSS_NOW), (
+        "a row inside the period authorises no more than a stale one: the age bound "
+        "is not the difference between the two refusals above")
+    assert [t["id"] for t in aut.get_due_tasks(now=_LOSS_NOW)] == [42]
+
+
+def test_a_windowless_task_is_not_what_this_grant_is_for(aut, monkeypatch,
+           tmp_path):
+    """The positive control from the item, kept as a test.
+
+    #30 declares `preferred_hours: []` and needed nothing on 2026-10-10: it ran
+    11.5 min after the release on the row it already had. `_window_hours` returns
+    None for it, so `window_catch_up_row` must refuse BEFORE it opens the store.
+
+    The probe RECORDS what it is asked rather than only raising, and that is the
+    whole point: `window_loss_rows` swallows any exception from the store into an
+    empty ledger (`app/autonomy.py:2416-2423`), so a raise is absorbed and the call
+    still answers None — the review ran exactly that and watched it stay green. What
+    makes this falsifiable is `reached`: consulting the ledger for a windowless task
+    is recorded even though the return value cannot show it. The block after proves
+    the probe is wired at all, because a probe nothing ever calls records nothing
+    whatever the code does.
+    """
+    _held_window_chain(aut, monkeypatch, tmp_path)      # the store, held and recorded
+    write_task(aut, 30, preferred_hours=[], last_run="2026-10-09T07:14:44+00:00",
+               next_run="2026-10-10T07:14:44+00:00")
+    t30 = _chain_task(aut, 30)
+    assert aut._is_preferred_hour(t30) is True
+
+    reached: list[str] = []
+
+    class _StoreMustNotBeOpened:
+        """Every ledger read is logged; nothing about the store is hidden."""
+
+        def wm_keys(self, *a, **k):
+            reached.append("wm_keys")
+            return ["window_lost:42:2026-10-09T22:00"]
+
+        def wm_get(self, *a, **k):
+            reached.append("wm_get")
+            return json.dumps({
+                "task_id": 42, "window_hours": "00-04,22-23",
+                "window_open": "2026-10-10T05:00:00+00:00",
+                "window_close": "2026-10-10T12:00:00+00:00",
+                "pause_since": _HOLD_SINCE,
+                "recorded_at": _LOSS_NOW.isoformat()})
+
+    monkeypatch.setattr("workers.queue.WorkQueue",
+                        lambda *a, **k: _StoreMustNotBeOpened())
+    assert aut.window_catch_up_row(t30, now=_LOSS_NOW) is None
+    assert reached == [], (
+        f"the ledger was opened for a task with no window: {reached}. The store\"s "
+        "own failures are swallowed into an empty ledger, so the None above cannot "
+        "show this — the reads it made are the evidence")
+
+    # That the probe is wired: the same patched store, asked about the WINDOWED task,
+    # IS read — and the grant still answers, which is what the empty `reached` above
+    # would otherwise be indistinguishable from.
+    assert aut.window_catch_up_row(_chain_task(aut, 42), now=_LOSS_NOW) is not None
+    assert reached, (
+        "no ledger read was ever attempted, so the assertion above is vacuous")

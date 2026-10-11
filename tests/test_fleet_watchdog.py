@@ -1102,3 +1102,278 @@ async def test_unreadable_run_records_fall_back_and_the_alarm_still_fires(
         f"an unparsable record was read as a disagreement it cannot support: {msg!r}")
     assert "lost a completion" not in msg, (
         f"a front matter that does not parse cannot quote an instant: {msg!r}")
+
+
+# ── The lost-occurrence ledger (#2552) ───────────────────────────────────────
+#
+# `watermarks` is `PRIMARY KEY (source, key)`: one row per key, updated in place.
+# That is why the pause itself is unanswerable after the fact — #2498 owns that
+# half — and why the ledger below is keyed per OCCURRENCE rather than per task:
+# "how many cycles did that hold cost" is only computable if each one is a row.
+#
+# The clock AND the zone are pinned, and both pins are load-bearing. The window is
+# `preferred_hours`, machine-local hours (#1437 Defect B), and `autonomy
+# ._local_tz()` answers with the zone of whatever box runs the suite — so WHICH
+# occurrence `_window_losses` selects is a function of that zone and of the minute
+# the suite runs. An earlier version of this section left both unpinned and read the
+# recorded instants back through `_to_local`, which made the recorded HOURS true
+# anywhere while leaving every row-count assertion below a matter of the machine.
+# Pinned, the fixture is the 2026-10-10 incident carrying its own numbers, and the
+# assertions name them exactly: at UTC-7 the window [22,23,0,1,2,3,4] is
+# 2026-10-10T05:00Z -> 2026-10-10T12:00Z, the occurrence the hold really covered.
+
+#: The box's own offset that week. The pause row's persisted `updated_at` is
+#: 17:57:57Z, and the window it starved opened at 22:00 local the next morning —
+#: which is 05:00Z only at UTC-7.
+_INCIDENT_TZ = dt.timezone(dt.timedelta(hours=-7), "UTC-7")
+#: The instant the release still had not come: 3 h 10 min after the window closed,
+#: local hour 8 — the shape `_is_task_due` refused in.
+_INCIDENT_NOW = dt.datetime(2026, 10, 10, 15, 10, tzinfo=dt.timezone.utc)
+#: The persisted `(_pool, operator_paused).updated_at` of that hold, verbatim.
+_INCIDENT_SINCE = "2026-10-09T17:57:57.490185+00:00"
+#: Task #42's own window, read verbatim from ~/obsidian/autonomy/42-*.md.
+_LOSS_WINDOW = [22, 23, 0, 1, 2, 3, 4]
+#: The occurrence that hold starved, in both clocks it is written in.
+_OCC_OPEN = "2026-10-10T05:00:00+00:00"      # 22:00 local on 2026-10-09
+_OCC_CLOSE = "2026-10-10T12:00:00+00:00"     # 05:00 local on 2026-10-10
+_OCC_KEY = "window_lost:42:2026-10-09T22:00"
+
+
+def _ledger_keys(q) -> list[str]:
+    """Every loss row in the store, and nothing else.
+
+    `WINDOW_LOSS_WM_SOURCE` is the source the scheduled-task source already uses for
+    its other watermarks — `nextrun_alerted_at` lives under it — so the ledger's own
+    namespace is the key's prefix, and a whole-source listing would count the alarm's
+    stamps beside the losses."""
+    return sorted(k for k in q.wm_keys(autonomy.WINDOW_LOSS_WM_SOURCE)
+                  if k.startswith(autonomy.WINDOW_LOSS_WM_PREFIX))
+
+
+def _held_over_a_closed_window(tmp_path, board, monkeypatch, *, held=True):
+    """The 2026-10-10 board: task 42, its window closed, the pool held across it.
+
+    Clock, zone and local hour are pinned to the incident's (`_utcnow`,
+    `_local_tz`, `_local_hour`), so the occurrence `_window_losses` selects is the
+    one named in `_OCC_*` on any box at any minute. `held=False` is the same board
+    with no operator pause row at all.
+
+    The hold is seeded the way the release leaves it: the queue's
+    `(_pool, operator_paused)` row, whose `updated_at` IS the since-instant
+    (`workers/pool.py:550-580`), aged with raw SQL because `wm_set` cannot age a
+    row through the public API — the very workaround `wm_updated_at`'s own
+    docstring names. So the assertion beside it measures the incident's shape, not
+    a fixture invented for the test. And because that `since` is the incident's
+    real one, it lands AFTER the two earlier occurrences inside the recorder's
+    lookback had opened: a block that began inside an occurrence left that
+    occurrence unblocked minutes, and the recorder must not claim it as their
+    cause — which is what `keys == [_OCC_KEY]` then measures.
+    """
+    import workers.pool as pool_mod
+
+    monkeypatch.setattr(autonomy, "_utcnow", lambda: _INCIDENT_NOW)
+    monkeypatch.setattr(autonomy, "_local_tz", lambda: _INCIDENT_TZ)
+    # 15:10Z read at UTC-7. `_is_preferred_hour` evaluates the window against
+    # `_local_hour()` rather than the instant it is given (#2552's own finding), so
+    # the hour is pinned apart from the clock; 8 is the hour the 10-10 refusal
+    # actually evaluated, and it is outside the window.
+    monkeypatch.setattr(autonomy, "_local_hour", lambda: 8)
+    # `last_run` is the nightly reflection's last completion before the loss (two
+    # days, so the elapsed gate is satisfied) and `next_run` the retry stamp its
+    # file carried when the window closed.
+    write_task(board, 42, preferred_hours=_LOSS_WINDOW,
+               last_run="2026-10-08T09:18:03+00:00",
+               next_run="2026-10-09T09:18:03+00:00")
+    q = WorkQueue(tmp_path / "loss.db")
+    if held:
+        q.wm_set(pool_mod.PAUSE_WM_SOURCE, pool_mod.PAUSE_WM_KEY, "1")
+        conn = sqlite3.connect(str(tmp_path / "loss.db"))
+        conn.execute("UPDATE watermarks SET updated_at=? WHERE source=? AND key=?",
+                     (_INCIDENT_SINCE,
+                      pool_mod.PAUSE_WM_SOURCE, pool_mod.PAUSE_WM_KEY))
+        conn.commit()
+        conn.close()
+    return q
+
+
+def test_a_window_closed_under_a_hold_is_recorded_with_every_name_it_owes(
+        tmp_path, board, monkeypatch):
+    """Clause 4. The record names the task, the occurrence and the block, durably.
+
+    Durable means the same table the pause lives in — `watermarks` — so a reader
+    holding `workers.db` and no log can answer which cycles a hold cost. On 2026-10-10
+    the loss existed only as prose in `memory/2026-10-10.md:22`, 17 hours after the
+    window closed, from an alarm structurally one period late; this row is the
+    machine-readable half that was missing.
+    """
+    q = _held_over_a_closed_window(tmp_path, board, monkeypatch)
+    rows = fw._window_losses(q)
+
+    assert [r["task_id"] for r in rows] == [42], rows
+    row = rows[0]
+    assert row["name"] == "task42"
+    assert row["window_hours"] == "00-04,22-23", row
+
+    # The occurrence, named exactly: the UTC instants the row carries, and the
+    # local hours the window was declared in. The length is the window's own.
+    assert row["window_open"] == _OCC_OPEN, row
+    assert row["window_close"] == _OCC_CLOSE, row
+    o = dt.datetime.fromisoformat(row["window_open"])
+    c = dt.datetime.fromisoformat(row["window_close"])
+    assert autonomy._to_local(o).hour == 22, row
+    assert autonomy._to_local(c).hour == 5, row
+    assert c - o == dt.timedelta(hours=len(_LOSS_WINDOW)), row
+    assert row["recorded_at"] == _INCIDENT_NOW.isoformat(), row
+
+    keys = _ledger_keys(q)
+    # One row, for the one occurrence the hold covered. The two earlier
+    # occurrences inside the lookback opened before the hold began, and the
+    # key's own local opening hour is what tells them apart.
+    assert keys == [_OCC_KEY], keys
+    persisted = json.loads(q.wm_get(autonomy.WINDOW_LOSS_WM_SOURCE, keys[0]))
+    assert persisted == row, "what the tick returned is not what is on disk"
+
+
+def test_the_record_names_the_block_and_outlives_the_catch_up_it_granted(
+        tmp_path, board, monkeypatch):
+    """Clause 4's other half: the pause's own `since`, and a row the run does not eat.
+
+    `pause_since` is the `(_pool, operator_paused)` row's `updated_at` read back — the
+    block's identity, not a description of it. And the row survives the completion it
+    authorised: what expires is the authorisation, which rides on the task's own
+    `last_run`, never the record of the loss.
+    """
+    import workers.pool as pool_mod
+
+    q = _held_over_a_closed_window(tmp_path, board, monkeypatch)
+    rows = fw._window_losses(q)
+    assert len(rows) == 1
+    assert rows[0]["pause_since"] == _INCIDENT_SINCE, rows[0]
+    assert rows[0]["pause_since"] == pool_mod.operator_pause_state(q)["since"], (
+        "the record must name the block's own since-instant, not a restatement")
+
+    before = q.wm_get(autonomy.WINDOW_LOSS_WM_SOURCE, _OCC_KEY)
+
+    # The catch-up runs: 3 h 09 min after the occurrence closed, so the completion
+    # stamp post-dates it. Nothing else about the task moved.
+    write_task(board, 42, preferred_hours=_LOSS_WINDOW,
+               last_run="2026-10-10T15:09:00+00:00",
+               next_run="2026-10-10T22:00:00-07:00")
+    assert fw._window_losses(q) == [], (
+        "a task that has run since the window closed was recorded as a fresh loss")
+    assert q.wm_get(autonomy.WINDOW_LOSS_WM_SOURCE, _OCC_KEY) == before, (
+        "the ledger row was rewritten or removed by the very run it authorised; it "
+        "is the record of what was lost, not a token the fix consumes")
+
+    # Same store redirect the scheduler tests use, so the row is read by
+    # `window_catch_up_row` the way the engine reads it.
+    monkeypatch.setattr("workers.queue.configured_db_path",
+                        lambda: tmp_path / "loss.db")
+    task = [t for t in autonomy._all_runnable_tasks() if t.get("id") == 42][0]
+    assert autonomy.window_catch_up_row(task, now=_INCIDENT_NOW) is None, (
+        "the grant survived the run it granted: a standing out-of-window bypass")
+
+
+def test_no_loss_is_recorded_without_a_block_covering_the_occurrence(
+        tmp_path, board, monkeypatch):
+    """No witnessed block, no row, nothing to authorise.
+
+    Every row in this ledger is a licence to dispatch outside a window, so writing
+    one where the queue names no hold would widen that window by the back door — the
+    move the item forbids in its own constraints. A task unrun because it failed, or
+    because it simply ran inside the window, must produce nothing here.
+    """
+    q = _held_over_a_closed_window(tmp_path, board, monkeypatch, held=False)
+    assert fw._window_losses(q) == []
+    assert _ledger_keys(q) == [], (
+        "a loss row appeared with no block on the queue to cover the occurrence")
+
+
+class _LedgerUnreadable:
+    """A queue that answers every watermark read but the loss ledger's.
+
+    Delegation is the point. `operator_pause_state` swallows its own failures and
+    reports "not held" (`workers/pool.py:571-575`), so a queue that raised on EVERY
+    read would be turned away at `_window_losses`' own early exit and the test
+    below would be grading pool's guard instead of the recorder's. Only the loss
+    ledger's source refuses, and `refused` records the keys it refused, so the test
+    can also see that the recorder reached the ledger at all.
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self.db_path = real.db_path
+        self.refused: list[str] = []
+
+    def wm_get(self, source, key):
+        if source == autonomy.WINDOW_LOSS_WM_SOURCE:
+            self.refused.append(key)
+            raise sqlite3.OperationalError("database is locked")
+        return self._real.wm_get(source, key)
+
+    def wm_updated_at(self, source, key):
+        return self._real.wm_updated_at(source, key)
+
+    def wm_keys(self, source):
+        return self._real.wm_keys(source)
+
+    def wm_set(self, source, key, value, **kw):
+        if source == autonomy.WINDOW_LOSS_WM_SOURCE:
+            self.refused.append(key)
+            raise sqlite3.OperationalError("database is locked")
+        return self._real.wm_set(source, key, value, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+async def test_the_recorder_runs_from_the_tick_and_never_silences_the_alarms(
+        tmp_path, board, monkeypatch):
+    """The wiring: a recorder nothing calls is a file format, not a feature.
+
+    `_window_losses` runs from `tick`, ahead of the stall alarms. Two things about
+    that call are observable and both are asserted: the row it owes lands in the
+    store, and the alarm sharing the tick still reaches a person — the new call sits
+    between `tick` and the `next_run` detector, so a ledger write that cost the
+    alarm its alert would show up here as an empty list. The incident board puts
+    task 42 a period past its own `next_run`, so the alarm has something to say, and
+    the streak starts below the threshold, so it says it on exactly the fifth tick.
+
+    The second half is the failure mode: the same board with a ledger whose reads and
+    writes both explode. `refused` proves the recorder reached that ledger — the
+    refusal is on the loss path inside `_window_losses`, not on the pause read that
+    precedes it — and the swallow is what the empty return and the tick that does not
+    raise measure. #1682 is an alarm that could not report its own silencing; a loss
+    ledger that skipped both stall alarms would repeat it.
+    """
+    _pacing_constants_unchanged()
+    q = _held_over_a_closed_window(tmp_path, board, monkeypatch)
+    assert [e["id"] for e in fw._next_run_stalled(q)] == [42], (
+        "the incident board is invisible to the `next_run` detector, so the alert "
+        "count below would measure a fixture rather than the alarm")
+
+    _streak_at_alerting_threshold(monkeypatch, stall_streak=0, nextrun_streak=0,
+                                  nextrun_alerted_at=None)
+    alerts = _watch_alerts(monkeypatch)
+    for _ in range(fw._STALL_NEXTRUN_TICKS - 1):
+        await fw.tick(q)
+    assert alerts == [], (
+        f"the alarm fired before its own {fw._STALL_NEXTRUN_TICKS} ticks, or the "
+        f"ledger write changed its pacing: {alerts}")
+    await fw.tick(q)
+    assert len(alerts) == 1 and "42" in alerts[0], (
+        f"the tick that records a lost occurrence silenced the stall alarm: {alerts}")
+    assert _ledger_keys(q) == [_OCC_KEY], (
+        "the recorder never ran from the tick")
+
+    broken = _LedgerUnreadable(q)
+    assert fw._window_losses(broken) == [], (
+        "the recorder let a locked ledger escape: the tick that cannot write a loss "
+        "row would also skip both stall alarms, which is #1682's silence")
+    assert broken.refused == [_OCC_KEY], (
+        "the recorder never reached the loss ledger — the exception was raised on a "
+        "path some other guard already covers, so the line above graded that guard "
+        "instead of `_window_losses`' own")
+    await fw.tick(broken)
+    assert len(alerts) == 1, (
+        f"a second alert arrived once the ledger began refusing: {alerts}")
