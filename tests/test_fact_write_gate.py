@@ -500,10 +500,14 @@ def test_no_code_refuses_on_so_the_reservation_really_is_prose(monkeypatch):
 # bytes and demands that the note quote its output, and one re-derives the note's
 # overlap count through `app.kg_store.text_hash`, the store's own key function.
 #
-# What stays out of reach of a gate, and is recorded as owed on #2441 rather than
-# pretended away: whether a Lloyd-agent labeler is the labeler the bar demands
-# (the note names its own), and measurement (b) of two — a paired LloydMemEval
-# `knowledge_update` gain — which no number in this file is evidence for.
+# What stays out of reach of a gate: measurement (b) of two — a paired LloydMemEval
+# `knowledge_update` gain — which no number in this file is evidence for, and
+# Alan's ship decision. The labeler question this block used to name as owed was
+# RULED on 2026-10-11 (#2441's `owed_settled` entry 1: an agent reader's labels
+# count as measurement (a)'s evidence provisionally and are not hand labels), #2556
+# recorded the ruling in the note, and the #2556 nodes at the foot of this file pin
+# it. What is still owed there is Alan's spot-check at ship time, which no round may
+# take or simulate.
 
 #: The note, its committed sample directory, and the note it supplements.
 NOTE_2441 = ROOT / "eval" / "measurements" / "fact-write-gate-2026-10-08.md"
@@ -819,3 +823,151 @@ def test_the_note_arming_scan_fires_only_on_an_affirmative_claim():
     assert _affirmative_arming_claims("The CI satisfies the bar.")
     # Negated, the same shape is exactly what the note is allowed to say.
     assert not _affirmative_arming_claims("This note does not authorize flipping the mode.")
+
+
+# ── #2556: the 2026-10-11 labeler ruling, recorded in the note it rules on ────
+#
+# #2441 left two things owed to a reader that is not a round, and owed-check ruled
+# both on 2026-10-11 (vault `backlog/2441-*.md`, `owed_settled` entries 1 and 3,
+# `follow_up: 2556`): a Lloyd-agent reader's labels count as measurement (a)'s
+# evidence PROVISIONALLY and are not hand labels — bound (i) of that ruling is that
+# the note may never be quoted as Alan's labels or as a human-labelled CI — and no
+# recurring re-score is warranted. The note recorded neither. Worse, its title and
+# the close's **(a)** bullet both called these 60 labels hand-labelled, which is the
+# quotation bound (i) forbids: a reader who quoted the note without reaching "Who
+# labelled" would have carried a human-labelled CI into the ship decision. So the
+# nodes below pin the ruling to the sentence that carries it, and pin the ruling's
+# own bound to the committed labels — the E-row indices Alan is to spot-check come
+# out of `labels.txt`, not out of the prose that names them.
+#
+# What these nodes deliberately do NOT do: take the ship decision, or pretend the
+# spot-check ran. Every clause here is a claim about what the note says, plus one
+# claim about the labels file, and the arming scan above still has to stay green
+# over the new sentences.
+
+#: The paragraph #2556 removed, byte for byte as #2441 shipped it at 50bba19b. The
+#: control that makes "the owed sentence is gone" below a finding rather than a
+#: scan over text that never carried it.
+PRE_RULING_WHO_LABELLED = """That does not settle the harder half of the clause, which #2441 leaves owed:
+whether a Lloyd-agent reader is the reader the bar demands, or whether the sample
+has to be Alan's. If the ruling comes back "Alan's", the rows are committed, the
+label format is one line per row, and the label file is the thing to over-label —
+the sample does not have to be drawn again."""
+
+#: … and the close's **(a)** bullet as it shipped, which said bar (a) was "taken".
+PRE_RULING_BULLET_A = """- **(a)** a false-supersede CI over >= 60 hand-labelled UPDATE verdicts — **taken
+  by this note**: 0/60 = 0.000 [0.000, 0.060]."""
+
+_WHO_LABELLED = re.compile(r"^## Who labelled\n(.*?)(?=^## )", re.M | re.S)
+_BULLET_A = re.compile(r"^- \*\*\(a\)\*\*(.*?)(?=^- \*\*\(b\)\*\*)", re.M | re.S)
+
+
+def _who_labelled(text: str) -> str:
+    """The body of the '## Who labelled' section — the one section #2556 rewrites,
+    so clauses 1, 2 and 4 are graded against the section that carries the ruling
+    and not against a matching sentence parked somewhere else in the note."""
+    found = _WHO_LABELLED.search(text)
+    assert found, "the note has no '## Who labelled' section to record a ruling in"
+    return _prose(found.group(1))
+
+
+def _bullet_a(text: str) -> str:
+    """The close's **(a)** bullet: the words a reader quotes when they quote the bar
+    as satisfied. That the extraction finds it at all is shown by the control in the
+    clause 3 node, which reads this same extractor over the shipped bullet."""
+    found = _BULLET_A.search(text)
+    assert found, "the note's close has no '- **(a)**' bullet to qualify"
+    return _prose(found.group(1))
+
+
+# ── clause 1: the labeler is ruled, and what was ruled is provisional ────────
+
+def test_the_note_records_the_ruling_that_agent_labels_are_provisional_evidence():
+    """Clause 1: 'Who labelled' no longer leaves the labeler owed, and says instead
+    that an agent reader's labels count as measurement (a)'s evidence, provisionally."""
+    note = _note2441()
+    who = _who_labelled(note)
+    assert "which #2441 leaves owed" not in _prose(note)
+    assert "which #2441 leaves owed" in _prose(PRE_RULING_WHO_LABELLED)
+    assert "Ruled on 2026-10-11" in who
+    assert "COUNT as measurement (a)'s evidence, provisionally" in who
+    assert "follow-up #2556" in who
+
+
+# ── clause 2: not hand labels, and not quotable as one ───────────────────────
+
+def test_the_note_withholds_the_hand_labelled_word_from_the_agent_labels():
+    """Clause 2: bound (i) of the ruling — these labels are NOT hand labels, the
+    bar's word is not satisfied by them, and the note may not be quoted as Alan's
+    labels or as a human-labelled CI."""
+    who = _who_labelled(_note2441())
+    assert "They are not hand labels" in who
+    assert 'The bar\'s word is "hand-labelled" and it is not satisfied by them' in who
+    assert "may never be quoted as Alan's labels or as a human-labelled CI" in who
+    # Control: the shipped section carried no such bound, so the three assertions
+    # above are about the ruling and not about prose that was always there.
+    assert "They are not hand labels" not in _prose(PRE_RULING_WHO_LABELLED)
+
+
+# ── clause 3: title and **(a)** bullet stop asserting a hand-labelled sample ──
+
+def test_the_title_and_the_measurement_a_bullet_no_longer_claim_hand_labels():
+    """Clause 3: the two places a reader meets this note before 'Who labelled' — the
+    title and the close's **(a)** bullet — cannot be read as claiming hand labels,
+    while `_stated_n` still reads n = 60 off the note."""
+    note = _note2441()
+    title = note.splitlines()[0]
+    assert not re.search(r"hand[- ]label", title, re.I), title
+    assert "n = 60" in title, title
+    a = _bullet_a(note)
+    assert "agent-labelled, not hand-labelled" in a, a
+    assert "provisional evidence toward (a)" in a, a
+    assert "not (a) satisfied" in a, a
+    assert "0/60 = 0.000 [0.000, 0.060]" in a, a
+    assert "taken by this note" not in a
+    # Controls: the ban bites on the shipped bullet, and the extractor found the
+    # bullet it is quoting rather than matching an empty span.
+    assert re.search(r"hand[- ]label", _prose(PRE_RULING_BULLET_A), re.I)
+    assert "taken by this note" in _prose(PRE_RULING_BULLET_A)
+    assert _stated_n(_prose(note)) == 60 == _sample_meta()["n"]
+
+
+# ── clause 4: the ship-time guard, its indices read off the label file ────────
+
+def test_the_note_records_the_ship_time_spot_check_and_the_no_redraw_bound():
+    """Clause 4: the bounded guard that lets the provisional count stand — which
+    rows Alan spot-checks at ship time, that he over-labels any line he rejects, and
+    that the draw is never repeated. The five indices are checked against
+    `labels.txt`, so the note cannot name a row that is not an E row."""
+    who = _who_labelled(_note2441())
+    assert "Alan spot-checks the committed labels" in who
+    assert "over-labels any line he rejects" in who
+    assert "The draw is never repeated" in who
+    assert "one line per row" in who
+    found = re.search(r"the 5 E rows \(0-indexed ([\d, ]+)\) plus (\d+) P rows", who)
+    assert found, who
+    assert [int(x) for x in found.group(1).split(",")] == [16, 37, 47, 50, 57]
+    assert int(found.group(2)) == 10
+    # …and those five ARE the E-labelled rows of the committed sample: the
+    # spot-check list is a reading of labels.txt, not a list the prose invented.
+    assert sorted(r for r, lab in _labels2441().items() if lab == "E") == \
+        [16, 37, 47, 50, 57]
+
+
+# ── clause 5: one re-score bundled with (b), and no recurring job ────────────
+
+def test_the_note_rules_out_a_recurring_re_score_and_bundles_the_one_it_allows():
+    """Clause 5: #2441's entry-3 ruling — no recurring re-score and no autonomy
+    task, exactly one re-score bundled with the measurement-(b) run, an early one
+    only if a labelled reader records an S or D row. That trigger is shown never to
+    have fired over the committed sample, which is why the bound is a trigger and
+    not a schedule."""
+    prose = _prose(_note2441())
+    assert "No recurring re-score is warranted" in prose
+    assert "no autonomy task for one" in prose
+    assert "exactly one re-score, bundled with the measurement-(b) run" in prose
+    assert "an early one only if a labelled reader ever records an S or D row" in prose
+    committed = _labels2441()
+    assert sum(1 for lab in committed.values() if lab in "SD") == 0
+    # Control for that zero: the same reader over one planted S row says one.
+    assert sum(1 for lab in {**committed, 58: "S"}.values() if lab in "SD") == 1

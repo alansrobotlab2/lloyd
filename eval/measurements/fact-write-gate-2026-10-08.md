@@ -1,11 +1,14 @@
-# Fact write gate (#1487): UPDATE verdicts hand-labelled at n = 60, measured 2026-10-08
+# Fact write gate (#1487): UPDATE verdicts labelled by a Lloyd agent at n = 60, measured 2026-10-08
 
-**What this note is.** Measurement **(a)** of the two the arming bar asks for: a
-false-supersede CI over >= 60 hand-labelled UPDATE verdicts (#1487 human clause 2,
+**What this note is.** A false-supersede CI over >= 60 UPDATE verdicts, which is
+the shape of measurement **(a)**, the first of the two the arming bar asks for;
+the bar's own word for the labels there is "hand-labelled" (#1487 human clause 2,
 settled by #2344's owed ruling, and quoted in `config.yaml`'s `write_gate`
-comment). It sits beside `eval/measurements/fact-write-gate-2026-09-25.md` and
-supplements it; it replaces nothing. Read the last section before quoting any
-number from this one.
+comment). The 60 labels here are a Lloyd agent's: this note is provisional
+evidence for (a), never hand labels, and not (a) satisfied — see "Who labelled".
+It sits beside `eval/measurements/fact-write-gate-2026-09-25.md` and supplements
+it; it replaces nothing. Read the last section before quoting any number from
+this one.
 
 ## Sample
 
@@ -111,11 +114,28 @@ forbids djev as labeler because djev is the system under test, and this sample
 does not use it: the `answers` block on each row travels in the decisions file for
 provenance and played no part in any label.
 
-That does not settle the harder half of the clause, which #2441 leaves owed:
-whether a Lloyd-agent reader is the reader the bar demands, or whether the sample
-has to be Alan's. If the ruling comes back "Alan's", the rows are committed, the
-label format is one line per row, and the label file is the thing to over-label —
-the sample does not have to be drawn again.
+**Ruled on 2026-10-11, not owed** — #2441's `owed_settled` entry 1, recorded here by
+its follow-up #2556: a Lloyd-agent reader's labels COUNT as measurement (a)'s
+evidence, provisionally. They are not hand labels. The bar's word is
+"hand-labelled" and it is not satisfied by them, so this note may never be quoted
+as Alan's labels or as a human-labelled CI. Arming still requires measurement (b)
+plus Alan's explicit ship decision, and the ruling changes nothing about that. The
+guard that lets the provisional count stand is bounded and sits inside the ship
+decision: Alan spot-checks the committed labels — the 5 E rows
+(0-indexed 16, 37, 47, 50, 57) plus 10 P rows — and over-labels any line he
+rejects. The draw is never repeated; `labels.txt` is one line per row, so the file
+is the thing to over-label and the sample never has to be drawn again.
+
+## Re-scoring, ruled 2026-10-11
+
+No recurring re-score is warranted, and no autonomy task for one. The log gains
+roughly 50 UPDATE rows a day, but a re-score needs a reader and the clause forbids
+djev, so "recurring" could only mean a recurring agent-labelled pass whose one
+output is a tighter bound on an event observed 0 times in 60 — already under the
+one-in-seventeen risk the ship decision weighs, with `mode` at `noop` and (b)
+untaken. A run that cannot change a decision is a cost, not evidence. What is
+planned instead: exactly one re-score, bundled with the measurement-(b) run, and an
+early one only if a labelled reader ever records an S or D row.
 
 ## Two caveats the shape of the frame imposes
 
@@ -137,14 +157,18 @@ The bar for `knowledge_graph.write_gate.mode: "on"` is **two measurements plus a
 decision**, per #2344's owed ruling and the reservation carried in `config.yaml`'s
 `write_gate` comment:
 
-- **(a)** a false-supersede CI over >= 60 hand-labelled UPDATE verdicts — **taken
-  by this note**: 0/60 = 0.000 [0.000, 0.060].
+- **(a)** a false-supersede CI over ">= 60 hand-labelled UPDATE verdicts" — the
+  bar's own wording. The CI this note carries is agent-labelled, not
+  hand-labelled, so it is provisional evidence toward (a) and not (a) satisfied:
+  0/60 = 0.000 [0.000, 0.060].
 - **(b)** a paired LloydMemEval `knowledge_update` gain from
   `eval/fact_write_gate_snapshot.py` and `eval/run_memory_eval.py
   --fact-snapshot` — **not taken**. The instrument exists and is tested
   (`tests/test_fact_write_gate_snapshot.py`); no paired run is on record.
 
-plus Alan's explicit ship decision. This note completes measurement (a) only. It
+plus Alan's explicit ship decision. This note completes measurement (a) only, and
+completes it as an agent-labelled CI — the "hand-labelled" in (a) is the bar's
+wording, not a description of these 60 labels (see "Who labelled"). It
 does not authorize flipping the mode, and no threshold, cutoff, branch or config
 value moved in the change that wrote it: `knowledge_graph.write_gate.mode` stays
 `"noop"`, and
