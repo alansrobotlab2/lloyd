@@ -4197,11 +4197,18 @@ def test_a_raw_row_with_no_pre_strip_field_still_gates_on_title_and_summary(
 #
 # `GATE_URL_RUN` is the reference the expectations below are measured against, written out
 # here rather than imported from the module: an expectation computed with the module's own
-# pattern could not notice that pattern eating prose. It is the regex the item names,
-# including its one looseness — `[^ ]+` spans a newline, so a URL that ends a line also
-# takes the first token of the line after it. No fixture here has a keyword in that
-# position, and the residual is recorded on the item.
-GATE_URL_RUN = re.compile(r"https?://[^ ]+|www[^ ]+")
+# pattern could not notice that pattern eating prose. Since #2577 it is the NEWLINE-BOUNDED
+# run, which is what the gate is supposed to do; no fixture between here and the #2577
+# section has a keyword in the position the old class used to eat, so every expectation
+# spelled against it below reads the same under both runs and had to be re-read, not merely
+# re-run, when the class changed.
+#
+# `GATE_URL_RUN_AS_FILED` is the run the module compiled until #2577, whose `[^ ]` matches a
+# newline. It stays spelled out because the delta the #2577 nodes assert is between these two
+# runs, and a claim about what the old class did to the gate's input cannot be computed from
+# code that no longer carries it.
+GATE_URL_RUN = re.compile(r"https?://[^\s]+|www[^\s]+")
+GATE_URL_RUN_AS_FILED = re.compile(r"https?://[^ ]+|www[^ ]+")
 
 # The #2241 fixture above with ONE thing moved: the only keyword of the fixture profile
 # that occurs anywhere in it, `vllm`, sits inside the ADDRESS on the last line instead of
@@ -4535,3 +4542,353 @@ def test_a_gate_only_keep_reaches_the_day_file_graded_and_with_its_gate_text(tmp
         "the gate text was dropped between the scorer and the day file"
     assert row["summary"] == "", "the published copy gained the pre-strip description"
     assert "LLM scored 1 of 1" in proc.stdout, proc.stdout[-2000:]
+
+
+# --- #2577: an address may not reach past the end of its own line ---------------------
+
+# `_GATE_URL_RUN` compiled `[^ ]` until #2577, and `[^ ]` matches a newline as readily as a
+# space: an address that ended a line took that newline, and the first token of the line
+# after it, out of the gate's input along with itself. `re.search(r"[^ ]", "\n")` is the
+# whole mechanism, and it fires on the shape a YouTube description is made of — a link block
+# followed by a `Timestamps:` ledger — so the token that disappears is routinely a heading or
+# a label rather than prose nobody needed. It is a silent failure in both directions: an item
+# whose only keyword sat in that position was dropped with nothing logged, and nothing about
+# a keep-rate says so. The six nodes below are the property, the class, the other branch of
+# the alternation, the ablation still being intact, the recorded row this came from, and the
+# keep this change adds arriving in the day file with its address still in it.
+
+# The clause-1 shape. `gripper` (robotics, PROFILE_MD above) is the ONLY keyword of the
+# fixture profile anywhere in this block, and it is the FIRST token of the line AFTER a
+# line-final address — the exact position the old class ate. The title holds no keyword, so
+# keep versus drop can only ever be about that one token.
+LINE_FINAL_URL_TITLE = "Bench notes from the Tuesday session"
+LINE_FINAL_URL_DESCRIPTION = "\n".join([
+    "📎 Slides: https://example.com/talk-notes",
+    "gripper calibration ran long, so the sweep moved to Thursday",
+])
+
+# The clause-4 shape, from the other side: an address that ENDS a line and holds the only
+# keyword in the row. Bounding the class to one line must not hand this row back — the
+# address still has to leave the gate input whole, stopping at the newline rather than
+# running through it. `vllm` occurs inside the address and nowhere else; the title and the
+# second line hold no keyword.
+ADDRESS_AT_LINE_END_TITLE = "Field notes from the workshop"
+ADDRESS_AT_LINE_END_DESCRIPTION = "\n".join([
+    "👉 Bench notes: https://vllm-project.github.io/vllm/bench",
+    "Calibration logs are in the shared folder",
+])
+
+# Clause 5's fixture: the damaged half of the retained row's `gate_description`, verbatim
+# from byte 0 of its `Speaker info:` heading to the end of the field — 823 of its 2,352
+# characters, and all five of its addresses, every one of them line-final. The row is
+# youtube:UCLKPca3kwwd-B59HNr-_lvA:HGfsfKaVuGY in the retained raw corpus; the prose the
+# field carries before this block has no address in it, so nothing a newline-bounded run
+# could reach across is being left untested by cutting it. Two of the five addresses are
+# `https://www.…`, so the first alternation branch takes those and only the bare
+# `www.…` branch is unexercised here — which is what the node above this one is for.
+WITNESS_TITLE = "Parsing the Epstein Files for JMail — Palak Agarwal & Omar Alhait, Reducto"
+WITNESS_LINK_AND_TIMESTAMPS = "\n".join([
+    "Speaker info:",
+    "- https://palakagarwal.me/",
+    "- https://www.linkedin.com/in/palak06/",
+    "- https://www.linkedin.com/in/oalhait",
+    "- https://github.com/oalhait",
+    "- https://docs.reducto.ai/overview",
+    "",
+    "Timestamps:",
+    "0:00 - Document processing and Reducto",
+    "2:02 - The JMail case study",
+    "3:10 - Omar on the parsing challenge",
+    "5:27 - JFlights and handwritten logs",
+    "6:35 - Configure and inspect extraction",
+    "7:41 - Scaling the document pipeline",
+    "9:07 - Deploy an API pipeline",
+    "10:14 - Generate a resume schema",
+    "12:38 - Schemas informed by document content",
+    "13:48 - Redaction and PDF metadata",
+    "15:34 - Nested schemas and citations",
+    "17:41 - Figures and hybrid OCR",
+    "19:23 - Parsing as the foundation",
+    "21:30 - Benchmarks and practical evaluation",
+    "23:44 - Product design and training data",
+    "26:12 - Tailor document configurations",
+    "27:59 - Interactive exercise instructions",
+])
+
+
+def test_a_keyword_that_is_the_first_token_after_a_line_final_url_keeps_its_item(
+        redirect_paths):
+    r"""Clause 1 (#2577): the line after an address is that line's own business.
+
+    The four asserts before the call are the fixture's shape, because the node is worthless
+    if the shape drifts: the keyword is the profile's, it is alone in the block, and it is
+    the first token of the line that FOLLOWS the address. Then the pair — the as-filed run
+    takes `gripper` along with `https://example.com/talk-notes\n`, so the matcher sees
+    nothing and the row was dropped on the day the pattern shipped; the module's bounded run
+    leaves the newline and the token standing, and the row is kept.
+    """
+    profile = _profile(redirect_paths)
+    all_kw = [kw for t in profile["topics"] for kw in t["keywords"]]
+    item = _item("keyword-under-an-address", title=LINE_FINAL_URL_TITLE, summary="",
+                 gate_description=LINE_FINAL_URL_DESCRIPTION)
+
+    assert profile_mod.match_keywords(LINE_FINAL_URL_TITLE, all_kw) == [], \
+        "the title gained a keyword, so the keep below would not be about the address"
+    assert LINE_FINAL_URL_DESCRIPTION.splitlines()[1].split(" ")[0] == "gripper", \
+        "the fixture's keyword is no longer the first token of the line after the address"
+    assert [t["matched_keywords"] for t in
+            profile_mod.keyword_match(LINE_FINAL_URL_DESCRIPTION, profile)] == [["gripper"]], \
+        "something besides `gripper` matched, so the pair below is not one variable"
+    assert profile_mod.match_keywords(
+        GATE_URL_RUN_AS_FILED.sub(" ", LINE_FINAL_URL_DESCRIPTION), all_kw) == [], \
+        "the as-filed run no longer eats this token, so 'dropped today' is not what is pinned"
+
+    assert profile_mod.match_keywords(
+        scoring_mod.gate_match_text(item), all_kw) == ["gripper"], \
+        "the gate's own copy of the text still lost the token after the address"
+
+    kept = scoring_mod.stage1_filter([item], profile)
+    assert [i.id for i in kept] == ["keyword-under-an-address"], \
+        "a keyword one line below an address still cannot carry a stage-1 keep"
+
+
+def test_the_gate_ablation_class_is_the_one_re_honours_and_not_a_posix_name():
+    r"""Clause 2 (#2577): `[^\s]`, the class Python reads — not `[^[:space:]]`, the name it does not.
+
+    Two byte-exact asserts go through the module's own function: an address that ends a line
+    leaves the newline and the next line's first token standing — two spaces where `Watch ` met
+    the substitution space — and an address inside one line still leaves whole. Then the shipped
+    run is pinned to the newline-bounded class by its own pattern string, which is the assert
+    that fails if anyone reaches for the spelling the item offered instead.
+
+    That spelling, `[^[:space:]]`, is not a POSIX class to `re`. It compiles as the negated
+    literal set `[`, `:`, `s`, `p`, `a`, `c`, `e` — the six characters the item names, plus the
+    bracket Python also reads into the class — with its `*` left quantifying a literal `]`
+    rather than the class. So on `https://example.com/…`, whose host begins with `e`, it matches
+    nothing at all: `sub` returns its input with every address and every keyword in it still
+    standing. The last assert is the witness for that, on this node's own input — strictly worse
+    than the bug the spelling was offered for, and silent.
+    """
+    item = _item("line-final", title="Watch", summary="",
+                 gate_description="https://example.com/robot\n"
+                                  "Timestamps: 0:00 intro and realtime robotics demo")
+    mid_line = _item("mid-line", title="Notes", summary="",
+                     gate_description="see https://example.com/robot for the bench "
+                                      "and beyond")
+
+    assert GATE_URL_RUN_AS_FILED.sub(" ", item.stage1_text()) == \
+        "Watch   0:00 intro and realtime robotics demo", \
+        "the as-filed damage this change is for is no longer what the old run does"
+
+    assert scoring_mod.gate_match_text(item) == \
+        "Watch  \nTimestamps: 0:00 intro and realtime robotics demo", \
+        "the bounded run did not stop at the newline, or took the next line with it"
+    assert scoring_mod.gate_match_text(mid_line) == \
+        "Notes see   for the bench and beyond", \
+        "an address inside one line is no longer removed whole"
+    assert "example.com" not in scoring_mod.gate_match_text(mid_line), \
+        "the run stopped short of the address and left its host in the gate input"
+
+    assert scoring_mod._GATE_URL_RUN.pattern == r"https?://[^\s]+|www[^\s]+", \
+        "the run the module ships is not the newline-bounded class this clause names"
+
+    posix = re.compile(r"https?://[^[:space:]]*|www[^[:space:]]*")
+    assert posix.sub(" ", item.stage1_text()) == item.stage1_text(), \
+        "the POSIX spelling does ablate something on this input, so it is not the trap"
+
+
+def test_the_scheme_less_www_branch_of_the_run_is_newline_bounded_too():
+    """Clause 3 (#2577): the second branch of the alternation got the same class.
+
+    `www[^ ]+` had the identical looseness and no scheme to hide behind — a channel footer
+    line reading `See www.example.com/talk` followed by anything reached into that anything.
+    Both directions are pinned, because bounding a branch is as easy to overdo as to omit:
+    line-final, the newline and the next line's first token survive; mid-line, the address
+    still leaves whole. The as-filed run is asserted on the same two inputs first, so the
+    node cannot pass against a fixture that quietly stopped being the buggy shape.
+    """
+    line_final = _item("www-line-final", title="Notes", summary="",
+                       gate_description="See www.example.com/talk\nTimestamps: 0:00 and slides")
+    mid_line = _item("www-mid-line", title="Notes", summary="",
+                     gate_description="see www.example.com/talk for the bench")
+
+    assert GATE_URL_RUN_AS_FILED.sub(" ", line_final.stage1_text()) == \
+        "Notes See   0:00 and slides", \
+        "the scheme-less branch no longer ate the next line, so the fix below proves nothing"
+    assert GATE_URL_RUN_AS_FILED.sub(" ", mid_line.stage1_text()) == \
+        "Notes see   for the bench", \
+        "the reference run no longer removes a mid-line scheme-less address"
+
+    assert scoring_mod.gate_match_text(line_final) == \
+        "Notes See  \nTimestamps: 0:00 and slides", \
+        "the www branch still crosses the newline, or the newline no longer survives"
+    assert scoring_mod.gate_match_text(mid_line) == "Notes see   for the bench", \
+        "a mid-line www address is no longer removed whole"
+    assert "www.example.com" not in scoring_mod.gate_match_text(mid_line), \
+        "the www run stopped short and left the host in the gate input"
+
+
+def test_bounding_the_run_to_one_line_did_not_weaken_the_address_ablation(redirect_paths):
+    """Clause 4 (#2577, as amended at the gate): nothing that had to stop being a keep got one.
+
+    Three rows go through `stage1_filter` together and exactly one of them comes back. The
+    shipped address-only fixture `ADDRESS_ONLY_DESCRIPTION` — the row whose only keyword sits
+    inside a URL address, which is what the clause names as the DROPPED row after the review
+    rung refused the filed wording (`URL_ONLY_DESCRIPTION`'s `vllm` is in the channel's own
+    prose label, so that fixture is the KEPT half of the #2463 pair and no diff can drop it
+    without breaking `test_the_gate_keeps_a_link_only_description_the_stored_summary_lost`) —
+    and the same shape with its address at the END of a line, which is the row this change had
+    every incentive to let back in: bounding the run to a line is exactly what would leave a
+    line-final address's keyword standing if the class were wrong. Staying dropped is therefore
+    this change's own risk, not a restatement of #2463. The third row is
+    `URL_ONLY_DESCRIPTION`, kept, its five addresses asserted keyword-free first so the keep
+    cannot be an address's doing. The #2463 node
+    `test_a_keyword_inside_only_a_url_address_stops_carrying_a_stage1_keep` covers the same
+    pair over the frozen corpus and is green in this file at the commit this node was written
+    in.
+    """
+    profile = _profile(redirect_paths)
+    all_kw = [kw for t in profile["topics"] for kw in t["keywords"]]
+    address_at_line_end = _item("address-at-line-end", title=ADDRESS_AT_LINE_END_TITLE,
+                                summary="",
+                                gate_description=ADDRESS_AT_LINE_END_DESCRIPTION)
+    address_only = _item("address-only-shipped", title=LINK_FARM_TITLE, summary="",
+                         gate_description=ADDRESS_ONLY_DESCRIPTION)
+    prose_keep = _item("prose-keyword", title=LINK_FARM_TITLE, summary="",
+                       gate_description=URL_ONLY_DESCRIPTION)
+
+    assert profile_mod.match_keywords(ADDRESS_AT_LINE_END_TITLE, all_kw) == [], \
+        "the title gained a keyword, so the drop below would not be about the address"
+    assert [t["matched_keywords"] for t in profile_mod.keyword_match(
+        ADDRESS_AT_LINE_END_DESCRIPTION, profile)] == [["vllm"]], \
+        "the row's only keyword is no longer the one inside its line-final address"
+    assert [t["matched_keywords"] for t in profile_mod.keyword_match(
+        ADDRESS_ONLY_DESCRIPTION, profile)] == [["vllm"]], \
+        "the shipped address-only fixture is no longer the row the clause is about"
+    assert profile_mod.match_keywords(
+        scoring_mod.gate_match_text(address_at_line_end), all_kw) == [], \
+        "bounding the class to a line let a line-final address keep its keyword"
+    assert profile_mod.match_keywords(
+        scoring_mod.gate_match_text(address_only), all_kw) == [], \
+        "the ablation stopped removing an address that ends its line"
+    assert profile_mod.match_keywords(scoring_mod.gate_match_text(prose_keep),
+                                     all_kw) == ["vllm"], \
+        "the prose keep was lost with the loosening, which is a different bug than this one"
+    urls = " ".join(ln.split("https://", 1)[1] for ln in URL_ONLY_DESCRIPTION.splitlines()
+                    if "https://" in ln)
+    assert not profile_mod.match_keywords(urls, all_kw), \
+        f"a URL path of the fixture gained a keyword: {urls}"
+
+    kept = scoring_mod.stage1_filter([address_at_line_end, address_only, prose_keep], profile)
+    assert [i.id for i in kept] == ["prose-keyword"], \
+        "an address-only row came back as a keep, or the prose row lost its place"
+
+
+# What the gate's text for the fixture has to come out as, spelled by hand: the title, one
+# space, `Speaker info:`, the five bullets reduced to a dash and the substitution space each,
+# a blank line, and then the ledger — every byte from its header down required to arrive
+# exactly as it went in. Deliberately not computed from either pattern: an expectation built
+# by substituting with a regex could not notice a regex eating prose, which is the same reason
+# `GATE_URL_RUN` is written out rather than imported.
+WITNESS_LEDGER = WITNESS_LINK_AND_TIMESTAMPS.split("\n\nTimestamps:", 1)[1]
+WITNESS_GATE_TEXT = (WITNESS_TITLE + " Speaker info:\n"
+                     + "-  \n" * 5 + "\nTimestamps:" + WITNESS_LEDGER)
+
+
+def test_the_recorded_witness_row_loses_only_its_addresses_from_the_gate_text():
+    """Clause 5 (#2577): the row that was the evidence, put through the gate's own function.
+
+    One assert decides it, against an expectation written out by hand rather than substituted
+    by a pattern: the whole gate text byte for byte, five bare bullets where the five addresses
+    were and every byte of the `Timestamps:` ledger from its header down untouched. That single
+    comparison is the clause "loses only URL substrings" made literal — an address deleted
+    instead of replaced by one space leaves a bullet a character shorter and fails it, and so
+    does a run that reached across one newline, which would drop a header character or a label
+    along with the address it started at. `Timestamps:` and `0:00` are the two tokens the filed
+    span swallowed, so the three asserts before it check the same fixture under the as-filed
+    run, which is where they vanish: without those, the node would still pass on a block that
+    had quietly stopped being damaged by the old class. The asserts after it name the survivors
+    in the tokens a reader cares about, in case the whole-text compare fails on something an
+    exact-bytes diff does not explain.
+    """
+    item = _item("witness-reducto", title=WITNESS_TITLE, summary="",
+                 gate_description=WITNESS_LINK_AND_TIMESTAMPS)
+    out = scoring_mod.gate_match_text(item)
+    as_filed_spans = [m.group(0) for m in
+                      GATE_URL_RUN_AS_FILED.finditer(WITNESS_LINK_AND_TIMESTAMPS)]
+    as_filed = GATE_URL_RUN_AS_FILED.sub(" ", item.stage1_text())
+
+    assert len(as_filed_spans) == 5, \
+        f"the as-filed run ate {len(as_filed_spans)} spans here, not five: {as_filed_spans}"
+    assert as_filed_spans[0] == "https://palakagarwal.me/\n-", \
+        "the as-filed run no longer eats a bullet here, so the row stopped being the witness"
+    assert as_filed_spans[-1] == "https://docs.reducto.ai/overview\n\nTimestamps:\n0:00", \
+        f"the filed span is gone: {as_filed_spans[-1]!r}"
+    assert "Timestamps:" not in as_filed, \
+        "the as-filed run left the ledger header, so the row stopped being the witness"
+    assert "0:00 - Document processing and Reducto" not in as_filed, \
+        "the as-filed run left the first timestamp, so the row stopped being the witness"
+
+    assert out == WITNESS_GATE_TEXT, repr(out)
+
+    assert "https://" not in out and "www." not in out, \
+        "an address survived the run over the recorded row"
+    assert out.count("Timestamps:") == 1, \
+        "the ledger header is still being eaten, or now appears twice"
+    assert "0:00 - Document processing and Reducto" in out, \
+        "the label that went with the swallowed header is still gone"
+    labels = re.findall(r"(?m)^(\d+:\d+) - ", WITNESS_LINK_AND_TIMESTAMPS)
+    assert len(labels) == 17, \
+        f"the fixture's ledger changed length: {len(labels)} labels"
+    assert [l for l in labels if l not in out] == [], \
+        "a timestamp label did not survive the run"
+
+
+def test_the_row_this_change_brings_back_is_stored_and_published_with_its_address(tmp_path):
+    """The matcher-only half of the acceptance, across the one process boundary here.
+
+    The change makes one more kind of row a keep, and the suspicion that goes with that is a
+    published copy that was edited to get there. So this drives the real
+    `python -m intel_pipeline --score` — the command autonomy task #30 spawns, which re-reads
+    `raw/<date>.jsonl` in its own process and writes `intel-<date>.jsonl`, the only file the
+    writer reads — over the clause-1 row, the one the as-filed class dropped. Four things are
+    asserted about the row that comes out: it exists, which is this fix crossing into a second
+    process; `summary` is the bytes that went in, address and all; the raw day file comes back
+    unmutated, because the ablated string must exist only as an argument to the matcher; and
+    `_entry_body` renders that body byte for byte with the address the gate never saw still in
+    it.
+
+    A GitHub row, not a YouTube one, because the two publish through different branches:
+    `_entry_body`'s feed branch runs `strip_link_footer`, which since #2143 removes any
+    block carrying a URL for reasons of its own, so a rendered feed body holding no address is
+    that policy and says nothing about this change. The GitHub branch renders the body as it
+    stands, which is the only place a byte-identity claim about the published copy means what
+    it is being made to mean here — and on this row one string is both the gate's input and
+    the published copy (`gate_description` is empty for a GitHub row, so `stage1_text()` is
+    title plus summary), which is as tight as matcher-only can be pinned.
+    """
+    home, feeds = _cli_home(tmp_path)
+    today = _today_str()
+    raw_text = _item("gh-under-address", source="github", title=LINE_FINAL_URL_TITLE,
+                     summary=LINE_FINAL_URL_DESCRIPTION).to_json() + "\n"
+    (feeds / "raw" / f"{today}.jsonl").write_text(raw_text, encoding="utf-8")
+
+    day, proc = _run_cli(home, 7, "--score")
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    rows = [json.loads(l) for l in
+            (feeds / f"intel-{day}.jsonl").read_text().splitlines() if l.strip()]
+    assert [r["id"] for r in rows] == ["gh-under-address"], \
+        f"a keyword under a line-final address did not reach the day file: {rows}"
+    row = rows[0]
+
+    assert row["summary"] == LINE_FINAL_URL_DESCRIPTION, repr(row["summary"])
+    assert "https://example.com/talk-notes" in row["summary"], \
+        "the stored copy lost the address the gate ablated"
+    assert row["gate_description"] == "", \
+        "a GitHub row carries no pre-strip copy; the gate text must stay absent"
+    assert (feeds / "raw" / f"{today}.jsonl").read_text(encoding="utf-8") == raw_text, \
+        "the scoring pass rewrote the raw row it read"
+
+    rendered = vw_mod._entry_body(models_mod.ScoredItem.from_dict(row))
+    assert rendered == LINE_FINAL_URL_DESCRIPTION, repr(rendered)

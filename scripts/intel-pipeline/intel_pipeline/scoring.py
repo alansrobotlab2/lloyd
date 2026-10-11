@@ -286,21 +286,36 @@ def _keyword_fallback(item: FeedItem, profile: dict) -> dict:
 # test_url_ablation_is_match_time_only_stored_and_rendered_bytes_are_unchanged reads the
 # day file back instead of trusting this comment.
 #
-# Two residuals, stated because a partial guard read as a whole one is the worse failure.
-# `[^ ]+` spans a newline, so a URL that ends a line also takes the first token of the
-# line after it; and a scheme-less host (tinyurl.com/…, the bare-host branch of
-# _LINK_PRESENT_RE at body.py:202) is not a URL to this pattern, so a keyword inside one
-# can still carry a keep. Both are recorded on #2463, along with what the ablation gives up:
+# The run is newline-bounded, on both branches (#2577). `[^ ]`, which this compiled until
+# then, matches a newline as readily as a space, so a URL that ended a line took the first
+# token of the line after it along with the newline: over the retained row
+# youtube:UCLKPca3kwwd-B59HNr-_lvA:HGfsfKaVuGY one span swallowed `\n\nTimestamps:\n0:00`
+# and the other four each ate the `-` opening the next speaker bullet. The class also has to
+# be one Python's `re` honours: `[^[:space:]]` is not POSIX to this engine but the negated
+# literal set `[`, `:`, `s`, `p`, `a`, `c`, `e` with its `*` left quantifying a literal `]`,
+# so on an address whose host begins with any of those seven characters — the `e` of
+# example.com, the `s` of s.x — it does not match at all and leaves the address whole in the
+# gate input, a worse failure than the one it was offered for. Both halves are pinned by
+# test_the_gate_ablation_class_is_the_one_re_honours_and_not_a_posix_name.
+#
+# One residual is left, stated because a partial guard read as a whole one is the worse
+# failure: a scheme-less host (tinyurl.com/…, the bare-host branch of
+# _LINK_PRESENT_RE at body.py:384) is not a URL to this pattern, so a keyword inside one
+# can still carry a keep. Recorded on #2463, along with what the ablation gives up:
 # 16 of the corpus's 732 stage-1 keeps (all of them GitHub rows, 5% of its GitHub keeps),
 # and 3 of the 33 rows the frozen corpus in tests/test_intel_pipeline_scorer.py admits under
 # the whole-word rule. Whether the gate should instead carry the repo's own name would
 # reverse the 2026-09-11 ruling quoted in `stage1_filter`'s docstring above — repo traffic
 # is not an interest signal — so it is a separate decision owed on that item, not taken here.
-_GATE_URL_RUN = re.compile(r"https?://[^ ]+|www[^ ]+")
+_GATE_URL_RUN = re.compile(r"https?://[^\s]+|www[^\s]+")
 
 
 def gate_match_text(item: FeedItem) -> str:
     """The gate text with every URL substring replaced by a single space.
+
+    Every URL substring and nothing else: the run cannot cross the newline that ends the line
+    its address finished on, so the token after a line-final address stays in the text the
+    matcher reads (#2577).
 
     A space and not the empty string: deleting an address would splice the prose on either
     side of it into one token and could invent a match at the seam, where a space keeps the
