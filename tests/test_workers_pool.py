@@ -781,18 +781,21 @@ async def test_the_status_carries_each_surfaces_last_measured_mitigation(q, monk
     body = await _status_body(q, monkeypatch)
     # #2153: every surface entry now carries the aggregate over its history too.
     # This fixture records once, so the median IS that reading and n is 1 — the
-    # exact-equality form is kept deliberately, because a sixth key here is a
-    # sixth thing `/api/workers/status` sends on every call, and a null median
-    # for a dispatch-only control is the honest answer rather than a missing
-    # measurement (`seconds: None` already says a pause times no stop).
-    # #2431 added the sixth, `spaced_firings`: one reading is one firing.
+    # exact-equality form is kept deliberately, because one more key here is one more
+    # thing `/api/workers/status` sends on every call, and a null median for a
+    # dispatch-only control is the honest answer rather than a missing measurement
+    # (`seconds: None` already says a pause times no stop).
+    # #2431 added `spaced_firings`: one reading is one firing. #2551 added
+    # `distinct_pids`, and a fixture recorded by this test process has one writer.
     assert body["mitigation"] == {
         "session_cancel": {"classification": "in-flight", "seconds": 0.021,
                            "at": "2026-09-24T20:00:00+00:00",
-                           "median_seconds": 0.021, "n": 1, "spaced_firings": 1},
+                           "median_seconds": 0.021, "n": 1, "spaced_firings": 1,
+                           "distinct_pids": 1},
         "pool_pause": {"classification": "dispatch-only", "seconds": None,
                        "at": "2026-09-24T20:00:00+00:00",
-                       "median_seconds": None, "n": 1, "spaced_firings": 1},
+                       "median_seconds": None, "n": 1, "spaced_firings": 1,
+                       "distinct_pids": 1},
     }
 
 
@@ -828,6 +831,10 @@ async def test_the_route_still_publishes_last_median_and_n_for_a_reading_with_no
         "in-flight", 0.07, "2026-10-08T17:17:44+00:00"), legacy
     assert (legacy["n"], legacy["median_seconds"], legacy["spaced_firings"]) == (
         1, 0.07, 1), f"a pre-#2431 reading reads as {legacy}"
+    assert legacy["distinct_pids"] == 0, (
+        "a reading with no pid has no writer to count, and #2551 published a count "
+        "that says 0 rather than one that raises or guesses 1"
+    )
 
     for i in range(20):
         mitigation_state.record(
@@ -842,6 +849,56 @@ async def test_the_route_still_publishes_last_median_and_n_for_a_reading_with_no
     )
     assert burst["at"] == "2026-10-08T17:17:49+00:00", (
         "the newest reading is still the one published beside the counts"
+    )
+    assert burst["distinct_pids"] == 1, (
+        f"those twenty readings were written by this one test process and must "
+        f"publish one writer: {burst}"
+    )
+
+
+async def test_the_route_publishes_how_many_pids_wrote_a_surfaces_readings(
+        q, monkeypatch, tmp_path):
+    """`GET /api/workers/status` makes a multi-pid burst visible in the bytes (#2551).
+
+    `spaced_firings` says 1 for a burst, which is what stopped #2431's `n >= 5` from
+    being satisfied by 20 rows. It was not enough. The file this item was filed over
+    held 20 readings per surface from **20 distinct pids** inside 22 seconds —
+    `scripts/mitigation_drill.py`'s synthetic pool runs the maintenance seat, so every
+    drill spawned a drill — and spacing cannot tell twenty processes drilling each
+    other from one process looping: both are one cluster of stamps.
+
+    So the route publishes a third count, and it has to be the number that separates
+    the two readings that are otherwise identical. The node above and this one are the
+    same shape — 20 readings, `spaced_firings: 1` — and the only thing that tells them
+    apart is 1 writer there against 20 here, which is precisely the live reading the
+    item says must stop reproducing: `n: 20, spaced_firings: 1` with 20 distinct pids
+    inside one minute.
+
+    The pids are rewritten into the file rather than faked in `record`, because what
+    the route reports is what the BYTES say — the same rule #2431 pinned for a reading
+    with no pid at all.
+    """
+    import app.paths as paths
+    import json
+    from app import mitigation_state
+
+    state = tmp_path / "mitigation_drill.json"
+    monkeypatch.setattr(paths, "MITIGATION_DRILL_STATE", state)
+    mitigation_state.record(
+        [{"surface": "session_cancel", "classification": "in-flight",
+          "seconds": 0.2, "ok": True} for _ in range(20)], path=state)
+    doc = json.loads(state.read_text(encoding="utf-8"))
+    hist = doc["surfaces"]["session_cancel"]["history"]
+    assert len(hist) == 20, "the fixture has to hold twenty readings to count over"
+    for i, r in enumerate(hist):
+        r["pid"] = 4_100_000 + i
+        r["ppid"] = 4_000_000
+    state.write_text(json.dumps(doc), encoding="utf-8")
+
+    sec = (await _status_body(q, monkeypatch))["mitigation"]["session_cancel"]
+    assert (sec["n"], sec["spaced_firings"], sec["distinct_pids"]) == (20, 1, 20), (
+        f"a 20-pid burst must publish n 20, spaced_firings 1 and 20 distinct writers: "
+        f"{sec}"
     )
 
 

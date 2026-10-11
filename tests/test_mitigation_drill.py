@@ -408,9 +408,13 @@ def test_read_publishes_median_and_n_per_surface_and_still_says_never_run(tmp_pa
 
     state = tmp_path / "one.json"
     _record(state, "session_cancel", 0.042, "only")
+    # exact-equality again, and #2551 has to spend it on a seventh key rather than
+    # quietly widen one: `distinct_pids` is the count spacing cannot supply — one
+    # reading has one writer, and the count that matters is the one that comes apart
+    # from `n` when twenty processes write inside one minute.
     assert mitigation_state.read(path=state)["session_cancel"] == {
         "classification": "in-flight", "seconds": 0.042, "at": "only",
-        "median_seconds": 0.042, "n": 1, "spaced_firings": 1,
+        "median_seconds": 0.042, "n": 1, "spaced_firings": 1, "distinct_pids": 1,
     }, "a one-reading series must report its own stop-time as its median"
 
     _record(state, "pool_pause", None, "only", classification="dispatch-only")
@@ -469,6 +473,49 @@ def test_every_reading_carries_the_pid_that_wrote_it(tmp_path):
         "the latest-reading copy beside classification/seconds/at carries the "
         "same attribution as the history entry it duplicates"
     )
+
+
+def test_read_counts_the_distinct_pids_behind_a_surface(tmp_path):
+    """#2551 clause 4's read() half — the count that tells a burst from a series.
+
+    Two files, the same `n`, the same stamps, and one number apart. The left column is
+    the box's file from 2026-10-11: 20 readings, 20 pids, nineteen seconds wide, which
+    `spaced_firings` correctly calls ONE firing but which is nothing like 20 hourly
+    drills that happen to have been written to the same file. The right column is a
+    legacy file whose rows predate attribution: `distinct_pids: 0`, which is a real
+    answer (no row names a writer) and not an empty one, so the published triple can
+    be read without guessing what a 0 meant.
+
+    Every stamp here has to parse, and the assertion below is the reason: `_stamp`
+    drops a row whose `at` will not read, so a fixture built by formatting seconds
+    arithmetically — `09:04:{45+i}` runs into `09:04:60` and `09:04:64` — silently pins
+    `spaced_firings` on fifteen rows while its docstring claims twenty. A count pinned
+    on a sample smaller than the one named is a count that was never pinned.
+    """
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    burst = tmp_path / "burst.json"
+    first = datetime(2026, 10, 11, 9, 4, 45, tzinfo=timezone.utc)
+    rows = [{"classification": "in-flight", "seconds": 0.2, "ok": True,
+             "at": (first + timedelta(seconds=i)).isoformat(timespec="seconds"),
+             "pid": 4_100_000 + i, "ppid": 4_000_000} for i in range(20)]
+    assert all(datetime.fromisoformat(r["at"]) for r in rows), (
+        "an unparseable `at` is dropped by the spacing pass rather than failing it, so "
+        "one bad stamp quietly shrinks the sample this node counts"
+    )
+    burst.write_text(json.dumps({"surfaces": {"session_cancel": {
+        **rows[-1], "history": rows}}}), encoding="utf-8")
+    got = mitigation_state.read(path=burst)["session_cancel"]
+    assert (got["n"], got["spaced_firings"], got["distinct_pids"]) == (20, 1, 20), got
+
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps({"surfaces": {"session_cancel": {
+        **rows[-1], "history": [{k: v for k, v in r.items()
+                                  if k not in ("pid", "ppid")}
+                                 for r in rows]}}}), encoding="utf-8")
+    got = mitigation_state.read(path=legacy)["session_cancel"]
+    assert (got["n"], got["spaced_firings"], got["distinct_pids"]) == (20, 1, 0), got
 
 
 def test_the_cli_records_the_invocation_that_wrote_it(tmp_path):
@@ -664,3 +711,464 @@ def test_newest_reading_at_is_the_seat_s_witness_and_none_when_there_is_none(tmp
     broken = tmp_path / "broken.json"
     broken.write_text("{not json", encoding="utf-8")
     assert mitigation_state.newest_reading_at(path=broken) is None
+
+
+# ── #2551: one drill records at a time, and a drill never drills itself ─────
+#
+# #2431's burst turned out not to be one process looping. `drill_pool_pause` starts
+# a real `WorkerPool` over a scratch temp-dir queue
+# (`scripts/mitigation_drill.py`, `drill_pool_pause`), and `WorkerPool.start()`
+# creates the scheduler task whose first action is the maintenance seat that SPAWNS
+# the drill (`workers/pool.py`, `_scheduler_loop` → `_maybe_mitigation_drill`),
+# against `workers.maintenance.mitigation_drill.enabled: true` in `config.yaml` and
+# a queue with no `last_drill_at` watermark to hold it off. Every drill therefore
+# spawns a drill, and the seat's `_drill_proc` — correctly process-local, since
+# `poll()` is the only honest liveness check for a child the seat itself owns —
+# cannot see a child of a child. Re-measured in this worktree on 2026-10-11 at
+# 09:12Z: one CLI drill run, and 41 s later a second
+# `… -m scripts.mitigation_drill --wait-free-window 3600` orphaned onto ppid 1487
+# (`systemd --user`), on a box whose live `mitigation_drill.json` held 20 readings
+# per surface from 20 distinct pids inside 22 seconds.
+#
+# Two bounds follow. A machine-wide slot that exactly one drill may hold while it
+# measures and records — `app.atomic_io.commit_lock` on the state file, refused
+# rather than waited, because a drill that queued behind another would measure the
+# same moment anyway. And a marker a drill puts on its own process for its own
+# duration, so the seat inside its synthetic pool declines instead of handing it a
+# second drill; `ppid` beside `pid` is what makes that chain readable off the file
+# if it ever happens again.
+
+
+class _FakeProc:
+    """A stand-in `Popen` handle: the seat only ever asks it `poll()`."""
+
+    pid = 4242
+
+    def poll(self):
+        return None
+
+
+def test_a_second_drill_declines_while_one_holds_the_slot(tmp_path, monkeypatch, capsys):
+    """#2551 clause 1 — one drill records at a time, machine-wide.
+
+    The first `main()` run records one reading per surface. Then a drill that is
+    *already running* — held here by the same `commit_lock` the drill itself takes,
+    which is the machine-wide primitive `app/atomic_io.py` ships and which the box
+    already had two zero-byte files for under `logs/locks/` during the 20-pid burst:
+    those are `atomic_write_text`'s per-WRITE flock, which serialises one file
+    replacement and plainly did not exclude a second drill — and the second run must
+    come back having done nothing. Not "measured, then lost the merge": declined,
+    with no reading of its own, so `n` says 1 both before and after.
+
+    The refusal is immediate rather than a wait: a drill that queued behind another
+    would fire two seconds late into the same round-hold gap and record a second
+    reading for the same firing, which is the very inflation #2431 is about.
+    """
+    import json
+
+    from app import atomic_io, paths
+
+    state = tmp_path / "mitigation_drill.json"
+    monkeypatch.setattr(paths, "MITIGATION_DRILL_STATE", state)
+    monkeypatch.setattr(D, "live_status", lambda url, timeout=3.0: None)
+
+    assert D.main([]) == 0, "the first drill did not run"
+    capsys.readouterr()
+    after_first = mitigation_state.read(path=state)
+    assert (after_first["session_cancel"]["n"], after_first["pool_pause"]["n"]) == (1, 1)
+
+    with atomic_io.commit_lock(state, timeout=0.0):
+        rc = D.main([])
+
+    out = capsys.readouterr()
+    assert rc == 2, (
+        f"a drill that could not take the slot exited {rc}; 2 is what a drill that "
+        f"measured nothing returns, and 0 would report a reading that does not exist"
+    )
+    report = json.loads(out.out)
+    assert report["surfaces"] == [] and report["ok"] is False, (
+        f"a declined drill still printed measured surfaces: {report}"
+    )
+    assert report["declined"] and "drill" in report["declined"], (
+        f"the report must say it declined and why, got {report.get('declined')!r}"
+    )
+    assert "refused" not in out.err and "declined" in out.err, (
+        f"stderr was {out.err!r}: a drill that stood aside for another drill is not "
+        "the same event as one the round hold refused, and the two lines are what a "
+        "reader of server.err tells apart afterwards"
+    )
+    after_second = mitigation_state.read(path=state)
+    assert (after_second["session_cancel"]["n"],
+            after_second["pool_pause"]["n"]) == (1, 1), (
+        "the declined drill recorded anyway, which is the race the slot exists to "
+        "close: two drills merging the same file lose one of them silently"
+    )
+
+
+def test_the_slot_is_taken_after_the_wait_not_across_it(tmp_path, monkeypatch):
+    """The bound is on measuring, not on waiting — and the order is deliberate.
+
+    A seat-spawned drill carries `--wait-free-window 3600`, and on 2026-10-11 the
+    round hold was engaged 09:05:05Z with drills sitting in that window. A drill that
+    took the slot before it waited would hold it for the whole hour and every later
+    firing would decline without ever looking at the hold; taking it after the wait
+    means the one that wakes up first is the one that measures, and the rest stand
+    aside in milliseconds. This node pins the order by probing the slot from inside
+    the status read that is keeping the drill waiting: while it waits, the slot is
+    free, so a hold engaged for the whole window costs the series nothing but the
+    window.
+    """
+    from app import atomic_io, paths
+
+    state = tmp_path / "mitigation_drill.json"
+    monkeypatch.setattr(paths, "MITIGATION_DRILL_STATE", state)
+    clock = {"t": 0.0}
+    monkeypatch.setattr(D, "_sleep",
+                        lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(D, "_monotonic", lambda: clock["t"])
+    reads = {"n": 0}
+
+    def held(url, timeout=3.0):
+        reads["n"] += 1
+        if reads["n"] == 1:
+            try:
+                with atomic_io.commit_lock(state, timeout=0.0):
+                    pass
+            except TimeoutError as e:
+                raise AssertionError(
+                    "the drill held the machine-wide slot while it was still waiting "
+                    "for the round hold to release: with the 3600 s window the seat "
+                    "passes, that drill would hold the slot for the hour and every "
+                    "later firing would decline without ever looking at the hold"
+                ) from e
+        return _hold(True)
+
+    monkeypatch.setattr(D, "live_status", held)
+    assert D.main(["--wait-free-window", "60"]) == 2, (
+        "a drill whose whole window had the hold engaged must exit 2, not run"
+    )
+    assert reads["n"] == 5, (
+        f"{reads['n']} status reads for a 60 s window: the wait polled a different "
+        "number of times than the window and interval say, so the slot probe above "
+        "may never have run while the drill was waiting"
+    )
+    assert not state.exists(), "a refused drill recorded a reading"
+
+
+_HOLDER_SRC = """
+import sys, time
+from pathlib import Path
+from app import mitigation_state as m
+
+with m.drill_slot(path=Path(sys.argv[1])) as held:
+    if not held:
+        sys.exit(3)
+    Path(sys.argv[2]).write_text(str(__import__('os').getpid()))
+    time.sleep(float(sys.argv[3]))
+"""
+
+
+def test_the_slot_is_contended_across_processes_not_only_across_fds(tmp_path):
+    """#2551 clause 1 across the boundary an flock exists for: two OS processes.
+
+    `test_a_second_drill_declines_while_one_holds_the_slot` proves the slot is not
+    re-entrant within this process, which is a necessary thing to know and is not the
+    claim. An advisory file lock earns its place in this item because it is NOT
+    per-process: the pair #2551 was filed over was twenty processes, and every witness
+    of them was in a different address space. Two fds in one process cannot show that —
+    only two processes can — so the holder here is a child that takes the slot and sits
+    on it, and the challenger is the real CLI in a second child. Neither can see the
+    other's descriptors; the only thing between them is the lock file.
+
+    Output goes to FILES, not pipes, for the reason the #2431 node above spells out at
+    length: a pipe couples this node to an EOF it does not need, and what is being
+    checked is the exit code, the report word, and the absence of a reading.
+    """
+    import os
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "LLOYD_DATA": str(tmp_path),
+           "PYTHONPATH": str(repo_root)}
+    state = tmp_path / "mitigation_drill.json"
+    marker = tmp_path / "holder-holds"
+    out = tmp_path / "drill.out"
+    err = tmp_path / "drill.err"
+
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER_SRC, str(state), str(marker), "30"],
+        cwd=repo_root, env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.time() + 20
+        while not marker.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert marker.exists(), (
+            "the holder child never took the slot, so nothing here was contended"
+        )
+        holder_pid = int(marker.read_text())
+        assert holder_pid != os.getpid(), (
+            "the holder is this process, which would leave the node asserting about an "
+            "fd rather than about a second process"
+        )
+
+        with open(out, "wb") as o, open(err, "wb") as e:
+            drill = subprocess.Popen(
+                [sys.executable, "-m", "scripts.mitigation_drill",
+                 "--status-url", "http://127.0.0.1:9/x"],
+                cwd=repo_root, env=env, stdout=o, stderr=e)
+            rc = drill.wait(timeout=120)
+
+        # The URL is dead, so there is no round hold to refuse on: the only thing that
+        # can stop this drill is the slot, and the only writer it could have had is the
+        # holder. A drill whose status read refused would take exit 2 for the wrong
+        # reason, which is why the report word and the absent file are both checked and
+        # not just the code.
+        said = out.read_text() + err.read_text()
+        assert rc == 2, f"the challenged drill exited {rc} on a held slot: {said}"
+        assert "declined" in said, (
+            f"a drill that stands aside must say so in its own words: {said}"
+        )
+        assert str(holder_pid) in said, (
+            f"the decline names no holder, so a reader cannot tell who was drilling: "
+            f"{said}"
+        )
+        assert not state.exists(), (
+            "the challenged drill recorded a reading while another process held the "
+            "slot, which is the exact loss this bound exists to prevent"
+        )
+    finally:
+        holder.terminate()
+        holder.wait(timeout=20)
+
+
+async def test_a_drill_never_starts_another_drill(tmp_path, monkeypatch):
+    """#2551 clause 2 — the recursion, cut where it starts.
+
+    `drill_pool_pause` runs a real `WorkerPool` over a scratch queue, and that pool's
+    scheduler seat is the very thing that spawns drills. So a drill marks its own
+    process for its own duration and the seat declines to spawn one into it.
+
+    The control after the drill is what makes this a test and not a restatement: the
+    same `maybe_run_mitigation_drill`, on the same kind of watermark-less queue with
+    the same config block, is asserted to SPAWN the moment the process is not marked.
+    Without that pair, "no spawn happened" could only mean the seat never ticked or
+    the config said off — which is exactly how #2333's own trigger sat reading `{}`
+    for a week while every other node in the file stayed green.
+    """
+    import json
+
+    import app.config as app_config
+    from workers import maintenance as M
+    from workers.queue import WorkQueue
+
+    monkeypatch.setattr(M, "_drill_proc", None)
+    # The seat reads its switch off `app.config.CONFIG` at call time, so the test
+    # supplies the block rather than inheriting whatever this box's config.yaml says
+    # today: with the drill off, "it did not spawn" is true for the wrong reason.
+    MAINT = {"enabled": False, "mitigation_drill": {"enabled": True}}
+    monkeypatch.setattr(app_config, "CONFIG",
+                        {"workers": {"maintenance": MAINT}})
+
+    seat_ticks, spawns = [], []
+    # Bound BEFORE the patch. A spy that looks the name up on the module after
+    # `setattr` calls itself, and dies in a recursion that looks exactly like the bug
+    # this node is about without being it.
+    real = M.maybe_run_mitigation_drill
+
+    def spy(queue, cfg, *, now=None, popen=None):
+        block = ((cfg or {}).get("mitigation_drill") or {})
+        seat_ticks.append((bool(block.get("enabled")),
+                           mitigation_state.drill_recursion_blocked()))
+        return real(queue, cfg, now=now,
+                    popen=lambda argv, **kw: spawns.append(list(argv)) or _FakeProc())
+
+    monkeypatch.setattr(M, "maybe_run_mitigation_drill", spy)
+
+    state = tmp_path / "mitigation_drill.json"
+    await D.run(None, state_path=state)
+
+    assert seat_ticks, (
+        "the maintenance seat never ticked inside the drill's own synthetic pool, so "
+        "this node pinned nothing — the recursion is real only because `start()` runs "
+        "that seat, and the fix is invisible if it does not"
+    )
+    assert all(enabled for enabled, _ in seat_ticks), (
+        f"the seat inside the drill read a config that does not ask for a drill: "
+        f"{seat_ticks} — with it off the seat spawns nothing anyway, and the marker "
+        "would be untested"
+    )
+    assert all(blocked for _, blocked in seat_ticks), (
+        "the seat ran inside a drill with the process unmarked, which is the "
+        "condition that wrote 20 readings from 20 pids in 22 seconds on 2026-10-11"
+    )
+    assert spawns == [], f"a drill spawned a drill: {spawns}"
+
+    got = mitigation_state.read(path=state)
+    assert (got["session_cancel"]["n"], got["pool_pause"]["n"]) == (1, 1), (
+        f"one firing must write exactly one reading per surface, got {got}"
+    )
+    import os as _os
+    written = json.loads(state.read_text())["surfaces"]
+    assert [r["pid"] for s in ("session_cancel", "pool_pause")
+            for r in written[s]["history"]] == [_os.getpid()] * 2, (
+        "both surfaces must be written by the one drill that ran"
+    )
+
+    # The control: same function, same watermark-less queue, same config, in a
+    # process that is not a drill — and it spawns.
+    q = WorkQueue(tmp_path / "workers.db")
+    out = M.maybe_run_mitigation_drill(
+        q, dict(MAINT),
+        popen=lambda argv, **kw: spawns.append(list(argv)) or _FakeProc())
+    assert "spawned" in out, (
+        f"the seat did not spawn even outside a drill ({out}), so the assertion above "
+        "that it spawned nothing inside one proves nothing"
+    )
+    assert len(spawns) == 1 and spawns[0][1:3] == ["-m", "scripts.mitigation_drill"]
+    assert not mitigation_state.drill_recursion_blocked(), (
+        "the drill's marker outlived the drill: every later seat tick in this process "
+        "would now decline, quietly stopping the hourly series the whole item exists "
+        "to restore"
+    )
+
+
+def test_a_reading_carries_the_ppid_of_the_process_that_wrote_it(tmp_path):
+    """#2551 clause 3 — a drill that spawned a drill is visible in the bytes.
+
+    `invocation` cannot tell a seat's child from a drill's child: both are spawned
+    from the identical argv (`mitigation_drill_argv`), which is exactly why the
+    2026-10-11 report could count 20 CLI-attributed readings off one logged seat
+    spawn and not say which parent each had. `ppid` beside `pid` says it: 20 readings
+    with 20 pids and 1 ppid is one drill that spawned 19; 20 readings with 20 pids and
+    pids spread over hours is a series.
+
+    The other half is the file that already exists on the box: a reading written
+    before this field existed has no `ppid`, and it has to read back as a null
+    `ppid` rather than a missing key or a raised KeyError — the reader is a status
+    route, and it goes silent on the control it was asked about if it throws here.
+    """
+    import json
+    import os
+
+    state = tmp_path / "mitigation_drill.json"
+    _record(state, "session_cancel", 0.2, "2026-10-11T09:05:07+00:00")
+    entry = json.loads(state.read_text())["surfaces"]["session_cancel"]
+    assert entry["history"][-1]["pid"] == os.getpid()
+    assert entry["history"][-1]["ppid"] == os.getppid(), (
+        f"the reading must name the parent too, got {entry['history'][-1]}"
+    )
+    assert entry["ppid"] == os.getppid(), (
+        "the latest-reading copy beside classification/seconds/at carries the same "
+        "attribution as the history entry it duplicates"
+    )
+
+    legacy_no_history = tmp_path / "legacy.json"
+    legacy_no_history.write_text(json.dumps({"surfaces": {"session_cancel": {
+        "classification": "in-flight", "seconds": 0.07, "ok": True,
+        "at": "2026-10-08T17:17:44+00:00", "pid": 111}}}), encoding="utf-8")
+    got = mitigation_state.read(path=legacy_no_history)["session_cancel"]
+    assert (got["n"], got["spaced_firings"]) == (1, 1), (
+        f"a reading written before ppid existed changed the counts the route "
+        f"publishes: {got}"
+    )
+    stored = mitigation_state._readings(
+        json.loads(legacy_no_history.read_text())["surfaces"]["session_cancel"])
+    assert stored[-1]["ppid"] is None, (
+        "a stored reading with no ppid must read back as a null ppid, not raise "
+        "KeyError at whoever is trying to find out whose drill it was"
+    )
+
+    legacy_no_ppid = tmp_path / "legacy_history.json"
+    legacy_no_ppid.write_text(json.dumps({"surfaces": {"session_cancel": {
+        "classification": "in-flight", "seconds": 0.07, "ok": True,
+        "at": "2026-10-08T17:17:44+00:00",
+        "history": [{"classification": "in-flight", "seconds": 0.07, "ok": True,
+                     "at": "2026-10-08T17:17:34+00:00", "pid": 111,
+                     "invocation": None},
+                    {"classification": "in-flight", "seconds": 0.08, "ok": True,
+                     "at": "2026-10-08T17:17:44+00:00", "pid": 112,
+                     "invocation": None}]}}}), encoding="utf-8")
+    two = mitigation_state.read(path=legacy_no_ppid)["session_cancel"]
+    assert (two["n"], two["spaced_firings"]) == (2, 1), (
+        f"the two pre-ppid readings now read as {two}"
+    )
+    stored_two = mitigation_state._readings(
+        json.loads(legacy_no_ppid.read_text())["surfaces"]["session_cancel"])
+    assert [r["ppid"] for r in stored_two] == [None, None], (
+        "a history written without the field reads back with it null for every "
+        "entry, which is what lets a reader say 'unattributed' rather than crash"
+    )
+
+
+def test_a_drill_exits_within_5s_of_recording_even_on_a_pipe_nobody_reads(tmp_path):
+    """#2551 clause 5 — `… | tail -25` returns, so children cannot pile up.
+
+    The shape is the one that swallowed the round's own measurement: one pipe for
+    both streams (which is what a merged-capture caller sees), nobody reading it, and
+    the writer a drill. What hung was not the write — the report is ~1.5 KB, nowhere
+    near the 64 KiB buffer — it was EOF. The drill's synthetic pool spawned a second
+    drill with stderr INHERITED by design (a refusal reason belongs in server.err),
+    so that child held the write end of the pipe open for its own
+    `--wait-free-window 3600`, and every process further down the chain inherited it
+    again. `tests/test_mitigation_drill.py::test_the_cli_records_the_invocation_that_wrote_it`
+    documents hitting this and routing around it with file redirects; this node pins
+    the fix instead, at the bound the item sets.
+
+    Measured from the moment the reading lands on disk, because that is the moment
+    the clause sets its five seconds from: the drill then has to be gone and its
+    pipe closed, with nobody draining it.
+    """
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+
+    repo_root = Path(D.__file__).resolve().parents[1]
+    state = tmp_path / "mitigation_drill.json"
+    argv = [sys.executable, "-m", "scripts.mitigation_drill",
+            "--status-url", "http://127.0.0.1:9/x"]
+    proc = subprocess.Popen(
+        argv, cwd=str(repo_root), stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        start_new_session=True, env={**os.environ, "LLOYD_DATA": str(tmp_path)})
+    try:
+        deadline = time.monotonic() + 60.0
+        while not state.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert state.exists(), (
+            f"the drill wrote no reading within 60 s; log: "
+            f"{proc.peek_pipe(1) if hasattr(proc, 'peek_pipe') else ''}"
+        )
+        started = time.monotonic()
+        out, _ = proc.communicate(timeout=5.0)
+        took = time.monotonic() - started
+    except subprocess.TimeoutExpired:
+        descendants = subprocess.run(
+            ["ps", "-eo", "pid,ppid,args"], capture_output=True, text=True
+        ).stdout
+        raise AssertionError(
+            "the drill's pipe never reached EOF within 5 s of its own reading — the "
+            "signature of a descendant drill still alive holding the inherited "
+            "stderr, which is what `… | tail -25` used to hang on. ps now:\n"
+            + "\n".join(ln for ln in descendants.splitlines()
+                        if "mitigation_drill" in ln)
+        ) from None
+    finally:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        proc.wait(timeout=10)
+    assert took < 5.0 and proc.returncode == 0, (
+        f"the drill closed its own pipe {took:.2f}s after recording and exited "
+        f"{proc.returncode}: {out[-500:]}"
+    )
+    assert '"classification": "in-flight"' in out, (
+        f"the report never reached the pipe: {out[-500:]}"
+    )

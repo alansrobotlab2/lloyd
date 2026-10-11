@@ -66,6 +66,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import sys
 import tempfile
 import time
@@ -309,19 +310,39 @@ async def run(status: Optional[dict] = None, *, state_path: Optional[Path] = Non
     test, a REPL, whatever loop left the 20 readings #2431 is about — leaves it
     null, and that is what makes the file self-explaining. `pid` is stamped by
     `mitigation_state.record()` itself, so attribution does not depend on any
-    caller remembering to pass it."""
+    caller remembering to pass it.
+
+    Two bounds wrap the measuring (#2551). `mitigation_state.drill_process()` marks
+    this process as a drill for the duration, which is what stops the maintenance seat
+    inside `drill_pool_pause`'s own synthetic pool from spawning a drill into the run
+    that is drilling — the recursion whose 20-pid burst this whole item is about. And
+    `mitigation_state.drill_slot()` is the machine-wide one-live-writer bound: a second
+    drill that arrives while one holds the slot comes back `declined`, having measured
+    nothing, because two drills merging this file lose one of them with nothing to show
+    it and one reading per firing is the series' whole unit.
+    """
     reason = refusal(status)
     if reason:
         return {"refused": reason, "surfaces": [], "ok": False}
-    surfaces = [
-        await drill_session_cancel(overrides.get("session_cancel")),
-        await drill_pool_pause(overrides.get("pool_pause")),
-    ]
     from app import mitigation_state
-    try:
-        mitigation_state.record(surfaces, path=state_path, invocation=invocation)
-    except Exception as e:  # the measurement is the report; a lost write is a note
-        print(f"mitigation drill: could not record state: {e}", file=sys.stderr)
+    with mitigation_state.drill_process():
+        with mitigation_state.drill_slot(path=state_path) as held:
+            if not held:
+                holder = mitigation_state.drill_slot_pid(path=state_path)
+                return {"refused": None,
+                        "declined": ("another drill is recording"
+                                     + (f" (pid {holder})" if holder else "")),
+                        "surfaces": [], "ok": False}
+            surfaces = [
+                await drill_session_cancel(overrides.get("session_cancel")),
+                await drill_pool_pause(overrides.get("pool_pause")),
+            ]
+            try:
+                mitigation_state.record(surfaces, path=state_path,
+                                        invocation=invocation)
+            except Exception as e:  # the report stands; a lost write is a note
+                print(f"mitigation drill: could not record state: {e}",
+                      file=sys.stderr)
     return {
         "refused": None,
         "surfaces": surfaces,
@@ -376,11 +397,51 @@ def main(argv: Optional[list[str]] = None) -> int:
         status = live_status(args.status_url)
     report = asyncio.run(run(status, invocation=_invocation()))
     print(json.dumps(report, indent=2))
-    if report["refused"]:
-        print(f"refused: {report['refused']}", file=sys.stderr)
+    # A drill that stood aside measured nothing, exactly as one that was refused did,
+    # and it gets its own word on stderr because the two need different follow-ups: a
+    # refusal says the round hold is driving, a decline says something is already
+    # drilling — and on 2026-10-11 "something is already drilling" was itself the
+    # incident, twenty times over inside one minute.
+    stood_aside = report.get("declined") or report.get("refused")
+    if stood_aside:
+        kind = "declined" if report.get("declined") else "refused"
+        print(f"{kind}: {stood_aside}", file=sys.stderr)
         return 2
     return 0 if report["ok"] else 1
 
 
+def _exit_now(code: int) -> None:
+    """Leave by the exit syscall, having written the report (#2551 clause 5).
+
+    The mechanism, stated at the level the evidence supports. A pipe's reader sees EOF
+    only when EVERY write end is closed, and until this round cut the recursion the
+    drill's own synthetic pool spawned a child carrying our stdout — that child lives
+    for its whole `--wait-free-window 3600`, so a caller who ran
+    `python -m scripts.mitigation_drill … | tail -25` sat waiting for EOF from a
+    descendant long after our report had arrived. The recursion gate is what fixes
+    that, because a process we did not start is beyond anything we can do here.
+
+    What this function does bound is OUR end of the pipe, and the shutdown it would
+    otherwise unwind: `sys.exit` raises, and interpreter shutdown joins non-daemon
+    threads and closes stdio before the descriptor is really gone. So the descriptor is
+    closed by the exit syscall the instant the report is flushed, and nothing about how
+    the drill's loop and pool were torn off can delay a caller that already has its
+    answer. With the recursion cut this is the smaller half of the fix — a plain
+    `sys.exit(main())` child reaches EOF in well under a second on this box — and it is
+    kept because the clause it exists for is a bound on time, not on cause.
+
+    Flushing first is the entire cost. The report is on its way out, then this process
+    is gone and its end of every pipe it inherited is closed by the kernel.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.flush()
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    # Not `sys.exit(main())`: see `_exit_now`. The hazard is a pipe on a CLI
+    # invocation, which is the only thing that reaches this block — `main()` stays a
+    # plain-returning function for the tests and any other in-process caller.
+    _exit_now(code)

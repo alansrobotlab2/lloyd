@@ -632,11 +632,12 @@ def maybe_run_mitigation_drill(queue: WorkQueue, cfg: Optional[dict] = None, *,
     the caller's log line, never an exception: this runs on the scheduler loop's
     seat, and a tick that raises takes every source's enqueue pass with it.
 
-    Four gates, in the order a reader needs them:
+    Five gates, in the order a reader needs them:
     `workers.maintenance.mitigation_drill.enabled` (off unless config says
-    otherwise), the hourly `interval_seconds` against its OWN `_LAST_DRILL_AT`
-    watermark, no drill subprocess of ours still running, and the subprocess
-    route itself.
+    otherwise), this process not being a drill itself (#2551 — the drill runs a pool,
+    and this seat lives on a pool), the hourly `interval_seconds` against its OWN
+    `_LAST_DRILL_AT` watermark, no drill subprocess of ours still running, and the
+    subprocess route itself.
 
     The watermark is stamped BEFORE the spawn, not after: a failed spawn costs an
     hour, while a successful spawn whose stamp failed costs a second drill running
@@ -655,6 +656,19 @@ def maybe_run_mitigation_drill(queue: WorkQueue, cfg: Optional[dict] = None, *,
     settings = {**MITIGATION_DRILL_DEFAULTS, **((cfg or {}).get("mitigation_drill") or {})}
     if not settings["enabled"]:
         return {"skipped": "disabled"}
+
+    # Gate zero of #2551: not this process, if this process is a drill. The seat is a
+    # tenant of `WorkerPool.start()`, and `scripts/mitigation_drill.py`'s
+    # `drill_pool_pause` starts a REAL pool over a scratch temp-dir queue to measure
+    # the pause — so every drill that ever fired re-armed this very seat against a
+    # queue with no `last_drill_at` to hold it off, and drilled itself. Nothing
+    # bounded that chain: the file on 2026-10-11 held 20 readings per surface from 20
+    # distinct pids inside 22 seconds, with drills orphaned onto `systemd --user`.
+    # Declined without stamping the hour, because a drill has no business spending
+    # the series' next firing on itself.
+    from app import mitigation_state
+    if mitigation_state.drill_recursion_blocked():
+        return {"skipped": "inside-a-drill"}
 
     if _drill_proc is not None:
         rc = _drill_proc.poll()

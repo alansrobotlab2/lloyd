@@ -863,6 +863,26 @@ is a `last_drill_at` its own process did not write — a handle dies with the
 process that spawned it, so a restart used to cost an hour of the series with no
 line anywhere.
 
+**One drill, machine-wide.** The 2026-10-08 reading named the wrong cause, and #2551
+found it: those twenty processes were drills spawning drills. `drill_pool_pause` starts
+a real `WorkerPool` to measure the pause, `start()` runs the maintenance seat on that
+pool's scratch queue, and the scratch queue has no `last_drill_at` — so the hourly gate
+passes on the first tick and the drill is handed a copy of itself, with no bound on the
+chain. Four things close it. `mitigation_state.drill_process()` marks the running
+drill's own process, and the seat declines with `skipped: inside-a-drill` while
+`drill_recursion_blocked()` says the process asking is one — before the watermark, so a
+drill cannot spend the series' next firing on itself. `mitigation_state.drill_slot()` is
+the flock that lets exactly one drill record at a time, an `app.atomic_io.commit_lock`
+named off the state file so a candidate venv and the live backend contend for the same
+slot; a second drill takes none of it and comes back `declined` having recorded nothing,
+which is also why the slot is taken after the round-hold wait and never across it. Each
+reading carries `ppid` beside `pid`, and `read()` publishes `distinct_pids` beside `n`
+and `spaced_firings`: 20 readings from 20 pids inside a minute is a chain, the same 20
+over 20 hours is the series, and spacing cannot tell those two apart.
+`scripts/mitigation_drill.py::_exit_now` is the
+last, because a descendant holding the inherited stdout kept a piped caller waiting on a
+report that had already arrived.
+
 The dashboard reads the pool through `app/routers/dashboard.py::_workers`,
 off the loop via `asyncio.to_thread`; `completed` is excluded from the "open"
 counts because it dominates the depth table.
