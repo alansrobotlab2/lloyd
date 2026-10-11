@@ -26,9 +26,26 @@ slots. It also makes `limit` mean the *pool* rather than the answer, which has t
 said to the reranker explicitly: qmd caps its own ranking window at
 `RERANK_CANDIDATE_LIMIT = 40`, applied as `fused.slice(0, candidateLimit)` *before*
 it reranks, so a deep ask that leaves the default still only ever ranks 40
-candidates. Recorded against the live daemon, named segments, pool 240, rerank on,
-the same wire text the client sends: the five files enter the reply at ranks 14, 17,
-35, 39 and 175. Zero of the five at a pool of 40.
+candidates. Recorded against the live daemon on 2026-09-14, named segments, pool 240,
+rerank on, the same wire text the client sends: the five files entered that reply at
+ranks 14, 17, 35, 39 and 175. Zero of the five at a pool of 40.
+
+Those five numbers are one corpus on one day, not properties of the corpus: the ranks
+move with the corpus. `qmd-watcher.sh` runs `qmd update` + `qmd embed` on every vault
+write (60 s cooldown) and the nightly jobs write constantly, so the same ask answers at
+different depths on different days — re-measured on 2026-10-11 over that same arm, the
+five landed at 8, 45, 49, 51 and 141 in a 240-row pool. Nothing in this file asserts
+those depths as current; the live node asserts only that the five reach the pool.
+`measure_pre_rank_pool_ranks` is what measures them today:
+
+    cd ~/lloyd && PYTHONPATH=$PWD:$PWD/tests \\
+        ~/lloyd/.venvs/lloyd/bin/python tests/test_doc_candidate_pool.py
+
+which prints, per arm, the reranker the recall took, the pre-rank pool width and where
+each of the five landed. The footer also drives production's own arm, and on 2026-10-11
+that was a red by construction: `RECALL_RERANKER` is `"djev"` there, whose doc leg asks
+32 rows rather than 240, so four of the five never reach its pool at all — the gap
+recorded on #2571 and owed to the eval owner, not assumed away here.
 
 The rows below are that recorded arm, in reply order, with the task files at their
 observed ranks. What is under test there is everything downstream of the daemon's
@@ -41,9 +58,12 @@ things hold the daemon-side half, and neither is a unit test:
     of the file, POSTs the real payload through the real `_vault_recall` to the index
     production queries and asserts the same five paths enter the pre-rank pool. Run by
     hand (2026-09-14): 235-row pool, the five at ranks 14, 17, 35, 39 and 175 — the
-    recording's own numbers. It is marked `live_vault` because a round under test does
-    not control that corpus, and the gate runs `-m "not live_vault"`, so this file is
-    NOT the thing that stops a retrieval regression in review.
+    recording's own numbers. Its failure text now reports which reranker ran, how wide
+    the pool the demote loop actually saw was, and where each of the five landed, so a
+    red from a scheduled run is readable without re-running anything (#2571). It is
+    marked `live_vault` because a round under test does not control that corpus, and
+    the gate runs `-m "not live_vault"`, so this file is NOT the thing that stops a
+    retrieval regression in review.
   - The thing that does is the eval: `doc_hit_rate`, `mrr_doc`, `ndcg10` and
     `doc_recall_avg` are ARMED metrics of the paired promotion comparison
     (`workers/sources/automod_regression.py:101`), measured on a pinned corpus on
@@ -52,6 +72,7 @@ things hold the daemon-side half, and neither is a unit test:
     and a promotion fails on it. That is where retrieval is gated; this file gates the
     client, which is the half the eval cannot localise.
 """
+import inspect
 import urllib.error
 
 import pytest
@@ -136,18 +157,36 @@ def _paths_seen_by_the_demoter(monkeypatch):
     the pool before the sort and the `[:limit]` slice. Spying its pattern is the
     only seam onto the pre-ranking pool in that config.
     """
-    seen: list = []
+    spy = _DemoteLoopSpy(vault._DAILY_LOG_RE)
+    monkeypatch.setattr(vault, "_DAILY_LOG_RE", spy)
+    return spy.seen
 
-    class Spy:
-        def __init__(self, inner):
-            self._inner = inner
 
-        def search(self, text, *a, **kw):
-            seen.append(text or "")
-            return self._inner.search(text, *a, **kw)
+class _DemoteLoopSpy:
+    """Wrap `vault._DAILY_LOG_RE` and record every path the demote loop looks at.
 
-    monkeypatch.setattr(vault, "_DAILY_LOG_RE", Spy(vault._DAILY_LOG_RE))
-    return seen
+    The seam `_paths_seen_by_the_demoter` installs and the measurement below share one
+    implementation, because the number a failure prints has to be the number the
+    assertion was judged on — two spies means two pools.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.seen: list = []
+
+    def search(self, text, *a, **kw):
+        self.seen.append(text or "")
+        return self._inner.search(text, *a, **kw)
+
+
+def _always(rows):
+    """A daemon that answers the same reply whatever it is asked."""
+    return lambda payload: [dict(r) for r in rows]
+
+
+def _reply_missing(prefix):
+    """The recorded reply with every row of one expectation taken out."""
+    return [r for r in _snapshot_reply() if not r["title"].startswith(prefix)]
 
 
 # ── The request: name the segments, ask for a pool, widen the rerank window ───
@@ -392,60 +431,297 @@ EVAL_DOC_PREFIXES = ("autonomy/24-", "autonomy/48-", "autonomy/51-",
                      "autonomy/67-", "autonomy/74-")
 
 
+def measure_pre_rank_pool_ranks(post=None, fusion=None, reranker=None):
+    """Drive the recall's document leg once and report what its pre-rank pool held.
+
+    Returns `{"arm", "asked", "pool_width", "ranks", "returned"}`: the arm
+    `vault.recall_reranker()` answered at call time, the payload the client posted, the
+    number of distinct paths the demote loop saw before the sort and the `[:limit]`
+    slice, and for each of the five eval expectations the 1-based rank it reached in
+    that pool, or `None` for absent.
+
+    One measurement, read by two readers — the assertions below judge it, and the
+    failure text and the `__main__` footer print the same numbers. That is deliberate:
+    a witness computed separately from the value under test is a second number free to
+    disagree with the first, and #2571 is exactly the cost of reading a live system
+    twice and believing both.
+
+    `post` stands in for the daemon's answer, which is the only way to prove a failure
+    message renders without breaking retrieval somewhere to make it fire. Left None it
+    is the real `_qmd_post`, byte for byte: the real POST is the live node's whole
+    point, so it passes nothing. `fusion` and `reranker` pin the two knobs that decide
+    what gets asked for; left None the drive takes whatever the module is configured
+    with, because the report has to name which retriever *ran*, not which one this
+    function picked — and under the djev arm the ask is 32 rows, not 240.
+    """
+    original = (vault._qmd_post, vault._DAILY_LOG_RE,
+                vault.RECALL_QMD_FUSION, vault.RECALL_RERANKER)
+    spy = _DemoteLoopSpy(original[1])
+    answer = post if post is not None else original[0]
+    payloads: list = []
+
+    def spy_post(payload):
+        payloads.append(payload)
+        return answer(payload)
+
+    try:
+        vault._qmd_post = spy_post
+        vault._DAILY_LOG_RE = spy
+        if fusion is not None:
+            vault.RECALL_QMD_FUSION = fusion
+        if reranker is not None:
+            vault.RECALL_RERANKER = reranker
+        arm = vault.recall_reranker()      # at call time: this is the arm reported
+        out = vault._vault_recall({"query": KG_QUERY, "limit": 20, "grep_code": False,
+                                   "include_facts": False, "expand_graph": False})
+    finally:
+        (vault._qmd_post, vault._DAILY_LOG_RE,
+         vault.RECALL_QMD_FUSION, vault.RECALL_RERANKER) = original
+
+    pool = list(dict.fromkeys(spy.seen))
+    return {
+        "arm": arm,
+        "asked": payloads[0] if payloads else {},
+        "post_count": len(payloads),
+        "pool_width": len(pool),
+        "ranks": {p: next((i + 1 for i, path in enumerate(pool) if path.startswith(p)),
+                          None) for p in EVAL_DOC_PREFIXES},
+        "returned": len(out.get("documents") or []),
+    }
+
+
+def _pool_witness(m):
+    """The two facts a red on the live node has to carry, rendered from one reading.
+
+    Names the arm the recall took at call time, so a red under the 32-row djev arm is
+    distinguishable from a red under the 240-row qmd arm without re-running anything;
+    and the pool width the demote loop actually saw next to where each of the five
+    expectations landed, so "the pool was empty", "the pool was narrow" and "the pool
+    was wide but the file was not in it" are three different sentences.
+    """
+    asked = m["asked"] or {}
+    landed = ", ".join(
+        f"{p}={'absent' if m['ranks'][p] is None else 'rank ' + str(m['ranks'][p])}"
+        for p in EVAL_DOC_PREFIXES)
+    return (f"[witness] reranker arm taken at call time: {m['arm']}; doc leg asked "
+            f"limit={asked.get('limit')} candidateLimit={asked.get('candidateLimit')} "
+            f"over {len(asked.get('collections') or [])} collections "
+            f"(POST count {m['post_count']}); pre-rank pool width the demote loop saw: "
+            f"{m['pool_width']}; the five expectations in that pool: {landed}; "
+            f"documents returned: {m['returned']}")
+
+
+def _assert_the_five_reach_the_pre_rank_pool(post=None, fusion=None, reranker=None):
+    """The live node's assertions, in one function so a stubbed drive can prove them.
+
+    Every message carries `_pool_witness`. Before #2571 the only width in the text was
+    `pool width {vault.RECALL_DOC_POOL}` — the width the client ASKED for, not the
+    width the pool had — and nothing named which reranker ran, so the nightly report
+    of a red here could not be read. The numbers now printed are the ones the
+    assertions below judge, from `measure_pre_rank_pool_ranks`.
+    """
+    m = measure_pre_rank_pool_ranks(post=post, fusion=fusion, reranker=reranker)
+    w = _pool_witness(m)
+    asked = m["asked"] or {}
+    assert asked, f"no query POST reached the qmd daemon on :8181 — {w}"
+    assert asked.get("collections") == list(vault.VAULT_SEGMENTS), (
+        "the live doc leg did not name the segments, so it is asking for a global "
+        f"top-k again — the shape that returned none of the five at any depth — {w}")
+    assert asked["limit"] >= vault.RECALL_DOC_POOL, (
+        f"the live doc leg asked for {asked['limit']} rows, below the "
+        f"{vault.RECALL_DOC_POOL}-row pool the 2026-09-14 recording needs — {w}")
+    assert asked.get("candidateLimit") == asked["limit"], (
+        "the live ask did not widen qmd's own rerank window with it, so rows past "
+        f"the daemon's default 40 candidates come back unranked — {w}")
+    assert m["pool_width"], (
+        "the doc leg POSTed and the pre-rank pool is empty — nothing survived the "
+        f"fold — {w}")
+    missing = [p for p in EVAL_DOC_PREFIXES if m["ranks"][p] is None]
+    assert not missing, (
+        f"{len(missing)} of the five expectations never reached the pre-rank pool: "
+        f"{missing} — {w}")
+    assert m["returned"], f"the query still has to return an answer — {w}"
+
+
 @pytest.mark.live_vault
-def test_the_live_daemon_hands_the_five_task_files_to_the_pre_rank_pool(monkeypatch, collection_fusion):
+def test_the_live_daemon_hands_the_five_task_files_to_the_pre_rank_pool(collection_fusion):
     """The half every test above cannot check: the daemon, over the real seam.
 
     Each assertion above answers a reply this file wrote, so the only failure they can
     report is a client-side cut. This one posts the payload `_vault_recall` really
     builds — `VAULT_SEGMENTS` named, `limit` and `candidateLimit` both at
-    `RECALL_DOC_POOL` (240), rerank on — to the index on :8181, and asserts the five
-    files reach the pool the final ranker is handed. It is the only assertion here that
-    can fail because retrieval, rather than the client, stopped returning them.
+    `RECALL_DOC_POOL` (240) under the arm the test session pins — to the index on
+    :8181, and asserts the five files reach the pool the final ranker is handed. It is
+    the only assertion here that can fail because retrieval, rather than the client,
+    stopped returning them.
+
+    Its failure text now carries its own witnesses: which reranker arm the recall took,
+    how wide the pool the demote loop actually saw was, and where each of the five
+    landed (#2571). The node reads a corpus that is re-indexed on every vault write, so
+    a red is expected sometimes; what was missing was a readable one. A scheduled run
+    that hit this had to guess between a retrieval regression and an unrelated live
+    state, and the guess cost an item plus a triage pass.
 
     Marked `live_vault`, which the automod gate excludes with `-m "not live_vault"`: a
     round under test does not control this corpus, and nightly jobs rewrite it. Not
-    skip-guarded on the daemon being up — same reading as `test_conversation_relations`
-    — because an unreachable daemon is exactly the outage this test exists to catch.
+    guarded on the daemon answering — same reading as `test_conversation_relations` —
+    because an unreachable daemon is exactly the outage this test exists to catch.
     Run by hand against the corpus production is serving; cite the run in the round
-    report, do not count the gate as having run it.
+    report, do not count the gate as having run it. The recorded depths are not
+    asserted as current; `measure_pre_rank_pool_ranks` re-measures them (#2571).
     """
-    payloads: list = []
-    real_post = vault._qmd_post
+    _assert_the_five_reach_the_pre_rank_pool()
 
-    def spy_post(payload):
-        payloads.append(payload)
-        return real_post(payload)          # straight through: the POST is the point
 
-    monkeypatch.setattr(vault, "_qmd_post", spy_post)
-    seen = _paths_seen_by_the_demoter(monkeypatch)
+def test_a_forced_missing_expectation_reports_the_arm_the_pool_width_and_every_rank():
+    """#2571 clauses 1, 2 and 3 together: the witnesses render, on a real red.
 
-    out = vault._vault_recall({"query": KG_QUERY, "limit": 20, "grep_code": False,
-                               "include_facts": False, "expand_graph": False})
+    The reply is the recorded one with `autonomy/67-` taken out, so an expectation is
+    genuinely absent from the pool while nothing client-side is broken — and the drive
+    is the live node's own assertions over that answer, not a paraphrase of them. What
+    is under test is the message: an `assert` whose witness no node ever reaches is
+    prose, and the message that did render before this change named neither the arm nor
+    the width, which is why a nightly red here cost an item and a triage pass.
+    """
+    gone = "autonomy/67-"
+    with pytest.raises(AssertionError) as caught:
+        _assert_the_five_reach_the_pre_rank_pool(
+            post=_always(_reply_missing(gone)), fusion="collection", reranker="qmd")
+    text = str(caught.value)
+    assert "reranker arm taken at call time: qmd" in text, text
+    assert "pre-rank pool width the demote loop saw: 239" in text, text
+    assert f"{gone}=absent" in text, text
+    for prefix, rank in (("autonomy/24-", 14), ("autonomy/48-", 17),
+                         ("autonomy/74-", 35), ("autonomy/51-", 39)):
+        assert f"{prefix}=rank {rank}" in text, text
 
-    assert payloads, "no query POST reached the qmd daemon on :8181"
-    doc_leg = payloads[0]
-    assert doc_leg["collections"] == list(vault.VAULT_SEGMENTS), (
-        "the live doc leg did not name the segments, so it is asking for a global "
-        "top-k again — the shape that returned none of the five at any depth")
-    assert doc_leg["limit"] >= vault.RECALL_DOC_POOL, (
-        f"the live doc leg asked for {doc_leg['limit']} rows, below the "
-        f"{vault.RECALL_DOC_POOL}-row pool the recorded ranks require")
-    assert doc_leg.get("candidateLimit") == doc_leg["limit"], (
-        "the live ask did not widen qmd's own rerank window with it, so rows past "
-        "the daemon's default 40 candidates come back unranked")
 
-    pool = list(dict.fromkeys(seen))
-    assert pool, (
-        f"the doc leg POSTed and the pre-rank pool is empty — the daemon answered "
-        f"{len(payloads)} request(s) and nothing survived the fold")
-    missing = [p for p in EVAL_DOC_PREFIXES
-               if not any(path.startswith(p) for path in pool)]
-    assert not missing, (
-        f"{len(missing)} of the five expectations never reached the pre-rank pool of "
-        f"{len(pool)} real rows (pool width {vault.RECALL_DOC_POOL}): {missing}"
-    )
-    assert out["documents"], "the query still has to return an answer"
+def test_a_red_with_the_production_reranker_pinned_names_that_arm_and_its_32_row_ask(
+        monkeypatch):
+    """The two arms are now tellable apart from one red, which they were not (#2571).
+
+    `vault.RECALL_RERANKER` is `"djev"` in production, where the doc leg asks
+    `recall_djev_pool()` = 32 rows with its own rerank window at 20 instead of a 240-row
+    pool — so four of the five expectations cannot reach that pool at any depth, and a
+    red taken there looked exactly like a retrieval regression on the recorded arm. The
+    same assertions are driven here with that arm pinned and the GPU stubbed, and the
+    text has to name the arm and the width it really asked for.
+    """
+    from app import djev
+
+    monkeypatch.setattr(djev, "enabled", lambda: True)
+    monkeypatch.setattr(djev, "rank",
+                        lambda query, candidates, **kw: [
+                            {"index": i, "score": float(len(candidates) - i)}
+                            for i in range(len(candidates))])
+    shadow: list = []
+    monkeypatch.setattr(vault, "_djev_shadow_rerank",
+                        lambda *a, **k: shadow.append(a))
+
+    asked_pool = vault.recall_djev_pool()
+    with pytest.raises(AssertionError) as caught:
+        _assert_the_five_reach_the_pre_rank_pool(
+            post=lambda payload: _snapshot_reply()[:int(payload.get("limit", 20))],
+            fusion="collection", reranker="djev")
+    text = str(caught.value)
+    assert "reranker arm taken at call time: djev" in text, text
+    assert f"doc leg asked limit={asked_pool} candidateLimit=20" in text, text
+    assert asked_pool == 32, (
+        "this node's prose names the 32-row djev arm from the item; if the canvas "
+        f"width moved, the prose moved with it: {asked_pool}")
+    assert not shadow, (
+        "djev ranked, so the shadow seam must not also run: it would write a row to "
+        "the log the floors are calibrated from")
+
+
+def test_a_refusing_daemon_fails_the_live_assertion_rather_than_softening_it():
+    """The witnesses are a report, not an excuse to stop failing on an outage.
+
+    `QmdUnavailable` is the condition this node exists to catch. The same drive with a
+    daemon that refuses to answer has to end in a red — not a pass, and not a
+    `pytest.skip`, which a nightly report shows as "unverified" and which is how a live
+    node stops being read at all.
+    """
+    def refuse(payload):
+        raise vault.QmdUnavailable("connection refused on :8181")
+
+    outcome: list = []
+    try:
+        try:
+            _assert_the_five_reach_the_pre_rank_pool(post=refuse, fusion="collection",
+                                                     reranker="qmd")
+        except vault.QmdUnavailable:
+            outcome.append("raised")        # the outage reached the caller: a red
+        except AssertionError as red:
+            outcome.append(str(red))
+        except pytest.skip.Exception as turned_away:   # type: ignore[attr-defined]
+            pytest.fail(
+                "the live assertion turned an unreachable daemon into a non-result "
+                f"instead of a red: {turned_away}")
+    finally:
+        assert outcome, "an unreachable daemon left the live assertion passing"
+    if outcome[0] != "raised":
+        assert "pre-rank pool width the demote loop saw: 0" in outcome[0], outcome[0]
+
+
+def test_the_live_node_still_carries_the_live_vault_mark_and_no_answer_of_its_own():
+    """#2571's own constraint, pinned, so the next round does not find the cheap way.
+
+    The item records that the runbook step "is NOT the fix and was not edited from this
+    run: no skip/xfail was added, the `live_vault` mark was not dropped", and asks for
+    the node to keep its real POST. Witnesses make a red readable, which is precisely
+    the pressure that makes a guard look tempting, so the constraint is a node now.
+    """
+    node = test_the_live_daemon_hands_the_five_task_files_to_the_pre_rank_pool
+    marks = sorted({m.name for m in getattr(node, "pytestmark", [])})
+    assert marks == ["live_vault"], (
+        "the live node keeps its `live_vault` mark and carries no other — an xfail or "
+        f"a skipif here is the thing this item forbids: {marks}")
+    src = inspect.getsource(node).lower()
+    for banned in ("skip", "xfail", "_qmd_post", "post="):
+        assert banned not in src, (
+            f"the live node's source mentions {banned!r}: it must keep the real POST "
+            "with no answer of its own and keep failing when the daemon is down")
+
+
+def test_the_measurement_reports_the_pool_and_ranks_the_recording_witnesses():
+    """The command the header names, pinned on a stubbed answer rather than a corpus.
+
+    Fed the recorded reply, `measure_pre_rank_pool_ranks` has to reproduce the
+    recording's own depths — which is the same arithmetic the failure witnesses are
+    built from, so the numbers a red prints and the numbers the header tells a reader
+    to go and measure come out of one implementation and cannot disagree.
+    """
+    m = measure_pre_rank_pool_ranks(post=_always(_snapshot_reply()),
+                                    fusion="collection", reranker="qmd")
+    assert m["arm"] == "qmd" and m["post_count"] == 1, m
+    assert m["asked"]["limit"] == m["pool_width"] == vault.RECALL_DOC_POOL, m
+    expected = {p: next(rank for path, rank in RECORDED_RANKS.items()
+                        if path.startswith(p)) for p in EVAL_DOC_PREFIXES}
+    assert m["ranks"] == expected, m
+
+
+def test_the_module_header_dates_every_rank_it_states():
+    """#2571 clause 5: the header's ranks are a recording, never the corpus's state.
+
+    The header stated `14, 17, 35, 39 and 175` as where the five files enter the reply.
+    The same arm measured on 2026-10-11 put them at 8, 45, 49, 51 and 141: the index is
+    re-indexed on every vault write, so both are true of their own day and the old text
+    let a reader treat the first as a fact to check a red against. So: every place the
+    header states that quintuple has its measurement date next to it, and the command
+    that re-measures the depths is named.
+    """
+    flat = " ".join((__doc__ or "").split())
+    assert "measure_pre_rank_pool_ranks" in flat, (
+        "the header must name what to run to re-measure the ranks today")
+    assert "move with the corpus" in flat, (
+        "the header must say the depths move, not state them as the corpus's ranks")
+    stated = [i for i in range(len(flat)) if flat.startswith("14, 17, 35, 39", i)]
+    assert stated, "the header should still record what was measured, dated"
+    for i in stated:
+        window = flat[max(0, i - 200):i + 200]
+        assert "2026-09-14" in window, (
+            f"a stated quintuple with no measurement date near it: …{window}…")
 
 
 @pytest.mark.live_vault
@@ -522,7 +798,6 @@ def test_the_widenings_price_is_stated_as_a_fresh_query_not_a_cached_repeat():
     3,672-4,027 ms at pool 240 rerank-on, 119-183 ms for the identical repeat of
     a query just run at 240, and 150-210 ms at pool 240 with the rerank skipped.
     """
-    import inspect
     from pathlib import Path
 
     src = Path(vault.__file__).read_text(encoding="utf-8")
@@ -573,3 +848,30 @@ def test_the_widenings_price_is_stated_as_a_fresh_query_not_a_cached_repeat():
     # the comment cannot cite a ceiling nobody wrote. (`R` is in scope from the
     # ceiling check above.)
     assert set(R.LATENCY_BUDGET_MS) == {R.CONTEXT_NIGHTLY, R.CONTEXT_PAIRED_CHECK}
+
+
+if __name__ == "__main__":
+    # The command the header names, runnable as the header says it (#2571). Prints only:
+    # every claim in this file stays a node, so a readable line here is never a pass —
+    # it is the reading a red's `[witness]` text would have shown.
+    #
+    #   cd ~/lloyd && PYTHONPATH=$PWD:$PWD/tests \
+    #       ~/lloyd/.venvs/lloyd/bin/python tests/test_doc_candidate_pool.py
+    import json as _json
+
+    def _report(label: str, **kw) -> None:
+        try:
+            m = measure_pre_rank_pool_ranks(**kw)
+        except Exception as exc:                        # noqa: BLE001 - a probe reports
+            print(f"{label}: FAILED {type(exc).__name__}: {exc}")
+            return
+        asked = m["asked"] or {}
+        print(f"{label}: {_pool_witness(m)}")
+        print(f"    payload: {_json.dumps({k: asked.get(k) for k in ('limit', 'candidateLimit', 'rerank')}, sort_keys=True)}")
+
+    print("as the module is configured right now")
+    _report("  default")
+    print("the two arms, pinned one at a time (the djev line asks the live GPU 2)")
+    _report("  qmd arm ", fusion="collection", reranker="qmd")
+    _report("  djev arm", fusion="collection", reranker="djev")
+    print("no assertion ran; the live node is the assertion", flush=True)
