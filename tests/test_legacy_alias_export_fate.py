@@ -169,6 +169,20 @@ def test_no_recurring_autonomy_task_is_told_to_run_an_exporter():
     scripts/memory/kg_rebuild.py freeze`), not the Python method name — no task
     file has ever spelled `export_json`. Reads the live task dir, which is what
     the scheduler reads (precedent: test_automod_hardening, test_backlog_tags_shape).
+
+    #2561 is the hit this fires on that is not an instruction at all. #79's weekly
+    retention sweep took on a `facts-quarantine-*` store and its numbered list named
+    `scripts/memory/kg_rebuild.py` as the writer that moves a superseded facts tree
+    into it — true, useful, and nothing to do with export. But the needle is a bare
+    substring, `kg_rebuild.py` sits in EXPORT_JSON_CALLERS above, and a task's
+    front matter IS the prompt `_build_task_prompt` hands the worker, so a sentence
+    of provenance reddened main. The rule the fix follows: a recurring task that has
+    to refer to one of these two scripts names WHAT IT DOES ("the KG rebuild that
+    swaps the facts tree"), never the path, because the only reading of one of these
+    paths inside a recurring task's instructions is "run this". Answer a hit here by
+    rephrasing the task, not by widening the scan back over the Activity Log or
+    dropping a needle — the log is excluded because #24's and #74's honest
+    freeze-pause lines are in it, and the needles are the point.
     """
     assert AUTONOMY_DIR.is_dir(), f"{AUTONOMY_DIR} missing — the pin would pass vacuously"
     needles = ["export_json", "kg_rebuild.py", "kg_migrate_to_sqlite.py",
@@ -355,3 +369,85 @@ def test_constant_still_names_the_legacy_path_for_the_migration():
     live-tree file, and quietly changing its value would be the worse bug."""
     from app.paths import VAULT_FACTS_ALIASES, VAULT_FACTS_ROOT
     assert VAULT_FACTS_ALIASES == VAULT_FACTS_ROOT / "entity-aliases.json"
+
+
+# ── #2561 clause 3: the green came from the vault, not from a marker ────────
+
+#: The four nodes the gate listed as failing at 0ae3064f, each with the file that
+#: defines it. The first is this file's own; the three retention nodes are the
+#: vault-count guards #2559 moved to eighteen, whose second name this list spells
+#: as it reads on disk today (`…says_eighteen_stores…`) rather than as #2561's
+#: original filing spelled it (`…says_seventeen_stores…`), which no longer exists.
+_GREEN_AT_HEAD: dict[str, list[str]] = {
+    "tests/test_legacy_alias_export_fate.py": [
+        "test_no_recurring_autonomy_task_is_told_to_run_an_exporter",
+    ],
+    "tests/test_retention_sweep.py": [
+        "test_the_skill_says_eighteen_stores_and_its_table_has_a_row_per_report_line",
+        "test_the_table_guard_refuses_a_row_short_and_a_row_long",
+        "test_the_task_description_names_every_store_the_sweep_prints",
+    ],
+}
+
+
+def test_the_four_head_green_nodes_carry_no_skip_or_xfail_marker():
+    """#2561 clause 3: the four named nodes exist, are collected, and carry no marker.
+
+    The clause is not "they pass" — the run says that — it is *how* main got green: no
+    test skipped, xfailed, deleted or re-marked `live_vault`. Read statically out of the
+    two source files, so no environment can satisfy it. Three claims, each one a
+    different way of faking green:
+
+      * each named function still EXISTS in its file — a deleted test is the cheapest
+        green on the box, and the file would still exit 0;
+      * none carries a `skip`/`skipif`/`xfail` decorator, and neither file sets a
+        module-level `pytestmark` naming one, which is the same thing one level up;
+      * none skips UNCONDITIONALLY: a `skip(...)` call that is not nested inside an `if`
+        is a marker written as a statement.
+
+    What it deliberately does not forbid is a CONDITIONAL `pytest.skip` on an unreachable
+    vault, which three of these four nodes have always had (`test_the_skill_says…`,
+    `test_the_table_guard…`, `test_the_task_description…` each read
+    `~/obsidian/skills/retention-sweep/SKILL.md` or `~/obsidian/autonomy/79-…md` and
+    skip when the vault is away). That guard predates #2561 and is not "to get there";
+    the run that settles whether it was taken is the acceptance run itself, which showed
+    all four PASSED, not skipped — and clause 3's ban is on the marker, not on the vault
+    being mounted.
+    """
+    forbidden = {"skip", "skipif", "xfail", "live_vault", "fault_injection"}
+    found: list[str] = []
+    problems: list[str] = []
+    for rel, names in _GREEN_AT_HEAD.items():
+        tree = ast.parse((REPO / rel).read_text(encoding="utf-8"), filename=rel)
+        by_name = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        for node in tree.body:  # module-level pytestmark = [pytest.mark.xfail, …]
+            if isinstance(node, ast.Assign) and any(
+                    getattr(t, "id", "") == "pytestmark" for t in node.targets):
+                words = {a.attr for a in ast.walk(node) if isinstance(a, ast.Attribute)}
+                if words & forbidden:
+                    problems.append(f"{rel}: module pytestmark names "
+                                    f"{sorted(words & forbidden)}")
+        for name in names:
+            fn = by_name.get(name)
+            if fn is None:
+                problems.append(f"{rel}::{name} is GONE from the file")
+                continue
+            found.append(name)
+            for dec in fn.decorator_list:
+                words = {a.attr for a in ast.walk(dec) if isinstance(a, ast.Attribute)}
+                if words & forbidden:
+                    problems.append(f"{rel}::{name} carries a "
+                                    f"{sorted(words & forbidden)} decorator")
+            # Every skip-shaped call must sit under an `if`, or it always runs.
+            guarded: set[int] = set()
+            for outer in ast.walk(fn):
+                if isinstance(outer, ast.If):
+                    for inner in ast.walk(outer):
+                        guarded.add(id(inner))
+            for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
+                words = {a.attr for a in ast.walk(call.func) if isinstance(a, ast.Attribute)}
+                words |= {getattr(call.func, "id", "")}
+                if words & {"skip", "skipif", "xfail"} and id(call) not in guarded:
+                    problems.append(f"{rel}::{name} skips unconditionally")
+    assert not problems, "clause 3 forbids these: " + "; ".join(problems)
+    assert len(found) == 4, f"expected the four named nodes, found {len(found)}: {found}"
