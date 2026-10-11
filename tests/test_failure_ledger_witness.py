@@ -1,16 +1,20 @@
 """The vault witnesses in `backlog/data/`, checked for real.
 
-Five witnesses and one retired path. #2079 clause 6 quotes figures whose bytes are
+Six witnesses and one retired path. #2079 clause 6 quotes figures whose bytes are
 tracked here as 2 dated rows; #2175 clause 5 asks that the twelve `vault_land` rows
 behind its count stay re-derivable from committed bytes rather than out of a ledger
 another job appends to; #2228 clause 5 asks that the gate report of the round that item
 was resumed from be re-derivable the same way, and with `gate.json` — a path already
-holding another item's witness, so not a free name — left byte-for-byte as it was; and
+holding another item's witness, so not a free name — left byte-for-byte as it was;
 #2383 owed two, a 25-row extract behind its `3-in-25` baseline and the gate report of
 the round it was resumed from, both of which its owed entry told it to write ONTO
-retired or taken paths. Following that wording is what left main red and got #2387
-filed, so the two #2383 witnesses are the ones this file exists to have warned about.
-All five are checked here against the file on disk, not a fixture built here. The
+retired or taken paths; and #2523 owes the 221 rows behind #2385's red-tree figure — the
+implement runs that finished with no round at all — whose owed entry named the SAME
+retired mirror path #2387 was filed over, so those bytes are committed at a dated
+sibling and re-derived from there, never from the store #1975 folds. Following that
+wording is what left main red and got #2387 filed, so the two #2383 witnesses are the
+ones this file exists to have warned about.
+All six are checked here against the file on disk, not a fixture built here. The
 retired path is the promotions-ledger mirror the retention sweep took out of the vault —
 #2054's para, #2064's `ffc04ce5` — and no witness may stand on it: #2178 was filed when
 #2175's extract did exactly that, and #2387 when #2383's did it again.
@@ -21,7 +25,7 @@ runs in the default `pytest tests/` the gate's `tests` rung executes. A node beh
 a module-level skip would be a claim with no witness — which is the exact thing
 clause 6 is about.
 
-It ships nine nodes: eight over the vault bytes —
+It ships ten nodes: nine over the vault bytes —
 `test_the_witness_is_a_dated_file_not_the_retired_mirror_path`,
 `test_the_witness_holds_the_two_live_rows_the_clause_quotes`,
 `test_every_witness_row_is_an_error_alert_of_the_quoted_family`,
@@ -29,7 +33,8 @@ It ships nine nodes: eight over the vault bytes —
 `test_the_2175_vault_land_extract_is_a_dated_file_too`,
 `test_the_2228_gate_witness_is_a_dated_sibling_and_the_mirror_is_untouched`,
 `test_the_2383_extract_is_a_dated_file_reproducing_the_unadjudicated_baseline`,
-`test_the_2383_gate_witness_is_a_dated_sibling_because_gate_json_was_taken` — plus
+`test_the_2383_gate_witness_is_a_dated_sibling_because_gate_json_was_taken`,
+`test_the_2523_red_tree_extract_reproduces_the_two_roundless_items` — plus
 `test_the_docstring_names_every_node_this_file_ships`, the rail that re-checks this
 paragraph against the module's own bytes on every run.
 
@@ -46,6 +51,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -77,6 +83,23 @@ WITNESS_2383_NAME = "2026-10-08.2383-promotions-witness.jsonl"
 #: onto a dated sibling — so this byte copy took the sibling route and `gate.json` was
 #: left as it was found.
 WITNESS_2383_GATE_NAME = "2026-10-08.2383-SM_20261008_002738.gate-witness.json"
+#: #2523's red-tree extract: the 221 ledger rows behind #2385's "2 of the red-tree items
+#: attempted opened no round". #2385's owed entry named the retired mirror path for them,
+#: so they are committed at a dated sibling and re-derived here — the route #2178 and
+#: #2387 set for the two extracts above. The name is the one the item asked for; the
+#: directory's `YYYY-MM-DD.<item>-<subject>-witness` convention would name it
+#: `2026-10-08.2523-red-tree-witness.jsonl`, and the item's own name is kept so this
+#: round is not graded on a rename nobody asked for.
+WITNESS_RED_TREE_NAME = "promotions-red-tree-20261008.jsonl"
+#: The window the projection was taken over, inclusive at both ends and compared as ISO
+#: strings — the same field the store itself is aged on.
+RED_TREE_WINDOW = ("2026-09-26T18:19:58Z", "2026-10-08T02:46:25Z")
+#: The keys the projection was allowed to keep, and nothing else. Every row of the live
+#: store carries a dozen more (`ts`, `session_id`, `outcome`, the reasoning-bank fields);
+#: dropping them is what fits 221 rows into 62,109 bytes instead of the store's 31 MB.
+RED_TREE_KEYS = frozenset({
+    "created_at", "event", "phase", "item_id", "round_id", "num_turns", "closed_by",
+    "base", "action", "node_ids", "nodes", "acceptance"})
 
 
 def witness_rows():
@@ -389,6 +412,181 @@ def test_the_2383_gate_witness_is_a_dated_sibling_because_gate_json_was_taken():
         "documents a failure a later reader cannot check"
 
 
+def red_tree_attempt(rows):
+    """The two figures #2385 quotes, counted over a list of rows and nothing else.
+
+    Split out of the node below on purpose: this function takes rows and no path, so a
+    figure it returns cannot have come from the store the extract was cut out of. That is
+    the whole point of committing the extract — #1975 folds `promotions.jsonl`, and a
+    figure whose only home is that file has an expiry date nobody announced.
+    """
+    finished = [r for r in rows if r.get("event") == "backlog_implement"
+                and r.get("phase") == "finished"]
+    return ({r["item_id"] for r in finished},
+            {r["item_id"] for r in finished if r.get("round_id") is None})
+
+
+def test_the_2523_red_tree_extract_reproduces_the_two_roundless_items():
+    """#2523: the bytes behind #2385's "the only 2 that opened no round" are committed,
+    and the figure comes out of those bytes alone.
+
+    What the figure is. Across `2026-09-26T18:19:58Z..2026-10-08T02:46:25Z` the loop filed
+    a red tree for 55 items, and 48 of them have a `backlog_implement` row that reached
+    `phase: finished`. Exactly 2 of those finished rows carry a null `round_id` — item 1846
+    on 2026-09-29 at 14 turns, item 2384 on 2026-10-08 at 22 — and those two are the loss
+    #2385 is about: an implement turn spent with no round opened, so 36 turns bought
+    nothing but the filing.
+
+    Two numbers this docstring exists to carry, because a later reader cannot re-derive
+    them from the extract and will re-derive something else. (1) #2385's report quotes
+    "50 attempted". Under the definition the null-round count is actually taken on — items
+    with a `phase: finished` `backlog_implement` row in the window — the population is 48,
+    and 48 is all these bytes can yield; the only other census the extract supports is the
+    55 items with a `red_tree_filed` row. "50" is not hiding in here, so a re-derivation
+    that expects it will conclude the extract is broken when it is intact. (2) The
+    committed extract is 221 rows — measured, 221 newline characters over 221 parsed
+    objects, 62,109 bytes. The projection as filed in #2523 said 220; the projection
+    yields 221, and a node written to assert 220 would have to fail on the very bytes it
+    was written to protect.
+
+    Why the bytes are committed at all: the only other home they have is the live
+    promotions ledger, 31,995,042 bytes over 22,257 rows at triage and ~30x the
+    `WITNESS_MAX_BYTES` ceiling on what an owed entry may order whole — and #1975 folds
+    that store, so a figure that lives only there stops being re-derivable the day the
+    fold rewrites it. Why they are NOT at the path the owed entry named: that path is the
+    promotions mirror the retention sweep retired (#2054's para, #2064's `ffc04ce5`),
+    which this file's first node and `tests/test_diagnosis_fanout_replay.py` both keep
+    absent. Writing an extract there is what got #2387 filed over #2383's, and the fix
+    #2387 applied there is the fix applied here: the bytes stay, the name becomes a
+    sibling, and a node reads them.
+    """
+    from scripts.automod import backlog as B
+
+    data = paths.VAULT_ROOT / "backlog" / "data"
+    witness = data / WITNESS_RED_TREE_NAME
+    assert witness.is_file(), (
+        f"{WITNESS_RED_TREE_NAME} must be committed: #2385's two round-less items are "
+        "only re-derivable from bytes with history, the automod state dir is not a git "
+        "tree, and the live store is a folding target (#1975)")
+    assert not (data / "promotions.jsonl").exists(), \
+        "the extract belongs on the dated sibling; the retired mirror stays absent"
+
+    # The seam this round crosses is a process one, not a function one: the figure has to
+    # survive #1975's next fold, and that fold runs elsewhere and rewrites a 31,995,042-byte
+    # file. Nothing in this module may reach that file — an import of the module that
+    # resolves it, or a spelling of the environment variable that redirects it, is the only
+    # way a later edit could. Each mark is built by concatenation because a scan that
+    # forbids a token has to avoid spelling it: the first version of this node wrote the
+    # state directory's name into its own assert and then tripped over its own assert text.
+    # Four marks: the state directory, the variable that redirects it, and the two import
+    # forms that reach the module resolving it — the review rung caught that the first
+    # version named only the `import X`-with-`from` spelling, so a dotted-module import would
+    # have walked past the scan straight into the live store. Every mark below is built by
+    # concatenation because a scan that forbids a token cannot spell it: the first version
+    # wrote the state directory's name into its own assert text and tripped over it.
+    own = Path(__file__).read_text(encoding="utf-8")
+    for mark in ("lloyd" "-automod", "LLOYD_AUTOMOD" "_STATE",
+                 "automod import " "state", "scripts.automod" ".state"):
+        assert mark not in own, (
+            f"this file now names the live promotions-ledger store ({mark!r}), so the "
+            "figures below are no longer derived from committed bytes alone — which is "
+            "the only thing that keeps them alive across the fold")
+
+    # Clause 1's word is COMMITTED, and `is_file()` alone would green-light a scratch file
+    # dropped into that directory. Every other witness node in this file stops at
+    # `is_file()` — this one goes one subprocess further, to the same `git ls-files` the
+    # item's own check and #2064's absence rail use, because the property here is history:
+    # a figure with no commit behind it is a figure #1975's fold has nothing to hold.
+    tracked = subprocess.run(
+        ["git", "-C", str(paths.VAULT_ROOT), "ls-files", "--error-unmatch",
+         str(witness.relative_to(paths.VAULT_ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{WITNESS_RED_TREE_NAME} is on disk but not tracked: "
+        f"`git ls-files --error-unmatch` said {tracked.stderr.strip() or 'nothing'}, and an "
+        "uncommitted extract is a scratch file rather than bytes with history")
+
+    # The docstring is part of what this node ships, and its two numbers are the two a later
+    # reader cannot re-derive from these bytes and will re-derive wrong instead. Pinned as
+    # prose — the shape tests/test_action_review.py uses for a preamble it needs to keep
+    # saying a thing — because the rail at the end of this file compares only node NAMES, so
+    # a docstring that quietly dropped "48" would have left the module green and the extract
+    # documented by a figure of record that its own bytes cannot produce.
+    doc = test_the_2523_red_tree_extract_reproduces_the_two_roundless_items.__doc__ or ""
+    for phrase in ("\"50 attempted\"", "the population is 48", "extract is 221 rows",
+                   "62,109 bytes", "said 220"):
+        assert phrase in doc, (
+            f"the docstring no longer states {phrase!r}, and #2385's figure is only safe "
+            "while the numbers it cannot re-derive are stated next to the bytes")
+
+    # The extract's own integrity, measured the way `wc` measures: newline CHARACTERS (the
+    # file ends with one, so `wc -l` and the parsed-row count have to agree, and an
+    # agreement is what proves no row was truncated mid-object) and `wc -c` on disk.
+    raw = witness.read_text(encoding="utf-8")
+    rows = list(fl.iter_jsonl(witness))
+    assert raw.count("\n") == len(rows) == 221, (
+        f"the extract has {raw.count(chr(10))} newline characters and parses to "
+        f"{len(rows)} rows; 221 is the count measured when it was cut, and either figure "
+        "moving means the committed bytes are no longer the projection they document")
+    assert witness.stat().st_size == 62109 == len(raw.encode("utf-8")), (
+        f"`wc -c` on the extract is {witness.stat().st_size}, not the 62,109 bytes the "
+        "projection yields")
+    assert witness.stat().st_size < B.WITNESS_MAX_BYTES, (
+        f"the extract is {witness.stat().st_size} bytes against the "
+        f"{B.WITNESS_MAX_BYTES:,}-byte ceiling an owed entry may ask for — the whole "
+        "reason this is a projection and not a copy")
+
+    # The projection's shape: the window it was cut over, inclusive, on the ISO string the
+    # store itself is aged by, and only for items a red tree was actually filed for.
+    lo, hi = RED_TREE_WINDOW
+    stamps = [str(r["created_at"]) for r in rows]
+    assert min(stamps) == lo and max(stamps) == hi, (
+        f"the extract spans {min(stamps)}..{max(stamps)}, not the window "
+        f"{lo}..{hi} #2385's figure was counted over")
+    assert all(lo <= s <= hi for s in stamps), "a row sits outside the projection's window"
+    for r in rows:
+        assert set(r) <= RED_TREE_KEYS, f"row keeps keys the projection excluded: {r}"
+    assert {r["event"] for r in rows} == {
+        "backlog_implement", "red_tree_filed", "red_tree_closed"}, (
+        "an extract of a third event is not the census of red-tree items it is named for")
+    filed_items = {r["item_id"] for r in rows if r["event"] == "red_tree_filed"}
+    assert {r["item_id"] for r in rows} == filed_items, (
+        "the extract holds a row for an item with no `red_tree_filed` row in the window, "
+        "so it is no longer a census of red-tree items and its counts mean something else")
+    assert (len(filed_items), sum(1 for r in rows if r["event"] == "red_tree_filed"),
+            sum(1 for r in rows if r["event"] == "backlog_implement"),
+            sum(1 for r in rows if r["event"] == "red_tree_closed")) == (55, 83, 109, 29), (
+        "the extract is no longer 83 filings + 109 implement rows + 29 closes over 55 "
+        "items, which is what the 221 rows are made of")
+
+    # The figure itself, out of `red_tree_attempt`, which sees rows and no path.
+    attempted, roundless = red_tree_attempt(rows)
+    assert len(attempted) == 48, (
+        f"{len(attempted)} items finished an implement in the window, not the 48 #2385's "
+        "figure is a fraction of — and not the 50 its report quotes, which is the number "
+        "these bytes cannot produce")
+    assert sorted(roundless) == [1846, 2384], (
+        f"items with a finished implement and no round are {sorted(roundless)}; the two "
+        "that opened no round are the whole motivating finding of #2385")
+    assert len(attempted - roundless) == 46, \
+        "46 of the 48 opened a round, which is the denominator of '2 of 48'"
+    assert sorted((r["item_id"], r["created_at"], r["num_turns"]) for r in rows
+                  if r.get("event") == "backlog_implement"
+                  and r.get("phase") == "finished"
+                  and r.get("round_id") is None) == [
+        (1846, "2026-09-29T17:09:14Z", 14), (2384, "2026-10-08T01:20:02Z", 22)], (
+        "the two null-round rows are no longer the rows #2385 names, so the extract "
+        "documents a finding a later reader cannot check")
+    # 54 finished rows over 48 items: the loop re-attempted items 1694, 1866 and 2218. The
+    # row/item split is pinned because "2 of 54" and "2 of 48" are different claims and the
+    # file alone does not say which one it supports.
+    finished_rows = [r for r in rows if r.get("event") == "backlog_implement"
+                     and r.get("phase") == "finished"]
+    assert len(finished_rows) == 54, (
+        f"{len(finished_rows)} finished implement rows over {len(attempted)} items — the "
+        "figure is per item, and a reader who counts rows gets a different fraction")
+
+
 def test_the_docstring_names_every_node_this_file_ships():
     """A docstring that counts its own nodes has to be checked against the file.
 
@@ -413,7 +611,7 @@ def test_the_docstring_names_every_node_this_file_ships():
         f"the module docstring advertises {sorted(advertised - shipped)} that this "
         f"file does not ship; this file ships {sorted(shipped - advertised)} the "
         "docstring never names")
-    assert len(shipped) == 9, (
-        "eight witness nodes over the vault bytes plus this rail. The count is spelled "
+    assert len(shipped) == 10, (
+        "nine witness nodes over the vault bytes plus this rail. The count is spelled "
         "out so that adding a node has to come back here and re-read the "
         "paragraph, instead of leaving it a sentence behind")
