@@ -1406,6 +1406,35 @@ mechanism. 02:10 is the one gap wide enough for the ~2 h 30 m the ten reps need 
 the nightly reflection chain, ahead of the 04:00 health report, the 05:00 qmd index
 maintenance, the 05:30 graph backup and the 06:00 retrieval eval.
 
+### The egress-arms window
+
+```bash
+systemctl --user enable --now lloyd-egress-window.timer   # 1 rep x 18 scenarios x 2 arms, daily 06:23
+```
+
+`lloyd-egress-window.service` is tracked beside it and `install-services.sh` links it
+already — its glob is over every `*.service` and `*.timer` in
+`agent-services/systemd/` — which leaves *enabling* as the only step a landing does not
+do, and an enabled-but-never-active timer is the failure #2537 found on its sibling.
+`is-enabled` alone does not prove the arming: check `is-active` or
+`show -p ActiveState` too.
+
+It runs `eval/run_egress_arms.sh 1 --on-port 8599 --drain-wait 3600` — one rep of the 18
+canary scenarios against both egress arms, the ON arm's enforcement flag set only in the
+private MCP process the window launches — for the same reason the persistence window needs
+its own unit and a harder one: the driver refuses to start while any queue row is in
+flight, so a pool-dispatched window can never start. The unit sets no
+`LLOYD_EGRESS_ENFORCE` and edits no `config.yaml`, and it leaves `LLOYD_CANARY_ROWS`
+unset so the armed rows land on the tracked corpus the canary `check` and `record` read;
+its `LLOYD_EGRESS_ARMS_ROOT` is a directory of its own under `~/lloyd-data`, which is what
+keeps the ON arm's deny rows readable after the post-run leak check.
+
+06:23 is a different time from 02:10 because of what each unit bounds: this one does not
+claim its hour avoids an automod round — rounds are resident 67.2% of the time and start
+in all 24 hours — it waits that out with an explicit one-hour drain instead, and the hour
+only keeps its engine work out of the way of the 02:10 window and the 04:00-06:00
+scheduled jobs.
+
 ---
 
 ## Part 11b — Desktop computer use

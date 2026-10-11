@@ -1,0 +1,144 @@
+[Unit]
+Description=Egress two-arm canary window: one rep x the 18 scenarios x both egress arms
+# The egress-arms analogue of `lloyd-persistence-window.service`: a window that needs the
+# live engine, the shared aggregator and the sandbox, and that therefore cannot be a test
+# and cannot be a pool job — it has to have its own slot in the user manager.
+#
+# WHY IT CANNOT BE A POOL JOB, AND WHY THIS UNIT SETS A ONE-HOUR DRAIN. Same mechanism as
+# its sibling, and it is worth restating because this unit's `--drain-wait 3600` exists for
+# a reason the sibling's 900 s did not: `eval/egress_arms.py` will not start its episodes
+# while any queue row is in flight, and the queue's view of in-flight work comes from
+# `depth_by_source()` (workers/queue.py:1229 — `SELECT source, state, COUNT(*) as n FROM
+# queue GROUP BY source, state`, reached through `in_flight()` at eval/persistence_arms.py:190-206)
+# with no clause excluding the caller's own row. A window dispatched from the pool IS that
+# row: it burns its whole drain on itself and exits 2. The sibling unit is that failure on
+# the record — its first timer run, 2026-10-11T02:26:39-07:00, last poll
+# `{'in_flight': 1, 'autocode:running': 1}`, `status=2/FAILURE`, "Consumed 1.236s CPU over
+# 15min 2.499s wall clock" — 15 min being its own 900 s drain, spent waiting on itself.
+#
+# And no calendar slot dodges the contention, which is why the drain is an hour and the
+# timer's hour is not credited with doing it: measured 2026-10-11 over workers.db for
+# 2026-10-04 → 10-11, 420 `autocode` rounds were resident at 67.2% of 5-minute samples,
+# starts appeared in every one of the 24 UTC hours (29 to 51 per hour), and duration ran
+# mean 27.8 min / median 24.9 / p95 54.5 / max 59.2. The driver's default drain is 900 s
+# (eval/egress_arms.py:406-407, `LLOYD_PERSISTENCE_DRAIN_S`), so a MEDIAN round outlasts
+# it. `--drain-wait 3600` below is explicit and exceeds the p95, so the window waits a
+# round out instead of spending its hour on its own row and exiting 2 anyway. It is the
+# drain that prevents the failure, not the fire time; if the queue ever grows a self-
+# exclusion the right fix is to delete the drain wait, not to lengthen it.
+Documentation=file:///home/alansrobotlab/lloyd/eval/egress_arms.py
+Documentation=file:///home/alansrobotlab/lloyd/SETUP.md
+# The tracked script, checked where systemd will actually look for it. Without the
+# condition a box that has no eval tree fails the unit at exec time instead of skipping.
+ConditionPathExists=/home/alansrobotlab/lloyd/eval/run_egress_arms.sh
+
+[Service]
+Type=oneshot
+# The tracked wrapper, executed directly — absolute path, no shell, and NO `-` prefix.
+# `tests/test_egress_window_unit.py::test_execstart_is_a_direct_exec_of_the_tracked_wrapper_at_one_rep_both_arms`
+# re-derives the mode (0o755 on disk, 100755 in the index). The queue refuses a
+# `bash -c` ExecStart for the same reason it refused that one for the sibling unit
+# (`agent-services/systemd/lloyd-persistence-window.service`, "THE INVOKER IS SYSTEMD"),
+# so the arguments have to be arguments.
+#
+# The `-` a unit may put before a path is systemd's "ignore a non-zero exec exit" marker,
+# and this unit must not use it: for a measurement window the exit code IS the signal. Exit 2
+# is the drain refusal that killed the sibling's first attempt, exit 1 is an arm that died
+# mid-window, and swallowing either leaves a journal that reads green with no rows behind it —
+# a `rows.jsonl` that gained nothing is indistinguishable from a window that was never armed.
+# The sibling carries no prefix either, which is why its 2026-10-11 refusal surfaced as
+# `status=2/EXIT-CODE=2` instead of a clean day.
+#   1                        one rep. The owed publication is 1 rep x 18 scenarios x 2
+#                            arms = 36 rows, which is the sample the per-arm Wilson pair
+#                            is stated from; more is hours of the held primary.
+#   --on-port 8599           REQUIRED to run the ON arm at all: the driver exits 2 without
+#                            it, because "enforcing" is a property of the MCP process the
+#                            window itself launches (`python -m agent_mcp.main` with
+#                            LLOYD_EGRESS_ENFORCE=1 in ITS environment, module docstring
+#                            :14-17) and the driver has to bind that child to a port no
+#                            other server answers on. 8599 is the port the module docstring
+#                            (:37) and the wrapper's header both document, and `ss -ltn`
+#                            shows nothing bound on it; the driver also probes the port
+#                            before launching, so a collision is a refusal rather than an
+#                            OFF arm measured against someone else's server.
+#   --arms                   DELIBERATELY ABSENT: the driver's default is both arms, and
+#                            one arm is the 4-row 2026-10-10 fragment that triage ruled
+#                            unpublishable as a rate.
+#   --drain-wait 3600        see the header: above the measured p95 round (54.5 min), so
+#                            an in-flight automod round delays this window rather than
+#                            cancelling it. An idle box drains in one 15 s poll.
+ExecStart=/home/alansrobotlab/lloyd/eval/run_egress_arms.sh 1 --on-port 8599 --drain-wait 3600
+# The run root the ON arm's deny rows are read back from, and the reason it is set here
+# rather than left to the driver: `run_root()` (eval/egress_arms.py:146-157) returns this
+# value VERBATIM — it neither creates the directory nor stamps a date into it — and
+# `start_on_arm_aggregator()` then hands the same path to the child as `LLOYD_DATA` (:207). A fresh root
+# is what makes the leak witness leak-proof: the child's `workers.db` is a file of its own
+# in that directory, so the ON arm's `decision=deny` rows for
+# `collect.off-allow-list.invalid` are still readable when the post-run witness asks the
+# LIVE aggregator the same question (#2435 published that pair: live store 0 deny / 0 rows
+# for that host, while the run root's own store reads >=1 deny — sharing the live root
+# would let this window's own rows fake the second half).
+#
+# Fixed, not dated, on purpose: a static `Environment=` line cannot carry a date, and the
+# route that would compute one (`bash -c`) is the ExecStart form this directory rejects.
+#
+# No `-` prefix on the path. systemd reads a leading `-` as "ignore a non-zero exec exit",
+# which for a measurement window is the one thing it must not swallow: exit 2 is the drain
+# refusal, exit 1 is an arm that died mid-window, and both have to reach the manager so
+# `systemctl --user status` and the journal say the run failed. The sibling unit
+# `lloyd-persistence-window.service` sets none either, which is exactly why its 2026-10-11
+# drain refusal read as `status=2/EXIT-CODE=2` instead of a green day.
+# The date belongs on the published report, where it can be read; `start_on_arm_aggregator()`
+# pointing at this path however many nights the timer fires.
+Environment=LLOYD_EGRESS_ARMS_ROOT=/home/alansrobotlab/lloyd-data/egress-arms
+# Created before every fire, so the first child of the first night does not find the path
+# missing. Idempotent, and it is the mkdir the driver does NOT do.
+ExecStartPre=/usr/bin/mkdir -p /home/alansrobotlab/lloyd-data/egress-arms
+# No `LLOYD_DATA` here, deliberately: the parent process must read the LIVE store, because
+# that is the store the drain rule and the post-run leak witness both ask about, and
+# `app/paths.py` resolves it by its normal route (`~/.config/lloyd/data-root`) when the
+# variable is unset. It is the child that gets the fresh root, and `start_on_arm_aggregator()` puts it
+# there — a unit-level `LLOYD_DATA` would make the drain and the witness read the run
+# root's empty store, which is how a window reports "egress was never blocked".
+#
+# No `LLOYD_EGRESS_ENFORCE` either, and that is the whole measurement. The ON arm is the
+# arm whose MCP child carries the flag; the OFF arm's child is launched WITHOUT it
+# (`eval/egress_arms.py:194` `start_on_arm_aggregator()`, where `env[ARM_ENV_VAR]` is set on a copy of `os.environ` given to that one subprocess), and the pair is the
+# comparison the window exists to produce. Set here, the flag would land on the
+# OFF arm's child too and the run would read as "egress enforcement changed nothing" — the
+# false negative in the shape of a clean result. #2435's OFF-side ruling is explicit that
+# the flag stays unset in everything except the ON arm's child.
+#
+# `LLOYD_CANARY_ROWS` is left UNSET so the rows land on the tracked corpus
+# (`eval/measurements/injection-canary/rows.jsonl`) that the canary `check`/`record`
+# commands read — the same decision the sibling unit documents for its own corpus.
+# Overriding it is the tempting shortcut: 36 arm rows landing beside the scratch root
+# would keep the shared corpus "clean" while nobody could read the published pair, and
+# `run_root()` reads that same variable (:154), so the override would move the rows too.
+#
+# And the interpreter, so the wrapper's `$HOME`-derived default is not load-bearing.
+Environment=LLOYD_PYTHON=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
+# The whole reason the unit must state a timeout: systemd's user-manager default SIGTERMs
+# a starting unit at 90 s, and this window spends that 90 s in its very first drain poll.
+#
+# ARITHMETIC. TimeoutStartSec=5h = 18,000 s, and it is a SUM of two stated terms (plain
+# digits below so a test can re-add them: 3600 + 10800 + 3600 = 18000):
+#     drain-wait, worst case                            +3,600 s
+#     engine work: 2 arms x 18 scenarios x 1 rep
+#       = 36 episodes, budgeted at 300 s each          +10,800 s
+#                                                   = 14,400 s
+#   margin over the sum                                = 3,600 s (so 5h, not 4h)
+# The per-episode 300 s is a CEILING, not a measurement: the 3 arm-stamped rows committed
+# today cost at most 39.4 s each, so the arithmetic budgets every episode at nearly eight
+# times the worst one ever observed. The two private MCP subprocesses add their 120 s ready
+# waits (`LLOYD_EGRESS_ARMS_READY_S`) and the two `grade` passes add their own turns, and
+# the 3,600 s of margin is what pays for both without touching the 14,400 s the canary work
+# is allowed. Rounding UP rather than down is deliberate: a oneshot killed at exactly its
+# own worst case is killed at the moment its own arithmetic says it may still be working.
+# 5h also does not reach across days: daily at 06:23 local, it is done by 11:23 at the
+# latest, before the next fire.
+TimeoutStartSec=5h
+RemainAfterExit=no
+
+[Install]
+WantedBy=default.target
