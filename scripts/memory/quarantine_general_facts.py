@@ -16,8 +16,17 @@ does is the tree move plus the two graph consequences, and nothing else:
 
   * `facts/general/` is RELOCATED, whole, to `<vault-derived-root>/facts-quarantine-<run-tag>/general/`
     — the root `kg_rebuild.py:911` already names and `facts-quarantine-20260923T070837Z` already
-    occupies beside the facts tree. Not deleted: the fact text is the only copy, and a move that
-    can be read back the next day is the difference between a quarantine and a data loss.
+    occupies beside the facts tree. Not deleted *by this script*: the fact text is the only copy,
+    and a move that can be read back the next day is the difference between a quarantine and a
+    data loss. That is not a promise the tree survives, and #2585 is the record of its having been
+    read as one. The retention sweep owns the `facts-quarantine-*` store and removes any directory
+    in it older than `FACTS_QUARANTINE_MAX_AGE_DAYS` — 30 days as this is written — aged on the run
+    tag inside the directory's own name, and the daily autonomy job runs that sweep with `--apply`,
+    unattended. So this destination has an expiry date, and both this script's reports print it:
+    `dest_deletable_on` is the run tag advanced by the horizon read out of
+    `scripts/groundskeeper/retention-sweep.py` at run time (`sweep_constant`), never by a number
+    restated here, and it is the date after which the copy this move preserved stops existing
+    unless a person has ruled it worth keeping somewhere the sweep cannot reach.
   * every active edge naming it is expired through `kg.edges.expire(edge_id, reason)`
     (`app/kg_store.py:729`), its indexed rows leave the table with the files through
     `facts_idx.reindex(paths, root=…)`, and its `entities` row goes with the existing
@@ -85,6 +94,20 @@ ENTITY = "general"
 #: root would be a second thing every later reader of `vault-derived/` has to
 #: learn — and it is the root the 09-23 precedent already occupies.
 QUARANTINE_PREFIX = "facts-quarantine-"
+
+#: The sweep that owns the horizon this mover's destination lives under, and the constant in
+#: it that carries the number (#2585). The mover reads the value out of that file's own source
+#: and never states it: a horizon written in two places is a promise that breaks the day one
+#: of them is edited, and the delete date printed below is worth nothing if it came from a
+#: number this script invented. `retention-sweep.py` has a hyphen and imports `app.paths` at
+#: module level, so it is read as text — the one assignment line, with the comment block above
+#: it left out, which is the same shape `tests/test_retention_sweep.py` reaches for.
+RETENTION_SWEEP = LLOYD / "scripts" / "groundskeeper" / "retention-sweep.py"
+RETENTION_AGE_CONSTANT = "FACTS_QUARANTINE_MAX_AGE_DAYS"
+
+#: The shape `run_tag` writes, stated once so the tag format and the parse that reads it back
+#: cannot be edited apart.
+RUN_TAG_FMT = "%Y%m%dT%H%M%SZ"
 
 #: A fact line, as the fact files actually write one: the `fact:` key of a mapping
 #: inside a `- ` list item, indented TWO spaces. See the module docstring — the
@@ -189,7 +212,73 @@ def run_tag(now: dt.datetime | None = None) -> str:
     UTC because the tag carries a `Z`, and a naive local stamp inside a name that reads as
     UTC is the #1525 class of bug: every later reader takes it as the same instant it is not.
     """
-    return (now or dt.datetime.now(dt.timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
+    return (now or dt.datetime.now(dt.timezone.utc)).strftime(RUN_TAG_FMT)
+
+
+def sweep_constant(name: str, path: Path | None = None) -> int | None:
+    """The value of one plain `NAME = <int>` assignment in the retention sweep's source.
+
+    Read as text, never imported: `retention-sweep.py` has a hyphen so it is not an importable
+    module name, importing it would run its module level, and this is the same route
+    `tests/test_retention_sweep.py` takes to read the same constants. Matching one assignment
+    line at the start of a line is also the smallest surface that can change — a commented-out,
+    renamed or expression-valued constant stops matching instead of resolving to something else.
+
+    `path` defaults to `RETENTION_SWEEP` resolved HERE, at call time, and not as a `path=
+    RETENTION_SWEEP` default: a default argument binds once at import, which would leave the
+    module attribute as a knob that looks redirectable and is not — the one thing a reader of
+    this function needs to be able to do is point it at another copy of the sweep.
+
+    None when the line is absent, commented out, or no longer a plain integer literal. That is
+    deliberately not a crash and deliberately not a default: the horizon moving out from under
+    this script is a fact the report has to carry, and a `30` filled in on the failure path
+    would be exactly the duplicated number this reader exists to prevent.
+    """
+    try:
+        text = (path if path is not None else RETENTION_SWEEP).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(rf"^{name} = (\d+)\s*$", text, re.M)
+    return int(m.group(1)) if m else None
+
+
+def deletable_on(tag: str, horizon_days: int | None) -> str | None:
+    """The UTC date the sweep becomes entitled to delete a `facts-quarantine-<tag>` directory.
+
+    The tag plus the sweep's own horizon, and nothing else. The store ages each directory on its
+    run tag (`_facts_tag_age`, `retention-sweep.py:2730`) and deletes it once `age > FACTS_QUARANTINE_MAX_AGE_DAYS`
+    (`:2812`), so the instant the comparison flips is the tag advanced by that many days, and
+    this names the UTC date that instant falls on. A date and not the instant: the horizon is a
+    count of days, and a second-granularity stamp would promise a precision the printed promise
+    does not have.
+
+    None for a tag that is not the shape `run_tag` writes, or for a horizon that could not be
+    read: no date is printed for a promise this script cannot support.
+    """
+    if horizon_days is None:
+        return None
+    try:
+        stamp = dt.datetime.strptime(tag, RUN_TAG_FMT)
+    except ValueError:
+        return None
+    return (stamp + dt.timedelta(days=horizon_days)).date().isoformat()
+
+
+def dest_fate(tag: str) -> dict:
+    """How long the destination directory survives, per the sweep's own number — not this one.
+
+    `{"horizon_days": int | None, "deletable_on": "YYYY-MM-DD" | None, "unknown": str | None}`.
+    Read once per run so the printed date and the report field cannot disagree with each other.
+    """
+    horizon = sweep_constant(RETENTION_AGE_CONSTANT)
+    date = deletable_on(tag, horizon)
+    unknown = None
+    if horizon is None:
+        unknown = (f"{RETENTION_AGE_CONSTANT} is not a plain integer assignment in "
+                   f"{RETENTION_SWEEP}, so this script cannot name the sweep's horizon")
+    elif date is None:
+        unknown = f"run tag {tag!r} is not the {RUN_TAG_FMT} instant the sweep parses"
+    return {"horizon_days": horizon, "deletable_on": date, "unknown": unknown}
 
 
 def files_to_clear(kg, facts_root: Path, entity: str = ENTITY
@@ -249,6 +338,8 @@ def quarantine(kg, facts_root: Path, *, apply: bool = False, ts: str | None = No
     entity_dir = entity_dir_for(facts_root, entity)
     tag = ts or run_tag()
     dest = quarantine_root_for(facts_root, tag) / entity
+    # Read once, so the date printed and the date in the report cannot be two different answers.
+    fate = dest_fate(tag)
 
     exists = entity_dir.is_dir()
     before_lines = fact_line_count(entity_dir) if exists else 0
@@ -263,6 +354,12 @@ def quarantine(kg, facts_root: Path, *, apply: bool = False, ts: str | None = No
         "fact_lines_before_move": before_lines,
         "run_tag": tag,
         "quarantine_dest": str(dest),
+        # #2585: how long the destination lives, per the sweep that owns it. `unknown` carries
+        # why the date could not be named, and is None when it could.
+        "retention_store": f"{QUARANTINE_PREFIX}*",
+        "retention_horizon_days": fate["horizon_days"],
+        "dest_deletable_on": fate["deletable_on"],
+        "dest_fate_unknown": fate["unknown"],
         "apply": bool(apply),
         "moved": False,
         "moved_files": 0,
@@ -377,6 +474,15 @@ def print_report(rep: dict) -> None:
     print(f"  .md / .lock files     {rep['md_files']} / {rep['lock_files']}")
     print(f"  fact lines (2-space)  {rep['fact_lines_before_move']}")
     print(f"  would relocate to     {rep['quarantine_dest']}")
+    # #2585: the destination's own expiry, on the same lines as the path it applies to, in both
+    # modes. Before this the mover printed a path into a store it described as permanent, and
+    # the sweep that deletes that path ran unattended every day one directory away.
+    if rep["dest_deletable_on"]:
+        print(f"  deletable from        {rep['dest_deletable_on']} (UTC) — the retention "
+              f"sweep's {rep['retention_store']} store deletes that directory "
+              f"{rep['retention_horizon_days']} days after its run tag")
+    else:
+        print(f"  deletable from        UNKNOWN — {rep['dest_fate_unknown']}")
     print(f"  active edges naming   {rep['edges_active_before']}")
     print(f"  entities row          {'present' if rep['entities_row_before'] else 'absent'}")
     print(f"  indexed fact rows     {rep['facts_idx_rows_before']}")

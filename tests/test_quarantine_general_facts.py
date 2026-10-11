@@ -33,6 +33,7 @@ on it prints 0, and clause 4's "post-move total equals the printed pre-move tota
 here holds at least two fact lines, the one-space tree is asserted to count 0 rather than to be
 silently skipped, and `--apply` refuses a tree whose count reads zero.
 """
+import ast
 import hashlib
 import importlib.util
 import io
@@ -687,3 +688,250 @@ def test_apply_refuses_while_a_rebuild_holds_writes_disabled(env, monkeypatch):
     assert _quarantine_roots(env["derived"]) == []
     code, out = _cli(env)                                   # the dry run is always safe
     assert code == 0 and "fact lines (2-space)  5" in out
+
+
+# ── the destination's expiry, printed (#2585) ─────────────────────────────────
+#
+# The mover relocated `facts/general/` — 8 `.md`, 365 two-space fact lines, the only copy of
+# that text — into `facts-quarantine-<run-tag>/`, described its docstring as "Not deleted … a
+# move that can be read back the next day", and printed the destination path with no date
+# beside it. The retention sweep owns that glob, deletes anything in it older than
+# FACTS_QUARANTINE_MAX_AGE_DAYS aged on the name's own tag, and runs `--apply` from a daily
+# autonomy job with nobody in the loop. So the guarantee the mover printed was false on a
+# schedule, and the one number that would have caught it — the date the copy dies — was in
+# neither of the two reports an operator reads. These nodes pin the date. The RULING on whether
+# these particular lines are meant to survive is not here: that is owed after landing, and
+# printing the date is what makes it a decision somebody can see they have to make.
+
+SWEEP_SCRIPT = ROOT / "scripts" / "groundskeeper" / "retention-sweep.py"
+
+#: A run tag with a horizon's worth of distance from today, and the date it dies. The mover's
+#: own arithmetic is recomputed here from `datetime`, not from anything the mover exports, so a
+#: change to that arithmetic has to disagree with this.
+FATE_TAG = "20261011T193926Z"
+FATE_RUN_UTC = "2026-10-11T19:39:26+00:00"
+
+
+def _sweep_horizon() -> int:
+    """`FACTS_QUARANTINE_MAX_AGE_DAYS` read out of the sweep module the way its suite reads it.
+
+    The loader is the one clause 2 names: `importlib.util.spec_from_file_location(...)` followed
+    by `exec_module(...)`, the two lines at the head of `tests/test_retention_sweep.py`'s `rs`
+    fixture. Exec'ing that file is side-effect-free — `main()` sits behind `if __name__ ==
+    "__main__"` at `retention-sweep.py:3123` — so the module can be brought up just to ask it a
+    number.
+    """
+    spec = importlib.util.spec_from_file_location("retention_sweep_under_test", SWEEP_SCRIPT)
+    assert spec and spec.loader, "the retention sweep script is gone"
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return int(mod.FACTS_QUARANTINE_MAX_AGE_DAYS)
+
+
+def _sweep_horizon_from_source() -> int:
+    """The same constant parsed out of the sweep's source TEXT, without running it.
+
+    A second route on purpose. `_sweep_horizon` follows the loader the clause names; this one
+    reads bytes, so if the constant ever stopped being a plain assignment line — the case where
+    the mover's own reader starts returning None — the two routes disagree and the node that
+    compares them says so, instead of two readers failing in the same direction.
+    """
+    src = SWEEP_SCRIPT.read_text(encoding="utf-8")
+    m = re.search(r"^FACTS_QUARANTINE_MAX_AGE_DAYS\s*=\s*(\d+)\s*$", src, re.M)
+    assert m, "the sweep no longer assigns FACTS_QUARANTINE_MAX_AGE_DAYS on one line"
+    return int(m.group(1))
+
+
+def _deletable_on(tag: str, horizon_days: int) -> str:
+    """The date `tag` + `horizon_days`, computed here and not by the mover."""
+    import datetime as _dt
+    instant = _dt.datetime.strptime(tag, "%Y%m%dT%H%M%SZ").replace(
+        tzinfo=_dt.timezone.utc)
+    return (instant + _dt.timedelta(days=horizon_days)).date().isoformat()
+
+
+def _relocation_bullet(doc: str) -> str:
+    """The docstring bullet that describes where `facts/general/` is moved to.
+
+    Scoped to that one bullet because it is the one sentence that makes the survival claim: a
+    check over the whole docstring would pass if a disclaimer were added anywhere else while the
+    bullet itself went on promising that the tree is kept.
+    """
+    bullets = [b for b in re.split(r"\n(?=  \* )", doc) if "RELOCATED" in b]
+    return bullets[0] if len(bullets) == 1 else ""
+
+
+def _dest_line(out: str) -> str:
+    """The report line naming the destination directory."""
+    lines = [l for l in out.splitlines() if "relocate to" in l]
+    assert len(lines) == 1, out
+    return lines[0]
+
+
+def _fate_line(out: str) -> str:
+    """The report line that says when the destination becomes deletable."""
+    lines = [l for l in out.splitlines() if "deletable from" in l]
+    assert len(lines) == 1, out
+    return lines[0]
+
+
+def test_both_reports_print_the_date_the_sweep_becomes_entitled_to_delete_the_destination(env):
+    """Clause 1 (#2585): the destination's expiry is on the page, dry run and --apply alike.
+
+    Both modes, because both are read before a decision: the dry run is what an operator reads
+    to decide whether to pass `--apply`, and a date that appeared only after the move would be
+    a date nobody could have acted on. The date sits next to the path it is the date OF — the
+    node checks the two names are on the page together, which is the whole complaint: the path
+    was printed for months with no expiry beside it.
+
+    The loader clause 2 names is the one the expectation is built from: `_sweep_horizon()` brings
+    the sweep up with `importlib.util.spec_from_file_location` + `exec_module`, and the source-text
+    route is compared against it as well. If the two ever disagree, the constant has stopped being
+    a plain assignment line, which is the exact failure the mover's own reader answers with None —
+    and this catches that from outside the mover.
+    """
+    assert _sweep_horizon() == _sweep_horizon_from_source(), (
+        "the sweep's horizon no longer reads the same from its module as from its bytes, so the "
+        "number the mover prints would have two different sources")
+    expect = _deletable_on(FATE_TAG, _sweep_horizon())
+
+    code, dry = _cli(env, "--ts", FATE_TAG)
+    assert code == 0, dry
+    assert "deletable from" in dry, dry
+    assert expect in dry, f"dry run does not print the {expect} expiry: {dry}"
+    assert "facts-quarantine-" in _dest_line(dry), dry
+    assert _quarantine_roots(env["derived"]) == [], "the dry run created the doomed directory"
+
+    code, applied = _cli(env, "--apply", "--ts", FATE_TAG)
+    assert code == 0, applied
+    assert "deletable from" in applied, applied
+    assert expect in applied, f"--apply does not print the {expect} expiry: {applied}"
+    assert "facts-quarantine-" in _dest_line(applied), applied
+    assert (env["derived"] / f"facts-quarantine-{FATE_TAG}" / GENERAL).is_dir(), applied
+
+
+def test_the_printed_date_is_the_run_tag_plus_the_horizon_read_from_the_sweep_itself(env,
+                                                                                    monkeypatch):
+    """Clause 2 (#2585): the date is the sweep's number, not a copy of it.
+
+    The horizon is parsed out of `retention-sweep.py`'s bytes here and added to the run tag with
+    `datetime`, and the mover's printed date has to match — so if the mover ever quietly carries
+    its own 30, the two disagree and this fails. The mover's source is checked for the same
+    thing: no bare 30 anywhere in the function that computes the date, since a duplicated
+    constant is exactly the drift this clause rules out.
+    """
+    horizon = _sweep_horizon_from_source()
+    assert horizon != 0, "a zero-day horizon would make this node pass by accident"
+
+    code, out = _cli(env, "--apply", "--ts", FATE_TAG)
+    assert code == 0, out
+    assert f"{horizon} days after its run tag" in out, \
+        f"the report does not attribute the date to the sweep's own {horizon}-day horizon: {out}"
+    assert _deletable_on(FATE_TAG, horizon) in out, out
+    assert f"{_deletable_on(FATE_TAG, horizon + 1)}" not in out, \
+        f"the report printed a date other than tag+{horizon}: {out}"
+
+    rep = json.loads(_cli(env, "--json", "--apply", "--ts", FATE_TAG)[1])
+    assert rep["retention_horizon_days"] == horizon, rep
+    assert rep["dest_deletable_on"] == _deletable_on(FATE_TAG, horizon), rep
+    assert rep["retention_store"] == "facts-quarantine-*", rep
+
+    # Every integer literal in the three functions that compute the date, from their AST rather
+    # than from a source slice: the arithmetic is `sweep_constant`, `deletable_on` and `dest_fate`,
+    # and a slice from `def dest_fate(` would leave the first two unexamined — exactly where a
+    # hardcoded horizon would go to hide. AST also skips the docstrings, one of which discusses a
+    # literal 30 on purpose, so this checks the number the code would use and not the prose.
+    fns = {"sweep_constant", "deletable_on", "dest_fate"}
+    ints: set[int] = set()
+    for node in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.FunctionDef) and node.name in fns:
+            ints |= {c.value for c in ast.walk(node)
+                     if isinstance(c, ast.Constant)
+                     and isinstance(c.value, int) and not isinstance(c.value, bool)}
+    assert horizon not in ints, \
+        (f"the mover states {horizon} as a literal in its own date arithmetic "
+         f"({sorted(ints)}); read it from the sweep instead")
+    fate_body = SCRIPT.read_text(encoding="utf-8")
+    fate_body = fate_body[fate_body.index("def dest_fate("):fate_body.index("def files_to_clear(")]
+    assert "sweep_constant" in fate_body and "RETENTION_AGE_CONSTANT" in fate_body, \
+        "dest_fate no longer reads the horizon out of the sweep"
+
+
+def test_the_mover_docstring_states_the_store_and_horizon_that_expire_the_quarantine():
+    """Clause 3 (#2585): the module no longer promises a survival the sweep will break.
+
+    Asserted on properties of the text rather than on the sentences themselves: the relocation
+    bullet must name the glob that enforces the horizon, name the constant it reads, say the job
+    runs `--apply` unattended, state how many days, and say plainly that the tree is not kept
+    forever. A paraphrase that keeps all five is fine — the thing being removed is a guarantee,
+    not a turn of phrase, and a node that grep-matched one exact sentence would be pinned to the
+    wording instead of the claim.
+    """
+    doc = _load_mover().__doc__ or ""
+    assert doc, "the mover has no module docstring to state a guarantee in"
+    bullet = _relocation_bullet(doc)
+    assert bullet, "the docstring no longer describes the relocation as a bullet"
+    assert "facts-quarantine-*" in bullet, \
+        "the store that enforces the horizon is not named where the move is described"
+    assert "FACTS_QUARANTINE_MAX_AGE_DAYS" in bullet, "the constant is not named"
+    assert f"{_sweep_horizon_from_source()} days" in bullet, \
+        "the horizon is not stated as the number of days the sweep will wait"
+    assert "--apply" in bullet, \
+        "the bullet still implies somebody has to pull the trigger"
+    assert "not" in bullet.lower() and ("survive" in bullet.lower() or "forever" in bullet.lower()), \
+        "nothing in the bullet qualifies the move as anything other than permanent"
+    assert "by this script" in bullet, \
+        "the surviving 'not deleted' wording is back to promising more than the mover controls"
+
+
+def test_the_date_follows_the_sweep_constant_and_degrades_to_unknown_when_it_is_unreadable(
+        env, tmp_path, monkeypatch):
+    """Sensitivity (#2585): the printed date is derived, and an unreadable horizon is admitted.
+
+    Three horizons, one mover. With the constant edited to 7 in a doctored copy of the sweep the
+    report moves by 23 days, which no copy of a constant inside the mover could do. With the
+    sweep unreadable the report says UNKNOWN and names the file it could not read rather than
+    printing a date it cannot justify — and still performs the move, because the expiry line is
+    a report, and a mover that refused to quarantine over a formatting problem would be
+    refusing the thing that protects the tree.
+    """
+    import datetime as _dt
+    horizon = _sweep_horizon_from_source()
+    qgf = _load_mover()
+
+    doctored = tmp_path / "retention-sweep.py"
+    doctored.write_text(
+        SWEEP_SCRIPT.read_text(encoding="utf-8").replace(
+            f"FACTS_QUARANTINE_MAX_AGE_DAYS = {horizon}",
+            "FACTS_QUARANTINE_MAX_AGE_DAYS = 7", 1), encoding="utf-8")
+    assert "FACTS_QUARANTINE_MAX_AGE_DAYS = 7" in doctored.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(qgf, "RETENTION_SWEEP", doctored)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rep7 = qgf.quarantine(env["kg"], facts_root=env["facts_root"], apply=False, ts=FATE_TAG)
+        qgf.print_report(rep7)
+    out7 = buf.getvalue()
+    assert rep7["retention_horizon_days"] == 7, rep7
+    assert rep7["dest_deletable_on"] == _deletable_on(FATE_TAG, 7), rep7
+    assert _deletable_on(FATE_TAG, 7) in out7, out7
+    assert "7 days after its run tag" in out7, out7
+    assert "30" not in _fate_line(out7), \
+        "the fate line still carries the horizon the doctored sweep no longer declares"
+    assert _dt.date.fromisoformat(_deletable_on(FATE_TAG, 7)) \
+        < _dt.date.fromisoformat(_deletable_on(FATE_TAG, horizon)), \
+        "a shorter horizon produced a later date, so the date is not derived from the constant"
+
+    monkeypatch.setattr(qgf, "RETENTION_SWEEP", tmp_path / "absent" / "retention-sweep.py")
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rep_x = qgf.quarantine(env["kg"], facts_root=env["facts_root"],
+                               apply=False, ts=FATE_TAG)
+        qgf.print_report(rep_x)
+    out_x = buf.getvalue()
+    assert rep_x["dest_deletable_on"] is None, rep_x
+    assert "UNKNOWN" in out_x, out_x
+    assert "retention-sweep.py" in out_x, "the report did not name the file it could not read"
+    assert not re.search(r"deletable from\s+\d{4}-", out_x), \
+        f"a date was printed with no horizon to compute it from: {out_x}"
+    assert rep_x["entity_dir_exists"], "a horizon that cannot be read stopped the dry run looking"

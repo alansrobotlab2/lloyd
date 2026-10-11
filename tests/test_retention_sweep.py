@@ -6927,7 +6927,17 @@ def test_the_quarantine_dry_run_names_every_candidate_and_leaves_the_tree_untouc
     assert old.name in dry_line, dry_line
     assert f"{dry['bytes'] / 1024:.0f} KiB candidate" in dry_line, dry_line
     assert f">{rs.FACTS_QUARANTINE_MAX_AGE_DAYS}d" in dry_line, dry_line
-    assert fresh.name not in dry_line, dry_line
+    # #2585 moved what this node can say about the in-window directory. It used to require the
+    # fresh name be absent from the line altogether, which is the invisibility #2585 was filed
+    # about — a quarantine whose death date lived only in the word `2`. The name is on the line
+    # now, with the date it becomes deletable, so the guarantee sits where the delete actually
+    # is: not in the candidate set, and nowhere on the line carrying a byte count, which is how a
+    # directory this sweep means to remove is named. Its own segment says `deletable from`.
+    assert fresh.name not in {c["name"] for c in dry["candidates"]}, dry
+    segments = [s for s in dry_line.replace(" — ", "; ").split("; ") if fresh.name in s]
+    assert len(segments) == 1, \
+        f"the fresh dir should appear in exactly one segment, its own: {dry_line}"
+    assert "deletable from" in segments[0] and "KiB" not in segments[0], segments[0]
 
     p = rs.sweep_facts_quarantine(True, rs.time.time())
     apply_line = rs._facts_quarantine_line(p)
@@ -7041,3 +7051,128 @@ def test_a_symlink_named_like_a_quarantine_is_skipped_and_never_followed(rs):
     assert p["not_a_dir"] == 1 and p["candidates"] == [] and p["removed"] == 0, p
     assert link.is_symlink() and (outside / "keep.md").is_file()
     assert "1 non-directory skipped" in rs._facts_quarantine_line(p), rs._facts_quarantine_line(p)
+
+
+def test_the_report_names_every_in_window_quarantine_with_the_date_it_dies(rs):
+    """Clause 4 of #2585: the in-window segment lists directories and dates, not a count alone.
+
+    The line that failed this item read `2 within 30d` over the live store on 2026-10-11 while it
+    held `facts-quarantine-20261011T193926Z` — the 365 quarantined `general` fact lines, whose
+    only copy that was — and the date that directory becomes deletable (2026-11-10) was computable
+    from numbers the sweep had already read but appeared nowhere. A count is the shape that hides
+    a quarantine: it answers "is there anything in here?" and not "when does the thing I put here
+    go away?", which is the question that needed asking before the move, not after the delete.
+
+    Seeded with all four states at once — two in-window, one past the window, one held — because
+    the clause's other half is that candidates and held directories keep printing exactly as
+    they did. A change that adds the in-window names by rewriting the segments that already work
+    would have traded one unreadable line for another.
+    """
+    import datetime as _dt
+    horizon = rs.FACTS_QUARANTINE_MAX_AGE_DAYS
+    in_window = [f"facts-quarantine-{_fq_tag(rs, days)}" for days in (1, 10)]
+    for name in in_window:
+        _fq_seed(rs, name)
+    gone = _fq_seed(rs, f"facts-quarantine-{_fq_tag(rs, horizon + 10)}")
+    held = _fq_seed(rs, "facts-quarantine-hand-moved")
+
+    now = rs.time.time()
+    report = rs.sweep_facts_quarantine(False, now)
+    line = rs._facts_quarantine_line(report)
+
+    assert [d["name"] for d in report["in_window_dirs"]] == sorted(in_window), report
+    assert report["in_window"] == len(in_window), report
+    for name in in_window:
+        # The date is the tag inside the NAME advanced by the horizon, computed here from a
+        # calendar the sweep does not share with this assertion.
+        want = (_dt.datetime.strptime(name[len(rs.FACTS_QUARANTINE_PREFIX):],
+                                      "%Y%m%dT%H%M%SZ").replace(tzinfo=_dt.timezone.utc)
+                + _dt.timedelta(days=horizon)).date().isoformat()
+        entry = [d for d in report["in_window_dirs"] if d["name"] == name][0]
+        assert entry["deletable_on"] == want, (name, entry, want)
+        assert f"{name} deletable from {want}" in line, line
+
+    # The two segments that were already readable are untouched in shape.
+    assert f">{horizon}d" in line, line
+    assert f"{gone.name} {report['bytes'] / 1024:.0f} KiB" in line, line
+    assert "candidate" in line, line
+    assert "held, never deleted: " in line, line
+    assert f"{held.name} " in line and "(run tag is not a parseable instant)" in line, line
+    assert gone.name not in {d["name"] for d in report["in_window_dirs"]}, report
+    assert not report["removed"], "a dry run deleted something"
+
+
+def test_the_unattended_run_prints_the_date_it_is_acting_on(tmp_path):
+    """#2585, the seam the report line exists for: a real `--apply` run, read as a job log.
+
+    Every other node in this file calls `sweep_facts_quarantine()` and `_facts_quarantine_line()`
+    in process. Neither is what anyone reads. Autonomy task #79 runs this file as a program with
+    `--apply`, unattended, and what a person sees is whatever `main()` puts on stdout — so a date
+    that reached the report dict but not that stream would satisfy every in-process node and still
+    leave the deletion as invisible as it was when #2585 was filed. This runs the script twice
+    against a scratch data root and asserts on the child's stdout only.
+
+    The property that matters is the one `test_dry_run_and_apply_print_the_same_workers_store_line`
+    established for another store: the line an operator approves in a dry run is the line `--apply`
+    prints. Unlike `test_the_bare_invocation_prunes_the_store_it_resolves`, this one runs the
+    interpreter under test rather than a bare `python3` — the claim here is that `main()` puts the
+    date on its stdout, which does not depend on the interpreter, and the bare-invocation claim is
+    that node's to make.
+    The quarantine segment must survive that transition carrying its dates, because that segment
+    is the only place the surviving directory's own expiry appears anywhere.
+
+    `--apply` exits 2 from a linked worktree by design — the automod-store guard refuses — so this
+    uses `_APPLY_STATUS_FROM_A_WORKTREE`, the same constant the workers.db node uses. The
+    facts-quarantine pass runs before that refusal and deletes what it decided to delete, which is
+    what the final assertions check on disk.
+    """
+    import datetime as _dt
+
+    root = tmp_path / "data"
+    derived = root / "_pipeline" / "vault-derived"
+    derived.mkdir(parents=True)
+    # The horizon the child will use, taken from the child's own file, not from a number here.
+    spec = importlib.util.spec_from_file_location("rs_horizon_probe", _SCRIPT)
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    horizon = int(probe.FACTS_QUARANTINE_MAX_AGE_DAYS)
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    doomed_tag = (now - _dt.timedelta(days=horizon + 10)).strftime("%Y%m%dT%H%M%SZ")
+    kept_tag = (now - _dt.timedelta(days=10)).strftime("%Y%m%dT%H%M%SZ")
+    kept_date = (_dt.datetime.strptime(kept_tag, "%Y%m%dT%H%M%SZ").replace(
+        tzinfo=_dt.timezone.utc) + _dt.timedelta(days=horizon)).date().isoformat()
+    for tag in (doomed_tag, kept_tag):
+        d = derived / f"facts-quarantine-{tag}"
+        d.mkdir()
+        (d / "general-overview.md").write_text("x" * 1024, encoding="utf-8")
+
+    env = {k: v for k, v in os.environ.items() if k != "LLOYD_VAULT_ROOT"}
+    env["LLOYD_DATA"] = str(root)
+    env["LLOYD_VAULT_ROOT"] = str(tmp_path / "no-vault-here")
+
+    def run(*args: str) -> str:
+        proc = subprocess.run([sys.executable, str(_SCRIPT), *args], env=env,
+                              cwd=str(_SWEEP_TREE), capture_output=True, text=True,
+                              timeout=300)
+        assert proc.returncode in ((0,) if not args else
+                                   (0, _APPLY_STATUS_FROM_A_WORKTREE)), \
+            f"{args} exit {proc.returncode}: {proc.stderr[-800:]}"
+        return proc.stdout
+
+    dry_line = _store_line(run(), "facts quarantine")
+    assert "DRY RUN" in run(), "a run without --apply did not say so on its own output"
+    assert "candidate" in dry_line and f"facts-quarantine-{doomed_tag} " in dry_line, dry_line
+    assert f"facts-quarantine-{kept_tag} deletable from {kept_date}" in dry_line, \
+        f"the dry run never named the date the surviving quarantine dies: {dry_line}"
+
+    applied_line = _store_line(run("--apply"), "facts quarantine")
+    assert "freed" in applied_line, applied_line
+    assert applied_line.replace("freed", "candidate", 1) == dry_line, (
+        "the line an operator approves in a dry run is not the line --apply printed, so the "
+        f"dates on screen were not the dates acted on:\nDRY  {dry_line}\nAPPLY {applied_line}")
+
+    assert not (derived / f"facts-quarantine-{doomed_tag}").exists(), \
+        "the quarantine the log reported as freed is still on disk"
+    assert (derived / f"facts-quarantine-{kept_tag}").is_dir(), \
+        "the in-window quarantine was deleted inside its own window"

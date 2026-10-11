@@ -2738,6 +2738,33 @@ def facts_quarantine_age(path: Path, now: float | None = None) -> tuple[float | 
         return None, source
 
 
+def facts_quarantine_deletable_on(now: float | None,
+                                  age: float | None) -> str | None:
+    """The UTC date one quarantine directory becomes a delete candidate, or None if held.
+
+    #2585. The store reported an in-window directory as part of a bare `2 within 30d`, which is
+    a count with no date in it: the expression that says WHEN these directories die is the same
+    comparison the delete already makes (`age > FACTS_QUARANTINE_MAX_AGE_DAYS`), and it appeared
+    nowhere a human reads before the delete happened. This is that comparison solved for its
+    boundary, so no second horizon number exists to drift against the first — the basis is the
+    directory's own age on the store's own basis (tag instant, or mtime for a renamed directory,
+    which is the `age` the caller already holds) and the answer is the date
+    `basis + FACTS_QUARANTINE_MAX_AGE_DAYS` falls on in UTC.
+
+    A date and not an instant: the horizon is a count of days, and a second-granularity stamp
+    would promise a precision the comparison does not carry.
+
+    `age is None` is the held case and returns None: a directory whose tag does not parse has no
+    boundary to name, which is exactly why the delete never selects it. The caller prints `held`
+    rather than inventing a date for a directory it is never going to delete.
+    """
+    if age is None:
+        return None
+    basis = (now if now is not None else time.time()) - age * 86400.0
+    return datetime.fromtimestamp(basis + FACTS_QUARANTINE_MAX_AGE_DAYS * 86400.0,
+                                  timezone.utc).date().isoformat()
+
+
 def sweep_facts_quarantine(apply: bool, now: float,
                            *, root: Path | None = None) -> dict:
     """Remove (or, with `apply` false, name and size) a quarantine past its window.
@@ -2759,7 +2786,8 @@ def sweep_facts_quarantine(apply: bool, now: float,
     store = Path(root) if root is not None else FACTS_QUARANTINE_ROOT
     out: dict = {"apply": bool(apply), "root": store, "present": store.is_dir(),
                  "candidates": [], "held": [], "bytes": 0, "freed": 0,
-                 "removed": 0, "in_window": 0, "not_a_dir": 0, "unreadable": 0}
+                 "removed": 0, "in_window": 0, "in_window_dirs": [],
+                 "not_a_dir": 0, "unreadable": 0}
     if not out["present"]:
         # The state of a box that has never run a rebuild swap or a #2557 `--apply`:
         # nothing to bound, reported as zero rather than created — a sweep that mkdirs
@@ -2788,6 +2816,16 @@ def sweep_facts_quarantine(apply: bool, now: float,
             out["bytes"] += cand["bytes"]
             continue
         out["in_window"] += 1
+        # #2585: named with the date it dies, not folded into a count. `age` here is the SAME
+        # number the comparison above just rejected, and `now - age` is the directory's own
+        # basis instant on this store's own basis (tag, or mtime for a renamed directory), so
+        # the date printed is that basis advanced by the horizon being compared against —
+        # never a second copy of the horizon that could drift from it.
+        out["in_window_dirs"].append({
+            "name": path.name,
+            "deletable_on": facts_quarantine_deletable_on(now, age),
+            "source": source,
+        })
     if apply:
         for cand in out["candidates"]:
             shutil.rmtree(store / cand["name"])
@@ -2825,7 +2863,17 @@ def _facts_quarantine_line(p: dict) -> str:
         notes.append("held, never deleted: " + ", ".join(held))
     quiet = []
     if p["in_window"]:
-        quiet.append(f"{p['in_window']} within {FACTS_QUARANTINE_MAX_AGE_DAYS}d")
+        # #2585: the directory names and their dates, not a bare count. `FACTS_QUARANTINE_NAMES_SHOWN`
+        # caps the candidate and held lists above because those grow with the number of runs, and a
+        # Muse-shaped `+N more` is the right shape for thousands of rows; this list is one entry per
+        # quarantine directory, which is one per attended maintenance run. It is also not truncated on
+        # purpose: the failure this line exists to prevent was a quarantine directory sitting inside
+        # the word `2`, whose date nobody could read, and a list that could hide an entry would
+        # reproduce it at scale.
+        quiet.append(
+            f"{p['in_window']} within {FACTS_QUARANTINE_MAX_AGE_DAYS}d ("
+            + "; ".join(f"{d['name']} deletable from {d['deletable_on']}"
+                        for d in p["in_window_dirs"]) + ")")
     if p["not_a_dir"]:
         quiet.append(f"{p['not_a_dir']} non-directory skipped")
     if p["unreadable"]:
