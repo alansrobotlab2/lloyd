@@ -671,9 +671,13 @@ def test_a_resolver_that_cannot_answer_still_lets_the_write_through(autonomy_tre
 
     `constant_quotes.Report.resolved` exists because "0 mismatches" and "nothing to
     compare" look identical, and the vault-side rail logs its count for the `@live_vault`
-    witness in `tests/test_constant_quotes.py`. This route records nothing when it has
-    nothing to say, so the only thing standing between a failing harvest and a stopped
-    engine is the `except` tuple in `_stale_description_error`. Both classes named here
+    witness in `tests/test_constant_quotes.py`. Until #2534 this route recorded nothing
+    at all, so the only thing standing between a failing harvest and a stopped engine was
+    the `except` tuple in `_stale_description_error`; it now also writes one ledger row
+    with `resolved: null` and the exception class
+    (`app/description_guard_ledger.py`), which is that third state becoming visible — and
+    `test_a_ledger_sink_that_raises_never_reaches_the_caller` is the half that keeps the
+    new witness from inheriting this node's failure mode. Both classes named here
     are ones that tuple has to answer for — walking the tree, and converting a number —
     and `ValueError` is the one a guard on a write path can least afford to let escape,
     because the write it would block may be the `status: draft` that stops a job.
@@ -722,6 +726,426 @@ def test_a_malformed_call_leaves_the_next_write_working(autonomy_tree):
         f"the write after a malformed call was refused: {json.dumps(good)}")
     assert len(list(autonomy_tree.glob("*.md"))) == 1, (
         "the write after a malformed call did not land")
+
+
+# ── #2534: the guard's silence is distinguishable from its agreement ─────────────────
+
+# The six nodes above refuse and allow, and that is all any observer could ever see:
+# `_stale_description_error` bound only `.found` off the resolver's `Report` and
+# returned None on an empty one, so a description that compared 8 numbers and agreed
+# left the function exactly as a description that compared nothing did. The vault-side
+# rail refuses to read that way — `constant_quotes.INSTRUMENT_FAILURE`,
+# `Report.resolved`, `Report.is_silent` and `scan()`'s `pairs`/`silent` denominators
+# all exist so a sweep cannot print "0 mismatches" about a check that measured nothing —
+# and the engine half, which is the route 34 `autonomy_write_task` calls actually
+# travelled (14 with a non-empty description, measured 2026-10-10), kept none of it. So
+# "does this guard fire in production, and does it mis-block a writer that legitimately
+# needs to publish a number the tree has not caught up with?" had no answer, and could
+# not have one: the only record was the absence of a refusal.
+#
+# `app/description_guard_ledger.py` is that record. These nodes pin it as the item asked
+# for it: ONE row per call that reaches the resolver, the verdict untouched, the store
+# bounded and outside the code tree, and the sink unable to speak out of turn.
+
+#: The row schema, pinned as a set so a rename or a dropped field is a failure here
+#: rather than a `KeyError` in the owed pass that finally reads the file.
+LEDGER_KEYS = {"at", "task", "op", "resolved", "found", "refused", "error"}
+
+
+@pytest.fixture
+def guard_ledger(tmp_path, monkeypatch):
+    """The #2534 ledger, redirected into this test's own `tmp_path`.
+
+    `LLOYD_DESCRIPTION_GUARD_LEDGER` is read on every call, not at import, which is why
+    one environment variable moves the writer here and the module's own CLI below to
+    the same file — the same knob `app/harness/denial_journal.py` documents for the same
+    reason. Unset, the default is the real store under the data root, which the
+    location node asserts directly.
+    """
+    from app import description_guard_ledger as LEDGER
+
+    path = tmp_path / "guard-ledger.jsonl"
+    monkeypatch.setenv(LEDGER.LEDGER_ENV, str(path))
+    return path
+
+
+def _ledger_rows(path: Path) -> list[dict]:
+    from app import description_guard_ledger as LEDGER
+
+    return LEDGER.rows(path)
+
+
+def test_every_call_that_reaches_the_resolver_appends_exactly_one_row(autonomy_tree,
+                                                                     guard_ledger):
+    """Clause 1: one row per call, carrying the four things that make it a verdict.
+
+    Driven through `call_tool`, because the thing being observed is what the engine's
+    own route leaves behind, not what a helper called directly would write.
+
+    Four states, one row each: a refused create (`task: 0`, because the create path
+    runs the guard ahead of `_next_task_id()` so a refusal leaves the id free — `op` is
+    what distinguishes that zero from a task numbered zero); the corrected retry, which
+    is the same call with one digit changed and now agrees; an update, which carries the
+    id it named; and a create with no description at all, which adds NOTHING because it
+    never reaches the resolver. That last edge is why the count is exact rather than a
+    floor: a blank description is not a claim about a constant, and a ledger that
+    counted it would be counting calls instead of checks.
+    """
+    value = _tree_value()
+
+    stale = _write_via_mcp({"name": "Ledger reconciliation",
+                            "description": _quote(value + 7), "frequency": "daily"})
+    assert "error" in stale, "the control half: the stale create stopped refusing"
+
+    rows = _ledger_rows(guard_ledger)
+    assert len(rows) == 1, f"a refused call wrote {len(rows)} rows, expected exactly 1"
+    row = rows[0]
+    assert set(row) == LEDGER_KEYS, f"the row schema drifted: {sorted(row)}"
+    assert row["task"] == 0 and row["op"] == "create", row
+    assert row["resolved"] == 1, (
+        f"a quote of exactly one constant resolved {row['resolved']} pairs, so the "
+        "resolver is not answering and every number below is meaningless")
+    assert row["found"] == 1, f"one disagreement should be found=1: {row}"
+    assert row["refused"] is True, f"a refusal recorded as {row['refused']!r}: {row}"
+    assert row["error"] == "", row
+    assert list(autonomy_tree.glob("*.md")) == [], (
+        "the ledger row exists but the refusal did not stop the write")
+
+    fixed = _write_via_mcp({"name": "Ledger reconciliation", "description": _quote(value)})
+    assert "error" not in fixed, f"the corrected retry was refused: {fixed}"
+    rows = _ledger_rows(guard_ledger)
+    assert len(rows) == 2, f"the retry added {len(rows) - 1} rows, expected 1"
+    assert rows[1]["refused"] is False and rows[1]["found"] == 0, rows[1]
+    assert rows[1]["resolved"] == 1, (
+        f"the agreeing retry resolved {rows[1]['resolved']} pairs; it must have "
+        "compared something to agree about it")
+
+    _write(autonomy_tree, **{"42-ledger.md": (
+        "---\nid: 42\nname: Ledger reconciliation\nstatus: up_next\n"
+        f"description: {_quote(value)}\n---\n\n# body\n")})
+    updated = _write_via_mcp({"id": 42, "description": _quote(value)})
+    assert "error" not in updated, f"the update was refused: {updated}"
+    rows = _ledger_rows(guard_ledger)
+    assert rows[-1]["task"] == 42 and rows[-1]["op"] == "update", (
+        f"an update did not carry the id it was called with: {rows[-1]}")
+
+    blank = _write_via_mcp({"name": "Queue sweep", "description": "",
+                            "frequency": "daily"})
+    assert "error" not in blank, f"a description-free create was refused: {blank}"
+    assert len(_ledger_rows(guard_ledger)) == 3, (
+        "a create that never reached the resolver added a row, so the ledger counts "
+        "calls rather than checks and its denominator is wrong")
+
+
+def test_an_agreeing_description_is_distinguishable_from_one_that_resolved_nothing(
+        autonomy_tree, guard_ledger):
+    """Clause 2: the two non-refused rows are NOT the same row, which is the whole item.
+
+    Both calls below succeed, both write their file, and the tool's answer to each is
+    the absence of an `error` key — which is precisely the pair the pre-#2534 route
+    could not tell apart. In the store one says `resolved: 1` and the other
+    `resolved: 0`, so "nothing stale" and "nothing comparable" are different facts and
+    `counts()` files them in different buckets.
+
+    Two controls, both of which the distinction needs. The first is `resolved == 1` on
+    the agreeing row, exactly: if the resolver had stopped answering the tree entirely,
+    both rows would read `resolved: 0`, the distinction would look intact for one more
+    release, and the store would be quietly reporting that no description in production
+    ever names a constant. The second is that the `resolved: 0` row is the RESOLVER
+    saying there is nothing to compare and not the guard skipping the comparison:
+    `_stale_description_error` returns before the resolver only for a description that
+    is empty or whitespace, so the call below is measured against the resolver directly
+    before it is made, and a description that resolves 0 pairs while non-blank is
+    exactly what a nightly task with no constant in its prose looks like.
+    """
+    from app import description_guard_ledger as LEDGER
+
+    value = _tree_value()
+    from scripts.automod import constant_quotes as CQ
+    from app.paths import LLOYD_HOME
+
+    # The reachability control, run before the call it explains.
+    zero_desc = "Sweep the queue nightly and log the count."
+    assert zero_desc.strip(), "a blank description short-circuits and writes no row"
+    assert CQ.mismatches(zero_desc, CQ.tree_constants(LLOYD_HOME)).resolved == 0, (
+        "the description chosen to demonstrate `resolved: 0` actually resolves "
+        "something, so the row below would not be the state under test")
+
+    agreed = _write_via_mcp({"name": "Ledger reconciliation", "description": _quote(value)})
+    plain = _write_via_mcp({"name": "Queue sweep", "description": zero_desc})
+    assert "error" not in agreed and "error" not in plain, (
+        f"the two calls under test are supposed to differ only in what they resolved: "
+        f"{agreed} / {plain}")
+    assert len(list(autonomy_tree.glob("*.md"))) == 2, (
+        "both calls were supposed to write their task file; the difference below is "
+        "then a difference in verdicts, which is the thing this item forbids")
+
+    rows = _ledger_rows(guard_ledger)
+    assert len(rows) == 2, rows
+    assert [r["refused"] for r in rows] == [False, False], rows
+    assert rows[0]["resolved"] == 1, (
+        "the description that quotes one constant resolved nothing, so `resolved: 0` "
+        "below is the resolver being deaf and not the distinction being real")
+    assert rows[1]["resolved"] == 0, (
+        "a description naming no constant was credited with a comparison it never made")
+
+    tally = LEDGER.counts(rows)
+    assert tally["passed"] == 1 and tally["zero_resolved"] == 1 and tally["refused"] == 0, (
+        f"'nothing stale' and 'nothing comparable' landed in one bucket: {tally}")
+
+
+def test_the_record_changes_no_verdict_a_zero_resolved_description_still_writes(
+        autonomy_tree, guard_ledger):
+    """Clause 3: the ledger sees everything and decides nothing.
+
+    Three shapes, none of which may change behaviour:
+
+      * a description that resolves 0 pairs is WRITTEN, and recorded as
+        `zero_resolved` — refusing it would block the ordinary nightly write on an
+        instrument that had nothing to say, which is the no-deadlock argument
+        `_stale_description_error`'s own docstring makes and which the row must not
+        quietly undo;
+      * a status-only park on a file whose stored description is stale still writes,
+        and adds NO row, because the guard never runs for that call — the row count is
+        the proof that recording sits beside the verdict and not in front of it;
+      * the same file with the stale description SUPPLIED still refuses, which is the
+        control keeping the middle block from being a pass for a guard that is not
+        connected.
+
+    The stale-file fixture is the one
+    `test_a_status_only_update_on_a_file_whose_description_is_still_stale_writes`
+    builds, kept deliberately: this node is only interesting if it cannot refuse.
+    """
+    value = _tree_value()
+    stale_on_disk = (
+        "---\nid: 42\nname: Ledger reconciliation\nstatus: up_next\nfrequency: daily\n"
+        f"description: Reconcile the ledger window against {STALE_PROBE_CONSTANT} "
+        f"({value + 7}).\n---\n\n# body\n")
+    _write(autonomy_tree, **{"42-ledger.md": stale_on_disk})
+
+    plain = _write_via_mcp({"name": "Queue sweep",
+                            "description": "Sweep the queue nightly and log the count."})
+    assert "error" not in plain, (
+        f"a description resolving zero pairs was refused, which is the deadlock #2408 "
+        f"argues against and #2534 must not introduce: {plain}")
+    created = [p.name for p in autonomy_tree.glob("*.md") if p.name != "42-ledger.md"]
+    assert len(created) == 1, (
+        f"the zero-resolved create did not reach disk on its own file: {created}")
+    rows = _ledger_rows(guard_ledger)
+    assert len(rows) == 1 and rows[0]["resolved"] == 0 and rows[0]["refused"] is False, (
+        f"the zero-resolved write was not recorded as such: {rows}")
+
+    parked = _write_via_mcp({"id": 42, "status": "draft"})
+    assert "error" not in parked, (
+        f"parking a task was refused: {parked}")
+    assert "status: draft" in (autonomy_tree / "42-ledger.md").read_text(encoding="utf-8"), (
+        "the park did not reach disk")
+    assert len(_ledger_rows(guard_ledger)) == 1, (
+        "a call that never reached the resolver wrote a row, so the ledger is counting "
+        "writes and not checks")
+
+    supplied = _write_via_mcp({"id": 42, "description": _quote(value + 7)})
+    assert "error" in supplied, (
+        "the guard stopped refusing a supplied stale description, so the assertions "
+        "above are measuring an unconnected guard and a ledger")
+    rows = _ledger_rows(guard_ledger)
+    assert len(rows) == 2 and rows[-1]["refused"] is True and rows[-1]["task"] == 42, (
+        f"the refusal was not recorded: {rows[-1] if rows else 'no rows'}")
+    assert "status: draft" in (autonomy_tree / "42-ledger.md").read_text(encoding="utf-8"), (
+        "the refused update changed the file anyway")
+
+
+@pytest.mark.parametrize("boom", [OSError("data root full"), ValueError("not a number")],
+                         ids=["oserror", "valueerror"])
+@pytest.mark.parametrize("sink_call", ["_append", "_bound"], ids=["append", "bound"])
+def test_a_ledger_sink_that_raises_never_reaches_the_caller(autonomy_tree, guard_ledger,
+                                                           monkeypatch, boom, sink_call):
+    """Clause 4: the fail-open covers its own logging, at every syscall the sink makes.
+
+    #2408's failure mode was a guard that raises into the dispatcher; a witness bolted
+    onto that guard inherits it exactly, and inherits it in the worst place — a data
+    root on a full disk turning every task write into a traceback, including the
+    `status: draft` that stops a job. Both classes are parametrised because both are
+    realistic here (`OSError` from the filesystem, `ValueError` from coercing a field)
+    and the existing resolver node two above established that this pair, not some
+    broader net, is what the route has to answer for.
+
+    Two injection points as well, for the same reason: "while writing the record" is not
+    one syscall. `_append` is the line; `_bound` runs after it and costs three more
+    filesystem touches — `target.stat()`, a re-read of the whole file, and
+    `atomic_write_text` for the trim. Injecting only at the append would leave the
+    trim, the part that touches the disk most, untested while the clause claimed the
+    whole write was covered. The two points do not lose the same thing, and the node
+    says so rather than pretending: a dead `_append` loses the row, a dead `_bound`
+    loses only the trim, because by then the append has already landed.
+
+    The order is the test. First an UNPATCHED call, which must produce a row: that is
+    what makes "no row appeared below" a statement about the sink rather than about a
+    ledger that was never wired to this path. Then the patched call: the file is still
+    written, no `error` is returned, and the only loss is the row itself. Then the stale
+    call: with the sink broken the REFUSAL still happens, because the ledger has no
+    vote — a witness that could suppress a refusal by failing would be a second verdict.
+    """
+    from app import description_guard_ledger as LEDGER
+
+    value = _tree_value()
+
+    live = _write_via_mcp({"name": "Ledger reconciliation", "description": _quote(value)})
+    assert "error" not in live and len(_ledger_rows(guard_ledger)) == 1, (
+        "the unpatched control did not write a row, so the assertions below would pass "
+        "on a ledger that is not connected to this route at all")
+
+    def _raise(*a, **k):
+        raise boom
+
+    monkeypatch.setattr(LEDGER, sink_call, _raise)
+
+    out = _write_via_mcp({"name": "Second task", "description": _quote(value)})
+    assert "error" not in out, (
+        f"a sink raising {type(boom).__name__} became a refused write: {out}")
+    assert len(list(autonomy_tree.glob("*.md"))) == 2, (
+        "the write after a raising sink did not land its file")
+    # What each injection point is allowed to cost, and not one byte more: killing
+    # `_append` loses the row, and killing `_bound` loses only the trim — the append it
+    # follows has already landed, so that row is legitimately there. Counting one row for
+    # both injections would be a claim about the sink's internals rather than about the
+    # clause, which is "no exception escapes and no verdict moves", not "no bytes".
+    rows_after = _ledger_rows(guard_ledger)
+    assert len(rows_after) == (2 if sink_call == "_bound" else 1), (
+        f"injecting {type(boom).__name__} at {sink_call} changed the ledger by the wrong "
+        f"amount, so this node is not testing what it says: {rows_after}")
+
+    stale = _write_via_mcp({"name": "Third task", "description": _quote(value + 7)})
+    assert "error" in stale, (
+        f"with the sink raising {type(boom).__name__} the guard stopped refusing: a "
+        "failing witness just cleared a stale description")
+    assert len(list(autonomy_tree.glob("*.md"))) == 2, (
+        "the refusal with the broken sink wrote its file anyway")
+
+
+def test_the_ledger_is_a_bounded_jsonl_under_the_data_root_that_one_command_counts(
+        tmp_path, monkeypatch):
+    """Clause 5: where the rows live, how big they may get, and the one command.
+
+    **Location.** The default path is `app.paths.AUTONOMY_DESCRIPTION_LEDGER_PATH`, and
+    that constant hangs off `PIPELINE_DIR` exactly as `TASKS_DIR` does, so under
+    production it is `~/lloyd-data/_pipeline/…` and a `rm -r` aimed at `~/lloyd` cannot
+    reach it (the 2026-09-22 rule `app/paths.py` states above `SESSIONS_DIR`). The one
+    case where the path IS inside a checkout is `app.paths`' rule 3 — a worktree or a
+    scratch clone keeping its state in its own gitignored `.lloyd-data/` — and this node
+    accepts only that, proving it with `git check-ignore` rather than with a filename
+    that merely looks temporary. A future `= LLOYD_HOME / "_pipeline" / …` would be a
+    store in the repo, and is refused here twice over: by the source line, and by the
+    ignore check.
+
+    **Bound.** `MAX_BYTES` is 65536 and `_bound` trims to `LOW_WATER_BYTES` (32768) so
+    the rewrite is amortised rather than per-call. A row costs 123 bytes on a passing
+    call and 138 on a refusal or a resolver error — measured over this schema, not
+    estimated — so 900 of them
+    is deliberately more than the ceiling: the file must come back under it, every line
+    still parseable, the NEWEST row present and the OLDEST gone. Trimming to the ceiling
+    would put the next append straight back over it, which is why the low-water mark is
+    a separate constant and is pinned as below it.
+
+    **The command.** `.venvs/lloyd/bin/python -m app.description_guard_ledger`, run as a
+    subprocess with no arguments, finding the file through the environment variable the
+    writer reads. A hand-built file with one row in each bucket goes in, and the printed
+    line must separate all of them — refused 1, passed 2, zero_resolved 1, and the
+    resolver-raised shape 1, which is neither of the first three and must not be
+    counted among them.
+    """
+    import subprocess
+
+    import app.paths as paths
+    from app import description_guard_ledger as LEDGER
+
+    # ── location ────────────────────────────────────────────────────────────────
+    monkeypatch.delenv(LEDGER.LEDGER_ENV, raising=False)
+    default = LEDGER.ledger_path()
+    assert default == paths.AUTONOMY_DESCRIPTION_LEDGER_PATH, (
+        "the module and app.paths disagree about where the rows go, so the owed pass "
+        f"would read one file while the engine writes another: {default}")
+    assert default.is_relative_to(paths.DATA_ROOT), (
+        f"{default} is outside {paths.DATA_ROOT}, so it is not one of this box's "
+        "runtime stores and a checkout cleanup can reach it")
+    declared = [ln for ln in (REPO / "app" / "paths.py").read_text(encoding="utf-8")
+                .splitlines() if ln.startswith("AUTONOMY_DESCRIPTION_LEDGER_PATH")]
+    assert len(declared) == 1 and "PIPELINE_DIR" in declared[0] \
+        and "LLOYD_HOME" not in declared[0], (
+        f"the store must be derived from PIPELINE_DIR like TASKS_DIR, not from a code "
+        f"tree: {declared}")
+    assert paths.AUTONOMY_DESCRIPTION_LEDGER_PATH \
+        == paths.PIPELINE_DIR / LEDGER.LEDGER_NAME
+    if default.is_relative_to(REPO):
+        # Only paths.py's rule 3 may put a store inside a checkout, and only in the
+        # tree's own gitignored data root: prove git ignores it, or it is a repo file.
+        assert default.is_relative_to(REPO / ".lloyd-data"), (
+            f"{default} sits inside the code tree somewhere other than the gitignored "
+            "worktree data root")
+        probe = subprocess.run(["git", "-C", str(REPO), "check-ignore", "-q", "--stdin"],
+                               input=str(default) + "\n", capture_output=True, text=True)
+        assert probe.returncode == 0, (
+            f"{default} is inside the checkout and NOT git-ignored, so a round's "
+            "`git add -A` would commit runtime state into a commit")
+
+    # ── bound ───────────────────────────────────────────────────────────────────
+    assert LEDGER.LOW_WATER_BYTES < LEDGER.MAX_BYTES, (
+        "trimming to the ceiling puts the next append back over it and the file is "
+        "rewritten on every call")
+    assert LEDGER.MAX_BYTES == 65536 and LEDGER.LEDGER_NAME.endswith(".jsonl")
+
+    # Hermetic, unlike the location assertions above: this loop writes 900 rows and
+    # then asserts which of them survived, so it needs a file no other node is
+    # appending to. Unpatched it would write into the shared DATA_ROOT store the six
+    # #2408 nodes also touch, and under `-n auto` a sibling node's row is one more row
+    # the trim may or may not have dropped — a race that reads as "the trim dropped
+    # forward". `default` above stays the unpatched path because that is the location
+    # claim; below is the size claim, and the two need different files.
+    busy = tmp_path / "bound-loop.jsonl"
+    monkeypatch.setenv(LEDGER.LEDGER_ENV, str(busy))
+    last = 899
+    for i in range(last + 1):
+        assert LEDGER.record(task_id=i, resolved=1, found=0, refused=False)
+    size = busy.stat().st_size
+    assert size <= LEDGER.MAX_BYTES, (
+        f"900 rows grew the ledger to {size} bytes, past its {LEDGER.MAX_BYTES} "
+        "ceiling, so an unbounded store was shipped under the name of a bounded one")
+    rows = _ledger_rows(busy)
+    assert rows, "trimming left a file no reader can parse"
+    assert all(ln.strip() for ln in busy.read_text(encoding="utf-8").splitlines())
+    assert rows[-1]["task"] == last, (
+        f"the newest row is task {rows[-1]['task']}, not {last}: the trim dropped "
+        "forward instead of back")
+    assert rows[0]["task"] > 0, (
+        "no row was ever dropped, so the size assertion above has not been exercised")
+
+    # ── the one command ─────────────────────────────────────────────────────────
+    read_me = tmp_path / "read-me.jsonl"
+    buckets = [
+        {"task": 79, "op": "update", "resolved": 2, "found": 1, "refused": True},
+        {"task": 80, "op": "create", "resolved": 1, "found": 0, "refused": False},
+        {"task": 81, "op": "update", "resolved": 3, "found": 0, "refused": False},
+        {"task": 82, "op": "create", "resolved": 0, "found": 0, "refused": False},
+        {"task": 83, "op": "update", "resolved": None, "found": None, "refused": False,
+         "error": "OSError"},
+    ]
+    read_me.write_text("".join(
+        json.dumps({"at": "2026-10-11T00:00:00+00:00", "error": "", **row}) + "\n"
+        for row in buckets), encoding="utf-8")
+    monkeypatch.setenv(LEDGER.LEDGER_ENV, str(read_me))
+
+    proc = subprocess.run([sys.executable, "-m", "app.description_guard_ledger"],
+                          cwd=REPO, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, f"the reader exited {proc.returncode}: {proc.stderr[-400:]}"
+    assert "refused=1" in proc.stdout, proc.stdout
+    assert "passed=2" in proc.stdout, proc.stdout
+    assert "zero_resolved=1" in proc.stdout, (
+        f"the command did not separate 'nothing stale' from 'nothing comparable': "
+        f"{proc.stdout}")
+    assert "instrument_error=1" in proc.stdout and "rows=5" in proc.stdout, proc.stdout
+    assert str(read_me) in proc.stdout, (
+        "the reader did not name the file it counted, so a wrong path reads as an empty "
+        f"store: {proc.stdout}")
 
 
 

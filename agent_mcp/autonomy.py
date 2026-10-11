@@ -174,8 +174,14 @@ def _refuse_broken(exc: Exception) -> str:
 #: (`git log -S'constant_quotes' -- agent_mcp/` is empty at #2408's base), so the
 #: afternoon `01dea8bc` moved `LEDGER_ARCHIVE_AGE_DAYS` from 30 to 14 an
 #: `autonomy_write_task(description=…)` could have gone on publishing 30.
-def _stale_description_error(description) -> str | None:
+def _stale_description_error(description, *, task_id: int = 0) -> str | None:
     """Refuse a description quoting a tree constant at a value the tree does not have.
+
+    `task_id` is only ever read by the #2534 ledger row, never by the verdict, so that a
+    row can be traced back to a task. It is the id the CALLER named: 0 on the create
+    path, which deliberately runs this guard ahead of `_next_task_id()` so a refused
+    create leaves the id available for the retry — the ledger's `op` field is what tells
+    a create's `task: 0` apart from an update of a task numbered 0.
 
     Returns the tool-protocol refusal — the module's plain `{"error": ...}` string, the
     shape every other refusal here uses — or None when the description may be published.
@@ -207,6 +213,21 @@ def _stale_description_error(description) -> str | None:
     descriptions legitimately name no constant, and refusing those would block ordinary
     writes on an instrument that had nothing to say.
 
+    **It still does not police zero resolved pairs — but since #2534 it records them.**
+    Before that item the `Report` was discarded at the call (`.found` was the only
+    attribute ever bound), so "resolved 8 pairs and agreed" and "resolved nothing, so
+    could not disagree" left this function byte-identically, and the question "does the
+    guard fire in production, and does it mis-block?" had no corpus to answer from:
+    `git grep -n "logging|logger|print(" agent_mcp/autonomy.py` was empty and no store
+    held a row. Every call that reaches the resolver now appends exactly one row to
+    `app.description_guard_ledger` — task id, `report.resolved`, how many mismatches
+    `report.found` held, and whether this call refused — and `counts()` there is what
+    answers the question. Recording changes no verdict: zero resolved pairs still
+    writes, because refusing those would block ordinary writes on an instrument that had
+    nothing to say, and the no-deadlock argument two paragraphs up depends on it. A
+    resolver that raises gets a row too, with `resolved: null` and its exception class,
+    which is the third state the ledger exists to keep separate from the other two.
+
     **Fail-open, and it cannot swallow anyone's error.** The item's stated failure mode is
     a guard that RAISES into the dispatcher, so everything the resolver does is inside the
     `try`, and the tuple covers what that work can actually raise: `OSError` walking the
@@ -218,19 +239,38 @@ def _stale_description_error(description) -> str | None:
     resolver that cannot answer yields None and the write proceeds, which is also what
     keeps a broken instrument from blocking the `status: draft` park that stops a job. The
     number is still judged at the land either way.
+
+    The #2534 ledger inherits that property rather than assuming it: `LEDGER.record`
+    swallows `OSError` and `ValueError` itself and returns False, so a data root on a
+    full disk costs one warning line and one lost row, never a refused write and never a
+    traceback into `call_tool`. Pinned by
+    `tests/test_agent_mcp_autonomy_tasks_gate.py::test_a_ledger_sink_that_raises_never_reaches_the_caller`.
     """
     text = str(description or "")
     if not text.strip():
+        # No description, so nothing reaches the resolver and nothing is recorded: a
+        # row here would be a count of calls that made no claim to check.
         return None
     import subprocess
 
     from app.paths import LLOYD_HOME
     from scripts.automod import constant_quotes as CQ
 
+    from app import description_guard_ledger as LEDGER
+
     try:
-        found = CQ.mismatches(text, CQ.tree_constants(LLOYD_HOME)).found
-    except (OSError, UnicodeDecodeError, subprocess.SubprocessError, ValueError):
+        # The whole Report, not `.found`: `resolved` is the denominator that makes an
+        # empty `found` mean "agreed" rather than "nothing to compare" (#2534).
+        report = CQ.mismatches(text, CQ.tree_constants(LLOYD_HOME))
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError, ValueError) as exc:
+        LEDGER.record(task_id=task_id, resolved=None, found=None, refused=False,
+                      resolver_error=type(exc).__name__)
         return None
+    found = report.found
+    # Written before the refusal is assembled, so a refusal is journaled even on the
+    # branch that returns a refusal. `record` is itself fail-open (#2534 clause 4).
+    LEDGER.record(task_id=task_id, resolved=report.resolved, found=len(found),
+                  refused=bool(found))
     if not found:
         return None
     # The same sentence `vault_guards.autonomy_description_errors` refuses a land with,
@@ -667,7 +707,7 @@ def _handle_write(params: dict) -> str:
         # Ahead of `_next_task_id` so the refusal is the first thing a bad create can do:
         # the id is derived from the highest one on disk, so writing nothing here leaves
         # the same id available, and a stale description never reaches the file at all.
-        refusal = _stale_description_error(params.get("description", ""))
+        refusal = _stale_description_error(params.get("description", ""), task_id=task_id)
         if refusal:
             return refusal
         new_id = _next_task_id()
@@ -718,7 +758,7 @@ def _handle_write(params: dict) -> str:
         # The truthiness test mirrors the loop below, so an empty description is ignored
         # here exactly as it is ignored there.
         if params.get("description"):
-            refusal = _stale_description_error(params["description"])
+            refusal = _stale_description_error(params["description"], task_id=task_id)
             if refusal:
                 return refusal
         for key in ("status", "priority", "frequency", "skill_name", "agent_id", "model",

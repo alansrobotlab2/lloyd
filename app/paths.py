@@ -169,6 +169,15 @@ VAULT_DERIVED_ROOT = PIPELINE_DIR / "vault-derived"
 # scripts/skill_pseudo_queries.py, read by agent_mcp.skills when
 # skills.pseudo_queries.enabled is on. Regenerable, keyed by each skill's text hash.
 SKILL_PSEUDO_QUERIES_PATH = PIPELINE_DIR / "skill-pseudo-queries.json"
+# One JSONL row per call the #2408 description guard reaches the resolver for
+# (#2534): `app/description_guard_ledger.py` owns the schema and bounds the file
+# itself, so this is `SKILL_PSEUDO_QUERIES_PATH` above and `DENIAL_JOURNAL_PATH`
+# below in shape — a guard's witness, written by engine code, read only by whoever
+# asks how often the guard fires. It hangs off PIPELINE_DIR like `TASKS_DIR` rather
+# than off the code tree, which is the 2026-09-22 rule: a `rm -r` aimed at a checkout
+# must not be able to reach runtime state, and a worktree's copy of this file lands in
+# that tree's own gitignored `.lloyd-data`, not in a commit.
+AUTONOMY_DESCRIPTION_LEDGER_PATH = PIPELINE_DIR / "autonomy-description-guard.jsonl"
 
 # Runtime state directories. These were once spelled `Path.home() / "lloyd" /
 # ...` at a dozen call sites, which pinned them to the *user's* lloyd checkout

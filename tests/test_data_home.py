@@ -100,8 +100,12 @@ def test_the_environment_wins(tmp_path):
 def test_this_suite_never_resolves_the_live_root():
     assert paths.DATA_ROOT != paths.PRODUCTION_DATA_ROOT
     assert os.environ["LLOYD_DATA"] == str(paths.DATA_ROOT)
+    # `AUTONOMY_DESCRIPTION_LEDGER_PATH` joined this list with #2534: its writer is
+    # engine code sitting on the MCP task-write path, so a row landing inside a
+    # checkout would put a guard's witness where the 2026-09-22 teardown lives.
     for const in (paths.SESSIONS_DIR, paths.WORKERS_DB, paths.USAGE_DB, paths.LOGS_DIR,
-                  paths.VAULT_KG_DB_DEFAULT, paths.EVENT_LOGS_DIR, paths.TASKS_DIR):
+                  paths.VAULT_KG_DB_DEFAULT, paths.EVENT_LOGS_DIR, paths.TASKS_DIR,
+                  paths.AUTONOMY_DESCRIPTION_LEDGER_PATH):
         assert const.is_relative_to(paths.DATA_ROOT), const
 
 
