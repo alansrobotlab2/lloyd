@@ -24,8 +24,14 @@ Shape of what follows: a boundary map derived from chokepoints in the tree, a
 threat table over it, an open set, and a retrospective that scores the model
 against incidents this box already wrote up. Pinned by
 `tests/test_threat_model_doc.py` (row shape, the miss vocabulary, the arithmetic)
-and by `tests/test_architecture_coverage_doc_claims.py` (every cited path and
-line anchor resolves, as for every other doc in this directory).
+and by `tests/test_architecture_coverage_doc_claims.py`, whose path node resolves
+every cited path and line anchor here — read the qualifier before borrowing that
+comfort: that node is parameterized over five docs, not over the directory, so
+the other thirty-one architecture pages are graded for *command* claims only and
+nothing asks whether a path they cite is on disk (#2582). A line anchor is only
+checked to be shorter than its file, which is how two cells in this very table
+pointed at `main()` and at a grant function until the 2026-10-11 pass re-anchored
+them (#2583).
 
 ## How this model was built, and the one way it lies
 
@@ -79,7 +85,7 @@ prompt cannot be access control — is for.
 | B5 | tool result → next turn's input | every tool's own output, including a subprocess's stdout | nothing: results are trusted as authored | `agent_mcp/_injection_probe.py:121` (records) |
 | B6 | model output → shell | an argv string | the deny table, twice | `app/harness/safety.py:417`, `agent_mcp/main.py:531` |
 | B7 | model output → filesystem and vault | a path plus bytes | one constant, three lanes | `app/harness/protected_paths.py:259` |
-| B8 | model output → the network | a URL, a body, a header | a default-deny destination table | `agent_mcp/egress.py`, `app/harness/outbound_content.py:526` |
+| B8 | model output → the network | a URL, a body, a header | a destination table that **records rather than refuses** on this box: `harness.egress_policy.enforce` is set `false` at `~/lloyd/config.yaml:712`, so `egress.guard`'s resolution-based floor never runs and each lane falls back on its own `_is_private_host` — two different functions, only one of which resolves (#2584) | `agent_mcp/egress.py`, `app/harness/outbound_content.py:526` |
 | B9 | an unattended session → the tool surface | every tool call from a worker or a round | two tuples and the session's platform | `app/tool_bans.py:23` |
 | B10 | a grant → authority | a scope predicate, an expiry, a quota | a human at Mission Control, or a task file's front matter | `agent_mcp/builtin_grants.py`, `app/harness/policy.py:1363` |
 | B11 | an automod round → live `main` | a diff, then a restart of the running system | the gate ladder and the guardian | `scripts/automod/spec.py:422`, `scripts/automod/gate.py:3532` |
@@ -87,7 +93,7 @@ prompt cannot be access control — is for.
 | B13 | a run's output → a durable store | loaded memory, facts, the entity store, eval baselines, `-latest` pointers | the job that owns the file, with no cross-job reader | `app/memory_flush.py`, `app/kg_store.py` |
 | B14 | a network peer → the backend API | an HTTP request that can start a turn | the peer's address, and a fingerprint if one arrives | `server.py:241`, `server.py:181` |
 | B15 | a nested RPC call → tool dispatch | a tool call issued from inside a `Bash` child | the allowlist stamped when the parent call began | `app/harness/rpc_policy.py:76` |
-| B16 | an act → Alan's desktop session | a click, a keystroke, a window focus | a lease only a human grants, revoked by mouse motion | `app/desktop_lease.py:89` |
+| B16 | an act → Alan's desktop session | a click, a keystroke, a window focus | a lease only a human grants, revoked by mouse motion | `app/desktop_lease.py:123` |
 | B17 | a new dependency → this machine | a package name, a resolver, an installer | an install-command matcher | `app/harness/supply_chain.py:340` |
 | B18 | a bench or eval trial → the production tool surface | a full `run_query` with the real tool pool | the task's `requires_runtime:` flag | `scripts/autoresearch/bench_runner_sdk.py`, `agent_mcp/_tool_sandbox.py` |
 | B19 | a guard's own inputs → its verdict *(added by I-03, I-10, I-11 in this sitting)* | the file set a counter walks, the argv a matcher reads, the config value a mode resolves | the guard itself, with no second reader | `app/config.py`, `app/harness/denial_journal.py` |
@@ -124,15 +130,15 @@ appears in this table: those threats are in the next one.
 | T-15 | B1 | inject | Prose from a fetched page instructs the turn that fetched it | `agent_mcp/_injection_probe.py:121` |
 | T-16 | B5 | inject | A tool result's own content instructs the next turn | `agent_mcp/_injection_probe.py:52` |
 | T-17 | B2 | inject | A vault note's text is matched as relevant and then obeyed | `app/prefetch.py:1840` |
-| T-18 | B1 | E | Fetched content points the browser at a loopback or private address | `agent_mcp/browser.py` |
-| T-19 | B8 | I | Data leaves to a destination the policy never named | `agent_mcp/egress.py` |
+| T-18 | B1 | E | Fetched content points the browser at a loopback or private address | `agent_mcp/browser.py:147` — the resolving one. The `http_fetch`/`http_request` copy at `agent_mcp/http_tools.py:49` matches the hostname's text and does not resolve, so this control is lane-specific while `enforce` is off (#2584) |
+| T-19 | B8 | I | Data leaves to a destination the policy never named | `agent_mcp/egress.py` — the measurement, not the gate: its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, false here, so the table holds zero denies (#2580) |
 | T-20 | B8 | I | A credential rides out inside a request body the model composed | `app/harness/outbound_content.py:526` |
 | T-21 | B17 | chain | A turn installs a package nobody reviewed | `app/harness/supply_chain.py:340` |
 | T-22 | B17 | chain | A skill's installer pulls arbitrary code through a channel the matcher does not read | `eval/supply-chain/` |
 | T-23 | B11 | T | A round lands a diff in a path the loop may never write | `scripts/automod/spec.py:422` |
 | T-24 | B11 | E | A round edits its own gate to let itself through | `scripts/automod/gate.py:3532` |
 | T-25 | B11 | T | An agent-authored change weakens a guard and the suite stays green | `scripts/automod/gate.py:2648` |
-| T-26 | B11 | D | A promotion ships a crash loop into the running system | `agent-services/guardian/guardian.py:2147` |
+| T-26 | B11 | D | A promotion ships a crash loop into the running system | `agent-services/guardian/guardian.py:689` |
 | T-27 | B11 | T | A promotion silently deletes data and looks like a clean landing | `agent-services/guardian/vaultwatch.py` |
 | T-28 | B9 | E | An unattended turn reaches a tool it was never allowed to hold | `app/tool_bans.py:23` |
 | T-29 | B10 | E | An unattended turn mints itself the authority it was banned from using | `app/tool_bans.py:35` |
@@ -141,7 +147,7 @@ appears in this table: those threats are in the next one.
 | T-32 | B14 | S | A peer outside loopback starts a turn over the API | `server.py:241` |
 | T-33 | B14 | S | A presented fingerprint is read as identity where none was required | `server.py:181` |
 | T-34 | B15 | E | A nested call performs a write, skipping every pre-dispatch hook | `app/harness/rpc_policy.py:76` |
-| T-35 | B16 | E | The desktop is acted on with no live lease, or after the lease was revoked | `app/desktop_lease.py:89` |
+| T-35 | B16 | E | The desktop is acted on with no live lease, or after the lease was revoked | `app/desktop_lease.py:123` |
 | T-36 | B18 | agency | A trial told to be destructive is handed the real tool surface | `agent_mcp/_tool_sandbox.py` |
 | T-37 | B13 | T | A derivation run rewrites the entity store and the graph is unrecoverable | `app/kg_store.py` |
 | T-38 | B13 | poison | A night's bad output is the input the next night is graded against | `scripts/maintenance/corpus_shape.py` |
@@ -167,7 +173,7 @@ makes it visible, which is the only reason to keep the two tables apart.
 | id | B | Class | Capability | Nearest existing work | Control |
 |---|---|---|---|---|---|
 | O-01 | B4 | persist | Nothing checks where a skill came from, or whether it changed since review, at the moment its body is delivered as an instruction | the index-description tests, and nothing upstream of delivery | **none** |
-| O-02 | B13 | poison | A worker's own run report reaches next night's context through the same lane as everything else, with no sanitizer on that seam | [[memory]] documents the four verbs, not the provenance of a write | **none** |
+| O-02 | B13 | poison | A worker's own run report reaches next night's context through the same lane as everything else, with no sanitizer on that seam | [[memory]] documents the four `memory_*` verbs and their guards — all four **retired 2026-09-23**, their guards folded into the tools they wrapped — and says nothing about the provenance of a write | **none** |
 | O-03 | B3 | T | A loaded-memory file other than the identity file is writable by every lane that can reach the vault | the ceiling guard bounds size, never authorship | **none** |
 | O-04 | B18 | agency | A read-only capture is published to a peer that granted nothing, and its content is an input no scanner reads | the lease governs acting, never seeing | **none** |
 | O-05 | B19 | R | A guard's verdict has no second reader, so an empty log cannot tell "nothing arrived" from "nothing looked" | #1948 closed the mode-typo case for two guards and no others | **none** |
@@ -254,7 +260,13 @@ negative here is the honest deliverable, and this page will take it.
   future round, not this page).
 - **Whether a cited control still exists, or a `#NNNN` is still open.**
   Path and line resolution is `tests/test_architecture_coverage_doc_claims.py`'s
-  job for this doc as for every other; backlog liveness is deliberately *not*
+  job for this doc — the same node's five-doc scope is #2582, and its line check
+  is a length comparison, not a symbol one, which is #2583. It is not the same
+  check for the rest of this directory. Neither file re-derives a prose figure:
+  the retrospective headline is recomputed from its rows, but the `1 of 13`
+  independent-coverage number and every count in the review log are checked by a
+  human reading the table, which is where they will drift. Backlog liveness is
+  deliberately *not*
   pinned, because a suite node that goes red when a human closes an item is holding
   the board still rather than testing anything.
 - **The guards themselves.** Their order, their modules and where one rule is
@@ -284,6 +296,19 @@ negative here is the honest deliverable, and this page will take it.
   learned and did not expect: B19 exists as a seam and explains five of the six
   misses on its own, and a model built from this tree's guards cannot predict this
   tree's damage because the guards are what the damage left behind.
+- **2026-10-11 — `current` (arch-review, whole-doc unit).** All 41 threat rows,
+  19 boundaries and 8 incident sources re-read against the tree at `1d694d45`:
+  the table's shape, the miss arithmetic and the 12-rung gate count hold. Four
+  cells did not. B8 and T-19 credited egress default-deny as an authorizer while
+  `harness.egress_policy.enforce` is `false` on this box, and reading what falls
+  back when it is off found the reason underneath: T-18's SSRF control exists
+  twice and the HTTP lane's copy is the pattern-only one (#2584, #2580). Two
+  anchors landed on non-deciders — the guardian line pointed at `main()`, the
+  lease line at `grant()` — because the path node compares a line
+  number to a file's length (#2583); O-02's nearest-work pointed at the four
+  `memory_*` verbs, retired 2026-09-23. The intro and the not-cover bullet both
+  claimed path resolution ran "as for every other doc in this directory": it
+  covers five of thirty-six (#2582), and neither file re-derives a prose count.
 
 
 
