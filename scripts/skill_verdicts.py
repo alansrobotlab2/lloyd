@@ -1756,7 +1756,13 @@ def candidate_input_lost(evidence_cmd: str) -> str | None:
     actually count the corpus it pins, and a command that pins one path while counting another is
     still named.
     """
-    if _DISPOSAL_TOMBSTONE_RE.fullmatch((evidence_cmd or "").strip()):
+    # Both frames, because both are in the ledger: the shape `repair_verdicts` mints now and
+    # the shape the 31 rows stored before #2569 carry. Neither matcher is derived by hand, and
+    # neither covers the other's bytes — `tombstone_matcher` builds each from its own template,
+    # so the exemption cannot be widened by editing a regex, only by editing a template.
+    command = (evidence_cmd or "").strip()
+    if (_DISPOSAL_TOMBSTONE_RE.fullmatch(command)
+            or _LEGACY_DISPOSAL_TOMBSTONE_RE.fullmatch(command)):
         return None
     specs = list(_CANDIDATE_PATH_RE.finditer(evidence_cmd))
     if not specs:
@@ -2110,8 +2116,29 @@ _MISSING_INPUT_RE = re.compile(
 #: number goes nonzero and the disposal is falsified by its own check, rather than by
 #: somebody remembering to look. Braces are filled with a path already screened for
 #: shell metacharacters by `disposable_input`.
-TOMBSTONE_TEMPLATE = ('echo "dated_corpus_files=$(ls -1 \'{input}\' 2>/dev/null | wc -l)'
+#:
+#: The path is quoted only long enough to reach a variable, because the pins these rows
+#: carry are EREs, not globs: every `grep -xE` key spells its extension `[0-9]{8}\.md`, and
+#: in shell `[0-9]` is ONE digit and `{8}` is literal text. Quoting the path — which is what
+#: #1588 shipped — meant `ls` was handed a name with those characters in it and found
+#: nothing; unquoting it finds nothing too, for the reason just given. So the directory is
+#: listed plainly and the pin is matched between `^` and `$` by `grep -cE`, the same dialect
+#: the ledger already reads pins in. Measured 2026-10-11 over the live candidates directory:
+#: the shipped form printed `dated_corpus_files=0` against 11 snapshots its pin named, the
+#: unquoted glob printed 0 against the same 11, this form printed 11. A count that can only
+#: ever be 0 is a disposal whose advertised reopen leg can never fire, which is what
+#: `DISPOSAL_NOTE` below promises it can.
+TOMBSTONE_TEMPLATE = ('echo "dated_corpus_files=$(p=\'{input}\'; ls -1 "$(dirname "$p")"'
+                      ' 2>/dev/null | grep -cE "^$(basename "$p")\\$")'
                       ' pinned_input=\'{input}\'"')
+
+#: The tombstone #1588 shipped, kept for one reason: it is the shape of the 31 rows already
+#: in the ledger, and `_disposal_matcher` reads this template to recognise them. It mints
+#: nothing — `repair_verdicts` fills `TOMBSTONE_TEMPLATE` — and it must not be edited to
+#: look like the live template, because then nothing would match those rows and `audit`
+#: would report 31 `input_lost` findings on its own bookkeeping (#2433's whole result).
+LEGACY_TOMBSTONE_TEMPLATE = ('echo "dated_corpus_files=$(ls -1 \'{input}\' 2>/dev/null | wc -l)'
+                             ' pinned_input=\'{input}\'"')
 
 DISPOSAL_NOTE = (
     "#1588 disposal: the check above was pinned to {input}, which retention has pruned, so "
@@ -2124,13 +2151,44 @@ DISPOSAL_NOTE = (
 #: `pinned_input=` to the same string. `candidate_input_lost` exempts exactly this shape: a
 #: disposal's claim is the absence of its corpus, so classifying it as a falsifier that lost its
 #: input is a verdict on the ledger's bookkeeping, not on a decision nobody can re-run (#2433).
-_DISPOSAL_TOMBSTONE_PARTS = TOMBSTONE_TEMPLATE.split("{input}")
-_DISPOSAL_TOMBSTONE_RE = re.compile(
-    re.escape(_DISPOSAL_TOMBSTONE_PARTS[0])
-    + r"(?P<pin>[^'\"\n]*)"
-    + re.escape(_DISPOSAL_TOMBSTONE_PARTS[1])
-    + r"(?P=pin)"
-    + re.escape(_DISPOSAL_TOMBSTONE_PARTS[2]) + r"\Z")
+def tombstone_matcher(template: str):
+    """Compile a tombstone template into a matcher for commands that ARE that template.
+
+    Built from the template's own frame — `re.escape` over each literal span, with the two
+    `{input}` braces replaced by a named group and a backreference — so a template and its
+    matcher cannot drift apart, and so the counted path and the published `pinned_input=` are
+    bound to one string: a row that counts one corpus while claiming another is not exempt.
+
+    The caller supplies a template with exactly two braces. `candidate_input_lost` exempts the
+    shapes of BOTH templates, which is why this is a factory rather than the one regex it
+    used to be; see `_DISPOSAL_TOMBSTONE_RE` and `_LEGACY_DISPOSAL_TOMBSTONE_RE`.
+    """
+    parts = template.split("{input}")
+    if len(parts) != 3:
+        raise ValueError(f"a tombstone template splices its pin twice, got "
+                         f"{len(parts) - 1} braces: {template!r}")
+    return re.compile(
+        re.escape(parts[0])
+        + r"(?P<pin>[^'\"\n]*)"
+        + re.escape(parts[1])
+        + r"(?P=pin)"
+        + re.escape(parts[2]) + r"\Z")
+
+
+#: The live disposal's own frame. `candidate_input_lost` exempts exactly this shape: a
+#: disposal's claim is the absence of its corpus, so classifying it as a falsifier that lost
+#: its input is a verdict on the ledger's bookkeeping, not on a decision nobody can re-run
+#: (#2433).
+_DISPOSAL_TOMBSTONE_RE = tombstone_matcher(TOMBSTONE_TEMPLATE)
+
+#: ...and the frame of the disposals that are already stored, whose count is a quoted `ls`
+#: with `wc -l`. Every one of those rows has to stay exempt: `_pattern_names_any` reads their
+#: published pin against the real directory listing, so a pin that names nothing left is
+#: `input_lost` for a reader that re-executes it, and #2433 was landed to stop `audit`
+#: exiting 1 every night over corpus retention did the pruning. `test_a_legacy_quoted_
+#: tombstone_keeps_its_exemption_after_the_count_changed` pins the pair, and the two matchers
+#: cover disjoint frames — no row is exempted by both.
+_LEGACY_DISPOSAL_TOMBSTONE_RE = tombstone_matcher(LEGACY_TOMBSTONE_TEMPLATE)
 
 #: The characters no pinned path may contain in either tombstone builder: each one can close
 #: the quote the template splices it into, or start a substitution inside it. A backslash is

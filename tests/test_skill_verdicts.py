@@ -5463,6 +5463,232 @@ def test_the_exemption_needs_the_disposal_frame_and_nothing_wider(tmp_path):
     assert "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 1" in out, out
 
 
+# ── #2569: the reopen leg a disposal advertises has to be able to fire ────────────
+#
+# Every disposal's reason text promises that "a nonzero count falsifies this disposal and
+# reopens the decision", and the count was `ls -1 '<pin>' | wc -l` — the path spliced inside
+# single quotes, so no shell ever expanded it and `ls` was asked for a file with a literal
+# `[0-9]{8}` in its name. Measured 2026-10-11 over the live candidates directory, which holds
+# 11 `candidate-bash-logic-*` snapshots that its pin names: the shipped form printed
+# `dated_corpus_files=0`. Two hazards sit on top of the fix, and both are pinned below: the
+# exemption regex is derived from the template, so editing the template revokes the exemption
+# on the 31 rows already stored (#2433's exit-0 result), and no existing test can tell an
+# absent corpus from a broken glob because `_cand_dir_2433` deliberately holds nothing the
+# pin could match.
+
+def _minted_tombstone_2569(store: Path, tmp_path: Path,
+                           dir_name: str = "candidates") -> tuple[Path, str]:
+    """The check `repair --dispose-unverifiable` appends, taken from the real route.
+
+    Returns `(the candidate directory the row pins, the stored command)`. The disposal is
+    minted while the corpus is absent, which is the only moment one is minted at all: a key
+    whose snapshots are on disk is never disposed. So a test that wants the reopen leg to
+    fire has to put the files back AFTER the mint — which is exactly what a restore does.
+    """
+    cand = _cand_dir_2433(tmp_path, dir_name)
+    input_lost_row(store, input_lost_cmd_2433(cand))
+    _, out = run_repair_2433(store, tmp_path, "--dispose-unverifiable")
+    assert repair_tally_2433(out)["disposed"] == 1, out
+    return cand, sv.load_verdicts(store)[INPUT_LOST_KEY_2433]["evidence_cmd"]
+
+
+def _restore_2569(cand: Path, *days: str) -> list[str]:
+    """Put dated snapshots back where retention took them; names returned for the record."""
+    names = [f"candidate-seq-3-bash-fs-edit-bash-fs-read-{day}.md" for day in days]
+    for name in names:
+        (cand / name).write_text("---\npattern_key: candidate-seq-3-bash-fs-edit-bash-fs-read\n"
+                                 "---\nbody\n", encoding="utf-8")
+    return names
+
+
+def _legacy_tombstone_2569(pin: str) -> str:
+    """#1588's tombstone over `pin`, spelled out rather than read from a constant.
+
+    These are the bytes the ledger's 31 stored disposals carry. Spelling them here keeps the
+    tests below witnesses to the historical shape: a legacy constant edited to match whatever
+    the code now does would stop meaning anything.
+    """
+    return (f"echo \"dated_corpus_files=$(ls -1 '{pin}' 2>/dev/null | wc -l)"
+            f" pinned_input='{pin}'\"")
+
+
+def test_the_minted_tombstone_counts_a_restored_corpus_nonzero(tmp_path):
+    """#2569 clause 1: the falsifier a disposal advertises has to be able to go nonzero.
+
+    Asserted across the boundary the row is written for: `repair --dispose-unverifiable`
+    mints it, `bash -c` then executes the stored command the way `audit` does, and the corpus
+    is restored afterwards. Over a directory holding two files the pin names plus the
+    fixture's one unrelated candidate the count has to be 2 and the exit 0 — a reopen leg
+    that cannot fire is a disposal that can never be questioned — and the same command over a
+    directory holding none has to print 0, or the number proves nothing in either direction.
+    """
+    cand, cmd = _minted_tombstone_2569(tmp_path / "verdicts.jsonl", tmp_path)
+
+    absent = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert absent.returncode == 0, absent.stderr
+    assert "dated_corpus_files=0" in absent.stdout, absent.stdout
+    assert "No such file or directory" not in absent.stderr, absent.stderr
+
+    assert len(_restore_2569(cand, "20261011", "20261012")) == 2
+    ran = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert ran.returncode == 0, ran.stderr
+    assert "dated_corpus_files=2" in ran.stdout, ran.stdout
+
+
+def test_the_minted_count_is_the_ere_dialect_the_ledger_stores_not_a_shell_glob(tmp_path):
+    """#2569 clause 2: `grep -cE`, because no amount of re-quoting makes `[0-9]{8}` a glob.
+
+    The item's own first suggestion — "unquote the glob" — is measured here and does not fix
+    it: in shell `[0-9]` is ONE digit and `{8}` is literal text, so the unquoted command
+    counts 0 on the very fixture that has two matching files, and a round that followed that
+    suggestion would have shipped the same permanent zero with tidier quoting. The ledger's
+    pins are EREs (every `grep -xE` key spells its extension that way, which is why
+    `UNSAFE_PIN_CHARS` excepts that one backslash), so the count reads them as EREs: the
+    directory listed plainly, the pattern between `^` and `$` in `grep -cE`.
+
+    Three readings of one directory of three files — two named by the pin, one not — is what
+    tells the shapes apart: minted 2, unquoted glob 0, quoted `wc -l` 0.
+    """
+    cand, cmd = _minted_tombstone_2569(tmp_path / "verdicts.jsonl", tmp_path)
+    _restore_2569(cand, "20261011", "20261012")
+    pin = f"{cand}/{INPUT_LOST_PATTERN_2433}"
+
+    ran = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert "dated_corpus_files=2" in ran.stdout, ran.stdout
+
+    unquoted = subprocess.run(["bash", "-c", f"ls -1 {pin} 2>/dev/null | wc -l"],
+                              capture_output=True, text=True)
+    assert unquoted.stdout.strip() == "0", (
+        f"an unquoted glob counts {unquoted.stdout.strip()} here, so a grep -cE is not "
+        f"merely one way of counting this dialect: {unquoted.stdout!r}")
+    quoted = subprocess.run(["bash", "-c", f"ls -1 '{pin}' 2>/dev/null | wc -l"],
+                            capture_output=True, text=True)
+    assert quoted.stdout.strip() == "0", quoted.stdout
+
+
+def test_a_legacy_quoted_tombstone_keeps_its_exemption_after_the_count_changed(tmp_path,
+                                                                              monkeypatch):
+    """#2569 clause 3: the disposals already in the ledger keep their exemption.
+
+    `_DISPOSAL_TOMBSTONE_RE` is the template's own frame, so a new template silently revokes
+    the exemption on every row the old frame wrote: at triage, 31 stored rows carry
+    `dated_corpus_files=` and all 31 are the quoted form, and their pins name a corpus
+    retention deleted for real. An unexempted one is `input_lost`, and `audit` goes back to
+    exit 1 every night over bookkeeping nobody can re-run — the state #2433 was landed to
+    end. So the exemption GAINS a frame rather than moving it.
+
+    The final lines are the part that must not be true by blindness: swap the legacy frame's
+    matcher for one that matches nothing and that same row is exactly what
+    `candidate_input_lost` exists to name. What keeps it out of `input_lost` is the
+    exemption, not a detector that stopped seeing.
+    """
+    cand = _cand_dir_2433(tmp_path)
+    legacy = _legacy_tombstone_2569(f"{cand}/{INPUT_LOST_PATTERN_2433}")
+    assert sv.candidate_input_lost(legacy) is None, "a stored disposal must stay exempt"
+
+    _, minted = _minted_tombstone_2569(tmp_path / "verdicts.jsonl", tmp_path)
+    assert minted != legacy, (
+        "the minted check is still the quoted form, whose count can never go nonzero")
+    assert sv.candidate_input_lost(minted) is None, "the new frame has to be exempt too"
+    assert sv._DISPOSAL_TOMBSTONE_RE.fullmatch(legacy) is None, (
+        "the live template's matcher describes what the module mints now, not its history")
+
+    monkeypatch.setattr(sv, "_LEGACY_DISPOSAL_TOMBSTONE_RE",
+                        sv.tombstone_matcher("no frame {input} matches {input} here"))
+    assert sv.candidate_input_lost(legacy) is not None, (
+        "the legacy row was not being exempted by the legacy frame")
+
+
+def test_audit_exits_zero_over_tombstones_in_both_shapes_with_no_candidate_files(tmp_path):
+    """#2569 clause 4: #2433's result survives the change to the count.
+
+    One store, both frames, no candidate file anywhere: the row `repair` mints now, and a row
+    in the historical quoted shape, which is what the ledger's 31 disposals are. `audit`
+    executes each command and reads each published pin against the directory listing, so this
+    is the pair of readings that decides whether the exemption still covers the ledger once
+    the template has moved: exit 0, `input_lost 0`, and the key tally still the last line.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    cand, minted = _minted_tombstone_2569(store, tmp_path)
+    assert minted != _legacy_tombstone_2569(f"{cand}/{INPUT_LOST_PATTERN_2433}"), (
+        "the store below would hold one shape twice, not the pair the ledger is moving through")
+    legacy = _legacy_tombstone_2569(f"{cand}/candidate-seq-6-legacy-key-[0-9]{{8}}\\.md")
+    stored_row(store, "seq-6-legacy-key", legacy, verdict=sv.UNVERIFIABLE_VERDICT,
+               reason="a disposal stored in the shape the ledger already holds")
+
+    rc, out = run_audit(store)
+    assert rc == 0, out
+    assert "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 0" in out, out
+    assert out.splitlines()[-1] == "keys: 2 unrunnable: 0", out
+
+
+def test_the_exemption_still_binds_the_counted_path_to_the_published_pin(tmp_path):
+    """#2569 clause 5: one path in two places, and two paths is not a tombstone.
+
+    The backreference exists so a row cannot publish one corpus while counting another, and
+    moving the count behind `dirname`/`basename` is exactly the change that could break it:
+    the frame now holds shell that SPLITS the pin, so what matters is not that the two
+    splices look alike but that the number printed is a reading of the path published two
+    inches later. That is checked by making the count nonzero over files the pin names, in
+    the directory the pin names, and reading the published pin back out of the matcher.
+
+    The rest is the wider-exemption trap: the same frame with a second path in the
+    `pinned_input=` slot matches neither matcher and is named by `candidate_input_lost`.
+    """
+    cand, cmd = _minted_tombstone_2569(tmp_path / "verdicts.jsonl", tmp_path)
+    got = sv._DISPOSAL_TOMBSTONE_RE.fullmatch(cmd.strip())
+    assert got is not None, cmd
+    assert got["pin"] == f"{cand}/{INPUT_LOST_PATTERN_2433}", got["pin"]
+    assert f"pinned_input='{got['pin']}'" in cmd, cmd
+
+    restored = _restore_2569(cand, "20261011", "20261012")
+    ran = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert "dated_corpus_files=2" in ran.stdout, ran.stdout
+
+    # Same corpus, same directory, one path swapped out: the count still comes from the
+    # directory the pin names, so a row claiming a different file is not the exempt shape, and
+    # `candidate_input_lost` — which reads the published pin against that listing — says so.
+    # The absent-corpus state is what makes the second half decidable: with the two snapshots
+    # still on disk the pattern genuinely matches files, and naming the row would be a claim
+    # that a present corpus had been lost.
+    other = f"{cand}/{restored[0]}"
+    swapped = cmd.replace(f"pinned_input='{got['pin']}'", f"pinned_input='{other}'")
+    assert swapped != cmd, "the swap did not happen; the check below proves nothing"
+    assert sv._DISPOSAL_TOMBSTONE_RE.fullmatch(swapped) is None
+    assert sv._LEGACY_DISPOSAL_TOMBSTONE_RE.fullmatch(swapped) is None
+    for name in restored:
+        (cand / name).unlink()
+    assert sv.candidate_input_lost(cmd) is None, "the exempt row must stay exempt"
+    assert sv.candidate_input_lost(swapped) is not None, (
+        "a tombstone counting one path while publishing another was exempted")
+
+
+def test_both_tombstone_frames_are_derived_from_their_templates():
+    """Acceptance prose: the exemption and its legacy twin come from the two templates.
+
+    Hand-written regexes beside the templates are how this pair drifts: a template edited in
+    one place and a matcher not updated beside it changes which rows are exempt, and nothing
+    fails until a nightly reports 31 findings on its own bookkeeping. So each matcher is
+    graded against its own template's rendered bytes and against the other template's, and
+    the two templates are pinned apart from one another by the counting form — `grep -cE`
+    over a plain listing versus a quoted `ls` with `wc -l`. That difference is what #2569
+    exists to fix, and it is the reason one frame cannot cover both shapes.
+    """
+    probe = "/tmp/wherever/skills/candidates/candidate-a-b-[0-9]{8}\\.md"
+    for template, matcher in ((sv.TOMBSTONE_TEMPLATE, sv._DISPOSAL_TOMBSTONE_RE),
+                              (sv.LEGACY_TOMBSTONE_TEMPLATE,
+                               sv._LEGACY_DISPOSAL_TOMBSTONE_RE)):
+        assert template.count("{input}") == 2, template
+        got = matcher.fullmatch(template.format(input=probe))
+        assert got is not None and got["pin"] == probe, template
+
+    assert "grep -cE" in sv.TOMBSTONE_TEMPLATE, sv.TOMBSTONE_TEMPLATE
+    assert "grep -cE" not in sv.LEGACY_TOMBSTONE_TEMPLATE, sv.LEGACY_TOMBSTONE_TEMPLATE
+    assert sv._DISPOSAL_TOMBSTONE_RE.fullmatch(
+        sv.LEGACY_TOMBSTONE_TEMPLATE.format(input=probe)) is None, (
+        "one frame cannot cover both shapes, so the legacy twin is load-bearing")
+
+
 def test_a_key_whose_corpus_is_on_the_disk_is_never_disposed_as_blind(tmp_path):
     """Rail: the new class is reached only by a row the predicate actually decides.
 
