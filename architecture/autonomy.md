@@ -673,8 +673,15 @@ could be spelled one tool later and land in the same file. On 2026-10-05 a turn 
 `autonomy_write_task` was refused at 06:38:16Z had already created
 `autonomy/96-djev-name-prior-probe.md` with `status: up_next` through `vault_write` at
 06:27:38Z, and `run_scheduled-task_20261005_062825_b3ceb1` started 47 seconds after that
-write — armed through the open door, refused through the closed one. It is not a rare
-shape either: 17 of the 2514 rows in `~/obsidian/memory/audit/writes.jsonl` are
+write — armed through the open door, refused through the closed one. That refusal has
+committed bytes of its own: row 75 of `~/lloyd-data/safety/denials.jsonl` is the 06:38:16Z
+`grant` denial, and its witness copy is `~/obsidian/backlog/data/denials.2362.witness.jsonl`
+(1 row / 678 bytes, byte-identical to that row). It is a **separate** witness because
+#2190's `~/obsidian/backlog/data/denials.jsonl` is a frozen extract that ends
+2026-10-04T18:23:51Z and holds no `target #96` row, so appending this denial to it would move
+the 63 rows / 32,504 bytes #2190 quotes from it. `tests/test_denial_journal.py` pins both
+files' counts, so a silent truncation of either reddens a test. It is not a rare shape
+either: 17 of the 2514 rows in `~/obsidian/memory/audit/writes.jsonl` are
 `vault_write` onto `autonomy/`, across 7 sessions. `agent_mcp/vault.py`,
 `_autonomy_schedule_refusal`, now refuses it, and it shares its rule rather than
 restating it: `policy.front_matter_map`, `policy.schedule_value_moves` and

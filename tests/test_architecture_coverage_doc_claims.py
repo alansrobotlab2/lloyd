@@ -2978,3 +2978,127 @@ def test_the_files_section_3_names_are_the_files_the_wiring_grep_prints():
     assert _files_named_by(command_only) == set(), (
         "a filename inside a cited command is being read as a citation, which is "
         "how the set check would pass on prose that names no file")
+
+
+# --------------------------------------------------------------------------- #
+# #2517 clause 4: the 06:38:16Z refusal is quoted against committed bytes.
+#
+# The page quotes two refusals out of the live denial journal and, for #2190's, names the
+# witness copy under `backlog/data/` beside the live path. #2362's refusal — the
+# `autonomy_write_task` denial that proves the `vault_write` door was open — was cited
+# against the live file alone, and that file is bounded by nothing: it is not one of the
+# groundskeeper sweep's seventeen stores, and it has grown from the 63 rows #2190 extracted
+# to 203. A citation whose denominator moves has no history, so the paragraph now names
+# `backlog/data/denials.2362.witness.jsonl` beside it, the way the #2190 sentence above
+# already names `backlog/data/denials.jsonl`.
+#
+# Graded as a citation of the same kind as every other assertion in this file: the row/byte
+# figures the paragraph prints are extracted from the prose and compared to the committed
+# files, so the failure this catches is the doc drifting from the bytes, not a sentence
+# being reworded.
+# --------------------------------------------------------------------------- #
+
+#: Where the paragraph says the refusal happened. The anchor is the timestamp because it is
+#: the only string in the section that identifies which row is being quoted.
+_DENIAL_QUOTE_ANCHOR = "was refused at 06:38:16Z"
+
+#: The live store, which stays cited. The witness supplements it; it does not replace it.
+_DENIAL_LIVE_PATH = "`~/lloyd-data/safety/denials.jsonl`"
+_DENIAL_WITNESS_PATH = "backlog/data/denials.2362.witness.jsonl"
+_FROZEN_DENIALS_PATH = "backlog/data/denials.jsonl"
+
+#: "63 rows / 32,504 bytes", as the paragraph prints it, singular or plural.
+_QUOTED_COUNT = re.compile(r"([\d,]+)\s+rows?\s*/\s*([\d,]+)\s+bytes")
+
+
+def _denial_quote_window(text: str) -> str:
+    """The flat prose from the 06:38:16Z refusal through its citation.
+
+    Flat because the page is hand-wrapped at ~78 columns and the sentence whose counts
+    matter spans four source lines — the same reason #2362 clause 5 uses `_flat`.
+    """
+    flat = _flat(text)
+    start = flat.find(_DENIAL_QUOTE_ANCHOR)
+    assert start >= 0, (
+        "the paragraph quoting the 2026-10-05T06:38:16Z refusal no longer says it in the "
+        "words this extractor anchors on, so the citation check below read nothing")
+    return flat[start:start + 1200]
+
+
+def _quoted_counts(window: str) -> list[tuple[int, int]]:
+    """Every `(rows, bytes)` pair the prose prints, thousands separators stripped."""
+    return [(int(a.replace(",", "")), int(b.replace(",", "")))
+            for a, b in _QUOTED_COUNT.findall(window)]
+
+
+def _measured_witness(name: str) -> tuple[int, int]:
+    """`wc -l -c` over a committed `backlog/data/` file, in the vault under test."""
+    from tests.board_presence import vault_root
+
+    raw = (vault_root() / "backlog" / "data" / name).read_bytes()
+    return len(raw.splitlines(keepends=True)), len(raw)
+
+
+def test_the_refused_write_is_cited_against_committed_bytes():
+    """source: architecture/autonomy.md § The dispatch-affecting fields, third surface.
+    claim: the paragraph quoting the 2026-10-05T06:38:16Z refusal names
+           `backlog/data/denials.2362.witness.jsonl` beside the live journal path, and every
+           row/byte figure it prints for the two witnesses equals that file as committed.
+    verdict: #2517 landed the witness; the counts are the half that stops the citation
+             decaying into a path nobody can open.
+
+    The live path is asserted present as well as the witness because the clause is "beside",
+    not "instead of": the journal is where a reader checks the row is still the row, and the
+    copy is what makes the quote outlive a store nothing bounds.
+    """
+    window = _denial_quote_window(_text("autonomy.md"))
+    assert _DENIAL_LIVE_PATH in window, (
+        "the paragraph no longer cites the live journal at all, which leaves the copy as the "
+        "only source and drops the store the row was actually written to")
+    assert _DENIAL_WITNESS_PATH in window, (
+        "the 06:38:16Z refusal is quoted against `~/lloyd-data/safety/denials.jsonl` only, "
+        "which is the state #2517 was filed to end — the live journal is bounded by nothing")
+    assert _FROZEN_DENIALS_PATH in window, (
+        "the paragraph justifies the separate witness by way of #2190's frozen extract, so it "
+        "has to name that file for the distinction to be checkable")
+
+    counts = _quoted_counts(window)
+    assert counts, (
+        "no `N rows / M bytes` figure was extracted from the refusal paragraph, so the "
+        "citation was graded for a path and not for the numbers a reader re-derives")
+    witness_measured = _measured_witness("denials.2362.witness.jsonl")
+    frozen_measured = _measured_witness("denials.jsonl")
+    assert witness_measured in counts, (
+        f"the paragraph prints {counts} but the committed #2362 witness is "
+        f"{witness_measured}: the quote and the bytes it cites disagree, which is the drift "
+        "a bare path cannot show")
+    assert frozen_measured in counts, (
+        f"the paragraph prints {counts} but #2190's frozen extract is {frozen_measured}")
+
+
+def test_the_committed_bytes_check_can_fail_on_a_stale_figure():
+    """The check above fails on a moved number and on a dropped path, not on a rewording.
+
+    Driven on text this file writes, with the same extractor, so a green citation check is
+    never an extraction that quietly found nothing to compare.
+    """
+    window = _denial_quote_window(_text("autonomy.md"))
+    counts = _quoted_counts(window)
+    assert len(counts) >= 2, counts
+
+    stale = window.replace("678 bytes", "6,780 bytes")
+    assert stale != window, "the fixture did not change the figure, so nothing was tested"
+    assert _measured_witness("denials.2362.witness.jsonl") not in _quoted_counts(stale), (
+        "a witness figure with one digit moved is invisible to the extractor, so the "
+        "comparison above would pass on any number the prose printed")
+
+    dropped = window.replace(_DENIAL_WITNESS_PATH, "a witness copy")
+    assert _DENIAL_WITNESS_PATH not in dropped, "the fixture did not drop the witness"
+    assert _DENIAL_LIVE_PATH in dropped, (
+        "the fixture lost the live path too, so the path assertion would have failed for the "
+        "wrong reason and proved nothing about the witness")
+
+    reworded = window.replace(_DENIAL_QUOTE_ANCHOR, "was denied that morning")
+    assert _DENIAL_QUOTE_ANCHOR not in reworded, (
+        "the anchor survives its own replacement, so the extractor's vacuity guard in "
+        "_denial_quote_window would never fire")
