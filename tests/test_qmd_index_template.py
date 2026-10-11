@@ -55,7 +55,18 @@ def _collections_section(setup_text: str) -> str:
 
 
 def _live_like(tmp_path: Path, colls: dict, drop: tuple[str, ...] = ()) -> Path:
-    """A config in the shape the daemon's file has after a documented re-sync."""
+    """A config in the shape the daemon's file has after a documented re-sync.
+
+    Every field the template declares, not just `path`: the re-sync is `cp
+    ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml`, which copies the
+    whole file, so a live file that lost every `pattern:` line is not a re-synced
+    box — it is a fiction this helper invented while `config_drift` could only
+    read paths. #2543 made `pattern` and `ignore` drift fields, which turned the
+    fiction into a false `drift_count` here (`in_sync: True` over a pair that now
+    differs on 14 collections' `pattern`), and dropping it is what keeps
+    `test_the_drift_check_reads_the_reconciled_template_as_in_sync` asserting the
+    thing its name says instead of the shape of an old helper.
+    """
     p = tmp_path / "live.yml"
     lines = ["collections:"]
     for name, spec in colls.items():
@@ -63,6 +74,11 @@ def _live_like(tmp_path: Path, colls: dict, drop: tuple[str, ...] = ()) -> Path:
             continue
         lines.append(f"  {name}:")
         lines.append(f"    path: {spec['path']}")
+        if "pattern" in spec:
+            lines.append(f"    pattern: \"{spec['pattern']}\"")
+        if "ignore" in spec:
+            lines.append("    ignore:")
+            lines.extend(f"      - {entry}" for entry in spec["ignore"])
     p.write_text("\n".join(lines) + "\n")
     return p
 
@@ -168,8 +184,11 @@ def test_the_dropped_facts_collection_stays_dropped(tmp_path):
 def test_the_drift_check_reads_the_reconciled_template_as_in_sync(tmp_path):
     """config_drift over the real seam: patched template vs patched-template-live.
 
-    Same collections, same paths, in the order a documented `cp` produces them —
-    the state the acceptance check demands — so the answer must be "in sync".
+    Same collections, same paths, same patterns and ignores, in the order a
+    documented `cp` produces them — the state the acceptance check demands — so
+    the answer must be "in sync". `drift_count` here is 0 for the pair this
+    helper builds, and that is the point of the whole check; it is never asserted
+    against the box's real live file, which a person edits by hand (#2543).
     """
     from scripts.maintenance.qmd_index_maintenance import config_drift
     tmpl, _ = _patched(tmp_path)

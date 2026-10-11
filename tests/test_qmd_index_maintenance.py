@@ -290,6 +290,300 @@ def test_two_unreadable_bodies_are_never_scored_as_in_sync(tmp_path):
     assert {d["kind"] for d in out["drift"]} == {"uncomparable_body"}
 
 
+# --- #2543: `pattern` and `ignore` are compared fields too -------------------
+#
+# Why this is a check and not a nicety: #2180's ruling ends in narrowing
+# `subliminal`, whose `pattern: "**/*.md"` is precisely what makes it swallow the
+# eleven vault collections nested under it, and that narrowing is two separate
+# steps — the daemon's file edited by hand, the tracked template committed after
+# it (#2538's two legs). Between those two steps the files disagree on `pattern`
+# and on nothing else, and `config_drift` compared names and paths only, so it
+# printed `in_sync: true` over the half-landed state a drift check exists to
+# catch. Measured before the nodes below existed: a fixture pair identical except
+# one collection's `**/*.md` → `*.md` returned `{"drift_count": 0, "in_sync":
+# true}`, and `git log -S"'pattern'"` over the script showed no commit had ever
+# added a pattern comparison.
+#
+# Still fixture-only, for the reason in this file's header, sharpened by #2543:
+# the REAL pair's `drift_count` is not a constant any more. Once #2538's live
+# edit lands ahead of its template commit, this box's `subliminal` legitimately
+# reads `drift_count: 1 kind pattern` — that is the change working — so no node
+# here pins the real pair to 0. The one default-path call lives in
+# `tests/test_qmd_index_template.py`, asserts `comparable`, and never `drift_count`.
+
+WIDE = """\
+collections:
+  subliminal:
+    path: /home/me/obsidian
+    pattern: "**/*.md"
+    ignore:
+      - agents/**
+      - templates/**
+  memory:
+    path: /home/me/obsidian/memory
+    pattern: "**/*.md"
+"""
+
+#: `WIDE` with `subliminal` narrowed to one level — the live leg of #2180's
+#: ruling, template still carrying the wide glob. The string replace is aimed at
+#: the `pattern` line that is followed by `ignore:`, so `memory` is untouched.
+NARROW = WIDE.replace('    pattern: "**/*.md"\n    ignore:',
+                      '    pattern: "*.md"\n    ignore:')
+
+#: One collection with a `pattern`, and the same collection without the key.
+ONE = ("collections:\n  vault:\n    path: /home/me/vault\n"
+       "    pattern: \"**/*.md\"\n")
+ONE_NO_PATTERN = "collections:\n  vault:\n    path: /home/me/vault\n"
+#: `ignore` written three ways that all mean "nothing ignored".
+ONE_IGNORE_LIST = ONE + "    ignore:\n      - agents/**\n"
+ONE_IGNORE_EMPTY = ONE + "    ignore: []\n"
+ONE_IGNORE_NULL = ONE + "    ignore:\n"
+
+
+# --- clause 1: a differing pattern is one row, naming both values -----------
+
+def test_a_narrowed_pattern_is_drift_named_with_both_values(tmp_path):
+    """The #2543 reproduction: paths agree, names agree, only the glob differs.
+
+    Before this round that pair read `drift_count: 0, in_sync: true` — the
+    measured current behaviour, and the whole reason the item exists.
+    """
+    t, l = _pair(tmp_path, template=WIDE, live=NARROW)
+    out = m.config_drift(t, l)
+    assert out["drift_count"] == 1, out["drift"]
+    row = out["drift"][0]
+    assert row["collection"] == "subliminal"
+    assert row["kind"] == "pattern"
+    assert row["template_pattern"] == "**/*.md"
+    assert row["live_pattern"] == "*.md"
+    assert out["in_sync"] is False
+
+
+def test_a_field_changed_in_two_collections_is_two_rows(tmp_path):
+    """One row per collection: the count is the number of differing fields."""
+    live = NARROW.replace('  memory:\n    path: /home/me/obsidian/memory\n'
+                          '    pattern: "**/*.md"',
+                          '  memory:\n    path: /home/me/obsidian/memory\n'
+                          '    pattern: "*.md"')
+    t, l = _pair(tmp_path, template=WIDE, live=live)
+    out = m.config_drift(t, l)
+    assert out["drift_count"] == 2, out["drift"]
+    assert {d["collection"] for d in out["drift"]} == {"subliminal", "memory"}
+    assert {d["kind"] for d in out["drift"]} == {"pattern"}
+
+
+# --- clause 2: `ignore` is a sorted set, so order is agreement --------------
+
+def test_the_same_ignores_written_in_a_different_order_are_not_drift(tmp_path):
+    """#2543 clause 2: entries are compared as a SET, not as written lines."""
+    t, l = _pair(tmp_path, template=WIDE,
+                 live=WIDE.replace("      - agents/**\n      - templates/**",
+                                   "      - templates/**\n      - agents/**"))
+    out = m.config_drift(t, l)
+    assert out["drift"] == [], out["drift"]
+    assert out["drift_count"] == 0 and out["in_sync"] is True
+
+
+def test_a_repeated_ignore_entry_is_not_drift(tmp_path):
+    """`agents/**` twice is the one entry it means, not a second difference."""
+    t, l = _pair(tmp_path, template=WIDE,
+                 live=WIDE.replace("      - agents/**\n      - templates/**",
+                                   "      - agents/**\n      - agents/**\n"
+                                   "      - templates/**"))
+    assert m.config_drift(t, l)["drift_count"] == 0
+
+
+def test_ignores_that_differ_as_sets_are_named_with_both_sides(tmp_path):
+    """One entry gone from the live list is real drift, with both values."""
+    t, l = _pair(tmp_path, template=WIDE,
+                 live=WIDE.replace("      - templates/**\n", ""))
+    out = m.config_drift(t, l)
+    assert out["drift_count"] == 1, out["drift"]
+    row = out["drift"][0]
+    assert row["kind"] == "ignore"
+    assert row["template_ignore"] == ["agents/**", "templates/**"]
+    assert row["live_ignore"] == ["agents/**"]
+
+
+# --- clause 3: a key one side forgot is drift, not a permanent agreement ----
+
+def test_a_pattern_one_side_forgot_is_drift_with_that_side_none(tmp_path):
+    """Both directions, because the two mistakes differ: a template missing its
+    `pattern` misdescribes a narrowed collection, a live file missing one indexes
+    the whole tree. An omitted key must not read as agreement forever.
+    """
+    t, l = _pair(tmp_path, template=ONE, live=ONE_NO_PATTERN)
+    out = m.config_drift(t, l)
+    assert out["drift_count"] == 1, out["drift"]
+    assert out["drift"][0]["kind"] == "pattern"
+    assert out["drift"][0]["template_pattern"] == "**/*.md"
+    assert out["drift"][0]["live_pattern"] is None
+
+    t, l = _pair(tmp_path, template=ONE_NO_PATTERN, live=ONE)
+    row = m.config_drift(t, l)["drift"][0]
+    assert row["template_pattern"] is None
+    assert row["live_pattern"] == "**/*.md"
+
+
+def test_a_field_neither_side_declares_is_agreement(tmp_path):
+    """Absent on both sides is the agreement case of clause 3, tested alone."""
+    t, l = _pair(tmp_path, template=ONE_NO_PATTERN, live=ONE_NO_PATTERN)
+    out = m.config_drift(t, l)
+    assert out["drift"] == [] and out["in_sync"] is True
+
+
+def test_an_absent_ignore_and_an_empty_one_are_the_same_value(tmp_path):
+    """Three spellings of "nothing ignored": no key, `ignore: []`, `ignore:`.
+
+    YAML reads those as an absent key, an empty list and None, so comparing raw
+    values would call a re-sync that changed nothing a difference.
+    """
+    for a, b in ((ONE, ONE_IGNORE_EMPTY), (ONE, ONE_IGNORE_NULL),
+                 (ONE_IGNORE_NULL, ONE_IGNORE_EMPTY)):
+        t, l = _pair(tmp_path, template=a, live=b)
+        out = m.config_drift(t, l)
+        assert out["drift_count"] == 0, (a, b, out["drift"])
+
+
+def test_an_ignore_only_one_side_has_is_drift_with_that_side_none(tmp_path):
+    t, l = _pair(tmp_path, template=ONE_IGNORE_LIST, live=ONE)
+    out = m.config_drift(t, l)
+    assert out["drift_count"] == 1, out["drift"]
+    row = out["drift"][0]
+    assert row["kind"] == "ignore"
+    assert row["template_ignore"] == ["agents/**"]
+    assert row["live_ignore"] is None
+
+
+# --- clause 4: an unreadable body still gets exactly one honest row ---------
+
+def test_an_unreadable_body_never_buys_a_pattern_or_ignore_row(tmp_path):
+    """A malformed body is not compared on ANY field, and gets one row saying so.
+
+    `pattern` and `ignore` are fields of the body, so the malformed side has no
+    value of them to name; a row underneath the `uncomparable_body` one would be
+    a comparison against something nobody read. This is `path`'s existing rule
+    (#1298's malformed-body handling) extended to the two fields #2543 adds, and
+    the live side below differs on all three fields to prove only one row lands.
+    """
+    t, l = _pair(
+        tmp_path,
+        template="collections:\n  vault: qmd\n",
+        live="collections:\n  vault:\n    path: /home/me/vault\n"
+             "    pattern: \"*.md\"\n    ignore:\n      - agents/**\n",
+    )
+    out = m.config_drift(t, l)
+    assert out["drift_count"] == 1, out["drift"]
+    assert {d["kind"] for d in out["drift"]} == {"uncomparable_body"}
+    assert out["malformed"] == {"template": ["vault"], "live": []}
+
+
+def test_order_comments_and_the_header_are_still_not_drift_with_the_new_fields(
+        tmp_path):
+    """The #1298 exemption keeps its teeth now that two more fields are read.
+
+    Same collections, paths, patterns and ignores, re-sorted and with a header
+    comment on one side — the state a legitimate `cp` re-sync leaves behind.
+    `test_reordering_and_comments_are_not_drift` above predates `pattern` being
+    compared and so writes no `ignore:` block at all; this pair does.
+    """
+    colls = yaml.safe_load(WIDE)["collections"]
+    lines = ["# why subliminal is rooted at the vault — kept on one side only",
+             "collections:"]
+    for name in reversed(list(colls)):
+        spec = colls[name]
+        lines.append(f"  {name}:")
+        lines.append(f"    path: {spec['path']}")
+        lines.append(f"    pattern: \"{spec['pattern']}\"")
+        if "ignore" in spec:
+            lines.append("    ignore:")
+            lines.extend(f"      - {entry}" for entry in spec["ignore"])
+    t, l = _pair(tmp_path, template=WIDE, live="\n".join(lines) + "\n")
+    out = m.config_drift(t, l)
+    assert out["drift"] == [], out["drift"]
+    assert out["drift_count"] == 0 and out["in_sync"] is True
+
+
+# --- clause 5: the docstring is what tells a reader what a 0 means ----------
+
+def test_the_drift_docstring_names_pattern_and_ignore_as_compared():
+    """Doc-claim node, because the docstring IS the interface of this check.
+
+    Its previous text said in so many words that `pattern`/`ignore` were fields
+    the check made no claim about, and that sentence was load-bearing: it is how
+    a reader knew `drift_count: 0` said nothing about a narrowed glob. So the
+    node holds both halves of the new contract — the fields are named as
+    compared, and the out-of-scope list no longer carries them — plus the
+    exemptions and their reason, which the item requires to stay stated.
+    """
+    doc = " ".join((m.config_drift.__doc__ or "").split())
+    assert "`pattern` and `ignore`" in doc, doc
+    assert "sorted set" in doc, "how `ignore` is normalised must be stated"
+    assert "silent side reported as `None`" in doc, doc
+    assert "Deliberately NOT compared:" in doc, doc
+    # The exact retired sentence, not a paraphrase of it: kept out even as a
+    # quotation, because a reader skimming for the phrase finds the quote and
+    # stops at the exemption rather than the history around it.
+    assert "never claimed to cover" not in doc, doc
+
+    scope = doc.split("Deliberately NOT compared:")[1].split("Never raises")[0]
+    assert "`pattern`" not in scope and "`ignore`" not in scope, scope
+    assert "order" in scope and "comments" in scope, scope
+    assert "not the files whole" in scope, scope
+    assert "~50" in scope and "~90" in scope, (
+        "the reason whole-file comparison stays out is the size gap between the "
+        "~50-line live config and the ~90-line commented template")
+
+
+# --- the two seams the row has to cross ------------------------------------
+
+def test_the_nightly_report_carries_pattern_and_ignore_rows_as_json(monkeypatch,
+                                                                    tmp_path):
+    """The row crosses into a JSON file on disk, so it has to survive `json`.
+
+    `ignore` is normalised to a sorted SET for comparison; storing the set in the
+    row is a TypeError inside the nightly job, and a check that dies while
+    reporting leaves no report at all. The proof is therefore a round trip:
+    `main()` writes the dated file and `_run_main` reads it back with
+    `json.loads`. This pair also differs on both new fields of one collection,
+    which is the two-rows-for-one-collection case.
+    """
+    t, l = _pair(tmp_path, template=WIDE,
+                 live=NARROW.replace("      - templates/**\n", ""))
+    report = _run_main(monkeypatch, tmp_path, t, l)
+    cd = report["config_drift"]
+    assert cd["drift_count"] == 2, cd["drift"]
+    assert [d["kind"] for d in cd["drift"]] == ["pattern", "ignore"], cd["drift"]
+    assert cd["drift"][0]["live_pattern"] == "*.md", cd
+    assert cd["drift"][1]["template_ignore"] == ["agents/**", "templates/**"], cd
+    assert cd["drift"][1]["live_ignore"] == ["agents/**"], cd
+
+
+def test_the_printed_drift_line_shows_the_values_that_differ(monkeypatch, tmp_path,
+                                                             capsys):
+    """The other seam: the operator's screen.
+
+    The printer read `template_path` off every row, so a `pattern` row printed
+    `template=None live=None` — it named the collection and hid the one thing
+    the operator could go and fix.
+    """
+    t, l = _pair(tmp_path, template=WIDE,
+                 live=NARROW.replace("      - templates/**\n", ""))
+    monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
+    monkeypatch.setattr(m, "LIVE_CONFIG", l)
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    monkeypatch.setattr(m, "INDEX", tmp_path / "qmd" / "index.sqlite")
+    monkeypatch.setattr(m, "inspect_index", lambda: {"orphan_ratio": 0.0, "vectors_orphaned": 0})
+    monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
+    monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
+    monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py", "--dry-run"])
+    assert m.main() == 0
+    printed = capsys.readouterr().out
+    assert "subliminal [pattern] template=**/*.md live=*.md" in printed, printed
+    assert ("subliminal [ignore] template=['agents/**', 'templates/**'] "
+            "live=['agents/**']") in printed, printed
+
+
 # --- the seam: the job the daemon's operator actually reads ------------------
 # `config_drift` returning a dict proves nothing on its own. What the nightly
 # task (#81) produces is a JSON file under _pipeline/reflection, and the failure

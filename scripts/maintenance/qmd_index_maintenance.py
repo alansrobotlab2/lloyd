@@ -1197,6 +1197,32 @@ def _qmd_collections(
     return out, None, malformed
 
 
+def _ignore_of(spec: dict) -> list[str] | None:
+    """A collection's `ignore` as a comparison value: sorted unique entries, or None.
+
+    Three shapes mean the same thing here — the key absent, `ignore:` with nothing
+    under it, and `ignore: []` — so all three normalise to `None`, and a re-ordered
+    or repeated list is agreement rather than drift (#2543 clause 2/3). A scalar
+    string is one entry, which is the only reading that cannot invent a difference
+    out of a quoting choice.
+
+    The value is a sorted LIST, never a set, because the drift row travels: the
+    report is serialised with `json.dumps` on its way to disk and again by
+    `--json`, and a `set` in it is a TypeError inside the nightly job rather than
+    a comparison — the check that exists to be read would stop producing a file.
+    """
+    raw = spec.get("ignore")
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        entries = [raw] if raw.strip() else []
+    elif isinstance(raw, (list, tuple, set, frozenset)):
+        entries = [str(e) for e in raw]
+    else:
+        entries = [str(raw)]
+    return sorted(set(entries)) or None
+
+
 def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG) -> dict:
     """Compare the committed template with the config the daemon actually reads.
 
@@ -1208,11 +1234,26 @@ def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG) -> 
     described the 2026-09-07 world. A reindex from the stale template drops that
     collection from both the FTS and the vector legs.
 
-    Compared: which collections exist, and each one's `path`.
+    Compared: which collections exist, and each one's `path`, `pattern` and
+    `ignore`. Those last two are new (#2543): they were originally skipped as
+    fields this check made no claim about, which stopped being true the moment
+    #2180 put a narrowing of `subliminal` on the schedule — applied live and
+    committed to the template as two separate steps, `pattern` is the ONLY field
+    that tells a half-landed pair from a reconciled one, so a check that skipped
+    it printed `in_sync: true` over exactly the state it exists to catch.
+    `pattern` is compared as its scalar, so a
+    `**/*.md` narrowed to `*.md` on one side is one `kind: pattern` row naming
+    both values, and `ignore` as a sorted set, so the same entries re-ordered
+    agree. A key present on one side and absent on the other is drift with the
+    silent side reported as `None` — absent on both sides is agreement, but an
+    omitted key must not be allowed to read as agreement forever.
     Deliberately NOT compared: collection *order* and comments — a re-sync
     copies whole files, so those reconcile themselves and calling them drift
-    would cry wolf every time the block is re-sorted — nor `pattern`/`ignore`,
-    which this check has never claimed to cover.
+    would cry wolf every time the block is re-sorted — and not the files whole,
+    which for these two would be a permanently red line: the live config is ~50
+    lines and the template ~90 (`wc -l` on 2026-10-11), because the tracked copy
+    carries the rationale comments a new host reads, so byte equality would
+    report every comment as drift while naming none of the fields.
 
     Never raises and never changes the job's exit code: with either file missing
     there is nothing to compare, and that is a note in the report, not a failure.
@@ -1257,24 +1298,66 @@ def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG) -> 
                  "template_path": None, "live_path": livec[name].get("path")}
             )
         elif name in tmpl_bad or name in live_bad:
-            # Declared on both sides, but one side's path is unknown, so no
-            # comparison of it means anything. Name it rather than reporting
-            # either "no drift" or a path change that was never made.
+            # Declared on both sides, but one side's body is unknown, so no
+            # comparison of it — path, pattern or ignore — means anything. Name
+            # it rather than reporting either "no drift" or a change that was
+            # never made, and emit that one row only: a pattern row underneath
+            # would be an invented value for a side that has none.
             out["drift"].append(
                 {"collection": name, "kind": "uncomparable_body",
                  "template_path": tmpl[name].get("path"),
                  "live_path": livec[name].get("path")}
             )
-        elif tmpl[name].get("path") != livec[name].get("path"):
-            out["drift"].append(
-                {"collection": name, "kind": "path_differs",
-                 "template_path": tmpl[name].get("path"),
-                 "live_path": livec[name].get("path")}
-            )
+        else:
+            # Every compared field is judged on its own line, so a collection
+            # whose path moved *and* whose pattern was narrowed gets two rows.
+            # One row per field is what lets each row's two values be true: a
+            # single row could name one field and hide the other's difference.
+            if tmpl[name].get("path") != livec[name].get("path"):
+                out["drift"].append(
+                    {"collection": name, "kind": "path_differs",
+                     "template_path": tmpl[name].get("path"),
+                     "live_path": livec[name].get("path")}
+                )
+            if tmpl[name].get("pattern") != livec[name].get("pattern"):
+                out["drift"].append(
+                    {"collection": name, "kind": "pattern",
+                     "template_pattern": tmpl[name].get("pattern"),
+                     "live_pattern": livec[name].get("pattern")}
+                )
+            t_ignore, l_ignore = _ignore_of(tmpl[name]), _ignore_of(livec[name])
+            if t_ignore != l_ignore:
+                out["drift"].append(
+                    {"collection": name, "kind": "ignore",
+                     "template_ignore": t_ignore, "live_ignore": l_ignore}
+                )
 
     out["drift_count"] = len(out["drift"])
     out["in_sync"] = out["drift_count"] == 0
     return out
+
+
+#: The per-field value a drift row names. A row carries exactly one of these
+#: pairs — `template_<field>`/`live_<field>` — and which one follows its `kind`.
+DRIFT_FIELDS = ("path", "pattern", "ignore")
+
+
+def _drift_pair(row: dict) -> tuple:
+    """The two values a drift row carries, whichever field its `kind` names.
+
+    `main()`'s printer prints one line per drift row, and since #2543 the row's
+    field is not always `path`: reading `template_path` off a `pattern` row
+    printed None twice and named, on the one screen an operator reads, a
+    difference they could not see. Whichever pair the row does carry is the
+    answer; a row that carries none (`template_only` for a collection the daemon
+    dropped, `uncomparable_body` for an unreadable body) prints None twice, which
+    is what it means.
+    """
+    for field in DRIFT_FIELDS:
+        tk, lk = f"template_{field}", f"live_{field}"
+        if tk in row or lk in row:
+            return row.get(tk), row.get(lk)
+    return None, None
 
 
 # ---- #2180: one collection's root swallowing another collection's root -------
@@ -2199,8 +2282,13 @@ def _emit(r: dict, as_json: bool) -> None:
         elif cd.get("drift_count"):
             print(f"  qmd config drift  {cd['drift_count']} collection difference(s)")
             for d in cd["drift"]:
+                # Read the row's own field: a `pattern` row carries
+                # template_pattern/live_pattern, and printing `template_path`
+                # for it would print None twice for a difference the operator
+                # can now actually fix.
+                tv, lv = _drift_pair(d)
                 print(f"    · {d['collection']} [{d['kind']}] "
-                      f"template={d.get('template_path')} live={d.get('live_path')}")
+                      f"template={tv} live={lv}")
             print(f"    re-sync ({cd.get('resync_direction')}):")
             print(f"      {cd.get('resync_command')}")
         else:
