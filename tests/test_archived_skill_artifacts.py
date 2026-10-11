@@ -162,10 +162,53 @@ def test_no_recorded_reflection_writer_expectation_names_a_retired_skill(retired
         EXPECTED_VAULT_WRITE_WRITERS,
     )
 
-    assert EXPECTED_BOUND_WRITERS and EXPECTED_VAULT_WRITE_WRITERS, (
-        "both recorded writer sets are empty, so asserting that neither names a "
-        "retired skill is vacuous — delete this test if the rule ever goes away"
+    # Deliberately unconditional, and knowingly asymmetric with the vault half below it:
+    # #2531 clause 4 asks that `EXPECTED_BOUND_WRITERS` keep its 3 entries and its half of
+    # the floor UNCHANGED. The asymmetry is a ruling, not an oversight waiting to be
+    # tidied, and it is spelled out in the message because the person who meets it is the
+    # one holding a red line. The two halves differ because the vault half's emptiness
+    # came from deleting a recorded name for a skill that had stopped existing — pure
+    # bookkeeping, which is why the scan measures its replacement — while emptiness HERE
+    # would mean three autonomy tasks had been unbound from skills that still advertise
+    # the behaviour. That is a fleet change, not a bookkeeping change.
+    assert EXPECTED_BOUND_WRITERS, (
+        "no bound-writer expectation is recorded, so the discovery equality in "
+        "`tests/test_skill_reflection_archive.py` has no recorded side for the tier that "
+        "OWES an archive step, and asserting that neither set names a retired skill "
+        "would be vacuous — delete this test if the rule ever goes away.\n"
+        "If you got here by unbinding the last bound writer: this line is NOT to be "
+        "relaxed the way the vault line beside it was relaxed on #2531. The vault half "
+        "could be measured because pruning a name for a retired skill is bookkeeping; "
+        "emptiness here means three autonomy tasks stopped owing an archive step, which "
+        "is a decision about the fleet. Bring the three task ids and the ruling that "
+        "retired them, or re-bind them."
     )
+    # The exempt tier is allowed to be empty, and since #2531 it is: an exemption is a
+    # property of a live skill's instruction, so archiving the only skill that ever took
+    # one (vault commit 6a683b77) must empty the dict rather than leave a retired name in
+    # it. The floor that used to stand here — `and EXPECTED_VAULT_WRITE_WRITERS` — could
+    # only be satisfied by re-adding that retired name, which is the opposite of what
+    # pruning is for. Emptiness is not a free exit, and the condition is measured HERE
+    # rather than delegated to `test_the_only_exemption_is_a_call_that_cannot_reach_the_path`
+    # because that node carries `live_vault` and the hard rung deselects it: an empty
+    # recorded dict may only stand while the discovery scan also finds no `vault-write`
+    # writer. "Empty because nothing prescribes one", never "empty because nobody looked".
+    from scripts.reflection_archive import classify_all
+    from tests.test_skill_reflection_archive import _active_skills
+
+    discovered_exempt = {
+        skill
+        for (skill, _stem), tier in classify_all(_active_skills()).items()
+        if tier == "vault-write"
+    }
+    if not EXPECTED_VAULT_WRITE_WRITERS:
+        assert not discovered_exempt, (
+            f"the recorded exempt dict is empty but the scan still discovers "
+            f"`vault-write` writers: {sorted(discovered_exempt)}. An empty exempt tier is "
+            "legal only when nothing prescribes a `vault_write` of a reflection report: "
+            "record each one with its PATH_ESCAPE reason, do not leave the discovery "
+            "unrecorded — that is the silent-narrowing failure the equality exists for."
+        )
     stale = {
         name: retired[name]
         for name in set(EXPECTED_BOUND_WRITERS) | set(EXPECTED_VAULT_WRITE_WRITERS)
@@ -174,8 +217,9 @@ def test_no_recorded_reflection_writer_expectation_names_a_retired_skill(retired
     assert not stale, (
         f"reflection-writer expectations still carry retired skills: {stale}. Drop the "
         "entry: a retired skill has no instruction left to exempt, and the discovery "
-        "scan cannot produce it (`agent_mcp/skills.py:69` returns None for a "
-        "quarantined status), so the equality assert in "
+        "scan cannot produce it (a quarantined skill is dropped by "
+        "`_is_quarantined_skill`, `agent_mcp/skills.py:178` with the statuses at `:87`), "
+        "so the equality assert in "
         "test_skill_reflection_archive.py can never pass while it is listed."
     )
     # Positive control that this guard has teeth today: the three skills whose entries

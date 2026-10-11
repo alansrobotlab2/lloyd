@@ -235,9 +235,6 @@ EXPECTED_BOUND_WRITERS: dict[str, tuple[str, set[str]]] = {
 #: Write prescriptions routed through vault_write / mem_write, which reject any
 #: ~/lloyd/ or ~/lloyd-data/ target with PATH_ESCAPE — the instruction cannot
 #: destroy a report, so the absence of an archive step costs nothing today.
-#: `nightly-day-end-synthesis` is the entry that reason belongs to: it publishes the
-#: report with `vault_write(path="~/lloyd-data/_pipeline/reflection/day-end-synthesis-latest.md")`,
-#: and a `~/lloyd-data/` target is exactly what `agent_mcp/vault.py` refuses.
 #: An entry is dropped in the round that archives its skill, never left behind. A
 #: quarantined skill leaves the scan that discovers this set, so a stale key turns the
 #: equality assert named above red at the checkout while the gate's
@@ -246,14 +243,19 @@ EXPECTED_BOUND_WRITERS: dict[str, tuple[str, set[str]]] = {
 #: (backlog #1270): `nightly-prompt-audit` and `nightly-behavior-test` are
 #: `status: archived` since vault commit `978aa34b` (backlog #900). One entry was
 #: dropped on 2026-10-08 (backlog #2405): `autonomy-reflection-pipeline` is
-#: `status: archived` since vault commit `42144a4b` (backlog #2401).
+#: `status: archived` since vault commit `42144a4b` (backlog #2401). One more was
+#: dropped on 2026-10-11 (backlog #2531), which is what leaves this dict empty:
+#: `nightly-day-end-synthesis` is `status: archived` since vault commit `6a683b77`, and
+#: the reason sentence above is the reason it ever had an entry — that skill prescribed
+#: its report with `vault_write(path="~/lloyd-data/_pipeline/reflection/day-end-synthesis-latest.md")`,
+#: and a `~/lloyd-data/` target is exactly what `agent_mcp/vault.py` refuses, so its
+#: missing archive step could not have destroyed a report; the report was in fact never
+#: written, since `find ~/lloyd-data/_pipeline -name '*day-end*'` returns no rows.
 #: tests/test_archived_skill_artifacts.py pins that rule for both tiers, so the
 #: recurrence guard no longer depends on anyone remembering to prune this dict, and
 #: test_the_exempt_dict_comment_block_names_only_recorded_entries below is what keeps
 #: this block from outliving the entries it documents.
-EXPECTED_VAULT_WRITE_WRITERS: dict[str, set[str]] = {
-    "nightly-day-end-synthesis": {"day-end-synthesis-latest"},
-}
+EXPECTED_VAULT_WRITE_WRITERS: dict[str, set[str]] = {}
 
 #: The recorded debt, **measured by archive presence rather than by tier**: bound
 #: writers that still lack a named archive step. Computed from `archive_problems`
@@ -1312,7 +1314,8 @@ def test_classification_survives_an_unclassifiable_mention(skills):
 
 @pytest.mark.live_vault
 def test_the_only_exemption_is_a_call_that_cannot_reach_the_path(skills):
-    """One exemption is allowed, and it is the one that cannot destroy a report.
+    """No exemption is recorded now, and the one that ever was is the shape that could
+    not destroy a report.
 
     Anything routed through `vault_write`/`mem_write` returns `PATH_ESCAPE` on a
     `~/lloyd/` or `~/lloyd-data/` target, so no archive step can be owed by it —
@@ -1320,7 +1323,12 @@ def test_the_only_exemption_is_a_call_that_cannot_reach_the_path(skills):
     a writer and owes the step. So the exempt set is asserted equal to the
     recorded one (it cannot grow unlisted) and each entry is re-checked to still
     classify as `vault-write` (an entry whose reason lapsed fails rather than
-    grandfathering in)."""
+    grandfathering in).
+
+    The equality is what makes an empty recorded dict mean something: #2531 archived
+    `nightly-day-end-synthesis`, the only skill that ever took the exemption, so this
+    passes with both sides empty — empty because the scan discovers no `vault-write`
+    writer, which is a measurement, not the absence of one."""
     classified = classify_all(skills)
     exempt: dict[str, set[str]] = {}
     for (name, stem), tier in classified.items():
@@ -1422,15 +1430,33 @@ def test_the_exempt_dict_comment_block_names_only_recorded_entries():
         assert key in block, (
             f"{key} is recorded as exempt but never named where its reason is stated"
         )
-    # The entry that reason belongs to, pinned in the enforced rung: pruning the dict
-    # dry is not a way out of this file (#2405's acceptance says the same of the
-    # truthiness guard in tests/test_archived_skill_artifacts.py).
-    assert EXPECTED_VAULT_WRITE_WRITERS.get("nightly-day-end-synthesis") == {
-        "day-end-synthesis-latest"
-    }, (
-        "nightly-day-end-synthesis no longer records day-end-synthesis-latest as a "
-        "`vault_write` prescription, so the reason above documents an exemption that "
-        "is no longer taken — re-point it at the entry that is, not at nothing"
+    # The pruned entry, pinned in the enforced rung. This dict is empty since #2531
+    # archived `nightly-day-end-synthesis` in place (vault commit 6a683b77), so the pin
+    # cannot be "the dict still holds it" — a quarantined skill holds no exemption, because
+    # `_active_skills()` drops a quarantined skill (`is_quarantined_skill_file`, `agent_mcp/skills.py:178`, statuses at `:87`) and the discovery scan cannot produce
+    # the entry. The two halves that keep "pruning the dict dry is not a way out of this
+    # file" true are therefore: the dict must NOT have grown the name back, and the block
+    # must still say the entry was dropped, with its date, backlog number and vault commit.
+    # (#2405's acceptance says the same of the truthiness guard in
+    # tests/test_archived_skill_artifacts.py.)
+    assert "nightly-day-end-synthesis" not in EXPECTED_VAULT_WRITE_WRITERS, (
+        "the exempt dict records an exemption for `nightly-day-end-synthesis` again, but "
+        "that skill has been `status: archived` since vault commit 6a683b77: "
+        "`_active_skills()` drops a quarantined skill (`is_quarantined_skill_file`, `agent_mcp/skills.py:178`, statuses at `:87`), so the discovery "
+        "scan can never produce this entry and the equality assert in this file is dead "
+        "while the name is listed. Do not satisfy an emptiness floor by re-adding it."
+    )
+    day_end_dropped = [
+        sentence
+        for sentence in re.split(r"(?<=[.!?])\s+", block)
+        if "nightly-day-end-synthesis" in sentence and "dropped" in sentence
+    ]
+    assert day_end_dropped, (
+        "the block no longer records that `nightly-day-end-synthesis`'s exemption was "
+        "dropped on 2026-10-11 (backlog #2531, vault commit 6a683b77): the dict may be "
+        "empty, but the reason it went empty has to stay readable, or the next reader "
+        "sees an empty exempt tier and cannot tell 'nothing prescribes a vault_write of a "
+        "reflection report' from 'nobody checked'"
     )
 
     unlisted = [
@@ -1913,4 +1939,258 @@ def test_signal_pointer_readers_check_the_report_is_this_cycle_complete(skills):
         "consumers read the canonical signal report without checking it is this cycle's "
         "complete report, so a stub or a stale report is consumed as current (#1285): "
         f"{offenders}"
+    )
+
+
+# --- 9. #2531: the archive the exempt tier's last entry depended on -------------------
+def test_an_archived_reflection_skill_is_quarantined_by_the_loader_and_was_never_bound():
+    """#2531's vault half, measured at the two consumers instead of quoted from prose.
+
+    `skills/nightly-day-end-synthesis/SKILL.md` advertised a schedule — a "Runs at 1:30 AM
+    PST daily" line in its front-matter description and repeated in its body — that no
+    scheduler ever implemented: the report it prescribes,
+    `_pipeline/reflection/day-end-synthesis-latest.md`, has no on-disk existence at all
+    (`find ~/lloyd-data/_pipeline -name '*day-end*'` → no rows), and the file is now
+    `status: archived` IN PLACE, the shape #2401 used for `autonomy-reflection-pipeline`,
+    with the directory left at `skills/nightly-day-end-synthesis/`.
+
+    Two process boundaries, both measured where the answer is consumed:
+
+    * `prompt_builder._is_quarantined_skill` (an alias, `app/prompt_builder.py:1007`, of
+      `agent_mcp.skills.is_quarantined_skill_file`, `agent_mcp/skills.py:178`) and
+      `_active_skills()`. That is the predicate
+      the skill index applies, and `_active_skills()` is the very dict handed to
+      `reflection_archive.classify_all` to discover the writer tiers — so a `status:` edit
+      the loader did not honour could not pass here while it passes the exempt-dict
+      equality that depends on it. Asserting the loader's verdict rather than the file's
+      wording is deliberate: a vault round is free to re-word a skill, and a wording-pin in
+      this file is the self-rewriting-baseline
+      shape named in `knowledge/software/guardian-data-damage-false-trip.md`.
+    * `~/obsidian/autonomy/*.md` front matter, which is what the autonomy scheduler reads
+      to bind a skill to a task. The sentence that replaced the schedule claims two facts —
+      no task binds this skill, and the session-log extraction it prescribed is task 56 —
+      and both are asserted off those files. `len(bound) >= 30` is the positive control:
+      at least one binding has to be found for "no task binds it" to be a measurement
+      rather than an empty scan. A round that DOES bind the skill reddens this node, which
+      is the correct alarm: the archive premise would then be false, not the test.
+
+    Unmarked, for the reason this file's header gives: both inputs are front matter a
+    loader consumes, not prose wording, and a marked node would report the quarantine
+    instead of enforcing it. The front-matter schedule assertion is scoped to
+    `description` — the text retrieval actually surfaces — for the same reason: a schedule
+    in the indexed description is a machine-facing claim, and an archived skill that still
+    advertises a run time is the exact state that made this file's exempt dict stale for
+    five days.
+    """
+    from app.prompt_builder import _is_quarantined_skill
+    from agent_mcp.skills import _parse_frontmatter
+
+    vault = SKILLS_DIRS[0].parent
+    name = "nightly-day-end-synthesis"
+    skill_file = SKILLS_DIRS[0] / name / "SKILL.md"
+    assert skill_file.is_file(), (
+        f"{skill_file} is gone: the archive was a MOVE, and #2531 archives in place. A "
+        "moved file leaves the `skills/<name>/` path the index and this file's scan name "
+        "empty, which is a different state from `status: archived` and not what the "
+        "loader quarantines on"
+    )
+    assert not (SKILLS_DIRS[0] / ".archived" / name / "SKILL.md").exists(), (
+        f"a copy of {name} was also placed under skills/.archived/, so two files now "
+        "describe one skill and only one of them is the one the scan reads"
+    )
+    assert _is_quarantined_skill(skill_file), (
+        f"{skill_file} is not quarantined by the loader's own predicate, so "
+        "`_active_skills()` still hands it to `classify_all`, the exempt-dict scan "
+        "still discovers it, and the equality in "
+        "test_the_only_exemption_is_a_call_that_cannot_reach_the_path is red while "
+        "`EXPECTED_VAULT_WRITE_WRITERS` is empty"
+    )
+    assert name not in _active_skills(), (
+        f"{name} is still in the active skill set the nightly prompt and the reflection "
+        "classifier read, whatever its front matter says"
+    )
+
+    whole = skill_file.read_text()
+    fm, _body = _parse_frontmatter(whole, source=str(skill_file))
+    assert fm.get("status") == "archived", (
+        f"front matter reads status={fm.get('status')!r}; the quarantine above cannot be "
+        "true for long on that input"
+    )
+    # The false claim itself, over the WHOLE file — the two sites #2531 names are the
+    # front-matter description and a body line, and a description-scoped check would let a
+    # round put the schedule back where the body used to say it.
+    stale_claim = re.search(r"1[:.]\s?30\s*(AM|am|PST)", whole)
+    assert stale_claim is None, (
+        f"{skill_file} states the retired schedule again ({stale_claim.group(0)!r}). "
+        "#2531's check is `grep -rn '1:30 AM PST' ~/obsidian/skills/ "
+        "--exclude-dir=.archived` returning nothing, and the only scheduler-shaped thing "
+        "that could make a run time true is an autonomy task binding this skill — which "
+        "the scan below measures"
+    )
+    desc_schedule = re.search(r"\b\d{1,2}[:.]\d{2}\s*(AM|PM)\b",
+                              str(fm.get("description", "")), re.I)
+    assert desc_schedule is None, (
+        f"the indexed description still states a run time ({desc_schedule.group(0)!r}). "
+        "That text is what retrieval surfaces to every prompt, so a run time there is a "
+        "machine-facing claim about a skill nothing schedules"
+    )
+    # Anywhere else in the file, a run time counts as a schedule claim when it is attached
+    # to a verb of running. (Two body lines do carry clock times — `(4:00am)` for
+    # `reflection-signals`, `(4:20am)` for `reflection-knowledge`: other skills' claims in
+    # an archived file, named on #2531 rather than edited here.)
+    body_schedule = [
+        line for line in whole.splitlines()
+        if re.search(r"\b(runs?|run\s+at|scheduled|schedule|fires|kicks\s+off)\b", line, re.I)
+        and re.search(r"\b\d{1,2}[:.]\d{2}\s*(AM|PM)?\b", line, re.I)
+    ]
+    assert not body_schedule, (
+        f"the body states this skill running at a clock time again: "
+        f"{[line[:80] for line in body_schedule]}. Nothing schedules it, and '1:30 AM PST' "
+        "was exactly that shape of sentence"
+    )
+    assert "trajectory-extraction" in whole, (
+        "the line that replaced the schedule claims no longer names the skill that does "
+        "the session-log extraction today, so the file retires a job and leaves the reader "
+        "with no successor to follow"
+    )
+
+    # The item's own check, measured over the tree instead of quoted: no live skill repeats
+    # the retired schedule. `.archived/` is excluded for the reason #2531's triage gives —
+    # `skills/.archived/day-end-synthesis/SKILL.md` carries the same two claims and is
+    # quarantined prose that must not be edited.
+    live_roots = [p for p in SKILLS_DIRS if p.is_dir()]
+    assert live_roots, f"no skill root exists among {SKILLS_DIRS}"
+    repeating: list[str] = []
+    for root in live_roots:
+        for path in sorted(root.rglob("*.md")):
+            if ".archived" in path.relative_to(root).parts:
+                continue
+            for no, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+                if "1:30 AM PST" in line:
+                    repeating.append(f"{path.relative_to(root)}:{no}")
+    assert not repeating, (
+        f"a live skill advertises the retired schedule again: {repeating[:6]}. The "
+        "quarantined copies under `.archived/` are the only place those words may stand"
+    )
+
+    bound: dict[str, str] = {}
+    from app.autonomy import _parse_task_file
+
+    autonomy_dir = vault / "autonomy"
+    for task_file in sorted(autonomy_dir.glob("*.md")):
+        # Read the task the way the scheduler does, with its graduated recovery: the
+        # binding that decides whether this skill runs is the value
+        # `_parse_task_file` returns, and a file the plain parser degrades to nothing is a
+        # task that is still dispatched, not an absent binding.
+        meta = _parse_task_file(task_file) or {}
+        skill = str(meta.get("skill_name") or "").strip()
+        if skill:
+            bound[str(skill)] = str(meta.get("id") or task_file.stem)
+    assert len(bound) >= 30, (
+        f"the autonomy scan over {autonomy_dir} found only {len(bound)} skill bindings, so "
+        f"'no task binds {name}' would be a verdict from a scan that barely ran — check the "
+        "glob against `ls ~/obsidian/autonomy/*.md | wc -l` before believing the empty half"
+    )
+    assert name not in bound, (
+        f"{name} is bound by autonomy task {bound.get(name)} after all, so archiving it "
+        "was wrong and the schedule claim it carried may be true again — un-archive it and "
+        "re-measure, rather than editing this assertion to match"
+    )
+    assert bound.get("trajectory-extraction") == "56", (
+        f"the file's replacement sentence names task 56 (`trajectory-extraction`) as what "
+        f"does the session extraction today; the autonomy front matter says "
+        f"trajectory-extraction -> {bound.get('trajectory-extraction')!r}, so that sentence "
+        "is the one that needs correcting"
+    )
+
+
+def test_a_retired_skill_is_named_with_its_retirement_where_an_active_skill_names_it():
+    """A live skill's pointer to a retired skill has to carry the word `archived`.
+
+    `nightly-day-end-synthesis` sat in `system-health-check`'s Related Skills as "Automated
+    daily health summary" while it was already retired by every other measure, and
+    `skills/skills-index.md` listed it under `## Nightly Pipeline` with no mark, which is
+    clause 3's two surfaces. `tests/test_archived_skill_artifacts.py` already pins that no
+    retired name may appear in a bench prompt or an architecture document; the sibling
+    failure mode, a live skill recommending a retired one as if it ran, was pinned for one
+    skill at a time by prose this file had to keep re-reading. So it is now a rule over every
+    retired skill, which is what makes #2531's edit durable: the next archival cannot leave a
+    live pointer unmarked, and no future round has to know to check.
+
+    Scope, and its cost: active skills only (`_is_quarantined_skill`), since quarantined
+    prose is not a recommendation and #2531's triage is explicit that `.archived/` is out of
+    bounds. The name must appear on a line that also says `archived` — the form the two
+    corrected surfaces use — and one line per name is what is asked, not an essay.
+
+    Three pointers exist in the vault today that this round has no business editing, because
+    the retirement they leave unmarked is not #2531's: `memory-capture` recommends
+    `periodic-memory-capture-lloyd`, and `ml-paper-writing` recommends
+    `research-paper-writing`. They are recorded, not silently tolerated — the assertion is an
+    equality, so a NEW pointer reddens this node and fixing a recorded one means emptying its
+    entry in the same change, which is the same shrink-only shape
+    `test_a_retired_name_survives_only_in_a_bench_prompt` gives its drift record.
+    """
+    from app.prompt_builder import _is_quarantined_skill
+
+    #: (surface that points, retired skill pointed at) — measured 2026-10-11, #2531. The
+    #: index row is `skills/skills-index.md`, whose four other retired bullets predate this
+    #: item and are not #2531's to mark.
+    known_unmarked = {("memory-capture", "periodic-memory-capture-lloyd"),
+                      ("ml-paper-writing", "research-paper-writing"),
+                      ("skills-index.md", "autonomy-reflection-pipeline"),
+                      ("skills-index.md", "tls-migration-gotchas"),
+                      ("skills-index.md", "research-paper-writing"),
+                      ("skills-index.md", "periodic-memory-capture-lloyd")}
+
+    retired = {
+        entry.name
+        for root in SKILLS_DIRS
+        if root.is_dir()
+        for entry in root.iterdir()
+        if entry.is_dir() and not entry.name.startswith(".")
+        and (entry / "SKILL.md").is_file()
+        and _is_quarantined_skill(entry / "SKILL.md")
+    }
+    assert retired, "no skill is quarantined, so 'is it marked archived' discriminates nothing"
+
+    found: set[tuple[str, str]] = set()
+    for root in SKILLS_DIRS:
+        if not root.is_dir():
+            continue
+        for entry in sorted(root.iterdir()):
+            skill_file = entry / "SKILL.md"
+            if (not entry.is_dir() or entry.name.startswith(".")
+                    or not skill_file.is_file() or _is_quarantined_skill(skill_file)):
+                continue
+            for line in skill_file.read_text(errors="replace").splitlines():
+                for other in retired:
+                    if other != entry.name and other in line and "archived" not in line.lower():
+                        found.add((entry.name, other))
+        #: The human-facing index is not a SKILL.md and so is not the loader's surface, but
+        #: it is the surface a human reads to decide what runs — clause 3's second half.
+        index_file = root / "skills-index.md"
+        if index_file.is_file():
+            for line in index_file.read_text(errors="replace").splitlines():
+                for other in retired:
+                    if line.startswith("- **") and other in line and "archived" not in line.lower():
+                        found.add((index_file.name, other))
+    assert found == known_unmarked, (
+        f"live pointers to a retired skill that carry no retirement mark changed: found "
+        f"{sorted(found)}, recorded {sorted(known_unmarked)}. A NEW pair means a surface "
+        "recommends a job nothing runs — mark the retirement on that line the way "
+        "`system-health-check` now says `archived 2026-10-11 (#2531)` and the index's "
+        "`nightly-day-end-synthesis` bullet says `*(archived ...)*`. A MISSING pair means the "
+        "pointer was fixed, so empty its entry here in the same change rather than leaving "
+        "this record asserting a defect that is gone."
+    )
+    #: ...and this item's own two surfaces, named, because the equality above tolerates the
+    #: recorded pairs and a rule with no positive control is indistinguishable from a rule
+    #: that never found anything.
+    assert ("system-health-check", "nightly-day-end-synthesis") not in found, (
+        "system-health-check recommends nightly-day-end-synthesis with no retirement mark "
+        "again — the 'Automated daily health summary' line #2531 corrected"
+    )
+    assert ("skills-index.md", "nightly-day-end-synthesis") not in found, (
+        "skills/skills-index.md lists nightly-day-end-synthesis under its Nightly Pipeline "
+        "heading with no mark again"
     )
