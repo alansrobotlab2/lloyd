@@ -131,14 +131,20 @@ by bare filename somewhere else is not attributed, because a bare filename canno
 be told apart from one in a different directory. That is the reason
 ``PROSE_WRITE`` carries verbs of instruction and not nouns like "output" — the
 nouns are what descriptive annotations use, and three of the read-list items in
-``autonomy-reflection-pipeline`` Step 6.1 are annotated that way.
+``autonomy-reflection-pipeline`` Step 6.1 (archived 2026-10-08, vault commit
+``42144a4b``) are annotated that way. The example is still the best one there is,
+so it stays; ``test_no_prose_surface_states_a_retired_skill_as_live_spec`` below is
+what keeps every such citation here, and in ``scripts/reflection_archive.py``, in
+the past tense its skill's status demands.
 """
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -501,9 +507,11 @@ def test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree(tmp_path, mo
 
     # Both homes the reports have had. `~/lloyd/` is the 2026-07 incident path and the
     # spelling older skill text still carries; `~/lloyd-data/` is where the reports
-    # live since 2026-09-22 and what the exempt skill prescribes today
-    # (`nightly-day-end-synthesis`'s `vault_write(path="~/lloyd-data/…")`), so the
-    # exemption is only honest while the resolver refuses that one too.
+    # live since 2026-09-22 and what the skill holding the exemption prescribed while
+    # it was live (`nightly-day-end-synthesis`, archived 2026-10-11, vault commit
+    # `6a683b77`), so the exemption is only honest while the resolver refuses that one
+    # too — and the targets below keep both spellings, because the archived skill's
+    # text is not the only thing that ever named a `~/lloyd/` path.
     targets = (
         "~/lloyd/_pipeline/reflection/signals-latest.md",
         "/home/alansrobotlab/lloyd/_pipeline/reflection/signals-latest.md",
@@ -1482,6 +1490,306 @@ def test_the_exempt_dict_comment_block_names_only_recorded_entries():
     )
 
 
+# --- The prose surfaces the block guard above cannot reach ------------------------
+#: The two files whose prose the rule below reads, labelled as they are cited in
+#: backlog items. The module half is resolved through the imported module, so the
+#: node reads the file the suite actually loaded rather than a same-named path.
+PROSE_SURFACE_FILES: tuple[tuple[str, Path], ...] = (
+    ("scripts/reflection_archive.py", Path(ra.__file__)),
+    ("tests/test_skill_reflection_archive.py", Path(__file__)),
+)
+
+#: A sentence says a skill is out of circulation. `archive` alone is NOT in this list
+#: on purpose: this file's own subject is dated `archive` copies of reports, so a
+#: bare "archived" beside a skill name would let a sentence about a `cp` excuse a
+#: live-spec claim about the skill.
+_RETIREMENT_WORD = re.compile(r"\b(?:archived|retired|retirement|quarantined)\b", re.IGNORECASE)
+
+#: Which retirement is meant: the day, the vault commit that set the status, or the
+#: backlog item that decided it. A retirement word with no record beside it is a word
+#: doing no work — it is the shape that let a citation read as a live instruction for
+#: three rounds while the dict entry beside it was already gone.
+_RETIREMENT_RECORD = re.compile(
+    r"\b20\d\d-\d\d-\d\d\b"  # ISO date, the form every retirement here is written in
+    r"|\b[0-9a-f]{7,40}\b"  # a vault commit, abbreviated (7+) or full (40)
+    r"|#\d{2,6}\b"  # the backlog item, e.g. "#2405"
+)
+
+#: Everything a marker is made of, so a mutation can remove one.
+_MARKER_EVIDENCE = re.compile(
+    r"\bdropped\b|\barchived\b|\bretired\b|\bretirement\b|\bquarantined\b"
+    r"|\b20\d\d-\d\d-\d\d\b|\b[0-9a-f]{7,40}\b|#\d{2,6}\b",
+    re.IGNORECASE,
+)
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def _prose_paragraphs(path: Path) -> list[tuple[str, str]]:
+    """`[(where, text)]`, one entry per prose paragraph of a Python file: every
+    docstring (module, class or function) and every run of contiguous `#` comments,
+    with the sigils stripped and the wrapping closed up so a sentence written across
+    three `#:` lines is still the one sentence the rule reads.
+
+    `tokenize` for comments, not a regex over lines: a `#` inside a string — an
+    assert message quoting `"#900"`, say — is not a comment, and a rule that read one
+    as one would alarm on test prose it was never pointed at. `ast` for docstrings,
+    for the same reason: `\"\"\"` in prose is not a docstring boundary.
+
+    The where-string carries the construct and its line so a failure can be acted on,
+    which is what the block guard above could not do once its subject left the block.
+    """
+    src = path.read_text(encoding="utf-8")
+    lines = src.splitlines()
+    out: list[tuple[str, str]] = []
+
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not (node.body
+                and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and isinstance(node.body[0].value.value, str)):
+            continue
+        doc = node.body[0].value
+        who = "module docstring" if isinstance(node, ast.Module) else f"docstring of {node.name}"
+        body = [ln.strip().strip('"').strip() for ln in lines[doc.lineno - 1:doc.end_lineno]]
+        out.append((f"{who} (line {doc.lineno})", " ".join(b for b in body if b)))
+
+    run: list[tokenize.TokenInfo] = []
+    blocks: list[list[tokenize.TokenInfo]] = []
+    tokenized = tokenize.generate_tokens(iter(src.splitlines(keepends=True)).__next__)
+    for tok in tokenized:
+        if tok.type != tokenize.COMMENT:
+            continue
+        if run and tok.start[0] == run[-1].start[0] + 1:
+            run.append(tok)
+        else:
+            if run:
+                blocks.append(run)
+            run = [tok]
+    if run:
+        blocks.append(run)
+    for block in blocks:
+        text = " ".join(t.string.lstrip("#").lstrip(":").strip() for t in block)
+        out.append((f"comment block (lines {block[0].start[0]}-{block[-1].start[0]})", text))
+    return out
+
+
+def _retired_skill_names() -> set[str]:
+    """Every skill folder the loader refuses to advertise — the inventory the rule
+    below keys on.
+
+    The same partition `tests/test_archived_skill_artifacts.py` builds its `retired`
+    fixture from: `prompt_builder._is_quarantined_skill`, the exact predicate
+    `_load_skills_index()` applies. Deciding "is this name retired" from that
+    predicate rather than from a second regex over `status:` is what keeps this node
+    and that file from disagreeing about which skills are out of circulation.
+    """
+    from app.prompt_builder import _is_quarantined_skill
+
+    retired: set[str] = set()
+    for root in SKILLS_DIRS:
+        if not root.is_dir():
+            continue
+        for entry in root.iterdir():
+            skill_file = entry / "SKILL.md"
+            if entry.is_dir() and skill_file.is_file() and _is_quarantined_skill(skill_file):
+                retired.add(entry.name)
+    assert retired, (
+        f"no skill under {SKILLS_DIRS} is quarantined, so 'does this sentence name a "
+        "retired skill' currently discriminates nothing — that is either a vault "
+        "outage (every advertised skill, archived ones included, is a decision the "
+        "loader made) or the inventory moved; either way the rule below would pass "
+        "while reading nothing it could fail on"
+    )
+    return retired
+
+
+def _unmarked_retired_prose(
+    paragraphs: list[tuple[str, str]], retired: set[str]
+) -> list[tuple[str, str]]:
+    """`(where, sentence)` for each sentence that names a retired skill without
+    stating its retirement.
+
+    One sentence is the unit because one sentence is what a reader trusts: a marker
+    in the neighbouring sentence does not tell the reader holding this one that the
+    skill is gone.
+    """
+    violations: list[tuple[str, str]] = []
+    for where, text in paragraphs:
+        for sentence in _SENTENCE_END.split(text):
+            if not any(name in sentence for name in retired):
+                continue
+            if re.search(r"\bdropped\b", sentence, re.IGNORECASE):
+                continue
+            if _RETIREMENT_WORD.search(sentence) and _RETIREMENT_RECORD.search(sentence):
+                continue
+            violations.append((where, sentence))
+    return violations
+
+
+def test_no_prose_surface_states_a_retired_skill_as_live_spec():
+    """Clause 3 of #2530: the widened guard — a present-tense justification for a
+    skill nobody advertises any more is caught in the prose of BOTH files, not only
+    in the block contiguous to the exempt dict.
+
+    Unmarked, deliberately, so the gate's hard `-m "not live_vault"` rung runs it.
+    The reason is the same one `test_the_exempt_dict_comment_block_names_only_recorded_entries`
+    gives for itself: the rule it polices lives partly in `live_vault` nodes the hard
+    rung deselects, and a citation that rots in a docstring is invisible to every rung
+    if the only node that reads prose is one of those. It reads only skill *names* and
+    the loader's quarantine decision, never skill prose, so it does not rise and fall
+    with wording a nightly job is free to change.
+
+    Why the block guard was not enough — the shape of the gap, not its content:
+    `_comment_block_above` walks back from the constant and stops at the first
+    non-`#` line, so it can only ever see one block. Everything else in either file —
+    this module docstring, every function docstring, every other comment run — was
+    structurally unreachable, and that is precisely where the three citations of
+    `autonomy-reflection-pipeline` survived the round that dropped its dict entry:
+    one comment block and one `#: `-free docstring in the module, one here. So the
+    surfaces are now "every docstring and every comment run of these two files",
+    which is also what makes clause 1's second fix reachable: the citation at
+    `scripts/reflection_archive.py` inside `_heading_verb`'s docstring is neither a
+    module docstring nor a comment, and a guard scoped to those two would still miss
+    it.
+
+    Keyed on the retired inventory, never on "a skill name this dict does not record".
+    Measured over these two files before the change, 14 sentences name a LIVE skill
+    that no dict records at all — `nightly-reflection-signals`,
+    `nightly-reflection-knowledge-write`, `historical-knowledge-refresh`, and a real
+    skill folder literally named `obsidian` — so copying the block rule's
+    `name in sentence and "dropped" not in sentence` onto these surfaces would have
+    been red the day it landed, on prose that is true. What a retired skill's name may
+    not do is hold a sentence in the present tense: the comment inside
+    `test_the_exempt_tier_is_a_call_that_cannot_reach_the_path` was still saying
+    `nightly-day-end-synthesis`'s `vault_write` is "what the exempt skill prescribes
+    today" on 2026-10-11, the day that skill itself was archived (vault commit
+    `6a683b77`) — the rot does not even need time to pass, only a round that edited
+    the dict and not the paragraph under it.
+
+    A marker is the word `dropped`, or a retirement word (`archived`, `retired`,
+    `retirement`, `quarantined`) together with WHICH retirement: a date, a vault
+    commit, or the backlog item that decided it. Clause 1's mandated wording —
+    `(archived 2026-10-08, vault commit 42144a4b)` — satisfies it twice over. The
+    attribution is not decoration: this file argues for dated `archived` copies of
+    reports all the way down, so a bare "archived" beside a name would let a sentence
+    about a `cp` excuse a claim that the skill still runs.
+
+    When a skill is archived later, the red this node raises belongs to the round that
+    archived it, which is the round that owns the sentence — the house rule above the
+    exempt dict is "an entry is dropped in the round that archives its skill, never
+    left behind", and the prose beside that dict is part of the entry.
+    """
+    retired = _retired_skill_names()
+    surfaces = {label: _prose_paragraphs(path) for label, path in PROSE_SURFACE_FILES}
+    for label, paragraphs in surfaces.items():
+        assert paragraphs, (
+            f"{label} yielded no docstring or comment paragraph, so the rule below "
+            "would pass on an empty read — a file with no prose to check is not the "
+            "same thing as a file with no violation in its prose"
+        )
+
+    named = [
+        (label, where, sentence)
+        for label, paragraphs in surfaces.items()
+        for where, text in paragraphs
+        for sentence in _SENTENCE_END.split(text)
+        if any(name in sentence for name in retired)
+    ]
+    assert len(named) >= 3, (
+        f"only {len(named)} sentence(s) in these two files name a retired skill: "
+        "the rule below is vacuous until at least a few do, because a corpus with "
+        "nothing to mark proves only that it was never read. Either the prose was "
+        "deleted rather than marked, or the vault stopped quarantining anything — "
+        f"inventory: {sorted(retired)}"
+    )
+    assert {"autonomy-reflection-pipeline", "nightly-day-end-synthesis"} & {
+        name for _l, _w, s in named for name in retired if name in s
+    } == {"autonomy-reflection-pipeline", "nightly-day-end-synthesis"}, (
+        "neither of the two skills whose citations this file exists to police appears "
+        "in the prose any more — the Step 6.1 example and the exempt-tier comment are "
+        "the two surfaces #2530 and #2531 had to fix, and deleting them instead of "
+        "marking them would leave this node green with nothing left to guard"
+    )
+
+    violations = [
+        (label, where, sentence)
+        for label, paragraphs in surfaces.items()
+        for where, sentence in _unmarked_retired_prose(paragraphs, retired)
+    ]
+    assert not violations, (
+        "prose states a retired skill as if it still ran: "
+        f"{[(label, where, sentence[:120]) for label, where, sentence in violations]}. "
+        "Say it was dropped, or name the retirement in the same sentence — the date, "
+        "the vault commit, or the backlog item. A present-tense citation is what makes "
+        "a quarantined skill look like a live prescription to the next reader, which "
+        "is the defect #2405 recorded and #2530 was filed to close."
+    )
+
+    # Clause 4: live-skill prose is not what this rule is for, and the four names that
+    # triage measured are the control — each appears in this prose and each stays out
+    # of the retired inventory, so a pass here is not a pass because the scan skipped
+    # the sentences that mention them.
+    for live in ("nightly-reflection-signals", "nightly-reflection-knowledge-write",
+                 "historical-knowledge-refresh", "obsidian"):
+        assert live not in retired, (
+            f"{live} is now quarantined, so the sentence naming it here needs its "
+            "retirement marked in the same change that archived it — see the house "
+            "rule above `EXPECTED_VAULT_WRITE_WRITERS`"
+        )
+        assert any(live in text for paragraphs in surfaces.values() for _w, text in paragraphs), (
+            f"{live} no longer appears in either file's prose, so it is no longer a "
+            "control for 'live prose stays untouched' — name a live skill that does, "
+            "or the green below proves nothing about prose like it"
+        )
+
+    # Teeth for the rule, in the file's own shape: `not violations` is also satisfied
+    # by a finder that never reports anything, so every sentence that IS green here
+    # gets its marker taken away and has to turn red. A sentence that stays green with
+    # its date, sha and backlog refs deleted is green for a reason the rule cannot say.
+    marked = [
+        (label, where, sentence)
+        for label, where, sentence in named
+        if not any(label == v_label and where == v_where and sentence == v_sentence
+                   for v_label, v_where, v_sentence in violations)
+    ]
+    assert marked, (
+        "no sentence in either file carries a retirement marker, so there is nothing "
+        "here for the rule to check and the green above says nothing"
+    )
+    for label, where, sentence in marked:
+        stripped = _MARKER_EVIDENCE.sub("", sentence)
+        assert _unmarked_retired_prose([(where, stripped)], retired), (
+            f"{label} {where}: this sentence passes with every marker stripped out of it "
+            f"— {stripped[:120]!r} — so it was never passing because of its retirement "
+            "statement, and the rule cannot tell it from a live-spec citation"
+        )
+
+    # Clause 5: the negative control on the way the rot actually returns — someone
+    # writes the example again, present tense, with the skill's status nowhere in the
+    # sentence. It has to be reported, and named: file, where, and the sentence.
+    injected = (
+        "`autonomy-reflection-pipeline` Step 6.1 is the read-list shape to follow, "
+        "seven items long."
+    )
+    target_label = "tests/test_skill_reflection_archive.py"
+    mutated = surfaces[target_label] + [("negative control (injected by this node)", injected)]
+    found = _unmarked_retired_prose(mutated, retired)
+    assert [sentence for _where, sentence in found if sentence == injected] == [injected], (
+        f"reintroducing one present-tense mention of a retired skill into the prose "
+        f"{target_label} reads did not turn the rule red: {injected!r} is absent from "
+        f"{[(where, sentence[:120]) for where, sentence in found]} — the finder cannot "
+        "fail, and an un-failable pin is not a pin"
+    )
+    reported_where = [where for where, sentence in found if sentence == injected]
+    assert reported_where == ["negative control (injected by this node)"], (
+        "the failure did not name where the sentence sits, so a red here would be "
+        f"acted on blind: {reported_where}"
+    )
+
+
 @pytest.mark.live_vault
 def test_the_recorded_debt_is_measured_by_archive_presence(skills):
     """The last skill that overwrote a report without naming a copy is now gone
@@ -2108,9 +2416,9 @@ def test_a_retired_skill_is_named_with_its_retirement_where_an_active_skill_name
     """A live skill's pointer to a retired skill has to carry the word `archived`.
 
     `nightly-day-end-synthesis` sat in `system-health-check`'s Related Skills as "Automated
-    daily health summary" while it was already retired by every other measure, and
-    `skills/skills-index.md` listed it under `## Nightly Pipeline` with no mark, which is
-    clause 3's two surfaces. `tests/test_archived_skill_artifacts.py` already pins that no
+    daily health summary" while it was already retired by every other measure (archived
+    2026-10-11, vault commit `6a683b77`), and `skills/skills-index.md` listed it under
+    `## Nightly Pipeline` with no mark, which is clause 3's two surfaces. `tests/test_archived_skill_artifacts.py` already pins that no
     retired name may appear in a bench prompt or an architecture document; the sibling
     failure mode, a live skill recommending a retired one as if it ran, was pinned for one
     skill at a time by prose this file had to keep re-reading. So it is now a rule over every

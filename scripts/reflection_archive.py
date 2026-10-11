@@ -88,8 +88,11 @@ READ = re.compile(
 #: Prose that prescribes producing the file, with no tool call to bind. Deliberately
 #: verbs of *instruction* only: "Output: …" and "— prompt audit output (Subagent B)"
 #: annotate a file, they do not write it, and the second is the annotation on an
-#: item of a **read** list (`autonomy-reflection-pipeline` Step 6.1), so a noun here
-#: would read a reader as a writer.
+#: item of a **read** list in `autonomy-reflection-pipeline` Step 6.1 (archived
+#: 2026-10-08, vault commit `42144a4b`), so a noun here would read a reader as a
+#: writer. The example outlives the skill; the tense has to say so, and
+#: `tests/test_skill_reflection_archive.py`
+#: holds every sentence here that names a retired skill to that rule.
 PROSE_WRITE = re.compile(
     r"\b(?:merge|merges|consolidate|consolidates|regenerate|regenerates"
     r"|write|writes|written)\b",
@@ -169,8 +172,9 @@ def _heading_verb(body_lines: list[str], idx: int) -> str | None:
 
     `Write pattern files from the artifact:` followed by two backticked paths is a
     write prescription; `Read these files:` followed by seven is not — and in
-    `autonomy-reflection-pipeline` Step 6.1 the read list is seven items long, while
-    in `historical-knowledge-refresh` the write list nests two levels
+    `autonomy-reflection-pipeline` Step 6.1 (archived 2026-10-08, vault commit
+    `42144a4b`) the read list was seven items long, while in
+    `historical-knowledge-refresh` the write list nests two levels
     (`**Consolidate patterns:** Merge all pattern analysis into:` then two
     sub-bullets). So this walks back through the list, taking the first verb it
     meets, and gives up at a blank line, a heading, or six non-blank lines — far
