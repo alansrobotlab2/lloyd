@@ -3455,6 +3455,48 @@ def _body_lines(lines):
     return [(i, l) for i, l in enumerate(lines, 1)
             if l.strip() and not l.startswith(cs_mod.DIGEST_STRUCTURAL_PREFIXES)]
 
+#: What the shipped digest held at the #2509 backfill (vault commit `7e87c931`): 203
+#: `### ` entries, and 205 `---` rules — one terminating each entry plus the two that
+#: delimit the front matter. The node below pinned both figures as equalities, and an
+#: equality against an append-only file is a dated snapshot: `write_item_to_vault`
+#: appends one entry and one rule per published video, so the file held 218 entries and
+#: 220 rules when #2570 was filed and `assert 218 == 203` fired on a pipeline that was
+#: working. So the entry count is a FLOOR — it only ever goes up, and it going down is
+#: precisely the emptied-entry failure clause 2 forbids — and the rule count is a
+#: RELATION to it, which is what a delete that swallowed a separator would break.
+BACKFILL_ENTRIES = 203
+
+
+def _front_matter_end(lines):
+    """1-based line number of the front matter's closing `---`, 0 when the file has no
+    front matter. `write_item_to_vault`'s create path emits exactly two of those rules
+    and they are the only ones that are not some entry's terminator."""
+    if lines and lines[0].strip() == "---":
+        return next((i for i, l in enumerate(lines[1:], 2) if l.strip() == "---"), 0)
+    return 0
+
+
+def _digest_structure(lines):
+    """The four readings #2509 clause 2 pins, over any digest's lines.
+
+    Returns `(entries, entry_rules, orphaned_headings, link_bodies)`: how many `### `
+    headings the file holds; how many `---` rules sit outside its front matter, which
+    the writer emits exactly one per entry; the headings with no non-blank
+    `**Source:**` line in the three lines after them — an entry a delete emptied; and
+    the body lines carrying a URL again, scoped to bodies the way the instrument
+    counts so the writer's own `[Link](https://…)` line is not a hit.
+    """
+    fm_end = _front_matter_end(lines)
+    headings = [i for i, l in enumerate(lines, 1) if l.startswith("### ")]
+    entry_rules = sum(1 for i, l in enumerate(lines, 1)
+                      if i > fm_end and l.strip() == "---")
+    orphans = [i for i in headings
+               if not any(n.strip().startswith("**Source:**")
+                          for n in lines[i:i + 3] if n.strip())]
+    link_bodies = [(i, l) for i, l in _body_lines(lines)
+                   if body_mod._LINK_PRESENT_RE.search(l)]
+    return len(headings), entry_rules, orphans, link_bodies
+
 
 def test_the_shipped_digest_carries_no_channel_promo_residue():
     """#2509 clause 1: the named residue is gone from the published digest, and
@@ -3491,24 +3533,101 @@ def test_the_backfill_left_every_entry_populated_and_link_free():
     """#2509 clause 2: a delete that empties an entry is the same failure as the
     residue, so the structure the backfill had to preserve is pinned numerically.
 
-    203 `### ` headings and 205 `---` rules are what the file held before the
-    backfill; every heading still has its non-blank `**Source:**` line within three
-    lines; and `_LINK_PRESENT_RE` — the predicate that found the 16 URL-bearing
-    lines #2453 deleted — is 0 over the bodies. That last figure is only 0
-    BODY-SCOPED: over the whole file it is 205, because the writer's own 203
-    `[Link](https://…)` lines match it and two video TITLES match it too (the
+    The four readings are `_digest_structure`'s, and
+    `test_the_digest_structure_readings_fire_on_an_emptied_entry_and_survive_growth`
+    pins each of them against a digest that test writes through the real writer, so
+    nothing here rests on the shipped file being a particular size. What it asserts of
+    the shipped file: the entry count has not fallen below the 203 the file held at the
+    backfill (it grows by one per published digest, so the floor is the only direction
+    an entry can be lost); every entry is still terminated by exactly one `---` rule
+    outside the front matter; every heading still has its non-blank `**Source:**` line
+    within three lines; and `_LINK_PRESENT_RE` — the predicate that found the 16
+    URL-bearing lines #2453 deleted — is still 0 over the bodies. That last figure is
+    only 0 BODY-SCOPED: over the whole file every entry's own `[Link](https://…)` line
+    matches the predicate and two video TITLES match it too, so the whole-file figure
+    moves with the entry count — which is the reason the check is body-scoped (the
     triage recorded the scope; the item's whole-file wording was unsatisfiable).
     """
     lines = SHIPPED_DIGEST.read_text(errors="replace").splitlines()
-    assert sum(1 for l in lines if l.startswith("### ")) == 203
-    assert sum(1 for l in lines if l.strip() == "---") == 205
+    entries, entry_rules, orphans, linky = _digest_structure(lines)
 
-    orphans = [i for i, l in enumerate(lines, 1)
-               if l.startswith("### ")
-               and not any(n.strip().startswith("**Source:**")
-                           for n in lines[i:i + 3] if n.strip())]
+    assert entries >= BACKFILL_ENTRIES, (
+        f"the digest holds {entries} entries, below the {BACKFILL_ENTRIES} it had at "
+        f"the #2509 backfill: an entry, or a whole day of them, has gone missing")
+    assert entry_rules == entries, (
+        f"{entries} entries but {entry_rules} `---` rules outside the front matter: "
+        f"the writer terminates every entry with exactly one")
+
     assert orphans == [], f"entries emptied of their Source line: {orphans}"
-
-    bodies = _body_lines(lines)
-    linky = [(i, l) for i, l in bodies if body_mod._LINK_PRESENT_RE.search(l)]
     assert linky == [], f"a body line carries a URL again: {linky}"
+
+
+def test_the_digest_structure_readings_fire_on_an_emptied_entry_and_survive_growth(
+        intel_state):
+    """#2570: each of the four readings must be able to fail, and must not fail on
+    the growth that fired the old equality.
+
+    The digest here is the real artifact: three items published through
+    `write_item_to_vault` with the profile that routes a YouTube item to
+    `knowledge/ai-llms/youtube-digest.md`, so the bytes the structural readings run
+    over are the ones the writer appends in production, not a shape this test
+    invented. Then each failure clause 2 forbids is introduced and has to be seen: a
+    body deleted together with its `**Source:**` line, a URL back in a body line, a
+    separator rule deleted while its heading stands. Finally a fourth entry is
+    published — the case that broke the pinned `== 203`, and the one that must read
+    clean, because a green test that only describes one Tuesday is not a guard.
+    """
+    digest = intel_state / "vault" / DIGEST_FILE
+    _publish(intel_state,
+             _yt_item("An agent that keeps its own scratch pad",
+                      "An agent held a block reference across turns and reused it on "
+                      "the next request, which is what the memory layer needed.",
+                      "str1"),
+             _yt_item("Retrieval on a one-GPU budget",
+                      "A small team running its own model can still index a full corpus "
+                      "for an agent by keeping the vector leg on the same card.",
+                      "str2"),
+             _yt_item("Nightly evals that keep their baseline",
+                      "A baseline that moves under the runner cannot show an agent "
+                      "regression, so the nightly run froze its commit and reported.",
+                      "str3"))
+    assert digest.is_file(), digest
+    lines = digest.read_text(errors="replace").splitlines()
+
+    assert _digest_structure(lines) == (3, 3, [], []), (
+        "a freshly published three-entry digest did not read clean")
+
+    # An emptied entry: the entry's prose AND its Source line gone, heading and rule
+    # standing. This is the #2509 failure mode, and it is the orphan reading that sees
+    # it — no count moves at all. Every heading in that file is orphaned, so the
+    # reading has to name all three, at the positions they hold once the lines above
+    # them have been deleted.
+    no_source = [l for l in lines if not l.startswith("**Source:**")]
+    stranded = [i for i, l in enumerate(no_source, 1) if l.startswith("### ")]
+    assert len(stranded) == 3, stranded
+    assert _digest_structure(no_source)[2] == stranded, (
+        "a digest with every Source line deleted read as having no orphaned entries")
+
+    # A URL back in a body line, which is #2453's residue. Body-scoped, so the answer
+    # is the one injected line: the `[Link](https://…)` line each entry also carries
+    # must not be what makes a clean file read dirty.
+    url_back = [l.replace("reused it on the next", "reused it, see https://example.com/x")
+                for l in lines]
+    fired = _digest_structure(url_back)[3]
+    assert len(fired) == 1 and "example.com" in fired[0][1], (
+        f"the URL reading is not body-scoped: {fired}")
+
+    # A separator rule that went missing while its heading stands: the entry count
+    # alone cannot see a delete that takes an entry and its rule together, so the
+    # pairing is what does — and here it is 3 headings over 2 rules.
+    last_rule = max(i for i, l in enumerate(lines) if l.strip() == "---")
+    assert _digest_structure(lines[:last_rule] + lines[last_rule + 1:]) == (3, 2, [], [])
+
+    # And growth: publishing one more entry moves both readings by one, which is the
+    # case the pinned `== 203` could not express and #2570 exists because of.
+    assert vw_mod.write_item_to_vault(
+        _yt_item("A fourth digest lands the same way",
+                 "A fourth agent digest published through the same writer, which is the "
+                 "growth a floor tolerates and an equality misreads as damage.",
+                 "str4"), DIGEST_PROFILE) is True
+    assert _digest_structure(digest.read_text(errors="replace").splitlines()) == (4, 4, [], [])
