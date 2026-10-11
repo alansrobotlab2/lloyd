@@ -362,3 +362,47 @@ def test_the_digest_prompt_carries_the_skill_copy_verbatim(tmp_path):
         "Rules section verbatim — either the skill stopped loading, or a second copy "
         "is being rendered in its place")
     _assert_rules_reach_prose(prompt, "the skill-sourced digest prompt")
+
+
+# ---------------------------------------------------------------------------
+# #2554 clause 3. That item added a POINTER to the `## Measured in Lloyd`
+# convention — one line in the closing skill, one mention in the closure turn's
+# prompt — and was forbidden from editing this file. Pinned here because this is
+# the file that already reads the schema and already rules on what may be copied
+# out of it.
+# ---------------------------------------------------------------------------
+
+
+def test_the_schema_was_not_touched_to_add_the_closure_pointer():
+    """The convention keeps exactly one owner: this file.
+
+    #2554's pointers must not have been paid for by moving, rewording or duplicating
+    the rule. Clause 3's checks are `git -C ~/obsidian status --porcelain --
+    knowledge/KNOWLEDGE_SCHEMA.md` empty and `grep -c 'Measured in Lloyd'` staying 1.
+
+    The item's second number is a phantom and is not asserted: clause 3 as filed
+    demanded "`[{}]` stays 5", but `grep -c '\\[{}\\]'` on this file is 0 — and the
+    file has not changed since the convention itself landed (`git log -1 --
+    knowledge/KNOWLEDGE_SCHEMA.md` → `0050139c`, 2026-10-08 15:41), so the tree never
+    held 5 and no round could have satisfied it. Byte-unchanged is the property the
+    clause was reaching for, and it is what fails if a round edits this file at all.
+    """
+    import subprocess
+
+    text = _require(SCHEMA)
+    assert text.count("Measured in Lloyd") == 1, (
+        "the convention must appear exactly once in its owning file; a second mention "
+        f"means #2554's pointer was written INTO the schema ({text.count('Measured in Lloyd')})")
+    assert "### `## Measured in Lloyd`" in text, (
+        "the convention's own heading is gone, so whatever is single-sourced here now "
+        "is not this rule")
+
+    dirty = subprocess.run(
+        ["git", "-C", str(VAULT), "status", "--porcelain", "--",
+         "knowledge/KNOWLEDGE_SCHEMA.md"],
+        capture_output=True, text=True)
+    assert dirty.returncode == 0, dirty.stderr.strip()
+    assert dirty.stdout.strip() == "", (
+        "#2554's round was not allowed to modify the schema, and it is dirty in the "
+        f"vault working tree:\n{dirty.stdout}")
+

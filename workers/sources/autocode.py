@@ -2059,7 +2059,13 @@ async def _run_and_record(item, candidate, triage, budget, started,
                 "you were told to end the turn rather than watch it, and that is no "
                 "reason for `landed: false`, `not_met` or `rejected`. Judge each clause "
                 "on the change itself. `unnecessary` and `rejected` close the item with "
-                "no landing, so neither fits a round you landed with every clause met."
+                "no landing, so neither fits a round you landed with every clause met. "
+                "One thing can still be owed at this moment and cannot be settled by the "
+                "verdict: if the item you closed was filed by a knowledge note, and a "
+                "dated measurement artifact exists for it, that note may owe a "
+                "`Measured in Lloyd` section. The trigger for one, and every rule about "
+                "writing it, live in the vault's `knowledge/KNOWLEDGE_SCHEMA.md` — the "
+                "only place they are written."
             ))
     except DrainActive as exc:
         S.append_event({"event": "backlog_implement", "item_id": candidate.id,

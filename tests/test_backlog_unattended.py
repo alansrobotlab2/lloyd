@@ -2622,6 +2622,97 @@ def test_a_landing_whose_summary_is_the_finalizers_own_instruction_reports_nothi
     assert fm["status"] == "done" and "all 9 clause(s) met" in fm["activity_log"][-1]
 
 
+def _finalizer_prompt_text() -> str:
+    """The closure turn's ENTIRE finalizer instruction, folded to one string.
+
+    `_finalizer_prompt_open()` reads only the first fragment, which is all the echo
+    rule needs. A pointer that had to be added at the END of that instruction is not
+    visible to it, so this takes the `final_schema_prompt=` argument as one literal out
+    of the AST of `workers/sources/autocode.py` — the same file the closure turn is
+    built in, because a pointer written anywhere else in the repo would reach no
+    session (triage: `git grep -n "knowledge/" -- workers/sources/autocode.py` was 0
+    hits, while `scripts/automod/backlog.py` only mirrors the prompt's opener)."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(I))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg != "final_schema_prompt":
+                continue
+            val = kw.value
+            # Adjacent literals fold into one Constant; a Tuple/List of them is folded
+            # too, and a parenthesised `(...)` group is a Constant as well. A JoinedStr
+            # (an f-string) would have to be refused rather than half-read.
+            if isinstance(val, ast.Constant) and isinstance(val.value, str):
+                return val.value
+            raise AssertionError(
+                "`final_schema_prompt=` is no longer a plain string literal in "
+                f"autocode (it is a {type(val).__name__}), so this test cannot read the "
+                "wording a closure turn is actually given (#2554)")
+    raise AssertionError(
+        "no `final_schema_prompt=` call in autocode: the closure turn stopped being "
+        "asked for an outcome, so a test pinning wording in it pins nothing (#2554)")
+
+
+def test_the_closure_prompt_points_at_the_measured_in_lloyd_convention():
+    """#2554 clause 2: the one surface a closing actor always loads names the rule.
+
+    `## Measured in Lloyd` (`knowledge/KNOWLEDGE_SCHEMA.md`, vault 0050139c) fires at a
+    closure, and before this round nothing that reaches a closure mentioned it:
+    `git grep KNOWLEDGE_SCHEMA -- scripts/automod/` 0 files, and every one of the 635
+    autocode sessions' `messages[0]` that contains the string got it from an item body
+    or a diff that happened to quote it. The closure turn's own instruction is the
+    surface that is present at every closure, so the pointer goes there.
+
+    A pointer, not a copy: the schema stays the single owner of the section's
+    placement, citation and carry-across rules (`tests/test_prose_rules_contract.py`
+    #431 ruled the writer-side Prose Rules must be INLINED because they govern prose
+    across every sentence; this rule fires at one decision, which is why naming the
+    path is enough).
+    """
+    prompt = _finalizer_prompt_text()
+    assert "knowledge/KNOWLEDGE_SCHEMA.md" in prompt, (
+        "the closure turn is no longer told the convention exists, which is the state "
+        "#2554 was filed about")
+    assert "Measured in Lloyd" in prompt, (
+        "the pointer names the schema file but not the section it is pointing at, so "
+        "nothing at the closure would know which rule it is being sent to read")
+    assert "Open Questions" not in prompt and "Never retro-fit" not in prompt, (
+        "the pointer started carrying the entry's placement or no-retro-fit rule, which "
+        "puts a second copy of the convention where its two owners are not")
+
+
+def test_the_pointer_left_the_opening_line_the_echo_rule_matches():
+    """#2554 clause 2's safety condition: the append cost the echo rule nothing.
+
+    `backlog.echoes_finalizer_prompt` recognises a summary that transcribed the
+    instruction from its OPENING words (`_FINALIZER_PROMPT_OPENERS`), and
+    `_finalizer_prompt_open()` re-reads those words from this same source. A pointer
+    appended at the END of the instruction is only safe while the first fragment is
+    untouched, so this asserts the prompt still begins with the opener both of them
+    match on, and that the detector still catches #875's real transcription."""
+    prompt = _finalizer_prompt_text()
+    opener = _finalizer_prompt_open()
+    assert prompt.startswith(opener), (
+        "the appended pointer moved or reworded the prompt's opening line, so "
+        "_FINALIZER_PROMPT_OPENERS no longer matches what the finalizer is told and the "
+        "echo rule (#1318) pins nothing")
+    assert prompt.endswith("are written."), (
+        "the pointer is no longer the last thing in the instruction — a pointer that "
+        "precedes the transcription request would sit in front of the words the closer "
+        "is asked to restate, which is how #875's echo happened in the first place")
+    assert B.echoes_finalizer_prompt(
+        {"summary": _echo_of_the_finalizer_prompt()}) is True, (
+        "the detector stopped recognising #875's transcription, which is the outcome "
+        "the rule exists to catch")
+    assert B.echoes_finalizer_prompt({"summary": prompt}) is True, (
+        "the WHOLE instruction transcribed as a summary now passes the detector: the "
+        "rule matches on the opener, so if that ever loosens the silent-green returns")
+
+
 def test_an_echoed_summary_reports_nothing_even_beside_a_bare_met(isolated):
     """The echo rule on its own, with no empty-`not_met` rule to hide behind.
 
