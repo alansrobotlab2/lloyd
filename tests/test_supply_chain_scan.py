@@ -339,3 +339,128 @@ def test_pip_audit_is_refused_unless_its_service_url_is_a_local_mirror(tmp_path,
 
     monkeypatch.setenv(sc.OSV_API_URL_ENV, "https://api.osv.dev/v1")
     assert sc.resolve_scanner()[0] is None, "a remote service is not an offline scan"
+
+
+# ── #2593 clause 5 — a verdict has a shelf life, and says which clock ran out ──
+
+NOW = dt.datetime(2026, 10, 11, 12, 0, tzinfo=dt.timezone.utc)
+
+
+def _doc(generated_at: str, freshness: str) -> dict:
+    return {"schema": sc.BASELINE_SCHEMA, "scan_status": "completed",
+            "verdict": "no_advisories", "generated_at": generated_at,
+            "database": {"directory": "/tmp/db", "freshness": freshness},
+            "advisory_count": 0}
+
+
+def _fresh(hours: float = 0.0) -> str:
+    return (NOW - dt.timedelta(hours=hours)).isoformat()
+
+
+def test_a_two_day_old_clean_scan_is_still_a_clean_scan():
+    """The control on the other side of both ceilings: nothing is downgraded
+    inside the shelf life, so the rule is a decay and not a blanket refusal that
+    a tired operator switches off."""
+    doc = _doc(_fresh(24), _fresh(24))
+    assert sc.stale_stamps(doc, now=NOW) == []
+
+
+def test_a_stale_generated_at_downgrades_the_verdict_and_names_the_stamp():
+    """`generated_at` older than the verdict's life: the scan ran, and what it
+    proved has an expiry date on it. Naming the stamp is what makes the downgrade
+    actionable — "stale" alone does not say whether to re-scan or re-mirror."""
+    doc = _doc(_fresh(4 * 24), _fresh(24))
+    reasons = sc.stale_stamps(doc, now=NOW)
+    assert len(reasons) == 1, reasons
+    assert "generated_at" in reasons[0] and "4.0 days" in reasons[0], reasons
+    assert sc.effective_verdict(doc, now=NOW) == sc.STALE_VERDICT
+    assert "3-day" in reasons[0], reasons[0]
+
+
+def test_a_stale_database_freshness_downgrades_even_a_fresh_scan():
+    """The mirrored OSV database is a second, independent clock. A scan run this
+    morning against a nine-day-old mirror is fresh paperwork over stale knowledge:
+    OSV publishes new advisories against versions already in the tree, so the
+    verdict decays with no change to the tree at all."""
+    doc = _doc(_fresh(1), _fresh(9 * 24))
+    reasons = sc.stale_stamps(doc, now=NOW)
+    assert len(reasons) == 1 and "database.freshness" in reasons[0], reasons
+    assert sc.effective_verdict(doc, now=NOW) == sc.STALE_VERDICT
+
+
+def test_both_clocks_failing_names_both():
+    doc = _doc(_fresh(30 * 24), _fresh(30 * 24))
+    reasons = sc.stale_stamps(doc, now=NOW)
+    assert len(reasons) == 2, reasons
+    assert any("generated_at" in r for r in reasons)
+    assert any("database.freshness" in r for r in reasons)
+
+
+def test_the_shipped_baseline_of_2026_10_01_fails_both_ceilings():
+    """The demonstration the item asked for, run against the artifact as it was
+    committed rather than against a fiction: 10 days past the verdict's life and
+    11 past the mirror's, presenting `no_advisories` the whole time."""
+    doc = {"schema": sc.BASELINE_SCHEMA, "scan_status": "completed",
+           "verdict": "no_advisories",
+           "generated_at": "2026-10-01T14:30:00.898424Z",
+           "database": {"directory": "/tmp/db",
+                        "freshness": "2026-09-30T14:27:46.692030Z"},
+           "advisory_count": 0}
+    reasons = sc.stale_stamps(doc, now=NOW)
+    assert len(reasons) == 2, reasons
+    assert sc.effective_verdict(doc, now=NOW) == sc.STALE_VERDICT
+
+
+def test_an_unreadable_stamp_counts_as_stale_never_as_fresh():
+    """A stamp this cannot parse cannot earn a present tense by being ambiguous —
+    which is the naive-local-timestamp bug in artifact form."""
+    doc = _doc("last tuesday", "not-a-date")
+    reasons = sc.stale_stamps(doc, now=NOW)
+    assert any("generated_at" in r for r in reasons), reasons
+
+
+def test_a_coverage_gap_is_never_relabeled_stale():
+    """Only an artifact that claimed `no_advisories` decays. A scanner-absent
+    record already says it produced no verdict, and turning that into `stale`
+    would imply a scan that ran and aged — which is #688's honesty rule."""
+    for verdict in ("none_recorded", "advisories_found"):
+        doc = _doc(_fresh(90 * 24), _fresh(90 * 24))
+        doc["verdict"] = verdict
+        assert sc.stale_stamps(doc, now=NOW) == []
+        assert sc.effective_verdict(doc, now=NOW) == verdict
+
+
+def test_a_scan_run_against_a_stale_mirror_reports_stale_not_clean():
+    """The edge a person hits: `run_offline_scan` builds the record, and the
+    record's own verdict must not say `no_advisories` about a nine-day-old
+    database. The report is the single definition — the printed line and the
+    committed YAML both read `verdict_label`, so they cannot disagree."""
+    report = sc.ScanReport(scan_status="completed", scanner_name="osv-scanner",
+                           scanner_version="2.6.0", scanner_path="/usr/bin/true",
+                           offline=True, db_directory="/tmp/db",
+                           db_freshness=_fresh(9 * 24), duration_seconds=1.0,
+                           advisory_count=0, generated_at=_fresh(1))
+    assert report.verdict_label == "stale", report.verdict_label
+    assert report.to_dict()["verdict"] == "stale"
+    assert "database.freshness" in " ".join(report.to_dict()["stale"])
+    assert "stale:" in sc._format_report(report)
+    fresh = sc.ScanReport(scan_status="completed", scanner_name="osv-scanner",
+                          scanner_version="2.6.0", scanner_path="/usr/bin/true",
+                          offline=True, db_directory="/tmp/db",
+                          db_freshness=_fresh(1), duration_seconds=1.0,
+                          advisory_count=0, generated_at=_fresh(1))
+    assert fresh.verdict_label == "no_advisories"
+    assert fresh.to_dict()["stale"] == []
+    assert "no_advisories" in sc._format_report(fresh)
+
+
+def test_a_finding_is_not_downgraded_by_its_own_age():
+    """Advisories present is a fact with a count beside it, not a clean claim: a
+    stale scan that found something must keep saying it found something."""
+    report = sc.ScanReport(scan_status="completed", scanner_name="osv-scanner",
+                           scanner_version="2.6.0", scanner_path="/usr/bin/true",
+                           offline=True, db_directory="/tmp/db",
+                           db_freshness=_fresh(40 * 24), duration_seconds=1.0,
+                           advisory_count=3, generated_at=_fresh(40 * 24))
+    assert report.verdict_label == "advisories_found"
+    assert report.to_dict()["advisory_count"] == 3

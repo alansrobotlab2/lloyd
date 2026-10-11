@@ -1301,6 +1301,11 @@ def _attended_by_session_id(session_id: str | None, *,
 # The offline advisory scan
 # ---------------------------------------------------------------------------
 
+#: The artifact's own schema id, named so a test and a reader can cite it instead
+#: of repeating the literal — this file used to type it twice, in `to_dict` and in
+#: `write_baseline`'s copy, which is how a schema bump lands on one of them.
+BASELINE_SCHEMA = "lloyd-supply-chain-baseline/1"
+
 BASELINE_DIR = "eval/supply-chain"
 BASELINE_FILE = "baseline.yaml"
 #: Upstream flags, verified against https://google.github.io/osv-scanner/usage/offline-mode/
@@ -1348,18 +1353,44 @@ class ScanReport:
     advisories: list[Advisory] = field(default_factory=list)
     dependency_set: list[dict[str, Any]] = field(default_factory=list)
     reason: str = ""
+    #: The tree this record describes — path, commit sha and file list, from
+    #: `tree_record`. An artifact without it names an address, not a tree, and a
+    #: worktree that got deleted is then unanswerable (#2593 clause 1).
+    tree: dict[str, Any] = field(default_factory=dict)
     generated_at: str = ""
     #: True when this record was written as an explicit coverage-gap disclosure
     #: rather than as the result of a scan.
     coverage_gap: bool = False
 
+    @property
+    def verdict_label(self) -> str:
+        """The verdict this record carries *now*, staleness included.
+
+        The single definition: the YAML field and `main`'s printed line both read
+        it, so a scan run against a nine-day-old database cannot print
+        `no_advisories` while the file it just wrote says `stale` (#2593 clause 5).
+        The exit code stays on `scan_status` — a stale scan *did* run, and exit 3
+        means "no instrument", which is a different complaint. The status verdict
+        is computed first because
+        `stale_stamps` speaks only about an artifact that claimed
+        `no_advisories` — a coverage gap and a real finding are already honest
+        about themselves.
+        """
+        verdict = status_verdict(self.advisory_count)
+        if stale_stamps({"verdict": verdict, "generated_at": self.generated_at,
+                         "database": {"directory": self.db_directory,
+                                      "freshness": self.db_freshness}}):
+            return STALE_VERDICT
+        return verdict
+
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema": "lloyd-supply-chain-baseline/1",
+        """The artifact as written — `verdict_label` and `stale` included, so the
+        file says which of its own clocks ran out."""
+        doc: dict[str, Any] = {
+            "schema": BASELINE_SCHEMA,
             "generated_at": self.generated_at or _utc_stamp(),
             "scan_status": self.scan_status,
-            "verdict": ("none_recorded" if self.advisory_count is None
-                        else ("advisories_found" if self.advisory_count else "no_advisories")),
+            "verdict": self.verdict_label,
             "scanner": {"name": self.scanner_name, "version": self.scanner_version,
                         "path": self.scanner_path, "argv": list(self.argv)},
             "offline": bool(self.offline),
@@ -1374,6 +1405,13 @@ class ScanReport:
             "dependency_set": list(self.dependency_set),
             "reason": self.reason,
         }
+        if self.tree:
+            doc["tree"] = dict(self.tree)
+        # Judged on the status verdict, not on `doc["verdict"]`, which may already
+        # read `stale`: see `status_verdict`.
+        doc["stale"] = stale_stamps({**doc,
+                                     "verdict": status_verdict(self.advisory_count)})
+        return doc
 
 
 def _utc_stamp() -> str:
@@ -1653,7 +1691,7 @@ def run_offline_scan(root: Path | str | None = None, *, scanner: str | None = No
                       duration_seconds=duration, advisory_count=count,
                       advisories=advisories,
                       dependency_set=dependency_set_summary(root),
-                      generated_at=_utc_stamp())
+                      generated_at=_utc_stamp(), tree=tree_record(root))
 
 
 def _db_dir(spec: ScannerSpec) -> str | None:
@@ -1747,6 +1785,207 @@ def _parse_scan_output(scanner: str, text: str) -> tuple[list[Advisory], int] | 
 
 
 # ---------------------------------------------------------------------------
+# How long a verdict stays true, and which tree it describes
+# ---------------------------------------------------------------------------
+
+#: A `no_advisories` verdict is present tense, and the dataset behind it moves
+#: daily: OSV publishes new advisories against versions this tree already runs,
+#: so the verdict decays without anything in the tree changing. The committed
+#: `baseline.yaml` sat at `generated_at: 2026-10-01` / `database.freshness:
+#: 2026-09-30` while carrying `verdict: no_advisories` — 10 and 11 days, with
+#: nothing on the box regenerating it or calling either number old (#2593).
+#: These two ceilings are the verdict's shelf life, as constants so a cadence, a
+#: doc and a test all read the same number.
+STALE_GENERATED_MAX_DAYS = 3
+#: The mirrored OSV database is a second, independent clock: a scan run today
+#: against a nine-day-old mirror is fresh paperwork over stale knowledge, and the
+#: failure mode below already says as much about a *missing* mirror.
+STALE_DB_FRESHNESS_MAX_DAYS = 7
+#: The verdict a stale artifact is allowed to carry. Not `none_recorded`, which
+#: means "no scan ran", and not `no_advisories`: advisories may have landed the
+#: day after the stamp, and only the reader can tell those two apart.
+STALE_VERDICT = "stale"
+
+
+def _parse_stamp(value: Any) -> dt.datetime | None:
+    """An ISO-8601 artifact stamp as an aware UTC datetime, or None.
+
+    A stamp this cannot read counts as aged rather than fresh: an artifact whose
+    clock is unreadable cannot claim to have been written a moment ago.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        moment = dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    return moment.astimezone(dt.timezone.utc)
+
+
+def _live_checkout() -> Path:
+    """The checkout a committed artifact is allowed to describe.
+
+    Read through `app.paths.LIVE_CHECKOUT` — passwd-derived, so a gate round with
+    `$HOME` redirected still names the production tree — and looked up per call,
+    never cached at import: a checker that plants its own root has to be able to
+    say so.
+    """
+    try:
+        from app.paths import LIVE_CHECKOUT
+        return Path(LIVE_CHECKOUT)
+    except Exception:  # noqa: BLE001 — a checker still checks without app.paths
+        return Path(__file__).resolve().parents[2]
+
+
+def tree_record(root: Path | str | None = None) -> dict[str, Any]:
+    """The tree a scan describes: its path, its commit, and its files by name.
+
+    The committed baseline named only absolute paths, so the round that produced
+    it could — and did — record a worktree that no longer exists. A commit sha is
+    what keeps the claim checkable after the directory is gone:
+    `git show <sha>:requirements.lock` still answers it.
+    """
+    base = _repo_root(root)
+    sha = branch = None
+    try:
+        proc = subprocess.run(["git", "-C", str(base), "rev-parse", "HEAD",
+                               "--abbrev-ref", "HEAD"],
+                              capture_output=True, text=True, check=False, timeout=10)
+        if proc.returncode == 0:
+            lines = proc.stdout.split()
+            sha = lines[0] if lines else None
+            branch = lines[1] if len(lines) > 1 else None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return {"root": str(base), "commit": sha, "branch": branch,
+            "worktree": str(base) != str(_live_checkout()),
+            "files": [str(f.relative_to(base)) for f in dependency_files(base)]}
+
+
+class BaselineTargetOutsideCheckout(RuntimeError):
+    """The scan's input is not a file a reader can go and look at.
+
+    Raised rather than written past, because the alternative is a committed
+    artifact attesting "no advisories" about a tree nobody can re-examine — which
+    is what shipped once (`scanner.argv` naming
+    `/home/alansrobotlab/lloyd-hand/G/requirements.txt`, a path that no longer
+    exists) and stayed green for 40 commits because nothing read the field.
+    """
+
+
+def scan_target_paths(argv: Sequence[str]) -> list[str]:
+    """The lockfile paths a scanner argv names, format prefixes stripped.
+
+    `--lockfile requirements.txt:/abs/requirements.lock` carries a format label
+    and a path in one token; the path is the thing that has to exist. The split is
+    POSIX-only by design — a Windows drive-letter path would be mis-split here,
+    and this box has never had one.
+    """
+    out: list[str] = []
+    take = False
+    for token in argv:
+        if take:
+            take = False
+            text = str(token)
+            head, sep, tail = text.partition(":")
+            out.append(tail if sep and re.fullmatch(r"[A-Za-z0-9_.-]+", head) else text)
+            continue
+        take = str(token) == "--lockfile"
+    return out
+
+
+def check_scan_targets(argv: Sequence[str], *, root: Path | str | None = None,
+                       live_root: Path | str | None = None) -> list[str]:
+    """Every scan target that is not a real file inside the live checkout.
+
+    Relative names resolve against `root` (the tree the scan ran over); an
+    absolute path has to sit under the live checkout. Empty means every target in
+    `argv` is a file a reader can open.
+    """
+    base = _repo_root(root)
+    live = Path(live_root) if live_root else _live_checkout()
+    offenders: list[str] = []
+    for raw in scan_target_paths(argv):
+        path = Path(raw)
+        if not path.is_absolute():
+            path = base / path
+        if not path.is_file():
+            offenders.append(f"{raw}: not a file")
+            continue
+        try:
+            path.resolve().relative_to(live.resolve())
+        except ValueError:
+            offenders.append(f"{raw}: resolves outside the live checkout {live}")
+    return offenders
+
+
+def status_verdict(advisory_count: int | None) -> str:
+    """The verdict a scan's status alone carries, before any clock is consulted.
+
+    Separate from `effective_verdict` because staleness is judged on this one: an
+    artifact already downgraded to `stale` would otherwise stop reporting its own
+    stale reasons on the next read, and a reader of `stale: []` beside
+    `verdict: stale` would be told the clocks are fine.
+    """
+    if advisory_count is None:
+        return "none_recorded"
+    return "advisories_found" if advisory_count else "no_advisories"
+
+
+def stale_stamps(doc: dict[str, Any], *,
+                 now: dt.datetime | None = None) -> list[str]:
+    """Which of the artifact's own stamps no longer support its verdict.
+
+    Empty for an artifact that never claimed `no_advisories` — a coverage gap or a
+    real finding does not decay into `stale`; it was never a clean claim — and each
+    entry names *which* stamp failed and by how much, because "stale" without a
+    clock is a warning nobody can act on.
+    """
+    if str(doc.get("verdict") or "") != "no_advisories":
+        return []
+    moment = now or dt.datetime.now(dt.timezone.utc)
+    reasons: list[str] = []
+    generated = _parse_stamp(doc.get("generated_at"))
+    if generated is None:
+        reasons.append(f"`generated_at` {doc.get('generated_at')!r} is not a readable "
+                       "stamp, so the verdict cannot claim to be current")
+    else:
+        age = (moment - generated).total_seconds() / 86400.0
+        if age > STALE_GENERATED_MAX_DAYS:
+            reasons.append(f"`generated_at` is {age:.1f} days old, past the "
+                           f"{STALE_GENERATED_MAX_DAYS}-day life of a "
+                           "`no_advisories` verdict")
+    database = doc.get("database")
+    if isinstance(database, dict):
+        fresh = _parse_stamp(database.get("freshness"))
+        if fresh is None:
+            reasons.append("`database.freshness` is missing or unreadable, so the "
+                           "advisory data behind the verdict has no date at all")
+        else:
+            age = (moment - fresh).total_seconds() / 86400.0
+            if age > STALE_DB_FRESHNESS_MAX_DAYS:
+                reasons.append(f"`database.freshness` is {age:.1f} days old, past the "
+                               f"{STALE_DB_FRESHNESS_MAX_DAYS} days an OSV mirror stays "
+                               "worth scanning against")
+    return reasons
+
+
+def effective_verdict(doc: dict[str, Any], *,
+                      now: dt.datetime | None = None) -> str:
+    """The verdict a reader should take from this artifact right now.
+
+    One function answers for both edges — the writer stamps the file, `show`
+    re-reads it — so the artifact and the tool can never disagree about what is
+    stale. That is the same one-definition rule the scan's exit code follows.
+    """
+    if stale_stamps(doc, now=now):
+        return STALE_VERDICT
+    return str(doc.get("verdict") or "none_recorded")
+
+
+# ---------------------------------------------------------------------------
 # The committed baseline
 # ---------------------------------------------------------------------------
 
@@ -1763,6 +2002,24 @@ def write_baseline(report: ScanReport, path: Path | str | None = None, *,
     import yaml
 
     target = Path(path) if path else baseline_path(root)
+    # No artifact that cannot be re-examined gets written, and the check runs
+    # before anything is created: a half-built `eval/supply-chain/` in a tree that
+    # is about to be refused is itself a lie about what was scanned (#2593 clause 1).
+    #
+    # A caller may redirect `path` on purpose — the tests do, and so does any
+    # operator writing a copy elsewhere — but that is not permission to describe a
+    # tree outside the checkout, so the target check reads the report's own argv
+    # against the live checkout rather than against where the file lands.
+    offenders = check_scan_targets(report.argv, root=root)
+    if offenders:
+        raise BaselineTargetOutsideCheckout(
+            "refusing to write "
+            f"{'(re-runnable with `scan --write-baseline`)' if path is None else str(target)}: "
+            f"the scan's input is not a file in the live checkout — {'; '.join(offenders)}. "
+            "A baseline is a standing claim about a tree, and a path from a deleted "
+            "worktree is not a tree: this is how the 2026-10-01 artifact came to "
+            "attest `no_advisories` for `/home/alansrobotlab/lloyd-hand/G/`, which "
+            "no longer exists (#2593).")
     target.parent.mkdir(parents=True, exist_ok=True)
     header = ("# Supply-chain baseline for the current tree (#688). Committed, "
               "offline, regenerated with\n"
@@ -1771,7 +2028,12 @@ def write_baseline(report: ScanReport, path: Path | str | None = None, *,
               "# scan_status: scanner_absent means NO scanner ran and "
               "advisory_count is therefore null —\n"
               "# it is a coverage gap, and must never be read as 'this tree has no "
-              "vulnerabilities'.\n")
+              "vulnerabilities'.\n"
+              "# verdict: stale means the scan ran but its own stamps aged out "
+              "(generated_at > 3 days,\n"
+              "# database.freshness > 7): the tree was clean *then*, and this file "
+              "is not a present-tense\n"
+              "# claim until it is regenerated.\n")
     target.write_text(header + yaml.safe_dump(report.to_dict(), sort_keys=False,
                                               allow_unicode=True),
                       encoding="utf-8")
@@ -2155,9 +2417,13 @@ def _opt_value(args: Sequence[str], flag: str) -> str | None:
 
 def _format_report(report: ScanReport) -> str:
     if report.scan_status == "completed":
-        return (f"{report.scanner_name} {report.scanner_version or '(version unknown)'}: "
-                f"{report.advisory_count} advisory(ies) in {report.duration_seconds}s, "
-                f"offline={report.offline}")
+        line = (f"{report.scanner_name} {report.scanner_version or '(version unknown)'}: "
+                f"{report.verdict_label} "
+                f"({report.advisory_count} advisory(ies) in {report.duration_seconds}s, "
+                f"offline={report.offline})")
+        for reason in report.to_dict()["stale"]:
+            line += f"\n  stale: {reason}"
+        return line
     return f"{report.scan_status}: {report.reason}"
 
 

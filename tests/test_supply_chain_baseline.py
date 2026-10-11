@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import datetime as dt
 import subprocess
+from pathlib import Path
+
+import yaml
 
 import pytest
 
@@ -159,3 +162,111 @@ def test_the_baseline_reports_no_advisory_naming_torch_or_setuptools(baseline):
     ids = {rec["id"] for rec in baseline["advisories"]}
     assert not (ids & set(ADVISED_BEFORE_1914)), sorted(ids & set(ADVISED_BEFORE_1914))
     assert baseline["advisory_count"] == len(baseline["advisories"])
+
+
+# ── #2593 clause 1 — the baseline may only describe a tree a reader can open ──
+
+def _report(**kw):
+    """A completed, zero-advisory scan whose argv points at files of `root`."""
+    base = kw.pop("root")
+    files = [Path(base) / "requirements.txt", Path(base) / "requirements.lock"]
+    return sc.ScanReport(
+        scan_status="completed", scanner_name="osv-scanner", scanner_version="2.6.0",
+        scanner_path="/usr/bin/true",
+        argv=sc.OsvScannerSpec().argv(files),
+        offline=True, db_directory="/tmp/db", db_freshness=_NOW_ISO,
+        duration_seconds=1.0, advisory_count=0,
+        dependency_set=[{"path": "requirements.txt", "packages": 1,
+                         "sha256": "aaaa"}],
+        generated_at=_NOW_ISO, **kw)
+
+
+_NOW_ISO = "2026-10-11T12:00:00+00:00"
+
+
+def test_write_baseline_refuses_a_target_outside_the_live_checkout(tmp_path):
+    """The 2026-10-01 defect, planted: a scan run in a worktree, committed as a
+    standing claim about the tree.
+
+    `/home/alansrobotlab/lloyd-hand/G/` is the path the shipped artifact still
+    names — a deleted round's worktree, which no one can go and look at, under a
+    verdict that reads `no_advisories`. The check is on the *input*, not on where
+    the YAML lands: a caller may legitimately redirect `path`, and that is not
+    permission to describe another tree.
+    """
+    root = tmp_path / "live"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "requirements.txt").parent.mkdir(parents=True, exist_ok=True)
+    (root / "requirements.txt").write_text("requests==2.32.0\n", encoding="utf-8")
+    (root / "requirements.lock").write_text("requests==2.32.0\n", encoding="utf-8")
+    dead = tmp_path / "lloyd-hand" / "G"
+    dead.mkdir(parents=True)
+    for name in ("requirements.txt", "requirements.lock"):
+        (dead / name).write_text("requests==2.32.0\n", encoding="utf-8")
+
+    report = _report(root=root)
+    report.argv = ["scan", "--offline", "--format", "json",
+                   "--lockfile", str(dead / "requirements.txt"),
+                   "--lockfile", f"requirements.txt:{dead / 'requirements.lock'}"]
+    out = tmp_path / "out" / "baseline.yaml"
+    with pytest.raises(sc.BaselineTargetOutsideCheckout) as caught:
+        sc.write_baseline(report, out, root=root)
+    assert "lloyd-hand" in str(caught.value)
+    assert not out.exists(), (
+        "the artifact was written and then refused — a refused baseline still on "
+        "disk is the lie this node exists to stop")
+    assert not out.parent.exists() or list(out.parent.iterdir()) == []
+
+
+def test_a_scan_target_may_be_a_path_the_box_has_but_the_checkout_does_not(tmp_path):
+    """The other half of the rule, so the refusal cannot be widened into "only
+    files under git": a target that exists but sits outside the live checkout is
+    still unreviewable by the person reading the verdict."""
+    root = tmp_path / "live"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "requirements.txt").parent.mkdir(parents=True, exist_ok=True)
+    (root / "requirements.txt").write_text("requests==2.32.0\n", encoding="utf-8")
+    elsewhere = tmp_path / "somewhere-else"
+    elsewhere.mkdir()
+    (elsewhere / "requirements.txt").write_text("x==1\n", encoding="utf-8")
+    report = _report(root=root)
+    report.argv = ["scan", "--lockfile", str(elsewhere / "requirements.txt")]
+    offenders = sc.check_scan_targets(report.argv, root=root, live_root=root)
+    assert offenders and "outside the live checkout" in offenders[0], offenders
+
+
+def test_write_baseline_records_the_commit_of_the_tree_it_describes(tmp_path, monkeypatch):
+    """The artifact names a path *and* a commit, so the claim survives the path.
+
+    A worktree is deleted; a commit is not. `git show <sha>:requirements.lock` is
+    how a reader checks a baseline whose tree is gone, which is exactly what
+    `architecture/index.md` already does for retired docs and what the 2026-10-01
+    artifact could not support because it recorded no sha at all.
+    """
+    root = tmp_path / "live"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "requirements.txt").parent.mkdir(parents=True, exist_ok=True)
+    (root / "requirements.txt").write_text("requests==2.32.0\n", encoding="utf-8")
+    (root / "requirements.lock").write_text("requests==2.32.0\n", encoding="utf-8")
+    import subprocess
+    for args in (["init", "-q"], ["config", "user.email", "t@t"],
+                 ["config", "user.name", "t"], ["add", "-A"],
+                 ["commit", "-q", "-m", "seed"]):
+        subprocess.run(["git", "-C", str(root), *args], check=True,
+                       capture_output=True)
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    monkeypatch.setattr(sc, "_live_checkout", lambda: root)
+    ran = _report(root=root)
+    ran.tree = sc.tree_record(root)
+    out = tmp_path / "baseline.yaml"
+    sc.write_baseline(ran, out, root=root)
+    text = out.read_text(encoding="utf-8")
+    doc = yaml.safe_load(text[text.index("schema:"):])
+    assert doc["tree"]["commit"] == sha
+    assert doc["tree"]["files"] == ["requirements.txt", "requirements.lock"]
+    argv_paths = sc.scan_target_paths(doc["scanner"]["argv"])
+    assert argv_paths, "the artifact wrote no scan targets at all"
+    for raw in argv_paths:
+        assert Path(raw).is_file(), f"{raw} does not resolve on this box"
+    assert "lloyd-hand" not in out.read_text(encoding="utf-8")
