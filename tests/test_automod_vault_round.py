@@ -3484,7 +3484,7 @@ def test_an_unattributable_parallel_failure_set_never_buys_a_serial_whole_select
     assert row["state"] == "skipped" and row["refuse"] is False, row
 
 
-def test_a_serial_re_ask_that_answers_buys_neither_a_refusal_nor_a_second_run(
+def test_a_serial_re_ask_that_answers_buys_no_refusal_and_spends_only_its_own_share(
         vault, guard_tree, probed, tmp_path, monkeypatch):
     """Clause 4's other unanswered branch: the re-ask itself says nothing.
 
@@ -3495,8 +3495,18 @@ def test_a_serial_re_ask_that_answers_buys_neither_a_refusal_nor_a_second_run(
     nothing has confirmed red at the proposed vault; falling through to the pre-land
     run would report a `checked` whose delta was computed against a failure that may
     have been load. So the answer is `skipped`, and the witness that this branch is
-    not the one above is the number and shape of the child runs: two — the parallel
-    proposed run and the serial re-ask — and no third over the pre-land mirror.
+    not the one above is the number and shape of the child runs: the parallel
+    proposed run, the serial draws of its failing file, and nothing over the pre-land
+    mirror.
+
+    It used to read "…nor a second run", and #2521 clause 1 retired that half: the
+    break-after-one-null-draw rule rested on the null draw having spent the whole
+    remainder ("the budget that just failed to buy one will not buy two"), which stops
+    being true the moment each draw is capped at its reserved share. The second draw
+    launches because the first was never allowed to take its room, and it is still not
+    a refusal. The child-run shape is therefore [2, 1, 1] — one parallel run, `PROPOSED_DRAWS`
+    bounded serial draws — and the pinned `parallel_retry_2` block below is the witness
+    that the second draw answered nothing too rather than never having been asked.
     """
     calls: list[dict] = []
 
@@ -3522,11 +3532,16 @@ def test_a_serial_re_ask_that_answers_buys_neither_a_refusal_nor_a_second_run(
                                      "files": 1, "workers": 1,
                                      "note": "canned: timed out after 1.0s"}, \
         rep["parallel_retry"]
+    assert rep["parallel_retry_2"] == {"ran": 0, "failed": [], "seconds": 1.0,
+                                       "files": 1, "workers": 1,
+                                       "note": "canned: timed out after 1.0s"}, \
+        rep["parallel_retry_2"]
+    assert rep["proposed_runs"] == 0, rep
     assert "re-ask" in rep["reason"] and "answered nothing" in rep["reason"], rep["reason"]
     assert rep["candidate"]["failed"] == [COUNT_NODE], rep["candidate"]
-    assert [c["workers"] for c in calls] == [2, 1], (
-        f"expected the parallel proposed run and the serial re-ask and nothing else: "
-        f"{calls}")
+    assert [c["workers"] for c in calls] == [2, 1, 1], (
+        f"expected the parallel proposed run and the "
+        f"{VG.PROPOSED_DRAWS} bounded serial draws and nothing else: {calls}")
     assert "baseline" not in rep, (
         "a pre-land run was launched off a failure nothing confirmed")
 
@@ -4959,11 +4974,16 @@ def test_a_draw_that_collected_nothing_is_not_counted_as_a_draw_and_never_refuse
     empty is not a pass to be counted and not a verdict to be built on. The 0 has to
     survive onto the row too: a projection that writes the count only `if count:`
     would report the key absent, which is what a side that never ran looks like.
+
+    Both #2521 draws are scripted empty, because under the reserved allowance a null
+    first draw no longer stops the side: the probe asks every draw it owes and counts
+    none of them, rather than spending one bounded draw and calling the side answered.
     """
     tree = make_guard_tree(tmp_path / "tree")
     _disagreement_vault(vault)
     _draw_runs(monkeypatch, parallel_failed=[COUNT_NODE],
-               proposed_draws=[[COUNT_NODE]], base_draws=[], proposed_ran=[0])
+               proposed_draws=[[COUNT_NODE], [COUNT_NODE]], base_draws=[],
+               proposed_ran=[0, 0])
     rep = _probe_here(tmp_path, tree, vault)
     assert rep["refuse"] is False, rep
     assert rep["proposed_runs"] == 0, rep
@@ -5596,7 +5616,8 @@ assert SEEN_B < SEEN_A, "the first-seen-order claim needs the fixture pair unsor
 
 
 def _budget_runs(monkeypatch, *, parallel: dict, re_ask: list[dict] | None = None,
-                 base: list[dict] | None = None, real_clock: bool = False):
+                 base: list[dict] | None = None, real_clock: bool = False,
+                 record: dict | None = None):
     """Stand in every run the probe launches, each with the cost and verdict named.
 
     `parallel`, `re_ask[i]` and `base[i]` carry `seconds` (what it cost — the clock
@@ -5608,6 +5629,12 @@ def _budget_runs(monkeypatch, *, parallel: dict, re_ask: list[dict] | None = Non
     NEVER STARTED has to be able to say so: `ran: 0` on the row cannot distinguish a draw
     that timed out mid-run from one that was never launched, which is the same
     ambiguity #2383 found on the row itself.
+
+    `record`, when given, is filled with `{side: [timeout, ...]}` — the run allowance the
+    probe handed each launch, in call order. A draw's scripted `seconds` is what it
+    COST; only the handed timeout says what it was ALLOWED to spend, which is the whole
+    content of #2521 (a fake that dropped that argument could not tell a bounded launch
+    from a wholesale one, and the node would pass on the old code).
     """
     re_ask = re_ask if re_ask is not None else []
     base = base if base is not None else [{"seconds": 3.0}]
@@ -5620,6 +5647,14 @@ def _budget_runs(monkeypatch, *, parallel: dict, re_ask: list[dict] | None = Non
 
     def fake(python, tree, files, vault, data_root, mark, budget, workers=1):
         side = _side_of(Path(vault))
+        if record is not None:
+            # The first proposed-side call is the parallel whole-tree draw; everything
+            # else on that side is a serial re-ask, and the pre-land side is serial by
+            # construction. Keyed separately so a node can bound a re-ask without
+            # mistaking the parallel launch's allowance for one.
+            which = ("parallel" if side == "proposed" and proposed_calls["n"] == 0
+                     else "re-ask" if side == "proposed" else "pre-land")
+            record.setdefault(which, []).append(float(budget))
         spec: dict = {}
         if side == "proposed":
             # The FIRST proposed-side call is the whole-tree parallel draw and every one
@@ -5783,6 +5818,171 @@ def test_the_named_failures_span_every_draw_and_are_capped_beside_the_true_count
     assert rep["unadjudicated"] == ids[:10], rep["unadjudicated"]
     assert len(rep["unadjudicated"]) == 10, "the cap is 10 names"
     assert rep["unadjudicated"][10 - 1] == ids[9], "first-seen order, truncated, not sorted"
+
+
+def test_the_first_serial_re_ask_is_bounded_so_the_second_proposed_draw_still_launches(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """#2521 clause 1: the first re-ask gets a SHARE, not the whole remainder.
+
+    The harm on the ledger is one draw eating the probe: 2026-10-07T03:54:53Z drove a
+    serial re-ask over 135 nodes until the row's own arithmetic read `-0.0s left`, it
+    answered `ran: 0`, and the loop stopped there — the second proposed-side draw never
+    started, and the land committed over 2 seen failures with
+    "the serial re-ask ... answered nothing". Every serial draw was handed
+    `run_budget()`, the entire unspent budget, so the draw that could not finish was
+    also the draw that left nothing for the one still owed.
+
+    The budget here is the derived 400.0 s (a 200.0 s parallel draw + 4 x 50.0 s of
+    measured serial draw cost off the fixture ledger), the parallel draw costs 200.0 s of
+    it, and the first re-ask is scripted as a draw that spends ALL of a 100 s allowance
+    and reports nothing — the exact shape of that row. What the clause asks is that the
+    allowance handed to it be less than the 200.0 s on hand, and that the second draw
+    still be launched afterwards, which is what the handed-timeout record says.
+    """
+    _disagreement_vault(vault)
+    record: dict = {}
+    re_asked = _budget_runs(
+        monkeypatch, parallel={"seconds": 200.0, "failed": [SEEN_A]},
+        re_ask=[{"seconds": 100.0, "ran": 0, "failed": [],
+                 "note": "canned: timed out after 100.0s"},
+                {"seconds": 60.0, "failed": [SEEN_A]}],
+        record=record)
+
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=_budget_ledger(tmp_path, [_drawn_row(200.0, 50.0)],
+                                                   name="measured-400.jsonl"))
+
+    assert rep["budget"] == 400.0, rep["budget"]
+    handed = record["re-ask"]
+    # Half of the 200.0 s that was unspent when the launch was made, and so strictly
+    # below it: on the old code this is 200.0 (the whole remainder) and the assert fails.
+    assert handed[0] == 100.0, handed
+    assert handed[0] < 200.0, handed
+    # The draw still owed keeps its own room: 400 - 200 - 100 = 100.0 s, launchable.
+    assert len(re_asked) == 2, f"the second draw never launched: {re_asked}"
+    assert handed[1] == 100.0 and handed[1] >= VG.MIN_RUN_SECONDS, handed
+    # One draw reported and one did not, so the failure still cannot be attributed —
+    # bounded launches buy a roomlier skip, never a verdict the draws did not reach.
+    assert rep["state"] == "skipped" and rep["refuse"] is False, rep["reason"]
+    assert rep["proposed_runs"] == 1, rep
+    assert "only 1 of the 2 draws against the vault as proposed could run" \
+        in rep["reason"], rep["reason"]
+    assert "400s probe budget" in rep["reason"], rep["reason"]
+    assert rep["unadjudicated"] == [SEEN_A], rep
+
+
+def test_the_first_pre_land_draw_is_bounded_so_the_second_baseline_draw_still_launches(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """#2521 clause 2: the A/B's second side is reserved for too, not just the re-ask.
+
+    Same probe, the other half of the comparison: both proposed draws lose the node
+    (200.0 + 60.0 + 60.0 s of the derived 400.0 s, leaving 80.0 s), so the pre-land side
+    is reached with 2 draws owed and 80.0 s in hand. Handed the whole remainder, the
+    first baseline draw that runs long ends the A/B on one side and the row answers
+    "only 1 of the 2 draws against the pre-land vault could run" — the same non-answer
+    clause 1 removes, on the side that decides whether a red node is this land's.
+    """
+    _disagreement_vault(vault)
+    record: dict = {}
+    _budget_runs(monkeypatch, parallel={"seconds": 200.0, "failed": [SEEN_A]},
+                 re_ask=[{"seconds": 60.0, "failed": [SEEN_A]},
+                         {"seconds": 60.0, "failed": [SEEN_A]}],
+                 base=[{"seconds": 40.0, "failed": [SEEN_A]},
+                       {"seconds": 40.0, "failed": [SEEN_A]}],
+                 record=record)
+
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=_budget_ledger(tmp_path, [_drawn_row(200.0, 50.0)],
+                                                   name="measured-400.jsonl"))
+
+    handed = record["pre-land"]
+    assert handed[0] == 40.0, handed          # (400 - 320) / 2 draws still owed
+    assert handed[0] < 80.0, handed           # strictly below the whole remainder
+    assert len(handed) == 2, f"the second baseline draw never launched: {handed}"
+    assert handed[1] == 40.0, handed          # all that is left is its own, once owed=1
+    # The node lost both pre-land draws too, so it is the box and not this land.
+    assert rep["state"] == "checked" and rep["refuse"] is False, rep["reason"]
+    assert rep["baseline_runs"] == 2, rep
+    assert rep["pre_existing"] == [SEEN_A], rep
+
+
+def test_a_reserve_that_cannot_be_met_launches_no_re_ask_and_stays_an_unattributed_skip(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """#2521 clause 3: an unmet reserve is a skip BEFORE launching, never a refusal.
+
+    The 300.0 s fallback budget, a 294.0 s parallel draw, 6.0 s left. Six seconds is
+    above the 5.0 s `MIN_RUN_SECONDS` the old gate checked, so the old code launched a
+    re-ask it knew could not finish — and the row said the re-ask "answered nothing"
+    when what happened was that 3.0 s could not report. Sharing 6.0 s between the 2 draws
+    still owed gives 3.0 s each, under the floor, so nothing is launched at all.
+
+    And the land still goes: `refuse` stays False, which is #2036's standing rule that a
+    probe outage is never a refusal, and the `reason` still names both the probe budget
+    and the seconds left so the skip is not a mystery to whoever reads the row. That
+    pair across the ledger seam is pinned end to end by
+    `test_the_ledger_row_of_a_budget_short_land_names_the_failures_it_skipped`.
+    """
+    _disagreement_vault(vault)
+    record: dict = {}
+    re_asked = _budget_runs(monkeypatch, parallel={"seconds": 294.0,
+                                                   "failed": [SEEN_A, SEEN_B]},
+                            record=record)
+
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=tmp_path / "no-ledger-here.jsonl")
+
+    assert rep["budget"] == 300.0 and rep["budget_source"].startswith("fallback"), rep
+    assert re_asked == [], f"a run was launched on 3.0s of share: {re_asked}"
+    assert record.get("re-ask", []) == [], record
+    assert rep["state"] == "skipped" and rep["refuse"] is False, rep["reason"]
+    assert "could not start inside the 300s probe budget" in rep["reason"], rep["reason"]
+    # Budget and seconds left, named, as the clause requires.
+    assert "6.0s left" in rep["reason"], rep["reason"]
+    assert "2 draws still owed" in rep["reason"], rep["reason"]
+    # The reserve is what stopped the launch, not an empty budget: 6.0 s is more than one
+    # draw needs, and less than two draws each need. That band is this clause.
+    assert VG.MIN_RUN_SECONDS <= 6.0 < 2 * VG.MIN_RUN_SECONDS, VG.MIN_RUN_SECONDS
+    assert rep["unadjudicated"] == [SEEN_A, SEEN_B], rep
+    assert "baseline" not in rep, rep
+    # The denominator the skip is read on: zero draws completed because zero were
+    # launched, which is the "found nothing" distinction the row exists to carry.
+    assert rep["proposed_runs"] == 0, rep
+
+
+def test_a_reserve_that_cannot_be_met_launches_no_pre_land_draw_and_never_refuses(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """#2521 clause 3 on the pre-land side: 9.0 s left buys no first draw either.
+
+    The proposed side completed both draws and confirmed the node (200.0 + 95.0 + 96.0 s
+    of 400.0 s, leaving 9.0 s), so this is the branch that has already done the work and
+    is about to ask the pre-land side. The old check was `run_budget() < MIN_RUN_SECONDS`
+    — 9.0 s passes it — and the first baseline draw then took all 9.0 s, timed out, and
+    the row answered that the pre-land draw "answered nothing". Sharing 9.0 s between the
+    2 draws owed here gives 4.5 s, under the floor, so the probe says up front that the
+    pre-land run could not start, and still does not refuse.
+    """
+    _disagreement_vault(vault)
+    record: dict = {}
+    _budget_runs(monkeypatch, parallel={"seconds": 200.0, "failed": [SEEN_A]},
+                 re_ask=[{"seconds": 95.0, "failed": [SEEN_A]},
+                         {"seconds": 96.0, "failed": [SEEN_A]}],
+                 record=record)
+
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=_budget_ledger(tmp_path, [_drawn_row(200.0, 50.0)],
+                                                   name="measured-400.jsonl"))
+
+    assert rep["proposed_runs"] == 2, rep  # the proposed side DID finish its work
+    assert record.get("pre-land", []) == [], record
+    assert rep["state"] == "skipped" and rep["refuse"] is False, rep["reason"]
+    assert "the pre-land run could not start inside the 400s probe budget" \
+        in rep["reason"], rep["reason"]
+    assert "9.0s left" in rep["reason"], rep["reason"]
+    assert VG.MIN_RUN_SECONDS <= 9.0 < 2 * VG.MIN_RUN_SECONDS, VG.MIN_RUN_SECONDS
+    assert "baseline" not in rep, rep
+    assert "unadjudicated" not in rep, (
+        "the proposed side attributed its failures, so naming them again here would "
+        "say the opposite of what happened")
 
 
 def test_the_row_of_every_2383_key_is_what_the_ledger_keeps():

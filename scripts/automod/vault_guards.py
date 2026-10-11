@@ -45,6 +45,10 @@ only a node that loses EVERY one of those `PROPOSED_DRAWS` draws goes on to the
 pre-land baseline, which is itself drawn `BASELINE_DRAWS` times. #2283 is why one
 draw of one side is not evidence: four lands were refused on a single lost draw of
 two nodes whose whole world is `tmp_path`, over a file no test in the tree reads.
+Each of those serial draws gets an equal share of what is left of the probe budget
+(`_draw_allowance`) rather than all of it, so a draw that cannot finish cannot spend
+the room the draw still owed needs (#2521); the side's total stays capped by the
+budget, because the shares sum to what was left.
 A node that loses the pre-land draws too is the box rather than the land, and is
 ledgered as `pre_existing`. Where xdist cannot be had the answer is a `skipped`
 that says so, never the serial run that would spend the budget to report nothing.
@@ -160,6 +164,29 @@ SERIAL_SELECTION_COST_S = 735.0
 #: anything, and a subprocess killed while importing pytest is a worse
 #: non-answer than one that says so up front.
 MIN_RUN_SECONDS = 5.0
+
+
+def _draw_allowance(left_s: float, draws_owed: int) -> float:
+    """What ONE serial draw may take while `draws_owed` draws of its side are owed.
+
+    #2521. Every serial draw used to be handed the whole unspent probe budget, and a
+    draw that needed more than what is left therefore spent all of it, reported
+    `ran: 0`, and left nothing for the draw still owed — the 2026-10-07T03:54:53Z and
+    17:15:16Z rows each drove one re-ask across 135 and 121 nodes to `-0.0s left` and
+    answered "could not be attributed" without ever starting the second draw. Splitting
+    what is left evenly across the draws still owed is what makes the second one
+    launchable: the first can no longer eat its room. The side's total cost is
+    unchanged, because the shares sum to `left_s` exactly — this moves *when* the
+    budget may be spent, and never *how much* of it a probe may spend.
+
+    An equal share, not a multiple of the measured per-draw cost `probe_budget`
+    derives: the serial draws recorded in the window #2521's triage read cost 1.3-32.3 s,
+    so any cap fitted to them (~48 s at x1.5 headroom) sits below what the wide re-asks
+    that actually ran out of budget were doing (135 and 121 nodes), and would guarantee
+    `ran: 0` on exactly the case it was meant to rescue. A share of the real remainder
+    costs nothing to measure and never asks a draw to fit a figure it was not sized for.
+    """
+    return max(float(left_s), 0.0) / max(int(draws_owed), 1)
 
 
 def guard_selection(tree: Path) -> list[str]:
@@ -1002,7 +1029,13 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         return deadline - time.time()
 
     def run_budget() -> float:
-        """What the next run may spend: the whole probe budget still unspent."""
+        """The whole unspent budget: the CANDIDATE parallel draw's allowance, and no
+        other run's. It is the first run of the probe and the only one with no sibling
+        still owed, so taking the remainder wholesale is right for it — #2521 moved the
+        serial draws to `_draw_allowance`, which is what a side with a draw still owed
+        has to use. Whether the queue for the tests lock should be charged against this
+        remainder at all is the ruling #2521's owed-check entry carries.
+        """
         return max(left(), 0.0)
 
     if os.environ.get(NESTING_ENV) == "1":
@@ -1198,15 +1231,21 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
                 f"cannot fit — so they are neither this land's nor the tree's"))
         draws: list[dict] = []
         while len(draws) < PROPOSED_DRAWS:
-            if run_budget() < MIN_RUN_SECONDS:
+            room = _draw_allowance(left(), PROPOSED_DRAWS - len(draws))
+            if room < MIN_RUN_SECONDS:
                 break
             draws.append(_run_selection(interp, tree, retry_files, proposed_vault,
                                         probe_data, mark_expr or mark,
-                                        run_budget(), 1))
-            if not draws[-1]["ran"]:
-                # A draw that launched and answered nothing has bought no answer,
-                # and the budget that just failed to buy one will not buy two.
-                break
+                                        room, 1))
+            # No break on `ran: 0` any more, and #2521 is why the old rule came off.
+            # It read "the budget that just failed to buy one will not buy two", which
+            # was true only while every draw was handed the WHOLE remainder: a draw
+            # that timed out there had by definition spent everything, and a second one
+            # could only time out again. Inside a reserved share that premise is gone —
+            # the timed-out draw spent `room` and the next draw's share is still
+            # standing beside it — so breaking here would report `proposed_runs: 0` for
+            # a probe that still had half its remainder unused, and the row would say
+            # the budget ran out when it did not.
         for i, draw in enumerate(draws):
             report["parallel_retry" if i == 0 else f"parallel_retry_{i + 1}"] = {
                 "ran": draw["ran"], "failed": draw["failed"], "note": draw["note"],
@@ -1219,7 +1258,9 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
             return done(reason=(
                 f"the serial re-ask of the parallel run's "
                 f"{len(cand['failed'])} failing node(s) could not start inside the "
-                f"{budget:.0f}s probe budget ({left():.1f}s left), so they are "
+                f"{budget:.0f}s probe budget ({left():.1f}s left, which is under the "
+                f"{MIN_RUN_SECONDS:.0f}s one draw needs once that is shared between the "
+                f"{PROPOSED_DRAWS} draws still owed), so they are "
                 f"neither this land's nor the tree's"))
         if not completed:
             _name_unadjudicated(draws)
@@ -1274,24 +1315,32 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
                                 f"lose every serial draw were dismissed "
                                 f"({', '.join(bits)}): " + ", ".join(dismissed[:5])))
         failing_files = _failing_files(confirmed)
-        if run_budget() < MIN_RUN_SECONDS:
+        if _draw_allowance(left(), BASELINE_DRAWS) < MIN_RUN_SECONDS:
             # Asking for the pre-land run here would burn a run on a budget that
             # cannot report, which is the state the three #2042 rows are in.
             # Refusing on a red node alone is the wider rule the module docstring
             # refuses to adopt, so the honest answer is "could not attribute".
+            #
+            # The test is the FIRST DRAW'S allowance, not the raw remainder (#2521):
+            # `BASELINE_DRAWS` draws are owed here, and launching one with 8 s of a
+            # 300 s probe left would spend the room the second needs and land on
+            # `base_draws[-1]` over an empty list. Same skip, same reason, one stricter
+            # line — and never a refusal, which is #2036's standing rule.
             return done(reason=(f"the pre-land run could not start inside the "
                                 f"{budget:.0f}s probe budget ({left():.1f}s left), so "
                                 f"the {len(confirmed)} failing node(s) are neither "
                                 f"this land's nor the tree's"))
         base_draws: list[dict] = []
         while len(base_draws) < BASELINE_DRAWS:
-            if run_budget() < MIN_RUN_SECONDS:
+            room = _draw_allowance(left(), BASELINE_DRAWS - len(base_draws))
+            if room < MIN_RUN_SECONDS:
                 break
             base_draws.append(_run_selection(interp, tree, failing_files, base_vault,
                                              probe_data, mark_expr or mark,
-                                             run_budget(), 1))
-            if not base_draws[-1]["ran"]:
-                break
+                                             room, 1))
+            # As on the proposed side: a draw that answered nothing spent only its own
+            # share, so the draw still owed keeps its own and gets asked anyway. The
+            # `not completed_base` skip below is still the answer when neither reports.
         for i, draw in enumerate(base_draws):
             report["baseline" if i == 0 else f"baseline_{i + 1}"] = {
                 "ran": draw["ran"], "failed": draw["failed"], "note": draw["note"],
