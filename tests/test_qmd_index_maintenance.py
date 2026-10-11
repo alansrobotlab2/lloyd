@@ -32,6 +32,7 @@ what it must leave alone in THIS file is pinned below.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import json
 import os
@@ -4086,3 +4087,284 @@ def test_the_650_figure_survives_as_history_in_every_place_that_had_it():
         "the tracked template states the figure again, which is the exact defect "
         "#2089 removed: nothing in that file can say how many documents are "
         "indexed, because the count goes stale before the next reader arrives")
+
+
+# ── #2539: the bytes of the run that deleted the pre-wipe corpus are committed ──
+#
+# `eval/episodic-arm/README.md` and #2420 both cite one nightly report as the record of
+# 2026-10-07T05:00:51, when the stray-retention rule freed 2,577,571,840 B in a single run
+# with `held: []` — the last two copies of the pre-wipe session corpus. Until this round the
+# bytes existed in one place: `$LLOYD_DATA/_pipeline/reflection/`. They were never
+# *unprotected* — `scripts/backup/snapshot-data.sh` takes a read-only btrfs snapshot of the
+# whole data home hourly and `scripts/backup/restore-data.sh` is the recovery route — but a
+# snapshot is a backup, not a history: no clone, no second account and no later reader can
+# resolve a citation to it. The copies now match the arrangement family four of
+# `tests/fixtures/.gitignore` describes and #2119/#2199/#2255 each landed for their own
+# report: the runtime original, this fixture for nodes, and the board witness
+# `backlog/data/qmd-index-maintenance-2026-10-07.json` (vault commit `d0fc5ee4`) for a person.
+
+#: The committed report, copied byte-for-byte out of the runtime path on 2026-10-11, the day
+#: HEAD was `b2dedfe9`: 257 lines, 8,557 B, md5 `8f6e7b935d62ef681af2430b9a517b29`. The
+#: digest is for a reader checking the copy by hand and nothing else — every figure below is
+#: read out of the parsed bytes, because a pinned digest only ever restates that a file is
+#: itself.
+LOSS_WITNESS = ROOT / "tests" / "fixtures" / "qmd-index-maintenance-2026-10-07.json"
+
+#: The same bytes on the board, and the only route to them that tells the truth in a gate
+#: tree: `board_presence.vault_root()` consults `LLOYD_OBSIDIAN_VAULT` and so can be
+#: redirected by a caller, where a passwd-derived `$HOME` resolves through a round home and
+#: would have a node grade a vault the gate is not running against.
+LOSS_WITNESS_VAULT_REL = Path("backlog") / "data" / "qmd-index-maintenance-2026-10-07.json"
+
+#: A sibling name no negation in `tests/fixtures/.gitignore` rescues, so it exists to be
+#: ignored. Without it, a `check-ignore` answer of "not ignored" for the witness is
+#: indistinguishable from a `check-ignore` that answers that to everything, which is what a
+#: broken control always looks like (#2282).
+LOSS_WITNESS_CONTROL_REL = "tests/fixtures/loss-report-no-negation-control.json"
+
+
+def _loss_witness() -> dict:
+    """The committed report, parsed. Read per call and never at import: an import-time read
+    is what turned #2282's unstaged fixture into a collection error for the whole file."""
+    return json.loads(LOSS_WITNESS.read_text(encoding="utf-8"))
+
+
+def _ignore_rule(rel: str) -> tuple[int, str, str]:
+    """Ask the real ignore mechanism about one path: exit code, source file, pattern.
+
+    `git check-ignore -v` exits 0 for ANY matching rule, a negation included, and prints the
+    winner as `file:line:pattern` — so the exit status alone cannot tell an admitted path
+    from an ignored one, and `git add` of an ignored path exits 0 while staging nothing.
+    `--no-index` keeps a tracked path graded by the rules instead of exempt from them.
+    """
+    p = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "--no-index", "-v", rel],
+                       capture_output=True, text=True)
+    head = p.stdout.strip().split("\t")[0] if p.stdout.strip() else ""
+    parts = head.split(":")
+    return (p.returncode, parts[0] if len(parts) >= 3 else head, parts[-1] if parts else "")
+
+
+def test_the_loss_witness_fixture_is_admissible_and_in_the_index():
+    """Clause 1: the witness is admissible through the pre-existing negation and staged.
+
+    Two separate facts, because they fail separately. Admission is a rule question — root
+    `.gitignore` ends every `*.json`, and this file is rescued only by the
+    `!qmd-index-maintenance-*.json` line that family four of `tests/fixtures/.gitignore`
+    explains — and a round cannot edit either file to make the answer come out right, since
+    the scope check refuses `.gitignore` outright. Trackedness is a git-index question that
+    no rule can prove: `git add` of an ignored name exits 0 having staged nothing, which is
+    how #2282 lost two review attempts to a fixture its author believed committed. So both
+    are asked of the real mechanisms, and the control sibling — one directory and no
+    negation away — has to come back ignored, or the witness's clean answer is only evidence
+    that `check-ignore` is answering "not ignored" to everything.
+    """
+    assert LOSS_WITNESS.is_file(), (
+        f"no committed witness at {LOSS_WITNESS}: the figures #2539 quotes would then live "
+        "only in one machine's `_pipeline/reflection/`")
+
+    ctl_code, ctl_src, ctl_pat = _ignore_rule(LOSS_WITNESS_CONTROL_REL)
+    assert ctl_code == 0 and ctl_pat == "*.json" and not ctl_src.startswith("tests/fixtures/"), (
+        f"positive control broken: a sibling with no negation of its own resolved to "
+        f"{ctl_src!r} / {ctl_pat!r} (exit {ctl_code}), so the root rule is not what the "
+        "family-four negation is beating and the witness's answer below proves nothing")
+
+    rel = LOSS_WITNESS.relative_to(ROOT).as_posix()
+    code, src, pat = _ignore_rule(rel)
+    assert code == 0 and src.startswith("tests/fixtures/.gitignore") \
+        and pat == "!qmd-index-maintenance-*.json", (
+        f"{rel} resolves to {src!r} / {pat!r} (exit {code}) instead of the pre-existing "
+        "negation `!qmd-index-maintenance-*.json`: `git add` would stage nothing here, and "
+        "every node in this section would error on the missing file")
+
+    tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files", "--error-unmatch", rel],
+                             capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{rel} is admissible but not in the index: {tracked.stderr.strip()} — an untracked "
+        "witness is a file only this worktree has, which is the same absence wearing a "
+        "green suite")
+
+
+def test_the_loss_witness_still_answers_the_re_derive_the_item_quotes():
+    """Clause 3: the `wc -l -c` figure #2539 quotes lives in the repository.
+
+    The item's whole argument is that a reader must be able to re-run
+    `wc -l -c < backlog/data/qmd-index-maintenance-2026-10-07.json` and get `257 8557`;
+    against a copy in a data home that command is a claim about one box, and against these
+    bytes it is a check. A whole-file line count is why the witness is the report and not an
+    extract of the section the numbers are in: cut the JSON down to `stray_retention` and the
+    re-derive can no longer be answered at all, which is the reason family four's comment
+    gives for committing the report whole. The two counts are pinned separately because they
+    fail for different reasons — a re-flowed file keeps its bytes and loses newlines, a
+    truncated one loses both, and the second is the failure the 2026-09-22 wipe is the
+    precedent for.
+    """
+    raw = LOSS_WITNESS.read_text(encoding="utf-8")
+    assert raw.count("\n") == 257, (
+        f"`wc -l` of the committed witness is {raw.count(chr(10))}, not the 257 that "
+        f"`wc -l -c $LLOYD_DATA/_pipeline/reflection/{LOSS_WITNESS.name}` printed on the "
+        f"night it was written ({len(raw.encode())} B now)")
+    assert len(raw.encode()) == 8557, (
+        f"the committed witness is {len(raw.encode())} B, not the 8,557 B the item quotes, "
+        "so it is not the file the run wrote and no figure read out of it re-derives "
+        "anything")
+
+
+def test_the_committed_loss_witness_still_carries_the_deletion_it_measured():
+    """Clause 4: the four quoted figures are re-derived from these bytes, none spelled.
+
+    What the item and the README quote is one `stray_retention` block: two backups deleted,
+    2,577,571,840 B, nothing held, on an acting run. Each is read out of the parsed report
+    rather than restated here, and the deleted pair is re-derived from the report's own
+    `bak_series` minus its `kept` — the rule the module applies — because a `.py` naming a
+    real candidate is a code reference and a code reference is a hold: that mechanism, not a
+    bug, is what kept the two pre-wipe copies on disk until the night it stopped holding
+    anything (#2323), and `test_no_scanned_file_in_our_own_tree_names_a_measured_backup`
+    walks this whole tree for such a literal on every run. Committing this report is what
+    puts those two names into that guard's offender set from this run onward, so the only
+    place they may appear is the `*.json` that measured them.
+
+    The relations are pinned alongside the numbers because a report that carried the right
+    total for the wrong reason would pass a numbers-only check: the freed bytes are the two
+    mains plus their own `-wal`/`-shm` sidecars, the surviving copy is the newest by mtime,
+    the run deleted exactly what it planned, and nothing at all was held — the last of those
+    is the whole reason #2420 had to be written, since a hold at least leaves a trace of why
+    something survived.
+    """
+    rep = _loss_witness()
+    sr = rep["stray_retention"]
+
+    assert sr["dry_run"] is False, (
+        "only an acting run can report a deletion; on a rehearsal the zeros below are "
+        "vacuous and the loss this item is about never happened")
+    assert sr["held"] == [], (
+        f"the run that deleted the corpus is now reporting a hold: {sr['held']}")
+
+    kept = set(sr["kept"])
+    derived = [n for n in sr["bak_series"] if n not in kept]
+    assert len(derived) == 2 and sr["deleted"] == derived, (
+        f"`deleted` is {sr['deleted']} and the report's own series-minus-kept is {derived}: "
+        "the pair the item quotes is no longer what the module's rule frees, so this node is "
+        "pinning a number rather than the behaviour behind it")
+    assert sr["deleted"] == sr["planned"], (
+        f"the run deleted {sr['deleted']} but planned {sr['planned']}: an acting run that "
+        "disagrees with its own plan is a different incident than the one on this board")
+
+    assert sr["deleted_bytes"] == 2_577_571_840, sr["deleted_bytes"]
+    pile = {e["name"]: e for e in rep["stray"]}
+    freed = sum(pile[n + suffix]["bytes"]
+                for n in sr["deleted"] for suffix in ("", "-wal", "-shm"))
+    assert freed == sr["deleted_bytes"], (
+        f"the two mains and their sidecars are {freed} B, not the {sr['deleted_bytes']} B "
+        "the report's total quotes, so the figure the README carries counts something else")
+
+    newest = max(sr["bak_series"], key=lambda n: pile[n]["mtime"])
+    assert sr["kept"] == [newest], (
+        f"the copy the rule keeps is {sr['kept']} while the newest by mtime is {newest}: "
+        "the keep side of the rule is what this witness has to stay an example of")
+    assert all(n in pile for n in sr["bak_series"]), (
+        "every file the series names has to be in the pile the report measured, or the "
+        "byte arithmetic above is over an incomplete pile")
+
+    bak_prefix = "index.sqlite." + "bak"
+    reported = {h["name"] for h in sr["held_for_person"]}
+    assert reported == {e["name"] for e in rep["stray"]
+                        if not e["name"].startswith(bak_prefix)}, (
+        "the files handed to a person are no longer exactly the strays outside the "
+        f"`{bak_prefix}*` series: {sorted(reported)}")
+    assert "keep_list" not in sr, (
+        "this report now carries a keep-list section, which is #2420's channel arriving in "
+        "the bytes of the run that predates it — a witness that grew a feature retroactively "
+        "is no witness, and the deletion here was invisible in advance precisely because "
+        "that channel did not exist yet")
+
+
+def _board_copy_of_the_loss_witness_agrees(root: Path) -> None:
+    """Compare the board's copy of the report with the fixture, or say what is wrong.
+
+    Split out of the node so both branch behaviours can be shown to run against synthetic
+    roots — the one that matters is a vault that exists and holds no witness, which is a
+    FAILURE and not a skip, for the reason #1897's witness node states: the copy is the
+    deliverable, so a node that skipped on its absence would pass on exactly the regression
+    it is here for (the copy never landed, or a later sweep took it) and would only ever
+    catch drift between two files that are both present. The one state that does skip is no
+    vault directory at all, which is a property of the checkout rather than of this change.
+    """
+    from board_presence import VAULT_ROOT_ENV
+
+    if not root.is_dir():
+        pytest.skip(f"no vault directory at {root} (set {VAULT_ROOT_ENV} to point at one): "
+                    f"there is no board here for the witness to live on")
+    witness = root / LOSS_WITNESS_VAULT_REL
+    assert witness.is_file(), (
+        f"#2539's witness is not committed at {witness}. The report of the run that deleted "
+        "the pre-wipe corpus would then live in the tree and in one machine's "
+        "`_pipeline/reflection/` only, and the citation in `eval/episodic-arm/README.md` "
+        "would resolve for nobody but the box that ran the job — which is the gap this item "
+        "was filed to close, so an absent copy here is the item unfixed, not unmeasured.")
+    committed = LOSS_WITNESS.read_bytes()
+    board = witness.read_bytes()
+    assert board == committed, (
+        f"the board copy {witness} ({len(board)} B, sha256 "
+        f"{hashlib.sha256(board).hexdigest()[:16]}) and the committed fixture "
+        f"{LOSS_WITNESS} ({len(committed)} B, sha256 "
+        f"{hashlib.sha256(committed).hexdigest()[:16]}) are not the same bytes. A dated "
+        "report is immutable, so they can only disagree if one was edited, re-flowed or "
+        "truncated — and at that point neither is the file the 05:00:51 run wrote.")
+
+
+def test_the_board_copy_of_the_loss_report_is_the_bytes_the_suite_runs_on():
+    """Clause 5's other half: the human-facing copy is byte-identical to the fixture.
+
+    Two homes, one byte string, which is the arrangement `tests/fixtures/.gitignore` family
+    four documents: the board witness is what a person opens when they follow the citation
+    `eval/episodic-arm/README.md` now carries, the fixture is what a node can actually read
+    in a gate tree, and this node is the only thing that says they are still the same file.
+    It compares rather than quotes a digest — the digest in this section's comment is
+    bookkeeping for a hand check, and a compared byte is a better witness than a claimed one
+    (#2199's precedent). It reaches the board through `board_presence.vault_root()`, not a
+    passwd anchor, for the reason `tests/test_qmd_doc_claims.py` states about its own
+    `REFLECTION`: the gate runs with `$HOME` at a round home, and an anchor resolves straight
+    through it into a vault the gate is not running against.
+    """
+    from board_presence import vault_root
+
+    _board_copy_of_the_loss_witness_agrees(vault_root())
+
+
+def test_a_board_holding_no_witness_fails_the_node_that_looks_for_it(monkeypatch, tmp_path):
+    """The failure half of clause 5: the skip is for a missing vault, never a missing copy.
+
+    A node whose only green path is a skip is not a pin, and the state this one has to catch
+    — the witness swept, or never landed — looks exactly like the state it has to excuse
+    (a checkout with no vault) from the outside. So each branch is called directly against a
+    synthetic root: an absent directory skips, a vault holding no witness fails naming the
+    path it wanted, and a vault holding a DIFFERENT file fails naming both copies. The third
+    case goes through the real node with `LLOYD_OBSIDIAN_VAULT` redirected, which is also the
+    proof that the env override the helper's docstring relies on is read per call.
+    """
+    from board_presence import VAULT_ROOT_ENV
+
+    absent = tmp_path / "checkout-with-no-vault"
+    with pytest.raises(pytest.skip.Exception) as skipinfo:
+        _board_copy_of_the_loss_witness_agrees(absent)
+    assert str(absent) in str(skipinfo.value), (
+        "the no-vault skip did not name the directory it looked in")
+
+    bare = tmp_path / "vault-without-the-witness"
+    bare.mkdir()
+    with pytest.raises(AssertionError) as failinfo:
+        _board_copy_of_the_loss_witness_agrees(bare)
+    assert str(bare / LOSS_WITNESS_VAULT_REL) in str(failinfo.value), (
+        "a vault with no witness failed without naming the path it wanted, so the reason "
+        f"reads like a bug rather than a missing deliverable: {failinfo.value}")
+
+    board = tmp_path / "vault-with-a-different-file"
+    (board / LOSS_WITNESS_VAULT_REL).parent.mkdir(parents=True, exist_ok=True)
+    (board / LOSS_WITNESS_VAULT_REL).write_text(
+        json.dumps({"stray_retention": {"held": [], "deleted": []}}), encoding="utf-8")
+    monkeypatch.setenv(VAULT_ROOT_ENV, str(board))
+    with pytest.raises(AssertionError) as excinfo:
+        test_the_board_copy_of_the_loss_report_is_the_bytes_the_suite_runs_on()
+    reason = str(excinfo.value)
+    assert str(board / LOSS_WITNESS_VAULT_REL) in reason and str(LOSS_WITNESS) in reason, (
+        f"a disagreeing board copy failed without naming both files: {reason}")

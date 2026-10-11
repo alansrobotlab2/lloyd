@@ -48,6 +48,11 @@ SWAP_REPORT = "qmd-side-copy-rebuild-20261005-2026-10-05T072250.json"
 REHEARSAL_REPORT = "qmd-side-copy-rebuild-20261004-2026-10-04T113501.json"
 MAINTENANCE_BEFORE = "qmd-index-maintenance-2026-10-05.json"
 MAINTENANCE_AFTER = "qmd-index-maintenance-2026-10-06.json"
+#: The nightly that unlinked the two pre-wipe backups — the run this arm's README records
+#: under "Found on the way", and the report it cites there. Committed for the first time by
+#: #2539: until this round that citation resolved on no clone, only on the one box holding
+#: `$LLOYD_DATA/_pipeline/reflection/`, which is the exact shape #2396 was cut to close.
+MAINTENANCE_LOSS = "qmd-index-maintenance-2026-10-07.json"
 
 #: The committed home of every report cited below. Before #2396 this file read all four
 #: out of `REFLECTION` alone, which is not hermetic in either direction: the gate graded
@@ -68,20 +73,31 @@ CITED_REPORTS = {
     SWAP_REPORT: "!qmd-side-copy-rebuild-*.json",
     MAINTENANCE_BEFORE: "!qmd-index-maintenance-*.json",
     MAINTENANCE_AFTER: "!qmd-index-maintenance-*.json",
+    MAINTENANCE_LOSS: "!qmd-index-maintenance-*.json",
 }
 
-# Provenance of the four committed witnesses, each copied byte-for-byte out of
-# `$LLOYD_DATA/_pipeline/reflection/` on 2026-10-08, the day HEAD was `f3809a69`.
+# Provenance of the five committed witnesses: the four #2396 copied byte-for-byte out of
+# `$LLOYD_DATA/_pipeline/reflection/` on 2026-10-08, the day HEAD was `f3809a69`, and the
+# fifth #2539 copied the same way on 2026-10-11, the day HEAD was `b2dedfe9`.
 # Lines and bytes as `wc -l -c` prints them, then the md5:
 #
 #   rebuild-20261004-2026-10-04T113501   68 lines, 1,783 B  2957114779d1a5a7f7a9e6dc1b1a652c
 #   rebuild-20261005-2026-10-05T072250   82 lines, 2,250 B  8af93f34848086e3b974cd5719bff0af
 #   index-maintenance-2026-10-05        226 lines, 7,408 B  fc110dcbd5b248b5e4ccf0a7f3c9a175
 #   index-maintenance-2026-10-06        243 lines, 7,989 B  9db5937166170b9cb342c1d0fff21b10
+#   index-maintenance-2026-10-07        257 lines, 8,557 B  8f6e7b935d62ef681af2430b9a517b29
 #
 # Each name above is the tail of a constant in this file: the two rebuild reports are
-# `REHEARSAL_REPORT` and `SWAP_REPORT`, the two nightlies `MAINTENANCE_BEFORE` and
-# `MAINTENANCE_AFTER`.
+# `REHEARSAL_REPORT` and `SWAP_REPORT`, the three nightlies `MAINTENANCE_BEFORE`,
+# `MAINTENANCE_AFTER` and `MAINTENANCE_LOSS`.
+#
+# The 10-07 report has two further copies, not one: the board witness at
+# `backlog/data/qmd-index-maintenance-2026-10-07.json` (vault commit `d0fc5ee4`), which
+# #2539 clause 5 asked for and which `tests/test_qmd_index_maintenance.py` compares with
+# these bytes through `board_presence.vault_root()` on the #1897 pattern, and nothing here.
+# What `test_no_node_of_this_file_reaches_the_vault_copy` pins is this file's own route —
+# the passwd anchor, which resolves even in a gate worktree and so would quietly grade a
+# tree the gate does not run in — and it stays satisfied: no node of THIS file opens it.
 #
 # Those digests are bookkeeping, not an assertion. `_assert_matches_runtime` compares the
 # committed bytes with the runtime copy whenever it can reach one, which is the
@@ -521,14 +537,16 @@ def test_the_three_new_cited_reports_are_exact_tracked_and_admissible():
     is admission — root `.gitignore` ends `*.json`, and `git add` of a name no negation
     rescues exits 0 having staged nothing, which is the silent failure #2282 spent two
     review attempts on. So each new name goes through `_ignore_rule` with the control
-    sibling beside it, and the whole tracked family is counted, because "5" is the number
-    `git ls-files tests/fixtures | grep -c qmd` prints once all four witnesses and the
-    #2119 one are in the index.
+    sibling beside it, and the whole tracked family is counted, because "6" is the number
+    `git ls-files tests/fixtures | grep -c qmd` prints once the four #2302 witnesses,
+    #2119's nightly and #2539's loss report are all in the index — a family count, so a
+    round that commits a seventh witness widens this number and its own clause together.
     """
     exact = {  # name -> (lines, bytes), as `wc -l -c` of the runtime report prints them
         REHEARSAL_REPORT: (68, 1783),
         MAINTENANCE_BEFORE: (226, 7408),
         MAINTENANCE_AFTER: (243, 7989),
+        MAINTENANCE_LOSS: (257, 8557),
     }
     for name, (lines, size) in exact.items():
         fixture = _fixture(name)
@@ -564,10 +582,11 @@ def test_the_three_new_cited_reports_are_exact_tracked_and_admissible():
         ["git", "-C", str(ROOT), "ls-files", "tests/fixtures"],
         capture_output=True, text=True)
     qmd = sorted(ln for ln in listed.stdout.split("\n") if "qmd" in ln)
-    assert len(qmd) == 5, (
-        f"`git ls-files tests/fixtures | grep -c qmd` prints {len(qmd)} ({qmd}), not 5: "
-        "four cited reports plus #2119's nightly witness is the whole committed family, "
-        "and one fewer means a figure the paragraph quotes is in no repository")
+    assert len(qmd) == 6, (
+        f"`git ls-files tests/fixtures | grep -c qmd` prints {len(qmd)} ({qmd}), not 6: "
+        "four cited reports plus #2119's nightly witness plus #2539's loss report is the "
+        "whole committed family, and one fewer means a figure some paragraph quotes is in "
+        "no repository")
 
     spec = (ROOT / "scripts" / "automod" / "spec.py").read_text(encoding="utf-8")
     denied = spec.split("DENIED_GLOBS", 1)[1].split(")", 1)[0]
@@ -872,3 +891,133 @@ def test_the_survivor_count_the_readme_quotes_is_the_one_the_tree_yields():
         f"{sessions} holds {total} exported transcripts and every one of them predates the "
         "wipe, so this tree is a frozen copy rather than the live archive the README's "
         f"{SURVIVORS} is a count of")
+
+
+# ── #2539: the report of the deleting run is now a witness with history ────────
+#
+# The README paragraph above cites one dated report as the record of the run that unlinked
+# the last two copies of the pre-wipe corpus, and until this round that citation resolved on
+# exactly one machine: the bytes sat in `$LLOYD_DATA/_pipeline/reflection/`, in no
+# repository, while the hourly btrfs snapshots of the data home
+# (`scripts/backup/snapshot-data.sh`) kept them alive for 48 hours each and no longer. That
+# is the distinction this pair of nodes is written around — the file was not unprotected, it
+# was unpinnable, and the fix is a copy with history plus a citation that reaches it.
+
+def test_the_committed_loss_report_is_the_runtime_bytes_on_every_branch_of_the_comparison(
+        monkeypatch, tmp_path):
+    """Clause 2: the 2026-10-07 witness is the report, and the mechanism proving it is walked.
+
+    `_report` is #2396's mechanism for exactly this claim, and it is already exercised on
+    four other reports — but a mechanism applied to other files is not a pin on this one, so
+    the loss report is put through all four branches here. They are the four ways this
+    round's deliverable could fail to be one: never staged (#2282's silent `git add`), staged
+    and then edited or truncated against the machine that measured it, a tree with no data
+    home (the ordinary gate case, which still has to grade the paragraph), and no committed
+    copy at all. The last two are the same branch seen from either side of #2396: the
+    runtime half is the control, never the source.
+    """
+    committed = _fixture(MAINTENANCE_LOSS)
+    live = tmp_path / "reflection"
+    live.mkdir()
+    monkeypatch.setattr(sys.modules[__name__], "REFLECTION", live)
+
+    # Branch 1: an agreeing runtime copy resolves, and what it resolves to is the run
+    # #2420 and this README both name.
+    (live / MAINTENANCE_LOSS).write_bytes(committed.read_bytes())
+    rep = _report(MAINTENANCE_LOSS)
+    assert rep == json.loads(committed.read_text(encoding="utf-8")), (
+        "an agreeing runtime copy did not resolve to the committed witness")
+    assert rep["ran_at"] == "2026-10-07T05:00:51.896339", (
+        f"the committed witness is not the 05:00:51 run the README cites: {rep['ran_at']}")
+
+    # Branch 2: a disagreeing runtime copy fails, naming both files. One quoted figure is
+    # changed rather than the whole payload, because the failure has to be about a byte a
+    # paragraph quotes and not about formatting.
+    mutated = json.loads((live / MAINTENANCE_LOSS).read_text(encoding="utf-8"))
+    mutated["stray_retention"]["deleted_bytes"] = 2_577_571_839
+    (live / MAINTENANCE_LOSS).write_text(json.dumps(mutated, indent=2), encoding="utf-8")
+    with pytest.raises(AssertionError) as excinfo:
+        _report(MAINTENANCE_LOSS)
+    reason = str(excinfo.value)
+    assert str(live / MAINTENANCE_LOSS) in reason and str(committed) in reason, (
+        f"a disagreeing runtime copy failed without naming both files: {reason}")
+
+    # Branch 3: no runtime copy is not a skip and not a failure — a plain clone has to be
+    # able to grade the paragraph from the committed bytes alone.
+    (live / MAINTENANCE_LOSS).unlink()
+    assert _report(MAINTENANCE_LOSS)["stray_retention"]["deleted_bytes"] == 2_577_571_840, (
+        "an unreachable runtime record stopped meaning 'no control available' and became a "
+        "skip or a failure again, which is the silent green #2396 exists to avoid")
+
+    # Branch 4: and the committed half failing is loud. An ignored witness — the #2282
+    # shape, where `git add` exits 0 having staged nothing — is a missing witness here.
+    empty = tmp_path / "fixtures-without-the-loss-report"
+    empty.mkdir()
+    for name in CITED_REPORTS:
+        if name != MAINTENANCE_LOSS:
+            (empty / name).write_bytes((FIXTURES / name).read_bytes())
+    assert len(list(empty.iterdir())) == len(CITED_REPORTS) - 1, (
+        "the witness directory was not built one file short of the cited set")
+    monkeypatch.setattr(sys.modules[__name__], "FIXTURES", empty)
+    with pytest.raises(pytest.fail.Exception) as failinfo:
+        _report(MAINTENANCE_LOSS)
+    assert str(empty / MAINTENANCE_LOSS) in str(failinfo.value), (
+        "an unstaged loss report failed without naming the witness it could not read: "
+        f"{failinfo.value}")
+
+
+def test_the_readme_names_the_committed_copy_beside_the_runtime_citation():
+    """Clause 5's prose half: the citation survives the loss of the data home it cites.
+
+    The seam is prose to committed bytes. `eval/episodic-arm/README.md` has always named
+    the runtime path, and a reader with the repository alone could not resolve it — the
+    same defect #2396 closed for `architecture/qmd.md` §5, re-filed here because this
+    README is the file #2420's owed entry pointed at. So the committed board path has to be
+    named *beside* the runtime one, in the same bullet: a citation parked somewhere else in
+    the file is a citation to a file nobody associates with the sentence. What is then
+    checked is not that two strings coexist but that they describe the same event — the two
+    backups the README spells out are exactly the two the committed report says the run
+    deleted, and every byte figure the paragraph quotes is re-derived from those bytes,
+    which is why no `.bak` name is typed into this file to do it.
+    """
+    raw = EPISODIC_README.read_text(encoding="utf-8")
+    flat = _flat(raw)
+    runtime_cite = "$LLOYD_DATA/_pipeline/reflection/" + MAINTENANCE_LOSS
+    committed_cite = "backlog/data/" + MAINTENANCE_LOSS
+    assert runtime_cite in flat, (
+        "the README no longer names the runtime report at all, so there is no citation here "
+        "for the committed copy to sit beside")
+    assert committed_cite in flat, (
+        f"the README cites only {runtime_cite}, which resolves on no clone: the report is "
+        "committed, so the citation should reach the copy a reader can actually open")
+
+    bullets = [b for b in raw.split("\n- ") if "qmd-index-maintenance" in b]
+    assert len(bullets) == 1, (
+        f"{len(bullets)} bullets of the README name the report, so the split that is 'beside' "
+        "in this node is no longer the bullet the citation lives in")
+    bullet = _flat(bullets[0])
+    assert committed_cite in bullet and runtime_cite in bullet, (
+        "the two citations are not in the same bullet: a committed path in some other "
+        "section does not make this paragraph checkable")
+    assert abs(bullet.index(runtime_cite) - bullet.index(committed_cite)) < 400, (
+        "the committed path is named in the bullet but nowhere near the runtime citation "
+        "it is standing in for")
+
+    rep = _report(MAINTENANCE_LOSS)
+    sr = rep["stray_retention"]
+    named = set(re.findall(r"index\.sqlite\.bak-[\w-]+", raw))
+    assert named == set(sr["deleted"]), (
+        f"the README names {sorted(named)} as the unlinked backups and the committed report "
+        f"says {sorted(sr['deleted'])}: one of the two is wrong about what the run did, and "
+        "the report is the one with a timestamp on it")
+    assert DELETED_BYTES in bullet, (
+        f"the bullet no longer quotes the run's total, so {DELETED_BYTES} cannot be checked "
+        "against the report that measured it")
+    assert f"{sr['deleted_bytes']:,}" == DELETED_BYTES, (
+        f"the constant this file quotes is no longer the report's own total "
+        f"{sr['deleted_bytes']}")
+    pile = {e["name"]: e for e in rep["stray"]}
+    for name in sr["deleted"]:
+        assert f"{pile[name]['bytes']:,} B" in bullet, (
+            f"the bullet no longer states the {pile[name]['bytes']:,} B of {name}, so the "
+            "figure is a claim about the report rather than a quote from it")

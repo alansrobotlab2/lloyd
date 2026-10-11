@@ -68,7 +68,10 @@ lloyd` and/or `--budget 4096`; retrieval is identical.
   (1,327,300,608 B) and `index.sqlite.bak-20260919-203417` (1,250,205,696 B), each
   with a 32,768 B `-shm` — 2,577,571,840 B for the run, `deleted_bytes` counting the
   sidecars too — with `held: []` in
-  `$LLOYD_DATA/_pipeline/reflection/qmd-index-maintenance-2026-10-07.json`. This
+  `$LLOYD_DATA/_pipeline/reflection/qmd-index-maintenance-2026-10-07.json`, whose bytes are
+  committed to the board as `backlog/data/qmd-index-maintenance-2026-10-07.json` (257 lines,
+  8,557 B) and to the tree as `tests/fixtures/qmd-index-maintenance-2026-10-07.json`, so this
+  citation outlives the data home it was written in. This
   file told a person to keep exactly those two backups against this rule, and was
   overruled by a rule that could
   not read it: what held a backup was a filename appearing in a `*.py`/`*.ts`/`*.sh`
