@@ -769,13 +769,21 @@ def _drop_url_blocks(lines: list) -> list:
     rule line (`_RULE_LINE_RE`), a label from a closed list (`_FOOTER_LABEL_RE`,
     `_RULELESS_FOOTER_ANCHOR_RE`), a colon-closed label of at most 40 characters
     (`_RUN_LABEL_RE`), a signup verb (`_SIGNUP_CTA_RE`) — and the corpus is open-set, so each
-    is a hand-maintained list the next channel walks through. `youtube-digest.md:1663`
-    walked through all four at once: its CTA label is 79 characters (measured with `len()` on
-    the stored line), so `_RUN_LABEL_RE`'s cap declined the label and `_link_run_bounds`'
-    floor of two link lines declined the single bare UTM URL under it. The CodeRabbit sponsor
-    slot at `:1450` is a different failure again: its ad is the FIRST block of the
+    is a hand-maintained list the next channel walks through. The Nate's-Library UTM link
+    under `### Should You Pay $100 A Month For OpenAI's Dots When Meta's Muse Has A Free
+    Version?` in the digest's `## 2026-10-03` section walked through all four at once: its
+    CTA label is 79 characters (measured with `len()` on the stored line), so
+    `_RUN_LABEL_RE`'s cap declined the label and `_link_run_bounds`' floor of two link lines
+    declined the single bare UTM URL under it. The CodeRabbit sponsor slot that OPENED the
+    `### GEMINI 4 is nuts...` entry in the `## 2026-10-01` section is a different failure
+    again: its ad is the FIRST block of the
     description, where no footer rule ever looks, and it carries no `utm_` at all, so a
     tracking-parameter rule would miss it too. Presence is not a list.
+
+    Both lines are cited by section and heading, never by line number: the #2453 backfill
+    (vault `f7d4bfaf`, 2026-10-08) deleted them, and the four-digit numbers that pointed at
+    them had been dead in this docstring for the whole fortnight since, naming a blank line
+    to anyone who followed the pointer.
 
     #2224 widened what "a link is present" means, because the presence rule shipped with a
     spelling hole. `_URL_RE` needs `https://` or `www.`, and the two rows that filed this
@@ -862,9 +870,9 @@ def _url_free_or(lines: list, unchanged: str) -> str:
     leave a description with a URL in it by three routes — it abstains at the first rule
     because the text under it is prose, it abstains because its tail is prose, or it strips a
     footer and returns the rest — and only the last one reaches the end of the function. The
-    row at `youtube-digest.md:1450` went out through the FIRST of those three, at 500
-    characters unchanged (measured against the base commit's own function), so a drop that ran
-    only after the anchors would not have seen it.
+    GEMINI 4 row opening the `## 2026-10-01` section went out through the FIRST of those
+    three, at 500 characters unchanged (measured against the base commit's own function), so
+    a drop that ran only after the anchors would not have seen it.
     """
     kept = _drop_url_blocks(lines)
     dropped = kept is not lines

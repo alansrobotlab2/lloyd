@@ -2065,3 +2065,44 @@ def test_confirm_policy_docstring_describes_the_fence_that_actually_covers_it():
         "automod:\n  review:\n    confirm: off\n")
     assert ok, f"the fence refuses the very flip 65ec576a landed: {reason}"
     assert changed == ["automod.review.confirm"], changed
+
+
+# ── #2566: no source cites the shipped YouTube digest by line number ────────
+#
+# Six pointers in the intel pipeline's body contract and its test file named lines of
+# `knowledge/ai-llms/youtube-digest.md` that vault commit `f7d4bfaf` (the #2453 backfill,
+# 2026-10-08) deleted. Nobody corrected them at the time, so the corpus carried three
+# sentences sending a reader to a blank line for three days — the same rot
+# `test_a_line_citation_of_claude_md_must_land_on_the_venv_rule` exists for, on a file
+# whose history lives in a DIFFERENT repository, so no check in this one can ever see the
+# delete. That asymmetry is the whole argument for the rule: a digest is append-only and
+# its bytes are versioned elsewhere, so every line number written against it is a claim
+# with an expiry date nobody in CI can observe. The replacement is a day section plus an
+# entry heading, and `tests/test_intel_pipeline_body.py` has a node that checks those
+# anchors still resolve.
+
+#: Either spelling the six used: the full `youtube-digest.md:1663`, or the short
+#: backtick form `:1450` that follows a full one in the same paragraph.
+DIGEST_LINE_CITATION_RE = re.compile(r"youtube-digest\.md:(\d+)|`:(\d{3,4})")
+
+#: The two files that narrate the digest-strip rules. Scoped on purpose: the `:NNNN` half
+#: of this pattern is a PORT across most of the docs corpus (`:8096`, `:5173`), and the
+#: committed witness under `tests/fixtures/` quotes an old robotics-digest line inside a
+#: historical landing message, which is a record of what was said, not a pointer to follow.
+DIGEST_CITING_SRC = ("scripts/intel-pipeline/intel_pipeline/body.py",
+                     "tests/test_intel_pipeline_body.py")
+
+
+def test_no_source_cites_the_youtube_digest_by_line_number():
+    """#2566 clause 1: both files cite the digest by day section and entry heading,
+    and the shape that rotted is gone — with the pattern shown to bite on the exact
+    spans it replaced, so this node is a guard and not an epitaph.
+    """
+    for rel in DIGEST_CITING_SRC:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert not DIGEST_LINE_CITATION_RE.search(text), (
+            f"{rel} cites the shipped digest by line number again")
+    for was in ("the row at `youtube-digest.md:" + "1450` went out",
+                "the sponsor slot at `:" + "1450` is a different failure",
+                "`knowledge/ai-llms/youtube-digest.md:" + "1663` did with a label"):
+        assert DIGEST_LINE_CITATION_RE.search(was), f"{was!r} no longer trips the grep"

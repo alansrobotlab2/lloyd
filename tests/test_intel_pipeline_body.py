@@ -2047,11 +2047,16 @@ def test_the_rubric_sentence_the_sweep_is_built_to_catch_is_one_the_old_grep_mis
 # footer label from a closed list, an arrow prefix, a colon-terminated label of at most 40
 # characters, two or more link lines. The corpus is open-set, so the next channel that
 # labels its affiliate link differently walks through all of them at once — which is what
-# `knowledge/ai-llms/youtube-digest.md:1663` did with a 79-character label, and
-# `:1450` did with a sponsor ad sitting at the HEAD of a description whose first `______`
+# the Nate's-Library UTM link under `### Should You Pay $100 A Month For OpenAI's Dots When
+# Meta's Muse Has A Free Version?` in `knowledge/ai-llms/youtube-digest.md`'s
+# `## 2026-10-03` section did with a 79-character label, and what the CodeRabbit sponsor
+# slot that opened the `### GEMINI 4 is nuts...` entry in its `## 2026-10-01` section did
+# with a sponsor ad sitting at the HEAD of a description whose first `______`
 # rule has prose under it — a shape the strip abstains on entirely, returning all 500
 # stored characters unchanged. The property these nodes pin is `this block carries a URL`,
-# which needs no vocabulary and no position.
+# which needs no vocabulary and no position. Both entries are dated anchors on purpose: the
+# #2453 backfill (vault `f7d4bfaf`, 2026-10-08) deleted the lines, and the numbers that
+# pointed at them had been dead here since the day it landed.
 #
 # The cost is in these tests too, not only in the code comment: a URL glued into a line of
 # prose now takes that line, and any line set off with it, down with it (39 of the 55
@@ -2645,7 +2650,9 @@ def test_the_stored_bare_email_row_loses_its_contact_block(intel_state):
     `_EMAIL_RE` already existed and was consulted nowhere on this path — only by
     `_is_footer_tail_line`, which needs a footer anchor to be asked at all. This row has no
     set-off rule to abstain on and no label the closed lists carry, so the address reached
-    the digest at `youtube-digest.md:1826` inside a body that also names an OpenAI safety
+    the digest inside the `### OpenAI's employee's WARNING` entry of its `## 2026-10-04`
+    section — a dated section anchor, not a line number: the #2453 backfill (vault
+    `f7d4bfaf`, 2026-10-08) deleted the line, in a body that also names that OpenAI safety
     lead's departure.
 
     The block-granularity cost is visible here rather than argued: block 1 is
@@ -3427,12 +3434,33 @@ def test_prose_that_merely_mentions_subscribe_or_opens_welcome_to_survives(
 # code they hold in place. `tests/test_corpus_shape.py` carries clause 6's nodes for
 # the instrument, and its last comment points here.
 #
-# Reading the live vault from a test is what `tests/test_corpus_shape.py` already
-# does when its `LLOYD_OBSIDIAN_VAULT` node seeds itself from
-# `knowledge/robotics/youtube-digest.md`: the alternative, a fixture the test writes,
-# would pass on a machine whose shipped copy still carries the CodeRabbit block.
+# Which vault is read is `board_presence.vault_root()`'s answer — `LLOYD_OBSIDIAN_VAULT`
+# when a test sets it, else `~/obsidian` — the resolution every other live-vault reader in
+# this suite already goes through. It used to be a hard-coded `Path.home() / "obsidian"`,
+# which left these nodes the only digest readers that could not be aimed at a seeded vault.
+# That mattered because the shipped file GROWS: the pipeline appends an entry every time it
+# publishes, so a check over it can only ever assert properties, and a property no test can
+# seed a violation into is a reading nobody has ever seen fail. #2566 made the path
+# overridable; `test_each_digest_property_fires_on_a_seeded_vault` is what that buys.
+DIGEST_REL = Path("knowledge") / "ai-llms" / "youtube-digest.md"
 
-SHIPPED_DIGEST = Path.home() / "obsidian" / "knowledge" / "ai-llms" / "youtube-digest.md"
+
+def _shipped_digest() -> Path:
+    """The published digest, resolved through `board_presence.vault_root()`.
+
+    Asked per call, not frozen at import: an override a caller's `monkeypatch.setenv`
+    could not move would let a test aim the node at a seeded vault, see its own seed, and
+    read that as checking the shipped file — the exact trap
+    `tests/board_presence.py:VAULT_ROOT_ENV`'s comment names.
+    """
+    import board_presence
+
+    return board_presence.vault_root() / DIGEST_REL
+
+
+#: The digest as of import — the default, mirroring `board_presence.VAULT_ROOT`. The nodes
+#: below call `_shipped_digest()`, which re-answers the override.
+SHIPPED_DIGEST = _shipped_digest()
 
 #: The control grep from the item, unchanged: the phrases #2453 left behind, in the
 #: spelling the item's own acceptance names. It was 4 on 2026-10-10.
@@ -3457,11 +3485,13 @@ def _body_lines(lines):
 
 #: What the shipped digest held at the #2509 backfill (vault commit `7e87c931`): 203
 #: `### ` entries, and 205 `---` rules — one terminating each entry plus the two that
-#: delimit the front matter. The node below pinned both figures as equalities, and an
-#: equality against an append-only file is a dated snapshot: `write_item_to_vault`
-#: appends one entry and one rule per published video, so the file held 218 entries and
-#: 220 rules when #2570 was filed and `assert 218 == 203` fired on a pipeline that was
-#: working. So the entry count is a FLOOR — it only ever goes up, and it going down is
+#: delimit the front matter. Those two figures are a dated observation of one Tuesday's
+#: file, not an expectation of this one: the node that ran them as equalities is gone, and
+#: an equality against an append-only file is a snapshot with an expiry date —
+#: `write_item_to_vault` appends one entry and one rule per published video, so the file
+#: measured 218 entries and 220 rules on 2026-10-11 when #2570 was filed, and the pinned
+#: 203-entry equality failed on a pipeline that was working. So the entry count is a FLOOR
+#: — it only ever goes up, and it going down is
 #: precisely the emptied-entry failure clause 2 forbids — and the rule count is a
 #: RELATION to it, which is what a delete that swallowed a separator would break.
 BACKFILL_ENTRIES = 203
@@ -3498,6 +3528,27 @@ def _digest_structure(lines):
     return len(headings), entry_rules, orphans, link_bodies
 
 
+def _assert_digest_properties_clean(lines, where):
+    """The three properties #2509 clauses 1 and 2 hold of ANY digest, asserted in one
+    place so every reader of the shipped file runs the same three guards.
+
+    `where` names the file in the failure message, because the same asserts now run
+    against a seeded fixture as against the shipped copy and a bare `hits == []` cannot
+    tell a reader which digest is dirty.
+
+    #2566 moved them here when it deleted the file's absolute structural counts (the
+    203-entry and 205-rule equalities #2509 shipped, since a growing file cannot equal a
+    number) and needed to show that the deletion cost nothing: all three of these fire on
+    a seeded violation in `test_each_digest_property_fires_on_a_seeded_vault`, and none of
+    them reads the file's size.
+    """
+    hits = [(i, l) for i, l in enumerate(lines, 1) if AD_CONTROL_RE.search(l)]
+    assert hits == [], f"{where}: promo residue still published: {hits}"
+    _entries, _rules, orphans, linky = _digest_structure(lines)
+    assert orphans == [], f"{where}: entries emptied of their Source line: {orphans}"
+    assert linky == [], f"{where}: a body line carries a URL again: {linky}"
+
+
 def test_the_shipped_digest_carries_no_channel_promo_residue():
     """#2509 clause 1: the named residue is gone from the published digest, and
     each repaired body is the channel's own description alone.
@@ -3505,15 +3556,19 @@ def test_the_shipped_digest_carries_no_channel_promo_residue():
     `grep -c -iE 'welcome to|subscribe|links.outskill|\U0001f449|My Links'` on this
     file was 4 on 2026-10-10 (the `My Links \U0001f517` line, `Welcome to TheAIGRID —`,
     `Subscribe for more AI Engineer talks…`, `\u2764\ufe0f SUBSCRIBE TO MY YOUTUBE CHANNEL
-    \U0001f4fa`). Two repaired bodies are named by the text that must be ALL they hold: the
-    GEMINI 4 entry, whose real description was stranded six lines under the
+    \U0001f4fa`); it has been 0 on every run since the #2453 backfill, and that grep count
+    is a dated observation of the dirty file, not a figure this node asserts. What it
+    asserts is `_assert_digest_properties_clean` — the residue reading beside the two
+    structural ones — and then the two repaired bodies, named by the text that must be ALL
+    they hold: the GEMINI 4 entry, whose real description was stranded six lines under the
     CodeRabbit sponsor copy, and the ASTRA 6.1 entry, whose Anthropic paragraph sat
-    under `Sponsored by Granola` and `@granola_so #ad`.
+    under `Sponsored by Granola` and `@granola_so #ad`. Both headings still exist in the
+    shipped file, which is what makes this node about content and not about size.
     """
-    assert SHIPPED_DIGEST.is_file(), SHIPPED_DIGEST
-    lines = SHIPPED_DIGEST.read_text(errors="replace").splitlines()
-    hits = [(i, l) for i, l in enumerate(lines, 1) if AD_CONTROL_RE.search(l)]
-    assert hits == [], f"promo residue still published: {hits}"
+    digest = _shipped_digest()
+    assert digest.is_file(), digest
+    lines = digest.read_text(errors="replace").splitlines()
+    _assert_digest_properties_clean(lines, "shipped digest")
 
     text = "\n".join(lines)
     for heading, body in [
@@ -3531,25 +3586,31 @@ def test_the_shipped_digest_carries_no_channel_promo_residue():
 
 def test_the_backfill_left_every_entry_populated_and_link_free():
     """#2509 clause 2: a delete that empties an entry is the same failure as the
-    residue, so the structure the backfill had to preserve is pinned numerically.
+    residue, so the structure the backfill had to preserve is pinned as a relation and
+    three properties — never as this file's size.
 
-    The four readings are `_digest_structure`'s, and
-    `test_the_digest_structure_readings_fire_on_an_emptied_entry_and_survive_growth`
-    pins each of them against a digest that test writes through the real writer, so
-    nothing here rests on the shipped file being a particular size. What it asserts of
-    the shipped file: the entry count has not fallen below the 203 the file held at the
-    backfill (it grows by one per published digest, so the floor is the only direction
-    an entry can be lost); every entry is still terminated by exactly one `---` rule
-    outside the front matter; every heading still has its non-blank `**Source:**` line
-    within three lines; and `_LINK_PRESENT_RE` — the predicate that found the 16
-    URL-bearing lines #2453 deleted — is still 0 over the bodies. That last figure is
-    only 0 BODY-SCOPED: over the whole file every entry's own `[Link](https://…)` line
-    matches the predicate and two video TITLES match it too, so the whole-file figure
-    moves with the entry count — which is the reason the check is body-scoped (the
-    triage recorded the scope; the item's whole-file wording was unsatisfiable).
+    Two readings come from `_digest_structure`: the entry count against the FLOOR it stood
+    at on the backfill date, and each entry's one terminating `---` rule. The other two
+    properties, the orphaned-heading and body-URL readings, are asserted by
+    `_assert_digest_properties_clean`, the same call the promo node makes and the same call
+    `test_each_digest_property_fires_on_a_seeded_vault` shows failing on a seeded fixture.
+    `test_the_digest_structure_readings_fire_on_an_emptied_entry_and_survive_growth` pins
+    the readings again over a digest written through the real writer. What this node can
+    assert of the shipped file, given that it grows one entry per published video:
+    the entry count has not fallen below the 203 it held at the vault commit named beside
+    `BACKFILL_ENTRIES` (going down is the only direction an entry can be lost, so a floor
+    is the whole of what a count can say here); every entry is still terminated by exactly
+    one `---` rule outside the front matter; every heading still has its non-blank
+    `**Source:**` line within three lines; and `_LINK_PRESENT_RE` — the predicate that
+    found the 16 URL-bearing lines #2453 deleted — is still 0 over the bodies. That last
+    figure holds BODY-SCOPED only: measured 2026-10-11, over the whole file every entry's
+    own `[Link](https://…)` line matched the predicate and two video TITLES matched it too,
+    so the whole-file figure moves with the entry count — which is the reason the check is
+    body-scoped (the triage recorded the scope; the item's whole-file wording was
+    unsatisfiable).
     """
-    lines = SHIPPED_DIGEST.read_text(errors="replace").splitlines()
-    entries, entry_rules, orphans, linky = _digest_structure(lines)
+    lines = _shipped_digest().read_text(errors="replace").splitlines()
+    entries, entry_rules = _digest_structure(lines)[:2]
 
     assert entries >= BACKFILL_ENTRIES, (
         f"the digest holds {entries} entries, below the {BACKFILL_ENTRIES} it had at "
@@ -3558,8 +3619,7 @@ def test_the_backfill_left_every_entry_populated_and_link_free():
         f"{entries} entries but {entry_rules} `---` rules outside the front matter: "
         f"the writer terminates every entry with exactly one")
 
-    assert orphans == [], f"entries emptied of their Source line: {orphans}"
-    assert linky == [], f"a body line carries a URL again: {linky}"
+    _assert_digest_properties_clean(lines, "shipped digest")
 
 
 def test_the_digest_structure_readings_fire_on_an_emptied_entry_and_survive_growth(
@@ -3574,7 +3634,7 @@ def test_the_digest_structure_readings_fire_on_an_emptied_entry_and_survive_grow
     invented. Then each failure clause 2 forbids is introduced and has to be seen: a
     body deleted together with its `**Source:**` line, a URL back in a body line, a
     separator rule deleted while its heading stands. Finally a fourth entry is
-    published — the case that broke the pinned `== 203`, and the one that must read
+    published — the case the pinned 203-entry equality broke on, and the one that must read
     clean, because a green test that only describes one Tuesday is not a guard.
     """
     digest = intel_state / "vault" / DIGEST_FILE
@@ -3624,10 +3684,245 @@ def test_the_digest_structure_readings_fire_on_an_emptied_entry_and_survive_grow
     assert _digest_structure(lines[:last_rule] + lines[last_rule + 1:]) == (3, 2, [], [])
 
     # And growth: publishing one more entry moves both readings by one, which is the
-    # case the pinned `== 203` could not express and #2570 exists because of.
+    # case the pinned 203-entry equality could not express and #2570 exists because of.
     assert vw_mod.write_item_to_vault(
         _yt_item("A fourth digest lands the same way",
                  "A fourth agent digest published through the same writer, which is the "
                  "growth a floor tolerates and an equality misreads as damage.",
                  "str4"), DIGEST_PROFILE) is True
     assert _digest_structure(digest.read_text(errors="replace").splitlines()) == (4, 4, [], [])
+
+
+# ── #2566: the shipped-digest nodes read an overridable vault, and assert only
+#          properties of it ─────────────────────────────────────────────────────────
+#
+# The two nodes above read the digest the pipeline PUBLISHES, and that file grows one
+# entry per published video. #2509 nevertheless pinned two of its readings as
+# equalities, so the file reddened an unrelated diff the first time the pipeline
+# published after the item was filed — measured on 2026-10-11, when the shipped digest
+# held 218 entries and 220 rules against the pinned 203 and 205. #2570 turned the pair
+# into a floor and a relation. #2566 is the other half of the same defect class: the
+# path was hard-coded to this machine's home directory, so a property asserted over the
+# shipped file could never be shown to fire, and the file it fires on is one a test is
+# not allowed to write. With `LLOYD_OBSIDIAN_VAULT` honoured, the seed below IS a
+# published digest and the readings are the live ones.
+
+#: An assert that compares one of the digest readings with a NUMBER. The two nodes may
+#: compare two readings with each other (`entry_rules == entries`) and may compare a
+#: reading with the dated floor beside it (`entries >= BACKFILL_ENTRIES`); what neither
+#: may do is name a figure the growing file is expected to equal. The guard targets the
+#: ASSERT SHAPE rather than the digits 203/205, because the digits are a true statement
+#: about the file on the day they were measured and only the assert is a claim about
+#: every day after it.
+ABSOLUTE_COUNT_ASSERT_RE = re.compile(
+    r"assert\s+\w*(entries|entry_rules|headings|rules|orphans|linky|hits)\b[^=\n]*==\s*\d")
+
+
+def _seeded_digest_vault(intel_state, monkeypatch) -> Path:
+    """Aim both shipped-digest nodes at the fixture vault `intel_state` already
+    redirects the writer into, and return the digest path they now read.
+
+    One assertion does the real work here: if `_shipped_digest()` did not move, the
+    nodes called below would read the LIVE vault while this node believed it was
+    reporting on its own seed — a green run that tested nothing, which is the failure
+    mode `tests/board_presence.py:VAULT_ROOT_ENV` exists to prevent.
+    """
+    import board_presence
+
+    vault = intel_state / "vault"
+    monkeypatch.setenv(board_presence.VAULT_ROOT_ENV, str(vault))
+    seeded = _shipped_digest()
+    assert seeded == vault / DIGEST_REL, (
+        "`LLOYD_OBSIDIAN_VAULT` did not move `_shipped_digest()`: the nodes would read "
+        "the live vault and report on it as the seed")
+    assert seeded == vault / DIGEST_FILE, (
+        "the seeded file and the node's digest are not the same path, so the writer's "
+        "bytes are not the bytes the nodes read")
+    return seeded
+
+
+def test_the_shipped_digest_path_resolves_through_the_shared_vault_root(monkeypatch):
+    """#2566 clause 2: the digest path is `tests/board_presence.vault_root()`'s answer,
+    not a hard-coded `Path.home() / "obsidian"`.
+
+    Both branches are pinned, because the defect was the missing one: an override that
+    the helper honours and this file ignores leaves a test seeding a vault it never
+    reads. `_shipped_digest()` re-asks per call and the module-level `SHIPPED_DIGEST`
+    freezes the import-time answer — the same split
+    `board_presence.VAULT_ROOT` documents for itself.
+    """
+    import board_presence
+
+    assert SHIPPED_DIGEST == board_presence.vault_root() / DIGEST_REL, (
+        "`SHIPPED_DIGEST` was not built from `vault_root()`")
+    assert DIGEST_REL == Path(DIGEST_FILE), (
+        "the fixture's digest and the nodes' digest are different files")
+
+    monkeypatch.delenv(board_presence.VAULT_ROOT_ENV, raising=False)
+    assert _shipped_digest() == Path.home() / "obsidian" / DIGEST_REL
+
+    monkeypatch.setenv(board_presence.VAULT_ROOT_ENV, str(Path.home() / "other-vault"))
+    assert _shipped_digest() == Path.home() / "other-vault" / DIGEST_REL, (
+        "the override did not move the path the digest nodes read")
+
+
+def test_neither_shipped_digest_node_asserts_an_absolute_count():
+    """#2566 clause 3: no reading of the growing file is compared with a number.
+
+    The item's own check was `grep -nE '== *(203|205)\\b'`, which is a search for one
+    Tuesday's two figures; it goes green again the moment somebody re-pins the file to
+    tomorrow's counts. This targets the assert shape instead, so re-pinning to the
+    current entry count is caught too, and it bites on the exact two lines it replaced.
+    """
+    import inspect
+
+    src = "\n".join(
+        inspect.getsource(f) for f in (
+            test_the_shipped_digest_carries_no_channel_promo_residue,
+            test_the_backfill_left_every_entry_populated_and_link_free))
+    assert not ABSOLUTE_COUNT_ASSERT_RE.search(src), (
+        "a shipped-digest node compares a structural reading with a literal count")
+    assert ABSOLUTE_COUNT_ASSERT_RE.search("assert entries == " + "203"), (
+        "the guard no longer catches the equality it was written for")
+    assert ABSOLUTE_COUNT_ASSERT_RE.search("assert entry_rules == " + "205"), (
+        "the guard no longer catches the rule-count equality")
+    assert not ABSOLUTE_COUNT_ASSERT_RE.search(
+        "assert entry_rules == entries"), "a relation between two readings is allowed"
+
+
+def test_each_digest_property_fires_on_a_digest_seeded_with_that_violation(
+        intel_state, monkeypatch):
+    """#2566 clause 4: dropping the two count asserts dropped no guard.
+
+    The vault is the one `intel_state` redirects the writer into, published through
+    `write_item_to_vault` and then read back by the two real nodes, which are called
+    directly here — so what fails is the node, on bytes the pipeline writes, not a
+    helper this file invented. Three entries come out clean; then each property is
+    violated on its own and its owner has to name it.
+
+    `BACKFILL_ENTRIES` is patched to the seed's size for node 2's calls. That is the one
+    reading the seed cannot satisfy honestly (the shipped file stood at 203 entries at
+    the backfill, this one at three) and the patch is what forces node 2's failure to
+    come from the violated property instead of from the file being small.
+    """
+    digest = _seeded_digest_vault(intel_state, monkeypatch)
+    _publish(intel_state,
+             _yt_item("An agent that keeps its own scratch pad",
+                      "An agent held a block reference across turns and reused it on "
+                      "the next request, which is what the memory layer needed.",
+                      "seed1"),
+             _yt_item("Retrieval on a one-GPU budget",
+                      "A small team running its own model can still index a full corpus "
+                      "for an agent by keeping the vector leg on the same card.",
+                      "seed2"),
+             _yt_item("Nightly evals that keep their baseline",
+                      "A baseline that moves under the runner cannot show an agent "
+                      "regression, so the nightly run froze its commit and reported.",
+                      "seed3"))
+    assert digest.is_file(), digest
+    clean = digest.read_text(errors="replace").splitlines()
+    assert _digest_structure(clean)[:2] == (3, 3), (
+        "the seeded digest did not publish as three terminated entries")
+    _assert_digest_properties_clean(clean, "seed")
+    monkeypatch.setattr(sys.modules[__name__], "BACKFILL_ENTRIES", 3)
+
+    # A promo-residue line, which is #2453's own failure and clause 1's reading. The
+    # node that owns it must report it before it reaches anything else.
+    promo = [l for l in clean]
+    promo.insert(len(promo) - 1, "Subscribe for more AI Engineer talks")
+    digest.write_text("\n".join(promo))
+    with pytest.raises(AssertionError, match="promo residue"):
+        test_the_shipped_digest_carries_no_channel_promo_residue()
+
+    # An entry emptied of its Source line, which is clause 2's orphan reading: no count
+    # of anything in the file moves, so only the property can see it.
+    no_source = [l for l in clean if not l.startswith("**Source:**")]
+    assert _digest_structure(no_source)[2], "deleting the Source lines orphaned nothing"
+    digest.write_text("\n".join(no_source))
+    with pytest.raises(AssertionError, match="emptied of their Source line"):
+        test_the_backfill_left_every_entry_populated_and_link_free()
+
+    # A URL back in a body line, which is the 16 lines #2453 deleted. The writer's own
+    # `[Link](https://…)` line is structural and does not count, so the injected line has
+    # to be the hit — which is what makes this reading body-scoped rather than whole-file.
+    url_back = [l.replace("froze its commit and reported",
+                          "froze its commit, https://example.com/the-baseline")
+                for l in clean]
+    assert url_back != clean, "the seed stopped carrying the line this violates"
+    digest.write_text("\n".join(url_back))
+    with pytest.raises(AssertionError, match="carries a URL"):
+        test_the_backfill_left_every_entry_populated_and_link_free()
+
+
+#: The three entries the #2143/#2224 docstrings and this file's comments cite as the
+#: corpus that walked through the shape rules: the CodeRabbit-sponsored GEMINI 4 entry,
+#: the Nate's-Library UTM link under the OpenAI DevDay question, and the bare-email
+#: OpenAI-safety entry. Each is named by heading and by the day section it was published
+#: into, which is what a line number was supposed to buy and did not: `f7d4bfaf` deleted
+#: the LINES and six pointers into them stayed in prose worded as though they resolved,
+#: because the file they point into is versioned in another repository where no check of
+#: ours can ever see the delete. Headings survive an append-only file's edits, and this
+#: node is what makes the anchor as trustworthy as the number it replaced.
+DIGEST_ANCHOR_HEADINGS = (
+    "### GEMINI 4 is nuts...",
+    "### Should You Pay $100 A Month For OpenAI's Dots When Meta's Muse Has A Free Version?",
+    "### OpenAI's employee's WARNING",
+)
+
+#: The day sections those entries were published into (2026-10-01, -03 and -04). A new
+#: section is appended each time the pipeline publishes and none is ever removed, so a
+#: dated section cannot rot the way a line offset does.
+DIGEST_ANCHOR_SECTIONS = ("## 2026-10-01", "## 2026-10-03", "## 2026-10-04")
+
+
+def test_the_digest_anchors_the_corpus_citations_use_still_resolve():
+    """#2566 clause 1's other half: a date-and-heading anchor is only an improvement
+    on a line number if something checks it still lands.
+
+    Read through `_shipped_digest()`, so this holds against a seeded vault as it does
+    against the live one, and it asserts only that each anchor EXISTS — never where,
+    which is the claim that went stale in the first place. The three headings are the
+    same entries #2509 clause 1 repaired, so the shipped-content node above already
+    depends on two of them surviving; this node is what stops the third from drifting.
+    """
+    text = _shipped_digest().read_text(errors="replace")
+    for heading in DIGEST_ANCHOR_HEADINGS:
+        assert f"\n{heading}\n" in text, f"a docstring cites {heading!r}, which is gone"
+    for section in DIGEST_ANCHOR_SECTIONS:
+        assert f"\n{section}\n" in text, f"a docstring cites {section!r}, which is gone"
+
+
+def _digest_region_source() -> str:
+    """This file's own source from the #2509 header to the end, for the node that
+    reads its own narration.
+
+    Everything above that header narrates the body contract, not the shipped digest, so
+    the region boundary is what keeps the dated-figure rule from reaching prose that was
+    never about the file's size.
+    """
+    text = Path(__file__).read_text(encoding="utf-8")
+    return text[text.index("# --- #2509 clauses 1 and 2:"):]
+
+
+def test_the_digest_narration_dates_the_figures_it_reports():
+    """#2566 clause 5: the sentences that used to state the file's size as an
+    expectation state it as a measurement of a dated file instead.
+
+    The digits themselves are harmless and stay — 203 entries really was the count at
+    the #2509 backfill, and 4 really was the residue grep on 2026-10-10. What rots is a
+    figure without a date beside it, because the next reader takes it for a current
+    expectation and the next automod gate spends a review on the difference. So the two
+    figure-sets in this region are pinned to their provenance, and no sentence in it is
+    allowed to state a structural count in the present tense.
+    """
+    src = _digest_region_source()
+    assert "on 2026-10-11" in src, (
+        "the 218/220 measurement lost the date it was taken on, so it reads as an "
+        "expectation again")
+    assert "7e87c931" in src, (
+        "the 203/205 figures lost the vault commit they were measured at")
+    assert "on 2026-10-10" in src, "the residue grep lost the date it scored 4 on"
+    present_tense = re.findall(
+        r"(?:holds|has|contains|carries)\s+(?:\d{3})\s*(?:entries|rules|`###`|headings)",
+        src)
+    assert not present_tense, f"an undated present-tense count is back: {present_tense}"
