@@ -46,7 +46,12 @@ ONE_DISABLED = (
     "alpha.timer\tenabled\n"
     "beta.timer\tdisabled\n"
     "checked 2 timers: 1 enabled, 1 not enabled\n"
-    "FAIL beta.timer is not enabled — run: systemctl --user enable beta.timer (SETUP.md:1520)\n"
+    # Mirrors the guard's FAIL line byte for byte as of #2537, which moved the
+    # remediation to `enable --now` (the arming form) and dropped its stale
+    # `SETUP.md:1520` pointer. The caller parses only the `FAIL <unit> ` prefix, so
+    # what has to stay faithful is that prefix, not the prose after it.
+    "FAIL beta.timer is not enabled — run: systemctl --user enable --now beta.timer "
+    "(SETUP.md carries the enable route for each repo timer)\n"
 )
 NOTHING_LOOKED_AT = (
     "FAIL 0 *.timer in /nowhere — the check looked at nothing, which is not a pass\n"

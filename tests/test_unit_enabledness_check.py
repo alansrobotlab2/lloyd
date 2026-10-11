@@ -291,6 +291,56 @@ def test_the_cert_renew_units_docstring_blames_the_route_not_the_operator():
         "state it exists to refuse")
 
 
+def test_the_remediation_arms_the_timer_and_points_by_content(tmp_path):
+    """#2537: the command a red watchdog prints has to be one that works.
+
+    `is-enabled` answers the unit FILE, so plain `systemctl --user enable X.timer`
+    links X into `timers.target.wants/` and leaves `ActiveState=inactive` until the
+    user manager is restarted — this check then goes green and the job still never
+    fires. That is the hole #2428's window fell into: this script's FAIL line printed
+    the bare form, and `lloyd-persistence-window.timer` sat installed, red-lined and
+    unarmed (`journalctl --user -u lloyd-persistence-window.service --since
+    2026-10-08` → `-- No entries --`) while its enable was handed forward.
+
+    The arming form is `enable --now`, which is what SETUP.md carries for every repo
+    timer it documents and the only form an unattended turn may run at all — measured
+    at #2537's triage: `enable --now` is tier 1 with no service-control hit, `start`
+    is tier 2 plus `systemctl start` and is refused to a background session.
+
+    Pinned by RUNNING the script at a stub that answers one timer `disabled`, so what
+    is graded is the line an operator actually reads rather than a grep of the source.
+    The vacuity control is that a FAIL line naming that unit exists at all before any
+    shape is asserted about it. The line must offer `enable --now <unit>`, must not
+    offer the bare form for any unit, and no output line may carry a `SETUP.md:<n>`
+    pointer — the no-line-number rule
+    `test_the_cert_renew_units_docstring_blames_the_route_not_the_operator` applies to
+    prose, for the reason it names: the number this script used to print had already
+    drifted, and the line it named was a `/proc` environ capture, not an enable route.
+
+    What this node still refuses to assert is unchanged: that some timer IS enabled or
+    active on the box. That is host state, and the two commands that measure it are
+    `systemctl --user is-enabled lloyd-persistence-window.timer` and `systemctl --user
+    show lloyd-persistence-window.timer -p ActiveState`.
+    """
+    unit_dir = _unit_names(tmp_path, "alpha.timer", "beta.timer")
+
+    proc, out, _ = _run(unit_dir, {"beta.timer": "disabled"}, tmp_path, tag="arming")
+
+    assert proc.returncode != 0, f"a disabled timer passed:\n{proc.stdout}"
+    assert _denominator(out) == 2, out
+    fails = _fail_lines(out)
+    named = [line for line in fails if "beta.timer" in line]
+    assert named, f"the miss named no unit to fix, so the shape checks below prove " \
+                  f"nothing about a hint nobody is shown: {fails}"
+    assert not [line for line in fails if "alpha.timer" in line], fails
+    for line in named:
+        assert re.search(r"enable --now beta\.timer\b", line), line
+    for line in fails:
+        assert re.search(r"enable (?!--now)\S*\.timer", line) is None, \
+            f"bare `enable` does not arm a timer: {line}"
+    assert not [line for line in out if re.search(r"SETUP\.md:\d+", line)], out
+
+
 def test_the_guard_names_its_caller():
     """#1989 clause 5: the header's WHO RUNS IT names the health script, and the
     health script really does name this guard — a header that claims a caller the

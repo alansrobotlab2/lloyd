@@ -324,9 +324,88 @@ def test_setup_md_carries_the_enable_route():
     """A linked-but-never-enabled timer is the drift #1891 exists to catch:
     `install-services.sh` echoes the `systemctl --user enable` lines instead of
     running them, and `scripts/maintenance/check-unit-enabledness.sh` asserts every
-    repo timer answers `enabled`. The enable itself is host state and cannot be set
-    from a round (`systemctl` is refused at dispatch), so this pins the one place a
-    human or a rebuild looks: the same page that carries the cert-renew line."""
+    repo timer answers `enabled`. The enable is host state, so this pins the one place
+    a human or a rebuild looks: the same page that carries the cert-renew line. It is
+    not beyond an unattended turn's reach, and #2537 corrected the older claim here
+    that it was: `systemctl --user enable --now <timer>` is tier 1 with no
+    service-control hit, while any `start` verb is refused to a background session.
+    What makes the exact string below worth pinning is that only the `--now` form
+    ARMS — plain `enable` links the unit file and leaves the timer
+    `ActiveState=inactive` until the user manager restarts — so this route has to keep
+    the flag, and the guard's FAIL line now names the same command."""
     text = SETUP.read_text(encoding="utf-8")
     assert "systemctl --user enable --now lloyd-persistence-window.timer" in text, \
         "SETUP.md must carry the enable route, or the timer ships disabled"
+
+
+def test_the_watchdog_hint_for_this_timer_is_that_arming_route():
+    """Clause 2 as far as a test can hold it: the two routes cannot disagree.
+
+    Two commands look like the fix and are not it. Plain `enable` links the unit file
+    and leaves `ActiveState=inactive` until the user manager is restarted, so the
+    02:10 fire never arrives while `check-unit-enabledness.sh` reads green; and
+    `systemctl --user start` is a service-control verb, refused to an unattended turn.
+    `systemctl --user enable --now lloyd-persistence-window.timer` is the one command
+    that is both arming and reachable from here — so this pins that the remediation
+    the watchdog prints for this unit and the route SETUP.md carries are the SAME
+    command. The drift #2537 actually hit was a hint reading `enable` where the docs
+    read `enable --now`: green check, unarmed timer, no window.
+
+    The half this node cannot see — that the script really prints the line its source
+    builds — is pinned by
+    `test_the_remediation_arms_the_timer_and_points_by_content` in
+    tests/test_unit_enabledness_check.py, which runs the guard against a stub
+    `systemctl` answering one timer `disabled`. This one owns the cross-file identity,
+    which is where the divergence lived.
+
+    Still host state, read by hand and asserted by nothing here: that the timer
+    answers `enabled` (`systemctl --user is-enabled lloyd-persistence-window.timer`)
+    and that it is ARMED — `systemctl --user show lloyd-persistence-window.timer
+    -p ActiveState` → `ActiveState=active`, which `enabled` alone does not give."""
+    guard = (ROOT / "scripts" / "maintenance" / "check-unit-enabledness.sh")
+    hint = re.search(r"systemctl --user enable( --now)? \$unit",
+                     guard.read_text(encoding="utf-8"))
+    assert hint, "the guard's FAIL line no longer builds a remediation from $unit"
+    assert hint.group(1), (
+        "the guard prints bare `enable`, which only links the unit file and leaves "
+        "this timer ActiveState=inactive — the hint that let it ship unarmed (#2537)")
+
+    command = f"systemctl --user enable --now {TIMER.name}"
+    assert command in SETUP.read_text(encoding="utf-8"), \
+        f"the watchdog's remediation {command!r} is not the documented route"
+
+
+def test_the_arming_route_is_reachable_from_an_unattended_turn():
+    """The premise #2537 was confirmed on, pinned against the two guards that decide
+    it rather than against a sentence about them.
+
+    The whole item rests on an asymmetry: an unattended turn may ARM this timer but may
+    never START its service. `app.harness.safety.bash_command_tier` answers 1 for
+    `systemctl --user enable --now <timer>` with nothing in the durable-external table
+    to match, while `systemctl --user start <service>` is tier 2 AND a service-control
+    label, which is what refuses it to a background session — a worker turn that
+    restarted the unit owning the primary would kill every turn in flight, its own
+    included. So the arming route is loop-runnable, and the string
+    `test_setup_md_carries_the_enable_route` pins is the one the loop can actually
+    run; a future widening of either table flips that silently, and this is the node
+    that would say so.
+
+    Measured with the same read-only probe #2537's triage used, at this commit:
+    arm → tier 1, `match_durable_external` None, `find_service_control` None;
+    start → tier 2, `systemctl state change (restart/stop a unit)`, `systemctl start`.
+    Nothing here executes either command."""
+    from app.harness.safety import bash_command_tier, match_durable_external
+    from app.harness.service_control import find_service_control
+
+    arm = f"systemctl --user enable --now {TIMER.name}"
+    assert bash_command_tier(arm) == 1, \
+        "arming this timer stopped being tier-1: an unattended turn can no longer arm it"
+    assert match_durable_external(arm) is None, arm
+    assert find_service_control(arm) is None, \
+        f"`enable --now` became service control ({find_service_control(arm)!r}), " \
+        "which is refused to a background session and would put this timer back " \
+        "behind a human, as #2527 believed it was"
+
+    start = f"systemctl --user start {SERVICE.name}"
+    assert bash_command_tier(start) == 2, start
+    assert find_service_control(start) == "systemctl start", start

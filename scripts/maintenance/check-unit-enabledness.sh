@@ -43,6 +43,21 @@
 # for each verdict beside how many timers were checked, so a run that quietly
 # checked one timer reads differently from a run that checked five.
 #
+# WHAT THE FAIL LINE NAMES, AND WHY IT IS `enable --now`. `is-enabled` answers the
+# unit FILE, not the running timer: `systemctl --user enable X.timer` links X and
+# leaves `ActiveState=inactive` until the user manager restarts, so `enabled` is a
+# necessary half of "this job will run" and never the whole of it. A remediation that
+# printed the bare form therefore sent the operator away with this check green and the
+# timer still not armed — which is what #2537 found on lloyd-persistence-window.timer,
+# installed by #2428 and never once fired (`journalctl --user -u
+# lloyd-persistence-window.service --since 2026-10-08` → `-- No entries --`). Pinning
+# the arming form is the least this guard can do; checking `ActiveState` itself is a
+# wider contract (#2537 records it as owed, not taken). `--now` is also the only form
+# an unattended turn can act on at all: `systemctl --user start` is both tier 2
+# (durable-external) and a service-control verb, refused to a background session,
+# while `systemctl --user enable --now <timer>` is tier 1 with no service-control hit
+# — pinned by tests/test_persistence_window_unit.py against the guards themselves.
+#
 # tests/test_unit_enabledness_check.py drives this through a stub `systemctl` on
 # PATH and `--unit-dir`, so the suite never reads the live host — the same reason
 # tests/test_cert_renew_units.py refuses to pin enabledness.
@@ -127,7 +142,23 @@ printf 'checked %d timers: %d enabled, %d not enabled\n' \
 
 if (( ${#MISS[@]} > 0 )); then
   for unit in "${MISS[@]}"; do
-    echo "FAIL $unit is not enabled — run: systemctl --user enable $unit (SETUP.md:1520)"
+    # `--now` is the arming half, not decoration. Plain `enable` only links the unit
+    # file into `timers.target.wants/`; the timer keeps reading `ActiveState=inactive`
+    # until the user manager is restarted, so a hint that prints the bare form sends
+    # its reader away with the check green and no job scheduled. That is how
+    # lloyd-persistence-window.timer (#2428) sat from install to #2537: the only
+    # command this script ever printed was the half that does not arm it. `--now` is
+    # also the form SETUP.md carries for every repo timer it documents, and the only
+    # form a worker turn may run at all — `systemctl --user start` is a
+    # service-control verb, refused to a background session.
+    #
+    # The pointer is by content, never by line number: a `SETUP.md:<n>` moves with
+    # every edit above it and then names something else, which is the rule
+    # tests/test_unit_enabledness_check.py already applies to prose pointers. The one
+    # this line used to print had drifted — the number it named was a `/proc` environ
+    # capture, not an enable route.
+    echo "FAIL $unit is not enabled — run: systemctl --user enable --now $unit" \
+         "(SETUP.md carries the enable route for each repo timer)"
   done
   exit 1
 fi
