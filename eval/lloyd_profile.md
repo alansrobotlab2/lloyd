@@ -198,8 +198,10 @@ projects. It also modifies its own code through a gated loop.
    compaction/context-rot arms would not catch.
 6. Harness robustness: tool-call parsing edge cases, empty tool pools,
    model drift into prose tool calls, repetition loops.
-7. Inference efficiency on 24 GB: KV cache pressure at long context,
-   NVFP4/GGUF quality trade-offs, speculative decoding not in use.
+7. Inference efficiency on 24 GB: KV cache pressure at long context, NVFP4/GGUF
+   quality trade-offs. Speculative decoding is in use (MTP, 3 speculative tokens), so
+   what is unknown is its acceptance rate — `vllm:spec_decode_num_accepted_tokens_total`
+   / `vllm:spec_decode_num_draft_tokens_total` on `:8096/metrics` — not whether it is on.
 8. Voice: ~38 s cold start, latency from ASR to first spoken word, wake word.
 9. Research pipeline: deep research off a registry; quality of synthesis and
    dedupe of topics is unmeasured.
