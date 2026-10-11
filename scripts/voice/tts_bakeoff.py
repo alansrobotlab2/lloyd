@@ -151,6 +151,11 @@ def paced(tokens: list[str], rate: float, t0: float) -> Iterator[str]:
 
 # ── runners ─────────────────────────────────────────────────────────────────
 
+class NonAudioResponse(RuntimeError):
+    """The speech endpoint answered with something that is not waveform bytes,
+    so decoding it as s16le would be measuring framing instead of audio."""
+
+
 class OpenAIRunner:
     """Any OpenAI-style `/v1/audio/speech` that streams raw s16le PCM."""
 
@@ -162,12 +167,33 @@ class OpenAIRunner:
         self.extra = extra or {}
 
     def stream(self, text: str) -> Iterator[np.ndarray]:
+        # `stream_format: "audio"` is what makes vLLM-Omni — production's engine
+        # since 2026-10-09 — send the s16le this loop decodes; `stream: true`
+        # alone selects `text/event-stream` carrying base64 of it. The worker
+        # has sent the field since the switch (agent-services/livekit_worker.py)
+        # and the vendored server ignores it. `--extra` stays last so a
+        # candidate that needs a different body still wins; the guard below is
+        # what catches an override, or a server, that gets it wrong. See #2528.
         body = {"model": self.model, "input": text, "voice": self.voice,
-                "response_format": "pcm", "stream": True, "speed": 1.0, **self.extra}
+                "response_format": "pcm", "stream": True, "speed": 1.0,
+                "stream_format": "audio", **self.extra}
         req = urllib.request.Request(self.url, data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
         carry = b""
         with urllib.request.urlopen(req, timeout=300) as r:
+            ct = r.headers.get("Content-Type") or ""
+            if ct.split(";")[0].strip().lower().startswith("text/"):
+                # Refuse `text/*`, do NOT require an `audio/` prefix: the broken
+                # answer is text/event-stream and the correct one is audio/pcm,
+                # so a guard matching "stream" would pass the case it is here to
+                # catch — and a candidate answering application/octet-stream is
+                # sending real bytes. Measured on :8093 2026-10-10: 61921 SSE
+                # bytes decoded as s16le read rms -3.83 dBFS / crest +3.66 dB
+                # against the real 42240-byte PCM's -19.1 / +12.3, inflating
+                # audio_s to 1.29 s from 0.88 s. Wrong, not noisy: stop.
+                raise NonAudioResponse(
+                    f"{self.url} answered content-type {ct!r}, not waveform: "
+                    f"refusing to decode it as s16le PCM")
             while True:
                 b = r.read1(4096) if hasattr(r, "read1") else r.read(4096)
                 if not b:
