@@ -78,10 +78,15 @@ ARCH = ROOT / "architecture"
 EVAL = ROOT / "eval"
 HOME = Path.home()
 
-#: The four docs this item added. Named explicitly rather than glob-fresh:
-#: a new doc elsewhere must not silently join the surface this file grades.
+#: The docs this file pins as units, beyond the corpus-wide command sweep.
+#: Named explicitly rather than glob-fresh: a new doc elsewhere must not
+#: silently join the surface this file grades.
+#: `threat-model.md` joined on #2563: a doc whose entire payload is a table of
+#: path citations is the strongest case in the corpus for having those citations
+#: read against the tree rather than re-read by a human, and it is graded here
+#: rather than by a checker of its own so the rule has one owner.
 NEW_DOCS = ("measurement.md", "context-window.md", "authority-surfaces.md",
-            "browser-side-panel.md")
+            "browser-side-panel.md", "threat-model.md")
 
 #: How many top-level architecture docs exist. The command sweep reads the glob,
 #: not this number; the number is the vacuity guard, because a `glob("*.md")`
@@ -89,9 +94,9 @@ NEW_DOCS = ("measurement.md", "context-window.md", "authority-surfaces.md",
 #: a sweep over "every doc" pass by sweeping nothing. A doc landing here moves
 #: the number, and that is the sweep admitting its new subject, which is the
 #: #1890 ruling: every doc is graded, so every doc has to be in the surface.
-ARCH_DOC_SURFACE = 35   # + guard-coverage.md (#1948, 2026-10-01)
+ARCH_DOC_SURFACE = 36   # + threat-model.md (#2563, 2026-10-11)
 
-#: The heading every one of the four carries, in the words clause 3 asks for.
+#: The heading every doc in `NEW_DOCS` carries, in the words clause 3 asks for.
 NOT_COVERED = "What this doc does not cover"
 
 #: `eval/` directories that are artifacts, not arms. `__pycache__` is here
