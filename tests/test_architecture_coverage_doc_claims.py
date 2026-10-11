@@ -1,11 +1,11 @@
-"""#1699 pins the four architecture docs that made the unreviewed areas review
+"""#1699 pins the architecture docs that made the unreviewed areas review
 units to the tree they inventory.
 
 `workers/sources/arch_review.py::doc_slugs` globs top-level
 `architecture/*.md`, so a doc is what turns an area into something the
 cadence reads at all — an undocumented area cannot be reached by `groups:`,
 because `parse_groups` only accepts a `<doc-slug>:<section>` pair inside a doc
-that already exists. Four areas had no doc: the eval/bench surface, the context
+that already exists. The areas left without one were the eval/bench surface, the context
 window, write authority across surfaces, and the browser side panel.
 
 A doc that inventories a set rots in one direction only: the set moves and the
@@ -23,9 +23,16 @@ with nothing wrong:
   * paths resolve against the working tree, not `git ls-files` — a doc may cite
     a git-ignored runtime file (`data/tool_overrides.yaml`) that is real on this
     box and absent from every worktree, and a tracked-files check reports it as
-    missing. `$LLOYD_DATA/...` and `~/...` resolve under the data root and
-    the home directory, because the scored store moved there on 2026-09-22
-    (`architecture/data-home.md`) and a repo-rooted check would call it absent.
+    missing; and a bare citation resolves under *every* root this box has — the
+    checkout, the vault, the data root and the account home — because the docs
+    inventory all four. `$LLOYD_DATA/...` and `~/...` name their own root and
+    keep it: the scored store moved out of the tree on 2026-09-22
+    (`architecture/data-home.md`), a repo-rooted check called it absent, and a
+    check that let a `~/` spelling fall back into the repo would green a
+    citation whose whole point is that it is not in the repo. The two roots the
+    gate moves (`$HOME`, and `LLOYD_DATA` for the rungs that execute candidate
+    code) are read through `app.data_root`'s passwd-derived names as well, so a
+    real path is not reported missing because the gate redirected its root.
 
 A *command* is a citation of the same kind, and it needed an extractor of its
 own: `_CITATION` only fires on a span carrying a slash, so `run-fixtures-eval` —
@@ -35,21 +42,36 @@ and the check above stayed green while an operator following the doc got a usage
 dump and exit 1 (#1792). The command half is at the bottom of this file and owes
 the same three proofs.
 
-**Two rulings about that command half, shipped here because they are the reason
-it is shaped as it is (#1890).**
+**Three rulings about what is graded and where a citation lands, shipped here
+because they are the reason the file is shaped as it is (#1890, #2582).**
 
-*It grades every top-level `architecture/*.md`, not the four docs of #1699.*
-`NEW_DOCS` stays what it always was — the four docs whose *path* assertions,
-index rows and "does not cover" sections this file pins — but a wrong *verb*
+*The command half grades every top-level `architecture/*.md`.* A wrong *verb*
 fails the same way wherever it is written: `workers/sources/arch_review.py`
-makes every doc a review unit, and a command claim in one of the other thirty
-sends an operator to the same usage dump and exit 1. Grading four of thirty-four
-docs was prevention that protected 2 of the corpus's 15 command spans; the other
-13 went ungraded, and the one report the corpus-wide sweep produced
+makes every doc a review unit, and a command claim in a doc nobody reads sends
+an operator to the same usage dump and exit 1. Grading only the docs of #1699
+was prevention that protected a couple of the corpus's command spans and left
+the rest ungraded, and the one report the corpus-wide sweep produced
 (`harness.md:1573`) was in an ungraded doc. So the command sweep reads the glob.
-The cost is that a newly written doc joins the surface the moment it lands, which
-is the point: `test_the_command_sweep_covers_every_architecture_doc` names the
-count so a glob that stopped finding the corpus cannot pass quietly.
+
+*So does the path half (#2582), and it always should have.* A doc's payload is
+mostly path citations, and `test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree`
+is parameterized over the same `ARCH.glob("*.md")` the command sweep and
+`workers/sources/arch_review.py::doc_slugs` read — not over `NEW_DOCS`, which
+was the "protected a named few of the corpus" shape the paragraph above was
+written against, kept for paths. The cost is the same one and is the point: a
+doc written tomorrow is graded the moment it lands. `ARCH_DOC_SURFACE` is the
+vacuity guard for both halves — the glob's own count has to equal it, so a
+sweep over "every doc" cannot mean a sweep over nothing — and
+`test_the_path_surface_is_the_whole_corpus_the_vacuity_number_holds` pins that
+for the path node while the command nodes pin it for theirs.
+
+What a widened path check finds on a corpus written before it existed is
+`PATH_CITATION_EXEMPTIONS`: per-doc citation spellings that are allowed not to
+be on disk, each with the reason. The anti-rot in that list is mechanical, not a
+reader — `test_every_path_citation_exemption_is_a_citation_the_doc_actually_makes`
+refuses an entry no doc cites (a stale exemption, or one invented to swallow
+future rot), so the only way to grow the list is to write the sentence that
+needs it.
 
 *A module with no dispatch chain is still skipped, and that is not an exemption.*
 Nothing beside a library or a flag-only script can be a subcommand, and reporting
@@ -66,6 +88,7 @@ from __future__ import annotations
 import ast
 import collections
 import json
+import os
 import re
 import subprocess
 import sys
@@ -77,6 +100,47 @@ ROOT = Path(__file__).resolve().parent.parent
 ARCH = ROOT / "architecture"
 EVAL = ROOT / "eval"
 HOME = Path.home()
+
+#: The roots a bare architecture citation may legitimately land in, in the order
+#: the check tries them. The docs inventory this machine, and this machine keeps
+#: four trees: the checkout, the vault, the runtime data root and the account
+#: home. Reading only the checkout is what made #2582's 31 ungraded docs safe to
+#: write — and unsafe to read: a citation of `lloyd/SOUL.md`, `_pipeline/` or
+#: `.config/systemd/user/` is true on this box and false under `ROOT`, so an
+#: extractor that asked only the repo could never be widened without drowning in
+#: reports that are the extractor's, not the doc's.
+#:
+#: The vault and data roots are `app.data_root`'s passwd-derived names, not
+#: `Path.home()`'s. Inside an automod gate `HOME` is the round's symlink farm and
+#: `LLOYD_DATA` is the round's own empty root (`scripts/automod/gate.py::_child_env`,
+#: `scripts/automod/worktree.py::HOME_LINK_SKIP`), so `Path.home()/"lloyd-data"`
+#: there is a directory holding nothing — where production's `_pipeline/` and
+#: `sessions/` are real. A check that read the moved root off `$HOME` would go
+#: red at the gate for a citation that is true, which is the failure mode
+#: `app/paths.py`'s header exists to prevent.
+def _passwd_root(name: str, fallback: Path) -> tuple[Path, str]:
+    try:
+        from app.data_root import ACCOUNT_HOME
+    except Exception:                          # pragma: no cover - stdlib-only
+        return fallback, "Path.home() (app.data_root unavailable)"
+    return ACCOUNT_HOME / name, f"app.data_root.ACCOUNT_HOME/{name}"
+
+
+ACCOUNT_HOME, DATA_ROOT, VAULT_ROOT = (
+    _passwd_root("", HOME)[0], _passwd_root("lloyd-data", HOME / "lloyd-data")[0],
+    _passwd_root("obsidian", HOME / "obsidian")[0])
+
+CITATION_ROOTS: tuple[tuple[str, Path], ...] = (
+    ("checkout", ROOT),
+    ("vault", VAULT_ROOT),
+    ("data", DATA_ROOT),
+    ("home", ACCOUNT_HOME),
+)
+
+#: The data root the running process was pointed at, honoured beside the
+#: production one so a `$LLOYD_DATA/...` citation resolves wherever `LLOYD_DATA`
+#: says the data lives (a round's root, a canary's, a `tmp_path` in a unit test).
+ENV_DATA_ROOT = Path(os.environ["LLOYD_DATA"]) if os.environ.get("LLOYD_DATA") else None
 
 #: The docs this file pins as units, beyond the corpus-wide command sweep.
 #: Named explicitly rather than glob-fresh: a new doc elsewhere must not
@@ -189,10 +253,77 @@ _CITATION = re.compile(
 
 def _resolve(prefix: str | None, rel: str) -> Path:
     if prefix == "$LLOYD_DATA/":
-        return HOME / "lloyd-data" / rel
+        return (ENV_DATA_ROOT or DATA_ROOT or HOME / "lloyd-data") / rel
     if prefix == "~/":
         return HOME / rel
     return ROOT / rel
+
+
+def _rel_within(path: Path) -> Path | None:
+    """`path` relative to whichever known root it sits under, or None.
+
+    The inverse of `_resolve`, needed because `unresolved_citations` is handed
+    resolved paths rather than the spans they came from: to ask the other roots
+    the same question it has to recover the relative spelling first. The data
+    root the process was pointed at is tried before the checkout, so a
+    `$LLOYD_DATA/...` citation aimed at a round's or a fixture's root still
+    yields its bare relative name.
+    """
+    for base in (ENV_DATA_ROOT, ROOT, DATA_ROOT, VAULT_ROOT, ACCOUNT_HOME, HOME):
+        if base is None:
+            continue
+        try:
+            return Path(path).relative_to(base)
+        except ValueError:
+            continue
+    return None
+
+
+def citation_roots(path: Path) -> list[Path]:
+    """Every path a citation that resolved to `path` could equally mean.
+
+    A doc citing `lloyd/SOUL.md` means the vault's, and one citing `_pipeline/`
+    means the data root's; neither spelling names its root, so the honest
+    question is "does this relative path exist anywhere this machine keeps
+    files", not "is it under the checkout". A path sitting under no known root
+    comes back alone, so a citation to somebody else's tree is still reported
+    against the one place it was read as.
+    """
+    rel = _rel_within(path)
+    if rel is None:
+        return [Path(path)]
+    out = [base / rel for _, base in CITATION_ROOTS]
+    if ENV_DATA_ROOT is not None:
+        out.insert(0, ENV_DATA_ROOT / rel)
+    out.append(Path(path))
+    return list(dict.fromkeys(out))
+
+
+def resolve_citation(path: Path) -> Path | None:
+    """The first root that actually holds `path`, or None if none does."""
+    for cand in citation_roots(path):
+        if cand.exists():
+            return cand
+    return None
+
+
+def cited_citations(text: str) -> list[tuple[str, Path, int | None]]:
+    """`(span as written, resolved path, line anchor)` for every citation.
+
+    The span is kept because the exemption list is keyed on what the doc wrote,
+    not on the path the extractor built from it: an entry has to be checkable
+    against the doc, and `lloyd/SOUL.md` is the citation a reader can find,
+    whereas `/home/…/lloyd/SOUL.md` is an artefact of which root won.
+    """
+    out = []
+    for span in _CODE_SPAN.findall(text):
+        m = _CITATION.match(span.strip())
+        if not m or "/" not in m.group("path"):
+            continue
+        out.append((span.strip(),
+                    _resolve(m.group("pre"), m.group("path")),
+                    int(m.group("line")) if m.group("line") else None))
+    return out
 
 
 def cited_paths(text: str) -> list[tuple[Path, int | None]]:
@@ -200,15 +331,9 @@ def cited_paths(text: str) -> list[tuple[Path, int | None]]:
     working tree — deliberately NOT `git ls-files`, because a citation has to
     resolve where the reader is standing and some real ones are untracked;
     `$LLOYD_DATA/...` against `~/lloyd-data`, the root the mover moved them to;
-    `~/...` against home."""
-    out = []
-    for span in _CODE_SPAN.findall(text):
-        m = _CITATION.match(span.strip())
-        if not m or "/" not in m.group("path"):
-            continue
-        out.append((_resolve(m.group("pre"), m.group("path")),
-                    int(m.group("line")) if m.group("line") else None))
-    return out
+    `~/...` against home. Whether it is *there* is a separate question and it
+    asks every root: see `citation_roots`."""
+    return [(p, line) for _span, p, line in cited_citations(text)]
 
 
 def git_ignored(paths) -> set[str]:
@@ -244,27 +369,506 @@ def git_ignored(paths) -> set[str]:
 
 
 def unresolved_citations(cited) -> list:
-    """Cited paths that do not exist and are not git-ignored."""
-    ignored = git_ignored([p for p, _ in cited if not Path(p).exists()])
-    return [p for p, _ in cited if not Path(p).exists() and Path(p) not in ignored]
+    """Cited paths that exist under no root the box has and are not git-ignored."""
+    absent = [Path(p) for p, _ in cited if resolve_citation(p) is None]
+    ignored = git_ignored(absent)
+    return [p for p in absent if p not in ignored]
 
 
-@pytest.mark.parametrize("slug", NEW_DOCS)
-def test_every_path_a_new_doc_cites_resolves_in_the_working_tree(slug):
-    cited = cited_paths(_text(slug))
+#: Every top-level architecture doc, read the way the cadence reads it:
+#: `ARCH.glob("*.md")`, the same glob `workers/sources/arch_review.py::doc_slugs`
+#: uses to decide what is a review unit at all. The path half is parameterized
+#: over this and not over `NEW_DOCS` (#2582): a citation is a citation wherever
+#: it is written, and the citations in the docs outside `NEW_DOCS` were read by
+#: no node at all.
+PATH_DOC_SLUGS = [p.name for p in sorted(ARCH.glob("*.md"))]
+
+#: Citations allowed not to be on disk, keyed by the doc that writes them and by
+#: the span exactly as written, with the reason the sentence is honest despite the
+#: missing file. Four kinds earn a place here, and the reason has to name which:
+#:
+#:   * `generated:` runtime state the box writes under one of the roots — absent
+#:     in a fresh worktree, before the job that makes it has run, or in an
+#:     untracked production directory like `agent-services/cert/`;
+#:   * `historical:` the sentence is dated or says itself that the path is gone,
+#:     moved or absent ("no `archived/` directory of any kind", a `git show
+#:     <sha>^:` recovery, a file-name *pattern*), so it is a record, not a pointer;
+#:   * `other-tree:` the path is in a checkout the extractor cannot see — the
+#:     `qmd/` fork, an upstream package's own module layout, a different box —
+#:     including the sub-path case, where the sentence names a directory
+#:     (`agent-services/`) and lists its internals relative to it;
+#:   * `stale:` the path moved or was retired *in this repo* and the sentence
+#:     still points at the old spelling. This is the one kind that is rot: it is
+#:     here because clearing it is a doc edit with its own investigation, not a
+#:     one-line change, which is what the owed-check on #2582 exists to watch.
+#:
+#: What this list must never become is a place to park rot: it is a report with a
+#: date, and `test_every_path_citation_exemption_is_a_citation_the_doc_actually_makes`
+#: refuses an entry no doc cites, so the only way to add one is to write the
+#: sentence that needs it. The owed-check on #2582 rules on whether it shrinks.
+PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
+ 'arch-review.md': {
+  '.archive/':
+   ('historical: the page quotes the `.gitignore` rule'
+    '`/architecture/.archive/` and the directory as it was; this is'
+    'the subject of `test_index_md_sends_a_reader_to_history_rather'
+    '_than_the_absent_archive`'),
+  'agent_mcp/memory_ops.py:12':
+   ('stale: the module was retired in ed78a3a9 with eleven other'
+    'tools, and the worked example still cites its old shape'),
+  'arch-review-conflicts/':
+   ("generated: the gate's per-round conflict reports, written"
+    'under the runtime root by a run and swept with the round'),
+  'pending-research/':
+   ('generated: the vault staging directory the research worker'
+    'fills while a sweep is in flight and empties when the note'
+    'lands'),
+ },
+ 'automod.md': {
+  '.venvs/':
+   ('generated: interpreter venvs the install scripts build, never'
+    'committed, so no worktree has them'),
+  'app/x.py:164':
+   ("historical: the invented path of the section's worked example,"
+    "the same shape as this file's own `app/paths.py:999999`"
+    'control'),
+  'dist/':
+   ("other-tree: the qmd fork's build output, named as the"
+    'directory the daemon serves; the fork sits at `~/lloyd/qmd`,'
+    'which is gitignored and in no worktree'),
+  'graphify-out/':
+   ("generated: graphify's own output directory, written by a hand"
+    'run or a cadence job and left unanchored on purpose'
+    '(automod.md:2088)'),
+ },
+ 'autonomy-jobs.md': {
+  '_archived/':
+   ("historical: the vault task directory's archive subdirectory,"
+    "which the page's point is that a non-recursive `glob` cannot"
+    'see'),
+  'agents/':
+   ('generated: a scan target under the vault that exists only once'
+    'a subagent profile has landed there'),
+  'archived/':
+   ("historical: the sentence's own claim is that no `archived/`"
+    'directory exists under `~/obsidian/backlog/`, which is the'
+    'finding being reported'),
+  'memory/reflection/morning-briefing-latest.md':
+   ('historical: the paragraph says plainly that this documented'
+    'output exists nowhere and the job keeps no durable record'),
+  'proposed/':
+   ('generated: the staging directory the research-queue job'
+    'creates when it has a candidate to propose'),
+  'references/prefs.yaml':
+   ('other-tree: a path inside the skill directory the sentence'
+    'names, which the extractor roots only at the four box roots'),
+  'scripts/groundskeeper/groundskeeper-survey.py':
+   ('stale: retired in 201901b4 with its queue writer and both'
+    'unwired consumers, which is #1012'),
+  'scripts/memory/batch-process-orphans.py':
+   ('stale: retired in the same 201901b4 sweep that took the survey'
+    'and its queue writer (#1012)'),
+  'scripts/memory/process-groundskeeper-queue.py':
+   ('stale: retired in the same 201901b4 sweep that took the survey'
+    'and its queue writer (#1012)'),
+  'scripts/state.json':
+   ('other-tree: a path inside the skill directory the sentence'
+    "names; the job's own state lives under its runtime root"),
+  '~/obsidian/autonomy/85-secondary-routing-eval.md':
+   ('stale: a dated finding names the task file by a number the'
+    'task no longer carries; the skill of that name is at'
+    '`~/obsidian/skills/secondary-routing-eval`'),
+  '~/obsidian/memory/facts/':
+   ('stale: the fact-markdown directory the extraction used to'
+    'write; the store now lives in `kg.sqlite`, so the layout is'
+    'retired'),
+ },
+ 'autonomy.md': {
+  '_archived/':
+   ("historical: the vault task directory's archive subdirectory,"
+    "which the page's point is that a non-recursive `glob` cannot"
+    'see'),
+  '~/obsidian/autonomy/NN-slug.md':
+   ('historical: the file-name pattern the page defines for a task'
+    'file, with `NN` a placeholder rather than a path'),
+ },
+ 'background-runs.md': {
+  'sessions-background/':
+   ('generated: background-run transcripts under the runtime root,'
+    'created by the first concurrent run and bounded by the'
+    'retention sweep'),
+  'workers/handlers/ambient.py':
+   ("stale: the ambient handler's old module path; the tool is"
+    'dispatched from `agent_mcp/ambient.py`, which is what the row'
+    'should say'),
+ },
+ 'backlog.md': {
+  '~/.openclaw/':
+   ('historical: the sentence states that neither `~/.openclaw/`'
+    'nor its database exists on this machine any more'),
+  '~/.openclaw/data/backlog.db':
+   ('historical: the predecessor store the page is describing as'
+    'migrated away, not a live pointer'),
+  '~/Development/clawdeck/':
+   ('other-tree: a checkout on a different box that the page names'
+    'as the predecessor project; it is not on this machine and'
+    'never in a worktree'),
+ },
+ 'data-home.md': {
+  '.venvs/':
+   ('generated: interpreter venvs the install scripts build, never'
+    'committed, so no worktree has them'),
+  'desktop/':
+   ('generated: the desktop-lease directory under the runtime root,'
+    'created the first time the desktop tool grants a lease'),
+  'qmd/':
+   ("other-tree: the qmd fork's checkout in the production tree,"
+    'which `.gitignore:155` excludes, so no worktree contains it'),
+ },
+ 'desktop.md': {
+  'eval/desktop_grounding/':
+   ("historical: the page's own finding is that the directory does"
+    'not exist, which is why the section could not cite an outcome'),
+  'tools/computer_use/':
+   ('other-tree: a directory of the upstream hermes-agent project'
+    'the row names, whose tree the extractor cannot see'),
+  '~/lloyd-data/desktop/lease.json':
+   ('generated: the lease file the desktop tool writes when it'
+    'first grants one; the directory is not there before the'
+    'feature runs'),
+ },
+ 'djev.md': {
+  'server/structured_server.py':
+   ('other-tree: a file of the upstream djev-spark repository the'
+    'same row names, not of this checkout'),
+ },
+ 'editing-safeguards.md': {
+  'app/inner_voice/heuristics.py':
+   ('stale: retired in 4da219fa with the ensemble and grading'
+    'machinery it belonged to; the sentence predates the thin-'
+    'observer rewrite'),
+ },
+ 'guard-coverage.md': {
+  '.venvs/':
+   ('generated: interpreter venvs the install scripts build, never'
+    'committed, so no worktree has them'),
+ },
+ 'harness.md': {
+  'entrypoints/chat_utils.py:2000':
+   ('other-tree: a module inside the upstream vLLM package whose'
+    "line the page cites; that layout is not this repo's"),
+ },
+ 'index.md': {
+  '.archive/':
+   ('historical: the page quotes the `.gitignore` rule'
+    '`/architecture/.archive/` and the directory as it was; this is'
+    'the subject of `test_index_md_sends_a_reader_to_history_rather'
+    '_than_the_absent_archive`'),
+  'architecture/.archive/':
+   ("historical: the archive rule #2582 corrected in this page's"
+    'own preamble: the name is a `.gitignore` pattern and the'
+    'directory is absent'),
+ },
+ 'infrastructure.md': {
+  'agent-services/autonomy.service':
+   ('stale: the unit is at `agent-'
+    'services/systemd/autonomy.service`; the row drops the'
+    'directory and so names a path the tree has never had'),
+  'agent-services/cert/':
+   ('generated: TLS material `scripts/gen-cert.sh` writes into the'
+    "production tree; a worktree has no copy of the machine's"
+    'secrets'),
+  'bin/start-livekit-server.sh':
+   ('other-tree: a sub-path of `agent-services/`, the directory the'
+    'section is about, so the real file is `agent-services/bin/...`'),
+  'bin/start-obsidian-sync.sh':
+   ('other-tree: a sub-path of `agent-services/`, the directory the'
+    'section is about, so the real file is `agent-services/bin/...`'),
+  'bin/start-qwen3-tts.sh':
+   ('other-tree: a sub-path of `agent-services/`, the directory the'
+    'section is about, so the real file is `agent-services/bin/...`'),
+  'bin/start-qwen38-flash-next.sh':
+   ('other-tree: a sub-path of `agent-services/`, the directory the'
+    'section is about, so the real file is `agent-services/bin/...`'),
+  'bin/start-secondary.sh':
+   ('other-tree: a sub-path of `agent-services/`, the directory the'
+    'section is about, so the real file is `agent-services/bin/...`'),
+  'conf.d/':
+   ('other-tree: a sub-path of `agent-services/`, whose supervisor'
+    'drop-in directory the sentence is describing'),
+  'conf/livekit.yaml':
+   ('other-tree: a sub-path of `agent-services/`, so the file the'
+    'row means is `agent-services/conf/livekit.yaml`'),
+  'middlewares/cors.py:91':
+   ('other-tree: a module inside the upstream vLLM package the line'
+    'is cited from, not a path in this repository'),
+  'scripts/qmd-watcher.sh':
+   ('other-tree: a sub-path of `agent-services/`, so the file is'
+    '`agent-services/scripts/qmd-watcher.sh`'),
+ },
+ 'knowledge-graph.md': {
+  'facts-rebuild/':
+   ('generated: the staging directory a fact-store rebuild writes'
+    'before it swaps the new store in, and is removed after'),
+  'vLLM/vLLM-state.md':
+   ('historical: a vault note the rebuild collapsed into another'
+    'entity; the collision count carried beside it is a dated'
+    'figure'),
+ },
+ 'memory.md': {
+  'agent_mcp/memory_ops.py':
+   ('stale: the module was retired in ed78a3a9 with eleven other'
+    'duplicate or subsumed tools'),
+ },
+ 'mission-control.md': {
+  'agent-services/cert/':
+   ('generated: TLS material `scripts/gen-cert.sh` writes into the'
+    "production tree; a worktree has no copy of the machine's"
+    'secrets'),
+ },
+ 'qmd.md': {
+  '$LLOYD_DATA/_pipeline/reflection/qmd-stray-keep-list.json':
+   ('generated: the keep-list the qmd stray sweep writes under the'
+    'runtime root when it next runs'),
+  'dist/':
+   ("other-tree: the qmd fork's build output, named as the"
+    'directory the daemon serves; the fork sits at `~/lloyd/qmd`,'
+    'which is gitignored and in no worktree'),
+  'dist/cli/qmd.js':
+   ("other-tree: the qmd fork's built entry point, named in the"
+    'same sentence as the fork at `~/lloyd/qmd`'),
+  'src/':
+   ("other-tree: the qmd fork's TypeScript sources, named in the"
+    'same sentence as the fork at `~/lloyd/qmd`'),
+  'src/llm.ts':
+   ("other-tree: the qmd fork's model resolver, named in the same"
+    'sentence as the fork at `~/lloyd/qmd`'),
+  'src/mcp/server.ts':
+   ("other-tree: the qmd fork's REST layer, named in the same"
+    'sentence as the fork at `~/lloyd/qmd`'),
+  'src/store.ts':
+   ("other-tree: the qmd fork's indexing layer, named in the same"
+    'sentence as the fork at `~/lloyd/qmd`'),
+  'src/vecindex.ts':
+   ("other-tree: the qmd fork's vector index, named in the same"
+    'sentence as the fork at `~/lloyd/qmd`'),
+ },
+ 'research-pipeline.md': {
+  'pending-research/domain-research/':
+   ('generated: the vault staging directory the research worker'
+    'fills while a domain sweep is in flight, empty between runs'),
+  '~/obsidian/lloyd/research-queue.md':
+   ('stale: the queue lives at `~/obsidian/research-queue.md` (with'
+    '`lloyd/research-queue-archive.md` beside it), so the'
+    "sentence's directory segment is stale"),
+ },
+ 'retrieval.md': {
+  'architecture/recall-research-2026-09-24.md':
+   ("historical: deleted in 4a6cdd54; index.md's Retired section"
+    'reads it back with `git show`, which is what the citation'
+    'means'),
+ },
+ 'skills.md': {
+  '.archived/':
+   ('generated: the quarantine directory a skill is renamed into,'
+    'present only while a skill is actually parked there'),
+  'arxiv/scripts/':
+   ('other-tree: a supporting path inside a skill directory under'
+    'the vault, which the sentence names rather than spells out'),
+  'autolink/autolink.py':
+   ('other-tree: a supporting path inside a skill directory under'
+    'the vault, which the sentence names rather than spells out'),
+  'github-pr-workflow/references/':
+   ('other-tree: a supporting path inside a skill directory under'
+    'the vault, which the sentence names rather than spells out'),
+  '~/.npm-global/lib/node_modules/openclaw/skills/':
+   ("historical: the retired openclaw install's skill root, which"
+    'the page lists as a location the migration left'),
+  '~/.openclaw/skills/':
+   ("historical: the retired openclaw install's skill root, listed"
+    'as a location the migration away from it left behind'),
+  '~/lloyd/skills/':
+   ('historical: the pre-migration skills root; the library moved'
+    'to `~/obsidian/skills/`, which is why the row lists it as a'
+    'stale location'),
+ },
+ 'subliminal.md': {
+  'agent_mcp/subliminal.py':
+   ('stale: the module was retired in f5789b71 by the'
+    'prefetch/subliminal rework that moved the machinery elsewhere'),
+  'architecture/recall-research-2026-09-24.md':
+   ("historical: deleted in 4a6cdd54; index.md's Retired section"
+    'reads it back with `git show`, which is what the citation'
+    'means'),
+  'sessions-background/':
+   ('generated: background-run transcripts under the runtime root,'
+    'created by the first concurrent run and bounded by the'
+    'retention sweep'),
+  'vault-derived/sessions-background/':
+   ('generated: a directory of the nightly derived index under the'
+    'vault, rebuilt by the consolidation job and absent before its'
+    'first run'),
+  'vault-derived/sessions/':
+   ('generated: a directory of the nightly derived index under the'
+    'vault, rebuilt by the consolidation job and absent before its'
+    'first run'),
+  '~/lloyd/agent_mcp/subliminal.py':
+   ('stale: the same f5789b71 retirement, spelled from the account'
+    'home by the sentence that names the checkout'),
+  '~/lloyd/skills/':
+   ('historical: the pre-migration skills root; the library moved'
+    'to `~/obsidian/skills/`, which is why the row lists it as a'
+    'stale location'),
+ },
+ 'testing.md': {
+  '.venvs/':
+   ('generated: interpreter venvs the install scripts build, never'
+    'committed, so no worktree has them'),
+  'agent-services/cert/':
+   ('generated: TLS material `scripts/gen-cert.sh` writes into the'
+    "production tree; a worktree has no copy of the machine's"
+    'secrets'),
+  'qmd/':
+   ("other-tree: the qmd fork's checkout in the production tree,"
+    'which `.gitignore:155` excludes, so no worktree contains it'),
+ },
+ 'tools.md': {
+  'graphify-out/':
+   ("generated: graphify's own output directory, written by a hand"
+    'run or a cadence job and left unanchored on purpose'
+    '(automod.md:2088)'),
+ },
+ 'vllm.md': {
+  '.archive/':
+   ('historical: the page quotes the `.gitignore` rule'
+    '`/architecture/.archive/` and the directory as it was; this is'
+    'the subject of `test_index_md_sends_a_reader_to_history_rather'
+    '_than_the_absent_archive`'),
+  'v1/core/kv_cache_utils.py':
+   ('other-tree: a module inside the upstream vLLM package the'
+    'paragraph is describing, not a path in this repository'),
+  '~/.config/systemd/user/nvidia-power-limit.service':
+   ('generated: the installed copy of `agent-'
+    'services/systemd/nvidia-power-limit.service`, which the'
+    'install step links into the user unit directory when it runs'),
+ },
+ 'voice.md': {
+  'agent-services/services/tts/qwen3-tts/':
+   ('generated: an untracked service checkout in the production'
+    'tree, so a worktree has never contained it'),
+  'api/backends/optimized_backend.py':
+   ('other-tree: a module of the upstream vllm-omni project the'
+    'paragraph names, whose tree the extractor cannot see'),
+  'bin/':
+   ('other-tree: a sub-path of `agent-services/`, the directory the'
+    'section enumerates'),
+  'listen/decide/':
+   ('other-tree: a sub-path of the voice service directory the'
+    'section enumerates, not of the repository root'),
+  'models/':
+   ('other-tree: a sub-path of the voice service directory the'
+    'section enumerates, holding downloaded weights that are never'
+    'committed'),
+  'qwen3-tts/models/':
+   ('other-tree: a sub-path of the untracked qwen3-tts service'
+    'checkout, holding downloaded weights that are never committed'),
+  'resemblyzer/audio.py':
+   ('other-tree: a module of the upstream resemblyzer package the'
+    'sentence names, whose tree the extractor cannot see'),
+  'scripts/ww_replay.py':
+   ('other-tree: a sub-path of `agent-services/`, so the file meant'
+    'is `agent-services/scripts/ww_replay.py`'),
+  'stop/':
+   ('other-tree: a sub-path of the voice service directory the'
+    'section enumerates'),
+  'voice/addressee.py':
+   ('other-tree: a sub-path of `agent-services/`, so the file meant'
+    'is `agent-services/voice/addressee.py`'),
+  'voice/thinking.py':
+   ('other-tree: a sub-path of `agent-services/`, so the file meant'
+    'is `agent-services/voice/thinking.py`'),
+  'voice/timeline.py':
+   ('other-tree: a sub-path of `agent-services/`, so the file meant'
+    'is `agent-services/voice/timeline.py`'),
+  'voice/wake.py':
+   ('other-tree: a sub-path of `agent-services/`, so the file meant'
+    'is `agent-services/voice/wake.py`'),
+  'voice_library/profiles/dave_cullen/':
+   ('generated: a cloned voice profile produced by a sample run, so'
+    'it exists only on a box where that profile was built'),
+  '~/Projects/lloyd-services/':
+   ("other-tree: a checkout on the machine this page's history"
+    'describes, not on this box and never in a worktree'),
+ },
+ 'workers-jobs.md': {
+  'distill/':
+   ("historical: the sentence's finding is that the staging"
+    'directory does not exist, from a layout the job no longer uses'),
+  'pending-research/':
+   ('generated: the vault staging directory the research worker'
+    'fills while a sweep is in flight and empties when the note'
+    'lands'),
+  'pending-research/domain-research/':
+   ('generated: the vault staging directory the research worker'
+    'fills while a domain sweep is in flight, empty between runs'),
+ },
+ 'workers.md': {
+  'pending-research/':
+   ('generated: the vault staging directory the research worker'
+    'fills while a sweep is in flight and empties when the note'
+    'lands'),
+ },
+}
+
+
+def _resolved_or_none(path: Path) -> Path | None:
+    return resolve_citation(path)
+
+
+@pytest.mark.parametrize("slug", PATH_DOC_SLUGS)
+def test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree(slug):
+    """Clause 1 (#2582): the path check reads the corpus, not a named few.
+
+    Existence is asked of every root the box has (`citation_roots`), because the
+    corpus cites the vault, the data root and the account home as plainly as it
+    cites the checkout — see the header. A citation still absent everywhere is
+    legitimate only if `PATH_CITATION_EXEMPTIONS` carries the doc's reason for
+    it, and a line anchor is checked against the file the citation actually
+    resolved to, not against the checkout's guess at it.
+    """
+    cited = cited_citations(_text(slug))
     assert cited, f"{slug} cites no path at all — the doc has stopped being checkable"
-    missing = [str(p) for p in unresolved_citations(cited)]
-    too_short = [f"{p}:{n}" for p, n in cited
-                 if p.exists() and n is not None
-                 and len(p.read_text(encoding="utf-8", errors="replace").splitlines()) < n]
-    assert not missing, f"{slug} cites paths that are not on disk: {missing}"
-    assert not too_short, f"{slug} cites line numbers past the end of the file: {too_short}"
+    exempt = PATH_CITATION_EXEMPTIONS.get(slug, {})
+    resolved = []
+    for _span, path, line in cited:
+        hit = _resolved_or_none(path)
+        if hit is None:
+            continue
+        resolved.append(hit)
+        if line is not None:
+            n_lines = len(hit.read_text(encoding="utf-8", errors="replace").splitlines())
+            assert n_lines >= line, (
+                f"{slug} cites {hit}:{line}, but that file has {n_lines} lines — a "
+                "line anchor past the end is a pointer to nothing")
+    assert resolved, (
+        f"{slug} cites {len(cited)} paths and not one of them exists under any root "
+        "the box has — a doc whose every citation is exempt has stopped being "
+        "checkable, which is the failure the exemption list exists to be unable to hide")
+    absent = [pth for _s, pth, _l in cited if _resolved_or_none(pth) is None]
+    ignored = git_ignored(absent)              # one batched call for the whole doc
+    missing = sorted({span for span, path, _line in cited
+                      if _resolved_or_none(path) is None
+                      and path not in ignored and span not in exempt})
+    assert not missing, (
+        f"{slug} cites paths that exist under none of the "
+        f"{len(CITATION_ROOTS)} roots, are not git-ignored, and carry no exemption "
+        f"reason: {missing}")
 
 
 def test_the_path_extractor_is_what_the_check_depends_on():
     """Negative control over deliberately wrong text: one real path, one
     invented one, one line number past the end. If the extractor could not tell
-    these apart, `test_every_path_a_new_doc_cites_resolves_in_the_working_tree`
+    these apart, `test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree`
     would pass on a doc full of fiction."""
     real = "app/paths.py"
     text = ("see `app/paths/no_such_module_really.py`, then `$LLOYD_DATA/eval/nope/`, "
@@ -274,9 +878,17 @@ def test_the_path_extractor_is_what_the_check_depends_on():
     cited = cited_paths(text)
     paths = [p for p, _ in cited]
     assert ROOT / real in paths, "the extractor missed a path that is plainly there"
-    assert HOME / "lloyd-data/eval/nope" in paths, (
+    # The data root a run is pointed at is not always `~/lloyd-data`: conftest
+    # gives the suite a scratch one, and a gate round points `LLOYD_DATA` at the
+    # round's. The assertion is that the prefix became a path under *that* root,
+    # which is the behaviour the resolver owes, not which directory it names.
+    data_span = [q for q in paths if q.name == "nope" and "eval" in q.parts]
+    assert data_span, (
         "a $LLOYD_DATA citation was not extracted, so the data-root half of the "
         "resolution check has nothing to resolve")
+    assert all(q.parent == (ENV_DATA_ROOT or DATA_ROOT) / "eval" for q in data_span), (
+        f"the $LLOYD_DATA citation resolved outside the data root the run names "
+        f"({ENV_DATA_ROOT or DATA_ROOT}): {data_span}")
     missing = {str(p) for p in paths if not p.exists()}
     assert any("no_such_module_really" in m for m in missing), (
         "an invented path slipped through the extractor, so the resolution check "
@@ -296,6 +908,291 @@ def test_the_path_extractor_is_what_the_check_depends_on():
     anchored = sorted(n for p, n in cited if p == ROOT / real and n)
     assert anchored == [100, 999999], "line anchors were not parsed beside their paths"
     assert len((ROOT / real).read_text(encoding="utf-8").splitlines()) < 999999
+
+
+# ── #2582: the path surface is the corpus, and a citation lands in any root ───
+
+def test_the_path_surface_is_the_whole_corpus_the_vacuity_number_holds():
+    """Clause 1's other half: the widened node's id-set is the corpus, and the
+    corpus has a size.
+
+    `test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree` is
+    parameterized over `PATH_DOC_SLUGS`, which is the glob's own output — so if
+    the glob ever finds nothing (a moved `architecture/`, a wrong `ROOT`, a
+    worktree cut before the docs landed) pytest collects no id of that node and
+    the widening passes by grading nothing. A parametrize over a glob needs a
+    count beside it: this is the vacuity guard the #1890 command nodes have
+    always had, now over the path half too.
+    """
+    on_disk = [p.name for p in sorted(ARCH.glob("*.md"))]
+    assert on_disk == PATH_DOC_SLUGS, (
+        "the node's parametrised id-set is no longer the glob it claims to read")
+    assert len(PATH_DOC_SLUGS) == ARCH_DOC_SURFACE, (
+        f"the glob found {len(PATH_DOC_SLUGS)} top-level architecture docs, want "
+        f"{ARCH_DOC_SURFACE}: either a doc landed (the path node grades it now, so "
+        f"move the constant up) or this file is reading the wrong tree")
+    assert set(NEW_DOCS) <= set(PATH_DOC_SLUGS), (
+        "a doc in NEW_DOCS is not in the corpus-wide glob, so the path node the "
+        "#1699 nodes were written beside has quietly narrowed")
+
+
+#: One real citation per root the path check is supposed to consult, drawn from
+#: sentences the corpus already writes, plus one invented path that has to stay
+#: unresolvable. The relative spellings are the point: every example but the
+#: checkout row is a path `ROOT` does not have, so this node fails on a resolver
+#: that went back to asking only the repo — the state #2582 was filed about, and
+#: the state a `citation_roots` that stopped consulting the other roots silently
+#: returns to.
+ROOT_PROOFS: tuple[tuple[str, str], ...] = (
+    ("checkout", "app/harness/safety.py"),      # in the tree under test
+    ("vault", "lloyd/SOUL.md"),                 # the vault's identity file
+    ("data", "_pipeline"),                      # the runtime store's own root
+    ("home", ".config/systemd/user"),           # units outside every tree
+)
+
+#: Invented, and must stay missing under every root.
+FICTIONAL_CITATION = "app/harness/no_such_root_proof_zzz.py"
+
+
+def test_a_cited_path_resolves_under_every_root_the_box_has_not_just_the_repo():
+    """Clause 2: the root map, pinned with one real citation per root and the
+    fiction case beside it.
+
+    `architecture/authority-surfaces.md` cites the vault's `lloyd/SOUL.md` and
+    `architecture/data-home.md` cites `_pipeline/`; both were invisible to the old
+    resolver, which asked only `ROOT` for a spelling that names no root. That is
+    why the widening had to come with a root map rather than with the git-ignore
+    exemption #2582 first proposed: `git check-ignore` answers rc=1 for `sessions`,
+    `_pipeline` and `lloyd/MEMORY.md` — they are not ignored, they are in another
+    tree, which is the one thing `git` was never asked about.
+
+    Asserted per root, and asserted *against the checkout* for the three rows that
+    are not it: a proof that resolved under `ROOT` as well would pass on a
+    repo-only resolver and prove nothing, which is the trap
+    `test_the_identity_file_is_still_cited_and_lands_outside_the_repo` names for
+    the vault row.
+    """
+    named = dict(CITATION_ROOTS)
+    assert [label for label, _ in CITATION_ROOTS] == ["checkout", "vault", "data", "home"]
+    for label, rel in ROOT_PROOFS:
+        assert (named[label] / rel).exists(), (
+            f"the {label} root proof {named[label] / rel} is not on disk, so this "
+            "node is grading a root it cannot see")
+        hit = resolve_citation(ROOT / rel)
+        assert hit is not None, (
+            f"a citation of `{rel}` resolved under no root: the widened check has "
+            f"lost the {label} root, which is the root that makes the corpus's "
+            f"sentence about it true — `{rel}` is not under the checkout")
+        if label != "checkout":
+            assert not (ROOT / rel).exists(), (
+                f"the {label} proof now resolves inside the checkout too, so this "
+                "node can no longer tell a root-map resolver from a repo-only one "
+                f"— move the proof to something only the {label} root has")
+    assert resolve_citation(ROOT / FICTIONAL_CITATION) is None, (
+        f"the invented `{FICTIONAL_CITATION}` resolved, so the widened check "
+        "accepts fiction from some root the map is too generous about")
+
+
+def test_the_root_map_covers_the_roots_and_prices_what_that_gives_up():
+    """The shape of the map, so a later narrowing cannot hide inside a green.
+
+    `citation_roots` is the one place the widened check decides where a citation
+    may live, so its surface is pinned: the four roots of clause 2, the data root
+    the process was pointed at when there is one, and the original path for a
+    citation under no known root (which must come back unchanged rather than get
+    re-rooted onto the box — a doc citing somebody else's tree is a finding, not
+    a path to relocate).
+
+    The priced cost, stated here because it is a real trade and not a bug: an
+    unprefixed spelling that exists under two roots counts as resolved on the
+    first of them, and a `~/`-spelled fiction whose relative name happens to exist
+    in the checkout is not reported. It is the same case the git-ignore exemption
+    already gives up (see `git_ignored`), and the fiction case stays covered by
+    `test_the_path_extractor_is_what_the_check_depends_on`.
+    """
+    rel = "app/paths.py"
+    roots = citation_roots(ROOT / rel)
+    for label, base in CITATION_ROOTS:
+        assert base / rel in roots, (
+            f"citation_roots no longer offers the {label} root: {roots}")
+    untouched = citation_roots(Path("/nowhere/on/this/box/app/x.py"))
+    assert untouched == [Path("/nowhere/on/this/box/app/x.py")], (
+        f"a path under no known root got re-rooted onto the box: {untouched}")
+    assert resolve_citation(Path("/nowhere/on/this/box/app/x.py")) is None
+
+
+def test_the_module_header_states_the_surface_it_grades_without_a_count():
+    """Clause 5: the header says what the path half grades, and no hand-typed
+    count of graded docs survives to rot.
+
+    `architecture/threat-model.md`'s false parenthetical — "as for every other doc
+    in this directory", over a five-name parametrize — was a *prose* claim about
+    the surface, and it survived because the only account of the surface a reader
+    gets is the header. A sentence that names a number is a second definition of
+    the glob, and #2563's finding is that a second definition drifts the moment a
+    doc lands without a test forcing the sentence to move. So the header names the
+    glob and the guard constant by their real names, and a spelled-out or typed
+    count in front of "docs" is what this node refuses.
+    """
+    header = __doc__
+    assert "ARCH.glob(\"*.md\")" in header, (
+        "the header no longer says the path half reads the corpus-wide glob")
+    assert "ARCH_DOC_SURFACE" in header, (
+        "the header no longer names the vacuity guard that keeps a sweep over "
+        "\"every doc\" from meaning a sweep over nothing")
+    counted = re.findall(
+        r"(?i)\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+        r"thirty|thirty-four|thirty-six)\s+(?:top-level\s+)?(?:architecture\s+)?docs?\b",
+        header)
+    assert counted == [], (
+        f"the header types a count of graded docs ({counted}) instead of naming "
+        "the glob — a number here is a second definition of the surface and the "
+        "first thing to go stale when a doc lands")
+
+
+def test_every_path_citation_exemption_is_a_citation_the_doc_actually_makes():
+    """Clause 3's anti-growth rail. An exemption list read only by the check it
+    exempts is how a report quietly becomes a permanent excuse: nothing in the
+    widened node notices an entry whose sentence was deleted, so an unpoliced list
+    outlives its reason and swallows the next author's rot.
+
+    So each entry is checked against the doc it is filed under — the span has to
+    be one that doc still cites, and the reason has to name one of the three kinds
+    `PATH_CITATION_EXEMPTIONS`'s comment admits — and any doc that exempts
+    anything has to have a citation that resolves, which is the same "a doc that
+    cites nothing is an all-clear" rule the widened node enforces from the inside.
+    The scale of the list is asserted too: exemptions are the corpus's debt, and a
+    list reaching a quarter of every citation in it is not a report anybody will
+    clear but a second, undocumented surface.
+    """
+    assert PATH_CITATION_EXEMPTIONS, (
+        "the exemption list is empty while the path node reads the whole corpus. "
+        "An empty list passing here and a corpus passing there are the same green "
+        "for two different reasons — if the corpus really is clean, delete the "
+        "list, this node and the exemption clause in the widened node together")
+    for slug, entries in PATH_CITATION_EXEMPTIONS.items():
+        assert slug in PATH_DOC_SLUGS, (
+            f"{slug} is exempted but is not a top-level architecture doc: an entry "
+            "that survives its doc is an exemption with nothing left to excuse")
+        assert entries, f"{slug} maps to no exemption at all — drop the key"
+        cited = {span for span, _p, _l in cited_citations(_text(slug))}
+        for span, reason in entries.items():
+            assert span in cited, (
+                f"{slug} is exempted for `{span}` but does not cite it: the "
+                "sentence went and the excuse stayed, which is how this list would "
+                "come to cover a citation nobody wrote yet")
+            kind = reason.split(":", 1)[0].strip()
+            assert kind in ("generated", "historical", "other-tree", "stale"), (
+                f"{slug}: the `{span}` exemption reasons with {reason!r}, which "
+                "does not open with one of the four kinds the list admits "
+                "(generated / historical / other-tree / stale) — a fifth kind is "
+                "a decision nobody has reviewed")
+            assert len(reason.split(":", 1)[-1].strip()) > 30, (
+                f"{slug}: the `{span}` exemption reason {reason!r} names a kind "
+                "but no mechanism — say what about this box makes the sentence "
+                "true anyway")
+        assert [p for _s, p, _l in cited_citations(_text(slug))
+                if resolve_citation(p) is not None], (
+            f"{slug} exempts every citation it makes, so nothing about it is "
+            "checkable any more")
+    total = sum(len(v) for v in PATH_CITATION_EXEMPTIONS.values())
+    every_citation = sum(len(cited_citations(_text(slug))) for slug in PATH_DOC_SLUGS)
+    assert total <= every_citation // 4, (
+        f"{total} exemptions against {every_citation} citations in the corpus: the "
+        "widening has stopped reporting rot and started documenting an absence, "
+        "and the honest move is a doc fix or a filed item, not another entry")
+
+
+ARCHIVE_DIR = ARCH / ".archive"
+
+#: The sentence as it stood before #2582, kept as the fixture this node has to
+#: catch. It told a reader that a doc describing something gone "is moved to
+#: `architecture/.archive/` (gitignored)", present tense, in the page every new
+#: author reads first.
+ARCHIVE_CLAIM = "`architecture/.archive/` (gitignored)"
+
+#: What the corrected sentence has to keep saying, and the commit the pre-fix
+#: sentence is read from — this round's base, which stays an ancestor of `main`
+#: however many docs land on top of it. `HEAD` is deliberately not the control:
+#: the moment this fix is committed, `HEAD` is the page that passes.
+ABSENT_CLAIM = "no `architecture/.archive/` directory is present"
+PRE_FIX_INDEX = "828ce7a5"
+
+
+def _live_preamble(text: str) -> str:
+    """The part of `index.md` that speaks in the present tense: everything before
+    the dated Review log. A log line is a record of what somebody believed on a
+    date and stays as written; a preamble sentence is an instruction, and the two
+    are not graded by the same rule — see the same split in
+    `test_arch_review_states_the_archive_directory_is_absent_here`.
+    """
+    cut = text.find("## Review log")
+    assert cut > 0, ("index.md lost its Review log section, so the split this "
+                     "node grades by is no longer there")
+    return text[:cut]
+
+
+def test_index_md_sends_a_reader_to_history_rather_than_the_absent_archive():
+    """Clause 4: the index's own archive sentence, and a node that reads it.
+
+    Three facts, each checked rather than quoted:
+
+    * `architecture/.archive/` is **not in this checkout** — `ls -d` on it is a
+      `No such file`, which is why a present-tense "is moved to" there sent a
+      reader to a path that is not there;
+    * `.gitignore:192` carries `/architecture/.archive/`, and that pattern
+      matches the *trailing-slash* spelling only — `git check-ignore
+      architecture/.archive` returns rc=1. So "(gitignored)" was true of a rule
+      and false of the box, and it was uncatchable by the git-ignore exemption in
+      `unresolved_citations`, which asks the bare spelling;
+    * retirements in this corpus are `git rm`'d and read back with `git show`,
+      which is what `## Retired (in git history alone)` on the same page already
+      does for one doc.
+
+    So the fix is the sentence, and the check is this node rather than a reader:
+    the preamble may not claim the archive is where a doc goes, must say the
+    directory is absent, and must still name git history as where a retirement
+    lives. The control runs the same predicate over the pre-fix page from git, so
+    the node is shown to catch the sentence it exists for.
+    """
+    text = _text("index.md")
+    pre = _live_preamble(text)
+    assert not ARCHIVE_DIR.exists(), (
+        f"{ARCHIVE_DIR} exists again, so this node's premise moved — check whether "
+        "retired docs are being kept there and re-read the sentence it pins")
+    assert ARCHIVE_CLAIM not in pre, (
+        "the index again tells a reader a retired doc is moved to a directory this "
+        "checkout does not have")
+    assert ABSENT_CLAIM in pre, (
+        "the corrected sentence no longer says out loud that the archive directory "
+        "is absent here, which is the half a new author needs")
+    assert "git history" in pre, (
+        "the corrected sentence no longer says where a retirement actually goes")
+    assert "## Retired (in git history alone)" in text, (
+        "the section the preamble points at is gone, so the pointer is the new "
+        "version of the old bug")
+
+    # The git rule the sentence mistook for a fact.
+    probe = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-v",
+                            "architecture/.archive"], capture_output=True, text=True)
+    assert probe.returncode == 1, (
+        f"`git check-ignore architecture/.archive` now says {probe.stdout.strip()!r}; "
+        "the bare spelling the exemption asks about is the one that was never "
+        "ignored, and this node's reading of the incident has to be re-checked")
+    slashed = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-v",
+                             "architecture/.archive/"], capture_output=True, text=True)
+    assert slashed.returncode == 0, (
+        "the trailing-slash spelling stopped matching a .gitignore pattern, so the "
+        "word \"gitignored\" is now false in a different way — see .gitignore:192")
+
+    before = subprocess.run(["git", "-C", str(ROOT), "show",
+                            f"{PRE_FIX_INDEX}:architecture/index.md"],
+                            capture_output=True, text=True)
+    assert before.returncode == 0, before.stderr
+    assert ARCHIVE_CLAIM in _live_preamble(before.stdout), (
+        f"the control lost its bite: {PRE_FIX_INDEX}'s index.md no longer carries "
+        "the sentence this node was written to catch, so the node is green with "
+        "nothing left for it to catch")
 
 
 def test_each_new_doc_is_linked_from_the_index_as_its_own_row():
@@ -333,7 +1230,7 @@ def test_every_wikilink_in_a_new_doc_names_a_top_level_architecture_doc(slug):
 
 
 # --------------------------------------------------------------------------- #
-# The four docs, as review units
+# The #1699 docs, as review units
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("slug", NEW_DOCS)
@@ -347,7 +1244,7 @@ def test_each_new_doc_says_what_it_does_not_cover(slug):
     assert len(bullets) >= 4, (
         f"{slug} §{NOT_COVERED} names {len(bullets)} boundary as bullets. The "
         "boundary of an area is a list of what the NEXT reader has to go "
-        "elsewhere for — all four docs carry at least 4, so a section trimmed to "
+        "elsewhere for — every doc in `NEW_DOCS` carries at least 4, so a section trimmed to "
         "one line is boilerplate wearing the heading, not a boundary")
     assert len(body) >= 400, (
         f"{slug} §{NOT_COVERED} has {len(body)} chars of prose, under the 400 "
@@ -357,7 +1254,7 @@ def test_each_new_doc_says_what_it_does_not_cover(slug):
 
 @pytest.mark.parametrize("slug", NEW_DOCS)
 def test_each_new_doc_is_a_review_unit_the_moment_it_lands(slug):
-    """The whole reason for the four docs: `doc_slugs` globs the directory, so
+    """The whole reason for the #1699 docs: `doc_slugs` globs the directory, so
     landing one is what makes the cadence able to read it. Pinned here rather
     than watched later because the glob is the mechanism, and a rename or a
     move into a subdirectory would quietly un-make the unit."""
@@ -376,7 +1273,7 @@ def test_the_identity_file_is_still_cited_and_lands_outside_the_repo():
     `_resolve` has three branches (line 138): `$LLOYD_DATA/` to the data root, `~/`
     to the home directory, everything else to the source tree. The file header says
     why the second exists — a repo-rooted check calls the moved store absent — and
-    three architecture docs spell vault paths with that prefix (`measurement.md`,
+    These architecture docs spell vault paths with that prefix (`measurement.md`,
     `vault-protection.md`, `workers-jobs.md` all cite `~/obsidian/lloyd/bench`).
     Row 1 spelled the identity file `lloyd/SOUL.md`: no prefix, contains a slash, so
     `_resolve` took the default branch and asked the source tree for
@@ -436,7 +1333,7 @@ THIS_FILE = Path(__file__).resolve().relative_to(ROOT).as_posix()
 
 #: The node #1763 files, spelled with its parametrisation. Named exactly, because
 #: "the check is green" is equally true of a check that is no longer collected.
-NAMED_NODE = ("test_every_path_a_new_doc_cites_resolves_in_the_working_tree"
+NAMED_NODE = ("test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree"
               "[authority-surfaces.md]")
 
 #: Anchored to a decorator at the start of a line, or to a call of the runtime
@@ -469,7 +1366,7 @@ def test_the_gate_selection_drops_nothing_and_the_named_node_passes():
       out of the gate's reach;
     - the run reports one **PASSED line** per node collected less this one, so a
       skipped or xfailed node cannot hide inside a passing exit code;
-    - the node #1763 files — `test_every_path_a_new_doc_cites_resolves_in_the_working_tree`
+    - the node #1763 files — `test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree`
       `[authority-surfaces.md]` — is among them and is reported PASSED **by
       name**, which is the verdict this item was filed for;
     - exit code 0, and no `skipped`/`xfailed` anywhere in the output.
@@ -1180,7 +2077,7 @@ def test_the_rewrite_cost_verdict_names_its_break_sites_and_its_command():
 # as a broken command. Every top-level doc is swept (#1890), so this scoping,
 # not a list of docs or modules, is what keeps the half quiet: of the corpus's 15
 # command spans, 3 sit beside a module with no chain and are skipped on that
-# property alone — see the finding appended to #1792 and the two rulings in this
+# property alone — see the finding appended to #1792 and the rulings in this
 # file's docstring.
 
 _COMMAND_SPAN = re.compile(r"`([^`\n]+)`")
@@ -1547,7 +2444,7 @@ def undispatched_claims(text, label="<doc>"):
 
 
 def test_the_command_sweep_covers_every_architecture_doc():
-    """Clause 1 (#1890): the graded surface is the corpus, not the four #1699 docs.
+    """Clause 1 (#1890): the graded surface is the corpus, not the #1699 docs.
 
     `NEW_DOCS` protected 2 of the corpus's 15 command spans, both in
     `measurement.md`; the other 13 sat in 7 docs no node read, and the report the
@@ -1575,12 +2472,12 @@ def test_the_command_sweep_covers_every_architecture_doc():
                     f"{len(docs)} docs about this machine, which means the "
                     "extractor or the resolver went stale — the same vacuity the "
                     "path half pins at its own extractor")
-    # The widening itself: claims outside the four docs are being graded, not
+    # The widening itself: claims outside the #1699 docs are being graded, not
     # skipped. Anything that narrowed the sweep back — a per-doc exemption, a
     # re-introduced `for slug in NEW_DOCS` — empties this set.
     outside = sorted({g for g in graded if g[0] not in NEW_DOCS})
     assert outside, (
-        "every graded command claim came from the four #1699 docs, so the other "
+        "every graded command claim came from the #1699 docs, so the other "
         f"{ARCH_DOC_SURFACE - len(NEW_DOCS)} docs are grading nothing")
 
     # What it graded, pinned so the aggregate above cannot be satisfied by one
@@ -2793,7 +3690,7 @@ def test_the_family_count_command_prints_and_names_the_set_it_counts():
         assert _run(cmd), f"a proving command prints nothing: {cmd}"
 
 
-#: The three docs #2329 reworded, and the recovery-command shape they now name. A
+#: The docs #2329 reworded, and the recovery-command shape they now name. A
 #: fixed historical set, typed here rather than harvested from the docs: a node that
 #: read the commands out of the prose it is grading would pass on docs that named
 #: none, which is exactly the state the round started in.
@@ -2809,13 +3706,13 @@ def _git_lines(*args: str) -> list[str]:
 
 
 def test_every_archive_recovery_command_the_docs_name_resolves():
-    """#2329 clause 5. Each of the three docs now tells a reader how to get a
+    """#2329 clause 5. Each of the #2329 docs now tells a reader how to get a
     retired doc back, and a recovery command that does not resolve is a second dead
     pointer wearing the clothes of a fix — the failure this whole item exists to
     close, since the sentence it replaced pointed at a directory that is not in the
     tree.
 
-    So every backticked `git show <rev>^:architecture/…` the three docs carry is
+    So every backticked `git show <rev>^:architecture/…` those docs carry is
     run, not admired. A `<slug>` template is expanded over the roster git itself
     records for that retirement — the copies tracked at that commit's parent for
     the `.archive/` one, the files that commit deleted from `architecture/` for the
@@ -2858,7 +3755,7 @@ def test_every_archive_recovery_command_the_docs_name_resolves():
 
 
 def test_the_reworded_docs_gain_no_unresolvable_path_citation():
-    """#2329 clause 2's mechanical half. These three docs are in the corpus the
+    """#2329 clause 2's mechanical half. These docs are in the corpus the
     citation check above grades, and its exemption list is `git_ignored()` — which
     is precisely why `architecture/.archive/` never went red there even while it was
     being asserted as current (`.gitignore` carries `/architecture/.archive/`). That

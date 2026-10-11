@@ -25,10 +25,14 @@ threat table over it, an open set, and a retrospective that scores the model
 against incidents this box already wrote up. Pinned by
 `tests/test_threat_model_doc.py` (row shape, the miss vocabulary, the arithmetic)
 and by `tests/test_architecture_coverage_doc_claims.py`, whose path node resolves
-every cited path and line anchor here — read the qualifier before borrowing that
-comfort: that node is parameterized over five docs, not over the directory, so
-the other thirty-one architecture pages are graded for *command* claims only and
-nothing asks whether a path they cite is on disk (#2582). A line anchor is only
+every cited path and line anchor here — and since #2582 that node reads every
+top-level `architecture/*.md` rather than a named few, asking each citation
+whether it exists under the checkout, the vault, the data root or the account
+home, so a cell pointing at `~/lloyd-data/...` is graded rather than waved
+through. What it still cannot do is tell a live pointer from a sentence that
+names an absent path on purpose: that is what the exemption list in that file is,
+per doc and per citation, with a reason and a node refusing an entry no doc still
+makes. A line anchor is only
 checked to be shorter than its file, which is how two cells in this very table
 pointed at `main()` and at a grant function until the 2026-10-11 pass re-anchored
 them (#2583).

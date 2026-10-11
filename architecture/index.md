@@ -16,8 +16,12 @@ pool that does everything unasked ([[workers]]) — including rewriting its own
 code behind a gate and a rollback watchdog ([[automod]]).
 
 One doc per area. `status: implemented` docs describe what runs; a doc that
-turns out to describe something gone or never built is moved to
-`architecture/.archive/` (gitignored) rather than left to mislead. Every
+turns out to describe something gone or never built is deleted from the tree
+rather than left to mislead — no `architecture/.archive/` directory is present in
+this checkout (the name survives only as a `.gitignore` pattern, and every copy
+ever tracked there has been deleted), so a retired doc is recoverable from git
+history alone, the way the Retired section below and [[arch-review]] both do it.
+Every
 tracked doc here carries `status: implemented` — the only accepted value — and
 at least one date key, `date`, `updated` or `timestamp` (whichever the doc
 already uses; arch-review refreshes that one).
