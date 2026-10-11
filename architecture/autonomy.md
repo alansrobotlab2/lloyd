@@ -709,14 +709,29 @@ and the two spelling-parametrised nodes beside it.
 **What the rail does not reach, stated rather than implied.** `memory_add` /
 `memory_replace` / `memory_remove` are not lanes at all: that tool's `file` argument is
 grammar-bound to `MEMORY.md|USER.md|topics/<slug>` (`app/memory_ceiling.py`,
-`agent_mcp/session.py`), so it cannot name a task file. What stays open after #2362 is
-`Write`/`Edit` (`agent_mcp/builtin_fs.py` carries no reference to `autonomy`) and a Bash
-child, which `agent_mcp/_path_sandbox.py` sandboxes with one read-only bind per
-`PROTECTED_WRITE_ROOTS` entry — and `~/obsidian/autonomy/` is not one of those entries, so
-closing it that way would also refuse the sanctioned nightly writers of these very files.
-That is a scope ruling, recorded as owed on #2362, not something a guard can quietly
-assume. The asymmetry above still stands with it: a task file that leaves the live set is
-retired, not refused, and none of these three surfaces can delete one.
+`agent_mcp/session.py`), so it cannot name a task file. `Write`/`Edit`
+(`agent_mcp/builtin_fs.py`) are the **fourth** surface — the heading above counts the
+three that existed when #2362 rewrote this page — and they are **covered** as of
+#2516: `_autonomy_schedule_refusal` sits beside `_knowledge_vocabulary_refusal`,
+prices the same POST bytes under the same commit lock against `mut.pre_bytes`, imports
+`policy.front_matter_map`, `policy.schedule_value_moves` and `policy.create_arms_a_task`
+rather than restating them, and records one `denial_journal` row per refusal like its
+neighbours. That row is the only trace this lane leaves: `memory/audit/writes.jsonl`
+is `agent_mcp/vault.py`'s log and `builtin_fs.py` keeps no audit row of its own, so
+before #2516 a task file moved through this door was visible only in the session
+transcripts. What stays open is a Bash child, and it is **ACCEPTED-OPEN by ruling, not
+owed on anything**: `agent_mcp/_path_sandbox.py` closes a route only by adding a
+read-only bind per `PROTECTED_WRITE_ROOTS` entry, and `~/obsidian/autonomy/` can never
+become one of those entries, because the sanctioned writers of these very files are
+Bash tasks — #94 runs `--report ~/obsidian/autonomy/referential-integrity-latest.md`
+and `cp … ~/obsidian/autonomy/referential-integrity/$(date -u +%F).md`, and its skill
+text instructs it to write nothing under the vault except those two paths and to use
+Bash, never `Write` or `Edit`, for both. A bind over the directory would refuse the
+nightly ledger the directory exists to keep, which is what recording the half-open
+lane means; it stands beside #2190's deletion asymmetry as the second deliberate
+asymmetry rather than an oversight. The asymmetry above still stands with both of
+them: a task file that leaves the live set is retired, not refused, and none of these
+surfaces can delete one.
 
 ### The parser can never drop a task
 

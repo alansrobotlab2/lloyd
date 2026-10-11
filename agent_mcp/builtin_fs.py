@@ -374,6 +374,196 @@ def _knowledge_guard_unavailable(target: Path, tool: str, why: str) -> str:
         "code": ErrorCode.INTERNAL})
 
 
+# ── the #724 dispatch-field rail, on this lane too (#2516) ──────────────────
+#
+# #724 wrote the rule for the tool that asks (`autonomy_write_task`), #2190
+# extended it to the automod vault round, #2362 extended it to `vault_write`
+# after a turn created `autonomy/96-djev-name-prior-probe.md` `status: up_next`
+# through that lane and a run started 47 seconds later. This is the third FILE
+# lane onto the same directory, and it was the one with nothing in front of it:
+# the write deny-set (`app/harness/protected_paths.py`) holds five entries and
+# `~/obsidian/autonomy/` — the directory the scheduler reads — is none of them, so
+# before this guard a `Write`/`Edit` of a task file passed only the deny-set, the
+# memory ceiling and the knowledge vocabulary. An `Edit` flipping `status: draft`
+# to `up_next` wrote bytes. (The set's own constant is deliberately not spelled on
+# this line or anywhere else in this module:
+# `tests/test_protected_paths.py::test_every_lane_that_reaches_a_denied_path_consults_the_deny_set`
+# refuses a lane that names it, because a lane that can name the set is a lane that
+# can copy it, and the four earlier spellings of "protected" on this box is what
+# that rail exists to prevent. Name the module, not its constant.)
+#
+# The argument is the block above's, unchanged: a rule that lives on one of two
+# write surfaces is not a rule, and the surface with the rule is only a detour.
+# What is NOT restated below is the rule itself — `policy.front_matter_map`,
+# `policy.schedule_value_moves` and `policy.create_arms_a_task` are one
+# definition, imported at call time, so widening `SCHEDULE_STATE_FIELDS` widens
+# this lane with no edit to this module. That is the claim `app/harness/policy.py`
+# makes for "every lane", and until this guard it was true of two of the three.
+# Only the PATH shape is lane-specific, and it has to be: `vault.py` matches the
+# vault-relative string `_normalize_vault_path` hands it, this lane matches
+# `mut.real`, because that is what every other guard here keys on and the one
+# value that makes a `./` segment, a `~` prefix and a symlinked parent the same
+# file. `test_a_path_reached_by_realpath_is_the_same_file_by_every_lane` pins the
+# two predicates agree on extension.
+#
+# Zero measured traffic through this door — a parse of all 17,097 files under
+# `~/lloyd-data/sessions` found 0 `Write`/`Edit` calls naming `obsidian/autonomy/`
+# — which is a priority fact, not a verdict one, and the reason this closes a
+# completeness gap rather than a live leak. The denial row is what makes the route
+# observable from now on: this lane writes no vault audit row
+# (`memory/audit/writes.jsonl` is `agent_mcp/vault.py`'s log only), so after this
+# lands the only record of anyone reaching a task file here is `denials.jsonl`.
+
+
+def _autonomy_root() -> str:
+    """`<vault>/autonomy` realpathed, resolved per call for the reason
+    `_knowledge_root()` gives: a relocated HOME or a monkeypatched
+    `app.paths.VAULT_ROOT` has to move this guard with it, and a guard frozen at
+    import time is a guard that quietly stopped guarding on a moved box."""
+    try:
+        from app.paths import VAULT_ROOT
+        vault = str(VAULT_ROOT)
+    except Exception:  # noqa: BLE001 — a checker that cannot import still checks
+        vault = os.path.join(os.path.expanduser("~"), "obsidian")
+    return os.path.realpath(os.path.join(vault, "autonomy"))
+
+
+def _record_schedule_denial(mut: "_Mutation", tool: str, reason: str) -> None:
+    """One durable row per refusal (`app/harness/denial_journal.py`); never decides.
+
+    Same `guard` name as the `vault_write` lane's `_record_schedule_refusal`, on
+    purpose: it is one rail, and the question owed after landing — did anyone
+    reach a task file through a lane that used to be open — is one grep on the
+    guard name, with `tool` telling the lanes apart. A journal that is down must
+    not become a second verdict, hence the swallowed exception.
+    """
+    try:
+        from app.harness import denial_journal
+        denial_journal.record(guard="autonomy_schedule_rail", where="dispatch",
+                              session_id=get_bound_session(), tool=tool,
+                              reason=reason[:600], excerpt=str(mut.path),
+                              label="dispatch-affecting field on an autonomy task file")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _autonomy_schedule_refusal(mut: "_Mutation", post_text: str,
+                               tool: str) -> str | None:
+    """Refusal for task-file bytes about to land through `Write`/`Edit`, or None.
+
+    Priced on the POST bytes at the same site, and for the same reason, as
+    `_knowledge_vocabulary_refusal`: for `_edit` the new text only exists under
+    the commit lock, so a rule about the bytes about to land cannot be priced on
+    the request. `mut.pre_bytes` is that lane's own pre-image — the same bytes the
+    change ledger is about to snapshot — so the diff is against what this writer
+    actually read, inside one critical section on `mut.real`, which is what phase B
+    of the `vault_write` lane does for the same reason. A refusal returns before
+    `_ledger_begin`, so a write that never happened opens no undo record, and
+    before the `mkdir`, so a refused create leaves no directory behind.
+
+    Four answers, every one of them the rail's:
+
+    * an existing file whose dispatch VALUES do not move — a body edit,
+      `description`, an Activity Log line, a re-quoted `scheduled_at` whose parsed
+      value is identical — is written;
+    * an existing file whose dispatch value does move is refused, naming path,
+      field, `old -> new` and the #724 rail;
+    * a CREATE is judged only on whether it arms (`status: up_next`), by
+      `policy.create_arms_a_task`, the same create branch
+      `policy.schedule_fields_changed` uses for the tool call — so a `draft` task
+      carrying `skill_name` and `frequency`, the nightly chain's documented
+      hand-down shape, still lands;
+    * front matter this lane cannot read on either side, or a rail that cannot be
+      imported, is a refusal. Failing open there is a rail a caller switches off
+      by deleting one `---` line.
+
+    An existing file this lane could not read is a refusal too, and so is one that
+    appeared after `mut.existed` was computed: `pre_bytes is None` next to a path
+    on disk is a rail that cannot see the value it is supposed to protect.
+    """
+    real = mut.real or os.path.realpath(mut.path)
+    if not real.endswith(".md"):
+        return None  # `status` is a backlog item's field too; the scheduler reads these
+    root = _autonomy_root()
+    if not real.startswith(root + os.sep):
+        return None
+    try:
+        # Read here, at call time, for the same reason the field set is read from
+        # the rail and not from a tuple in this file: a lane that cannot load the
+        # rule says WHICH fields it could not verify, spelled from the set.
+        from app.harness.policy import (DISPATCHING_STATUS, SCHEDULE_STATE_FIELDS,
+                                        create_arms_a_task, front_matter_map,
+                                        schedule_value_moves, shown_schedule_value)
+    except Exception as exc:  # noqa: BLE001 — an unloadable rail is not a rail that passed
+        _record_schedule_denial(mut, tool, f"the rail itself could not run ({exc})")
+        return json.dumps({
+            "error": (f"{tool} refused: the autonomy schedule rail could not run, so "
+                      f"{mut.path} is not being written. Report this rather than "
+                      f"working around it."),
+            "code": ErrorCode.PROTECTED_PATH})
+    held = ", ".join(f"`{f}`" for f in sorted(SCHEDULE_STATE_FIELDS))
+    new_fm = front_matter_map(post_text)
+
+    if mut.pre_bytes is None:
+        if os.path.exists(real):
+            # `_write` sets `pre_bytes` only when its own read succeeds and `_edit`
+            # returns before this point when its read fails, so this branch is a
+            # genuine read failure or a file that appeared after `mut.existed` was
+            # computed. Either way there is no pre-image to diff and no licence to
+            # assume the dispatch state nobody has read.
+            _record_schedule_denial(mut, tool, "the on-disk task file could not be read")
+            return json.dumps({
+                "error": (f"{tool} refused: {mut.path} exists and could not be read to "
+                          f"compare its dispatch state, so nothing is being written."),
+                "code": ErrorCode.PROTECTED_PATH})
+        if new_fm is None:
+            _record_schedule_denial(mut, tool, "no parseable front matter on a create")
+            return json.dumps({
+                "error": (f"{tool} refused: {mut.path} would be created with no front "
+                          f"matter this rail can read, so none of the dispatch fields "
+                          f"the scheduler reads ({held}) can be checked. Refusing "
+                          f"rather than guessing."),
+                "code": ErrorCode.PROTECTED_PATH})
+        if create_arms_a_task(new_fm):
+            _record_schedule_denial(mut, tool, f"create with status: {DISPATCHING_STATUS}")
+            return json.dumps({
+                "error": (f"{tool} refused: {mut.path} would be created `status: "
+                          f"{DISPATCHING_STATUS}`, which arms a task — the #724 grant "
+                          "rail refuses that unattended on autonomy_write_task and "
+                          "this lane holds to the same rule. Create it `status: "
+                          "draft` and let a human, or a granted call, arm it."),
+                "code": ErrorCode.PROTECTED_PATH})
+        return None
+
+    old_fm = front_matter_map(mut.pre_bytes.decode("utf-8", errors="replace"))
+    if old_fm is None or new_fm is None:
+        which = "incoming" if new_fm is None else "on-disk"
+        _record_schedule_denial(mut, tool, "front matter unreadable on one side")
+        return json.dumps({
+            "error": (f"{tool} refused: the {which} front matter of {mut.path} cannot "
+                      f"be read as a mapping, so none of the dispatch fields ({held}) "
+                      f"can be checked against it. Repair the front matter rather "
+                      f"than writing past it."),
+            "code": ErrorCode.PROTECTED_PATH})
+    moves = schedule_value_moves(old_fm, new_fm)
+    if not moves:
+        return None
+    field, old, new = moves[0]
+    _record_schedule_denial(mut, tool, f"{field}: {old!r} -> {new!r}")
+    return json.dumps({
+        "error": (
+            f"{tool} refused: {mut.path} would move `{field}` "
+            f"{shown_schedule_value(old)} -> {shown_schedule_value(new)}"
+            + (f" (and {len(moves) - 1} other dispatch field(s): "
+               f"{', '.join(f for f, _, _ in moves[1:])}" if len(moves) > 1 else "")
+            + " — a dispatch-affecting field, which the #724 grant rail refuses "
+              "unattended on autonomy_write_task, and this lane holds to the same "
+              f"rule. Land the rest, and let a human or a granted call move "
+              f"`{field}`."),
+        "code": ErrorCode.PROTECTED_PATH,
+        "field": field, "path": str(mut.path)})
+
+
 def _bench_assertion_refusal(mut: "_Mutation") -> str | None:
     """Refuse a bench task the judge cannot grade, or None to proceed (#2286).
 
@@ -606,6 +796,15 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
             if vocab is not None:
                 return vocab
 
+            # The #724 dispatch-field rail, on the same bytes and at the same site:
+            # `~/obsidian/autonomy/` is in no deny-set, so this was the one lane
+            # where a `status: up_next` create or a draft -> up_next move reached a
+            # task file with nothing asking. Refuses before the undo record opens
+            # and before the `mkdir`, like the vocabulary check beside it.
+            schedule = _autonomy_schedule_refusal(mut, content, "Write")
+            if schedule is not None:
+                return schedule
+
             _ledger_begin(mut, op="write" if mut.existed else "create")
 
             try:
@@ -714,6 +913,13 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
             vocab = _knowledge_vocabulary_refusal(p, updated, "Edit")
             if vocab is not None:
                 return vocab
+            # Priced on `updated` for the same reason the vocabulary check above is,
+            # and it answers the question the vocabulary check cannot: an Edit
+            # arrives as a delta, so `status: draft` -> `up_next` is only visible in
+            # the whole file this lane has already assembled under the commit lock.
+            schedule = _autonomy_schedule_refusal(mut, updated, "Edit")
+            if schedule is not None:
+                return schedule
             _ledger_begin(mut, op="edit")
 
             try:

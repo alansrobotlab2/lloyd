@@ -801,3 +801,494 @@ def test_the_rail_survives_real_mcp_dispatch_in_both_directions(scratch, monkeyp
     assert "appended through real dispatch" in (
         (scratch.root / TASK_PATH).read_text(encoding="utf-8")), (
         "the success result lied: the file on disk never changed")
+
+
+# ── the fourth lane: `Write` and `Edit` (#2516) ─────────────────────────────
+#
+# Everything above is `vault_write`. The two handlers a turn reaches for most —
+# `agent_mcp/builtin_fs._write` and `_edit` — carried no autonomy guard at all:
+# `PROTECTED_WRITE_ROOTS` has five entries and the directory the scheduler reads
+# is none of them, so an `Edit` of `status: draft` -> `status: up_next` wrote
+# bytes. Triage counted 0 such calls across all 17,097 files in
+# `~/lloyd-data/sessions`, which makes this #2070's shape rather than #2362's: the
+# rule existed, the second surface it belongs on did not carry it, and closing the
+# detour is the whole of it. The 2026-10-05 incident quoted at the top of this file
+# is a `vault_write` incident, and that lane has refused it since #2362.
+#
+# So these nodes drive the real `Write`/`Edit` handlers, not a re-derived
+# predicate, against a scratch vault, and they pin the two things that make two
+# lanes holding one rule safe: the field set is read from
+# `policy.SCHEDULE_STATE_FIELDS` at call time here too, and the two lanes' path
+# predicates agree on extension even though one sees a vault-relative string and
+# the other a realpath.
+
+#: The scratch-vault seam. `_autonomy_root()` reads `app.paths.VAULT_ROOT` per call
+#: — the same seam `tests/test_okf_type_taxonomy.py::_fs_scratch` uses for the
+#: vocabulary guard, and the reason this fixture patches the module attribute and
+#: not a name inside `builtin_fs`.
+@pytest.fixture
+def fs(tmp_path, monkeypatch):
+    """`Write`/`Edit` aimed at a scratch tree, with the denial journal spied on.
+
+    `_Mutation`'s defaults do the rest: `gate_on` is False with no aggregator
+    context, which is the shape a unit caller takes straight into the handler, and
+    the write deny-set is `$HOME`-relative, so a temp path sits outside it and the
+    only thing that can refuse here is a guard under test.
+    """
+    import agent_mcp.builtin_fs as bfs
+    import app.paths as paths
+    from app.harness import denial_journal
+
+    monkeypatch.setattr(paths, "VAULT_ROOT", tmp_path)
+    journal: list[dict] = []
+    # Plain append, no `or True` — the same reason the `scratch` fixture gives.
+    monkeypatch.setattr(denial_journal, "record", lambda **kw: journal.append(kw))
+    return types.SimpleNamespace(root=tmp_path, mod=bfs, journal=journal)
+
+
+def _abs(fs, rel: str) -> str:
+    return str(fs.root / rel)
+
+
+def _refusal(result: str) -> dict:
+    """The refusal payload when the lane refused, `{}` when it wrote.
+
+    This lane answers success with a sentence (`File written: …`, `Edited …`) and
+    failure with a JSON object — the shape
+    `tests/test_okf_type_taxonomy.py::_fs_refusal` documents, and the one
+    `text_result` sniffs to set `isError`.
+    """
+    stripped = result.lstrip()
+    return json.loads(stripped) if stripped.startswith("{") else {}
+
+
+def _fs_write(fs, rel: str, content: str) -> dict:
+    return _refusal(fs.mod._write({"file_path": _abs(fs, rel), "content": content}))
+
+
+def _fs_edit(fs, rel: str, old_string: str, new_string: str) -> dict:
+    return _refusal(fs.mod._edit({"file_path": _abs(fs, rel),
+                                  "old_string": old_string,
+                                  "new_string": new_string}))
+
+
+def _fs_seed(fs, content: str, rel: str = TASK_PATH) -> str:
+    """Put a task file on disk WITHOUT the lane under test.
+
+    Necessary, not convenient, for the same reason `_seed_armed` is: this lane
+    refuses an armed create by design, so a file whose `status` reads `up_next` can
+    only arrive the way a real one arrives — a granted call, a human editor, or the
+    scheduler's own writer, none of which is the door under test.
+    """
+    target = fs.root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return content
+
+
+def test_an_edit_moving_status_on_an_existing_task_is_refused_and_writes_no_bytes(fs):
+    """Clause 1 on the `Edit` lane: refused, fully named, and not one byte moved.
+
+    The delta is why the guard sits under the commit lock rather than in
+    `_gate_check`: an `Edit` arrives as `old_string`/`new_string`, so the move this
+    rail exists to catch is visible only in the file the lane has already assembled.
+    The refusal has to carry everything the `vault_write` refusal carries — path,
+    field, `old -> new`, the rail it defers to — because a writer that is told "no"
+    without being told which field cannot do the half of the job that is left to it.
+    """
+    before = _fs_seed(fs, _task(status="draft"))
+
+    out = _fs_edit(fs, TASK_PATH, "status: draft", "status: up_next")
+
+    assert out, "a draft -> up_next Edit reached a task file through the open lane"
+    msg = out["error"]
+    assert _abs(fs, TASK_PATH) in msg, f"the refusal must name the path: {msg}"
+    assert "`status`" in msg and "draft -> up_next" in msg, msg
+    assert "#724" in msg, f"a refusal must name the rail it defers to: {msg}"
+    assert (fs.root / TASK_PATH).read_text(encoding="utf-8") == before, (
+        "the refusal wrote bytes anyway")
+    assert fs.journal and len(fs.journal) == 1, f"one refusal, one row: {fs.journal}"
+    assert fs.journal[0]["tool"] == "Edit", fs.journal
+    assert fs.journal[0]["guard"] == "autonomy_schedule_rail", fs.journal
+
+
+def test_a_write_creating_an_armed_task_is_refused_while_the_draft_create_lands(fs):
+    """Clause 2: the create answer is `policy.create_arms_a_task`, not "no creates".
+
+    The left half is the 2026-10-05 call spelled with `Write` instead of
+    `vault_write`: a new file whose `status` is `up_next` dispatches the moment it
+    lands, and there is no pre-image to diff, so the lane has to answer at create
+    time. The right half is why the answer is not a blanket refusal: the nightly
+    chain hands a task down as `status: draft` with `skill_name` and `frequency`
+    already set, and a guard that stopped that would stop the chain. The directory
+    assertion is the third shape of "nothing was written" — a refusal that ran its
+    own `mkdir` first leaves the outline of the write it refused.
+    """
+    refused = _fs_write(fs, TASK_PATH, _task(status="up_next"))
+
+    assert refused, "creating `status: up_next` was accepted"
+    assert "up_next" in refused["error"] and "#724" in refused["error"], refused
+    assert not (fs.root / TASK_PATH).exists(), "refused, but the file is there"
+    assert not (fs.root / "autonomy").exists(), "refused, but the mkdir ran"
+
+    landed = _fs_write(fs, TASK_PATH, _task(status="draft", frequency="weekly",
+                                            skill_name="djev-name-prior-probe"))
+    assert landed == {}, f"the sanctioned draft create was refused: {landed}"
+    text = (fs.root / TASK_PATH).read_text(encoding="utf-8")
+    assert "status: draft" in text and "skill_name: djev-name-prior-probe" in text, text
+    assert len(fs.journal) == 1, f"only the refusal journals: {fs.journal}"
+
+
+def test_writes_that_move_no_dispatch_field_still_land_on_the_write_edit_lane(fs):
+    """Clause 3 on this lane: an armed task file is still a writable file.
+
+    Four benign writes — an Activity Log append, a `description` edit, a whole-file
+    body append, and a `scheduled_at` re-quote whose PARSED value is identical —
+    then the control that makes them mean something: the same file, one field
+    moved, refused. The re-quote is the case the #2190 owed-after-landing
+    measurement exists to catch, and its mechanism is asserted rather than assumed:
+    if the loader stopped resolving an unquoted timestamp to a date, the accept
+    below would be proving nothing, and this file wants to know that.
+    """
+    _fs_seed(fs, _task(status="up_next", scheduled_at="2026-10-09T00:00:00+00:00"))
+
+    logged = _fs_edit(fs, TASK_PATH,
+                      "- 2026-10-05T06:27Z created by an autocode round",
+                      "- 2026-10-05T06:27Z created by an autocode round\n"
+                      "- 2026-10-11T09:00Z probed; 3 divergences in 24 h")
+    assert logged == {}, f"an Activity Log append refused: {logged}"
+    assert "3 divergences in 24 h" in (fs.root / TASK_PATH).read_text(encoding="utf-8")
+
+    described = _fs_edit(fs, TASK_PATH, "description: run the weekly probe",
+                         "description: run the weekly probe and log the count")
+    assert described == {}, f"a description edit refused: {described}"
+
+    on_disk = (fs.root / TASK_PATH).read_text(encoding="utf-8")
+    parsed = P.front_matter_map(on_disk)["scheduled_at"]
+    assert not isinstance(parsed, str), (
+        "the loader no longer resolves an unquoted timestamp to a date, so the "
+        "re-quote below cannot be a reformat and this node proves nothing")
+
+    requoted = _fs_edit(fs, TASK_PATH, "scheduled_at: 2026-10-09T00:00:00+00:00",
+                        "scheduled_at: '2026-10-09T00:00:00+00:00'")
+    assert requoted == {}, f"a re-quoted scheduled_at was a schedule change: {requoted}"
+    after = (fs.root / TASK_PATH).read_text(encoding="utf-8")
+    assert after.count("scheduled_at:") == 1, "the re-quote duplicated the key"
+
+    appended = _fs_write(fs, TASK_PATH, after + "\n## Findings\n\n- 3 in 24 h\n")
+    assert appended == {}, f"a whole-file body append refused: {appended}"
+
+    parked = _fs_edit(fs, TASK_PATH, "status: up_next", "status: draft")
+    assert parked, "the control failed: parking an armed task is a dispatch move"
+    assert "`status`" in parked["error"] and "up_next -> draft" in parked["error"], parked
+
+
+@pytest.mark.parametrize("field", sorted(P.SCHEDULE_STATE_FIELDS))
+def test_every_field_in_the_rail_is_guarded_on_this_lane_too(fs, field):
+    """Clause 4: the set this lane refuses IS `policy.SCHEDULE_STATE_FIELDS`.
+
+    Parametrised over the frozenset itself — not a list this file maintains — and
+    driven as an `Edit`, the shape whose move is invisible to anything but the
+    assembled bytes. `PAIRS` is reused from the `vault_write` nodes above so a field
+    added to the rail later falls through to the generic pair here as well and is
+    still refused; the node after this one executes that claim rather than
+    asserting it.
+    """
+    old, new = PAIRS.get(field, ("alpha-value", "beta-value"))
+    _fs_seed(fs, _task(**{field: old}))
+
+    out = _fs_edit(fs, TASK_PATH, f"{field}: {old}", f"{field}: {new}")
+
+    assert out, f"`{field}` moved through `Edit` and nothing asked: {out}"
+    assert f"`{field}`" in out["error"], f"the refusal omits the field: {out['error']}"
+    # The pair, in the form the two lanes share: an unquoted `scheduled_at` parses
+    # to a `datetime.date`, which `shown_schedule_value` renders as JSON, so that
+    # case arrives as `"2026-10-09" -> "2026-10-12"` and the values are still both
+    # in the refusal. Same tolerance the `vault_write` node above spells out.
+    assert f"{old} -> {new}" in out["error"] or (
+        old in out["error"] and new in out["error"]), out["error"]
+    assert "#724" in out["error"], out["error"]
+
+
+def test_a_field_added_to_the_rail_widens_this_lane_without_editing_it(fs,
+                                                                      monkeypatch):
+    """Clause 4 executed on the fourth lane: widen the rail, the lane widens.
+
+    A lane that kept its own tuple would pass the parametrised node above and fail
+    this one — which is exactly why each lane carries both, and why
+    `app/harness/policy.py`'s claim that "a field added above is refused by every
+    lane" needed this node to be true of three lanes and not two.
+    """
+    _fs_seed(fs, _task(review_gate="off"))
+
+    monkeypatch.setattr(P, "SCHEDULE_STATE_FIELDS",
+                        set(P.SCHEDULE_STATE_FIELDS) | {"review_gate"})
+    out = _fs_edit(fs, TASK_PATH, "review_gate: off", "review_gate: on")
+
+    assert out, (
+        "the lane refused known fields only because it knew them — it is not "
+        f"reading the rail: {out}")
+    assert "`review_gate`" in out["error"], out["error"]
+
+
+def test_the_write_edit_lane_fails_closed_on_front_matter_it_cannot_read(fs):
+    """The same two fail-closed shapes the `vault_write` lane pins, on this lane.
+
+    Skipping what it cannot parse is a rail a caller switches off by deleting one
+    `---` line, and the recovery parser is the scheduler's own, so a file this lane
+    cannot read may still be a file the scheduler dispatches. A create with no
+    front matter, and a body-level `Edit` onto a file whose ON-DISK front matter
+    never closes, are both refusals — and neither is the #724 refusal, which is why
+    the second one asserts the absence of that wording: a fail-closed that reads
+    like a field move teaches the writer the wrong lesson.
+    """
+    refused = _fs_write(fs, TASK_PATH, "# just prose, no front matter\n")
+    assert refused, f"a create with no front matter was accepted: {refused}"
+    assert "front matter" in refused["error"], refused["error"]
+    assert not (fs.root / TASK_PATH).exists()
+
+    broken = "---\nstatus: draft\nfrequency: weekly\n"
+    assert P.front_matter_map(broken) is None, "the fixture is not unparseable"
+    _fs_seed(fs, broken, rel="autonomy/98-corrupt.md")
+
+    out = _fs_edit(fs, "autonomy/98-corrupt.md", "status: draft", "status: up_next")
+    assert out, "an Edit past unreadable front matter passed a rail that cannot read it"
+    assert "front matter" in out["error"], out["error"]
+    assert "#724" not in out["error"], "not a field move: " + out["error"]
+    assert (fs.root / "autonomy" / "98-corrupt.md").read_text(encoding="utf-8") == broken
+
+
+def test_an_unloadable_rail_stops_the_write_edit_lane_too(fs, monkeypatch):
+    """The other fail-closed half: `sys.modules[...] = None`, the import trap.
+
+    The rail is imported inside the guard, which is what makes the field set live
+    at call time and also what makes a broken install or a circular import a
+    caller's silent problem. `sys.modules[name] = None` is the import machinery's
+    own way of making that import raise. `builtin_fs` imports `policy` nowhere
+    else, so the only handler on this path that could produce the word below is
+    this guard — a refusal from the deny-set would say `protected`, not `rail`.
+    """
+    import sys
+
+    before = _fs_seed(fs, _task(status="draft"))
+    monkeypatch.setitem(sys.modules, "app.harness.policy", None)
+
+    out = _fs_edit(fs, TASK_PATH, "status: draft", "status: up_next")
+
+    assert out, "a write went through with no rail to check it"
+    assert "rail" in out["error"], out["error"]
+    assert (fs.root / TASK_PATH).read_text(encoding="utf-8") == before
+
+
+def test_a_task_path_the_lane_cannot_read_as_bytes_is_a_refusal_not_a_create(fs):
+    """The third fail-closed shape: no pre-image, yet something on disk.
+
+    `_write` sets `mut.pre_bytes` only when its own read succeeds, so
+    `pre_bytes is None` beside a path that exists is either a read failure or a
+    file that appeared after `mut.existed` was computed — and the lane cannot tell
+    either of those from a create without the read that just failed. Assuming
+    "create" is the direction that arms something nobody has read. A directory
+    named `96-x.md` reaches that branch without needing root: `read_bytes()` on it
+    raises `IsADirectoryError`, the same `OSError` a permission or I/O failure
+    raises at the same site.
+    """
+    (fs.root / "autonomy" / "96-x.md").mkdir(parents=True)
+
+    out = _fs_write(fs, "autonomy/96-x.md", _task(status="up_next"))
+
+    assert out, f"an unreadable task path was treated as a create: {out}"
+    assert "could not be read" in out["error"], out["error"]
+    assert "#724" not in out["error"], out["error"]
+    assert (fs.root / "autonomy" / "96-x.md").is_dir(), (
+        "the refusal replaced a directory with a file")
+
+
+#: Shapes whose realpath is dispatch state, or emphatically is not, and whether the
+#: rail is meant to reach them. The `_archived/` case is True on purpose: the vault
+#: lane's predicate counts the whole subtree because retirement moves a file into
+#: `_archived/` without touching its `status`, so a restore is a write of those same
+#: bytes one level up. This lane must count the same set, or the two lanes disagree
+#: about which files are dispatch state — a disagreement no test would notice until
+#: one of them refused a write the other had just allowed.
+PATH_SHAPES = (
+    pytest.param("autonomy/96-djev-name-prior-probe.md", True, id="task-file"),
+    pytest.param("autonomy/_archived/25-memory-capture.md", True, id="archived-subtree"),
+    pytest.param("autonomy/referential-integrity-latest.md", True, id="report-in-task-dir"),
+    pytest.param("backlog/96-something.md", False, id="backlog-status-is-not-dispatch"),
+    pytest.param("notes/autonomy/96-x.md", False, id="deeper-dir-same-name"),
+    pytest.param("autonomy/96-notes.txt", False, id="not-markdown"),
+)
+
+
+def _lane_reaches(fs, rel: str) -> bool:
+    """Does this lane refuse a `status` move at `rel`? Behaviour, not a predicate.
+
+    Asked of the handler rather than of a helper on purpose: the claim worth pinning
+    is what a caller experiences, and a private predicate that nothing calls cannot
+    drift into disagreement with a guard that is.
+    """
+    _fs_seed(fs, _task(status="draft"), rel=rel)
+    return bool(_fs_edit(fs, rel, "status: draft", "status: up_next"))
+
+
+@pytest.mark.parametrize("rel,expected", PATH_SHAPES)
+def test_the_two_lanes_agree_on_which_paths_are_dispatch_state(fs, rel, expected):
+    """One rule, two path shapes, one extension: the lane-drift clause.
+
+    `agent_mcp/vault.py` decides on the vault-relative string its normalizer hands
+    it; this lane decides on `mut.real`. Those are different values for the same
+    file, so what can be checked is that they answer the same question the same way
+    — which is what this node does, shape by shape, against the real refusal. The
+    first assertion is the reader's control: if the vault lane's predicate moves,
+    this node says the comparison went stale instead of quietly agreeing.
+    """
+    import agent_mcp.vault as V
+
+    assert V._is_autonomy_task_path(rel) is expected, (
+        f"`_is_autonomy_task_path` moved for {rel!r}, so this comparison is stale")
+    assert _lane_reaches(fs, rel) is expected, (
+        f"{rel!r} is dispatch state to one lane and not to the other")
+
+
+def test_a_spelling_only_a_realpath_test_catches_is_refused(fs):
+    """The realpath half: a dot segment, a doubled separator, a symlinked parent.
+
+    Every one of these is the SAME file as `autonomy/96-x.md`, and every one is a
+    string the `startswith("autonomy/")` guard #2362's first round shipped would
+    have waved through — that bypass is documented at the top of the `vault_write`
+    section of this file and pinned by its spelling-parametrised nodes. This lane
+    keys on `mut.real`, so all four get the same refusal and the bytes still read
+    `draft`. The precondition is asserted too: spellings that are not one file would
+    make the loop below a tautology.
+    """
+    before = _fs_seed(fs, _task(status="draft"))
+    name = "96-djev-name-prior-probe.md"
+    (fs.root / "taskdir").symlink_to(fs.root / "autonomy", target_is_directory=True)
+    spellings = [
+        _abs(fs, TASK_PATH),
+        f"{fs.root}/autonomy/./{name}",
+        f"{fs.root}/autonomy//{name}",
+        _abs(fs, f"taskdir/{name}"),
+    ]
+    assert len({str(Path(s).resolve()) for s in spellings}) == 1, (
+        "these spellings are not one file, so the loop below proves nothing")
+
+    for spelling in spellings:
+        out = _refusal(fs.mod._edit({"file_path": spelling,
+                                     "old_string": "status: draft",
+                                     "new_string": "status: up_next"}))
+        assert out, f"{spelling!r} moved `status` through the open lane"
+        assert "`status`" in out["error"] and "#724" in out["error"], out["error"]
+        assert (fs.root / TASK_PATH).read_text(encoding="utf-8") == before, (
+            f"{spelling!r} was refused after the bytes were replaced")
+
+
+def test_a_refusal_here_lands_the_same_denial_row_the_other_lanes_write(fs, monkeypatch,
+                                                                       tmp_path):
+    """Clause 1's journal half, read back off the file, under the shared guard name.
+
+    The spy above shows a row was produced; this shows a person can find it, which
+    is the only thing the owed-after-landing traffic count can use — and on this
+    lane it is the ONLY trace, since `memory/audit/writes.jsonl` belongs to
+    `agent_mcp/vault.py` and `builtin_fs.py` keeps no vault audit row. The guard
+    name is deliberately the `vault_write` lane's: the question is "did anyone reach
+    a task file through a lane that used to be open", one grep on `guard`, with
+    `tool` telling the lanes apart. A per-lane guard name would make that two greps
+    nobody runs.
+    """
+    from app.harness import denial_journal
+
+    journal = tmp_path / "denials.jsonl"
+    monkeypatch.setenv(denial_journal.JOURNAL_ENV, str(journal))
+    monkeypatch.setattr(denial_journal, "record", _REAL_DENIAL_RECORDER)
+    _fs_seed(fs, _task(status="draft"))
+
+    assert _fs_edit(fs, TASK_PATH, "status: draft", "status: up_next")
+    assert _fs_write(fs, "autonomy/97-new.md", _task(status="up_next"))
+
+    rows = [json.loads(line)
+            for line in journal.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2, rows
+    assert {r["guard"] for r in rows} == {"autonomy_schedule_rail"}, rows
+    assert {r["tool"] for r in rows} == {"Edit", "Write"}, rows
+    assert {r["where"] for r in rows} == {"dispatch"}, rows
+    assert all(r["excerpt"].endswith(".md") for r in rows), rows
+    assert all("status" in r["reason"] and "up_next" in r["reason"] for r in rows), rows
+
+
+def test_the_refusal_reaches_a_turn_through_the_tool_dispatcher(fs):
+    """The seam the code graph cannot see: `call_tool`'s name-keyed Write/Edit branch.
+
+    `_write` and `_edit` are reached from `agent_mcp/builtin_fs.call_tool` by a
+    string comparison on the tool name, with no symbol reference for a grep or the
+    AST walk in `test_the_guard_is_wired_into_both_commit_sites` to find. A guard
+    wired into a helper the dispatcher skips would pass every direct-handler node
+    above and protect nothing, and the success it reported is the one the caller
+    acts on. Both directions again: the move comes back `isError`, the Activity Log
+    append comes back a success that really landed.
+    """
+    import asyncio
+
+    _fs_seed(fs, _task(status="up_next"))
+
+    moved = asyncio.run(fs.mod.call_tool("Edit", {
+        "file_path": _abs(fs, TASK_PATH), "old_string": "status: up_next",
+        "new_string": "status: draft"}))
+    assert moved.is_error is True, (
+        "the tool result said success; the caller will move on, not fix it")
+    assert moved.content, "isError with no payload: the caller has nothing to act on"
+    payload = json.loads(moved.content[0].text)
+    assert "`status`" in payload["error"] and "#724" in payload["error"], payload
+
+    benign = asyncio.run(fs.mod.call_tool("Edit", {
+        "file_path": _abs(fs, TASK_PATH),
+        "old_string": "- 2026-10-05T06:27Z created by an autocode round",
+        "new_string": "- 2026-10-05T06:27Z created by an autocode round\n"
+                      "- 2026-10-11T09:15Z appended across dispatch"}))
+    assert benign.is_error is False, benign.content[0].text
+    assert "appended across dispatch" in (fs.root / TASK_PATH).read_text(encoding="utf-8"), (
+        "the success result lied: the file on disk never changed")
+
+
+def test_the_guard_is_wired_into_both_commit_sites():
+    """Both lanes, pinned structurally: `_write` and `_edit` each call the guard.
+
+    Two call sites, one rule, and the failure mode is one of them quietly losing its
+    call in a refactor — a handler that no longer asks is invisible to every node
+    above, each of which drives exactly one of the two. So this parses the module
+    and counts what it finds: `_gate_check` could not hold this rule (the post bytes
+    do not exist there), and a call outside the `commit_lock` block would compare
+    against a pre-image somebody else has since replaced, which is the invariant
+    `tests/test_memory_writer_lane.py` exists to keep.
+    """
+    src = (Path(__file__).resolve().parents[1] / "agent_mcp" / "builtin_fs.py")
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    guard = "_autonomy_schedule_refusal"
+
+    found = {name: 0 for name in ("_write", "_edit")}
+    for fn in tree.body:
+        if isinstance(fn, ast.FunctionDef) and fn.name in found:
+            for node in ast.walk(fn):
+                if (isinstance(node, ast.Call)
+                        and getattr(node.func, "id", "") == guard):
+                    found[fn.name] += 1
+                    assert fn.lineno < node.lineno
+                    inside_lock = any(
+                        isinstance(w, ast.With) and w.lineno < node.lineno
+                        <= max(getattr(c, "lineno", 0) for c in ast.walk(w))
+                        for w in ast.walk(fn)
+                        if isinstance(w, ast.With)
+                        and getattr(getattr(w.items[0].context_expr, "func", None),
+                                    "id", "") == "commit_lock")
+                    assert inside_lock, (
+                        f"{fn.name} calls {guard} outside its commit_lock block, so "
+                        "the pre-image it judges is not the one it will replace")
+    assert found == {"_write": 1, "_edit": 1}, (
+        f"one rule, two commit sites, and this is what the parse found: {found}")
+
+    # And the rule is not restated here: the field set comes from the rail, so a
+    # second copy in this module is impossible to miss from the outside.
+    text = src.read_text(encoding="utf-8")
+    assert "SCHEDULE_STATE_FIELDS" in text, "the lane no longer reads the rail at all"
+    assert '"status", "scheduled_at", "depends_on"' not in text, (
+        "a hand-copied field list has appeared in the lane")
