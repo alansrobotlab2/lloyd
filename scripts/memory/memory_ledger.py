@@ -282,7 +282,8 @@ def archive_head(memories_dir: Path, loaded_name: str, ledger_name: str,
     ])
 
 
-def retire(memories_dir: Path, *, dry_run: bool = False, today: str | None = None) -> dict:
+def retire(memories_dir: Path, *, dry_run: bool = False, force: bool = False,
+           today: str | None = None) -> dict:
     """Move orphan rows out of each live ledger into its archive.
 
     A row is eligible only when its anchor joins no line in the loaded file. A row
@@ -294,10 +295,38 @@ def retire(memories_dir: Path, *, dry_run: bool = False, today: str | None = Non
     matter so the OKF gate that scans `lloyd/reviews/` accepts it; a file that
     exists is appended to and gets no header at all.
 
-    Returns `{loaded file: {"moved": [anchor…], "kept": n, "archive": path}}`.
+    #2415's disposition-before-retire rule, mechanical since #2540: a ledger with an
+    undispositioned orphan row is not retired at all. The rule lived only in §5 of
+    the curator skill as a sentence the run had to remember, and the row this command
+    clears without remembering it is the row that documented a line nobody can
+    relocate. `status` has always been able to count those rows; nothing between it
+    and the archive ever asked. The count comes from `status()` itself and not from
+    anchor arithmetic repeated here, because a guard that re-derives what it gates on
+    and a report that publishes it are two measurements, and two measurements drift
+    while each stays green on its own.
+
+    What the guard reads is the orphan COUNT and nothing else. No byte count, no
+    ceiling, no "until it fits" condition joins that `if` — #1881 forbids this route
+    making room, and the module docstring forbids the flag. §5's 24,576 B figure is
+    prose telling a curator WHEN to run this command; making it a condition here
+    would be that banned flag wearing a guard's clothes.
+
+    `force=True` performs the move the refusal withheld, and how many rows it moved is
+    reported so an override is never silent. It is the route for a run that has read
+    every orphan row and decided the archive beats hand disposition — §5's judgement,
+    made visible rather than made the default.
+
+    Returns `{loaded file: {"moved": [anchor…], "kept": n, "archive": path,
+    "refused": orphan anchors withheld, "forced": rows moved under override}}`.
+    `refused` counts distinct orphan ANCHORS, which is what `status` counts; `moved`
+    and `forced` count ROWS, so a ledger holding two rows of one orphan anchor
+    refuses on 1 and moves 2.
     """
     from datetime import date
     stamp = today or date.today().isoformat()
+    # One measurement for the guard and for the report: `status`'s own orphan set.
+    orphan_counts = {name: len(rec.get("orphan_rows") or [])
+                     for name, rec in status(memories_dir).items()}
     report = {}
     for name, ledger_name in LEDGERS.items():
         loaded, lpath = memories_dir / name, memories_dir / "memory" / ledger_name
@@ -305,6 +334,14 @@ def retire(memories_dir: Path, *, dry_run: bool = False, today: str | None = Non
             # No loaded file means no line can be shown to be gone: retire nothing.
             report[name] = {"moved": [], "kept": 0, "archive": None,
                             "skipped": "no loaded file" if not loaded.exists() else "no ledger"}
+            continue
+        orphans = orphan_counts.get(name, 0)
+        if orphans and not force:
+            # Nothing on this path opens a file, so a refused ledger cannot leave an
+            # archive behind — the shape §5b's ledger section depends on.
+            report[name] = {"moved": [], "kept": 0, "archive": None,
+                            "ledger": str(lpath), "dry_run": dry_run,
+                            "refused": orphans, "forced": 0}
             continue
         live = {anchor_of(e) for e in loaded_entries(loaded.read_text(encoding="utf-8"))}
         text = lpath.read_text(encoding="utf-8")
@@ -335,7 +372,8 @@ def retire(memories_dir: Path, *, dry_run: bool = False, today: str | None = Non
             tmp.write_text("".join(keep_lines), encoding="utf-8")
             tmp.replace(lpath)
         report[name] = {"moved": moved, "kept": kept, "archive": str(apath),
-                        "ledger": str(lpath), "dry_run": dry_run}
+                        "ledger": str(lpath), "dry_run": dry_run,
+                        "refused": 0, "forced": (len(moved) if force else 0)}
     return report
 
 
@@ -344,11 +382,22 @@ def _print_retire(rep: dict) -> None:
         if r.get("skipped"):
             print(f"{name}: nothing retired ({r['skipped']})")
             continue
+        if r.get("refused"):
+            # The wording is an interface: §5 of the curator skill quotes this line
+            # and tests/test_memory_ledger.py pins it byte for byte. `row(s)` is the
+            # plural this function already uses for its own tally, and the count is
+            # `status`'s — distinct orphan anchors — not a row count re-derived here.
+            print(f"{name}: refused, {r['refused']} orphan row(s) undispositioned "
+                  f"(#2415) — disposition first, or --force")
+            continue
         verb = "would archive" if r["dry_run"] else "archived"
         for anchor in r["moved"]:
             print(f"{name}: {verb} -> {r['archive']}: {anchor}")
         print(f"{name}: {len(r['moved'])} row(s) {verb}, {r['kept']} kept "
               f"(line still loaded)")
+        if r.get("forced"):
+            print(f"{name}: --force override: {r['forced']} orphan row(s) archived "
+                  f"undispositioned (#2415) — every one owed a disposition")
 
 
 def main(argv=None) -> int:
@@ -363,9 +412,16 @@ def main(argv=None) -> int:
     r.add_argument("--memories-dir", default=default_dir)
     r.add_argument("--dry-run", action="store_true")
     r.add_argument("--json", action="store_true")
+    # Not `--yes`, not `--all`, and no size in sight: this flag overrides the #2415
+    # disposition gate and nothing else. The count it moved is printed, so an
+    # override is a reported act rather than a habit (`retire`'s docstring).
+    r.add_argument("--force", action="store_true",
+                   help="archive the orphan rows the #2415 refusal withheld, and "
+                        "report how many; the disposition judgement stays yours")
     args = ap.parse_args(argv)
     if args.cmd == "retire":
-        rep = retire(Path(args.memories_dir).expanduser(), dry_run=args.dry_run)
+        rep = retire(Path(args.memories_dir).expanduser(), dry_run=args.dry_run,
+                     force=args.force)
         if args.json:
             print(json.dumps(rep, indent=1, ensure_ascii=False))
         else:

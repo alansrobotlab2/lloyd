@@ -331,7 +331,7 @@ def _module_docstring(rel: str) -> str:
 #: `tests/fixtures/.gitignore`, whose reason is literally this one: the gate runs with
 #: HOME at the round home, "a node that opened it would skip, and a skipping node pins
 #: nothing". The whole file, not an extract: an extract of a prose ban is the exact
-#: shape that can hide the offending line, and the file is 76 lines.
+#: shape that can hide the offending line, and the file is 80 lines.
 #:
 #: What the frozen corpus cannot do is notice the LIVE file drifting, so that is the
 #: `live_vault` node's whole job — the marker `pytest.ini` registers for "assertions
@@ -353,7 +353,7 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     anything.
 
     The asserts, in the order that makes each one falsifiable:
-      * the corpus is the whole file at its exact bytes (18,554 B / 76 lines), and it
+      * the corpus is the whole file at its exact bytes (19,690 B / 80 lines), and it
         names `topics/memory-md-ledger`, so a 0-hit below cannot be a wrong path or an
         empty slice;
       * no LINE states a ledger's cap as 32,768 B — `_assert_no_ledger_ceiling_claim`
@@ -371,7 +371,7 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
       * the text each later re-freeze carried in is present verbatim: the §2a-ter bullet
         vault `e45a6b6c` added, and both hunks vault `5c6793be` (#2425) added. #2284
         re-froze this witness WITH that bullet rather than reverting the prose, and the size
-        pin above alone could be satisfied by any 18,554 B file — naming the text is what
+        pin above alone could be satisfied by any 19,690 B file — naming the text is what
         makes "the freeze kept the prose" a fact about these bytes. It also says which
         corpus is being read: the node that byte-compares this file to the live skill is a
         `live_vault` node the gate deselects, so inside a gate these literals are the only
@@ -396,12 +396,28 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     # without touching this copy. Both figures below are that copy's own, re-measured the
     # same way — never copied from the item that asked for the freeze, since the nightly
     # appends to this skill and the file may have grown again by landing.
-    assert len(raw) == 18_554 and text.count("\n") == 76, (
+    # 2026-10-11, #2540: §5's retire bullet was rewritten to state the #2415 rule as
+    # mechanical, which grew the skill by 1,136 B and 4 lines. This pin is the
+    # growth's receipt: it moves only when the skill moves, and then only by what the
+    # commit actually wrote.
+    assert len(raw) == 19_690 and text.count("\n") == 80, (
         f"{SKILL_WITNESS.name} is {len(raw)} B / {text.count(chr(10))} newlines, not the "
-        "18,554 B / 76 lines of the whole skill file — a partial copy would make the "
+        "19,690 B / 80 lines of the whole skill file — a partial copy would make the "
         "0-hit below a coverage gap rather than a clean result")
     assert "topics/memory-md-ledger" in text and "ledger" in text.lower(), (
         f"{SKILL_WITNESS.name} does not name a ledger, so it is the wrong corpus")
+    # The two figures above are a receipt for a rewrite, and a receipt cannot say what
+    # was written: a corpus of the same 19,690 B and the same 80 lines carrying the OLD
+    # §5 wording would satisfy them and still tell the nightly to remember the rule. So
+    # the corpus is named by the two strings #2540 put into §5 — the refusal line the
+    # script now prints, and the framing that replaced the remembered one — the way the
+    # assert above names it by `topics/memory-md-ledger` rather than by its length.
+    assert "disposition first, or --force" in text, (
+        f"{SKILL_WITNESS.name} does not carry the #2415 refusal line §5 now quotes, so "
+        "the size above is not the post-#2540 corpus it claims to be")
+    assert "Disposition before retire is enforced by the script, not remembered by the " \
+           "run (#2415, mechanical since #2540)" in text, (
+        f"{SKILL_WITNESS.name} still frames disposition as something the run remembers")
 
     _assert_no_ledger_ceiling_claim("step-2a-ter-curation.md (committed witness)", text)
 

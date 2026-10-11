@@ -11,6 +11,7 @@ Run: .venvs/lloyd/bin/python -m pytest tests/test_memory_ledger.py
 import importlib.util
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -383,7 +384,7 @@ def test_retire_moves_an_orphan_row_into_reviews_and_prints_each_move(tmp_path, 
     orphan = _row(GONE[:ml.ANCHOR_CHARS].rstrip())
     assert orphan in ledger.read_text(encoding="utf-8")
 
-    assert ml.main(["retire", "--memories-dir", str(d)]) == 0
+    assert ml.main(["retire", "--memories-dir", str(d), "--force"]) == 0
     out = capsys.readouterr().out
 
     archive = d / "reviews" / "user-md-ledger-archive.md"
@@ -405,7 +406,7 @@ def test_retire_keeps_a_row_whose_anchor_still_joins_a_loaded_line(tmp_path, cap
     ledger = d / "memory" / "user-md-ledger.md"
     before = ledger.read_text(encoding="utf-8")
 
-    rep = ml.retire(d)
+    rep = ml.retire(d, force=True)
 
     after = ledger.read_text(encoding="utf-8")
     assert rep["USER.md"]["kept"] == 2 and len(rep["USER.md"]["moved"]) == 1
@@ -434,7 +435,7 @@ def test_a_ledger_with_no_orphan_is_left_alone_and_no_archive_appears(tmp_path):
 def test_a_dry_run_prints_the_move_and_writes_nothing(tmp_path, capsys):
     d, _ = _retire_dir(tmp_path)
     before = {p: p.read_bytes() for p in d.rglob("*") if p.is_file()}
-    assert ml.main(["retire", "--memories-dir", str(d), "--dry-run"]) == 0
+    assert ml.main(["retire", "--memories-dir", str(d), "--dry-run", "--force"]) == 0
     assert "would archive" in capsys.readouterr().out
     assert {p: p.read_bytes() for p in d.rglob("*") if p.is_file()} == before
 
@@ -448,7 +449,7 @@ def test_status_reads_one_live_ledger_and_agrees_before_and_after_a_retire(tmp_p
 
     before = ml.status(d)["USER.md"]
     assert before["orphan_rows"] == [gone] and before["rows"] == 3
-    ml.retire(d)
+    ml.retire(d, force=True)
     after = ml.status(d)["USER.md"]
 
     assert after["orphan_rows"] == [], "an archived row is not an orphan"
@@ -493,7 +494,17 @@ def test_retire_is_never_a_way_to_make_room(tmp_path, monkeypatch):
     assert not (d / "reviews").exists(), "and archived nothing"
 
     # No size, target or until-it-fits parameter exists to be misused later...
-    assert set(inspect.signature(ml.retire).parameters) == {"memories_dir", "dry_run", "today"}
+    # #2540 widened this set by exactly one name, `force`, which overrides the #2415
+    # orphan refusal and carries no size in any sense. The equality is the point: a
+    # second new name has to be argued for here. The ban below is the property this
+    # node exists for, kept whole rather than relaxed to accommodate the flag.
+    params = set(inspect.signature(ml.retire).parameters)
+    assert params == {"memories_dir", "dry_run", "force", "today"}, params
+    # The signature equality above is what holds this ban, and a set-intersection
+    # assertion under it could never fail, so it is not here. The surface a size flag
+    # would actually arrive on is argparse — a `--max-bytes` could be added without
+    # touching `retire`'s signature at all — and that surface is pinned by
+    # `test_the_retire_cli_offers_exactly_the_flags_it_is_allowed` below.
     # ...no write path calls the step...
     # (`app/memory_ceiling.py` names `memory_ledger.py status` in a docstring; what
     # it must not do is import the module or call its retire step.)
@@ -503,6 +514,207 @@ def test_retire_is_never_a_way_to_make_room(tmp_path, monkeypatch):
     # ...and the module says why, by name.
     doc = " ".join((ml.__doc__ or "").split())
     assert "#1881" in doc and "never make room" in doc
+    # ...and the CLI refuses a size flag it does not have: argparse exits on the
+    # unknown option before `retire` is reached, so the route cannot be handed a byte
+    # count by a caller that read §5's 24,576 B trigger as a `retire` argument.
+    with pytest.raises(SystemExit):
+        ml.main(["retire", "--memories-dir", "/nonexistent-dir-for-this-assert",
+                 "--max-bytes", "24576"])
+
+
+# ── #2415 made mechanical: retire refuses an undispositioned orphan row (#2540) ──
+#
+# §5 of the curator skill has ordered disposition before retire since #2415, and for
+# all that time `retire` has done its own anchor arithmetic and moved whatever
+# disagreed with it. The row that leaves by that door is the row that documented a
+# line nobody can now name — dispositioned by nobody, reported as `archived`. The
+# nodes below are the gate: refusal by default, `--force` for a run that actually
+# read the rows, and ONE measurement — `status`'s own `orphan_rows` — behind both the
+# guard and the number it prints.
+#
+# Every node above that exercises the archive route now passes the override. That is
+# not a softening: `retire`'s movable set IS `status`'s orphan set (both are ledger
+# rows minus loaded lines), so a ledger with anything to move is a ledger with
+# something to refuse, and the only honest way to test the archiver is to say the
+# override out loud. `test_a_ledger_with_no_orphan_is_left_alone_and_no_archive_appears`
+# stays on the default path, because it has nothing to refuse.
+
+
+def _orphans(n: int) -> str:
+    """N rows whose anchors join no line of USER.md. Distinct anchors, so `status`'s
+    count of orphan ANCHORS and `retire`'s count of moved ROWS are the same number
+    and a node can say which of the two it is asserting."""
+    return "".join(_row(f"**A loaded line that is gone {i}** — no bullet carries it"
+                        [:ml.ANCHOR_CHARS].rstrip()) for i in range(1, n + 1))
+
+
+def _refused_dir(tmp_path, orphans: int = 1):
+    """A memories dir whose USER ledger holds `orphans` undispositioned rows beside
+    one row whose line is still loaded, so it is a real ledger and not a pile of
+    orphans, and `kept` is a real number."""
+    anchors = [ml.anchor_of(e) for e in ml.loaded_entries(USER)]
+    ledger = ("# topics/user-md-ledger\n\n" + _orphans(orphans)
+              + _row(anchors[0]) + "a note that is not a row\n")
+    return _dir(tmp_path, ledger=ledger)
+
+
+def test_one_undispositioned_orphan_row_refuses_the_whole_ledger(tmp_path, capsys):
+    """Clause 1: one orphan row, and `retire` moves nothing for that file, writes no
+    `reviews/<ledger>-archive.md`, and prints the refusal IN PLACE of the tally.
+
+    The byte size of this fixture is decoration, not a condition. Triage measured
+    `user-md-ledger.md` live at 28,157 B on 2026-10-11 — past §5's 24,576 B trigger
+    to run `retire` at all — with 0 orphan rows that day, so the file is one reworded
+    index line away from exactly this shape. The guard cannot see a byte: #1881 bans
+    this route making room, which is what `test_retire_is_never_a_way_to_make_room`
+    is for, and the pair below pins the claim rather than asserting it.
+    """
+    d = _refused_dir(tmp_path)
+    ledger = d / "memory" / "user-md-ledger.md"
+    before = ledger.read_bytes()
+
+    assert ml.main(["retire", "--memories-dir", str(d)]) == 0
+    out = capsys.readouterr().out
+
+    assert "USER.md: refused, 1 orphan row(s) undispositioned (#2415) — " \
+           "disposition first, or --force" in out, out
+    assert "row(s) archived" not in out, f"the tally was followed, not replaced: {out}"
+    assert "MEMORY.md: nothing retired (no loaded file)" in out, out
+    assert ledger.read_bytes() == before, "not one byte moved, kept rows included"
+    assert not (d / "reviews").exists(), "a refused ledger creates no archive at all"
+
+
+def test_the_refusal_says_the_number_status_says(tmp_path, capsys, monkeypatch):
+    """Clause 2: the N in the refusal is the length of that file's `orphan_rows` in
+    the `status` report over the same fixture, and it comes from that call rather
+    than from arithmetic the guard repeats. Two measurements of one fact is how a
+    green gate and a green report come to disagree; one measurement cannot."""
+    d = _refused_dir(tmp_path, orphans=3)
+    reported = ml.status(d)["USER.md"]["orphan_rows"]
+    assert len(reported) == 3, "the fixture is the denominator this node is about"
+
+    assert ml.main(["retire", "--memories-dir", str(d), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["USER.md"]["refused"] == 3
+
+    # The number travels with `status`: doctor its orphan set and the refusal follows
+    # it, even though the ledger's own rows would have supported 3.
+    real = ml.status
+
+    def doctored(md):
+        rep = real(md)
+        rep["USER.md"]["orphan_rows"] = ["fabricated"] * 7
+        return rep
+
+    monkeypatch.setattr(ml, "status", doctored)
+    assert ml.main(["retire", "--memories-dir", str(d)]) == 0
+    out = capsys.readouterr().out
+    assert "USER.md: refused, 7 orphan row(s) undispositioned (#2415)" in out, out
+
+
+def test_force_moves_the_rows_the_refusal_withheld_and_says_the_count(tmp_path, capsys):
+    """Clause 3: the same fixture with `--force` archives exactly the refused rows
+    and prints the override count. The flag is §5's route for a run that read every
+    orphan row and chose the archive over hand disposition — and the number is
+    printed because an override that does not say what it overrode is the forgotten
+    sentence again, one flag closer."""
+    d = _refused_dir(tmp_path, orphans=2)
+    ledger = d / "memory" / "user-md-ledger.md"
+    rows = _orphans(2)
+    assert rows in ledger.read_text(encoding="utf-8")
+
+    assert ml.main(["retire", "--memories-dir", str(d), "--force"]) == 0
+    out = capsys.readouterr().out
+
+    archive = d / "reviews" / "user-md-ledger-archive.md"
+    assert archive.is_file()
+    assert rows in archive.read_text(encoding="utf-8"), "both refused rows, verbatim"
+    assert rows not in ledger.read_text(encoding="utf-8")
+    assert "USER.md: 2 row(s) archived, 1 kept (line still loaded)" in out, out
+    assert "USER.md: --force override: 2 orphan row(s) archived undispositioned " \
+           "(#2415)" in out, out
+    assert "refused," not in out, "an override is not also a refusal"
+
+
+def test_a_ledger_with_nothing_to_refuse_prints_the_tally_it_always_printed(tmp_path,
+                                                                           capsys):
+    """Clause 4: the guard is a refusal, not a re-format. With 0 orphan rows the line
+    is byte for byte the one #1488 pinned — `0 row(s) archived, N kept (line still
+    loaded)` — with no refusal and no override anywhere in the output, so the curator
+    greps for the tally survives this change unchanged."""
+    anchors = [ml.anchor_of(e) for e in ml.loaded_entries(USER)]
+    d = _dir(tmp_path, ledger="# topics/user-md-ledger\n\n"
+                              + _row(anchors[0]) + _row(anchors[1]))
+
+    assert ml.main(["retire", "--memories-dir", str(d)]) == 0
+    out = capsys.readouterr().out
+    assert "USER.md: 0 row(s) archived, 2 kept (line still loaded)" in out, out
+    assert "refused" not in out and "override" not in out and "--force" not in out, out
+    assert not (d / "reviews").exists()
+
+
+def test_the_retire_cli_offers_exactly_the_flags_it_is_allowed(tmp_path, capsys):
+    """#2540's ban, held on the surface a size flag would arrive on.
+
+    A `--max-bytes` can be added to the subparser without touching `retire`'s
+    signature, so the signature equality in
+    `test_retire_is_never_a_way_to_make_room` cannot see the change. This asks argparse
+    what the verb accepts. `--force` is the one name #2540 added, and it is here because
+    it overrides the #2415 disposition refusal and carries no size in any sense.
+    """
+    with pytest.raises(SystemExit) as caught:
+        ml.main(["retire", "--help"])
+    out = capsys.readouterr().out
+    assert caught.value.code == 0, out
+    options = set(re.findall(r"--[a-z][a-z-]*", out))
+    assert options == {"--help", "--memories-dir", "--dry-run", "--json", "--force"}, out
+
+
+def test_the_script_run_as_a_subprocess_prints_the_refusal_it_promises(tmp_path):
+    """The boundary §5 actually crosses: the curator runs this file as a program, not as
+    an import, so the contract is argv bytes in and stdout bytes out. Calling
+    `ml.main([...])` shares an interpreter with the code under test and would miss a
+    parser that only breaks when the shell hands it real strings, or a refusal that
+    never reaches the pipe a nightly run captures.
+    """
+    script = ROOT / "scripts" / "memory" / "memory_ledger.py"
+    d = _refused_dir(tmp_path)
+    argv = [sys.executable, str(script), "retire", "--memories-dir", str(d)]
+
+    refused = subprocess.run(argv, capture_output=True, text=True)
+    assert refused.returncode == 0, refused.stderr
+    assert "USER.md: refused, 1 orphan row(s) undispositioned (#2415) — " \
+           "disposition first, or --force" in refused.stdout, refused.stdout
+    assert not (d / "reviews").exists(), "the refusal over the pipe moved nothing either"
+
+    forced = subprocess.run(argv + ["--force"], capture_output=True, text=True)
+    assert forced.returncode == 0, forced.stderr
+    assert "USER.md: --force override: 1 orphan row(s) archived undispositioned " \
+           "(#2415)" in forced.stdout, forced.stdout
+    assert (d / "reviews" / "user-md-ledger-archive.md").is_file()
+
+
+def test_the_guard_reads_the_orphan_count_and_never_the_byte_count(tmp_path, capsys):
+    """The acceptance says the refusal keys off the orphan count ALONE, and the pair
+    that proves it is one ledger with an orphan under §5's 24,576 B run trigger and
+    one with no orphan past it. If a size ever joins the condition, one half of this
+    node stops refusing or the other starts, and the node says which."""
+    small = _refused_dir(tmp_path / "small")
+    assert len((small / "memory" / "user-md-ledger.md").read_bytes()) < 24_576
+    assert ml.main(["retire", "--memories-dir", str(small)]) == 0
+    out = capsys.readouterr().out
+    assert "USER.md: refused, 1 orphan row(s) undispositioned (#2415)" in out, out
+
+    anchors = [ml.anchor_of(e) for e in ml.loaded_entries(USER)]
+    fat = _dir(tmp_path / "fat",
+               ledger="# topics/user-md-ledger\n\n" + _row(anchors[0])
+                      + "padding note that is not a row\n" * 1200)
+    lpath = fat / "memory" / "user-md-ledger.md"
+    assert len(lpath.read_bytes()) > 24_576, "past §5's run trigger, deliberately"
+    assert ml.status(fat)["USER.md"]["orphan_rows"] == []
+    assert ml.main(["retire", "--memories-dir", str(fat)]) == 0
+    out = capsys.readouterr().out
+    assert "USER.md: 0 row(s) archived, 1 kept (line still loaded)" in out, out
+    assert "refused" not in out, "a big ledger with nothing to refuse is not refused"
 
 
 # ── #2425 — the archive is a vault file, and the vault-wide OKF gate scans it ──
@@ -544,7 +756,7 @@ def test_a_newly_created_archive_passes_the_real_okf_gate(tmp_path, monkeypatch,
     from scripts.vault import validate_okf
 
     d, _ = _retire_dir(tmp_path)
-    assert ml.main(["retire", "--memories-dir", str(d)]) == 0
+    assert ml.main(["retire", "--memories-dir", str(d), "--force"]) == 0
     archive = d / "reviews" / "user-md-ledger-archive.md"
     text = archive.read_text(encoding="utf-8")
 
@@ -581,7 +793,7 @@ def test_appending_to_an_existing_archive_writes_no_second_header(tmp_path, monk
     from scripts.vault import validate_okf
 
     d, anchors = _retire_dir(tmp_path)
-    ml.retire(d)
+    ml.retire(d, force=True)
     archive = d / "reviews" / "user-md-ledger-archive.md"
     first = archive.read_text(encoding="utf-8")
 
@@ -591,7 +803,7 @@ def test_appending_to_an_existing_archive_writes_no_second_header(tmp_path, monk
     loaded.write_text("".join(ln for ln in loaded.read_text(encoding="utf-8")
                              .splitlines(True) if anchors[0][:20] not in ln),
                       encoding="utf-8")
-    rep = ml.retire(d)
+    rep = ml.retire(d, force=True)
 
     assert rep["USER.md"]["moved"], "the second run must actually move a row"
     text = archive.read_text(encoding="utf-8")
