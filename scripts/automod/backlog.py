@@ -543,6 +543,14 @@ CLAUSE_OUTCOMES = ("met", "not_met", "deferred")
 # bytes) — over the byte ceiling on a rule's witness, so nothing is extracted from it
 # and the maxima are re-derived in place. "hit" is rows at that maximum, the ratio
 # owed-check #2444/1 re-sizes by.
+#
+# The extract for the 300-character fields is committed, so its ratio no longer needs a
+# pass over the store: the vault witness `backlog/data/2026-10-11.2444-lloyd-automod-
+# promotions.jsonl` (82 rows, 870,849 bytes, under the 1,048,576 ceiling), whose `.md`
+# sibling prints `confirm_votes_at_300 107` of `confirm_votes_total 110` off those bytes
+# alone — the at-the-max figure for `review_confirm_votes[].reason`. It sits on a DATED
+# sibling because an extract demand against this store used to name the retired mirror
+# slot instead; #2560 closed that, and `_RETIRED_WITNESS_NAMES` keeps it closed.
 OUTCOME_EVIDENCE_MAX = 450      # parse_outcome slices [:300]; on record 300, hit 1774/3568
 OUTCOME_SUMMARY_MAX = 600       # parse_outcome slices [:400]; on record 400, hit 866/961
 OUTCOME_HUMAN_PATH_MAX = 400    # slices [:300]; on record 300, hit 1/100; > the 100-char longest path
@@ -1367,27 +1375,56 @@ def _artifact_taken(artifact_dir: str, name: str) -> bool:
         return False
 
 
+#: Vault slots a witness name may never be aimed at again, keyed on BASENAME.
+#:
+#: `promotions.jsonl` was the ledger mirror until #2050 owed 5 retired the
+#: working-tree copy and #2054 re-aimed the figures at vault history, so every one of
+#: the five figures now names the live store. #2064 then deleted its 28,678 rows from
+#: the vault (vault `ffc04ce5`) and #2243 moved the last 44 witness rows that had
+#: re-landed there to a dated name (vault `7786c598`), which leaves the path absent from
+#: HEAD — and three assertions in `tests/test_failure_ledger_witness.py` (`:122`,
+#: `:326`, `:471`) keep it absent from the working tree. It is therefore a name the
+#: vault must not hold, while `_artifact_taken` can only ever answer "free" for it: the
+#: two facts together are what made an over-bound extract demand against the live ledger
+#: order the retired slot (#2444 owed 1, measured 2026-10-11), and obeying that order is
+#: what broke a rail three times before it — #2175→#2178, #2383→#2387 and #2385→#2523,
+#: each a whole follow-up item.
+#:
+#: KEYED ON THE BASENAME, never on the artifact directory joined to it: that literal
+#: path is allowed in exactly eight files under `tests/` and `scripts/` — the allowlist
+#: `_MIRROR_MENTION_FILES` in
+#: tests/test_automod_vault_round.py::test_no_reader_under_tests_or_scripts_opens_the_retired_mirror
+#: — and `scripts/automod/backlog.py` is not one of them, so spelling the path here would
+#: turn that rail red on the file whose job is to stop the demand.
+_RETIRED_WITNESS_NAMES = frozenset({"promotions.jsonl"})
+
+
 def _witness_artifact(source, artifact_dir: str = WITNESS_ARTIFACT_DIR, *,
                       taken=None, day: str = "", item_id=None) -> str:
     """The vault path witness bytes should go to — never a path it would clobber.
 
     The free-name case is unchanged and stays the bare basename #1756's convention
     looks like on disk (`backlog/data/iv-metrics.jsonl`), so the overwhelmingly
-    common demand is not rewritten into a dated monster. Only a name the vault
-    already holds moves, and it moves into the dated-sibling form the two items
-    that hit this by hand settled on — `<date>.<item>-<source directory>-<name>`,
-    e.g. `backlog/data/2026-10-10.2512-SM_20261010_204036-gate.json`. The source
+    common demand is not rewritten into a dated monster. Two things move a name into
+    the dated-sibling form the two items that hit this by hand settled on —
+    `<date>.<item>-<source directory>-<name>`, e.g.
+    `backlog/data/2026-10-10.2512-SM_20261010_204036-gate.json`: a name the vault
+    already holds (#2513), and a basename `_RETIRED_WITNESS_NAMES` rules out (#2560),
+    which fires even when the free-name probe says the slot is empty, because for a
+    retired slot the probe is always wrong in the safe-looking direction. The source
     directory is what keeps two items copying two DIFFERENT `gate.json` files on
     one day apart; the item id is what makes the name readable from the item that
     owes it, and it is optional because the emitter is also called by tests and by
     owed-check paths that have no item in hand. Re-triaging the same source is
     idempotent — same day, same directory, same id — so the demand keeps pointing
-    at the bytes its own last run wrote rather than spawning a fresh copy each pass.
+    at the bytes its own last run wrote rather than spawning a fresh copy each pass,
+    and for a retired name that is the whole fix: the second demand asks for the
+    extract the first one published, not a second copy of it.
     """
     src = _witness_target(source)
     name = src.name
     probe = taken if taken is not None else _artifact_taken
-    if not probe(artifact_dir, name):
+    if name not in _RETIRED_WITNESS_NAMES and not probe(artifact_dir, name):
         return f"{artifact_dir}/{name}"
     day = day or now_stamp()[:10]
     tag = re.sub(r"[^\w.\-+]", "-", src.parent.name).strip("-.")[:48] or "src"
@@ -1425,6 +1462,14 @@ def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
     witnesses rotate and grow, so a size written into the item's front matter is a
     figure that goes stale on purpose, and the demand does not need it — the ceiling is
     the number that governs the work.
+
+    The artifact it names comes from `_witness_artifact`, so a store whose basename is
+    `_RETIRED_WITNESS_NAMES` is asked for at a dated sibling rather than at the free
+    slot the vault must not hold (#2444 owed 1, 2026-10-11: the demand against the live
+    ledger named `promotions.jsonl`, a path three tests keep absent and whose deletion
+    is why the free-name probe could not see it). Re-triaging such a store re-asks for
+    the same dated file, so the extract its first demand published is the one the second
+    one measures.
     """
     target = _witness_target(path)
     # #2513: the same name rule as the under-bound clause, because the over-bound

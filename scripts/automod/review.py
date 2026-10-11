@@ -3828,6 +3828,12 @@ CONFIRM_REASON_MAX = 450
 # … not a budget" (`DIVERGENCE_MARKER`) instead of the unbounded branch's advice to
 # raise `harness.finalizer.max_tokens` (8192), which cannot help a schema that would
 # diverge at any budget (#1706).
+#
+# That 107-of-110 population is committed, so nobody has to re-measure the store to
+# check it: the vault witness `backlog/data/2026-10-11.2444-lloyd-automod-promotions.jsonl`
+# holds all 110 stored reasons on the 73 rows that carry them, and its `.md` sibling
+# prints `confirm_votes_at_300 107` off those bytes alone (#2560). Widening the cap stays
+# owed-check's call; this constant's job is to stop losing what the extract can count.
 CONFIRM_SCHEMA: dict = {
     "type": "object",
     "title": "automod_review_confirm",

@@ -43,6 +43,21 @@ exactly this paragraph: it said "all three nodes here run" while `pytest -v`
 collected four. Retyping the number fixes one drift and leaves the next in place; a
 number this file checks against itself is the only version that stays true.
 
+`test_the_2444_promotions_extract_reproduces_the_at_the_max_ratio` — the seventh
+witness, and the one whose demand was the last to name the retired slot. #2444 owed 1
+asked its round for an extract of the live promotions ledger committed to
+`backlog/data/promotions.jsonl` and re-derived from there; #2560 published it as a dated
+sibling in this directory instead — the name is discovered by glob there rather than
+spelled, because the middle term of it is the state directory that
+`test_the_2523_red_tree_extract_reproduces_the_two_roundless_items` rightly refuses to
+let these bytes name — so its figures come from committed bytes and no node here
+re-reads the store it was cut from: 107 of 110 stored `review_confirm_votes[].reason`
+strings sit at `CONFIRM_REASON_MAX` = 300 characters — 97.27% — over 73 rows, plus the 9
+`arch_review` rows, all with `detail: null`, that share the window; 82 rows and 870,849
+bytes in all, under the 1,048,576-byte ceiling the demand is written under. `tests/
+test_witness_artifact_clause.py` is where the emitter is pinned to stop naming that
+retired slot at all.
+
 These nodes read `~/obsidian`, so on a machine with no vault they fail loudly
 rather than silently passing: the witness is supposed to be there.
 """
@@ -611,7 +626,91 @@ def test_the_docstring_names_every_node_this_file_ships():
         f"the module docstring advertises {sorted(advertised - shipped)} that this "
         f"file does not ship; this file ships {sorted(shipped - advertised)} the "
         "docstring never names")
-    assert len(shipped) == 10, (
-        "nine witness nodes over the vault bytes plus this rail. The count is spelled "
+    assert len(shipped) == 11, (
+        "ten witness nodes over the vault bytes plus this rail. The count is spelled "
         "out so that adding a node has to come back here and re-read the "
         "paragraph, instead of leaving it a sentence behind")
+
+
+def test_the_2444_promotions_extract_reproduces_the_at_the_max_ratio():
+    """#2444 owed 1, published by #2560: the confirm-revote extract, on a dated sibling.
+
+    The seventh witness, and the one whose demand was the last to aim at the retired
+    slot: the owed note #2444 carried told its round to commit this extract to
+    `backlog/data/promotions.jsonl` and re-derive it from there, which is the path #2064
+    deleted (`ffc04ce5`) and three assertions above keep absent. It is committed instead
+    as a dated sibling under this directory — the form `_witness_artifact` emits for a
+    source whose basename is retired — and its name is DISCOVERED by glob below rather
+    than retyped, because that name's middle term is the live ledger's own directory and
+    the scan inside `test_the_2523_red_tree_extract_reproduces_the_two_roundless_items`
+    rightly refuses this file to spell it. That the emitter names exactly this file is
+    pinned in `tests/test_witness_artifact_clause.py`, which has no such wall.
+
+    82 rows, 870,849 bytes, copied byte-for-byte out of the live ledger and re-derived
+    from these committed bytes alone: `confirm_votes_at_300 107` of
+    `confirm_votes_total 110` — the ratio owed-check #2444/1 re-sizes against — carried
+    by `rows_with_votes 73`, plus `arch_review_rows 9`, every one with `detail: null`.
+    Under `WITNESS_MAX_BYTES` (1,048,576) by 177,727 bytes.
+
+    What is deliberately NOT asserted is that those 82 rows are still in the live store:
+    `sweep_promotions_ledger` ages rows out, and a node that went red the first time a
+    row aged would be an alarm about the passage of time, not about a broken witness.
+    The `.md` sibling carries the route back for a re-cut (the dated archive beside the
+    store, and vault `4bc93177` for the pre-window copy).
+    """
+    from scripts.automod import backlog as B
+
+    data = paths.VAULT_ROOT / "backlog" / "data"
+    hits = sorted(data.glob("*.2444-*promotions.jsonl"))
+    assert len(hits) == 1, f"the extract is one committed file, not {len(hits)}: {hits}"
+    witness = hits[0]
+    assert re.match(r"^\d{4}-\d{2}-\d{2}\.2444-[\w.\-+]+-promotions\.jsonl$",
+                    witness.name), (
+        f"not the dated-sibling form the emitter owes this store: {witness.name}")
+    assert witness.is_file() and not witness.is_symlink(), witness
+    assert not (data / "promotions.jsonl").exists(), \
+        "the extract belongs on the dated sibling; the retired mirror stays absent"
+
+    # Clause 4's word is COMMITTED, so this goes to the same `git ls-files` the #2523
+    # node uses: an extract on disk but untracked is a scratch file with no history for
+    # the next fold to hold.
+    tracked = subprocess.run(
+        ["git", "-C", str(paths.VAULT_ROOT), "ls-files", "--error-unmatch",
+         str(witness.relative_to(paths.VAULT_ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{witness.name} is on disk but not tracked: `git ls-files --error-unmatch` said "
+        f"{tracked.stderr.strip() or 'nothing'}, and an uncommitted extract is a scratch "
+        "file rather than bytes with history")
+
+    raw = witness.read_bytes()
+    assert len(raw) == witness.stat().st_size < B.WITNESS_MAX_BYTES, (
+        f"the extract must fit under the ceiling it was cut to fit: {len(raw)}")
+    rows = [json.loads(l) for l in raw.decode("utf-8").splitlines() if l.strip()]
+
+    votes = at_max = with_votes = arch = arch_null = 0
+    for r in rows:
+        for e in (r.get("review_confirm_votes") or []):
+            if isinstance(e, dict) and "reason" in e:
+                votes += 1
+                at_max += (len(str(e.get("reason") or "")) == 300)
+        if r.get("review_confirm_votes"):
+            with_votes += 1
+        if r.get("event") == "arch_review":
+            arch += 1
+            arch_null += r.get("detail") is None
+    assert len(rows) == 82 and with_votes == 73, (len(rows), with_votes)
+    assert votes == 110 and at_max == 107, (votes, at_max)
+    assert arch == 9 and arch_null == 9, (arch, arch_null)
+    assert all(r.get("review_confirm_votes") or r.get("event") == "arch_review"
+               for r in rows), "a row kept for no reason this extract publishes"
+    assert len(raw) == 870849, len(raw)
+
+    md = witness.with_suffix(".md").read_text(encoding="utf-8")
+    for quoted in (f"rows {len(rows)} bytes {len(raw)}",
+                   f"confirm_votes_total {votes}",
+                   f"confirm_votes_at_300 {at_max}",
+                   f"rows_with_votes {with_votes}",
+                   f"arch_review_rows {arch}"):
+        assert quoted in md, (
+            f"the note quotes figures this extract does not print: {quoted!r}")

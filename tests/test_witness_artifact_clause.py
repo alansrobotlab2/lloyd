@@ -1064,8 +1064,16 @@ def test_the_over_bound_note_states_the_ceiling_the_subset_and_the_fallback(tmp_
     truncates every entry at `CLAUSE_MAX_CHARS`, so a note longer than the ceiling it
     is quoting would arrive at the item cut off mid-sentence — with the fallback
     instruction, the last sentence, gone.
+
+    The store is named `sessions.jsonl` rather than after the promotions mirror this
+    rule first fired on, because #2560 made that basename a name the emitter will never
+    offer bare — it is a retired vault slot, and a demand against it now names a dated
+    sibling (#2513's node already sidesteps the same fact for the same reason). What is
+    under test here is the note's three halves and its budget, which hold for any free
+    name; the retired-name branch is pinned by `test_a_retired_witness_name_is_never_
+    offered_as_free` and its two companions below.
     """
-    witness = _over_bound(tmp_path)
+    witness = _over_bound(tmp_path, name="sessions.jsonl")
     body = _BODY_1869.format(witness=witness)
     _, owed = B.add_witness_artifact_clause(list(_AUTHORED), body, route_to_owed=True)
     assert len(owed) == 1, owed
@@ -1143,7 +1151,11 @@ def test_three_over_bound_tokens_yield_one_note_for_the_first_and_reach_only_owe
 
     The verbatim comparison is against the generator's own output rather than a
     re-wording, so the routing cannot quietly paraphrase the ceiling or drop the
-    fallback on the way into the front matter.
+    fallback on the way into the front matter. It is generated with the SAME item id the
+    writer will have in hand: since #2513 the dated artifact name carries the item id,
+    and since #2560 the retired name at the head of this body always takes that branch,
+    so a comparison built without one would be comparing a note for no item against a
+    note for item 31 and calling the difference a paraphrase.
     """
     first = _over_bound(tmp_path, "promotions.jsonl", "lloyd-automod")
     second = _over_bound(tmp_path, "2026-09-30.ndjson", "manifests")
@@ -1155,10 +1167,11 @@ def test_three_over_bound_tokens_yield_one_note_for_the_first_and_reach_only_owe
         f"the body really cites three, in this order: {tokens}")
 
     clauses, owed = B.add_witness_artifact_clause(list(_AUTHORED), body,
-                                                  route_to_owed=True)
+                                                  route_to_owed=True, item_id=31)
     assert clauses == list(_AUTHORED), clauses
     assert len(owed) == 1, f"three over-bound tokens, one note: {owed}"
     assert str(first) in owed[0], f"the first in reading order: {owed[0]}"
+    assert ".31-" in owed[0], f"the artifact is the item's own dated sibling: {owed[0]}"
     assert str(second) not in owed[0] and str(third) not in owed[0], owed[0]
 
     p = write_item(isolated, 31, body=body)
@@ -1446,3 +1459,134 @@ def test_the_over_bound_note_takes_the_same_no_clobber_name(tmp_path, isolated,
     assert owed[0].endswith("say so rather than ordering the store."), owed[0]
     assert victim.read_bytes() == before, (
         "the note was written to the store it warns about")
+
+
+# ══ #2560: a RETIRED vault slot reads free to the probe, so the probe cannot be
+# ══     the only thing that decides whether a name is offerable.
+#
+# `_artifact_taken` answers "free" for a path the vault deliberately deleted, and
+# the mirror basename under the artifact directory is exactly that: #2064 deleted its
+# 28,678 rows (vault
+# `ffc04ce5`), #2243 moved the 44 rows that had re-landed there to a dated name (vault
+# `7786c598`), and three assertions in `tests/test_failure_ledger_witness.py` (`:122`,
+# `:326`, `:471`) keep it absent from the working tree. So the over-bound extract demand
+# #2444 owed was aimed at the one slot the vault must not hold — and every round that
+# obeyed such an order broke a rail (#2175→#2178, #2383→#2387, #2385→#2523).
+
+#: The day the emitter is pinned to in this section, so the dated name is literal.
+_STAMP_2560 = "2026-10-11T13:25:09"
+#: The store shape #2444 owed 1 names: the live automod ledger, over the bound.
+_LEDGER_2560 = Path.home() / ".local/state/lloyd-automod/promotions.jsonl"
+
+
+def test_a_retired_witness_name_is_never_offered_as_free(tmp_path, isolated):
+    """#2560 clause 1: for the retired mirror name the free branch must not run.
+
+    The positive control is the production probe, not an injected answer: under
+    `isolated` the vault is an empty temporary tree, so `_artifact_taken` really does
+    report `promotions.jsonl` free — which is precisely the wrong answer for a slot the
+    vault deleted, and the reason #2513's clobber fix left this hazard standing. The
+    emitter therefore consults `_RETIRED_WITNESS_NAMES` before the probe, and a source
+    with that basename goes to the dated sibling even with a `taken` that says free.
+
+    The other half is the shape the overwhelmingly common demand must keep: a name the
+    vault does not hold and never held still comes back as the bare basename
+    (`backlog/data/iv-metrics.jsonl` form), so this rule does not turn every witness
+    into a dated monster.
+    """
+    assert B._artifact_taken(B.WITNESS_ARTIFACT_DIR, "promotions.jsonl") is False, (
+        "positive control: the probe reads the retired slot as free — that is the bug")
+
+    dated = B._witness_artifact(_LEDGER_2560, day="2026-10-11", item_id=2444)
+    assert dated == "backlog/data/2026-10-11.2444-lloyd-automod-promotions.jsonl", dated
+    assert dated != f"{B.WITNESS_ARTIFACT_DIR}/promotions.jsonl", dated
+
+    # The same rule with the probe explicitly answering "free", which is the literal
+    # wording of the clause: the dated branch fires anyway.
+    assert B._witness_artifact(_LEDGER_2560, taken=lambda d, n: False,
+                               day="2026-10-11", item_id=2444) == dated
+
+    # ... and an ordinary free name is untouched.
+    assert B._witness_artifact(tmp_path / "state/qmd/index.db",
+                               taken=lambda d, n: False) == "backlog/data/index.db", (
+        "a free name nobody retired was rewritten into a dated one")
+    assert B._witness_artifact(tmp_path / "state/lloyd-automod/sessions.jsonl",
+                               taken=lambda d, n: False) == "backlog/data/sessions.jsonl"
+    assert set(B._RETIRED_WITNESS_NAMES) == {"promotions.jsonl"}, (
+        "the set is keyed on BASENAME: the full retired path is legal in only eight "
+        "files under tests/ and scripts/, and backlog.py is not one of them")
+
+
+def test_the_over_bound_demand_for_2444_names_a_dated_extract(tmp_path, monkeypatch):
+    """#2560 clause 2: the note asks for the extract, not for the retired slot.
+
+    Same store shape (over `WITNESS_MAX_BYTES`, in `lloyd-automod/`, named after the
+    retired mirror) and the same item id the demand was issued for, at a pinned day so
+    the expected name is literal rather than reconstructed. Three things must hold at
+    once: the artifact is the dated sibling and the retired slot appears nowhere in the
+    note (a note that named both would let a round commit to the wrong one), the
+    re-derive command is `wc -l -c` on THAT artifact, and the note still ends on the
+    fallback sentence — the dated name is longer, and the tail is the first thing
+    `clean_clauses` truncates.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_2560)
+    store = _over_bound(tmp_path)          # <tmp>/state/lloyd-automod/promotions.jsonl
+    assert store.name in B._RETIRED_WITNESS_NAMES, store
+
+    note = B._over_bound_extract_demand(store, item_id=2444)
+    assert note, "the demand went silent on the store it exists for"
+    assert "backlog/data/2026-10-11.2444-lloyd-automod-promotions.jsonl" in note, note
+    assert f"`{B.WITNESS_ARTIFACT_DIR}/promotions.jsonl`" not in note, note
+    assert ("`wc -l -c < backlog/data/2026-10-11.2444-lloyd-automod-promotions.jsonl`"
+            in note), note
+    assert note.endswith("say so rather than ordering the store."), note
+    assert len(note) <= B.CLAUSE_MAX_CHARS, (
+        f"{len(note)} chars, past the {B.CLAUSE_MAX_CHARS} the budget truncates at")
+    assert B.clean_clauses([note], limit=1) == [note], (
+        "`clean_clauses` rewrote the note, and the tail is what it drops")
+
+
+def test_the_live_ledger_demand_for_2444_names_no_retired_slot(monkeypatch):
+    """#2560 clause 2 against the store the item actually cites, unpinned day.
+
+    The node above pins the rule on a fixture; this one reads the production emitter on
+    the real path, with nothing stubbed, because the claim under test is about THAT
+    store: 32,396,710 bytes over a 1,048,576 bound. The day is whatever today is, so
+    the assertion is the shape plus the item id, and the artifact named must be the one
+    `_witness_artifact` names for the same source — the demand and the emitter cannot
+    drift apart, or re-triage asks for bytes nobody was told to write.
+    """
+    if not _LEDGER_2560.is_file():
+        pytest.skip(f"the ledger this demand is about is not on this machine: "
+                    f"{_LEDGER_2560}")
+    note = B._over_bound_extract_demand(_LEDGER_2560, item_id=2444)
+    art = B._witness_artifact(_LEDGER_2560, item_id=2444)
+    assert note, "the demand went silent on a store over the bound"
+    assert f"`{art}`" in note, f"{note}\n!= emitted {art}"
+    assert art.startswith(f"{B.WITNESS_ARTIFACT_DIR}/{B.now_stamp()[:10]}.2444-"), art
+    assert art.endswith("-lloyd-automod-promotions.jsonl"), art
+    assert f"`{B.WITNESS_ARTIFACT_DIR}/promotions.jsonl`" not in note, note
+    assert note.endswith("say so rather than ordering the store."), note
+
+
+def test_re_demanding_a_retired_name_asks_for_the_same_dated_bytes(monkeypatch):
+    """#2560 clause 3: the second demand points at the first one's bytes.
+
+    The extract is published once, so a re-triage that named a NEW file each pass would
+    order a second copy of the same 870,849 bytes forever and leave the first one
+    orphaned. Nothing about the dated branch is random or stateful — same day, same
+    source directory, same item id — so calling the emitter twice and the generator
+    twice must return one answer, byte for byte. Different item ids on the same store
+    still separate, which is what keeps two items' extracts from colliding in the one
+    name.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_2560)
+    first = B._witness_artifact(_LEDGER_2560, item_id=2444)
+    assert first == B._witness_artifact(_LEDGER_2560, item_id=2444), (
+        "re-triage renamed the artifact, so it re-orders the bytes it already demanded")
+    note_1 = B._over_bound_extract_demand(_LEDGER_2560, item_id=2444)
+    note_2 = B._over_bound_extract_demand(_LEDGER_2560, item_id=2444)
+    assert note_1 == note_2, "the note itself moved between two calls"
+    other = B._witness_artifact(_LEDGER_2560, item_id=9999)
+    assert other != first and other.endswith("-promotions.jsonl"), (
+        f"a second item on the same store collided: {other}")
