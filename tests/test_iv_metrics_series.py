@@ -672,7 +672,8 @@ def test_breach_exits_2_when_the_recent_median_is_over_the_bound(tmp_path):
     expressed over JSONL fields rather than prose". Four prior rows at 0.20 plus
     this run's 1.0: median 0.20 > the 0.05 bound, so exit 2. Exit status rather than a
     sentence because the autonomy runner consumes exit codes reliably —
-    `scripts/skill_verdicts.py:633` and `scripts/validate_handoff.py:70` use 2 for a
+    `scripts/skill_verdicts.py:633` and `validate_handoff.main`'s usage branch (its
+    `return 2` before any file is opened) use 2 for a
     refusal for the same reason, and `_detect_silent_failures` (`app/autonomy.py:27-33`) only catches
     prose it has been told to look for.
     """

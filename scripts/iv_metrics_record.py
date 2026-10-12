@@ -118,7 +118,10 @@ MIN_BREACH_ROWS = 3
 #: Extra rows read behind the median window when counting unreadable ones.
 READ_SLACK = 100
 #: Sustained breach. 2 is the "refused/anomaly" code this repo already uses
-#: (`scripts/skill_verdicts.py:633`, `scripts/validate_handoff.py:70`). Named so the
+#: (`scripts/skill_verdicts.py:633`, `scripts/validate_handoff.py`'s `main()` usage
+#: branch, which `return 2`s before it touches a file). Named by function rather
+#: than line: #2610 added the clock check above `main()` and moved that `return 2`
+#: down ninety lines, which is exactly what a line number cannot survive. Named so the
 #: value returned and the value printed in the verdict prose cannot drift apart —
 #: `_verdict` embeds it in the line the runner scans for `exit code [1-9]`, so a
 #: retuned code that only reached the `return` would silently un-arm the alert.
