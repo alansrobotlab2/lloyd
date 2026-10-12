@@ -6,6 +6,8 @@ event into `inner_voice_observations`; the frontend reads it back via
 these endpoints.
 """
 
+import asyncio
+import heapq
 import json
 import logging
 from typing import Any
@@ -213,44 +215,36 @@ async def get_state(
 # Sessions opted into Inner Voice
 # ---------------------------------------------------------------------------
 
-@router.get("/sessions")
-async def list_inner_voice_sessions(
-    limit: int = Query(default=200, ge=1, le=1000),
-) -> dict[str, Any]:
-    """List sessions opted into Inner Voice (`inner_voice: true` in JSON).
+#: One parsed listing row per session file, keyed by path and valid while
+#: `(mtime_ns, size)` still matches. `None` records a file that is not an Inner
+#: Voice session, so a deep walk pays for each of those once per process too.
+_SESSION_ROW_CACHE: dict[str, tuple[tuple[int, int], tuple[float, dict[str, Any]] | None]] = {}
+_SESSION_ROW_CACHE_MAX = 50_000
 
-    Sorted newest first by mtime.
-    """
-    out: list[dict[str, Any]] = []
-    if not SESSIONS_DIR.exists():
-        return {"sessions": [], "count": 0}
-    try:
-        files = list(SESSIONS_DIR.glob("*.json"))
-    except Exception as e:
-        logger.warning("list_inner_voice_sessions glob failed: %s", e)
-        return {"sessions": [], "count": 0, "error": str(e)}
+#: How far `last_active` may run ahead of a file's mtime before the early stop
+#: below would miss it. The message-append path writes both in one go (measured
+#: over 559 Inner Voice sessions on 2026-10-12: never ahead, at most 1.5 ms
+#: behind); the slack is for a clock step between the stamp and the write.
+_MTIME_SLACK_S = 60.0
 
-    # Ordered by when the conversation was last active, not by file mtime —
-    # background writers (post-session capture, the titler, TodoWrite) touch
-    # a session file long after the talking stopped. See
-    # `app.routers.sessions._last_active_ts`.
+
+def _session_row(path, st) -> tuple[float, dict[str, Any]] | None:
+    """`(last_active, row)` for an Inner Voice session file, else `None`."""
+    key = str(path)
+    sig = (st.st_mtime_ns, st.st_size)
+    hit = _SESSION_ROW_CACHE.get(key)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
     from app.routers.sessions import _last_active_ts
 
-    loaded: list[tuple[float, Any, dict]] = []
-    for path in files:
-        try:
-            data = json.loads(path.read_text())
-        except Exception:
-            continue
-        if not data.get("inner_voice"):
-            continue
-        loaded.append((_last_active_ts(path, data), path, data))
-    loaded.sort(key=lambda row: row[0], reverse=True)
-
-    for _ts, path, data in loaded:
-        if len(out) >= limit:
-            break
-        out.append({
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        # Not cached: a file caught mid-write parses on the next call.
+        return None
+    entry = None
+    if isinstance(data, dict) and data.get("inner_voice"):
+        entry = (_last_active_ts(path, data), {
             "session_id": path.stem,
             "experiment_id": data.get("experiment_id"),
             "title": data.get("title") or data.get("topic") or "",
@@ -264,6 +258,71 @@ async def list_inner_voice_sessions(
                 data.get("inner_voice_evaluate_user_turns", False)
             ),
         })
+    if len(_SESSION_ROW_CACHE) >= _SESSION_ROW_CACHE_MAX:
+        _SESSION_ROW_CACHE.clear()
+    _SESSION_ROW_CACHE[key] = (sig, entry)
+    return entry
+
+
+def _scan_inner_voice_sessions(limit: int) -> list[dict[str, Any]]:
+    """The `limit` most recently active Inner Voice sessions, newest first.
+
+    A session JSON carries its whole transcript, and workers opt in, so this
+    listing cannot use the chat listing's filename fast path: parsing the
+    directory to answer it took 7.9 s over 10,503 files (2.5 GB) on
+    2026-10-12, on the event loop, with every other request queued behind it.
+    Instead the walk goes newest-mtime first and stops once it cannot change
+    the answer.
+
+    The order shown is `last_active`, not mtime — background writers touch a
+    session file long after the talking stopped (see
+    `app.routers.sessions._last_active_ts`). Those writers only ever move
+    mtime forward of `last_active`, so mtime is an upper bound on it: once
+    `limit` rows are in hand and the oldest of them is still newer than the
+    next file's mtime, no file further down can displace one. A backfill that
+    touches every file defeats the stop and the walk runs deep, which the row
+    cache makes a one-time cost.
+    """
+    entries = []
+    for path in SESSIONS_DIR.glob("*.json"):
+        try:
+            entries.append((path.stat(), path))
+        except OSError:
+            continue
+    entries.sort(key=lambda e: e[0].st_mtime, reverse=True)
+
+    kept: list[tuple[float, str, dict[str, Any]]] = []  # min-heap on last_active
+    for st, path in entries:
+        if len(kept) >= limit and kept[0][0] > st.st_mtime + _MTIME_SLACK_S:
+            break
+        entry = _session_row(path, st)
+        if entry is None:
+            continue
+        item = (entry[0], path.name, entry[1])
+        if len(kept) < limit:
+            heapq.heappush(kept, item)
+        elif item[:2] > kept[0][:2]:
+            heapq.heapreplace(kept, item)
+    kept.sort(key=lambda item: item[:2], reverse=True)
+    return [row for _ts, _name, row in kept]
+
+
+@router.get("/sessions")
+async def list_inner_voice_sessions(
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, Any]:
+    """List sessions opted into Inner Voice (`inner_voice: true` in JSON).
+
+    Sorted newest first by when the conversation was last active.
+    """
+    if not SESSIONS_DIR.exists():
+        return {"sessions": [], "count": 0}
+    try:
+        # Off the loop: a deep walk is file reads and JSON parsing.
+        out = await asyncio.to_thread(_scan_inner_voice_sessions, limit)
+    except Exception as e:
+        logger.warning("list_inner_voice_sessions scan failed: %s", e)
+        return {"sessions": [], "count": 0, "error": str(e)}
     return {"sessions": out, "count": len(out)}
 
 
