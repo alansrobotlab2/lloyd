@@ -134,6 +134,7 @@ def test_thinking_follows_config(harness, setting, expected):
 def prewarm(harness, monkeypatch, tmp_path):
     client, _ = harness
     voice._PREWARM_LAST.clear()
+    voice._PREWARM_INFLIGHT.clear()
     runs = []
 
     async def fake_run_query(messages, options):
@@ -160,7 +161,7 @@ def test_prewarm_sends_the_turns_own_prefix_for_one_token(prewarm, tmp_path, mon
         {"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
     ]}))
     r = client().post("/api/voice/prewarm", json={"session_key": "s1"})
-    assert r.json() == {"started": True}
+    assert r.json() == {"started": True, "trigger": "wake"}
     _drain_tasks()
     assert len(runs) == 1
     messages, options = runs[0]
@@ -175,15 +176,54 @@ def test_prewarm_is_debounced_per_session(prewarm):
     client, runs = prewarm
     c = client()
     assert c.post("/api/voice/prewarm", json={"session_key": "s2"}).json()["started"]
+    _drain_tasks()
     assert c.post("/api/voice/prewarm", json={"session_key": "s2"}).json() == {
-        "started": False, "reason": "recent"}
+        "started": False, "reason": "recent", "trigger": "wake"}
     assert c.post("/api/voice/prewarm", json={"session_key": "s3"}).json()["started"]
+
+
+def test_prewarm_triggers_and_their_debounce():
+    """The admission rules, without a request (2026-10-12): a keep-warm is
+    admitted 5 s after the last prewarm, a wake or a speech onset 20 s; a
+    prefill in flight or a turn running on the session refuses every
+    trigger; the switch refuses first."""
+    voice._PREWARM_LAST.clear()
+    voice._PREWARM_INFLIGHT.clear()
+    ok = dict(enabled=True, busy=False)
+    assert voice._prewarm_refusal("p", "wake", 100.0, **ok) is None
+    voice._PREWARM_LAST["p"] = 100.0
+    assert voice._prewarm_refusal("p", "wake", 110.0, **ok) == "recent"
+    assert voice._prewarm_refusal("p", "speech", 110.0, **ok) == "recent"
+    assert voice._prewarm_refusal("p", "keep-warm", 104.0, **ok) == "recent"
+    assert voice._prewarm_refusal("p", "keep-warm", 106.0, **ok) is None
+    assert voice._prewarm_refusal("p", "wake", 121.0, **ok) is None
+    assert voice._prewarm_refusal("p", "wake", 121.0, enabled=True, busy=True) == "busy"
+    voice._PREWARM_INFLIGHT.add("p")
+    assert voice._prewarm_refusal("p", "keep-warm", 999.0, **ok) == "in flight"
+    assert voice._prewarm_refusal("p", "keep-warm", 999.0, enabled=False, busy=False) == "disabled"
+    voice._PREWARM_INFLIGHT.clear()
+
+
+def test_prewarm_reads_the_trigger_and_refuses_a_busy_session(prewarm, monkeypatch):
+    client, runs = prewarm
+    c = client()
+    r = c.post("/api/voice/prewarm", json={"session_key": "s6", "reason": "keep-warm"})
+    assert r.json() == {"started": True, "trigger": "keep-warm"}
+    _drain_tasks()
+    assert voice._PREWARM_INFLIGHT == set(), "the in-flight mark is dropped when the prefill ends"
+    r = c.post("/api/voice/prewarm", json={"session_key": "s6", "reason": "nonsense"})
+    assert r.json()["trigger"] == "wake", "an unknown trigger is a wake"
+    from app import sessions_io
+    monkeypatch.setattr(sessions_io, "get_queue_state",
+                        lambda sid: {"current": {"turn_id": "t"}, "pending_user": 0})
+    r = c.post("/api/voice/prewarm", json={"session_key": "s7", "reason": "speech"})
+    assert r.json() == {"started": False, "reason": "busy", "trigger": "speech"}
 
 
 def test_prewarm_has_a_switch(prewarm):
     client, runs = prewarm
     r = client({"prewarm": False}).post("/api/voice/prewarm", json={"session_key": "s4"})
-    assert r.json() == {"started": False, "reason": "disabled"}
+    assert r.json() == {"started": False, "reason": "disabled", "trigger": "wake"}
 
 
 def test_prewarm_skips_a_session_that_will_summarize(prewarm, tmp_path, monkeypatch):

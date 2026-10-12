@@ -98,6 +98,8 @@ BACKEND_URL = os.environ.get("LLOYD_BACKEND_URL", "http://127.0.0.1:8080").rstri
 INJECT_URL = f"{BACKEND_URL}/api/voice/inject"
 SUMMARIZE_URL = f"{BACKEND_URL}/api/voice/summarize"
 PREWARM_URL = f"{BACKEND_URL}/api/voice/prewarm"
+#: Speech-onset prewarm posts are spaced at least this far apart per room.
+_PREWARM_POST_MIN_S = 2.0
 INTERRUPTED_URL = f"{BACKEND_URL}/api/voice/interrupted"
 LISTEN_URL = f"{BACKEND_URL}/api/voice/listen"
 
@@ -1528,6 +1530,16 @@ class RoomBridge:
                                     ["One moment.", "Let me check.", "Checking now."])
         self._filler_i = 0
         self._prewarm = bool(vt.get("prewarm", True))
+        # Keep the prefix warm while a conversation is open (2026-10-12): the
+        # wake fire was the only prewarm trigger, follow-ups fire no wake word,
+        # and this session's 88k-token prefill ran 7.6-15.6 s — past the inject.
+        keep_warm = vt.get("keep_warm") or {}
+        self._keep_warm_enabled = bool(keep_warm.get("enabled", True))
+        self._keep_warm_every_s = float(keep_warm.get("every_seconds", 15.0))
+        #: When this room last asked for a prewarm, whatever the trigger; the
+        #: speech-onset trigger is spaced `_PREWARM_POST_MIN_S` apart and the
+        #: keep-warm waits `_keep_warm_every_s` since any of them.
+        self._last_prewarm_post = 0.0
         # Track which assistant message ids have already been TTS'd so the
         # session poller doesn't speak the same reply twice. Seeded at
         # connect time with the entire existing history so we only speak
@@ -1580,6 +1592,7 @@ class RoomBridge:
         self._tasks.append(asyncio.create_task(self._watch_audio_loop()))
         self._tasks.append(asyncio.create_task(self._listen_session()))
         self._tasks.append(asyncio.create_task(self._barge_watchdog()))
+        self._tasks.append(asyncio.create_task(self._keep_warm_loop()))
 
     @property
     def has_remote_participants(self) -> bool:
@@ -2073,10 +2086,7 @@ class RoomBridge:
         if self._prewarm:
             # The user is still mid-sentence; spend that time prefilling the
             # session's prompt (see /api/voice/prewarm).
-            try:
-                asyncio.create_task(self._post_prewarm())
-            except RuntimeError:
-                pass
+            self._prewarm_on("wake")
         LOG.info("[%s] wake fired: %s/%.2f — window open (%.1fs)",
                  self.room_name, det.name if det else "?",
                  det.score if det else 0.0, self.wake.continuation_seconds)
@@ -2096,6 +2106,12 @@ class RoomBridge:
         b = self._barge
         if b is not None and b["identity"] == identity:
             b["silence_at"] = None  # they started again while paused
+        if self._prewarm and (self.wake.matches_lock(identity)
+                              or self.wake.conversation_open_for(identity)):
+            # The person in the conversation started talking. Inside a
+            # conversation no wake word fires, so this onset is the earliest
+            # moment the prompt can be prefilled for what they are saying.
+            self._prewarm_on("speech")
         if not self._barge_in_enabled:
             return
         tts = self.tts
@@ -2880,12 +2896,58 @@ class RoomBridge:
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
 
-    async def _post_prewarm(self) -> None:
+    def _prewarm_on(self, trigger: str) -> None:
+        """Ask the backend to prefill the session's prefix, for `trigger`
+        (`wake`, `speech`, `keep-warm`). A speech onset is a VAD edge and
+        comes several times a sentence; it is spaced `_PREWARM_POST_MIN_S`
+        apart here, and the backend debounces every trigger again."""
+        now = time.monotonic()
+        if trigger == "speech" and now - self._last_prewarm_post < _PREWARM_POST_MIN_S:
+            return
+        self._last_prewarm_post = now
         try:
-            await self.http.post(PREWARM_URL, json={"session_key": self.session_id},
+            asyncio.create_task(self._post_prewarm(trigger))
+        except RuntimeError:
+            pass
+
+    async def _post_prewarm(self, trigger: str = "wake") -> None:
+        try:
+            await self.http.post(PREWARM_URL, json={"session_key": self.session_id,
+                                                    "reason": trigger},
                                  timeout=5.0)
         except Exception as e:
             LOG.debug("[%s] prewarm request failed: %s", self.room_name, e)
+
+    def _keep_warm_due(self, now: float) -> bool:
+        """A keep-warm touch is due while someone is in the room with the
+        conversation or follow-up window open, no spoken turn of this room is
+        running (its own prefill keeps the prefix warm, and the history will
+        differ once it lands), and `every_seconds` have passed since this room
+        last asked for a prewarm of any kind."""
+        if not (self._prewarm and self._keep_warm_enabled):
+            return False
+        if not self.has_remote_participants:
+            return False
+        if not (self.wake.in_conversation() or self.wake.remaining_s() > 0):
+            return False
+        if self._active_turn is not None:
+            return False
+        return now - self._last_prewarm_post >= self._keep_warm_every_s
+
+    async def _keep_warm_loop(self) -> None:
+        """Touch the session's prefix while a conversation is open, so the
+        follow-up finds it in the engine's cache instead of paying the pool's
+        eviction in front of the listener."""
+        if not (self._prewarm and self._keep_warm_enabled):
+            return
+        tick = min(1.0, max(0.02, self._keep_warm_every_s / 4))
+        try:
+            while True:
+                await asyncio.sleep(tick)
+                if self._keep_warm_due(time.monotonic()):
+                    self._prewarm_on("keep-warm")
+        except asyncio.CancelledError:
+            return
 
     async def _inject_only(self, payload: dict) -> None:
         try:

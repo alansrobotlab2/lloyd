@@ -326,7 +326,7 @@ def test_an_acoustic_wake_asks_the_backend_to_prewarm():
         b._on_wake(HearingEvent("wake", detection=det), "user-a")
         await asyncio.sleep(0.05)
     asyncio.run(go())
-    assert {"session_key": "20260917_000000_gate"} in b.http.posts
+    assert {"session_key": "20260917_000000_gate", "reason": "wake"} in b.http.posts
 
 
 class _SpeakingTTS:

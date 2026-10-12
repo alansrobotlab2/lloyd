@@ -20,6 +20,7 @@ the daemon.
 import logging
 import uuid
 from datetime import datetime
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -344,43 +345,95 @@ async def voice_interrupted(request: Request):
 #: (or a wake per sentence inside one window) costs one prefill, not several.
 _PREWARM_LAST: dict[str, float] = {}
 _PREWARM_DEBOUNCE_S = 20.0
+#: A keep-warm touch is admitted sooner: on a cache hit it costs the engine
+#: tens of milliseconds, and its whole point is to run before the pool evicts
+#: the prefix.
+_KEEP_WARM_DEBOUNCE_S = 5.0
+#: Sessions with a prewarm running right now — never two over one prefix.
+_PREWARM_INFLIGHT: set[str] = set()
+#: What may ask for a prewarm. `wake`: the wake word fired mid-sentence.
+#: `speech`: the person in the conversation started talking (no wake word
+#: inside a conversation). `keep-warm`: the worker's periodic touch while the
+#: conversation is open and no spoken turn runs.
+PREWARM_TRIGGERS = ("wake", "speech", "keep-warm")
+
+
+def _prewarm_refusal(session_id: str, trigger: str, now: float, *,
+                     enabled: bool, busy: bool) -> Optional[str]:
+    """Why this request does not start a prewarm, or None when it does.
+
+    Pure over its arguments plus the two module registers, so the rules are
+    testable without a request: the switch; a prefill already running over
+    this prefix; a turn running or queued on the session (it is prefilling
+    the same prefix itself, and the history will differ once it lands); and
+    the debounce — 20 s for a wake or a speech onset, 5 s for a keep-warm.
+    """
+    if not enabled:
+        return "disabled"
+    if session_id in _PREWARM_INFLIGHT:
+        return "in flight"
+    if busy:
+        return "busy"
+    gap = _KEEP_WARM_DEBOUNCE_S if trigger == "keep-warm" else _PREWARM_DEBOUNCE_S
+    if now - _PREWARM_LAST.get(session_id, float("-inf")) < gap:
+        return "recent"
+    return None
 
 
 @router.post("/api/voice/prewarm")
 async def voice_prewarm(request: Request):
-    """Prefill a session's prompt while the user is still talking.
+    """Prefill a session's prompt before the turn that needs it arrives.
 
-    The worker calls this the moment the wake word fires — mid-sentence,
-    measured at ~3 s before the finished utterance is injected. A spoken
-    turn's prefix is the session's system prompt, tools and history, and after
-    a break it is usually not in the engine's cache any more: the worker pool
-    runs 100-200k-token turns around the clock. Measured through a real room
-    on 2026-09-17: first answer token 4.16 s after inject on a cold session,
-    0.45 s on the warm turn after it. This spends that prefill during the
-    user's own sentence.
+    A spoken turn's prefix is the session's system prompt, tools and history,
+    and after a break it is usually not in the engine's cache any more: the
+    worker pool runs 100-200k-token turns around the clock. Measured through
+    a real room on 2026-09-17: first answer token 4.16 s after inject on a
+    cold session, 0.45 s on the warm turn after it.
 
-    Body: {session_key}. Answers at once; the prefill runs in the background.
-    Fire-and-forget by design — a prewarm that fails costs nothing but the
-    head start.
+    Three triggers (`PREWARM_TRIGGERS`), all from the worker. The wake word
+    firing mid-sentence was the only one until 2026-10-12, and that morning's
+    session showed why it is not enough: an 88k-token prompt prefilled in
+    7.6 s on the first wake and 15.6 s after a restart — finishing AFTER the
+    inject it was meant to precede — and follow-ups inside the conversation,
+    which fire no wake word, got no prewarm at all. So the worker also posts
+    on speech onset of the person in the conversation, and a keep-warm touch
+    every `voice_turn.keep_warm.every_seconds` while the conversation is open
+    and no spoken turn runs: a cache hit costs the engine tens of
+    milliseconds; a miss pays the prefill in advance instead of in front of
+    the listener.
+
+    Body: {session_key, reason?}. Answers at once; the prefill runs in the
+    background. Fire-and-forget by design — a prewarm that fails costs
+    nothing but the head start. Refusals (`_prewarm_refusal`) are answered,
+    never raised.
     """
     import asyncio
     import time
+
+    from app.sessions_io import get_queue_state
 
     data = await request.json() if (await request.body()) else {}
     session_id = (data.get("session_key") or data.get("session_id") or "").strip()
     if not session_id:
         raise HTTPException(status_code=400, detail="session_key is required")
-    if not _voice_turn_cfg().get("prewarm", True):
-        return JSONResponse({"started": False, "reason": "disabled"})
+    trigger = str(data.get("reason") or "wake")
+    if trigger not in PREWARM_TRIGGERS:
+        trigger = "wake"
+    qs = get_queue_state(session_id)
+    busy = bool(qs.get("current")) or bool(qs.get("pending_user"))
     now = time.monotonic()
-    if now - _PREWARM_LAST.get(session_id, 0.0) < _PREWARM_DEBOUNCE_S:
-        return JSONResponse({"started": False, "reason": "recent"})
+    why = _prewarm_refusal(session_id, trigger, now,
+                           enabled=bool(_voice_turn_cfg().get("prewarm", True)),
+                           busy=busy)
+    if why is not None:
+        return JSONResponse({"started": False, "reason": why, "trigger": trigger})
     _PREWARM_LAST[session_id] = now
-    asyncio.get_running_loop().create_task(_prewarm(session_id))
-    return JSONResponse({"started": True})
+    _PREWARM_INFLIGHT.add(session_id)
+    asyncio.get_running_loop().create_task(_prewarm(session_id, trigger))
+    return JSONResponse({"started": True, "trigger": trigger})
 
 
-async def _prewarm(session_id: str) -> None:
+async def _prewarm(session_id: str, trigger: str = "wake") -> None:
     """One completion of one token over the prefix the next spoken turn sends.
 
     Built with the turn's own setup and history loader, so the prefix matches
@@ -417,11 +470,16 @@ async def _prewarm(session_id: str) -> None:
         options.max_turns = 1
         async for _ in run_query(history + [{"role": "user", "content": "."}], options):
             pass
-        logger.info("voice prewarm %s: prefilled in %.2fs (%d history messages)",
-                    session_id, time.monotonic() - t0, len(history))
+        # The duration is the measurement: under a second the prefix was in
+        # the cache (the touch did its job); seconds mean a prefill the
+        # listener would otherwise have waited through.
+        logger.info("voice prewarm %s (%s): prefilled in %.2fs (%d history messages)",
+                    session_id, trigger, time.monotonic() - t0, len(history))
     except Exception as e:
-        logger.warning("voice prewarm %s failed after %.2fs: %s",
-                       session_id, time.monotonic() - t0, e)
+        logger.warning("voice prewarm %s (%s) failed after %.2fs: %s",
+                       session_id, trigger, time.monotonic() - t0, e)
+    finally:
+        _PREWARM_INFLIGHT.discard(session_id)
 
 
 # ── /api/voice/summarize ──────────────────────────────────────────────────

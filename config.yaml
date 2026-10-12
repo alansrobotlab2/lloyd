@@ -1173,6 +1173,19 @@ livekit:
     # room, the warm turn after it 0.45 s. Skipped for a session over its
     # compaction threshold (its turn will summarize, changing the prefix).
     prewarm: true
+    # 2026-10-12: the wake fire was the only trigger, and most turns in a
+    # conversation fire no wake word, so they got no prewarm at all; and this
+    # session's 88k-token prompt prefilled in 7.6 s on the wake (15.6 s after a
+    # restart, under worker load) — finishing AFTER the inject it was meant to
+    # precede. The worker now also posts a prewarm on speech onset of the
+    # person in the conversation, and while the conversation is open and no
+    # spoken turn runs, a keep-warm touch every `every_seconds` (one token over
+    # the prefix: tens of milliseconds on a cache hit, and on a miss the
+    # prefill is paid in advance instead of in front of the listener). The
+    # backend admits a keep-warm 5 s after the last prewarm, the others 20 s.
+    keep_warm:
+      enabled: true
+      every_seconds: 15
     # Stop and say "The rest is in the chat." past this many characters.
     max_spoken_chars: 1500
     # The first clause of a reply may be cut at a comma once it is this long

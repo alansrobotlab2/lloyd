@@ -795,6 +795,130 @@ def test_stop_while_speaking_stops_and_injects_nothing():
     assert [p for p in b.http.posts if p and "text" in p] == []
 
 
+# ── the prefix stays warm (2026-10-12) ─────────────────────────────────────
+
+def _prewarms(b):
+    return [p for p in b.http.posts if p and "reason" in p and "text" not in p]
+
+
+def _conv_bridge(texts=(), **extra):
+    b = _bridge(list(texts), barge=False, **extra)
+    b.wake.extend("user-a")
+    b.wake.open_conversation("user-a")
+    return b
+
+
+def test_speech_onset_in_an_open_conversation_prewarms_the_prompt():
+    """Inside a conversation no wake word fires, so until 2026-10-12 a
+    follow-up got no prewarm and paid the pool's eviction in front of the
+    listener. The onset of the locked speaker's speech is the earliest
+    moment to prefill."""
+    b = _conv_bridge()
+
+    async def go():
+        b._on_speech_start("user-a")
+        await asyncio.sleep(0.02)
+        return b
+    b = asyncio.run(go())
+    assert _prewarms(b) == [{"session_key": "20260924_000000_dplx", "reason": "speech"}]
+
+
+def test_a_strangers_speech_onset_prewarms_nothing():
+    b = _conv_bridge()
+
+    async def go():
+        b._on_speech_start("user-b")
+        await asyncio.sleep(0.02)
+        return b
+    assert _prewarms(asyncio.run(go())) == []
+
+
+def test_speech_onsets_are_spaced_a_vad_edge_is_not_a_sentence():
+    b = _conv_bridge()
+
+    async def go():
+        b._on_speech_start("user-a")
+        b._on_speech_start("user-a")
+        await asyncio.sleep(0.02)
+        b._on_speech_start("user-a")
+        await asyncio.sleep(0.02)
+        return b
+    assert len(_prewarms(asyncio.run(go()))) == 1
+
+
+def test_the_wake_fire_still_prewarms_and_says_so():
+    b = _conv_bridge()
+
+    async def go():
+        b._prewarm_on("wake")
+        await asyncio.sleep(0.02)
+        return b
+    assert _prewarms(asyncio.run(go())) == [
+        {"session_key": "20260924_000000_dplx", "reason": "wake"}]
+
+
+def test_with_prewarm_off_no_trigger_posts():
+    b = _conv_bridge(voice_turn={"prewarm": False})
+
+    async def go():
+        b._on_speech_start("user-a")
+        await asyncio.sleep(0.02)
+        assert not b._keep_warm_due(time.monotonic() + 1000)
+        return b
+    assert _prewarms(asyncio.run(go())) == []
+
+
+class _Room:
+    def __init__(self, people=("user-a",)):
+        self.remote_participants = {p: object() for p in people}
+
+
+def test_keep_warm_touches_the_prefix_while_the_conversation_is_open():
+    """While the window is open and no spoken turn runs, one touch every
+    `every_seconds`; none while a spoken turn runs (its own prefill keeps the
+    prefix warm); none once the conversation closes; none for an empty room."""
+    b = _conv_bridge(voice_turn={"keep_warm": {"every_seconds": 0.05}})
+    b.room = _Room()
+
+    async def go():
+        task = asyncio.create_task(b._keep_warm_loop())
+        await asyncio.sleep(0.3)
+        n_open = len(_prewarms(b))
+        b._active_turn = "t-running"
+        await asyncio.sleep(0.2)
+        n_running = len(_prewarms(b))
+        b._active_turn = None
+        b.wake.close_conversation()
+        await asyncio.sleep(0.2)
+        n_closed = len(_prewarms(b))
+        b.wake.extend("user-a")
+        b.wake.open_conversation("user-a")
+        b.room = _Room(people=())
+        await asyncio.sleep(0.2)
+        n_empty = len(_prewarms(b))
+        task.cancel()
+        return n_open, n_running, n_closed, n_empty
+    n_open, n_running, n_closed, n_empty = asyncio.run(go())
+    assert 3 <= n_open <= 7, n_open
+    assert n_running == n_open and n_closed == n_open and n_empty == n_open
+    assert all(p["reason"] == "keep-warm" for p in _prewarms(b))
+
+
+def test_keep_warm_waits_for_the_last_prewarm_of_any_kind():
+    b = _conv_bridge(voice_turn={"keep_warm": {"every_seconds": 10.0}})
+    b.room = _Room()
+    now = time.monotonic()
+    b._last_prewarm_post = now - 3.0  # a wake prewarm 3 s ago
+    assert not b._keep_warm_due(now)
+    assert b._keep_warm_due(now + 8.0)
+
+
+def test_keep_warm_has_a_switch():
+    b = _conv_bridge(voice_turn={"keep_warm": {"enabled": False, "every_seconds": 0.01}})
+    b.room = _Room()
+    assert not b._keep_warm_due(time.monotonic() + 1000)
+
+
 # ── what a spoken turn says while it works ─────────────────────────────────
 
 class _SpeakTTS:

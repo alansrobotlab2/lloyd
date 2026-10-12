@@ -89,6 +89,10 @@ End to end, one utterance:
    Silero. The wake word fires **while the word is being said**; the worker
    opens the window, pushes `wake_state: listening` to the browser and asks the
    backend to prewarm the session's prompt, all before the sentence ends.
+   Inside a conversation no wake word fires, so the onset of the locked
+   speaker's speech asks for the same prewarm, and a keep-warm touch every
+   15 s holds the prefix in the engine's cache while the conversation is open
+   (2026-10-12, "Prewarm" below).
 4. Silero closes the utterance after 380 ms of silence. The end-of-turn
    model (turn-1-mini, fed every frame) decides whether it is a finished
    thought (if not, it is held, and released the moment the model's score
@@ -1144,21 +1148,69 @@ next thing the user says is still heard.
   audio clock), with `eos→audio` total and `max_gap` — the longest silence
   between audio the turn spoke. `scripts/voice/e2e_voice.py` prints them.
 
-### Prewarm: the prefill happens during the sentence
+### Prewarm: the prefill happens before the words arrive
 
 A spoken turn's prefix is the session's system prompt, tools and history, and
 after a break it is usually no longer in the engine's cache — the worker pool
-runs 100–200 k-token turns around the clock. Through a real room, a cold
-session's first answer token came 4.16 s after inject and the warm turn after
-it 0.45 s. The wake word fires ~3 s before the finished utterance is injected,
-so the worker posts `/api/voice/prewarm` from the wake event and the backend
-runs one completion of **one token** over the exact prefix the turn will send
+runs 100–200 k-token turns around the clock. Through a real room
+(2026-09-17), a cold session's first answer token came 4.16 s after inject and
+the warm turn after it 0.45 s. The backend's `/api/voice/prewarm` runs one
+completion of **one token** over the exact prefix the turn will send
 (`_voice_turn_setup` builds both — one definition, so they cannot drift — with
-the same history loader). Debounced 20 s per session; skipped for a session
-over its compaction threshold, whose turn will summarize (and whose prewarm
-would otherwise spend a summarization call on what might be a false wake —
-it loads with `mode_override="truncate"`, which never calls a model).
-`voice_turn.prewarm` switches it off.
+the same history loader); skipped for a session over its compaction
+threshold, whose turn will summarize (and whose prewarm would otherwise spend
+a summarization call on what might be a false wake — it loads with
+`mode_override="truncate"`, which never calls a model). `voice_turn.prewarm`
+switches all of it off.
+
+**Three triggers, all from the worker** (`PREWARM_TRIGGERS`, carried as the
+request's `reason`). The wake word firing mid-sentence, ~3 s before the
+utterance is injected, was the only one until 2026-10-12, and that morning's
+session showed why it is not enough:
+
+| Measured 2026-10-12, session `20261011_125039_iveef0` | |
+|---|---|
+| prompt the prewarm prefills | 88,304 tokens (60 k chars of system prompt, ~29 k tokens of tool schemas, 12 k of history) |
+| prewarm on the 09:04 wake | 7.64 s — the inject came 4 s after the wake, so the turn paid the rest |
+| prewarm after a backend restart, under worker load | 15.63 s |
+| model first token with the prefix warm | 1.1 s (`[TIMING]` in `server.err`) |
+| `first_delta` on turns with no tools, same session | 1.1 s to 4.6 s, depending on what the pool had evicted |
+
+Follow-ups inside the conversation — most turns — fire no wake word and got
+no prewarm at all. So now, beside the wake:
+
+- **speech onset** (`speech`): the first VAD edge of the locked speaker inside
+  the follow-up window or the conversation, from `_on_speech_start`, spaced
+  `_PREWARM_POST_MIN_S` (2 s) apart in the worker because an edge comes
+  several times a sentence;
+- **keep-warm** (`keep-warm`, `voice_turn.keep_warm`): `_keep_warm_loop`
+  touches the prefix every `every_seconds` (15) while someone is in the room
+  with the conversation or follow-up window open and no spoken turn of this
+  room is running (its own prefill keeps the prefix warm, and the history
+  will differ once it lands) — `_keep_warm_due` is the whole rule. On a cache
+  hit the touch costs the engine tens of milliseconds; on a miss it pays the
+  prefill in advance instead of in front of the listener. The keep-warm waits
+  `every_seconds` since this room's last prewarm of any kind.
+
+The backend admits or refuses every trigger in `_prewarm_refusal`, answered
+in the JSON and never raised: the switch; a prefill already in flight for the
+session (`_PREWARM_INFLIGHT`, never two over one prefix); a turn running or
+queued on the session (`busy` — it is prefilling the same prefix itself);
+and the debounce, 20 s for a wake or a speech onset and 5 s for a keep-warm.
+The log line is the measurement: `voice prewarm <session> (<trigger>):
+prefilled in 0.04s` is a hit, seconds are a prefill the listener would have
+waited through. Read it beside `first_delta` in `voice/turns.jsonl` to see
+whether the follow-ups got faster.
+
+What this is, in DuplexCascade's terms (arXiv 2603.09180, assessed
+2026-10-12): the paper's conversational model has a small context that is
+always resident, so its 600 ms micro-turns never pay a prefill. Ours is an
+88 k-token agent prompt on an engine shared with the worker pool, and keeping
+it resident is the one piece of that design that applies here without a
+second model. The rest of the paper — the `listen` token, the backchannel
+token, the micro-turn loop — maps onto things already in this tree
+(turn-1-mini's threshold, fillers and progress captions) or onto a separate
+duplex controller that was judged not worth building yet.
 
 ### Clauses play back to back
 
@@ -1896,7 +1948,7 @@ clones, and voice mode keeps speaking the old voice.
 | the same, for spoken alerts | `systemctl --user restart lloyd-guardian` — re-stages, which re-runs `sync-voice-config.py` |
 | TTS model path / `default_model` | `agent-tts` |
 | `livekit.stt` / `.vad` / `.wake` / `.acoustic_wake` / `.voiceprint` / `.turn_detection` / `.barge_in` / `.conversation` | `lloyd-agent-worker` |
-| `livekit.voice_turn` | **both**: the backend reads `reminder`, `thinking`, `prewarm` and `typed_turns` (`round restart --only lloyd-backend`); the worker reads `stream_replies`, `typed_turns`, `filler`, `progress`, `queued_notice`, `thinking_sound`, `first_clause_chars`, `max_spoken_chars` and `prewarm` (`lloyd-agent-worker`) |
+| `livekit.voice_turn` | **both**: the backend reads `reminder`, `thinking`, `prewarm` and `typed_turns` (`round restart --only lloyd-backend`); the worker reads `stream_replies`, `typed_turns`, `filler`, `progress`, `queued_notice`, `thinking_sound`, `first_clause_chars`, `max_spoken_chars`, `prewarm` and `keep_warm` (`lloyd-agent-worker`) |
 | `livekit.tts.voice`, or the voiceprint backend | also re-run `scripts/voice/enroll_own_voice.py` — the own-voice profile is of the old voice / model |
 | `livekit.yaml`, or the host's tailnet address | `agent-livekit-server` — it resolves `node_ip` at boot |
 
@@ -1971,7 +2023,11 @@ voice.
   during a spoken turn's silent tool phase cancelling it (whichever spoken
   turn is running, never a typed one, nothing with barge-in off), an
   acknowledgement there cancelling nothing, the cancel not waiting behind the
-  heard note, the note telling the model not to finish the reply; progress
+  heard note, the note telling the model not to finish the reply; the prefix
+  kept warm (a speech onset in the conversation prewarms, a stranger's does
+  not, onsets are spaced, the wake still prewarms, the keep-warm touches only
+  while the window is open with someone in the room and no spoken turn
+  running, and waits for the last prewarm of any kind, the switches); progress
   captions and the thinking sound, the queued notice, a typed turn through the
   tap; the tap carrying typed turns and never spoken ones, `_emit` fanning out,
   the interruption note used once, the typed-turn reminder only with a
@@ -2000,7 +2056,9 @@ voice.
   errors.
 - `tests/test_voice_inject_stream.py` — the endpoint's stream and its JSON
   fallback, the reminder in the model's text and not the chat's, thinking
-  config, and the prewarm's prefix, debounce, switch and summarization skip.
+  config, and the prewarm's prefix, debounce, switch and summarization skip,
+  the three triggers and the admission rules (in flight, busy, per-trigger
+  debounce).
 - `tests/test_tts_output_shaping.py` — the shelves, WSOLA, and the drain loop:
   tail silence and playout wait at the end of a reply, clauses back to back
   with one end, a clause from before an interrupt never spoken.
@@ -2035,6 +2093,24 @@ third line is a remark to nobody inside the open conversation (the addressee
 judge must reject it), and it prints the worker's `[latency]` breakdowns.
 
 ## History
+
+**2026-10-12 — the interruption that queued, and the prefix that was cold.**
+One morning's exchange: "Yeah, that's great." over Lloyd was taken for a
+request, cut him off and became a turn; that turn finished the interrupted
+answer (629 characters) because its note said only what had been heard; and
+"give me a full systems check", said 2 s later while that turn ran a tool in
+silence, queued behind it for 14.8 s — barge-in existed only while audio
+played. Landed as one commit: a new spoken request cancels the running spoken
+turn, audible or silent, never a typed one; the backchannel vocabulary
+widened and made phrase-aware; the interruption note tells the model not to
+finish the reply; `get_queue_state` reports `cancelling` ("Barge-in"). Then,
+from reading DuplexCascade against this loop: the prewarm fired only on a
+wake, so follow-ups inside the conversation paid the pool's eviction (an
+88 k-token prefill, 7.6–15.6 s) in front of the listener; the worker now
+prewarms on speech onset and keeps the prefix warm while the conversation is
+open ("Prewarm"). Full duplex itself was assessed and not built: the paper's
+own latencies are not better than this loop's, and its one applicable idea is
+the resident prefix.
 
 **2026-09-24 — a conversation, not a command line.** Measured seams
 (`[latency]`), parallel post-VAD stages, an earlier first clause, progress
@@ -2098,6 +2174,18 @@ and is history, not reference.
 
 ## Review log
 
+- 2026-10-12 — a targeted pass, not a full one: the sections touched today
+  ("Barge-in", "Prewarm", the gate's steps 6 and 9, the round trip's step 3,
+  the config table, the tests list) were rewritten against the tree as
+  landed, and the numbers in them are from that morning's `server.err`,
+  worker log and `voice/turns.jsonl`. Re-measured in passing and left as
+  stated elsewhere in the doc: the prompt is now 88 k tokens for a long voice
+  session (the thinking section's "77 k chars, prefix warm" is the
+  2026-09-17 system prompt alone), and the warm first token was 1.1 s on
+  2026-10-12 against the ~600 ms the speculative-generation section quotes
+  from 2026-09-24 — a shared engine under four worker turns, not a regression
+  to chase in this doc. The 2026-09-24 entry below remains the last full
+  check of every path and constant.
 - 2026-09-24 — **current.** Checked every path, config key, constant, test name
   and named symbol in the doc against the tree (all 76 backticked filenames, the
   whole `livekit:` and `guardian.voice:` blocks, `POLL_INTERVAL`/`_IDLE_GRACE_SECONDS`/
