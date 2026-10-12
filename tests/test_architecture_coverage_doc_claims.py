@@ -1111,6 +1111,143 @@ def test_every_path_citation_exemption_is_a_citation_the_doc_actually_makes():
         "and the honest move is a doc fix or a filed item, not another entry")
 
 
+# ── #2606: a collected count a doc states has to be re-measurable ────────────
+
+#: The paragraph carrying the page's collected counts, found by its own marker and
+#: not by a heading. A review log holds dated counts by the dozen; the one that
+#: reads as current is the Status paragraph's, and `Re-measured` is written exactly
+#: once in the page (asserted below), so the extractor cannot be grading some
+#: older entry's numbers and calling the page current.
+_REMEASURED_PARA = re.compile(r"^Re-measured .*?(?=\n\n)", re.S | re.M)
+
+#: ``<code>tests/x.py</code> 93`` — a count is claimable only in that shape: a file
+#: span immediately followed by its number. That is what makes the pair checkable
+#: by a node rather than re-read by a human, and it is why the page's prose
+#: ("collects 93 in `tests/test_prefetch.py`", the number behind the file) is
+#: deliberately not a claim this reads.
+_COLLECTED_PAIR = re.compile(r"`(?P<f>tests/[a-z0-9_]+\.py)`\s+(?P<n>\d+)")
+
+#: The group total, in prose, parenthesised so it cannot be mistaken for a pair.
+_COLLECTED_GROUP_TOTAL = re.compile(r"\((\d+) across those four\)")
+
+#: The command the counts have to name. #2606's own page published "44 green … 73
+#: in `test_prefetch.py`" with no command beside it, and no reader could say what
+#: had been run that made 73 true. This is #2301/#2391's ruling for
+#: guard-coverage's fenced blocks — a stated denominator, re-runnable — applied to
+#: a test count instead of a block count.
+COLLECT_COMMAND = "--collect-only"
+
+#: The file whose ambient cases sit outside the four-file queue/resolver group.
+PREFETCH_FILE = "tests/test_prefetch.py"
+
+
+def _remeasured_paragraph(text: str) -> str:
+    found = _REMEASURED_PARA.findall(text)
+    assert len(found) == 1, (
+        f"{len(found)} `Re-measured …` paragraphs on the page; the extractor reads "
+        "one, so a second is a set of current counts nobody grades")
+    return found[0]
+
+
+def _collected_claims(para: str) -> dict[str, int]:
+    claims = {m.group("f"): int(m.group("n"))
+              for m in _COLLECTED_PAIR.finditer(para)}
+    assert claims, (
+        "no `file.py  N` pair came out of the Re-measured paragraph — that is this "
+        "extractor failing, not the page having nothing to check")
+    return claims
+
+
+def collected_node_counts(files) -> dict[str, int]:
+    """Nodes each file collects, from one batched `--collect-only -q` run.
+
+    Batched because the per-file answer is the same either way — a node id names
+    its own file before the first `::` — and one collection costs a fraction of
+    what five cost. This is the command the page names, run as written; what it
+    prints is the only number the page is allowed to state.
+    """
+    files = sorted(set(files))
+    ran = _pytest(["--collect-only", "-q", *files])
+    assert ran.returncode == 0, f"collecting {files} exited {ran.returncode}\n" \
+                                + (ran.stdout + ran.stderr)[-900:]
+    counts = dict.fromkeys(files, 0)
+    for line in ran.stdout.splitlines():
+        if "::" not in line:
+            continue
+        origin = line.strip().split("::", 1)[0]
+        if origin in counts:
+            counts[origin] += 1
+    assert sum(counts.values()) > 0, f"no node ids attributed to {files}: {ran.stdout[:400]}"
+    return counts
+
+
+def _stale_collected_counts(claims: dict[str, int]) -> dict[str, tuple[int, int]]:
+    """Which claims the named command does not bear out, as (stated, actual)."""
+    actual = collected_node_counts(claims)
+    return {f: (n, actual[f]) for f, n in claims.items() if actual[f] != n}
+
+
+def test_the_ambient_page_states_the_command_its_collected_counts_came_from():
+    """#2606 clause 4: every collected count the ambient page states as current is
+    what `--collect-only -q` collects for that file today, the command is named
+    beside the numbers, the group total adds up, and the node that reads the
+    page's own citations is named somewhere on the page.
+
+    What was published instead was "17 / 5 / 16 / 6 = 44 green across the four
+    files that pin this page, 73 in `test_prefetch.py`" — a four-file selection
+    reported as though it were the pinning surface, over a number the same command
+    contradicts (93), and it went out an hour before the file it had not run
+    reported this page's citations red. A count with no command beside it can only
+    be aged by the author who ran it, which is the failure #2606 names and this
+    node prices in the only currency that ages by itself: re-running the command.
+
+    The counts are *collected*, never passing — a passing count is a verdict with a
+    date on it, and the whole item is a doc edit that reported the wrong verdict.
+    """
+    text = _text("ambient-context-injection.md")
+    para = _remeasured_paragraph(text)
+    assert COLLECT_COMMAND in para, (
+        "the Re-measured paragraph states counts without the command that produces "
+        "them — the shape #2606 was filed about, and the one no later reader can "
+        "check")
+    stale = _stale_collected_counts(_collected_claims(para))
+    assert stale == {}, (
+        f"the page states counts the command does not bear out (stated, actual): {stale}")
+    claims = _collected_claims(para)
+    group = {f: n for f, n in claims.items() if f != PREFETCH_FILE}
+    assert len(group) == 4, f"the total's group is {sorted(group)}, not four files"
+    total = _COLLECTED_GROUP_TOTAL.search(para)
+    assert total, "the page states no group total, so its own arithmetic is unreadable"
+    assert int(total.group(1)) == sum(group.values()), (
+        f"the paragraph says {total.group(1)} across those four while the four it "
+        f"names collect {sum(group.values())}: {group}")
+    assert ("test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree"
+            "[ambient-context-injection.md]") in text, (
+        "the page no longer names the node that reads its own citations, so a "
+        "reader cannot tell which selection a green claim covered")
+
+
+def test_a_collected_count_the_command_contradicts_is_what_the_node_flags():
+    """The same helper, aimed at the sentence #2606 was filed about: the published
+    claim comes back flagged, with the stated number beside the measured one.
+
+    Without this the node above could be green because `collected_node_counts`
+    counts nothing at all — the failure every extractor in this file is written
+    against. 73 is in the fixture because that is what the page published; the
+    assertion is the mismatch, and the measured side of it is re-read here rather
+    than quoted, so the node cannot go stale by outliving 93.
+    """
+    published = ("Re-measured 2026-10-12: the four files that pin this page are "
+                 "green, and `tests/test_prefetch.py` 73.\n\n")
+    claims = _collected_claims(published)
+    assert claims == {PREFETCH_FILE: 73}, claims
+    stale = _stale_collected_counts(claims)
+    assert list(stale) == [PREFETCH_FILE], (
+        f"the helper found nothing wrong with the claim that started #2606: {stale}")
+    stated, actual = stale[PREFETCH_FILE]
+    assert stated == 73 and actual != 73, stale
+
+
 # ── #2583: a line anchor has to land inside a definition, not just a file ────
 
 #: What the resolution node above asks of a `path:NNN` citation is that the FILE

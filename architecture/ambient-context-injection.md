@@ -22,10 +22,17 @@ are named by file, not by count: `tests/test_session_queue.py` and
 `tests/test_active_session_resolution.py` over the queue and the resolver,
 `tests/test_ambient_prefetch_retention.py` and `tests/test_session_doc_claims.py`
 over this page's own sentences, and the ambient cases in `tests/test_prefetch.py`.
-Re-measured 2026-10-12: 17 collected in `test_session_queue.py`, 5 in
-`test_active_session_resolution.py`, 16 in `test_ambient_prefetch_retention.py`,
-6 in `test_session_doc_claims.py` — 44 across those four, all passing — and 73 in
-`test_prefetch.py`. The "(nine cases)" and "63 tests" this paragraph carried are
+Re-measured 2026-10-12 by `--collect-only -q` on each file — collected nodes, not
+passing ones, so the figure ages rather than reassures:
+`tests/test_session_queue.py` 17, `tests/test_active_session_resolution.py` 5,
+`tests/test_ambient_prefetch_retention.py` 16,
+`tests/test_session_doc_claims.py` 6 (44 across those four), and
+`tests/test_prefetch.py` 93. Those five are the mechanism's surface. A sixth file
+reads this page's own sentences —
+`tests/test_architecture_coverage_doc_claims.py` — so a claim that the page is
+"green" has to say whether it ran that one too, which is exactly what #2606 was
+filed about; its node for this slug is named in the review log below. The
+"(nine cases)" and "63 tests" this paragraph carried are
 the un-identified counts the review log below already retired for the same
 reason: a number with no named set drifts and nobody notices.
 
@@ -505,8 +512,19 @@ mode has no reason to block it.
   description, which says "at no cost" — the override path, which is
   `$LLOYD_DATA/data/tool_overrides.yaml` rather than a file in the checkout, and
   the Status paragraph's "(nine cases)" and "63 tests", replaced with the
-  collected counts measured on 2026-10-12 (17 / 5 / 16 / 6 = 44 green across the
-  four files that pin this page, 73 in `test_prefetch.py`). Filed from the same
+  per-file `--collect-only -q` collected counts the Status paragraph now carries.
+  What that pass published instead — "17 / 5 / 16 / 6 = 44 green across the four
+  files that pin this page, 73 in `test_prefetch.py`" — was a four-file selection
+  reported as though it were the pinning surface, over a wrong number: the same
+  command collects 93 in `tests/test_prefetch.py`, and the fifth file that reads
+  this page's own sentences was red on the tree this page landed into — node
+  `test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree[ambient-context-injection.md]`
+  of `tests/test_architecture_coverage_doc_claims.py`, whose whole file the pass
+  never ran. A count is now worth writing only with
+  the command that produces it beside it and the node id of anything excluded
+  named, which is the rule #2606 filed and
+  `test_the_ambient_page_states_the_command_its_collected_counts_came_from` holds.
+  Filed from the same
   pass: **#2598** (the notes drain has no user-session check, so a worker's turn
   consumes the note meant for the human), **#2600** (`notable`/`urgent` with no
   resolvable session are downgraded to the passive note and reported `ok=true`),
