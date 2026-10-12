@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, automod]
 type: reference
 status: implemented
-date: 2026-09-12
+date: 2026-10-12
 ---
 
 # Automod: self-modification with automatic rollback
@@ -17,7 +17,7 @@ that actually went wrong.
 
 ## 1. Why this needed machinery at all
 
-**The git working tree is production.** `conf.d/lloyd-backend.conf` runs
+**The git working tree is production.** `agent-services/supervisor/conf.d/lloyd-backend.conf` runs
 `server.py` out of `/home/alansrobotlab/lloyd`. No build step, no release
 artifact, no staging. A saved file is a deploy, pending only a restart.
 
@@ -205,17 +205,18 @@ alone, each now pinned by a test:
 
 | | was | measured need | now |
 |---|---|---|---|
-| iteration budget | 30 | 45, 65, 76 on the three hand-driven triages | 90, per-request via `max_turns`, ceiling 120 |
+| iteration budget | 30 | 45, 65, 76 on the three hand-driven triages | 90, per-request via `max_turns`, on the worker ceiling (300) |
 | item body | 6,000 chars | next item 12,279; largest 21,300 | 30,000, cut from the end |
 | observer | none | — | attached, transcript kept |
 
 The ceiling is enforced at the endpoint, not by the source, and it binds:
 `messages._turn_budget` (in `app/routers/messages.py`) clamps whatever a worker
-asks for to
-`agent.max_turns_ceiling` (120). Triage asks for 90 and gets it; `autocode`
-asks for 150 — the value `workers.sources.autocode.max_turns` carries, and
-the one its own `DEFAULT_MAX_TURNS` argues for — and is served 120. Raising
-one without the other moves nothing.
+asks for to `agent.max_turns_ceiling_worker` (300) — anything arriving on the
+worker platform, which is every pool source, the scheduler's `scheduled-task`
+rows and `arch-review` — and to `agent.max_turns_ceiling` (120) for everyone
+else. Both keys are `agent:` sub-keys, and the branch is on the caller, not on
+the request. Triage asks for 90 and gets it; `autocode` asks for 250 and gets
+it. Raising a source's `max_turns` past its platform's ceiling moves nothing.
 
 **Running out of budget is not a conclusion.** The loop stops cleanly at
 `max_turns` with whatever text it has, which for a triage means no verdict
@@ -897,7 +898,10 @@ reviews. Five changes, each with a switch.
   in a `finally`, a dry run never touches it, and a second landing of one round
   is refused.
 
-**The chamber** (`automod.chamber`, **ships false**). `_loop_is_free` refused
+**The chamber** (`automod.chamber`, **on**). `config.yaml` has carried
+`chamber: true` since 2026-09-15 (`52958ffb`); `state.chamber_enabled` defaults
+to false, so the switch is a config choice, and reading the code alone says
+"off" while the box says "on". `_loop_is_free` refused
 a new round for a promotion's whole window, though only `land` needs it — the
 turn and gate touch the worktree and the canary ports, and triage and digest
 turns already run on the live backend during observation. With the switch on
@@ -915,9 +919,10 @@ so the item keeps its attempt; `promote`'s "still under observation" refusal
 stays behind it for any caller that did not wait, and a moved `main` takes
 the existing `_regate_after_move` path. Accepted failure mode: a rollback of
 the observed promotion restarts the stack under the next round's turn, which
-ends `infra_failed` and is re-offered as `infra`. It ships off because a round
-waiting to land is exactly what the turn-end reaper must not touch, and that
-wants a few days of `land.running` in production first. True two-wide
+ends `infra_failed` and is re-offered as `infra`. The objection this was written against — a round waiting to land is exactly
+what the turn-end reaper must not touch, and it wanted a few days of
+`land.running` in production first — has been a live condition since 2026-09-15,
+not a future one. §9.11's re-measurement of land failures is what grades it. True two-wide
 concurrency was considered and not taken: five single-writer resources
 (`current.json`, fixed canary ports, the worktree count, `S.Lock`,
 `select_confirmed`) would need sharding, and two 150k-token turns contend for
@@ -2429,7 +2434,7 @@ The day also showed three dead ends the loop could only escalate:
   schema admits; the vault reviews that diverged afterwards were all 5- or 6-clause
   contracts and none were 4, because a leaf cap bounds what the schema accepts and
   not what the finalizer writes. So `review.CLAUSES_PER_CALL` bounds the CALL:
-  `review._vault_generation_slices` cuts a contract into runs of that length,
+  `review.clause_chunks` cuts a contract into runs of that length,
   `build_vault_prompt` shows one run under the contract's own clause numbers, and
   `review.merge_grading_chunks` merges the answers into one per-clause list. An
   answer that leaves a clause index ungraded or grades one twice is
@@ -4059,8 +4064,8 @@ than the one this prevents.
   diff (a list is one leaf); and the diff is refused if any path sits under a
   `CONFIG_DENIED_KEYS` prefix — `mcp_servers`, `models`, `model`,
   `subagents`, `server`, `services`, `guardian`, `automod.enabled`,
-  `automod.landing`, `workers.enabled`, `workers.slots`, and the loop's own
-  three sources `workers.sources.{autocode,autotriage,owed-check}` — the
+  `automod.landing`, `workers.enabled`, `workers.slots` and
+  `knowledge_graph.write_gate` (#2344, fenced 2026-10-08) — the
   config half of what `PROTECTED_GLOBS` is for code: the lock-out, the
   rollback path, the engine's identity, the loop editing its own budget. Also
   refused: a changed leaf named in `CONFIG_DENIED_LEAVES` anywhere in the tree
@@ -4070,7 +4075,7 @@ than the one this prevents.
   placeholders), and the removal of a top-level key. The refusal names every
   offending key path and the rule that caught it. What passes moves to the
   `config_value` bucket, and `spec.requires_drill(paths, buckets=…)` arms
-  rung 6 for it — a config change is boot-affecting, so the bound is on how
+  the `drill` rung for it — a config change is boot-affecting, so the bound is on how
   it lands, the same shape `protected` has. The canary rungs already boot from
   the round's worktree, so the candidate file is the one `canary_boot` and
   `canary_smoke` exercise. The loop's own three sources (`autocode`,
@@ -4434,3 +4439,25 @@ from `denied.json` first).
   `arch_review.json`. Filed: #919 (`gate.py`'s own module docstring still
   lists eight rungs and pre-`frontend` timings), #823 (autocode's
   `max_turns: 150` is unreachable under `agent.max_turns_ceiling: 120`).
+
+- **2026-10-12 — `current`.** Whole-document pass at `cdfee07f`. The mechanism
+  described is still what runs; corrected in place: the §3.2c turn-ceiling
+  paragraph and its table row said every worker is clamped by
+  `agent.max_turns_ceiling` (120) while §3.2i and §3.2d say 300 — the clamp
+  branches on the caller's platform (`_turn_budget`, 300 for pool sources), so
+  the 120 was the false side; `automod.chamber` was still written as shipping
+  false and refused, though `config.yaml` has carried `chamber: true` since
+  2026-09-15 (`52958ffb`);
+  §10's fenced-prefix list named `workers.sources.{autocode,autotriage,owed-check}`
+  as whole-source fences, which the same paragraph refutes two sentences later
+  (`CONFIG_LOOP_SOURCE_LEAVES`) and which `spec._config_denied_prefix` does not
+  do, and omitted `knowledge_graph.write_gate`, fenced since #2344; §10 armed
+  "rung 6" for a `config_value` change when the rung is `drill`, the twelfth;
+  §4.5 named `review._vault_generation_slices`, which is `review.clause_chunks`;
+  and §2.1's `conf.d/lloyd-backend.conf` is
+  `agent-services/supervisor/conf.d/lloyd-backend.conf`. Filed: #2607
+  (`config.yaml`'s `automod.review` comment still points at
+  `promote.SEAMS_POLICY`, which is `review.seams_policy()` now), #2608
+  (`gate.py`'s docstring numbers the ladder without its two conditional rungs, so
+  `drill` is 9 there and twelfth in `Gate.run`; the doc must not cite a rung by
+  number while two numberings exist).
