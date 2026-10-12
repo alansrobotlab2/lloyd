@@ -15,15 +15,19 @@ tracked under `agent-services/systemd/`, was the missing caller — the measurem
 
 These nodes pin the caller as configuration, the way `tests/test_cert_renew_units.py`
 pins the renewal units: parsed through the INI shape systemd reads, the service must
-be a oneshot that execs the shipped script at ten reps and overrides neither the rows
-nor the report path; the timer must be a single recurring quiet-hour one whose comment
-names the scheduled work the hour avoids; and `install-services.sh`'s symlink loop
-must actually link both, which is tested by RUNNING the installer against a throwaway
+be a oneshot that execs the shipped script at ten reps with a drain that outlasts a
+measured autocode round (#2595: `--drain-wait 4200`, because 642 of the 898 autocode
+runs in the 14 days to 2026-10-12 ran past the driver's 900 s default) and overrides
+neither the rows nor the report path; the timer must be a single recurring quiet-hour
+one whose comment names the scheduled work the hour avoids; and
+`install-services.sh`'s symlink loop must actually link both, which is tested by
+RUNNING the installer against a throwaway
 `HOME` and a stub `systemctl` on the front of `PATH` — the same seam-crossing shape
 `tests/test_unit_enabledness_check.py` uses, so the host's manager is never touched.
 
 What is NOT pinned here, deliberately: that the window runs and lands a hold on the
-live box. That needs the aggregator, the engine and ~2 h 30 m, and pausing this box's
+live box. That needs the aggregator, the engine and the ~3 h 20 m of drain, reps and
+grade that `ExecStart` now budgets, and pausing this box's
 pool from a test is exactly what the runner refuses to do to somebody else's landing.
 It is owed after landing and named in the item.
 
@@ -33,6 +37,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -51,7 +56,14 @@ TIMER = UNIT_DIR / "lloyd-persistence-window.timer"
 INSTALLER = ROOT / "agent-services" / "setup" / "install-services.sh"
 SETUP = ROOT / "SETUP.md"
 WINDOW_SCRIPT = "eval/run_persistence_arms.sh"
+WINDOW_PATH = ROOT / WINDOW_SCRIPT
+DRIVER = ROOT / "eval" / "persistence_arms.py"
 REPS = "10"
+DRAIN_FLAG = "--drain-wait"
+DRAIN_WAIT_S = 4200       # the ExecStart budget; the driver's own default is 900 s
+PER_REP_S = 13 * 60       # thirteen minutes: the driver's figure for one rep
+WINDOW_S = DRAIN_WAIT_S + int(REPS) * PER_REP_S      # 4200 + 7800 = 12000 s = 3 h 20 m
+RETRIEVAL_EVAL_S = 6 * 3600       # #82 nightly-retrieval-eval, the bound on this span
 
 
 def _parse(path: Path):
@@ -83,6 +95,41 @@ def _execstart() -> str:
     return _parse(SERVICE).get("Service", "ExecStart")
 
 
+def _exec_argv() -> list[str]:
+    """The `ExecStart` line as argv, split the way systemd splits it: POSIX quoting, so
+    a quoted path holding a space stays one token where `str.split` would cut it in two
+    and the test would be reading a different command than the one systemd runs."""
+    return shlex.split(_execstart())
+
+
+def _driver_args():
+    """`ExecStart`'s own arguments, parsed by the DRIVER's `build_parser()` rather than
+    by a regex beside it.
+
+    This is the seam the drain lives on: a flag the driver does not know is an
+    `SystemExit` here, a value it cannot cast is one too, and an argument the wrapper
+    drops before the driver ever sees it arrives as `drain_wait is None`, which is
+    precisely the driver's way of saying "fall back to the 900 s default"
+    (`eval/persistence_arms.py:458`). Reading the unit through the code that will read it
+    at 02:10 is what keeps a green suite from meaning a window that silently drains for
+    900 s again."""
+    sys.path.insert(0, str(ROOT / "eval"))
+    import persistence_arms as PA
+    return PA.build_parser().parse_args(_exec_argv()[1:])
+
+
+def _unit_window_seconds() -> int:
+    """The span the unit actually asks for: the drain it passes plus the reps it asks
+    for, at the driver's own thirteen minutes each. Derived from `ExecStart`, never from
+    the constants above, so a drain changed in the unit moves this number and the prose
+    that has to match it."""
+    ns = _driver_args()
+    assert ns.drain_wait is not None, \
+        f"ExecStart passes no {DRAIN_FLAG}, so the driver resolves the 900 s default at " \
+        f"eval/persistence_arms.py:458 and there is no span to do arithmetic on: {_execstart()!r}"
+    return int(ns.drain_wait + ns.reps * PER_REP_S)
+
+
 def _git_tracked(path: Path) -> bool:
     r = subprocess.run(["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
                         str(path.relative_to(ROOT))],
@@ -109,19 +156,36 @@ def test_both_units_are_tracked_in_the_repo():
         assert _git_tracked(path), f"{path.name} is not tracked in git"
 
 
-def test_the_service_is_a_oneshot_that_runs_the_window_at_ten_reps():
-    """Clause 1, first half: `Type=oneshot` and an `ExecStart` that runs the shipped
-    script with the rep count as its argument. A timer on a service that never runs
-    the window is the same gap with a clock attached."""
+def test_the_service_is_a_oneshot_running_ten_reps_with_a_drain_that_outlasts_a_round():
+    """Clauses 1 and 2: `Type=oneshot`, and an `ExecStart` that runs the shipped script
+    at ten reps with `--drain-wait 4200`. A timer on a service that never runs the
+    window is the same gap with a clock attached.
+
+    The argument list used to be pinned as exactly `[10]`, which is the whole reason the
+    drain was still the driver's 900 s default: the drain this window runs is an
+    `ExecStart` argument, and 642 of the 898 autocode runs in the 14 days to 2026-10-12
+    outlived 900 s (longest 3552 s), with the queue busy at 02:10 on 18 of the 20 nights
+    the run store covers — so the old default made the nightly fire a refusal, and the
+    one fire this unit has had is exactly that. Pinned now, in this order: the script
+    suffix, the rep count, the flag appearing exactly once, and the drain seconds AS THE
+    DRIVER PARSES THEM — not as a substring of the line. A value argparse would refuse, a
+    flag argparse never sees and a second flag silently overriding the first each turn
+    this red rather than passing on text."""
     cp = _parse(SERVICE)
     assert cp.has_section("Service"), SERVICE
     assert cp.get("Service", "Type") == "oneshot", "a long-running service would hold " \
         "the pool on every boot; this is one window per fire, then it is done"
-    tokens = _execstart().split()
-    assert tokens[0].endswith(WINDOW_SCRIPT), \
+    argv = _exec_argv()
+    assert argv[0].endswith(WINDOW_SCRIPT), \
         f"ExecStart must run the shipped window script: {_execstart()!r}"
-    assert tokens[1:] == [REPS], \
-        f"the window must be invoked at ten reps, got {tokens[1:]!r}"
+    assert argv[1] == REPS, \
+        f"the window must be invoked at ten reps, got {argv[1:]!r}"
+    assert argv.count(DRAIN_FLAG) == 1, \
+        f"exactly one {DRAIN_FLAG} may set the drain, got {argv[2:]!r}"
+    ns = _driver_args()
+    assert ns.reps == int(REPS), f"argparse read the rep count as {ns.reps}"
+    assert ns.drain_wait == float(DRAIN_WAIT_S), \
+        f"{DRAIN_FLAG} must hand the driver {DRAIN_WAIT_S} s, parsed {ns.drain_wait}"
 
 
 def test_the_script_systemd_execs_is_the_tracked_executable_one():
@@ -131,6 +195,64 @@ def test_the_script_systemd_execs_is_the_tracked_executable_one():
     script = ROOT / WINDOW_SCRIPT
     assert script.is_file() and _git_tracked(script), script
     assert os.access(script, os.X_OK), f"{script} is not executable"
+
+
+def test_the_unit_arguments_reach_the_driver_through_the_shipped_wrapper(tmp_path):
+    """Clause 5: the process boundary the unit's numbers cross before anything runs.
+
+    `ExecStart` names the WRAPPER, which validates the rep count and then
+    `exec "$PYTHON" "$ROOT/eval/persistence_arms.py" "$@"`
+    (`eval/run_persistence_arms.sh:49`). A `"$@"` dropped there is a unit that still
+    exits 0 and drains for 900 s, because the flag and not the exit code is what carries
+    the budget — and a renamed flag is an argparse error at 02:10, in a journal nobody is
+    reading. So this runs the tracked wrapper for real, passing the unit's OWN arguments,
+    with a stub interpreter standing where the venv python would: the stub records argv
+    and exits, so no window opens, no dispatch is held and no engine is touched, which is
+    exactly what `tests/conftest.py` exists to keep a round from doing.
+
+    Three things get pinned, because they fail separately: the forwarded tail is the
+    unit's tail verbatim (a dropped or reordered argument), the driver's `build_parser()`
+    accepts THAT tail and reads 4200.0 out of it (a flag the wrapper forwards but the
+    driver does not know), and the no-flag case resolves to `drain_wait is None` — the
+    driver's own way of saying it is about to use the 900 s default, which is the state
+    this item was filed to end (`eval/persistence_arms.py:458`)."""
+    assert _git_tracked(WINDOW_PATH) and '"$@"' in WINDOW_PATH.read_text(encoding="utf-8"), \
+        "the wrapper must forward its arguments to the driver"
+
+    argv = _exec_argv()
+    stub, out = tmp_path / "stub-python", tmp_path / "argv.txt"
+    stub.write_text("#!/usr/bin/env bash\n"
+                    f'printf \'%s\\n\' "$@" > "{out}"\n'
+                    "exit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    # 180 s, not the 60 s this node shipped with: at head db55d731 the gate's parallel
+    # pass timed out here (`parallel_only_failures` names this node, `failed: 0` after
+    # its serial re-run), while a second round's suite was live on the box at the same
+    # time — 70+ unrelated nodes landed in that same list. The fork itself is sub-second
+    # in isolation; the budget has to survive a contended machine, and the sibling
+    # wrapper test already allows 90 s (`tests/test_run_persistence_arms.py:202`).
+    proc = subprocess.run([str(WINDOW_PATH), *argv[1:]], capture_output=True,
+                          text=True, timeout=180, cwd=str(tmp_path),
+                          env=dict(os.environ, LLOYD_CANARY_PYTHON=str(stub)))
+    assert proc.returncode == 0, \
+        f"the wrapper refused the unit's own arguments ({proc.returncode}): " \
+        f"{(proc.stderr or proc.stdout)[-300:]}"
+    forwarded = out.read_text(encoding="utf-8").splitlines()
+    assert forwarded and Path(forwarded[0]).resolve() == DRIVER.resolve(), \
+        f"the wrapper did not exec the driver it names: {forwarded[:1]!r}"
+    assert forwarded[1:] == argv[1:], \
+        f"the wrapper dropped or reordered the unit's arguments: {forwarded[1:]!r} " \
+        f"!= {argv[1:]!r}"
+
+    sys.path.insert(0, str(ROOT / "eval"))
+    import persistence_arms as PA
+    ns = PA.build_parser().parse_args(forwarded[1:])
+    assert ns.reps == int(REPS) and ns.drain_wait == float(DRAIN_WAIT_S), \
+        f"the driver read reps={ns.reps} drain_wait={ns.drain_wait} off the forwarded " \
+        f"tail {forwarded[1:]!r}"
+    assert PA.build_parser().parse_args([REPS]).drain_wait is None, \
+        "with no flag the driver falls back to the 900 s default — so the flag's " \
+        "presence in ExecStart is load-bearing, not decorative"
 
 
 def test_the_unit_sets_neither_override_so_the_reps_land_on_the_tracked_corpus():
@@ -204,19 +326,27 @@ def test_the_timer_fires_once_a_day_at_one_hour_and_catches_up():
     assert 1 <= int(hh) <= 2, \
         f"the slot must sit in the 01:00-02:59 band that has no nightly writes, no " \
         f"morning measurement and ~no user turns: {value}"
-    assert int(mm) <= 15, f"start early: the ~2 h 30 m window must finish before 05:00 " \
-        f"jobs and the morning human band: {value}"
+    assert int(mm) <= 15, f"start early: from the latest start the 300 s jitter allows " \
+        f"(02:15) the ~3 h 20 m span must still end clear of the 06:00 retrieval eval: " \
+        f"{value}"
 
 
 def test_the_timer_comment_names_the_scheduled_work_the_hour_avoids():
-    """Clause 3, second half: the hour is only defensible as prose. It must name the
-    chain it waits out (the 22:00-04:00 write window the precedent
-    `lloyd-qmd-cleanup.timer` documents, which measures out at 22:00 / 00:00 / 01:00
-    in the run store) and the morning measurements it stays ahead of — the 04:00
-    health report, the 05:00 qmd index maintenance, the 05:30 graph backup and the
-    06:00 retrieval eval, which is itself an engine-heavy measurement. A number with
-    no provenance behind it would be decoration, so the band's own human-turn count
-    is quoted too."""
+    """#2595 clause 4 (the second half of #2428's clause 3): the hour is only defensible
+    as prose, and the prose has to describe the window the service actually runs.
+
+    It must name the chain it waits out (the 22:00-04:00 write window the precedent
+    `lloyd-qmd-cleanup.timer` documents, which measures out at 22:00 / 00:00 / 01:00 in
+    the run store), the drain it exists to wait for, and the one measurement it stays
+    ahead of — the 06:00 retrieval eval, itself engine-heavy, which is why the drain has
+    a bound rather than a preference. The 04:00 health report and the 05:00 qmd index
+    maintenance now fall INSIDE the span and the comment says so: both are
+    pool-dispatched, so they queue behind the hold and run after it, whereas the 05:30
+    graph backup is a user timer that does not queue, and is tolerable only because it
+    copies the KG store and touches no engine. Saying "before the morning measurements"
+    of a window that overlaps three of them would be a claim the schedule contradicts. A
+    number with no provenance behind it would be decoration, so the band's own human-turn
+    count is quoted too."""
     prose = _comments(TIMER)
     assert prose.strip(), f"{TIMER.name} chose its hour in silence"
     for token, what in [("22:00", "the nightly write window"),
@@ -225,8 +355,17 @@ def test_the_timer_comment_names_the_scheduled_work_the_hour_avoids():
                         ("05:30", "the graph backup"),
                         ("06:00", "#82 nightly-retrieval-eval")]:
         assert token in prose, f"the comment does not name {what} as avoided: {token}"
-    assert re.search(r"2 h 30 m|~2 h 30", prose), \
+    assert re.search(r"3 h 20 m|~3 h 20", prose), \
         "the comment must state the wall clock the window occupies"
+    assert str(DRAIN_WAIT_S) in prose, \
+        f"…and name the {DRAIN_WAIT_S} s drain it waits out, or the two units describe " \
+        "two different windows read side by side"
+    assert "02:15" in prose, \
+        "the span only clears 06:00 from the latest start the jitter allows, so the " \
+        "comment has to carry that start, not the nominal 02:10"
+    assert "queue behind" in prose, \
+        "the 04:00 and 05:00 jobs fall inside a span this long: the comment has to say " \
+        "they queue behind the hold and run after it, not that the hour stays ahead"
 
 
 def test_the_service_states_the_wall_clock_and_outlives_the_manager_default():
@@ -235,19 +374,41 @@ def test_the_service_states_the_wall_clock_and_outlives_the_manager_default():
     reads `TimeoutStartUSec=1min 30s`), so an oneshot that inherits it is SIGTERM'd
     inside rep 1 — the driver resumes dispatch on the way out, so no hold leaks, but
     the timer records a clean exit and produces no rows. The unit must state the
-    ~2 h 30 m budget (thirteen minutes of engine per rep, the driver's own figure)
-    and set `TimeoutStartSec` above the 2 h 45 m worst case that budget allows."""
+    ~3 h 20 m budget as the sum of its two terms — the 4200 s drain ExecStart passes and
+    thirteen minutes of engine per rep, the driver's own figure — and set
+    `TimeoutStartSec` above that worst case. The drain and the rep count are parsed out
+    of `ExecStart` and multiplied at the driver's own thirteen minutes rather than read
+    off the prose, because the drain is the term a future round will be tempted to raise
+    and the 06:00 bound is what says by how much."""
     cp = _parse(SERVICE)
     execstart = _execstart()
     text = SERVICE.read_text(encoding="utf-8")
-    assert "2 h 30 m" in text, "the unit must state the wall clock it expects"
+    assert "3 h 20 m" in text, "the unit must state the wall clock it expects"
     assert "thirteen minutes" in text.lower(), "…with its per-rep budget named"
+    assert str(DRAIN_WAIT_S) in text, "…and the drain term beside it, not merged into the sum"
+    window = _unit_window_seconds()
+    assert window == WINDOW_S == 12000, \
+        f"3 h 20 m is {DRAIN_WAIT_S} s of drain + {REPS} reps x {PER_REP_S} s = " \
+        f"{WINDOW_S} s, but ExecStart asks for {window} s"
     assert execstart in text, "the wall clock must be documented beside the line it describes"
     declared = cp.get("Service", "TimeoutStartSec")
-    assert _systemd_seconds(declared) > _systemd_seconds("2h 45m"), \
-        f"TimeoutStartSec={declared} is under the window's own worst case"
+    assert _systemd_seconds(declared) > window, \
+        f"TimeoutStartSec={declared} is under the window's own worst case ({window} s)"
     assert _systemd_seconds(declared) <= _systemd_seconds("8h"), \
         f"TimeoutStartSec={declared} is a licence to hang, not a budget"
+    # The bound the drain was sized against, computed instead of asserted as prose: the
+    # latest start the timer's `RandomizedDelaySec=300` allows is 02:15, and #82
+    # nightly-retrieval-eval at 06:00 is the engine-heavy measurement a window running
+    # beside it would contaminate. 4200 s is what is left of 02:15→06:00 once ten reps
+    # take 7800 s and ~25 min is kept for the closing grade, so a longer drain spends
+    # that grade room and a much longer one runs the reps past 06:00 by themselves.
+    ends = 2 * 3600 + 15 * 60 + window
+    assert ends < RETRIEVAL_EVAL_S, \
+        f"from the latest jittered start the window ends {ends} s past the " \
+        f"06:00 retrieval eval ({RETRIEVAL_EVAL_S} s)"
+    assert RETRIEVAL_EVAL_S - ends >= 1500, \
+        f"only {RETRIEVAL_EVAL_S - ends} s is left for the closing grade; 4200 s of " \
+        "drain is the largest value that keeps half an hour ahead of 06:00"
 
 
 # ── clause 4: the installer links them, and neither is system scope ──
@@ -282,8 +443,14 @@ def _run_installer(tmp_path: Path) -> tuple[Path, list[str]]:
     env = dict(os.environ, HOME=str(home), USER="lloyd-window-test",
                PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
                STUB_LOG=str(log))
+    # 300 s, from 120 s: this node and the wrapper node above both timed out in the
+    # gate's parallel pass at head db55d731 (`parallel_only_failures`, `failed: 0` on the
+    # serial re-run) while a second round's suite was live on the box — 70+ unrelated
+    # nodes are in that same list. The installer forks `systemctl --user` through the
+    # stub on PATH, so the fork is the thing the contended machine was slow at, not the
+    # installer's logic; the budget has to survive that.
     proc = subprocess.run(["bash", str(INSTALLER)], capture_output=True, text=True,
-                          env=env, cwd=str(tmp_path), timeout=120)
+                          env=env, cwd=str(tmp_path), timeout=300)
     assert proc.returncode == 0, f"installer exited {proc.returncode}: {proc.stderr[-500:]}"
     assert log.is_file() and "--user daemon-reload" in log.read_text(), \
         "the installer never asked systemctl to reload the user manager"

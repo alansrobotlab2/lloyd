@@ -1415,15 +1415,21 @@ systemctl --user enable --now lloyd-persistence-window.timer   # 10 persistence-
 
 `lloyd-persistence-window.service` is tracked beside it and lands through
 `agent-services/setup/install-services.sh` the same way, so it only needs enabling. It
-runs `eval/run_persistence_arms.sh 10` — ten reps of the three persistence arms with
-worker dispatch held — because nothing in the pool can: the driver refuses to start its
-reps while any queue row is in flight, and a job dispatched to run the window *is* that
-row, so it burns the 900 s drain and exits 2 every time. A pytest round cannot run it
-either (`tests/conftest.py` refuses the production tree, and the window needs the live
+runs `eval/run_persistence_arms.sh 10 --drain-wait 4200` — ten reps of the three
+persistence arms with worker dispatch held — because nothing in the pool can: the driver
+refuses to start its reps while any queue row is in flight, and a job dispatched to run
+the window *is* that row, so it burns the drain default and exits 2 every time (the flag
+is an `ExecStart` argument, so a dispatched job never sees it). A pytest round cannot run
+it either (`tests/conftest.py` refuses the production tree, and the window needs the live
 aggregator and engine), so systemd is the invoker; the unit's own header carries the
-mechanism. 02:10 is the one gap wide enough for the ~2 h 30 m the ten reps need — after
-the nightly reflection chain, ahead of the 04:00 health report, the 05:00 qmd index
-maintenance, the 05:30 graph backup and the 06:00 retrieval eval.
+mechanism. The explicit `--drain-wait 4200` is what outlasts a straggler round: 642 of
+the 898 autocode runs in the 14 days to 2026-10-12 ran past the 900 s default (longest
+3552 s), and the queue was busy at 02:10 on 18 of the 20 nights the run store covers.
+02:10 is the one gap whose far end still clears the 06:00 retrieval eval with that
+budget — 12000 s from the latest jittered start 02:15 is 05:35 — after the nightly
+reflection chain; the 04:00 health report and the 05:00 qmd index maintenance are
+pool-dispatched and queue behind the hold, and the 05:30 graph backup is a store copy
+with no engine in it.
 
 ### The egress-arms window
 

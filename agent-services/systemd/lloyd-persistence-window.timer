@@ -2,27 +2,38 @@
 Description=Nightly Lloyd persistence-arm window (#2428)
 
 [Timer]
-# 02:10 local. The one gap on this box wide enough for the ~2 h 30 m the window
-# needs -- ten reps at the driver's thirteen minutes of engine each
-# (eval/persistence_arms.py, `canary_cmd`), plus the drain and the grade. Chosen
+# 02:10 local. The one gap on this box that ends early enough for the ~3 h 20 m this
+# window now needs -- 4200 s of drain plus ten reps at the driver's thirteen minutes
+# of engine each (eval/persistence_arms.py, `canary_cmd`) = 12000 s, with
+# the closing grade on top. From the latest start the jitter below allows (02:15) that
+# is 05:35, inside the 06:00 bound with ~25 min left for the grade. The hour is chosen
 # against the schedule the precedent lloyd-qmd-cleanup.timer documents and against
 # the run store's own history (workers.db, populated since 2026-09-22):
 #   * AFTER the chain that precedent calls the 22:00-04:00 extraction/classifier
 #     write window, which measures out at 22:00 (#38 reflection-signals, #42
 #     knowledge-analysis), 00:00 (#58 skill-consolidation) and 01:00 (#39
 #     knowledge-write, #56 trajectory-extraction). A straggler still running at
-#     02:10 is what the 900 s drain exists to wait for.
-#   * BEFORE the morning measurements: #60 knowledge-health-report at 04:00, #81
-#     qmd-index-maintenance at 05:00, the 05:30 graph backup, and #82
-#     nightly-retrieval-eval at 06:00 -- itself an engine-heavy measurement, so a
-#     window running beside it would contaminate the one or the other.
+#     02:10 is what the 4200 s drain exists to wait for, and that straggler is the
+#     common case rather than the tail: the queue was busy at 02:10 on 18 of the 20
+#     nights the run store covers, and 642 of the 898 autocode runs in the 14 days to
+#     2026-10-12 outlived the 900 s this drain used to have (longest 3552 s) -- the
+#     one fire this window has had is a refusal on exactly that.
+#   * AHEAD of #82 nightly-retrieval-eval at 06:00, which is the bound and not one of
+#     several: it is itself an engine-heavy measurement, so a window running beside it
+#     would contaminate the one or the other, and the drain number is what keeps this
+#     window off it -- the sum is in the service's ExecStart comment.
 #   * IN the unoccupied band: user turns across 21 days of chat transcripts number
 #     1 between 01:00 and 06:59, against 20 in the 08:00 hour alone, and these reps
 #     want the primary to themselves for their whole duration.
-# What this hour does graze, and why that is survivable: the 04:17 cert renew is a
-# seconds-long tailscale mint with no engine in it, and #60's 04:00 slot queues
-# behind the dispatch hold and runs within the hour of it -- the hold defers that
-# job, this timer does not skip it.
+# What a span this long grazes that the 900 s budget never reached, and why each is
+# survivable:
+# the 04:17 cert renew is a seconds-long tailscale mint with no engine in it; #60
+# knowledge-health-report at 04:00 and #81 qmd-index-maintenance at 05:00 are
+# pool-dispatched, so they queue behind the dispatch hold and run once the window
+# releases it -- the hold defers those two jobs, this timer does not skip them; and
+# the 05:30 graph backup is the one morning job inside the span that does NOT queue
+# behind the hold, being a user timer, which is tolerable because the backup copies the
+# KG store and touches no engine. So 05:30 is not the bound; 06:00 is.
 # Jitter like the precedent's, so the start never lands on the hourly snapshot.
 OnCalendar=*-*-* 02:10:00
 Persistent=true

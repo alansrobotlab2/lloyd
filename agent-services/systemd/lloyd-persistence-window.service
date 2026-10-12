@@ -8,7 +8,9 @@ Documentation=file:///home/alansrobotlab/lloyd/eval/run_persistence_arms.sh
 # (eval/persistence_arms.py:190-207, IN_FLIGHT_STATES at :89), and that depth is
 # `SELECT source, state, COUNT(*) FROM queue GROUP BY source, state` with no
 # exclusion of the calling row (workers/queue.py:1103-1111). So a pool run burns the
-# 900 s drain and exits 2 every time it tries. A pytest round cannot run it either:
+# default 900 s drain (a dispatched run gets no `--drain-wait`: that flag is an
+# ExecStart argument, not an environment default) and exits 2 every time it tries.
+# A pytest round cannot run it either:
 # tests/conftest.py refuses against the production tree, and the window needs the
 # live aggregator and the engine. systemd is the caller that is neither (#2428).
 #
@@ -27,16 +29,35 @@ Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # (workers/pool.py:716-728). `exec` inside the wrapper keeps systemd's SIGTERM
 # landing on the process that owns that resume rather than on a shell behind it.
 #
-# Wall clock the ten reps below are expected to occupy: thirteen minutes of engine
-# per rep -- the driver's own figure for one `run` invocation of the three arms
-# (eval/persistence_arms.py, `canary_cmd`) -- times ten, plus up to `--drain-wait`'s
-# 900 s for the queue to quiet and the closing grade: about 2 h 30 m normally, with
-# ~2 h 45 m the worst case a full drain allows.
-ExecStart=/home/alansrobotlab/lloyd/eval/run_persistence_arms.sh 10
+# Wall clock the line below is expected to occupy, as the sum of its two terms:
+#   --drain-wait 4200 s            the queue to quiet, refused if it has not
+#   10 reps x 13 min = 7800 s      thirteen minutes of engine per rep -- the driver's
+#                                  own figure for one `run` invocation of the three
+#                                  arms (eval/persistence_arms.py, `canary_cmd`)
+#                                  -- times ten
+#   4200 + 7800 = 12000 s          = 3 h 20 m, and the closing grade is on top of it
+# Why the drain is 4200 s and not the driver's 900 s default: a straggler still
+# running at 02:10 is the normal case here, not the exception. Of the 898 autocode
+# runs in the 14 days to 2026-10-12, 642 outlived 900 s and the longest ran 3552 s,
+# and the queue was busy at 02:10 on 18 of the 20 nights the run store covers -- so
+# 900 s was a nightly refusal -- the one fire this unit has had is that refusal,
+# `refused: queue still busy after 900s: {'in_flight': 1, 'autocode:running': 1}` over
+# a 15min 2.5s wall clock (`journalctl --user -u lloyd-persistence-window.service`) --
+# and 4200 s clears the observed 3552 s straggler with 648 s to spare.
+# Why not longer: the latest start the timer's jitter allows is 02:15, and #82
+# nightly-retrieval-eval at 06:00 is the hard bound, being itself an engine-heavy
+# measurement a window running beside would contaminate. 02:15 to 06:00 is 13500 s;
+# take the 7800 s of reps and 5700 s is left, and 4200 s of that keeps ~1500 s --
+# half an hour, near enough -- for the grade. A longer drain buys waiting time the
+# grade then spends, and nothing else.
+ExecStart=/home/alansrobotlab/lloyd/eval/run_persistence_arms.sh 10 --drain-wait 4200
 # So that budget has somewhere to run. The user manager's default start timeout on
 # this box is 90 s (`systemctl --user show default` reads TimeoutStartUSec=1min 30s),
 # which would SIGTERM the window inside its first rep -- the driver would resume
 # dispatch on the way out, so no hold would leak, but the timer would have produced
-# zero rows and looked like a passing run. 4 h is margin over the worst case above,
-# not an expectation.
+# zero rows and looked like a passing run. 4 h = 14400 s is above the 12000 s
+# arithmetic above by 2400 s, which is the grade's margin: it is a hang guard, not an
+# expectation, and a run that ever reached it would be 40 min past the arithmetic and
+# overlapping the 06:00 eval -- which is why the drain number, not this one, is the
+# term that protects the morning.
 TimeoutStartSec=4h
