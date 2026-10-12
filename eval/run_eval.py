@@ -214,6 +214,22 @@ ENTITY_LEG_ORDER = ("seed", "fact", "graph_expanded_fact", "graph_neighbor")
 #: The retrieval half of that tuple — an entity in one of these was returned.
 RETRIEVAL_LEGS = ENTITY_LEG_ORDER[1:]
 
+#: One published rate per entity leg (#2621), keyed `rate name -> leg`, DERIVED from
+#: `ENTITY_LEG_ORDER` rather than listed, so a leg added to the tuple is a leg with a
+#: rate, an interval and a denominator rule the same night it is added — a hand-kept
+#: second list is how a leg ends up scored but never trended.
+#:
+#: They exist because the union in `_entities_in_result` over-determines `entity_hit`:
+#: measured on the nightly series 2026-10-02..2026-10-12, 42 of 43 hits carried a seed
+#: leg and 41 carried the fact leg as well, so while the graph legs' carrier sets fell
+#: 8 -> 4 and 10 -> 4 the three trended entity values did not move in the digit across
+#: eleven nights. A leg-only regression is invisible to `entity_hit` by construction;
+#: it cannot be invisible to `entity_hit_rate_graph_neighbor_carried`.
+#: `entity_hit_rate_retrieval_carried` (#1548) is not the escape hatch: it is the UNION
+#: of the three retrieval legs, so it holds exactly still while one of them empties and
+#: the other three stand.
+ENTITY_LEG_RATES = {f"entity_hit_rate_{leg}_carried": leg for leg in ENTITY_LEG_ORDER}
+
 
 def _entity_legs(result: dict,
                  seeds: list[str] | None = None) -> dict[str, list[str]]:
@@ -330,6 +346,36 @@ def _retrieval_entity_hit(rec: dict) -> bool:
         return bool(sc["entity_hit_retrieval_carried"])
     attrib = sc.get("entity_legs") or {}
     return any((v or {}).get("retrieval_satisfied") for v in attrib.values())
+
+
+def _leg_entity_hit(rec: dict, leg: str) -> bool | None:
+    """Did THIS ONE LEG carry a matched gold entity for this query (#2621)?
+
+    Read off `scoring.entity_legs` — the attribution `_score` writes in the same call
+    that decides `entity_hit` (`_entity_leg_attribution`, over the same `_norm`'d pairs
+    and the same `_entity_pair_satisfied` rule), never off a second mark. That is the
+    point of the route: the published per-leg rate and the record's own leg list are
+    one block of bytes read twice, so a rate can never read a different way from the
+    attribution beside it — which is the failure #1548 files in general: a published
+    entity number that reads as retrieval while the record's own legs say `seed`.
+
+    THREE states, and the third is the one a rate must not invent:
+      * True — some matched gold entity names `leg` in its `legs`.
+      * False — the artifact attributed this query's matches and `leg` is not among
+        them. An empty `entity_legs` is this state, not the next one: an artifact that
+        scored the query and matched no gold entity has stated "no leg carried it".
+      * None — the record carries no attribution at all (every artifact written before
+        #1548, the automod baseline arm, a synthetic fixture). Absence is not a
+        measurement, and reading it as `False` is how a leg that was never recorded
+        publishes a confident 0.000. #1548's `_retrieval_entity_hit` above reads the
+        same absence as not-carried because "the query's own seed handed it the hit"
+        was the safer failure for THAT rate; for a per-leg rate the safe failure is the
+        empty denominator, because its whole job is to register movement in one leg.
+    """
+    attrib = (rec.get("scoring") or {}).get("entity_legs")
+    if not isinstance(attrib, dict):
+        return None
+    return any(leg in ((v or {}).get("legs") or []) for v in attrib.values())
 
 
 def _doc_paths(result: dict) -> list[str]:
@@ -1068,9 +1114,10 @@ def _collapse_rescore(query_spec: dict, result: dict,
     }
 
 
-# The seven scored metrics and how each one's run-to-run uncertainty is
-# estimated (#696). A hit/miss rate is a binomial proportion and takes the
-# closed-form Wilson interval; the other five are means of a per-query value
+# The scored metrics and how each one's run-to-run uncertainty is
+# estimated (#696, plus #2271's two shares and #2621's four leg rates).
+# A hit/miss rate is a binomial proportion and takes the
+# closed-form Wilson interval; the rest are means of a per-query value
 # that is not a count of successes — an mrr_doc of 0.447 is not "8.9 of 20" —
 # so their interval comes from resampling the run's own per-query vector. The
 # per-query values are already persisted (`records[].scoring`), so this adds
@@ -1084,6 +1131,14 @@ CI_METRICS = {
     # seed extractor. Trend THIS one for retrieval quality; the gap between the two
     # is the seed-carried share, and it is reported, not hidden.
     "entity_hit_rate_retrieval_carried": ("entity_hit_retrieval_carried", "wilson"),
+    # ── one rate per entity leg (#2621) ── each counts the gold-bearing queries THAT
+    # LEG ALONE satisfies, read off the same `scoring.entity_legs` attribution the
+    # record already carries (`_leg_entity_hit`), so a record's mark and the published
+    # rate are one block of bytes read twice and cannot disagree. The scoring field is
+    # `None` on purpose: no per-query boolean backs these rates — `_leg_hit` goes to
+    # the attribution instead of to `scoring[<field>]`, and naming a field here would
+    # advertise a key no artifact has ever carried.
+    **{rate: (None, "wilson") for rate in ENTITY_LEG_RATES},
     "doc_hit_rate": ("doc_hit", "wilson"),
     "entity_recall_avg": ("entity_recall", "bootstrap"),
     "doc_recall_avg": ("doc_recall", "bootstrap"),
@@ -1102,8 +1157,11 @@ CI_METRICS = {
 }
 
 
-#: The five scored rates, each with the gold list that makes a query countable on
-#: its leg (#1663, adopting option (b) of #1600's ruling). A query with an empty
+#: Every scoreable rate, each with the gold list that makes a query countable on
+#: its leg (#1663, adopting option (b) of #1600's ruling; #2621's four per-entity-leg
+#: rates join it under the SAME entity-gold rule, because a query that names no gold
+#: entity asks nothing of a leg as much as it asks nothing of `entity_hit`).
+#: A query with an empty
 #: `expect_entities` asks NOTHING of the entity leg, yet `_score` records
 #: `entity_hit: bool([])` = False for it, and a query with an empty `expect_docs`
 #: scores `rr_doc`/`ndcg10` as 0.0 (`_ndcg_at_k` returns 0.0 on empty gold) — while
@@ -1111,7 +1169,7 @@ CI_METRICS = {
 #: average. One leg, two populations: on nightly-20260928 `entity_hit_rate` read
 #: 0.488 over all 86 queries and 0.636 over the 66 carrying entity gold, `doc_hit_rate`
 #: 0.616 over 86 against 0.671 over 79, `mrr_doc` 0.305 against 0.332 and `ndcg10`
-#: 0.360 against 0.392. From this commit the five rates follow the recalls, because
+#: 0.360 against 0.392. From that commit those five rates follow the recalls, because
 #: a query the corpus never asked is a measurement of the LABEL set, not of
 #: retrieval. `ci95[<metric>].n` is the gold-bearing subset, so the denominator
 #: travels with the number instead of having to be re-derived by hand.
@@ -1127,6 +1185,12 @@ GOLD_BEARING_LEGS = {
     # Same gold list, narrower numerator (#1548) — so both entity rates divide over
     # the entity leg's n, and a reader can multiply either back out.
     "entity_hit_rate_retrieval_carried": "entities",
+    # Each per-leg rate (#2621) divides over the SAME entity-gold subset as
+    # `entity_hit_rate` does — a query with no gold entity is not a measurement of any
+    # leg — which is what lets `k/n` be multiplied back out against any of the six
+    # entity rates now in `summary.overall` (the headline, #1548's retrieval-carried
+    # reading, and one per leg) and mean one population every time.
+    **{rate: "entities" for rate in ENTITY_LEG_RATES},
     "doc_hit_rate": "docs",
     # #1663 extends #1600's ruling to the two rank-based doc legs, which share
     # `doc_hit_rate`'s and `doc_recall_avg`'s population.
@@ -1135,12 +1199,14 @@ GOLD_BEARING_LEGS = {
 }
 
 #: The rates that score a query as a hit or a miss, as opposed to averaging the
-#: per-query score the scorer wrote. `_metric_value` branches on this.
+#: per-query score the scorer wrote. `_metric_value` branches on this. The four
+#: per-entity-leg rates (#2621) are in it because each scores one query as carried by
+#: that leg or not, and out of it for no other reason they are not `scoring` keys.
 HIT_RATE_METRICS = ("entity_hit_rate", "entity_hit_rate_retrieval_carried",
-                    "doc_hit_rate")
+                    "doc_hit_rate", *ENTITY_LEG_RATES)
 
 
-def _leg_hit(rec: dict, metric: str) -> bool:
+def _leg_hit(rec: dict, metric: str) -> bool | None:
     """This query's hit on one hit leg, asked the SAME way the published rate
     asks it.
 
@@ -1150,9 +1216,19 @@ def _leg_hit(rec: dict, metric: str) -> bool:
     `scoring.entity_legs`, so an artifact predating that field reads as not-carried
     in the rate and in the interval alike — never one way in one and the other way
     in the other.
+
+    `None` is the third state, and only the per-leg rates (#2621) ever return it: the
+    record carries no `entity_legs` attribution at all, so this leg was never measured
+    for this query and the query leaves the denominator (`_metric_value`), the
+    interval's `n` and the rate together. A two-valued reader cannot express that,
+    which is why the per-leg rates would otherwise print 0.000 for a corpus they could
+    not read — the exact confusion `drift unknown, never read as 0` already forbids on
+    the drift term beside them.
     """
     if metric == "entity_hit_rate_retrieval_carried":
         return _retrieval_entity_hit(rec)
+    if metric in ENTITY_LEG_RATES:
+        return _leg_entity_hit(rec, ENTITY_LEG_RATES[metric])
     return bool((rec.get("scoring") or {}).get(CI_METRICS[metric][0]))
 
 
@@ -1190,7 +1266,12 @@ def _metric_value(rec: dict, metric: str):
     if not _counts_on_leg(rec, metric):
         return None
     if metric in HIT_RATE_METRICS:
-        return 1.0 if _leg_hit(rec, metric) else 0.0
+        hit = _leg_hit(rec, metric)
+        # Only #2621's per-leg rates ever answer None, and it means "this artifact
+        # never attributed this query" — the query then leaves the rate, its interval
+        # and its n together, which is what makes an old baseline read as unmeasured
+        # rather than as a 0.000 hit rate.
+        return None if hit is None else (1.0 if hit else 0.0)
     return (rec.get("scoring") or {}).get(CI_METRICS[metric][0])
 
 
@@ -1208,14 +1289,15 @@ def metric_series(records: list[dict], metric: str) -> list:
 def confidence_intervals(records: list[dict], *,
                          n_resamples: int = evstats.N_RESAMPLES,
                          seed: int = evstats.SEED) -> dict:
-    """The 95 % interval beside each of the seven overall metrics.
+    """The 95 % interval beside every metric in `CI_METRICS`.
 
     Entry shape: ``{"ci": [lo, hi], "n": int, "kind": "wilson"|"bootstrap"}``,
-    plus `k` (the hit count) on the three hit rates. Every entry carries its own `n`
+    plus `k` (the hit count) on every `wilson` metric — the hit rates, which since
+    #2621 include the four per-entity-leg rates. Every entry carries its own `n`
     because a 20-query run is not one denominator: `fact_entity_recall_avg` is
     scored only where the corpus HAS the entity row, and a query whose expectation
     list is empty scores None for a recall (#541) and leaves that metric's average.
-    Since #1663 the five scored rates leave it the same way, through the one reader
+    Since #1663 those five scored rates leave it the same way, through the one reader
     `metric_series` — so `ci95[<rate>].n` IS the population that rate divided, and a
     reader can check a headline against its own interval instead of re-deriving a
     denominator by hand, which is the instrument #1600 had to fall back to.
@@ -1725,9 +1807,10 @@ def summarize(records: list[dict], *,
     # half, so the denominators travel with the numbers: a pinned_rate over 4 of 20
     # queries is not comparable to one over 18, and the whole point of #541 is that
     # a low number here is a finding rather than a malfunction. Since #1663 that
-    # rule is UNIFORM across the seven scored metrics — the recalls always dropped a
-    # query the corpus never asked about, and now the three hit rates and
-    # `mrr_doc`/`ndcg10` do too, through one reader (`metric_series`, keyed by
+    # rule is UNIFORM across every scoreable metric — the recalls always dropped a
+    # query the corpus never asked about, and now the hit rates (all seven of them,
+    # #2621's four per-entity-leg rates among them) and `mrr_doc`/`ndcg10` do too,
+    # through one reader (`metric_series`, keyed by
     # `GOLD_BEARING_LEGS`). What is left over is the counterfactual pair, which
     # reads its own `expected_pinned` block, and `latency_ms_avg`, which is a count
     # of wall clock and not a score.
@@ -1766,6 +1849,36 @@ def summarize(records: list[dict], *,
         # the fact leg and which therefore cannot be seed-inflated either.
         "entity_hit_rate_retrieval_carried": avg(
             metric_series(records, "entity_hit_rate_retrieval_carried")),
+        # ── one rate per entity leg (#2621) ── each is the share of entity-gold
+        # queries that LEG ALONE carried, out of the same `metric_series` population
+        # the interval below bounds. They exist because the union in
+        # `_entities_in_result` over-determines `entity_hit`: 42 of 43 nightly hits
+        # carried a seed leg and 41 the fact leg too, so the graph legs could and did
+        # fall 8 -> 4 and 10 -> 4 across eleven nights without moving any trended
+        # entity number. A leg-only regression has nowhere to show except here.
+        # `seed` is published beside the three retrieval legs even though it is the
+        # seed extractor and not retrieval: its level is the size of the confound
+        # #1548 found in the headline, and a reader comparing the seed rate to
+        # `entity_hit_rate` should not have to derive a fifth number by hand.
+        **{rate: avg(metric_series(records, rate))
+           for rate in ENTITY_LEG_RATES},
+        # Did this artifact record per-query leg attribution at all (#2621 clause 4)?
+        # A baseline written before `scoring.entity_legs` exists attributes nothing, so
+        # every one of its queries reads None and every leg rate above is null — but
+        # null alone cannot tell a later reader "not recorded" from "recorded and zero",
+        # and `drift unknown, never read as 0` already refuses that conflation.
+        #
+        # Read off the RECORDS' fields, deliberately not off `metric_series`: a run
+        # whose queries carry no entity gold has an empty series for every leg and
+        # would then report False, which is a statement about the LABEL set arriving as
+        # a statement about the artifact's shape. Two different absences, and only one
+        # of them is what a reader needs to know before trusting a null leg rate:
+        # `False` here means the artifact predates the field, and is NOT a claim that
+        # the leg carried nothing.
+        "entity_leg_rates_measured": {
+            rate: any(isinstance((r.get("scoring") or {}).get("entity_legs"), dict)
+                      for r in records)
+            for rate in ENTITY_LEG_RATES},
         "doc_hit_rate": avg(metric_series(records, "doc_hit_rate")),
         "entity_recall_avg": avg(metric_series(records, "entity_recall_avg")),
         "doc_recall_avg": avg(metric_series(records, "doc_recall_avg")),
@@ -2107,6 +2220,15 @@ def print_table(records: list[dict], summary: dict) -> None:
     print(f"         entity leg: hit={_fmt_rate(o.get('entity_hit_rate'))} "
           f"of which retrieval-carried={_fmt_rate(_rc)} "
           f"(the rest came only from `seeds_extracted`)")
+    # The same hit decomposed per leg (#2621), one line, on the page where the headline
+    # is read: a rate nobody prints is a rate nobody consults before deciding the entity
+    # side is unmoved, and the four of them together are what says whether the union
+    # above is being carried by everything or by the seed extractor alone. `null` is
+    # `_fmt_rate3`'s own null-vs-zero rule — an artifact predating
+    # `scoring.entity_legs` prints nulls here, not a row of zeros.
+    print("         per-leg carriers: " + "  ".join(
+        f"{leg}={_fmt_rate3(o.get(rate))}"
+        for rate, leg in ENTITY_LEG_RATES.items()))
     mv, pn = o.get("counterfactual_moved_rate"), o.get("counterfactual_pinned_rate")
     total = o.get("n_queries", 0)
     # #1640's companion, out of the PINNED denominator rather than out of the query

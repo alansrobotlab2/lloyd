@@ -31,6 +31,15 @@ What this script does, from the ``records[]`` already stored in
 * ``entity_hit`` / ``doc_hit``: exact two-sided McNemar on the discordant pairs
   (an exact test, not an approximation) plus the discordant counts, and a Wilson
   interval on the current night's rate.
+* one exact McNemar per **entity leg** (#2621) — ``seed``, ``fact``,
+  ``graph_expanded_fact``, ``graph_neighbor`` — over the carrier bits derived from
+  ``records[].scoring.entity_legs``, under the same names ``eval/run_eval.py``
+  publishes in ``summary.overall``. The union ``entity_hit`` grades is over-determined
+  by the seed leg, so a night that lost half its graph carriers printed
+  ``entity_hit delta +0.000`` and this file agreed: 2026-10-02 .. 2026-10-12 hold all
+  three scored entity values identical to the digit while the graph legs' carrier
+  counts went 8 -> 4 and 10 -> 4. A pair whose artifact predates the attribution
+  reports these four legs as ``UNMEASURED``, never as a zero delta.
 * ``ndcg10`` / ``mrr_doc`` (from ``scoring.rr_doc``): a **paired bootstrap over
   queries**, always printed with the words "resampling approximation" because it
   is not an exact test.
@@ -114,6 +123,50 @@ SEED = 20260919                    # fixed: the interval must be reproducible
 #: label -> key inside ``records[].scoring``
 BINARY_LEGS = (("entity_hit", "entity_hit"), ("doc_hit", "doc_hit"))
 CONT_LEGS = (("ndcg10", "ndcg10"), ("mrr_doc", "rr_doc"))
+
+#: One binary leg per entity carrier (#2621), as ``(published rate name, bit key)``.
+#: The first element is EXACTLY the key `eval/run_eval.py` writes into
+#: `summary.overall`, so the nightly report and this audit cannot name one leg two
+#: ways; `tests/test_eval_trend_stats.py` pins that the two spellings are one set
+#: rather than trusting a copy. They are spelled out rather than generated from
+#: `run_eval`'s `ENTITY_LEG_RATES` for the same reason `GOLD_BEARING_LEGS` is restated
+#: below: this tool re-runs over artifacts the current scorer no longer wrote, and a
+#: `run_eval` import drags the engine's whole config with it.
+#:
+#: The bit key is NOT a `scoring` key. The bit is derived in `load_night` out of
+#: `records[].scoring.entity_legs`, because a leg that lives inside an attribution dict
+#: is invisible to a tool whose whole interface is one key per leg — and that is the
+#: mechanism this table exists to end. Measured on the nights already on disk,
+#: 42 of 43 entity hits carry a seed leg and 41 carry the fact leg as well, so
+#: `entity_hit` held bit-identical across eleven nights (2026-10-02 through
+#: 2026-10-12) while the `graph_expanded_fact` carriers fell 8 -> 4 and the
+#: `graph_neighbor` carriers 10 -> 4: the union in `_entities_in_result` was
+#: over-determined by the seed leg, and every one of those movements was real.
+#: `entity_hit_retrieval_carried` could not see them either — it is the UNION of the
+#: three retrieval legs, so it holds still while one empties and three stand.
+#:
+#: Kept out of `BINARY_LEGS` itself: that tuple is the denominator of the pooled
+#: discordance figure this file prints and `skills/retrieval-eval/SKILL.md` quotes
+#: ("`over 18 binary legs`"), and silently widening a quoted historical count is a
+#: re-base, not an addition. Anything that wants every binary leg reads
+#: `ALL_BINARY_LEGS`.
+ENTITY_LEGS = (
+    ("entity_hit_rate_seed_carried", "_leg_seed"),
+    ("entity_hit_rate_fact_carried", "_leg_fact"),
+    ("entity_hit_rate_graph_expanded_fact_carried", "_leg_graph_expanded_fact"),
+    ("entity_hit_rate_graph_neighbor_carried", "_leg_graph_neighbor"),
+)
+#: bit key -> the `entity_legs` leg name whose presence it encodes, spelled out
+#: beside the table above rather than sliced out of it: a wrong slice would quietly
+#: derive a bit nobody measures from a name nobody asked for.
+ENTITY_LEG_BITS = {
+    "_leg_seed": "seed",
+    "_leg_fact": "fact",
+    "_leg_graph_expanded_fact": "graph_expanded_fact",
+    "_leg_graph_neighbor": "graph_neighbor",
+}
+#: Every leg difference-tested with the exact McNemar test.
+ALL_BINARY_LEGS = BINARY_LEGS + ENTITY_LEGS
 
 #: The contract the nightly report must obey, printed with every audit so the
 #: sentence travels with the numbers it governs. ``{alpha}`` is filled in at
@@ -291,6 +344,20 @@ def load_night(path: Path) -> Night:
         if not isinstance(scoring, dict):
             raise ValueError(f"{path.name}: record {rid!r} has no scoring block")
         scores[rid] = scoring
+        # One bit per entity leg, derived here where the per-record attribution is in
+        # hand (#2621). The four keys are written ONLY when `entity_legs` is present to
+        # derive them from — an artifact predating it carries none of them, which is how
+        # `audit_transition` knows to call that leg unmeasured rather than average a
+        # zero it never read. An EMPTY `entity_legs` is the other case and gets zeros:
+        # the artifact scored the query, matched no gold entity, and therefore stated
+        # that no leg carried it. Same three states, same boundary, as
+        # `eval/run_eval.py::_leg_entity_hit` on the write side.
+        attrib = scoring.get("entity_legs")
+        if isinstance(attrib, dict):
+            for bit_key, leg in ENTITY_LEG_BITS.items():
+                scoring[bit_key] = 1 if any(
+                    leg in ((v or {}).get("legs") or [])
+                    for v in attrib.values()) else 0
         if isinstance(rec.get("query"), str):
             questions[rid] = rec["query"]
         expected = rec.get("expected")
@@ -705,6 +772,13 @@ def audit_transition(prev: Night, cur: Night, reps: int = BOOT_REPS,
         leg["prev_rate"], leg["cur_rate"] = _mean(prev_bits), _mean(cur_bits)
         leg["wilson"] = wilson_interval(sum(cur_bits), leg["rate_n"])
         legs[label] = leg
+    # One exact McNemar per entity leg (#2621), the same test `entity_hit` gets two
+    # lines above, over the same paired ids. This is the half the item was filed for:
+    # the union above cannot move when a graph leg empties, so a night that lost every
+    # graph carrier printed `entity_hit delta +0.000` and nothing else on this page
+    # disagreed.
+    for label, key in ENTITY_LEGS:
+        legs[label] = _entity_leg_mcmemar(prev, cur, ids, key)
     for label, key in CONT_LEGS:
         legs[label] = paired_bootstrap(
             [_num(prev.scores[i], key) for i in ids],
@@ -732,6 +806,79 @@ def _num(scoring: dict, key: str) -> float:
 
 def _mean(xs: list[int]) -> float:
     return sum(xs) / len(xs) if xs else float("nan")
+
+
+#: The keys every leg dict carries when no statistic could be computed for it, so the
+#: printer and `Transition.rejected` see one shape whether the number exists or not.
+def _unmeasured_leg(reason: str, n_ids: int, *, n_pair: int = 0) -> dict:
+    """A leg this pair could not be asked about: no rate, no delta, no p — no zero.
+
+    The two ways it happens are named in `reason` because they are different facts:
+    neither night recorded the attribution at all (every baseline written before
+    #2621), or only part of the paired corpus carries it (a definition break mid-window).
+    What is not on offer is `delta 0.000`, which is exactly the false green this whole
+    item exists to remove: a McNemar over bits that were never recorded reads
+    `b=0 c=0`, and a reader who cannot tell that from "measured, and nothing moved"
+    will keep reading a blind instrument as a stable one. The file already refuses the
+    same conflation in two other places — `drift unknown` for a missing corpus block
+    (#1374) and the null-vs-zero rule in `_fmt_rate` on the write side — and this is
+    its side of the page for the entity legs.
+    """
+    return {"unmeasured": reason, "b": 0, "c": 0, "m": 0, "n": n_ids,
+            "n_pair": n_pair, "delta": None, "p": None, "significant": False,
+            "exact": True, "rate_n": None, "prev_rate": None, "cur_rate": None,
+            "wilson": (float("nan"), float("nan"))}
+
+
+def _entity_leg_mcmemar(prev: Night, cur: Night, ids: list[str],
+                        bit_key: str) -> dict:
+    """Exact McNemar over one entity leg's carriers, or an unmeasured marker (#2621).
+
+    Identical test to `_bit`/`mcmemar_exact` over `entity_hit`, over the same joined
+    ids, with one deliberate difference: `_bit` RAISES on a missing key, because for
+    `entity_hit` a missing key is a corrupt artifact, while for these four legs it is
+    the ordinary case — every baseline on disk before #2621 carries no
+    `scoring.entity_legs` at all. Turning that into an exception would break every
+    historical window this tool is re-run over; turning it into a 0 would report a leg
+    nobody measured as a leg that did not move.
+
+    The paired population is the ids BOTH nights attributed. None: unmeasured. All of
+    them: the test. A strict subset: unmeasured with the count named, because McNemar
+    needs pairs and a leg attributed on part of a corpus is a definition break a person
+    reads, not a rate to average across the gap. On real nights the subset case does
+    not arise — an artifact writes the attribution for every record or for none — so
+    the branch costs one comparison and buys the tool the honesty to say "I could not
+    read this leg" in the artifact-shaped future where it does.
+    """
+    prev_bits: list[int] = []
+    cur_bits: list[int] = []
+    for i in ids:
+        p = prev.scores[i].get(bit_key)
+        c = cur.scores[i].get(bit_key)
+        if p is None or c is None:
+            continue
+        prev_bits.append(1 if p else 0)
+        cur_bits.append(1 if c else 0)
+    n_pair = len(prev_bits)
+    if n_pair == 0:
+        return _unmeasured_leg(
+            "neither night records `scoring.entity_legs`, so this leg was never "
+            "attributed on this pair", len(ids))
+    if n_pair < len(ids):
+        return _unmeasured_leg(
+            f"attributed on only {n_pair} of {len(ids)} paired queries", len(ids),
+            n_pair=n_pair)
+    leg = mcmemar_exact(prev_bits, cur_bits)
+    # Same divisor discipline as `entity_hit` two lines above: `rate_n` is read back off
+    # the lists the rate and the interval were computed from, so the count the print
+    # names beside them cannot drift from the arithmetic (#2060). These four legs divide
+    # over the paired corpus, exactly as `entity_hit` does, and for the same reason —
+    # the artifact's own gold-bearing `ci95[<rate>].n` is a different population and the
+    # two must not be read as one.
+    leg["rate_n"] = n_pair
+    leg["prev_rate"], leg["cur_rate"] = _mean(prev_bits), _mean(cur_bits)
+    leg["wilson"] = wilson_interval(sum(cur_bits), n_pair)
+    return leg
 
 
 def observed_discordance(transitions: list[Transition]) -> dict:
@@ -928,6 +1075,27 @@ def print_transition(t: Transition, alpha: float = ALPHA) -> None:
               f"exact McNemar p={leg['p']:.3f} ({call})  "
               f"Wilson 95% on {t.cur.label} over {leg['rate_n']} paired queries: "
               f"[{lo:.3f}, {hi:.3f}]")
+    # One line per entity leg (#2621), directly under `entity_hit`, because the pair
+    # this tool exists to adjudicate is exactly the pair where the union above holds
+    # still and one carrier set did not: 2026-10-11 -> 2026-10-12 prints
+    # `entity_hit delta +0.000` while `graph_neighbor` carriers went 5 -> 4. Without
+    # these four lines that pair reports the entity side as unmoved.
+    for label, _ in ENTITY_LEGS:
+        leg = t.legs[label]
+        if leg.get("unmeasured"):
+            # Absence printed as absence, on the same page and in the same column, so a
+            # leg that could not be read is never confused with one that did not move.
+            print(f"  {label:<44} delta n/a  UNMEASURED: {leg['unmeasured']}")
+            continue
+        lo, hi = leg["wilson"]
+        call = "rejects H0" if leg["significant"] else "does not reject H0"
+        print(f"  {label:<44} delta {leg['delta']:+.3f}  "
+              f"rates {leg['prev_rate']:.3f} -> {leg['cur_rate']:.3f} "
+              f"(over {leg['rate_n']} paired queries)  "
+              f"discordant b={leg['b']} c={leg['c']}  "
+              f"exact McNemar p={leg['p']:.3f} ({call})  "
+              f"Wilson 95% over {leg['rate_n']} paired queries: "
+              f"[{lo:.3f}, {hi:.3f}]")
     for label, _ in CONT_LEGS:
         leg = t.legs[label]
         if leg["significant"]:
@@ -983,6 +1151,17 @@ def print_totals(transitions: list[Transition], alpha: float = ALPHA) -> dict:
     marginal_only = [t for t in audited if t.marginal and not t.rejected]
     binary_sig = sum(1 for t in audited for k, _ in BINARY_LEGS if t.legs[k]["significant"])
     cont_sig = sum(1 for t in audited for k, _ in CONT_LEGS if t.legs[k]["significant"])
+    # The per-entity-leg tally (#2621), counted and printed apart from the line above
+    # rather than folded into it: that line's `of N` is the denominator of a figure
+    # `skills/retrieval-eval/SKILL.md` quotes for windows that predate these legs, and
+    # widening it silently would re-base a published count. An unmeasured leg is
+    # subtracted from the denominator instead of added to the numerator — it could not
+    # have rejected, and reporting it as a non-rejection would be the same false green
+    # the leg line refuses to print.
+    entity_leg_unmeasured = sum(1 for t in audited for k, _ in ENTITY_LEGS
+                                if t.legs.get(k, {}).get("unmeasured"))
+    entity_leg_sig = sum(1 for t in audited for k, _ in ENTITY_LEGS
+                         if t.legs.get(k, {}).get("significant"))
     admissible = sum(1 for t in transitions if t.admissible)
     drift_unknown = sum(1 for t in transitions if t.drift_moved is None)
     drift_moved = sum(1 for t in transitions if t.drift_moved is True)
@@ -1014,6 +1193,10 @@ def print_totals(transitions: list[Transition], alpha: float = ALPHA) -> dict:
           "   <- exact McNemar")
     print(f"  continuous legs rejecting (of {len(audited) * len(CONT_LEGS)}): {cont_sig}"
           "   <- paired bootstrap, resampling")
+    print(f"  entity-leg carrier legs rejecting "
+          f"(of {len(audited) * len(ENTITY_LEGS) - entity_leg_unmeasured} readable, "
+          f"{entity_leg_unmeasured} unmeasured): {entity_leg_sig}"
+          "   <- exact McNemar, one per entity leg (#2621)")
     print(f"  corpus block moved: {drift_moved}; drift unknown: {drift_unknown}"
           "   <- fact half (facts / edges_active / entities)")
     # A separate line, not a clause on the one above: folding the two halves into
@@ -1037,6 +1220,11 @@ def print_totals(transitions: list[Transition], alpha: float = ALPHA) -> dict:
             "incomparable": gold_moved,
             "rejected": len(rejected), "marginal_only": len(marginal_only),
             "binary_sig": binary_sig, "cont_sig": cont_sig,
+            # Counted apart from `binary_sig`, and the unreadable legs named rather than
+            # dropped, so a caller reading this dict cannot pool the new legs into the
+            # figure the skill quotes or mistake an unmeasured leg for a non-rejection.
+            "entity_leg_sig": entity_leg_sig,
+            "entity_leg_unmeasured": entity_leg_unmeasured,
             "admissible": admissible, "drift_unknown": drift_unknown,
             "drift_moved": drift_moved,
             "doc_moved": doc_moved, "doc_identical": doc_identical,
@@ -1075,6 +1263,16 @@ def rescore_claim(claim: dict, by_label: dict[str, Night], reps: int, seed: int,
             all_support = False
             continue
         leg = t.legs[metric]
+        if leg.get("unmeasured"):
+            # The claim names a leg this pair cannot read (#2621) — the artifact predates
+            # `scoring.entity_legs`, so no carrier set exists to difference-test. This is
+            # `cannot evaluate`, exactly as an unjoinable pair above is, and NOT a delta
+            # of zero: scoring a claim UNSUPPORTED because nothing was recorded is the
+            # false green the leg print line refuses, arriving from the other side.
+            print(f"  {prev_label} -> {cur_label}: {metric} UNMEASURED "
+                  f"({leg['unmeasured']}) -> cannot evaluate")
+            all_support = False
+            continue
         moving = leg["delta"] < 0 if decline else leg["delta"] > 0
         direction_ok = moving and leg["significant"]
         supported = direction_ok and not (t.drift_moved is not False)

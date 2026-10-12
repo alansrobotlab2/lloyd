@@ -1560,7 +1560,22 @@ def test_print_table_renders_a_run_whose_document_leg_measured_nothing(capsys):
     assert "doc_hit=null" in out, out
     assert "MRR=null" in out, out
     assert "NDCG10=null" in out, out
-    assert "0.000" not in out, "a null reached the page as a measured zero"
+    # The ban is on the null legs, not on the whole page. It used to read
+    # `assert "0.000" not in out`, which held only while nothing on the page had a
+    # legitimate reason to be a measured zero — and #2621's per-leg carrier line is
+    # precisely a leg that was asked and returned nothing: this fixture's hit came in
+    # on the fact leg, so `seed=0.000` is the truth about the seed extractor and
+    # `fact=1.000` beside it is the truth about retrieval. The exact figures are pinned
+    # below, so the ban still says "no null reached the page as a zero" while naming
+    # which zeros are supposed to be there. (Flagged as a future break in #1663's own
+    # review advisory: "a future legitimate measured zero ... would fail it spuriously".)
+    leg_line = next(ln for ln in out.splitlines()
+                    if "per-leg carriers:" in ln)
+    assert leg_line in out, out
+    assert ("seed=0.000  fact=1.000  graph_expanded_fact=0.000  "
+            "graph_neighbor=0.000") in leg_line, leg_line
+    assert "0.000" not in out.replace(leg_line, ""), \
+        "a null reached the page as a measured zero"
     row = next(ln for ln in out.splitlines() if ln.startswith("ent-1"))
     assert row.split()[3] == "—", row
 
@@ -1908,3 +1923,260 @@ def test_superseded_slot_fires_on_a_newer_note_in_the_same_title_family(
     out = _dup_scored_with(monkeypatch, content, paths)
     assert out["superseded_slot_share"] == pytest.approx(0.5)
     assert out["_dup_metrics"]["superseded_slot_disagreements"] == 0
+
+
+# ── one published rate per entity leg (#2621) ────────────────────────────────
+
+LEG_RATES = ("entity_hit_rate_seed_carried", "entity_hit_rate_fact_carried",
+             "entity_hit_rate_graph_expanded_fact_carried",
+             "entity_hit_rate_graph_neighbor_carried")
+
+#: The three-query set behind every test in this section, run twice: once against
+#: `_legged_result()` and once with `graph_neighbors_used` dropped. `q1` names gold on
+#: the seed, fact AND neighbour legs, `q2` on the fact leg only, `q3` on the seed leg
+#: only — the shape of the nightly corpus, where one query is carried by several legs.
+def _leg_record(qid: str, spec: dict, result: dict, seeds: list[str]) -> dict:
+    """`_record` plus the `expected` block `summarize` reads.
+
+    `_counts_on_leg` drops a query from a leg's denominator only when the artifact
+    STATES that leg's gold list and it is empty, so a fixture without this block is a
+    fixture in which every query counts on every leg — which would quietly make the
+    n=3-over-4 assertion below pass for the wrong reason.
+    """
+    rec = _record(qid, spec, result, seeds=seeds)
+    rec["expected"] = {"entities": spec.get("expect_entities") or [],
+                       "docs": spec.get("expect_docs") or []}
+    return rec
+
+
+def _leg_rate_records(with_neighbours: bool = True) -> list[dict]:
+    """Three scored records over one retrieval output, the second arm of which drops
+    every graph-neighbour carrier while leaving the seed and fact carriers standing.
+
+    This is the #2621 regression in miniature: the dropped output is a graph-only
+    regression, the kind the union in `_entities_in_result` cannot see because the fact
+    and seed legs carry the same gold anyway.
+    """
+    result = _legged_result()
+    if not with_neighbours:
+        result = {k: v for k, v in result.items() if k != "graph_neighbors_used"}
+    seeds = [SEED_ONLY_GOLD, "Graph", CARIED_BY_FACT]
+    specs = [
+        {"id": "q1", "query": "q", "category": "entity",
+         "expect_entities": [SEED_ONLY_GOLD, CARIED_BY_FACT, CARIED_BY_NEIGHBOUR],
+         "expect_docs": ["knowledge/kg.md"]},
+        {"id": "q2", "query": "q", "category": "entity",
+         "expect_entities": [CARIED_BY_FACT], "expect_docs": ["knowledge/kg.md"]},
+        {"id": "q3", "query": "q", "category": "entity",
+         "expect_entities": [SEED_ONLY_GOLD], "expect_docs": ["knowledge/kg.md"]},
+    ]
+    return [_leg_record(s["id"], s, result, seeds=seeds) for s in specs]
+
+
+def test_one_rate_per_entity_leg_is_published_from_the_record_attribution():
+    """#2621 clause 1: `summary.overall` carries one rate per entity leg, and each
+    counts the gold-bearing queries THAT LEG ALONE satisfies.
+
+    Over three entity-gold queries whose gold sits on the seed, fact and neighbour legs
+    as described on `_leg_rate_records`:
+
+      seed                     3/3  (every query's seed list names one of its gold)
+      fact                     2/3  (q1, q2)
+      graph_expanded_fact      0/3  (no query names the expanded entity as gold)
+      graph_neighbor           1/3  (q1 only)
+
+    and the count is read out of `scoring.entity_legs`, the field the record already
+    wrote (#1548) — so the rate and the attribution cannot disagree, which is the
+    property this clause is written as and not merely a nice phrase:
+    `test_the_published_leg_rate_and_the_record_agreement_cannot_disagree` pins it.
+    """
+    o = ev.summarize(_leg_rate_records())["overall"]
+    assert o["entity_hit_rate_seed_carried"] == pytest.approx(1.0)
+    assert o["entity_hit_rate_fact_carried"] == pytest.approx(0.667, abs=1e-3)
+    assert o["entity_hit_rate_graph_expanded_fact_carried"] == pytest.approx(0.0), \
+        "a leg that carried no query's gold must read 0.0, not be absent"
+    assert o["entity_hit_rate_graph_neighbor_carried"] == pytest.approx(0.333, abs=1e-3)
+    # `entity_hit` itself is 3/3: the union is complete even though no single leg is,
+    # which is exactly why these four rates had to be published at all.
+    assert o["entity_hit_rate"] == pytest.approx(1.0)
+    assert all(o[k] is not None for k in LEG_RATES), o
+    # Positive control: the four are not all reading one number. fact and neighbour
+    # differ on this input, so a bug that averaged the union four times fails here.
+    assert (o["entity_hit_rate_fact_carried"]
+            != o["entity_hit_rate_graph_neighbor_carried"])
+
+
+def test_a_graph_only_regression_moves_one_leg_rate_and_no_other():
+    """#2621's acceptance check, in one assert: dropping every graph-neighbour carrier
+    while the seed and fact carriers stand leaves EVERY previously published entity
+    rate identical and moves exactly one new one.
+
+    This is the measurement the item was filed on: over the eleven nightly artifacts
+    2026-10-02..2026-10-12 the graph legs' carrier counts went 8 -> 4 and 10 -> 4 and
+    `entity_hit_rate` 0.652, `entity_recall_avg` 0.579 and `fact_entity_recall_avg`
+    0.545 did not move in the digit, because 42 of the 43 hits carried a seed leg and
+    41 carried the fact leg as well. #1548's `entity_hit_rate_retrieval_carried` is
+    pinned holding here too, and that is the finding: it is the UNION of the three
+    retrieval legs, so it cannot register one of them emptying.
+    """
+    before = ev.summarize(_leg_rate_records(with_neighbours=True))["overall"]
+    after = ev.summarize(_leg_rate_records(with_neighbours=False))["overall"]
+    held = ("entity_hit_rate", "entity_hit_rate_retrieval_carried",
+            "entity_hit_rate_seed_carried", "entity_hit_rate_fact_carried",
+            "entity_hit_rate_graph_expanded_fact_carried")
+    for metric in held:
+        assert after[metric] == pytest.approx(before[metric]), (
+            f"{metric} moved on a graph-only change: this leg was supposed to be "
+            f"blind to it — {before[metric]} -> {after[metric]}")
+    assert before["entity_hit_rate_graph_neighbor_carried"] == pytest.approx(0.333, abs=1e-3)
+    assert after["entity_hit_rate_graph_neighbor_carried"] == pytest.approx(0.0), (
+        "the whole point of #2621: a leg-only regression has to be visible somewhere")
+
+
+def test_the_published_leg_rate_and_the_record_agreement_cannot_disagree():
+    """#2621 clause 1's actual guarantee: the rate and `scoring.entity_legs` are one
+    block of bytes read twice, never two computations that can drift apart.
+
+    The test hand-edits the attribution after scoring — a record whose `entity_legs`
+    says the fact leg carried the gold it was scored against — and both the published
+    rate and the interval's `k` follow the bytes, because `metric_series` ->
+    `_metric_value` -> `_leg_hit` -> `_leg_entity_hit` all read `scoring.entity_legs`
+    and nothing else. Had the rate been computed from `fact_entities_top10` (the #1548
+    trap, a field that re-reads through a resolver) this edit would have moved one and
+    not the other.
+    """
+    records = _leg_rate_records()
+    q1 = next(r for r in records if r["id"] == "q1")
+    for entry in q1["scoring"]["entity_legs"].values():
+        entry["legs"] = [leg for leg in entry["legs"] if leg != "fact"]
+    o = ev.summarize(records)["overall"]
+    ci = o["ci95"]["entity_hit_rate_fact_carried"]
+    # q1 no longer names the fact leg for any of its gold, so only q2 counts: 1 of 3.
+    assert o["entity_hit_rate_fact_carried"] == pytest.approx(0.333, abs=1e-3), (
+        "the published rate did not follow the edited attribution")
+    assert ci["k"] == 1 and ci["n"] == 3, ci
+    # The union is untouched by the edit — q1 is still carried by its seed and by the
+    # graph neighbour — which is the whole #2621 blindness, reproduced by editing one
+    # field of one record.
+    assert o["entity_hit_rate"] == pytest.approx(1.0)
+    assert o["entity_hit_rate_seed_carried"] == pytest.approx(1.0)
+    assert o["entity_hit_rate_graph_neighbor_carried"] == pytest.approx(0.333, abs=1e-3)
+    assert o["entity_leg_rates_measured"]["entity_hit_rate_fact_carried"] is True
+
+
+def test_each_leg_rate_carries_its_own_ci95_entry_with_its_own_n_and_k():
+    """#2621 clause 2: every per-leg rate gets a Wilson interval naming its OWN n and
+    k, on the gold-bearing denominator rule #2060/#1663 set for the binary legs.
+
+    Same fixture as clause 1: n is 3 on all four (the three entity-gold queries) and k
+    is that leg's carrier count — 3, 2, 0, 1 — so `ci95[k]/ci95[n]` reproduces the
+    published rate for each leg separately. The n/k rule is what makes the interval
+    comparable across legs: a `k` over the full eight-query record set would divide a
+    different population than the rate above it.
+    """
+    o = ev.summarize(_leg_rate_records())["overall"]
+    ci = o["ci95"]
+    expected_k = {"entity_hit_rate_seed_carried": 3,
+                  "entity_hit_rate_fact_carried": 2,
+                  "entity_hit_rate_graph_expanded_fact_carried": 0,
+                  "entity_hit_rate_graph_neighbor_carried": 1}
+    for metric in LEG_RATES:
+        assert metric in ev.CI_METRICS, metric
+        assert ev.CI_METRICS[metric][1] == "wilson", metric
+        assert metric in ev.GOLD_BEARING_LEGS, metric
+        entry = ci[metric]
+        assert entry["kind"] == "wilson" and len(entry["ci"]) == 2, entry
+        assert entry["n"] == 3, f"{metric}: {entry}"
+        assert entry["k"] == expected_k[metric], entry
+        assert entry["k"] / entry["n"] == pytest.approx(o[metric], abs=1e-3), (
+            f"{metric}: the interval bounds a different proportion than the rate — "
+            f"k={entry['k']} n={entry['n']} against {o[metric]}")
+    # The published rate is the k/n to three decimals, so `n=0 [no verdict]` on the
+    # page cannot mean a rate that interval does not bound.
+    for metric in LEG_RATES:
+        assert f"{o[metric]:.3f}" == f"{ci[metric]['k'] / ci[metric]['n']:.3f}", metric
+
+
+def test_leg_rates_average_only_entity_gold_queries_and_n_is_not_the_record_count():
+    """#2621 clause 2, denominator half: a fourth query with NO entity gold is not
+    counted on any leg, so n is 3 over 4 records and every leg rate divides 3.
+
+    The query is a document-only question whose retrieval output still hits the doc
+    leg, so it is a real record with real scores and `entity_legs: {}` — and
+    `_entities_in_result` scores it `entity_hit: False`, the very asymmetry #1600
+    measured as the +14.8 pt swing. `test_ci95_overall_n_is_each_metric_s_own_leg`
+    asserts this for the entity headline; this pins it for the four new legs, which
+    share the rule deliberately so `k/n` means the same population across all six
+    entity rates.
+    """
+    records = _leg_rate_records() + [_leg_record(
+        "q4-doc-only",
+        {"id": "q4", "query": "q", "category": "document", "expect_entities": [],
+         "expect_docs": ["knowledge/kg.md"]},
+        _legged_result(), seeds=["Unrelated Seed"])]
+    o = ev.summarize(records)["overall"]
+    assert len(records) == 4
+    for metric in LEG_RATES:
+        assert o["ci95"][metric]["n"] == 3, (
+            f"{metric}: n counted a query with no entity gold — {o['ci95'][metric]}")
+    # Positive control: had all four records counted, fact would read 2/4 not 2/3.
+    assert o["entity_hit_rate_fact_carried"] == pytest.approx(0.667, abs=1e-3)
+    assert o["doc_hit_rate"] == pytest.approx(1.0), (
+        "positive control: the fourth query is live and scored on the leg it DOES "
+        "have gold for, so n=3 is a leg denominator and not a dropped record")
+
+
+def test_a_run_with_no_entity_gold_publishes_no_leg_verdict(capsys):
+    """#2621 clause 2's no-verdict case: with no entity-gold query in the run, each
+    leg rate is null, its ci95 entry reports n=0 with the reason, and the page prints
+    neither a rate nor a 0.000 for those legs.
+
+    Same rule #1663 set for `entity_hit_rate`/`doc_hit_rate`, extended to the four new
+    rates: 0.000 here would report an unasked question as a measured failure to
+    retrieve, and it would be believed because the other three legs on the line read
+    real numbers.
+    """
+    records = [_leg_record("doc-only",
+                       {"id": "d", "query": "q", "category": "document",
+                        "expect_entities": [], "expect_docs": ["knowledge/kg.md"]},
+                       _legged_result(), seeds=["Unrelated Seed"])]
+    summary = ev.summarize(records)
+    o = summary["overall"]
+    for metric in LEG_RATES:
+        assert o[metric] is None, metric
+        entry = o["ci95"][metric]
+        assert entry["n"] == 0 and entry["ci"] == [None, None], entry
+        # Absence is recorded as absence, not as "measured, carried nothing".
+        assert o["entity_leg_rates_measured"][metric] is True, (
+            "the attribution EXISTS and is empty for this query; the leg is "
+            "unmeasured because the query has no gold, which n=0 says")
+    ev.print_table(records, summary)
+    out = capsys.readouterr().out
+    leg_line = next(ln for ln in out.splitlines() if "per-leg carriers:" in ln)
+    assert "seed=null" in leg_line and "graph_neighbor=null" in leg_line, leg_line
+    assert "0.000" not in leg_line, leg_line
+
+
+def test_an_artifact_without_the_attribution_reports_the_leg_rates_unmeasured():
+    """#2621 clause 4, write side: a record that never carried `scoring.entity_legs`
+    publishes null leg rates and says WHY in `entity_leg_rates_measured`.
+
+    A pre-#1548 baseline has no attribution at all. The leg rates must then be null
+    (the query left the denominator), and null alone cannot be told from "recorded and
+    zero" by anything downstream that only globs the rates — so
+    `entity_leg_rates_measured` is the artifact stating that it predates the field.
+    The distinction is `drift unknown, never read as 0` applied to a leg.
+    """
+    records = _leg_rate_records()
+    for r in records:
+        del r["scoring"]["entity_legs"]
+    o = ev.summarize(records)["overall"]
+    for metric in LEG_RATES:
+        assert o[metric] is None, f"{metric} read 0.0 for a leg it could not read"
+        assert o["ci95"][metric]["n"] == 0, metric
+        assert o["entity_leg_rates_measured"][metric] is False, (
+            f"{metric}: an artifact with no attribution must say UNMEASURED")
+    # The entity headline and the recalls are unaffected: they read `scoring` keys that
+    # predate the attribution, so an old artifact still trends on them.
+    assert o["entity_hit_rate"] == pytest.approx(1.0)
+    assert o["ci95"]["entity_hit_rate"]["n"] == 3

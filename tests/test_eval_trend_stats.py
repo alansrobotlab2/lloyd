@@ -2234,3 +2234,359 @@ def test_the_witness_bytes_re_derive_the_two_denominators_the_item_quotes():
     assert committed.returncode == 0, (
         "the witness on disk differs from the witness in the vault's git, so the bytes "
         "this checked are not the bytes anyone else can re-check")
+
+
+# ===========================================================================
+# #2621 — one exact McNemar per entity leg
+#
+# The four legs below are graded off `records[].scoring.entity_legs`, the
+# per-entity attribution #1548 added and this tool never read. Until now the only
+# entity-side difference test was on `entity_hit`, which is the union over
+# seed+fact+graph_expanded_fact+graph_neighbor and is carried by the seed leg on
+# 42 of the 43 nightly hits, so it holds still while a graph leg empties. These
+# tests pin the leg that cannot.
+# ===========================================================================
+
+#: 6 queries, every one of which is an entity hit on BOTH nights — the fixture is
+#: deliberately built so `entity_hit` has b=0 c=0, because the pair this change
+#: exists for (nightly-20261011 -> nightly-20261012) is exactly that.
+LEG_IDS = tuple(f"q{i}" for i in range(1, 7))
+
+
+def _legged_night(label: str, day: int, neighbours: tuple[str, ...],
+                  *, expanded: tuple[str, ...] = ("q1", "q2"),
+                  facts: tuple[str, ...] = LEG_IDS,
+                  emit_attribution: bool = True) -> dict:
+    """A baseline document carrying `scoring.entity_legs` in the shape
+    `eval/run_eval.py` writes it.
+
+    Every query is carried by its own seed and by the fact leg, and `neighbours` is
+    the set of queries the graph-neighbour leg carried that night. Key names are the
+    real ones for the same reason `_night` keeps them: a fixture that invented a key
+    would pass against a mock and find nothing in `~/lloyd-data/eval/baselines/`.
+    """
+    records = []
+    for q in LEG_IDS:
+        legs: dict[str, list[str]] = {"seed": ["seed"]}
+        if q in facts:
+            legs.setdefault("fact", []).append("fact")
+        if q in expanded:
+            legs.setdefault("graph_expanded_fact", []).append("graph_expanded_fact")
+        if q in neighbours:
+            legs.setdefault("graph_neighbor", []).append("graph_neighbor")
+        scoring = {"entity_hit": True, "doc_hit": True, "entity_recall": 1.0,
+                   "doc_recall": 1.0, "ndcg10": 0.5, "rr_doc": 0.5,
+                   "first_doc_rank": 1, "fact_entity_recall": 0.5,
+                   "entity_hit_retrieval_carried": q in facts}
+        if emit_attribution:
+            # One entry per matched gold entity, keyed by the `_norm`'d label, exactly
+            # as `_score` writes it. One entity per query is enough: the tool's reader
+            # ORs over the values, and the shape it must not be able to assume is more
+            # than one.
+            scoring["entity_legs"] = {
+                f"gold-{q}": {"legs": sorted({leg for legs_ in legs.values()
+                                              for leg in legs_}),
+                              "retrieval_satisfied": q in facts}}
+        records.append({"id": q, "query": f"query {q}", "expected":
+                        {"entities": [f"gold-{q}"], "docs": ["memory/x.md"]},
+                        "scoring": scoring})
+    return {"label": label, "ran_at": f"2026-01-{day:02d}T13:00:00+00:00",
+            "records": records,
+            "summary": {"overall": {"n_queries": len(records)}},
+            "corpus": dict(CORPUS_A)}
+
+
+def _legged_window(tmp_path: Path, prev_neighbours, cur_neighbours,
+                   prev_attribution: bool = True) -> Path:
+    d = tmp_path / "baselines"
+    d.mkdir(parents=True, exist_ok=True)
+    nights = [("nightly-2026-01-10", 10, prev_neighbours, prev_attribution),
+              ("nightly-2026-01-11", 11, cur_neighbours, True)]
+    for label, day, nbrs, emit in nights:
+        doc = _legged_night(label, day, nbrs, emit_attribution=emit)
+        (d / f"{label}.json").write_text(json.dumps(doc), encoding="utf-8")
+    return d
+
+
+def test_a_moved_graph_leg_prints_a_non_zero_delta_beside_entity_hit_zero(tmp_path,
+                                                                          capsys):
+    """#2621 clause 3, and the item's acceptance check in one assert.
+
+    Five of six queries carry a graph-neighbour gold on the first night and four on
+    the second, while `entity_hit` is a hit on all six both nights. The page must
+    print `entity_hit  delta +0.000` AND a non-zero delta on
+    `entity_hit_rate_graph_neighbor_carried`, on the same pair. This is the shape of
+    nightly-20261011 -> nightly-20261012 (graph carriers 5 -> 4, entity_hit b=0 c=0),
+    which today's tool reports as the entity side not having moved.
+    """
+    d = _legged_window(tmp_path, ("q1", "q2", "q3", "q4", "q5"),
+                       ("q1", "q2", "q3", "q4"))
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    out = capsys.readouterr().out
+    ent = next(ln for ln in out.splitlines()
+               if ln.strip().startswith("entity_hit delta"))
+    assert "delta +0.000" in ent, ent
+    assert "discordant b=0 c=0" in ent, ent
+    nbr = next(ln for ln in out.splitlines()
+               if "entity_hit_rate_graph_neighbor_carried" in ln)
+    assert "delta +0.000" not in nbr, nbr
+    # 5/6 -> 4/6 = 0.833 -> 0.667.
+    assert "delta -0.167" in nbr, nbr
+    assert "rates 0.833 -> 0.667" in nbr, nbr
+    assert "discordant b=1 c=0" in nbr, nbr
+    assert "exact McNemar" in nbr, nbr
+
+
+def test_a_leg_that_did_not_move_still_prints_zero(tmp_path, capsys):
+    """The other half of the same page: a leg whose carrier set is unchanged reads
+    `delta +0.000`, so the non-zero line above is a finding and not noise from a
+    printer that never says the word zero.
+
+    The seed, fact and expanded legs are constant across this pair; only the
+    neighbour leg moves.
+    """
+    d = _legged_window(tmp_path, ("q1", "q2", "q3", "q4", "q5"),
+                       ("q1", "q2", "q3", "q4"))
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    out = capsys.readouterr().out
+    for metric in ("entity_hit_rate_seed_carried", "entity_hit_rate_fact_carried",
+                   "entity_hit_rate_graph_expanded_fact_carried"):
+        line = next(ln for ln in out.splitlines() if metric in ln)
+        assert "delta +0.000" in line, (metric, line)
+
+
+def test_each_entity_leg_is_difference_tested_by_the_same_exact_mcnemar(tmp_path):
+    """#2621 clause 3's method half: each per-leg rate goes through
+    `mcmemar_exact` and returns the same field set `entity_hit`'s leg entry does.
+
+    The pair is the 5 -> 4 fixture, so the neighbour leg is b=1 c=0 and
+    `p == mcmemar_exact(1, 0) == 1.0` exactly — one query flipping one leg can never
+    clear any alpha, which is the property the tool's own header states. A leg that
+    reported a delta without a p could not be called noise, and the fleet's whole
+    claim to withhold is built on that p being there.
+    """
+    from scripts.eval_trend_stats import ENTITY_LEGS
+    d = _legged_window(tmp_path, ("q1", "q2", "q3", "q4", "q5"),
+                       ("q1", "q2", "q3", "q4"))
+    prev, cur = load_window(d)
+    t = audit_transition(prev, cur, 1000, 12345)
+    assert t.auditable
+    # Not a subset check: the per-leg entry has EXACTLY `entity_hit`'s fields, so a
+    # consumer that reads one reads the other correctly and nothing had to be renamed
+    # or invented to get here.
+    for label, _key in ENTITY_LEGS:
+        leg = t.legs[label]
+        assert set(leg) == set(t.legs["entity_hit"]), (
+            label, sorted(set(t.legs["entity_hit"]) ^ set(leg)))
+        assert leg["exact"] is True, (
+            f"{label}: an entity leg must be the exact test, not the bootstrap arm")
+        assert leg["rate_n"] == 6, label
+    nbr = t.legs["entity_hit_rate_graph_neighbor_carried"]
+    assert (nbr["b"], nbr["c"]) == (1, 0), nbr
+    # The same function `entity_hit` goes through, on one discordant pair: the exact
+    # answer at b+c = 1 is 1.0, which is why one flipped carrier never clears alpha.
+    assert nbr["p"] == mcmemar_exact([1], [0])["p"] == 1.0, nbr
+    assert nbr["significant"] is False
+    assert nbr["prev_rate"] == pytest.approx(5 / 6) and \
+        nbr["cur_rate"] == pytest.approx(4 / 6), nbr
+    # Positive control: on the leg that did move, the union leg did not.
+    assert t.legs["entity_hit"]["b"] == 0 and t.legs["entity_hit"]["c"] == 0
+    assert t.legs["entity_hit"]["significant"] is False
+
+
+def test_a_leg_losing_half_its_carriers_rejects_the_null(tmp_path, capsys):
+    """The new leg has to be able to FAIL, or it is decoration.
+
+    Six of eight carrier queries drop the neighbour leg between nights while every
+    query stays an entity hit: b=6 c=0, p = 0.03125, below alpha — the same six-
+    one-sided-flips figure the synthetic tests up top pin for `entity_hit`. So the
+    instrument can and does reject a graph-only regression that `entity_hit` reports
+    as nothing having happened.
+    """
+    ids8 = tuple(f"q{i}" for i in range(1, 9))
+    d = tmp_path / "baselines"
+    d.mkdir(parents=True, exist_ok=True)
+    for label, day, nbrs in (("nightly-2026-01-10", 10, ids8),
+                             ("nightly-2026-01-11", 11, ids8[:2])):
+        night = _legged_night8(label, day, nbrs)
+        (d / f"{label}.json").write_text(json.dumps(night), encoding="utf-8")
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    out = capsys.readouterr().out
+    ent = next(ln for ln in out.splitlines()
+               if ln.strip().startswith("entity_hit delta"))
+    assert "delta +0.000" in ent and "b=0 c=0" in ent, ent
+    nbr = next(ln for ln in out.splitlines()
+               if "entity_hit_rate_graph_neighbor_carried" in ln)
+    assert "discordant b=6 c=0" in nbr, nbr
+    assert "p=0.031" in nbr and "rejects H0" in nbr, nbr
+
+
+def _legged_night8(label: str, day: int, neighbours) -> dict:
+    """`_legged_night` over eight queries, for the six-flip rejection fixture."""
+    global LEG_IDS
+    saved = LEG_IDS
+    LEG_IDS = tuple(f"q{i}" for i in range(1, 9))
+    try:
+        return _legged_night(label, day, neighbours)
+    finally:
+        LEG_IDS = saved
+
+
+# ===========================================================================
+# #2621 clause 4 — a baseline that never had the attribution says UNMEASURED
+# ===========================================================================
+
+def test_a_baseline_predating_the_attribution_is_unmeasured_never_zero(tmp_path,
+                                                                       capsys):
+    """#2621 clause 4: the previous night's artifact carries no `entity_legs` at all,
+    so each per-entity-leg rate is reported UNMEASURED and the page never prints
+    `delta +0.000` for a leg it could not read.
+
+    The pair is otherwise identical, so a tool that averaged the missing bits as
+    zeros would print `delta -0.833` and read as a catastrophic graph collapse. The
+    shape is already in production: artifacts before #1548 landed, and the automod
+    baseline arm, carry no attribution — which is why the three states (attributed
+    hit / attributed miss / never attributed) are distinguished at the reader rather
+    than collapsed to 0/1.
+    """
+    d = _legged_window(tmp_path, ("q1", "q2", "q3", "q4", "q5"),
+                       ("q1", "q2", "q3", "q4"), prev_attribution=False)
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines()
+             if "_carried" in ln and " delta " in ln]
+    assert len(lines) == 4, out
+    for line in lines:
+        assert "UNMEASURED" in line, line
+        assert "delta +0.000" not in line, line
+        assert "p=" not in line, line
+    # The scored legs are unaffected: they read `scoring` keys that predate the
+    # attribution, so an old artifact still trends on them.
+    ent = next(ln for ln in out.splitlines()
+               if ln.strip().startswith("entity_hit delta"))
+    assert "delta +0.000" in ent and "UNMEASURED" not in ent, ent
+
+
+def test_an_unmeasured_leg_is_counted_as_unmeasured_not_as_a_non_rejection(tmp_path,
+                                                                          capsys):
+    """The fleet summary keeps the new legs on their own line and subtracts the
+    unreadable ones from the denominator instead of counting them as non-rejections.
+
+    Over one pair whose previous night has no attribution: 4 legs, 4 unmeasured, 0
+    readable. Had they been averaged as zeros the line would read `of 4 ... 0`,
+    indistinguishable from four legs that were measured and held.
+    """
+    d = _legged_window(tmp_path, ("q1", "q2", "q3", "q4", "q5"),
+                       ("q1", "q2", "q3", "q4"), prev_attribution=False)
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    out = capsys.readouterr().out
+    tally = next(ln for ln in out.splitlines() if "entity-leg carrier legs" in ln)
+    assert "of 0 readable, 4 unmeasured" in tally, tally
+
+
+def test_a_claim_about_an_unmeasured_leg_cannot_be_scored(tmp_path, capsys):
+    """#2621 clause 4's other side: a verdict naming a leg the pair cannot read is
+    `cannot evaluate`, not UNSUPPORTED.
+
+    Scoring a claim UNSUPPORTED because nothing was recorded is a false green of the
+    same family as a +0.000 delta — #1220's whole design is that an absence has its
+    own label, because a reader cannot tell "the metric exists and did not fall" from
+    "the metric does not exist" without help.
+    """
+    d = _legged_window(tmp_path, ("q1", "q2", "q3", "q4", "q5"),
+                       ("q1", "q2", "q3", "q4"), prev_attribution=False)
+    argv = ["--baselines", str(d), "--reps", "200", "--claim",
+            "entity_hit_rate_graph_neighbor_carried:declined:"
+            "nightly-2026-01-10:nightly-2026-01-11"]
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    leg = next(ln for ln in out.splitlines()
+               if "graph_neighbor_carried" in ln and " -> " in ln
+               and "UNMEASURED" in ln)
+    assert "cannot evaluate" in leg, leg
+    assert "UNMEASURED" in leg, leg
+    assert "delta" not in leg and "p=" not in leg, (
+        f"a leg that could not be read was graded as if it had been: {leg}")
+    # The overall verdict is still UNSUPPORTED, and that is correct rather than
+    # generous: an unverifiable claim does not become a verdict. What clause 4 asks
+    # for is that the UNVERIFIABILITY be named — `cannot evaluate`, the same label an
+    # unjoinable pair gets — and not arrive disguised as a measured non-decline.
+    assert "CLAIM VERDICT: UNSUPPORTED" in out, out
+
+
+def test_the_writer_s_own_artifact_is_what_the_reader_is_measured_on(tmp_path):
+    """The process boundary this change actually crosses: `eval/run_eval.py` writes the
+    baseline in the nightly eval's process, and this file reads it in a different one
+    (and later the skill reads it in a third). A fixture hand-typed in this file proves
+    the reader; it cannot prove the two agree.
+
+    So the artifact here is produced by the writer's own scorer
+    (`eval/run_eval.py::_score`, the same function `main()` calls before it writes a
+    record), serialized to JSON and re-read through `load_window` — the byte round trip
+    production takes. Two queries on the same retrieval output: one whose gold is
+    carried by the graph neighbour, one by the fact leg alone. The reader must see the
+    neighbour leg carried on exactly one of them, and the writer's published per-leg
+    rate for that leg must be the same 1/2 the reader's carrier bits compute.
+
+    Had the two sides disagreed about the key name (`graph_neighbors_used` vs
+    `graph_neighbors`), about the entity key inside it (`entity` vs `name`), or about
+    whether an empty attribution means 0 or "unmeasured", this test fails and every
+    hand-typed fixture above still passes.
+    """
+    sys.path.insert(0, str(ROOT / "eval"))
+    import run_eval as writer  # noqa: PLC0415 — the other process's module, on purpose
+
+    result = {"facts": [{"entity": "Lloyd", "text": "t"}],
+              "graph_expanded_facts": [],
+              "graph_neighbors_used": [{"entity": "Inner Voice", "weight": 1.0}],
+              "documents": [{"path": "memory/x.md"}]}
+    specs = [
+        {"id": "q-nbr", "query": "what is the inner voice", "category": "entity",
+         "expect_entities": ["Inner Voice"], "expect_docs": ["memory/x.md"]},
+        {"id": "q-fact", "query": "what is lloyd", "category": "entity",
+         "expect_entities": ["Lloyd"], "expect_docs": ["memory/x.md"]},
+        {"id": "q-miss", "query": "what is qmd", "category": "entity",
+         "expect_entities": ["Qmd"], "expect_docs": ["memory/x.md"]},
+    ]
+    records = []
+    for spec in specs:
+        scoring = writer._score(spec, result, seeds=["lloyd"])
+        records.append({"id": spec["id"], "query": spec["query"],
+                        "category": spec["category"], "error": None,
+                        "latency_ms": 10.0, "seeds_extracted": ["lloyd"],
+                        "result_summary": {}, "expected":
+                        {"entities": spec["expect_entities"],
+                         "docs": spec["expect_docs"]},
+                        "scoring": scoring})
+    overall = writer.summarize(records)["overall"]
+    d = tmp_path / "baselines"
+    d.mkdir(parents=True, exist_ok=True)
+    for name, night_records in (("nightly-2026-01-10.json", records),
+                                ("nightly-2026-01-11.json", records)):
+        (d / name).write_text(json.dumps(
+            {"label": name[:-5], "ran_at": f"2026-01-{10 if '10' in name else 11}"
+             "T13:00:00+00:00",
+             "records": json.loads(json.dumps(night_records)),
+             "summary": {"overall": json.loads(json.dumps(overall))},
+             "corpus": dict(CORPUS_A)}), encoding="utf-8")
+
+    prev, cur = load_window(d)
+    t = audit_transition(prev, cur, 200, 7)
+    nbr = t.legs["entity_hit_rate_graph_neighbor_carried"]
+    fact = t.legs["entity_hit_rate_fact_carried"]
+    assert not nbr.get("unmeasured"), nbr
+    # The reader found the writer's attribution at all — and the writer's own published
+    # rate is the same proportion the reader's bits compute over the same 3 queries.
+    assert nbr["rate_n"] == 3 and (nbr["b"], nbr["c"]) == (0, 0), nbr
+    assert nbr["cur_rate"] == pytest.approx(
+        overall["entity_hit_rate_graph_neighbor_carried"], abs=1e-3), (
+        f"reader {nbr['cur_rate']} vs writer "
+        f"{overall['entity_hit_rate_graph_neighbor_carried']}")
+    assert fact["cur_rate"] == pytest.approx(
+        overall["entity_hit_rate_fact_carried"], abs=1e-3)
+    assert nbr["cur_rate"] == pytest.approx(1 / 3) and \
+        fact["cur_rate"] == pytest.approx(1 / 3), (nbr, fact)
+    # Positive control: the two legs are NOT reading one number. `Qmd` matched nothing,
+    # so its query is attributed `{}` — a MISS the reader must count as 0 and not skip.
+    assert prev.scores["q-miss"]["entity_legs"] == {}, prev.scores["q-miss"]
+    assert t.legs["entity_hit"]["cur_rate"] == pytest.approx(2 / 3), t.legs["entity_hit"]
