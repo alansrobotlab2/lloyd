@@ -1419,6 +1419,25 @@ def _normalize_vault_path(path: str) -> tuple[str | None, str | None]:
     return Path(*parts).as_posix(), None
 
 
+def _vault_escape_message(path: str, target: Path) -> str:
+    """The refusal for a vault-relative path that RESOLVES outside the vault.
+
+    This is a different failure from the one `_normalize_vault_path` refuses, and
+    the two messages must not say the same thing. The reducer turns away a leading
+    ``/``, a leading ``~`` (above) and any ``~``/``..`` segment, so by the time the
+    callers' `is_relative_to` check runs the string in hand is already
+    vault-relative — the only input that reaches here is a vault entry that is a
+    symlink leaving the tree. For that caller, "send a vault-relative path" is
+    false advice about a path that already is one, which is why this message names
+    the rejected target and what it resolves to instead of naming an accepted
+    spelling. The pair is pinned by
+    ``tests/test_vault_write_schedule_guard.py::test_a_symlink_leaving_the_scratch_vault_is_refused_naming_its_target``.
+    """
+    resolved = target.resolve()
+    return (f"path {path!r} escapes the vault: it resolves to {resolved}, "
+            f"which is not under the vault root {VAULT}")
+
+
 def _sha256_bytes(data: bytes) -> str:
     """The digest the change ledger records, called through the ledger itself.
 
@@ -1544,7 +1563,7 @@ def _vault_read(params: dict) -> dict:
     try:
         target = VAULT / path
         if not target.resolve().is_relative_to(VAULT.resolve()):
-            return _err("path escapes vault root", ErrorCode.PATH_ESCAPE)
+            return _err(_vault_escape_message(path, target), ErrorCode.PATH_ESCAPE)
         if not target.exists():
             resolved = _resolve_case_insensitive(path)
             if resolved is None:
@@ -1934,7 +1953,7 @@ def _vault_write(params: dict) -> dict:
             return domain_err
         target = VAULT / path
         if not target.resolve().is_relative_to(VAULT.resolve()):
-            return _err("path escapes vault root", ErrorCode.PATH_ESCAPE)
+            return _err(_vault_escape_message(path, target), ErrorCode.PATH_ESCAPE)
         # The third lane onto the same two files (`memory_add`, Write/Edit, this),
         # so it carries the same ceiling — a guard on one lane only is a guard on
         # whichever lane the writer did not choose. Refusal, not commit: it returns

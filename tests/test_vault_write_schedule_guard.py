@@ -1292,3 +1292,202 @@ def test_the_guard_is_wired_into_both_commit_sites():
     assert "SCHEDULE_STATE_FIELDS" in text, "the lane no longer reads the rail at all"
     assert '"status", "scheduled_at", "depends_on"' not in text, (
         "a hand-copied field list has appeared in the lane")
+
+
+# ── #2611: the two vault-path refusals are the whole contract a rejected caller gets ─
+#
+# Two refusals stand between a caller and the vault, and before this section
+# neither was pinned by any test. `_normalize_vault_path` answers a wrong-SPELLING
+# path with `path must be vault-relative or under <root>, got '<yours>'` — the one
+# message that lets the caller repair its own call — and `git grep -n
+# 'vault-relative or under' -- tests/` returned nothing, so deleting the
+# `{vault_str}` half of that f-string failed nothing and left a refusal that says
+# only "not that, and I won't say what". The two `is_relative_to` sites in
+# `_vault_read` and `_vault_write` answer a DIFFERENT failure — a vault entry that
+# is a symlink leaving the tree — with the bare constant `"path escapes vault
+# root"`, naming neither the target nor the root it resolved through.
+#
+# The nodes below pin the two messages apart, which is the property: the reducer's
+# must name the root and the word `vault-relative`, and the escape message must
+# name the rejected target and must NOT contain that word. For a path that reaches
+# the escape check, being vault-relative is already true — the reducer rejects a
+# leading `/`, a leading `~` and every `~`/`..` segment long before
+# `is_relative_to` runs — so advice to re-spell the path would be false advice
+# about a path that already is one.
+#
+# Everything here asserts against the `scratch` fixture's patched root, never
+# `/home/alansrobotlab/obsidian`. A node that read the real vault would pass
+# against any message naming that path, including one produced by a reducer that
+# had stopped honouring the patched `VAULT` — the exact thing being pinned.
+
+#: A benign body for the write lane: none of these paths is an autonomy task file,
+#: so the schedule rail, the OKF guards and the bench rail must all stay out of
+#: the way of what is being measured here — the path checks in front of them.
+BENIGN_NOTE = "# outside the vault\n\nNothing here is an autonomy task.\n"
+
+
+def _outside_vault_shapes(scratch) -> tuple[tuple[str, str], ...]:
+    """The two outside-vault spellings, built from the fixture rather than the machine.
+
+    A `~/lloyd/...` home path (the shape a caller sends when it means the code
+    checkout) and an absolute path under no vault at all (the generic case). The
+    absolute one is a sibling of the scratch root, so this file hardcodes no home
+    directory and keeps meaning the same thing wherever pytest put the tmp dir.
+    """
+    return (
+        ("~/lloyd/agent_mcp/vault.py", "a home path under the lloyd checkout"),
+        (str(Path(scratch.root).parent / "outside-the-vault" / "CLAUDE.md"),
+         "an absolute path under no vault"),
+    )
+
+
+def _outside_vault_refusals(scratch) -> list[tuple[str, str, str, dict]]:
+    """Four refusals: both tools against both outside-vault shapes.
+
+    Driven through the handlers, not the reducer, because the reducer's string and
+    the handler's error CODE are joined at the call site — `_vault_read` maps
+    `norm_err` to `MISSING_PARAM` when the text contains "required" — and a node
+    that called `_normalize_vault_path` directly could not see that join break.
+    """
+    rows: list[tuple[str, str, str, dict]] = []
+    for tool in ("_vault_read", "_vault_write"):
+        handler = getattr(scratch.mod, tool)
+        for given, why in _outside_vault_shapes(scratch):
+            params = {"path": given, "content": BENIGN_NOTE}
+            rows.append((tool, given, why, handler(params)))
+    return rows
+
+
+def test_an_outside_vault_refusal_names_the_scratch_vault_root(scratch):
+    """clause 1: the refusal that works still says which root it wants.
+
+    The message pinned here is `path must be vault-relative or under <root>, got
+    '<the caller's string>'`, and the half a later edit can most easily lose is
+    `<root>`, leaving a refusal that says only "not that, and I won't say what".
+
+    Four refusals — `_vault_read` and `_vault_write` each against a `~/lloyd/...`
+    target and an absolute outside-vault target — and every one must carry both
+    halves of the answer: the root (`str(scratch.root)`, the patched `VAULT`) and
+    the required form (`vault-relative`). Pinned apart from the echo-and-code node
+    below because they are halves of one f-string: a rewrite that kept the root and
+    dropped the echo would leave this node green, and vice versa.
+    """
+    root = str(scratch.root)
+    rows = _outside_vault_refusals(scratch)
+    assert len(rows) == 4, f"two tools by two shapes is four refusals, not {len(rows)}"
+    for tool, given, why, out in rows:
+        assert "error" in out, f"{tool} accepted {why} {given!r}: {out}"
+        msg = out["error"]
+        assert root in msg, (
+            f"{tool} refused {given!r} without naming the vault root {root!r} — "
+            f"a caller cannot tell a vault from a home directory: {msg!r}")
+        assert "vault-relative" in msg, (
+            f"{tool} refused {given!r} without naming the required form: {msg!r}")
+
+
+def test_an_outside_vault_refusal_still_echoes_the_callers_own_string(scratch):
+    """clause 2: the same four refusals keep the half that makes the message actionable.
+
+    `got '<the caller's own string>'` plus `code: PATH_ESCAPE` is what distinguishes
+    "this spelling is wrong" from a refusal that names a root the caller can only
+    guess about, and the code is what every caller's error branch keys on. Pinned in
+    its own node because it is a different half of one f-string: a rewrite that kept
+    the root and dropped the echo would leave clause 1 green.
+    """
+    for tool, given, why, out in _outside_vault_refusals(scratch):
+        assert "error" in out, f"{tool} accepted {why} {given!r}: {out}"
+        msg = out["error"]
+        assert f"got {given!r}" in msg, (
+            f"{tool}'s refusal of {given!r} stopped echoing the caller's string: "
+            f"{msg!r}")
+        assert out["code"] == "PATH_ESCAPE", (
+            f"{tool} refused {given!r} with {out['code']!r}, not PATH_ESCAPE — the "
+            "root is named but every caller's error branch keys on the code")
+
+
+def _plant_escape_link(scratch, rel: str = "dream-link.md") -> tuple[Path, Path]:
+    """Put a symlink INSIDE the scratch vault that points outside it.
+
+    The only input that can reach `_vault_read`'s and `_vault_write`'s
+    `is_relative_to` check: the reducer has already rejected a leading `/`, a
+    leading `~` and every `~`/`..` segment, so a `..` traversal never gets there.
+    Returns `(link, target)` with `target` living one directory OUT of the vault.
+    """
+    outside = Path(scratch.root).parent / "outside-the-vault"
+    outside.mkdir(parents=True, exist_ok=True)
+    target = outside / "dream-target.md"
+    target.write_text("bytes that live outside the vault\n", encoding="utf-8")
+    link = Path(scratch.root) / rel
+    link.symlink_to(target)
+    return link, target
+
+
+def test_a_symlink_leaving_the_scratch_vault_is_refused_naming_its_target(scratch):
+    """clause 3: the escape refusal names the rejected target, and never re-spells it.
+
+    Both tools, one vault-relative path that resolves out of the tree. The message
+    must carry the path as the caller named it AND what it resolves to — the only
+    two facts that make a symlink escape findable — and must NOT contain
+    `vault-relative`, because telling this caller to send a vault-relative path is
+    false advice about a path that already is one. The refusals also have to refuse:
+    `_vault_read` must not hand back the outside bytes, `_vault_write` must not
+    replace them, and neither may leave an audit row.
+    """
+    link, target = _plant_escape_link(scratch)
+    resolved = str(target.resolve())
+
+    read = scratch.mod._vault_read({"path": link.name})
+    assert "error" in read, f"a symlink out of the vault was read: {read}"
+    assert "bytes that live outside the vault" not in read.get("text", ""), (
+        "the escape guard let the outside file's bytes through anyway")
+    for msg, where in ((read["error"], "_vault_read"),):
+        assert link.name in msg, (
+            f"{where} refused an escape without naming the rejected path "
+            f"{link.name!r}: {msg!r}")
+        assert resolved in msg, (
+            f"{where} refused an escape without naming what it resolves to "
+            f"({resolved}): {msg!r}")
+        assert "vault-relative" not in msg, (
+            f"{where} told a caller whose path already IS vault-relative to "
+            f"re-spell it: {msg!r}")
+        assert read["code"] == "PATH_ESCAPE", read
+
+    wrote = _write(scratch, link.name, "rewritten through a symlink\n")
+    assert "error" in wrote, (
+        f"a symlink out of the vault was written through: {wrote}")
+    msg = wrote["error"]
+    assert link.name in msg, (
+        f"_vault_write refused an escape without naming the rejected path "
+        f"{link.name!r}: {msg!r}")
+    assert resolved in msg, (
+        f"_vault_write refused an escape without naming what it resolves to "
+        f"({resolved}): {msg!r}")
+    assert "vault-relative" not in msg, (
+        "_vault_write told a caller whose path already IS vault-relative to "
+        f"re-spell it: {msg!r}")
+    assert wrote["code"] == "PATH_ESCAPE", wrote
+    assert target.read_text(encoding="utf-8") == "bytes that live outside the vault\n", (
+        "the refused write reached the file the symlink points at, outside the vault")
+    assert _audit_rows(scratch) == [], (
+        "the escape refusal returned after the audit row, so a refused write is "
+        "recorded as if it landed")
+
+
+def test_a_symlink_that_stays_inside_the_vault_is_not_the_refusal_above(scratch):
+    """The control the node above needs: the guard refuses LEAVING, not symlinks.
+
+    Without this, `test_a_symlink_leaving_the_scratch_vault_is_refused_naming_its_target`
+    would still pass if the containment check were replaced by `return _err(...)`
+    unconditionally, and a vault whose links all resolve in-tree is the normal
+    shape of the tree — the real vault currently holds none at all
+    (`find ~/obsidian -maxdepth 4 -type l` → 0 on 2026-10-12), which is why
+    item #2611 files this as defence in depth rather than a hot path.
+    """
+    inside = Path(scratch.root) / "notes"
+    inside.mkdir(parents=True, exist_ok=True)
+    (inside / "target.md").write_text("inside bytes\n", encoding="utf-8")
+    (Path(scratch.root) / "alias.md").symlink_to(inside / "target.md")
+
+    out = scratch.mod._vault_read({"path": "alias.md"})
+    assert out.get("text") == "inside bytes\n", (
+        f"a link that stays in the vault was refused: {out}")
