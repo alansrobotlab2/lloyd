@@ -115,6 +115,13 @@ def _voice_extra_body() -> dict:
     return {}
 
 
+def _queued_behind(qs: dict) -> bool:
+    """Will a turn enqueued now wait on another? A running turn counts unless
+    its cancel is already requested; a queued user turn always does."""
+    return (bool(qs.get("current")) and not bool(qs.get("cancelling"))) \
+        or bool(qs.get("pending_user"))
+
+
 # ── /api/voice/inject ─────────────────────────────────────────────────────
 
 @router.post("/api/voice/inject")
@@ -181,10 +188,13 @@ async def voice_inject(request: Request):
     # Is another turn already running (or queued) on this session? The queue
     # is strictly serial, so this turn will wait — minutes, when a typed turn
     # is mid-investigation — and the worker should say so instead of a filler
-    # followed by silence (the 2026-09-24 19:17 "Yeah." waited 44 s).
+    # followed by silence (the 2026-09-24 19:17 "Yeah." waited 44 s). A
+    # running turn whose cancel is already requested does not count: the
+    # worker just cancelled it for this very request, and it stops within a
+    # second (the cancel races the model stream and any tool call), so
+    # "still finishing the last thing" would describe nothing.
     from app.sessions_io import get_queue_state
-    qs = get_queue_state(session_id)
-    queued_behind = bool(qs.get("current")) or bool(qs.get("pending_user"))
+    queued_behind = _queued_behind(get_queue_state(session_id))
 
     await _save_session_meta(session_id, model, preview=prompt_text)
 

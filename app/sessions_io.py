@@ -953,12 +953,18 @@ def get_queue_state(session_id: str) -> dict[str, Any]:
             "depth": 0,
         }
     cur = q.current
+    cancelling = bool(cur is not None and q.cancel_event is not None
+                      and q.cancel_event.is_set())
     return {
         "current": {
             "turn_id": cur.turn_id,
             "source": cur.source,
             "started_at": cur.started_at.isoformat() if cur.started_at else None,
+            # Its cancel was requested and it has not yet stopped: a turn
+            # behind it is waiting on a cancel, not on an investigation.
+            "cancelling": cancelling,
         } if cur else None,
+        "cancelling": cancelling,
         "pending_user": len(q.pending_user),
         "pending_ambient": len(q.pending_ambient),
         "depth": len(q.pending_user) + len(q.pending_ambient),

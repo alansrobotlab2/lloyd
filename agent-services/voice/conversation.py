@@ -35,14 +35,27 @@ PURE_BACKCHANNELS = frozenset({
     "mm", "mmm", "mhm", "mm-hmm", "mmhmm", "hmm", "uh-huh", "uh huh", "uhhuh",
     "huh", "ah", "oh", "i see", "gotcha", "got it", "cool", "nice", "wow",
     "interesting", "crazy", "ha", "haha", "right right",
+    "makes sense", "fair enough", "good to know", "love it", "no worries",
+    "no problem", "well done", "good job", "nice one", "good stuff",
 })
 
 #: Acknowledgements that ARE answers when Lloyd just asked something.
+#: "Great." after "Shall I restart it?" is a yes; after a statement it is
+#: the listener listening (2026-10-12: "Yeah, that's great." became a turn,
+#: cut Lloyd off, and re-answered the question it acknowledged).
 ANSWERING_BACKCHANNELS = frozenset({
     "yeah", "yea", "yep", "yup", "okay", "ok", "right", "sure", "alright",
     "all right", "thanks", "thank you", "okay thanks", "ok thanks",
     "yeah okay", "okay cool", "yeah yeah", "okay okay",
+    "great", "good", "perfect", "awesome", "excellent", "sweet", "fine",
+    "sounds good", "all good", "very good", "very nice",
 })
+
+#: Words that carry no meaning of their own inside an acknowledgement:
+#: "yeah, that's great" is "yeah great". Never "is" or "that" — "Is that
+#: right?" is a question, and the question mark guards it besides.
+_ACK_FILLERS = frozenset({"that's", "thats", "so", "really", "very", "pretty",
+                          "um", "uh", "well", "lloyd"})
 
 #: Said to end the conversation. Matched on the whole utterance, so "stop the
 #: build" is a request, not a closer.
@@ -74,24 +87,53 @@ def words(text: str) -> list[str]:
     return normalize(text).split()
 
 
+def _ack_phrases(words: list[str], vocab: frozenset) -> list[str] | None:
+    """Split `words` into vocabulary phrases, longest first ("good thank you"
+    -> ["good", "thank you"]); None when some word belongs to none."""
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        for k in (3, 2, 1):
+            cand = " ".join(words[i:i + k])
+            if len(words[i:i + k]) == k and cand in vocab:
+                out.append(cand)
+                i += k
+                break
+        else:
+            return None
+    return out
+
+
 def is_backchannel(text: str, after_question: bool = False) -> bool:
     """A short acknowledgement rather than something to answer.
 
-    At most three words, and the whole utterance must be in the vocabulary —
-    "yeah, check the other one" is a request that happens to open with yeah.
+    At most three words once the fillers and Lloyd's name are gone, every
+    phrase in the vocabulary, and never a question — "yeah, check the other
+    one" is a request that happens to open with yeah, and "Is that right?"
+    asks something. "Yeah, that's great." and "Good, Lloyd. Thank you,
+    Lloyd." are acknowledgements.
     """
+    if ends_with_question(text):
+        return False
     n = normalize(text)
-    if not n or len(n.split()) > 3:
+    if not n:
         return False
     if n in PURE_BACKCHANNELS:
         return True
-    if after_question:
-        return False
-    if n in ANSWERING_BACKCHANNELS:
+    if not after_question and n in ANSWERING_BACKCHANNELS:
         return True
-    # "yeah yeah okay", "okay cool thanks": every word an acknowledgement.
-    vocab = PURE_BACKCHANNELS | ANSWERING_BACKCHANNELS
-    return all(w in vocab for w in n.split())
+    kept = [w for w in n.split() if w not in _ACK_FILLERS]
+    if not kept or len(kept) > 3:
+        return False
+    # "yeah yeah okay", "okay cool thanks", "good thank you": every phrase an
+    # acknowledgement. After a question only the pure ones stay backchannels;
+    # one answering word in the mix makes it the answer.
+    phrases = _ack_phrases(kept, PURE_BACKCHANNELS | ANSWERING_BACKCHANNELS)
+    if phrases is None:
+        return False
+    if after_question:
+        return all(ph in PURE_BACKCHANNELS for ph in phrases)
+    return True
 
 
 _POLITE_TAIL = (" thanks", " thank you", " lloyd", " please")

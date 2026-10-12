@@ -134,6 +134,33 @@ async def test_cancel_current():
     print("OK cancel: slow turn honored cancel_event")
 
 
+async def test_queue_state_reports_a_running_turn_whose_cancel_is_requested():
+    """`cancelling` is what `/api/voice/inject` reads to decide whether a new
+    spoken turn is waiting behind an investigation or behind a cancel the
+    worker just sent for it (2026-10-12)."""
+    msg_mod._run_turn = _slow_cancel_aware_run
+    session_id = "test-session-cancelling"
+    _session_queues.pop(session_id, None)
+
+    turn = _make_turn("slow")
+    await _enqueue(session_id, turn)
+    await asyncio.sleep(0.05)
+    state = get_queue_state(session_id)
+    assert state["current"]["turn_id"] == turn.turn_id
+    assert state["cancelling"] is False and state["current"]["cancelling"] is False
+
+    get_cancel_event(session_id).set()
+    state = get_queue_state(session_id)
+    assert state["current"] is not None, "the turn has not stopped yet"
+    assert state["cancelling"] is True and state["current"]["cancelling"] is True
+
+    await asyncio.wait_for(turn.done.wait(), timeout=3)
+    await asyncio.sleep(0.05)
+    state = get_queue_state(session_id)
+    assert state["current"] is None and state["cancelling"] is False
+    print("OK cancelling: reported while the cancel is pending, never after")
+
+
 async def test_idle_returns_none_event():
     session_id = "test-session-idle"
     _session_queues.pop(session_id, None)

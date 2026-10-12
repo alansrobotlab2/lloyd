@@ -2216,13 +2216,19 @@ class RoomBridge:
         turn_id = self._speaking_turn or self._active_turn
         dropped = tts.interrupt()
         if not was:
-            await self._cancel_turn(turn_id)
+            # Nothing was being said, so there is nothing to report as heard;
+            # the running spoken turn is what the new request supersedes.
+            LOG.info("[%s] new request from %s (%s) while a spoken turn runs — "
+                     "cancelling it", self.room_name, identity, why)
+            await self._cancel_turn(turn_id, any_spoken=True)
             return
         LOG.info("[%s] barge-in from %s (%s) — stopped; heard %d chars, %d unheard, "
                  "dropped %d queued", self.room_name, identity, why, len(heard),
                  unheard, dropped)
-        await self._post_interrupted(heard, unheard)
-        await self._cancel_turn(turn_id)
+        # Side by side: the cancel used to wait behind the heard-note POST,
+        # and on 2026-10-12 that put it 1.7 s after the words.
+        await asyncio.gather(self._post_interrupted(heard, unheard),
+                             self._cancel_turn(turn_id, any_spoken=True))
 
     async def _post_interrupted(self, heard: str, unheard: int) -> None:
         try:
@@ -2232,19 +2238,32 @@ class RoomBridge:
         except Exception as e:
             LOG.debug("[%s] interrupted POST failed: %s", self.room_name, e)
 
-    async def _cancel_turn(self, turn_id: Optional[str]) -> None:
-        """Cancel `turn_id` if it is the session's running turn — never a turn
-        queued after it, which is what the listener just asked for."""
-        if not turn_id:
+    def _is_spoken_turn(self, turn_id: Optional[str]) -> bool:
+        """A turn this room injected from speech — not a typed one it speaks
+        through the tap, and not anything another client enqueued."""
+        return bool(turn_id) and turn_id in self._streamed_turns \
+            and turn_id not in self._tap_turns
+
+    async def _cancel_turn(self, turn_id: Optional[str], *,
+                           any_spoken: bool = False) -> None:
+        """Cancel the session's running turn if it is `turn_id` — or, with
+        `any_spoken`, any turn this room injected from speech. Never a turn
+        queued after it (that is what the listener just asked for), and never
+        a typed turn: someone mid-investigation in the chat is not interrupted
+        by a word in the room."""
+        if not turn_id and not any_spoken:
             return
         base = f"{BACKEND_URL}/api/sessions/{self.session_id}"
         try:
             r = await self.http.get(f"{base}/queue", timeout=3.0)
             cur = (r.json() or {}).get("current") if r.status_code == 200 else None
-            if not cur or cur.get("turn_id") != turn_id:
+            cur_id = cur.get("turn_id") if cur else None
+            if not cur_id:
+                return
+            if cur_id != turn_id and not (any_spoken and self._is_spoken_turn(cur_id)):
                 return
             await self.http.post(f"{base}/cancel", timeout=3.0)
-            LOG.info("[%s] cancelled turn %s after barge-in", self.room_name, turn_id)
+            LOG.info("[%s] cancelled turn %s after barge-in", self.room_name, cur_id)
         except Exception as e:
             LOG.debug("[%s] turn cancel failed: %s", self.room_name, e)
 
@@ -2836,12 +2855,18 @@ class RoomBridge:
 
         if not inject_text:
             return
-        if self.tts is not None and (self.tts.is_speaking or self._barge is not None):
-            if self._barge_in_enabled:
-                # A new request while Lloyd talks: that is what an
-                # interruption is. Stop, record what was heard, cancel the
-                # old turn, then ask the new one.
-                await self._commit_barge_in(identity, "new request")
+        if self._barge_in_enabled and self.tts is not None and (
+                self.tts.is_speaking or self._barge is not None
+                or self._active_turn is not None):
+            # A new request while Lloyd talks — or while a spoken turn is
+            # still running, silently, in its tool phase — is what an
+            # interruption is. Stop, record what was heard, cancel the old
+            # turn, then ask the new one. Before 2026-10-12 only audible
+            # speech counted: a request made during the silence of a tool
+            # call queued behind the turn it superseded ("give me a full
+            # systems check" waited 14.8 s while the previous spoken turn
+            # finished re-answering the question it had been cut off on).
+            await self._commit_barge_in(identity, "new request")
         payload = {"text": inject_text, "session_key": self.session_id}
         if speaker_name:
             payload["speaker"] = speaker_name

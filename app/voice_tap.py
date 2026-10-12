@@ -106,17 +106,26 @@ def record_interruption(session_id: str, heard: str, unheard_chars: int = 0) -> 
     heard = " ".join((heard or "").split())
     if len(heard) > 600:
         heard = "…" + heard[-600:]
+    # The note says what was heard AND what to do about it. Without the second
+    # half the model finished the interrupted reply: on 2026-10-12 a
+    # three-word acknowledgement became a turn, and the model read the whole
+    # corrected answer (629 characters, 10 s) to a listener who had moved on.
+    tail = (
+        " They interrupted to say something new: answer what they just said. "
+        "Do not resume, repeat or finish the interrupted reply unless they ask "
+        "for it; if what they said needs no answer, one short sentence is "
+        "enough.</system-reminder>\n\n"
+    )
     if heard:
         note = (
             "<system-reminder>The listener interrupted your previous spoken "
             f"reply. They heard only this much of it: \"{heard}\" — the rest "
-            "was never said aloud, so do not assume they know it."
-            "</system-reminder>\n\n"
+            "was never said aloud, so do not assume they know it." + tail
         )
     else:
         note = (
             "<system-reminder>The listener interrupted your previous spoken "
-            "reply before any of it was heard.</system-reminder>\n\n"
+            "reply before any of it was heard." + tail
         )
     _heard_notes[session_id] = (time.monotonic(), note)
     return note

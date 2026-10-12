@@ -530,7 +530,9 @@ queue state because it is also the promoter's idle gate — no disk reads there.
 ## Voice
 
 The wake word opens a conversation; barge-in is on (`architecture/voice.md`,
-"The gate", "Conversation mode", "Barge-in"). The cloned voice is shaped in the
+"The gate", "Conversation mode", "Barge-in"). **A new spoken request cancels
+the running spoken turn, audible or silent in a tool call; it never cancels a
+typed turn** (2026-10-12). The cloned voice is shaped in the
 worker (`agent-services/tts_shaping.py`), never in the gitignored TTS tree. Do
 not "fix" the presence band by cutting 300 Hz — raise the highs, gate
 measurements on sub-1 kHz energy. A voice change needs `lloyd-agent-worker`

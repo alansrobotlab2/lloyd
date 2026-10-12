@@ -227,13 +227,20 @@ def test_the_longest_silence_between_spoken_audio_is_recorded():
 # ── the vocabulary ─────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("text", ["Yeah.", "Okay.", "Mm.", "Mm-hmm.", "Thank you.",
-                                  "Yeah, okay.", "Crazy.", "Uh-huh", "Got it."])
+                                  "Yeah, okay.", "Crazy.", "Uh-huh", "Got it.",
+                                  # 2026-10-12: "Yeah, that's great." was a turn
+                                  "Yeah, that's great.", "Great.", "Sounds good.",
+                                  "Oh nice.", "Makes sense.", "Perfect.",
+                                  "Good, Lloyd. Thank you, Lloyd.",
+                                  "Yeah, that's really great."])
 def test_acknowledgements_are_backchannels(text):
     assert conv.is_backchannel(text)
 
 
 @pytest.mark.parametrize("text", ["Yeah, check the other one.", "What?",
-                                  "Okay, now restart it.", "No.", "Stop."])
+                                  "Okay, now restart it.", "No.", "Stop.",
+                                  "Great, now restart it.", "Is that right?",
+                                  "So what's next?", "That's it.", "Great?"])
 def test_requests_are_not(text):
     assert not conv.is_backchannel(text)
 
@@ -242,6 +249,13 @@ def test_after_a_question_yeah_is_an_answer_and_mm_is_still_not():
     assert not conv.is_backchannel("Yeah.", after_question=True)
     assert not conv.is_backchannel("Sure.", after_question=True)
     assert conv.is_backchannel("Mm-hmm.", after_question=True)
+    # The widened words follow the same split: "Sounds good." answers "Shall
+    # I?", "Makes sense." never does, and one answering word in a mix is
+    # the answer.
+    assert not conv.is_backchannel("Sounds good.", after_question=True)
+    assert not conv.is_backchannel("Yeah, that's great.", after_question=True)
+    assert conv.is_backchannel("Makes sense.", after_question=True)
+    assert conv.is_backchannel("Oh, nice.", after_question=True)
 
 
 @pytest.mark.parametrize("text,closer", [
@@ -648,6 +662,128 @@ def test_a_barge_in_never_cancels_a_turn_that_is_not_the_one_being_spoken():
     assert asyncio.run(go()).http.cancels == []
 
 
+def test_a_new_request_while_a_spoken_turn_runs_silently_cancels_it():
+    """2026-10-12 09:05: Lloyd was silent in a tool call of the spoken turn
+    he had been cut off on; "give me a full systems check" queued behind it
+    for 14.8 s. A new request supersedes the running spoken turn whether or
+    not audio is playing — and nothing is reported as heard, since nothing
+    was being said."""
+    b = _barge_bridge(["Give me a full systems check, please."])
+    b.tts = _TTS(speaking=False)
+    b._speaking_turn = None
+    b._active_turn = "t-old"
+    b._streamed_turns.append("t-old")
+
+    async def go():
+        b._stream_replies = False
+        await b._handle_utterance_event(HearingEvent("utterance", utterance=_utt()), "user-a")
+        return b
+    b = asyncio.run(go())
+    assert b.http.cancels == ["t-old"]
+    assert b.http.interrupted == []
+    assert [p["text"] for p in b.http.posts if p and "text" in p] == \
+        ["Give me a full systems check, please."]
+
+
+def test_a_new_request_cancels_whichever_spoken_turn_is_running():
+    """The worker's idea of the active turn can lag the backend's — a second
+    spoken turn already started while the first's clauses were still playing.
+    What is cancelled is the session's running turn, provided this room spoke
+    it."""
+    b = _barge_bridge(["No, the other one."])
+    b._streamed_turns.extend(["t-old", "t-newer"])
+
+    async def go():
+        b._stream_replies = False
+        b.http.current_turn = "t-newer"
+        await b._handle_utterance_event(HearingEvent("utterance", utterance=_utt()), "user-a")
+        return b
+    assert asyncio.run(go()).http.cancels == ["t-newer"]
+
+
+def test_a_new_request_never_cancels_a_typed_turn():
+    """A typed turn mid-investigation in the chat is not interrupted by a word
+    in the room, speaking or silent; the spoken request queues behind it and
+    the queued notice says so."""
+    for speaking in (True, False):
+        b = _barge_bridge(["Give me a full systems check."])
+        b.tts = _TTS(speaking=speaking)
+        b._active_turn = "t-spoken"
+        b._streamed_turns.extend(["t-spoken", "t-typed"])
+        b._tap_turns["t-typed"] = object()
+
+        async def go():
+            b._stream_replies = False
+            b.http.current_turn = "t-typed"
+            await b._handle_utterance_event(
+                HearingEvent("utterance", utterance=_utt()), "user-a")
+            return b
+        b = asyncio.run(go())
+        assert b.http.cancels == [], speaking
+        assert [p["text"] for p in b.http.posts if p and "text" in p] == \
+            ["Give me a full systems check."]
+
+
+def test_with_barge_in_off_a_request_during_a_silent_turn_just_queues():
+    b = _bridge(["Give me a full systems check."], barge=False)
+    b.tts = _TTS(speaking=False)
+    b._active_turn = "t-old"
+    b._streamed_turns.append("t-old")
+    b.wake.extend("user-a")
+    b.wake.open_conversation("user-a")
+
+    async def go():
+        b._stream_replies = False
+        await b._handle_utterance_event(HearingEvent("utterance", utterance=_utt()), "user-a")
+        return b
+    b = asyncio.run(go())
+    assert b.http.cancels == []
+    assert [p["text"] for p in b.http.posts if p and "text" in p] == \
+        ["Give me a full systems check."]
+
+
+def test_an_acknowledgement_over_a_silent_spoken_turn_cancels_nothing():
+    """The 2026-10-12 utterance itself: "Yeah, that's great." while a spoken
+    turn runs is the listener listening — not a turn, not a cancel."""
+    b = _barge_bridge(["Yeah, that's great."])
+    b.tts = _TTS(speaking=False)
+    b._active_turn = "t-old"
+    b._streamed_turns.append("t-old")
+
+    async def go():
+        await b._handle_utterance_event(HearingEvent("utterance", utterance=_utt()), "user-a")
+        return b
+    b = asyncio.run(go())
+    assert b.http.cancels == [] and b.tts.interrupts == 0
+    assert [p for p in b.http.posts if p and "text" in p] == []
+
+
+def test_the_cancel_does_not_wait_behind_the_heard_note():
+    """Both POSTs go out together: on 2026-10-12 the cancel followed the
+    heard-note POST and reached the backend 1.7 s after the words."""
+    b = _barge_bridge(["No, the other one."])
+    order = []
+
+    class _SlowHTTP(_HTTP):
+        async def post(self, url, json=None, timeout=None):
+            if url.endswith("/api/voice/interrupted"):
+                order.append("interrupted-start")
+                await asyncio.sleep(0.2)
+                order.append("interrupted-end")
+            elif url.endswith("/cancel"):
+                order.append("cancel")
+            return await super().post(url, json=json, timeout=timeout)
+    b.http = _SlowHTTP()
+
+    async def go():
+        b._stream_replies = False
+        await b._handle_utterance_event(HearingEvent("utterance", utterance=_utt()), "user-a")
+        return b
+    b = asyncio.run(go())
+    assert b.http.cancels == ["t-old"]
+    assert order.index("cancel") < order.index("interrupted-end")
+
+
 def test_stop_while_speaking_stops_and_injects_nothing():
     b = _barge_bridge(["Stop."])
 
@@ -792,6 +928,31 @@ def test_an_interruption_note_rides_the_next_turn_once():
     note = voice_tap.take_heard_note("s1")
     assert note and "It is seven." in note and "interrupted" in note
     assert voice_tap.take_heard_note("s1") is None
+
+
+def test_a_turn_behind_a_cancelling_turn_is_not_queued_behind():
+    """The worker cancelled the running spoken turn for this very request, so
+    the queued notice would describe nothing; a queued user turn still counts."""
+    from app.routers.voice import _queued_behind
+    cur = {"turn_id": "t", "source": "user"}
+    assert _queued_behind({"current": cur, "cancelling": False, "pending_user": 0})
+    assert not _queued_behind({"current": cur, "cancelling": True, "pending_user": 0})
+    assert _queued_behind({"current": cur, "cancelling": True, "pending_user": 1})
+    assert not _queued_behind({"current": None, "pending_user": 0})
+    assert _queued_behind({"current": None, "pending_user": 1})
+
+
+def test_the_interruption_note_says_not_to_finish_the_reply():
+    """2026-10-12: told only what was heard, the model finished the reply —
+    629 characters re-answering the question the listener had just
+    acknowledged. The note now says what to do, with or without heard text."""
+    from app import voice_tap
+    voice_tap.reset_for_tests()
+    for heard in ("It is seven.", ""):
+        note = voice_tap.record_interruption("s1", heard, 40)
+        assert "answer what they just said" in note
+        assert "Do not resume, repeat or finish" in note
+        assert note.count("<system-reminder>") == 1 == note.count("</system-reminder>")
 
 
 def test_a_typed_turn_is_told_about_the_voice_room_only_while_one_listens():

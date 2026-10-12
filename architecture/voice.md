@@ -695,8 +695,12 @@ audio.
 6. **Managing the conversation**: a stop word while he talks (or while a
    spoken turn is still running tools) stops him and cancels that turn; a
    closer ("that's all", "never mind", "thanks, Lloyd") ends the
-   conversation; a **backchannel** ("yeah", "mm", "okay") is not a turn —
-   unless his last sentence was a question, when "yeah" is the answer.
+   conversation; a **backchannel** ("yeah", "mm", "okay", "yeah, that's
+   great", "good, Lloyd, thank you") is not a turn — unless his last
+   sentence was a question, when "yeah" is the answer. The check drops
+   fillers and his name first ("that's", "really", "lloyd"), matches
+   vocabulary phrases rather than words ("good thank you"), and never
+   takes a question ("Is that right?") for one.
 7. Continuation (not woke): the locked LiveKit identity, and — only when the
    wake-word utterance matched an *enrolled* profile — the voiceprint anchor.
    Past the short follow-up window (inside the conversation), also an enrolled
@@ -705,8 +709,10 @@ audio.
    nothing; a short unmatched transcript on an acoustic wake is a misheard bare
    wake; a long one is injected as-is, since the acoustic model is the
    authority on whether the word was said.
-9. Lloyd was speaking and barge-in is on: a real interruption — stop him,
-   record what was heard, cancel the turn being spoken, then inject.
+9. Barge-in is on and Lloyd was speaking, **or a spoken turn is still
+   running** (silently, in a tool call): a real interruption — stop him,
+   record what was heard (if anything was), cancel the running spoken turn,
+   then inject. Never a typed turn (below).
 
 `WakeState` holds two windows now. The follow-up window is as before: a wake
 opens `continuation_seconds` (6 s) for the locked participant, every
@@ -815,6 +821,50 @@ typed, carries "The listener interrupted your previous spoken reply. They heard
 only this much of it: …" in its prompt tail (`app/voice_tap.py`) — LiveKit
 Agents truncates its chat context at the playout position; the transcript here
 keeps the whole reply and the model is told which part was said.
+
+**A new request supersedes the running spoken turn, speaking or silent
+(2026-10-12).** Barge-in used to exist only while audio played: both triggers
+checked `tts.is_speaking`. But most of a long spoken turn is silence — the
+tool phase — and the session queue is strictly serial, with a user turn
+preempting only a running *ambient* one (`sessions_io.enqueue_turn`). So a
+request made during that silence queued behind the turn it superseded. The
+morning it was noticed: "Yeah, that's great." over Lloyd was taken for a
+request (the vocabulary lacked "great"), cut him off and became a turn; the
+heard-note tail told that turn only what had been heard, so the model
+finished the interrupted answer — 629 characters, 10 s of speech nobody asked
+for; and "give me a full systems check", said 2 s later while that turn ran a
+Bash call, waited 14.8 s behind it with "Still finishing the last thing."
+Three fixes, one per cause:
+
+- the inject site treats a new request as an interruption when a spoken turn
+  is running (`_active_turn`), not only when audio plays; with nothing
+  playing there is no heard note to send, just the cancel. `_cancel_turn`
+  cancels the session's running turn when it is the one being spoken **or
+  any turn this room injected from speech** (`_is_spoken_turn`:
+  `_streamed_turns` minus `_tap_turns`) — the worker's `_active_turn` can lag
+  the backend's current turn by one. **Never a typed turn**: someone
+  mid-investigation in the chat is not interrupted by a word in the room;
+  that request queues and says so. The cancel and the heard-note POST go out
+  together (`asyncio.gather`); the cancel used to wait behind the note and
+  reached the backend 1.7 s after the words. The cancel itself is fast: the
+  harness races the model stream and every tool call against the event.
+- the backchannel vocabulary carries "great", "good", "perfect", "sounds
+  good", "makes sense" and their kin, split the same way as before — a word
+  that answers a question is in `ANSWERING_BACKCHANNELS`, one that never does
+  in `PURE_BACKCHANNELS` — and the classifier drops fillers and the name,
+  matches phrases, and refuses a question.
+- the interruption note (`voice_tap.record_interruption`) says what to do, not
+  only what was heard: answer what they just said, do not resume, repeat or
+  finish the interrupted reply unless asked.
+
+`/api/voice/inject` also stops counting a running turn whose cancel is
+already requested as something to wait behind (`get_queue_state` reports
+`cancelling`): the worker just cancelled it for this very request, and
+"still finishing the last thing" would describe nothing. Inner Voice can
+extend a spoken turn past its spoken answer (two observer injections on the
+09:04 turn kept it running 10 s after Lloyd had stopped talking); that is
+the observer's business, and with the cancel above it costs the listener
+nothing.
 
 Not yet measured: speakers instead of earbuds. If AEC3 leaks with the HDMI
 monitor speakers, the second stage is server-side AEC3 (`pywebrtc-audio`)
@@ -1917,7 +1967,11 @@ voice.
   taking back unplayed frames and resume replaying them first, a push held by
   a pause and released by an interrupt, heard text; barge-in pausing on
   sustained speech, the warm-up, silence and a backchannel resuming, real words
-  stopping him with `interrupted` + a cancel of that turn only; progress
+  stopping him with `interrupted` + a cancel of that turn only; a new request
+  during a spoken turn's silent tool phase cancelling it (whichever spoken
+  turn is running, never a typed one, nothing with barge-in off), an
+  acknowledgement there cancelling nothing, the cancel not waiting behind the
+  heard note, the note telling the model not to finish the reply; progress
   captions and the thinking sound, the queued notice, a typed turn through the
   tap; the tap carrying typed turns and never spoken ones, `_emit` fanning out,
   the interruption note used once, the typed-turn reminder only with a
