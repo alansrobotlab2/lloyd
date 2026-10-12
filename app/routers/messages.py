@@ -1643,12 +1643,12 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 # of the assistant text. Checked BEFORE the cancelled path
                 # because the server's /ambient-decide handler schedules a
                 # cancel after recording the decision — so this turn may
-                # end via either the cancelled or the normal-completion
-                # path, and we want the silent breadcrumb regardless. (#295
-                # Slice 4)
+                # end via either path and wants the breadcrumb either way.
+                # Asked with this turn's own id: an entry a dead turn left
+                # behind is discarded here, never spent. (#2599, #295 S4)
                 ambient_decision = None
                 if turn.source == "ambient":
-                    ambient_decision = take_ambient_decision(session_id)
+                    ambient_decision = take_ambient_decision(session_id, turn.turn_id)
 
                 if ambient_decision and not ambient_decision.get("surface", True):
                     silent_entry = {

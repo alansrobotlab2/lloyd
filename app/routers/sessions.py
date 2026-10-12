@@ -1364,10 +1364,13 @@ async def get_prefetch_queue(session_id: str):
 async def post_ambient_decide(session_id: str, request: Request):
     """Record an ambient-turn decision. Called by the `ambient_decide` MCP tool.
 
-    Only valid when the session's current turn is `source: ambient`.
-    `surface=false` also cancels the running turn so the agent stops
-    generating further output — the server's `_run_turn` finally clause
-    handles persistence rewriting (muted breadcrumb vs normal response).
+    Only valid when the session's current turn is `source: ambient`, and the
+    decision is stamped with that turn's id: the stored answer belongs to the
+    turn that gave it, and `take_ambient_decision` hands it back to nobody else
+    (#2599). `surface=false` also cancels the running turn so the agent stops
+    generating further output; the rewriting of that turn's persistence — muted
+    breadcrumb instead of the normal response — happens on the consumer's
+    harness `result` branch, which is where the decision is read back.
 
     Body: {
       "surface": bool,         # required
@@ -1389,11 +1392,16 @@ async def post_ambient_decide(session_id: str, request: Request):
     message = (data.get("message") or "").strip()
     reasoning = (data.get("reasoning") or "").strip()
 
-    set_ambient_decision(session_id, {
+    # One dict for both halves: what goes into the slot is exactly what the
+    # response names, so neither the tool nor a later reader can be told the
+    # decision belongs to a turn the store has never heard of (#2599).
+    decision = {
         "surface": surface,
         "message": message,
         "reasoning": reasoning,
-    })
+        "turn_id": current.turn_id,
+    }
+    set_ambient_decision(session_id, decision)
 
     # Silent decision → ask the loop to stop after the current iteration
     # so the agent doesn't waste further output tokens. We can't set the
@@ -1415,7 +1423,10 @@ async def post_ambient_decide(session_id: str, request: Request):
     return JSONResponse({
         "decision_recorded": True,
         "surface": surface,
-        "turn_id": current.turn_id,
+        # Read out of the recorded dict rather than off `current` again: the
+        # handler already knows whose turn it is answering for, and this is the
+        # value the consumer will match against (#2599).
+        "turn_id": decision["turn_id"],
     })
 
 

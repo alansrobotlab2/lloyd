@@ -739,24 +739,63 @@ def peek_ambient_prefetch(session_id: str) -> list[AmbientPrefetchEntry]:
 
 
 # ---------------------------------------------------------------------------
-# Ambient-turn decision state (task #295, Slice 4)
+# Ambient-turn decision state (task #295, Slice 4; turn-scoped by #2599)
 #
 # When an agent calls `ambient_decide(session_id, surface=False)` during an
-# ambient turn, we record the decision here. `_run_turn`'s finally clause
-# consults this dict and, if surface=False, suppresses normal assistant
-# persistence and writes a muted breadcrumb instead.
+# ambient turn, the decision is recorded here under the session and stamped
+# with the `turn_id` of the turn that made it. The harness `result` branch of
+# `_run_turn` asks `take_ambient_decision(session_id, turn_id)` for it and, on
+# a match with surface=False, suppresses normal assistant persistence and writes
+# a muted breadcrumb instead.
+#
+# The id is the point (#2599). The read lives in that one branch, not in a
+# cleanup path, so a turn that ends any other way — the user hit Stop, the
+# harness raised, the consumer was cancelled — leaves its entry standing, and
+# there is one slot per session, so the next ambient turn is the one that finds
+# it. A decision may therefore be consumed only by the turn that recorded it:
+# any other turn is answering for a different signal, and "silent" spent that
+# way deletes the reply the turn was going to give the user and replaces it with
+# somebody else's reasoning.
 # ---------------------------------------------------------------------------
 
 _ambient_decisions: dict[str, dict[str, Any]] = {}
 
 
 def set_ambient_decision(session_id: str, decision: dict[str, Any]) -> None:
+    """Record one ambient turn's decision, overwriting any earlier one.
+
+    `decision` has to carry the deciding turn's `turn_id`: a slot with no id in
+    it can never be matched again, so `take_ambient_decision` discards it as
+    belonging to somebody else.
+    """
     _ambient_decisions[session_id] = decision
 
 
-def take_ambient_decision(session_id: str) -> Optional[dict[str, Any]]:
-    """Pop and return the decision for a session, or None if unset."""
-    return _ambient_decisions.pop(session_id, None)
+def take_ambient_decision(session_id: str, turn_id: str) -> Optional[dict[str, Any]]:
+    """Pop the session's ambient decision, and hand it back only to its owner.
+
+    Returns the decision when the recorded `turn_id` is `turn_id` — the turn
+    that called `ambient_decide` and has to persist its own breadcrumb. Returns
+    `None` when nothing is recorded, and when the entry belongs to another turn:
+    a late call from a preempted turn, or one left behind by a turn that ended
+    without reaching the read at all. That mismatch is a discard, not a
+    hold-back — the entry is removed either way, because every later ambient
+    turn of the session is equally not its owner, and it is logged naming both
+    ids so a crossed silencing is readable in the log instead of inferred from
+    a missing reply (#2599).
+    """
+    decision = _ambient_decisions.pop(session_id, None)
+    if decision is None:
+        return None
+    recorded = decision.get("turn_id")
+    if recorded == turn_id:
+        return decision
+    logger.warning(
+        "ambient decision for session %s was recorded by turn %s and discarded "
+        "when turn %s asked for it: a silent decision silences only the turn that "
+        "made it (#2599)",
+        session_id, recorded, turn_id)
+    return None
 
 
 def _get_or_create_queue(session_id: str) -> SessionQueue:

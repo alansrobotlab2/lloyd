@@ -26,8 +26,10 @@ Re-measured 2026-10-12 by `--collect-only -q` on each file — collected nodes, 
 passing ones, so the figure ages rather than reassures:
 `tests/test_session_queue.py` 17, `tests/test_active_session_resolution.py` 5,
 `tests/test_ambient_prefetch_retention.py` 16,
-`tests/test_session_doc_claims.py` 6 (44 across those four), and
-`tests/test_prefetch.py` 93. Those five are the mechanism's surface. A sixth file
+`tests/test_session_doc_claims.py` 8 (46 across those four), and
+`tests/test_prefetch.py` 93. Those five are the mechanism's surface, and
+`tests/test_ambient_decision_turn_scope.py`, which came in with #2599, is a sixth
+that pins the decision store rather than the queue. Another file
 reads this page's own sentences —
 `tests/test_architecture_coverage_doc_claims.py` — so a claim that the page is
 "green" has to say whether it ran that one too, which is exactly what #2606 was
@@ -215,9 +217,11 @@ Agent either:
   A) Replies normally
      → Assistant message lands, tagged source="ambient"
   B) Calls ambient_decide(session_id,surface=false,reasoning="...")
-     → Server stores decision in _ambient_decisions[sid]
+     → Server stores decision in _ambient_decisions[sid], stamped with the
+       deciding turn's turn_id
      → cancel_event.set() 0.5s LATER, via _deferred_ambient_cancel
-     → On the harness `result` event: take_ambient_decision consumed
+     → On the harness `result` event: take_ambient_decision(sid, turn_id) hands
+       the decision back to the turn that recorded it and to nobody else
      → messages.py writes muted breadcrumb instead of assistant message:
          "(ambient: Lloyd reviewed and chose not to surface — <reasoning>)"
      → Emits ambient_silent SSE event onto the turn's broker queue
@@ -243,6 +247,17 @@ server schedules that cancel, a silenced ambient turn can finish down either
 branch — normal completion or cancelled-mid-stream — and only the earlier check
 gets the breadcrumb written in both cases.
 
+**And only the turn that decided gets to be silenced by it.** The read is
+`take_ambient_decision(sid, turn_id)` and it answers only the turn whose id the
+entry carries, because the alternative was #2599: the pop is that one branch, so
+a turn ending any other way leaves its entry standing, and with one slot per
+session the next ambient turn is the one that finds it. Keyed by session alone,
+that orphan replaced the successor's reply with the dead turn's breadcrumb and
+its `ambient_silent` — a reply the user never got, attributed to a decision
+nobody made for it. A late entry is therefore discarded, removed so no third
+turn can spend it either, and logged naming both the recording and the asking
+turn id.
+
 ### Preemption
 
 If the user sends a message while an ambient turn is running or queued:
@@ -260,7 +275,7 @@ If the user sends a message while an ambient turn is running or queued:
   `AMBIENT_QUEUE_CAP` eviction.
 
 User turns always win, and `/cancel` never drops one: `drain_pending`'s
-`source=None` default means "ambient only" (`app/sessions_io.py:1061`), which
+`source=None` default means "ambient only" (`app/sessions_io.py:1100`), which
 is what `drain_pending=true` on that route relies on. Draining the user tier is
 the explicit `source="all"` sentinel — both tiers, ambient then user, summed
 count — and `DELETE /api/sessions/{id}` is its only caller
@@ -284,7 +299,7 @@ the branch is reachable, through `"all"`. Fixed by #909.
 |------|------|---------|
 | `_last_user_session_id` | `Optional[str]` | Hint for `get_active_session_id()` — most recent session that received a user turn |
 | `_ambient_prefetch_queue` | `dict[session_id, list[AmbientPrefetchEntry]]` | Mechanism 1's per-session queue. In memory only: a backend restart loses undelivered signals |
-| `_ambient_decisions` | `dict[session_id, dict]` | What `ambient_decide` recorded, popped by the turn's own completion path via `take_ambient_decision` |
+| `_ambient_decisions` | `dict[session_id, dict]` | What `ambient_decide` recorded, stamped with the deciding turn's `turn_id` and handed back by `take_ambient_decision(session_id, turn_id)` to that turn alone — the pop is the one place the slot is read, so an entry left behind by a turn that never reached its `result` event is discarded and logged rather than spent on the session's next ambient turn (#2599) |
 | `SessionQueue.pending_ambient` | `deque[SessionTurn]` | Mechanism 2's tier, popped only when `pending_user` is empty |
 | `AMBIENT_PREFETCH_CAP` / `AMBIENT_PREFETCH_DRAIN_MAX` | `5` / `3` | Hold cap and per-turn cap |
 | `AMBIENT_QUEUE_CAP` | `3` | Queued ambient *turns* per session; oldest evicted |
@@ -556,4 +571,22 @@ mode has no reason to block it.
   surviving several nights of machine turns and arriving in a chat prompt is
   evidence — and whether `browser` counts as a reader, which is a ruling on the
   platform list, not on this gate.
+- 2026-10-12 — **#2599 landed**: an ambient `surface=false` silences the turn that
+  wrote it and no other. `post_ambient_decide` stamps the stored decision with the
+  deciding turn's `turn_id` and answers with that same recorded value;
+  `take_ambient_decision(session_id, turn_id)` hands it back only on a match, and on a
+  mismatch removes the entry — so no third turn can spend it either — and logs a
+  warning naming the session and both turn ids. Keying the slot by session was only
+  half of it; the read sits inside `_run_turn`'s harness `result` branch rather than a
+  cleanup path, so an ambient turn ending any other way left its `surface=false`
+  standing and the *next* ambient turn of that session persisted the dead turn's muted
+  breadcrumb in place of its own reply — no race required. The deferred cancel reaches
+  the same slot from the other side, a decide call landing up to 0.5 s after its own
+  turn stopped being current. Both halves are pinned by
+  `tests/test_ambient_decision_turn_scope.py`, which crosses the router/store seam with
+  the real route and the real dict (a mocked store would pin nothing), and the comment
+  above `_ambient_decisions` no longer promises the `finally` clause that made the leak
+  look impossible to anyone who read it. Ambient traffic here is thin enough that no
+  crossed silencing had left a fingerprint, which is a coverage gap, not a clean bill;
+  the scan that would settle it is recorded as owed on #2599.
 

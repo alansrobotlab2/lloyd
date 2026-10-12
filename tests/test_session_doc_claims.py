@@ -269,5 +269,91 @@ def test_the_architecture_page_describes_the_drain_that_shipped():
     )
 
 
+# --- #2599: the ambient decision store is the deciding turn's, not the session's
+
+#: The false half of the block comment above `_ambient_decisions`, by its exact
+#: wording. The pop sits inside `_run_turn`'s harness `result` branch, and
+#: `messages.py`'s Inner-Voice comment names the endings that never reach it:
+#: "the user hit Stop, the harness raised, the consumer was cancelled". A
+#: comment promising a `finally` clause is what made an orphaned `surface=false`
+#: look impossible to the review that read this code before #2599.
+FALSE_FINALLY_CLAIM = "finally clause"
+
+#: The arch page's own misattribution. "The turn's own completion path" stated
+#: the intent and not the key — and a sentence that sounds like the invariant
+#: closes the report instead of opening it.
+FALSE_ROW_CLAIM = "popped by the turn's own completion path"
+
+
+def _comment_above(path: str, anchor: str) -> str:
+    """The run of `#` lines immediately above the first line containing `anchor`.
+
+    Scoped to the block rather than the whole file: the absence check below is a
+    claim about the comment #2599 refuted, not about the phrase "finally clause"
+    anywhere in a 1,000-line module.
+    """
+    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    hit = next((i for i, line in enumerate(lines) if anchor in line), None)
+    assert hit is not None, f"{Path(path).name} no longer declares {anchor!r}"
+    # The block ends a blank line above the declaration, so step back over the
+    # padding before collecting `#` lines — a helper that stopped at the blank
+    # would return "" and report a present comment as missing.
+    start = hit - 1
+    while start >= 0 and not lines[start].strip():
+        start -= 1
+    while start >= 0 and lines[start].lstrip().startswith("#"):
+        start -= 1
+    block = "\n".join(lines[start + 1:hit])
+    assert block, f"no comment block above {anchor!r} in {Path(path).name}"
+    assert anchor not in block, (
+        f"the block above {anchor!r} reached the declaration itself: {block!r}")
+    return block
+
+
+def test_the_ambient_decision_comment_states_the_turn_scoped_rule():
+    """The comment above `_ambient_decisions` has to describe where the pop
+    really happens and whose decision a stored one is.
+
+    Both halves matter. The false one — a `finally` clause that never existed —
+    is what made the leak read as impossible; the missing one — that only the
+    turn which recorded a decision may consume it — is the invariant the code
+    now holds, and a reader who is not told it may well break it again.
+    """
+    block = _comment_above(SESSIONS_IO, "_ambient_decisions: dict")
+    assert FALSE_FINALLY_CLAIM not in block, (
+        f"the comment promises a pop that does not exist: {block!r}")
+    # Positive controls, so this cannot be passed by deleting the comment: it is
+    # still about this store, still names the mechanism, and now names both the
+    # real pop site and the owning turn.
+    assert "ambient_decide" in block, block
+    assert "result" in block, f"the comment never names where the pop happens: {block!r}"
+    assert "turn_id" in block, f"the comment never says whose it is: {block!r}"
+
+
+def test_the_arch_page_names_the_deciding_turn_as_the_only_consumer():
+    """The page's `_ambient_decisions` row and its consume step are what a future
+    session reads instead of the code, so they have to say the decision is
+    consumed by the turn that recorded it and by nobody else."""
+    with open(ARCH_PAGE, encoding="utf-8") as fh:
+        text = fh.read()
+    assert len(text.splitlines()) > 200, (
+        f"{ARCH_PAGE} reads as only {len(text.splitlines())} lines; an unread or "
+        "truncated file must not pass an absence check")
+    flat = re.sub(r"\s+", " ", text)
+    # Positive controls: still the ambient page, still documenting this store.
+    assert "_ambient_decisions" in flat, "positive control failed: not this page"
+    assert "ambient_decide" in flat, "positive control failed: not this store"
+    assert FALSE_ROW_CLAIM not in flat, (
+        "the page still calls the consumer 'the turn's own completion path', "
+        "which is the sentence that hid #2599")
+    row = re.search(r"^\| `_ambient_decisions` \|.*\|$", text, re.MULTILINE)
+    assert row, "the Components table no longer has a row for `_ambient_decisions`"
+    assert "turn_id" in row.group(0), row.group(0)
+    assert re.search(r"deciding turn", row.group(0)), row.group(0)
+    # The walkthrough step shows the widened call, not the session-only pop.
+    assert re.search(r"take_ambient_decision\(sid, turn_id\)", flat), (
+        "the consume step still pops by session alone")
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
