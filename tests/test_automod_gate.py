@@ -2429,6 +2429,113 @@ def test_a_bare_node_id_from_the_grader_holds_at_the_rung_that_refused_it(tmp_pa
     # ledger, so the strict half is pinned where the decision is made.
 
 
+# ── #2567: the rung hands its own contract to the sha rail ──────────────────
+#
+# `RV.grade` is given the whole contract; until #2567 `parse_review` was given only
+# its clause COUNT, so the sha rail could not see the text the grader was handed and
+# voided a round for echoing a literal its own clause named. These two nodes are the
+# boundary: the first is the threading AND the pass it produces, the second is the
+# identical grade against a contract that never named the token.
+
+_RAIL_ECHO_TOKEN = "0f" * 6
+
+
+def _clause_echo_gate(tmp_path, monkeypatch, clauses):
+    """A review rung whose grader quotes a token no repo resolves, graded against
+    `clauses`, on a round that edits neither `CITATION_RAIL_MODULES` member.
+
+    The worktree is the graded tree and carries the token in no file, so the only
+    place it can be corroborated is the contract — and `changed_paths` is app code
+    plus a test, never `scripts/automod/review.py` or `gate.py`, so #2494's standing
+    rule cannot be the explanation for whatever verdict comes back.
+    """
+    (tmp_path / "app").mkdir(exist_ok=True); (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "app" / "x.py").write_text("def f():\n    return 1\n\n\ndef g():\n    return 2\n")
+    (tmp_path / "tests" / "test_x.py").write_text(
+        "def test_one():\n    assert 1\n\n\ndef test_two():\n    assert 2\n")
+    events, _ = _stub_grader(monkeypatch, tmp_path, None)
+    monkeypatch.setattr(RV, "item_contract", lambda iid, ledger=None: {
+        "id": iid, "title": "t", "body": "b", "path": "", "clauses": list(clauses)})
+    obj = {"premise": "sound", "summary": "GATE_SUMMARY_SENTINEL graded as asked",
+           "clauses": [{"clause": i, "verdict": "met", "evidence_path": "app/x.py",
+                        "evidence_line": 3, "test_node_id": "tests/test_x.py::test_one",
+                        "how_verified": "ran",
+                        "note": ("the rail keeps refusing " + _RAIL_ECHO_TOKEN)
+                        if i == 1 else "a clause with no token in it"}
+                       for i in range(1, len(clauses) + 1)],
+           "test_honesty": [], "seams_unverified": []}
+    monkeypatch.setattr(RV, "grade", lambda **kw: {
+        "ok": True, "error": "", "session_id": "sess_r", "structured": obj,
+        "structured_error": "", "text": "", "stop_reason": "stop", "duration_s": 1.0})
+    monkeypatch.setattr(RV, "confirm_policy", lambda: False)
+    seen: list[dict] = []
+    real = RV.parse_review
+
+    def spy(obj_, **kw):
+        seen.append(kw)
+        return real(obj_, **kw)
+
+    monkeypatch.setattr(RV, "parse_review", spy)
+    g = _ReviewGate(tmp_path)
+    g.rung_changed_paths = lambda: ["app/x.py", "tests/test_x.py"]
+    ok, detail, data = g.rung_review()
+    return ok, detail, data, events, seen
+
+
+def test_the_rung_hands_the_grader_s_own_clause_texts_to_the_sha_rail(tmp_path,
+                                                                      monkeypatch):
+    """#2567 clause 5, end to end through the rung: `parse_review` is called with
+    `clause_texts` equal to the graded contract's clause list, and the round whose
+    grader echoed a token its clause named PASSES instead of being voided.
+
+    The threading is asserted on the recorded kwargs — the same list object's
+    contents, `contract["clauses"]`, not a joined string and not the count — because
+    that keyword is the whole fix at this boundary; the pass is asserted on the rung's
+    own verdict, because threading a value the rail ignores would otherwise be
+    invisible. `n_clauses` still carries the length beside it.
+    """
+    clauses = [f"the rail must KEEP refusing {_RAIL_ECHO_TOKEN}", "clause two holds"]
+    ok, detail, data, events, seen = _clause_echo_gate(tmp_path, monkeypatch, clauses)
+
+    assert len(seen) == 1, f"the rung should grade once, saw {len(seen)} parses"
+    assert list(seen[0]["clause_texts"]) == clauses, seen[0].get("clause_texts")
+    assert seen[0]["n_clauses"] == len(clauses), seen[0]["n_clauses"]
+    assert not any(p in " ".join(map(str, seen[0]["changed_paths"]))
+                   for p in ("scripts/automod/review.py", "scripts/automod/gate.py")), \
+        "this must be the non-rail shape, or #2494's standing rule would explain it"
+    assert ok is True, detail
+    assert all("citation_unresolved" not in c for c in data["clauses"]), data["clauses"]
+    assert events[-1]["ok"] is True and events[-1]["event"] == "review", events[-1]
+
+
+def test_the_rung_still_voids_a_note_whose_contract_never_named_the_token(tmp_path,
+                                                                         monkeypatch):
+    """#2567 clause 2 at the boundary it was measured at: the SAME rung, the SAME
+    grader note echoing the token, graded against a contract whose clause texts do
+    not carry it. The rung does not pass, and the clause row on its ledger event
+    still carries the `note cites commit …, which `git cat-file -t` does not resolve
+    in the repo under review` finding.
+
+    What the row does NOT carry is what makes this the honest half: a citation the
+    graded tree cannot corroborate is recorded as `external_blocker` — the grader
+    cited evidence not in the tree — not as a refusal that spends the round's
+    attempt. Paired with the node above, the two differ by one clause string and
+    nothing else, so the pass there cannot be a rail that stopped working.
+    """
+    ok, detail, data, events, seen = _clause_echo_gate(
+        tmp_path, monkeypatch, ["the rail must KEEP refusing an unresolved commit",
+                                "clause two holds"])
+
+    assert len(seen) == 1 and _RAIL_ECHO_TOKEN not in list(seen[0]["clause_texts"])[0]
+    assert ok is False, "a token no clause named is still the grader's invention"
+    assert _RAIL_ECHO_TOKEN in " ".join(events[-1]["clauses"][0]["citation_unresolved"]), \
+        events[-1]["clauses"][0]
+    assert "does not resolve" in detail, detail
+    assert data["external_blocker"] is True, data
+    assert data["external_reason"] == "grader cited evidence not in the graded tree", data
+    assert events[-1]["event"] == "review" and events[-1]["ok"] is False, events[-1]
+
+
 def test_a_refusal_whose_entries_are_all_retired_is_a_pass_that_spent_no_attempt(
         tmp_path, monkeypatch):
     """Clause 4, the overturn half, on the field the charging walk keys on.

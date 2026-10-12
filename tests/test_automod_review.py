@@ -9,6 +9,7 @@ go without letting author and grader disagree indefinitely.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -1408,16 +1409,17 @@ _INCIDENT_SHA = "08a4f4" + "f0"
 _RAIL_NOTE = f"satisfied by a test in a prior landing (agent_mcp/facts.py:520-540, commit {_INCIDENT_SHA})"
 
 
-def _rail_graded(root, note, *, changed):
+def _rail_graded(root, note, *, changed, clause_texts=()):
     """One clause, cited with the note's token, graded with `changed` as the
-    diff's file list — the single input the standing rule reads. Verdict
-    `partial` and an empty `test_node_id` keep the OTHER rails (which must stay
-    untouched) out of the answer, so what comes back is the sha rail's."""
+    diff's file list — the single input the standing rule reads — and `clause_texts`
+    as the contract the grader was shown (#2567). Verdict `partial` and an empty
+    `test_node_id` keep the OTHER rails (which must stay untouched) out of the
+    answer, so what comes back is the sha rail's."""
     return RV.parse_review(
         _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/m.py",
               "evidence_line": 1, "note": note}),
         worktree=root, changed_tests=["tests/test_a.py"], n_clauses=1,
-        tests_passed=True, changed_paths=changed, repo=root)
+        tests_passed=True, changed_paths=changed, repo=root, clause_texts=clause_texts)
 
 
 @pytest.mark.parametrize("rail_file", list(RV.CITATION_RAIL_MODULES))
@@ -1474,7 +1476,14 @@ def test_the_sha_detector_takes_no_part_in_the_standing_rule(repo):
     `changed_paths` and its answer here is the same list both times. What differs
     is severity alone: with the round editing a rail module, the advisory
     sentences are the voiding ones plus the standing suffix, in the same order, so
-    the caller decided and the detector stayed whole."""
+    the caller decided and the detector stayed whole.
+
+    #2567 added a third thing the CALLER knows and the detector still does not: the
+    clause texts of the contract being graded. So this node also pins the
+    signature — three parameters, `also` defaulted, and no parameter a contract
+    could be passed through — and shows that a contract naming both tokens changes
+    nothing the detector reports, while the caller stops holding them against the
+    grader. The list is what it always was; only the severity moved."""
     r, _ = repo
     note = f"pinned by {_PHANTOM_SHA}, and the incident commit {_INCIDENT_SHA}"
     assert RV.unresolved_shas(note, r, also=()) == [_PHANTOM_SHA, _INCIDENT_SHA]
@@ -1483,6 +1492,21 @@ def test_the_sha_detector_takes_no_part_in_the_standing_rule(repo):
     assert [s.split(" (advisory")[0] for s in stood["clauses"][0]["citation_advisory"]] == \
         voided["clauses"][0]["citation_unresolved"]
     assert len(stood["clauses"][0]["citation_advisory"]) == 2
+
+    params = inspect.signature(RV.unresolved_shas).parameters
+    assert list(params) == ["text", "repo", "also"], \
+        f"the git-only detector gained a parameter: {list(params)}"
+    assert params["also"].default is None, params["also"].default
+    assert not [p for p in params if "claus" in p or "contract" in p], \
+        "clause texts reach the caller, never the detector"
+
+    named = _rail_graded(r, note, changed=["app/m.py"],
+                         clause_texts=[f"the rail must keep refusing {_PHANTOM_SHA} "
+                                       f"and {_INCIDENT_SHA}"])
+    assert RV.unresolved_shas(note, r, also=()) == [_PHANTOM_SHA, _INCIDENT_SHA], (
+        "the detector answered differently once a contract named both tokens, so it "
+        "is no longer git-only")
+    assert "citation_unresolved" not in named["clauses"][0], named["clauses"][0]
 
 
 def test_the_other_citation_rails_keep_their_standing_when_the_round_edits_the_rail(repo):
@@ -1509,6 +1533,123 @@ def test_the_other_citation_rails_keep_their_standing_when_the_round_edits_the_r
         changed_paths=rail, repo=r)
     assert "app/no_such_file.py" in " ".join(gone["clauses"][0]["citation_unresolved"]), \
         "a path that resolves to nothing is still a finding about the diff"
+
+
+# ── #2567: the contract the grader was handed is corroborating data ──────────
+#
+# The rail consulted git, the graded tree and the round's own diff, and never the
+# one input the grader is handed unasked: its own contract. An item whose clause
+# names a hex literal as its SUBJECT — "the rail must KEEP refusing <token>" —
+# could therefore not be graded by a round editing no rail module: to say what it
+# verified, the grader has to echo the literal, and echoing it voided the grading.
+# `cc6211c4` (#2494) covers only rounds whose diff edits CITATION_RAIL_MODULES and
+# `8b99335b` (#2512) only tokens the diff itself carries, so the clause-text shape
+# was the survivor. Zero instances had occurred since those two fixes as of the
+# 2026-10-11 triage, which is why this is a small change and not an emergency.
+
+def test_a_token_its_own_clause_named_no_longer_voids_a_non_rail_round(repo):
+    """#2567 clause 1: a NON-rail round — its diff names neither module of
+    `CITATION_RAIL_MODULES` — whose note echoes a token that appears verbatim in one
+    of the graded contract's clause texts gains no `citation_unresolved` entry, and
+    `unreliable` carries no `git cat-file` sentence.
+
+    The token is in no git object and in no file of the graded tree, so this is the
+    contract route alone: `changed_paths` excludes `scripts/automod/review.py` and
+    `scripts/automod/gate.py`, which rules out #2494's demotion as the explanation,
+    and no file the diff touches carries the literal, which rules out #2512's
+    `_round_material`.
+    """
+    r, _ = repo
+    out = _rail_graded(r, f"clause 2 met: the rail keeps refusing {_PHANTOM_SHA} "
+                          f"as the clause demands",
+                       changed=["app/m.py", "tests/test_a.py"],
+                       clause_texts=[f"the rail must KEEP refusing {_PHANTOM_SHA}"])
+    assert "citation_unresolved" not in out["clauses"][0], out["clauses"][0]
+    assert not [u for u in out["unreliable"] if "cat-file" in u], out["unreliable"]
+    assert out["citation_note"] == "", (
+        "nothing was demoted: the pass came from corroborating the token, not from "
+        "the rail standing down, and a demotion note here would say otherwise")
+    assert out["clauses"][0]["verdict"] == "partial", \
+        "the route resolves a citation; it does not move the grader's verdict"
+
+
+def test_the_same_note_still_voids_when_no_clause_of_the_contract_names_the_token(repo):
+    """#2567 clause 2: the escape is keyed on the text belonging to the contract that
+    grader was shown. The byte-identical note, graded against a contract whose clause
+    texts do not carry the literal, still yields the blocking `note cites commit …,
+    which `git cat-file -t` does not resolve in the repo under review` finding.
+
+    Three contracts, one note, all refusing: clauses naming a DIFFERENT hex literal
+    (the near miss — the route must match the token, not merely have been handed
+    something), clauses naming nothing hex at all, and the empty list a caller that
+    never opted in passes.
+    """
+    r, _ = repo
+    note = f"clause 2 met: the rail keeps refusing {_PHANTOM_SHA} as the clause demands"
+    for texts in ([f"the rail must KEEP refusing {'ab' * 6}"],
+                  ["clause one holds", "clause two holds"],
+                  []):
+        out = _rail_graded(r, note, changed=["app/m.py", "tests/test_a.py"],
+                           clause_texts=texts)
+        assert _PHANTOM_SHA in " ".join(out["clauses"][0]["citation_unresolved"]), \
+            (f"a contract that never named the token let the note through: {texts!r}",
+             out["clauses"][0])
+        assert [u for u in out["unreliable"] if "cat-file" in u], out["unreliable"]
+
+
+def test_a_call_that_passes_no_clause_texts_is_unchanged(repo):
+    """The other half of #2567 clause 5, at the parser's own door: omitting the
+    keyword and passing the empty default return the same object, so
+    `review_tools.grade_commit`, `grade_vault` and the `n_clauses=0` calls in
+    `tests/test_review_grader_policy.py` are on their pre-#2567 path whether or not
+    they were edited.
+
+    Compared as whole dicts rather than one field, because the claim is that nothing
+    else moved. A readable repo is required to make the comparison mean anything: on
+    one the rail cannot read, `unresolved_shas` invents nothing and both calls would
+    agree trivially.
+    """
+    r, _ = repo
+    obj = _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/m.py",
+                "evidence_line": 1,
+                "note": f"clause 2 met: the rail keeps refusing {_PHANTOM_SHA}"})
+
+    def grade(**kw):
+        return RV.parse_review(obj, worktree=r, changed_tests=["tests/test_a.py"],
+                               n_clauses=1, tests_passed=True,
+                               changed_paths=["app/m.py"], repo=r, **kw)
+
+    omitted = grade()
+    assert _PHANTOM_SHA in " ".join(omitted["clauses"][0]["citation_unresolved"]), \
+        omitted["clauses"][0]
+    assert omitted == grade(clause_texts=()), \
+        "the empty default changed what a caller that passes nothing gets"
+
+
+def test_the_incident_commit_stays_refused_under_the_contract_route(repo):
+    """#2567 clause 3: the 2026-09-24 fabrication the rail exists to catch — the note
+    `SM_20260924_104307` was voided on — is still refused against a contract whose
+    clauses do not name it, on a round that edits neither rail module.
+
+    The incident commit is tree content today: the write-up of it, inside `tests/`
+    and `scripts/automod/`, the paths `_SHA_CONTENT_PROSE_PATHS` excludes. That is
+    exactly why a tree-wide match would wrongly escape it, and why this route matches
+    only the contract handed to the grader that cited it. In this fixture the token
+    sits in no file at all, so what is under test is the contract route alone. The
+    last assertion is the accepted cost, written where a later reader can see it: a
+    contract that DOES name the incident commit corroborates quoting it — which is
+    what #2567's own clause 3 is, and the whole point of the item.
+    """
+    r, _ = repo
+    voided = _rail_graded(r, _RAIL_NOTE, changed=["app/m.py", "tests/test_a.py"],
+                          clause_texts=["clause one holds", "clause two holds"])
+    assert _INCIDENT_SHA in " ".join(voided["clauses"][0]["citation_unresolved"]), \
+        voided["clauses"][0]
+    assert [u for u in voided["unreliable"] if "cat-file" in u], voided["unreliable"]
+
+    cost = _rail_graded(r, _RAIL_NOTE, changed=["app/m.py", "tests/test_a.py"],
+                        clause_texts=[f"the rail must KEEP refusing {_INCIDENT_SHA}"])
+    assert "citation_unresolved" not in cost["clauses"][0], cost["clauses"][0]
 
 
 def test_the_note_of_an_unsound_premise_is_marked_but_its_verdict_still_stands(wt):

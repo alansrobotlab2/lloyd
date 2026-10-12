@@ -2750,14 +2750,43 @@ def _round_material(worktree: Path, changed) -> str:
             break
     return "\n".join(out)
 
+def _clause_stated_tokens(tokens: list[str], clause_texts) -> set[str]:
+    """Which of `tokens` the grader was handed, verbatim, in its own contract.
+
+    The one corpus the note rail never consulted: `_tree_carried_tokens` reads the
+    graded tree and `_round_material` reads the diff, while the clause texts are
+    input the grader is shown unasked — `gate.rung_review` builds the prompt out of
+    `contract["clauses"]` and hands the same contract object to
+    `RV.grade`. So a grader writing "the rail keeps refusing `<token>`" about a
+    clause that names `<token>` is quoting its own instructions, and the 2026-10-11
+    incident is exactly that: a NON-rail round whose item named a literal as its
+    subject had its grading voided for echoing it.
+
+    Substring, matching `_round_material`'s route one line below rather than
+    inventing a second notion of "carried by the input". No cap is applied: this is
+    a few hundred characters the grader already read, not a corpus read off disk,
+    and the cap in `_RAIL_CORPUS_CAP_CHARS` exists to bound an unbounded file read.
+    """
+    if not tokens or not clause_texts:
+        return set()
+    stated = "\n".join(str(t) for t in clause_texts)
+    return {t for t in tokens if t and t in stated}
+
+
 def _rail_sha_unresolved(note: str, *, worktree: Path | None,
                          changed_paths=(), repo: Path | None = None,
-                         also: "tuple | None" = None) -> list[str]:
+                         also: "tuple | None" = None,
+                         clause_texts=()) -> list[str]:
     """Which commit-ish tokens in a grader's note the rail may hold against it.
 
     `unresolved_shas` answers from git alone and stays that way
-    (`test_the_sha_detector_takes_no_part_in_the_standing_rule` pins it); the two
+    (`test_the_sha_detector_takes_no_part_in_the_standing_rule` pins it); the three
     other ways a token can be REAL are decided here, in order:
+
+      * `_clause_stated_tokens` — the grader was handed the token itself, in the
+        clause texts of the contract it is grading against. Keyed on THAT contract
+        and nothing else: a token in no clause of this contract stays refused, which
+        is why this is corroborating data rather than a wider escape.
 
       * `_tree_carried_tokens` — the graded tree publishes it as file content,
         outside the paths that record citations rather than carry data. This is the
@@ -2768,15 +2797,27 @@ def _rail_sha_unresolved(note: str, *, worktree: Path | None,
       * `_round_material` — the round's own diff put it somewhere git never looked,
         which is how a freeze round would quote its own new digest at its review.
 
-    A token that is neither is left in the list: `0f0f0f0f0f0f` names no object and
-    no file, and the incident `08a4f4f0` sits in the tree only inside `tests/` and
-    `scripts/automod/`, the prose that RECORDS the fabrication. That exclusion is
-    what keeps this a second way to be corroborated rather than a way to corroborate
-    anything.
+    A token that is none of the three is left in the list: `0f0f0f0f0f0f` in a note
+    whose contract never named it names no object, no file and no clause, and the
+    incident `08a4f4f0` sits in the tree only inside `tests/` and `scripts/automod/`,
+    the prose that RECORDS the fabrication. That exclusion is what keeps a second way
+    to be corroborated from becoming a way to corroborate anything — and it is why the
+    2026-09-24 incident stays refused under this route too: the round that was voided
+    for it was graded against a contract about `agent_mcp/facts.py`, which named no
+    such commit.
+
+    `clause_texts=()` is the pre-#2567 behaviour byte for byte, which is what lets
+    `review_tools.grade_commit` and `grade_vault` keep their present verdicts while
+    the live rung opts in.
     """
     tok = unresolved_shas(note, repo, also=also)
     if not tok:
         return []
+    stated = _clause_stated_tokens(tok, clause_texts)
+    if stated:
+        tok = [t for t in tok if t not in stated]
+        if not tok:
+            return []
     carried = _tree_carried_tokens(worktree,
                                    [t for t in tok if not t.startswith("--")])
     missing = [t for t in tok if t not in carried]
@@ -2976,7 +3017,7 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                  n_clauses: int, require_tests: bool = True,
                  tests_passed: bool = False, changed_paths=(),
                  repo: Path | None = None, added_tests: int = 0,
-                 pre_existing_failures=frozenset()) -> dict | None:
+                 pre_existing_failures=frozenset(), clause_texts=()) -> dict | None:
     """The grader's object, validated, with `met` downgraded where the
     evidence does not hold up. None if unusable. `require_tests=False` is
     the vault shape: prose has no pytest node to point at.
@@ -3022,6 +3063,17 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     `pre_existing_failures` is the tests rung's list of node ids that fail at
     base too: a `met` whose node is one of them, or sits in a file with one, is
     downgraded to `partial` (`_cites_pre_existing`).
+
+    `clause_texts` is the graded contract's own clause texts, and it reaches only
+    the sha rail, as the third way a cited commit can be corroborated
+    (`_clause_stated_tokens`): a grader quoting a literal its clause named is
+    quoting input it was handed, and #2567 is the round that says so. It is the
+    whole contract's clause list, not the one clause this entry answers — a note
+    freely quotes a different clause than the one it is filed under, and a token the
+    grader was plainly handed is corroborated wherever in the contract it came from.
+    Default `()`: a caller that passes nothing gets today's verdict unchanged, which
+    is why `review_tools.grade_commit` and `grade_vault` need no edit to stay as
+    they were.
     """
     if not isinstance(obj, dict):
         return None
@@ -3124,14 +3176,15 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
         # not this round has the standing to be refused on it — `unresolved_shas`
         # is never told about `changed_paths` (clause 4: the detector stays whole
         # and the caller decides).
-        # The two extra routes live in `_rail_sha_unresolved`, which never changes
+        # The three extra routes live in `_rail_sha_unresolved`, which never changes
         # what `unresolved_shas` itself reports: the detector still answers from git
-        # alone, and this caller decides what to hold against the grader.
+        # alone, and this caller decides what to hold against the grader — including
+        # what the grader was itself handed, via `clause_texts` (#2567).
         sha_finding = [f"note cites commit {sha}, which `git cat-file -t` does not resolve "
                        f"in the repo under review"
                        for sha in _rail_sha_unresolved(
                            note, worktree=worktree, changed_paths=changed_paths,
-                           repo=repo)]
+                           repo=repo, clause_texts=clause_texts)]
         if sha_finding:
             if rail_stale:
                 # Demoted, not dropped, exactly as #1755 does for a blocking

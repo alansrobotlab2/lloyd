@@ -2751,7 +2751,14 @@ class Gate:
                                      # no test".
                                      repo=self.live,
                                      added_tests=RV.def_test_delta(grade_root, self.base, changed),
-                                     pre_existing_failures=set(pre_existing_failures))
+                                     pre_existing_failures=set(pre_existing_failures),
+                                     # The clause texts THIS grader was shown — the
+                                     # same list `RV.grade` is handed as
+                                     # `contract["clauses"]` and the second reader as
+                                     # `clauses=` below — so a note quoting a literal
+                                     # its own contract named is corroborated by the
+                                     # input, not invented (#2567).
+                                     clause_texts=contract["clauses"])
         finally:
             self._drop_snapshot(snapshot)
         tree_note = (f" (citations validated against {head[:8] or 'the working tree'} "
