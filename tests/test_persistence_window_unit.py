@@ -585,3 +585,274 @@ def test_the_arming_route_is_reachable_from_an_unattended_turn():
     start = f"systemctl --user start {SERVICE.name}"
     assert bash_command_tier(start) == 2, start
     assert find_service_control(start) == "systemctl start", start
+
+
+# ── #2596: the report a timer-fired window has to leave behind ────────────────
+#
+# `eval/persistence_arms.py:362-365` writes the dated report only when
+# `LLOYD_CANARY_REPORT` is non-blank, and this unit has never set that variable —
+# correctly, since the unset is what keeps every rep on the tracked rows file. The
+# consequence was that a timer-fired window produced rows and no report: as of the
+# round that opened this section, `eval/measurements/injection-canary/` held exactly
+# one report, the hand-written `run-2026-10-04-persistence.md`, and `git grep -n
+# ExecStartPost -- .` returned nothing, so no systemd surface wrote one either. The fix
+# is a second Exec line, and these five nodes pin it clause by clause.
+#
+# The line crosses a real process boundary in both directions: systemd forks the venv
+# python with only the unit's own `Environment=` lines and a cwd of the user's home, and
+# the report is written by a CLI, not by this test importing it. So the nodes below
+# FORK — reading the rendered table out of the child's stdout rather than trusting a
+# substring of the Exec line — because every failure mode here (a `-m` form that cannot
+# resolve, a missing `--force` on a second same-day window, a date spelled out where
+# systemd has no date specifier) is invisible to a test that only parses text.
+
+REPORT_SCRIPT = "eval/run_injection_canary.py"      # named absolutely by the unit
+VENV_PY_SUFFIX = ".venvs/lloyd/bin/python"          # the repo's own interpreter
+REPORT_TABLE_HEADER = ("| window | episodes ran | summary leak (95% CI) |"
+                       " unattributed | attributed | benign control |")
+WRITING_FLAGS = ("--write", "--force")              # dropped to make a run read-only
+
+
+def _execstartpost() -> str:
+    """The unit's post-start line, or a failure that says what its absence costs."""
+    cp = _parse(SERVICE)
+    assert cp.has_option("Service", "ExecStartPost"), \
+        "the unit has no ExecStartPost, so a completed window renders its report to the " \
+        "journal and writes nothing: the one report in the tracked dir is still the " \
+        "hand-written run-2026-10-04-persistence.md"
+    return cp.get("Service", "ExecStartPost")
+
+
+def _post_argv() -> list[str]:
+    """`ExecStartPost` as argv, split with POSIX quoting exactly as `ExecStart` is."""
+    return shlex.split(_execstartpost())
+
+
+def _service_env() -> dict[str, str]:
+    """The environment systemd will hand `ExecStartPost`: the unit's own `Environment=`
+    lines with `%h` expanded, and nothing else inherited.
+
+    Passing the process nothing but these two variables is the point — a child that
+    needs `VIRTUAL_ENV`, a login `PATH` or the caller's cwd is a child that works under
+    `pytest` and fails at 02:10 with nobody reading the journal."""
+    home = str(Path.home())
+    env = {}
+    for line in _env_lines(SERVICE):
+        key, _, value = line.split("=", 1)[1].partition("=")
+        env[key] = value.replace("%h", home)
+    return env
+
+
+def _utc_today() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def test_the_unit_itself_writes_the_dated_report_after_the_window():
+    """Clause 1: an `ExecStartPost` whose argv runs the repo's venv python on
+    `eval/run_injection_canary.py report --write`, so the dated report is the unit's own
+    output and not a side effect of an environment variable it is not allowed to set.
+
+    The two tokens are pinned as things that exist, not as strings: the interpreter is a
+    file this box can execute, the script is a file, and both live under the same
+    checkout `ExecStart` runs — which is what makes a moved repo root a test failure
+    rather than a unit that stops producing reports in silence. And because the unset of
+    `LLOYD_CANARY_REPORT` is load-bearing on the rows side, the post line may not name it
+    inline either: an `Environment=`-free unit that reaches the same variable through its
+    own argv is the same override wearing a different hat."""
+    argv = _post_argv()
+    assert argv[0].endswith(VENV_PY_SUFFIX), \
+        f"the post-start step must run the repo's venv python, got {argv[0]!r}"
+    assert os.path.isabs(argv[0]) and Path(argv[0]).is_file() and \
+        os.access(argv[0], os.X_OK), f"{argv[0]} is not an executable interpreter"
+    assert argv[1].endswith(REPORT_SCRIPT), \
+        f"the post-start step must run the canary CLI, got {argv[1:]!r}"
+    assert Path(argv[1]).is_file(), f"{argv[1]} does not exist"
+
+    repo_root = str(Path(_exec_argv()[0]).parents[1])     # ExecStart's own checkout
+    for token in argv[:2]:
+        assert token.startswith(repo_root + os.sep), \
+            f"{token!r} is outside the checkout ExecStart runs ({repo_root}), so the " \
+            "two Exec lines would report on different trees if either moved"
+
+    assert argv[2] == "report", f"the subcommand must be report, got {argv[:3]!r}"
+    assert "--write" in argv, \
+        f"without --write the CLI prints and leaves the tree alone: {argv!r}"
+    assert "LLOYD_CANARY" not in _execstartpost(), \
+        "naming the override inline is an override; the report must come from this line"
+
+    monkey = pytest.MonkeyPatch()
+    monkey.delenv(RC.ROWS_ENV_VAR, raising=False)
+    monkey.delenv(RC.REPORT_ENV_VAR, raising=False)
+    try:
+        today = _utc_today()
+        assert RC.report_path(today) == RC.OUT_DIR / f"run-{today}{RC.REPORT_SUFFIX}", \
+            "the target the flags resolve to is the dated report in the tracked dir"
+        assert RC.OUT_DIR.name == "injection-canary", RC.OUT_DIR
+        assert RC.report_path(today).parent == RC.OUT_DIR
+    finally:
+        monkey.undo()
+
+
+def test_the_post_start_command_resolves_from_the_directory_systemd_starts_it_in():
+    """Clause 2: the argv, run for real from a foreign cwd under nothing but the unit's
+    own environment, exits 0 and prints the window table.
+
+    systemd starts this unit in the user's home — the unit sets no `WorkingDirectory=` —
+    and that is the ground the `-m` form falls through: `python -m
+    eval.run_injection_canary report` from outside the checkout dies with
+    `ModuleNotFoundError: No module named 'eval'`, while the absolute-script form exits 0
+    from anywhere because `OUT_DIR` (`eval/run_injection_canary.py:80`) is derived from
+    `LLOYD_HOME`, the script's own resolved parent, not from the cwd. `cwd="/"` here is
+    stricter than `%h` on purpose: if it resolves from the filesystem root it resolves
+    from home too.
+
+    The writing flags are dropped so the fork only renders — that is what the operator
+    contract in `_report_cmd`'s docstring says a bare `report` does — and stdout is read
+    as the report it is: the table header and the 2026-10-04 row, the window the item
+    says must stay on a line of its own."""
+    cp = _parse(SERVICE)
+    wd = (cp.get("Service", "WorkingDirectory")
+          if cp.has_option("Service", "WorkingDirectory") else None)
+    argv = _post_argv()
+    assert wd or (os.path.isabs(argv[0]) and os.path.isabs(argv[1])), \
+        f"neither every path token is absolute nor is WorkingDirectory set: {argv!r}"
+    assert not any(t == "-m" for t in argv), \
+        "the -m form cannot resolve unless the unit sets WorkingDirectory=%h/lloyd"
+    assert "--out" not in argv, "an --out here would be a path the unit invented per run"
+
+    proc = subprocess.run([t for t in argv if t not in WRITING_FLAGS],
+                          capture_output=True, text=True, env=_service_env(),
+                          cwd="/", timeout=180)
+    assert proc.returncode == 0, \
+        f"the post-start argv failed from cwd=/ ({proc.returncode}): " \
+        f"{(proc.stderr or proc.stdout)[-400:]}"
+    assert REPORT_TABLE_HEADER in proc.stdout, \
+        f"no window table on stdout: {proc.stdout[:300]!r}"
+    assert "| 2026-10-04 |" in proc.stdout, \
+        "the 2026-10-04 window has to stay in the table the unit writes"
+    assert "[not written]" in proc.stdout, \
+        "with the writing flags dropped the CLI must refuse to touch the tree"
+    assert proc.stderr == "", f"the report rendered but complained: {proc.stderr[-300:]}"
+
+
+def test_the_post_start_carries_force_because_a_same_day_rerun_would_otherwise_refuse(tmp_path):
+    """Clause 3: `--force`, no date literal, and a target that is `RC.report_path(<utc
+    today>)` inside `RC.OUT_DIR`.
+
+    The flag is not decoration. `_report_cmd` computes the target, sees it exists and
+    returns 1 with `[refused] … already exists — pass --force to overwrite`
+    (`eval/run_injection_canary.py:1667-1676`), which on a unit whose window actually
+    succeeded reads as `Failed with result 'exit-code'` — a second completed window on
+    one UTC day would fail the very run that earned the report. So this writes twice to
+    one throwaway target and once more with the flag, through the child process, because
+    the refusal is a child's exit status and not an exception this suite could catch.
+
+    No date is spelled out, because systemd has no date specifier and `$(date -u +%F)`
+    needs a shell this unit's own comment rules out; the dated name comes from
+    `report_path()` (`:115-125`), which is the same function that named
+    `run-2026-10-04-persistence.md`. Writes go to `tmp_path`, never to the tracked dir."""
+    post = _execstartpost()
+    argv = _post_argv()
+    assert "--force" in argv, f"without --force a second window on one day exits 1: {argv!r}"
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", post), \
+        f"a date literal in an Exec line cannot be interpolated: {post!r}"
+    for shell_ism in ("$(", "${", "`", "%Y", "date "):
+        assert shell_ism not in post, \
+            f"{shell_ism!r} needs a shell, and this unit execs directly"
+
+    today = _utc_today()
+    target = RC.report_path(today)
+    assert target == RC.OUT_DIR / f"run-{today}{RC.REPORT_SUFFIX}", target
+    assert target.parent == RC.OUT_DIR, \
+        "the dated name resolves inside the tracked report dir, beside the 2026-10-04 one"
+
+    head, target2 = argv[:2], tmp_path / f"run-{today}{RC.REPORT_SUFFIX}"
+    same_day = head + ["report", "--write", "--out", str(target2)]
+    writes = [same_day,               # rep 10 finished, first window of the day
+              same_day,               # a second one finished: this is the refusal
+              same_day + ["--force"]]  # …which is the flag the unit carries
+    env, ran = _service_env(), []
+    for i, cmd in enumerate(writes):
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                              cwd="/", timeout=180)
+        ran.append(proc)
+        assert proc.returncode == (0 if i != 1 else 1), \
+            f"write {i + 1} of the same-day pair returned {proc.returncode}: " \
+            f"{(proc.stderr or proc.stdout)[-300:]}"
+    assert "already exists" in ran[1].stderr and "--force" in ran[1].stderr, \
+        f"the second window was refused for a different reason: {ran[1].stderr[-300:]}"
+    assert target2.is_file() and REPORT_TABLE_HEADER in target2.read_text(encoding="utf-8"), \
+        "the third write, the one shaped like the unit's, overwrote and left a table"
+    assert not (RC.OUT_DIR / f"run-{today}{RC.REPORT_SUFFIX}").exists(), \
+        "this node must never create the file the first real window is owed"
+
+
+def test_the_unit_reaches_neither_override_on_any_surface_systemd_reads():
+    """Clause 4: no environment surface — `Environment=`, `EnvironmentFile=` or
+    `PassEnvironment=` — names either override, and `ExecStart`, `Type=oneshot` and
+    `TimeoutStartSec=4h` are exactly as shipped.
+
+    The two extra keys are the hole #2428's post-review finding left open: an INI read
+    keeps only the last `Environment=`, so the older node could not see a second one, and
+    neither `EnvironmentFile=` nor `PassEnvironment=` was named at all — either would
+    carry `LLOYD_CANARY_REPORT` into the window without a single `Environment=` line
+    changing. They are refused outright rather than searched for the two names, because
+    a file systemd reads and this test's `_env_lines` does not is precisely the kind of
+    gap that outlives a name-based blocklist.
+
+    The preserved line is pinned by its shipped suffix and the timeout by its parsed
+    seconds, so the new Exec line cannot pay for itself by quietly shortening either."""
+    text = SERVICE.read_text(encoding="utf-8")
+    surfaces = [l.strip() for l in text.splitlines()
+                if l.strip().startswith(("Environment=", "EnvironmentFile=",
+                                         "PassEnvironment="))]
+    for override in (RC.ROWS_ENV_VAR, RC.REPORT_ENV_VAR):
+        assert not [l for l in surfaces if override in l], \
+            f"an environment surface names the bench's own default: {override}"
+    assert not [l for l in surfaces if l.startswith(("EnvironmentFile=",
+                                                    "PassEnvironment="))], \
+        "EnvironmentFile=/PassEnvironment= would hand the window an override this node's " \
+        "Environment= scan never sees (#2428's post-review finding)"
+
+    for line in (_execstart(), _execstartpost()):
+        assert "LLOYD_CANARY" not in line, f"inline assignment: {line!r}"
+        for pool_ism in ("curl", "wget", "enqueue", "/api/", "bash -c", "sh -c",
+                         "python -c"):
+            assert pool_ism not in line, \
+                f"the executable surface reaches the pool ({pool_ism!r}): {line!r}"
+
+    cp = _parse(SERVICE)
+    assert _execstart().endswith(f"/{WINDOW_SCRIPT} {REPS} {DRAIN_FLAG} {DRAIN_WAIT_S}"), \
+        f"ExecStart changed: {_execstart()!r}"
+    assert cp.get("Service", "Type") == "oneshot"
+    assert _systemd_seconds(cp.get("Service", "TimeoutStartSec")) == 4 * 3600, \
+        "TimeoutStartSec=4h is the window's hang guard; the report render costs 0.07 s"
+
+
+def test_the_service_comment_describes_the_report_write_and_its_success_only_trigger():
+    """Clause 5: the unit's own prose says where the report comes from, what the numbers
+    are, and when the step runs.
+
+    Three claims, because each is a thing a later reader could otherwise get wrong from
+    the line alone. That it comes from `ExecStartPost` and never from
+    `LLOYD_CANARY_REPORT` — the unit above states the unset is deliberate, so a report
+    appearing by some other route would be the bug. That every figure is `summarize`'s and
+    `_wilson`'s output unchanged, which is what keeps the 2026-10-04 window a row of its
+    own with its own denominator (`persistence_windows` groups on the row's UTC day)
+    rather than a number merged into the new window's. And that systemd runs
+    `ExecStartPost` only after a successful `ExecStart`, so the refused drain this unit
+    has actually produced — exit 2 — wrote no empty report and never will."""
+    prose = _comments(SERVICE)
+    assert "ExecStartPost" in prose, \
+        "the unit must name the line that writes the report"
+    assert "LLOYD_CANARY_REPORT" in prose and "never from" in prose, \
+        "…and say the env var is not where it comes from"
+    assert "summarize" in prose and "_wilson" in prose and "unchanged" in prose, \
+        "the table's provenance has to be stated, not implied by a flag"
+    assert "only after" in prose and "ExecStart" in prose, \
+        "the success-only trigger is what makes a failed window write nothing"
+    assert "exit 2" in prose, \
+        "the refused-drain case is named by the status the one fire this unit had returned"
+    assert "--force" in prose, \
+        "…and the comment must say why overwriting a same-day file is the right behaviour"

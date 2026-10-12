@@ -17,7 +17,9 @@ Documentation=file:///home/alansrobotlab/lloyd/eval/run_persistence_arms.sh
 # Deliberately NO LLOYD_CANARY_ROWS and NO LLOYD_CANARY_REPORT here. Unset is what
 # leaves every rep on the tracked eval/measurements/injection-canary/rows.jsonl --
 # the file the leak-rate denominator behind #2194's owed entries is read from. A
-# window writing a scratch path measures itself into nowhere.
+# window writing a scratch path measures itself into nowhere. The dated report is still
+# written, and by no variable: `ExecStartPost`, at the bottom of this file, asks the
+# bench for it by flag at its tracked dated name (#2596).
 
 [Service]
 Type=oneshot
@@ -61,3 +63,38 @@ ExecStart=/home/alansrobotlab/lloyd/eval/run_persistence_arms.sh 10 --drain-wait
 # overlapping the 06:00 eval -- which is why the drain number, not this one, is the
 # term that protects the morning.
 TimeoutStartSec=4h
+# The report, written by this unit rather than by the variable above refuses to set.
+# eval/persistence_arms.py:362-365 asks the bench for a report only when
+# LLOYD_CANARY_REPORT is non-blank, so a timer-fired window was rows and nothing else:
+# since the window shipped, eval/measurements/injection-canary/ has held exactly one
+# report, the hand-written run-2026-10-04-persistence.md. The dated report comes from
+# this line and never from that variable -- the unset that keeps the rows on the tracked
+# corpus is not the thing that has to give to get a report (#2596).
+#
+# `report --write` with no --out names itself. report_path()
+# (eval/run_injection_canary.py:115-125) returns OUT_DIR/run-<UTC date>-persistence.md
+# and OUT_DIR (:80) hangs off LLOYD_HOME -- the script's own resolved parent, not the
+# cwd -- which is the only way a dated filename gets into a systemd Exec line: systemd
+# has no date specifier, and $(date -u +%F) needs a shell, ruled out above for the same
+# reason it is ruled out for ExecStart. No --out, so no date literal, so no shell. Both
+# paths are absolute because the unit sets no WorkingDirectory=, so systemd starts it in
+# the user's home, where `python -m eval.run_injection_canary` dies with
+# `ModuleNotFoundError: No module named 'eval'` (measured 2026-10-12, exit 1).
+#
+# Every figure in that file is summarize()'s and _wilson()'s output unchanged (:1164,
+# :1257, rendered by render_persistence_report at :1602), and persistence_windows
+# (:1592) groups a window by the UTC day on its own rows -- so the 2026-10-04 figures
+# stay a row with their own denominator and a new window gets the line beside them,
+# never a share of theirs.
+#
+# --force is load-bearing, not tidy: _report_cmd sees an existing target and returns 1
+# with `[refused] ... already exists` (:1667-1676), so a second completed window on one
+# UTC day would otherwise end as `Failed with result 'exit-code'` on a run whose window
+# actually succeeded.
+#
+# systemd runs ExecStartPost only after ExecStart exits 0, and that is the half that
+# keeps a bad night quiet: the window's one fire to date refused its 900 s drain and
+# left at exit 2, and wrote no empty report. The timeout above covers this step too, and
+# the step costs it 0.07 s -- the render's measured wall clock over the shipped corpus
+# on 2026-10-12.
+ExecStartPost=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python /home/alansrobotlab/lloyd/eval/run_injection_canary.py report --write --force
