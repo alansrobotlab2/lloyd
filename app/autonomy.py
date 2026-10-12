@@ -4322,6 +4322,40 @@ def _stamp_session_start_cwd(session_id: str, task_id) -> str | None:
     return written
 
 
+#: Marker line a monitoring script prints so its own exit code can survive the
+#: agent turn it ran inside (#2619). `scripts/memory/knowledge-health-report.py`
+#: is the first emitter: this box raised its alarm every night from 2026-10-10
+#: to 2026-10-12 while `workers.db` recorded `status: success` beside every one
+#: of them — the runner records the TURN's verdict, and the skill's own
+#: invocation (`... 2>&1 | tail -80; echo EXIT=$?`) hides the script's exit even
+#: from the shell. `_SILENT_FAILURE_PATTERNS` cannot cover this: it greps the
+#: agent's PROSE for "exit code N", and on those three nights the prose never
+#: mentioned the alarm, so `silent_failure_indicators` was 0. Scanning TOOL
+#: RESULTS instead turns the line into `meta_json.script_alarm` on the run row,
+#: which is what /api/autonomy/health counts and the watchdog prints. The
+#: emitter prints the line to stdout AND stderr so a `| tail -N` keeps it.
+#:
+#: The home is deliberate: it sits below `EVIDENCE_PILOT_TASK_IDS`, the deepest
+#: `architecture/*.md` citation into this file, because an insert above any of
+#: the eight graded anchors moves every one of them off the definition its
+#: sentence means (#2605: re-point a citation by the cited line's TEXT, never by
+#: adding the diff's delta). Do not tidy it up next to its near-neighbour
+#: `_SILENT_FAILURE_PATTERNS` — that costs eight doc anchors to save a scroll.
+EXIT_SENTINEL_RE = re.compile(
+    r"^LLOYD_SCRIPT_EXIT:\s+(\S+)\s+exit=([1-9]\d*)\s*$", re.MULTILINE)
+
+
+def _scan_exit_sentinels(content: str) -> dict[str, int]:
+    """{script: nonzero_exit} for sentinel lines in one tool result, {} for none.
+
+    Nonzero only, deliberately: `exit=0` is every healthy run of every emitter,
+    and recording it would make the marker mean "a script ran" instead of the
+    one thing it exists to say — "a script is red".
+    """
+    return {script: int(code)
+            for script, code in EXIT_SENTINEL_RE.findall(content or "")}
+
+
 @_records_trigger
 async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     """Execute a single autonomy task via Claude Agent SDK."""
@@ -4451,6 +4485,8 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     # is_error=True rather than raising, so without this they never reach the run
     # record. Defined before the try so the except path can reference it safely.
     tool_errors: list[str] = []
+    # #2619: alarms observed in this turn's tool results, {script: exit_code}.
+    script_alarms: dict[str, int] = {}
     # Declared out here so the `finally` at the bottom can always close it,
     # including when the run fails before the observer is attached.
     iv_state = None
@@ -4674,6 +4710,17 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 async for evt in recorded:
                     if evt["type"] in ("tool_call", "tool_result"):
                         dispatch.observe(evt)
+                    # #2619: an alarm a script exited with must reach the run
+                    # row even when the agent's final text never mentions it, so
+                    # this reads the tool RESULT — the bytes the model was shown,
+                    # and the only place an exit code that died inside the turn
+                    # still exists. Every tool result, not the `is_error` ones
+                    # below: a script that exits 2 while the shell reports
+                    # success (a pipe, an `|| true`) arrives is_error=False.
+                    if evt["type"] == "tool_result":
+                        for script, code in _scan_exit_sentinels(
+                                str(evt.get("content") or "")).items():
+                            script_alarms[script] = code
                     if evt["type"] == "text_delta":
                         final_response += evt["text"]
                     elif evt["type"] == "iteration_retry":
@@ -4825,6 +4872,13 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         grade = _acceptance_grade(task, dispatch, terminal_text)
         if grade is not None:
             meta[_ACCEPTANCE_GRADE_KEY] = grade
+        # #2619: into the record file ONLY when an alarm was observed. On disk
+        # the ABSENCE of the key has to mean "no script exited nonzero", so a
+        # reader never has to tell an empty dict from a producer that stopped
+        # honouring the marker — and a run that predates this change reads as a
+        # clean night, which is true, not as a lost alarm.
+        if script_alarms:
+            meta["script_alarm"] = dict(script_alarms)
 
         record = _write_run_record(
             task_id=task_id, run_id=run_id, status="success",
@@ -4881,6 +4935,12 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         }
         if grade is not None:
             result[_ACCEPTANCE_GRADE_KEY] = grade
+        # #2619: top level too, for the same reason `claims` had to be added
+        # (#945): `workers/sources/scheduled_task.py`'s execute ends in a
+        # hand-written whitelist that lifts NAMED keys out of this result, and a
+        # key it does not name never reaches the queue row. Carried even when
+        # empty so the lift sees a producer that honours the marker every run.
+        result["script_alarm"] = dict(script_alarms)
         # Out unverified on purpose: the pool runs the checks when it writes the
         # row, so nothing that happened during the run — including this model's
         # own tool calls, which could have edited the file being claimed — can
@@ -5362,6 +5422,11 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
             "claims_insufficient": 0, "gap_runs": 0,
             "gpu_hours": 0.0, "wasted_hours": 0.0, "total_seconds": 0.0,
             "max_seconds": 0.0, "consecutive_failures": 0, "last_success": None,
+            # #2619: runs whose SCRIPT reported a nonzero exit. A count, not a
+            # rate: a nightly whose alarm rail was red three straight nights at
+            # `fail_rate` 0.0 is the exact failure this field exists to make
+            # visible, and "3" is what the watchdog's line has to print.
+            "script_alarm_runs": 0,
             "_streak_open": True,
         })
         e["runs"] += 1
@@ -5412,6 +5477,12 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
             e["empty"] += 1
         if silent:
             e["silent"] += 1
+        # #2619: read from this row's own `meta_json` — the marker sits beside
+        # `status`, not inside it, which is what lets an alarm show up while the
+        # turn that ran the script is still recorded as a success. A reader of
+        # this field never has to open the report file.
+        if meta.get("script_alarm"):
+            e["script_alarm_runs"] += 1
         if meta.get("stop_reason") == "max_turns":
             e["max_turns_runs"] += 1
         if int(meta.get("silent_failure_indicators") or 0) > 0:
@@ -5483,6 +5554,9 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
              "timeouts": 0, "empty": 0,
              "silent": 0, "fail_rate": None, "silent_rate": None, "gpu_hours": 0.0,
              "unobserved_in_window": True,
+             # #2619: zero because NO run was observed in the window — not
+             # "checked and clean", which is what a row with runs reports.
+             "script_alarm_runs": 0,
              "wasted_hours": 0.0, "avg_seconds": 0.0, "max_seconds": 0.0,
              "runs_with_bundle": 0, "runs_without_bundle": 0,
              "claims_checked": 0, "claims_verified": 0, "claims_refuted": 0,
@@ -5556,6 +5630,10 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
             "gpu_hours": round(sum(t["gpu_hours"] for t in out_tasks), 2),
             "wasted_hours": round(sum(t["wasted_hours"] for t in out_tasks), 2),
             "empty_runs": sum(t["empty"] for t in out_tasks),
+            # #2619: an alarm rail that refuses to clear moves this count and
+            # no other fleet number — each of the 2026-10-10..12 nights left
+            # fail_rate, silent_rate and consecutive_failures untouched.
+            "script_alarm_runs": sum(t["script_alarm_runs"] for t in out_tasks),
             "timeout_runs": sum(t["timeouts"] for t in out_tasks),
             # #525 pilot coverage next to the rate it produces. A window with a
             # low rate but most runs in `runs_without_bundle` is a window where

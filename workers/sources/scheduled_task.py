@@ -489,4 +489,15 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # exactly how `claims` was lost above.
     if "acceptance_grade" in result:
         out["meta"] = {**out["meta"], "acceptance_grade": result["acceptance_grade"]}
+    # #2619 — the script alarm, lifted by name for the same reason and by the same
+    # mechanism as `acceptance_grade` above. It is the only thing that separates an
+    # alarm night from a clean one on this row: a monitoring script's exit code
+    # dies inside the agent turn, so three consecutive knowledge-health alarms
+    # (2026-10-10..12, each report line 291 reading ABOVE FLOOR) were recorded
+    # `status: success` with nothing in the row to
+    # say otherwise. The producer sends the key on every run and the lift copies
+    # it only when non-empty, so the row carries the field exactly on alarm runs —
+    # absence keeps meaning "no script reported a nonzero exit".
+    if result.get("script_alarm"):
+        out["meta"] = {**out["meta"], "script_alarm": result["script_alarm"]}
     return out

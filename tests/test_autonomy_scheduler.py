@@ -2438,26 +2438,34 @@ def test_the_health_payload_keeps_every_key_today_s_consumers_read(aut, monkeypa
 
     assert old_fleet_keys <= set(h["fleet"]), (
         f"the fleet block lost {sorted(old_fleet_keys - set(h['fleet']))}")
-    # Five keys have been let in since that snapshot, each by a named decision
+    # Six keys have been let in since that snapshot, each by a named decision
     # rather than silently: #1401's two clamp keys, #713's
     # `evidence_unevaluable_reason` — the sentence explaining a null
-    # `refuted_or_insufficient_rate` — and #1807's `task_failures` /
-    # `infra_failures`, which split `failures` by who owns it. `failures` and
-    # `fail_rate` are untouched by that split, so every consumer reading the
-    # headline number reads the same number as before; the two new keys exist
-    # because a fleet reporting `failures: 25` cannot say whether 25 tasks are
-    # broken or the box was down, and the second is what a 13-second
-    # `ToolDiscoveryError` in a landing window started being counted as.
+    # `refuted_or_insufficient_rate` — #1807's `task_failures` /
+    # `infra_failures`, which split `failures` by who owns it, and #2619's
+    # `script_alarm_runs`. `failures` and `fail_rate` are untouched by that
+    # split, so every consumer reading the headline number reads the same number
+    # as before; the two new keys exist because a fleet reporting `failures: 25`
+    # cannot say whether 25 tasks are broken or the box was down, and the second
+    # is what a 13-second `ToolDiscoveryError` in a landing window started being
+    # counted as. `script_alarm_runs` joins for the reason the first five cannot
+    # cover: a nightly whose own script exited 2 three nights running
+    # (knowledge-health 2026-10-10..12) leaves `failures`, `fail_rate`,
+    # `silent_rate` and `consecutive_failures` all clean, because the runner
+    # records the TURN and the exit code died inside it — so containment here is
+    # what keeps that blind spot from being added by the same route as a
+    # rename. The new key is additive and every pre-snapshot key keeps its
+    # meaning, which is the property clause 5 of #1401 actually defends.
     # The fleet rate stopped being its own sum (#713) precisely so it could not
     # disagree with the artifact rollup, and a null a consumer cannot explain is
     # the trap #1401 exists to close. Anything else this set grows by fails here
     # naming itself, which is what the containment assertion is for.
     assert set(h["fleet"]) - old_fleet_keys == {
         "oldest_input", "window_clamped_to_hours", "evidence_unevaluable_reason",
-        "task_failures", "infra_failures"}, (
+        "task_failures", "infra_failures", "script_alarm_runs"}, (
         f"the fleet block gained {sorted(set(h['fleet']) - old_fleet_keys)} — "
-        "the clause permits the two clamp keys, #713's unevaluable reason and "
-        "#1807's infra/task split")
+        "the clause permits the two clamp keys, #713's unevaluable reason, "
+        "#1807's infra/task split and #2619's script_alarm_runs")
     assert isinstance(h["fleet"]["runs"], int)
     assert isinstance(h["fleet"]["fail_rate"], float)
     assert h["fleet"]["runs"] == sum(t["runs"] for t in h["tasks"]), (

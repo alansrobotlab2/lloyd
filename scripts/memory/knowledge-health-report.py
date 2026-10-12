@@ -1376,6 +1376,30 @@ def generate_report(
 EXIT_OK = 0
 EXIT_ALARM = 2
 
+#: Marker line naming this script's real exit code, printed just before exit.
+#:
+#: A scheduled run's exit code died inside the agent turn's Bash call: task 60
+#: has raised this alarm every night since 2026-10-10 and `workers.db` recorded
+#: `status: success` beside every one of them, because the runner records the
+#: TURN's outcome, and the pipe the skill's own invocation uses
+#: (`... 2>&1 | tail -80; echo EXIT=$?`) hands the shell exit code 0 even when
+#: this script returned 2 (#2619). The line is therefore the machine-readable
+#: half of the alarm: `app/autonomy.py` scans every tool result in the turn for
+#: it and records the pair in that run's `meta_json.script_alarm`, which is what
+#: `/api/autonomy/health` (`script_alarm_runs`) and the queue-health watchdog
+#: read. It goes to BOTH stdout and stderr — emitted last, so any `tail` worth
+#: reading keeps it, and `2>&1` merges it — and it changes nothing about the
+#: exit code: `EXIT_ALARM = 2` still leaves the process, still pinned by
+#: `tests/test_knowledge_health_stale_facts.py`.
+EXIT_SENTINEL_PREFIX = "LLOYD_SCRIPT_EXIT: "
+
+
+def emit_exit_sentinel(script: str, code: int) -> None:
+    """Print the exit-code marker line on both streams. See EXIT_SENTINEL_PREFIX."""
+    line = f"{EXIT_SENTINEL_PREFIX}{script} exit={code}"
+    print(line)
+    print(line, file=sys.stderr)
+
 
 def _parse_edge_ts(value) -> datetime | None:
     """A `created_at` string as a UTC datetime, or None when it cannot be stated.
@@ -1723,14 +1747,16 @@ def main():
         pass
 
     alarms = _alarms(store_stats, hygiene, dup_id_files, baseline)
+    rc = EXIT_OK
     if alarms:
         print("\nALARM:", file=sys.stderr)
         for a in alarms:
             print(f"  - {a}", file=sys.stderr)
         _alert(alarms, output_file)
         if not args.no_alarm_exit:
-            return EXIT_ALARM
-    return EXIT_OK
+            rc = EXIT_ALARM
+    emit_exit_sentinel("knowledge-health-report.py", rc)
+    return rc
 
 
 def _alert(alarms: list[str], report_path: Path) -> None:

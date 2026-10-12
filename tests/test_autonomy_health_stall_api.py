@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 from pathlib import Path
 
 import pytest
@@ -367,3 +368,156 @@ def test_the_shared_gap_predicate_keeps_its_strict_bound_and_its_numbers():
                          "never_run": True,
                          "past_next_run": False}, (
         f"a row with no stamps started answering like a healthy one: {unstamped}")
+
+
+# ── #2619: an alarm NIGHT is a number the fleet can see ──────────────────────
+#
+# The knowledge-health report exits 2 when an alarm rail fires. From 2026-10-10
+# to 2026-10-12 that happened three nights running, and every one of those runs
+# is `status: success` in `workers.db` — the runner records the agent TURN, and
+# the script's exit code dies inside a Bash call in it. This endpoint is what
+# `queue-health-check` reads, so a monitor built to raise an alarm was raising
+# nothing the fleet could see: `fail_rate`, `silent_rate`,
+# `consecutive_failures` and `empty_runs` all stayed at their clean values.
+#
+# The marker the runner now writes into `runs.meta_json` (`script_alarm`,
+# {"knowledge-health-report.py": 2}) is surfaced here as a per-task count plus a
+# fleet total, so an alarm night is a NUMBER in the same table a human already
+# reads. No reader of it opens the report file.
+
+#: What a knowledge-health alarm night writes into the run row's `meta_json`.
+ALARM_META = {"script_alarm": {"knowledge-health-report.py": 2}}
+
+
+def _seed_script_run(queue, when: dt.datetime, task_id: str,
+                     meta: dict | None = None) -> str:
+    """One `scheduled-task` row for `task_id`, with `meta` in `meta_json`."""
+    stamp = when.isoformat()
+    queue.record_run(
+        run_id=f"run-alarm-{task_id}-{stamp}", queue_id=None,
+        source="scheduled-task", status="success",
+        started_at=stamp, completed_at=stamp, duration_seconds=60.0,
+        summary="Knowledge health report written", task_id=task_id,
+        meta_json=json.dumps(meta) if meta is not None else "")
+    return stamp
+
+
+def test_the_endpoint_counts_alarm_runs_per_task_and_in_the_fleet(
+        client, queue, autonomy_dir):
+    """clause 3: an alarm night is visible on this endpoint, per task and fleet-wide.
+
+    Three rows for task 60, all `status: success`, two carrying the marker —
+    which is the real shape of 2026-10-10..12: three consecutive alarm nights,
+    zero failures. The assertion that carries the weight is the one on
+    `fail_rate`: if the alarm somehow also moved `fail_rate`, the count below
+    would prove nothing about the gap this field exists to close.
+    """
+    _task_file(autonomy_dir, 60, "Knowledge health report", "up_next")
+    for back in (1, 2, 3):
+        _seed_script_run(queue, PIN - dt.timedelta(days=back),
+                         "60", ALARM_META if back <= 2 else None)
+
+    body = client.get("/api/autonomy/health", params={"days": 7}).json()
+    assert "error" not in body, body
+    row = next(t for t in body["tasks"] if t["task_id"] == "60")
+
+    assert row["script_alarm_runs"] == 2, (
+        f"two alarm nights in the window, endpoint said "
+        f"{row.get('script_alarm_runs')!r}")
+    assert row["fail_rate"] == 0.0 and row["consecutive_failures"] == 0, (
+        "the control: this is supposed to be a run that looks healthy on every "
+        "pre-existing number, and if it does not, the count above is not "
+        "measuring what it claims")
+    assert body["fleet"]["script_alarm_runs"] == 2, (
+        f"fleet total {body['fleet'].get('script_alarm_runs')!r} does not "
+        "match the per-task count")
+
+
+def test_a_task_with_no_marker_reports_zero_not_missing(client, queue,
+                                                        autonomy_dir):
+    """The field is in the table's SHAPE, so the watchdog can print it unconditionally.
+
+    Two negative cases in one node, because the failure mode is the same: a
+    reader must be able to print `script_alarm_runs` for every row without
+    first asking whether the row is old enough to predate the marker.
+    (a) a run whose `meta_json` is empty — every row written before this change,
+    which on 2026-10-12 is every one of the 663 `scheduled-task` rows in
+    `~/lloyd-data/workers.db` (0 of them carry `script_alarm`), so this is the
+    shape of every row the watchdog will read up to and including the last
+    nightly before this lands;
+    (b) a run whose `meta_json` will not parse, which must not raise and must
+    not be counted;
+    (c) an idle task, which has no run at all.
+    """
+    _task_file(autonomy_dir, 61, "Nightly tidy", "up_next")
+    _seed_script_run(queue, PIN - dt.timedelta(hours=3), "61", None)
+    stamp = (PIN - dt.timedelta(hours=4)).isoformat()
+    queue.record_run(run_id="run-unparseable-61", queue_id=None,
+                     source="scheduled-task", status="success",
+                     started_at=stamp, completed_at=stamp,
+                     duration_seconds=60.0, summary="x", task_id="61",
+                     meta_json="{not json")
+    _task_file(autonomy_dir, 62, "Never ran", "up_next")
+
+    body = client.get("/api/autonomy/health", params={"days": 7}).json()
+    row = next(t for t in body["tasks"] if t["task_id"] == "61")
+    assert row["script_alarm_runs"] == 0, (
+        f"empty and unparseable meta_json produced "
+        f"{row['script_alarm_runs']!r} — an absent marker read as an alarm")
+    idle = next(t for t in body["idle_tasks"] if t["task_id"] == "62")
+    assert idle["script_alarm_runs"] == 0, (
+        "an idle task has no `script_alarm_runs` at all, so a watchdog that "
+        "prints the field for every row dies on the idle rows")
+
+
+# ── #2619: the watchdog's own report has to carry the number ─────────────────
+#
+# Surfacing a field on the endpoint is half of it. `queue-health-check` is the
+# job that reads this endpoint every 15 minutes, and what it PRINTS is what a
+# human ever sees: a field the skill's Step 1 does not print and Step 2 does not
+# flag is a field that exists in JSON and in no report. Task 60's three alarm
+# nights were exactly that — every number the skill prints was healthy.
+#
+# These nodes read the live skill file rather than a copy, because a claim about
+# what a running job prints is only worth what it says about the file the job
+# actually loads. Unmarked on purpose — the same trade
+# `tests/test_autonomy_run_record.py` documents for this skill's Step 2: the gate
+# runner hardcodes `-m "not live_vault"`, so a marked node pins nothing. A
+# missing skill FAILS here rather than skipping: a skipped check is exactly how
+# the false green below survived, because nothing was reading the line.
+#
+# The false green, stated plainly because it is the reason these nodes exist:
+# vault commit 864733c8 put `script_alarm_runs` into this skill's Step 1 and
+# Step 2 while the code half was still in review, so between that commit and
+# this one the watchdog prints `script-alarm runs: 0 across 0 tasks` on a box
+# with three alarm nights — a check that reads as performed. Landing the count is
+# what makes the sentence true; the lines are not this diff's to change.
+
+#: The watchdog skill, on the live board this box's jobs load from.
+def _skill_text() -> str:
+    import os
+    root = os.environ.get("LLOYD_OBSIDIAN_VAULT") or (Path.home() / "obsidian")
+    path = Path(root) / "skills" / "queue-health-check" / "SKILL.md"
+    if not path.is_file():
+        pytest.fail(f"no queue-health-check skill on this box at {path} — the "
+                    "job that reads this endpoint loads it from here")
+    return path.read_text(encoding="utf-8")
+
+
+def test_the_watchdog_skill_prints_the_alarm_field():
+    """The acceptance check's watchdog half: an alarm night reaches the report.
+
+    Both halves are pinned because they fail differently. Step 1 is the fleet
+    table's code block — if it never prints the field, the number is invisible no
+    matter what Step 2 says. Step 2 is the criteria list — a printed number
+    nothing judges is printed decoration, and the whole reason task 60's alarm
+    survived three nights is that no criterion could be met by it.
+    """
+    text = _skill_text()
+    step1, _, rest = text.partition("## Step 2")
+    assert step1.count("script_alarm_runs") >= 1, (
+        "Step 1 does not print `script_alarm_runs`, so an alarm night never "
+        "reaches the report a human reads")
+    assert rest.split("## Step 3")[0].count("script_alarm_runs") >= 1, (
+        "Step 2 does not judge `script_alarm_runs`, so the printed number "
+        "decides nothing")
