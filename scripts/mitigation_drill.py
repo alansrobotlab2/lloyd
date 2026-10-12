@@ -32,7 +32,7 @@ session is touched:
 
 Not drilled here: the Inner Voice cancel sets the same kind of turn
 ``cancel_event`` from inside the backend, and the guardian rollback already has
-its canary drill (`scripts/automod/rehearse.py`, gate rung 7).
+its canary drill (`scripts/automod/rehearse.py`, the `drill` rung).
 
 The drill refuses while a self-mod round holds the live pool (read from
 ``/api/workers/status``'s ``round_hold``, the pool's own state), so it never

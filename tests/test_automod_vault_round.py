@@ -3072,7 +3072,7 @@ def test_the_agreement_excuse_text_says_the_copy_is_retired_not_current():
     describes in the present tense has gone — and a false mechanism note in the module that
     IMPLEMENTS the excuse is worse than no note, because it teaches the next round that
     re-committing a 33,113,707-byte mirror is what an ack is for. The price of re-timing it is
-    gate rung 6's live rollback drill, since `scripts/automod/**` is in `PROTECTED_GLOBS`
+    the `drill` rung's live rollback drill, since `scripts/automod/**` is in `PROTECTED_GLOBS`
     (`scripts/automod/spec.py`); the item rules that worth paying rather than leaving the lie.
 
     Pinned on the docstring of the IMPORTED function, not a re-read of the file: `agreement` is

@@ -52,7 +52,7 @@ def test_ordinary_code_is_allowed(path):
     "app/lifecycle.py", "app/gitinfo.py",
 ])
 def test_the_rollback_path_is_protected(path):
-    """These may be changed, but only with a live drill. See rung 6."""
+    """These may be changed, but only with a live drill. See the `drill` rung."""
     assert spec.classify(path) == "protected"
 
 
@@ -649,7 +649,7 @@ def test_a_list_is_a_leaf_compared_whole():
 
 def test_a_config_value_change_arms_the_drill_via_buckets():
     """The bound on the lane is on HOW it lands: a config value change is
-    boot-affecting, so rung 0's bucket turns rung 6 on the way a protected
+    boot-affecting, so rung 0's bucket turns the `drill` rung on the way a protected
     path does. Paths alone cannot see it — the bucket is content-judged — so
     the paths-only call keeps its old answer and the gate passes the buckets."""
     ok, reason, buckets = _scope_with("a:\n  cap: 400\n", "a:\n  cap: 401\n")
@@ -817,7 +817,7 @@ def tracked_agent_services_paths() -> list[str]:
     The index and not the working tree because rung 0 classifies the paths a diff
     touches (`gate.py:928`, `rung_preflight`), which is exactly what a commit can
     carry there. Measured at `1842b8cf`: 187 files, of which 112 already classify
-    `protected` (writable today, with rung 6's drill) and 75 `unlisted`. Re-read
+    `protected` (writable today, gated by the `drill` rung) and 75 `unlisted`. Re-read
     at this round's base `c2bd72b`: 192 files, 117 `protected`, 75 `unlisted` —
     the five more are `guardian/datawatch.py` and four `systemd/` units, all
     already `protected`, which is why the unlisted count the rails are priced on

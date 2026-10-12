@@ -7,7 +7,7 @@ three tiers rather than two:
   * **allowed** — ordinary code. Lands automatically once the gate passes.
   * **protected** — the gate, the guardian, and the restart/health path the
     rollback itself depends on. Lloyd may edit these, but the change must
-    additionally survive a live rollback drill (gate rung 6). A bound on *how*
+    additionally survive a live rollback drill (the gate's `drill` rung). A bound on *how*
     it changes, not on *whether* — which is the difference between guarding a
     capability and amputating it.
   * **denied** — never landed by this loop, whatever the run spec says.
@@ -29,7 +29,7 @@ iterations discovering that its contract needed a Browser page it could not
 touch.
 
 Note `requirements.txt` / `requirements.lock` are *allowed*, but only because
-gate rung 3 builds a throwaway venv from them (btrfs reflink clone + `uv pip
+The gate's `venv` rung builds a throwaway venv from them (btrfs reflink clone + `uv pip
 install` of the delta) and boots the canary against it. Without that rung they
 would belong in `denied`.
 
@@ -425,7 +425,7 @@ def check_scope(paths: list[str], *, contents=None
 
     Returns (ok, reason, buckets). `ok` is False if anything is denied or
     unlisted. Protected paths are permitted here — they are what turns on the
-    rollback drill in rung 6, handled by the caller.
+    rollback drill (the `drill` rung), handled by the caller.
 
     `contents(path) -> (before, after)` lets a denied path in
     `COMMENT_ONLY_GLOBS` through on content: `comment_only_change` first (the

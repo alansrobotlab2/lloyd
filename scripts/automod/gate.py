@@ -8,7 +8,12 @@ The gate always runs **from the live tree** against the worktree, so a
 candidate that weakens the gate is judged by the old gate, not by itself.
 
 Rung order is a cost ladder, and it short-circuits: an import error should
-cost 3 seconds, not a full canary boot.
+cost 3 seconds, not a full canary boot. The number in front of each name is its
+index in the order `Gate.run` builds, which is the ONE numbering this tree has:
+it is the same ordinal a round's `rungs[]` records carry, the two conditional
+rungs hold their positions in it rather than sitting outside it, and
+`tests/test_automod_doc_claims.py` fails a rung that was inserted into the ladder
+without the prose being renumbered.
 
   0 preflight      ~1s    lock, clean tree, ancestry, diff scope; with an item
                           bound, that it has clauses and the diff has a test
@@ -29,7 +34,10 @@ cost 3 seconds, not a full canary boot.
                           touched, which is what pyflakes cannot and #528
                           explicitly does not do. Recorded; blocks nothing until
                           a soak of real rounds says it may.
-  4 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
+  4 frontend       ~5s    CONDITIONAL rung: the tsc delta and a vite
+                          build over the round's `web/` paths, recorded
+                          as SKIPPED when no `web/` path changed.
+  5 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
                           workers (~600 s serial) + a collected-count floor.
                           A failure under load is re-run serially before it
                           is believed; a real one re-probes the failing files
@@ -37,26 +45,28 @@ cost 3 seconds, not a full canary boot.
                           a failure that is not the round's (pre-existing or
                           flaky, in a file the diff did not touch) PASSES the
                           rung, recorded and filed as a `red-tree` item
-  5 review      60-180s   a second reader: a fresh session on the LIVE
+  6 prompt_surface cond.  CONDITIONAL rung: the scored behavioural
+                          check on what the model is told, run only for
+                          a prompt-surface diff.
+  7 review      60-180s   a second reader: a fresh session on the LIVE
                           backend grades the diff against the item's
                           acceptance clauses (scripts/automod/review.py).
                           Refuses with findings; the premise verdict decides
                           whether the item is retried or handed to a human.
                           Skipped (recorded) only when no item is bound.
-  6 venv        0-300s    only when requirements changed (reflink + uv)
-  7 canary boot   ~30s    both /health green, tool floor, config-follows-code
-  8 canary smoke  ~30s    one real turn, sentinel through a real Bash call
+  8 venv        0-300s    only when requirements changed (reflink + uv)
+  9 canary_boot   ~30s    both /health green, tool floor, config-follows-code
+ 10 canary_smoke  ~30s    one real turn, sentinel through a real Bash call
                           (recorded as SKIPPED when the engine is unreachable;
                            `skip_smoke` is refused while it answers)
-  9 drill         ~90s    only when the diff touches the rollback path
+ 11 drill         ~90s    only when the diff touches the rollback path
 
-Two rungs are not numbered above because they only exist conditionally:
-`frontend` (between `static` and `tests`: tsc delta + vite build, recorded as
-SKIPPED when no `web/` path changed) and `prompt_surface` (between `tests` and
-`review`: the scored behavioural check, only for a prompt-surface diff). Of the
-twelve, `vet` and `pyright` are the only rungs that read the change set itself
-rather than the behaviour it produces, and the only two deliberately written not
-to block: each records into the round event and waits for a soak of real rounds
+`frontend` (4) and `prompt_surface` (6) are numbered where they run rather than
+listed beside the ladder, because a rung that is unnumbered is a rung a citation
+cannot point at. Of the twelve, `vet` and `pyright` are the only rungs that
+read the change set itself rather than the behaviour it produces, and the only
+two deliberately written not to block: each records into the round event and
+waits for a soak of real rounds
 before either is allowed to refuse one. A type checker is in this ladder because
 the analyser is cheap, deterministic and cannot be argued with, which is exactly
 what a loop with no human review tier needs; it is observe-only because nobody

@@ -2106,3 +2106,258 @@ def test_no_source_cites_the_youtube_digest_by_line_number():
                 "the sponsor slot at `:" + "1450` is a different failure",
                 "`knowledge/ai-llms/youtube-digest.md:" + "1663` did with a label"):
         assert DIGEST_LINE_CITATION_RE.search(was), f"{was!r} no longer trips the grep"
+
+
+# ---------------------------------------------------------------------------
+# gate.py's OWN module docstring: the one numbering (#2608)
+# ---------------------------------------------------------------------------
+#
+# `architecture/automod.md` §4 got pinned to the executed ladder in #679, but the
+# module docstring in `scripts/automod/gate.py` was never pinned at all, and it
+# carried a SECOND numbering of the same ladder: it listed ten rungs 0-9 and put
+# `frontend` and `prompt_surface` outside the numbering entirely. Under that
+# docstring "rung 6" is `venv`; under the ladder `Gate.run` builds it is `drill`.
+# The tree noticed: `scripts/automod/rehearse.py` called itself "gate rung 6"
+# while `scripts/mitigation_drill.py` called the SAME rung "gate rung 7", and
+# neither number is right (0-based, `drill` is 11).
+#
+# So the docstring now carries the ladder's own ordinals, conditional rungs
+# included, and these nodes hold it there. The docstring is what an operator
+# reads at 3am and what a prose citation quotes; a number in it that disagrees
+# with the code is a citation no one can resolve.
+
+#: Lines of the module docstring that name a rung: `  N name`. Two spaces of
+#: indent plus a 1-2 digit ordinal plus a bare lowercase rung name — the shape
+#: the rung table uses and nothing else in that docstring has.
+GATE_RUNG_ROW = re.compile(r"^ {1,2}(\d{1,2}) ([a-z_]+)\s")
+
+#: Every gate-rung citation that names its rung rather than numbering it, as
+#: `(file, an anchor line of its prose, the rung it means)`. The point of the
+#: anchor is that it locates the citation: a bare number can be re-typed by
+#: someone who never read the item, but the rung name is what makes the
+#: sentence true.
+NAMED_RUNG_CITATIONS = [
+    ("scripts/automod/spec.py", "survive a live rollback drill", "drill"),
+    ("scripts/automod/spec.py", "builds a throwaway venv", "venv"),
+    ("scripts/automod/spec.py", "rollback drill (the", "drill"),
+    ("scripts/automod/rehearse.py", "and it fires whenever a diff touches", "drill"),
+    ("scripts/mitigation_drill.py", "its canary drill", "drill"),
+    ("agent_mcp/automod.py", "Skip the live-LLM turn", "canary_smoke"),
+    ("tests/test_automod_spec.py", "but only with a live drill", "drill"),
+    ("tests/test_automod_spec.py", "bucket turns the", "drill"),
+    ("tests/test_automod_spec.py", "writable today, gated by", "drill"),
+    ("tests/test_automod_vault_round.py", "live rollback drill", "drill"),
+]
+
+#: The files whose gate-rung citations are held to the naming convention. The
+#: context-relief ladder in `app/harness/` is a DIFFERENT, genuinely 0-based
+#: ladder (rungs 0-4) and is not in this list; neither is
+#: `scripts/groundskeeper/retention-sweep.py`, whose "rung 2" is its own store
+#: list. Markdown is out because `architecture/automod.md` carries a dated
+#: change-log entry with a 1-based ordinal ("`drill`, the twelfth") that is
+#: history, and rewriting history is not what a numbering fix means.
+CITATION_SCAN_GLOBS = ["scripts/automod/*.py", "tests/test_automod_*.py"]
+CITATION_SCAN_FILES = ["agent_mcp/automod.py", "scripts/mitigation_drill.py"]
+
+#: A bare number after the word "rung" is a citation only while it is inside the
+#: ladder. `scripts/automod/state.py` says "tests rung 408 s of it", which is a
+#: duration wearing the same clothes, and a scan that flagged it would be
+#: ignored within a week.
+RUNG_CITATION = re.compile(r"(?:gate )?rung (\d+)")
+
+
+def _gate_docstring() -> str:
+    """`scripts/automod/gate.py`'s module docstring, as the interpreter sees it."""
+    from scripts.automod import gate as G
+    doc = G.__doc__
+    assert doc, "scripts/automod/gate.py has no module docstring to number"
+    return doc
+
+
+def _docstring_ordinals() -> dict[int, str]:
+    """The docstring's rung rows as `{ordinal: name}`, refusing a doubled ordinal.
+
+    The two spaces of indent matter: they are what separates a rung row from
+    prose that happens to start with a number, and they are how the table is
+    laid out in the first place.
+    """
+    found: dict[int, str] = {}
+    for line in _gate_docstring().splitlines():
+        m = GATE_RUNG_ROW.match(line)
+        if m:
+            n, name = int(m.group(1)), m.group(2)
+            assert n not in found, (
+                f"gate.py's docstring numbers {found.get(n)!r} and {name!r} both "
+                f"{n}: a rung added to the ladder has to be inserted at its own "
+                "position, not appended to the table")
+            found[n] = name
+    return found
+
+
+def _docstring_row_of(name: str) -> str:
+    """The whole rung-table line the docstring uses for `name`."""
+    for line in _gate_docstring().splitlines():
+        m = GATE_RUNG_ROW.match(line)
+        if m and m.group(2) == name:
+            return line
+    raise AssertionError(f"gate.py's docstring has no rung row for {name!r}")
+
+
+def test_the_gate_docstring_numbers_every_rung_including_the_conditional_ones(monkeypatch):
+    """clause 1: one ladder, one numbering, the conditional rungs inside it and marked.
+
+    Each of the twelve rungs must appear as `N name` with `N` its position in the
+    order `Gate.run` builds (`preflight` 0 through `drill` 11), and the two
+    conditional ones — `frontend` 4, `prompt_surface` 6 — must say CONDITIONAL on
+    their own row rather than be explained in a paragraph beside the table. The
+    sentence that explained why two rungs were "not numbered above" has to stay
+    gone: while it stands, the docstring's numbering is optional, and a citation
+    can pick either convention and claim to be right.
+    """
+    real = _real_ladder(monkeypatch)
+    doc = _gate_docstring()
+    by_name = {name: i for i, name in enumerate(real)}
+    ordinals = _docstring_ordinals()
+    assert sorted(ordinals) == list(range(len(real))), (
+        f"the docstring numbers its rungs {sorted(ordinals)} for a ladder of "
+        f"{len(real)}: every rung takes the index it has in Gate.run")
+    assert set(ordinals.values()) == set(real), (
+        f"docstring rungs {sorted(ordinals.values())} are not the executed "
+        f"names {sorted(real)}")
+    for name in real:
+        assert ordinals[by_name[name]] == name, (
+            f"{name} belongs at {by_name[name]} but the docstring puts "
+            f"{ordinals[by_name[name]]!r} there")
+    for name in ("frontend", "prompt_surface"):
+        row = _docstring_row_of(name)
+        assert "CONDITIONAL" in row, (
+            f"the {name} row must be marked CONDITIONAL at its own position; a "
+            f"conditional rung described only in prose reads as a rung that "
+            f"always runs: {row!r}")
+    assert "not numbered above" not in doc, (
+        "the docstring is back to explaining rungs outside its numbering")
+
+
+def test_the_gate_docstring_ordinals_are_the_executed_ladder_positions(monkeypatch):
+    """clause 2: parse the docstring's ordinals against the order that RUNS.
+
+    A rung inserted in the middle shifts every position after it, and before this
+    node existed that shift silently invalidated each prose citation that quoted a
+    number — which is how ten sites came to name `drill`, `venv` and
+    `canary_smoke` by numbers that were neither the docstring's nor the ladder's.
+    Inserting a rung at the END is still free: it becomes `len(ladder)`, and the
+    docstring gains one row, and both are the change the commit says it is.
+    """
+    real = _real_ladder(monkeypatch)
+    found: dict[int, str] = {}
+    for line in _gate_docstring().splitlines():
+        m = GATE_RUNG_ROW.match(line)
+        if m:
+            n, name = int(m.group(1)), m.group(2)
+            assert n not in found, (
+                f"gate.py's docstring numbers {found.get(n)!r} and {name!r} both "
+                f"{n}: one rung must be added to the ladder and its row renumbered")
+            found[n] = name
+    assert found == dict(enumerate(real)), (
+        f"docstring says {found} but Gate.run executes {dict(enumerate(real))}; "
+        "the docstring's ordinals are what prose citations quote, so a rung "
+        "inserted anywhere but the end has to be renumbered in the same commit")
+
+
+def test_the_gate_docstring_states_the_count_of_rungs_that_run(monkeypatch):
+    """clause 3: the count word in gate.py's first line is checked against the ladder.
+
+    "twelve rungs" in prose is a second definition of the ladder, and the second
+    definition is the one that goes stale — §4's own count word already gets this
+    check (`test_the_doc_rung_count_matches_the_ladder_that_runs`) and the module
+    docstring did not, so a thirteenth rung could be added with the code, the doc
+    table and the docstring each claiming a different total.
+    """
+    real = len(_real_ladder(monkeypatch))
+    stated = re.search(r"\b([A-Za-z]+) rungs, cheapest first", _gate_docstring())
+    assert stated, "gate.py's docstring no longer states the rung count in line 1"
+    word = stated.group(1).lower()
+    assert word in RUNG_NUMBERS, f"unparseable rung count {word!r}"
+    assert RUNG_NUMBERS[word] == real, (
+        f"gate.py's docstring states {word!r} rungs but Gate.run executes {real}")
+
+
+def test_no_gate_rung_is_cited_by_a_bare_number(monkeypatch):
+    """clause 4: a rung is cited BY NAME, because two numberings existed and both were wrong.
+
+    The scan's own list, and it excludes this file: the pattern is what it looks
+    for, so the file that holds the pattern cannot also be the thing it refuses.
+    Ten sites came through here naming `drill` (8), `venv` (1) and
+    `canary_smoke` (1) with numbers — `spec.py` three, `rehearse.py` one,
+    `mitigation_drill.py` one, `agent_mcp/automod.py` one, and four in the
+    `test_automod_*` files. One of those four (`test_automod_spec.py:652`) hid
+    behind a "rung 0" filter in the item's own scan, which is why this one scans
+    every match on a line rather than the first.
+    """
+    real = len(_real_ladder(monkeypatch))
+    paths = [ROOT / g for g in CITATION_SCAN_FILES]
+    for glob in CITATION_SCAN_GLOBS:
+        paths.extend(sorted(ROOT.glob(glob)))
+    seen, offenders = 0, []
+    for path in paths:
+        if path.name == Path(__file__).name:
+            continue
+        assert path.is_file(), f"the citation scan names {path}, which is not a file"
+        seen += 1
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for m in RUNG_CITATION.finditer(line):
+                if 1 <= int(m.group(1)) <= real:
+                    offenders.append(f"{path.relative_to(ROOT)}:{n}: {line.strip()[:88]}")
+    assert seen >= 12, f"the scan covered only {seen} files; its glob list rotted"
+    assert not offenders, (
+        "gate rungs are named, not numbered: this ladder has been re-ordered "
+        "twice, and a bare ordinal is a citation no reader can resolve. "
+        "Sites still citing by number:\n  " + "\n  ".join(offenders))
+
+
+def test_the_sites_that_named_a_number_now_name_their_rung():
+    """clause 4's other half: the rewritten citations actually say which rung.
+
+    Refusing the bare number is half of it; the sentence has to survive with the
+    name in it, or the fix is a deletion that leaves the reader with less than
+    they had. Each anchor locates one of the ten rewritten sites.
+    """
+    assert len(NAMED_RUNG_CITATIONS) == 10, "one anchor per rewritten site"
+    for rel, anchor, rung in NAMED_RUNG_CITATIONS:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        hit = [ln for ln in text.splitlines() if anchor in ln]
+        assert hit, f"{rel}: no line contains {anchor!r} — the citation moved"
+        assert any(rung in ln for ln in hit), (
+            f"{rel}: the citation at {anchor!r} no longer names {rung!r}: {hit[0][:88]}")
+
+
+def test_the_automod_tool_schemas_the_model_reads_cite_no_rung_by_number():
+    """The one place a rung number was READ BY A MODEL, checked across that seam.
+
+    `agent_mcp/automod.py`'s `skip_smoke` description said "Skip the live-LLM turn
+    (rung 5)". That string does not stay in the repo: `list_tools()` ships it over
+    MCP `tools/list`, and the model reads it before deciding whether to ask for a
+    skip — under the docstring's numbering 5 was `review`, under the executed
+    ladder it was `tests`, and the rung it actually skips is `canary_smoke`
+    (`gate.py` records it as SKIPPED for an unreachable engine). A file-level grep
+    proves the bytes; this calls `list_tools()` and reads the schema a client
+    receives, which is the same claim one boundary further out.
+    """
+    import asyncio
+    import json
+
+    from agent_mcp import automod as A
+
+    tools = asyncio.run(A.list_tools())
+    assert tools, "agent_mcp/automod.py exposes no tools to check"
+    for tool in tools:
+        shipped = json.dumps(tool.input_schema) + (tool.description or "")
+        for m in RUNG_CITATION.finditer(shipped):
+            assert not 1 <= int(m.group(1)) <= 12, (
+                f"{tool.name}'s schema cites rung {m.group(1)} by number; a "
+                "number is ambiguous here in a way it is not in a comment — the "
+                "model has no other convention to disambiguate it")
+    gate_tool = next(t for t in tools if t.name == "automod_gate")
+    skip = gate_tool.input_schema["properties"]["skip_smoke"]["description"]
+    assert "canary_smoke" in skip, (
+        f"the skip_smoke description no longer names the rung it skips: {skip!r}")

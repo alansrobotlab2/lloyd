@@ -10,7 +10,7 @@ directory. The scratch repo is a clone; the canary has its own supervisord
 socket; the guardian is pointed at a scratch state dir via CLI flags. A
 recording proxy wrapper asserts the live socket is never contacted.
 
-This is gate rung 6, and it fires whenever a diff touches a protected path —
+This is the gate's `drill` rung, and it fires whenever a diff touches a protected path —
 the guardian, its unit, the supervisor confs, or the health/restart path the
 rollback depends on. That is the concrete form of "Lloyd may edit his own
 parachute, but must demonstrate it still opens".
