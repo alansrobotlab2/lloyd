@@ -331,7 +331,7 @@ def _module_docstring(rel: str) -> str:
 #: `tests/fixtures/.gitignore`, whose reason is literally this one: the gate runs with
 #: HOME at the round home, "a node that opened it would skip, and a skipping node pins
 #: nothing". The whole file, not an extract: an extract of a prose ban is the exact
-#: shape that can hide the offending line, and the file is 80 lines.
+#: shape that can hide the offending line, and the file is 82 lines.
 #:
 #: What the frozen corpus cannot do is notice the LIVE file drifting, so that is the
 #: `live_vault` node's whole job — the marker `pytest.ini` registers for "assertions
@@ -353,7 +353,7 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     anything.
 
     The asserts, in the order that makes each one falsifiable:
-      * the corpus is the whole file at its exact bytes (19,690 B / 80 lines), and it
+      * the corpus is the whole file at its exact bytes (22,287 B / 82 lines), and it
         names `topics/memory-md-ledger`, so a 0-hit below cannot be a wrong path or an
         empty slice;
       * no LINE states a ledger's cap as 32,768 B — `_assert_no_ledger_ceiling_claim`
@@ -369,13 +369,15 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         the thing to ask rather than remember), because clause 5 asks that the prose
         "name the new cap", not merely omit the old one;
       * the text each later re-freeze carried in is present verbatim: the §2a-ter bullet
-        vault `e45a6b6c` added, and both hunks vault `5c6793be` (#2425) added. #2284
+        vault `e45a6b6c` added, both hunks vault `5c6793be` (#2425) added, and the two
+        sentences vault `acede7e9` (#2626) added — §4's same-run orphan-ownership
+        paragraph and §5's over-width-anchor ruling. #2284
         re-froze this witness WITH that bullet rather than reverting the prose, and the size
-        pin above alone could be satisfied by any 19,690 B file — naming the text is what
+        pin above alone could be satisfied by any 22,287 B file — naming the text is what
         makes "the freeze kept the prose" a fact about these bytes. It also says which
         corpus is being read: the node that byte-compares this file to the live skill is a
         `live_vault` node the gate deselects, so inside a gate these literals are the only
-        evidence that the frozen corpus is the post-#2425 one.
+        evidence that the frozen corpus is the post-#2626 one.
 
     None of that is asserted against the live vault, and that is the honest limit of a
     repo node: it pins this corpus. `live_vault` below is what keeps the pin from
@@ -386,7 +388,7 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         "it clause 5's corpus is a vault file the gate cannot open")
     raw = SKILL_WITNESS.read_bytes()
     text = raw.decode("utf-8")
-    # Bytes, not characters: the file is full of em dashes, so `len(text)` reads 147 short
+    # Bytes, not characters: the file is full of em dashes, so `len(text)` reads 171 short
     # of `wc -c` and a char count would fail on a file nobody truncated. Both figures were
     # measured from the re-frozen fixture itself (`wc -c` and `tr -cd '\n' | wc -c`), which
     # is what #2284 re-freezes it to — a copy of the live skill's text, not a truncation.
@@ -400,14 +402,26 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     # mechanical, which grew the skill by 1,136 B and 4 lines. This pin is the
     # growth's receipt: it moves only when the skill moves, and then only by what the
     # commit actually wrote.
-    assert len(raw) == 19_690 and text.count("\n") == 80, (
+    # 2026-10-12, #2628: the fourth such pairing after #2284 (`3c1c9515`), #2415
+    # (`d13514fa`), #2468 (`42298875`) and #2540 (`72db44a1`). Vault `acede7e9` (#2626)
+    # grew the skill by 2 lines / 2,597 B and left this copy at the previous freeze, which
+    # is what reddened the `live_vault` byte-compare below — a vault commit cannot stage a
+    # `tests/` path, so the re-freeze is this round. What the vault commit wrote: §4 gained
+    # the paragraph making an `orphan rows:` after-figure THIS run caused its own work to
+    # finish before the `curation:` block is filed, and §5's hand-disposition paragraph
+    # gained the ruling that an `anchor:` field over 60 characters is a typo to re-point,
+    # not coverage owed. Both literals are this copy's own, re-measured from the new file
+    # after the copy — a `wc -c` of 22,287 and 82 newlines from `tr -cd '\n' | wc -c` — and
+    # not carried from #2628, whose 22,287 / 82 was a snapshot at `acede7e9` and would have
+    # been a false receipt if a nightly had appended to the skill before this landed.
+    assert len(raw) == 22_287 and text.count("\n") == 82, (
         f"{SKILL_WITNESS.name} is {len(raw)} B / {text.count(chr(10))} newlines, not the "
-        "19,690 B / 80 lines of the whole skill file — a partial copy would make the "
+        "22,287 B / 82 lines of the whole skill file — a partial copy would make the "
         "0-hit below a coverage gap rather than a clean result")
     assert "topics/memory-md-ledger" in text and "ledger" in text.lower(), (
         f"{SKILL_WITNESS.name} does not name a ledger, so it is the wrong corpus")
     # The two figures above are a receipt for a rewrite, and a receipt cannot say what
-    # was written: a corpus of the same 19,690 B and the same 80 lines carrying the OLD
+    # was written: a corpus of the same 22,287 B and the same 82 lines carrying the OLD
     # §5 wording would satisfy them and still tell the nightly to remember the rule. So
     # the corpus is named by the two strings #2540 put into §5 — the refusal line the
     # script now prints, and the framing that replaced the remembered one — the way the
@@ -476,6 +490,24 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         "the Archive bullet never gained its #2425 clause, so the witness still sends a "
         "curator to create `lloyd/reviews/memory-md-retired.md` without the block section "
         "3 now requires — the unfenced archive that turned the vault-wide OKF gate red")
+
+    # The two sentences vault `acede7e9` (#2626) added and #2626's re-freeze carried in:
+    # §4's rule that an `orphan rows:` after-figure THIS run caused is its own work to
+    # finish, and §5's that an over-width `anchor:` is a typo to re-point. Pinned by name
+    # for the reason given above — the byte pin alone would also be satisfied by the old
+    # text padded to 22,287 B, and the node that could tell the two apart is the
+    # `live_vault` one the gate deselects. Neither states a cap: the first is about who
+    # owes a disposition, the second about a field the joining function can never emit, so
+    # pinning them leaves the ban's corpus the same one it re-adjudicated over.
+    assert ("An `orphan rows:` after-figure this run caused by rows it wrote itself is "
+            "this run's work to finish before the `curation:` block is filed" in text), (
+        "section 4 never gained its #2626 paragraph, so this corpus is the pre-`acede7e9` "
+        "text padded to the new size — a freeze made by editing the copy rather than by "
+        "copying the skill")
+    assert ("An `anchor:` field longer than 60 characters is a typo to re-point, not "
+            "coverage owed (#2626)" in text), (
+        "section 5 never gained its #2626 over-width-anchor ruling, so the witness still "
+        "sends a curator to file a ledger bug over a 3-character authoring typo")
 
 
 #: Same reason as the gate node, opposite question: is the file the nightly reads still
