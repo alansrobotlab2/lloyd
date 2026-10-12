@@ -2,8 +2,9 @@
 set -euo pipefail
 # vLLM *main* venv for Inferact/Qwen3.8-Flash-Next-NVFP4, with FP8 KV cache.
 #
-#   venv:  ~/lloyd/.venvs/vllm-flash-next-main
-#   start: VLLM_VENV=~/lloyd/.venvs/vllm-flash-next-main bin/start-qwen38-flash-next.sh
+#   venv:  ~/lloyd/.venvs/vllm-flash-next-main-1012 (dated: a rebuild goes to a
+#          new path and the previous build stays as the revert target)
+#   start: VLLM_VENV=~/lloyd/.venvs/vllm-flash-next-main-1012 bin/start-qwen38-flash-next.sh
 #   model: setup/setup-qwen38-flash-next.sh (same checkpoint as the offload venv)
 #
 # WHY A SECOND VENV FOR THE SAME MODEL
@@ -61,7 +62,7 @@ set -euo pipefail
 #   health on first boot, 265 s on the second. supervisord's startsecs for
 #   agent-llm-primary must cover the cold case (see the .conf).
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-flash-next-main}"
+VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-flash-next-main-1012}"
 
 # Per-commit wheel index, keyed by full SHA — the `nightly` index rolls daily
 # and would not have this build next week.
@@ -87,8 +88,30 @@ VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-flash-next-main}"
 # 0.2.x/0.3.x.devN because the build clones shallow and finds no release tag.
 # It is consistent across neighbouring commits, so it is cosmetic — but it
 # must be quoted EXACTLY here or pip cannot resolve it.
-BASE_SHA="dff1bde84dd6e34a49c150116d0f212507280910"
-VLLM_PIN="0.2.1.dev19+gdff1bde84"
+# REBUILT 2026-10-12 at a98247ab4db6 (main, 2026-10-10, the last commit touching
+# vllm/models/qwen4_exp at the time; inside v0.31.1rc1). What it adds over
+# dff1bde for this card, all on the Qwen4Exp path:
+#   #57097  fused QK-norm/RoPE/gate + KV write into the QSA prepare launch
+#   #59533  QSA QKVG and indexer QK projections merged into one GEMM
+#   #58957  fused HC down projection + SiLU; #60027 HC up on the skinny GEMM
+#   #58114  PLE metadata overhead; #57105 QSA indexer workspace fragmentation
+#   #58489  BUGFIX pinned PLE prefetch ids dangling in piecewise CUDA graphs
+#           (cpu_offload=True, exactly this deployment)
+#   #58961  BUGFIX profiling KV cache held alive by QSA key views
+#   #59528  BUGFIX QSA ring wrote dummy rows into the shared null block
+#   #59853  M-RoPE cos/sin cache 4x smaller (images are enabled here)
+# Breaking changes crossed on the way, handled in this script and the launcher:
+#   #57937  VLLM_PLE_CPU_OFFLOAD removed; --engram-config is the only spelling
+#   #57387  transformers floor 5.16.1 (qwen4_exp config is upstream now)
+#   `python -m vllm.entrypoints.openai.api_server` deprecated -> `vllm serve`
+# FlashInfer moves 0.6.18.post1 -> 0.7.0.post1 with the wheel (its pin).
+#
+# Previous pin, the build this slot served 2026-09-17 -> 2026-10-12, kept at
+# .venvs/vllm-flash-next-main as the revert target:
+#   BASE_SHA=dff1bde84dd6e34a49c150116d0f212507280910
+#   VLLM_PIN=0.2.1.dev19+gdff1bde84
+BASE_SHA="a98247ab4db686ee03c66d5feb3c761e52a2f8ab"
+VLLM_PIN="0.31.1rc1.dev260+ga98247ab4"
 
 echo "=== vLLM main venv for Qwen3.8-Flash-Next (UVA PLE offload + FP8 KV) ==="
 if [[ ! -x /opt/cuda/bin/nvcc ]]; then
@@ -113,6 +136,20 @@ echo "=== 1/3 Installing vLLM $VLLM_PIN (per-commit wheel) ==="
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     --extra-index-url https://pypi.org/simple
 "$PY" -m pip install -q ninja hf_transfer huggingface_hub
+
+# Prebuilt FlashInfer kernels for the version the wheel pinned. vLLM's own
+# requirements/cuda.txt lists flashinfer-cubin beside flashinfer-python (the
+# cubin package left PyPI at 0.6.14; both live on flashinfer.ai/whl), and the
+# per-arch JIT cache skips the ~20-minute, ~45 GiB `cicc` storm a fresh venv
+# otherwise pays on first boot — the storm behind the 09-17 oomd kill
+# (architecture/vllm.md §8). Without them nothing breaks: the launcher's
+# CUDA_HOME/PATH exports still let FlashInfer JIT every kernel it needs.
+FI_VER="$("$PY" -c 'import importlib.metadata as m; print(m.version("flashinfer-python"))')"
+echo "=== 1b/3 FlashInfer prebuilt cubins + JIT cache ($FI_VER, cu130) ==="
+"$PY" -m pip install -q "flashinfer-cubin==$FI_VER" --index-url https://flashinfer.ai/whl/ \
+    || echo "  WARN: no flashinfer-cubin $FI_VER on flashinfer.ai — JIT at first boot instead"
+"$PY" -m pip install -q "flashinfer-jit-cache==$FI_VER+cu130" --index-url https://flashinfer.ai/whl/cu130 \
+    || echo "  WARN: no flashinfer-jit-cache $FI_VER+cu130 — JIT at first boot instead"
 SP="$("$PY" -c 'import sysconfig;print(sysconfig.get_paths()["purelib"])')"
 echo "site-packages: $SP"
 
@@ -186,9 +223,8 @@ if not any(a.startswith("sm_120") for a in torch.cuda.get_arch_list()):
     fail.append("sm_120 missing from torch arch list — cannot drive the RTX PRO 6000")
 import vllm
 print(f"vLLM:         {vllm.__version__}")
-import vllm.envs as envs
-if not hasattr(envs, "VLLM_PLE_CPU_OFFLOAD"):
-    fail.append("VLLM_PLE_CPU_OFFLOAD absent — this wheel predates UVA PLE offload (#54371)")
+# VLLM_PLE_CPU_OFFLOAD is gone since #57937 (2026-09-21); the UVA offload is
+# requested through EngramConfig only, which the next check proves exists.
 try:
     from vllm.config import EngramConfig  # noqa: F401
     print("PLE offload:  EngramConfig present (UVA path, #54371)")
@@ -218,7 +254,7 @@ if fail:
     print("\nFAILED:")
     for f in fail: print(f"  - {f}")
     sys.exit(1)
-print("\nOK — venv ready. Start: VLLM_VENV=$VLLM_VENV bash bin/start-qwen38-flash-next.sh")
+print("\nOK — venv ready. Start: VLLM_VENV=<this venv> bash bin/start-qwen38-flash-next.sh")
 PYEOF
 
 # Named for the venv, not hardcoded: this script honours VLLM_VENV, and a

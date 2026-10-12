@@ -259,8 +259,16 @@ if [[ ! -f "$MODEL_DIR/config.json" ]]; then
 fi
 
 # Refuse to start unpatched: without the offload code this silently needs ~170
-# GiB of VRAM and dies at load, which is a confusing way to find out.
-if ! "$VLLM_VENV/bin/python" -c "import vllm.envs as e; raise SystemExit(0 if hasattr(e,'VLLM_PLE_CPU_OFFLOAD') else 1)" 2>/dev/null; then
+# GiB of VRAM and dies at load, which is a confusing way to find out. The uva
+# build is probed through EngramConfig — VLLM_PLE_CPU_OFFLOAD was removed from
+# main by #57937 (2026-09-21) and a wheel past that has no such attribute.
+if [[ "$PLE_IMPL" == "uva" ]]; then
+  if ! "$VLLM_VENV/bin/python" -c "from vllm.config import EngramConfig; EngramConfig(cpu_offload=True)" 2>/dev/null; then
+    echo "ERROR: this venv's vllm has no EngramConfig(cpu_offload=...) — not a UVA PLE offload build."
+    echo "Rebuild: bash $PROJECT_DIR/setup/setup-vllm-flash-next-main.sh"
+    exit 1
+  fi
+elif ! "$VLLM_VENV/bin/python" -c "import vllm.envs as e; raise SystemExit(0 if hasattr(e,'VLLM_PLE_CPU_OFFLOAD') else 1)" 2>/dev/null; then
   echo "ERROR: this venv has no VLLM_PLE_CPU_OFFLOAD — the PLE offload overlay is missing."
   echo "Rebuild: bash $PROJECT_DIR/setup/setup-vllm-qwen38-flash-next.sh"
   exit 1
@@ -629,8 +637,10 @@ export VLLM_ENABLE_CUDAGRAPH_GC=1
 export FLASHINFER_WORKSPACE_BASE="${FLASHINFER_WORKSPACE_BASE:-$VLLM_VENV}"
 export MAX_JOBS="${MAX_JOBS:-8}"
 
-CMD=("$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server
-  --model "$MODEL_DIR"
+# `vllm serve` through its module, not the console script: the module form
+# survives a renamed venv (console-script shebangs embed the build path) and
+# `python -m vllm.entrypoints.openai.api_server` is deprecated upstream.
+CMD=("$VLLM_VENV/bin/python" -m vllm.entrypoints.cli.main serve "$MODEL_DIR"
   --served-model-name Qwen3.8-Flash-Next-nvfp4 primary
   --port "${PORT:-8096}"
   --host 127.0.0.1
@@ -655,7 +665,7 @@ CMD=("$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server
 # 4-minute boot. PORT is for side-by-side trials on a bare port (8097 was
 # the 2026-09-10 FP8 trial); production stays on 8096.
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
-  echo "DRY_RUN: PLE_IMPL=$PLE_IMPL VLLM_PLE_CPU_OFFLOAD=${VLLM_PLE_CPU_OFFLOAD:-<unset>} VLLM_ALLOW_LONG_MAX_MODEL_LEN=${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-<unset>}"
+  echo "DRY_RUN: PLE_IMPL=$PLE_IMPL VLLM_PLE_CPU_OFFLOAD=${VLLM_PLE_CPU_OFFLOAD:-<unset>} (worker build only) VLLM_ALLOW_LONG_MAX_MODEL_LEN=${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-<unset>}"
   echo "DRY_RUN: FLASHINFER_WORKSPACE_BASE=$FLASHINFER_WORKSPACE_BASE MAX_JOBS=$MAX_JOBS"
   printf '%q ' "${CMD[@]}"; echo
   exit 0

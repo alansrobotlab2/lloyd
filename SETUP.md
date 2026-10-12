@@ -381,7 +381,8 @@ Two other model-specific venvs exist and are only needed if you run those models
 | `vllm-laguna` | 0.25.1 | Laguna S 2.1 + DFlash draft |
 | `vllm-qwen3.8` | nightly | **Qwen3.8-27B-NVFP4 (live primary)** |
 | `vllm-qwen38-flash-next` | 0.28.1rc1.dev188 + patches | Qwen3.8-Flash-Next-NVFP4 (125B MoE, PLE offload worker) |
-| `vllm-flash-next-main` | main @ `dff1bde84dd6` + PDL patch | **live primary** since 2026-09-10 (rebuilt 09-17): the same checkpoint on vLLM main, UVA PLE offload, FP8 KV cache |
+| `vllm-flash-next-main-1012` | main @ `a98247ab4db6` + PDL patch | **live primary** since 2026-10-12: the same checkpoint on vLLM main, UVA PLE offload, FP8 KV cache, FlashInfer 0.7.0.post1 with prebuilt cubins |
+| `vllm-flash-next-main` | main @ `dff1bde84dd6` + PDL patch | the 09-17 build, served 2026-09-17 → 10-12; **revert target** |
 | `vllm-djev` | `0.29.1rc1.dev347+gdee37d891` + a 9-file overlay | **djev** since 2026-09-20: DiffusionGemma 26B-A4B NVFP4 structured reads on GPU 2 |
 
 ### `vllm-djev` — DiffusionGemma structured decisions (GPU 2)
@@ -480,20 +481,36 @@ offload) instead and paused #53899 in its favour, so a plain wheel of main now
 serves this checkpoint on one card — that is the next venv. This one stays
 buildable as the known-good fallback the start script boots by default.
 
-### `vllm-flash-next-main` — the same model on vLLM main, with FP8 KV
+### `vllm-flash-next-main-1012` — the same model on vLLM main, with FP8 KV
 
 ```bash
-bash agent-services/setup/setup-vllm-flash-next-main.sh
+bash agent-services/setup/setup-vllm-flash-next-main.sh   # builds .venvs/vllm-flash-next-main-1012
 ```
 
-vLLM main at `dff1bde84dd6` (2026-09-16; the wheel calls itself
-`0.2.1.dev19+gdff1bde84` because the CI clones shallow, and that string must be
-quoted exactly), a per-commit wheel keyed by full SHA — the `nightly` index
-rolls daily and would not have this build next week. That commit is the merge
-of PR #55557, chosen as the *minimum* that gets both things this box wanted:
-the FP8 main KV cache on the QSA path, which this venv carried from a
-contributor's fork for a week, and #55309's fused PLE-residual and QSA
-output-gate kernels.
+vLLM main at `a98247ab4db6` (2026-10-10; the wheel calls itself
+`0.31.1rc1.dev260+ga98247ab4` and that string must be quoted exactly), a
+per-commit wheel keyed by full SHA — the `nightly` index rolls daily and would
+not have this build next week. Rebuilt 2026-10-12 from `dff1bde84dd6` (the
+2026-09-16 merge of PR #55557, the FP8 QSA KV path) for the Qwen4Exp work that
+landed in between — the fused QSA prepare launch (#57097), the merged QSA and
+indexer projections (#59533), the fused HC projections (#58957, #60027), and
+three bugfixes this deployment was exposed to: pinned PLE prefetch ids
+dangling in piecewise CUDA graphs (#58489), the profiling KV cache held alive
+by QSA key views (#58961), and the QSA ring writing dummy rows into the shared
+null block (#59528). The setup script's header lists them. Two upstream
+changes crossed on the way: `VLLM_PLE_CPU_OFFLOAD` is gone (#57937; the
+launcher's venv gate now probes `EngramConfig`), and `python -m
+vllm.entrypoints.openai.api_server` is deprecated, so the launcher runs
+`vllm serve` through its module (`-m vllm.entrypoints.cli.main serve`, which
+survives a renamed venv where the console script would not). The venv also
+carries `flashinfer-cubin` and the per-arch `flashinfer-jit-cache` from
+flashinfer.ai, so a fresh venv's first boot does not pay the ~20-minute JIT
+storm of §8 in `architecture/vllm.md`.
+
+A rebuild goes to a **new, dated venv path** and the previous build stays
+where it is as the revert target: FlashInfer's JIT cache under the venv embeds
+its path, so renaming a venv into place costs the recompile the dated path
+avoids.
 Main carries UVA PLE offload (#54371): the GPU reads the 95.37 GiB N-gram table
 straight out of **pinned** host RAM, so there is no offload worker process, no
 CUDA-IPC handshake, no `ptrace_scope` requirement, and none of the three
@@ -513,19 +530,21 @@ The PDL hang is **not filed upstream** — the tracker's one hit for
 will retire that patch; it has to be re-proved on every rebuild. Pinned by
 `agent-services/setup/vllm-flash-next-main.versions.txt`.
 
-**Revert target.** The 09-10 build is kept at `.venvs/vllm-flash-next-main-0910`
-(the old wheel plus the fork overlay). Its `bin/python -m vllm…` still works
-from the renamed path, which is all the launcher uses, so reverting is one line
-in `agent-llm-primary.conf`: `VLLM_VENV=…/vllm-flash-next-main-0910`. Its
-console scripts (`bin/pip`, `bin/vllm`) still carry the old path in their
-shebangs and now point at the new venv — do not use them. To rebuild it from
-nothing, check out this script at git `4a3ac77`.
+**Revert targets.** The 09-17 build (`dff1bde84dd6`) is at
+`.venvs/vllm-flash-next-main`, untouched; reverting is one line in
+`agent-llm-primary.conf`, `VLLM_VENV=…/vllm-flash-next-main`, then `round
+restart --only agent-llm-primary`. The 09-10 build is at
+`.venvs/vllm-flash-next-main-0910` (the old wheel plus the fork overlay); its
+`bin/python -m vllm…` still works from the renamed path, but its console
+scripts (`bin/pip`, `bin/vllm`) carry the old path in their shebangs — do not
+use them. To rebuild either from nothing, check out this script at git
+`4a3ac77` (09-10) or at the commit before the 10-12 rebuild (09-17).
 
 Serving it is the same start script with the venv pointed at it, and FP8 is a
 second knob:
 
 ```bash
-VLLM_VENV=~/lloyd/.venvs/vllm-flash-next-main KV_CACHE_DTYPE=fp8 bash agent-services/bin/start-qwen38-flash-next.sh
+VLLM_VENV=~/lloyd/.venvs/vllm-flash-next-main-1012 KV_CACHE_DTYPE=fp8 bash agent-services/bin/start-qwen38-flash-next.sh
 ```
 
 The script detects which offload implementation the venv carries and adapts

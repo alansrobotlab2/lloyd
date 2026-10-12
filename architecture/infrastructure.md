@@ -25,7 +25,7 @@ what to back up); this is the running shape.
 | Automod worktrees | `~/lloyd-work/SM_<stamp>/`, cut from live `main` per round |
 | Vault | `~/obsidian` (Obsidian Sync, headless via `agent-obsidian-sync`) |
 | Secrets | `.env` (gitignored), expanded into `config.yaml` `${VAR}` placeholders at boot |
-| Python venvs | `.venvs/lloyd` (backend, aggregator, voice worker), `vllm-flash-next-main` (primary, served), `vllm-qwen38-flash-next` and `vllm-qwen3.8` (alternate primary builds), `qwen3-tts` |
+| Python venvs | `.venvs/lloyd` (backend, aggregator, voice worker), `vllm-flash-next-main-1012` (primary, served), `vllm-flash-next-main` (the 09-17 build, revert target), `vllm-qwen38-flash-next` and `vllm-qwen3.8` (alternate primary builds), `qwen3-tts` |
 | State outside the repo | `~/.local/state/lloyd-automod/` (ledger, rounds, clusters), `~/.local/state/lloyd-guardian/` (pinned guardian snapshot), `~/.local/share/<channel>/` (youtube `seen.json`) |
 
 ## GPUs
@@ -77,7 +77,7 @@ check, and those checks are the only reason this table can be trusted.
 
 | Alias | Port | Engine | Model | Program |
 |---|---|---|---|---|
-| `primary` | 8096 | vLLM, venv `vllm-flash-next-main` | Qwen3.8-Flash-Next NVFP4, FP8 KV | `agent-llm-primary` |
+| `primary` | 8096 | vLLM, venv `vllm-flash-next-main-1012` | Qwen3.8-Flash-Next NVFP4, FP8 KV | `agent-llm-primary` |
 | `secondary` | 8091 | llama.cpp `llama-server`, `--parallel 1` | Qwen3.6-35B-A3B UD-Q3_K_XL | `agent-llm-secondary` |
 | — | 8090 | Qwen3-TTS (`.venvs/qwen3-tts`) | cloned voice `clone:dave_cullen` | `agent-tts` |
 
@@ -138,8 +138,9 @@ ever reports; restarting a slot is precisely the operation that would have
 swapped the model in the first place.
 
 Three venvs can serve the primary's model family, which is why `VLLM_VENV` is
-pinned in the conf rather than left to the launcher: `vllm-flash-next-main`
-(what the program names, and the only one with the fp8 QSA path),
+pinned in the conf rather than left to the launcher: `vllm-flash-next-main-1012`
+(what the program names; the undated `vllm-flash-next-main` is the 09-17 build
+kept as the revert target, with the same fp8 QSA path),
 `vllm-qwen38-flash-next` (the PLE-offload-worker build — and the launcher's
 *own* fallback default — but a dropped `VLLM_VENV` no longer reaches BF16:
 the conf still exports `KV_CACHE_DTYPE=fp8`, that build's QSA kernel has no

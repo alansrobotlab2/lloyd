@@ -144,7 +144,9 @@ def test_the_supervisord_environment_pins_the_fix():
     which fall back to the BF16 worker venv when the variables are absent."""
     env = _conf_env()
     assert env.get("KV_CACHE_DTYPE") == "fp8"
-    assert env.get("VLLM_VENV", "").endswith("/.venvs/vllm-flash-next-main")
+    # A dated suffix is the rebuild convention since 2026-10-12 (the previous
+    # build stays at the undated path as the revert target).
+    assert re.search(r"/\.venvs/vllm-flash-next-main(-\d{4})?$", env.get("VLLM_VENV", ""))
     # The chunk budget adopted from the Layer 3 arms (the conf's comment and
     # architecture/vllm.md §3.3).
     assert env.get("MAX_NUM_BATCHED_TOKENS") == "4096"
@@ -176,7 +178,9 @@ def _dry_run(tmp_path, **extra) -> str:
 def test_the_supervisord_environment_launches_fp8_on_the_main_venv(tmp_path):
     out = _dry_run(tmp_path)
     assert "--kv-cache-dtype fp8" in out
-    assert "vllm-flash-next-main/bin/python -m vllm.entrypoints.openai.api_server" in out
+    # `vllm serve` through its module (the api_server module is deprecated
+    # upstream; the console script embeds the build path).
+    assert re.search(r"vllm-flash-next-main(-\d{4})?/bin/python -m vllm\.entrypoints\.cli\.main serve ", out)
     assert "--max-num-batched-tokens 4096" in out
     assert "--limit-mm-per-prompt" in out and "--language-model-only" not in out
 

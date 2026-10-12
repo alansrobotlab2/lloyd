@@ -27,8 +27,8 @@ One process, launched by `agent-services/bin/start-qwen38-flash-next.sh` under
 supervisord as `agent-llm-primary`. The live command line, verbatim:
 
 ```
-.venvs/vllm-flash-next-main/bin/python -m vllm.entrypoints.openai.api_server
-  --model      agent-services/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP4
+.venvs/vllm-flash-next-main-1012/bin/python -m vllm.entrypoints.cli.main serve
+               agent-services/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP4
   --served-model-name Qwen3.8-Flash-Next-nvfp4 primary
   --port 8096 --host 127.0.0.1 --trust-remote-code
   --tensor-parallel-size 1
@@ -57,15 +57,20 @@ fp8` is emitted from `KV_CACHE_DTYPE` (§3), and `--engram-config
 offload (§8) — on the older worker build the same request goes out as
 `VLLM_PLE_CPU_OFFLOAD=1` plus `--distributed-executor-backend mp` instead.
 
-vLLM main at `dff1bde84dd6` (the wheel reports `0.2.1.dev19+gdff1bde84`) — a
-**main** build, not a release, because the FP8 QSA path §3 depends on is newer
-than any. Until 2026-09-17 that path was PR #55557 overlaid from a
-contributor's fork onto `0.28.1rc1.dev661+g6ee5bb0a0`; the PR merged as
-`dff1bde84dd6` on 09-16 and the venv was rebuilt at exactly that commit, which
-also brings #55309 (the PLE outer residual fused into the short-conv kernel,
-1.44x on that kernel at bs=1; the QSA output gate fused into the attention
-epilogue, 1.10x single-row). The old build is kept at
-`.venvs/vllm-flash-next-main-0910` as the revert target.
+vLLM main at `a98247ab4db6` (2026-10-10; the wheel reports
+`0.31.1rc1.dev260+ga98247ab4`) — a **main** build, not a release, a habit that
+started when the FP8 QSA path §3 depends on was newer than any release. The
+history: until 2026-09-17 that path was PR #55557 overlaid from a contributor's
+fork onto `0.28.1rc1.dev661+g6ee5bb0a0`; the PR merged as `dff1bde84dd6` on
+09-16 and the venv was rebuilt at exactly that commit (plus #55309, the PLE
+outer residual and QSA output gate fusions); on 2026-10-12 it was rebuilt again
+at `a98247ab4db6` for the Qwen4Exp fusions and bugfixes that followed (the
+setup script's header lists them; SETUP.md has the summary), with FlashInfer
+0.7.0.post1 and its prebuilt cubins. Each rebuild goes to a new dated venv
+path; the 09-17 build stays at `.venvs/vllm-flash-next-main` and the 09-10 one
+at `.venvs/vllm-flash-next-main-0910`, both revert targets by `VLLM_VENV` in
+the conf. The launcher runs `vllm serve` through its module since 10-12 (the
+`openai.api_server` module is deprecated upstream).
 
 Two served names, deliberately: `primary` is the alias every caller in this
 repo uses, and `Qwen3.8-Flash-Next-nvfp4` is what `models.primary.expect_model`
@@ -96,8 +101,9 @@ carries the slot table and the identity probe in full.)
   `expect_kv_pool_tokens_min` are the same idea one level down (§3.1).
 - **The two venvs.** `start-qwen38-flash-next.sh` adapts to whichever
   `VLLM_VENV` names: `vllm-qwen38-flash-next` (the PLE-offload-worker build, the
-  script's own fallback default) and `vllm-flash-next-main` (vLLM main, UVA
-  offload — what `agent-llm-primary.conf` serves since 2026-09-10).
+  script's own fallback default) and `vllm-flash-next-main-1012` (vLLM main,
+  UVA offload — what `agent-llm-primary.conf` serves, a main build since
+  2026-09-10, this venv since 10-12).
 - **The secondary (`:8091`, Qwen3.6-35B-A3B UD-Q3_K_XL, llama.cpp,
   `--parallel 1` because llama.cpp divides `--ctx-size` across slots and the
   full 256K window was the point) is off since 2026-09-20** —
@@ -304,7 +310,7 @@ itself is unchanged. Quality sat at the noise floor.
 **The venv guard.** `start-qwen38-flash-next.sh` refuses `KV_CACHE_DTYPE=fp8`
 on a venv whose QSA kernel has no fp8 path (it greps for `IS_FP8` in
 `qsa.py`), rather than booting BF16 quietly. That refusal is why
-`VLLM_VENV=.venvs/vllm-flash-next-main` and `KV_CACHE_DTYPE=fp8` must travel
+`VLLM_VENV=.venvs/vllm-flash-next-main-1012` and `KV_CACHE_DTYPE=fp8` must travel
 together.
 
 ### 3.1 Pinned and asserted, twice, from two sources
@@ -407,7 +413,7 @@ Every knob is an environment variable the launcher reads, so an arm is one
 
 | Knob | Default | Production | Notes |
 |---|---|---|---|
-| `VLLM_VENV` | `vllm-qwen38-flash-next` | **`vllm-flash-next-main`** | the BF16 worker build vs the FP8 main build |
+| `VLLM_VENV` | `vllm-qwen38-flash-next` | **`vllm-flash-next-main-1012`** | the BF16 worker build vs the FP8 main build (dated per rebuild; the undated path is the 09-17 revert target) |
 | `KV_CACHE_DTYPE` | *(empty = BF16)* | **`fp8`** | §3 |
 | `MAX_NUM_BATCHED_TOKENS` | *(empty = vLLM's 8192)* | **`4096`** | §5.1 |
 | `MAX_MODEL_LEN` | `262144` | default | §4 |
