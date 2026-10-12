@@ -26,6 +26,7 @@ session memory injection patterns, or fact ranking stays in its owning module
 from __future__ import annotations
 
 import difflib
+import functools
 import json
 import logging
 import re
@@ -544,6 +545,274 @@ def with_body_contract(body: str) -> str:
         lines[i] = TASK_BODY_CONTRACT
         return "\n".join(lines)
     return f"\n{TASK_BODY_CONTRACT}\n\n{text.lstrip(chr(10))}"
+
+
+# ── The #2265 body-tool predicate (#2589) ────────────────────────────────────
+#
+# Which backticked names in an autonomy task's *body* are tools nobody delivered.
+# This lives here, beside the contract line above, because three readers need the
+# same answer and a rule with two definitions is a rule whose rails drift from the
+# corpus they guard:
+#
+#   - the corpus guard, `tests/test_research_doc_claims.py
+#     ::test_no_task_body_orders_a_tool_its_prompt_never_names`, one node per task
+#     file, graded at automod vault-land;
+#   - `agent_mcp/vault.py`, both phases of its autonomy rail;
+#   - `agent_mcp/builtin_fs.py`, the Write/Edit rail #2362 built for dispatch
+#     fields.
+#
+# Until #2589 only the test had it (`git grep -n "undelivered|instruction_region"
+# -- agent_mcp/ app/ scripts/` returned nothing), so the two free-form lanes could
+# put arbitrary instruction-region text into a task file and the file joined the
+# graded corpus with no check in front of it. That is how `autonomy/97-landed-outcomes-daily-record.md`
+# arrived ordering `email_send` and `email_search` — names that task's built prompt
+# never contains — and surfaced hours later as another round's red base probe
+# (`1 failed, 113 passed` at base `e2ce15a5`), repaired afterwards by an unrelated
+# item's vault land (`9cc48cee`).
+#
+# `app.autonomy` and `app.harness.policy` are imported lazily inside the functions
+# below: this module sits on the MCP import path, and the package has spent weeks
+# removing exactly this kind of edge.
+
+#: Where a task body stops being instructions. Machine-written content is not an
+#: instruction channel: `append_activity_line` (app/autonomy.py:286-307) appends
+#: `- <ISO>: note` bullets under a `## Activity Log` heading, and everything at or
+#: after that heading is the log. 39 of the 43 task files under `autonomy/` carry
+#: one, so without this cut the guard would spend most of the corpus on records it
+#: cannot fix and must not fix — the load-bearing count is asserted, not quoted, by
+#: `test_the_activity_log_cut_carries_the_real_corpus`.
+_ACTIVITY_HEADING_RE = re.compile(r"^##\s+Activity", re.I | re.MULTILINE)
+
+#: A dated log bullet, wherever it sits. The scheduler's own writer emits
+#: `- 2026-10-05T00:06:35Z: …`, and a hand-written one that starts the same way is
+#: log prose by shape whatever it means, so it stays out of the graded region.
+_DATED_BULLET_RE = re.compile(r"^-\s+\d{4}-\d{2}-\d{2}T")
+
+#: Names the guard has to be able to see for its verdict to mean anything. Every one
+#: is served by a local module (vault, fact store, backlog), so none of them vanishes
+#: when an external bridge is down — which is why the floor below is a set of names
+#: and not a count. This set is `tests/test_research_doc_claims.py`'s, name for name:
+#: a wider one would make the rails refuse every task-file write on a box whose mail
+#: bridge is down, which is not a rule but an outage wearing one.
+_GUARD_MUST_SEE = frozenset({"vault_write", "vault_recall", "fact_add",
+                             "fact_relate", "backlog_write_task"})
+
+#: The universe build's own floor, matching the test's three asserts: a universe that
+#: came back empty or half-built would make the guard pass by matching nothing, which
+#: is the one outcome worse than a false alarm.
+_GUARD_MIN_TABLES = 5
+_GUARD_MIN_ANNOTATED = 100
+
+
+def instruction_region(body: str) -> str:
+    """The part of a task body that is instructions, with the machine-written log cut.
+
+    Cutting at the `## Activity Log` heading is not a convenience. The log is appended
+    by the scheduler itself (`append_activity_line`, app/autonomy.py:286-307) and it
+    quotes the human text it was handed — a triage run's note saying "the caller used
+    `fact_add` for this" is an accurate record and, to this predicate, a false
+    instruction. The same holds for the `- 2026-…T…:` bullets the writer emits.
+    Measured on today's corpus the cut changes no verdict: all 39 files the guard
+    parametrizes over carry an activity heading and none of them has a log-only
+    offender, so nothing here is red because of it and nothing would go red if it were
+    removed. It stays because the log is where a *future* honest note goes, and a
+    guard that turns a truthful run report into an instruction is a guard that will be
+    silenced the first time it cries wolf. Both cuts are pinned by a fixture, not by
+    the corpus: `tests/test_research_doc_claims.py::test_the_body_tool_guard_fires_on_an_undelivered_tool`
+    names one tool in a dated bullet and one below the heading and requires both out of
+    the verdict.
+    """
+    cut = _ACTIVITY_HEADING_RE.search(body)
+    if cut:
+        body = body[:cut.start()]
+    return "\n".join(
+        ln for ln in body.splitlines() if not _DATED_BULLET_RE.match(ln))
+
+
+def _advertised_tool_names() -> set[str]:
+    """What `tools/list` would answer right now.
+
+    `_dispatch` is what the running server would actually route, and it is the only
+    answer available from inside a rail (which runs on the loop and cannot run a
+    nested event loop). Off a server process it is empty, so the accessor is called
+    for real instead — with a bounded thread hop when a loop happens to be running.
+    """
+    import agent_mcp.main as _main
+
+    dispatch = getattr(_main, "_dispatch", None)
+    if dispatch:
+        return {str(name) for name in dispatch}
+    return {tool.name for tool in _run_off_loop(_main.list_tools)}
+
+
+def _run_off_loop(make_coro, timeout_s: float = 60.0):
+    """Run an async accessor from sync code, loop running or not.
+
+    `asyncio.run` refuses to be called on a thread that already has a loop, so an
+    in-loop caller gets its own thread; and the whole thing is bounded, because a
+    universe that cannot be built in a minute has to raise into the rail's
+    fail-closed branch rather than hang a tool call.
+    """
+    import asyncio
+    import concurrent.futures
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(make_coro())
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, make_coro()).result(timeout=timeout_s)
+
+
+@functools.lru_cache(maxsize=1)
+def lloyd_tool_names() -> frozenset[str]:
+    """Every tool name Lloyd could deliver: the routing tables ∪ what it advertises.
+
+    The two halves are the shipped floor and the live ceiling. The
+    `agent_mcp.annotations` tables are deterministic and go on the wire in a probe
+    with no server, but they used to be the whole universe — which is why this
+    predicate could not serve as a writer's rule: the tables are *curation* lists,
+    so every advertised tool that no table curates was invisible to them. On this
+    box `email_send` reaches the prompt through `TOOL_GROUPS["email"]` and the
+    schedule-gate list while `vault_write` and `session_inject_context` are in no
+    table at all, so a body naming the second pair read as "not a tool name". The
+    accessor's own names go in as well, which is what makes the answer "what the
+    agent can call" rather than "what one annotation module chose to mention" —
+    148 names on this box.
+
+    The accessor only knows the truth in a process that has the full module list,
+    so the floor stays: a universe missing a name that is certainly a tool, or
+    built from fewer tables than a real import yields, raises. That fails the
+    guard's node loudly and makes the rails refuse (fail-closed, like the dispatch
+    rail beside them) instead of quietly green-lighting a body whose universe
+    stopped containing tools.
+    """
+    import agent_mcp.annotations as _ann
+
+    names: set[str] = set()
+    tables = 0
+    for attr, value in vars(_ann).items():
+        if (attr.isupper() and not attr.startswith("_")
+                and isinstance(value, (frozenset, set))):
+            tables += 1
+            names |= set(value)
+    annotated = len(names)
+    names |= _advertised_tool_names()
+    # The three checks and the name floor are the test's, in the same order and with
+    # the same comparisons — `annotated`, not `len(names)`, is what the count floor
+    # applies to, because the floor is about the scan working, not about the mail
+    # tools being advertised. Raising is the fail-closed path for both callers: the
+    # guard's node reports it loudly, and a rail refuses rather than wave a body
+    # through on a universe that stopped containing tools.
+    if tables < _GUARD_MIN_TABLES:
+        raise RuntimeError(f"only {tables} annotation tables found")
+    if annotated <= _GUARD_MIN_ANNOTATED:
+        raise RuntimeError(f"only {annotated} annotated names — the scan broke")
+    if len(names) < annotated:
+        raise RuntimeError("the advertised tool surface returned nothing usable")
+    unseen = sorted(_GUARD_MUST_SEE - names)
+    if unseen:
+        raise RuntimeError(
+            f"the tool universe is missing {unseen}; the guard would silently stop "
+            "seeing those actions — check that agent_mcp.main.list_tools() ran")
+    return frozenset(names)
+
+
+def undelivered_tool_names(prompt: str, region: str,
+                           tools: frozenset[str]) -> list[str]:
+    """Backticked tool names in `region` that `prompt` never names. The #2265 predicate.
+
+    Backticks rather than bare words, because the failure mode is an author naming
+    a tool they expect the run to call, and that is how a body does it — and because
+    a name that merely appears (in prose like "the memory_add path") should not fail
+    a doc. A prompt never backticks what it delivers, so `name in prompt` is a safe
+    test for "the run was told this tool exists". The answer is sorted and
+    de-duplicated: a node's message and a rail's refusal must not depend on where in
+    the file the name happened to land.
+    """
+    offenders = set()
+    for name in set(re.findall(r"`([A-Za-z_][A-Za-z0-9_.]*)`", region)):
+        base = name.split(".")[0]
+        if base in tools and base not in prompt:
+            offenders.add(base)
+    return sorted(offenders)
+
+
+def _task_file_split(text: str) -> tuple[dict | None, str]:
+    """A task file's front matter as a mapping, and its body. (None, "") if unreadable.
+
+    Same split `_vault_write`'s own front-matter guard uses, and the same recovery
+    parser the scheduler reads (`front_matter_map` → `parse_frontmatter_text`), so a
+    file whose YAML is loose but field-recoverable is judged on the fields the
+    scheduler would actually run — not waved through as "unparseable, not my
+    business", and not judged against a body this reader invented.
+    """
+    if not text.startswith("---"):
+        return None, ""
+    lines = text.splitlines()
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        return None, ""
+    from app.harness.policy import front_matter_map
+
+    fields = front_matter_map(text)
+    return fields, "\n".join(lines[end + 1:])
+
+
+def task_prompt_of(fields: dict) -> str:
+    """The prompt the scheduler would deliver for these front-matter fields.
+
+    The same chain a run actually gets: `_load_skill_content(skill_name)` into
+    `_build_task_prompt`, which carries only `silent_hint`, a header line, the skill
+    body and the front-matter `description` — never the body. That asymmetry is the
+    whole reason a body ordering an undelivered tool is worth refusing at the write:
+    the line reaches no run, so it is documentation that misleads every later reader
+    into thinking an instruction exists where none was ever delivered.
+    """
+    from app.autonomy import _build_task_prompt, _load_skill_content
+
+    # `or ""`, the same value `tests/test_research_doc_claims.py::_prompt_and_region`
+    # passes for this case. `_load_skill_content` returns None for a missing or
+    # unresolvable `skill_name`, and `_build_task_prompt` puts that value into its `parts`
+    # list raw (app/autonomy.py:2798), so None does not stringify — the join raises,
+    # measured as `TypeError: sequence item 3: expected str instance, NoneType found`.
+    # Both rails fail closed on that exception, so the cost of passing None is not a
+    # silent pass but its opposite: every write to a task file whose skill is missing or
+    # unresolvable would be refused for a reason the caller cannot fix, which is an
+    # outage wearing a guard's clothes. The scheduler never prompts such a task
+    # (`run_task` skips an unresolved skill), so `""` costs nothing real and is the
+    # conservative direction for the verdict: a smaller prompt can only add offenders,
+    # never hide one.
+    slug = fields.get("skill_name")
+    skill_content = _load_skill_content(str(slug)) if slug else None
+    return _build_task_prompt(fields, skill_content or "")
+
+
+def body_undelivered_tools(text: str,
+                           tools: frozenset[str] | None = None) -> list[str]:
+    """Offending tool names in a whole task file's instruction region; [] means clean.
+
+    The rails' single call. The skip rule is the corpus guard's own reach, not a
+    narrower one: `_is_autonomy_task_path` admits numbered files, and every numbered
+    file the guard parametrizes over gets a prompt here, because
+    `app.autonomy._build_task_prompt` builds one from `name` + `skill_name` +
+    `description` and needs no `id`. Requiring an `id` would have been the quiet
+    version of the bug this item is about — a rail that grades a smaller set than the
+    corpus it claims to protect.
+
+    So [] means only "there is no front matter here at all", which is `autonomy/_config.md`
+    and the notes beside it, and those must keep landing. Front matter that is present
+    but will not read as a mapping also answers [], and that is not a hole: both rails
+    call this *after* their dispatch-field check, which refuses exactly that file with
+    "front matter cannot be read as a mapping" and never reaches this line.
+    """
+    fields, body = _task_file_split(text)
+    if not fields:
+        return []
+    return undelivered_tool_names(
+        task_prompt_of(fields),
+        instruction_region(body),
+        lloyd_tool_names() if tools is None else tools)
 
 
 def _recover_block_field(fm_text: str, field: str):

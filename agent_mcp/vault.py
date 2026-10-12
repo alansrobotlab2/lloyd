@@ -1780,6 +1780,77 @@ def _record_schedule_refusal(path: str, reason: str) -> None:
         pass
 
 
+def _record_body_refusal(path: str, reason: str) -> None:
+    """Journal a refused autonomy body. Never raises: a refusal the journal cannot
+    see is still a refusal, and losing the journal row is the lesser failure.
+
+    One guard name for both phases of this lane and for the Write/Edit lane's body
+    rule too, so the owed-check over the denial journal is one grep
+    (`guard="autonomy_body_rail"`) and every row it finds names the path and the
+    offending tool names in its own `excerpt`.
+    """
+    try:
+        from app.harness import denial_journal
+        from agent_mcp._shared import get_bound_session
+        denial_journal.record(guard="autonomy_body_rail", where="dispatch",
+                              session_id=get_bound_session() or "", tool="vault_write",
+                              reason=f"{path}: {reason}"[:600], excerpt=str(path),
+                              label="body orders a tool its built prompt never names")
+    except Exception:  # noqa: BLE001 — journaling must never become why a write failed
+        logger.debug("autonomy body rail: denial journal unavailable", exc_info=True)
+
+
+def _autonomy_body_refusal(path: str, content: str) -> dict | None:
+    """Refuse a task body that orders a tool the task's own built prompt never names.
+
+    THE COST THIS PAYS FOR, measured rather than imagined. `autonomy/97-landed-outcomes-daily-record.md`
+    arrived in the graded corpus with an "Arming" section backticking two tools its
+    delivered prompt does not contain. Nothing refused it: the predicate lived only
+    inside the corpus guard's file, and the guard is graded at automod vault-land, so
+    the red surfaced hours later as another round's base probe (`1 failed, 113 passed`
+    at base `e2ce15a5`) and was repaired by an unrelated item's vault land (`9cc48cee`,
+    #2587). That is a red tree, a `high` item and a spent round on the price of a
+    five-word body edit — which is why this refuses rather than warns.
+
+    The predicate is `agent_mcp._shared.body_undelivered_tools`, the same call
+    `tests/test_research_doc_claims.py`'s corpus node makes, so a write can never be
+    refused for something the guard would pass, nor land something the guard would
+    redden. Fail-closed like the rails beside it: a predicate that cannot run (the
+    tool universe failing its own floor, the task's skill unreadable) is a refusal
+    that says which, not a pass. Writes onto `autonomy/*.md` are rare and the fix is a
+    retry; a hole here is what this item is filed about.
+
+    Returns None for a body with nothing to report — which includes a file that is not
+    a task at all (no `id` in its front matter), so `autonomy/_config.md` and the
+    drafts beside it keep landing.
+    """
+    try:
+        from agent_mcp._shared import body_undelivered_tools
+        offenders = body_undelivered_tools(content)
+    except Exception as exc:  # noqa: BLE001 — an unloadable rail is not a rail that passed
+        logger.exception("autonomy body rail unavailable for vault path %s", path)
+        _record_body_refusal(path, f"the predicate itself could not run ({exc})")
+        return _err("vault_write refused: the autonomy body rail could not run, so "
+                    f"{path} is not being written. Report this rather than working "
+                    "around it.", ErrorCode.PROTECTED_PATH)
+    if not offenders:
+        return None
+    named = ", ".join(f"`{name}`" for name in offenders)
+    _record_body_refusal(path, f"body orders {named}")
+    return _err(
+        f"vault_write refused: {path}'s body orders {named}, and that task's built "
+        "prompt never names it. What a run is actually delivered is `silent_hint`, "
+        "the SKILL.md its `skill_name` points at and the front-matter `description` — "
+        "never the body — so this line reaches no run: it is documentation claiming an "
+        "instruction that was never delivered, and every later reader takes it as one. "
+        "Put the tool in the `description` (or in that SKILL.md) if the run is meant to "
+        "call it, or drop the instruction from the body. "
+        "`tests/test_research_doc_claims.py::test_no_task_body_orders_a_tool_its_"
+        "prompt_never_names` grades this rule over the whole corpus, so landing this "
+        "write would have reddened the next round that touched the file.",
+        ErrorCode.PROTECTED_PATH)
+
+
 def _autonomy_schedule_refusal(path: str, content: str) -> dict | None:
     """Refuse a `vault_write` that would ARM a task by creating it (#2362), phase A.
 
@@ -1800,11 +1871,17 @@ def _autonomy_schedule_refusal(path: str, content: str) -> dict | None:
 
     The rule is the landing route's rule, read from the rail's own frozenset and
     its helpers in `app/harness/policy.py`, never copied: a write that moves a
-    VALUE is refused, one that rewrites the body, the description or an Activity
-    Log line is not, a re-quoted timestamp is not, and a CREATE is judged only on
-    whether it arms. Fail-closed in both directions: front matter this cannot turn
-    into a mapping is a refusal, and a rail that cannot be imported stops the
-    write.
+    VALUE is refused, one that rewrites the description or an Activity Log line is
+    not, a re-quoted timestamp is not, and a CREATE is judged only on whether it
+    arms. Fail-closed in both directions: front matter this cannot turn into a
+    mapping is a refusal, and a rail that cannot be imported stops the write.
+
+    The body has exactly one exception (#2589): `_autonomy_body_refusal` below
+    applies the #2265 corpus guard's predicate — a backticked tool name in the
+    instruction region that the task's own built prompt never names — so the write
+    that would have joined the graded corpus unrefused is refused at the write. The
+    guard and the rails call the same shipped function, because a rule with two
+    definitions is a rule whose rails drift from the corpus they guard.
 
     SPLIT ACROSS THE LOCK, BECAUSE THE WRITER'S OWN INVARIANT SAYS SO. Reading a
     target outside `commit_lock` is what
@@ -1862,7 +1939,10 @@ def _autonomy_schedule_refusal(path: str, content: str) -> dict | None:
                     "refuses that unattended on autonomy_write_task and this lane "
                     "holds to the same rule. Create it `status: draft` and let a "
                     "human, or a granted call, arm it.", ErrorCode.PROTECTED_PATH)
-    return None
+    # The dispatch fields are clean; the body is the other thing this file can carry
+    # that nothing else checks on a create (#2589). Ordered after the arming check so
+    # a create that is both armed and badly worded is refused for the dangerous half.
+    return _autonomy_body_refusal(path, content)
 
 
 def _autonomy_schedule_move_refusal(path: str, content: str,
@@ -1915,7 +1995,12 @@ def _autonomy_schedule_move_refusal(path: str, content: str,
                     "writing past it.", ErrorCode.PROTECTED_PATH)
     moves = schedule_value_moves(old_fm, new_fm)
     if not moves:
-        return None
+        # Nothing dispatch-affecting moved, but the body still came through this
+        # branch, and #2589 is the write that rewrote a task's body with no dispatch
+        # field in sight. The dispatch comparison stays first: a write that both moves
+        # `status` and orders an undelivered tool is refused for the field, because
+        # that is the half that could run.
+        return _autonomy_body_refusal(path, content)
     field, old, new = moves[0]
     _record_schedule_refusal(path, f"{field}: {old!r} -> {new!r}")
     return _err(

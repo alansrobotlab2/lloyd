@@ -447,6 +447,73 @@ def _record_schedule_denial(mut: "_Mutation", tool: str, reason: str) -> None:
         pass
 
 
+def _record_body_denial(mut: "_Mutation", tool: str, reason: str) -> None:
+    """One durable row per refused autonomy body (`app/harness/denial_journal.py`).
+
+    One `guard` name shared with the `vault_write` lane's `_record_body_refusal`, on
+    the same purpose as `_record_schedule_denial` beside it: it is one rule across the
+    free-form lanes, so the owed question — what prose tried to reach a task file, and
+    through which lane — is one grep on `guard="autonomy_body_rail"`, with `tool`
+    telling the lanes apart. A journal that is down must not become a second verdict.
+    """
+    try:
+        from app.harness import denial_journal
+        denial_journal.record(guard="autonomy_body_rail", where="dispatch",
+                              session_id=get_bound_session(), tool=tool,
+                              reason=f"{mut.path}: {reason}"[:600],
+                              excerpt=str(mut.path),
+                              label="body orders a tool its built prompt never names")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _autonomy_body_denial(mut: "_Mutation", post_text: str,
+                          tool: str) -> str | None:
+    """Refuse a task body ordering a tool its own built prompt never names (#2589).
+
+    The Write/Edit half of the rule the `vault_write` lane enforces in
+    `agent_mcp/vault.py::_autonomy_body_refusal`, and the same shipped predicate —
+    `agent_mcp._shared.body_undelivered_tools` — is what both call, which is the point:
+    the corpus guard, the vault lane and this lane cannot disagree about what an
+    offender is, so no body is refused by one and passed by another. The reason it has
+    to be on this lane too is the class rule the vault lane's docstring already cites:
+    a guard on one of two write surfaces is not a guard.
+
+    Called from the same site as the #2362 dispatch-field rail — before the mutation
+    commits — so a refusal here changes no bytes, opens no undo entry and records no
+    change-ledger row; the denial journal row is the only thing it writes. Fail-closed
+    like the rails beside it: a predicate that cannot run refuses, naming why.
+    """
+    try:
+        from agent_mcp._shared import body_undelivered_tools
+        offenders = body_undelivered_tools(post_text)
+    except Exception as exc:  # noqa: BLE001 — an unloadable rail is not a rail that passed
+        _record_body_denial(mut, tool, f"the predicate itself could not run ({exc})")
+        return json.dumps({
+            "error": (f"{tool} refused: the autonomy body rail could not run, so "
+                      f"{mut.path} is not being written. Report this rather than "
+                      "working around it."),
+            "code": ErrorCode.PROTECTED_PATH})
+    if not offenders:
+        return None
+    named = ", ".join(f"`{name}`" for name in offenders)
+    _record_body_denial(mut, tool, f"body orders {named}")
+    return json.dumps({
+        "error": (
+            f"{tool} refused: {mut.path}'s body orders {named}, and that task's built "
+            "prompt never names it. What a run is actually delivered is `silent_hint`, "
+            "the SKILL.md its `skill_name` points at and the front-matter `description` "
+            "— never the body — so this line reaches no run: it is documentation "
+            "claiming an instruction that was never delivered, and every later reader "
+            "takes it as one. Put the tool in the `description` (or in that SKILL.md) "
+            "if the run is meant to call it, or drop the instruction from the body. "
+            "`tests/test_research_doc_claims.py::test_no_task_body_orders_a_tool_its_"
+            "prompt_never_names` grades this rule over the whole corpus, so landing "
+            "this write would have reddened the next round that touched the file."),
+        "code": ErrorCode.PROTECTED_PATH,
+        "path": str(mut.path)})
+
+
 def _autonomy_schedule_refusal(mut: "_Mutation", post_text: str,
                                tool: str) -> str | None:
     """Refusal for task-file bytes about to land through `Write`/`Edit`, or None.
@@ -533,7 +600,11 @@ def _autonomy_schedule_refusal(mut: "_Mutation", post_text: str,
                           "this lane holds to the same rule. Create it `status: "
                           "draft` and let a human, or a granted call, arm it."),
                 "code": ErrorCode.PROTECTED_PATH})
-        return None
+        # Dispatch state is clean on this create, but the body still came through here,
+        # and a create is one of the two ways a bad body arrives (#2589). Ordered after
+        # the arming check so a create that is both armed and badly worded is refused
+        # for the dangerous half.
+        return _autonomy_body_denial(mut, post_text, tool)
 
     old_fm = front_matter_map(mut.pre_bytes.decode("utf-8", errors="replace"))
     if old_fm is None or new_fm is None:
@@ -547,7 +618,11 @@ def _autonomy_schedule_refusal(mut: "_Mutation", post_text: str,
             "code": ErrorCode.PROTECTED_PATH})
     moves = schedule_value_moves(old_fm, new_fm)
     if not moves:
-        return None
+        # Nothing dispatch-affecting moved, but the post bytes still came through this
+        # branch, and #2589's incident is exactly a body rewrite that moved none of them.
+        # The dispatch comparison stays first: a write that both moves `status` and orders
+        # an undelivered tool is refused for the field, the dangerous half.
+        return _autonomy_body_denial(mut, post_text, tool)
     field, old, new = moves[0]
     _record_schedule_denial(mut, tool, f"{field}: {old!r} -> {new!r}")
     return json.dumps({

@@ -1491,3 +1491,260 @@ def test_a_symlink_that_stays_inside_the_vault_is_not_the_refusal_above(scratch)
     out = scratch.mod._vault_read({"path": "alias.md"})
     assert out.get("text") == "inside bytes\n", (
         f"a link that stays in the vault was refused: {out}")
+
+
+
+
+
+# ── #2589: the body rule, on both free-form lanes ────────────────────────────────
+#
+# The #2265 corpus guard asks one question of a task file: does its instruction region
+# order the run to use a tool that the prompt the scheduler actually builds never names?
+# Until #2589 only the automod land graded the answer, because the predicate lived in
+# `tests/test_research_doc_claims.py` and a writer's rail cannot import a test helper. So
+# both free-form lanes read front matter only, a body could join the graded corpus
+# unrefused, and the item's incident file surfaced hours later as a red base probe on
+# somebody else's round.
+#
+# The predicate is shipped code now — `agent_mcp/_shared.py::body_undelivered_tools`,
+# beside `with_body_contract` — and every node below drives a rail that calls it.
+#
+# Fixture geometry, which is what makes these verdicts mean anything: the seed's
+# instruction region names no tool, and its backticked names sit exactly where the region
+# builder cuts — under `## Activity Log`, and inside a `- 2026-…T…:` dated bullet. So an
+# untouched seed is clean, and a refusal on it can only mean the cut broke. The status is
+# always `draft`, because `_task`'s default is `up_next` and an `up_next` create is
+# refused by the #2362 arming rule: such a node would pass with the body rule deleted.
+#
+# `vault_write` is the offender name, and the reason is measured: `email_send` looked like
+# the better choice (it is in `_GUARD_MUST_SEE`) but it is NOT in the universe on this box —
+# the Thunderbird bridge is absent from a worktree, so the advertised surface has 107 names
+# and none of them is a mail tool, while the annotated tables have 132 and none either. A
+# fixture naming a tool outside the universe is refused by neither lane and the node passes
+# because the guard is blind, not because the rule held. `vault_write` is in
+# `_GUARD_MUST_SEE`, so the universe floor that both the guard and the rails run is what
+# keeps it present; the three `_GUARD_MUST_SEE` names that are not mail tools were checked
+# in universe here.
+BODY_OFFENDER = "vault_write"
+BODY_ORDER = f"Send the digest with `{BODY_OFFENDER}`.\n"
+
+
+def _body_task(**over) -> str:
+    """A draft task file with an empty-by-design instruction region and NO skill.
+
+    Dropping `skill_name` (`_task` filters a None value out) is load-bearing, not tidiness.
+    `_task`'s default names a real skill, `agent_mcp._shared.task_prompt_of` delivers that
+    SKILL.md into the prompt exactly as a run receives it, and the skill this fixture would
+    inherit backticks `email_send` — so the body sentence below would be ordering a tool the
+    prompt DOES name and the correct verdict would be to let it through. Measured: with the
+    inherited skill, `body_undelivered_tools` on the offending document returns []. An empty
+    `skill_name` is what removes it: `_task` filters a None override away, so the key has to
+    arrive as `""` to render as `skill_name: ` and resolve to no skill at all — the smallest
+    prompt there is, which is where an undelivered name is unambiguous.
+    """
+    over.setdefault("status", "draft")
+    over.setdefault("skill_name", "")
+    head, log = _task(**over).split("## Activity Log", 1)
+    return (head + "Read the probe report, then record the outcome.\n\n"
+            "## Activity Log\n" + log)
+
+
+def _ordered(doc: str) -> str:
+    """The same document plus one instruction sentence, ABOVE the Activity Log heading —
+    the one position that is unambiguously an order and not a record."""
+    head, log = doc.split("## Activity Log", 1)
+    return head.rstrip("\n") + "\n\n" + BODY_ORDER + "\n## Activity Log" + log
+
+
+def _body_rows(rows: list[dict]) -> list[dict]:
+    """This rule's own denial rows out of a journal spy. The owed check over the live
+    journal is one grep on the guard name, so the tests read the spy the same way."""
+    return [r for r in rows if r.get("guard") == "autonomy_body_rail"]
+
+
+def _ledger_spy(scratch, monkeypatch) -> list[str]:
+    """The vault lane's own ledger call, spied on the lane.
+
+    The same patch site
+    `test_a_refused_write_records_no_change_ledger_entry` uses, for the same reason:
+    `_ledger_record` is this module's one way into the change ledger, so a list that
+    stays empty on a refusal and grows on an accept is the whole claim — a refusal
+    opens no undo record, because an entry for a write that never happened is an undo
+    record pointing at nothing. The benign node below is that spy's positive control.
+    """
+    recorded: list[str] = []
+    monkeypatch.setattr(scratch.mod, "_ledger_record",
+                        lambda *a, **k: recorded.append(str(k.get("path") or a[:1])))
+    return recorded
+
+
+# ── clause 1: vault_write refuses on the create phase, naming tool and path ───────
+
+def test_vault_write_refuses_a_body_ordering_a_tool_its_prompt_never_names(scratch, monkeypatch):
+    """clause 1: the body rule refuses on this lane, says both the offending tool and the
+    path, and leaves nothing behind.
+
+    The file is the shape the incident had — a task whose body gained a sentence ordering
+    a tool its prompt never delivers. Before #2589 this call returned success.
+    """
+    ledger = _ledger_spy(scratch, monkeypatch)
+
+    res = _write(scratch, TASK_PATH, _ordered(_body_task()))
+
+    text = str(res)
+    assert "refused" in text.lower(), f"the write was accepted: {text[:300]}"
+    assert BODY_OFFENDER in text, f"the refusal does not name the offending tool: {text[:300]}"
+    assert TASK_PATH in text, f"the refusal does not name the path: {text[:300]}"
+    assert not (scratch.root / TASK_PATH).exists(), "a refused create wrote the file"
+    assert ledger == [], f"a refused write opened a ledger entry: {ledger}"
+    assert _audit_rows(scratch) == [], "a refused write opened an audit row"
+    rows = _body_rows(scratch.journal)
+    assert len(rows) == 1, f"expected exactly one body-denial row, got {rows}"
+    assert rows[0]["tool"] == "vault_write", rows[0]
+
+
+# ── clause 3: the locked-diff phase, the only one an edit can reach ──────────────
+
+def test_the_vault_lanes_locked_diff_phase_refuses_the_body_too(scratch, monkeypatch):
+    """clause 3: phase A only ever sees a CREATE, so rewriting the body of a file that
+    already exists — which is how #97's red body arrived — moved no dispatch field and
+    reached the disk untouched. A body rule on phase A alone was a create check.
+
+    Driven through the handler AND by calling the locked phase directly. The handler alone
+    cannot tell "phase B refused" from "phase A refused", since A runs first and would have
+    said the same words; the direct call is what pins which one.
+    """
+    ledger = _ledger_spy(scratch, monkeypatch)
+    seed = _seed(scratch, _body_task())
+    ledger.clear()      # the seed write above is an accepted write and records one entry
+    before = (scratch.root / TASK_PATH).read_bytes()
+    new = _ordered(seed)
+
+    direct = scratch.mod._autonomy_schedule_move_refusal(TASK_PATH, new, before)
+    assert direct is not None and "refused" in str(direct).lower(), (
+        f"the locked-diff phase passed a body ordering {BODY_OFFENDER}: {direct}")
+    assert BODY_OFFENDER in str(direct) and TASK_PATH in str(direct), (
+        f"the phase-B refusal names neither the tool nor the path: {str(direct)[:300]}")
+
+    res = _write(scratch, TASK_PATH, new)
+    assert "refused" in str(res).lower(), f"the lane accepted the body rewrite: {str(res)[:300]}"
+    assert (scratch.root / TASK_PATH).read_bytes() == before, "a refused write changed the file"
+    assert ledger == [], f"a refused write opened a ledger entry: {ledger}"
+
+    # The other half of "as well as": the dispatch rule still fires on this phase. A body
+    # rule that displaced it would still read as a working rail everywhere else.
+    moved = new.replace("status: draft", "status: up_next")
+    dispatch = scratch.mod._autonomy_schedule_move_refusal(TASK_PATH, moved, before)
+    assert dispatch is not None and "status" in str(dispatch), (
+        f"the dispatch rule stopped firing on the locked phase: {dispatch}")
+    assert (scratch.root / TASK_PATH).read_bytes() == before
+
+
+# ── clause 2: Write and Edit, same bytes, same verdict, same site ────────────────
+
+def test_write_and_edit_refuse_the_same_body_shape(fs, monkeypatch):
+    """clause 2: the second free-form lane, which is the one the item's own evidence
+    points at — the incident file has zero `vault_write` audit rows, and the fs lane is
+    the door with neither a rail nor a journal row. A rule on one of two write surfaces
+    is not a rule (#2362's lesson, learned twice).
+
+    `Edit` is not decoration: it is the same reducer with a different post-text, and the
+    corpus guard catches two-word body edits, so a lane that refused only whole-file
+    writes would refuse the rare shape and pass the common one.
+    """
+    led: list[dict] = []
+    monkeypatch.setattr(fs.mod, "_ledger_begin", lambda mut, **kw: led.append(kw))
+    _fs_seed(fs, _body_task())
+    before = (fs.root / TASK_PATH).read_bytes()
+
+    w = _refusal(fs.mod._write({"file_path": _abs(fs, TASK_PATH),
+                                "content": _ordered(_body_task())}))
+    assert w, "Write accepted the offending body and returned prose instead of a refusal"
+    assert BODY_OFFENDER in w["error"], f"Write did not name the tool: {w['error'][:300]}"
+    assert TASK_PATH in w["error"], f"Write did not name the path: {w['error'][:300]}"
+
+    e = _refusal(fs.mod._edit({"file_path": _abs(fs, TASK_PATH),
+                               "old_string": "Read the probe report, then record the outcome.",
+                               "new_string": BODY_ORDER.rstrip("\n")}))
+    assert e, "Edit accepted the same shape"
+    assert BODY_OFFENDER in e["error"], f"Edit did not name the tool: {e['error'][:300]}"
+    assert TASK_PATH in e["error"], f"Edit did not name the path: {e['error'][:300]}"
+
+    assert (fs.root / TASK_PATH).read_bytes() == before, "a refused Write/Edit changed the file"
+    assert led == [], f"a refused Write/Edit opened the undo/ledger entry: {led}"
+    assert [r.get("tool") for r in _body_rows(fs.journal)] == ["Write", "Edit"], (
+        f"expected one body-denial row per lane, got {[r.get('tool') for r in fs.journal]}")
+
+
+def test_the_body_rule_is_called_by_the_same_rail_at_the_same_site(fs):
+    """clause 2's placement half — "at the same pre-commit site as the #2362 dispatch-field
+    rail" is a claim about WHERE, and every behavioural node above passes whether the check
+    runs before the write or after it. Only a post-write refusal would leave bytes behind,
+    and that would fail somewhere else for the wrong reason. So this reads the tree.
+
+    Three things: the dispatch rail itself reaches the body rule (one decision point, not
+    two that can drift — drift is how #2589 happened); both commit sites still ask; and in
+    line order, the ask comes before `_ledger_begin`, so a refusal cannot leave an undo
+    entry pointing at a write that never happened.
+    """
+    tree = ast.parse(Path(fs.mod.__file__).read_text(encoding="utf-8"))
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+    def calls_by_line(fn):
+        return {n.func.id: n.lineno for n in ast.walk(fn)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+
+    asked = calls_by_line(fns["_autonomy_schedule_refusal"])
+    assert "_autonomy_body_denial" in asked, (
+        "the fs lane's dispatch rail no longer reaches the body rule, so the two checks "
+        "are two places again and one of them will be forgotten")
+    for site in ("_write", "_edit"):
+        lines = calls_by_line(fns[site])
+        assert "_autonomy_schedule_refusal" in lines, f"{site} stopped asking the rail"
+        assert lines["_autonomy_schedule_refusal"] < lines["_ledger_begin"], (
+            f"{site} opens the ledger before asking the rail, so a refusal there leaves an "
+            "undo entry for a write that never happened")
+
+
+# ── clause 4: what must keep landing, on both lanes ──────────────────────────────
+
+def test_a_benign_body_still_lands_and_is_ledgered_on_both_lanes(scratch, fs):
+    """clause 4: three shapes that are not orders, each carrying a backticked tool name and
+    so each one this rule could refuse by accident.
+
+      * the name in the front-matter `description`, which `_build_task_prompt` DOES deliver
+        to the run — ordering it in prose is then a true instruction, and refusing it would
+        make the guard refuse the fix it tells the caller to make;
+      * the name only under `## Activity Log`, the scheduler's own history;
+      * the name only inside a dated `- 2026-…T…:` bullet, which is what
+        `append_activity_line` writes and what a run's honest report looks like.
+
+    Each must land AND be recorded: a guard that refuses nothing but stops writing the undo
+    ledger and the audit row would satisfy this clause's first sentence and break the run's
+    ability to undo the write.
+    """
+    named = _body_task(description=f"Report the digest with {BODY_OFFENDER}.")
+    assert BODY_OFFENDER in named, "fixture lost its prompt-named tool"
+    log_only = _body_task()
+    dated = _body_task().replace(
+        "## Activity Log",
+        f"- 2026-10-11T07:00:00Z: used `{BODY_OFFENDER}` for this.\n\n## Activity Log", 1)
+    for label, doc in (("prompt-named", named), ("log-only", log_only), ("dated", dated)):
+        res = _write(scratch, TASK_PATH, doc)
+        assert res.get("success") is True, f"{label}: a benign write was refused: {res}"
+        assert doc in (scratch.root / TASK_PATH).read_text(encoding="utf-8"), \
+            f"{label}: reported success without writing the bytes"
+    assert not _body_rows(scratch.journal), f"a benign write was denied: {_body_rows(scratch.journal)}"
+    assert len(_audit_rows(scratch)) == 3, (
+        f"expected one audit row per benign write, got {_audit_rows(scratch)}")
+
+    _fs_seed(fs, _body_task())
+    w = fs.mod._write({"file_path": _abs(fs, TASK_PATH), "content": named})
+    assert not _refusal(w), f"Write refused a prompt-named body: {w}"
+    assert BODY_OFFENDER in (fs.root / TASK_PATH).read_text(encoding="utf-8")
+    e = fs.mod._edit({"file_path": _abs(fs, TASK_PATH),
+                      "old_string": "- 2026-10-05T06:27Z created by an autocode round",
+                      "new_string": "- 2026-10-05T06:27Z created by an autocode round\n"
+                                    f"- 2026-10-12T09:00:00Z: used `{BODY_OFFENDER}`"})
+    assert not _refusal(e), f"Edit refused a dated log bullet: {e}"
+    assert not _body_rows(fs.journal), f"the fs lane denied a benign body: {_body_rows(fs.journal)}"

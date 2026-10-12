@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import functools
 import os
 import re
 import subprocess
@@ -306,21 +305,27 @@ def _task_dir() -> Path:
     return _vault_root() / "autonomy"
 
 
-#: Where an instruction region stops. Same convention
-#: `tests/test_legacy_alias_export_fate.py` already uses for the same question —
-#: everything after `## Activity Log` is history the scheduler never executes,
-#: and a `- 2026-…T…: …` bullet is a run report, so an honest log line cannot
-#: trip the guard. Two pins asking "what does this body tell its run to do?" must
-#: not answer it two different ways.
-_ACTIVITY_HEADING_RE = re.compile(r"^##\s+Activity", re.I | re.MULTILINE)
-_DATED_BULLET_RE = re.compile(r"^-\s+\d{4}-\d{2}-\d{2}T")
-#: Names the guard has to be able to see for its verdict to mean anything. Every
-#: one is served by a local module (vault, fact store, backlog), so none of them
-#: vanishes when an external bridge is down — which is why `_lloyd_tool_names`
-#: floors on these names rather than on a count, and why the fixture test below
-#: reuses them as its fixture tools instead of inventing names of its own.
-_GUARD_MUST_SEE = frozenset({"vault_write", "vault_recall", "fact_add",
-                             "fact_relate", "backlog_write_task"})
+#: The region builder, the delivered-tool universe and the offender predicate are
+#: shipped code now — `agent_mcp/_shared.py`, beside `with_body_contract` — and this
+#: file imports them (#2589). It used to hold the only copy, and that is precisely how
+#: the gap this item closes stayed open: a writer's rail cannot import a test helper, so
+#: both free-form lanes checked dispatch fields only, a body naming a tool its prompt
+#: never delivered joined the graded corpus unrefused, and the red surfaced hours later
+#: as some other round's base probe. One definition, so the guard and the rails cannot
+#: hand down different verdicts on the same bytes.
+#:
+#: The three names keep their private spelling on purpose: every node below, and the
+#: child-run collection pins, address them by these names. The two region regexes are
+#: deliberately NOT imported — `tests/test_legacy_alias_export_fate.py` carries its own
+#: `ACTIVITY_HEADING` for its own scan — because a node that grabbed a raw regex could
+#: pass while the shipped builder cut somewhere else; every node here goes through
+#: `instruction_region`, which is the only way the cut can move without being seen.
+from agent_mcp._shared import (
+    instruction_region as _instruction_region,
+    lloyd_tool_names as _lloyd_tool_names,
+    undelivered_tool_names as _undelivered_tool_names,
+)
+
 
 
 def _task_files(task_dir: Path | None = None) -> list[Path]:
@@ -340,88 +345,6 @@ def _body_of(path: Path) -> str:
     """Everything after the front matter, the way `_parse_task_file` sees it."""
     parts = path.read_text(encoding="utf-8").split("---\n", 2)
     return parts[2] if len(parts) > 2 else ""
-
-
-def _instruction_region(body: str) -> str:
-    """The part of a body that registers work: before the activity log, minus its
-    dated run-report bullets.
-
-    `MULTILINE` on the heading regex is load-bearing and was this helper's first
-    bug: `search` over a whole body with a bare `^` matches only at offset 0, and
-    no task body begins with its activity heading, so without the flag the cut
-    never fires and every machine-written run note is graded as an instruction.
-    Both cuts are therefore pinned by name in
-    `test_the_body_tool_guard_fires_on_an_undelivered_tool`, which is what stops
-    either one rotting into a no-op.
-    """
-    m = _ACTIVITY_HEADING_RE.search(body)
-    region = body[:m.start()] if m else body
-    return "\n".join(ln for ln in region.splitlines()
-                     if not _DATED_BULLET_RE.match(ln))
-
-
-#: Memoised because the body-tool guard is one NODE PER TASK FILE (#2265): the
-#: universe is a property of the code tree, not of the file being graded, and 38
-#: nodes each paying a `list_tools()` round trip would multiply the land-time
-#: probe's cost by the size of a corpus the probe has to finish inside.
-@functools.lru_cache(maxsize=1)
-def _lloyd_tool_names() -> frozenset[str]:
-    """Every tool a run could possibly be told about: the central annotation
-    table plus every tool the MCP server actually advertises.
-
-    Both, because the table alone is not the tool surface. Measured at `e4ef79c4`
-    it holds 122 of the 147 names `list_tools()` advertises, and the 26 it omits are
-    disproportionately writers (`fact_add`, `memory_add`, `backlog_write_task`,
-    `research_propose`, the whole email-reply family) — precisely the actions a task
-    body would plausibly order, which is the #47 failure with a different verb. The
-    table is still read because the clause names it and because its sets are a
-    literal a reader can check.
-
-    The counts are NOT stable across environments, which is why the floor below is
-    a set of names and not a number: the same call inside a gate's round home
-    returned 107 advertised names and a 132-name union, because the Thunderbird
-    bridge is unreachable there and the mail, calendar, contacts and task tools are
-    simply absent from the advertised surface (the import banner says so). A count
-    assertion passed at 132 while 15 tools had vanished; `_GUARD_MUST_SEE` does not
-    have that hole.
-
-    The public UPPER_CASE frozensets are taken reflectively so a table added later
-    is covered without anyone editing this; the two private ones hold prefixes and
-    extras, not names.
-    """
-    import asyncio
-
-    import agent_mcp.annotations as A
-    import agent_mcp.main as M
-
-    tables = {k: v for k, v in vars(A).items()
-              if k.isupper() and not k.startswith("_")
-              and isinstance(v, (frozenset, set))}
-    names: set[str] = set()
-    for value in tables.values():
-        names |= set(value)
-    annotated = len(names)
-    names |= {t.name for t in asyncio.run(M.list_tools())}
-    # A universe that came back empty or half-built would make the guard below
-    # pass by matching nothing, which is the one outcome worse than a false alarm.
-    # The real control is the NAME FLOOR, not the counts: the counts are a
-    # property of the environment (see the docstring), so they were satisfied at
-    # 132 in a gate's round home with 15 tools already missing from the surface.
-    # `_GUARD_MUST_SEE` is a property of the guard.
-    assert len(tables) >= 5, f"only {sorted(tables)} annotation tables found"
-    assert annotated > 100, f"only {annotated} annotated names — the scan broke"
-    assert len(names) >= annotated, "list_tools returned nothing new or broke"
-    unseen = sorted(_GUARD_MUST_SEE - names)
-    assert not unseen, \
-        f"the tool universe is missing {unseen}; the guard below would silently "  \
-        "stop seeing those actions — check that agent_mcp.main.list_tools() ran"
-    return frozenset(names)
-
-
-def _undelivered_tool_names(prompt: str, region: str, tools: frozenset[str]) -> list[str]:
-    """Tool names the instruction region backticks that the prompt never says."""
-    named = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", region))
-    return sorted(n for n in named if n in tools and n not in prompt)
 
 
 def _prompt_and_region(path: Path) -> tuple[str, str]:
@@ -834,9 +757,10 @@ def test_the_body_tool_guard_fires_on_an_undelivered_tool(tmp_path):
       * `vault_write` in the body's prose — must be CAUGHT. Remove the membership
         check in `_undelivered_tool_names` and the other two fire as well, so the
         check cannot silently stop checking.
-      * `fact_relate` inside a dated run-report bullet — must be EXCLUDED. Drop
-        `_DATED_BULLET_RE` and it lands in the verdict; the filter is then pinned
-        by a name that exists nowhere else in the body.
+      * `fact_relate` inside a dated run-report bullet — must be EXCLUDED. Drop the
+        dated-bullet filter inside `agent_mcp/_shared.py::instruction_region` and it
+        lands in the verdict; the filter is then pinned by a name that exists nowhere
+        else in the body.
       * `backlog_write_task` after the `## Activity Log` heading — must be
         EXCLUDED. Lose `re.MULTILINE` on the heading regex and `search` matches
         only at offset 0, the cut never fires, and this name appears too.
@@ -1486,3 +1410,55 @@ def test_the_reliance_guard_trips_on_the_sentence_it_was_filed_against():
     assert not _bench_mine_relies_claim(corrected), (
         "the guard flags the corrected prose, which means it is matching the "
         "module name rather than the claim")
+
+
+#: The three shipped functions this guard calls. `_prompt_and_region` stays local on
+#: purpose and is not in this set: it is this sweep's own cut with the scheduler's
+#: *recovering* parser, because #2265's rule is that a file with broken front matter is a
+#: parse failure rather than a silent skip, whereas the rails take the strict cut and hand
+#: an unreadable file to the dispatch rail one line earlier. `agent_mcp._shared`
+#: `body_undelivered_tools` composes the three names below, so a rail and this node cannot
+#: disagree about what an offender is.
+_SHIPPED_PREDICATE_NAMES = {"_instruction_region", "_lloyd_tool_names",
+                            "_undelivered_tool_names"}
+
+
+def test_the_rails_and_this_guard_share_one_definition():
+    """#2589 clause 5: the predicate has exactly one home, and it is shipped code.
+
+    The gap this item closes existed because this file held the only copy: a writer's rail
+    cannot import a test helper, so the two free-form lanes could only check dispatch
+    fields and a body joined the corpus unrefused. A node is needed because the failure
+    mode is silent in both directions — a re-inlined copy here would keep every corpus
+    node green while the rails drifted, and a rail that quietly imported a different
+    function would refuse a different set of bytes than this guard reports.
+
+    So the check is identity, not text: the three names this file calls must BE the
+    shipped functions (one object, not two equal-looking ones), this module must define
+    none of them itself, and the corpus the guard parametrizes over must be the whole
+    reachable set of numbered task files with a prompt that builds.
+    """
+    import inspect
+    import agent_mcp._shared as sh
+
+    for local, shipped in ((_instruction_region, sh.instruction_region),
+                           (_lloyd_tool_names, sh.lloyd_tool_names),
+                           (_undelivered_tool_names, sh.undelivered_tool_names)):
+        assert local is shipped, (
+            f"{getattr(shipped, '__name__', shipped)} is no longer the function this "
+            "guard calls, so the guard and the rails can disagree on the same bytes")
+        assert getattr(inspect.getmodule(shipped), "__name__", "") == "agent_mcp._shared", (
+            "the predicate left shipped code, which puts it out of reach of a rail")
+
+    defined = {n.name for n in ast.parse(Path(__file__).read_text(encoding="utf-8")).body
+               if isinstance(n, ast.FunctionDef)}
+    redefined = sorted(defined & _SHIPPED_PREDICATE_NAMES)
+    assert not redefined, (
+        f"this file re-defines part of the predicate: {redefined}. The rails cannot "
+        "import a helper defined here, which is exactly how #2589 stayed open")
+
+    assert _TASK_SWEEP, "the sweep is empty, so every corpus node here passes on nothing"
+    for path in _TASK_SWEEP:
+        assert sh.body_undelivered_tools(path.read_text(encoding="utf-8")) == [], (
+            f"{path.name} is in the corpus with an undelivered tool named; the rails would "
+            "now refuse the write that produced it")
