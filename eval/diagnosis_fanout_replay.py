@@ -128,7 +128,21 @@ ARMS = ("A", "A-retry", "B")
 ARM_A, ARM_RETRY, ARM_B = "A", "A-retry", "B"
 #: Matched token ceiling per case-arm, shared by every theory in arm B, so the
 #: fan-out has to buy its extra dispatches out of the same budget.
-DEFAULT_TOKEN_CEILING = 120_000
+#:
+#: 200,000, up from 120,000, because 120,000 sits below ONE completed
+#: investigation: the #2258 case that died at the 20-turn budget finished at 27
+#: turns having spent 179,186 tokens (`~/lloyd-data/eval/2258/probe-maxturns-40.log`,
+#: line `CAP=40 claims_n=1 tokens=179186`). At the old figure every arm-A row this
+#: study could record was ALSO a `kind: ceiling` "over-ceiling" row — see the
+#: spend-vs-ceiling append in `run_case_a` — so the spend line in `format_report`
+#: printed the same refusal for both arms and stopped discriminating, and spend is
+#: the only axis the arms are matched on. The 20,814 above the measurement is
+#: headroom, a judgement rather than a second measurement: a ceiling of exactly
+#: 180,000 clears 179,186 by 814 tokens, so the next case that read one more log
+#: would be back to recording a ceiling row. A case that really does spend past
+#: this still reports `kind: ceiling`, which is the true answer; what the number
+#: may not do is make an ordinary case look over budget.
+DEFAULT_TOKEN_CEILING = 200_000
 
 
 class RecordError(Exception):
@@ -878,6 +892,13 @@ async def generate_theories_live(case: dict, *, max_turns: int = 6) -> list[str]
     The prompt carries the incident and nothing else — no log path, no ledger
     line — because a theory generated after reading a log is anchored to it,
     which is the failure class the whole technique exists to fight.
+
+    The 6-turn budget is left alone deliberately, and it is the one live budget
+    still without a measurement. Reading nothing is why 6 is plausible here and
+    was implausible for `investigate_live`, but no #2258 run ever reached this
+    step to check it — every smoke run died in arm A — so 6 stays as shipped until
+    the owed probe (#2624) says otherwise. Raising an unmeasured budget would buy
+    nothing and hide whether arm B's generation step has the same problem.
     """
     prompt = (
         f"Incident: {case.get('input')}\n\n"
@@ -895,8 +916,28 @@ async def generate_theories_live(case: dict, *, max_turns: int = 6) -> list[str]
 
 
 async def investigate_live(case: dict, theory: str, *,
-                           max_turns: int = 20) -> dict:
-    """One scoped per-theory investigation: evidence for THIS theory only."""
+                           max_turns: int = 40) -> dict:
+    """One scoped per-theory investigation: evidence for THIS theory only.
+
+    40 turns, up from 20, and the number is measured rather than chosen: a real
+    investigation of the case `flaky-SM_20260928_080412` on this engine took 27
+    turns to reach `stop_reason: stop`
+    (`~/lloyd-data/eval/2258/probe-maxturns-40.log`, line
+    `META: {"stop_reason": "stop", "num_turns": 27, ...}`). 40 is the cap that
+    measurement was taken under; the same case at 20 ended at 21 turns with
+    `stop_reason: max_turns`.
+
+    Running out of turns is not a short answer, it is NO answer. A run that ends
+    `max_turns` gets no `final_schema` restatement — the finalizer's
+    `FINALIZABLE_STOP_REASONS` is `{stop, end_turn}` with "no verdict to restate"
+    as the stated reason (`app/harness/finalizer.py:66`), and the P6b wrap-up
+    leaves `stop_reason` at `max_turns` rather than changing that
+    (`app/harness/options.py:33-41`). So `out["structured"]` came back `{}`, the
+    claim list came back empty, and `run_case_a` raised — which read as "the model
+    found no evidence" when the instrument had simply stopped it early. Cost of
+    the raised budget, measured on the same probe: 601,744 ms and 179,186 tokens
+    for ONE arm-A investigation.
+    """
     prompt = (
         f"Incident: {case.get('input')}\n\n"
         f"Candidate cause under investigation, and the only one: {theory}\n\n"

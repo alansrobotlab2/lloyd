@@ -12,6 +12,7 @@ one pins.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import subprocess
@@ -23,13 +24,15 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from eval import diagnosis_fanout_replay as replay  # noqa: E402
 from eval.diagnosis_fanout_replay import (  # noqa: E402
-    ARM_A, ARM_B, ARM_RETRY, MIN_CASES, RecordError, THEORIES_PER_CASE,
-    VAULT_WITNESS, WITNESS_CASES, WITNESS_ROWS, WITNESS_SHA, RowWriter,
-    agrees, baseline_problem, build_cases, case_complete, citation_rows,
-    excluded_note, format_report, learnings_cases, load_cases,
-    rank_theories, run_case_a, select_cases, slot_labels, verify_citation,
-    verify_citations, witness_census, write_baseline, write_cases)
+    ARM_A, ARM_B, ARM_RETRY, DEFAULT_TOKEN_CEILING, MIN_CASES, RecordError,
+    THEORIES_PER_CASE, VAULT_WITNESS, WITNESS_CASES, WITNESS_ROWS, WITNESS_SHA,
+    RowWriter, agrees, baseline_problem, build_cases, case_complete,
+    citation_rows, excluded_note, format_report, investigate_live,
+    learnings_cases, load_cases, rank_theories, run_case_a, select_cases,
+    slot_labels, verify_citation, verify_citations, witness_census,
+    write_baseline, write_cases)
 
 LEDGER = REPO / ".git"  # exists, so a missing-ledger path is never confused with one
 
@@ -889,6 +892,143 @@ def test_a_single_trace_arm_reads_the_older_shape_and_refuses_a_silent_answer(tm
         "counted into the denominator as though it had been measured")
 
 
+# ── #2624: the live wiring's budgets ────────────────────────────────────────
+#
+# `investigate_live`'s 20-turn default and the 120,000 ceiling were read by
+# nothing until this section: `cmd_run` calls the investigator with no `max_turns`
+# and the CLI's `--ceiling` defaults to the module constant, so both numbers were
+# the study's real configuration while no test could see them. That is how the
+# study died on its first case — see each node's docstring for the measurement.
+
+def test_the_live_investigation_budget_reaches_the_engine_turn_it_must_fit_in(
+        monkeypatch):
+    """Clause 1: the budget the arm asks for is the budget the harness is given.
+
+    Two boundaries in one node because the failure lived between them. The default is
+    read off `investigate_live`'s own signature — `cmd_run` never passes `max_turns`,
+    so the default IS the study's budget — and is then followed across into
+    `_engine_turn`, the single call that hands the number to
+    `app.harness.loop.run_query`. A signature saying 40 over a call that dropped the
+    argument would satisfy a signature-only test and still stop at the harness's own
+    default, and nothing in the file would have looked wrong.
+
+    The figure is measured, not chosen: investigating `flaky-SM_20260928_080412` on
+    this engine reached `stop_reason: stop` at 27 turns under a cap of 40
+    (`~/lloyd-data/eval/2258/probe-maxturns-40.log`,
+    `META: {"stop_reason": "stop", "num_turns": 27, ...}`), while the shipped 20 ended
+    the same case at 21 turns with `stop_reason: max_turns`. Running out of turns is
+    not a shorter answer, it is no answer: the finalizer restates a `final_schema` only
+    for `stop`/`end_turn` (`FINALIZABLE_STOP_REASONS`, `app/harness/finalizer.py:66`,
+    "no verdict to restate"), so the exhausted arm got `structured: {}`, hence
+    `claims: []`, hence a `run_case_a` refusal that read as "the model found no
+    evidence".
+    """
+    case = _study_corpus()[0]
+    seen: list[dict] = []
+
+    async def fake_turn(prompt, *, schema, session_id, max_turns):
+        seen.append({"schema": schema, "session_id": session_id,
+                     "max_turns": max_turns})
+        return {"structured": {"claims": [{"claim": "parallel-load-flake at base",
+                                           "citations": []}]},
+                "tokens": 179_186, "model": "primary"}
+
+    monkeypatch.setattr(replay, "_engine_turn", fake_turn)
+
+    assert inspect.signature(investigate_live).parameters["max_turns"].default >= 40, (
+        "the live investigator's turn budget is back under 40; the one case measured "
+        "end-to-end on this engine needed 27 turns to answer at all")
+
+    out = asyncio.run(investigate_live(case, "parallel-load-flake at base"))
+
+    assert len(seen) == 1, seen
+    assert seen[0]["max_turns"] == 40, (
+        f"the signature says 40 but the harness call got {seen[0]['max_turns']}")
+    assert seen[0]["schema"] is replay.CLAIMS_SCHEMA, (
+        "an investigation answers the claims schema; a theories schema here would "
+        "silently return no claims for a perfectly good trace")
+    assert seen[0]["session_id"].startswith("bench_"), (
+        "a non-bench session id is not sandboxed, so an investigation could write")
+    # An explicit budget still wins over the default — the probe that measured 27
+    # turns was itself run at a different cap, and that has to stay possible.
+    asyncio.run(investigate_live(case, "parallel-load-flake at base", max_turns=7))
+    assert seen[1]["max_turns"] == 7, seen[1]
+    # And the answer arrives in the shape `run_case_a` reads, since that arm's whole
+    # bug history is a key the live investigator never returned.
+    assert out["claims"][0]["claim"] == "parallel-load-flake at base", out
+    assert out["tokens"] == 179_186 and out["model"] == "primary", out
+
+
+def test_one_completed_investigation_fits_the_default_token_ceiling(tmp_path):
+    """Clause 2: one finished arm-A trace is under the ceiling the module ships with.
+
+    179,186 tokens is what the single completed investigation of a #2258 case spent on
+    this engine (`~/lloyd-data/eval/2258/probe-maxturns-40.log`,
+    `CAP=40 claims_n=1 tokens=179186`) against the 120,000 this module shipped. The
+    over-ceiling case is not a warning: `run_case_a` appends a second row of
+    `kind: ceiling` for it, so every arm-A result arrived tied to a refusal and
+    `format_report`'s spend line printed the same shape for both arms — the one axis
+    the arms are matched on went flat, which is what this raise is for.
+
+    No `token_ceiling` argument is passed below on purpose: the thing under test is the
+    module default, which is also `run --ceiling`'s default. Arm B's fan-out
+    enforcement — the ceiling must actually cut the fan-out off — stays pinned by
+    `test_the_fan_out_stops_at_the_matched_token_ceiling`, which passes its own number
+    and is untouched by this raise.
+    """
+    assert DEFAULT_TOKEN_CEILING >= 180_000, (
+        f"the default ceiling is {DEFAULT_TOKEN_CEILING}; one completed "
+        f"investigation measured 179,186 tokens, so at or under that every arm-A "
+        f"row is also an over-ceiling row")
+    case = _study_corpus()[0]
+    rows_path = tmp_path / "rows.jsonl"
+
+    async def measured_spend(case_arg, theory):
+        return {"tool": "Task", "model": "primary", "tokens": 179_186,
+                "claims": [{"claim": "parallel-load-flake at base: parallel-load-flake",
+                            "citations": [{"path": "eval/README.md", "line": 1}]}]}
+
+    verdict = asyncio.run(run_case_a(case, investigate=measured_spend,
+                                     writer=RowWriter(rows_path), run_id="c24a"))
+
+    rows = [json.loads(ln) for ln in rows_path.read_text().splitlines()]
+    assert [r["kind"] for r in rows] == ["tool", "verdict"], (
+        f"a third row means the measured spend tripped the default ceiling: {rows}")
+    assert verdict["tokens"] == 179_186
+    assert agrees(case, verdict["chosen_cause"])
+
+
+def test_the_refusal_to_record_an_empty_cause_survives_the_raised_budgets(tmp_path):
+    """Clause 3: more turns and more tokens bought no licence to record a guess.
+
+    The raise is exactly what makes this worth re-pinning. An exhausted run still
+    returns no structured answer, so the arm can still be handed a claim list with
+    nothing readable in it — and the row it would then write is the one that fakes the
+    headline: `agrees()` asks whether every marker of the expected cause occurs in the
+    text, empty text answers no to all of them, and `format_report` subtracts that 0/N
+    from arm B's measured rate before printing a HEADLINE. So the investigator below
+    answers the way an exhausted one does — the live shape, `claims` present, a blank
+    claim inside it — at the raised default ceiling and the measured spend, which
+    proves the refusal outlives the numbers this round changed rather than only the
+    numbers it was written against.
+    """
+    case = _study_corpus()[0]
+    rows_path = tmp_path / "rows.jsonl"
+
+    async def exhausted(case_arg, theory):
+        return {"tool": "Task", "model": "primary", "tokens": 179_186,
+                "claims": [{"claim": "   ",
+                            "citations": [{"path": "eval/README.md", "line": 1}]}]}
+
+    with pytest.raises(RuntimeError, match="no non-empty claim"):
+        asyncio.run(run_case_a(case, investigate=exhausted,
+                               writer=RowWriter(rows_path), run_id="c24b"))
+
+    assert not (rows_path.exists() and rows_path.read_text().strip()), (
+        "the refused cell still left rows on disk: a tool row without a cause is "
+        "counted into the denominator as though the arm had been measured")
+
+
 def test_report_grades_only_the_named_keys_and_counts_that_subset(tmp_path):
     """Clause 2: the same 98-row corpus can be reported over 21 keys, and N is 21.
 
@@ -1016,8 +1156,13 @@ def test_report_grading_the_real_sequence_end_to_end_needs_no_engine(tmp_path):
     rows_path.write_text("".join(json.dumps(r) + "\n"
                                  for r in _study_rows(cases, only)), encoding="utf-8")
     baseline_path = tmp_path / "retry_baseline.json"
+    # The default ceiling, not a literal: this CLI call passes no `--ceiling`, so the
+    # baseline has to be written at whatever `main` will assume. Hard-coding it here
+    # held the node to 120,000 and made #2624's raise look like a broken report — the
+    # ceiling this node is about is the wiring, not the number.
     write_baseline(baseline_path, cases_path=cases_path, n=NON_LEAKY, model="primary",
-                   token_ceiling=120_000, token_spend=861_000, top1_hits=NON_LEAKY)
+                   token_ceiling=DEFAULT_TOKEN_CEILING, token_spend=861_000,
+                   top1_hits=NON_LEAKY)
 
     proc = subprocess.run(
         [sys.executable, str(REPO / "eval" / "diagnosis_fanout_replay.py"), "report",
