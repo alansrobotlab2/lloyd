@@ -2216,7 +2216,7 @@ def build_parser() -> argparse.ArgumentParser:
                          f"(production {RECALL_SEED_TOP_K})")
     # The djev adoption arm. Note the honest caveat before reading a result
     # off it: the labelled set is 20 queries / 50 doc labels and the noise
-    # floor is 0.02 MRR (agent_mcp/vault.py:172), so this eval can adjudicate
+    # floor is 0.02 MRR (the eval block above `RECALL_QMD_FUSION`, `agent_mcp/vault.py:216`), so this eval can adjudicate
     # a LARGE win or a LARGE loss and nothing in between.
     ap.add_argument("--djev-rerank", dest="djev_rerank", action="store_true",
                     default=RECALL_DJEV_RERANK,

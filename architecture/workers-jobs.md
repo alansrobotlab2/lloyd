@@ -155,7 +155,7 @@ source reporting nothing at all while the window already held two runs of it.
   store failing to hold a row, and two functions decide that between them:
   `enqueue_if_due()` declines the offer silently unless `_runner_needed()` is true
   — `pending_promotions()` non-empty **and** no `runner_alive()`
-  (`workers/sources/automod_regression.py:367`) — because offering unconditionally
+  (`workers/sources/automod_regression.py:1348`) — because offering unconditionally
   would write ninety-six "nothing to measure" rows a day over the handful worth
   reading; and `start_runner()`, the job body, re-checks and returns
   `_skipped("no promotion is waiting to be measured")` (`:1175`, skip `:1183`). So

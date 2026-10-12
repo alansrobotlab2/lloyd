@@ -762,7 +762,7 @@ def _isolate_djev_shadow(tmp_path_factory):
 
     Paths, not `LLOYD_DJEV_SHADOW=0`, because that variable is itself asserted
     on: `test_djev_rerank_arm.py::test_the_eval_mutes_the_shadow_recorder`
-    reads it out of the process to prove `eval/run_eval.py:35` set it, and an
+    reads it out of the process to prove `eval/run_eval.py`'s own `os.environ.setdefault("LLOYD_DJEV_SHADOW", "0")` set it, and an
     ambient mute makes that assertion hold with the line under test deleted. A
     redirected path silences the same writes without touching the switch.
 

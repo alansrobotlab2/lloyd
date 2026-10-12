@@ -47,7 +47,7 @@ summarises persistently and then again from scratch.
    (`compaction_state.py:241`). One record per session in `data["compaction"]`,
    folded forward rather than regenerated; the fold calls the same summariser
    layer 3 does (`compaction_state.fold` → `compaction_llm.summarize_incremental`,
-   `app/compaction_state.py:489`). History is rebuilt as
+   `app/compaction_state.py:562`). History is rebuilt as
    `[summary] + rows past the boundary`.
 3. **LLM summarisation** (`app/compaction_llm.py`) — the other implementation of
    that step, and the one that runs with the flag off: one fresh summary of the
@@ -229,7 +229,7 @@ destructive layers break at the front. `app/compaction.py:505` is
 `new_convo: list[dict] = [CS.summary_message(record)]`: the compacted conversation
 begins with the summary, so position 0 changed and the longest common prefix of the
 old and new prompt is about zero — the whole compacted conversation re-prefills.
-`app/harness/microcompact.py:11` clears the oldest tool results "needed to get under
+`app/harness/microcompact.py:620` clears the oldest tool results "needed to get under
 ``token_budget``, oldest first, and stops", and the module states at its line 28
 that "Clearing is oldest-first by design", so the first cleared message is the break
 and the surviving suffix is nearly the whole conversation.

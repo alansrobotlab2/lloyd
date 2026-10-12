@@ -256,7 +256,7 @@ advertising has three consequences in `app/harness/tool_schema.py::build_tool_li
    the model reads ("Tool call denied: …"). Non-Bash writes have their own
    lane: `builtin_fs` refuses `Write`/`Edit` under `PROTECTED_WRITE_ROOTS` —
    the credential tree, `~/lloyd/agent-services`, `~/lloyd/.venvs`, and
-   `~/obsidian/lloyd/SOUL.md` (`app/harness/protected_paths.py:119`, landed
+   `~/obsidian/lloyd/SOUL.md` (`app/harness/protected_paths.py:151`, landed
    2026-09-20) — lifted only by the `allow_protected_writes()` contextvar,
    which is settable in code and by no production caller today. It is not
    `protected_roots()`: those are `$HOME`, the vault and the code tree, and

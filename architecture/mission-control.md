@@ -391,7 +391,7 @@ tree is gone by render time.
 
 `_is_private_host` was defined on 2026-04-11 and called from nowhere until
 2026-09-09 (`b7e2f69`, "wire the SSRF guard that was never called"). #278's
-acceptance required that the check at `agent_mcp/browser.py:50` be "intact",
+acceptance required that the check at `agent_mcp/browser.py:147` be "intact",
 its triage verdict called that line the only network-shaped code in the
 module, and the test written to satisfy both asserted the predicate returned
 the right booleans. All three statements were true and none of them was about

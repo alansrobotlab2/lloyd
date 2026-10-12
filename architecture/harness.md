@@ -1966,7 +1966,7 @@ asking `allow_entries()` and `floor_reason()` in the order `guard()` asks them, 
 or loopback destination can never book itself as an escape and the runner's own
 `serve_corpus` fixtures stay benign. That third arm is #2128, and the blind half it measured
 is the reason it is keyed on `EGRESS_TOOLS` rather than on annotations: `http_fetch` and
-`http_search` are annotated read-only, so the shape `agent_mcp/egress.py:10` quotes #590's
+`http_search` are annotated read-only, so the shape `agent_mcp/egress.py`'s module docstring quotes #590's
 EchoLeak fixture with — "exfiltration through a legitimate egress path, no dangerous-looking
 tool involved" — was scored as a benign echo, and two of the four egress lanes were invisible
 to the rule above. `http_search` takes no url argument, so it is judged against

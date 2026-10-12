@@ -63,7 +63,7 @@ a per-arm wrapper that changes one thing at `_qmd_post` or a module constant.
 constructed in `workers/sources/automod_regression.py:803` and nowhere in
 `eval/run_eval.py`, which reaches the daemon through
 `agent_mcp/vault.py:70 QMD_DAEMON_URL` — so the nightly baseline scores the live
-index, and the `corpus` block its artifact records (`eval/run_eval.py:101`) is the
+index, and the `corpus` block its artifact records (`eval/run_eval.py:117`, whose `label_agreement_ceiling` import the block pins) is the
 KG half only: no document or vector count, so `corpus_ok` cannot go false however
 the document corpus re-embeds, and `eval_trend_stats.corpus_diff` prints
 "corpus identical" across a drift that moves every doc-side number (#1374).

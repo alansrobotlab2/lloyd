@@ -336,7 +336,7 @@ that pass so Lloyd's own writes do not read as downloads.
   with live tools must mint a sandboxed id. Of the two producers that exist,
   `tests/test_tool_sandbox.py` pins only the bench runner's mint
   (`_trial_session_id`); the eval driver's shape at
-  `eval/run_preserve_thinking_eval.py:267` is covered by a literal in the
+  `eval/run_preserve_thinking_eval.py:254` is covered by a literal in the
   parametrised table, so renaming that prefix would leave its sessions
   unsandboxed with a green suite (#1333).
 - **A route that is none of the three lanes.** The write deny-set is now asked by

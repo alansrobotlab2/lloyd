@@ -37,7 +37,7 @@ from agent_mcp import vault
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "architecture" / "djev.md"
 
-#: The fixture title in `tests/test_backlog_dedupe.py:58` whose 32 rows the doc
+#: The fixture title in `tests/test_backlog_dedupe.py:61` whose 32 rows the doc
 #: counts, and the one in `tests/test_backlog_spawn_loop.py:792` that accounts
 #: for 4 more. Both are asserted against those modules below, so a rename that
 #: would make the doc's counts unfalsifiable fails a test.

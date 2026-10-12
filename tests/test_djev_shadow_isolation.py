@@ -8,7 +8,7 @@ floor from them". Its path is a `Path.home()` literal bound at import
 appended its fixtures' rows to the same file production writes. Re-measured
 2026-09-21 08:19Z over the live log, 96 rows spanning 01:55:15Z→08:19:15Z: 36
 of its 44 `dedupe` rows carried one of the two fixture titles in
-`tests/test_backlog_dedupe.py:58` and `tests/test_backlog_spawn_loop.py:792`,
+`tests/test_backlog_dedupe.py:61` and `tests/test_backlog_spawn_loop.py:792`,
 and 27 of its 32 `rerank` rows carried an empty `meta`. A floor read off that
 file is a floor set from fixtures.
 
@@ -21,7 +21,7 @@ the fix, because the session outlives every drain — and with no teardown,
 because restoring at session end is itself a drain window. Paths are repointed
 rather than `LLOYD_DJEV_SHADOW=0` set, because that variable is asserted on by
 `test_djev_rerank_arm.py::test_the_eval_mutes_the_shadow_recorder`, which reads
-it out of the process to prove `eval/run_eval.py:35` set it; an ambient mute
+it out of the process to prove `eval/run_eval.py`'s own `os.environ.setdefault("LLOYD_DJEV_SHADOW", "0")` set it; an ambient mute
 would make that assertion hold with the line under test deleted.
 
 The pins, in the order they would fail:
@@ -63,7 +63,7 @@ PRODUCTION_DIR = Path.home() / ".local" / "state" / "lloyd-djev"
 PRODUCTION_LOG = PRODUCTION_DIR / "shadow.jsonl"
 DOC = ROOT / "architecture" / "djev.md"
 
-#: The fixture title from `tests/test_backlog_dedupe.py:58` — 32 of the live
+#: The fixture title from `tests/test_backlog_dedupe.py:61` — 32 of the live
 #: log's rows carried this one string before the conftest fixture landed.
 NAME = "http_fetch error body says only the status code on a quarter of calls"
 BODY = ("The error body from http_fetch carries only the status code; 71 errors "

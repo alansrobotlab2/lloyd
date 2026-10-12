@@ -33,7 +33,7 @@ missing has written the drift into the file that is supposed to catch it.
 | `eval/` (repo) | the runners, the arm fixtures and corpora, and a small set of committed baselines | a commit |
 | `$LLOYD_DATA/eval/baselines/` | every baseline a run produced since the runtime data root moved | the runners themselves |
 
-`app/paths.py:100` is the one definition — `EVAL_BASELINES_DIR = DATA_ROOT /
+`app/paths.py:121` is the one definition — `EVAL_BASELINES_DIR = DATA_ROOT /
 "eval" / "baselines"` — and `eval/run_eval.py:2055` writes its record there, not
 beside the script. The repo's `eval/baselines/` keeps a tracked handful (the
 context-rot, compaction-recall and skills-index pins, for instance) so a reader

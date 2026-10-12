@@ -33,7 +33,7 @@ Neither path exists on this box, no marketplace or installer code exists in the
 tree, and the skills index **is** in the system prompt on every turn. The doc
 also named `skills_get` and `file_read` as the way to read a skill; both are on
 the phantom-tool ban list (`scripts/skill_lint.py:211`,
-`tests/test_skill_tool_names.py:39`) — this file was itself an instance of the
+`tests/test_skill_tool_names.py::PHANTOM_TOOLS`) — this file was itself an instance of the
 defect described under "Phantom tool names" below. Its skill inventory listed
 34 skills, of which 8 have since been archived and 3 no longer exist at all.
 The history is kept here rather than deleted because the OpenClaw vocabulary
@@ -88,7 +88,7 @@ mechanisms rather than one with options.
 
 ### 1. The index, in the system prompt
 
-`prompt_builder._load_skills_index` (`app/prompt_builder.py:1010`) walks an optional
+`prompt_builder._load_skills_index` (`app/prompt_builder.py:1258`) walks an optional
 overlay root (`<overlay>/skills`, when `LLOYD_OVERLAY_DIR` is set — the
 autoresearch bench runner passes one; what it may put there is bounded by
 `_canonical_prompt_paths()` in `scripts/autoresearch/common.py`, today
@@ -292,8 +292,8 @@ does not reach.
 ## The MCP tools
 
 Two, both read-only (`agent_mcp/annotations.py:49`), both served by the
-`skills` module inside the lloyd-mcp aggregator (`agent_mcp/main.py:84`,
-`:149`):
+`skills` module inside the lloyd-mcp aggregator (`agent_mcp/main.py:149`,
+where its tools are spliced into `TOOLS`; the module itself is imported at the head of that file):
 
 - **`skills_search(query, max_results=10)`** — ranked over name, description,
   tags and body, using the same `_score_skill` prefetch uses.

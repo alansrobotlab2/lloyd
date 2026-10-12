@@ -483,7 +483,7 @@ def prefix_miss_summary(hours: float = 24) -> dict:
 # end: `app/compaction.py:505` makes the new conversation
 # `[CS.summary_message(record)] + ...`, so position 0 changed and the longest
 # common prefix of the old and new prompt is ~0, and
-# `app/harness/microcompact.py:11` clears "oldest first, and stops" — restated at
+# `app/harness/microcompact.py:620` clears "oldest first, and stops" — restated at
 # `:28`, "Clearing is oldest-first by design" — so the first cleared message is
 # the break and the surviving suffix is nearly the whole conversation.
 # arXiv:2609.37725v1 §4.3 prices a context edit as the re-prefill of everything

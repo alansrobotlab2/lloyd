@@ -995,7 +995,7 @@ has to show a gain, so `RECALL_DJEV_RERANK` stays off. A djev that *replaces*
 the cross-encoder only has to match it, which is #1336.
 
 **Carry the caveat anyway.** The labelled set is 20 queries and 50 doc labels,
-and `agent_mcp/vault.py:172` puts the noise floor at 0.02 MRR. Reproducing +0.09
+and the eval block above `RECALL_QMD_FUSION` (`agent_mcp/vault.py:216`) puts the noise floor at 0.02 MRR. Reproducing +0.09
 three times against a deterministic baseline is much stronger than one run, but
 it is still twenty questions. The absolute latencies above were taken on a box
 that was also running the test suite. The comparison between arms is fair,
@@ -1319,7 +1319,7 @@ conftest's `_isolate_backlog_dedupe` keeps supplying. Re-measured 2026-09-21
 08:19Z over the live log, 96 rows spanning 01:55:15Z→08:19:15Z: 36 of its 44
 `dedupe` rows carry one of the two fixture titles (32 ×
 "http_fetch error body says only the status code on a quarter of calls" at
-`tests/test_backlog_dedupe.py:58`, 4 × "graph_refresh is advertised but never
+`tests/test_backlog_dedupe.py:61`, 4 × "graph_refresh is advertised but never
 called by any tool" at `tests/test_backlog_spawn_loop.py:792`), and 27 of its
 32 `rerank` rows carry an empty `meta` — the shape of `test_djev_shadow.py`'s
 direct `shadow(seam="rerank", state="s", questions={"q": {}})` calls. 63 fixture
@@ -1337,7 +1337,7 @@ at exactly that moment. Session scope is also what the per-test patch needed —
 drain has nowhere production to go. Paths are redirected rather than
 `LLOYD_DJEV_SHADOW=0` set, because
 `test_djev_rerank_arm.py::test_the_eval_mutes_the_shadow_recorder` reads that
-variable out of the process to prove `eval/run_eval.py:35` set it; an ambient
+variable out of the process to prove the `os.environ.setdefault("LLOYD_DJEV_SHADOW", "0")` at the head of `eval/run_eval.py` set it; an ambient
 mute would make that assertion hold with the line under test deleted.
 
 **The check.** `FH=$(mktemp -d); HOME=$FH .venvs/lloyd/bin/python -m pytest

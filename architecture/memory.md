@@ -44,7 +44,7 @@ that also made `fact_resolve` stop defaulting to `auto_resolve=true`.
 
 ## 2. `improve`: the detector is evidence, never a verdict
 
-`_detect_contradictions_sync` (`agent_mcp/facts.py:104`) fires when two of an
+`_detect_contradictions_sync` (`agent_mcp/facts.py:430`) fires when two of an
 entity's facts share >0.6 token overlap. That is *phrased alike*, not
 *disagrees* — measured on `Lloyd`: 32,857 "contradictions" from 5,489 facts,
 and the scan is O(n²). So the loop requires an independent reason per action:
@@ -214,7 +214,7 @@ feature". Two findings say the criterion is mis-aimed rather than the code dead:
 
 1. **The metric is pool-composition-bound.** `_rank` (`agent_mcp/vault.py:1023`)
    caps the returned fact list at `FACT_RANK_CAP_SEED=10`
-   (`agent_mcp/retrieval.py:116`; graph-expanded neighbours get their own
+   (`agent_mcp/retrieval.py:118`; graph-expanded neighbours get their own
    `FACT_RANK_CAP_GRAPH=5`) across *all* seed entities — the only per-entity
    guardrail is a query-token filter, and it applies only above
    `FACT_GODNODE_THRESHOLD=50`. So

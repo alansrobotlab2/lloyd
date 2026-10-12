@@ -1103,6 +1103,394 @@ def test_every_path_citation_exemption_is_a_citation_the_doc_actually_makes():
         "and the honest move is a doc fix or a filed item, not another entry")
 
 
+# ── #2583: a line anchor has to land inside a definition, not just a file ────
+
+#: What the resolution node above asks of a `path:NNN` citation is that the FILE
+#: is there and the number is smaller than its line count. `len(splitlines())`
+#: is not an anchor: in a 2163-line file it points anywhere, so a citation whose
+#: number lands on `def main()` in a module whose decider is elsewhere passed,
+#: and passed in the two threat-model control cells that started #2583
+#: (`guardian.py:2147` for a crash-loop verdict that `evaluate_liveness`
+#: decides at `:689`). The node below asks the second question: is line N inside
+#: something the file *defines*.
+#:
+#: The tolerance is the span, and only the span. The rule reports an anchor that
+#: lands on prose, a comment, a blank line between two definitions, or a
+#: definition other than the one the sentence is about; it does NOT ask that the
+#: enclosing definition's *name* appear in the citing sentence, which is the
+#: other half #2583 proposed and which is not shipped here: a threat-table cell
+#: is prose that never names a symbol, and `architecture/threat-model.md`'s own
+#: corrected cells would fail such a rule. Whether to add name proximity is an
+#: open question on the item, settled only against this rule's report rate.
+#:
+#: What is graded: a citation whose file resolves under one of the roots and
+#: parses as Python. Non-Python targets, a file that does not parse, and a
+#: citation with no anchor stay with the resolution node above — this node adds
+#: a question, it does not take one away.
+
+#: A `.py:NNN` spelling seen without the extractor, used only to ask a doc that
+#: has anchors whether the extractor graded any of them. Deliberately not
+#: `_CITATION`: an assertion that reads the same regex as the extraction it
+#: audits proves nothing about that extraction.
+_ANCHORISH_PY = re.compile(r"[\w./$~#-]+\.py:\d+")
+
+#: How many `.py:NNN` anchors the corpus-wide sweep has to grade to be a sweep.
+#: Measured at shipping, over the corpus this diff re-pointed: 140 anchors into
+#: parseable Python (the pre-fix scan counted 143; three of the 18 it reported
+#: became name citations with no number left to grade). The floor is well below
+#: the count and above nothing: a corpus whose anchors all went unresolvable — a
+#: moved `ROOT`, a renamed package — would grade a handful, and a node grading a
+#: handful of 140 is not reading the corpus.
+ANCHOR_GRADED_FLOOR = 100
+
+
+def definition_spans(py: Path) -> list[tuple[int, int, str]] | None:
+    """Every span in a Python file a line anchor may land in, or None to skip.
+
+    A *definition* is any `def`/`async def`/`class` at any nesting, with its
+    decorator lines, because those lines are part of what the definition is
+    (`@property` above a getter is the line a reader looks for). Beside them, the
+    module's own bindings — `X = …` and `X: T = …` at column zero, which is what
+    "module-level assignment" means in the clause. A multi-line `X = (…)` is one
+    span, so an anchor anywhere inside a table written as a module constant is
+    inside a binding.
+
+    Anything else is not a span, and that is the whole rule: a comment, a
+    docstring, the blank line between two statements, an `import`'s continuation
+    line, a bare module-level call, a `try:` arm. Each of those is something the
+    file *says* or something that happens once at import, not a thing the module
+    defines — and every one of them is an anchor that moves on its own without
+    the sentence about it changing. The corpus's 18 reported anchors were all in
+    that set: `app/paths.py:100` and `app/harness/protected_paths.py:119` land on
+    comment lines above the constant they name (`EVAL_BASELINES_DIR` is 21 lines
+    below its own citation, `PROTECTED_WRITE_ROOTS` 32);
+    `app/harness/microcompact.py:11` and `agent_mcp/egress.py:10` land on module
+    docstrings, which state policy and decide none of it.
+
+    What a doc does instead when the thing it means is a module-level call or a
+    fallback arm is name it: "`eval/run_eval.py`'s `os.environ.setdefault
+    ("LLOYD_DJEV_SHADOW", "0")`" outlives any insertion above it, which is the
+    line number's only advantage, and it is what three of the re-points in this
+    diff do.
+
+    None means "ask me something else": the file does not parse, so its spans are
+    not knowable. That skip is not free — `unparsable_py_citations` below counts
+    exactly those citations and the sweep node pins the count to zero, so a file
+    that stops parsing is a red node naming it, not a silent pass.
+    """
+    try:
+        tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError, ValueError):
+        return None
+    spans: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and node.end_lineno is not None):
+            start = min([node.lineno] + [d.lineno for d in node.decorator_list])
+            spans.append((start, node.end_lineno, node.name))
+    for node in tree.body:                             # module level only
+        target = (node.targets[0] if isinstance(node, ast.Assign)
+                  else getattr(node, "target", None))
+        if isinstance(target, ast.Name) and node.end_lineno is not None:
+            spans.append((node.lineno, node.end_lineno, target.id))
+    return spans
+
+
+def py_anchor_citations(text: str) -> list[tuple[str, Path, int]]:
+    """The citations the span rule owns: `path:NNN` spans whose file resolves and is Python.
+
+    Resolution is `resolve_citation`, so a citation into the vault or the data
+    root is read where it lives rather than where the checkout guesses. A `.py`
+    that does not parse is still one of these — it lands in
+    `unparsable_py_citations` instead of `definition_spans`, and the per-doc
+    identity and the sweep's zero-count both have to account for it.
+    """
+    out: list[tuple[str, Path, int]] = []
+    for span, path, line in cited_citations(text):
+        if line is None:
+            continue
+        hit = resolve_citation(path)
+        if hit is not None and hit.suffix == ".py":
+            out.append((span, hit, line))
+    return out
+
+
+def unparsable_py_citations(text: str) -> list[tuple[str, Path, int]]:
+    """The `.py` citations this rule cannot grade because their file will not parse.
+
+    The one exit `definition_spans` has, spelled out so it can be counted: the
+    sweep pins this list empty over the corpus, which is what stops "a file that
+    does not parse is skipped" from being a way for a broken or renamed target to
+    pass quietly. An anchor whose file no longer parses is not an anchor either.
+    """
+    return [(span, hit, line) for span, hit, line in py_anchor_citations(text)
+            if definition_spans(hit) is None]
+
+
+def anchor_span_report(text: str) -> tuple[list[tuple[str, Path, int]], list[str]]:
+    """`(graded, mis_anchored)` for one doc: what the span rule read, and what it objects to.
+
+    `mis_anchored` carries the span as the doc wrote it, which is the only
+    spelling a reader can go and find.
+    """
+    graded: list[tuple[str, Path, int]] = []
+    bad: list[str] = []
+    for span, hit, line in py_anchor_citations(text):
+        spans = definition_spans(hit)
+        if spans is None:
+            continue
+        graded.append((span, hit, line))
+        if not any(lo <= line <= hi for lo, hi, _name in spans):
+            bad.append(span)
+    return graded, bad
+
+
+@pytest.mark.parametrize("slug", PATH_DOC_SLUGS)
+def test_every_line_anchor_in_an_architecture_doc_lands_inside_a_definition(slug):
+    """Clause 1 and clause 4 (#2583): a line anchor is graded on its span, over
+    the whole corpus.
+
+    Parameterized over `PATH_DOC_SLUGS` — the same `ARCH.glob("*.md")` the
+    command sweep and the resolution node read, with `ARCH_DOC_SURFACE` as its
+    vacuity guard — and not over `NEW_DOCS`: #2583's own two instances were in
+    the threat model, but the defect is a citation written anywhere, and the
+    sweep that found the corpus's other mis-anchors ran over the glob while the
+    resolution node's own widening (#2582) had already made the glob the path
+    surface. A doc written tomorrow is graded the moment it lands.
+    """
+    text = _text(slug)
+    owned = py_anchor_citations(text)
+    graded, bad = anchor_span_report(text)
+    assert graded or not owned, (
+        f"{slug} cites {owned} — `path:NNN` spans whose files are present and "
+        "Python — and the span rule graded none of them. An extraction that "
+        "matched nothing would pass this node for free, which is the failure "
+        "every extractor-proof in this file exists to prevent")
+    # The one skip the rule takes, bounded per doc. The first gate refused the
+    # `graded + unparsable == owned` version of this: partitioning the same list
+    # two ways cannot fail, so it graded nothing while reading like a check. This
+    # one can: a cited file that stops parsing (moved, renamed, or turned into a
+    # template) lands here rather than passing through `anchor_span_report`'s
+    # `continue`.
+    unparsable = unparsable_py_citations(text)
+    assert not unparsable, (
+        f"{slug} cites {[s for s, _p, _l in unparsable]}, which resolve to `.py` "
+        "files that do not parse, so no span of theirs is knowable and the rule "
+        "graded none of them")
+    assert not bad, (
+        f"{slug} anchors {len(graded)} citations into parseable Python and "
+        f"{len(bad)} of them land outside every definition in the file: "
+        f"{sorted(bad)}. A line number smaller than the file's line count is "
+        "not an anchor — it is a pointer into whatever comment, docstring or "
+        "blank line happens to be at that offset, and the next edit to the file "
+        "moves the thing the sentence meant without moving the number.")
+
+
+def test_the_anchor_span_sweep_grades_the_corpus_not_a_named_few():
+    """Clause 4's own proof: the surface the sweep reads is the glob, the glob
+    has a size, and the anchors it grades are a surface, not an accident.
+
+    A parametrize over a glob collects no id at all when the glob finds nothing,
+    so the sweep needs a count beside it — the same reason `ARCH_DOC_SURFACE`
+    exists for the command half and `test_the_path_surface_is_the_whole_corpus_the_vacuity_number_holds`
+    exists for the resolution half. This node re-reads the glob rather than
+    trusting that the other node ran.
+    """
+    on_disk = [p.name for p in sorted(ARCH.glob("*.md"))]
+    assert on_disk == PATH_DOC_SLUGS and len(on_disk) == ARCH_DOC_SURFACE, (
+        f"the span sweep reads {PATH_DOC_SLUGS} while the glob has {on_disk} and "
+        f"the pinned surface is {ARCH_DOC_SURFACE}")
+    graded, per_doc = [], {}
+    for slug in PATH_DOC_SLUGS:
+        g, _bad = anchor_span_report(_text(slug))
+        graded += g
+        per_doc[slug] = len(g)
+    assert len(graded) >= ANCHOR_GRADED_FLOOR, (
+        f"the sweep graded only {len(graded)} line anchors "
+        f"({per_doc}); the corpus measured 140 when this rule shipped, so this is "
+        "anchors going unread — a path that stopped resolving, or a rename — not "
+        "a clean corpus")
+    read_by = {slug for slug, n in per_doc.items() if n}
+    assert len(read_by) >= 15, (
+        f"only {sorted(read_by)} contribute graded anchors: a sweep that reads "
+        "one doc's anchors and skips the rest is the #1699 shape #2582 was filed "
+        "against")
+    # One-directional on purpose. `_CITATION` sees a subset of what a plain regex
+    # does — it refuses a bare `entity_naming.py:871` for want of a directory and
+    # a citation into a tree this box cannot read — so the surplus is the
+    # extractor's known silence, recorded on the item, not this node's subject.
+    # What the comparison does catch is the extractor inventing an anchor no doc
+    # spelled, which would make the sweep grade a sentence nobody wrote.
+    probe = sum(len(_ANCHORISH_PY.findall(_text(slug))) for slug in PATH_DOC_SLUGS)
+    assert probe >= len(graded), (
+        f"the independent probe counts {probe} `.py:NNN` spellings in the corpus "
+        f"while the extractor graded {len(graded)} of them")
+    # The skip `definition_spans` is allowed, bounded. The per-doc identity makes
+    # an unparsable citation visible; this makes it a failure, because an anchor
+    # into a file that no longer parses is an anchor into nothing — the same loss
+    # #2582 was filed over when a whole root went unread. Zero was measured when
+    # the rule shipped, over all 140 owned anchors.
+    unparsable = [f"{slug}:{span}" for slug in PATH_DOC_SLUGS
+                  for span, _p, _l in unparsable_py_citations(_text(slug))]
+    assert not unparsable, (
+        f"these `.py` citations resolve but do not parse, so nobody grades them: "
+        f"{unparsable}. Either the target moved, was renamed, or became a "
+        "template that never parses — re-point it or say so here in words.")
+
+
+#: Three anchors the corpus really carried, each paired with the line this round
+#: re-pointed its sentence to. These are the fixture for the two nodes below: a
+#: pair invented for the occasion proves the rule fires on the invention, which
+#: is not a claim about the corpus.
+#:
+#:   * `agent_mcp/facts.py:104` — the comment block above `_OPPOSING_PAIRS`,
+#:     cited by `memory.md` for `_detect_contradictions_sync`, which is at `:430`.
+#:   * `app/paths.py:100` — a comment line, cited by `measurement.md` for
+#:     `EVAL_BASELINES_DIR`, which is at `:121`.
+#:   * `tests/test_backlog_dedupe.py:58` — the blank line above the `EXISTING`
+#:     fixture tuple, which the `dedupe`-row claim in `djev.md` is about.
+REAL_WRONG_ANCHORS = (
+    ("agent_mcp/facts.py", 104, 430),
+    ("app/paths.py", 100, 121),
+    ("tests/test_backlog_dedupe.py", 58, 59),
+)
+
+
+def test_the_span_rule_is_shown_able_to_fail_on_anchors_the_corpus_wrote():
+    """Clause 2: the rule is shown able to fail, on anchors the corpus actually
+    wrote, and each pair is first asserted on the AST.
+
+    The order matters. A pair asserted only through the report could be green
+    because the rule works or because the file moved under it and both numbers
+    now sit where the rule likes them; so the wrong line is checked to be
+    outside every span and the right line inside the span of the symbol the
+    citing sentence names, and only then does the report get asked. And the
+    #2583 repro is asserted here too, from the other side: the resolution node's
+    own predicate (`n_lines >= line`) passes every one of these numbers, which is
+    exactly why this second question had to be added.
+    """
+    for rel, wrong, right in REAL_WRONG_ANCHORS:
+        spans = definition_spans(ROOT / rel)
+        assert spans is not None, f"{rel} stopped parsing; the pair is ungradeable"
+        inside = [(lo, hi, name) for lo, hi, name in spans if lo <= wrong <= hi]
+        assert inside == [], f"{rel}:{wrong} is now inside {inside}, not a fixture"
+        assert any(lo <= right <= hi for lo, hi, _ in spans), (
+            f"{rel}:{right} is outside every definition, so the 'good' half of "
+            "this pair proves nothing")
+        n_lines = len((ROOT / rel).read_text(encoding="utf-8").splitlines())
+        assert wrong < n_lines and right < n_lines, (
+            f"{rel} has {n_lines} lines; the resolution node would report one of "
+            f"{wrong}/{right} and the comparison below is not the one #2583 made")
+
+        bad_text = f"the decision is at `{rel}:{wrong}`\n"
+        graded, bad = anchor_span_report(bad_text)
+        assert graded, f"`{rel}:{wrong}` was never graded, so it cannot be reported"
+        assert bad == [f"{rel}:{wrong}"], (
+            f"the corpus wrote `{rel}:{wrong}` and the span rule passed it: {bad}")
+
+        good_text = f"the decision is at `{rel}:{right}`\n"
+        graded_ok, bad_ok = anchor_span_report(good_text)
+        assert graded_ok and bad_ok == [], (
+            f"the re-pointed `{rel}:{right}` is reported ({bad_ok}), so the rule "
+            "is not reading spans")
+
+
+def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition():
+    """The boundary of this rule, pinned rather than left to be rediscovered.
+
+    #2583's two founding instances are NOT anchors this rule can catch, and a
+    green corpus must not be read as if it were: `guardian.py:2147` is the head
+    of `def main()` and `:689` is the head of `evaluate_liveness`, so both
+    numbers sit inside a definition and the span rule is silent on both. Same
+    for `app/desktop_lease.py:89` (`grant`, the human's side) against `:123`
+    (`agent_may_act`, the decision a turn crosses). Telling one `def` from the
+    one a threat row means is the name-proximity half of the item, which triage
+    ruled unsatisfiable as written — a threat-table cell is prose that never
+    names a symbol, so that rule would refuse `architecture/threat-model.md`'s
+    own corrected cells — and which the item carries as an owed ruling.
+
+    So this node asserts the silence. It is the same four numbers #2583 was
+    filed with, checked structurally rather than remembered, and it is what a
+    later reader needs to know before trusting "every anchor is graded".
+    """
+    guardian, lease = ("agent-services/guardian/guardian.py", "app/desktop_lease.py")
+    heads: dict[str, dict[str, int]] = {}
+    for rel in (guardian, lease):
+        spans = definition_spans(ROOT / rel)
+        assert spans is not None, f"{rel} stopped parsing; the boundary is ungradeable"
+        heads[rel] = {name: lo for lo, _hi, name in spans}
+    assert heads[guardian]["main"] == 2147, (
+        f"`main` moved off :2147 ({heads[guardian]['main']}) — if it is gone "
+        "altogether, this boundary may no longer be the one worth pinning")
+    assert heads[guardian]["evaluate_liveness"] == 689
+    assert heads[lease]["grant"] == 89
+    assert heads[lease]["agent_may_act"] == 123
+
+    _g, bad = anchor_span_report(
+        f"| T-26 | ships a crash loop | `{guardian}:2147` |\n"
+        f"| T-35 | acted on with no lease | `{lease}:89` |\n")
+    assert bad == [], (
+        f"the span rule is now reporting anchors that land on a real `def` "
+        f"({bad}) — either the rule grew a name window, which is the owed "
+        "ruling and needs the item's sign-off, or these two lines moved")
+
+
+def test_the_span_rule_grades_the_file_the_resolver_pointed_at(tmp_path, monkeypatch):
+    """The one process boundary this rule crosses, put across on purpose.
+
+    #2582 was filed because the resolution node read one root when the corpus
+    cites several; a span rule bolted on beside it inherits the same seam, so a
+    citation into the runtime data root has to be graded against the file the
+    resolver actually returned — not against a same-named file in the checkout,
+    and not against `ROOT` guessed a second time. The two copies disagree
+    deliberately, and the span rule's verdict follows the copy under the data
+    root, which is the only proof that `definition_spans` was handed the
+    resolved path rather than a re-derived one.
+    """
+    rel = "eval/span_rule_probe.py"
+    assert not (ROOT / rel).exists(), f"{rel} exists in the checkout; pick another"
+    # The module's own data-root binding, not `app.paths`: `_resolve` reads this
+    # name, so pointing it at `tmp_path` is what makes the citation resolve to a
+    # file that exists in no checkout.
+    monkeypatch.setattr(sys.modules[__name__], "ENV_DATA_ROOT", tmp_path)
+    (tmp_path / "eval").mkdir(parents=True, exist_ok=True)
+    probe = tmp_path / rel
+    probe.write_text(
+        "def data_root_copy():\n    return 2\n\n\n# a comment, no definition\n",
+        encoding="utf-8")
+    text = f"cites `$LLOYD_DATA/{rel}:4`, a comment in the data-root copy\n"
+    graded = py_anchor_citations(text)
+    assert len(graded) == 1, (
+        f"the citation did not resolve to exactly one file: {graded}. It must "
+        "exist ONLY under the data root — `resolve_citation` takes the first hit, "
+        "so a checkout copy would be the honest answer and prove nothing")
+    _span, target, line = graded[0]
+    assert target == probe, f"resolved to {target}, not the file outside the tree"
+    assert line == 4 and anchor_span_report(text)[1] == [f"$LLOYD_DATA/{rel}:4"], (
+        "the anchor was not graded against the file the resolver pointed at: the "
+        "copy outside the checkout has a bare comment at line 4 and has to be "
+        "reported for that, which reading the checkout could not show")
+
+
+def test_the_span_rule_sees_an_anchor_inside_a_table_cell():
+    """Clause 3's extractor proof, on the form the corpus's anchors are written
+    in. `architecture/threat-model.md` is a table of control citations, and so
+    is every threat table that will follow it; an extractor whose `_CODE_SPAN`
+    happened to need a line start would grade none of them and report a clean
+    corpus.
+    """
+    row = "| T-99 | x | E | a threat that reads plausibly | `app/paths.py:100` |\n"
+    graded, bad = anchor_span_report(row)
+    assert graded, "an anchor inside a table cell was not extracted at all"
+    assert bad == ["app/paths.py:100"], (
+        f"app/paths.py:100 is a comment above `FAILURE_LEDGER_DB`, so the cell "
+        f"has to be reported; got {bad}")
+    clean = "| T-99 | x | E | a threat that reads plausibly | `app/paths.py:102` |\n"
+    assert anchor_span_report(clean)[1] == [], (
+        "the binding line itself is reported, so the rule has no tolerance for "
+        "an anchor that is merely one line out")
+
+
 ARCHIVE_DIR = ARCH / ".archive"
 
 #: The sentence as it stood before #2582, kept as the fixture this node has to
@@ -1987,7 +2375,11 @@ def test_the_rewrite_cost_verdict_names_its_break_sites_and_its_command():
     # (a) the front-break sites, named as sites rather than described.
     assert "`app/compaction.py:505` is `new_convo: list[dict] = " \
         "[CS.summary_message(record)]`" in flat, flat[:400]
-    assert "app/harness/microcompact.py:11" in sec, flat[:400]
+    # `:620` since #2583: the anchor used to be `:11`, a line of that module's
+    # docstring, and a docstring is what a file says rather than what it does —
+    # the same edit that made the new span rule green over this corpus. The site
+    # is `microcompact()`, which is what the section prices as a front break.
+    assert "app/harness/microcompact.py:620" in sec, flat[:400]
     assert "Clearing is oldest-first by design" in flat, (
         "the microcompact site is cited without the rule that makes it a "
         "front break, so the citation prices nothing")
