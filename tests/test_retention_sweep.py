@@ -6327,19 +6327,37 @@ def test_a_row_the_writer_appended_is_a_row_the_sweep_can_age(rs):
 
 
 def test_a_turn_row_written_during_the_archive_is_never_frozen_out(rs):
+    """A row appended after the snapshot survives the rename — carried by the graft.
+
+    Two byte-stable rows: the callback writes LIVE at attempt 0 and LIVE+LATE
+    from attempt 1 on, so the rename settles at attempt 2 with a grafted tail
+    of both. Stability is load-bearing: the size CAS in `_rewrite_live_ledger`
+    renames only while the file's size still matches the tail it just read,
+    and the first cut of this node called `_turn_row(0)` INSIDE the callback —
+    a fresh `time.time()` whose `json.dumps` repr is 488 or 489 bytes by value
+    — so every attempt changed the row's length, the CAS never settled, and
+    the sweep's honest refusal failed this node on roughly 1 run in 7
+    (measured: 2 of 15 at 086669ab). Nothing survives in `body` — the only
+    seeded row is 120 d old and already archived — so both surviving rows are
+    pure graft: drop the graft and the store ends empty, this node red naming
+    ["LIVE", "LATE"]. `refused is None` pins the settle; the two-row list pins
+    the carry, including a row that landed after the first refused rename.
+    """
     path = rs.VOICE_TURNS_FILE
     _seed_turn_rows(path, [_turn_row(120)])
     before = path.read_bytes()
+    live = (json.dumps(_turn_row(0, turn_id="LIVE")) + "\n").encode()
+    late = (json.dumps(_turn_row(0, turn_id="LATE")) + "\n").encode()
 
     def append_during_build(attempt=None):
-        path.write_bytes(before + (json.dumps(_turn_row(0, turn_id="LIVE"))
-                                 + "\n").encode())
+        path.write_bytes(before + live if attempt is None or attempt < 1
+                         else before + live + late)
 
     assert rs.sweep_voice_turns(True, time.time(), path=path,
                                 on_attempt=append_during_build)["refused"] is None
     assert [json.loads(ln)["turn_id"]
-            for ln in path.read_text(encoding="utf-8").splitlines()] == ["LIVE"], \
-        "the turn spoken while the sweep ran must still be in the store"
+            for ln in path.read_text(encoding="utf-8").splitlines()] == ["LIVE", "LATE"], \
+        "the turns spoken while the sweep ran must still be in the store"
 
 
 def test_a_turn_row_is_small_enough_that_the_window_bounds_what_it_claims(rs):
@@ -7255,6 +7273,26 @@ def test_an_apply_pass_deletes_pause_journal_rows_past_the_horizon(rs, tmp_path,
 
     left = WorkQueue(rs.WORKERS_DB).pause_journal_holds()
     assert len(left) == 2, [h["started_at"] for h in left]
-    assert all("31" not in (h["started_at"] or "") for h in left), left
+    # Every survivor must be inside the horizon it was seeded inside of. The
+    # first cut of this guard was `all("31" not in h["started_at"] ...)` — a
+    # text proxy for "the 31-day row is gone" — but a seeded row's `at` keeps
+    # the RUN's time-of-day (only the day number is wound back), so the
+    # substring fired on 119 of every 3600 run-seconds whatever the sweep did:
+    # red at 21:31Z on 2026-10-12 at 3b438c45 with the prune itself correct
+    # (the count and report assertions passed beside it). Age against
+    # `PAUSE_JOURNAL_MAX_AGE_DAYS` fails for the one reason this node exists
+    # to catch — a row past the horizon surviving the `--apply` — and for no
+    # reading of the clock.
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    for h in left:
+        started = datetime.fromisoformat(h["started_at"])
+        if started.tzinfo is None:      # a naive stamp is this box's UTC
+            started = started.replace(tzinfo=timezone.utc)
+        age_days = (now - started).total_seconds() / 86400
+        assert age_days < rs.PAUSE_JOURNAL_MAX_AGE_DAYS, (
+            f"a hold started {age_days:.1f} d ago survived the "
+            f"{rs.PAUSE_JOURNAL_MAX_AGE_DAYS}d horizon: {h}")
     assert rs.WORKERS_DB.stat().st_size <= before + 4096, (
         "a prune that only adds pages is not a prune")
