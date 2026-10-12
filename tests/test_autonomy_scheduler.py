@@ -2403,7 +2403,7 @@ def test_the_health_payload_keeps_every_key_today_s_consumers_read(aut, monkeypa
 
     Three readers take this payload apart today — `web/src/api.ts:1251`,
     `agent_mcp/autonomy.py:418-440` and the arch-review prompt at
-    `workers/sources/arch_review.py:855-856` — and the item's clause 3 says they
+    `workers/sources/arch_review.py:873-874` — and the item's clause 3 says they
     keep working unchanged. `old_fleet_keys` is the fleet block's shape as
     measured on live state on 2026-09-23 before the change, so the containment
     assertion is containment against a real snapshot, not against a wish: the

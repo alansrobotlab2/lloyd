@@ -4223,7 +4223,7 @@ ruled out when it was gitignored but still inside the tree; it has lived in
 | `review_backfill.jsonl` | `review_tools backfill` | the grader's verdict beside the author's. **Its own file on purpose**: a backfilled verdict measures the grader, and `implement_outcomes` must never read it as a verdict on the round |
 | `scorecard.jsonl` | `round scorecard --record` | the trend, so a row survives the terminal it was printed in |
 | `eval-noise.json` | regression worker | the measured noise floor (§8.1) |
-| `arch_review.json` | `arch-review` worker | per-unit review cursor: verdict, `reviewed_commit`, attempts, the ids each unit filed (`workers/sources/arch_review.py:147`) |
+| `arch_review.json` | `arch-review` worker | per-unit review cursor: verdict, `reviewed_commit`, attempts, the ids each unit filed (`workers/sources/arch_review.py:161`) |
 
 The ledger deliberately does **not** reuse
 `scripts.autoresearch.common.ledger_append`, whose contract is "best-effort,

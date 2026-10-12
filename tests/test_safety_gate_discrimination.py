@@ -521,7 +521,7 @@ def test_an_unattended_session_may_not_move_the_live_checkout():
 
 #: Clause 3. The read shapes the arch-review prompt itself orders, plus the
 #: fleet's scratch-checkout pattern. `--since='30 days ago'` is quoted from the
-#: prompt (`workers/sources/arch_review.py:966-967`), so the arm that must not
+#: prompt (`workers/sources/arch_review.py:984-985`), so the arm that must not
 #: fire is not invented here.
 _LIVE_READS = [
     f"git -C {_LIVE} log --since='30 days ago' -- architecture/foo.md",

@@ -1,12 +1,21 @@
 """arch-review — one architecture review unit per real session, and the doc edits itself.
 
-`architecture/` was hand-curated on 2026-09-11: 22 top-level docs, 17 retired
-into the gitignored `.archive/`, an `index.md` that lists them. Nothing keeps
-it honest from there. Three `tests/test_*_doc_claims.py` pin numbers in three
-of the 22; `agent_mcp/memory_ops.py:12` cites a doc that no longer exists; the
-measured tables in `autonomy-jobs.md` and `workers-jobs.md` are snapshots of
-one afternoon. A doc that has drifted is worse than no doc, because it is read
-as current.
+`architecture/` was hand-curated on 2026-09-11 — a set of top-level docs, a crop
+of them retired into the gitignored `.archive/`, and an `index.md` that lists what
+was left. How large that set was, and how large it is now, is **not repeated
+here**: `doc_slugs` globs `architecture/*.md` and that glob is the authority, and
+the corpus size is pinned as `ARCH_DOC_SURFACE` in
+`tests/test_architecture_coverage_doc_claims.py` — the same rule
+`architecture/arch-review.md` §1 states for its own page, for the reason it
+states it: a remembered count is read as current long after it stopped being
+true. What became of the retired ones is git's record, not this checkout's — see
+`EXCLUDED_DIRS` and `doc_slugs`, and for the prose §1 of that doc.
+
+Nothing kept the corpus honest from there. A few `tests/test_*_doc_claims.py`
+pinned numbers into the docs they covered; `agent_mcp/memory_ops.py:12` cites a
+doc that no longer exists; the measured tables in `autonomy-jobs.md` and
+`workers-jobs.md` are snapshots of one afternoon. A doc that has drifted is worse
+than no doc, because it is read as current.
 
 This source is Alan's shape: a picklist of subjects with a last-run date, and
 the oldest line gets one real session that reviews the architecture **and** the
@@ -110,9 +119,14 @@ LONG_LIVED = True
 
 #: Where the picklist lives, relative to the repo root.
 ARCH_DIRNAME = "architecture"
-#: Reviewed docs are the top-level ones only. `architecture/.archive/` holds
-#: retired docs — five are still tracked — and a review of a doc that was
-#: retired *for being wrong* is the one review with no possible value.
+#: Reviewed docs are the top-level ones only. `architecture/.archive/` is where a
+#: retired doc goes, and here it is **absent and holds nothing tracked**: only
+#: five copies were ever added to git (`412a8012`), and `f80c9d00` is the commit
+#: that untracked all five; the other retirements never had a tracked copy.
+#: The filter is not a description of that tree but a guard on a future one —
+#: `.gitignore` keeps the `/architecture/.archive/` rule, so the directory may be
+#: recreated at any time, and a future `rglob` would then offer a doc retired
+#: *for being wrong* — the one review with no possible value.
 EXCLUDED_DIRS = (".archive",)
 
 DOC_STATUSES = ("current", "stale", "superseded", "aspirational")
@@ -252,9 +266,13 @@ def arch_dir(root: Path | None = None) -> Path:
 def doc_slugs(root: Path | None = None) -> list[str]:
     """Every reviewable doc, by slug, sorted.
 
-    `glob("*.md")` does not descend, so `.archive/` is already out; the
-    explicit filter is here because five archived docs are still tracked and a
-    future `rglob` would silently pick them up.
+    `glob("*.md")` does not descend, so `.archive/` is already out; the explicit
+    filter is here for a tree that does not exist yet. `architecture/.archive/` is
+    absent in this checkout and nothing under it is tracked — `f80c9d00` untracked
+    the five retired copies git ever had — but `.gitignore` carries
+    `/architecture/.archive/`, so the directory may be recreated, and a future
+    `rglob` would then silently pick its docs up. The exclusion is by **path**, so
+    it holds whatever git's record of that path happens to be.
     """
     d = arch_dir(root)
     if not d.is_dir():

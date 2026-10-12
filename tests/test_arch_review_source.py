@@ -1712,6 +1712,107 @@ def test_the_docstring_no_longer_says_every_review_edits_production():
     assert "scratch checkout" in (A.__doc__ or "")
 
 
+#: The module's own text, for the prose pins below. `inspect.getsource` rather than
+#: a fixture tree because these assert about THIS checkout's module — the sentence
+#: they refuse is false because of what git records here, and a fixture's copy of
+#: the file would be a copy of the claim rather than the claim.
+_MODULE_SRC = inspect.getsource(A)
+
+
+def _module_prose() -> str:
+    """Module docstring plus every comment and docstring, newlines folded to
+    spaces, so a sentence wrapped over four `#:` lines is matched as the sentence
+    it is and not as whichever fragment its author happened to break the line at."""
+    return " ".join(_MODULE_SRC.split())
+
+
+def _archive_absent_in_this_checkout() -> None:
+    """The fact the prose below has to match: nothing under `architecture/.archive/`
+    is tracked in HEAD, and the directory is not on disk."""
+    assert _git(A.repo_root(), "ls-tree", "--name-only", "HEAD",
+                "architecture/.archive/").strip() == "", (
+        "the archive is tracked in HEAD again, so the wording this node pins is "
+        "back to being true — rewrite the node along with the prose, not the prose "
+        "back to the old sentence")
+    assert not (A.repo_root() / "architecture" / ".archive").exists()
+
+
+def test_the_module_never_claims_the_archive_is_still_tracked():
+    """Clauses 1 and 4: `f80c9d00` untracked the five retired copies, so "five are
+    still tracked" has been false in this checkout for a month — and a false reason
+    on a working rail is how the rail gets deleted by the next reader who checks it.
+    The module also stops repeating the curation-era counts (22 docs, 17 retired,
+    "three of the 22"), because a remembered number is read as current long after it
+    stopped being one: the glob is the authority and `ARCH_DOC_SURFACE` pins it."""
+    _archive_absent_in_this_checkout()
+    prose = _module_prose()
+    assert "still tracked" not in prose, "the false sentence is back"
+    for stale in ("22 top-level docs", "17 retired", "of the 22"):
+        assert stale not in prose, stale
+    # The authority, not a bare absence of numbers: a docstring that states a
+    # corpus size has to say where it came from.
+    assert "ARCH_DOC_SURFACE" in prose and \
+        "tests/test_architecture_coverage_doc_claims.py" in prose, (
+        "nothing in the module names the authority for a corpus count, so the next "
+        "author restores a remembered number")
+    assert A.EXCLUDED_DIRS == (".archive",), "the filter is what the prose is about"
+
+
+def test_the_archive_comment_states_the_future_rglob_reason_not_a_fake_one():
+    """Clauses 2 and 3: the reason that survives is the recursive glob, and the
+    comment and `doc_slugs` have to say all three true parts of it — the directory
+    is absent and untracked **here**, `.gitignore`'s rule is what lets it come back,
+    and a `rglob` would then offer a retired doc. Naming `.gitignore` is the load-
+    bearing part: it is why the rail is not dead code in a tree that has none."""
+    # Both spans, not one: the comment is where a reader looks first and `doc_slugs`
+    # is where the filter is applied, and a fix that rewrote only the first left the
+    # false claim standing in the function's own docstring. Each span is checked on
+    # its own text, so deleting one of the two cannot pass on the other's wording.
+    comment = ("#:" + _MODULE_SRC.split("#: Reviewed docs are the top-level ones only.")
+               [1].split("EXCLUDED_DIRS = ")[0])
+    spans = {
+        # The `#:` markers are stripped before folding: they are line-wrapping, and a
+        # check that saw `#: rglob` as one word would fail on a re-wrap of correct
+        # prose.
+        "the EXCLUDED_DIRS comment": " ".join(
+            " ".join(c.replace("#:", " ").split()) for c in comment.splitlines()),
+        "the doc_slugs docstring": " ".join(
+            (A.doc_slugs.__doc__ or "").split()),
+    }
+    for name, span in spans.items():
+        assert span, f"{name} is empty"
+        for must in ("absent", "f80c9d00", "/architecture/.archive/", ".gitignore",
+                     "rglob"):
+            assert must in span, f"{name} does not say {must!r}: {span[:200]}"
+        assert "still tracked" not in span, f"{name} re-arms the false sentence"
+
+    # The rule those spans name is in force, not merely named. Nothing else in the
+    # suite reads `.gitignore` for it — `git grep -n "architecture/\\.archive" tests/`
+    # lands on fixture paths and on quotations of the doc's own sentence, never on the
+    # rule — so the surviving reason could rot the other way than this item found: not
+    # "the docs are still tracked" but "the directory can never come back". Ask git,
+    # which is the only reader of the rule that matters.
+    probe = subprocess.run(
+        ["git", "-C", str(A.repo_root()), "check-ignore", "-v", "--no-index",
+         "architecture/.archive/probe.md"],
+        capture_output=True, text=True)
+    assert probe.returncode == 0, (
+        "the comment's whole justification is that `.gitignore` lets the directory be "
+        f"recreated, and git says it does not: {probe.stdout!r} {probe.stderr!r}")
+    assert "/architecture/.archive/" in probe.stdout, probe.stdout
+    # Control in the other direction: a doc that must be offered is not ignored. A
+    # probe reading (rule, exit 0) with a matcher that answered "ignored" to anything
+    # would satisfy the assert above; this is what makes it the rule being tested and
+    # not the probe.
+    control = subprocess.run(
+        ["git", "-C", str(A.repo_root()), "check-ignore", "-v", "--no-index",
+         "architecture/arch-review.md"],
+        capture_output=True, text=True)
+    assert control.returncode == 1, (
+        "git reports a tracked architecture doc as ignored, so the probe above was not "
+        f"answering this question: {control.stdout!r}")
+
+
 # ── 9b. the turn's OWN live writes are reverted, off its change ledger ───────
 
 #: The session id the stand-in turn reports (see `_turn`).

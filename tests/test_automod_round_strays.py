@@ -7,8 +7,8 @@ nightly probe's `eval/uptake/classifier-report.json`. The only notice was datawa
 hourly "Runtime data is being written into the code tree" alert — eleven rows that
 day, each naming the tree and none naming a round.
 
-The shape is the one `workers/sources/arch_review.py:1722` and
-`workers/sources/arch_review.py:1827-1829` already use for a worker turn: read
+The shape is the one `workers/sources/arch_review.py:1740` and
+`workers/sources/arch_review.py:1845-1847` already use for a worker turn: read
 `git status --porcelain --untracked-files=all --ignored=matching` before, read it after,
 and diff. (`--ignored=matching` is #2059, and it is one flag on the module's single
 `UNTRACKED_CMD` at `app/live_strays.py:70-71` — so every read named below, baseline and

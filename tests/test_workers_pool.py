@@ -2257,7 +2257,7 @@ async def test_a_source_that_reports_its_own_count_keeps_it(q, monkeypatch, work
 
     Six sources already write `num_turns` into the meta they return
     (`workers/sources/youtube_digest.py:901`, `bench_mine.py:920`,
-    `session_distill.py:342`, `arch_review.py:1928`, `deep_research.py:639` and the
+    `session_distill.py:342`, `arch_review.py:1946`, `deep_research.py:639` and the
     autonomy path at `app/autonomy.py:4393`), and some report a subset of the job's
     turns — youtube_digest reports one turn's count, not a sum. Overwriting those
     with the collected aggregate would silently change the meaning of every row they
