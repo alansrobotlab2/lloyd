@@ -55,7 +55,9 @@ SHIPPED_STEP = REPO / CANARY_STEP_REL
 #: step: the other half of "exactly one writer", and the file clause 6 keeps off the guard.
 SWEEP_ROUTE = REPO / "agent-services/bin/flash-next-run-arm.sh"
 
-ARM = "bf16"
+#: The engine's spelling. `bf16` — what the launcher's `A/B config:` line prints for an unset
+#: dtype — is refused by `vllm serve --kv-cache-dtype`, and by the driver before it.
+ARM = "bfloat16"
 FLEET_WAIT = "KV_ARM_FLEET_WAIT_S"
 
 #: The two lines an `A/B config:` boot can be. `None` means the boot printed no such line —
@@ -765,6 +767,38 @@ def test_the_verification_refuses_a_restore_boot_that_logged_the_arm_dtype(tree)
     assert proc.returncode != 0, _fail(proc, out)
     assert "not a closed window" in out, out[-800:]
     assert tree["stub"].resumed()
+
+
+def test_an_arm_boot_that_came_up_on_the_shipped_dtype_closes_the_window_and_says_so(tree):
+    """2026-10-12: the staged value was one the engine rejects, `vllm serve` exited 2 and
+    supervisord respawned it on its defaults, so the boot after staging logged `fp8`. The
+    fold is rightly skipped then — and the line count taken just before the fold was never
+    taken, so the check after the restore died on an unbound name instead of reporting. The
+    window must still restore, verify, give the hold back and say that nothing was measured."""
+    _boots(tree, RESTORE_DTYPE, RESTORE_DTYPE)
+    proc, out, _ = _win(tree)
+    assert proc.returncode != 0, "a window whose arm never served reported success"
+    assert "UnboundLocalError" not in out and "window failed" not in out, out[-800:]
+    assert "the arm never served" in out, out[-800:]
+    assert "window closed" in out, f"the restore was not verified: {out[-800:]}"
+    legs = tree["stub"].restarts.read_text().split("\n")[:-1]
+    assert legs == [f"kv-{ARM}-arm", f"kv-{RESTORE_DTYPE}-restore"], legs
+    assert not tree["stub"].step.exists() or not tree["stub"].step.read_text().strip(), (
+        "the fold ran against an engine whose dtype was not the arm's")
+    assert tree["stub"].resumed()
+
+
+def test_the_launchers_short_spelling_is_refused_before_the_hold_and_before_any_boot(tree):
+    """`bf16` is what the launcher prints for an unset dtype and not a value
+    `--kv-cache-dtype` takes. Refusing it costs nothing; accepting it costs two boots of a
+    95 GiB engine for a window that cannot arm."""
+    proc, out, env = _win(tree, "bf16")
+    assert proc.returncode == 2, _fail(proc, out)
+    assert "bfloat16" in out, out[-800:]
+    assert tree["stub"].posts == [], f"the window took a hold: {tree['stub'].posts}"
+    assert not env.exists(), "an arm was staged for a dtype the engine refuses"
+    assert not tree["stub"].restarts.exists() or not tree["stub"].restarts.read_text(), (
+        "the primary was restarted for a dtype the engine refuses")
 
 
 def test_the_verify_reads_the_bytes_the_restore_appended_and_not_the_history_before_them(tree):

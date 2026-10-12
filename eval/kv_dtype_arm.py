@@ -109,6 +109,14 @@ HOLD_ID = "kv-dtype-arm"
 #: fallback — that fallback is why a *missing* dtype line proves nothing (see `boot_dtype`).
 RESTORE_DTYPE = "fp8"
 
+#: Spellings an operator reaches for that this engine's `--kv-cache-dtype` does not take.
+#: The launcher's own `A/B config:` line prints `bf16` for an unset dtype, which is where
+#: the short form comes from — and on 2026-10-12 it cost a boot: `vllm serve` exited 2 on
+#: `invalid choice: 'bf16'` fifteen seconds in, supervisord respawned the engine on the
+#: shipped dtype (the one-shot env was already consumed), and the window restarted the
+#: primary twice to measure nothing. Refused here, before the hold and before any boot.
+ENGINE_SPELLING = {"bf16": "bfloat16"}
+
 #: The boot looks here, sources the file once, and deletes it
 #: (`agent-services/bin/start-qwen38-flash-next.sh:190-197`).
 ARM_ENV_NAME = "flash-next-arm.env"
@@ -405,6 +413,10 @@ async def run_window(cfg: dict[str, Any]) -> tuple[int, bool]:
             log("hold taken and queue drained: this window owns dispatch and the primary")
 
             step_rc: int | None = None
+            # `None` until an arm is actually serving: the fold is skipped when the boot
+            # did not come up on the arm dtype, and the checks after the restore must be
+            # able to tell "no arm" from "an arm whose fold wrote nothing".
+            before: int | None = None
             try:
                 stage_env(env_file, cfg["dtype"])
 
@@ -474,6 +486,15 @@ async def run_window(cfg: dict[str, Any]) -> tuple[int, bool]:
                     return 2, hold.ours
                 log(f"window closed: kv_dtype={restored} and {engine_health_url()} ok")
 
+                if before is None:
+                    warn(f"the arm never served: the boot after staging logged "
+                         f"kv_dtype={booted!r}, not {cfg['dtype']}, so the fold was not run "
+                         "and nothing was measured. The primary is back on the shipped "
+                         "dtype. An engine that exits on the staged value is respawned by "
+                         "supervisord on its defaults — read the service's .err log for "
+                         "the reason before firing another window.")
+                    return 2, hold.ours
+
                 if len(canary_records(canary_file)) <= before:
                     warn(f"no verdict line was appended to {canary_file} by this window. "
                          "That is the blind state #1625 was opened against, so it is not a "
@@ -524,12 +545,18 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="kv_dtype_arm",
         description="One-shot KV cache dtype arm over the gated primary restart.")
-    ap.add_argument("dtype", help=f"KV cache dtype to boot once, e.g. bf16 (the restore is "
+    ap.add_argument("dtype", help=f"KV cache dtype to boot once, e.g. bfloat16 (the restore is "
                                   f"always {RESTORE_DTYPE})")
     args = ap.parse_args(argv)
     dtype = args.dtype.strip()
     if not dtype or not dtype.replace("-", "").replace(".", "").isalnum():
         warn(f"refused: {dtype!r} is not a kv-cache-dtype")
+        return 2
+
+    if dtype in ENGINE_SPELLING:
+        warn(f"refused: {dtype!r} is not a value this engine's --kv-cache-dtype takes; "
+             f"it is spelled {ENGINE_SPELLING[dtype]!r}. Nothing was held, staged or "
+             "restarted.")
         return 2
 
     try:

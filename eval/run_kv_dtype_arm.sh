@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # One-shot KV cache dtype arm over the gated primary restart (#2404).
 #
-#   bash eval/run_kv_dtype_arm.sh bf16
+#   bash eval/run_kv_dtype_arm.sh bfloat16
+#
+# The dtype is the engine's own spelling (`vllm serve --kv-cache-dtype`): `bf16` is refused.
 #
 # The behaviour — which hold it takes, what it refuses, what it stages, how it closes — is
 # in `eval/kv_dtype_arm.py` and in `tests/test_run_kv_dtype_arm.py`. This file is a thin
@@ -24,7 +26,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: run_kv_dtype_arm.sh <kv-cache-dtype>   # e.g. bf16; the window restores fp8" >&2
+  echo "usage: run_kv_dtype_arm.sh <kv-cache-dtype>   # e.g. bfloat16; the window restores fp8" >&2
   exit 2
 }
 [[ $# -eq 1 && -n "${1:-}" && "${1:0:1}" != "-" ]] || usage
