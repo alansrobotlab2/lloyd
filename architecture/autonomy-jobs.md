@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, autonomy]
 type: reference
 status: implemented
-date: 2026-09-22
+date: 2026-10-12
 ---
 
 # The autonomy jobs
@@ -45,6 +45,22 @@ this document's. Typing a ceiling here has been wrong twice inside a week: the
 bound stopped at 85 while 86 was already running nightly, #1102 corrected it to
 86, and #87–#90 overtook that correction inside three days. So the range above
 is a floor, and the id it names carries the date it was the newest.
+
+**Membership below is behind the fleet, in both directions, as of 2026-10-12.**
+Seven task files exist in `~/obsidian/autonomy/` with no entry anywhere in this
+document: #91 nightly thinking-fidelity prevalence series, #92 vLLM prefix-miss
+daily, #93 step-conformance replay, #94 referential-integrity ledger, #95
+mitigation drill, #96 djev name-prior probe, #97 landed-outcomes daily record.
+And #87–#89 — the one-off paper digests — are still named below as members that
+write into `knowledge/` unattended, while no `87-*.md`, `88-*.md` or `89-*.md`
+exists on disk any more, in `~/obsidian/autonomy/` or in its `_archived/`.
+The group tables and rows keep the trio's ids because the membership checks
+derive from the tables, and the tables are pinned to *each other*, never to the
+directory — that gap is the finding, not the rows. Backlog **#2630** owns
+writing the seven entries and deciding where the departed trio belongs, and
+**#2631** owns the check that reconciles this document against the task-file
+directory so neither direction drifts silently again — the same failure #1102
+caught for #86, invisible again because no test reads the fleet.
 
 ## The functions
 
@@ -178,7 +194,8 @@ What the outside world did while nobody was looking. #30, #53 and the three pape
 digests #87 #88 #89 write into `knowledge/`; #68 writes no vault file at all — it
 is the only job in the fleet whose output is a *conversation* (an inject that
 expires) rather than a file, which is why it has a write tier of its own, and the
-only one that runs on the **secondary** engine.
+only one whose task file still names the **secondary** engine — an engine
+retired 2026-09-20, which is why the job sits parked (§#68).
 
 | ID | Freq | Role |
 |----|------|---|
@@ -191,9 +208,16 @@ only one that runs on the **secondary** engine.
 
 ### #68 — the name outlived the job
 
-`morning-briefing` names two things. One is #68, which runs every fifteen minutes
-around the clock on the **secondary** engine and triages mail and calendar into
-whatever chat session Alan is actually sitting in. The other — the 6 am "read the
+`morning-briefing` names two things. One is #68, whose fifteen-minute cadence is
+made to triage mail and calendar into whatever chat session Alan is actually
+sitting in. **The job is parked**: `status: draft` since Alan's ruling of
+2026-09-17, last run 2026-09-16. And its `model: secondary` now names the slot
+`551e9044` disabled on 2026-09-20 — invisible to both slot guards, since
+`slot_arm_block` and the #1577 lint read `requires_slot:` and this task has
+none, so arming it would succeed and `resolve_model_alias` would land every
+run on the *primary* under a retired slot's name — the #85 confusion of #1555,
+reachable from the one spelling both guards skip (#2632). Everything below
+describes the mechanism as designed and as it behaved while live. The other — the 6 am "read the
 overnight reports and announce a synthesis" job — no longer runs at all and no
 autonomy task binds it. Its skill is archived; an unbound copy survives as
 `~/obsidian/skills/nightly-morning-briefing/` still carrying "Runs at 6:00 AM PST
@@ -522,8 +546,8 @@ and re-enabled as #83 only once the skill could state the rules that prevent it:
 
 **Two linters enforce rule 4, and each carries a seven-name exemption list of
 which three entries are this chain.**
-`tests/test_skill_tool_names.py:137` (`ALLOWED_TO_MENTION`) and
-`scripts/skill_lint.py:276` (`PHANTOM_EXEMPT`) let `nightly-skills-management`,
+`tests/test_skill_tool_names.py:150` (`ALLOWED_TO_MENTION`) and
+`scripts/skill_lint.py:281` (`PHANTOM_EXEMPT`) let `nightly-skills-management`,
 `trajectory-skill-mining` and `nightly-skill-consolidation` write the phantom
 names down, because their job is to say those names are not real. The same two
 lists now also carry `web-search-and-fetch`, `create-hermes-plugin`,
@@ -594,7 +618,7 @@ decision about which of two names an existing pair always should have shared.
 
 | ID | Freq | Depends | Role |
 |----|------|---------|---|
-| #24 | 6×/day | — | Content-hash-gated fact extraction over the `pipeline_config.yaml` corpus, then index rebuild and a `kg_health` snapshot. Emits graph edges as it writes facts; no-ops when no source document changed |
+| #24 | 6×/day | — | Content-hash-gated fact extraction over the `scripts/memory/next-gen-memory/pipeline_config.yaml` corpus, then index rebuild and a `kg_health` snapshot. Emits graph edges as it writes facts; no-ops when no source document changed |
 | #51 | daily | #56 | Session co-access pairs from trajectories → `co_accessed` edges, provenance `INFERRED`, the trajectory as `source_doc` |
 | #74 | daily | #48 | Re-types active `mentions` edges with the v4 classifier and applies confident upgrades through `app.kg_store`. Runs after #48 so canonical names are settled first |
 
@@ -700,9 +724,9 @@ moves one out: `scripts/groundskeeper/retention-sweep.py` prunes logs, sessions 
 run records, never a backlog file; `app/backlog_move.py` is a status-move *recorder*
 ("One definition of 'record a backlog status move'") and never touches a path; the
 only writer in the tree that removes a backlog file is `backlog_task_delete`
-(`app/routers/backlog.py:754`), which deletes rather than archives and is wired to
+(`app/routers/backlog.py:804`), which deletes rather than archives and is wired to
 no job. The board hides the pile after `DONE_WINDOW_DAYS = 7`
-(`web/src/components/pages/BacklogPage.tsx:571`), so nothing downstream feels it
+(`web/src/components/pages/BacklogPage.tsx:572`), so nothing downstream feels it
 either. Archiving ~1,488 files is a bulk human-gated move in a protected path, and
 naming a job that may thereafter move board files is a scope call, so **it is not an
 autonomy task's to make: backlog #1566 is where that decision lives**, and a run
@@ -734,8 +758,10 @@ identified in the 2026-06-11 architecture review; its gzipped archives stay
 recoverable, but live consumers glob `*.json`, so archived sessions drop out of
 listings and recall by design.
 `scripts/groundskeeper/retention-sweep.py` is #79, pinned by
-`tests/test_retention_sweep.py`; its directory holds three scripts, not two —
-this, `groundskeeper-survey.py`, and `groundskeeper-weekly-summary.py`.
+`tests/test_retention_sweep.py`; its directory now holds this script alone —
+the sentence that used to read "three scripts, not two" named
+`groundskeeper-survey.py` and `groundskeeper-weekly-summary.py`, and both were
+deleted with #1012 (§#36) on 2026-09-23.
 
 **#78 and #80 look like the fleet's worst jobs and are not** — see
 [What the fleet actually costs](#what-the-fleet-actually-costs). Both are
@@ -778,7 +804,7 @@ monitor in the fleet with authority to act on what it finds.
 | #60 | daily | the graph | Knowledge Health Report: god entities (>20 facts), thin (<2), orphans, stale facts, contamination, near-duplicates, provenance coverage |
 | #82 | daily | retrieval | 20-query retrieval eval against production's recall defaults; records the trend |
 | #70 | weekly | the skills library | `skill-lint`, advisory — `DEAD`, `MISSING_DESC`, `DRIFT`, `DUPLICATE`, `STALE`. Read-only, writes `skill-lint-report.{md,json}` for a human |
-| #36 | daily | the vault | Read the groundskeeper queue and report counts, health score, and whether the timer ran |
+| #36 | daily | the vault | **Retired 2026-09-23 (#1012)** — the row and the id stay because the group tables pin each other; its task file is in `_archived/` and nothing dispatches it. Read the groundskeeper queue and report counts, health score, and whether the timer ran |
 | #76 | daily | the fleet | Queue health: per-task failure rate, timeouts, empty runs, `[SILENT]` rate, GPU-hours; reports the poisoned and quarantined rows the queue sweep has already triaged, and pauses failing tasks |
 | #86 | daily | the Inner Voice observer | Nightly grader run appended to a metrics series; flags a sustained `dropped_rate` breach |
 
@@ -1107,3 +1133,22 @@ decide what gets worked on next.
   `app.llm_slots` rather than a table of its own, and `--strict` exits 2 on it. The
   dated fleet-size counts elsewhere in this doc are measurements of the day each
   was taken and are not restated here; a retirement moves the fleet, not them.
+
+- **2026-10-12 — `stale`.** Re-verified against `3b438c45` and the live
+  `~/obsidian/autonomy/`. The wiring holds: exactly the ten `depends_on` edges
+  the diagram draws exist, and `EVIDENCE_PILOT_TASK_IDS` really is
+  `app/autonomy.py:2818` pinned at `tests/test_worker_evidence.py:663`.
+  Membership does not: seven live tasks (#91–#97) have no entry here at all,
+  #87–#89 are named as live members with no task file behind them, and #68 is
+  parked (`draft`, last run 2026-09-16) with a `model: secondary` that names a
+  slot disabled since 2026-09-20 — invisible to `slot_arm_block`, which reads
+  only `requires_slot:`. Corrected in place: four drifted `file:line` citations
+  (`test_skill_tool_names.py` 137→150, `skill_lint.py` 276→281,
+  `app/routers/backlog.py` 754→804, `BacklogPage.tsx` 571→572), the
+  groundskeeper "three scripts" sentence (the directory holds one since
+  #1012), #24's corpus spelled with its full path, #36's Measure row marked
+  retired, and both of #68's "runs around the clock on the secondary engine"
+  sentences. Filed: #2630 (the seven missing entries), #2631 (no check
+  reconciles the doc against the task-file directory), #2632 (#68's stale
+  `model:` and the guard blind spot), #2633 (pin the citation form so line
+  drift goes red).
