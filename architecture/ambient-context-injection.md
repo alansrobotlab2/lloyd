@@ -96,8 +96,10 @@ User sends message
       ├─ filters expired (expires_at)
       ├─ sorts newest-first, takes AMBIENT_PREFETCH_DRAIN_MAX = 3
       └─ puts the overflow back for the next turn
-  → drain_next_session_notes() (#1516) — a global file, drained for whatever
-      session is asking, and consuming is the same act as delivering
+  → drain_next_session_notes() (#1516) — a global file, and consuming is the same
+      act as delivering, so since #2598 the drain asks the reader first:
+      `is_user_session` over this turn's session JSON. A worker/autonomy turn
+      skips it, and the note waits for a turn that can reach a human
   → _format_context renders <ambient-signals> FIRST inside <context>
   → "<context>…</context>" + "\n\n" + the user's text
   → model sees: <context>...<ambient-signals>...</ambient-signals>...</context>
@@ -320,12 +322,22 @@ the drain, that response queued a signal nobody would drain and nothing could
 reclaim. `tests/test_active_session_resolution.py` pins the resolver and `/inject`'s
 409; `tests/test_ambient_prefetch_retention.py` pins this route's.
 
-The invariant is enforced at **both doors**, and that is exactly its limit: a rule
-held only at the door is held by nothing where the consumer reads. The
-next-session channel has no door with a target to check — the file is global, and
-the drain in `prefetch._prefetch_prepare` runs for the session that happens to
-turn up first, worker included, since worker turns arrive through the chat path
-for the Inner-Voice reason this section already names. Filed as #2598. One related
+The invariant is enforced at **both doors**, and a rule held only at the door is
+held by nothing where the consumer reads — the shape the next-session channel had
+until #2598. Its file is global, so the drain in `prefetch._prefetch_prepare` ran
+for whichever session turned up first, worker included, since worker turns arrive
+through the chat path for the Inner-Voice reason this section already names, and a
+worker turn between the overnight write and the first human turn read the brief
+into a transcript nobody reads and left the store empty. The consumer end now
+applies the same deny-list the doors apply: `sessions_io.is_user_session` over the
+draining turn's own session JSON, read once in `_prefetch_prepare` beside the
+plan-mode flag it also answers. Being a deny-list is the part that keeps delivery
+working — a session with no JSON on disk, a platform the list has never heard of,
+or no session id at all still drains and still receives the note; `platform`
+values a human reads (`mission-control`, `browser`) are not in the list, and
+widening it is a separate decision. Pinned by `tests/test_next_session_notes.py`,
+which drives `_prefetch_prepare` rather than the drain, because the drain's only
+production caller is the seam a turn crosses. One related
 nuance so the two predicates are not collapsed into one: `is_user_session` answers
 "can a signal reach a human through this session", and since #1064 the *listings*
 and exports ask a stricter question — `is_conversation_session`, an allow-list of
@@ -501,4 +513,29 @@ mode has no reason to block it.
   **#2599** (`_ambient_decisions` is keyed by session while the deferred 0.5 s
   cancel lets a decide call land on the next ambient turn), and **#2601**
   (`peek_next_session_notes` promises a debug endpoint that does not exist).
+- 2026-10-12 — **#2598 landed**: the notes drain stopped consuming the channel for
+  a machine session. `prefetch._prefetch_prepare` now reads the draining turn's
+  session JSON once — the same read the plan-mode fallback answers, which is why
+  the old `_read_plan_mode` is `_read_session_meta` plus `_plan_mode_from_meta` —
+  and calls `sessions_io.is_user_session` on it before `drain_next_session_notes`,
+  so a `worker` or `autonomy` turn leaves the note for the next readable turn
+  instead of deleting it. No second rule was written: inside the code that decides
+  the drain there is no platform set and no platform name as a literal, one test
+  asserts that absence, and another proves the decision goes through the module
+  attribute by monkeypatching `is_user_session` and watching the drain stop. The
+  fail-open cases are the design, not an oversight: an empty dict (no session id,
+  no file, unreadable bytes) reads as a reader, so `prefetch_context`'s sessionless
+  callers and every client the list has never heard of keep getting notes —
+  including the eval harnesses, all of which pass `session_id=None` explicitly or
+  by default, and the memory eval's sleep-note arm, which drains directly and is
+  untouched. Blast radius from `graph_affected` over `_prefetch_prepare`: depth 1
+  is `prefetch_context` and `prefetch_context_async` in `app/prefetch.py` plus four
+  test nodes; depth 2 adds `post_message_stream` (`app/routers/messages.py`),
+  `voice_inject` (`app/routers/voice.py`), the eval entry points and
+  `tests/test_prefetch.py`. Two things the change cannot show and the item stays
+  open on: whether real traffic delivers now — the live store has never been
+  written outside a test and a consumed note leaves no trace, so only a note
+  surviving several nights of machine turns and arriving in a chat prompt is
+  evidence — and whether `browser` counts as a reader, which is a ruling on the
+  platform list, not on this gate.
 

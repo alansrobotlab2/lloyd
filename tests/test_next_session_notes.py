@@ -29,8 +29,11 @@ after it has been drained, so a prompt that learned about the note differs.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
+import time
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -65,6 +68,34 @@ def _app() -> FastAPI:
 
 def _client() -> TestClient:
     return TestClient(_app())
+
+
+@pytest.fixture
+def sessions_dir(tmp_path, monkeypatch):
+    """A sessions directory this test owns.
+
+    The gate on the drain reads the draining turn's own session JSON, and the
+    delivery question that JSON answers is `platform`. `prefetch` imports
+    `app.paths.SESSIONS_DIR` inside the function, so patching the module
+    attribute is what the code actually reads — no test writes into the run's
+    scratch data root, where another test's session could be picked up.
+    """
+    root = tmp_path / "sessions"
+    root.mkdir()
+    monkeypatch.setattr(paths, "SESSIONS_DIR", root)
+    return root
+
+
+def _session(root, session_id: str, platform: str) -> None:
+    """Give `session_id` a session JSON carrying `platform`, as a client writes it."""
+    (root / f"{session_id}.json").write_text(
+        json.dumps({"session_id": session_id, "platform": platform, "messages": []}),
+        encoding="utf-8")
+
+
+def _notes_of(prepared) -> list:
+    """The notes half of a `_prefetch_prepare` result; a None result holds none."""
+    return [] if prepared is None else list(prepared[1])
 
 
 # ── clause 1: a target-less write lands on disk under the data root ──────────
@@ -351,3 +382,149 @@ def test_the_queue_it_was_meant_to_ride_still_cannot_carry_an_overnight_signal()
     assert sio.drain_ambient_prefetch("quiet-session") == [], (
         "the ambient queue kept a signal past its deadline, which is what this "
         "item says it cannot do")
+
+
+# ── the drain is gated on the session that drains it (#2598) ─────────────────
+
+@pytest.mark.parametrize("platform", ["worker", "autonomy"])
+def test_a_machine_turn_leaves_the_note_for_a_turn_that_can_reach_a_human(
+        sessions_dir, platform):
+    """Clauses 1 and 2: `NON_USER_PLATFORMS` is `{worker, autonomy}`, and a turn
+    running in either one must not consume the channel.
+
+    The turn is driven through `prefetch._prefetch_prepare`, the drain's only
+    production caller, because the premise is exactly that these turns reach it:
+    `workers/sources/_common.py` POSTs `/api/message/stream` with
+    `"platform": "worker"`, worker turns ride the chat path for Inner Voice, and
+    the route calls `prefetch_context_async` → `_prefetch_prepare`. Delivery here
+    IS deletion (`drain_next_session_notes` saves an empty list over the file), so
+    the load-bearing assertion is on the store after the call: a worker that read
+    the overnight brief into its own transcript also took it out of the store for
+    everybody, and nothing in the log says so.
+    """
+    _session(sessions_dir, "machine-run", platform)
+    nsn.write_next_session_note(source="nightly:brief", summary=NOTE,
+                                content="djev moved to GPU 2 on port 8012.")
+
+    prepared = prefetch._prefetch_prepare(
+        "what is the djev port again", "machine-run", None)
+    notes = _notes_of(prepared)
+
+    assert [n.summary for n in nsn.peek_next_session_notes()] == [NOTE], (
+        f"a {platform} turn consumed the note, leaving the channel empty for the "
+        "chat turn that can reach a human")
+    assert notes == [], f"the {platform} turn received the note anyway"
+    assert NOTE not in prefetch._format_context([], [], notes=notes), (
+        f"the {platform} turn rendered the note into its context block")
+
+
+@pytest.mark.parametrize("case", ["mission-control", "no-json", "no-session-id"])
+def test_every_reader_the_deny_list_licenses_still_drains_the_channel(
+        sessions_dir, case):
+    """Clause 3: the three controls that keep this a deny-list and not an
+    allow-list in disguise.
+
+    `is_user_session` answers False only for a platform it has been *told* is a
+    machine's, so the web UI (`mission-control`), a session with no JSON on disk
+    (a caller that has not written one yet — the id the older tests in this file
+    pass), and a turn with no session id at all (`prefetch_context` accepts
+    `session_id=None`, and every eval harness calls it that way) must each still
+    consume the note and see it rendered. A gate phrased as "the session JSON says
+    user" starves all three, and starves them exactly as quietly as a worker
+    draining the channel did.
+    """
+    sid = None if case == "no-session-id" else "morning-chat"
+    if case == "mission-control":
+        _session(sessions_dir, sid, "mission-control")
+    elif case == "no-json":
+        assert not (sessions_dir / f"{sid}.json").exists(), (
+            "the control the older tests in this file rely on needs a session id "
+            "with no file behind it")
+    nsn.write_next_session_note(source="nightly:brief", summary=NOTE,
+                                content="djev moved to GPU 2 on port 8012.")
+
+    notes = _notes_of(prefetch._prefetch_prepare(
+        "what is the djev port again", sid, None))
+
+    assert [n.summary for n in notes] == [NOTE], (
+        f"the {case} turn did not receive the note: a gate that starves an "
+        "unclassified reader is an allow-list")
+    assert nsn.peek_next_session_notes() == [], "the reader did not consume the note"
+    block = prefetch._format_context([], [], notes=notes)
+    assert "<next-session-notes>" in block and NOTE in block and "8012" in block
+
+
+def test_a_note_a_machine_turn_skipped_is_still_there_for_the_next_chat_turn(
+        sessions_dir):
+    """Clause 4: deferral must not be decay.
+
+    The channel exists to cross a night, so a note that survives being skipped has
+    to reach the next reader while it is inside the deadline its producer set.
+    Nothing rewrites the deferred note, so that deadline is the original one —
+    which is what the `expires_at` assertion below measures against the wall clock
+    the drain itself uses.
+    """
+    _session(sessions_dir, "overnight-worker", "worker")
+    _session(sessions_dir, "morning-chat", "mission-control")
+    nsn.write_next_session_note(source="nightly:brief", summary=NOTE)
+
+    assert _notes_of(prefetch._prefetch_prepare(
+        "implement the item", "overnight-worker", None)) == [], (
+        "the worker turn took the note the chat turn was waiting for")
+    waiting = nsn.peek_next_session_notes()
+    assert [n.summary for n in waiting] == [NOTE], "the deferral emptied the channel"
+    assert waiting[0].expires_at > time.time(), (
+        "the deferred note's deadline has already passed, so the next reader is "
+        "too late — the deferral is a loss by another name")
+
+    notes = _notes_of(prefetch._prefetch_prepare(
+        "what changed overnight", "morning-chat", None))
+
+    assert [n.summary for n in notes] == [NOTE], (
+        "a note that waited out a machine turn never reached the chat turn")
+    assert nsn.peek_next_session_notes() == [], (
+        "the delivered note was left in the store to be delivered twice")
+
+
+def test_the_gate_is_the_one_predicate_the_two_doors_already_use(
+        sessions_dir, monkeypatch):
+    """Clause 5, both halves.
+
+    Behaviour: making `app.sessions_io.is_user_session` answer False for a platform
+    the deny-list does not name must stop the drain. That only happens if the drain
+    asks the module attribute when it runs — a copied set, a reference bound at
+    import, or a literal platform comparison all keep draining while the
+    subsystem's one definition says the reader is not one.
+
+    Static: the module that drains must not carry a second definition of the
+    question. `is_user_session` appears in the drain's own source, and neither
+    platform set, a platform-field read, nor a platform name as a literal does.
+    """
+    _session(sessions_dir, "web-ui", "mission-control")
+    nsn.write_next_session_note(source="nightly:brief", summary=NOTE)
+    monkeypatch.setattr(sio, "is_user_session", lambda data: False)
+
+    notes = _notes_of(prefetch._prefetch_prepare(
+        "what is the djev port again", "web-ui", None))
+
+    assert notes == [], "the drain did not ask the predicate: it decided for itself"
+    assert [n.summary for n in nsn.peek_next_session_notes()] == [NOTE], (
+        "a session the one definition refused still consumed the channel")
+
+    drain_src = (inspect.getsource(prefetch._prefetch_prepare)
+                 + inspect.getsource(prefetch._read_session_meta))
+    assert "is_user_session" in drain_src, (
+        "the gate is not the predicate the doors use, so the assertions above "
+        "passing would only mean two definitions that happen to agree")
+    module_src = (Path(__file__).resolve().parents[1] / "app" / "prefetch.py"
+                  ).read_text(encoding="utf-8")
+    for token in ("NON_USER_PLATFORMS", "INTERACTIVE_PLATFORMS",
+                  "is_conversation_session", '"platform"', "'platform'"):
+        assert token not in module_src, (
+            f"app/prefetch.py now carries {token!r}: a second definition of the "
+            "platform question is a second place to update when the lists move")
+    for name in ("worker", "autonomy", "mission-control", "browser"):
+        for quoted in (f'"{name}"', f"'{name}'"):
+            assert quoted not in drain_src, (
+                f"the drain matches the platform name {name!r} by literal instead "
+                "of asking sessions_io")

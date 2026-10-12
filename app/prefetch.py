@@ -1389,19 +1389,36 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def _read_plan_mode(session_id: str | None) -> bool:
-    """Fallback for callers that don't pass `plan_mode`: read it off disk."""
+def _read_session_meta(session_id: str | None) -> dict:
+    """The draining turn's own session JSON, or `{}` when there is nothing to read.
+
+    Read once per turn and asked two questions of it: the plan-mode flag, and
+    whether this turn is allowed to consume the next-session channel (#2598).
+
+    `{}` is the answer for no session id, a missing file, unreadable bytes and
+    bytes that are not an object — all four of which `is_user_session` reads as
+    the web UI they almost certainly are. That is the delivery doors' behaviour on
+    purpose (`app/routers/sessions.py`): the machine-platform list in
+    `app/sessions_io.py` is a deny-list, and a client this code has never heard of
+    must keep receiving its briefs rather than silently losing them.
+    """
     if not session_id:
-        return False
+        return {}
     try:
         from app.paths import SESSIONS_DIR as _SD
-        _meta = _SD / f"{session_id}.json"
-        if _meta.exists():
-            _data = json.loads(_meta.read_text())
-            return bool((_data.get("plan") or {}).get("plan_mode"))
+        meta_path = _SD / f"{session_id}.json"
+        if meta_path.exists():
+            data = json.loads(meta_path.read_text())
+            if isinstance(data, dict):
+                return data
     except Exception:
-        pass  # non-fatal; prefetch continues with plain query_tokens
-    return False
+        pass  # non-fatal: an unreadable session is no session to prefetch for
+    return {}
+
+
+def _plan_mode_from_meta(meta: dict) -> bool:
+    """The plan-mode flag off an already-read session dict."""
+    return bool((meta.get("plan") or {}).get("plan_mode"))
 
 
 def _prefetch_prepare(text: str, session_id: str | None,
@@ -1419,7 +1436,12 @@ def _prefetch_prepare(text: str, session_id: str | None,
     Both drains run before the length guard, for the same reason: a producer that
     already decided a signal was worth showing should not be suppressed by a
     threshold that exists to skip *retrieval* on short messages.
+
+    The session JSON is read here, once, and both of its readers are below: the
+    plan-mode fallback, and the platform gate on the notes drain (#2598).
     """
+    session_meta = _read_session_meta(session_id)
+
     # Drain ambient queue FIRST — even a short message should surface
     # queued background context. Don't let the MIN_MESSAGE_LEN guard
     # suppress injections the producer already decided were worth showing.
@@ -1436,9 +1458,24 @@ def _prefetch_prepare(text: str, session_id: str | None,
     # 08:00. Not swallowed into silence the way the ambient drain is — a note no
     # turn received is a signal nobody would learn went missing (#910), so an I/O
     # fault here says so.
+    #
+    # Gated on the draining session (#2598), because being global is exactly what
+    # makes the queue's own safety unavailable: `drain_ambient_prefetch(session_id)`
+    # can only ever take what was addressed to this turn, while this drain takes
+    # whatever is waiting and consuming it IS deleting it. The write doors refuse a
+    # machine session; that rule was held only at the door, and worker turns arrive
+    # through the chat path for the Inner-Voice reason, so a run between the
+    # overnight write and the first human turn read the brief into a transcript
+    # nobody reads and left the store empty — invisible in both directions, the
+    # #910 shape again. `is_user_session` is the same deny-list those doors apply,
+    # so a session with no JSON, a platform nobody named, or no session id at all
+    # still drains and still gets its note.
+    notes: list = []
     try:
+        from app.sessions_io import is_user_session
         from app.next_session_notes import drain_next_session_notes
-        notes = drain_next_session_notes() or []
+        if is_user_session(session_meta):
+            notes = drain_next_session_notes() or []
     except Exception:
         logger.warning("next-session notes: drain failed", exc_info=True)
         notes = []
@@ -1452,7 +1489,7 @@ def _prefetch_prepare(text: str, session_id: str | None,
         focus.update(text)
 
     if plan_mode is None:
-        plan_mode = _read_plan_mode(session_id)
+        plan_mode = _plan_mode_from_meta(session_meta)
 
     return ambient_entries, notes, focus, bool(plan_mode)
 
