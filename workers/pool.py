@@ -594,6 +594,17 @@ HOLDER_MACHINE = "machine"
 #: kind that is never auto-released, so landing this change cannot silently
 #: resume a halt some earlier process took on a person's behalf.
 HOLDER_DEFAULT = HOLDER_PERSON
+#: What the hold journal records when the caller named no actor (#2615). A NAME,
+#: not a sentinel: the value that answered "who held the fleet" through the
+#: 2026-10-11..12 holds was the string `0`, which `holder_kind` then renders as
+#: `person`, so an unattributed hold and a person's hold were indistinguishable in
+#: the only place either was recorded. A row that reads `unattributed` says exactly
+#: what happened — something paused the fleet and did not say who.
+PAUSE_ACTOR_DEFAULT = "unattributed"
+#: The actor of the one release no person chose: `_release_dead_machine_pause`
+#: reconciling a machine hold whose lease died with its setter.
+PAUSE_ACTOR_RECONCILE = "startup-reconcile"
+
 #: How stale a machine hold's lease may be when a pool starts up. Five minutes:
 #: long enough that one missed beat (a busy loop, a 60 s refresh that lands 10 s
 #: late) never releases a live harness's measurement window, short enough that a
@@ -844,16 +855,21 @@ class WorkerPool:
     def _release_dead_machine_pause(self, inherited: dict[str, Any]) -> None:
         """Drop a machine hold whose lease says its setter is gone.
 
-        Releases by writing the same two rows `pause(False)` writes, so the
-        release is durable and the next pool — or the alert, which reads the row
-        and not this process — agrees that claims are free again.
+        Releases by writing the pause row `pause(False)` writes, so the release is
+        durable and the next pool — or the alert, which reads the row and not this
+        process — agrees that claims are free again. It no longer writes `0` over
+        the holder row (#2615 clause 2): that row is the only trace of what KIND
+        held, and this is the release nobody chose, so overwriting it destroyed the
+        attribution of a hold nobody was present to explain. The holder row keeps
+        naming `machine`, and the journal records this lift with
+        `actor=startup-reconcile` — which is how a later reader tells a release that
+        was reconciled from one a person clicked.
         """
         last_refresh = ("never (no lease stamp on the holder row)"
                         if inherited.get("lease_age_s") is None
                         else f"{inherited['lease_age_s']:.0f} s before this boot")
         try:
             self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY, "0")
-            self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY, "0")
         except Exception:
             # Fail toward the halt. A hold this process cannot release stays a
             # hold, the boot line says it was not reconciled, and a person is
@@ -864,6 +880,9 @@ class WorkerPool:
                              inherited.get("since"), last_refresh)
             return
         inherited["reconciled"] = True
+        self._journal_pause(value="0",
+                            holder_kind=inherited.get("holder") or HOLDER_DEFAULT,
+                            actor=PAUSE_ACTOR_RECONCILE)
         logger.warning("Worker pool: releasing the %s pause taken at %s whose lease was "
                        "last refreshed %s — its setter cannot have survived the restart; "
                        "dispatch resumes", inherited.get("holder"),
@@ -894,7 +913,8 @@ class WorkerPool:
                        "n/a" if age is None else f"{age:.0f} s", verdict)
 
     def pause(self, paused: bool = True, owner: str = "operator",
-              holder_kind: str = HOLDER_PERSON) -> None:
+              holder_kind: str = HOLDER_PERSON,
+              actor: Optional[str] = None) -> None:
         """Pause or resume. `owner` is `operator` (persisted) or `automod` (not).
 
         An automod resume lifts only its own pause, so a person's pause taken
@@ -909,36 +929,87 @@ class WorkerPool:
         person's hold, which is what the guardian's vault trip and every database
         written before this change are.
 
+        `actor` (#2615) is who or what named it — a free string a caller sends
+        (a Mission Control user, a harness name, a pid), not a new enum, and the
+        question `holder_kind` was never able to answer. It reaches the hold
+        journal only: the current-state rows stay two-valued, and a caller that
+        names nothing is recorded as `unattributed` rather than as the `0`
+        sentinel that tonight's holds left behind.
+
         Re-pausing a hold this process already holds refreshes the holder row and
         leaves the pause row's stamp alone on purpose: that stamp IS the hold's
         duration (#1550's `paused_since`), and a harness keeping its lease alive
-        must not make a 3-hour halt read as 5 seconds old.
+        must not make a 3-hour halt read as 5 seconds old. For the same reason it
+        appends NO journal row: a lease refresh is not a new hold, and 16 identical
+        INFO lines for the single 09:14:21Z hold on 2026-10-12 is exactly the
+        over-count a grep of stderr would have made.
         """
         kind = HOLDER_MACHINE if holder_kind == HOLDER_MACHINE else HOLDER_PERSON
+        journal_actor = (actor or "").strip() or PAUSE_ACTOR_DEFAULT
         if owner == "automod":
             self._paused_automod = paused
         else:
             already_held = self._paused_operator
             self._paused_operator = paused
+            transitioned = paused != already_held
+            held_kind = HOLDER_DEFAULT
             if not paused:
                 self._paused_automod = False
             try:
-                if paused != already_held:
+                # Read on the lift, before anything is written: the journal records
+                # the kind that WAS holding, and the resume call's own
+                # `holder_kind` is not that (the same error the stderr line makes
+                # with `holder=`).
+                if transitioned:
+                    held_kind = _holder_kind(
+                        self.queue.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY))
                     self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY,
                                       "1" if paused else "0")
-                # Written on every call: for a machine hold this write IS the
-                # lease refresh, and its `updated_at` is what a later pool start
-                # measures. On a resume it records "0" so a stale kind can never
-                # outlive the hold it described.
-                self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY,
-                                  kind if paused else "0")
+                # Written on every TAKE: for a machine hold this write IS the lease
+                # refresh, and its `updated_at` is what a later pool start measures.
+                # A resume no longer writes `0` over it (#2615 clause 2): that
+                # sentinel made `_holder_kind` answer "a person held this" for a
+                # fleet nobody was holding, and it erased the one attribution the
+                # row had. Leaving the kind that held is safe because every reader
+                # consults the holder row only while the pause row reads `1`.
+                if paused:
+                    self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY, kind)
             except Exception:
                 # The pause still holds for this process; only its survival of
                 # a restart is lost, and that is worth a loud line, not a refusal.
                 logger.exception("Worker pool: pause not persisted; a restart will clear it")
-        logger.info("Worker pool %s by %s (operator=%s automod=%s) holder=%s",
+            if transitioned:
+                self._journal_pause(value="1" if paused else "0",
+                                    holder_kind=kind if paused else held_kind,
+                                    actor=journal_actor)
+        logger.info("Worker pool %s by %s (operator=%s automod=%s) holder=%s actor=%s",
                     "paused" if paused else "resumed", owner,
-                    self._paused_operator, self._paused_automod, kind)
+                    self._paused_operator, self._paused_automod, kind,
+                    journal_actor)
+
+    def _journal_pause(self, *, value: str, holder_kind: str, actor: str) -> None:
+        """Append one durable-hold transition to the journal, loudly failing.
+
+        Separate from the watermark write's `except` on purpose: a failed journal
+        row is not a failed halt, and reporting it with "pause not persisted; a
+        restart will clear it" would tell a reader the fleet is unsafe when the
+        only thing lost is history. Losing the row is still worth shouting about —
+        #2615 exists because nobody could reconstruct who held the fleet and for
+        how long — so this logs at exception level with its own words.
+
+        The watermark rows are written first and the journal after, which chooses
+        the direction of a crash between the two: the history UNDER-counts a hold
+        rather than recording a hold whose state rows say never happened.
+        """
+        try:
+            self.queue.pause_journal_append(value=value, holder_kind=holder_kind,
+                                            actor=actor)
+        except Exception:
+            logger.exception(
+                "Worker pool: hold journal write FAILED (value=%s holder_kind=%s "
+                "actor=%s); this hold is unpersisted history — the fleet state is "
+                "correct, but nobody will be able to count it later",
+                value, holder_kind, actor)
 
     @property
     def _paused(self) -> bool:

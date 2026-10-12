@@ -853,7 +853,7 @@ def _operator_pause_clause(queue: WorkQueue) -> str:
     is no object to ask. The row is the durable fact; memory is a copy of it.
     """
     try:
-        from workers.pool import operator_pause_state
+        from workers.pool import HOLDER_PERSON, operator_pause_state
         state = operator_pause_state(queue)
     except Exception:
         logger.exception("stall alarm: could not read the operator pause; "
@@ -869,9 +869,16 @@ def _operator_pause_clause(queue: WorkQueue) -> str:
         if taken is not None:
             now = _dt.datetime.now(_dt.timezone.utc)
             held_h = max(0.0, (now - taken).total_seconds() / 3600.0)
-    return (f"the worker pool is PAUSED by operator, held {held_h:.1f} h since "
-            f"{since} — claims are held by that pause, not by this scheduler; "
-            f"resume it to drain the backlog")
+    # The kind, from the row the hold journal takes its `holder_kind` from (#2615
+    # clause 4). `by operator` alone made a harness's measurement window and a
+    # person's deliberate halt read as one sentence, so the reader could not tell
+    # "someone is doing this on purpose" from "a process died holding the fleet" —
+    # the two things #2498's distinction exists to separate. The journal is the
+    # history; this is the live hold, and both now name the same kind.
+    holder = state["holder"] or HOLDER_PERSON
+    return (f"the worker pool is PAUSED by operator ({holder} hold), held "
+            f"{held_h:.1f} h since {since} — claims are held by that pause, not by "
+            f"this scheduler; resume it to drain the backlog")
 
 
 def _parse_iso_safe(value):

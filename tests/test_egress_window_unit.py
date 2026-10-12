@@ -412,7 +412,9 @@ def test_the_timer_names_the_live_pool_query_and_refuses_to_claim_the_hour_avoid
 
     The item, and the sibling unit's own header, both cite `workers/queue.py:1103-1111` for
     the pool-status query. That is not the query any more — those lines are the boot-time
-    interrupted-run recovery sweep now — and `depth_by_source()` is at :1229. So this unit
+    interrupted-run recovery sweep now — and `depth_by_source()` is at :1253 (:1229 until
+    #2615's `pause_journal` DDL went into `_SCHEMA` 27 lines above it, which is precisely the
+    way this pointer moves and why it is read from the file rather than remembered). So this unit
     cites a line number and this node opens the real file at that number and requires the
     `queue`/`GROUP BY source, state` text to be there, plus `def depth_by_source` above it:
     a citation checked against nothing is how the sibling ended up carrying a dead pointer
@@ -427,7 +429,7 @@ def test_the_timer_names_the_live_pool_query_and_refuses_to_claim_the_hour_avoid
     both measured figures are required in the prose, with the lever that does work.
     """
     c = _comments(TIMER)
-    assert "workers/queue.py:1229" in c, c[:600]
+    assert "workers/queue.py:1253" in c, c[:600]
     qlines = QUEUE.read_text(encoding="utf-8").splitlines()
     cited = [int(n) for n in re.findall(r"workers/queue\.py:(\d+)", c)]
     assert cited, "the comment names no line at all"

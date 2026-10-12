@@ -187,7 +187,7 @@ class _FakePool:
         return self._paused
 
     def pause(self, paused: bool = True, owner: str = "operator",
-              holder_kind: str = "") -> None:
+              holder_kind: str = "", actor: str | None = None) -> None:
         # `holder_kind` is the route's #2498 parameter, and this double takes it
         # with no usable default on purpose: a double that accepted the argument and
         # discarded it stays green through a route that stopped threading a kind at
@@ -195,7 +195,15 @@ class _FakePool:
         # So the double refuses an absent kind and records the one it was given —
         # "did the handler execute" now includes "with which holder kind". The
         # kind's own semantics are pinned in tests/test_workers_router.py.
+        # `actor` is the route's #2615 third field and takes the opposite shape:
+        # `None` here is a VALUE, not a missing argument — a call that names no
+        # actor is legal, and the pool records it as `unattributed` — so refusing an
+        # absent one would refuse a request the route is allowed to make. It stays on
+        # the instance, not in `_calls`, because that tuple is what the reachability
+        # assertions below compare against; what the journal records for a named
+        # caller is pinned in tests/test_workers_router.py.
         assert holder_kind, "the pause route reached the pool without a holder kind"
+        self._actor = actor
         self._paused = paused
         self._calls.append(("workers/pause", paused, holder_kind))
 

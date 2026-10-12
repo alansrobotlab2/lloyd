@@ -376,14 +376,16 @@ def test_constant_still_names_the_legacy_path_for_the_migration():
 #: The four nodes the gate listed as failing at 0ae3064f, each with the file that
 #: defines it. The first is this file's own; the three retention nodes are the
 #: vault-count guards #2559 moved to eighteen, whose second name this list spells
-#: as it reads on disk today (`…says_eighteen_stores…`) rather than as #2561's
-#: original filing spelled it (`…says_seventeen_stores…`), which no longer exists.
+#: as it reads on disk today (`…says_nineteen_stores…`, #2615's hold journal being
+#: the store that moved it past #2559's `…says_eighteen_stores…`) rather than as
+#: #2561's original filing spelled it (`…says_seventeen_stores…`), which no longer
+#: exists. What the list holds is the four NODES, not one round's spelling.
 _GREEN_AT_HEAD: dict[str, list[str]] = {
     "tests/test_legacy_alias_export_fate.py": [
         "test_no_recurring_autonomy_task_is_told_to_run_an_exporter",
     ],
     "tests/test_retention_sweep.py": [
-        "test_the_skill_says_eighteen_stores_and_its_table_has_a_row_per_report_line",
+        "test_the_skill_says_nineteen_stores_and_its_table_has_a_row_per_report_line",
         "test_the_table_guard_refuses_a_row_short_and_a_row_long",
         "test_the_task_description_names_every_store_the_sweep_prints",
     ],

@@ -326,8 +326,11 @@ def test_an_existing_database_gets_the_table_on_next_init(tmp_path):
         kept = {r[0] for r in conn.execute("SELECT name FROM sqlite_master "
                                           "WHERE type='table'")}
     assert "authority_grants" in tables
+    # `pause_journal` is #2615's operator-hold history, created by the same `_SCHEMA`
+    # this node drives; a store in the file but not in this set would read as init
+    # dropping a table, which is what the exact equality is here to catch.
     assert kept == {"queue", "sqlite_sequence", "runs", "watermarks",
-                    "authority_grants", "grant_dispatch"}
+                    "authority_grants", "grant_dispatch", "pause_journal"}
 
 
 # ── Hook wiring: the non-interactive dispatch paths ────────────────────────

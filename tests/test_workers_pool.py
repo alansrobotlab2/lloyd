@@ -2552,3 +2552,182 @@ async def test_a_diagnostic_run_never_arms_another_diagnostic_from_the_pool(
     assert not arrived, (
         "the investigator armed itself: its own run entered the distribution "
         "that watches it, which is the recursion the item's risk list names")
+
+
+# ---------------------------------------------------------------------------
+# #2615 — the hold journal. The two `(_pool, operator_paused /
+# operator_pause_holder)` rows are the current state and can only ever hold the
+# LAST flip (PRIMARY KEY (source, key)); three fleet holds on 2026-10-11..12
+# therefore left no count, no actor and no per-hold duration on disk, and the
+# only surviving evidence was a 95.6-minute hole in the hourly claim histogram.
+# These tests run against a `tmp_path` workers.db (`q` is
+# `WorkQueue(tmp_path / "workers.db")`), never the live store.
+# ---------------------------------------------------------------------------
+
+
+def _journal(q):
+    """Every journal row, oldest first, as plain tuples."""
+    import sqlite3
+    with sqlite3.connect(str(q.db_path)) as conn:
+        return conn.execute(
+            "SELECT id, value, holder_kind, actor, hold_id FROM pause_journal "
+            "ORDER BY id"
+        ).fetchall()
+
+
+def test_taking_and_lifting_the_pause_appends_one_journal_row_per_transition(q):
+    """Clause 1: a transition is an APPEND, so the flips survive each other.
+
+    One take and one lift are two rows, and each carries the four things the
+    watermark row could never carry at once: its instant, the new value, the kind
+    that held, and who named it. The value is the same `'1'`/`'0'` spelling as the
+    row, so a reader can join the two stores without a mapping table.
+    """
+    pool = WorkerPool(q, slots=1)
+    pool.pause(True, actor="mission-control:al")
+    pool.pause(False, actor="mission-control:al")
+
+    rows = _journal(q)
+    assert len(rows) == 2, f"two transitions, two rows: {rows}"
+    (take_id, take_value, take_kind, take_actor, take_hold), \
+        (_, lift_value, lift_kind, lift_actor, lift_hold) = rows
+    assert (take_value, take_kind, take_actor) == ("1", "person", "mission-control:al"), rows
+    assert (lift_value, lift_kind, lift_actor) == ("0", "person", "mission-control:al"), rows
+    assert take_hold is None, "a take row is an OPEN hold until a lift points at it"
+    assert lift_hold == take_id, (
+        f"the lift row must name the take it closes, not just its own id: "
+        f"lift hold_id={lift_hold}, take id={take_id}")
+
+
+def test_a_pause_and_a_resume_that_change_nothing_append_nothing(q):
+    """Clause 1's other half: a lease refresh is not a hold, so it is not a row.
+
+    A machine hold re-calls `pause(True)` about every 60 seconds, and on stderr
+    that is one more identical `paused by operator` line each time — 16 lines for
+    the single 09:14:21Z-09:27:24Z hold on 2026-10-12, which is why counting holds
+    by grepping that log over-counts by an order of magnitude. The journal counts
+    transitions, so `COUNT(*)` is the number of holds without a dedup step, and a
+    double take or a double resume stays invisible exactly as it should be.
+    """
+    pool = WorkerPool(q, slots=1)
+    pool.pause(True, holder_kind="machine", actor="eval-window")
+    before = _journal(q)
+    assert len(before) == 1, before
+
+    pool.pause(True, holder_kind="machine", actor="eval-window")   # lease beat
+    pool.pause(True, holder_kind="machine", actor="eval-window")   # and another
+    pool.pause(False, holder_kind="machine", actor="eval-window")
+    pool.pause(False, holder_kind="machine", actor="eval-window")  # already resumed
+
+    rows = _journal(q)
+    assert len(rows) == 2, (
+        "two beats and a double resume must add no rows; the journal holds "
+        f"transitions: {rows}")
+    assert [r[1] for r in rows] == ["1", "0"], rows
+    assert {r[2] for r in rows} == {"machine"}, rows
+
+
+def test_the_holds_in_a_window_come_back_with_start_end_duration_and_actor(q):
+    """Clause 1's question, as ONE call: how many holds, each one's bounds, who.
+
+    Replays the shape of the 2026-10-11..12 series — a person's hold and a
+    machine's hold, each closed, plus one still open — and asks the store what it
+    knows. This is the query that was unanswerable on disk: "how many times was the
+    pool held this week" and each hold's duration existed only as a gap in the
+    hourly claim histogram.
+    """
+    pool = WorkerPool(q, slots=1)
+    pool.pause(True, actor="mission-control:al")
+    pool.pause(False, actor="mission-control:al")
+    pool.pause(True, holder_kind="machine", actor="eval-window")
+    pool.pause(False, holder_kind="machine", actor="eval-window")
+    pool.pause(True, actor="guardian-vault-trip")            # never lifted
+
+    holds = q.pause_journal_holds()
+    assert len(holds) == 3, f"three holds taken, three holds reported: {holds}"
+    assert [h["actor"] for h in holds] == ["mission-control:al", "eval-window",
+                                           "guardian-vault-trip"], holds
+    assert [h["holder_kind"] for h in holds] == ["person", "machine", "person"], holds
+    closed, machine, open_hold = holds
+    assert closed["ended_at"] is not None and closed["duration_s"] >= 0, closed
+    assert machine["started_at"] >= closed["started_at"], "window order is hold order"
+    assert open_hold["ended_at"] is None and open_hold["duration_s"] is None, (
+        f"a hold nobody lifted is OPEN, not zero-length: {open_hold}")
+    assert all(h["started_at"] for h in holds), holds
+
+
+def test_the_journal_sits_beside_the_current_state_rows_and_not_instead_of_them(q):
+    """Acceptance 1's other clause: the two watermark rows still answer current state.
+
+    `operator_paused`'s `updated_at` is what the stall alarm turns into "held N h"
+    and what `lease_age_s` turns into a machine's heartbeat, so the journal may
+    never become the source those readers use. After a full hold cycle the rows are
+    back to `'0'`/current-state and stamped, and the history is the only place a
+    count lives.
+    """
+    from workers.pool import PAUSE_WM_KEY, PAUSE_WM_SOURCE, operator_pause_state
+
+    pool = WorkerPool(q, slots=1)
+    pool.pause(True, actor="mission-control:al")
+    assert operator_pause_state(q)["paused"] is True
+    assert operator_pause_state(q)["holder"] == "person"
+    assert q.wm_updated_at(PAUSE_WM_SOURCE, PAUSE_WM_KEY), (
+        "the pause row's updated_at IS the hold's start instant for the alarm")
+
+    pool.pause(False, actor="mission-control:al")
+    assert q.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_KEY) == "0"
+    assert operator_pause_state(q)["paused"] is False
+    assert operator_pause_state(q)["since"] is None
+    assert len(_journal(q)) == 2, "the history, and nothing about it lives in the rows"
+
+
+def test_an_operator_resume_leaves_the_holder_row_naming_the_kind_that_held(q):
+    """Clause 2, first release path: `pause(False)` stops writing `0` over the holder.
+
+    `0` was not a neutral "no holder" marker: `_holder_kind` maps any value other
+    than `"machine"` — the sentinel included — to `person`, so the row could never
+    tell "nobody held this" from "a person held this", and a machine's hold that
+    was released by hand lost the one fact that distinguished it. The row keeps
+    naming the kind; the lift row in the journal is what says the hold is over.
+    """
+    from workers.pool import PAUSE_WM_HOLDER_KEY, PAUSE_WM_SOURCE
+
+    pool = WorkerPool(q, slots=1)
+    pool.pause(True, holder_kind="machine", actor="eval-window")
+    assert q.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY) == "machine"
+
+    pool.pause(False, holder_kind="machine", actor="eval-window")
+    held = q.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY)
+    assert held == "machine", (
+        f"the resume erased who held the fleet; row reads {held!r}")
+    rows = _journal(q)
+    assert [r[1] for r in rows] == ["1", "0"], rows
+    assert rows[1][4] == rows[0][0], "the lift row still points at the take it closed"
+
+
+def test_the_startup_reconciliation_of_a_dead_machines_hold_keeps_its_attribution(q):
+    """Clause 2, second release path — the one `pause(False)` never sees.
+
+    `_release_dead_machine_pause` is the release nobody chose, and it used to write
+    `0` to BOTH rows, so the hold that most needed an explanation was the one whose
+    trace was destroyed. After the reconciliation the holder row still reads
+    `machine`, and the journal's lift row carries `actor=startup-reconcile`, which
+    is how a later reader tells a reconciled release from a clicked one.
+    """
+    from workers.pool import PAUSE_WM_HOLDER_KEY, PAUSE_WM_KEY, PAUSE_WM_SOURCE
+
+    _hold_pause(q, "machine", held_for_hours=0.0, lease_age_s=360.0)
+    assert q.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY) == "machine"
+    seeded = _journal(q)
+    assert len(seeded) == 1 and seeded[0][1] == "1", seeded
+
+    WorkerPool(q, slots=1)                       # a boot reconciles at construction
+    assert q.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_KEY) == "0", "the fleet resumed"
+    held = q.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY)
+    assert held == "machine", (
+        f"startup reconciliation erased the kind that held; row reads {held!r}")
+
+    rows = _journal(q)
+    assert len(rows) == 2, f"the reconciled release is a transition: {rows}"
+    assert rows[1][1] == "0" and rows[1][2] == "machine", rows
+    assert rows[1][3] == "startup-reconcile", rows

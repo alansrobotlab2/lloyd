@@ -251,6 +251,26 @@ the transcript scratch home from backlog #566:
     rather than being created: 'nothing has ever been quarantined' and 'a quarantine exists
     and the window holds it' are different facts, and a `mkdir` would collapse them.
 
+19. `~/lloyd-data/workers.db` table `pause_journal` — every take and lift of the
+    persisted operator hold, two append-only rows per hold (#2615). The current-state
+    watermark row cannot carry this history: its PRIMARY KEY is (source, key), so a
+    flip can only overwrite the last one, and three fleet holds on 2026-10-11..12 left
+    no count, no actor and no per-hold duration anywhere on disk — the only surviving
+    evidence was a 95.6-minute hole in the hourly claim histogram (02Z 25 claims, 03Z
+    none, 04Z 16), which is how a halt that long was ever learned about at all.
+    DELETE rows past PAUSE_JOURNAL_MAX_AGE_DAYS (30, the horizon every other delete
+    store here takes) on the row's own ISO `at` stamp, and NEVER on the file mtime:
+    `workers.db` is one live database whose mtime is the newest write by any of its
+    seven tables, so an mtime window would keep every row forever while printing a
+    reassuring count — store 12's rule, one layer down. Printed ELEVENTH, directly
+    under the other two `workers.db` lines it shares a file and a horizon with, and
+    numbered nineteenth here because this list's numbers are its own order, not the
+    print order. The horizon can cut a hold in half, because a take is always older
+    than its own lift: past day 31 the take goes first and leaves the lift joined to
+    nothing, which is a hold this window no longer counts and is what a horizon means.
+    The pairing is not repaired — inventing a take row to balance a count is the
+    fabrication this store was added to make impossible.
+
 Stores 11, 12 and 13 are the three the loop leaves behind, and 13 is the one the other two
 read. None of the three is under `DATA_ROOT`, and store 12 is not even on the filesystem:
 it is the live repo's refs. That is the hazard the production-checkout guard exists for —
@@ -491,6 +511,14 @@ WORKER_RUN_MAX_AGE_DAYS = 30
 # item it names, or the reverse, is a join that answers differently depending on which
 # table the reader started from.
 QUEUE_MAX_AGE_DAYS = 30
+# The operator-hold journal (`workers.db` table `pause_journal`, #2615). Its own
+# constant so this horizon can move apart from the two above, and 30 today for the
+# same reason they are 30: someone asking "what held the fleet last month" should get
+# one answer whichever workers.db store they started from. The store is append-only
+# by design — two rows per hold, so a hold taken every hour for a month is 1,460 rows
+# — but append-only is not bounded, and the rule this script's own skill states
+# outright is that a store missing from its table is a store nothing bounds.
+PAUSE_JOURNAL_MAX_AGE_DAYS = 30
 #: States a queue row can be pruned in. Everything else — `queued`, `claimed`,
 #: `running`, and any state a future writer invents — is kept, because an unknown
 #: state is not evidence the work is over.
@@ -1566,6 +1594,26 @@ def sweep_queue_rows(apply: bool, now: float, *, db: Path | None = None,
                                  f"AND COALESCE(completed_at, enqueued_at) < ?"),
                           params=QUEUE_TERMINAL_STATES,
                           max_age_days=QUEUE_MAX_AGE_DAYS)
+
+
+def sweep_pause_journal(apply: bool, now: float, *, db: Path | None = None,
+                        busy_timeout_ms: int = DB_BUSY_TIMEOUT_MS) -> tuple[int, int, str]:
+    """DELETE `pause_journal` rows older than PAUSE_JOURNAL_MAX_AGE_DAYS (#2615).
+
+    The journal is append-only by contract — nothing in the pool or the route ever
+    deletes from it, because the whole of #2615 is that no store kept this history at
+    all — so this prune is its only bound. Same contract as `sweep_worker_runs`:
+    `(rows, bytes, skip_note)`, one write transaction, no row deleted in dry run.
+
+    The horizon can cut a hold in half: a take is always older than its own lift, so
+    at day 31 the take row goes first and leaves the lift row joined to nothing. That
+    is a hold this window no longer counts, which is what a horizon means; the
+    pairing is not repaired, because inventing a take row to balance a count would be
+    the fabrication this store was added to make impossible.
+    """
+    return _prune_db_rows(apply, now, db=db, busy_timeout_ms=busy_timeout_ms,
+                          table="pause_journal", where="at < ?", params=(),
+                          max_age_days=PAUSE_JOURNAL_MAX_AGE_DAYS)
 
 
 def _prune_db_rows(apply: bool, now: float, *, db: Path | None, busy_timeout_ms: int,
@@ -3023,6 +3071,7 @@ def main() -> int:
     gq_n, gq_b = sweep_groundskeeper_queue(args.apply, now)
     wr_n, wr_b, wr_skip = sweep_worker_runs(args.apply, now)
     wq_n, wq_b, wq_skip = sweep_queue_rows(args.apply, now)
+    pj_n, pj_b, pj_skip = sweep_pause_journal(args.apply, now)
     prov = sweep_provenance_journal(args.apply, now)
     turns = sweep_voice_turns(args.apply, now)
     pytest_dirs = sweep_pytest_tmpdirs(args.apply)
@@ -3074,6 +3123,15 @@ def main() -> int:
         print(f"{queue_label}: {wq_skip} — nothing pruned")
     else:
         print(f"{queue_label}: {wq_n} deleted, {wq_b / 1024:.0f} KiB freed")
+    # The hold journal, the third workers.db store and the third of them pruned by an
+    # age on an ISO text column (#2615). Same two shapes as the two lines above it,
+    # including the `nothing pruned` form: a queue busy enough to time out this sweep
+    # out is the one state in which a store that is supposed to be bounded was not.
+    journal_label = f"  workers.db pause_journal >{PAUSE_JOURNAL_MAX_AGE_DAYS}d"
+    if pj_skip:
+        print(f"{journal_label}: {pj_skip} — nothing pruned")
+    else:
+        print(f"{journal_label}: {pj_n} deleted, {pj_b / 1024:.0f} KiB freed")
     # Fourteenth store, and last of the data-root ones: the three automod lines below
     # print after it by design, so the store that only ever moves rows into a gzip beside
     # the file is read before the two that can name a production ref. Same line shape in

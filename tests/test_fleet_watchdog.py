@@ -1377,3 +1377,76 @@ async def test_the_recorder_runs_from_the_tick_and_never_silences_the_alarms(
     await fw.tick(broken)
     assert len(alerts) == 1, (
         f"a second alert arrived once the ledger began refusing: {alerts}")
+
+
+# ---------------------------------------------------------------------------
+# #2615 clause 4 — the stall alarm names the holder kind the journal records.
+# ---------------------------------------------------------------------------
+
+
+def _held_watchdog_queue(tmp_path, *, kind: str):
+    """A real workers.db whose pool is held by `kind`, as the alarm will find it."""
+    from workers.pool import WorkerPool as _WP
+    from workers.queue import WorkQueue as _WQ
+
+    q = _WQ(tmp_path / "workers.db")
+    _WP(q, slots=1).pause(True, holder_kind=kind)
+    return q
+
+
+def test_the_stall_alarm_names_the_kind_of_hold_and_keeps_its_hours(tmp_path):
+    """Clause 4: a person's hold and a machine's hold must not read as one sentence.
+
+    The sentence used to be `the worker pool is PAUSED by operator` with the hours
+    and the since-instant — and `operator_pause_state` already returned the kind,
+    unread. That is the gap #2498's findings named as still owed: a reader could not
+    tell "someone halted this on purpose" from "a process died holding the fleet",
+    which is the one distinction that decides whether to resume it. The hours and the
+    instant stay, because they are why the alarm fires at all; the kind is added,
+    read from the same row the hold journal takes its `holder_kind` from.
+    """
+    import re
+
+    person = fw._operator_pause_clause(_held_watchdog_queue(tmp_path / "p", kind="person"))
+    machine = fw._operator_pause_clause(_held_watchdog_queue(tmp_path / "m", kind="machine"))
+
+    assert "PAUSED by operator" in person and "PAUSED by operator" in machine, (
+        f"{person}\n{machine}")
+    assert "(person hold)" in person, person
+    assert "(machine hold)" in machine, machine
+    assert person != machine, "the two kinds read identically; the clause says nothing"
+    for clause in (person, machine):
+        assert re.search(r"held \d+\.\d h since ", clause), (
+            f"the duration and the since-instant must survive: {clause}")
+
+
+def test_the_stall_alarm_reads_the_kind_from_the_row_not_from_a_second_counter(tmp_path):
+    """No new alarm, no second stall counter: the clause is one read of one row.
+
+    The hold is aged with raw SQL because `wm_set` cannot age a row through the
+    public API — the same workaround `wm_updated_at`'s docstring names — so the
+    hours the alarm prints are derived from the row's `updated_at`, exactly as before
+    this change. A pre-#2498 database with no holder row at all still alarms, and
+    alarms as a person's hold, because that is `HOLDER_DEFAULT` and the safe reading.
+    """
+    import sqlite3
+
+    from workers.pool import PAUSE_WM_KEY, PAUSE_WM_SOURCE, WorkerPool as _WP
+    from workers.queue import WorkQueue as _WQ
+
+    q = _WQ(tmp_path / "workers.db")
+    _WP(q, slots=1).pause(True, holder_kind="machine")
+    since = "2026-10-10T06:24:42+00:00"
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE watermarks SET updated_at=? WHERE source=? AND key=?",
+                     (since, PAUSE_WM_SOURCE, PAUSE_WM_KEY))
+        conn.commit()
+
+    clause = fw._operator_pause_clause(q)
+    assert "(machine hold)" in clause, clause
+    assert since in clause, f"the since-instant must be quoted verbatim: {clause}"
+
+    legacy = _WQ(tmp_path / "legacy.db")
+    legacy.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY, "1")
+    assert "(person hold)" in fw._operator_pause_clause(legacy), (
+        "a database with no holder row alarms as the kind that is never auto-released")

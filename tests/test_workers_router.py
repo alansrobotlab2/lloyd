@@ -2292,3 +2292,67 @@ def test_a_naive_enqueued_at_is_read_as_utc_like_every_other_duration(tmp_path):
     assert 3990 <= out["probe"]["max_wait_seconds"] <= 4010, out
     assert out["probe"]["over_bound_count"] == 1, \
         "read as UTC, so it ages by real elapsed time and not by the box's offset"
+
+
+# ---------------------------------------------------------------------------
+# #2615 clause 3 — an actor reaches the hold journal through the route.
+# ---------------------------------------------------------------------------
+
+
+def _journal_rows(client_pool):
+    """The journal of the queue behind a `_pause_client` pool, oldest first."""
+    import sqlite3
+    with sqlite3.connect(str(client_pool.queue.db_path)) as conn:
+        return conn.execute(
+            "SELECT value, holder_kind, actor FROM pause_journal ORDER BY id"
+        ).fetchall()
+
+
+def test_the_pause_route_carries_an_actor_into_the_journal(monkeypatch, tmp_path):
+    """Clause 3: `actor` is accepted, and the hold's rows name whoever asked for it.
+
+    The route already knew a KIND (`holder_kind`) and an OWNER list (`owner`, which
+    says automod-or-operator, not who). Through the 2026-10-11..12 holds the value
+    answering "who held the fleet" was the string `0`, because nothing on this
+    surface read an actor at all. What the caller sends is a free string — a Mission
+    Control user, a harness name, a pid — and the item leaves naming it a ruling;
+    what the route must do is carry it, unchanged, to the journal.
+    """
+    client, pool, _ = _pause_client(monkeypatch, tmp_path)
+
+    res = client.post("/api/workers/pause",
+                      json={"paused": True, "holder_kind": "machine",
+                            "actor": "eval-window:2615"})
+    assert res.status_code == 200, res.text
+    resuming = client.post("/api/workers/pause",
+                           json={"paused": False, "holder_kind": "machine",
+                                 "actor": "eval-window:2615"}).json()
+    assert resuming["paused"] is False, resuming
+
+    rows = _journal_rows(pool)
+    assert rows == [("1", "machine", "eval-window:2615"),
+                    ("0", "machine", "eval-window:2615")], rows
+
+
+def test_a_pause_that_names_no_actor_journals_a_name_and_never_zero_or_null(
+        monkeypatch, tmp_path):
+    """Clause 3's second half: a missing, empty or whitespace actor is NAMED.
+
+    `0` is the sentinel this item exists to retire: `_holder_kind` renders it as
+    `person`, so an unattributed hold and a person's hold collapsed into one reading
+    in the only place either was recorded. A blank string counts as naming nothing —
+    a caller that sends `"  "` did not attribute the hold any more than one that
+    sends nothing — and both land on the same readable default.
+    """
+    client, pool, _ = _pause_client(monkeypatch, tmp_path)
+
+    client.post("/api/workers/pause", json={"paused": True})
+    client.post("/api/workers/pause", json={"paused": False})
+    client.post("/api/workers/pause", json={"paused": True, "actor": "   "})
+    client.post("/api/workers/pause", json={"paused": False, "actor": ""})
+
+    rows = _journal_rows(pool)
+    assert [r[0] for r in rows] == ["1", "0", "1", "0"], rows
+    assert [r[2] for r in rows] == ["unattributed"] * 4, (
+        f"an unattributed hold must read as a name, never a sentinel: {rows}")
+    assert all(r[2] not in ("0", "", None) for r in rows), rows

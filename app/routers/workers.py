@@ -460,6 +460,10 @@ async def workers_pause(request: Request):
     persisted one, so when the harness died its hold stayed and read, on every
     surface, exactly like a person's. A machine's hold re-POSTing `paused: true`
     refreshes its lease without moving the hold's start instant.
+
+    `actor` (#2615) is the optional third field: who or what named it, as a free
+    string the caller owns. It goes to the hold journal, never to a current-state
+    row, and a call that names none is recorded there as `unattributed`.
     """
     pool = get_pool()
     if not pool:
@@ -471,7 +475,15 @@ async def workers_pause(request: Request):
     owner = "automod" if data.get("owner") == "automod" else "operator"
     holder_kind = (HOLDER_MACHINE if data.get("holder_kind") == HOLDER_MACHINE
                    else HOLDER_PERSON)
-    pool.pause(paused, owner=owner, holder_kind=holder_kind)
+    # #2615: `actor` is who or what named it — a free string the caller owns (a
+    # Mission Control user, a harness name, a pid), not a new enum, and not a
+    # current-state row either: it reaches the hold journal in workers.db, which is
+    # where "who held the fleet, when, for how long" became answerable at all. An
+    # empty, missing or whitespace-only name stays unset and the pool records
+    # `unattributed`, because the value that answered this question through the
+    # 2026-10-11..12 holds was the string `0`.
+    actor = str(data.get("actor") or "").strip() or None
+    pool.pause(paused, owner=owner, holder_kind=holder_kind, actor=actor)
     return JSONResponse({"paused": pool.paused,
                          "paused_by": getattr(pool, "paused_by", None),
                          # #1550: the response to the click that took the pause is

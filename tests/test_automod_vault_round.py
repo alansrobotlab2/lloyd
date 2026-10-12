@@ -1215,7 +1215,9 @@ RETENTION_NODES = (
     # #2559's quarantine store is the seventh move: `…seventeen_stores…` → `…eighteen_stores…`,
     # same rule, same reason — and #2472's report-only store remains the one that changed the
     # number without changing this node's second name.
-    "test_the_skill_says_eighteen_stores_and_its_table_has_a_row_per_report_line",
+    # #2615's hold journal is the eighth move: `…eighteen_stores…` → `…nineteen_stores…`, for
+    # the same reason as the seven before it, and the second name once more needed no edit.
+    "test_the_skill_says_nineteen_stores_and_its_table_has_a_row_per_report_line",
     "test_the_task_description_names_every_store_the_sweep_prints",
 )
 

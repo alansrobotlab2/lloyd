@@ -1812,9 +1812,10 @@ def _assert_table_rows_match_report(rows: dict[str, str], report: list[str],
             f"{sorted(rows)}")
 
 
-def test_the_skill_says_eighteen_stores_and_its_table_has_a_row_per_report_line(
+def test_the_skill_says_nineteen_stores_and_its_table_has_a_row_per_report_line(
         rs, _store_report):
-    """Clause 4 of #2418, carried by #2472: the skill says eighteen, and its table's
+    """Clause 4 of #2418, carried by #2472 and widened by #2615: the skill says nineteen,
+    and its table's
     rows are the report's lines.
 
     The table is the operator's list of what the weekly sweep bounds, and it said nine
@@ -1826,7 +1827,7 @@ def test_the_skill_says_eighteen_stores_and_its_table_has_a_row_per_report_line(
     It went stale anyway, in the direction this node was blind to: #1644 added two
     stores and the prose stayed at ten for nine commits, because the count of report
     lines came from the suffix selector that could not see them (`#1835`). The report
-    side of the comparison is now the `_store_report` fixture — the eighteen lines
+    side of the comparison is now the `_store_report` fixture — the nineteen lines
     `main()` prints with all three automod rungs in play — so this node reads one
     measurement, not two.
     """
@@ -1839,11 +1840,11 @@ def test_the_skill_says_eighteen_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 18, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 19, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "eighteen unbounded-growth stores" in text, (
-        "the skill's description states a store count other than eighteen")
-    assert "eighteen in all" in text, "the skill's body states a store count other than eighteen"
+    assert "nineteen unbounded-growth stores" in text, (
+        "the skill's description states a store count other than nineteen")
+    assert "nineteen in all" in text, "the skill's body states a store count other than nineteen"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -1932,8 +1933,8 @@ def test_the_skill_says_eighteen_stores_and_its_table_has_a_row_per_report_line(
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "fifteen store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports fifteen stores by design")
+    assert "sixteen store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports sixteen stores by design")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -1993,7 +1994,7 @@ def test_the_table_guard_refuses_a_row_short_and_a_row_long(rs, _store_report):
         _assert_table_rows_match_report(_skill_table_rows(dropped), report,
                                         "fixture: store fourteen's row deleted")
     # The message names the store that lost its row, not merely the two counts: with
-    # sixteen lines and fifteen rows the counts cannot say WHICH store drifted, and the
+    # seventeen lines and sixteen rows the counts cannot say WHICH store drifted, and the
     # reader has to be able to answer that from the failure alone.
     assert "provenance journal" in str(short.value), (
         f"the refusal does not name the printed line left without a row: {short.value}")
@@ -2040,7 +2041,7 @@ _STORE_ORDER_ANCHOR = "in this order:"
 _STORE_ORDER_TAIL = "Report all"
 _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                       "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
-                      "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "1": 1, "2": 2, "3": 3, "4": 4,
+                      "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
 
@@ -2084,8 +2085,8 @@ def _store_report_lines(out: str) -> list[str]:
 
 def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
         rs, _store_report):
-    """#1835 clause 1, carried by #2472: the eighteen lines `main()` prints are
-    eighteen stores, and the three the loop leaves outside the data root are among them.
+    """#1835 clause 1, carried by #2472 and widened by #2615: the nineteen lines `main()`
+    prints are nineteen stores, and the three the loop leaves outside the data root are among them.
 
     This is the acceptance check itself, run against the real `main()`: the count a
     full sweep reports, taken through the selector every count comparison in this file
@@ -2094,8 +2095,8 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 18, (
-        f"the sweep prints {len(_store_report)} store lines, not the eighteen its report "
+    assert len(_store_report) == 19, (
+        f"the sweep prints {len(_store_report)} store lines, not the nineteen its report "
         f"has had since #2472 added the tool-quality store: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
@@ -2183,16 +2184,16 @@ def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
         f"the rule counted a line that is not a store: {report}")
 
 
-def test_a_run_outside_the_production_checkout_reports_fifteen_stores_and_one_refusal_line(
+def test_a_run_outside_the_production_checkout_reports_sixteen_stores_and_one_refusal_line(
         rs, monkeypatch, capsys):
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
     `  automod stores: REFUSED: …`, so a reader holding that output sees fourteen store
-    lines while the skill says eighteen — and SKILL.md now says so in those words. This
+    lines while the skill says nineteen — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
-    (just "eighteen", which makes every sandbox run look like it lost three stores) or the
+    (just "nineteen", which makes every sandbox run look like it lost three stores) or the
     alarming half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
     owns the predicate itself and the `NOT_PRODUCTION_EXIT` half; what is new here is the
     COUNT, which is the number a report is written from.
@@ -2202,7 +2203,7 @@ def test_a_run_outside_the_production_checkout_reports_fifteen_stores_and_one_re
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
     the rule. A refused run therefore still prints fourteen lines plus one refusal line,
-    not fifteen — neither the pytest basetemp root #2418 added nor the tool-quality store
+    not sixteen — neither the pytest basetemp root #2418 added nor the tool-quality store
     #2472 added is one of the three guarded stores, so both print here whatever the tree
     is, and the second of those is asserted below rather than left to the count: a store
     this sweep never deletes has no reason to sit behind the production-checkout guard at
@@ -2211,7 +2212,7 @@ def test_a_run_outside_the_production_checkout_reports_fifteen_stores_and_one_re
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 15, f"a refusal run should report fifteen stores: {report}"
+    assert len(report) == 16, f"a refusal run should report sixteen stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2343,7 +2344,7 @@ def _dry_run_report(rs, monkeypatch, capsys, *, refused: bool = False) -> str:
     all three automod rungs because a round's worktree shares the live repository's refs.
     The plain `rs` fixture already answers that question *yes* — deliberately, over
     redirected constants, so a node about `sessions/*.json` does not end on exit 2 for a
-    branch delete it never asked about — which is what lets the fifteen lines below be
+    branch delete it never asked about — which is what lets the sixteen lines below be
     produced from `tmp_path` alone: `AUTOMOD_WORK_ROOT` is an empty directory,
     `AUTOMOD_REPO` an empty repository, and the ledger trio absent files, so all three
     rungs are reading a machine that has never run the loop, and the ledger rung has no
@@ -2405,14 +2406,21 @@ def test_the_task_description_names_every_store_the_sweep_prints(
         pytest.skip("autonomy/79-retention-sweep.md is not reachable from the vault")
     front, description = fm
 
-    assert "nine" not in front.lower(), (
+    # "nine stores are bounded" is the retired claim; the count words that CONTAIN it
+    # are stripped first, as the sibling guard strips its own, because the report's
+    # count is nineteen since #2615 added the hold journal and a naive substring check
+    # would read that as the stale nine.
+    _front = front.lower()
+    for _w in ("nineteen", "seventeen", "eighteen", "fourteen", "fifteen", "twenty"):
+        _front = _front.replace(_w, "")
+    assert "nine" not in _front, (
         "the front matter still says nine somewhere, and the prompt the worker gets "
         "is built from this file: "
         + "; ".join(ln for ln in front.splitlines() if "nine" in ln.lower()))
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 18, (
+    assert len(items) == len(_store_report) == 19, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -2423,23 +2431,24 @@ def test_the_task_description_names_every_store_the_sweep_prints(
     # the data-root group as store 12, #2418's pytest basetemp store came next as 13, and
     # #2472's tool-quality store as 14 — three stores hanging off `DATA_ROOT`, all ahead of
     # everything the loop leaves outside it.
-    assert "voice" in items[11][1] and "rows" in items[11][1], items[11]
-    assert "pytest" in items[12][1] and "dirs" in items[12][1], items[12]
-    # #2559's store is item 14: the sweep prints it immediately below the pytest line, so
-    # the item list carries it there and every item after it moves up one number.
-    assert "facts quarantine" in items[13][1], items[13]
-    assert items[13][0] == 14, items[13]
+    # #2615 took position 11 — the hold journal prints ELEVENTH, under the two
+    # workers.db lines it shares the file and the lock with — so every data-root
+    # item after it moves up one index.
+    assert "pause_journal" in items[10][1] and items[10][0] == 11, items[10]
+    assert items[11][0] == 12 and items[12][0] == 13, items[11:]
+    assert "voice" in items[12][1] and "rows" in items[12][1], items[12]
+    assert "pytest" in items[13][1] and "dirs" in items[13][1], items[13]
+    # #2559's store is item 15: the sweep prints it immediately below the pytest line,
+    # so the item list carries it there and every item after it moves up one number.
+    assert "facts quarantine" in items[14][1], items[14]
+    assert items[14][0] == 15, items[14]
     # The reported-only store in the same position rule: it prints with the data-root
     # stores, below the pytest line and above the loop's three, because it is the one line
     # an operator is NOT approving an `--apply` for.
-    assert "tool-quality" in items[14][1] and "rows" in items[14][1], items[14]
-    assert "~/lloyd-work" in items[15][1] and "dirs" in items[15][1], items[15]
-    assert "automod/*" in items[16][1] and "branches" in items[16][1], items[16]
-    assert items[11][0] == 12 and items[12][0] == 13, items[11:]
-    assert items[14][0] == 15 and items[15][0] == 16 and items[16][0] == 17, items[14:]
-    assert items[17][0] == 18, items[17:]
-    assert items[16][0] == 17, items[16]
-
+    assert "tool-quality" in items[15][1] and "rows" in items[15][1], items[15]
+    assert "~/lloyd-work" in items[16][1] and "dirs" in items[16][1], items[16]
+    assert "automod/*" in items[17][1] and "branches" in items[17][1], items[17]
+    assert items[16][0] == 17 and items[17][0] == 18 and items[18][0] == 19, items[16:]
     # Clause 2, on the tenth store's own terms: the groundskeeper pair sits where the
     # sweep prints it, between the session spill dirs and `workers.db runs`, and names
     # both files plus the constant that decides its window, so the description says
@@ -6987,7 +6996,7 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
     is that the row states the rule. So this node pins the three things an operator reads off
     the table and nowhere else: the constant name, the 30-day window, and that age comes from
     the run tag. Exactly one row may carry the glob, and the description and body both say
-    eighteen, which is the count the report now prints in both modes.
+    nineteen, which is the count the report now prints in both modes.
     """
     # The same path the module's other skill nodes read, and the same skip they take when
     # it is unreachable — under the suite `rs.vault_root()` is the fixture's mirrored vault,
@@ -6998,8 +7007,8 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
         pytest.skip(f"the vault skill is not reachable from here: {skill}")
     text = skill.read_text(encoding="utf-8")
     front = text.split("---", 2)[1]
-    assert "eighteen unbounded-growth stores" in front, front[:200]
-    assert "eighteen in all" in text, "the skill's body states a count other than eighteen"
+    assert "nineteen unbounded-growth stores" in front, front[:200]
+    assert "nineteen in all" in text, "the skill's body states a count other than eighteen"
     rows = _skill_table_rows(text)
     hits = [(label, body) for label, body in rows.items()
             if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
@@ -7176,3 +7185,76 @@ def test_the_unattended_run_prints_the_date_it_is_acting_on(tmp_path):
         "the quarantine the log reported as freed is still on disk"
     assert (derived / f"facts-quarantine-{kept_tag}").is_dir(), \
         "the in-window quarantine was deleted inside its own window"
+
+
+# ---------------------------------------------------------------------------
+# #2615 clause 5 — the hold journal is a bounded store.
+# ---------------------------------------------------------------------------
+
+
+def _seed_pause_journal(db, *, ages_days: list[float]) -> int:
+    """Append journal rows aged `ages_days` through the queue's own writer.
+
+    Rows come from `WorkQueue.pause_journal_append` and only their `at` stamps are
+    wound back with raw SQL, because the writer stamps the wall clock: the horizon
+    is a claim about a ROW's age, and on an append-only store the file mtime is the
+    newest write by anything sharing the database.
+    """
+    from workers.queue import WorkQueue
+
+    q = WorkQueue(db)
+    for _ in ages_days:
+        q.pause_journal_append(value="1", holder_kind="person",
+                               actor="mission-control:al")
+    with sqlite3.connect(str(db)) as conn:
+        ids = [row[0] for row in
+               conn.execute("SELECT id FROM pause_journal ORDER BY id").fetchall()]
+        assert len(ids) == len(ages_days), (ids, ages_days)
+        for row_id, days in zip(ids, ages_days):
+            conn.execute(
+                "UPDATE pause_journal SET at = ? WHERE id = ?",
+                (time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                               time.gmtime(time.time() - days * 86400)), row_id))
+        conn.commit()
+        return conn.execute("SELECT COUNT(*) FROM pause_journal").fetchone()[0]
+
+
+def test_an_apply_pass_deletes_pause_journal_rows_past_the_horizon(rs, tmp_path, monkeypatch, capsys):
+    """Clause 5 of #2615: the append-only journal gets its bound from this sweep.
+
+    Nothing else ever deletes from `pause_journal` — that append-only contract IS
+    #2615, since no store kept this history at all — so this prune is its only
+    ceiling. The horizon is asserted to be 30 rather than assumed, and the report
+    carries its own line and its own count: a store folded into another line is a
+    store nothing bounds, which is the rule
+    `skills/retention-sweep/SKILL.md` states outright.
+    """
+    assert rs.PAUSE_JOURNAL_MAX_AGE_DAYS == 30, (
+        "the horizon moved without the test moving: the number in the report is the "
+        "promise the skill's table documents")
+    assert _seed_pause_journal(rs.WORKERS_DB,
+                               ages_days=[45.0, 31.0, 29.0, 1.0]) == 4
+    before = rs.WORKERS_DB.stat().st_size
+
+    # `main()` runs EVERY sweep, so the stores this test is not about are moved out
+    # of the way first: an unconditional `--apply` here archived the voice-turn rows
+    # the neighbouring turn-row tests seed, which is interference, not a finding.
+    monkeypatch.setattr(rs, "VOICE_TURNS_FILE", tmp_path / "voice-turns.jsonl")
+    monkeypatch.setattr(rs, "PROVENANCE_JOURNAL", tmp_path / "provenance.jsonl")
+    monkeypatch.setattr(sys, "argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0, "--apply must exit 0"
+    out = capsys.readouterr().out
+
+    assert f">{rs.PAUSE_JOURNAL_MAX_AGE_DAYS}d" in out, (
+        "the journal is absent from the report, so nothing bounds it")
+    line = _store_line(out, "pause_journal")
+    assert "2 deleted" in line, (
+        f"the report's count is this store's own, not a total: {line}")
+
+    from workers.queue import WorkQueue
+
+    left = WorkQueue(rs.WORKERS_DB).pause_journal_holds()
+    assert len(left) == 2, [h["started_at"] for h in left]
+    assert all("31" not in (h["started_at"] or "") for h in left), left
+    assert rs.WORKERS_DB.stat().st_size <= before + 4096, (
+        "a prune that only adds pages is not a prune")

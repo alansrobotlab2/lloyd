@@ -122,6 +122,33 @@ CREATE TABLE IF NOT EXISTS watermarks (
   updated_at  TEXT NOT NULL,
   PRIMARY KEY (source, key)
 );
+
+-- Every take and lift of the persisted operator hold, append-only (#2615).
+-- `watermarks` cannot carry this history: its PRIMARY KEY is (source, key), so
+-- `wm_set` can only overwrite the last flip, which is why three fleet holds on
+-- 2026-10-11..12 left no count, no actor and no per-hold duration — the only
+-- surviving record was the 95.6-minute hole in the hourly claim histogram. The two
+-- (_pool, operator_paused / operator_pause_holder) rows stay exactly as they are:
+-- they are the CURRENT state, and their `updated_at` is what the stall alarm reads
+-- as the hold's duration and as a machine lease. This table is the history beside
+-- them, and only `WorkQueue.pause_journal_append` writes it.
+--   value        '1' for a take, '0' for a lift — the same spelling as the row.
+--   holder_kind  the KIND that held: 'person' or 'machine' (#2498's distinction).
+--                On a lift it is the kind that WAS holding, not the resume call's
+--                own argument, which is what the stderr line gets wrong.
+--   actor        the caller's own identifier when it named one, else
+--                'unattributed' / 'startup-reconcile'. Never '0', never NULL.
+--   hold_id      on a lift, the id of the take row this closes; NULL on a take (an
+--                open hold) — so one hold is one pair of rows.
+CREATE TABLE IF NOT EXISTS pause_journal (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  at           TEXT NOT NULL,
+  value        TEXT NOT NULL,
+  holder_kind  TEXT NOT NULL,
+  actor        TEXT NOT NULL,
+  hold_id      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_pause_journal_at ON pause_journal(at DESC);
 """ + GRANT_DDL
 
 
@@ -1594,6 +1621,88 @@ class WorkQueue:
                 (source, key, value, _now_iso()),
             )
             conn.commit()
+
+    # -- operator-hold history (#2615) --------------------------------------
+
+    def pause_journal_append(self, *, value: str, holder_kind: str, actor: str,
+                             at: str | None = None) -> int:
+        """Append one operator-hold transition; return the new row's id.
+
+        Append-only: no UPDATE and no DELETE here, because the whole of #2615 is
+        that the flip which overwrote the last one left no countable record. A
+        lift carries `hold_id` — the id of the open take row it closes — so one
+        hold is one pair of rows and a duration is a subtraction, not a guess.
+
+        `BEGIN IMMEDIATE` for the pairing read and the INSERT together: reading
+        "which take is still open" outside the write transaction would let two
+        lifts closing at once both name the same take, which is a history that
+        double-counts a hold — the failure this store exists to remove.
+        """
+        stamp = at or _now_iso()
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            hold_id = None
+            if value == "0":
+                # The take this lift closes: the newest one no lift points at yet.
+                # Pairing lives only on the lift row, so a take row is written once
+                # and never revisited — "which hold is open" stays a read.
+                row = conn.execute(
+                    "SELECT id FROM pause_journal "
+                    "WHERE value = '1' "
+                    "  AND id NOT IN (SELECT hold_id FROM pause_journal "
+                    "                 WHERE hold_id IS NOT NULL) "
+                    "ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                hold_id = row["id"] if row else None
+            cur = conn.execute(
+                "INSERT INTO pause_journal (at, value, holder_kind, actor, hold_id) "
+                "VALUES (?,?,?,?,?)",
+                (stamp, value, holder_kind, actor, hold_id),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def pause_journal_holds(self, *, after: str | None = None,
+                            before: str | None = None) -> list[dict]:
+        """Every hold taken in the window, with its end, duration, kind and actor.
+
+        One SELECT answers "how many times was the fleet held, and for how long,
+        and who by" — the question the two watermark rows can never answer because
+        each flip overwrote the last. `after`/`before` are ISO stamps compared
+        against the take's own instant (both ends inclusive-ish: text ISO compare,
+        same convention as every other `at`/`completed_at` window in this file).
+        An open hold has `ended_at` and `duration_s` None, which is the honest
+        answer for a hold that has not been lifted rather than a zero.
+        """
+        sql = ("SELECT t.id AS hold_id, t.at AS started_at, l.at AS ended_at, "
+               "       t.holder_kind AS holder_kind, t.actor AS actor "
+               "FROM pause_journal t "
+               "LEFT JOIN pause_journal l ON l.hold_id = t.id AND l.value = '0' "
+               "WHERE t.value = '1'")
+        params: list[str] = []
+        if after is not None:
+            sql += " AND t.at >= ?"
+            params.append(after)
+        if before is not None:
+            sql += " AND t.at <= ?"
+            params.append(before)
+        sql += " ORDER BY t.id"
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        out = []
+        for row in rows:
+            started = _iso_or_none(row["started_at"])
+            ended = _iso_or_none(row["ended_at"])
+            out.append({
+                "hold_id": row["hold_id"],
+                "started_at": row["started_at"],
+                "ended_at": row["ended_at"],
+                "duration_s": ((ended - started).total_seconds()
+                               if started and ended else None),
+                "holder_kind": row["holder_kind"],
+                "actor": row["actor"],
+            })
+        return out
 
 
 # ── Module-level singleton ────────────────────────────────────────────────
