@@ -13,6 +13,13 @@ Provides two tools for the autonomy → active session context pipeline
                      `ambient_decide(surface=false)`)
       - `urgent`   → synthetic agent turn, framed for immediate surface
 
+    None of the three is unconditional. Target resolution can answer "no session"
+    — the 03:00 nightly case — and then no turn runs at any priority: the signal is
+    written to the file-backed next-session note (#1516) instead, and the tool's own
+    result says which door it took (`mechanism`) and which tier it could not honour
+    (`downgraded_from`), with a warning naming the producer when that tier was a
+    loud one (#2600).
+
   - `ambient_decide`: agent-only tool, callable during an ambient turn.
     Lets the agent opt out of surfacing a background signal to the user
     without generating assistant output. Keeps 99% of nudges silent.
@@ -23,6 +30,7 @@ tools just mint requests.
 """
 
 import json
+import logging
 
 import httpx
 
@@ -31,6 +39,11 @@ from app.config import service_url
 from mcp.types import Tool, TextContent
 
 LLOYD_BACKEND = service_url("backend", "http://127.0.0.1:8080")
+
+#: #2600: a producer's loud tier can be downgraded to the overnight note, and the
+#: MCP process log is the only place that outcome is recorded for a job that has
+#: already returned. Named per module as every other `agent_mcp` writer does.
+logger = logging.getLogger("lloyd-mcp.ambient")
 
 
 async def _post_json(path: str, body: dict, timeout: float = 10.0) -> tuple[int, dict]:
@@ -65,9 +78,10 @@ async def list_tools():
                 "it into the <context> block of the user's next turn at no cost; "
                 "'notable' runs an agent turn that may stay silent via "
                 "ambient_decide(surface=false); 'urgent' runs a turn framed to "
-                "surface it now, so use it sparingly. An empty session_id means "
-                "the user's most recent chat; with none, it waits in the "
-                "next-session channel (#1516)."
+                "surface it now, so use it sparingly. When nothing resolves, no "
+                "agent turn runs at any priority: ambient, notable and urgent "
+                "alike wait in the next-session note (#1516); `downgraded_from` "
+                "says the tier."
             ),
             inputSchema={
                 "type": "object",
@@ -204,14 +218,37 @@ async def _tool_session_inject_context(args: dict) -> list[TextContent]:
             "dedup_key": (args.get("dedup_key") or source).strip(),
             "ttl_seconds": int(args.get("ttl_seconds") or 0) or None,
         })
+        # The downgrade stays — this is the door that carries an overnight signal,
+        # and refusing here would delete the case #1516 was built for (#2600 fix
+        # shape 2). What changes is that it can no longer be denied: `mechanism`
+        # answers "which door" on the path where that answer is surprising (both
+        # session-targeted paths already return it), and `downgraded_from` is the
+        # tier read off the same variable `priority` echoes, so the pair cannot
+        # disagree about what was asked for.
+        #
+        # The warning is for the two tiers that asked for a turn and did not get
+        # one — a line on every downgrade would mean "no session resolved" instead
+        # of the sentence worth reading at 03:00, "a producer tried to wake someone
+        # and nothing woke". It names the source because a warning that cannot be
+        # traced to a task cannot be acted on.
+        if priority != "ambient":
+            logger.warning(
+                "session_inject_context: source=%s asked for priority=%s, but no "
+                "session resolved, so no agent turn ran — it was written to the "
+                "next-session note for the first chat turn to read",
+                source, priority)
         return text_result(json.dumps({
             "ok": 200 <= status < 300,
             "status": status,
             "channel": "next-session",
+            "mechanism": "next-session",
             "priority": priority,
+            "downgraded_from": priority,
             "reason": ("no user session was open to deliver to, so this went to the "
                        "next-session channel: the first chat turn reads it and the "
-                       "store holds it for 24 h"),
+                       "store holds it for 24 h; no agent turn ran"
+                       + ("" if priority == "ambient" else
+                          f" — the tier asked for was {priority}")),
             "server_response": body,
         }))
 

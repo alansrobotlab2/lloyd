@@ -170,6 +170,174 @@ def test_the_producer_tool_writes_the_channel_when_session_resolution_is_none(mo
         "the tool reported a delivery the store does not hold")
 
 
+# ── #2600: the note door says out loud which tier it could not honour ─────────
+
+#: The logger the producer tool writes to. Clause 3 counts warnings on ONE logger
+#: on purpose: filtering by name is what turns "exactly one warning" into a claim
+#: about the tool rather than about everything that happened during the call, the
+#: router's own logging included.
+AMBIENT_LOGGER = "lloyd-mcp.ambient"
+
+#: The producer identity every node below fires as, and the string clause 3
+#: requires to appear in the warning: a log line that does not name who fired is a
+#: line nobody can trace back to a task.
+PRODUCER = "nightly:reflection"
+
+
+def _note_door(monkeypatch, priority: str) -> tuple[dict, list[str]]:
+    """Fire `session_inject_context` as a 03:00 producer does; return its own
+    answer and the endpoints it crossed.
+
+    Only resolution is planted, as `None` — the nightly case, and the single
+    condition under which #2600 says a loud tier is silently downgraded. From there
+    it is the real handler POSTing to the real router into the real store, so a
+    payload that misdescribed the door still had to write the note to be read here.
+    """
+    from agent_mcp import ambient as A
+
+    client = _client()
+    asked: list[str] = []
+
+    async def fake_get_json(path, timeout=5.0):
+        asked.append(path)
+        return 200, {"session_id": None}
+
+    async def fake_post_json(path, body, timeout=10.0):
+        asked.append(path)
+        r = client.post(path, json=body)
+        return r.status_code, r.json()
+
+    monkeypatch.setattr(A, "_get_json", fake_get_json)
+    monkeypatch.setattr(A, "_post_json", fake_post_json)
+    out = asyncio.run(A._tool_session_inject_context({
+        "source": PRODUCER, "summary": NOTE, "priority": priority,
+    }))
+    return json.loads(out.content[0].text), asked
+
+
+def _ambient_warnings(caplog) -> list:
+    return [r for r in caplog.records
+            if r.name == AMBIENT_LOGGER and r.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize("priority", ["ambient", "notable", "urgent"])
+def test_the_note_door_names_itself_whatever_tier_was_asked_for(monkeypatch, priority):
+    """#2600 clauses 1 and 2: a producer whose signal landed on the overnight note
+    can tell that from the tool's own return value, at every tier.
+
+    `mechanism` is the field both session-targeted paths already return —
+    "prefetch" or "turn" — so the one question a producer asks, "which door did my
+    signal go through?", was answered by a missing key on precisely the path where
+    the answer is surprising. `downgraded_from` is the tier that could not be
+    honoured, in the same object as the `priority` that was asked for; both are read
+    off the one variable the tool echoes, so the pair can never disagree about what
+    was requested, which is the substance of "beside" for a consumer that reads keys
+    and not key order.
+
+    The write itself is deliberately untouched: a signal fired at 03:00 still
+    arrives tomorrow. That is why this is the note door reporting honestly rather
+    than refusing (#2600 fix shape 2) — refusing would drop the very case #1516
+    exists to carry.
+    """
+    reported, asked = _note_door(monkeypatch, priority)
+
+    assert "/api/next-session-note" in asked, f"the note door was not taken: {asked}"
+    assert reported["ok"] is True, reported
+    assert reported["mechanism"] == "next-session", reported
+    assert reported["downgraded_from"] == priority, reported
+    assert reported["priority"] == reported["downgraded_from"] == priority, reported
+    assert [n.source for n in nsn.peek_next_session_notes()] == [PRODUCER], (
+        "the payload describes a note the store does not hold")
+
+
+@pytest.mark.parametrize("priority", ["notable", "urgent"])
+def test_a_downgraded_loud_tier_logs_one_warning_naming_its_producer(monkeypatch,
+                                                                     caplog,
+                                                                     priority):
+    """#2600 clause 3: a tier that asked to wake someone, delivered instead as a
+    paragraph in tomorrow's prompt, leaves exactly one line naming its producer.
+
+    "Loud, and not loud" is the whole defect: the tool's own description promises
+    `urgent` "runs a turn framed to surface it now", and with no session resolving
+    it runs nothing, silently, in a process whose log is the only place a 03:00
+    producer's fate is recorded at all. Exactly one, not one-per-layer — a warning
+    on every branch is the noise that gets a real one ignored — and it names the
+    source, because a warning that cannot be traced to a task cannot be acted on.
+    """
+    with caplog.at_level(logging.WARNING, logger=AMBIENT_LOGGER):
+        reported, asked = _note_door(monkeypatch, priority)
+
+    warnings = _ambient_warnings(caplog)
+    assert len(warnings) == 1, (
+        f"{len(warnings)} warnings from {AMBIENT_LOGGER} for priority={priority}, "
+        f"expected exactly one: {[r.getMessage() for r in warnings]}")
+    message = warnings[0].getMessage()
+    assert PRODUCER in message, f"the warning does not name the producer: {message!r}"
+    assert priority in message, f"the warning does not name the tier: {message!r}"
+    assert reported["mechanism"] == "next-session", reported
+    assert "/api/next-session-note" in asked, asked
+
+
+def test_the_quiet_tier_takes_the_same_door_without_the_warning(monkeypatch, caplog):
+    """#2600 clause 3's other half: `ambient` is the tier that asked for the note,
+    so the same door costs it nothing and logs nothing.
+
+    Without this node the warning above could be green only because the tool warns
+    on every downgrade — which would make the log line mean "no session resolved"
+    instead of "a turn was promised and did not run", and the second reading is the
+    one worth reading at 03:00. `downgraded_from` still says `ambient`, because the
+    door still differs from the mechanism that tier names; what does not happen is
+    an unfulfilled promise, so the log stays quiet.
+    """
+    with caplog.at_level(logging.WARNING, logger=AMBIENT_LOGGER):
+        reported, asked = _note_door(monkeypatch, "ambient")
+
+    assert _ambient_warnings(caplog) == [], (
+        f"the quiet tier was warned about: "
+        f"{[r.getMessage() for r in _ambient_warnings(caplog)]}")
+    assert reported["downgraded_from"] == "ambient", reported
+    assert reported["mechanism"] == "next-session", reported
+    assert "/api/next-session-note" in asked, asked
+
+
+def test_the_tool_description_tells_the_producer_the_loud_tiers_can_stay_quiet(
+        monkeypatch):
+    """#2600 clause 4: the schema a producer agent reads before it fires has to say
+    that with no session resolving, every priority including `urgent` is written to
+    the next-session note and no agent turn runs.
+
+    The tier prose promised a turn unconditionally, so a background job choosing
+    `urgent` was choosing a promise the tool cannot always keep, and had no way to
+    notice it had not been kept. Every field name the description backticks is
+    checked against the payload the tool actually returns — a description that
+    advertises a key the handler stopped emitting is worse than one that says
+    nothing, because it closes the report that would have caught the gap. The
+    check runs in that direction only, because the advertised text shares the MCP
+    catalog's token ceiling with 104 other tools (`test_mcp_layer`'s ceiling node)
+    and a future trim may legitimately drop a name from the prose.
+    """
+    import re
+
+    from agent_mcp import ambient as A
+
+    descriptions = {t.name: (t.description or "") for t in asyncio.run(A.list_tools())}
+    flat = " ".join(descriptions["session_inject_context"].split()).lower()
+
+    assert "when nothing resolves" in flat, flat
+    assert "no agent turn runs at any priority" in flat, flat
+    assert "ambient, notable and urgent alike" in flat, flat
+    assert "next-session note" in flat, flat
+
+    reported, _ = _note_door(monkeypatch, "urgent")
+    advertised = re.findall(r"`([a-z_]+)`", flat)
+    assert "downgraded_from" in advertised, (
+        "the description no longer points a producer at the field that names the "
+        "tier it lost, so the downgrade is findable only by luck")
+    for field in advertised:
+        assert field in reported, (
+            f"description advertises `{field}`; the downgraded payload has no such key")
+
+
 # ── clause 2: delivered as appended context, never as a system-prompt change ──
 
 def test_the_note_arrives_as_a_new_part_of_the_context_block(_scratch_store):
