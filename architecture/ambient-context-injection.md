@@ -24,9 +24,9 @@ are named by file, not by count: `tests/test_session_queue.py` and
 over this page's own sentences, and the ambient cases in `tests/test_prefetch.py`.
 Re-measured 2026-10-12 by `--collect-only -q` on each file — collected nodes, not
 passing ones, so the figure ages rather than reassures:
-`tests/test_session_queue.py` 17, `tests/test_active_session_resolution.py` 5,
+`tests/test_session_queue.py` 18, `tests/test_active_session_resolution.py` 5,
 `tests/test_ambient_prefetch_retention.py` 16,
-`tests/test_session_doc_claims.py` 10 (48 across those four), and
+`tests/test_session_doc_claims.py` 10 (49 across those four), and
 `tests/test_prefetch.py` 93. Those five are the mechanism's surface, and
 `tests/test_ambient_decision_turn_scope.py`, which came in with #2599, is a sixth
 that pins the decision store rather than the queue. Another file
@@ -275,7 +275,7 @@ If the user sends a message while an ambient turn is running or queued:
   `AMBIENT_QUEUE_CAP` eviction.
 
 User turns always win, and `/cancel` never drops one: `drain_pending`'s
-`source=None` default means "ambient only" (`app/sessions_io.py:1100`), which
+`source=None` default means "ambient only" (`app/sessions_io.py:1106`), which
 is what `drain_pending=true` on that route relies on. Draining the user tier is
 the explicit `source="all"` sentinel — both tiers, ambient then user, summed
 count — and `DELETE /api/sessions/{id}` is its only caller

@@ -1954,6 +1954,77 @@ def test_the_gate_selection_drops_nothing_and_the_named_node_passes():
         f"filed for has no recorded verdict: {named}")
 
 
+# ── #2625 clause 2: those three nodes green because the page was re-measured ───
+#
+# The two reds #2625 filed were prose drift on `ambient-context-injection.md` — a
+# line anchor `840bb0e8` left pointing at a `#:` comment when the function it names
+# moved below it, and a collected count `14333737` left at 17 when it added the
+# node that made it 18 — so the fix is a doc edit and the only enforcement that
+# these three verdicts are green *by passing* is this: the ids still collected under
+# the gate's own selection, and reported PASSED by a child pytest.
+
+#: Two of the three nodes #2625 files, spelled as pytest spells them — the
+#: parametrised one with its id, because an id that is no longer collected is
+#: exactly the failure this guard exists for.
+RED_NODES_2625 = (
+    "test_the_ambient_page_states_the_command_its_collected_counts_came_from",
+    "test_every_line_anchor_in_an_architecture_doc_lands_inside_a_definition"
+    "[ambient-context-injection.md]",
+)
+
+#: The third node the item names. Its verdict cannot be read from a run this file
+#: starts: it runs the file, so running it from here would run this node inside it.
+SELF_RUNNER_2625 = "test_the_gate_selection_drops_nothing_and_the_named_node_passes"
+
+
+def test_the_nodes_2625_files_are_green_with_nothing_hidden():
+    """#2625 clause 2: the three nodes that item names are green because the page
+    was re-measured, not because any of them came off the rung.
+
+    The three ways a red node stops reading red with nothing fixed — moved out of
+    the gate's mark expression, marked `skip`/`skipif`/`xfail`, or deleted — are the
+    ones #1763 lists above, and they are graded here over the ids #2625 files rather
+    than over the file in general. A child pytest asked with
+    `scripts.automod.gate.TESTS_MARK_EXPR` still collects all three of them, the
+    source carries no marker that could have taken one out, and the two that a node
+    here may run report **PASSED by name** with no `skipped` or `xfailed` line in
+    that run.
+
+    The third is this file's own selection node, and the bargain it makes about
+    itself applies unchanged to it: excluded by id, which is visible in the argv
+    below, never by a mark, which is what the collection assert above would catch.
+    Its verdict is the one the gate's full-suite run records with no exclusion in
+    it, and its half here is collection plus the marker scan.
+    """
+    from scripts.automod.gate import TESTS_MARK_EXPR
+
+    gated = [ln for ln in (_pytest(["--collect-only", "-q", "-m", TESTS_MARK_EXPR,
+                                    THIS_FILE]).stdout.splitlines()) if "::" in ln]
+    missing = [n for n in RED_NODES_2625 + (SELF_RUNNER_2625,)
+               if not any(n in ln for ln in gated)]
+    assert missing == [], (
+        f"{missing} is no longer collected under the gate's selection "
+        f"({TESTS_MARK_EXPR!r}): the node #2625 names was deleted or marked out of "
+        f"the hard rung rather than fixed. {len(gated)} nodes are collected here")
+
+    src = (ROOT / THIS_FILE).read_text(encoding="utf-8")
+    hidden = _HIDE_RE.findall(src)
+    assert hidden == [], (
+        f"this file carries a marker that takes a node off the hard rung: {hidden}")
+
+    ran = _pytest(["-v", "-m", TESTS_MARK_EXPR]
+                  + [f"{THIS_FILE}::{n}" for n in RED_NODES_2625])
+    out = ran.stdout + ran.stderr
+    assert ran.returncode == 0, out[-1500:]
+    low = out.lower()
+    assert "skipped" not in low and "xfailed" not in low, out[-1500:]
+    for node in RED_NODES_2625:
+        named = [ln for ln in out.splitlines() if node in ln and " PASSED" in ln]
+        assert len(named) == 1, (
+            f"{node} has no single PASSED line, so a node #2625 was filed for has "
+            f"no recorded verdict: {named}")
+
+
 # ── #1760 clause 4: the deny-set rows cite symbols, not moved line numbers ────
 #
 # Row 3 of `authority-surfaces.md` pinned `PROTECTED_WRITE_ROOTS` to
