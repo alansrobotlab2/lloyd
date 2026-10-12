@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
@@ -520,6 +521,94 @@ def test_the_whole_doc_prompt_still_owns_the_front_matter_date(tree):
     assert DOC_DATE_RULE in p, "clause 2: the doc unit still refreshes the date to today"
     assert "you are the only one whose lines include the front matter" in p, \
         "and says why only this shape may edit the block"
+
+
+#: The shrink half of the same bug #1686 fixed one bullet over. `check_doc_bound`
+#: divides a group's deletions by its own SECTION (#913); the shared prompt told
+#: every unit it was the FILE. Measured in the automod ledger over the 50
+#: `arch_review` rows from 2026-09-12 to 2026-10-12: 11 group runs, 7 rejected, 5
+#: of them by that section cap — `group:workers-jobs:Dispatch` "deleted 22 of 43
+#: lines of its section (51%), cap 30%" on 2026-09-27T21:45, plus
+#: `autonomy-jobs:Build the graph` 14 of 28, `Queue the work` 16 of 31, `Bound
+#: entropy` 15 of 44 and `Measure` 83 of 232. 22 lines of that 824-line doc is
+#: 2.7%, so a turn that had stayed inside the number it was told was still over
+#: the rail, and the whole correction pass — its in-section edits included — went
+#: away. `_prompt_for` and `_payload` both pass 30, which is `config.yaml`'s
+#: `max_shrink_pct`, so the pct these nodes assert on is the shipped one.
+SHRINK_PCT = 30
+
+#: Read back out of a built group prompt rather than restated here: the point of
+#: #2603 is that the number in the prose and the number in the rail are one
+#: number, and a test that hardcoded it could stay green while they diverged.
+_SECTION_BASE = re.compile(r"your section is lines (\d+)-(\d+), (\d+) lines")
+
+
+def _quoted_section_base(p: str) -> tuple[int, int, int]:
+    """The `(start, end, count)` a group prompt quotes as its shrink base."""
+    m = _SECTION_BASE.search(" ".join(p.split()))
+    assert m is not None, (
+        "the group prompt quotes no section base, so the turn has no number to "
+        "budget its deletions against")
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def test_a_group_prompt_states_the_shrink_cap_against_its_own_section(tree):
+    """Clause 1: a group is told the cap against the unit the rail measures."""
+    p = _joined(_prompt_for(tree, "workers-jobs", "group", "Dispatch"))
+    start, end = _section(tree)
+    quoted = _quoted_section_base(p)
+    assert quoted == (start, end, end - start + 1), (
+        f"the prompt quotes {quoted} but the group's section is lines "
+        f"{start}-{end} ({end - start + 1} lines)")
+    assert f"{SHRINK_PCT}% of your section deleted" in p, (
+        "the percent has to be attached to the section, not merely near it")
+
+
+def test_a_group_prompt_never_gives_the_file_as_the_shrink_denominator(tree):
+    """Clause 2: the phrase that cost those five passes must not survive in a
+    group prompt at all, not merely outside the bound sentence — a second copy
+    elsewhere in the prompt would be the same wrong number read from a
+    different place."""
+    p = _joined(_prompt_for(tree, "workers-jobs", "group", "Dispatch"))
+    assert "of the doc" not in p, (
+        "a group prompt naming the doc as the denominator is the sentence that "
+        "told `Dispatch` 30% of 824 lines was its budget")
+
+
+def test_the_whole_doc_prompt_keeps_the_file_as_the_shrink_denominator(tree):
+    """Clause 3: the doc unit's bound really is the file — `check_doc_bound`
+    divides by `_head_line_count` when it has no section — so its wording must
+    not be moved to a section, and must not name a range it cannot edit."""
+    p = _joined(_prompt_for(tree, "memory", "doc"))
+    assert f"more than {SHRINK_PCT}% of the doc deleted" in p, (
+        "a whole-doc unit's cap is the file, and the doc wording is the only "
+        "true statement of it")
+    assert "of your section deleted" not in p
+    assert _SECTION_BASE.search(p) is None, (
+        "a doc unit has no section, so quoting a line range here would put the "
+        "wrong unit back into the sentence")
+
+
+async def test_the_section_count_a_group_is_told_is_the_base_the_rail_divides_by(
+        tree, monkeypatch):
+    """Clause 4: the two numbers are one number, checked across the seam.
+
+    Built through `build_prompt`, then the same group guts its section and the
+    rail's rejection is read back. This is the pair that was wrong: a turn reads
+    a count in prose, deletes a third of it, and the runner divides by something
+    else entirely.
+    """
+    doc = tree["arch"] / "workers-jobs.md"
+    _, _, quoted_count = _quoted_section_base(
+        _prompt_for(tree, "workers-jobs", "group", "Dispatch"))
+    start, end = _section(tree)
+    lines = doc.read_text().splitlines(keepends=True)
+    gutted = "".join(lines[:start] + lines[end:])   # heading kept, body removed
+    out = await _run_group(tree, monkeypatch, lambda: doc.write_text(gutted))
+    rejected = out["meta"]["doc_update_rejected"]
+    assert f"of {quoted_count} lines of its section" in rejected, (
+        f"the prompt told the turn its section is {quoted_count} lines; the rail "
+        f"divided by something else: {rejected!r}")
 
 
 def test_provenance_keys_on_the_configured_name_not_the_decorated_heading(tree):

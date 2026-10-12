@@ -995,9 +995,9 @@ and file an item titled "retire architecture/{slug}.md → \
 will be reverted and recorded as a defect.
 
 Your diff is bounded and the bound is enforced after the turn: more than \
-{max_delta_lines} changed lines, more than {max_shrink_pct}% of the doc \
-deleted, a broken front matter block, or {section_bound_hint} — and the whole \
-doc edit is thrown away, while your filed items survive. Stay well inside it.
+{max_delta_lines} changed lines, {shrink_bound}, a broken front matter block, \
+or {section_bound_hint} — and the whole doc edit is thrown away, while your \
+filed items survive. Stay well inside it.
 
 Every file you write other than that one doc is reverted after the turn — \
 anywhere in this checkout, and anywhere in the vault except `backlog/`, \
@@ -1091,6 +1091,23 @@ refreshes its `date:` field. Every front-matter line sits above your section, so
 a hunk there falls outside your lines and the bound throws the entire correction \
 pass away, your in-section corrections included."""
 
+#: Step 4's shrink sentence, and — like the front-matter bullet above it — it
+#: cannot be one shared sentence (#2603). `check_doc_bound` divides a group's
+#: deletions by its own section, `end - start + 1`, and only falls back to
+#: `_head_line_count` when it has no section; the one sentence every unit read
+#: named the FILE. `group:workers-jobs:Dispatch` was told the cap was 30% of an
+#: 824-line doc while the rail was dividing by its 43-line section, and the pass
+#: that deleted 22 lines — 2.7% of the file it had been promised, 51% of the
+#: section that decided it — lost its whole correction, in-section edits
+#: included. Five of the 11 group runs in the 2026-09-12→10-12 ledger died on
+#: that cap. A group is therefore told the number the rail divides by, and the
+#: file's count appears only as the number that is not it.
+_SHRINK_BOUND_DOC = "more than {max_shrink_pct}% of the doc deleted"
+_SHRINK_BOUND_GROUP = ("more than {max_shrink_pct}% of your section deleted (your "
+                       "section is lines {start}-{end}, {count} lines — that "
+                       "{count}, not the file's {file_lines}, is what the cap "
+                       "divides by)")
+
 _BIG_DOC_HINT = """\
 This doc is {lines} lines — read it in sections with Read's offset/limit \
 rather than in one call, and spend your budget on the paths, numbers and \
@@ -1146,6 +1163,18 @@ def build_prompt(unit: dict, *, head: str, last_reviewed: str, doc_lines: int,
                            else _FM_RULE_DOC.format(today=today)),
         doc_log_rule=(_GROUP_LOG_RULE if is_group else _DOC_LOG_RULE),
         max_delta_lines=max_delta_lines, max_shrink_pct=max_shrink_pct,
+        # The branch condition and the count are `check_doc_bound`'s, not new
+        # ones: it takes `section[1] - section[0] + 1` when it has a section and
+        # the file's line count when it has none, so choosing the sentence the
+        # same way is what keeps the number a turn is told from being a number
+        # no rail ever divided by. (`_prepare` fills `section` for a group only,
+        # so in practice this branch is the unit kind — but the rail reads
+        # `section`, and so does this.)
+        shrink_bound=(_SHRINK_BOUND_GROUP.format(
+            max_shrink_pct=max_shrink_pct, start=section[0], end=section[1],
+            count=section[1] - section[0] + 1, file_lines=doc_lines)
+            if section else
+            _SHRINK_BOUND_DOC.format(max_shrink_pct=max_shrink_pct)),
         section_bound_hint=("any hunk outside your section" if is_group
                             else "a destroyed front matter block"),
         doc_statuses="|".join(DOC_STATUSES),

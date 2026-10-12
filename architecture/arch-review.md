@@ -155,9 +155,13 @@ defence there, not the second one.
    824-line doc, where the whole file as denominator let one turn delete its
    section entire and score a few percent; the section rail of §2.3 cannot
    catch that case, since a hunk removing the whole section is by construction
-   inside it). What is still wrong is the sentence the turn is shown: the
-   shared `PROMPT` tells a group "more than 30% of the doc deleted" while the
-   rail it will be judged by says *of your section* (#2603).
+   inside it). The sentence the turn is shown states the same denominator now
+   (#2603): a group reads "more than 30% of your section deleted", with its
+   line range and line count quoted beside it, and that count is rendered by the
+   same expression rail 2 divides by — five of the 11 group runs in the
+   2026-09-12→10-12 ledger had been told the file instead and lost the pass for
+   obeying it. A whole-doc unit still reads "of the doc", which for it is the
+   truth.
    A front matter block that no longer opens the file is refused outright: the
    vault indexes on it.
 3. **A group edits only its own section.** `git diff -U0` gives old-side hunks;
@@ -372,3 +376,16 @@ Kill switch: `workers.sources.arch-review.enabled`.
   (`app/harness/live_git_writes.py`, the sixth lane of `check_bash_command`) and
   the run event carries `live_head_moved`, which is what makes the sentence true
   of the property it was written for rather than of the prompt.
+- 2026-10-12 — **#2603 landed**, which closes the §2 rail 2 defect that entry
+  left standing: the bound sentence a unit is shown now states the
+  denominator `check_doc_bound` actually uses. A group prompt reads "more than 30%
+  of your section deleted (your section is lines 11-21, 11 lines — that 11, not the
+  file's 29, is what the cap divides by)"; a whole-doc unit keeps "of the doc". The
+  group's number comes from `section[1] - section[0] + 1` at `build_prompt`'s
+  `shrink_bound`, the same expression and the same `section` the rail divides by, so
+  the count a turn budgets against and the count that decides its fate cannot be
+  different numbers — and `test_the_section_count_a_group_is_told_is_the_base_the_rail_divides_by`
+  asserts the pair rather than trusting the prose to have been read. Both sentences
+  are now module constants beside `_FM_RULE_DOC`/`_FM_RULE_GROUP` (#1686), which is
+  where #913's half-fix should have put them: it moved the denominator and left the
+  sentence, and the ledger spent five of eleven group runs on the difference.
