@@ -52,7 +52,7 @@ ROOT="${ARM_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 # those, and the tiered floor is leave-one-out clean at 0 of 90 on exactly these
 # records. Override ENGINE_OUTPUT_REF after a rebaseline.
 ENGINE_OUTPUT_PROBE="${ENGINE_OUTPUT_PROBE:-$ROOT/eval/engine_output_probe.py}"
-ENGINE_OUTPUT_REF="${ENGINE_OUTPUT_REF:-$ROOT/eval/engine_output/idle/20260924T211316Z_idle-5.json}"
+ENGINE_OUTPUT_REF="${ENGINE_OUTPUT_REF:-$ROOT/eval/engine_output/idle/20261012T041722Z_idle1012-5.json}"
 # THE VERDICT IS PERSISTED, not just echoed (#2163). What leaves this window has
 # to be decided before the window closes, and the window is what goes away: an arm
 # runs inside a primary restart, and `SKIP_BENCH=1` — how an admission sweep runs,

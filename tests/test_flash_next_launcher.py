@@ -696,7 +696,7 @@ def _canary_run(tmp_path: Path, *, run_rc: int, cmp_rc: int,
     root = tmp_path / "fakeroot"
     (root / ".venvs/lloyd/bin").mkdir(parents=True)
     (root / "eval/engine_output/idle").mkdir(parents=True)
-    (root / "eval/engine_output/idle/20260924T211316Z_idle-5.json").write_text("{}\n")
+    (root / "eval/engine_output/idle/20261012T041722Z_idle1012-5.json").write_text("{}\n")
     payload = tmp_path / "cmp-payload.json"
     if cmp_payload is None:
         payload.write_text("not json at all\n", encoding="utf-8")
@@ -922,7 +922,7 @@ def test_the_canary_persists_one_verdict_line_naming_the_worst_prompt(tmp_path):
     assert v["arm"] == "fp8kv", v
     assert (v["run_rc"], v["compare_rc"]) == (0, 1), v
     assert v["decision"] == "past-floor", v
-    assert v["reference"] == str(root / "eval/engine_output/idle/20260924T211316Z_idle-5.json"), v
+    assert v["reference"] == str(root / "eval/engine_output/idle/20261012T041722Z_idle1012-5.json"), v
     assert v["record"] == "/tmp/arm-record.json", v
     assert v["diverged"] == CANARY_PAYLOAD_DIVERGED["diverged"], v
 

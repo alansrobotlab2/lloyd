@@ -1,0 +1,263 @@
+{
+ "schema": 1,
+ "kind": "engine_output_floor",
+ "made": "2026-09-24T21:17:18+00:00",
+ "runs": [
+  "idle-1",
+  "idle-2",
+  "idle-3",
+  "idle-4",
+  "idle-5",
+  "cold-1",
+  "cold-2",
+  "cold-3",
+  "cold-4",
+  "cold-5"
+ ],
+ "n_runs": 10,
+ "corpus_sha256": "b880e4716d17316e7a6e21c138aea93ba32e5e9ec891faaa96814c987ad1063f",
+ "engine": {
+  "base_url": "http://127.0.0.1:8096",
+  "venv": "/home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main",
+  "vllm_version": "0.2.1.dev19+gdff1bde84",
+  "served_model": "Qwen3.8-Flash-Next-nvfp4",
+  "model_root": "/home/alansrobotlab/lloyd/agent-services/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP4",
+  "kv_cache_dtype": "fp8",
+  "kv_cache_size_tokens": 844969,
+  "block_size": 3200,
+  "mamba_cache_mode": "align",
+  "cache_config_published": true
+ },
+ "params": {
+  "temperature": 0,
+  "logprobs": 1,
+  "model": "primary",
+  "cache_salt": "none"
+ },
+ "summary": {
+  "prompts": 21,
+  "prompts_bitwise_reproducible": 14,
+  "prompts_token_reproducible": 16,
+  "agreement_min": 0.03125,
+  "median_lp_delta_max": 0.46926209633238614,
+  "token_lp_delta_max": 0.847229679726297
+ },
+ "cache_salt_modes": [
+  "fresh",
+  "none"
+ ],
+ "jitter_margin": 2.5,
+ "jitter_loo_worst_ratio": 1.9664,
+ "prompts": {
+  "short_capital": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "short_count": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "short_python": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "short_json": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "short_sql": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "short_prose": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "short_german": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "short_arith": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "chat_haiku": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "chat_explain": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "sys_restart": {
+   "agreement_min": 0.046511627906976744,
+   "median_lp_delta_max": 0.2971130907535553,
+   "token_lp_delta_max": 0.3861987590789795,
+   "first_divergence_min": 2,
+   "pairs_same_tokens": 0,
+   "pairs_bitwise": 0,
+   "pairs": 45,
+   "tier": "jitter"
+  },
+  "sys_rule_lookup": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0005013604968553409,
+   "token_lp_delta_max": 0.14814125001430511,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 0,
+   "pairs": 45,
+   "tier": "jitter"
+  },
+  "sys_missing_file": {
+   "agreement_min": 0.03125,
+   "median_lp_delta_max": 0.46926209633238614,
+   "token_lp_delta_max": 0.5763630867004395,
+   "first_divergence_min": 1,
+   "pairs_same_tokens": 8,
+   "pairs_bitwise": 0,
+   "pairs": 45,
+   "tier": "jitter"
+  },
+  "sys_summary": {
+   "agreement_min": 0.16279069767441862,
+   "median_lp_delta_max": 0.43982572108507156,
+   "token_lp_delta_max": 0.4729384481906891,
+   "first_divergence_min": 7,
+   "pairs_same_tokens": 6,
+   "pairs_bitwise": 0,
+   "pairs": 45,
+   "tier": "jitter"
+  },
+  "sys_count": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0053172443294897676,
+   "token_lp_delta_max": 0.12951383739709854,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 0,
+   "pairs": 45,
+   "tier": "jitter"
+  },
+  "tool_bash_disk": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "tool_read_file": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "tool_fetch": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "tool_none_needed": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 45,
+   "pairs_bitwise": 45,
+   "pairs": 45,
+   "tier": "exact"
+  },
+  "long_needle": {
+   "agreement_min": 0.45,
+   "median_lp_delta_max": 0.0002105950698023662,
+   "token_lp_delta_max": 0.2478640079498291,
+   "first_divergence_min": 9,
+   "pairs_same_tokens": 20,
+   "pairs_bitwise": 0,
+   "pairs": 45,
+   "tier": "jitter"
+  },
+  "long_continue": {
+   "agreement_min": 0.3541666666666667,
+   "median_lp_delta_max": 0.007777162885759026,
+   "token_lp_delta_max": 0.847229679726297,
+   "first_divergence_min": 17,
+   "pairs_same_tokens": 28,
+   "pairs_bitwise": 0,
+   "pairs": 45,
+   "tier": "jitter"
+  }
+ }
+}

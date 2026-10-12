@@ -1,25 +1,20 @@
 {
  "schema": 1,
  "kind": "engine_output_floor",
- "made": "2026-09-24T21:17:18+00:00",
+ "made": "2026-10-12T04:17:29+00:00",
  "runs": [
-  "idle-1",
-  "idle-2",
-  "idle-3",
-  "idle-4",
-  "idle-5",
-  "cold-1",
-  "cold-2",
-  "cold-3",
-  "cold-4",
-  "cold-5"
+  "idle1012-5",
+  "idle1012-4",
+  "idle1012-3",
+  "idle1012-2",
+  "idle1012-1"
  ],
- "n_runs": 10,
+ "n_runs": 5,
  "corpus_sha256": "b880e4716d17316e7a6e21c138aea93ba32e5e9ec891faaa96814c987ad1063f",
  "engine": {
   "base_url": "http://127.0.0.1:8096",
-  "venv": "/home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main",
-  "vllm_version": "0.2.1.dev19+gdff1bde84",
+  "venv": "/home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012",
+  "vllm_version": "0.31.1rc1.dev260+ga98247ab4",
   "served_model": "Qwen3.8-Flash-Next-nvfp4",
   "model_root": "/home/alansrobotlab/lloyd/agent-services/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP4",
   "kv_cache_dtype": "fp8",
@@ -38,25 +33,24 @@
   "prompts": 21,
   "prompts_bitwise_reproducible": 14,
   "prompts_token_reproducible": 16,
-  "agreement_min": 0.03125,
-  "median_lp_delta_max": 0.46926209633238614,
-  "token_lp_delta_max": 0.847229679726297
+  "agreement_min": 0.0,
+  "median_lp_delta_max": 0.4160548374056816,
+  "token_lp_delta_max": 0.4344845116138458
  },
  "cache_salt_modes": [
-  "fresh",
   "none"
  ],
- "jitter_margin": 2.5,
- "jitter_loo_worst_ratio": 1.9664,
+ "jitter_margin": 3.5,
+ "jitter_loo_worst_ratio": 2.7762,
  "prompts": {
   "short_capital": {
    "agreement_min": 1.0,
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "short_count": {
@@ -64,9 +58,9 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "short_python": {
@@ -74,9 +68,9 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "short_json": {
@@ -84,9 +78,9 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "short_sql": {
@@ -94,9 +88,9 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "short_prose": {
@@ -104,9 +98,9 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "short_german": {
@@ -114,9 +108,9 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "short_arith": {
@@ -124,9 +118,9 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "chat_haiku": {
@@ -134,9 +128,9 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "chat_explain": {
@@ -144,59 +138,59 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "sys_restart": {
-   "agreement_min": 0.046511627906976744,
-   "median_lp_delta_max": 0.2971130907535553,
-   "token_lp_delta_max": 0.3861987590789795,
+   "agreement_min": 0.047619047619047616,
+   "median_lp_delta_max": 0.3417927622795105,
+   "token_lp_delta_max": 0.37437528371810913,
    "first_divergence_min": 2,
    "pairs_same_tokens": 0,
    "pairs_bitwise": 0,
-   "pairs": 45,
+   "pairs": 10,
    "tier": "jitter"
   },
   "sys_rule_lookup": {
    "agreement_min": 1.0,
-   "median_lp_delta_max": 0.0005013604968553409,
-   "token_lp_delta_max": 0.14814125001430511,
+   "median_lp_delta_max": 0.00032463866227772087,
+   "token_lp_delta_max": 0.09384772181510925,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
+   "pairs_same_tokens": 10,
    "pairs_bitwise": 0,
-   "pairs": 45,
+   "pairs": 10,
    "tier": "jitter"
   },
   "sys_missing_file": {
-   "agreement_min": 0.03125,
-   "median_lp_delta_max": 0.46926209633238614,
-   "token_lp_delta_max": 0.5763630867004395,
+   "agreement_min": 0.03225806451612903,
+   "median_lp_delta_max": 0.4160548374056816,
+   "token_lp_delta_max": 0.4344845116138458,
    "first_divergence_min": 1,
-   "pairs_same_tokens": 8,
+   "pairs_same_tokens": 3,
    "pairs_bitwise": 0,
-   "pairs": 45,
+   "pairs": 10,
    "tier": "jitter"
   },
   "sys_summary": {
-   "agreement_min": 0.16279069767441862,
-   "median_lp_delta_max": 0.43982572108507156,
-   "token_lp_delta_max": 0.4729384481906891,
-   "first_divergence_min": 7,
-   "pairs_same_tokens": 6,
+   "agreement_min": 0.0,
+   "median_lp_delta_max": 0.16417299211025238,
+   "token_lp_delta_max": 0.39851778745651245,
+   "first_divergence_min": 0,
+   "pairs_same_tokens": 1,
    "pairs_bitwise": 0,
-   "pairs": 45,
+   "pairs": 10,
    "tier": "jitter"
   },
   "sys_count": {
    "agreement_min": 1.0,
-   "median_lp_delta_max": 0.0053172443294897676,
-   "token_lp_delta_max": 0.12951383739709854,
+   "median_lp_delta_max": 0.003971694270148873,
+   "token_lp_delta_max": 0.04981902241706848,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
+   "pairs_same_tokens": 10,
    "pairs_bitwise": 0,
-   "pairs": 45,
+   "pairs": 10,
    "tier": "jitter"
   },
   "tool_bash_disk": {
@@ -204,9 +198,9 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "tool_read_file": {
@@ -214,9 +208,9 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "tool_fetch": {
@@ -224,9 +218,9 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "tool_none_needed": {
@@ -234,29 +228,29 @@
    "median_lp_delta_max": 0.0,
    "token_lp_delta_max": 0.0,
    "first_divergence_min": null,
-   "pairs_same_tokens": 45,
-   "pairs_bitwise": 45,
-   "pairs": 45,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
    "tier": "exact"
   },
   "long_needle": {
    "agreement_min": 0.45,
-   "median_lp_delta_max": 0.0002105950698023662,
-   "token_lp_delta_max": 0.2478640079498291,
+   "median_lp_delta_max": 0.0001545917839393951,
+   "token_lp_delta_max": 0.20419812202453613,
    "first_divergence_min": 9,
-   "pairs_same_tokens": 20,
+   "pairs_same_tokens": 4,
    "pairs_bitwise": 0,
-   "pairs": 45,
+   "pairs": 10,
    "tier": "jitter"
   },
   "long_continue": {
-   "agreement_min": 0.3541666666666667,
-   "median_lp_delta_max": 0.007777162885759026,
-   "token_lp_delta_max": 0.847229679726297,
-   "first_divergence_min": 17,
-   "pairs_same_tokens": 28,
+   "agreement_min": 0.5416666666666666,
+   "median_lp_delta_max": 0.0029250633087940514,
+   "token_lp_delta_max": 0.2677174434065819,
+   "first_divergence_min": 26,
+   "pairs_same_tokens": 3,
    "pairs_bitwise": 0,
-   "pairs": 45,
+   "pairs": 10,
    "tier": "jitter"
   }
  }
