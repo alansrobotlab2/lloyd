@@ -407,6 +407,14 @@ PATH_DOC_SLUGS = [p.name for p in sorted(ARCH.glob("*.md"))]
 #: refuses an entry no doc cites, so the only way to add one is to write the
 #: sentence that needs it. The owed-check on #2582 rules on whether it shrinks.
 PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
+ 'ambient-context-injection.md': {
+  '~/lloyd-data/next-session-notes.json':
+   ('generated: `app/next_session_notes.py` creates the store on its '
+    'first note (`_save` writes it), and `_read` reads a missing file '
+    'as an empty channel by design, so a box holding no pending note '
+    'shows only the sibling `.lock` that `locked_file` takes for every '
+    'read — the location the row names is the one the module writes'),
+ },
  'arch-review.md': {
   '.archive/':
    ('historical: the page quotes the `.gitignore` rule'

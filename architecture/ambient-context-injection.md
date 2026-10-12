@@ -393,7 +393,7 @@ mechanism as a whole — the switches are all at the tool layer.
 in `harness.tool_search.baseline_tools` and `session_inject_context` does not,
 which costs nothing today because `tool_search.enabled` is `false` in both
 config.yaml and the live override — `TOOL_OVERRIDES_PATH`, which is
-`DATA_ROOT/data/tool_overrides.yaml` (`app/paths.py:119`:
+`$LLOYD_DATA/data/tool_overrides.yaml` (`app/paths.py:119`:
 `~/lloyd-data/data/tool_overrides.yaml`, not a file in the checkout;
 `data/**` under the repository is build input and is denied to the self-mod
 loop) — and every tool is advertised; if
@@ -503,7 +503,7 @@ mode has no reason to block it.
   `app/routers/sessions.py:948-1002`, not `756-785`), the "zero SDK cost"
   attribution — that phrase is the `/inject-prefetch` docstring, not the tool
   description, which says "at no cost" — the override path, which is
-  `DATA_ROOT/data/tool_overrides.yaml` rather than a file in the checkout, and
+  `$LLOYD_DATA/data/tool_overrides.yaml` rather than a file in the checkout, and
   the Status paragraph's "(nine cases)" and "63 tests", replaced with the
   collected counts measured on 2026-10-12 (17 / 5 / 16 / 6 = 44 green across the
   four files that pin this page, 73 in `test_prefetch.py`). Filed from the same
