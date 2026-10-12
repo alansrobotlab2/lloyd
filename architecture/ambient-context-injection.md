@@ -2,7 +2,7 @@
 segment: architecture
 type: architecture
 status: implemented
-date: 2026-09-12
+date: 2026-10-12
 tags: [ambient,architecture,autonomy,context-injection,lloyd,mcp]
 
 ---
@@ -18,10 +18,16 @@ live `<ambient-signals>` block, `ambient_decide`'s gate and set/take semantics,
 three fires of one `dedup_key` collapsing to one entry, a 1-second TTL enforced
 at drain, and the resolver's hint path and filesystem fallback. That manual
 list is what "all five verification tests pass" meant. The durable pins today
-are `tests/test_session_queue.py` (nine cases over the turn queue),
-`tests/test_active_session_resolution.py` (five over the resolver) and the
-ambient cases in `tests/test_prefetch.py` — 63 tests, all green when re-run on
-2026-09-12.
+are named by file, not by count: `tests/test_session_queue.py` and
+`tests/test_active_session_resolution.py` over the queue and the resolver,
+`tests/test_ambient_prefetch_retention.py` and `tests/test_session_doc_claims.py`
+over this page's own sentences, and the ambient cases in `tests/test_prefetch.py`.
+Re-measured 2026-10-12: 17 collected in `test_session_queue.py`, 5 in
+`test_active_session_resolution.py`, 16 in `test_ambient_prefetch_retention.py`,
+6 in `test_session_doc_claims.py` — 44 across those four, all passing — and 73 in
+`test_prefetch.py`. The "(nine cases)" and "63 tests" this paragraph carried are
+the un-identified counts the review log below already retired for the same
+reason: a number with no named set drifts and nobody notices.
 
 The ship note recorded the merge as `932a71c`. The repository's history has
 been rewritten since, so that hash resolves to nothing; the same commit, same
@@ -33,6 +39,18 @@ notable/urgent path.
 
 Producers call one MCP tool — `session_inject_context` — with a priority. The tool picks the delivery mechanism, branching on `priority` to choose which endpoint it POSTs to. Producers never touch the turn queue directly.
 
+That sentence has one exception, and it is the branch *before* the priority one:
+if no session resolves, `priority` no longer selects an endpoint. Since #1516 an
+unaddressable producer falls through to the file-backed **next-session channel**
+whatever it asked for (`agent_mcp/ambient.py:185-216` → `POST
+/api/next-session-note`), so a 03:00 pass with no session to name still leaves its
+signal for the morning. Two consequences the table below does not show: an
+unresolvable `notable` or `urgent` is delivered as a passive note, with no agent
+turn, no `ambient_decide` gate and no breadcrumb while the response says
+`ok=true` (filed, #2600); and the note channel is drained by *any* turn that runs
+prefetch, including a worker's, which consumes the note for the human who was
+meant to receive it (#2598).
+
 | Priority | Cost | Mechanism | When the agent sees it |
 |----------|------|-----------|------------------------|
 | `ambient` | Zero — no model call | Prefetch queue (passive) | Next user turn's `<context>` block |
@@ -41,9 +59,13 @@ Producers call one MCP tool — `session_inject_context` — with a priority. Th
 
 **Key invariant:** producers declare *intent*, not mechanism. They never need to think about turn queues or what a turn costs.
 
-The tool's own description still sells the cheap tier as "zero SDK cost"
-(`agent_mcp/ambient.py`, the `session_inject_context` description), and this
-page said the same until 2026-09-11. It is a fossil of the claude-agent-sdk
+The cheap tier is still sold as costing nothing, but the exact phrase "zero SDK
+cost" is not in `agent_mcp/ambient.py` — it is the first line of the
+`/api/sessions/{id}/inject-prefetch` docstring (`app/routers/sessions.py:1178`).
+The tool description a producer actually reads says the signal is queued "at no
+cost" (`agent_mcp/ambient.py:65`) and the module docstring says "cheap prefetch
+drain (no SDK turn)" (`:11`); this page attributed the wording to the wrong file
+until 2026-10-12. Either way it is a fossil of the claude-agent-sdk
 era: the in-process harness replaced the SDK, so the expensive tiers now cost a
 `run_query` turn against the local vLLM engine rather than a subprocess. The
 economics the tiers were built around are unchanged — one is free and two are
@@ -59,6 +81,8 @@ Passive. The agent does NOT wake up. Context only surfaces when the user sends t
 Producer (autonomy task, cron, pipeline)
   → session_inject_context(priority="ambient",source,summary,content?)
   → session_id=="" → GET /api/sessions/active resolves the target
+  → resolves to nothing → POST /api/next-session-note instead, at ANY priority
+      (the file-backed channel, #1516 — see the note under Core Concept)
   → MCP tool POSTs to /api/sessions/{sid}/inject-prefetch
   → Backend enqueues AmbientPrefetchEntry in _ambient_prefetch_queue[sid]
   → [NOTHING HAPPENS — queue sits passively]
@@ -72,6 +96,8 @@ User sends message
       ├─ filters expired (expires_at)
       ├─ sorts newest-first, takes AMBIENT_PREFETCH_DRAIN_MAX = 3
       └─ puts the overflow back for the next turn
+  → drain_next_session_notes() (#1516) — a global file, drained for whatever
+      session is asking, and consuming is the same act as delivering
   → _format_context renders <ambient-signals> FIRST inside <context>
   → "<context>…</context>" + "\n\n" + the user's text
   → model sees: <context>...<ambient-signals>...</ambient-signals>...</context>
@@ -81,10 +107,12 @@ User sends message
 Two ordering rules in there are load-bearing. The drain runs **above** the
 `MIN_MESSAGE_LEN` guard, so "ok" still surfaces a queued signal — a short
 message must not suppress an injection the producer already decided was worth
-showing. And it runs on the **caller's** thread, not in the worker thread the
+showing; the guard's `not ambient_entries and not notes` clause covers both
+drains. And it runs on the **caller's** thread, not in the worker thread the
 budgeted search phase uses (`_prefetch_prepare` vs `_prefetch_run`): the queue
 is mutated by producers on the event loop, so draining it off-thread would race
-them.
+them, and the next-session channel holds a note for exactly one turn — drained
+twice, it delivers twice.
 
 ### Rendered Context Block
 
@@ -93,11 +121,20 @@ them.
 Background producers queued these signals for you. The user did NOT ask —
 reference them only if naturally relevant to what they're saying now.
 - **[autonomy:task-42]** 3 new emails worth reviewing
+  _server clock when queued: 2026-09-16 09:14 PDT_
   > From: client@foo.com ("contract update"),...
 - **[pipeline:research-117]** Background research on quantum compilers finished
+  _server clock when queued: 2026-09-16 09:15 PDT_
   > Key finding: tket compiler beats qiskit on circuits >10q by 14%...
 </ambient-signals>
 ```
+
+The stamp under each summary is the **server's** reading of the instant the entry
+was queued, never a date the producer wrote (#1197: an autotriage brief invented
+`2026-09-17` in its own header, queried the calendar for that day, and reported a
+birthday as "(no events)"). `ambient_clock_stamp` (`app/sessions_io.py:555`) is
+the only formatter either ambient path uses, and it renders nothing for an unset
+instant — no measurement, no stamp, rather than a 1969 date offered as evidence.
 
 ### Key Properties
 
@@ -109,7 +146,18 @@ reference them only if naturally relevant to what they're saying now.
   takes the three newest and puts the remainder back. A burst is therefore
   spread across turns rather than dropped on the floor, and the newest signal
   is never the one that waits.
-- **`content` is truncated at 800 chars** when rendered, with an ellipsis.
+- **`content` is truncated at 800 chars** when rendered, with an ellipsis. The
+  summary line has its own, tighter cap the page did not used to state:
+  `AMBIENT_SUMMARY_MAX = 240` (`app/prefetch.py:145`), marked with
+  ` [... truncated]`, applied to every ambient line — and the next-session
+  channel caps its own fields at 720 / 2000 before a note is ever stored
+  (`NEXT_SESSION_SUMMARY_MAX` / `NEXT_SESSION_CONTENT_MAX`,
+  `app/next_session_notes.py:69-76`).
+- **A summary carrying a date that contradicts itself is refused, not rendered.**
+  `app/date_fidelity.refusal_detail` runs before the target check on all three
+  doors — `/inject`, `/inject-prefetch` and `/api/next-session-note` — and
+  answers 400 so a producer fixes its payload rather than blaming a missing
+  session (#1149).
 - **No model call** — nothing fires until the user engages naturally.
 - **A short message still drains.**
   `tests/test_prefetch.py::test_short_message_skips_search_but_keeps_ambient`
@@ -129,15 +177,24 @@ Producer
   → 409 if the target is not a user session (see "A worker session is nobody")
   → build_ambient_turn() wraps text in envelope:
 
-      <ambient priority="notable" source="autonomy:task-42" session_id="20260419_..."> 
+      <ambient priority="notable" source="autonomy:task-42" session_id="20260419_..."
+               server_clock="2026-09-16 09:14 PDT">
       {summary + content}
       </ambient>
 
+      The server clock when this was queued was **2026-09-16 09:14 PDT** — that is
+      a measured reading from this machine, not a date the producer wrote. Treat
+      it as the current day: anything the signal above says about "today", a date,
+      or a window has to agree with it or be reported as unverified (#1197).
       This is a background signal from `autonomy:task-42`. You were not asked a
       question — consider whether to mention this to the user. If it is not worth
       interrupting them, call
       `ambient_decide(session_id="...",surface=false,reasoning="...")` and stop.
-      If it is worth surfacing, reply briefly and naturally.
+      If it is worth surfacing, reply briefly and naturally — the user will see
+      your message as a normal assistant turn.
+
+      # One measured instant feeds both the envelope attribute and the turn's
+      # queue position, so the clock shown is the clock it was enqueued at.
 
   → Enqueued on the SessionQueue's ambient tier (from #296): dedup_key collapses
     a queued duplicate, and AMBIENT_QUEUE_CAP = 3 drops the oldest beyond it
@@ -194,11 +251,11 @@ If the user sends a message while an ambient turn is running or queued:
   `AMBIENT_QUEUE_CAP` eviction.
 
 User turns always win, and `/cancel` never drops one: `drain_pending`'s
-`source=None` default means "ambient only" (`app/sessions_io.py:1030-1074`), which
+`source=None` default means "ambient only" (`app/sessions_io.py:1061`), which
 is what `drain_pending=true` on that route relies on. Draining the user tier is
 the explicit `source="all"` sentinel — both tiers, ambient then user, summed
 count — and `DELETE /api/sessions/{id}` is its only caller
-(`app/routers/sessions.py:756-785`). That route wipes the session outright, so a
+(`app/routers/sessions.py:948-1002`). That route wipes the session outright, so a
 queued **user** turn it left behind would still run and still write nothing:
 `_append_messages` goes through `mutate_session`, which no-ops once the session
 JSON is gone — a full model turn spent on a transcript nobody will read again.
@@ -222,13 +279,15 @@ the branch is reachable, through `"all"`. Fixed by #909.
 | `SessionQueue.pending_ambient` | `deque[SessionTurn]` | Mechanism 2's tier, popped only when `pending_user` is empty |
 | `AMBIENT_PREFETCH_CAP` / `AMBIENT_PREFETCH_DRAIN_MAX` | `5` / `3` | Hold cap and per-turn cap |
 | `AMBIENT_QUEUE_CAP` | `3` | Queued ambient *turns* per session; oldest evicted |
+| *not here:* `app/next_session_notes.py` | file-backed, cap 5, TTL 24 h | The third store this subsystem writes to, and the only one that survives a restart: `~/lloyd-data/next-session-notes.json` (#1516). Its own caps (`NEXT_SESSION_NOTE_CAP`, `..._SUMMARY_MAX`, `..._CONTENT_MAX`) and its own no-deadline sentinel rule are declared and tested there — a second copy of either, here or in the queue module, is the defect |
 
 ### Endpoints (`app/routers/sessions.py`)
 
 | Route | Does |
 |---|---|
-| `POST /api/sessions/{id}/inject-prefetch` | Mechanism 1. 404 on an unknown session; 409 on a non-user one (#910); 400 without `source` and `summary` |
-| `POST /api/sessions/{id}/inject` | Mechanism 2. 409 on a non-user session, 404 on an unknown one |
+| `POST /api/sessions/{id}/inject-prefetch` | Mechanism 1. 404 on an unknown session; 409 on a non-user one (#910); 400 without `source` and `summary`, or on a date the summary contradicts (#1149) |
+| `POST /api/sessions/{id}/inject` | Mechanism 2. 409 on a non-user session, 404 on an unknown one, and the same date guard first |
+| `POST /api/next-session-note` | The third door (#1516): the same payload minus the session id, so it is the only one a 03:00 producer can use. 400 on the date guard, then 400 without `source`/`summary`; writes through `write_next_session_note`. No 409 is possible — nothing names a session |
 | `POST /api/sessions/{id}/ambient-decide` | 400 unless the session's *current* turn has `source == "ambient"` |
 | `GET /api/sessions/active` | The resolver a producer gets when it passes `session_id=""` |
 | `GET /api/sessions/{id}/prefetch-queue` | Debug peek that does not drain (`peek_ambient_prefetch`) |
@@ -261,6 +320,18 @@ the drain, that response queued a signal nobody would drain and nothing could
 reclaim. `tests/test_active_session_resolution.py` pins the resolver and `/inject`'s
 409; `tests/test_ambient_prefetch_retention.py` pins this route's.
 
+The invariant is enforced at **both doors**, and that is exactly its limit: a rule
+held only at the door is held by nothing where the consumer reads. The
+next-session channel has no door with a target to check — the file is global, and
+the drain in `prefetch._prefetch_prepare` runs for the session that happens to
+turn up first, worker included, since worker turns arrive through the chat path
+for the Inner-Voice reason this section already names. Filed as #2598. One related
+nuance so the two predicates are not collapsed into one: `is_user_session` answers
+"can a signal reach a human through this session", and since #1064 the *listings*
+and exports ask a stricter question — `is_conversation_session`, an allow-list of
+`INTERACTIVE_PLATFORMS` where an unknown platform is excluded — so a session can
+legitimately be missing from Mission Control and still be a valid ambient target.
+
 ### Inner Voice is the second producer
 
 Mechanism 2 is not reached only from MCP. The Inner Voice observer's `ambient`
@@ -275,7 +346,11 @@ after a single attempt.
 
 `autonomy.run_task` also passes `turn_source="ambient"` when attaching an
 observer, but that is the observer's own gate on the direct path, not a turn
-on this queue.
+on this queue. A third occupant of the tier is not a producer at all: the
+memory-flush turn (`build_flush_turn`, off by default at
+`memory_flush.enabled: false`) enqueues with `source="ambient"` to save durable
+facts before compaction, surfaces nothing by design, and is named back to Inner
+Voice as `memory_flush` so the observer skips it.
 
 ### What the user sees, and what the model sees again
 
@@ -305,7 +380,11 @@ mechanism as a whole — the switches are all at the tool layer.
 `mcp_servers.lloyd-mcp.disabled_tools` is the real one. `ambient_decide` sits
 in `harness.tool_search.baseline_tools` and `session_inject_context` does not,
 which costs nothing today because `tool_search.enabled` is `false` in both
-config.yaml and `data/tool_overrides.yaml` and every tool is advertised; if
+config.yaml and the live override — `TOOL_OVERRIDES_PATH`, which is
+`DATA_ROOT/data/tool_overrides.yaml` (`app/paths.py:119`:
+`~/lloyd-data/data/tool_overrides.yaml`, not a file in the checkout;
+`data/**` under the repository is build input and is denied to the self-mod
+loop) — and every tool is advertised; if
 progressive disclosure is ever switched back on, the agent-facing half stays
 always-visible while the producer-facing half is one discovery round-trip away.
 `ambient_decide` is also in `PLAN_MODE_ALWAYS_ALLOWED` — it records a routing
@@ -396,3 +475,30 @@ mode has no reason to block it.
   user turns (#909), and TTL was enforced only at drain, so a signal aimed at a
   session that never takes one sat unreclaimed — both since fixed, #909 first and
   #910 on 2026-09-20; the entries above record each.
+- 2026-10-12 — reviewed against `1bf72f2d` (status: **stale**, corrected). Both
+  mechanisms still ship exactly as described; what moved is around them. Added:
+  the third door (#1516, `POST /api/next-session-note`, `app/next_session_notes.py`
+  — cap 5, TTL 24 h, drained by the same `_prefetch_prepare`) and the fact that
+  `session_inject_context` branches on resolution *before* it branches on
+  `priority`, which the Core Concept's one-sentence invariant had gone quiet
+  about; the `server_clock` the envelope and every rendered ambient line now
+  carry (#1197, `ambient_clock_stamp`); the `AMBIENT_SUMMARY_MAX = 240` cap beside
+  the 800-char one; the #1149 date guard on all three doors; the memory-flush
+  turn as a third occupant of the ambient tier; and `is_conversation_session` as
+  the listing predicate that is deliberately *not* the delivery predicate.
+  Corrected: two drifted line pointers (`drain_pending` is
+  `app/sessions_io.py:1061`, not `1030-1074`; the `DELETE` route is
+  `app/routers/sessions.py:948-1002`, not `756-785`), the "zero SDK cost"
+  attribution — that phrase is the `/inject-prefetch` docstring, not the tool
+  description, which says "at no cost" — the override path, which is
+  `DATA_ROOT/data/tool_overrides.yaml` rather than a file in the checkout, and
+  the Status paragraph's "(nine cases)" and "63 tests", replaced with the
+  collected counts measured on 2026-10-12 (17 / 5 / 16 / 6 = 44 green across the
+  four files that pin this page, 73 in `test_prefetch.py`). Filed from the same
+  pass: **#2598** (the notes drain has no user-session check, so a worker's turn
+  consumes the note meant for the human), **#2600** (`notable`/`urgent` with no
+  resolvable session are downgraded to the passive note and reported `ok=true`),
+  **#2599** (`_ambient_decisions` is keyed by session while the deferred 0.5 s
+  cancel lets a decide call land on the next ambient turn), and **#2601**
+  (`peek_next_session_notes` promises a debug endpoint that does not exist).
+
