@@ -1719,3 +1719,101 @@ async def test_ledger_entries_of_another_session_or_the_checkout_are_left_alone(
     _ledger_write(wt / "doc.md", "post\n", turn="turn-9")
     assert A.revert_live_ledger_writes(_TURN_SID, tree["repo"], wt) == []
     assert (wt / "doc.md").read_text() == "post\n"
+
+
+# ── #2604 clause 4: a commit on live is invisible to `git status`, so HEAD is ──
+# ──    read directly at the end of the turn and named in the event             ──
+
+def _commit_on_live(tree, rel: str, content: str):
+    """A callback that does what the prompt forbids and the lane now blocks: edit
+    the doc on production and `git commit` it there.
+
+    The commit is the point. `execute` baselines live with
+    `git status --porcelain --untracked-files=all` before the turn and again after
+    it, and reports `after_live - before_live`; a commit folds the working-tree
+    change into HEAD and leaves the tree clean, so the set difference is empty and
+    the sweep reports nothing. `revert_live_ledger_writes` cannot see it either: it
+    walks `agent_mcp/_change_ledger`, which only `Edit`/`Write` write to. The two
+    baselines that rail 1 leans on are both blind here, which is what this node
+    measures — the only witness left is HEAD itself.
+    """
+    import subprocess
+
+    def go():
+        live = tree["repo"]
+        (live / rel).parent.mkdir(parents=True, exist_ok=True)
+        (live / rel).write_text(content)
+        subprocess.run(["git", "-C", str(live), "add", rel],
+                       capture_output=True, check=True)
+        r = subprocess.run(["git", "-C", str(live), "commit", "-q", "-m",
+                            "arch-review: rogue commit"], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+    return go
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_commits_on_live_is_reported_although_the_tree_is_clean(
+        tree, monkeypatch):
+    """Clause 4, and the acceptance check's second half: the source says so.
+
+    Both ends of the entry are read from outside the run. `base` before
+    `execute` is asked anything, `to` by a `rev-parse` after it returns — a
+    `from` compared against the event's own `base` field would only be checking
+    that one run copied one variable twice, which holds whatever the source
+    measured. And the run's two ordinary report channels are asserted empty
+    first: a commit folds the working-tree change into HEAD, so a clean tree and
+    an empty `stray_writes` are the thing this node is about, and if either ever
+    came back non-empty the entry would be decoration rather than the only
+    witness."""
+    import subprocess
+
+    rel = "architecture/session-lifecycle.md"
+    base_head = subprocess.run(["git", "-C", str(tree["repo"]), "rev-parse",
+                                "HEAD"], capture_output=True, text=True,
+                               check=True).stdout.strip()
+
+    monkeypatch.setattr(A, "run_prompt_in_session",
+                        _turn(_block(), live_edits=_commit_on_live(
+                            tree, rel, "---\ntype: note\n---\n\n# Rewritten on live\n")))
+    res = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+
+    clean = subprocess.run(["git", "-C", str(tree["repo"]), "status", "--porcelain",
+                            "--untracked-files=all"], capture_output=True,
+                           text=True, check=True).stdout.strip()
+    assert clean == "", (
+        "the tree is dirty, so the ordinary sweep can see this write and the "
+        "node is no longer about a commit that hides itself: " + clean)
+    assert res["meta"]["stray_writes"] == [], res["meta"]["stray_writes"]
+
+    moved = res["meta"].get("live_head_moved")
+    assert moved, ("live HEAD moved during the turn and the event says nothing — "
+                   "the porcelain baselines came out clean, as they must for a "
+                   "commit, so this key is the only record that it happened")
+    assert set(moved) == {"from", "to"}, moved
+    assert moved["from"] == base_head, (
+        "the entry does not name the HEAD that stood before the turn ran")
+    head = subprocess.run(["git", "-C", str(tree["repo"]), "rev-parse", "HEAD"],
+                          capture_output=True, text=True,
+                          check=True).stdout.strip()
+    assert moved["to"] == head, (
+        "the entry does not name the HEAD the turn left behind")
+    assert moved["from"] != moved["to"], moved
+    assert res["meta"]["commit"] != head, (
+        "the source's own commit sha was blamed for the move")
+
+
+@pytest.mark.asyncio
+async def test_the_sources_own_commit_is_not_reported_as_a_moved_head(tree, monkeypatch):
+    """The other half of the clause: the key is a report, not an alarm.
+
+    One ordinary green run commits the doc onto live, which moves HEAD by exactly
+    one commit. If that read as a stray move, the entry would fire on every
+    successful review and be switched off within a week — so `committed` is passed
+    in, and the only sha it forgives is the one this run created.
+    """
+    monkeypatch.setattr(A, "run_prompt_in_session",
+                        _turn(_block(), edits=_edit(_doc(tree), "Body line 1.",
+                                                    "Body line one.")))
+    res = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+    assert res["meta"]["commit"], "the fixture run did not commit, so it proves nothing"
+    assert res["meta"]["live_head_moved"] == {}, res["meta"]["live_head_moved"]

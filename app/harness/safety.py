@@ -507,6 +507,28 @@ def check_bash_command(command: str, cwd: str | None = None, *,
             excerpt = excerpt[:80] + "..."
         return (f"install provenance: {provenance.refusal}", excerpt)
 
+    # Sixth: mutating a checkout in the production tree from an unattended
+    # session (#2604). Every lane above asks what a command writes and where; this
+    # one asks whether the caller may move `HEAD` in the tree the running system
+    # boots from, which no path check can answer — `git commit` *cleans up* the
+    # dirt that would otherwise be its own witness, so the arch-review source's
+    # live sweep sees nothing and its revert, which walks the Edit/Write change
+    # ledger, has no entry to walk. The prompt there already forbids the verb;
+    # that sentence is what this lane stops depending on.
+    from app.harness.live_git_writes import check_live_git_writes
+    # `parent_of` on the same line as the call, not wrapped after it: the
+    # deriving grep in architecture/guard-coverage.md §4.5 matches
+    # `parent_of=parent_of`, and the line it prints has to name the guard it is
+    # counting — which is what
+    # tests/test_architecture_coverage_doc_claims.py asserts, in names rather than
+    # in lines, so the count itself is nobody's to maintain.
+    git_write = check_live_git_writes(command, session_id, parent_of=parent_of,
+                                      cwd=cwd)
+    if git_write:
+        excerpt = command.strip().splitlines()[0]
+        if len(excerpt) > 80:
+            excerpt = excerpt[:80] + "..."
+        return (f"live-checkout git write: {git_write}", excerpt)
     return None
 
 

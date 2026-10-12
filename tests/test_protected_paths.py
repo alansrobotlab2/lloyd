@@ -770,3 +770,106 @@ def test_the_deny_set_still_refuses_soul_md_and_still_allows_the_memory_files():
     assert len(PP.PROTECTED_WRITE_ROOTS) == 5, \
         "the deny-set grew; if that was deliberate, this node and the nightly's "\
         "route both need re-reading"
+
+
+# ── #2604 clause 2: the live-checkout git lane refuses nothing outside it ─────
+#
+# `tests/test_safety_gate_discrimination.py` pins what the lane blocks. This node
+# is the other half, and it lives here because this file is where the corpus of
+# *legitimate* writes to protected trees is catalogued: a self-mod round commits
+# in a linked worktree of this very repository, the nightly vault writers commit
+# in `~/obsidian`, and a gate clones the checkout to `/tmp`. A lane that blocked
+# any of those would not be a safety improvement, it would be the loop refusing
+# to run itself — and all three are commits, the verb this lane exists to stop.
+#
+# Real repositories, not path strings: a matcher that decided by regex on the
+# command text would pass a string-only test while blocking the fleet.
+
+def _mk_repo(root: Path) -> Path:
+    """A real git repo with one commit and a dirty file, ready to be committed to."""
+    import subprocess
+
+    root.mkdir(parents=True, exist_ok=True)
+    run = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                    text=True, check=True)
+    run("init", "-q", "-b", "main")
+    run("config", "user.email", "t@example.invalid")
+    run("config", "user.name", "test")
+    (root / "f.md").write_text("one\n")
+    run("add", "f.md")
+    run("commit", "-q", "-m", "seed")
+    # Left dirty on purpose: the arms below name a commit without staging it, and
+    # a fixture with a clean tree would make `git commit` succeed at *refusing* to
+    # commit — "nothing to commit" — so the final check that the guard's blessing
+    # is real would have nothing to prove.
+    (root / "f.md").write_text("one\ntwo\n")
+    return root
+
+
+def test_the_lane_leaves_every_other_checkout_alone(tmp_path):
+    """Clause 2: each of these is a `git commit` by a background session, and each
+    must reach the shell. `live=` is the same value in all three arms — the
+    refusal is about *which* checkout, never about there being a checkout."""
+    import subprocess
+
+    from app.harness.live_git_writes import check_live_git_writes
+
+    live = tmp_path / "lloyd"
+    _mk_repo(live)
+    worktree = tmp_path / "lloyd-work" / "SM_20261012_000000" / "home" / "lloyd"
+    vault = tmp_path / "obsidian"
+    clone = tmp_path / "tmp" / "clone"
+    # A *sibling* whose name starts with the live path as a string, which is what
+    # this box actually calls its runtime data (`~/lloyd` / `~/lloyd-data`). A
+    # containment test written as `path.startswith(live)` calls it production and
+    # refuses a triage round's own scratch tree, so the boundary is pinned here
+    # with the real names rather than argued in a docstring.
+    sibling = tmp_path / "lloyd-data" / "scratch"
+    for other in (worktree, vault, clone, sibling):
+        _mk_repo(other)
+
+    bg = "20261011_233337_owedcheck_ac94"
+    arms = {
+        # A round's own linked worktree, committed to the way the loop does it.
+        "round worktree": (f"cd {worktree} && git add f.md && git commit -m x", None),
+        "scratch clone": (f"cd {clone} && git add f.md && git commit -m x", None),
+        # The nightly vault writers, which the item names explicitly.
+        "vault": (f"cd {vault} && git add f.md && git commit -m x", None),
+        "vault by cwd": ("git add f.md && git commit -m x", str(vault)),
+        # And the `-C` spelling of the same three.
+        "worktree -C": (f"git -C {worktree} commit -am x", None),
+        "sibling scratch tree": (f"cd {sibling} && git add f.md && git commit -m x",
+                                 None),
+        "sibling by cwd": ("git add f.md && git commit -m x", str(sibling)),
+    }
+    for name, (cmd, cwd) in arms.items():
+        assert check_live_git_writes(cmd, bg, cwd=cwd, live=str(live)) is None, name
+        assert check_bash_command(cmd, cwd, at_dispatch=True,
+                                  session_id=bg) is None, name
+
+    # The same words aimed at the live tree are refused, so the four arms above
+    # passed because of the path and not because the matcher never fires.
+    (live / "f.md").write_text("two\n")
+    refused = check_live_git_writes(f"cd {live} && git add f.md && git commit -m x",
+                                    bg, live=str(live))
+    assert refused and "commit" in refused, refused
+
+    # From *inside* the tree, too. git finds the repository by walking up from the
+    # working directory, so `cd <live>/architecture && git commit` moves the same
+    # HEAD, and a lane that matched the checkout by equality alone let the write
+    # the clause exists to stop through a `cd` one level down.
+    nested = check_live_git_writes("git commit -m x", bg,
+                                   cwd=str(live / "architecture"), live=str(live))
+    assert nested and "commit" in nested, nested
+    nested_cd = check_live_git_writes(f"cd {live / 'architecture'} && git commit -m x",
+                                      bg, live=str(live))
+    assert nested_cd and "commit" in nested_cd, nested_cd
+
+    # And the worktree really can commit: the assertion above is about the guard,
+    # and a broken `git` in the fixture would make every arm vacuously true.
+    r = subprocess.run(["git", "commit", "-q", "-am", "x"], cwd=worktree,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=worktree,
+                          capture_output=True, text=True).stdout.strip()
+    assert head, "the fixture worktree has no commit to check"

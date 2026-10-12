@@ -3768,8 +3768,15 @@ def test_the_resolver_miss_block_derives_the_three_from_the_tree():
         assert _run(cmd), f"a proving command prints nothing: {cmd}"
     fan_out = next(c for c in cmds if "app/harness/safety.py" in c)
     lines = _run(fan_out)
-    assert len(lines) == 2, lines
-    assert "check_service_control(" in lines[0] and "check_install_provenance(" in lines[1]
+    # Names, never a count. The block's grep matches `parent_of=parent_of`, so a
+    # sixth session-scoped lane lands on it too (#2604 added one), and a literal
+    # line count fails on a change that left the guards the doc describes exactly
+    # as they were. What §4.5 claims is *which* guards `check_bash_command` feeds
+    # the resolver, so the three names are what is pinned — and each has to appear
+    # on a printed line, which is the one property a count was standing in for.
+    for guard in ("check_service_control(", "check_install_provenance(",
+                  "check_live_git_writes("):
+        assert any(guard in l for l in lines), (guard, lines)
 
     callers = next(c for c in cmds if "classify_session(" in c)
     calls = [l for l in _run(callers)
@@ -4723,3 +4730,60 @@ def test_the_committed_bytes_check_can_fail_on_a_stale_figure():
     assert _DENIAL_QUOTE_ANCHOR not in reworded, (
         "the anchor survives its own replacement, so the extractor's vacuity guard in "
         "_denial_quote_window would never fire")
+
+
+# ── #2604 clause 5: rail 4 must name the check, not just assert the property ───
+
+_RAIL4_ANCHOR = "the model never runs `git`"
+
+
+def test_arch_review_rail_4_names_the_thing_that_enforces_it():
+    """Rail 4 of `architecture/arch-review.md` asserts that the model never runs
+    `git`, and for its first months the sentence was the whole enforcement: `Bash`
+    is kept in the review's tool set by design, `tool_tier("Bash", "git -C <live>
+    commit …")` is 1 — the tier of the `git log` the same prompt orders — and
+    `DISALLOWED` never names the verb. #2604 made it a lane, and a rail that names
+    its checker is the difference between a claim a reader can re-test and a claim
+    a reader has to trust.
+
+    So this node asks for the module and function by name, for the event key that
+    says when the property broke anyway, and for the sentence to say which of the
+    two halves rests on what. It does NOT re-test the behaviour — that is
+    `tests/test_safety_gate_discrimination.py`, which is where a wrong answer costs
+    anything.
+    """
+    text = (ARCH / "arch-review.md").read_text()
+    assert _RAIL4_ANCHOR in text, (
+        "rail 4's headline sentence was reworded away; the node and the rail need "
+        "re-reading together")
+    rail4 = text[text.index(_RAIL4_ANCHOR):text.index(_RAIL4_ANCHOR) + 1800]
+
+    assert "check_live_git_writes" in rail4, (
+        "rail 4 asserts the no-git property without naming the check that enforces "
+        "it, which is the state #2604 was filed about")
+    assert "app/harness/live_git_writes.py" in rail4, rail4[:200]
+    assert "live_head_moved" in rail4, (
+        "rail 4 does not say what the run event reports when the property broke "
+        "anyway, so the report is undiscoverable from the doc that promises it")
+    # Which half rests on what: the commit arrives through the blob check, the
+    # no-git rule through the new lane. Both must be attributable, and the node
+    # must not pass on a paragraph that merely contains both words.
+    assert "commit_reviewed" in rail4, rail4[:200]
+    assert "#2604" in rail4, (
+        "the rail does not say when the sentence stopped being a prompt rule")
+
+    # And the other half of clause 5: naming a rail is only honest if the same doc
+    # says what the rail does *not* cover. `check_live_git_writes` refuses twelve
+    # git verbs in one directory; a turn can still dirty production with `sed -i`
+    # or a redirected `cp`, and a reader who was told "the model never runs git,
+    # there is a lane" will not go looking for the hole the lane left. So the doc
+    # has to carry that sentence, name at least one verb that survives the lane,
+    # and name what still reports it — otherwise the paragraph is reassurance.
+    anchor = "What still rests on the prompt"
+    assert anchor in text, (
+        "rail 4 gained a rail and the doc never said which part of the sentence "
+        "still rests on the model's compliance")
+    residual = text[text.index(anchor):text.index(anchor) + 1200]
+    assert ("`sed -i`" in residual or "`cp`" in residual), residual[:300]
+    for reporter in ("revert_live_ledger_writes", "live_strays"):
+        assert reporter in residual, (reporter, residual[:300])

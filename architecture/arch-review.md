@@ -167,7 +167,26 @@ defence there, not the second one.
    editable. Zero context is load-bearing: with context a one-line edit reports
    a hunk reaching three lines into the neighbour, and seven groups sharing
    [[autonomy-jobs]] would reject each other constantly.
-4. **The source commits onto live, the model never runs `git`.** The bound
+4. **The source commits onto live, the model never runs `git` — one half by
+   blob check, the other by `app/harness/live_git_writes.py::check_live_git_writes`
+   (#2604).** Both halves used to be instructions with one rail underneath: the
+   commit arrived through `commit_reviewed`, and the no-`git` rule lived only in
+   the prompt, where `Bash` is kept on purpose and `git commit` sits at tier 1
+   beside the `git log` the prompt orders. A commit was also invisible — the live
+   sweep baselines twice with `git status --porcelain` and reports the difference,
+   and a commit cleans the tree it dirtied, while `revert_live_ledger_writes`
+   walks the `Edit`/`Write` change ledger and a Bash write leaves no entry there.
+   So the lane now refuses a mutating git subcommand (`commit`, `add`, `apply`,
+   `reset`, `rebase`, `checkout`, `restore`, `switch`, `merge`, `revert`,
+   `cherry-pick`, `amend`, a non-read `stash`) whose working directory is
+   `app.paths.LIVE_CHECKOUT` **or any directory inside it** — git resolves a
+   repository by walking up, so `cd <live>/architecture` is the same `HEAD` — for
+   any session `attended_session` cannot place with
+   a person — and the run event's `live_head_moved` names base and observed HEAD
+   when HEAD moved anyway and `commit` was not this source's. Reads are
+   untouched (`log`, `status`, `diff`, `show`, `grep`, `merge-base`, `stash list`),
+   as is any other checkout: a round's worktree, a `/tmp` clone and the vault all
+   still commit. The bound
    checks run on the checkout's diff; what survives is carried to live by
    `commit_reviewed`. Under `scripts.automod.state.Lock` (non-blocking) and
    only when `app.routers.automod.drain_active()` is False — a commit inside
@@ -184,6 +203,16 @@ defence there, not the second one.
    under the same conflict rule. A pending row from before #1462 (only
    `rel`, doc dirty on live) is still paid by `commit_doc`. A turn that timed
    out never has its half edit committed.
+
+**What still rests on the prompt, after the lane.** Rail 4's second clause is
+"instruct **only** to run `git` reads", and the lane enforces one property of that
+sentence — no mutating `git` in the production checkout — not the sentence. A turn
+can still dirty live with `sed -i`, a redirected `cp`, or `rm`; nothing here
+promises production stays clean, and the sweep is what reports it when it does
+(`revert_live_ledger_writes` for the `Edit`/`Write` half, the `live_strays` report
+for the rest). The rail is that a turn's judgement can no longer become a
+**permanent object on `main`** by a command the source did not run: a tree write is
+revertable and visible, a commit was neither.
 
 A rejected doc edit does **not** unfile the findings. The two halves of a
 review are independent, and losing four real findings because the fifth
@@ -338,4 +367,8 @@ Kill switch: `workers.sources.arch-review.enabled`.
   cost), #2604 (rail 4's "the model never runs git" is a prompt rule, not a
   rail — `Bash` is kept and `git commit` is tier 1), #2605 (the module's own
   prose still says five retired docs are tracked, and #916 closed without
-  fixing it).
+  fixing it). #2604 landed the same day, so "the mechanism is unchanged" held
+  only for that pass: §2 rail 4 is a rail now
+  (`app/harness/live_git_writes.py`, the sixth lane of `check_bash_command`) and
+  the run event carries `live_head_moved`, which is what makes the sentence true
+  of the property it was written for rather than of the prompt.

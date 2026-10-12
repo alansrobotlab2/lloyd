@@ -397,11 +397,268 @@ def test_the_write_check_lets_a_round_edit_its_own_worktree(deny_home, tmp_path)
 #: The four seeding tests, which take no fixture: running this file directly
 #: covers these, while the #1620 section above needs `deny_home` and runs under
 #: pytest only (`-k write_check`).
+# ── #2604: an unattended session cannot move the live checkout's HEAD ─────────
+#
+# `architecture/arch-review.md` §2 rail 4 reads "the source commits onto live,
+# the model never runs `git`", and only half of that was true: the source's
+# commit path is a rail, and the "never runs git" half was a sentence in the
+# prompt. `DISALLOWED` in `workers/sources/arch_review.py` keeps `Bash`
+# deliberately — the prompt orders the turn to run `git log --since='30 days
+# ago' -- <paths>` itself — and `git commit` is tier 1, the same tier as that
+# `git status`. So the failure mode had no rail, and worse, no witness: the
+# source baselines live with `git status --porcelain` twice and reports the set
+# difference, and a commit *removes* the dirt it created.
+#
+# The two arms below are the whole claim. The refuse-arm is what a turn that
+# disobeys the prompt now meets; the allow-arm is the fleet's daily work, which
+# the corpus says is dominated by `git worktree add --detach` (~2,000 runs),
+# `git stash list`, and `git log`/`grep` reads aimed at the live tree — a guard
+# that blocked those would be a new outage wearing a safety badge, which is what
+# #2604's first owed item exists to catch in real traffic.
+#
+# The session ids are real ones from `~/lloyd-data/sessions`, not invented
+# shapes: `20261011_233337_owedcheck_ac94` is a four-part background id (the
+# lane's refuse side) and `20261011_221728_autocode_f0bb` the same, while the
+# allow side needs a human's — and a real chat id has no marker at all. These
+# are the shapes `app/routers/messages.py:2117` mints.
+
+_LIVE = str(__import__("app.paths", fromlist=["LIVE"]).LIVE_CHECKOUT)
+
+#: A background session, taken from a real id on this box.
+_BG = "20261011_233337_owedcheck_ac94"
+
+#: A human's chat session: three parts, no source slug — the shape
+#: `app/routers/messages.py` mints and the only positive evidence a person is
+#: on the other end.
+_CHAT = "20260928_091452_4f2a9c"
+
+
+def _gate(cmd: str, cwd: str | None = None, sid: str = _BG):
+    return safety.check_bash_command(cmd, cwd, at_dispatch=True, session_id=sid)
+
+
+def _lane(cmd: str, cwd: str | None = None, sid: str = _BG) -> str | None:
+    """The refusal `check_bash_command` gives, but only if it is *this* lane's.
+
+    Returning any lane's match would let an unrelated deny — the catastrophic
+    pattern table, the write deny-set — stand in for the git lane and the node
+    would pass while the lane was deleted. This file's own rule is that a test
+    says which lane answers.
+    """
+    match = _gate(cmd, cwd, sid)
+    return match[0] if match and match[0].startswith("live-checkout git write") else None
+
+
+#: Clause 1. Each entry names the subcommand the message has to repeat back, and
+#: the first six are run with **no `-C`** from a `cwd` of the live tree, because
+#: that is how a turn actually types it: `git commit -m x` inside the checkout it
+#: was pointed at.
+_LIVE_WRITES = [
+    ("commit", f"git -C {_LIVE} commit -m x -- architecture/foo.md", None),
+    ("commit", "git commit -m x -- architecture/foo.md", _LIVE),
+    ("reset", "git reset --hard HEAD~1", _LIVE),
+    ("rebase", "git rebase main", _LIVE),
+    ("checkout", "git checkout -- architecture/foo.md", _LIVE),
+    ("restore", "git restore architecture/tools.md", _LIVE),
+    ("switch", "git switch main", _LIVE),
+    ("cherry-pick", "git cherry-pick 01190f26", _LIVE),
+    ("merge", "git merge origin/main", _LIVE),
+    ("revert", "git revert --no-edit HEAD", _LIVE),
+    ("add", "git add architecture/foo.md", _LIVE),
+    # The same writes from one directory *inside* the checkout. git resolves a
+    # repository by walking up, so a nested cwd is the same `HEAD`; a matcher that
+    # compared the cwd to the live path for equality refused the root and let the
+    # subdirectory through.
+    ("commit", "git commit -m x -- architecture/foo.md", f"{_LIVE}/architecture"),
+    ("reset", "git reset --hard HEAD~1", f"{_LIVE}/app/harness"),
+    ("add", f"cd {_LIVE}/app && git add ../architecture/foo.md", None),
+    # The corpus's real shape (`autonomy-task:40`, session
+    # `20261006_020040_autonomy_74bc`). Its expected verb is `add`, not `commit`:
+    # the walk returns the *first* mutating segment, and a chained `git add f &&
+    # git commit` is refused on its `add`. A looser assertion — `verb in label` —
+    # accepted `commit` here only because the message's own boilerplate says "The
+    # source commits production", which is the review's finding that a message can
+    # be satisfied by its explanation instead of by its verdict.
+    ("add", f"cd {_LIVE} && git add f && git commit -q -F - <<'MSG'\nmsg\nMSG", None),
+    ("commit", f"bash -c 'cd {_LIVE} && git commit -m x'", None),
+    ("commit", f"bash -c 'bash -c \"git -C {_LIVE} commit -m x\"'", None),
+    ("commit", f"timeout 30 git -C {_LIVE} commit -m x", None),
+    ("commit", f"nice -n 10 git -C {_LIVE} commit -m x", None),
+    ("commit", f"env FOO=bar git -C {_LIVE} commit -m x", None),
+    ("commit", f"if git -C {_LIVE} commit -m x; then true; fi", None),
+    ("commit", f"git status --short && git -C {_LIVE} commit -m x", None),
+    ("stash", f"git -C {_LIVE} stash", None),
+    ("stash push", f"git -C {_LIVE} stash push -m wip", None),
+    ("stash pop", f"git -C {_LIVE} stash pop", None),
+    # The two flag forms that break a naive subcommand read: `-c` carries a
+    # value (so the verb is two tokens in), and `--paginate` carries none (so a
+    # matcher that assumed a value would eat the word `commit` and answer None).
+    ("commit", f"git -C {_LIVE} -c user.name=x commit -m y", None),
+    ("commit", f"git -C {_LIVE} --paginate commit -m x", None),
+]
+
+
+def test_an_unattended_session_may_not_move_the_live_checkout():
+    """Clause 1: each write shape is refused, and the message says which verb and
+    which tree. A refusal that does not name the subcommand leaves a worker
+    guessing which of its ten git calls was the problem, and a message that
+    cannot be read is how a guard becomes a mystery outage."""
+    for verb, cmd, cwd in _LIVE_WRITES:
+        match = _gate(cmd, cwd)
+        assert match is not None, f"{cmd} was let through"
+        label, excerpt = match
+        # The verb is matched at the head of the message, not anywhere in it:
+        # the lane's own boilerplate says "The source commits production" and
+        # lists `merge-base` among the reads it leaves alone, so a substring test
+        # is satisfied by the explanation and cannot fail for a `commit` or a
+        # `merge` arm however wrong the reported verb was.
+        assert label.startswith(f"live-checkout git write: `git {verb}` in the "
+                                f"live checkout"), (
+            f"{cmd}: message does not name {verb!r} where it reports it: {label!r}")
+        assert _LIVE in label, f"{cmd}: message does not name the live checkout"
+        assert excerpt, f"{cmd}: no excerpt returned"
+
+
+#: Clause 3. The read shapes the arch-review prompt itself orders, plus the
+#: fleet's scratch-checkout pattern. `--since='30 days ago'` is quoted from the
+#: prompt (`workers/sources/arch_review.py:966-967`), so the arm that must not
+#: fire is not invented here.
+_LIVE_READS = [
+    f"git -C {_LIVE} log --since='30 days ago' -- architecture/foo.md",
+    f"git -C {_LIVE} log --oneline -15 -- architecture/foo.md",
+    f"git -C {_LIVE} status --porcelain --untracked-files=all",
+    f"git -C {_LIVE} diff HEAD~1 -- app",
+    f"git -C {_LIVE} show HEAD:architecture/foo.md",
+    f"git -C {_LIVE} grep -n x -- app/",
+    f"git -C {_LIVE} merge-base --is-ancestor 8dbf465f HEAD",
+    f"git -C {_LIVE} stash list",
+    f"git -C {_LIVE} stash show -p",
+    f"git -C {_LIVE} worktree add --detach /home/alansrobotlab/lloyd-work/tri2606 HEAD",
+    f"git -C {_LIVE} rev-parse HEAD",
+    f"git -C {_LIVE} config --get user.name",
+    f"git -C {_LIVE} fsck --connectivity-only",
+    f"git -C {_LIVE} log --format='%H'",
+    f"git -C {_LIVE} log --oneline | grep commit",
+    # A write verb that is only data: inside another command's argument. The
+    # corpus's real shapes — a turn looking for a commit is routine.
+    f"grep -rn 'git commit' {_LIVE}/app/",
+    "ps aux | grep 'git commit'",
+    "awk '/git commit/{print}' notes.txt",
+    "python -c \"print('git commit')\"",
+    "echo 'git commit' > /tmp/note",
+    # A `git` in a non-shell program's argument position is that program's data.
+    f"docker run -w {_LIVE} alpine git commit -m x",
+    # A verb-shaped word that is not a subcommand.
+    f"git -C {_LIVE} commit-tree 4b825dc642 -m x",
+    f"git -C {_LIVE} -c alias.ci=commit status",
+    "git",
+    f"git -C {_LIVE}",
+]
+
+
+def test_a_read_of_the_live_checkout_and_a_talk_about_commits_are_not_writes():
+    """Clause 3, and the arm that decides whether this lane survives contact with
+    the fleet. Every entry is either a read the arch-review prompt or the nightly
+    jobs run constantly, or a mention of a write verb that is not one."""
+    # Positive control, and the reason this node needs one: `_lane` returns None
+    # for a command the lane never saw, so with the lane deleted every read below
+    # still "passes". This one arm is the lane being alive, measured in the same
+    # call sequence as the reads it frames.
+    assert _lane(f"git -C {_LIVE} commit -m x") is not None, (
+        "the lane is not answering at all, so the reads below prove nothing")
+    for cmd in _LIVE_READS:
+        match = _gate(cmd, _LIVE)
+        assert _lane(cmd, _LIVE) is None, f"{cmd} was refused as a write ({match})"
+
+
+def test_the_same_commit_from_a_chat_session_is_not_refused():
+    """Clause 1's other half: this is a guard on *unattended* sessions, so the
+    person whose tree it is keeps every verb. `chat_list_sessions` on this box
+    returns only the four-part background shapes, so the allowed id has to be the
+    three-part one `app/routers/messages.py:2117` mints — and that narrowness is
+    why the lane reads a shape rather than a word like `chat`."""
+    for _verb, cmd, cwd in _LIVE_WRITES:
+        assert _lane(cmd, cwd, _CHAT) is None, cmd
+        assert _gate(cmd, cwd, _CHAT) is None, (cmd, _gate(cmd, cwd, _CHAT))
+
+
+def test_the_desktop_terminal_guard_carries_this_lane_for_text_a_person_types():
+    """The one process boundary this lane has on the attended side, crossed
+    rather than described: `agent_mcp/desktop/guards.py::blocked_text` is a
+    different caller of `check_bash_command` than the MCP aggregator, it passes
+    `cwd=None` (so the target can only come from a `-C`), and it passes the id the
+    desktop lease carries — which for a person at a keyboard is none at all.
+
+    The three arms are the seam in both directions. A background id typed into a
+    terminal window still meets this lane, which is the only way the guard is a
+    guard rather than a hint. An absent id, and a minted chat id, are refused
+    nothing: `blocked_text` is the route a human's own keystrokes take, and the
+    lane standing down on no id is what keeps that route the doc's rail 4 says
+    belongs to a person.
+    """
+    from agent_mcp.desktop import guards
+
+    cmd = f"git -C {_LIVE} commit -m x"
+    refused = guards.blocked_text(cmd, window_class="kitty", session_id=_BG)
+    assert refused and "live-checkout git write" in refused, refused
+    for sid in ("", _CHAT):
+        assert guards.blocked_text(cmd, window_class="kitty",
+                                   session_id=sid) is None, repr(sid)
+
+
+def test_a_command_that_arrives_with_no_session_id_is_not_this_lanes_to_refuse():
+    """The one asymmetry with the neighbouring lanes that could take a human's own
+    commit away, so it is pinned rather than inherited: `check_service_control`
+    opens `if not session_id: return None`, and
+    `agent_mcp/desktop/guards.py::blocked_text` calls
+    `check_bash_command(text, None, at_dispatch=True)` with **no** id for text a
+    person is typing into a terminal. Refusing the empty id there would refuse that
+    person's `git commit` — the route the doc says belongs to a human — so the lane
+    stands down on no id while still refusing every id that carries no evidence of
+    a person (`…_owedcheck_…`, `worker:arch-review:…`, `autonomy-task:…`)."""
+    cmd = f"git -C {_LIVE} commit -m x"
+    for sid in ("", None):
+        assert _gate(cmd, _LIVE, sid) is None, repr(sid)
+        assert _gate("git reset --hard HEAD~1", _LIVE, sid) is None, repr(sid)
+
+
+def test_the_lane_replies_for_a_subagent_only_when_its_parent_is_unattended():
+    """A `task:` subagent is neither answer on its own — the harness says so
+    (`classify_session` returns UNKNOWN rather than guessing). The lane's side of
+    that: with no resolver it refuses (the guard picks its own side, which is the
+    direction `service_control` set the precedent for), and with one that names a
+    chat parent it stands down."""
+    from app.harness.live_git_writes import check_live_git_writes
+
+    cmd = f"git -C {_LIVE} commit -m x"
+    assert check_live_git_writes(cmd, "task:sub-1"), (
+        "a subagent with no resolver was let through")
+    assert check_live_git_writes(cmd, "task:sub-1",
+                                 parent_of=lambda _s: _CHAT) is None
+    assert check_live_git_writes(cmd, "task:sub-1",
+                                 parent_of=lambda _s: _BG)
+
+    # The other caller's exact shape. `_safety_pretool_cb`
+    # (`app/harness/safety.py`, the PreToolUse hook) hands over the session id and
+    # nothing else: `at_dispatch` defaults to False and `parent_of` is not passed,
+    # so on that route a subagent has no resolver and is refused. Pinned here at
+    # the level the hook calls, because a refusal that only exists on the
+    # aggregator's route is a refusal the hook never applies.
+    hook = safety.check_bash_command(cmd, _LIVE, session_id="task:sub-1")
+    assert hook and hook[0].startswith("live-checkout git write"), hook
+
+
 TESTS = [
     test_seeding_a_broad_pattern_makes_the_benign_arm_strictly_worse,
     test_removing_a_pattern_makes_the_true_positive_arm_strictly_worse,
     test_both_directions_discriminate_against_the_same_baseline,
     test_seeding_is_undone_and_the_baseline_pair_still_holds,
+    test_an_unattended_session_may_not_move_the_live_checkout,
+    test_a_read_of_the_live_checkout_and_a_talk_about_commits_are_not_writes,
+    test_the_same_commit_from_a_chat_session_is_not_refused,
+    test_the_desktop_terminal_guard_carries_this_lane_for_text_a_person_types,
+    test_a_command_that_arrives_with_no_session_id_is_not_this_lanes_to_refuse,
+    test_the_lane_replies_for_a_subagent_only_when_its_parent_is_unattended,
 ]
 
 

@@ -472,6 +472,33 @@ def _git(repo: Path, *args: str, timeout: int = _GIT_TIMEOUT) -> str:
     return r.stdout if r.returncode == 0 else ""
 
 
+def live_head_moved(live: Path, base_sha: str, committed: str) -> dict[str, str]:
+    """`{"from": base, "to": observed}` when live HEAD moved and the source did
+    not move it; `{}` when it did not move, or when the mover was this source.
+
+    Why this exists at all: `before_live`/`after_live` are `git status
+    --porcelain` snapshots and the live half of the report is their set
+    difference, while `revert_live_ledger_writes` walks the `Edit`/`Write`
+    entries of the change ledger. A commit is invisible to both, because it
+    *removes* the dirt it made: a turn that edited the doc live from Bash and
+    committed it leaves `git status` clean, so the diff of the two baselines is
+    empty and the ledger has no entry to walk. HEAD is the only witness, and
+    until #2604 nothing read it.
+
+    `committed` is the sha the source itself produced, so the one legitimate
+    mover is subtracted rather than reported; when the source committed and
+    something else committed afterwards, HEAD matches neither and the entry is
+    emitted, which is the honest answer. An unresolvable HEAD (`_git` returns
+    `''` on any failure) yields `{}`: this reports, it does not police, and a git
+    that cannot be asked must not read as a moved tree — that verdict is the
+    caller's `git_rev` failure to make.
+    """
+    now = _git(live, "rev-parse", "HEAD").strip()
+    if not now or now == base_sha or (committed and now == committed):
+        return {}
+    return {"from": base_sha, "to": now}
+
+
 def _porcelain(repo: Path, *pathspec: str) -> set[str]:
     """Paths git reports as changed, as repo-relative strings.
 
@@ -1881,9 +1908,17 @@ async def _review_in(wt: Path, live: Path, base_sha: str, item: QueueItem, paylo
         errs = "; ".join(str(e)[:160] for e in (run.get("errors") or [])[:2])
         why = f"turn produced nothing ({errs or 'no error reported'})"
         logger.warning("arch-review %s: %s — leaving the unit due", unit_key, why)
+        # A turn that produced no text can still have run Bash, so this surface
+        # is checked too rather than only the one that reaches a verdict — a
+        # guard on one of two return paths is no guard.
+        head_moved = await asyncio.to_thread(live_head_moved, live, base_sha, "")
+        if head_moved:
+            logger.warning("arch-review %s: live HEAD moved during a turn that "
+                           "committed nothing: %s -> %s", unit_key,
+                           head_moved["from"][:12], head_moved["to"][:12])
         return {"status": "failed", "summary": f"{unit_key}: {why}"[:500],
                 "meta": {**base, "session_id": session_id, "infra": True,
-                         "stray_writes": strays}}
+                         "stray_writes": strays, "live_head_moved": head_moved}}
 
     # 9. Verify what it claims it filed.
     filed_claim = list((parsed or {}).get("filed") or [])
@@ -1937,13 +1972,22 @@ async def _review_in(wt: Path, live: Path, base_sha: str, item: QueueItem, paylo
             logger.warning("arch-review %s: commit of %s failed — %s", unit_key, rel, detail)
 
     # 11. The record. A timeout is a real attempt: the turn had its budget.
+    #     `live_head_moved` is the witness the porcelain baselines cannot be
+    #     (#2604): a commit cleans up after itself, so `after_live - before_live`
+    #     is empty for exactly the write this source has no revert for.
     now_iso = _now_iso()
+    head_moved = await asyncio.to_thread(live_head_moved, live, base_sha, commit_sha)
+    if head_moved:
+        logger.warning("arch-review %s: live HEAD moved during the turn and this "
+                       "source did not commit it: %s -> %s", unit_key,
+                       head_moved["from"][:12], head_moved["to"][:12])
     event = {"event": "arch_review", "unit": unit_key, "kind": kind, "doc": slug,
              "name": name, "verdict": status or None,
              "grouping": (parsed or {}).get("grouping"),
              "doc_updated": bool(changed), "doc_update_rejected": reject or "",
              "commit": commit_sha, "commit_deferred": commit_note,
              "commit_conflict": commit_conflict, "conflict_kept": conflict_kept,
+             "live_head_moved": head_moved,
              "base": base_sha, "base_blob": base_blob, "worktree": str(wt),
              "filed": filed, "filed_unverified": unverified, "merged": merged,
              "appended_to": appended, "spawn_cap": spawn_cap,
@@ -1994,6 +2038,9 @@ async def _review_in(wt: Path, live: Path, base_sha: str, item: QueueItem, paylo
         bits.append(f"{len(unverified)} unverified id(s)")
     if strays:
         bits.append(f"{len(strays)} stray write(s)")
+    if head_moved:
+        bits.append(f"live HEAD moved {head_moved['from'][:12]}"
+                    f"->{head_moved['to'][:12]}, not by this source")
     return {
         "status": "success",
         "summary": ", ".join(bits)[:500],
@@ -2002,6 +2049,7 @@ async def _review_in(wt: Path, live: Path, base_sha: str, item: QueueItem, paylo
         "meta": {**base, "session_id": session_id, "verdict": status,
                  "grouping": (parsed or {}).get("grouping"),
                  "doc_updated": bool(changed), "doc_update_rejected": reject or "",
+                 "live_head_moved": head_moved,
                  "commit": commit_sha, "commit_deferred": commit_note,
                  "commit_conflict": commit_conflict, "conflict_kept": conflict_kept,
                  "filed": filed, "filed_unverified": unverified, "merged": merged,

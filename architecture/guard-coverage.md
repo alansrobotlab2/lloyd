@@ -356,7 +356,16 @@ git grep -c '^    "[a-z_]*": re.compile' -- agent_mcp/_injection_probe.py agent_
    `desktop_capture` has no lease behind it. The single hand-off from `main.py` to
    `check_bash_command` reaches the last two through `app/harness/safety.py`
    (`check_service_control`, `check_install_provenance`), which is why the
-   derivation has to name that file: the third command below prints both.
+   derivation has to name that file: the third command below prints one line per
+   **guard** it feeds the resolver, and the node over it asserts the *names* it
+   reaches, never how many lines come back — a line count is the first thing a new
+   lane moves, which is how #2604 turned `len(lines) == 2` red on a change that left
+   these three exactly as described. Since #2604 the fan-out in that file reaches
+   `check_live_git_writes(` as well (`app/harness/live_git_writes.py`, the lane that
+   refuses an unattended `git commit` in the production checkout); it is not one of
+   the three guards above, because it resolves a `task:` id through its own
+   `attended_session` and never calls `classify_session`, which is what every count
+   in this section is a count of.
 
    What each resolver consumer does on a miss, so nobody re-counts: the three
    above refuse or go unattended; the injection probe keeps `False` — one shadow
