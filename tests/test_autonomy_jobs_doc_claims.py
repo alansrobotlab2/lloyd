@@ -215,6 +215,18 @@ def _live_prose() -> str:
     return _text().split("## Review log", 1)[0]
 
 
+def _parked_job_section() -> str:
+    """§#68 — the parked-job subsection, prose flattened.
+
+    Scoped to the subsection rather than the whole document so a citation checked
+    "in the parked job's hazard" cannot be satisfied by the same id named in some
+    other section, the way #1520 is about two sections disagreeing.
+    """
+    after = _text().split("### #68 — the name outlived the job", 1)
+    assert len(after) == 2, "architecture/autonomy-jobs.md has no §#68 subsection to scope to"
+    return _flat(re.split(r"\n#{2,3} ", after[1], 1)[0])
+
+
 # ── clause 1 — #86 has an entry, and it states the four contract points ───────
 
 
@@ -459,6 +471,61 @@ def test_the_retired_secondary_eval_is_recorded_only_in_the_dated_log():
     assert "#85" in log and "#1577" in log, (
         "the §Review log no longer records the retirement, so the deletion carries no "
         "dated explanation of itself")
+
+
+def test_the_parked_job_s_slot_confusion_is_cited_by_its_backlog_item():
+    """#2634. The 2026-10-12 arch-review edit (`1d41b432`) that added #68's
+    stale-slot hazard named it "the #85 confusion of #1555", and that appositive put
+    a retired job's id back into current prose — the exact shape
+    `test_the_retired_secondary_eval_is_recorded_only_in_the_dated_log` forbids, which
+    is how the doc went red with no round's diff in front of it.
+
+    The hazard stays and the citation moves, and both halves are pinned so the fix
+    cannot be repeated by deleting the pointer along with the id: the subsection
+    still says in its own words what arming the parked job would do, and still cites
+    backlog **#1555**, the incident that confusion was recorded in.
+    """
+    section = _parked_job_section()
+    assert "resolve_model_alias" in section and "retired slot" in section, (
+        "§#68 no longer states the stale-slot hazard in its own words, so there is "
+        "nothing left for a citation to belong to")
+    assert "#1555" in section, (
+        "§#68's stale-slot hazard is no longer cited to the backlog item that "
+        "recorded it, so the sentence keeps its claim but loses its evidence")
+
+
+def test_the_retired_eval_check_reaches_green_by_running_not_by_bookkeeping(request):
+    """#2634 clause 2. The acceptance is that the node above passes because the
+    document was corrected — not because a skip, an xfail, a `live_vault` re-mark or a
+    deletion moved it off the gate's selection (`-m "not live_vault and not
+    fault_injection"`).
+
+    Each of those shapes is pinned semantically, never by a token scan this file's
+    own prose could defeat: the node is still *defined* here, it is still in
+    `session.items` **of the run that is executing** (deselection removes an item
+    from that list, so a re-mark or an excluded expression fails this), and no test
+    function in this module carries a skip or xfail mark. Run it under `-k "not
+    test_the_retired_secondary_eval"` and this test fails — that is the proof it can
+    fail.
+    """
+    name = "test_the_retired_secondary_eval_is_recorded_only_in_the_dated_log"
+    assert name in globals(), (
+        "the node the acceptance names is no longer defined in this module; deleting "
+        "a check is not the same as passing it")
+    assert not getattr(globals()[name], "pytestmark", []), (
+        "the node now carries a mark of its own, which is how a check gets excluded "
+        "from the gate's selection instead of being run by it")
+    ran = {it.name for it in request.session.items}
+    assert name in ran, (
+        f"the node the acceptance names is not in this run's items, so it was "
+        f"deselected rather than made true — {len(ran)} other nodes are running")
+    suppressed = sorted(
+        n for n, o in globals().items()
+        if n.startswith("test_") and callable(o)
+        and any(m.name in {"skip", "skipif", "xfail"} for m in getattr(o, "pytestmark", [])))
+    assert not suppressed, (
+        f"{suppressed} carry a skip or xfail mark; the acceptance forbids reaching "
+        "green by suppressing a run")
 
 
 # ── clause 4 — write authority: one tier per job, counts that match their rows ─

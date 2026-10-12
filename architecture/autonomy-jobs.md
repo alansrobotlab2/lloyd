@@ -215,9 +215,10 @@ sitting in. **The job is parked**: `status: draft` since Alan's ruling of
 `551e9044` disabled on 2026-09-20 — invisible to both slot guards, since
 `slot_arm_block` and the #1577 lint read `requires_slot:` and this task has
 none, so arming it would succeed and `resolve_model_alias` would land every
-run on the *primary* under a retired slot's name — the #85 confusion of #1555,
-reachable from the one spelling both guards skip (#2632). Everything below
-describes the mechanism as designed and as it behaved while live. The other — the 6 am "read the
+run on the *primary* under a retired slot's name — the confusion backlog
+**#1555** recorded, reachable from the one spelling both guards skip (#2632).
+Everything below describes the mechanism as designed and as it behaved while
+live. The other — the 6 am "read the
 overnight reports and announce a synthesis" job — no longer runs at all and no
 autonomy task binds it. Its skill is archived; an unbound copy survives as
 `~/obsidian/skills/nightly-morning-briefing/` still carrying "Runs at 6:00 AM PST
