@@ -482,6 +482,13 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
   'scripts/state.json':
    ('other-tree: a path inside the skill directory the sentence'
     "names; the job's own state lives under its runtime root"),
+  '~/.local/state/lloyd-automod/landed_outcomes.jsonl':
+   ('generated: the row #2572\'s daily record appends is created by '
+    'its first `--record` run, and #97 had run 0 times when #2630 '
+    'wrote the entry — `select count(*) from runs where task_id=97` '
+    'was 0 on 2026-10-12, and the doc says in the same breath that '
+    'the file does not exist yet. The one citation here whose '
+    'absence is the fact being reported, not a pointer to a file'),
   '~/obsidian/autonomy/85-secondary-routing-eval.md':
    ('stale: a dated finding names the task file by a number the'
     'task no longer carries; the skill of that name is at'
@@ -3122,8 +3129,17 @@ def test_no_architecture_doc_cites_a_command_its_module_does_not_dispatch():
                 excused.append((p.name, verb))
 
     assert not bad, "\n".join(bad)
-    assert graded_by == {"automod.md", "harness.md", "infrastructure.md",
-                         "measurement.md", "research-pipeline.md", "voice.md"}, (
+    # `autonomy-jobs.md` joined the set with #2630, which is the set growing in the
+    # right direction: §Watch the machinery cites the commands its seven jobs run —
+    # `scripts/step_conformance.py replay`, `scripts/maintenance/referential_integrity.py
+    # --record`, `python -m scripts.mitigation_drill`, `scripts/automod/landed_outcomes.py
+    # --record` — and each of those modules has a dispatch chain, so the claims are
+    # graded rather than excused. A doc that started making checkable command claims
+    # is what this sweep exists to collect, not a defect; the entry above, whose
+    # module has no chain, is the shape that would need reading.
+    assert graded_by == {"automod.md", "autonomy-jobs.md", "harness.md",
+                         "infrastructure.md", "measurement.md",
+                         "research-pipeline.md", "voice.md"}, (
         f"graded claims came from {sorted(graded_by)}; harness.md among them is "
         f"the point of #1890 — its `lloyd_rpc.py` row was the report the widening "
         f"existed to settle")

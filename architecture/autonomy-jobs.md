@@ -39,40 +39,46 @@ job is for, what it reads and writes, what it must not do, and what has already
 gone wrong with it.
 
 Jobs are numbered by their task id and that numbering is historical, not
-ordered: ids run 24 through 90 or beyond, with gaps where tasks were retired
-(2026-09-26). Which ids are live is `GET /api/autonomy/tasks`'s business, not
+ordered: ids run 24 through 97 or beyond, with gaps where tasks were retired
+(2026-10-12). Which ids are live is `GET /api/autonomy/tasks`'s business, not
 this document's. Typing a ceiling here has been wrong twice inside a week: the
 bound stopped at 85 while 86 was already running nightly, #1102 corrected it to
-86, and #87–#90 overtook that correction inside three days. So the range above
-is a floor, and the id it names carries the date it was the newest.
+86, and #87–#90 overtook that correction inside three days. #91–#97 then
+overtook the correction this paragraph carries, between 2026-09-29 and
+2026-10-11. So the range above is a floor, and the id it names carries the date
+it was the newest.
 
-**Membership below is behind the fleet, in both directions, as of 2026-10-12.**
-Seven task files exist in `~/obsidian/autonomy/` with no entry anywhere in this
-document: #91 nightly thinking-fidelity prevalence series, #92 vLLM prefix-miss
-daily, #93 step-conformance replay, #94 referential-integrity ledger, #95
-mitigation drill, #96 djev name-prior probe, #97 landed-outcomes daily record.
-And #87–#89 — the one-off paper digests — are still named below as members that
-write into `knowledge/` unattended, while no `87-*.md`, `88-*.md` or `89-*.md`
-exists on disk any more, in `~/obsidian/autonomy/` or in its `_archived/`.
-The group tables and rows keep the trio's ids because the membership checks
-derive from the tables, and the tables are pinned to *each other*, never to the
-directory — that gap is the finding, not the rows. Backlog **#2630** owns
-writing the seven entries and deciding where the departed trio belongs, and
+**Membership below is complete as of 2026-10-12, in both directions, and the
+completeness is still not mechanical.** The seven task files #91 nightly
+thinking-fidelity prevalence series, #92 vLLM prefix-miss daily, #93
+step-conformance replay, #94 referential-integrity ledger, #95 mitigation drill,
+#96 djev name-prior probe and #97 landed-outcomes daily record have their
+entries, in [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97).
+The three paper digests #87 #88 #89 are gone from the tables below: each read
+one named arXiv paper into exactly one knowledge note, was dispatched
+interactively on 2026-09-24, and leaves no `87-*.md`, `88-*.md` or `89-*.md`
+behind in `~/obsidian/autonomy/` or in its `_archived/` — a run record outliving
+its task file does not make the job a fleet member. What has *not* changed is
+why both errors were possible: the group tables are pinned to *each other*,
+never to the directory, so a task file appearing in `~/obsidian/autonomy/`
+fails nothing and a task file vanishing from it fails nothing either. Backlog
 **#2631** owns the check that reconciles this document against the task-file
-directory so neither direction drifts silently again — the same failure #1102
-caught for #86, invisible again because no test reads the fleet.
+directory; #2630 owns the content of this paragraph, which is the same failure
+#1102 caught for #86, recurring for seven jobs and, in the other direction, for
+three.
 
 ## The functions
 
 | Function | Jobs | What it is for |
 |---|---|---|
-| [Ingest](#ingest-68-30-53-87-88-89) | #68 #30 #53 · #87 #88 #89 | turn outside signal into internal state |
+| [Ingest](#ingest-68-30-53) | #68 #30 #53 | turn outside signal into internal state |
 | [Distil](#distil-38-42-39-40-47--56-57-58-83--54) | #38 #42 #39 #40 #47 · #56 #57 #58 #83 · #54 | read what we already have, write something more useful than the sum of it |
 | [Build the graph](#build-the-graph-24-51-74) | #24 #51 #74 | turn documents and trajectories into facts and typed edges |
 | [Canonicalize](#canonicalize-48-67-84) | #48 #67 #84 | make what is already stored agree with itself |
 | [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
 | [Bound entropy](#bound-entropy-79-81-78-80-90) | #79 #81 #78 #80 · #90 | stop the stores rotting or growing without limit |
 | [Measure](#measure-60-82-70-36-76-86) | #60 #82 #70 #36 #76 #86 | say whether any of it is working |
+| [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97) | #91 #92 #93 #94 #95 #96 #97 | read the machinery the rest of the fleet runs on — session traces, the engine's log window, run records, loaded memory, the mitigations, the decision engine, the loop's own landings — and report what it looks like |
 
 ### Write authority is the fault line
 
@@ -86,10 +92,10 @@ the row answers the permission question, never the size question:
 
 | Tier | Jobs | |
 |---|---|---|
-| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #87 #88 #89 · #48 | 24 |
+| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #48 · #92 #93 #94 | 24 |
 | Injects expiring context unattended | #68 | 1 |
 | Proposes; an operator applies | #67 #84 | 2 |
-| Reports only | #60 #82 #70 #78 #80 #36 #86 #90 | 8 |
+| Reports only | #60 #82 #70 #78 #80 #36 #86 #90 · #91 #95 #96 #97 | 12 |
 | Acts on the fleet itself | #76 | 1 |
 
 The rows answer "may it write while nobody is watching", not "how much may it
@@ -155,8 +161,10 @@ canonicalizing**, which is exactly why #74 declares `depends_on: 48` — it must
 re-type edges only after the names under them have settled. Under the chain
 grouping those three jobs sat in one list and the alternation was invisible.
 
-26 of the 36 tasks (2026-09-26) declare no dependency at all: ten jobs name a
-parent, one each, and those ten are exactly the arrows drawn above.
+29 of the 39 tasks (2026-10-12) declare no dependency at all: ten jobs name a
+parent, one each, and those ten are exactly the arrows drawn above. None of
+#91–#97 declares a parent, so the arrows are the same ten #1520 verified and the
+pair moved by seven together.
 
 ### Two holes in the wiring
 
@@ -188,23 +196,30 @@ mechanism and apply to every edge above:
 
 ---
 
-## Ingest: #68, #30, #53, #87, #88, #89
+## Ingest: #68, #30, #53
 
-What the outside world did while nobody was looking. #30, #53 and the three paper
-digests #87 #88 #89 write into `knowledge/`; #68 writes no vault file at all — it
-is the only job in the fleet whose output is a *conversation* (an inject that
-expires) rather than a file, which is why it has a write tier of its own, and the
-only one whose task file still names the **secondary** engine — an engine
-retired 2026-09-20, which is why the job sits parked (§#68).
+What the outside world did while nobody was looking. #30 and #53 write into
+`knowledge/`; #68 writes no vault file at all — it is the only job in the fleet
+whose output is a *conversation* (an inject that expires) rather than a file,
+which is why it has a write tier of its own, and the only one whose task file
+still names the **secondary** engine — an engine retired 2026-09-20, which is
+why the job sits parked (§#68).
 
 | ID | Freq | Role |
 |----|------|---|
 | #68 | every 15 min | Calendar + unread mail, filtered and classified, injected as ambient context |
 | #30 | 3×/day | GitHub releases/issues and YouTube RSS → keyword pre-filter → scorer → high-scoring items to the vault |
 | #53 | daily | Changelogs and release notes for the stack; compare each source's latest version against last-checked; only process actual changes, then write `knowledge/stack-updates/YYYY-MM-DD-<source>.md` |
-| #87 | daily | arXiv 2609.26758 read in full → exactly one knowledge note. One-off research digest dispatched interactively on 2026-09-24 |
-| #88 | daily | arXiv 2609.26532, same shape |
-| #89 | daily | arXiv 2609.26550, same shape |
+
+**The three paper digests held rows here until 2026-10-12.** #87 #88 #89 were
+`research-agent` jobs that each read one named arXiv paper — 2609.26758,
+2609.26532, 2609.26550 — into exactly one `knowledge/` note, and were dispatched
+interactively on 2026-09-24. No `87-*.md`, `88-*.md` or `89-*.md` is left in
+`~/obsidian/autonomy/` or in its `_archived/`, so the rows here described jobs
+with nothing to dispatch them; #2630 took the trio out of the
+function row, the write-authority row and this heading. The run records they
+left under `~/lloyd-data/autonomy-runs/` are history, and history is not
+membership.
 
 ### #68 — the name outlived the job
 
@@ -290,7 +305,7 @@ instruction rather than by accident.
 
 ## Distil: #38 #42 #39 #40 #47 · #56 #57 #58 #83 · #54
 
-Ten of the fleet's 36 jobs (2026-09-26), and the largest concentration of
+Ten of the fleet's 39 jobs (2026-10-12), and the largest concentration of
 unattended write authority in it. Two chains and one straggler: reflection turns
 the day's *signals* into memory and config, trace2skill turns the *tool-call
 record* into skills, and #54 turns the vault's existing notes into new ones.
@@ -1023,6 +1038,90 @@ name.
 
 ---
 
+## Watch the machinery: #91 #92 #93 #94 #95 #96 #97
+
+Measure asks whether the fleet is working. These seven ask a different question —
+whether the *machinery the fleet runs on* still looks like what its own
+documentation says — and they read it from outside: the engine's reasoning traces,
+the serving process's cache and KV window, other jobs' run records, the memory
+surface a prompt is assembled from, the mitigations that stop a run, the decision
+engine on GPU 2, and the self-modification loop's own landings. None of them is
+about a job's output, which is why they are not scattered through the six groups
+above and why they arrived as a block: all seven were created between 2026-09-29
+and 2026-10-11, and none of them had an entry here until #2630.
+
+| ID | Freq | Job | Reads | Writes | Must not |
+|----|------|-----|-------|--------|----------|
+| #91 | daily | Nightly thinking-fidelity prevalence series (`thinking-fidelity-prevalence-series`, #1770) | every session file under `~/lloyd-data/sessions`, walked twice by `scripts.thinking_fidelity_scan --record --per-day` | one row per calendar day plus a final `scope: whole_store` row, appended to `~/lloyd-data/_pipeline/metrics/thinking-fidelity-prevalence.jsonl` | `config.yaml` or `preserve_thinking_iterations`: switching the capture to `false` makes the marker rate fall without one fabricated trace going away, which is the failure #1510 closed |
+| #92 | daily | vLLM prefix-miss daily (`vllm-prefix-miss-daily`, #2006) | `usage.db`, `event_logs/*.events.jsonl`, and the primary engine's status lines in `~/lloyd-data/logs/services/agent-llm-primary.log*`, through `scripts.vllm_prefix_miss_window` | `~/lloyd-data/vllm-prefix-miss/vllm_prefix_miss_<counted-day>.json`, plus a backlog item when a §10 trigger moved or a day is about to rotate out of the ~11-file log window uncounted | stage or commit anything: `workers/sources/arch_review.py` and an automod round are the two things that commit onto live main, and a nightly reader that staged its own fixture would be a third |
+| #93 | daily | Step conformance replay (`step-conformance-replay`, #2104) | the last 7 days of run traces under `~/lloyd-data/autonomy-runs`, replayed against each task's learned `expected_steps` ledger by `scripts/step_conformance.py replay --days 7 --support 1.0 --escalate-writes` | its printed lines verbatim into its own run record, and the one escalation: a backlog draft for a flagged run that wrote no artefact every other run of its task wrote | `learn --out` and `replay --json`; the ledger and the trajectory store stay closed for writing, and the job never adjudicates, promotes, closes or re-triages the draft it filed, never injects into a session, never opens a round |
+| #94 | daily | Referential integrity ledger (`referential-integrity-ledger`, #2151 from #882) | every backticked path and `path:N` cite in `lloyd/MEMORY.md`, `lloyd/USER.md` and `memory/mental-models.md`, resolved against the repo, vault, data root and the citing file's directory | `~/obsidian/autonomy/referential-integrity-latest.md` and a dated copy under `~/obsidian/autonomy/referential-integrity/` — the only two paths it may touch, both through Bash; exit 1 is the expected result every night, because baseline dangling cites exist | edit a cited memory file or any other file, fix a dangling cite, pass `--expect-dangling` to move a number, file an item, or read an unchanged count as a problem to escalate |
+| #95 | daily | Mitigation drill, read (`mitigation-drill`, #2432 over #703/#2153) | `GET /api/workers/status`'s `.mitigation` block — one Bash call — which publishes what `~/lloyd-data/mitigation_drill.json` holds | nothing at all: `python -m scripts.mitigation_drill` from the pool's maintenance seat is the only writer of that state file, and a drill run of its own is refused while a self-modification round holds the pool | fire the drill, re-run the GET to refresh a stale reading or to confirm a `no-op`, edit the script, the state file or a threshold. A latest classification of `no-op` is a control regression to be named in one line; `{"state": "never-run"}` is a report, not a failure |
+| #96 | weekly | djev name-prior probe (`djev-name-prior-probe`, #2215 from #1452) | the pinned corpus `eval/djev/name_prior_corpus.jsonl` — 38 prompts on 2026-10-12, 10 dedupe / 10 entity / 10 edges / 8 rank, whose `sha256` every report records — one `choice` question per prompt against the decision engine | `~/lloyd-data/eval/djev/name_prior_<run date>.json`, the probe's default `--out-dir` since #2455, so a run leaves no file inside `~/lloyd` for anybody to `git add` | add a flag — `--samples`, `--url`, `--out-dir`, `--date` and `--corpus` are all absent from the command the skill gives — re-run the probe, or edit it; exit 3 means the engine was unreachable, no report was written and no flip rate was measured |
+| #97 | daily | automod landed-outcomes daily record (`landed-outcomes-daily-record`, #2572 from #2378) | `git log`/`git show` over `~/lloyd` plus the automod ledger, split by author and put through a Wilson interval by `scripts/automod/landed_outcomes.py`; it makes no model call | exactly one JSON row appended to `~/.local/state/lloyd-automod/landed_outcomes.jsonl` — `--record` is what makes it append, and without the flag the module prints, writes nothing and still exits 0 | add `--since`, which moves the window every rate in the row is measured on; edit, truncate, re-sort, compact or dedupe the journal; run it twice in one turn; hand-write a row |
+
+Five of the seven carry an `acceptance.objective_checks` block naming `Write` and
+`Edit` in its `tool_not_called` list, so their read-only bound is checked by the
+runner and not by the prose. #91 and #92 carry no such block: for those two the
+prohibition lives only in the `description` field a run is handed, which is why
+`preserve_thinking_iterations` and the staging rule are spelled out there in full.
+
+**Three of the seven are not report-only, whatever the report looks like.** The
+write-authority table asks one question — may it write while nobody is watching —
+and #92 files a backlog item, #93 files a backlog draft and #94 overwrites a
+latest-path ledger in the vault plus a dated copy beside it. Those are vault files
+that another job or a person will act on, so the three sit in the unattended-writer
+tier beside #30 and #53. #91, #95, #96 and #97 are the report-only half: one dated
+artefact each under the data root or the automod state dir — #95 leaves not even
+that, since it reads a state file another process owns — and nothing in the vault
+or the queue. #2630's triage read all seven as report-only from the artefact paths;
+the three that file are the ones where reading the artefact path alone was wrong,
+and the tier is where that difference has to be visible.
+
+The group has one shape, and it is the shape #86 arrived with: read something the
+rest of the system produces, append or overwrite exactly one dated artefact, print
+a line whose numbers a later reader can re-derive, and hold every judgement for a
+person. Four readings follow from that and are worth having written down, because
+each one looks like an outage from the run record alone:
+
+- **#94 exits 1 every night.** Twelve baseline dangling cites existed on 2026-10-04
+  (`200 cites, 12 dangling, 4 exempt`), so exit 1 is the ledger working. Exit ≥2 or
+  a traceback is the failure, and the `; echo "EXIT=$?"` on the command line is
+  there so the expected 1 is not recorded as a tool error.
+- **#95 reporting `-` is not a gap in #95.** A `never-run` state or a stale newest
+  `at` means the maintenance seat has not run the drill; the job's whole job is to
+  say so in the shape of one line and stop.
+- **#91's day rows are snapshots until their day closes.** 2026-09-28 read
+  45/10005 while the day was open and 45/10324 after, so a falling marker rate is
+  only ever judged across closed days — and the lever that would legitimately move
+  it is the prompt, not the capture setting.
+- **#93 reporting an empty window is a finding.** Zero baselines and zero flags is
+  reported as the absence it is, never as a pass; the detector has been read-only
+  for most of its life and an empty window is how that keeps looking fine.
+
+**#97 has never run**: `select count(*) from runs where task_id=97` over
+`~/lloyd-data/workers.db` was 0 on 2026-10-12, the file was created at 19:52Z on
+2026-10-11, and `~/.local/state/lloyd-automod/landed_outcomes.jsonl` does not exist
+on disk yet. Its reads and writes above are therefore stated from
+`skills/landed-outcomes-daily-record/SKILL.md` and the module's own `record()`
+docstring, not from an artefact — the first run is what turns this row from a plan
+into a record, and #2630's owed-check pass is where it gets confirmed.
+
+Two of these seven are the reason the other five are trusted at all: #93 is the
+only thing that notices when a run stopped doing a step every other run of its task
+did, and #94 is the only thing that notices when loaded memory starts pointing at
+files that are not there. Both are deliberately silent about what they find —
+`notify_on_complete: false`, no injected context, and one backlog draft as the
+entire alert surface — because the record behind that choice is the guardian's:
+every rollback so far was a false positive, so a page is not this group's currency.
+A group whose findings arrive as drafts and dated rows is easy to mistake for an
+inert one. It is not: #93 exists because the detector shipped read-only in #673 and
+nothing called it for six weeks, and #94 exists because `skill_lint` covers SKILL.md
+only and the groundskeeper covers wikilinks, so nothing at all resolved the
+backticked cites that every prompt in this system leans on.
+
+---
+
 ## What the fleet actually costs
 
 A snapshot, not a fact — the seven days to 2026-09-11, from `workers.db` where
@@ -1153,3 +1252,27 @@ decide what gets worked on next.
   reconciles the doc against the task-file directory), #2632 (#68's stale
   `model:` and the guard blind spot), #2633 (pin the citation form so line
   drift goes red).
+
+- **2026-10-12 — `current` for the fleet's membership; `stale` for one row.**
+  #2630 wrote the seven entries and took out the three that had no task file.
+  #91–#97 are a group of their own, [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97),
+  because what they read is the machinery the rest of the fleet runs on rather than
+  the outside world (Ingest) or a job's own output (Measure). Their write authority
+  split three/four against the triage's read that all seven were report-only: #92
+  files a backlog item, #93 files a backlog draft and #94 overwrites a vault ledger,
+  so those three sit with the unattended writers and #91 #95 #96 #97 are the
+  report-only half. The tier row counts did not move: the trio left the writer row
+  as the three arrived, and the report-only row went 8 → 12. #87–#89 are gone from
+  the function row, the tier row, the §Ingest heading and their own three rows; their
+  run records stay under `~/lloyd-data/autonomy-runs/`, and a record is not a
+  member. Two fleet counts were corrected rather than restated: §The wiring's
+  no-dependency sentence and §Distil's opening now read 29 of 39 and 10 of 39 on
+  `GET /api/autonomy/tasks` (the ten `depends_on` edges are unchanged — none of the
+  seven declares a parent), and the numbering floor moved to 97 with its date, which
+  is what the sentence asks a correcting pass to do. What is still owed on this
+  document: #2631's reconciler against `~/obsidian/autonomy/` (both directions of
+  this failure are still one `ls` away from being caught), #2632 (#68's stale
+  `model:`), #2633 (the citation form), and one row above that cannot be confirmed
+  until its job has run — #97's reads and writes are stated from its skill and its
+  module, and `select count(*) from runs where task_id=97` was 0 the day this was
+  written.

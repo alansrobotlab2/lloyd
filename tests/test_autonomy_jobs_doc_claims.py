@@ -89,14 +89,45 @@ _WORDS = {
     "thirty-two": 32, "thirty-three": 33, "forty": 40,
 }
 
-#: The four jobs created 2026-09-24 and 2026-09-25 that neither membership table
-#: listed: #87 #88 #89 (`research-agent`, one arXiv paper each → one knowledge
-#: note) and #90 (`corpus-shape-trend`, the shape metrics over four nightly
-#: corpora). Their absence was invisible to
-#: `test_every_job_has_one_function_and_exactly_one_write_tier` because it
-#: cross-checks the two tables against *each other*: symmetric omission passes.
-NEW_JOBS = ("#87", "#88", "#89", "#90")
-DIGESTS = ("#87", "#88", "#89")
+#: The jobs created since the last membership pass that both tables must list:
+#: #90 (`corpus-shape-trend`, the shape metrics over four nightly corpora, created
+#: 2026-09-25) and #91–#97, created between 2026-09-29 and 2026-10-11, which
+#: reached 2026-10-12 with no entry anywhere in the document. The omission was
+#: invisible to `test_every_job_has_one_function_and_exactly_one_write_tier`
+#: because it cross-checks the two tables against *each other*: symmetric omission
+#: passes, and no test reads `~/obsidian/autonomy/` (#2631 owns that check).
+#: #91–#97 joined the tables through #2630.
+NEW_JOBS = ("#90", "#91", "#92", "#93", "#94", "#95", "#96", "#97")
+
+#: The three paper digests #2630 took out of the membership tables. Each was a
+#: `research-agent` job that read one named arXiv paper into exactly one knowledge
+#: note and was dispatched interactively on 2026-09-24; as of 2026-10-12 no
+#: `87-*.md`, `88-*.md` or `89-*.md` exists in `~/obsidian/autonomy/` or in its
+#: `_archived/`. They are the mirror image of the seven omissions above — the
+#: tables named members with no task file behind them — and both directions were
+#: unnoticed for the same reason: nothing reconciles the tables with the directory.
+#: #90, created the same fortnight and still a live task file, is the positive
+#: control in `test_the_departed_paper_digests_hold_no_membership_row`.
+DEPARTED = ("#87", "#88", "#89")
+
+#: The seven watch-the-machinery jobs, each with the schedule its own task file's
+#: `frequency:` declares and three phrases its entry has to contain: what it reads,
+#: the artefact it writes, and one thing it must not do. Read off
+#: `~/obsidian/autonomy/9[1-7]-*.md` on 2026-10-12 and typed here rather than
+#: parsed from the vault on purpose: a check that opened the task directory is a
+#: `live_vault` read, which the gate deselects (`pytest.ini:10-13`), and every
+#: clause #2630 was accepted on has to be gradable by the rung that really runs.
+WATCH_JOBS = {
+    91: ("daily", "~/lloyd-data/sessions", "thinking-fidelity-prevalence.jsonl",
+         "preserve_thinking_iterations"),
+    92: ("daily", "agent-llm-primary", "vllm_prefix_miss_", "stage or commit"),
+    93: ("daily", "~/lloyd-data/autonomy-runs", "backlog draft", "learn --out"),
+    94: ("daily", "mental-models.md", "referential-integrity/", "expect-dangling"),
+    95: ("daily", "api/workers/status", "mitigation_drill.json",
+         "scripts.mitigation_drill"),
+    96: ("weekly", "name_prior_corpus.jsonl", "eval/djev/name_prior_", "--samples"),
+    97: ("daily", "automod ledger", "landed_outcomes.jsonl", "--since"),
+}
 
 #: The ten `depends_on` edges, as the wiring diagram's parent ─► child arrows.
 #: Verified parent-by-parent on 2026-09-26: 74→48, 48→24, 39→42, 58→57, 42→38,
@@ -971,17 +1002,21 @@ def test_the_wiring_sentence_and_its_diagram_still_declare_the_ten_verified_edge
 # ── #1520 clause 5 — the four newest jobs are in both tables ─────────────────
 
 
-def test_the_four_newest_jobs_are_listed_once_in_each_membership_table():
-    """#1520 clause 5. #87, #88, #89 (`research-agent`, one arXiv paper each) and
-    #90 (`corpus-shape-trend`) were created 2026-09-24 and 2026-09-25 and have run
+def test_the_newest_jobs_are_listed_once_in_each_membership_table():
+    """#1520 clause 5 (for #87–#90) and #2630 clause 1 (for #91–#97): the same
+    defect twice. #87, #88, #89 (`research-agent`, one arXiv paper each) and #90
+    (`corpus-shape-trend`) were created 2026-09-24 and 2026-09-25 and have run
     since — two runs each for the digests, one for #90, all green — yet neither
     table listed them, and the five tier rows still added up (20/1/3/8/1 = 33)
-    against a 36-task fleet.
+    against a 36-task fleet. Seven more task files were created between 2026-09-29
+    and 2026-10-11 (#91–#97, `status: up_next`, 2–14 runs apiece on the live route)
+    and reached 2026-10-12 with the same silence, which is what #2630 was filed for.
 
-    `test_every_job_has_one_function_and_exactly_one_write_tier` could not see it:
-    it compares the tables with each other, so a job missing from both is symmetric
-    and passes. This names the four ids and requires exactly one row apiece in each
-    table, because a count in a header cell is not a membership check.
+    `test_every_job_has_one_function_and_exactly_one_write_tier` could not see
+    either episode: it compares the tables with each other, so a job missing from
+    both is symmetric and passes. This names the ids and requires exactly one row
+    apiece in each table, because a count in a header cell is not a membership
+    check.
     """
     funcs, tiers = _table(FUNCTIONS_HEADER), _table(TIERS_HEADER)
     grouped = [i for ids, _ in funcs.values() for i in ids]
@@ -996,35 +1031,68 @@ def test_the_four_newest_jobs_are_listed_once_in_each_membership_table():
             f"which is the doc's answer to what that job may do unattended")
 
 
-def test_the_four_newest_jobs_sit_in_the_group_and_tier_their_output_belongs_to():
-    """#1520 clause 5's judgement, pinned the way #86's placement is. #87 #88 #89
-    read one outside document — an arXiv paper — and write one knowledge note into
-    `knowledge/`, which is what Ingest is for, and that note is durable state, so
-    they sit in the unattended-writer tier beside #30 and #53. #90 measures the
-    shape of four nightly-written corpora and appends one dated metrics row per run,
-    which is what #82 and #86 do when they record a trend: Reports only, under the
-    Bound entropy group whose #78/#80 pair is this doc's report-only half of bounding
-    growth. The choice of group is arguable; that each job has exactly one group and
-    one tier is not.
+#: The tier #2630 put each of #91–#97 in, and the reason, which is the tier
+#: table's own question — *may it write while nobody is watching* — not how much.
+#: #91 #95 #96 #97 leave one runtime artefact each (a metrics row, a probe report,
+#: an appended journal) and #95 leaves nothing at all: the drill's state file has a
+#: different writer. None of the four touches the vault or the queue. #92 files a
+#: backlog item when a §10 trigger moves, #93 files a backlog draft when a run wrote
+#: no artefact, and #94 overwrites a dated ledger pair under `~/obsidian/autonomy/`;
+#: those three act on durable state outside their own report, so they sit in the
+#: unattended-writer tier beside #30 and #53 rather than with the reporters. The
+#: triage of #2630 read all seven as Reports-only; three of them are not, and the
+#: divergence is stated in the doc's §Watch the machinery rather than buried.
+WATCH_TIER = {
+    "#91": "Reports only",
+    "#92": "Writes durable state unattended",
+    "#93": "Writes durable state unattended",
+    "#94": "Writes durable state unattended",
+    "#95": "Reports only",
+    "#96": "Reports only",
+    "#97": "Reports only",
+}
+
+
+def test_the_newest_jobs_sit_in_the_group_and_tier_their_output_belongs_to():
+    """#1520 clause 5's judgement (#87–#90), #2630 clauses 1 and 2's (#91–#97),
+    pinned the way #86's placement is.
+
+    #87 #88 #89 read one outside document — an arXiv paper — and wrote one
+    knowledge note into `knowledge/`, which is what Ingest is for, and that note is
+    durable state, so they sat in the unattended-writer tier beside #30 and #53
+    until their task files disappeared (#2630, `DEPARTED`). #90 measures the shape
+    of four nightly-written corpora and appends one dated metrics row per run, which
+    is what #82 and #86 do when they record a trend: Reports only, under the Bound
+    entropy group whose #78/#80 pair is this doc's report-only half of bounding
+    growth.
+
+    #91–#97 all read the machinery the other jobs run on — session traces, the
+    serving engine's log window, other jobs' run records, the memory surface a
+    prompt is built from, the mitigations that stop a run, the decision engine, the
+    self-modification loop's own landings — which is not Measure's job of saying
+    whether the fleet is working, so they form their own group. Their tiers split
+    on what the run is permitted to leave behind, not on what it measures: see
+    `WATCH_TIER`. The choice of group is arguable; that each job has exactly one
+    group and one tier is not.
     """
     funcs, tiers = _table(FUNCTIONS_HEADER), _table(TIERS_HEADER)
 
     def tier_of(job: str) -> list[str]:
         return [t for t, (ids, _) in tiers.items() if job in ids]
 
-    ingest = next(v for k, v in funcs.items() if k.startswith("[Ingest]"))
-    assert all(job in ingest[0] for job in DIGESTS), (
-        f"the digests {list(DIGESTS)} are not all in the Ingest row, which lists "
-        f"{ingest[0]} — an outside document in, a vault note out, is that group")
     bound = next(v for k, v in funcs.items() if k.startswith("[Bound entropy]"))
     assert "#90" in bound[0], f"#90 is not in the Bound entropy row, which lists {bound[0]}"
-    for job in DIGESTS:
-        assert tier_of(job) == ["Writes durable state unattended"], (
-            f"{job} is in {tier_of(job) or 'no tier'}; it writes a knowledge note into "
-            f"the vault with nobody watching, which is what that tier means")
     assert tier_of("#90") == ["Reports only"], (
         f"#90 is in {tier_of('#90') or 'no tier'}; outside its own metrics row it "
         f"changes nothing, the same position #82 and #86 hold")
+    watch = next(v for k, v in funcs.items() if k.startswith("[Watch the machinery]"))
+    for job, tier in WATCH_TIER.items():
+        assert job in watch[0], (
+            f"{job} is not in the Watch the machinery row, which lists {watch[0]} — "
+            f"every one of the seven reads the machinery another job runs on")
+        assert tier_of(job) == [tier], (
+            f"{job} is in {tier_of(job) or 'no tier'}, not {tier!r} as #2630 ruled: "
+            f"the tier answers what the run may write with nobody watching")
 
 
 def test_every_groups_heading_row_link_and_id_list_agree():
@@ -2341,17 +2409,40 @@ def test_the_folded_away_docs_are_recorded_as_gone_from_the_tree():
 def test_the_numbering_note_survives_the_archive_pointer_being_fixed():
     """#2329 clause 1's second half, pinned as its own node because the two edits
     sit in one file and the failure mode is collision, not correctness: rewriting
-    the retirement paragraph at line 1041 of this 1,100-line doc must not disturb
-    the id-range sentence at line 42, which is what
-    `test_no_second_fleet_bound_appears_anywhere_in_architecture` depends on for
-    its floor wording, its numbering-note anchor and its dated-range requirement."""
+    the retirement paragraph must not disturb the id-range sentence, which is what
+    `test_no_second_fleet_bound_appears_anywhere_in_architecture` depends on for its
+    floor wording, its numbering-note anchor and its dated-range requirement.
+
+    The bound itself is no longer pinned as a literal. #2329 wrote the probe around
+    `24 through 90`, but the doc's own rule is that the named id is a floor that
+    advances and carries the date it was newest — which is what #1102 was filed for
+    when the bound stopped at 85 with 86 already running nightly, and what #2630
+    repeats for #91–#97. A literal `90` therefore punished the correction the doc
+    asks for, and the collision this node exists to catch could not be told from a
+    bound being raised. What is pinned now is the shape of the whole sentence and a
+    bound that cannot sit below the highest id the document itself lists as a
+    member: `24 through <N> or beyond, with gaps where tasks were retired
+    (<a date>)`, with N at least the largest member id. Below that, the note names a
+    ceiling while the tables two rows down name jobs above it — the #1102 state, in
+    the one sentence whose job is not to be that.
+    """
     flat = _flat(_text())
-    note = ("ids run 24 through 90 or beyond, with gaps where tasks were retired")
-    assert note in flat, (
-        "the numbering note moved or was reworded, and the node that reads the "
-        "range as a floor rather than a ceiling loses its anchor")
-    assert re.search(re.escape(note) + r" \(\d{4}-\d{2}-\d{2}\)", flat), (
-        "the note lost the date that travels with the range")
+    m = re.search(
+        r"ids run 24 through (\d+) or beyond, with gaps where tasks were retired "
+        r"\((\d{4}-\d{2}-\d{2})\)", flat)
+    assert m, (
+        "the numbering note moved or was reworded out of the shape "
+        "`ids run 24 through <N> or beyond, with gaps where tasks were retired "
+        "(<date>)`, and the node that reads the range as a floor rather than a "
+        "ceiling loses its anchor")
+    named = int(m.group(1))
+    listed = max(int(i.lstrip("#")) for ids, _ in _table(FUNCTIONS_HEADER).values()
+                 for i in ids)
+    assert named >= listed, (
+        f"the note bounds the fleet at {named} while the functions table lists "
+        f"#{listed} as a member — a bound below the fleet's own newest member is the "
+        f"#1102 defect, and the date beside it ({m.group(2)}) is what makes it "
+        f"checkable rather than merely stale")
 
 
 # ── #2482 — the digester's filing rule lives in its skill, graded here ───────
@@ -2438,3 +2529,193 @@ def test_a_task_id_cited_by_the_digester_must_resolve_before_it_is_called_a_gate
     assert "0 files" in rule, (
         "the standing control — no wake-word autonomy task exists, live or archived — "
         "is what makes this rule checkable rather than advice")
+
+
+# ── #2630 — the seven watch-the-machinery jobs get entries; the digests lose rows ─
+#
+# The bargain this file's own docstring states is that schedules live in the task
+# files and membership is complete *here*, and #2630 is what happens when the second
+# half is false in both directions at once: seven live task files (#91–#97,
+# `status: up_next`, every one running on 2026-10-12) named nowhere, and three
+# departed ones (#87–#89) still named as unattended writers of `knowledge/` with no
+# task file behind them. The four tests below pin the four states #2630 had to
+# produce: an entry per job in its own group, the §intro claim that the seven are
+# undocumented, and the trio out of the membership tables. None of them reads
+# `~/obsidian/autonomy/` — that reconciler is #2631, and a check needing it would
+# carry `live_vault` and be deselected at the gate (`pytest.ini:10-13`), so these
+# ids are typed as an external fact, exactly as `NEW_JOBS` types #90's.
+
+WATCH_HEADING = "## Watch the machinery:"
+
+
+def _watch_slice() -> str:
+    """§Watch the machinery as written: the heading text through the next `## `.
+
+    Raw, not flattened, because its per-job table is read row by row; apply `_flat`
+    to the result for the prose. The assertion is the usual one in this file — a
+    section that stopped existing must fail loudly, not read as a doc with nothing
+    left to check.
+    """
+    text = _text()
+    assert WATCH_HEADING in text, (
+        "architecture/autonomy-jobs.md has no §Watch the machinery to hold #91–#97, "
+        "so the seven live task files are back to having no entry — the #2630 defect")
+    return text.split(WATCH_HEADING, 1)[1].split("\n## ", 1)[0]
+
+
+def _watch_row(job: str) -> str:
+    """One job's row in §Watch the machinery's table, or a failure naming the ids the
+    table actually has. A missing row must never read as a row with nothing in it."""
+    slice_ = _watch_slice()
+    have = re.findall(r"^\| #(\d+) \|", slice_, re.M)
+    row = next((ln for ln in slice_.splitlines()
+                if ln.strip().startswith(f"| {job} |")), "")
+    assert row, (
+        f"{job} has no row in §Watch the machinery's table, which has rows for "
+        f"{sorted(int(h) for h in have)} — #2630 clause 3 is one entry per job, in "
+        f"the shape of the #86 entry in §Measure")
+    return row
+
+
+def test_the_watch_group_table_holds_one_row_per_live_job_and_no_others():
+    """#2630 clause 3's membership half: the seven have entries, and the group holds
+    nothing that is not one of them.
+
+    `test_each_watch_entry_states_its_schedule_its_reads_its_writes_and_a_prohibition`
+    checks the rows' contents; this checks the row *set*, because a doc that gained
+    nine rows or kept the departed trio in here would satisfy the content test
+    row-by-row and still mis-state the group.
+    """
+    ids = [int(n) for n in re.findall(r"^\| #(\d+) \|", _watch_slice(), re.M)]
+    assert sorted(ids) == sorted(WATCH_JOBS), (
+        f"§Watch the machinery has per-job rows for {sorted(ids)}, not exactly the "
+        f"seven live task files {sorted(WATCH_JOBS)}")
+    assert len(ids) == len(set(ids)), f"a job has two entries: {sorted(ids)}"
+
+
+@pytest.mark.parametrize("job", sorted(WATCH_JOBS))
+def test_each_watch_entry_states_its_schedule_its_reads_its_writes_and_a_prohibition(
+        job: int):
+    """#2630 clause 3, in the shape #1102 left behind for #86
+    (`test_the_86_entry_states_its_frequency_its_subject_and_its_two_prohibitions`):
+    schedule in its own cell, then subject, then what it writes, then what it must
+    not do — four probes, each matching only in the entry's own row.
+
+    The schedule is checked against the `frequency:` the task file declares rather
+    than against the run record's cadence for the reason #1102 states: #86 said
+    "every night" while a later hand typed `frequency: weekly`, and the cell is the
+    only place the two can be caught disagreeing. The other three probes are the
+    artefact and the bound the task file itself names, so a row that reads as
+    self-evidently read-only but actually files a backlog draft fails here.
+    """
+    freq, reads, writes, prohibition = WATCH_JOBS[job]
+    row = _watch_row(f"#{job}")
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    assert cells[1] == freq, (
+        f"#{job}'s row reads {cells[1]!r} where its task file's `frequency:` says "
+        f"{freq!r} — the same drift #1102's clause 2 was written for")
+    for want, why in ((reads, "what it reads"), (writes, "what it writes"),
+                      (prohibition, "what it must not do")):
+        assert want in row, (
+            f"#{job}'s entry never states {why} in terms (`{want}` is what "
+            f"`~/obsidian/autonomy/{job}-*.md` names) — a schedule with a subject and "
+            f"no reads or writes is what #2630 was filed for")
+
+
+def test_the_doc_no_longer_states_that_the_seven_have_no_entry():
+    """#2630 clause 4. The §intro said, in 2026-10-12's own words, that the seven
+    task files exist "with no entry anywhere in this document". Once the entries
+    exist that sentence is false, and a false disclaimer is worse than none: a
+    reader who met #93 in §Watch the machinery and then read the intro would conclude
+    the section was describing a job that does not exist.
+
+    The probe is the disclaimer's own phrase, and the control beside it is the group
+    name — proving the grep resolved against a document that does name the seven, so
+    the absence below cannot be the shape of a failed search.
+    """
+    live = _flat(_live_prose())
+    for stale in ("no entry anywhere in this document",
+                  "have no entry here at all",
+                  "Seven task files exist"):
+        assert stale not in live, (
+            f"live prose still says the seven are undocumented ({stale!r}); the "
+            f"§Review log may keep the claim, being dated, and does")
+    assert "Watch the machinery" in live, (
+        "positive control failed: no live sentence names the group holding #91–#97, "
+        "so the three absences above would prove nothing")
+
+
+def test_the_departed_paper_digests_hold_no_membership_row():
+    """#2630 clause 5, the defect that is the seven's mirror image. #87 #88 #89 are
+    named in the functions row, the write-authority row and the §Ingest heading as
+    live members that "write into `knowledge/` unattended", while no `87-*.md`,
+    `88-*.md` or `89-*.md` exists in `~/obsidian/autonomy/` or its `_archived/`
+    (verified 2026-10-12) — so the tables named jobs that cannot run, in the one
+    document whose bargain is membership.
+
+    #90 is the control: created in the same fortnight, still a live task file, still
+    listed. If the control fails, the tables have stopped parsing and every absence
+    asserted here is vacuous — which is the failure mode this file's own docstring
+    calls out for a 0-hit grep.
+    """
+    text = _text()
+    funcs, tiers = _table(FUNCTIONS_HEADER), _table(TIERS_HEADER)
+    grouped = [i for ids, _ in funcs.values() for i in ids]
+    tiered = [i for ids, _ in tiers.values() for i in ids]
+    assert "#90" in grouped and "#90" in tiered, (
+        "positive control: #90 is in neither table, which means both stopped parsing "
+        "— the trio's absence below would then prove nothing")
+    for job in DEPARTED:
+        assert job not in grouped, (
+            f"{job} is still a member of a function row; its task file is gone from "
+            f"`~/obsidian/autonomy/` and from `_archived/`")
+        assert job not in tiered, (
+            f"{job} is still granted write authority in a doc that claims its "
+            f"membership is complete")
+        assert not re.search(rf"^\| {job} \|", text, re.M), (
+            f"{job} still has a per-job row claiming a cadence for a job that has no "
+            f"task file to carry it")
+    ingest = next(v for k, v in funcs.items() if k.startswith("[Ingest]"))
+    assert ingest[0] == ["#68", "#30", "#53"], (
+        f"the Ingest row reads {ingest[0]}; the trio's ids have to leave the row, not "
+        f"just its count")
+    heading = re.search(r"^## Ingest: (.+)$", text, re.M)
+    assert heading and _ids(heading.group(1)) == ["#68", "#30", "#53"], (
+        f"the §Ingest heading still decorates itself with {_ids(heading.group(1)) if heading else 'no heading'}; "
+        f"`test_every_groups_heading_row_link_and_id_list_agree` would catch the "
+        f"mismatch too, but only once the row is wrong as well")
+
+
+def test_the_seven_add_no_dependency_edge_and_the_fleet_arithmetic_moves_once():
+    """#2630's bound on itself: listing seven jobs must not invent wiring.
+
+    None of the seven declares `depends_on` — `grep -c depends_on
+    ~/obsidian/autonomy/9[1-7]-*.md` reads 0 for all seven, and
+    `GET /api/autonomy/tasks` on 2026-10-12 parsed 39 tasks with exactly ten
+    declaring a parent (39, 40, 42, 47, 48, 51, 57, 58, 74, 83) — so the ten arrows
+    stay, and the one arithmetic they sit inside moves: §The wiring's
+    "N of the M tasks declare no dependency" and §Distil's "Ten of the fleet's M
+    jobs" both take the route's 39, and 39 − 29 = 10 is still the diagram's arrow
+    count.
+    """
+    edges = _diagram_edges()
+    assert edges == TEN_EDGES, (
+        f"the wiring diagram reads {sorted(edges)}, not the ten verified edges "
+        f"{sorted(TEN_EDGES)} — none of #91–#97 declares a parent, so none of them "
+        f"belongs in this picture")
+    seven = {f"#{job}" for job in WATCH_JOBS}
+    assert not (seven & {e for pair in edges for e in pair}), (
+        f"the diagram drew an edge for one of {sorted(seven)}; the item's own "
+        f"`depends_on` check reads 0 for all seven files")
+    funcs = _functions_section()
+    m = re.search(r"\b(\w+) of the (\w+) tasks\b", _flat(funcs))
+    assert m, "§The wiring no longer counts the jobs that declare no dependency"
+    without, fleet = _num(m.group(1)), _num(m.group(2))
+    assert fleet == 39, (
+        f"the doc counts a fleet of {fleet} while `GET /api/autonomy/tasks` parsed 39 "
+        f"tasks on 2026-10-12, #91–#97 included — the denominator is the thing "
+        f"#1520 clause 3 pinned two sections together over")
+    assert fleet - without == len(edges), (
+        f"{fleet} − {without} = {fleet - without} but the diagram draws {len(edges)} "
+        f"edges; adding the seven adds no parent, so both numbers move by seven "
+        f"together or the sentence and the picture part company")
