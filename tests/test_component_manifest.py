@@ -901,16 +901,29 @@ def test_evictions_stays_0_while_the_registry_stays_inside_its_cap():
         "as a drop rate")
 
 
-def test_the_chat_template_field_says_why_when_no_file_is_configured():
+def test_the_chat_template_field_says_why_when_no_file_is_configured(monkeypatch,
+                                                                      request):
     """The absent half, asserted exactly rather than accepted either way.
 
     A version the manifest cannot name is a variable that moved without appearing
-    in the diff, so the absence must be *reported*, not guessed. This is what
-    shipped `config.yaml` yields — it has no `harness.component_manifest` section,
-    so the found path below is the only way that branch is ever driven, and this
-    test pins the other branch by its exact shape: `unrecorded`, plus a source that
-    names the two keys that would fix it.
+    in the diff, so the absence must be *reported*, not guessed. Absence is not a
+    state the operator's config yields either: `config.yaml` sets
+    `harness.component_manifest.chat_template_path` to a real template, so the only
+    node in this file that takes the absent branch is this one, and it takes it by
+    pinning both keys empty for its own call — the same reason it clears the
+    resolver's cache — rather than by the luck of which template files happen to
+    exist under `agent-services/` on the machine running the suite. The shape it
+    pins is `unrecorded`, plus a source that names the two keys that would fix it.
     """
+    from app.config import CONFIG
+    monkeypatch.setitem(CONFIG, "harness", {"component_manifest": {
+        "chat_template_path": "", "model_dir": ""}})
+    # Clear before the call so no earlier node's digest can answer for this key,
+    # and on teardown so the `unrecorded` entry written here cannot answer for a
+    # later node that runs under a configured template.
+    cm._template_cache.clear()
+    request.addfinalizer(cm._reset_template_cache)
+
     got = cm.chat_template("qwen3-32b", "http://127.0.0.1:8096/v1")
 
     assert got == {"id": "unrecorded",
@@ -928,9 +941,19 @@ def test_a_configured_chat_template_is_recorded_by_digest(tmp_path, monkeypatch)
     different one silently compares two different prompts. A digest rather than a
     path string: a path proves the file was reachable, not that it was unchanged.
 
-    Driven here because nothing else drives it — shipped `config.yaml` has no
-    `harness.component_manifest` section, so every other test in this file takes the
-    absent branch.
+    Driven here because the config-driven version of it is not portable: the
+    operator's `config.yaml` does set `harness.component_manifest.chat_template_path`
+    — to a model download git does not track — so this box reaches the found branch
+    from config alone, and a test that relied on that would read the machine rather
+    than the resolver. These three nodes pin a template of their own instead and so
+    are the found-branch nodes: this one by explicit path,
+    `test_a_chat_template_found_under_model_dir_is_digested_in_candidate_order` by
+    directory, `test_the_recorded_chat_template_reaches_the_manifest_line` on a
+    written line. Exactly one node takes the absent branch,
+    `test_the_chat_template_field_says_why_when_no_file_is_configured`, which pins
+    both keys empty; every other node here only asserts the field is present (for
+    instance `test_three_iterations_emit_exactly_one_manifest_line_each`), so it is
+    green whichever branch the machine's config yields.
     """
     from app.config import CONFIG
     template = tmp_path / "chat_template.jinja"
