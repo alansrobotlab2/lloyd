@@ -251,8 +251,19 @@ def drain_next_session_notes(now: float | None = None) -> list[NextSessionNote]:
 
 
 def peek_next_session_notes() -> list[NextSessionNote]:
-    """Snapshot without consuming — for the debug endpoint and for a human
-    checking tomorrow whether a nightly pass delivered anything.
+    """Snapshot without consuming — served by `GET /api/next-session-notes`.
+
+    That route is this channel's only read surface (#2601), and it is what answers
+    "did tonight's pass write anything, and is it still here?" without eating the
+    answer: delivery is destructive, and expiry is logged only inside
+    `drain_next_session_notes`, so a note that sat out its 24 h with no turn
+    arriving leaves no trace anywhere else.
+
+    Which is also why nothing is filtered here. An expired note comes back with
+    `expires_at` in the past rather than dropped, because "expired" and "never
+    written" are two different failures and a peek that hid them would report both
+    as an empty channel. The filter that withholds an expired note from a turn
+    belongs to the drain, and to nothing else.
     """
     with locked_file(store_path()):
         return _read(store_path())

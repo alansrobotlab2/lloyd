@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from app import sessions_io
 from app.date_fidelity import refusal_detail
-from app.next_session_notes import write_next_session_note
+from app.next_session_notes import peek_next_session_notes, write_next_session_note
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
     HEAD_PLATFORM_WINDOW,
@@ -1312,6 +1312,41 @@ async def api_next_session_note(request: Request):
     # itself logs what it dropped at delivery time, which is the moment a human
     # would ask about.
     return JSONResponse({"ok": True, **result})
+
+
+@router.get("/api/next-session-notes")
+async def get_next_session_notes():
+    """Debug endpoint — peek at the next-session channel without draining (#2601).
+
+    The mirror of `/api/sessions/{session_id}/prefetch-queue` below, for the
+    file-backed store: it serves `peek_next_session_notes` and consumes nothing, so
+    the note is still there for the turn afterwards. Until now the POST door above
+    was the whole public surface of a channel whose delivery is destructive, and the
+    question "did tonight's pass write anything, and is it still here?" was
+    answerable only by reading the store file by hand between turns — on a box that
+    runs background jobs continuously, a race with the turn that takes the note.
+
+    Nothing is filtered. A note past its deadline comes back with `expires_at` in
+    the past rather than omitted, because expiry is logged only inside a drain: a
+    note that sat out its TTL with no turn arriving has no other record, and a peek
+    that hid it would report "expired" and "never written" as the same empty
+    channel. What the entry keys are, and why `content` is not one of them, is the
+    prefetch peek's shape — the two queues are meant to be read side by side.
+    """
+    notes = peek_next_session_notes()
+    return JSONResponse({
+        "depth": len(notes),
+        "notes": [
+            {
+                "source": n.source,
+                "summary": n.summary,
+                "dedup_key": n.dedup_key,
+                "expires_at": n.expires_at,
+                "enqueued_at": n.enqueued_at,
+            }
+            for n in notes
+        ],
+    })
 
 
 @router.get("/api/sessions/active")

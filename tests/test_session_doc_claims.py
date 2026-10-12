@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from app import next_session_notes as nsn_mod
 from app import sessions_io
 from app.routers import sessions as sess_mod
 
@@ -353,6 +354,65 @@ def test_the_arch_page_names_the_deciding_turn_as_the_only_consumer():
     # The walkthrough step shows the widened call, not the session-only pop.
     assert re.search(r"take_ambient_decision\(sid, turn_id\)", flat), (
         "the consume step still pops by session alone")
+
+
+# --- #2601: the next-session channel's peek must point at a route that exists
+
+#: The peek's false promise, by its exact wording. `peek_next_session_notes` said
+#: it existed "for the debug endpoint and for a human checking tomorrow whether a
+#: nightly pass delivered anything", while `git grep -n 'next-session' --
+#: app/routers/` returned one route — the POST door. A sentence like that is a
+#: pointer, and a future session goes looking for the route it promises and finds
+#: none: the store's entire public surface was its write door.
+FALSE_PEEK_CLAIM = "for the debug endpoint"
+
+#: The route that makes the sentence true, spelled as the router spells it. Named
+#: rather than paraphrased so the assertion is about the pointer, not the prose.
+READ_DOOR = "GET /api/next-session-notes"
+
+
+def test_the_peek_names_the_route_that_serves_it():
+    """A docstring that points at a route is a claim about the tree, and this one
+    pointed at nothing for as long as the channel existed."""
+    doc = inspect.getdoc(nsn_mod.peek_next_session_notes) or ""
+    assert "note" in doc.lower(), (
+        "positive control failed: the peek's docstring no longer describes this "
+        "channel, so the absence check below is grading an empty string")
+    assert FALSE_PEEK_CLAIM not in doc, (
+        f"the docstring still points at a debug endpoint that does not exist: {doc!r}")
+    assert READ_DOOR in doc, (
+        f"the docstring must name the route that serves it ({READ_DOOR}): {doc!r}")
+
+
+def test_the_arch_page_lists_the_notes_read_door_beside_the_write_door():
+    """The Endpoints table is what a reader consults instead of the router, so the
+    read row has to sit beside the write row of the same channel — both doors of
+    one store, readable in a single pass of the table.
+    """
+    with open(ARCH_PAGE, encoding="utf-8") as fh:
+        text = fh.read()
+    assert len(text.splitlines()) > 200, (
+        f"{ARCH_PAGE} reads as only {len(text.splitlines())} lines; an unread or "
+        "truncated file must not pass an absence check")
+    # Positive controls: still this page, and still the write door it documented.
+    post_row = re.search(r"^\| `POST /api/next-session-note` \|.*\|$", text, re.MULTILINE)
+    assert post_row, "the Endpoints table no longer has a write row to sit beside"
+    get_row = re.search(r"^\| `GET /api/next-session-notes` \|.*\|$", text, re.MULTILINE)
+    assert get_row, (
+        "the Endpoints table has no read row, so the page still describes a "
+        "channel whose only door is the one that writes")
+    assert "peek_next_session_notes" in get_row.group(0), (
+        f"the read row never names what it serves: {get_row.group(0)}")
+    # The table's own vocabulary for this property, the one the prefetch peek row
+    # already uses: two peek rows that describe themselves differently are two
+    # readers guessing whether either of them is safe to call.
+    assert "does not drain" in get_row.group(0), (
+        f"the read row never says reading is non-consuming: {get_row.group(0)}")
+    post_line = text[:post_row.start()].count("\n")
+    get_line = text[:get_row.start()].count("\n")
+    assert get_line == post_line + 1, (
+        f"the read row has drifted {get_line - post_line:+d} line(s) from the write "
+        "row of the same channel; the pair is the point")
 
 
 if __name__ == "__main__":

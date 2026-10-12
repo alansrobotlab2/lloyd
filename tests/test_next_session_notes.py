@@ -532,6 +532,128 @@ def test_the_router_refuses_a_self_contradictory_date(_scratch_store):
         _scratch_store.read_text())["notes"] == []
 
 
+# ── the read door (#2601): answering "is it still here" without eating it ─────
+#
+# Before #2601 the POST door above was the whole public surface of this store.
+# Delivery is destructive and silent expiry is logged only inside a drain, so the
+# one question the channel exists to answer — "did tonight's pass write anything,
+# and is it still here?" — had exactly one answerer: reading
+# `~/lloyd-data/next-session-notes.json` by hand between turns, which on a box that
+# runs background jobs continuously is a race with the turn that takes the note.
+# The ambient queue beside this one has always had a non-consuming GET
+# (`/api/sessions/{id}/prefetch-queue`, backed by `peek_ambient_prefetch`).
+#
+# These nodes pin the mirror door at HTTP level on purpose. The reference route has
+# no route-level test of its own — `git grep -ln "prefetch-queue" -- tests/` is
+# empty, and `peek_ambient_prefetch` is exercised only at module level — so copying
+# how the peek is tested there would pin the dict and leave the route unproven.
+
+def test_the_read_door_reports_the_depth_and_the_notes_waiting(_scratch_store):
+    """`GET /api/next-session-notes` answers 200 and describes the store as it is.
+
+    The empty store is the case that matters most, so it is asserted first and
+    exactly: "the pass wrote nothing" and "the store is unreadable" both read as a
+    depth of 0 here, and nothing else in the system distinguishes them without a
+    hand `cat`. Two notes then have to come back in the order the store holds them.
+    """
+    client = _client()
+
+    empty = client.get("/api/next-session-notes")
+    assert empty.status_code == 200, empty.text
+    assert empty.json() == {"depth": 0, "notes": []}, empty.json()
+
+    now = time.time()
+    nsn.write_next_session_note(source="nightly:brief", summary="first", now=now)
+    nsn.write_next_session_note(source="nightly:research", summary="second",
+                                now=now + 1)
+
+    got = client.get("/api/next-session-notes")
+    assert got.status_code == 200, got.text
+    assert got.json()["depth"] == 2, got.json()
+    assert [n["source"] for n in got.json()["notes"]] == [
+        "nightly:brief", "nightly:research"], got.json()
+
+
+def test_the_read_door_consumes_nothing(_scratch_store):
+    """Reading is not delivery.
+
+    A route that drained would answer the question by destroying the evidence, and
+    would be strictly worse than the hand `cat` it replaces. The order below is the
+    one where all three claims are one test: written through the write door, read
+    twice through the read door, and only then delivered to a turn.
+    """
+    client = _client()
+    r = client.post("/api/next-session-note",
+                    json={"source": "nightly:reflection", "summary": NOTE})
+    assert r.status_code == 200, r.text
+
+    for _ in range(2):
+        got = client.get("/api/next-session-notes")
+        assert got.json()["depth"] == 1, got.json()
+    on_disk = json.loads(_scratch_store.read_text())["notes"]
+    assert [n["source"] for n in on_disk] == ["nightly:reflection"], on_disk
+
+    drained = nsn.drain_next_session_notes()
+    assert [n.summary for n in drained] == [NOTE], (
+        f"the read door took the note it was only meant to look at: {drained}")
+
+
+def test_the_read_door_answers_the_same_keys_as_the_ambient_peek(_scratch_store):
+    """The two queues have to be readable side by side, so the entry shape is not
+    a preference — and the assertion is against the *other route's* live response
+    rather than a literal list. The claim worth holding is that the two agree; a
+    hardcoded list goes stale in exactly the way this item is about: two stores,
+    two shapes, one reader comparing them at 07:00.
+    """
+    client = _client()
+    now = time.time()
+    sio.enqueue_ambient_prefetch("session-2601-keys", sio.AmbientPrefetchEntry(
+        source="autonomy:task-42", summary="ambient side",
+        dedup_key="autonomy:task-42", enqueued_at=now, expires_at=now + 3600))
+    nsn.write_next_session_note(source="nightly:brief", summary="notes side",
+                                now=now)
+
+    ambient = client.get("/api/sessions/session-2601-keys/prefetch-queue").json()
+    notes = client.get("/api/next-session-notes").json()
+    assert len(ambient["entries"]) == 1 and len(notes["notes"]) == 1, (ambient, notes)
+    assert set(notes["notes"][0]) == {
+        "source", "summary", "dedup_key", "enqueued_at", "expires_at"}, notes["notes"][0]
+    assert set(ambient["entries"][0]) == set(notes["notes"][0]), (
+        f"the two queues no longer read alike: {ambient['entries'][0]} vs {notes['notes'][0]}")
+
+
+def test_a_note_past_its_ttl_is_listed_by_the_read_door_not_hidden(_scratch_store):
+    """The distinction the peek exists to make, and the reason it filters nothing.
+
+    Expiry is logged only inside a drain, so a note that sits out its 24 h with no
+    turn arriving writes nothing anywhere: the row this route shows is the only
+    evidence it ever existed. Applying the drain's filter here would collapse
+    "expired" into "never written" — the same depth-0 answer for two very different
+    failures.
+
+    Write order matters: a write purges what is already past its deadline *at its
+    own backdated instant*, so the still-alive note goes in first and the stale one
+    follows under a `now` an hour before its own expiry.
+    """
+    now = time.time()
+    nsn.write_next_session_note(source="nightly:fresh", summary="still waiting",
+                                now=now)
+    nsn.write_next_session_note(source="nightly:stale", summary="expired overnight",
+                                now=now - 25 * 3600)
+
+    body = _client().get("/api/next-session-notes").json()
+    assert body["depth"] == 2, body
+    stale = [n for n in body["notes"] if n["source"] == "nightly:stale"]
+    assert stale, f"the peek hid the expired note, so 'expired' reads as 'never written': {body}"
+    assert stale[0]["expires_at"] < time.time(), stale[0]
+    assert [n["source"] for n in body["notes"] if n["expires_at"] > time.time()] == [
+        "nightly:fresh"], body
+
+    delivered = nsn.drain_next_session_notes()
+    assert [n.source for n in delivered] == ["nightly:fresh"], (
+        f"the peek showed a note delivery would not withhold: {delivered}")
+
+
 # ── the premise, kept honest ─────────────────────────────────────────────────
 
 def test_the_queue_it_was_meant_to_ride_still_cannot_carry_an_overnight_signal():

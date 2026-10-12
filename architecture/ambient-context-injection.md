@@ -26,7 +26,7 @@ Re-measured 2026-10-12 by `--collect-only -q` on each file — collected nodes, 
 passing ones, so the figure ages rather than reassures:
 `tests/test_session_queue.py` 17, `tests/test_active_session_resolution.py` 5,
 `tests/test_ambient_prefetch_retention.py` 16,
-`tests/test_session_doc_claims.py` 8 (46 across those four), and
+`tests/test_session_doc_claims.py` 10 (48 across those four), and
 `tests/test_prefetch.py` 93. Those five are the mechanism's surface, and
 `tests/test_ambient_decision_turn_scope.py`, which came in with #2599, is a sixth
 that pins the decision store rather than the queue. Another file
@@ -312,6 +312,7 @@ the branch is reachable, through `"all"`. Fixed by #909.
 | `POST /api/sessions/{id}/inject-prefetch` | Mechanism 1. 404 on an unknown session; 409 on a non-user one (#910); 400 without `source` and `summary`, or on a date the summary contradicts (#1149) |
 | `POST /api/sessions/{id}/inject` | Mechanism 2. 409 on a non-user session, 404 on an unknown one, and the same date guard first |
 | `POST /api/next-session-note` | The third door (#1516): the same payload minus the session id, so it is the only one a 03:00 producer can use. 400 on the date guard, then 400 without `source`/`summary`; writes through `write_next_session_note`. No 409 is possible — nothing names a session |
+| `GET /api/next-session-notes` | The read door for that same store (#2601): a debug peek that does not drain (`peek_next_session_notes`), in the entry shape of the prefetch peek below so the two queues read side by side. Expired notes are listed with `expires_at` in the past rather than hidden — expiry is logged only inside a drain, so a note no turn ever reached has no other record, and hiding it would collapse "expired" into "never written" |
 | `POST /api/sessions/{id}/ambient-decide` | 400 unless the session's *current* turn has `source == "ambient"` |
 | `GET /api/sessions/active` | The resolver a producer gets when it passes `session_id=""` |
 | `GET /api/sessions/{id}/prefetch-queue` | Debug peek that does not drain (`peek_ambient_prefetch`) |
@@ -590,3 +591,21 @@ mode has no reason to block it.
   crossed silencing had left a fingerprint, which is a coverage gap, not a clean bill;
   the scan that would settle it is recorded as owed on #2599.
 
+- 2026-10-12 — **#2601 landed**: the notes channel got the read door its peek had
+  been promising since #1516. `GET /api/next-session-notes` serves
+  `peek_next_session_notes` unchanged — `{depth, notes[]}` in the prefetch peek's
+  entry shape, consuming nothing — and the peek's docstring now names that route
+  instead of "the debug endpoint", the pointer a reader followed to nowhere. The gap
+  was never the file; it was the window. Delivery consumes, and expiry is logged only
+  inside a drain, so a note no turn ever reached left no record of having existed, and
+  the only way to ask "did tonight's pass write anything, and is it still here?" was to
+  read the store file by hand between turns — on a box that runs background jobs
+  continuously, a race with the turn that takes the note. The peek filters nothing, so
+  an `expires_at` in the past is what separates "expired" from "never written", and the
+  entry keys are pinned against the *other* route's live response rather than a literal
+  list, because the claim worth holding is that the two queues read alike. Both doors
+  of the channel now sit adjacent in the Endpoints table above. Two things this round
+  could not settle and the item stays open on: whether a TTL death with no drain should
+  log at all, and one real nightly pass checked through the route rather than the file.
+  The #2598 motive the item carried — a worker turn eating the note — was already closed
+  by the gate two entries above and is not what this door is for.
