@@ -11,7 +11,7 @@ import sqlite3
 
 import pytest
 
-from app import usage_store
+from app import sessions_io, usage_store
 
 
 def _old_schema_db(path):
@@ -46,7 +46,9 @@ def test_migration_keeps_rows_and_adds_null_columns(tmp_path, monkeypatch):
     row = dict(conn.execute("SELECT * FROM usage").fetchone())
     assert row["input_tokens"] == 123
     assert all(row[c] is None for c, _ in usage_store._TELEMETRY_COLUMNS)
-    # Unmeasured rows are out of every breakdown, not counted as zeros.
+    # Unmeasured rows are out of every breakdown, not counted as zeros. The
+    # bench/production split (#2663) rides in the same rows, so a window with no
+    # measured turn is still the empty list, not a row of zeros.
     assert usage_store.stop_reason_breakdown(hours=24) == []
     assert usage_store.tool_error_breakdown(hours=24)["turns_measured"] == 0
     assert usage_store.ttft_summary(hours=24)["first_p50_ms"] is None
@@ -69,9 +71,15 @@ def test_breakdowns():
             ttft_ms_first=1000, ttft_ms_max=1000, wrapped_up=1)
     _record()  # an unmeasured row: in no breakdown
 
+    # Every row here is a production turn: `s` is not a background-shaped id, so
+    # the bench halves are 0 and the totals are untouched by the split (#2663).
     assert usage_store.stop_reason_breakdown(hours=24) == [
-        {"stop_reason": "stop", "turns": 2, "wrapped_up": 0},
-        {"stop_reason": "max_turns", "turns": 1, "wrapped_up": 1},
+        {"stop_reason": "stop", "turns": 2, "wrapped_up": 0,
+         "bench_turns": 0, "production_turns": 2,
+         "bench_wrapped_up": 0, "production_wrapped_up": 0},
+        {"stop_reason": "max_turns", "turns": 1, "wrapped_up": 1,
+         "bench_turns": 0, "production_turns": 1,
+         "bench_wrapped_up": 0, "production_wrapped_up": 1},
     ]
     tools = usage_store.tool_error_breakdown(hours=24)
     assert tools["turns_measured"] == 3
@@ -85,6 +93,124 @@ def test_breakdowns():
     reasoning = usage_store.reasoning_tokens_summary(hours=24)
     assert reasoning == {"turns_measured": 1, "reasoning_tokens": 2,
                          "output_tokens": 5}
+
+
+#: Two real bench-family ids from `usage.db`, quoted from #2663. `bench_runner_sdk`
+#: mints its recorded id from `RECORDED_SESSION_SLUG = "bench"`; the bench-mining
+#: worker hands `new_background_session_id` the source `bench-mine`, whose mint
+#: rule keeps only alphanumerics, so the hyphen is gone before the id exists.
+_BENCH_ID = "20260924_100311_bench_67d5"
+_BENCH_MINE_ID = "20260922_183424_benchmine_6d65"
+_CHAT_ID = "20260924_100311_a1b2c3"
+
+
+def _record_turn(session_id, **tel):
+    usage_store.record_usage(session_id=session_id, model="primary",
+                             input_tokens=10, output_tokens=5, **tel)
+
+
+def test_the_bench_predicate_reads_the_session_id_slug_exactly():
+    """#2663 clause 2: ONE named predicate, compared as a slug, not a substring.
+
+    `benchmine` is the shape a predicate keyed on the id component `bench` loses
+    — 362 rows / 19 `max_turns` in `usage.db` since 2026-09-25 — and `benchmarked`
+    is the shape a `LIKE '%bench%'` predicate wrongly gains. The set is derived
+    from `sessions_io.BENCH_SOURCES` by the mint rule, so the two spellings of
+    one producer cannot drift apart.
+    """
+    assert sessions_io.BENCH_SESSION_SLUGS == frozenset({"bench", "benchmine"})
+    assert sessions_io.is_bench_session_id(_BENCH_ID) is True
+    assert sessions_io.is_bench_session_id(_BENCH_MINE_ID) is True
+    assert sessions_io.is_bench_session_id(_CHAT_ID) is False
+    assert sessions_io.is_bench_session_id("20260924_100311_owedcheck_1f2e") is False
+    assert sessions_io.is_bench_session_id("20260924_100311_benchmarked_1f2e") is False
+    assert sessions_io.is_bench_session_id("bench_002_recall") is False
+    assert sessions_io.is_bench_session_id("worker:arch-review:abc") is False
+    assert sessions_io.is_bench_session_id(None) is False
+
+
+def test_stop_reason_breakdown_separates_bench_trials_from_production_turns():
+    """#2663 clauses 1 and 2: the production count is readable from the return
+    value, with no caller-side SQL.
+
+    Bench trials and production worker turns share the `worker` platform and the
+    `usage` table has no source column, so before this split the published
+    number could not say which population it described: `max_turns` reported 142
+    turns over 168 h on 2026-10-13, and 140 of them were bench trials.
+    """
+    _record_turn(_BENCH_ID, stop_reason="max_turns", wrapped_up=1)
+    _record_turn(_BENCH_MINE_ID, stop_reason="max_turns", wrapped_up=0)
+    _record_turn(_CHAT_ID, stop_reason="max_turns", wrapped_up=1)
+    _record_turn(_CHAT_ID, stop_reason="stop", wrapped_up=0)
+
+    assert usage_store.stop_reason_breakdown(hours=24) == [
+        {"stop_reason": "max_turns", "turns": 3, "wrapped_up": 2,
+         "bench_turns": 2, "production_turns": 1,
+         "bench_wrapped_up": 1, "production_wrapped_up": 1},
+        {"stop_reason": "stop", "turns": 1, "wrapped_up": 0,
+         "bench_turns": 0, "production_turns": 1,
+         "bench_wrapped_up": 0, "production_wrapped_up": 0},
+    ]
+
+
+def test_wrapped_up_is_tallied_per_kind_not_inferred_from_the_stop_reason():
+    """#2663 clause 4, and the error the new instrument must not rebuild.
+
+    Over 168 h ending 2026-10-13 the bench-mine rows carry 19 `max_turns` with 0
+    `wrapped_up`, while production carries 11 `max_turns` / 11 `wrapped_up`, so
+    "every `max_turns` is wrapped up" is a production fact and not a bench fact.
+    A row that derived the wrap marker from the reason would report
+    `bench_wrapped_up=1` for the single row below.
+    """
+    _record_turn(_BENCH_MINE_ID, stop_reason="max_turns", wrapped_up=0)
+    assert usage_store.stop_reason_breakdown(hours=24) == [
+        {"stop_reason": "max_turns", "turns": 1, "wrapped_up": 0,
+         "bench_turns": 1, "production_turns": 0,
+         "bench_wrapped_up": 0, "production_wrapped_up": 0},
+    ]
+    _record_turn(_CHAT_ID, stop_reason="max_turns", wrapped_up=1)
+    assert usage_store.stop_reason_breakdown(hours=24) == [
+        {"stop_reason": "max_turns", "turns": 2, "wrapped_up": 1,
+         "bench_turns": 1, "production_turns": 1,
+         "bench_wrapped_up": 0, "production_wrapped_up": 1},
+    ]
+
+
+#: The query `stop_reason_breakdown` ran before #2663, verbatim. The three keys
+#: it returns have to keep answering exactly this after the split.
+_PRE_SPLIT_SQL = """SELECT stop_reason,
+                          COUNT(*)                     AS turns,
+                          COALESCE(SUM(wrapped_up), 0) AS wrapped_up
+                     FROM usage
+                    WHERE ts >= ? AND stop_reason IS NOT NULL
+                 GROUP BY stop_reason
+                 ORDER BY turns DESC, stop_reason"""
+
+
+def test_the_split_rides_along_and_leaves_the_pre_split_totals_readable():
+    """#2663 clause 3: the split adds keys, it never replaces the total.
+
+    #1554-era history and every trend comparison across this change is read off
+    `turns` / `wrapped_up`, so those two keys have to hold the same numbers the
+    unsplit query produced over the same rows — including for the bench rows the
+    split now names separately.
+    """
+    _record_turn(_BENCH_ID, stop_reason="max_turns", wrapped_up=1)
+    _record_turn(_BENCH_MINE_ID, stop_reason="max_turns", wrapped_up=0)
+    _record_turn(_CHAT_ID, stop_reason="max_turns", wrapped_up=1)
+    _record_turn(_CHAT_ID, stop_reason="stop", wrapped_up=0)
+    _record_turn(_BENCH_ID, stop_reason="stop", wrapped_up=0)
+    _record_turn("s")          # unmeasured: in no breakdown
+
+    since = usage_store._since(hours=24)
+    pre_split = [dict(r) for r in usage_store._conn().execute(_PRE_SPLIT_SQL,
+                                                             (since,))]
+    rows = usage_store.stop_reason_breakdown(hours=24)
+    assert [{k: r[k] for k in ("stop_reason", "turns", "wrapped_up")}
+            for r in rows] == pre_split
+    for r in rows:
+        assert r["turns"] == r["bench_turns"] + r["production_turns"]
+        assert r["wrapped_up"] == r["bench_wrapped_up"] + r["production_wrapped_up"]
 
 
 def test_by_class_is_stored_as_json():

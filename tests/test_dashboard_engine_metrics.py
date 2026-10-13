@@ -16,7 +16,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import engine_pressure, vllm_metrics
+from app import engine_pressure, usage_store, vllm_metrics
 from app.routers import dashboard as dash
 
 # 929 of 1000 prompt tokens served from cache on both engines.
@@ -49,8 +49,14 @@ def _handler(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, text=body)
 
 
-@pytest.fixture
-def client(monkeypatch):
+def _build_client(monkeypatch, keep: tuple[str, ...] = ()):
+    """A client for `/api/dashboard` with every section stubbed but `keep`.
+
+    The other sections read live state — the sessions directory, supervisord,
+    the worker queue — so the route is exercised alone. `_usage` is left real by
+    the one node that needs it and reads whatever `usage_store.DB_PATH` the test
+    moved.
+    """
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
         vllm_metrics.httpx, "AsyncClient",
@@ -59,11 +65,10 @@ def client(monkeypatch):
     monkeypatch.setattr(vllm_metrics, "_previous", {})
     monkeypatch.setattr(vllm_metrics, "_llamacpp_model_name", {})
     monkeypatch.setattr(engine_pressure, "snapshot", lambda: {"alias": "primary"})
-    # Every other section is irrelevant here and some read live state; each
-    # is replaced with an empty answer so the route is exercised alone.
     for name in ("_network", "_recent_sessions", "_services", "_workers",
                  "_autonomy", "_backlog", "_automod", "_usage"):
-        monkeypatch.setattr(dash, name, lambda: {})
+        if name not in keep:
+            monkeypatch.setattr(dash, name, lambda: {})
 
     async def _empty():
         return {}
@@ -79,6 +84,11 @@ def client(monkeypatch):
     return TestClient(app)
 
 
+@pytest.fixture
+def client(monkeypatch):
+    return _build_client(monkeypatch)
+
+
 def test_each_engine_row_carries_the_hit_rate_as_a_fraction(client):
     resp = client.get("/api/dashboard")
     assert resp.status_code == 200
@@ -92,3 +102,48 @@ def test_each_engine_row_carries_the_hit_rate_as_a_fraction(client):
         assert 0.0 <= rate <= 1.0
     assert rows["secondary"]["engine"] == "llama.cpp"
     assert rows["primary"]["engine"] == "vllm"
+
+
+#: Real bench-family session ids (#2663): the trial runner's `_bench_` and the
+#: bench-mining worker's `_benchmine_`, beside a minted web-chat id.
+_BENCH_ID = "20260924_100311_bench_67d5"
+_BENCH_MINE_ID = "20260922_183424_benchmine_6d65"
+_CHAT_ID = "20260924_100311_a1b2c3"
+
+
+@pytest.fixture
+def usage_client(monkeypatch):
+    """`/api/dashboard` with its `_usage` section reading a real store."""
+    return _build_client(monkeypatch, keep=("_usage",))
+
+
+def test_the_stop_reason_block_publishes_the_split_under_its_existing_key(
+        usage_client, tmp_path, monkeypatch):
+    """`stop_reasons_24h` keeps the shape `StopReasonStrip` draws, and now answers
+    the production question on the same row (#2663 clause 5).
+
+    This is the seam the conflation actually reached a human through:
+    `usage_store.stop_reason_breakdown` → `_usage()` → this key →
+    `DashboardPage.tsx`'s `<StopReasonStrip rows={usage.stop_reasons_24h} />`.
+    One row per `stop_reason` is what keeps the strip from duplicating an entry
+    per kind, and `turns` is the bar's denominator — so the split has to ride
+    beside those keys, not replace them.
+    """
+    monkeypatch.setattr(usage_store, "DB_PATH", tmp_path / "usage.db")
+    for sid, wrapped in ((_BENCH_ID, 1), (_BENCH_MINE_ID, 0), (_CHAT_ID, 1)):
+        usage_store.record_usage(session_id=sid, model="primary",
+                                 input_tokens=10, output_tokens=5,
+                                 stop_reason="max_turns", wrapped_up=wrapped)
+
+    resp = usage_client.get("/api/dashboard")
+    assert resp.status_code == 200
+    rows = resp.json()["usage"]["stop_reasons_24h"]
+    assert isinstance(rows, list) and rows, "an empty block renders no strip at all"
+    assert [row["stop_reason"] for row in rows] == ["max_turns"]
+    for row in rows:
+        assert {"stop_reason", "turns", "wrapped_up"} <= set(row), row
+    assert (rows[0]["turns"], rows[0]["wrapped_up"]) == (3, 2)
+    # The number the item could not get before, straight off the published row.
+    assert (rows[0]["bench_turns"], rows[0]["production_turns"]) == (2, 1)
+    assert (rows[0]["bench_wrapped_up"],
+            rows[0]["production_wrapped_up"]) == (1, 1)

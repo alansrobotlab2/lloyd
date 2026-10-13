@@ -1411,3 +1411,40 @@ def is_bench_source(source: object) -> bool:
     the 30-day horizon and a visible listing.
     """
     return isinstance(source, str) and source in BENCH_SOURCES
+
+
+#: `BENCH_SOURCES` spelled the way a SESSION ID spells it (#2663). A trial's
+#: document carries the writer's own source word — `bench`, or `bench-mine` with
+#: a hyphen — while the id is minted by `new_background_session_id(source)`,
+#: which filters the slug down to its alphanumeric characters, so the
+#: hyphen is gone by the time the id exists: `workers/sources/_common.py:666`
+#: passes `bench_mine.SESSION_SOURCE` ("bench-mine") and the file is
+#: `20260922_183424_benchmine_6d65.json`. `bench_runner_sdk` mints its id from
+#: `RECORDED_SESSION_SLUG = "bench"`, unchanged. So this set is built by applying
+#: THAT mint rule to `BENCH_SOURCES`, not by re-listing slugs: a third trial
+#: writer joins the family in one place and cannot be present as a source and
+#: absent as a slug. Measured over `usage.db` rows carrying a `stop_reason` since
+#: 2026-09-25: `_bench_` 1,556 rows / 295 `max_turns`, `_benchmine_` 362 rows /
+#: 19 `max_turns` — a predicate keyed on the slug `bench` alone loses the whole
+#: second shape. The other way it goes wrong is `LIKE '%bench%'`, which matches
+#: any id CONTAINING the substring and so classes a future producer slugged
+#: `benchmarked` as a trial; this rule is the slug, compared exactly.
+BENCH_SESSION_SLUGS = frozenset(
+    "".join(ch for ch in source if ch.isalnum())[:12] for source in BENCH_SOURCES)
+
+
+def is_bench_session_id(session_id: object) -> bool:
+    """Was this session id minted for a bench-family trial?
+
+    The id-derived twin of `is_bench_source`, and the only one a SQL store can
+    use: `usage.db` has no `source` column and no join to the session document,
+    so #2663's split of bench turns from production turns has to decide from the
+    id alone. The decision is `background_slug` — the third part of a four-part
+    background id — against `BENCH_SESSION_SLUGS`, so a chat id
+    (`20260924_100311_a1b2c3`), a `task_…` id, an id carrying a surface prefix
+    (`worker:arch-review:abc`) and every other producer's slug are production
+    here. A slug this rule does not recognise reads as production, which is the
+    direction an instrument may err: it under-claims bench, exactly as the
+    unsplit query did, and never inflates it.
+    """
+    return background_slug(session_id) in BENCH_SESSION_SLUGS

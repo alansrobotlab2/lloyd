@@ -1083,6 +1083,13 @@ def _format_attribution(attr: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+#: The SQL name `stop_reason_breakdown` registers `sessions_io.is_bench_session_id`
+#: under, so the query cannot form its own idea of what a trial is. A `LIKE
+#: '%bench%'` guess written in SQL is the thing #2663 exists to remove: it is a
+#: second, unauditable class decision beside the one in `sessions_io`.
+BENCH_SQL_PREDICATE = "lloyd_is_bench_session"
+
+
 def stop_reason_breakdown(hours: float = 24) -> list[dict]:
     """How turns ended over a window, most common first (P11).
 
@@ -1090,12 +1097,42 @@ def stop_reason_breakdown(hours: float = 24) -> list[dict]:
     and folding them in as "unknown" would drown the window's real mix in
     history. `turns_measured` beside it is the same guard `prefix_miss_summary`
     keeps.
+
+    #2663: every row also reports its bench and production halves —
+    `bench_turns` / `production_turns` and `bench_wrapped_up` /
+    `production_wrapped_up` — because a bench trial and a production worker turn
+    share the `worker` platform and `usage` has no source column, so a bench
+    burst used to read as a production property. Measured 2026-10-13 over 168 h:
+    `max_turns` totalled 142 turns, of which 140 were bench trials and 2
+    production, and that conflation is what made #2660's "one turn in ten ends on
+    `max_turns`" look true when production was at 0.13%. `turns` and `wrapped_up`
+    stay the unsplit totals, so #1554-era history and any trend across this
+    change stay readable off the same keys.
+
+    `wrapped_up` is tallied per kind, never inferred from the reason: over that
+    same window the bench-mine rows carry 19 `max_turns` with 0 `wrapped_up`, so
+    "every `max_turns` is wrapped up" holds for production and not for the bench
+    family — deriving one from the other would rebuild this item's own error
+    inside its replacement.
     """
     conn = _conn()
+    from app.sessions_io import is_bench_session_id
+    conn.create_function(
+        BENCH_SQL_PREDICATE, 1,
+        lambda sid: 1 if is_bench_session_id(sid) else 0,
+        deterministic=True)
     rows = conn.execute(
         """SELECT stop_reason,
                   COUNT(*)                          AS turns,
-                  COALESCE(SUM(wrapped_up), 0)      AS wrapped_up
+                  COALESCE(SUM(wrapped_up), 0)      AS wrapped_up,
+                  COALESCE(SUM(lloyd_is_bench_session(session_id)), 0)     AS bench_turns,
+                  COALESCE(SUM(1 - lloyd_is_bench_session(session_id)), 0) AS production_turns,
+                  COALESCE(SUM(CASE WHEN lloyd_is_bench_session(session_id) = 1
+                                    THEN COALESCE(wrapped_up, 0)
+                                    ELSE 0 END), 0) AS bench_wrapped_up,
+                  COALESCE(SUM(CASE WHEN lloyd_is_bench_session(session_id) = 1
+                                    THEN 0
+                                    ELSE COALESCE(wrapped_up, 0) END), 0)  AS production_wrapped_up
              FROM usage
             WHERE ts >= ? AND stop_reason IS NOT NULL
          GROUP BY stop_reason

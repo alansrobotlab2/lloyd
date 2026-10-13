@@ -2332,8 +2332,18 @@ export interface DashboardUsage {
 
 export interface StopReasonRow {
   stop_reason: string
+  /** The unsplit total — what this row meant before #2663, and still the
+   *  denominator the strip draws. */
   turns: number
   wrapped_up: number
+  /** #2663: the same rows split by population, because a bench trial and a
+   *  production worker turn share the `worker` platform and `usage.db` has no
+   *  source column. Optional: a backend that predates the split sends only the
+   *  three keys above. */
+  bench_turns?: number
+  production_turns?: number
+  bench_wrapped_up?: number
+  production_wrapped_up?: number
 }
 
 export interface ToolErrorSummary {
