@@ -423,3 +423,126 @@ def test_backlog_cluster_tracked_block_has_no_inner_voice_key():
 
     cfg = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text())
     assert "inner_voice" not in cfg["workers"]["sources"]["backlog-cluster"]
+
+
+# ── #2648: the bench family is hidden by default, opt-in, and counted ─────────
+
+
+def _bg_dir(tmp_path, *, bench=5, benchmine=3, others=2):
+    """A sessions directory with each class present and named the way the writers name it."""
+    d = tmp_path / "sessions"
+    d.mkdir()
+    import json as _json
+
+    def write(sid, source):
+        (d / f"{sid}.json").write_text(_json.dumps({
+            "session_id": sid, "platform": "worker" if source != "autonomy-task:39"
+            else "autonomy", "source": source, "title": f"t {sid}",
+            "messages": [{"role": "user", "content": "hi"}],
+        }), encoding="utf-8")
+    for i in range(bench):
+        write(f"20261013_0400{i}_bench_a23a{i}", "bench")
+    for i in range(benchmine):
+        write(f"20261013_0401{i}_benchmine_a6ed", "bench-mine")
+    for i in range(others):
+        write(f"20261013_0402{i}_autonomy_3c5d", "autonomy-task:39")
+    return d
+
+
+def test_the_listing_hides_the_bench_family_by_default_and_shows_it_on_request(tmp_path):
+    """Clause 2: a grid cannot spend the tab's row window without being asked.
+
+    One day of one detached grid wrote 273 transcripts on 2026-10-07 — more than the
+    150 rows the Background tab requests — so a default-on listing let a machine decide
+    which runs a human could see. Both names of the family are covered: a rule matching
+    `bench` alone would leave the 424 live `bench-mine` transcripts doing exactly what
+    the filter exists to stop.
+    """
+    from app.routers import sessions as SR
+
+    d = _bg_dir(tmp_path)
+    hidden = SR._collect_background_sessions(d, 10)
+    got = {r["source"] for r in hidden["sessions"]}
+    assert got == {"autonomy-task:39"}, sorted(got)
+
+    shown = SR._collect_background_sessions(d, 10, include_bench=True)
+    assert {r["source"] for r in shown["sessions"]} == {
+        "bench", "bench-mine", "autonomy-task:39"}
+
+
+def test_the_bench_filter_does_not_move_the_other_rows(tmp_path):
+    """`include_bench` decides WHICH class is eligible, not which runs are visible.
+
+    The failure this pins is the plausible-looking fix: a grid's rows pushing the
+    non-bench runs out of the window. Same limit, same non-bench rows in both modes,
+    and the opt-in only ADDS — so the toggle in the Runs panel cannot hide an incident
+    run by asking for trials alongside it.
+    """
+    from app.routers import sessions as SR
+
+    d = _bg_dir(tmp_path, bench=40, benchmine=20, others=6)
+    off = SR._collect_background_sessions(d, 8)
+    on = SR._collect_background_sessions(d, 8, include_bench=True)
+    non_bench = lambda res: sorted(r["id"] for r in res["sessions"]
+                                   if r["source"] not in ("bench", "bench-mine"))
+    assert non_bench(off) == non_bench(on), "the opt-in moved a non-bench row"
+    assert len(on["sessions"]) >= len(off["sessions"])
+    # Additive, so the page can exceed `limit` — the cap is per class (non-bench keeps
+    # #1064's `keep`, the opt-in trials are capped at the same `keep`), never a sum.
+    # What must never happen is the non-bench half exceeding its own window.
+    assert len(off["sessions"]) <= 8 and len(non_bench(on)) <= 8
+    assert sum(1 for r in on["sessions"]
+               if r["source"] in ("bench", "bench-mine")) <= 8
+
+
+def test_the_response_reports_how_many_bench_rows_it_hidden(tmp_path):
+    """Clause 3: `count: 8` must be distinguishable from `8 rows, 60 of them bench`.
+
+    The count is the server's, and it is a field of its own rather than folded into
+    `count` or `total` — those already mean "rows returned" and "what the pass settled"
+    to their callers. It is 0 on the request that asked for the trials, because then
+    nothing was withheld: a field that stays at 60 after being answered would let a
+    caller conclude the panel is still hiding something when it is not.
+    """
+    from app.routers import sessions as SR
+
+    d = _bg_dir(tmp_path, bench=7, benchmine=5, others=1)
+    assert SR._collect_background_sessions(d, 10)["bench_hidden"] == 12
+    assert SR._collect_background_sessions(
+        d, 10, include_bench=True)["bench_hidden"] == 0
+    # The rows it sent are not bench rows, so the count is not a count of the response.
+    assert not [r for r in SR._collect_background_sessions(d, 10)["sessions"]
+                if r["source"] in ("bench", "bench-mine")]
+
+
+def test_the_endpoint_passes_the_query_parameter_through(tmp_path, monkeypatch):
+    """The HTTP boundary: `?include_bench=true` is what a browser actually sends.
+
+    A parameter the collector honours but the route never forwards is a filter that
+    exists only in tests, so this drives the real handler over ASGI.
+    """
+    import httpx
+    from fastapi import FastAPI
+
+    from app.routers import sessions as SR
+    d = _bg_dir(tmp_path)
+    monkeypatch.setattr(SR, "SESSIONS_DIR", d)
+    app = FastAPI()
+    app.include_router(SR.router)
+
+    async def go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as client:
+            default = (await client.get(
+                "/api/background/sessions?limit=10")).json()
+            opted = (await client.get(
+                "/api/background/sessions?limit=10&include_bench=true")).json()
+            return default, opted
+    default, opted = asyncio.run(go())
+    assert [r["source"] for r in default["sessions"]] == ["autonomy-task:39"] * 2, (
+        "the fixture writes two non-bench runs; both must survive the default page")
+    assert default["bench_hidden"] == 8
+    assert {r["source"] for r in opted["sessions"]} == {
+        "bench", "bench-mine", "autonomy-task:39"}
+    assert opted["bench_hidden"] == 0

@@ -7296,3 +7296,349 @@ def test_an_apply_pass_deletes_pause_journal_rows_past_the_horizon(rs, tmp_path,
             f"{rs.PAUSE_JOURNAL_MAX_AGE_DAYS}d horizon: {h}")
     assert rs.WORKERS_DB.stat().st_size <= before + 4096, (
         "a prune that only adds pages is not a prune")
+
+
+# ── #2648: the bench family gets a 7-day horizon, everything else keeps 30 ─────
+
+
+def _bench_session(tmp_path, name="20261013_010000_bench_a23a", *,
+                   platform="worker", source="bench", pad=0, extra=""):
+    """A trial transcript shaped like the real thing, not like a convenience fixture.
+
+    `pad` pushes `source` past byte 512 — measured at byte **544** with `pad=60`, which
+    is what the nodes below that need a deep key assert rather than assume — and it does
+    so by inserting the two keys a live head really carries ahead of it: `sources` (the
+    summarizer's list of session-id PREFIXES) and `source_session_id` (a JOIN to some
+    other session, never this file's writer). Both are the mis-classification risk: a head
+    reading `"sources": ["bench"]` over `"source": "nightly-reflect"` would archive a
+    month of incident evidence at 7 days, which is the wrong-class direction #2197 hit on
+    live data (`sources` at byte 18 shadowing the real `source` at 112).
+
+    What the padding does NOT buy is REACH, and this file's first draft said it did. It
+    claimed a live trial's own `source` sits at byte 347-742; measured 2026-10-13 over all
+    2,019 live bench-family files, the first anchored match is the file's own and lands at
+    byte **185-233** — inside #2197's 512-byte budget. `SOURCE_WINDOW` is 2 KB for a
+    different reason, which `test_a_head_naming_two_sources_is_never_shortened` pins.
+    """
+    head = {"session_id": name}
+    if pad:
+        head["sources"] = [f"s{i}" for i in range(pad)]
+        head["source_session_id"] = "20260920_030303_nightly-refle"
+    head.update({"platform": platform, "source": source, "messages": []})
+    text = json.dumps(head)
+    if extra:
+        # Spliced in raw, after `source`, so a caller can put a SECOND mention of the key
+        # at a chosen depth — the shape a live transcript has when it embeds another
+        # session's JSON.
+        text = text[:-1] + extra + "}"
+    path = tmp_path / f"{name}.json"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_a_bench_trial_archives_at_seven_days(rs, tmp_path):
+    """Clause 1: both names of the family are gzipped out at 7 inactive days.
+
+    `bench` is the autoresearch runner and `bench-mine` the ledger-mining worker; both
+    stamp `platform: worker`, so nothing but `source` separates a trial from a job.
+    The 424 live `bench-mine` transcripts are why matching `bench` alone is not a fix.
+    """
+    for src in ("bench", "bench-mine"):
+        p = _bench_session(tmp_path, f"20261013_010000_{src.replace('-', '')}",
+                           source=src)
+        assert rs._archive_age_for(p) == 7, src
+    assert rs.BENCH_SESSION_ARCHIVE_AGE_DAYS == 7
+
+
+def test_a_bench_trial_older_than_seven_days_is_gzipped_out_of_the_listings(
+        rs, tmp_path, monkeypatch):
+    """The 7 days is enforced end-to-end: an 8-day-old trial goes, a 3-day-old stays.
+
+    Goes means gzipped out of the live listings and still readable, which is the rule
+    for every store in this file — a round re-opened on day 9 loses the listing, not
+    the transcript.
+    """
+    import time as _t
+    monkeypatch.setattr(rs, "SESSIONS_DIR", tmp_path)
+    old = _bench_session(tmp_path, "20261005_010000_bench_old")
+    fresh = _bench_session(tmp_path, "20261012_010000_bench_fresh")
+    for path, days in ((old, 8), (fresh, 3)):
+        stamp = _t.time() - days * 86400
+        os.utime(path, (stamp, stamp))
+    count, _saved = rs.sweep_sessions(True, _t.time())
+    assert count == 1, count
+    assert not old.exists() and old.with_suffix(".json.gz").exists()
+    assert fresh.exists(), "a trial inside the window must not be touched"
+
+
+def test_the_bench_fixture_is_deeper_than_any_live_source(rs, tmp_path):
+    """The fixture's padding measured against the store instead of taken on faith.
+
+    #2197's lesson is "a fixture that flatters the pattern proves nothing", and this file
+    first applied it to the wrong key: it put filler in front of `source` to stand in for
+    a `source` at byte 347-742, a place no live `source` is. Measured 2026-10-13 over every
+    live bench-family transcript, the first anchored `"source":` match is the file's own at
+    byte **185-233**, so a 512-byte probe sees the key on every live file and a shallower
+    fixture could not have told anyone.
+
+    Two directional assertions, because "the fixture is hard enough" only means something
+    as a comparison:
+
+    * the padded fixture is deeper than the DEEPEST live file — trim the decoys to make
+      another node pass and this one fails;
+    * no live `source` reaches 512, which is what settles the budget question by
+      measurement and retires the claim in the fixture's docstring.
+
+    Positive control, per #1236: the store has to actually be there, as an ASSERTION
+    rather than a skip. This node's first draft skipped when it found fewer than 50
+    transcripts, and the gate's `tests` rung caught that — it fails a round above 40
+    skips, so what looked like a careful guard was a measurement that hid itself in the
+    place which grades it. A `max()` over an unreadable directory is also a TypeError
+    dressed as an answer. The store is resolved through the PASSWD entry, which is how
+    this suite reaches live data everywhere else (`_production_tree` in conftest, and the
+    same shape in test_data_home / test_live_tree_isolation / test_okf_domain_taxonomy);
+    `app.paths.production_data_root()` was tried first and is not the suite's anchor, so
+    nothing here depends on which one of them resolves where.
+
+    The floor is one transcript, and the positive control is the STORE, not the family's
+    share of it. That is a correction from the review of `SM_20261013_140952`: an earlier
+    draft required 50 live bench-family files, and 50 is a number this file's own rule is
+    designed to shrink — at 18-44 trials a day a 7-day window settles around 130-300, but a
+    quiet fortnight with no grid and no bench round legitimately empties the family out
+    entirely, which would redden a unit test over a store behaving exactly as asked. So the
+    failure the control exists to catch — a moved or unreadable data root, which reads as
+    zero of everything — is caught by asserting the directory holds sessions AT ALL, and the
+    family's own count is a witness in the message rather than a threshold. A run that finds
+    the family empty still asserts the unconditional half below (the fixture beats the
+    512-byte budget that #2197 settled), so the claim that protects the rule never goes
+    unmeasured; only the comparison against a live file does.
+    """
+    import os
+    import pwd
+    store = Path(pwd.getpwuid(os.getuid()).pw_dir) / "lloyd-data" / "sessions"
+    assert store.is_dir() and any(store.glob("*.json")), (
+        f"{store} holds no sessions at all: this node measures the live store through the "
+        "passwd entry, so a moved or unmounted data root has nothing to say here. Do not "
+        "fix this by skipping — see the docstring."
+    )
+    live = list(store.glob("*_bench_*.json"))[:400]
+    live += list(store.glob("*_benchmine_*.json"))[:400]
+    assert len(live) >= 1, (
+        f"{store} is populated but holds no bench-family transcript, so the depth half "
+        f"below compares against nothing (it is skipped by an `if`, which is why the count "
+        "is printed here): re-read the store before believing a pass on a quiet fortnight"
+    )
+    deepest = 0
+    read = 0
+    for path in live:
+        try:
+            head = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        m = rs._SOURCE_RE.search(head[:rs.SOURCE_WINDOW])
+        if m:
+            read += 1
+            deepest = max(deepest, m.start())
+    assert read >= 50, f"only {read} of {len(live)} live heads were readable"
+    padded = _bench_session(tmp_path, pad=60).read_text(encoding="utf-8")
+    found = rs._SOURCE_RE.search(padded[:rs.SOURCE_WINDOW])
+    assert found is not None, "the padded fixture has no `source` inside the window at all"
+    fixture_at = found.start()
+    assert fixture_at > deepest, (
+        f"the padded fixture's `source` is at byte {fixture_at} but the deepest LIVE one "
+        f"is {deepest}: the fixture has become the easier case, the vacuous shape #2197 "
+        "named. Put the decoy keys back in _bench_session."
+    )
+    assert deepest < 512, (
+        f"a live bench transcript's own `source` now reaches byte {deepest}, past the 512 "
+        "#2197 measured for `platform` — the correction in _bench_session's docstring is "
+        "then stale and SOURCE_WINDOW's stated reason needs re-deriving."
+    )
+
+
+def test_a_head_naming_two_sources_is_never_shortened(rs, tmp_path):
+    """Why `SOURCE_WINDOW` is 2 KB: the window decides what the vote is taken on.
+
+    Not to reach the key — the node above measures that it does not need to. Every live
+    `bench` transcript embeds another session's JSON and so names `"source"` a second time
+    inside its first 2 KB (1,594 files, out to byte 1,548; no `bench-mine` file does).
+    `_session_source` classifies only when EVERY match it saw agrees, so narrowed to
+    #2197's 512 bytes it would read the header alone and call a file a trial whatever its
+    payload says; at 2 KB a contradiction is visible and resolves to *unclassified*, which
+    is the LONGER horizon. Widening this budget can therefore only lengthen a retention
+    window — #1236's direction — and if anyone reuses the 512 number here, the last
+    assertion fails instead of the rule quietly matching nothing.
+    """
+    p = _bench_session(tmp_path, "20261013_010001_bench_told", pad=30,
+                       extra=', "filler": "' + "p" * 250 + '", "source": "nightly-reflect"')
+    text = p.read_text(encoding="utf-8")
+    mentions = [m.start() for m in rs._SOURCE_RE.finditer(text)]
+    assert len(mentions) == 2, mentions
+    assert mentions[0] < 512 < mentions[1] < rs.SOURCE_WINDOW, (
+        f"the two mentions are at {mentions}: the shape this node is about is a second "
+        "mention between 512 and SOURCE_WINDOW"
+    )
+    assert rs._SOURCE_RE.findall(text[:512]) == ["bench"], (
+        "inside #2197's budget the head holds exactly one ballot, so a rule narrowed to "
+        "it would class this file a trial on its header alone"
+    )
+    assert rs._session_source(p) is None, (
+        "seen whole, a head naming `bench` up front and `nightly-reflect` in its payload "
+        "names two writers and classifies as nothing"
+    )
+    assert rs._archive_age_for(p) == rs.BACKGROUND_SESSION_ARCHIVE_AGE_DAYS, (
+        "and that abstention must be the 30-day evidence window, never the 7-day one"
+    )
+
+
+def test_every_other_background_run_keeps_the_thirty_day_evidence_window(
+        rs, tmp_path):
+    """Clause 1's other half, and the reason the branch is inside the background arm.
+
+    30 days exists because a background run is incident evidence: the autonomy run that
+    tripped an alarm is read a week later. A `worker`/`autonomy` session from any other
+    writer must be untouched by a rule written for trials — including near-misses on
+    the source name, which is why the comparison is exact rather than a prefix.
+    """
+    keeps = {
+        "autonomy task": _bench_session(
+            tmp_path, "20261013_020000_autonomy_3c5d", platform="autonomy",
+            source="autonomy-task:39"),
+        "worker summarize": _bench_session(
+            tmp_path, "20261013_020001_worker_sum", source="mc-summarize"),
+        "worker with no source": _bench_session(
+            tmp_path, "20261013_020002_worker_ns", source=None),
+        "near-miss benchmarked": _bench_session(
+            tmp_path, "20261013_020003_bench_nm", source="benchmarked"),
+        "near-miss bench-grid": _bench_session(
+            tmp_path, "20261013_020004_bench_grid", source="bench-grid"),
+    }
+    for label, path in keeps.items():
+        assert rs._archive_age_for(path) == 30, label
+    assert rs.BACKGROUND_SESSION_ARCHIVE_AGE_DAYS == 30
+
+
+def test_a_head_that_cannot_be_read_is_never_shortened_by_the_bench_rule(
+        rs, tmp_path):
+    """#1236's direction, restated for the new branch: a failed read lengthens only.
+
+    Two shapes of failure. An unreadable head never reaches the source probe at all,
+    because the branch sits inside the background arm — so it falls through to the
+    conversation window, the longest of the three. A readable head whose `source` is
+    ambiguous (the key twice with two values, which `workers/sources/bench_mine.py`
+    documents on live mined data) is classed as nothing and keeps 30, not 7.
+    """
+    broken = tmp_path / "20261013_030000_bench_broken.json"
+    broken.write_text("{not json at all", encoding="utf-8")
+    assert rs._archive_age_for(broken) == rs.SESSION_ARCHIVE_AGE_DAYS == 90
+
+    ambiguous = tmp_path / "20261013_030001_bench_two.json"
+    ambiguous.write_text(json.dumps({
+        "session_id": "20261013_030001_bench_two", "platform": "worker",
+        "sources": ["bench"], "source": "bench", "inherited_from": {"source": "chat"}})
+        + ',"source": "bench-mine"', encoding="utf-8")
+    assert rs._session_source(ambiguous) is None
+    assert rs._archive_age_for(ambiguous) == 30
+
+
+def test_the_bench_source_list_agrees_with_the_one_the_endpoint_reads(rs):
+    """Two restatements of a class are two chances to disagree, so they are pinned equal.
+
+    `app.sessions_io.BENCH_SOURCES` decides which rows the listing hides; this file's
+    `BENCH_SESSION_SOURCES` decides which transcripts get archived. A session the
+    endpoint hides but the sweep keeps is invisible AND live forever — the exact
+    half-class the page's own §11 producer list was written to stop.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from app.sessions_io import BENCH_SOURCES
+
+    assert set(rs.BENCH_SESSION_SOURCES) == set(BENCH_SOURCES) == {
+        "bench", "bench-mine"}
+
+
+def test_the_two_source_readers_agree_on_names_and_differ_on_read_budgets(rs, tmp_path):
+    """The two consumers read `source` differently on purpose — and this node runs BOTH
+    readers over the same files, so the difference is observed rather than described.
+
+    An earlier node asserted `rs.SOURCE_WINDOW == app.sessions_io.HEAD_SOURCE_WINDOW`.
+    That constant turned out to be read by one function — a head probe with no caller in
+    the tree — so the "disagreement" the node's docstring warned about could not reach a
+    single row, and the pair was two numbers agreeing with each other in the dark. Both
+    the constant and the probe are gone. What is left is true, and each half below is
+    executed against the consumer it names:
+
+    * the SWEEP reads the head with a regex inside `rs.SOURCE_WINDOW` (2,048 B), because
+      the archival pass never parses these files and #1236 forbids a read budget from
+      deciding what a rule classifies. Its own floor is asserted here: 512 is named
+      because it is the number #2197 settled for `platform` and therefore the number
+      someone reaches for next, and narrowing to it is exactly what
+      `test_a_head_naming_two_sources_is_never_shortened` fails on;
+    * the ENDPOINT has no window at all. `SR._collect_background_sessions` classifies a
+      row from `data.get("source")` on the whole-file JSON load its row build already
+      performs (`_read_session_json`: `sf.read_text()` then `json.loads`), so no byte
+      budget can blind it the way one can the sweep. That is the half this node's
+      predecessor only narrated, so it is run here: two transcripts that differ ONLY in
+      how deep their own `"source":` sits — byte ~200 (the live depth, measured 2026-10-13
+      over all 2,019 bench-family files) versus byte 544 at `pad=60`, past #2197's 512-byte
+      budget — come back labelled the same way from the collector, which withholds both and
+      reports `bench_hidden == 2`. The deep file's key is first asserted to be invisible to
+      a 512-byte probe, so the collector's answer demonstrably did not come from one.
+
+    The one thing the two readers must never disagree about is WHICH NAMES are trials, and
+    that is a single shared constant, `app.sessions_io.BENCH_SOURCES`, pinned by the node
+    above. Where both readers can see the same key they must also agree, which is the
+    `_archive_age_for` pair below: 7 days for both trials, 30 for the run that is evidence.
+    """
+    store = tmp_path / "sessions"
+    store.mkdir(exist_ok=True)   # the `rs` fixture already makes this one
+    shallow = _bench_session(store, "20261013_010000_bench_aaaa")
+    deep = _bench_session(store, "20261013_010100_bench_bbbb", pad=60)
+    evidence = _bench_session(store, "20261013_010200_reflect_cccc",
+                              source="nightly-reflect")
+
+    # The fixtures, measured rather than trusted: the two bench files differ only in the
+    # depth of their own key, and the deep one is out of reach of the budget a reader
+    # might reach for. If `pad` stops pushing `source` past 512 this fails, and the
+    # endpoint half below would be proving nothing.
+    assert rs._SOURCE_RE.search(shallow.read_text(encoding="utf-8")[:512]), (
+        "fixture: the shallow trial has to name its source inside 512 bytes, being the "
+        "live shape is the point (byte 185-233 on the real files)")
+    assert rs._SOURCE_RE.search(deep.read_text(encoding="utf-8")[:512]) is None, (
+        "fixture: with `source` back inside 512 bytes there is no depth left to "
+        "distinguish, and the collector half below stops meaning anything")
+
+    # Sweep reader: both depths are inside its 2 KB window, so it classifies both.
+    assert rs.SOURCE_WINDOW == 2048
+    assert rs.SOURCE_WINDOW > 512, (
+        "the sweep's source probe is deliberately wider than the platform budget; the "
+        "reason is at rs.SOURCE_WINDOW and in "
+        "test_a_head_naming_two_sources_is_never_shortened"
+    )
+    assert rs._session_source(shallow) == "bench"
+    assert rs._session_source(deep) == "bench"
+    assert rs.BENCH_SESSION_ARCHIVE_AGE_DAYS == 7
+    assert rs._archive_age_for(shallow) == 7, "both depths are 7 days to the sweep"
+    assert rs._archive_age_for(deep) == 7, "both depths are 7 days to the sweep"
+    assert rs._archive_age_for(evidence) == rs.BACKGROUND_SESSION_ARCHIVE_AGE_DAYS == 30, (
+        "the run that is incident evidence keeps its month in the same directory")
+
+    # Endpoint reader: the same three files, one windowed request, no byte budget in the
+    # path that decides. `source` at byte 200 and at byte 544 are the same answer.
+    from app.routers import sessions as SR
+    off = SR._collect_background_sessions(store, 10)
+    assert off["bench_hidden"] == 2, (
+        "the deep key is not a second file that got past the predicate: the collector "
+        "parses the whole JSON, so depth is not a thing it can miss")
+    assert [r["source"] for r in off["sessions"]] == ["nightly-reflect"], (
+        "the withheld rows are the bench family and nothing else left the window")
+    on = SR._collect_background_sessions(store, 10, include_bench=True)
+    assert on["bench_hidden"] == 0
+    assert sorted(r["source"] for r in on["sessions"]) == [
+        "bench", "bench", "nightly-reflect"]
+
+    from app import sessions_io
+    assert not hasattr(sessions_io, "source_from_head"), (
+        "a head probe with no caller would let someone pin two windows against each other "
+        "and call the agreement a cross-check"
+    )

@@ -900,12 +900,6 @@ def test_the_change_that_added_this_measurement_touched_only_eval_and_tests():
     """Wires nothing. Anything else in the diff is a second change smuggled into
     a measurement round — and the specific smuggling this one is watching for is a
     call site in the nightly path, which is the item's own last step."""
-    # The range is this measurement's OWN commits: everything from the commit that
-    # first added the module onward. `merge-base HEAD origin/main` would also work in
-    # a checkout sitting on main, but in a self-mod round the branch base is already
-    # ahead of origin/main by other rounds' commits, and their files would be
-    # attributed to this one — a scope test that fails on an untouched repo proves
-    # nothing about scope.
     try:
         added = subprocess.run(
             ["git", "-C", str(ROOT), "log", "--diff-filter=A", "-1", "--format=%H", "--",
@@ -913,11 +907,18 @@ def test_the_change_that_added_this_measurement_touched_only_eval_and_tests():
             capture_output=True, text=True, timeout=30).stdout.strip()
         if not added:
             pytest.skip("the module is not committed in this checkout")
-        base = subprocess.run(["git", "-C", str(ROOT), "rev-parse", f"{added}^"],
-                              capture_output=True, text=True, timeout=30).stdout.strip()
     except Exception:  # noqa: BLE001
         pytest.skip("no git history for this module in this checkout")
-    changed = subprocess.run(["git", "-C", str(ROOT), "diff", "--name-only", f"{base}..HEAD"],
+    # The range is the ADDING COMMIT's own diff, not `added^..HEAD`. The earlier form was
+    # read as "everything from this module onward is part of its change", which is only
+    # true while HEAD *is* that commit: it landed on main as 62f4290c, so from the first
+    # round opened after it onward the range carried every later round's files, and this
+    # node reddened a #2648 round's gate over `app/routers/sessions.py` — a file that node
+    # had never opened, on a claim about a module that round had never read. A smuggled
+    # nightly call site still has to arrive in a commit, and that commit is judged by its
+    # own round; the one this node can legitimately speak for is the one that added the
+    # measurement.
+    changed = subprocess.run(["git", "-C", str(ROOT), "show", "--name-only", "--format=", added],
                              capture_output=True, text=True, timeout=60).stdout.splitlines()
     # The control must be empty for the RIGHT reason. `git diff HEAD` compares the
     # working tree against HEAD and is therefore blind to a staged-but-uncommitted

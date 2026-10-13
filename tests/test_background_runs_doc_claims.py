@@ -167,3 +167,71 @@ def test_one_dated_sentence_records_the_emptiness_and_the_missing_witness():
     for cause in ("were deleted", "the sweep deleted", "someone deleted",
                   "a DELETE call removed"):
         assert cause not in para, f"the page asserted a cause: {cause}"
+
+
+# ── #2648: §12 must describe the bench family's life, not its old absence ─────
+
+def _bench_section() -> str:
+    text = DOC.read_text(encoding="utf-8")
+    start = text.find("### The bench family has a life of its own now")
+    assert start != -1, (
+        "clause 5: §12 no longer has the section that describes what #2648 changed — "
+        "the page went back to describing the absence the code no longer has")
+    section = text[start:]
+    nxt = section.find("\n## ", 5)
+    return " ".join((section[:nxt] if nxt != -1 else section).split())
+
+
+def test_the_page_states_the_bench_archive_age_and_the_default_hidden_listing():
+    section = _bench_section()
+    assert "BENCH_SESSION_ARCHIVE_AGE_DAYS = 7" in section, section[:200]
+    assert "`?include_bench=true`" in section
+    assert "bench_hidden" in section
+    # The two names, because a page that says only `bench` describes half the class.
+    assert "`bench`" in section and "`bench-mine`" in section
+
+
+def test_the_stated_numbers_are_the_ones_the_code_ships():
+    """A doc figure that no test re-reads is a figure that will rot (#2648 clause 5).
+
+    The archive age and the withheld-count field are read out of the modules the page
+    describes, so a change to either reddens this node instead of quietly leaving a
+    sentence that names a constant nobody sets any more.
+    """
+    import sys
+    import importlib.util
+
+    sys.path.insert(0, str(ROOT))
+    from app import sessions_io
+
+    spec = importlib.util.spec_from_file_location(
+        "rs_doc", ROOT / "scripts" / "groundskeeper" / "retention-sweep.py")
+    rs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rs)
+
+    section = _bench_section()
+    assert f"BENCH_SESSION_ARCHIVE_AGE_DAYS = {rs.BENCH_SESSION_ARCHIVE_AGE_DAYS}" \
+        in section
+    assert f"{rs.BACKGROUND_SESSION_ARCHIVE_AGE_DAYS} days" in section
+    assert set(sessions_io.BENCH_SOURCES) == {"bench", "bench-mine"}
+
+
+def test_the_page_keeps_the_measured_grid_day_and_drops_the_wrong_share():
+    """The row's original 2,544 / 24% counted 960 `.tool-results` dirs as sessions.
+
+    The corrected figures are 1,590 + 424 live transcripts and one grid-day of 273;
+    the page must keep a dated measurement rather than the inflated one it shipped with.
+    """
+    section = _bench_section()
+    # The corrected figures live in the section #2648 wrote; the §12 table row that
+    # still carries the 2,544 / 24% pair is not this clause's surface and is not
+    # rewritten here (it landed at HEAD from the review that filed the item). What the
+    # section must not do is repeat the inflated share as if it were a session count.
+    assert "24% of `sessions/`" not in section, (
+        "the 24% share counted `.tool-results` directories as sessions — #2648's triage")
+    # The burst is stated as its two components, because they are two writers: 249
+    # `bench` from the runner plus 24 `bench-mine` from the mining worker = 273
+    # transcripts, against a listing 150 rows wide.
+    assert "249 `bench`" in section and "24 `bench-mine`" in section, section[:400]
+    assert "2026-10-07" in section, (
+        "a burst-driven number needs the day it was measured on")

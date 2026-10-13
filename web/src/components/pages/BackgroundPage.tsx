@@ -26,7 +26,7 @@
  * break.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useState } from 'react'
 import {
   Moon, RefreshCw, Bot, Clock, CheckCircle2, XCircle, MinusCircle,
   BrainCircuit, Activity, FileText,
@@ -37,6 +37,14 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { runTranscriptIds, transcriptLabel } from '@/lib/runSessions'
+import { emptyStateCopy } from './benchRows'
+import { RunsToolbar } from './RunsToolbar'
+import {
+  initialPanelState,
+  loadRuns,
+  makeToggleDispatcher,
+  panelReduce,
+} from './runsPanelState'
 import { cn } from '@/lib/utils'
 
 const POLL_MS = 10_000
@@ -95,57 +103,64 @@ function SessionRow({
 }
 
 function RunsPanel({ onOpen }: { onOpen: (id: string) => void }) {
-  const [sessions, setSessions] = useState<BackgroundSession[]>([])
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
-
-  const load = useCallback(async () => {
-    try {
-      const out = await api.listBackgroundSessions(150)
-      setSessions(out.sessions || [])
-      setError(null)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+  // #2648. The panel's state is the reducer in `runsPanelState`, and `RunsToolbar` is the
+  // control that reads it, so the reveal/hide cycle is executable rather than
+  // pattern-matchable — see that module's header for why a mounted panel cannot be
+  // rendered under this repo's `environment: "node"` vitest config.
+  //
+  // `showBench` is which CLASS the endpoint may send, not whether the data is fresh: the
+  // endpoint hides the bench family by default because one day of one detached grid wrote
+  // 273 transcripts (2026-10-07) and this listing is 150 rows wide.
+  const [state, dispatch] = useReducer(panelReduce, initialPanelState)
 
   useEffect(() => {
-    void load()
-    const t = setInterval(() => { void load() }, POLL_MS)
+    // `state.showBench` is the dependency on purpose: pressing the control changes it,
+    // this effect re-runs, and the endpoint is re-asked. That is what "without a page
+    // reload" means mechanically — one refetch of the route this panel already polls, no
+    // route change, no `location.reload()`.
+    void loadRuns(state.showBench, dispatch)
+    const t = setInterval(() => { void loadRuns(state.showBench, dispatch) }, POLL_MS)
     return () => clearInterval(t)
-  }, [load])
+  }, [state.showBench])
 
   const grouped = useMemo(() => {
     const by = new Map<string, BackgroundSession[]>()
-    for (const s of sessions) {
+    for (const s of state.rows) {
       const key = producerOf(s)
       const list = by.get(key)
       if (list) list.push(s)
       else by.set(key, [s])
     }
     return [...by.entries()].sort((a, b) => b[1].length - a[1].length)
-  }, [sessions])
+  }, [state.rows])
 
-  if (error) {
+  if (state.error) {
     return (
       <div className="rounded border border-border p-4 text-xs text-muted-foreground">
-        Could not load background runs — {error}
+        Could not load background runs — {state.error}
       </div>
     )
   }
-  if (!loading && sessions.length === 0) {
+  if (!state.loading && state.rows.length === 0) {
     return (
       <div className="rounded border border-border p-4 text-xs text-muted-foreground">
-        No background runs recorded yet. Autonomy tasks and worker jobs appear
-        here as they run.
+        {emptyStateCopy(state.hiddenBench)}
       </div>
     )
   }
 
   return (
     <div className="space-y-4">
+      {/* #2648: the bench family is hidden by the endpoint by default, so the count it
+          withheld is stated here — otherwise "150 runs" reads as a full window when 148
+          of the eligible rows were trials that were never sent. The number is the
+          server's `bench_hidden`, never a count of the rows that arrived. */}
+      <RunsToolbar
+        showBench={state.showBench}
+        hiddenBench={state.hiddenBench}
+        shown={state.rows.length}
+        onToggle={makeToggleDispatcher(dispatch)}
+      />
       {grouped.map(([producer, rows]) => (
         <div key={producer} className="rounded border border-border">
           <div className="flex items-baseline gap-2 border-b border-border px-3 py-2">

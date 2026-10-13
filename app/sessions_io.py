@@ -1382,3 +1382,32 @@ async def _append_messages(session_id: str, new_messages: list[dict]):
         data["messages"] = msgs
         data["last_active"] = session_now_iso()
     await mutate_session(session_id, _append)
+
+
+#: The session sources that are autoresearch/bench *trials*: one transcript per
+#: variant of a hypothesis round, machine-titled (`bench <task> · <variant>`,
+#: `mine ledger loser bench_002_recall_user_fact`), written by
+#: `scripts/autoresearch/bench_runner_sdk.py` (`source="bench"`) and
+#: `workers/sources/bench_mine.py` (`SESSION_SOURCE = "bench-mine"`).
+#:
+#: #2197 deliberately did NOT class these as background sessions — they keep their own
+#: `source`, are not jobs, and `worker` would erase which harness wrote each one. That
+#: choice is why a trial was a *user* session to every policy, and with 1,590 `bench` +
+#: 424 `bench-mine` live transcripts measured 2026-10-13 (19% of the directory's live
+#: `.json`; one grid wrote 273 on 2026-10-07, more than the Background tab's whole
+#: 150-row window), every surface that shows "everything that is not a chat" inherited a
+#: class no human reads. #2648 gives the family its own handling rather than a platform: a
+#: 7-day archive horizon, and a default-hidden background listing.
+BENCH_SOURCES = frozenset({"bench", "bench-mine"})
+
+
+def is_bench_source(source: object) -> bool:
+    """Is this `source` value one of the bench-family trial writers?
+
+    The one place the family is named, because the two consumers — the sweep's archive
+    age (#2648 clause 1) and the background listing's default filter (clauses 2-4) —
+    must not be able to disagree about which sources are trials. The comparison is
+    exact, so a near-miss (`benchmarked`, `bench-mine-todo`) is not a trial and keeps
+    the 30-day horizon and a visible listing.
+    """
+    return isinstance(source, str) and source in BENCH_SOURCES

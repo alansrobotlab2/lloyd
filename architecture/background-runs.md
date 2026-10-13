@@ -736,9 +736,81 @@ archived until 90 days of inactivity.
 
 | what | why |
 |---|---|
-| ~~autoresearch bench trials~~ **moved out of this table** | This row was the page's most consequential lie. `run_bench_sdk` used to persist nothing — "session quarantine", pinned by `test_trials_do_not_write_session_files`, a test that no longer exists. `4abc079a` (2026-09-14, the vault-protection landing) inverted it, because the two vault wipes this page exists to learn from were caused by trials that, by design, left no transcript naming a single command they ran. What is quarantined now is the *machine*: the trial's session id is one `agent_mcp/_tool_sandbox.py` recognises (read-only bwrap Bash, non-`readOnlyHint` tools refused), `require_tool_sandbox` refuses to start a trial without it, and **every trial is recorded** through `record_events` into a `platform: worker`, `source: bench` session — 2,544 of them live on 2026-10-13, 24% of `sessions/` (#2648). It still stays out of `messages._run_turn`: no prefetch, no post-session capture, no titler, no ambient producers. |
+| ~~autoresearch bench trials~~ **moved out of this table** | This row was the page's most consequential lie. `run_bench_sdk` used to persist nothing — "session quarantine", pinned by `test_trials_do_not_write_session_files`, a test that no longer exists. `4abc079a` (2026-09-14, the vault-protection landing) inverted it, because the two vault wipes this page exists to learn from were caused by trials that, by design, left no transcript naming a single command they ran. What is quarantined now is the *machine*: the trial's session id is one `agent_mcp/_tool_sandbox.py` recognises (read-only bwrap Bash, non-`readOnlyHint` tools refused), `require_tool_sandbox` refuses to start a trial without it, and **every trial is recorded** through `record_events` into a `platform: worker`, `source: bench` session — 1,590 of them live on 2026-10-13 plus 424 `source: bench-mine`, 19% of the directory's live `.json` (#2648). The 2,544 / 24% first filed here counted the 960 `*.tool-results` spill directories as sessions. It still stays out of `messages._run_turn`: no prefetch, no post-session capture, no titler, no ambient producers. |
 | `_common.run_prompt_with_run_state` (#529) | Keeps its own per-step `state-trace.ndjson`, and has no single transcript to persist because each step's transcript is deliberately dropped. Nothing in production calls it yet. |
 | `automod-regression` | Runs its eval arms as subprocesses; there is no agent turn. |
+
+### The bench family has a life of its own now (#2648)
+
+Recording the trial was the right call — the two September vault wipes were caused by
+trials that left no transcript naming a single command. What the inversion never came
+with was any handling of the reason the old row gave for not recording: a grid writes
+hundreds of these. Closed 2026-10-13, on three axes, because a trial is evidence for the
+round that ran it and for nothing else.
+
+- **Archived at 7 days, not 30.** `BENCH_SESSION_ARCHIVE_AGE_DAYS = 7` in
+  `scripts/groundskeeper/retention-sweep.py`, applied one step INSIDE the background arm
+  of `_archive_age_for`: a session whose `source` is `bench` or `bench-mine` is gzipped
+  out of the live listings after 7 inactive days, while every other `worker`/`autonomy`
+  session — and any session whose head or `source` cannot be read — keeps the 30-day
+  window §8 states. That narrowness is the point: 30 days exists so a background run
+  stays available as incident evidence for a month, and the branch sits inside the
+  background arm so an unreadable head never reaches the source probe — a failed read can
+  only ever *lengthen* a window, which is #1236's direction. Gzip never delete, so a
+  round re-opened on day 8 is still readable.
+- **Hidden from the listing by default, with the withheld count beside it.**
+  `GET /api/background/sessions` returns no bench-family row unless the caller passes
+  `?include_bench=true`, and every response carries `bench_hidden`. Both halves are
+  load-bearing: without the filter one grid-day's output (249 `bench` + 24 `bench-mine`
+  on 2026-10-07, 38% of that day's files) exceeds the tab's whole 150-row window and
+  chooses which runs are visible; with the filter but without the count, a reader of
+  `count: 150` still cannot tell a busy day from a window 148 trials deep.
+
+  The opt-in is **additive, not a merge**. `limit` caps each class separately — the
+  non-bench page keeps #1064's `keep` slice exactly as the default request computed it
+  (identical rows either way, verified on the live store on 2026-10-13: 150 non-bench
+  rows in both modes), and the trials join it behind that, themselves capped at `keep`.
+  Merging them into one `limit` would be the obvious implementation and is refused: a
+  reader who toggles to look at a grid must not lose the incident run they were
+  reading, with a reload as the only way back. Worst case is a page of `keep + keep`
+  rows, from the same scanned slice the default request already opened, on the one
+  request that asked. Newest-first order and the mis-labelled exemption are unchanged.
+  Asking for bench rows cannot push an
+  incident run out of the window. The Runs panel's control — `RunsToolbar.tsx`, driven by
+  the `showBench` flag in `runsPanelState.ts`'s reducer — says `show N bench runs` /
+  `hide bench`, refetches on toggle at the same 150-row window (no reload, no route
+  change), and the number it names comes from `bench_hidden`, never from counting rows that
+  were deliberately not sent. Those two files are separate from `BackgroundPage.tsx` for
+  that last reason only: `web/vitest.config.ts` runs in `environment: "node"` with no DOM
+  package installed, so a state machine and a hook-free component can be EXECUTED by
+  `web/src/components/pages/BackgroundPage.test.ts` where a mounted panel cannot.
+- **Matched as a family, not one name.** `bench` is
+  `scripts/autoresearch/bench_runner_sdk.py:694`; `bench-mine` is
+  `workers/sources/bench_mine.py`, whose 424 live transcripts this item never
+  counted. Both stamp `platform: "worker"`, so the platform cannot tell a trial from a
+  job and only `source` can; a rule matching `bench` alone leaves a fifth of the family
+  on the 30-day horizon. One set, `app.sessions_io.BENCH_SOURCES`, read rather than
+  restated by the listing and the sweep — the lesson §11's producer list learned the hard
+  way. The sweep reads the source out of the head’s first **2 KB, and not for the
+  reason this page first gave**: it claimed a trial’s own `"source":` sits at byte
+  347-742 behind `sources: []` and `source_session_id`, so that a 512-byte budget would
+  have matched nothing. Measured 2026-10-13 over all 2,019 live bench-family files, that
+  key is the first anchored match at byte **185-233** — inside #2197’s 512 already. The 2
+  KB is there to see the *second* mention: every `bench` transcript embeds another
+  session’s JSON and repeats the key inside the window (1,594 files, out to byte 1,548)
+  while no `bench-mine` file does. `_session_source` classifies only when every mention
+  agrees, so a 512-byte budget reads one ballot and classes a head a trial whatever its
+  payload says; at 2 KB a contradiction is visible and abstains, which is the LONGER
+  window. Widening this budget can only ever lengthen a retention window — #1236’s
+  direction again — and `tests/test_retention_sweep.py` re-measures both numbers. The
+  abstention the wide window makes possible is a rule waiting for data, not one drawn
+  from it: **0 of the 2,019 live windows name two different values**, so no live file is
+  shortened or lengthened by it today — it is there so the next writer that does embed a
+  foreign session keeps its month.
+- **And not counted off a directory glob.** `ls *_bench_*.json` counts transcripts; the
+  same prefix's `*.tool-results` siblings are spill sidecars, not sessions. §12's row
+  above quotes 2,544 / 24% from the triage that conflated them — 1,584 transcripts + 960
+  sidecars — where the measured share of live `.json` is 14.9%.
 
 ## 13. Known limits
 
@@ -790,8 +862,11 @@ archived until 90 days of inactivity.
 | `app/routers/workers.py` | `/api/workers/health`, `/api/workers/runs`, `run_session_ids` (the §7 join, parsed) |
 | `app/post_capture.py`, `app/paths.py` | `sessions-background/` export |
 | `app/config.py` | `workers.sources.<name>.inner_voice` override merge |
-| `scripts/groundskeeper/retention-sweep.py` | 30/90-day archive |
+| `scripts/groundskeeper/retention-sweep.py` | 30/90-day archive, and 7 for the bench family (§13) |
 | `web/src/components/pages/BackgroundPage.tsx` | the tab |
+| `web/src/components/pages/RunsToolbar.tsx` | the Runs panel's bench control and its row-count line |
+| `web/src/components/pages/runsPanelState.ts` | that panel's reducer, and the one request per class it makes (§13) |
+| `web/src/components/pages/benchRows.ts` | the control's copy, and the empty-state line it withholds |
 | `web/src/lib/runSessions.ts` | a run row's openable transcripts, and their label |
 
 ## Tests
@@ -807,6 +882,8 @@ archived until 90 days of inactivity.
 | `tests/test_api_contracts.py` | `/api/background/sessions`, `/api/workers/health`, the two listings are complements, created sessions are chat-shaped |
 | `tests/test_workers_router.py` | the §7 join as a parsed `session_ids` field on `/api/workers/runs` and on `recent` in `/api/workers/health`: both meta keys unioned, one entry per transcript, `[]` for a row that names none — plus the Sources row's markup (one control per transcript, opening the mapped id), and this page's own §7 bullet naming the surface a human walks |
 | `web/src/lib/runSessions.test.ts` | the Sources panel's derivation, and that the page threads its own reader callback to the run rows (the click itself is human-only: no renderer in this vitest config) |
+| `web/src/components/pages/BackgroundPage.test.ts` | the Runs panel's bench control executed, not pattern-matched: one request per class at the same 150-row window, the withheld count taken off the response rather than the rows, and the rendered button's own `onClick` moving the state and the copy (a mounted `BackgroundPage` is still human-only — no renderer in this vitest config) |
+| `tests/test_background_runs_panel_contract.py` | the same control's WIRING mirrored into Python, because a `.test.ts` is not a testpath: the prop table read out of the panel's own `<RunsToolbar>` tag by a brace-aware scanner, the button's `onClick` bound to the prop, the effect's single dependency, the class as the only difference between the two requests — plus five mutations that must each redden it, and a drift check against the vitest file's own prop table |
 | `tests/test_background_runs_doc_claims.py` | what this page may assert: the chat summarizer's call path, scaling and a dated figure (§8, #1228), and that the mis-labelled class expires at the 90-day conversation age rather than a 30-day archive in every section that dates it (§8, §11, §13, #2651) |
 
 ## Review log

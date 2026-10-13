@@ -181,7 +181,8 @@ def _read_session_json(sf):
         return None
 
 
-def _collect_background_sessions(dir_path, limit: int) -> dict:
+def _collect_background_sessions(dir_path, limit: int,
+                                 include_bench: bool = False) -> dict:
     """Build the background listing for `dir_path`: every run that is not a conversation.
 
     BLOCKING by design — it walks a directory of whole transcripts — and the
@@ -213,6 +214,19 @@ def _collect_background_sessions(dir_path, limit: int) -> dict:
     Rows carry `platform` and `source` because that is how the tab groups
     them: `autonomy-task:39` and `autocode` are different kinds of unattended
     work and are read for different reasons.
+
+    `include_bench` is #2648. An autoresearch grid writes one transcript per trial,
+    and one day of one grid (2026-10-07) wrote 273 of them — more than this endpoint's
+    whole 150-row window — so a default-on listing let a grid decide which runs the tab
+    could see. Hidden by default, and the count of what was hidden travels with the
+    answer: the row window and the hidden count are two different numbers, and a caller
+    that sees only `count: 150` cannot tell "a busy day" from "148 of these are trials".
+    Two properties the parameter deliberately does NOT have:
+    * it does not shrink the walk — the budget is still `limit * 6` newest files and
+      every other class is pooled as before, so asking for bench rows cannot push an
+      incident run out of the window;
+    * it is not a ceiling on bench rows either — no separate quota is imposed, because
+      the caller who asks for them is the one caller who has decided they want the grid.
     """
     if not dir_path.exists():
         return {"sessions": [], "count": 0}
@@ -313,10 +327,48 @@ def _collect_background_sessions(dir_path, limit: int) -> dict:
     # a backfill that re-touches mtimes and reorders the walk — and is why the
     # slice happens after that sort and not before it.
     window = sorted(ordinary, key=lambda row: row[0], reverse=True)
-    window = window[:keep + max(8, keep // 4)]
+    take = keep + max(8, keep // 4)
+    window = window[:take]
     loaded = [r for r in (_read(row) for row in window) if r is not None]
     loaded.sort(key=lambda row: row[0], reverse=True)
-    loaded = (loaded[:keep] + mislabelled)
+    # #2648: the bench family leaves the pool BEFORE the cut, not after it. The order
+    # is the whole point — dropping trials from the finished 150 would leave the grid
+    # holding the window and the tab showing an empty list, which is the failure this
+    # is here to stop; taking them out first lets the runs that were crowded out have
+    # their place back. `sessions_io.is_bench_source` compares exact source names, so
+    # `benchmarked` (the eval corpus's own source, live on this box) stays in, and a row
+    # whose head will not name its source stays in as well — the same fail-longer,
+    # don't-guess direction the archive sweep takes.
+    trials: list = []
+    kept: list = []
+    bench_rows: list = []
+    for row in loaded:
+        (trials if sessions_io.is_bench_source(row[1].get("source"))
+         else kept).append(row)
+    if include_bench:
+        # ADDITIVE, never merged. Revealing the trials must not take a row away from a
+        # run that was on screen a moment ago — otherwise the control that exists to
+        # look at a grid also evicts whatever the reader was looking at, and a page
+        # reload is the only way back. So `limit` bounds EACH class here, not the sum:
+        # the non-bench window is byte-for-byte the one the default request got, and the
+        # trials join it from the same scanned slice (bounded by it, capped at `keep`).
+        hidden_bench = 0          # nothing was withheld, so nothing is reported withheld
+        bench_rows = trials[:keep]
+    else:
+        hidden_bench = len(trials)
+        # No refill. Hiding a class must not *shorten* the window by more than the
+        # shortfall the non-bench pool cannot cover, and the temptation to backfill the
+        # difference from the withheld pool is refused by clause 2 outright: a response
+        # that returns "whatever it takes to hit `limit`" is a listing where the grid
+        # decides again, just further into the day. A short window is the truth, and
+        # `bench_hidden` + the panel's copy make it legible rather than looking broken.
+    kept.sort(key=lambda row: row[0], reverse=True)
+    # `kept[:keep]` is #1064's cap on the non-bench half and is unchanged by #2648;
+    # the opt-in trials are joined AFTER it, not inside it, because they are additive by
+    # design — a row that was on screen before the toggle must still be on screen after
+    # it. Worst case this doubles a page's rows (keep + keep), bounded by the same slice
+    # the default request already opened, and only on the one request that asked.
+    loaded = (kept[:keep] + bench_rows + mislabelled)
     loaded.sort(key=lambda row: row[0], reverse=True)
     out = []
     for ts, data, sf in loaded:
@@ -341,16 +393,37 @@ def _collect_background_sessions(dir_path, limit: int) -> dict:
     # reach — the three fields are the honest version of a listing that is
     # deliberately bounded. The Background tab reads none of them today; they
     # exist so `count: 150` is not silently read as "there are 150".
+    #
+    # `bench_hidden` is #2648 and belongs to that same family of fields: it is how many
+    # bench-family transcripts this response withheld. It is not folded into `count` or
+    # `total`, because those already mean something specific to their callers — `count`
+    # is rows returned, `total` is what the pass settled — and a reader has to be able
+    # to tell "150 rows" from "150 rows, 148 trials withheld". It is 0 when the caller
+    # asked for the trials, because then nothing was withheld. Like the other three it
+    # is absent from the two earliest returns (missing directory, unreadable directory),
+    # which carry no accounting fields at all.
     chat_shaped = sum(1 for p in paths if not is_background_session_name(p.name))
     return {"sessions": out, "count": len(out),
             "scanned": opened,
             "total": len(ordinary) + len(mislabelled),
-            "unclassified": max(0, chat_shaped - opened)}
+            "unclassified": max(0, chat_shaped - opened),
+            "bench_hidden": hidden_bench}
 
 
 @router.get("/api/background/sessions")
-async def list_background_sessions(limit: int = 100):
+async def list_background_sessions(limit: int = 100, include_bench: bool = False):
     """Every run that is not a conversation: autonomy tasks and worker jobs.
+
+    `include_bench` (#2648) decides WHICH background runs are eligible: bench trials —
+    `source: bench` from the autoresearch runner and `source: bench-mine` from the
+    ledger-mining worker — are withheld by default, because one day of one detached
+    grid wrote 273 transcripts (2026-10-07), more than this endpoint's entire 150-row
+    window, so a default-on listing let a grid choose which runs the Background tab got
+    to show. `?include_bench=true` puts them back. It is a class filter, not a size one:
+    newest-first ordering and the `keep` cap are the same either way, and
+    `bench_hidden` in the envelope says how many were withheld (0 on a request that
+    asked for them). `_collect_background_sessions` decides all of that; this handler
+    only passes the flag down.
 
     The listing itself is `_collect_background_sessions`, and the only thing
     this handler adds is that the walk runs on a worker thread. It used to run
@@ -373,7 +446,8 @@ async def list_background_sessions(limit: int = 100):
     `tests/test_session_platform_checks.py`.
     """
     return JSONResponse(
-        await asyncio.to_thread(_collect_background_sessions, SESSIONS_DIR, limit))
+        await asyncio.to_thread(_collect_background_sessions, SESSIONS_DIR, limit,
+                                include_bench))
 
 
 @router.get("/api/sessions/{session_id}/todos")

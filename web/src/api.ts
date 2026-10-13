@@ -1233,13 +1233,28 @@ export const api = {
   // Every run that is not a conversation: autonomy tasks and worker jobs.
   // The other half of the history bifurcation — `listSessions` is chats and
   // excludes these, and the Background tab is the only page that reads this.
+  //
+  // The ENVELOPE is returned rather than `sessions` alone, because two of its numbers
+  // are only readable there and the Runs panel needs both (#2648): `count` so
+  // "Showing 150 runs" can say what it is a window of, and `bench_hidden` so the panel
+  // can offer to reveal transcripts it knows are being withheld instead of guessing.
+  // `includeBench` is the explicit opt-in that puts the bench family back — a class
+  // filter only; it does not resize the `limit` window, which is why the panel can
+  // toggle it without moving the non-bench rows (`app/routers/sessions.py`).
   listBackgroundSessions: (
     limit = 100,
-  ): Promise<{ sessions: BackgroundSession[]; count: number; scanned?: number }> =>
-    fetch(`${API_BASE}/background/sessions?limit=${limit}`).then(r => {
+    includeBench = false,
+  ): Promise<{
+    sessions: BackgroundSession[]; count: number; scanned?: number;
+    bench_hidden?: number;
+  }> => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (includeBench) params.set("include_bench", "true")
+    return fetch(`${API_BASE}/background/sessions?${params}`).then(r => {
       if (!r.ok) throw new Error(`background sessions: ${r.status}`)
       return r.json()
-    }),
+    })
+  },
 
   // Display metadata for one session, without pulling the whole list.
   // The chat header uses this to name the session it is showing.

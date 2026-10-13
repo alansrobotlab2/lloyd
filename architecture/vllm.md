@@ -800,7 +800,7 @@ has still not been run as of 2026-09-11.
   `task:` or splits on `_` into four or more parts, whose third part is then the producer
   slug (`20260925_041134_autocode_bd3f` → `autocode`). The mint behind nearly every chat id
   is `create_session`, which appends the literal `iv` to every chat session it pre-creates
-  (`app/routers/sessions.py:779`, `suffix = "iv" + secrets.token_hex(2)`). That line runs
+  (`app/routers/sessions.py:853`, `suffix = "iv" + secrets.token_hex(2)`). That line runs
   ahead of anything the request body is asked, so the three-part `<ts>_iv<hex>` shape is
   what a pre-created chat id *is*, not a mark of anything the caller opted into. The
   `inner_voice` body flag is read later in that same handler and picks what a session does,

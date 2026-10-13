@@ -471,6 +471,28 @@ SESSION_ARCHIVE_AGE_DAYS = 90
 # openable by id; the Background tab itself is a recent view — the newest 150
 # runs out of at most 600 files scanned, about the last 15 hours on screen.
 BACKGROUND_SESSION_ARCHIVE_AGE_DAYS = 30
+#: How long a bench *trial* transcript stays live: #2648.
+#:
+#: The 30 days above exists because a background run is incident evidence — the
+#: autonomy run that tripped an alarm is read a week later, which is what the §12
+#: paragraph in `architecture/background-runs.md` calls "out of the listings and
+#: recoverable". An autoresearch trial is evidence for one thing only: the round that
+#: ran it. `run_bench_sdk` began recording every trial on 2026-09-14 (`4abc079a`, the
+#: vault-protection landing — the two September wipes were caused by trials that left
+#: no transcript naming a single command), and the inversion shipped with no retention
+#: policy, so the class has been riding a horizon meant for evidence: measured
+#: 2026-10-13, 1,590 `source: bench` + 424 `source: bench-mine` live transcripts — 19%
+#: of the directory's live `.json` — and one detached skill grid wrote 273 in a
+#: single day (2026-10-07). A week is a round's working life plus the weekend it is
+#: read on; past that the transcript is a scoring artefact and `autoresearch/scores`
+#: already holds the number that outlives it.
+#:
+#: Gzip, never delete — the same rule as every other store here, so a round re-opened
+#: on day 8 can still be read. Nothing else is shortened: `app.sessions_io
+#: .is_bench_source` compares exact source names, so a head that cannot be read, a
+#: session with no `source`, and a `worker`/`autonomy` run from any other writer keep
+#: the 30 days above.
+BENCH_SESSION_ARCHIVE_AGE_DAYS = 7
 RUN_RECORD_MAX_AGE_DAYS = 30
 ACTIVITY_LOG_MAX_ENTRIES = 200
 CANDIDATE_MAX_AGE_DAYS = 30
@@ -582,11 +604,68 @@ def sweep_task_logs(apply: bool, now: float) -> tuple[int, int]:
 
 
 _PLATFORM_RE = re.compile(r'"platform":\s*"([^"]+)"')
+#: Same anchored shape as `_PLATFORM_RE`, and the same reason for anchoring: a real
+#: head carries `"sources": [...]` and `"source_session_id":` ahead of its own
+#: `"source"`, and either mistaken for it is a wrong class, not a missed one.
+_SOURCE_RE = re.compile(r'"source":\s*"([^"]+)"')
+#: How far into the head `_session_source` reads. NOT to reach the key — measured
+#: 2026-10-13 over all 2,019 live bench-family transcripts, the first anchored
+#: `"source":` match is the file's own and sits at byte **185-233**, so #2197's
+#: 512-byte budget already sees it on every live file. (A first draft of #2648 claimed
+#: 347-742 here, which is wrong; `tests/test_retention_sweep.py` re-measures it.)
+#:
+#: The 2 KB exists to read what comes AFTER the key. Every live `bench` transcript
+#: embeds other sessions' JSON and names `"source"` a second time inside the window
+#: (1,594 files, out to byte **1,548**; no `bench-mine` file repeats it), and
+#: `_session_source` classifies only when every match it saw agrees — so the window
+#: decides what the vote is taken on. At 512 it reads one ballot and calls a head a
+#: trial whatever its payload says; at 2,048 it can see a contradiction, and a
+#: contradiction abstains, which is the 30-day side. Widening this budget can therefore
+#: only ever lengthen a retention window. Re-measure with the offsets over
+#: `~/lloyd-data/sessions/*_bench_*.json` and `*_benchmine_*.json`.
+SOURCE_WINDOW = 2048
 
 #: Kept in step with `app.sessions_io.NON_USER_PLATFORMS`. Restated rather
 #: than imported because this script is stdlib-only and runs from cron with no
 #: venv; `tests/test_session_platform_checks.py` pins that the two agree.
 NON_USER_PLATFORMS = ("autonomy", "worker")
+
+#: The bench-family session sources, restated from `app.sessions_io.BENCH_SOURCES` for
+#: the same reason as the two above: this file runs standalone under `cron` without app
+#: on the path, and a test cross-checks the two lists against each other.
+#:
+#: `bench` is `scripts/autoresearch/bench_runner_sdk.py`; `bench-mine` is
+#: `workers/sources/bench_mine.py`. Both write one transcript per machine-driven trial
+#: with `platform: "worker"`, so the platform cannot tell a trial from a job — only the
+#: source can. Matching only `bench` would leave 424 live `bench-mine` transcripts on
+#: the 30-day horizon.
+BENCH_SESSION_SOURCES = ("bench", "bench-mine")
+
+
+def _session_source(path: Path) -> "str | None":
+    """The `source` a transcript was written under, or None when the head cannot say.
+
+    None is load-bearing, not a gap. It covers an unreadable file, a head that names no
+    `source` inside `SOURCE_WINDOW`, and a head that names the key twice with TWO
+    DIFFERENT VALUES — the case this refuses to arbitrate. Today that third case is a rule
+    waiting for data, not one drawn from it: 0 of the 2,019 live bench-family windows name
+    two different values, recorded in `architecture/background-runs.md` §12's bench
+    subsection — the first draft of #2648 justified the refusal on a mining-inheritance
+    claim that live data does not support. Every None gets NO class, and no class here
+    means the LONGER
+    window — the #1236 direction, where a read budget never silently destroys a month of
+    incident evidence. The direction that would shorten one is a head that reads as a
+    bench when it is not, and that is what the exact-name comparison and the anchored
+    pattern are for.
+    """
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:SOURCE_WINDOW]
+    except OSError:
+        return None
+    found = {m.group(1) for m in _SOURCE_RE.finditer(head)}
+    if len(found) == 1:
+        return found.pop()
+    return None
 
 
 def _session_platform(path: Path) -> str:
@@ -612,9 +691,19 @@ def _archive_age_for(path: Path) -> int:
     keeping a background run three months too long costs a few kilobytes,
     archiving a real conversation two months early loses it from the history
     the user actually reads.
+
+    #2648 shortens the background window for ONE source family: an autoresearch
+    bench trial (`bench`, `bench-mine`). The rest of this rule is untouched — a
+    `worker`/`autonomy` run from any other writer, and any file whose head or `source`
+    cannot be read, keeps the 30 days above, which is the whole reason the branch is
+    placed INSIDE the background arm rather than ahead of it. A file with an
+    unreadable platform therefore never reaches the source probe at all, so the #1236
+    direction still points one way: a failed read can only ever lengthen a window.
     """
     platform = _session_platform(path)
     if platform in NON_USER_PLATFORMS:
+        if _session_source(path) in BENCH_SESSION_SOURCES:
+            return BENCH_SESSION_ARCHIVE_AGE_DAYS
         return BACKGROUND_SESSION_ARCHIVE_AGE_DAYS
     return SESSION_ARCHIVE_AGE_DAYS
 
