@@ -49,6 +49,7 @@ which already owns the root-move rule (`architecture/data-home.md:33-34`).
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 from pathlib import Path
@@ -3059,3 +3060,504 @@ def test_no_current_sentence_claims_a_task_file_names_the_retired_secondary_engi
         "§#68 lost the sentence saying the linter now reports a `model:` naming a "
         "switched-off slot — the check is the reason the stale line could not "
         "survive a second time, and the doc is where a reader looks for that")
+
+
+# ── #2633 — a `file:line` citation is a claim, so it gets checked like one ────
+#
+# Four citations in this document had already drifted by 2026-10-12 and nothing
+# noticed: `1d41b432` ("arch-review: doc:autonomy-jobs — stale") corrected exactly
+# four numbers in place — `tests/test_skill_tool_names.py` 137→150,
+# `scripts/skill_lint.py` 276→281, `app/routers/backlog.py` 754→804,
+# `BacklogPage.tsx` 571→572 — and the suite stayed green throughout, because the only
+# citation any node resolved was `EVIDENCE_PILOT_TASK_IDS` at
+# `test_the_pilot_frozenset_citation_resolves_to_the_line_it_names`. A number in prose
+# is load-bearing here in a specific way: several sentences cite a line to prove the
+# thing is *not* where a reader might assume ("not inside the verifier's own file"), so
+# when the definition moves the sentence stops being evidence and still reads like it
+# is. This is the class rule `growing-a-docstring-moves-every-line`: any docstring
+# growth below a citation silently voids it.
+#
+# The rail is a resolver, not a list of pins: it reads every `path.ext:N` citation out
+# of the live prose, works out which backticked symbol the doc quotes *beside* it, and
+# asks the named file whether that line still is that symbol. A list of four pinned
+# numbers would have had the same blind spot as the four it would have fixed — the
+# next citation someone writes is not on the list.
+#
+# Scope is the §Review log's exclusion, and it is not a convenience: §Review log's
+# 2026-09-12 entry cites `app/autonomy.py:710` for the worker-evidence gate, a number
+# that was correct that day and is deliberately not corrected, because the entry
+# records what was true on the day it says.
+# `test_the_pilot_frozenset_citation_resolves_to_the_line_it_names` asserts that string
+# is absent from live prose, and
+# `test_the_dated_review_log_entry_keeps_what_was_true_that_day` asserts it IS present
+# in the log — so a resolver that scanned the whole file would fight both of them
+# instead of checking the claims. Neither is cited by a line number here, because this
+# is the item about what happens to a number in prose.
+
+#: A citation in the `path.ext:N` shape the doc uses for "go look at this line".
+CITATION = re.compile(r"`([A-Za-z0-9_./-]+\.(?:py|tsx|ts|md|sh|json)):(\d+)`")
+
+#: A backticked span. The doc wraps near 88 columns and a symbol's span can straddle
+#: a wrap, so spans are matched only after `_flat` has collapsed the newlines.
+QUOTED_SPAN = re.compile(r"`([^`\n]+)`")
+
+#: One candidate symbol. A hyphen stays INSIDE the token: the doc quotes skill names
+#: (`nightly-skills-management`) as often as it quotes identifiers, and splitting a
+#: slug into `nightly` + `skills` + `management` invents three symbols the sentence
+#: never said, then reports line numbers no reader asked for — the seeded perturbation
+#: in `test_a_drifted_citation_names_the_line_and_where_the_symbol_actually_is` produced
+#: four such locations for one citation before the hyphen was kept in the token. A slug
+#: never matches a Python or TSX source line, so it can only ever be a candidate that
+#: declines to resolve.
+IDENT_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+
+#: Words that sit in backticks for a reason other than being a symbol to locate.
+NOT_A_SYMBOL = frozenset({"py", "tsx", "ts", "md", "sh", "json", "true", "false",
+                          "None", "True", "False", "id", "line"})
+
+#: How far either side of a citation to look for the symbol the doc quotes beside it.
+#: 320 characters is one or two sentences of this doc's prose: wide enough that
+#: "`ALLOWED_TO_MENTION`) and `scripts/skill_lint.py:281` (`PHANTOM_EXEMPT`)" resolves
+#: whichever side the name falls on, narrow enough that a citation is not credited to a
+#: symbol named two sections away.
+CITATION_WINDOW = 320
+
+
+def _cited_symbols(text: str, start: int, end: int) -> list[str]:
+    """Identifiers the doc backticks near one citation, in the order it says them.
+
+    A span is skipped when it contains `/` or `:`: those are paths and other
+    citations, never the symbol being located. Everything else in the window is
+    offered, which makes the check permissive in one direction only — a stray quoted
+    word can make a drifted citation pass, it can never make a true one fail. That is
+    the right bias for a rail whose failure costs an author a red node; the seeded
+    nodes below are what prove it can still see the drift.
+    """
+    window = _flat(text[max(0, start - CITATION_WINDOW):min(len(text), end + CITATION_WINDOW)])
+    found: list[str] = []
+    for span in QUOTED_SPAN.findall(window):
+        if "/" in span or ":" in span:
+            continue
+        found += [t for t in IDENT_TOKEN.findall(span) if t not in NOT_A_SYMBOL]
+    return list(dict.fromkeys(found))
+
+
+def _symbol_definition(rel: str, src_text: str, symbol: str) -> int | None:
+    """The line where `symbol` is DEFINED in the file at `rel`, or None.
+
+    Clause 2 asks the failure text to say where the symbol actually lives, and a
+    first-occurrence search answers that question wrongly in the one file this item was
+    filed over: `ALLOWED_TO_MENTION` is mentioned in a prose comment at
+    `tests/test_skill_tool_names.py:41` and defined at :150, so a resolver reporting
+    ":41" would send an author to retype a citation to a number that is not the
+    definition either. Python goes through `ast`, which is the only way to be sure a
+    name is being bound rather than used; everything else (this doc cites one `.tsx`)
+    is matched against declaration keywords, with an `export`-prefixed line accepted
+    because `web/src/…/BacklogPage.tsx:572` is the file where that matters.
+
+    None is an answer, not a failure: it means the resolver will report where the name
+    is *mentioned* instead, and say plainly that nothing there is a definition.
+    """
+    name = re.escape(symbol)
+    if rel.endswith(".py"):
+        try:
+            tree = ast.parse(src_text)
+        except SyntaxError:
+            return None
+        lines = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound = node.name
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                target = node.targets[0] if isinstance(node, ast.Assign) else node.target
+                bound = getattr(target, "id", None)
+            else:
+                continue
+            if bound == symbol:
+                lines.append(node.lineno)
+        return min(lines) if lines else None
+    decl = re.compile(rf"^(?:export\s+)?(?:const|let|var|function|class|def)\s+{name}\b")
+    for i, line in enumerate(src_text.splitlines()):
+        if decl.match(line.strip()):
+            return i + 1
+    return None
+
+
+def _citation_drift(text: str) -> tuple[int, int, list[str]]:
+    """`(instances, distinct, drift lines)` for one slice of the document.
+
+    Two counts because the doc cites one number twice: live prose holds 8 citation
+    instances over 7 distinct `path:line` pairs, `app/autonomy.py:2818` appearing in
+    both §The functions and §Evidence pilot. A vacuity guard on the instances alone
+    would not notice the second citation being deleted, and one on the distinct count
+    alone would not notice a citation being added without a symbol beside it.
+
+    Returned rather than asserted so a caller can feed it a seeded sentence; the nodes
+    below are thin wrappers over the same measurement.
+    """
+    drift: list[str] = []
+    seen: set[str] = set()
+    instances = 0
+    for m in CITATION.finditer(text):
+        rel, line_s = m.group(1), m.group(2)
+        line = int(line_s)
+        instances += 1
+        seen.add(f"{rel}:{line}")
+        citation = f"`{rel}:{line_s}`"
+        source = ROOT / rel
+        if not source.is_file():
+            drift.append(f"{citation}: no such file in this checkout")
+            continue
+        src_text = source.read_text(errors="replace")
+        src_lines = src_text.splitlines()
+        quoted = _cited_symbols(text, m.start(), m.end())
+        if not quoted:
+            drift.append(
+                f"{citation}: no backticked symbol is quoted beside it, so nothing "
+                f"here can confirm the number — quote the symbol the line defines")
+            continue
+        cited = src_lines[line - 1] if 0 < line <= len(src_lines) else ""
+        if cited and any(re.search(rf"\b{re.escape(s)}\b", cited) for s in quoted):
+            continue
+        # Clause 2: say where the symbol IS. The first line that merely *mentions* it
+        # is not the answer — `ALLOWED_TO_MENTION` appears in a docstring comment at
+        # tests/test_skill_tool_names.py:41 and 109 lines below that is the definition
+        # the citation means — so the location is found as a definition, and only falls
+        # back to an occurrence when nothing in the file defines the name.
+        lives = []
+        for s in quoted:
+            at = _symbol_definition(rel, src_text, s)
+            if at:
+                lives.append(f"`{s}` is defined at {rel}:{at}")
+        if not lives:
+            occurrences = [i + 1 for i, l in enumerate(src_lines)
+                           if any(re.search(rf"\b{re.escape(s)}\b", l) for s in quoted)]
+            if occurrences:
+                shown = ", ".join(str(o) for o in occurrences[:3])
+                lives = [f"{rel} mentions {'/'.join(quoted)} at line {shown}"
+                         f"{'…' if len(occurrences) > 3 else ''} but defines none "
+                         f"of them"]
+            else:
+                lives = [f"not one of {quoted} appears anywhere in {rel}"]
+        reads = (cited.strip()
+                 if cited else f"<no such line: {rel} ends at {len(src_lines)} lines>")
+        drift.append(
+            f"{citation} is not where this document says. {rel}:{line} reads "
+            f"{reads!r}, and " + "; ".join(lives)
+            + " — retype the number in the sentence, or the symbol it names has been "
+              "renamed away and the sentence needs the new one")
+    return instances, len(seen), drift
+
+
+def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
+    """#2633 clauses 1 and 3: every citation in the current prose points at its symbol.
+
+    Eight citation instances over seven distinct files-and-numbers, in today's live
+    prose
+    (`app/autonomy.py:2818` twice, then `tests/test_worker_evidence.py:663`,
+    `tests/test_skill_tool_names.py:150`, `scripts/skill_lint.py:281`,
+    `agent_mcp/skills.py:87`, `app/routers/backlog.py:804` and
+    `web/src/components/pages/BacklogPage.tsx:572`). The eighth distinct citation in
+    the file — `app/autonomy.py:710`, the worker-evidence gate as numbered on
+    2026-09-12 — lives only in the dated §Review log and is out of scope by design,
+    which is clause 3; `test_the_pilot_frozenset_citation_resolves_to_the_line_it_names`
+    already forbids it in live prose.
+
+    The count assertion is the vacuity guard: a resolver whose regex stopped matching
+    this doc's citation shape would report no drift, which reads exactly like a clean
+    rail.
+    """
+    instances, distinct, drift = _citation_drift(_live_prose())
+
+    assert not drift, "; ".join(drift)
+    assert (instances, distinct) == (8, 7), (
+        f"the citation resolver saw {instances} citations ({distinct} distinct) in "
+        f"live prose; today there are 8 instances over 7 distinct `path:line` pairs "
+        f"(`app/autonomy.py:2818` in two sections), so either this document's citation "
+        f"shape changed or the pattern in CITATION did — a resolver that matches "
+        f"nothing reports no drift, which is not a clean result")
+
+
+def test_a_drifted_citation_names_the_line_and_where_the_symbol_actually_is():
+    """#2633 clause 2, seeded: the failure text is the repair.
+
+    The perturbation is the exact drift #2633 was filed for: `ALLOWED_TO_MENTION`'s
+    definition sat at `tests/test_skill_tool_names.py:137` and moved to :150 when that
+    file's docstring grew. Seeding :137 and reading the message must be enough to fix
+    the sentence — no hunt, because the hunt is the thing that was never done.
+    """
+    seeded = ("Two linters enforce rule 4. `tests/test_skill_tool_names.py:137` "
+              "(`ALLOWED_TO_MENTION`) and `scripts/skill_lint.py:281` "
+              "(`PHANTOM_EXEMPT`) let `nightly-skills-management` write the phantom "
+              "names down.")
+
+    instances, distinct, drift = _citation_drift(seeded)
+
+    assert (instances, distinct) == (2, 2), (
+        f"the seeded sentence holds 2 citations, resolver saw {instances} "
+        f"({distinct} distinct)")
+    assert len(drift) == 1, f"expected exactly the seeded citation to drift: {drift}"
+    msg = drift[0]
+    assert "`tests/test_skill_tool_names.py:137`" in msg, msg
+    assert "tests/test_skill_tool_names.py:150" in msg, (
+        f"the message does not say where the symbol really is: {msg}")
+    assert "ALLOWED_TO_MENTION" in msg, msg
+
+
+def test_the_resolver_ignores_a_citation_that_lives_only_in_the_dated_review_log():
+    """#2633 clause 3: §Review log's stale number stays a record, not a failure.
+
+    Three facts, because the exclusion is only safe if all three hold. (a) The
+    resolver run over this document's live prose reports nothing about
+    `app/autonomy.py:710`, and the string is still in §Review log — clause 3's
+    requirement. (b) The SAME citation and symbol, fed as live prose, DOES drift, so
+    "not reported" is the scope doing the work rather than a blind pattern: the
+    2026-09-12 entry cites `app/autonomy.py:710` for `EVIDENCE_PILOT_TASK_IDS`, which
+    is defined at `app/autonomy.py:2818` today — seed that sentence as live prose and
+    it drifts, naming 2818. (c) The two existing nodes that keep the log's
+    history honest (`test_the_pilot_frozenset_citation_resolves_to_the_line_it_names`
+    forbidding the number in live prose, `test_the_dated_review_log_entry_keeps_what_was_true_that_day`
+    requiring it in the log) still assert their own pair of claims — this node neither
+    replaces them nor needs either to change.
+    """
+    instances, distinct, drift = _citation_drift(_live_prose())
+
+    assert "app/autonomy.py:710" in _review_log(), (
+        "the 2026-09-12 review-log entry no longer cites `app/autonomy.py:710`; if the "
+        "history was rewritten rather than corrected, clause 3 has nothing to exclude")
+    assert not [d for d in drift if "app/autonomy.py:710" in d], (
+        f"the resolver reported the log's historical citation as drift: {drift}")
+    assert "app/autonomy.py:710" not in _live_prose(), (
+        "the historical number has crept back into current prose, which "
+        "test_the_pilot_frozenset_citation_resolves_to_the_line_it_names forbids; this "
+        "node must keep failing for THAT reason and not look like a resolver bug")
+
+    seeded = ("the pilot frozenset `EVIDENCE_PILOT_TASK_IDS` is in "
+              "`app/autonomy.py:710` and not in `workers/evidence.py`, which is what "
+              "the review found")
+    seeded_instances, seeded_distinct, seeded_drift = _citation_drift(seeded)
+    assert (seeded_instances, seeded_distinct) == (1, 1), seeded_instances
+    assert len(seeded_drift) == 1, (
+        f"a live-prose sentence citing :710 for `EVIDENCE_PILOT_TASK_IDS` must drift, "
+        f"or the exclusion above is a blind spot rather than a scope: {seeded_drift}")
+    assert "app/autonomy.py:2818" in seeded_drift[0], seeded_drift[0]
+
+
+#: The two exemption lists the §linters paragraph quantifies, in the files it names.
+EXEMPTION_LISTS = (("tests/test_skill_tool_names.py", "ALLOWED_TO_MENTION"),
+                   ("scripts/skill_lint.py", "PHANTOM_EXEMPT"))
+
+
+def _exemption_names(source: str, name: str) -> set[str]:
+    """The string entries of one exemption list, read with `ast`.
+
+    Parsed, not imported: `tests/test_skill_tool_names.py` is a test module and
+    `scripts/skill_lint.py` reaches for the vault at import, and the claim being
+    checked is about the *literals in the file* — which is also the only way to see
+    `frozenset({...})` and a bare `{...}` as the same shape, since the two lists are
+    written those two different ways.
+    """
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        target = node.targets[0] if isinstance(node, ast.Assign) else node.target
+        if getattr(target, "id", None) != name:
+            continue
+        return {c.value for c in ast.walk(node.value)
+                if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+    raise AssertionError(f"{name} is no longer an assignment in its source file")
+
+
+#: Spelled-out numbers, because this doc writes "seven-name", not "7-name".
+WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+         "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+
+
+def _linters_paragraph() -> tuple[int, list[str]]:
+    """The size and the chain names the §linters paragraph states, read off the doc.
+
+    Derived rather than typed because the paragraph is the thing under test. It says
+    "each carries a seven-name exemption list of which three entries are this chain"
+    and then names those three, so both numbers come from its own words: retype the
+    sentence to "eight-name" and the rail follows the sentence, while a name added to
+    one file without the sentence being told reddens it. That is the drift #2633 is
+    about, and why a symbol-line pin would have missed it — appending an entry to a
+    set literal moves no definition line.
+
+    The names are extracted from between "let " and " write the phantom names down"
+    rather than from a comma pattern, because the doc closes its list with "and", and
+    an `A`, `B` and `C` shape is exactly what a comma-only regex drops silently — a
+    dropped name is a membership claim this node would then stop checking.
+    """
+    para = _flat(_live_prose())
+    m = re.search(r"a (\w+)-name exemption list of which (\w+) entries are this chain",
+                  para)
+    assert m, (
+        "§linters no longer states the exemption lists' size and chain count in one "
+        "sentence; this node reads both out of that sentence and cannot guess")
+    size, count = WORDS.get(m.group(1)), WORDS.get(m.group(2))
+    assert size and count, f"unspelled number in the exemption sentence: {m.group(0)}"
+    # Windowed from the size sentence rather than searched whole-document: the first
+    # `let ` in this doc sits 36,107 characters before that sentence, and a lazy `.+?`
+    # across the whole file reaches past it and collects every backticked word in
+    # between — 344 comma-separated spans over 36,375 characters on today's text, which
+    # would silently widen "the chain's three entries" into "everything". 700 characters
+    # is a floor on the same property the stop below makes a hard bound.
+    window = para[m.start():m.start() + 700]
+    named = re.search(r"let (.+?) write the phantom \w+ down", window)
+    assert named, (
+        "§linters no longer names the chain skills it says are exempt, so there is "
+        "nothing here to check membership against")
+    # The bound the window exists for, checked rather than assumed: `para` is flat, so
+    # a heading inside the window would mean the window crossed out of §linters and the
+    # name list below would be collecting the NEXT section's quoted words as claimed
+    # chain entries. Today the next heading is 3,453 characters away, so 700 is inside
+    # the paragraph with room; if the paragraph is ever edited down to under 700
+    # characters this fires and the window is what needs retuning.
+    nxt = para.find(" ## ", m.start())
+    assert nxt == -1 or nxt > m.start() + 700, (
+        f"the 700-character window runs past the §linters paragraph into the next "
+        f"section (heading at +{nxt - m.start()}), so the chain-name list below is no "
+        f"longer the sentence's own")
+    chain = re.findall(r"`([\w-]+)`", named.group(1))
+    assert chain, f"no backticked skill names between 'let' and 'write down': {para[:200]}"
+    assert len(chain) == count, (
+        f"§linters says {count} entries are this chain and then names {len(chain)} "
+        f"({chain}) — the sentence disagrees with itself, so neither number can be "
+        f"trusted as the claim")
+    return size, chain
+
+
+def _exemption_verdict(sources: dict[str, str], size: int,
+                       chain: list[str]) -> list[str]:
+    """Complain about these two exemption-list sources against the doc's sentence.
+
+    An empty list means the sentence and the files agree. One function because the whole
+    point is that seeded bytes get the SAME judgement the real ones get — an assertion
+    hand-copied into a perturbation node is a second rule, and the thing being tested
+    here is that one rule fires.
+
+    A name's absence is reported even when the size happens to match: swapping one
+    entry for another keeps the count and voids the sentence all the same.
+    """
+    problems: list[str] = []
+    names = [n for _, n in EXEMPTION_LISTS]
+    measured = {n: _exemption_names(sources[n], n) for n in names}
+
+    for rel, name in EXEMPTION_LISTS:
+        other = [n for n in names if n != name][0]
+        if len(measured[name]) != size:
+            problems.append(
+                f"{name} in {rel} holds {len(measured[name])} names, while §linters "
+                f"says each list carries {size} — measured now: "
+                f"{name}={sorted(measured[name])}, {other}={sorted(measured[other])}")
+        missing = [c for c in chain if c not in measured[name]]
+        if missing:
+            problems.append(
+                f"{name} in {rel} no longer exempts {missing}, which §linters says "
+                f"write the phantom names down as their job — measured: "
+                f"{sorted(measured[name])}")
+    return problems
+
+
+def _real_exemption_sources() -> dict[str, str]:
+    """The two files' text, keyed by the list name each one carries."""
+    return {name: (ROOT / rel).read_text(errors="replace")
+            for rel, name in EXEMPTION_LISTS}
+
+
+def test_the_exemption_lists_are_the_size_and_membership_the_paragraph_claims():
+    """#2633 clause 4: `ALLOWED_TO_MENTION` and `PHANTOM_EXEMPT`, measured.
+
+    §linters says "each carries a seven-name exemption list of which three entries are
+    this chain", and names the three. Both halves re-measured from the two files the
+    paragraph cites (`ALLOWED_TO_MENTION` in `tests/test_skill_tool_names.py`,
+    `PHANTOM_EXEMPT` in `scripts/skill_lint.py` — named without numbers, because a
+    number in prose is the thing this item is about): 7 names in each today, and all
+    three of `nightly-skills-management`, `trajectory-skill-mining` and
+    `nightly-skill-consolidation` present in both.
+
+    The size and the three names are read out of the doc's own sentence rather than
+    typed here, which is what makes adding a name to one file without retyping the
+    sentence a failure: the files move, the claim does not. And
+    `test_growing_one_exemption_list_reddens_the_rail` feeds seeded bytes through the
+    same `_exemption_verdict`, so the shape of this node's failure is known before an
+    author has to read it.
+
+    What is deliberately NOT asserted is equality between the two lists. The
+    paragraph's own words are that they are "hand-maintained in two different files,
+    with nothing pinning them equal", and that is a statement about how they are kept,
+    not a contract about their contents: pinning equality would forbid exempting a
+    skill in one linter and not the other, which two different checks may each decide
+    for themselves.
+    """
+    size, chain = _linters_paragraph()
+
+    assert len(chain) == 3, (
+        f"§linters names {chain} as this chain's entries; its sentence says three, so "
+        f"either the list of names or the words 'which three entries' moved")
+
+    problems = _exemption_verdict(_real_exemption_sources(), size, chain)
+    assert not problems, "\n".join(problems)
+
+
+def test_growing_one_exemption_list_reddens_the_rail():
+    """Clause 4's failure leg, seeded: the drift a line-number pin cannot see.
+
+    `PHANTOM_EXEMPT` gains one entry and the sentence still says seven. Appending to a
+    set literal moves no definition line, so every `scripts/skill_lint.py:281`-style
+    check — including the citation resolver above in this same file — stays green while
+    the sentence goes stale. That is the drift #2633 was filed for, so its failure is
+    exercised rather than assumed:
+
+      * exactly one complaint, naming the grown list, the sentence's number and BOTH
+        measured sets, so a reader can see which file is the odd one out;
+      * the untouched pair judged at the same `size + 1` complains about the OTHER list
+        instead, which is the sentence's word `each` doing its work: growing one file
+        and retyping the number strands the file that did not grow;
+      * both sources gain the entry and the sentence is retyped to eight: passes. The
+        rail follows a corrected claim rather than fossilising today's count, so a real
+        eighth exemption can be landed by the same edit in both places.
+    """
+    size, chain = _linters_paragraph()
+    grown_name = EXEMPTION_LISTS[1][1]
+    real = _real_exemption_sources()
+    grown_text = real[grown_name].replace(
+        f"{grown_name} = frozenset({{",
+        f'{grown_name} = frozenset({{\n    "some-new-skill",', 1)
+    assert grown_text != real[grown_name], (
+        f"the seeded edit matched nothing in {EXEMPTION_LISTS[1][0]}; the list literal "
+        f"there changed shape and this node now proves nothing")
+
+    grown = _exemption_names(grown_text, grown_name)
+    assert len(grown) == size + 1, sorted(grown)
+    assert "some-new-skill" in grown and "some-new-skill" not in real[grown_name]
+
+    problems = _exemption_verdict(
+        {**real, grown_name: grown_text}, size, chain)
+    assert len(problems) == 1, f"expected exactly one complaint, got: {problems}"
+    msg = problems[0]
+    assert grown_name in msg, msg
+    assert f"{size + 1} names" in msg, msg
+    for _, other_name in EXEMPTION_LISTS:
+        assert f"{other_name}=" in msg, (
+            f"the message omits {other_name}'s measured set, so the reader cannot tell "
+            f"which of the two files is the odd one out: {msg}")
+    assert "some-new-skill" in msg, msg
+
+    other_name = EXEMPTION_LISTS[0][1]
+    at_eight = _exemption_verdict({**real, grown_name: grown_text}, size + 1, chain)
+    assert len(at_eight) == 1 and other_name in at_eight[0], (
+        f"with one list grown and the sentence retyped to {size + 1}, the verdict "
+        f"should now complain about the list that did NOT grow: {at_eight}")
+
+    both_text = real[other_name].replace(
+        f"{other_name} = {{", f'{other_name} = {{\n    "some-new-skill",', 1)
+    assert both_text != real[other_name], (
+        f"the seeded edit matched nothing in {EXEMPTION_LISTS[0][0]}")
+    assert not _exemption_verdict(
+        {other_name: both_text, grown_name: grown_text}, size + 1, chain), (
+        "the verdict still complains when both lists carry the entry and the sentence "
+        "says the number they carry, so a legitimate eighth exemption could never be "
+        "landed")
