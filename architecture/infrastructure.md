@@ -523,7 +523,7 @@ voice *change*. So a voice change needs the guardian re-staged
 | 8090 | Qwen3-TTS |
 | 8091 | secondary LLM |
 | 8096 | primary LLM |
-| 8181 | qmd — listening on `[::1]` only, so an IPv4-literal probe exits 7 against a healthy daemon (`scripts/service_health_check.py:51`) |
+| 8181 | qmd — listening on `[::1]` only, so an IPv4-literal probe exits 7 against a healthy daemon (`scripts/service_health_check.py:122`) |
 | 8500 | lloyd-mcp |
 | 8765 | the Thunderbird extension's bridge |
 | 18080 / 18500 | the automod **canary**: a candidate backend and aggregator booted from the round's worktree by the gate |

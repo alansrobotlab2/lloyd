@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -392,6 +393,42 @@ def test_declared_services_are_not_reported_twice(monkeypatch):
     assert len(derived) == len(set(derived))
 
 
+def test_recognising_a_supervisor_command_survives_an_absolute_argv_zero(monkeypatch):
+    """The recognition that used to be `cmd[0] == "supervisorctl"` still works by path (#2652).
+
+    This is the trap on the other side of the fix: resolving argv[0] is only safe
+    because the two places that ask "is this a supervisor call?" ask it about the
+    PROGRAM. Had `_sup_program` kept its equality test, every `SERVICES` entry would
+    have stopped naming a program the moment its argv[0] gained a directory,
+    `declared_programs()` would have lost the three `lloyd-mc:` members, and the derived
+    pass would have re-reported three declared services as undeclared ones — with every
+    test in this file still green, because they all feed the module a stub.
+    """
+    mod, _ = _fleet(monkeypatch, FLEET_LINES)
+    path = "/home/someone/.local/bin/supervisorctl"
+
+    assert mod._sup_program(
+        {"command": [path, "-c", "/etc/supervisord.conf", "status",
+                     "lloyd-mc:lloyd-backend"]}) == "lloyd-mc:lloyd-backend"
+    assert mod.is_supervisor_call([path, "-c", "/etc/supervisord.conf", "status"]), \
+        "a supervisor read addressed by path must read as one"
+
+    declared = mod.declared_programs()
+    for member in ("lloyd-mc:lloyd-backend", "lloyd-mc:lloyd-frontend",
+                   "lloyd-mc:lloyd-mcp"):
+        assert member in declared, f"{member} fell out of declared_programs()"
+
+    derived = [r["name"] for r in mod.derived_supervisor_rows()]
+    assert not [m for m in ("lloyd-mc:lloyd-backend", "lloyd-mc:lloyd-frontend",
+                            "lloyd-mc:lloyd-mcp") if m in derived], \
+        "a declared service was reported as an undeclared program"
+
+    # The recognition is a basename test, not a substring one: a stand-in named
+    # something else that merely contains the word is not supervisor.
+    assert not mod.is_supervisor_call(
+        ["/usr/local/bin/supervisorctl-stub", "-c", "/x", "status", "p"])
+
+
 # ---------------------------------------------------------------------- clause 4
 # #1141 is the incident this clause exists for: the health check used to prove the
 # vault sync worked by making it do something, and on 09-14 that probe deleted the
@@ -426,7 +463,17 @@ def test_grading_the_vault_sync_asks_supervisor_for_state_and_nothing_else(monke
 
     assert answer.commands, "the check must actually ask supervisor something"
     for cmd in answer.commands:
-        assert cmd[:3] == ["supervisorctl", "-c", str(mod.SUPervisor_CONF)], cmd
+        # argv[0] is an ABSOLUTE executable, asserted from the path and not by
+        # tracking the module. This line used to read `cmd[0] == "supervisorctl"`, and
+        # #2652 shipped green because that literal was rewritten to `mod.SUPERVISORCTL`
+        # — which is the bare name on a box whose PATH does not contain the binary, so
+        # the assertion would have gone on passing through the exact defect it is
+        # supposed to catch. `SUPERVISOR_NAME` is the one place the bare spelling is
+        # still allowed to live, so the comparison is against that, and the property
+        # that matters is asserted directly.
+        assert cmd[0] != mod.SUPERVISOR_NAME, cmd
+        assert os.path.isabs(cmd[0]) and os.access(cmd[0], os.X_OK), cmd
+        assert cmd[:3] == [mod.SUPERVISORCTL, "-c", str(mod.SUPervisor_CONF)], cmd
         assert cmd[3] == "status", cmd
         assert len(cmd) <= 5, cmd
 
@@ -449,7 +496,7 @@ def test_a_sync_line_without_a_state_field_re_asks_by_name_only(monkeypatch):
     rows = {r["name"]: r for r in mod.derived_supervisor_rows()}
     assert rows["agent-obsidian-sync"]["healthy"] is True, rows["agent-obsidian-sync"]
     asked = [c for c in answer.commands if c[3] == "status" and len(c) > 4]
-    assert asked == [["supervisorctl", "-c", str(mod.SUPervisor_CONF), "status",
+    assert asked == [[mod.SUPERVISORCTL, "-c", str(mod.SUPervisor_CONF), "status",
                       "agent-obsidian-sync"]], asked
 
 

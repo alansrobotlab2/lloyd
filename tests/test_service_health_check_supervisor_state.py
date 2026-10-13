@@ -814,3 +814,170 @@ def test_the_script_names_no_programs_to_excuse():
     assert "EXPECTED_STOPPED" not in text, "a second hand-maintained list appeared"
     for name in ("DECIDER", "decider"):
         assert name not in text, f"{name!r} is now hard-coded into the check"
+
+
+# ───────────────────────── the answer / non-answer boundary (#2652 clause 4) ─────
+#
+# `unverified` is a new word in this script's vocabulary, and a new word spreads by
+# analogy. Clause 4 is the half that keeps it honest: an exit-3 `status` naming a STOPPED
+# program is this box's steady state on a day nothing is wrong (two hand-started units),
+# so grading that as unreadable would let a healthy fleet be reported as one — its rows
+# leaving `Overall:`, its `Fleet:` heading silenced, and nobody able to tell from the
+# printed report. Both directions are pinned here, through a real child process, because
+# the pair is the distinction: the same call site, an answer on one side and a read that
+# could not start on the other.
+
+def _isolated(mod, tmp_path):
+    """Point the conf-derived globals at `tmp_path`, so a node grades its own bytes.
+
+    #2652 advisory: `_load_module()` leaves `SUPervisor_CONF` and `CONF_D_GLOB` on the
+    live paths, so a `STOPPED` row's hand-started check reads this box's real
+    `conf.d/` — the same fixture would give a different verdict on a box whose units
+    declare `autostart=false`. `_default_run` builds its own units tree for exactly
+    this reason; these nodes do the same thing in-process. Applied to the nodes added
+    below, not retro-fitted to the exit-3 node above, whose advisory-row assertion
+    depends on this box's real `agent-decider.conf` — isolating it there would change
+    the verdict it is pinning rather than the fixture it reads.
+    """
+    units = tmp_path / "sup"
+    units.mkdir(parents=True, exist_ok=True)
+    (units / "supervisord.conf").write_text("[supervisord]\nnodaemon=false\n",
+                                            encoding="utf-8")
+    mod.SUPervisor_CONF = units / "supervisord.conf"
+    mod.CONF_D_GLOB = str(units / "no-units-here-*.conf")
+    return mod
+
+
+def _declared_stub(tmp_path, stdout: str, rc: int) -> Path:
+    """A supervisorctl stand-in for a DECLARED per-name call: a state line and an LSB code.
+
+    The declared seven are read by `check_service`, which takes the exit code into the
+    verdict (that is what separates a crash-loop from a clean stop, #1040), unlike the
+    derived rows which grade the state word alone.
+    """
+    stub = tmp_path / "supervisorctl-declared"
+    stub.write_text("#!/bin/sh\n"
+                    f'printf "%s" {stdout!r}\n'
+                    f"exit {rc}\n", encoding="utf-8")
+    stub.chmod(0o755)
+    return stub
+
+
+def test_a_declared_service_answered_exit_3_is_graded_by_its_state_word(
+        tmp_path, monkeypatch):
+    """Clause 4 on the call site the six DECLARED rows use: `check_service`, rc 3.
+
+    `agent-decider` and `agent-llm-secondary` are STOPPED as this box's steady state,
+    so `status <name>` exits 3 while printing a usable state line. The item rules out
+    both directions of exit-code grading — `rc == 0` is not health, and `rc != 0` is
+    not unreadability — so the state word has to reach the status, and no `unverified`
+    marker may appear because the code was nonzero.
+    """
+    mod = _isolated(_load_module(), tmp_path)
+    stub = _declared_stub(tmp_path, "agent-old  STOPPED   not started\n", 3)
+    row = mod.check_service("agent-old", {
+        "command": [str(stub), "-c", "supervisord.conf", "status", "agent-old"],
+        "category": "supervisor", "timeout": 10})
+    assert row.get("unverified") is not True, row
+    assert "STOPPED" in row["status"], row
+    assert row["healthy"] is False, f"a STOPPED process is still a fault here: {row}"
+
+
+def test_a_declared_service_whose_command_never_ran_is_unverified_not_a_fault(
+        tmp_path, monkeypatch):
+    """The counterpart through `check_service`: same argv, nothing to exec.
+
+    That is #2652's original failure exactly — a bare argv[0] — and through this call
+    site it must land as `unverified` and unscored, where the exit-3 node above is a
+    graded verdict.
+    """
+    mod = _isolated(_load_module(), tmp_path)
+    missing = str(tmp_path / "absent" / "supervisorctl")
+    row = mod.check_service("agent-old", {
+        "command": [missing, "-c", "supervisord.conf", "status", "agent-old"],
+        "category": "supervisor", "timeout": 10})
+    assert row.get("unverified") is True, row
+    assert row["status"].startswith("unverified"), row
+    assert mod._scored_rows([row]) == [], row
+
+
+def test_a_derived_row_the_per_program_probe_could_not_ask_is_unverified(tmp_path):
+    """The per-program branch of the same boundary, which no test in the repo named.
+
+    #2652 advisory, raised twice: `derived_supervisor_rows` re-asks one program whose
+    fleet line carried no state, and if THAT read raises, the row used to be graded
+    from a `None` it had not earned. The branch is now `unverified — supervisor was
+    not asked …`, and the only way to reach it is a fleet answer that named the
+    program without a state plus a per-name read that cannot start — so this seeds the
+    first and denies the second, then asserts the marker is not billed.
+    """
+    mod = _isolated(_load_module(), tmp_path)
+    # `None`, not "": a `status` line that names a program with no second field is
+    # what `supervisor_fleet()` records for it (`fields[1] if len(fields) > 1 else
+    # None`), and an empty string is a different case — a state that came back
+    # present but meaningless, which `_state_verdict` already grades as a broken
+    # reading without asking anyone.
+    mod._FLEET = ({"agent-tts": None}, None)
+    mod.SUPERVISORCTL = str(tmp_path / "absent" / "supervisorctl")
+    rows = mod.derived_supervisor_rows()
+    assert len(rows) == 1, rows
+    assert rows[0]["unverified"] is True, rows[0]
+    assert "supervisor was not asked" in rows[0]["status"], rows[0]
+    assert mod._scored_rows(rows) == [], "a probe that never ran was billed anyway"
+
+
+def _state_stub(tmp_path, stdout: str, rc: int) -> Path:
+    """A real supervisorctl stand-in on disk, printing `stdout` and exiting `rc`."""
+    stub = tmp_path / "supervisorctl"
+    stub.write_text("#!/bin/sh\n"
+                    "case \"$*\" in\n"
+                    "  *status*)\n"
+                    f"    printf {json.dumps(stdout)}\n"
+                    f"    exit {rc}\n"
+                    "    ;;\n"
+                    "esac\n"
+                    "exit 0\n")
+    stub.chmod(0o755)
+    return stub
+
+
+def test_a_fleet_answer_of_exit_3_is_graded_and_never_marked_unverified(tmp_path,
+                                                                       monkeypatch):
+    mod = _isolated(_load_module(), tmp_path)
+    monkeypatch.setattr(
+        mod, "SUPERVISORCTL",
+        str(_state_stub(tmp_path,
+                        "agent-tts  RUNNING   pid 25, uptime 2:00:00\n"
+                        "agent-old  STOPPED   not started\n", 3)))
+
+    fleet, error = mod.supervisor_fleet()
+    assert error is None, f"an answered read was reported as a failure: {error}"
+    assert fleet == {"agent-tts": "RUNNING", "agent-old": "STOPPED"}, fleet
+
+    rows = {r["name"]: r for r in mod.derived_supervisor_rows()}
+    assert rows["agent-old"]["healthy"] is False, rows["agent-old"]
+    assert not any(r.get("unverified") for r in rows.values()), rows
+    assert len(mod._scored_rows(list(rows.values()))) == len(rows), \
+        "an answer was taken out of Overall:'s fraction"
+
+
+def test_the_same_call_site_marks_unverified_only_when_the_read_could_not_run(
+        tmp_path, monkeypatch):
+    """The counterpart, from the same two functions and no other difference."""
+    mod = _isolated(_load_module(), tmp_path)
+    monkeypatch.setattr(
+        mod, "SUPERVISORCTL",
+        str(_state_stub(tmp_path, "agent-tts  RUNNING   pid 25, uptime 2:00:00\n", 0)))
+    assert mod.supervisor_fleet() == ({"agent-tts": "RUNNING"}, None)
+    assert not any(r.get("unverified") for r in mod.derived_supervisor_rows())
+
+    monkeypatch.setattr(mod, "SUPERVISORCTL", str(tmp_path / "gone" / "supervisorctl"))
+    mod._FLEET = None
+    fleet, error = mod.supervisor_fleet()
+    assert isinstance(error, mod.UnreadableFleetRead), repr(error)
+    rows = mod.derived_supervisor_rows()
+    assert len(rows) == 1 and rows[0]["unverified"] is True, rows
+    assert rows[0]["status"].startswith("unverified"), rows[0]
+    assert "no undeclared program was graded, so this run covered only the declared " \
+           "services" in rows[0]["status"], rows[0]
+    assert mod._scored_rows(rows) == [], "a read that never ran was billed anyway"

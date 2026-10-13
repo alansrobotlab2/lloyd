@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import urllib.request
@@ -29,20 +30,90 @@ SUPervisor_CONF = "/home/alansrobotlab/lloyd/agent-services/supervisor/superviso
 if os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("UNIT"):
     SUPervisor_CONF = os.environ["UNIT"]
 
+#: A supervisor read that never reached supervisor is reported as this (#2652).
+#:
+#: The distinction is the whole point, and the old word erased it. A read that raised
+#: and a service that is down both used to land on `status: "error"`, and `_scored_rows`
+#: counts every row that is not advisory — so the checker's own missing PATH was billed
+#: to the fleet as six faults on a box whose six services were RUNNING. `unverified`
+#: says what actually happened: nothing was asked, so nothing was graded. Such a row is
+#: excluded from both sides of `Overall: N/M`, exactly as an advisory row is, and it
+#: still prints, with the reason it could not be read.
+UNVERIFIED_STATUS = "unverified"
+
+SUPERVISOR_NAME = "supervisorctl"
+
+#: Where this box keeps the binary, for a process whose PATH does not contain it.
+_SUPERVISOR_INSTALLS = ("/home/alansrobotlab/.local/bin/supervisorctl",)
+
+
+class UnreadableFleetRead(str):
+    """The reason a fleet-wide `status` could not be read at all (#2652 clause 4).
+
+    A `str` subclass rather than a new return shape, so every existing reader of
+    `supervisor_fleet()`'s second element — the `if error is not None` test, the
+    f-string that puts the reason into a row, and the tests that compare the text —
+    keeps working unchanged. The type exists for one decision it cannot otherwise make:
+    a read that *raised* never reached supervisor, so the rows it would have produced are
+    `unverified`; a read that answered with something unusable (`no usable program lines
+    (exit 3)`, this box's steady state while two hand-started units sit STOPPED) is an
+    answer about the fleet and stays a graded fault. Grading the second like the first
+    would let a healthy fleet be reported unreadable.
+    """
+
+
+def resolve_supervisor() -> str:
+    """An absolute, executable path to supervisorctl; the bare name if nothing resolves.
+
+    The bare name was the defect (#2652). This script runs from a shell whose PATH is
+    `/usr/local/bin:/usr/bin`, and supervisorctl is installed in `~/.local/bin`, so
+    every `subprocess.run(["supervisorctl", ...])` raised `FileNotFoundError` before
+    supervisor was contacted — six RUNNING services printed `[✗] error` and `Overall:`
+    billed the fleet for the checker's own miss. PATH is asked first, so an operator or
+    a test that puts another supervisor on PATH still gets the answer it asked for; the
+    known install is the fallback. The bare name survives only where nothing resolved at
+    all, which is the one case that is the fleet's business rather than the checker's —
+    and that row is reported `unverified`, not as a fault.
+    """
+    found = shutil.which(SUPERVISOR_NAME) or next(
+        (p for p in _SUPERVISOR_INSTALLS if os.access(p, os.X_OK)), None)
+    return found or SUPERVISOR_NAME
+
+
+#: argv[0] for every supervisor read in this file: absolute where the binary was found,
+#: `SUPERVISOR_NAME` where it was not, which is what makes a read raise and its row
+#: land in `UNVERIFIED_STATUS` instead of the fraction.
+SUPERVISORCTL = resolve_supervisor()
+
+
+def is_supervisor_call(argv) -> bool:
+    """True when this argv asks supervisor something, however argv[0] is spelled.
+
+    By basename — not by equality, not by substring. Equality on argv[0] is what made
+    the resolved path a silent regression: `_sup_program()` matched only the bare name,
+    so once argv[0] carried a directory it returned None for `lloyd-mc:lloyd-backend`,
+    that program fell out of `declared_programs()`, and the derived pass (#1649)
+    re-reported a *declared* service as an undeclared one. A substring test over argv[0]
+    (the other form in this file) matches a stand-in named `supervisorctl-stub` that is
+    not supervisor at all. Neither form is about the program, so neither is kept.
+    """
+    return bool(argv) and os.path.basename(str(argv[0])) == SUPERVISOR_NAME
+
+
 SERVICES = {
     # Supervisor services — status via supervisorctl, no HTTP check
-    "lloyd-backend": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "lloyd-mc:lloyd-backend"], "category": "lloyd"},
-    "lloyd-frontend": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "lloyd-mc:lloyd-frontend"], "category": "lloyd"},
-    "lloyd-mcp": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "lloyd-mc:lloyd-mcp"], "category": "lloyd"},
+    "lloyd-backend": {"command": [SUPERVISORCTL, "-c", SUPervisor_CONF, "status", "lloyd-mc:lloyd-backend"], "category": "lloyd"},
+    "lloyd-frontend": {"command": [SUPERVISORCTL, "-c", SUPervisor_CONF, "status", "lloyd-mc:lloyd-frontend"], "category": "lloyd"},
+    "lloyd-mcp": {"command": [SUPERVISORCTL, "-c", SUPervisor_CONF, "status", "lloyd-mc:lloyd-mcp"], "category": "lloyd"},
 
     # LLM inference servers — status via supervisorctl, no HTTP check
-    "agent-llm-primary": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-llm-primary"], "category": "supervisor"},
-    "agent-llm-secondary": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-llm-secondary"], "category": "supervisor"},
+    "agent-llm-primary": {"command": [SUPERVISORCTL, "-c", SUPervisor_CONF, "status", "agent-llm-primary"], "category": "supervisor"},
+    "agent-llm-secondary": {"command": [SUPERVISORCTL, "-c", SUPervisor_CONF, "status", "agent-llm-secondary"], "category": "supervisor"},
     # djev shares GPU 2 with the secondary, so at most one of these two is ever
     # enabled. Port 8011 is the structured decision API, which start-djev.sh
     # only launches once vLLM on 8010 answers — so an open 8011 means the whole
     # stack is serving, while an open 8010 during a cold boot does not.
-    "agent-djev": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-djev"], "category": "supervisor", "port": 8011},
+    "agent-djev": {"command": [SUPERVISORCTL, "-c", SUPervisor_CONF, "status", "agent-djev"], "category": "supervisor", "port": 8011},
 
     # QMD retrieval daemon — the path every vault_search/vault_recall needs,
     # and until #406 this check could not see it at all. Port is the one
@@ -53,7 +124,7 @@ SERVICES = {
     # first failed vault_search of the day. This is also the first SERVICES
     # entry to declare a `port`, i.e. the first thing to ever exercise
     # http_check().
-    "agent-qmd-daemon": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-qmd-daemon"], "category": "retrieval", "port": 8181},
+    "agent-qmd-daemon": {"command": [SUPERVISORCTL, "-c", SUPervisor_CONF, "status", "agent-qmd-daemon"], "category": "retrieval", "port": 8181},
 }
 
 # Every state supervisord can report for a program. A state outside this table is
@@ -93,7 +164,7 @@ def _sup_program(svc: dict) -> Optional[str]:
     `lloyd-backend` as a program supervisor never heard of.
     """
     cmd = svc.get("command") or []
-    if len(cmd) >= 5 and cmd[0] == "supervisorctl" and "status" in cmd:
+    if len(cmd) >= 5 and is_supervisor_call(cmd) and "status" in cmd:
         return cmd[-1]
     return None
 
@@ -151,7 +222,7 @@ def supervisor_fleet() -> tuple:
         fleet, error = {}, None
         try:
             r = subprocess.run(
-                ["supervisorctl", "-c", SUPervisor_CONF, "status"],
+                [SUPERVISORCTL, "-c", SUPervisor_CONF, "status"],
                 capture_output=True, text=True, timeout=10)
             noise = []
             for line in r.stdout.splitlines():
@@ -170,13 +241,21 @@ def supervisor_fleet() -> tuple:
                          f"{len(noise)} line(s) were not program lines") + (
                     f": {detail}" if detail else "")
         except Exception as exc:
-            error = str(exc)[:160]
+            # Typed, because the two failure shapes have to be told apart downstream:
+            # this one is supervisor never having been reached, while the `not fleet`
+            # branch above is an answer that made no sense (#2652 clause 4).
+            error = UnreadableFleetRead(str(exc)[:160])
         _FLEET = (fleet, error)
     return _FLEET
 
 
-def _ask_program(name: str) -> Optional[str]:
-    """Re-ask supervisor for one program's state, when the fleet read gave no usable one.
+def _ask_program(name: str, errors: Optional[list] = None) -> Optional[str]:
+    """Re-ask supervisor for one program's state, when the fleet read named it but gave
+    no usable state for it.
+
+    The condition is narrower than "the fleet read was useless": when the read did not
+    happen at all, `derived_supervisor_rows` returns the unverified row first and no
+    program reaches this function — one failed exec must not become N probes (#2652).
 
     The one probe a derived program gets, and it is the same read with one name
     added: `supervisorctl -c CONF status <program>`, whose answer is one line and
@@ -190,14 +269,22 @@ def _ask_program(name: str) -> Optional[str]:
     opens no port, runs no script, reads no sentinel file and no lock, asks
     supervisor nothing it does not already track — so it cannot cost anything the
     service it is measuring owns.
+
+    `errors` is an out-parameter, and it exists for one distinction: an answer with no
+    state field is supervisor telling us something, while a read that never started is
+    us failing to ask. `_process_state_row` grades the first and reports the second
+    `unverified` (#2652), so a checker that cannot reach supervisor must not be able to
+    turn a healthy fleet into a list of faults.
     """
     try:
         r = subprocess.run(
-            ["supervisorctl", "-c", SUPervisor_CONF, "status", name],
+            [SUPERVISORCTL, "-c", SUPervisor_CONF, "status", name],
             capture_output=True, text=True, timeout=10)
         fields = (r.stdout or "").split()
         return fields[1] if len(fields) > 1 else None
-    except Exception:
+    except Exception as exc:
+        if errors is not None:
+            errors.append(str(exc))
         return None
 
 
@@ -328,7 +415,17 @@ def _process_state_row(name: str, state: Optional[str],
         # program before calling the reading broken — same command with a name
         # appended, no new kind of probe, and a process that is up gets its true
         # state instead of a false alarm.
-        state = _ask_program(name)
+        asked = []
+        state = _ask_program(name, asked)
+        if state is None and asked:
+            # The re-ask raised, so supervisor was never reached at all. Nothing was
+            # learned about this program, and "nothing learned" must not be filed as
+            # "this service is down" (#2652: a bare argv[0] made this the fate of every
+            # derived row, on a box where every service was RUNNING).
+            return {"name": name, "category": FLEET_CATEGORY, "healthy": False,
+                    "status": f"{UNVERIFIED_STATUS} — supervisor was not asked "
+                              f"({asked[0]})",
+                    "exit_code": -1, "unverified": True}
     healthy, status = _state_verdict(name, state)
     row = {"name": name, "category": FLEET_CATEGORY, "healthy": healthy,
            "status": status, "exit_code": 0}
@@ -372,11 +469,20 @@ def derived_supervisor_rows() -> list:
     """
     fleet, error = supervisor_fleet()
     if error is not None:
-        return [{"name": "supervisorctl status", "category": FLEET_CATEGORY,
-                 "healthy": False, "exit_code": 0,
-                 "status": f"could not read the loaded program list ({error}) — no "
-                           "undeclared program was graded, so this run covered only "
-                           "the declared services"}]
+        row = {"name": "supervisorctl status", "category": FLEET_CATEGORY,
+               "healthy": False, "exit_code": 0,
+               "status": f"could not read the loaded program list ({error}) — no "
+                         "undeclared program was graded, so this run covered only "
+                         "the declared services"}
+        if isinstance(error, UnreadableFleetRead):
+            # Only a read that RAISED. The other shape of `error` — an answer carrying
+            # no usable program lines, `(exit 3)` being this box's steady state while
+            # two hand-started units sit STOPPED — is supervisor replying, and stays a
+            # graded fault, or a healthy fleet could be reported unreadable (#2652
+            # clause 4). The self-scope sentence is unchanged either way.
+            row["status"] = f"{UNVERIFIED_STATUS}: {row['status']}"
+            row["unverified"] = True
+        return [row]
     if not fleet:
         return [{"name": "supervisorctl status", "category": FLEET_CATEGORY,
                  "healthy": False, "exit_code": 0,
@@ -1214,7 +1320,7 @@ def check_service(name: str, service_def: dict) -> dict:
 
         # Special handling for supervisorctl: the state field decides, not the
         # exit code and not a substring of the answer.
-        if "supervisorctl" in command[0]:
+        if is_supervisor_call(command):
             status, healthy = _supervisor_verdict(output)
 
         # If supervisor says running, also check port is reachable
@@ -1246,14 +1352,16 @@ def check_service(name: str, service_def: dict) -> dict:
             "category": category
         }
     except Exception as e:
-        return {
-            "name": name,
-            "status": "error",
-            "healthy": False,
-            "exit_code": -1,
-            "output": str(e),
-            "category": category
-        }
+        row = {"name": name, "status": "error", "healthy": False, "exit_code": -1,
+               "output": str(e), "category": category}
+        if isinstance(e, OSError):
+            # The process never started, so this service was never measured: `error`
+            # here was a claim the run had no right to make. A `timeout` above is NOT
+            # this case — the binary was found, ran, and did not answer, which says
+            # something about the service and stays counted (#2652).
+            row["status"] = UNVERIFIED_STATUS
+            row["unverified"] = True
+        return row
 
 
 def _advisory_rows(results: list) -> list:
@@ -1266,8 +1374,18 @@ def _advisory_rows(results: list) -> list:
 
 
 def _scored_rows(results: list) -> list:
-    """The rows the verdict is arithmetic over."""
-    return [r for r in results if not r.get("advisory")]
+    """The rows the verdict is arithmetic over.
+
+    Two kinds are left out, and for the same reason: neither claims a fault. An advisory
+    row reports a condition the run declines to grade (#1726); an `unverified` row is one
+    that never reached what it was checking, so counting it turned the checker's own miss
+    into a fleet fault — six RUNNING services printed `Overall: 15/23` because of a
+    missing PATH entry (#2652). Excluding it from BOTH sides is the point: leaving it in
+    the denominator alone would hold the same sentence against a service nobody asked
+    about. The rows still print, with their reason, above the categories.
+    """
+    return [r for r in results
+            if not r.get("advisory") and not r.get("unverified")]
 
 
 def format_text(results: list, summary: dict) -> str:
@@ -1286,12 +1404,31 @@ def format_text(results: list, summary: dict) -> str:
         # and a stale trust store still cannot be missed under a separate heading.
         lines.append(f"Advisory: {len(advisory)} row(s) reported without a fault "
                      f"verdict: {', '.join(r['name'] for r in advisory)}")
+    unverified = [r for r in results if r.get("unverified")]
+    if unverified:
+        # Named on its own line for the same reason advisory is: dropping these from
+        # `Overall:` must not also make them invisible, or a run that read nothing
+        # would look like a run that read nothing wrong (#2652).
+        lines.append(f"Unverified: {len(unverified)} row(s) never reached what they "
+                     f"check, graded as neither healthy nor down: "
+                     f"{', '.join(r['name'] for r in unverified)}")
     lines.append("")
 
     for result in results:
-        icon = ("[!]" if result.get("advisory")
+        icon = ("[?]" if result.get("unverified")
+                else "[!]" if result.get("advisory")
                 else "[✓]" if result["healthy"] else "[✗]")
-        lines.append(f"{icon} {result['name']}\u2014 {result['status']}")
+        # The reason a failed read computed goes on the row with it (#2652). It was
+        # already there — `check_service`'s except arm put `str(e)` in `output` — and
+        # `format_text` rendered only `status`, so the printed line said `error` about a
+        # failure whose cause had been worked out one field earlier and thrown away.
+        # `--json` always dumped the whole row, which is how this survived review.
+        status = str(result["status"])
+        reason = str(result.get("output") or "")
+        if (result.get("unverified") or status in ("error", "timeout")) and reason \
+                and reason not in status:
+            status = f"{status} ({reason})"
+        lines.append(f"{icon} {result['name']}\u2014 {status}")
 
     lines.append("")
     lines.append("Categories:")
@@ -1389,9 +1526,12 @@ def main():
             # Only graded rows feed the arithmetic, so an advisory row cannot move a
             # category's word — clause 3 of #1726, for a category that later gains
             # both kinds of row. A category with nothing but advisory rows has no
-            # fault to name and reports its own verdict word instead.
-            graded = [r for r in results
-                      if r["category"] == cat and not r.get("advisory")]
+            # fault to name and reports its own verdict word instead. `unverified`
+            # rows are excluded by the same call for the same reason (#2652): a
+            # heading whose red means "the decision engine is down" must not be
+            # turned red by a check that never reached the engine, so the category
+            # goes through `_scored_rows` rather than a second copy of the rule.
+            graded = [r for r in _scored_rows(results) if r["category"] == cat]
             if graded:
                 healthy_in_cat = sum(1 for r in graded if r["healthy"])
                 if healthy_in_cat == len(graded):
