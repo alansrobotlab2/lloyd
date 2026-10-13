@@ -392,15 +392,40 @@ and `_save_session_meta` stamps a newly created four-part session `worker`
 instead, so no fresh run joins the set. They hold one or two user rows each and
 are not conversations, which is why the Background tab is where they belong.
 
-**That census no longer reproduces, and the reason is the retention rule two
-paragraphs below.** Re-measured 2026-10-13 over every readable head in
-`sessions/`: **no four-part id carries a human platform at all.** The eight
-`20260909_1538xx_autonomy_*` files exist only as `.json.gz` — archived, and the
-Background endpoint globs `*.json`, so an archived member of the class is in no
-listing — and `20260917_105134_autocode_029c` exists under no suffix. So the
-class the exemption exists for is currently empty, and the exemption's promise
-("never aged out") holds for 30 days, not forever: #2647. Treat the twelve as
-the incident that motivated the rule, not as live rows to go looking for.
+**That census no longer reproduces.** Re-measured 2026-10-13 over every readable
+head in `sessions/`: no four-part id on live data carries a human platform at
+all, and **no writer records a member's departure** — the sweep gzips and never
+deletes, nothing rewrites the `platform` of an *existing* session
+(`_save_session_meta` stamps it only in its create branch,
+`app/sessions_io.py:1327-1345`), and `DELETE /api/sessions/{session_id}`
+(`app/routers/sessions.py:1003`, unlink at `:1035`) is the only in-tree route
+that removes a transcript — so this page records the emptiness and the missing
+witness and asserts no cause for the vanished twelve, one of which,
+`20260917_105134_autocode_029c`, exists under no suffix at all (#2651).
+
+The eight `20260909_1538xx_autonomy_*` ids named above were never members of this
+class. They were sorted by their *filename* — the `_autonomy_` in the name is
+where the membership came from — while the head of each has always said
+`platform: worker`, and measured 2026-10-13 all 42 archived four-part files on
+the box report `platform: worker`, without exception. They are ordinary `worker`
+runs (`source: autonomy-task` in every one of those heads), archived on the
+machine age exactly like the background runs they always were.
+
+What the exemption promises is longer than this page used to say, and the reason
+is the field the sweep reads. `_archive_age_for`
+(`scripts/groundskeeper/retention-sweep.py:607-619`) takes the archive age from
+`platform`: `BACKGROUND_SESSION_ARCHIVE_AGE_DAYS` (30) for
+`NON_USER_PLATFORMS = ("autonomy", "worker")`, `SESSION_ARCHIVE_AGE_DAYS` (90)
+for everything else — including an unreadable head, which keeps the longer
+window. This class is *defined* by a platform word outside that tuple:
+`names_a_machine_platform` (`app/sessions_io.py:241-259`) returns exactly that
+membership test, and its own docstring says the class is identified by failing
+it. The sweep's predicate and the endpoint's exemption are complements over one
+field, so the 30-day background age cannot reach a file the exemption exists for.
+A member therefore stays in the Background listing for as long as its file is
+live, and leaves every `*.json` listing only when the sweep gzips it at the
+**90-day conversation age** (#2647, corrected by #2651). Treat the twelve as the
+incident that motivated the rule, not as live rows to go looking for.
 
 `_scan_recent_sessions` used to keep the newest 24 files by mtime and only
 then drop non-user rows, which with 22 of the newest 24 already background
@@ -444,7 +469,9 @@ days of inactivity, a conversation after 90. Same gzip-never-delete rule: an
 archived run is out of every listing and still recoverable. The platform is
 read from the file's first 4 KB, and an unreadable head keeps the *longer*
 window — a few stale kilobytes beat losing a conversation from the history
-two months early. `workers.db` is on the same sweep: the `runs` table loses rows
+two months early. That choice is a platform word and never the id shape, so a
+four-part transcript carrying a human platform sits on the 90-day side whatever
+its name looks like (§8). `workers.db` is on the same sweep: the `runs` table loses rows
 whose `completed_at` is older than 30 days (`WORKER_RUN_MAX_AGE_DAYS`), reaching the
 database through `workers.queue.configured_db_path()` so the sweep and the queue can
 never name different files, and a database the live pool is holding reports
@@ -693,11 +720,15 @@ into a multi-second request. Every four-part file is therefore still *considered
 for membership however old it is, which is how the 12 mis-labelled sessions got
 listed at all; they are listed ahead of ordinary runs, since the tab's ordinary
 window will not reach them otherwise and nothing else lists them. (That class is
-empty on live data now, and archiving a member ages it out after all — §8,
-#2647.) Paging past
+empty on live data now, and archiving a member does age it out after all — at the
+90-day conversation age and never the 30-day background one, because its platform
+word is by construction outside `NON_USER_PLATFORMS`; §8, #2647 as corrected by
+#2651.) Paging past
 `limit` is not built; `unclassified` names the chat-shaped files the read budget
-could not reach, so `count: 150` cannot be read as "there are 150". Older
-transcripts stay on disk for 30 days, openable by id.
+could not reach, so `count: 150` cannot be read as "there are 150". An archived
+transcript is not gone: the sweep gzips and never deletes, so it stays openable by
+id for as long as its `.json.gz` stands, and a member of this class is not even
+archived until 90 days of inactivity.
 
 ---
 
@@ -713,10 +744,13 @@ transcripts stay on disk for 30 days, openable by id.
 
 - The four-part ids carrying a human platform (§8) are gone from live data, so
   the class the Background tab's never-aged-out exemption exists for is empty
-  today. The exemption is still in the endpoint, and its real limit is now the
-  opposite of the old one: the sweep archives a background session at 30 days
-  and the endpoint globs `*.json`, so a member of that class is reachable for a
-  month and then listed by nothing (#2647).
+  today. The exemption is still in the endpoint, and its limit is an archive, not
+  a month: a member of that class is archived at the 90-day **conversation** age,
+  not the 30-day background age, because its platform word is by construction
+  outside `NON_USER_PLATFORMS` — `_archive_age_for` takes the age from `platform`,
+  so the background rule can never reach the class it would have cut short — and
+  the endpoint globs `*.json`, so from that archive onwards it is listed by
+  nothing (#2647, corrected by #2651).
 - `backlog-cluster` does **not** carry the key any more. `#1015` removed it and
   `/api/workers/health` reports the source `inner_voice: null` (measured
   2026-10-13), which is the honest answer for a source with no agent turn. An
@@ -773,6 +807,7 @@ transcripts stay on disk for 30 days, openable by id.
 | `tests/test_api_contracts.py` | `/api/background/sessions`, `/api/workers/health`, the two listings are complements, created sessions are chat-shaped |
 | `tests/test_workers_router.py` | the §7 join as a parsed `session_ids` field on `/api/workers/runs` and on `recent` in `/api/workers/health`: both meta keys unioned, one entry per transcript, `[]` for a row that names none — plus the Sources row's markup (one control per transcript, opening the mapped id), and this page's own §7 bullet naming the surface a human walks |
 | `web/src/lib/runSessions.test.ts` | the Sources panel's derivation, and that the page threads its own reader callback to the run rows (the click itself is human-only: no renderer in this vitest config) |
+| `tests/test_background_runs_doc_claims.py` | what this page may assert: the chat summarizer's call path, scaling and a dated figure (§8, #1228), and that the mis-labelled class expires at the 90-day conversation age rather than a 30-day archive in every section that dates it (§8, §11, §13, #2651) |
 
 ## Review log
 
@@ -792,3 +827,13 @@ transcripts stay on disk for 30 days, openable by id.
   #2646 (the endpoint's uncapped four-part head walk), #2647 (the never-aged-out
   exemption expiring at the sweep's 30-day archive) and #2648 (the recorded
   `source: bench` class has no life).
+- 2026-10-13 — **Correction to the entry above (#2651).** Its `#2647`
+  parenthetical is wrong, and so was every sentence on this page that repeated it:
+  `_archive_age_for` (`scripts/groundskeeper/retention-sweep.py:607-619`) picks the
+  archive age from the `platform` field, and this class exists precisely because
+  its platform is outside `NON_USER_PLATFORMS`, so a member is archived at the
+  90-day conversation age, not at 30 — the exemption was never expiring a month
+  after a run. §8, §11 and §13 now carry the measured policy; §8's eight
+  `20260909_1538xx_autonomy_*` ids are reattributed to ordinary `worker` runs
+  archived on the machine age, since all 42 archived four-part files on the box
+  report `platform: worker`. The entry above is left exactly as filed.
