@@ -252,10 +252,24 @@ _CITATION = re.compile(
 
 
 def _resolve(prefix: str | None, rel: str) -> Path:
+    """Where a citation with this prefix points, in the tree the check is running in.
+
+    `~/` is `ACCOUNT_HOME`, the passwd-derived name, and not `Path.home()`. A
+    doc writing `~/lloyd-data/workers.db` means the account's home — the one place
+    that spelling has ever pointed on this box — and inside an automod gate
+    `Path.home()` is `<round>/home`, a symlink farm that deliberately carries
+    neither `lloyd` nor `lloyd-data` (`worktree.py::HOME_LINK_SKIP`). Expanding
+    the tilde against *that* home turns a true citation into a missing file: the
+    gate's `tests` rung went red on nine architecture docs for exactly this, and
+    the red was reported against rounds that had touched none of them. It is the
+    same rule the four roots above already follow, stated at
+    `app/paths.py`'s header — a reader that wants live data reaches it through the
+    passwd entry, never through `$HOME`.
+    """
     if prefix == "$LLOYD_DATA/":
-        return (ENV_DATA_ROOT or DATA_ROOT or HOME / "lloyd-data") / rel
+        return (ENV_DATA_ROOT or DATA_ROOT or ACCOUNT_HOME / "lloyd-data") / rel
     if prefix == "~/":
-        return HOME / rel
+        return ACCOUNT_HOME / rel
     return ROOT / rel
 
 
@@ -268,8 +282,17 @@ def _rel_within(path: Path) -> Path | None:
     root the process was pointed at is tried before the checkout, so a
     `$LLOYD_DATA/...` citation aimed at a round's or a fixture's root still
     yields its bare relative name.
+
+    `HOME` comes before `ACCOUNT_HOME` because the two nest: inside a gate the
+    round's home is `<ACCOUNT_HOME>/lloyd-work/<round>/home`, so a path under it
+    is lexically under the account home as well, and whichever is tried first
+    decides the answer. Tried last, the account home swallows it and the relative
+    name comes back carrying the whole nesting — `lloyd-work/<round>/home/lloyd-data/workers.db`
+    — which every root then fails to find, for a file that is sitting in plain
+    sight in the data root. Most specific root first is the only order that can
+    recover the spelling the doc actually wrote.
     """
-    for base in (ENV_DATA_ROOT, ROOT, DATA_ROOT, VAULT_ROOT, ACCOUNT_HOME, HOME):
+    for base in (ENV_DATA_ROOT, ROOT, DATA_ROOT, VAULT_ROOT, HOME, ACCOUNT_HOME):
         if base is None:
             continue
         try:
@@ -1838,7 +1861,11 @@ def test_the_identity_file_is_still_cited_and_lands_outside_the_repo():
         "because it has nothing left to check")
 
     cited = cited_paths(text)
-    rooted = HOME / "obsidian" / "lloyd" / "SOUL.md"
+    # The account home, not `$HOME`: inside a gate the two differ, and the docs
+    # spell `~/obsidian/…` meaning the account's — the farm there carries the vault
+    # only as a symlink, so asserting against `$HOME` pins whichever spelling the
+    # process happened to expand, which is not the claim this row makes.
+    rooted = ACCOUNT_HOME / "obsidian" / "lloyd" / "SOUL.md"
     hits = [p for p, _line in cited if p.name == "SOUL.md"]
     assert hits == [rooted], (
         f"the identity-file citation resolves to {[str(h) for h in hits]}, not to "
@@ -1959,6 +1986,140 @@ def test_the_gate_selection_drops_nothing_and_the_named_node_passes():
     assert len(named) == 1, (
         f"{NAMED_NODE} is not reported PASSED by name, so the node this item was "
         f"filed for has no recorded verdict: {named}")
+
+
+#: The node #2645 was filed against, spelled with its parametrisation, for the
+#: same reason `NAMED_NODE` above is: "the check is green" is equally true of a
+#: check that no longer runs. This one is the red node the item names; the node
+#: above is the one #1763 filed.
+FILED_NODE = ("test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree"
+              "[voice.md]")
+
+
+def test_a_home_prefixed_citation_resolves_under_the_gate_s_nested_home(tmp_path,
+                                                                        monkeypatch):
+    """Clause 1's mechanism, over two directories this node builds itself.
+
+    The gate's `tests` rung runs candidate code with `HOME=<round>/home` and
+    `LLOYD_DATA=<round>/home/lloyd-data` (`scripts/automod/gate.py::_child_env`).
+    That home is a farm that by design carries neither `lloyd` nor `lloyd-data`
+    (`scripts/automod/worktree.py::HOME_LINK_SKIP`), and it sits INSIDE the account
+    home. Both facts are load-bearing here, so the fixture reproduces both: an
+    account home holding the one real file, and a round home nested three levels
+    below it holding nothing.
+
+    Two defects compounded, and the node below fails on each of them separately.
+    `_resolve` expanded `~/` against `Path.home()`, so a doc's `~/lloyd-data/…`
+    pointed at the empty farm; and `_rel_within` tried `ACCOUNT_HOME` before
+    `HOME`, which is true of anything under the account home — the farm included —
+    so the recovered relative name carried the whole nesting and no root could
+    re-find it. The result was a citation that is true of this box reported as a
+    missing file, on nine architecture docs, in rounds that had changed none of
+    them: `base_probe: probed 4 file(s) at base 5592e75c in a fresh data root: 16
+    already failing` (`~/.local/state/lloyd-automod/rounds/SM_20261013_060835/gate.json`).
+    """
+    mod = sys.modules[__name__]
+    account = tmp_path / "account"
+    (account / "lloyd-data").mkdir(parents=True)
+    real_file = account / "lloyd-data" / "workers.db"
+    real_file.write_text("not really sqlite", encoding="utf-8")
+    round_home = account / "lloyd-work" / "R_ONE" / "home"
+    round_home.mkdir(parents=True)
+    vault, data = account / "obsidian", account / "lloyd-data"
+    for name, value in (("HOME", round_home), ("ACCOUNT_HOME", account),
+                        ("DATA_ROOT", data), ("VAULT_ROOT", vault),
+                        ("ENV_DATA_ROOT", tmp_path / "round-data")):
+        monkeypatch.setattr(mod, name, value)
+    monkeypatch.setattr(mod, "CITATION_ROOTS",
+                        (("checkout", ROOT), ("vault", vault),
+                         ("data", data), ("home", account)))
+
+    m = _CITATION.match("~/lloyd-data/workers.db")
+    assert m and m.group("pre") == "~/", (
+        "the extractor no longer reads `~/lloyd-data/workers.db` as a home-prefixed "
+        f"citation, so everything below answers a question nobody asked: {m}")
+
+    resolved = _resolve(m.group("pre"), m.group("path"))
+    assert resolved == real_file, (
+        f"`~/` expanded against the moved home rather than the account home, which is "
+        f"exactly how a true citation goes missing at the gate: {resolved}")
+    assert resolve_citation(resolved) == real_file, (
+        "a citation pointing at a file that exists came back unresolved")
+
+    # The second defect, which the fix above would hide on its own: a path that
+    # lands under the round home by some other route — a `$LLOYD_DATA/` citation,
+    # or any caller handing `citation_roots` a path it built elsewhere — has to
+    # give back the spelling the doc wrote, not the nesting it was found under.
+    inside_farm = round_home / "lloyd-data" / "workers.db"
+    assert _rel_within(inside_farm) == Path("lloyd-data/workers.db"), (
+        "the account home swallowed a path under the round home, so the relative "
+        f"name came back carrying the nesting: {_rel_within(inside_farm)}")
+    assert resolve_citation(inside_farm) == real_file, (
+        "the same file resolved through one spelling and not the other, which is the "
+        "half that makes the guard depend on which root won the first match")
+
+
+def test_the_filed_node_passes_with_home_and_the_data_root_redirected():
+    """Clause 1 across the process boundary the gate actually crosses.
+
+    `_pytest` above inherits this process's environment, and that is why the tree
+    could read green locally for a day while every gate round carried seven red
+    nodes: the failure needed the pair `Gate._child_env` sets, `HOME` and
+    `LLOYD_DATA`, moved together. This node rebuilds that pair in a child
+    interpreter and asks pytest — not this file — for the verdict on the node #2645
+    names.
+
+    The farm mirrors `worktree.py::ensure_round_home` instead of inventing a smaller
+    one, because `~/.local/state/lloyd-automod/…` and `~/.config/…` citations in the
+    corpus resolve *through* those symlinks: a home without them would fail here for
+    a condition the gate never produces, which is the false alarm this suite has
+    been paying for all round. `lloyd` is the checkout and `lloyd-data` is the
+    round's own empty one, the two entries the farm withholds from the account.
+
+    It is built UNDER the account home — `<ACCOUNT_HOME>/lloyd-work/<name>/home`,
+    the layout `round_home` and `round_data_root` produce — and not under
+    `tmp_path`, because the nesting IS the condition: a farm standing outside the
+    account home can never be swallowed by it, so a `/tmp` layout would leave the
+    `_rel_within` order unexercised and let a regression pass on a layout the gate
+    does not build. Scope, said plainly: what this node pins across the child
+    boundary is the `~` expansion; the ordering defect is pinned by the node above,
+    where both homes are fixtures this file controls.
+    """
+    import shutil
+
+    from scripts.automod.gate import TESTS_MARK_EXPR
+    from scripts.automod.worktree import HOME_LINK_SKIP
+
+    nesting = ACCOUNT_HOME / "lloyd-work" / f"check-2645-{os.getpid()}"
+    home = nesting / "home"
+    home.mkdir(parents=True)
+    data = home / "lloyd-data"          # the round's own: real, and empty
+    data.mkdir()
+    try:
+        for entry in sorted(Path.home().iterdir()):
+            if entry.name in HOME_LINK_SKIP:
+                continue
+            try:
+                (home / entry.name).symlink_to(entry)
+            except OSError:
+                pass
+        (home / "lloyd").symlink_to(ROOT)
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "--no-header", "-p",
+             "no:cacheprovider", "-m", TESTS_MARK_EXPR, f"{THIS_FILE}::{FILED_NODE}"],
+            cwd=ROOT, env=dict(os.environ, HOME=str(home), LLOYD_DATA=str(data)),
+            capture_output=True, text=True, timeout=300)
+    finally:
+        # What lives under here is symlinks plus two empty directories, and
+        # `rmtree` descends the link tree without following it, so nothing of the
+        # account's own is in reach; the `finally` keeps a failure from leaving a
+        # stray farm behind for the next round to trip over.
+        shutil.rmtree(nesting, ignore_errors=True)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out[-2000:]
+    assert "1 passed" in out, (
+        "the child run recorded no passing verdict: an unmatched or deselected node id "
+        f"also exits 0, and would read here as the fix working: {out[-600:]}")
 
 
 # ── #2625 clause 2: those three nodes green because the page was re-measured ───
