@@ -2,11 +2,13 @@
 // list and nothing else.
 //
 // It is its own module because the answer used to be `boardsData[0].id`, read
-// off a list whose ids are positional: `app/routers/backlog.py` numbers the
-// boards by enumerating the sorted board names, so element 0 is whichever board
+// off a list the route orders by board *name*, so element 0 is whichever board
 // sorts first, not the one the person using Mission Control means. On the box
 // this was filed from, element 0 is `alfie` (7 tasks) while `lloyd` holds 1,997
-// (#2068). Keeping it a pure function of its arguments is also what lets
+// (#2068). The ids have since been pinned to the server's board list rather than
+// to that order (#2659), which changes nothing here: the default is still a name,
+// and `pickDefaultBoard` is what turns it into an id. Keeping it a pure function
+// of its arguments is also what lets
 // `vitest run` pin it — `web/` has a node-environment runner since 94850c3e, so
 // a lookup like this one needs no render to be checked, and the page can be
 // graded by a source claim about calling it.

@@ -34,11 +34,15 @@ class _Req:
         return self._payload
 
 
-def _write(d: Path, task_id: int, *, board: str) -> Path:
+def _write(d: Path, task_id: int, *, board: str | None) -> Path:
+    """One task file. ``board=None`` writes no ``board:`` key, which every reader
+    here calls the literal board ``default`` — a hand-edited or restored shape
+    that ``check_board`` refuses to write."""
+    board_line = f"board: {board}\n" if board is not None else ""
     p = d / f"{task_id}-a-task.md"
     p.write_text(
         f"---\ntype: backlog\nsegment: backlog\nstatus: draft\n"
-        f"priority: low\nboard: {board}\nblocked: false\nassigned: false\n"
+        f"priority: low\n{board_line}blocked: false\nassigned: false\n"
         f"position: {task_id * 1000}\n---\n\n# A task\n\nBody.\n",
         encoding="utf-8",
     )
@@ -151,6 +155,62 @@ def test_the_board_list_shows_every_board_even_empty_and_a_stray(board_dir):
     boards = {b["name"]: b["tasks_count"]
               for b in json.loads(BR.backlog_boards().body)}
     assert boards == {"lloyd": 1, "personal": 0, "alfie": 0, "default": 1}
+
+
+# ── #2659: the ids the board route hands out ────────────────────────────────
+
+def test_every_listed_board_carries_a_unique_id_and_filters_by_it(board_dir):
+    """A stray board stays reachable: an id of its own, and that id works.
+
+    A configured board's id comes from `BOARDS` alone, so the two strays here —
+    one hand-edited item naming `Autonomy`, one file with no `board:` key, which
+    every reader calls the literal board `default` — are allocated *above* that
+    block rather than sorting into the middle of it. So every board the picker
+    lists has a distinct non-zero id, and `?board_id=<that id>` returns exactly
+    that board's rows. A stray's id is rank-based among strays, which is safe
+    only because a stray is unwritable (`check_board`); the configured ids, the
+    ones a write can land on, are not rank-based at all.
+    """
+    _write(board_dir, 1, board="lloyd")
+    _write(board_dir, 2, board="lloyd")
+    _write(board_dir, 3, board="Autonomy")
+    _write(board_dir, 4, board=None)                    # reads as `default`
+
+    boards = json.loads(bytes(BR.backlog_boards().body))
+    ids = [b["id"] for b in boards]
+    assert len(ids) == len(set(ids)), f"board ids are not unique: {boards}"
+    assert all(i > 0 for i in ids), f"a board was listed with a zero id: {boards}"
+
+    by_name = {b["name"]: b["id"] for b in boards}
+    # A stray is allocated above the configured block, so it can never hold the
+    # id a client read for `lloyd`, `personal` or `alfie`. Over a corpus of just
+    # these four files the strays used to sort first and take ids 1 and 3.
+    assert {b: by_name[b] for b in BB.BOARDS} == {"alfie": 1, "lloyd": 2, "personal": 3}
+    for stray in ("Autonomy", "default"):
+        assert by_name[stray] > len(BB.BOARDS), \
+            f"a stray must not hold a configured id: {boards}"
+
+    for name, expected in (("Autonomy", {3}), ("default", {4}), ("lloyd", {1, 2})):
+        rows = json.loads(bytes(BR.backlog_tasks(board_id=str(by_name[name])).body))
+        assert {r["id"] for r in rows} == expected, \
+            f"?board_id={by_name[name]} should return {name}'s rows {expected}"
+
+
+def test_the_list_filter_still_accepts_a_board_name(board_dir):
+    """`?board_id=lloyd` is a name in an id-shaped parameter, and it stays valid.
+
+    `agent-services/guardian/notify.py` sets `BACKLOG_ITEM_BOARD = "lloyd"`
+    (line 173) and asks `?board_id=lloyd&q=<title>` for its duplicate-item check
+    (line 842), so making the parameter strictly numeric would blind the
+    guardian's dedupe — it would read zero rows and file a duplicate alert.
+    """
+    _write(board_dir, 1, board="lloyd")
+    _write(board_dir, 2, board="alfie")
+    _write(board_dir, 3, board="Autonomy")
+
+    rows = json.loads(bytes(BR.backlog_tasks(board_id=BB.DEFAULT_BOARD).body))
+    assert [r["id"] for r in rows] == [1]
+    assert {r["board"] for r in rows} == {"lloyd"}
 
 
 # ── The loop's own writer ───────────────────────────────────────────────────

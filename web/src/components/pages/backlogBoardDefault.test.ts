@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_BOARD_NAME, pickDefaultBoard } from './backlogBoardDefault'
 
 // Boards in the shape the route returns them and in the order the route returns
-// them: `app/routers/backlog.py` enumerates the sorted board names, so ids are
-// positional and element 0 is `alfie`. That order is the whole of #2068 — the
+// them: `app/routers/backlog.py` lists them sorted by board name, so element 0 is
+// `alfie`. (The ids are no longer allocated from that order — #2659 pinned a
+// configured board's id to `BOARDS` — but these fixtures only carry the shape the
+// page reads.) That order is the whole of #2068 — the
 // page's mount default was element 0, which on that box is a 7-task board whose
 // tasks are all `status: done` and therefore outside #1213's seven-day window,
 // while the 1,997-task `lloyd` board sat at index 1.

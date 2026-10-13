@@ -3256,7 +3256,7 @@ def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
     prose
     (`app/autonomy.py:2818` twice, then `tests/test_worker_evidence.py:663`,
     `tests/test_skill_tool_names.py:150`, `scripts/skill_lint.py:281`,
-    `agent_mcp/skills.py:87`, `app/routers/backlog.py:804` and
+    `agent_mcp/skills.py:87`, `app/routers/backlog.py:812` and
     `web/src/components/pages/BacklogPage.tsx:572`). The eighth distinct citation in
     the file — `app/autonomy.py:710`, the worker-evidence gate as numbered on
     2026-09-12 — lives only in the dated §Review log and is out of scope by design,

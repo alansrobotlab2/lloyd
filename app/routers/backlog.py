@@ -31,7 +31,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agent_mcp._shared import parse_frontmatter_text
-from app.backlog_boards import BOARDS, DEFAULT_BOARD, UnknownBoard, check_board
+from app.backlog_boards import (BOARDS, DEFAULT_BOARD, UnknownBoard,
+                                board_ids, check_board)
 from app.backlog_move import now_stamp, record_status_move, utc_instant
 from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import NEEDS_HUMAN_TAG, new_task_tags, normalize_tags
@@ -244,20 +245,24 @@ def _prune_fm_cache(found: list) -> None:
 def _board_index() -> tuple:
     """({board_name: id}, {board_name: task_count}) from one scan.
 
-    Ids stay positional over `sorted(names)` — the filter and the browser's
-    saved tab already depend on that shape — but they are not identities: a
-    board appearing or vanishing renumbers every id after it. `board` (the name)
-    is the identity; see `backlog_task_update`.
+    The counts come from the corpus; the ids come from
+    `app/backlog_boards.board_ids`, which takes a configured board's id from
+    `BOARDS` alone. A board name appearing on disk — a hand-edited `board:
+    Autonomy`, or a file with no `board:` key at all, which reads as the literal
+    board `default` — therefore joins the map without renumbering the ids a
+    browser tab saved, which is what made a stale id a mis-write rather than an
+    error (#2659). `board` (the name) is still the identity; see
+    `backlog_task_update`.
     """
-    # The configured boards are always listed, at 0 when empty, so a board
-    # does not vanish from the picker (and renumber every id after it) when
-    # its last item moves off. A stray name a hand edit left on disk is
-    # listed too, so its items stay reachable.
+    # The configured boards are always counted, at 0 when empty, so a board
+    # does not vanish from the picker when its last item moves off. A stray name
+    # a hand edit left on disk is counted too, so its items stay reachable and
+    # keep an id of their own — above the configured block, never in it.
     counts: dict[str, int] = {b: 0 for b in BOARDS}
     for _, fm, _ in _backlog_scan():
         board = fm.get("board") or "default"
         counts[board] = counts.get(board, 0) + 1
-    return {name: idx + 1 for idx, name in enumerate(sorted(counts))}, counts
+    return board_ids(counts), counts
 
 
 def _backlog_board_map() -> dict:
@@ -378,12 +383,13 @@ def _row_from(path: Path, fm: dict, body: str, board_map: dict) -> dict:
         "due_date": fm.get("due_date") or fm.get("due") or None,
         "position": fm.get("position", tid * 1000),
         "assigned_to_agent": fm.get("assigned", False),
-        # Both, and the name is the real one. `board_id` is positional over
-        # `sorted(names)`, so it renumbers whenever a board name appears or
-        # disappears — and a board disappears exactly when its last task is
-        # moved off it, which the task modal now does in one click. The vault,
-        # `agent_mcp/backlog.py` and the frontmatter all key on the name; the id
-        # stays for the existing filter/tab contract.
+        # Both, and the name is the real one. `board_id` is a filter handle: the
+        # vault, `agent_mcp/backlog.py` and the frontmatter all key on the name.
+        # It is stable per board now — `app/backlog_boards.board_ids` takes a
+        # configured board's id from `BOARDS` alone, so a stray name appearing on
+        # disk no longer renumbers the id a saved tab is holding (#2659) — and a
+        # board that is not in the map at all (impossible today, since every name
+        # on disk is listed) reads as 0, which the front end shows as unboarded.
         "board": task_board,
         "board_id": board_map.get(task_board, 0),
         "group": fm.get("group"),
@@ -674,11 +680,13 @@ async def backlog_task_update(request: Request):
             fm[key] = data[key]
     if "tags" in data:
         fm["tags"] = normalize_tags(data["tags"])
-    # `board` (a name) is preferred and `board_id` is the compatibility path.
-    # An id is positional over the sorted board names, so a browser tab holding
-    # a board list from before a board appeared or vanished sends an id that is
-    # still *valid* — for a different board — and the item moves somewhere
-    # nobody asked for. The name cannot drift that way. An unresolvable id used
+    # `board` (a name) is preferred and `board_id` is the compatibility path: the
+    # name is the identity the vault, `agent_mcp/backlog.py` and the frontmatter
+    # key on, and the modal sends it. The id is stable now —
+    # `app/backlog_boards.board_ids` takes a configured board's id from `BOARDS`
+    # alone, so a board name appearing on disk cannot hand a client's saved id to
+    # a different board (#2659, which is exactly the mis-write this path used to
+    # allow: a shifted-but-valid id, honoured with a 200). An unresolvable id used
     # to fall back to the task's current board and return success: a move the
     # user asked for that silently did not happen, which is the one outcome
     # worse than an error. It is a 400 now, like an invalid status above.

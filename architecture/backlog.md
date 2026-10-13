@@ -206,7 +206,7 @@ actually on disk:
 | Field | Type | Notes |
 |---|---|---|
 | `status` | enum | `draft` \| `up_next` \| `in_progress` \| `done`. See above. |
-| `board` | string | The board's **name** is its identity, and the set of names is closed since 2026-09-27: `app/backlog_boards.py::BOARDS` = `lloyd`, `personal`, `alfie`, checked by `check_board` in every writer (`agent_mcp/backlog.py`, both create and update in `app/routers/backlog.py`, `scripts/automod/backlog.py::new_item`), which raises `UnknownBoard` rather than folding a near-miss like `Lloyd`. `DEFAULT_BOARD` is `lloyd` — where a create naming no board (the guardian's alerts) lands. Before the list existed a board was whatever string a writer typed, and 19 items across 8 boards nobody had set up accumulated, 10 of them guardian alerts. **Reads never check the list**, so a hand-edited board still renders — and it renumbers `board_id`: see #2659. |
+| `board` | string | The board's **name** is its identity, and the set of names is closed since 2026-09-27: `app/backlog_boards.py::BOARDS` = `lloyd`, `personal`, `alfie`, checked by `check_board` in every writer (`agent_mcp/backlog.py`, both create and update in `app/routers/backlog.py`, `scripts/automod/backlog.py::new_item`), which raises `UnknownBoard` rather than folding a near-miss like `Lloyd`. `DEFAULT_BOARD` is `lloyd` — where a create naming no board (the guardian's alerts) lands. Before the list existed a board was whatever string a writer typed, and 19 items across 8 boards nobody had set up accumulated, 10 of them guardian alerts. **Reads never check the list**, so a hand-edited board still renders, and `board_ids` gives it an id above the configured block rather than letting it renumber a configured `board_id` (#2659). |
 | `priority` | enum | `low` \| `medium` \| `high`. Both writers default `low` since 2026-09-16, and the loop's every pool sorts on it ahead of the sweep's rank (`scripts/automod/backlog.py::priority_key`); `none`, absent or unknown reads as `low`; `high` means "next": triage takes it before anything else and never holds it, the next round takes it first, and within `high` the newest wins. `round priority-backfill` writes `low` onto files that have none. Before that day MCP stamped `medium` and the HTTP route `none`, and nothing read either. |
 | `tags` | list | Coerced through `app/backlog_tags.py::normalize_tags` — see below. |
 | `blocked` / `assigned` | bool | Free-text filters on `backlog_tasks`; no machine acts on them. |
@@ -611,27 +611,34 @@ that a merge never loses text.
 | `POST /api/backlog/task-create` | The UI's create — and the guardian's. |
 | `POST /api/backlog/task-delete` | Unlink the file. The only destructive path. |
 
-**The board's name is its identity and `board_id` is a compatibility path.** An
-id is positional over `sorted(names)` — `_board_index` assigns `idx + 1` — so it
-renumbered whenever a board appeared or vanished, and a board vanished exactly
-when its last task was moved off it, which the task modal does in one click. A
-browser tab holding a board list from thirty seconds ago then sends an id that is
-still *valid*, for a different board, and the item moves somewhere nobody asked
-for. The modal half of that is closed: `_board_index` seeds its counts with every
-name in `app/backlog_boards.BOARDS` at 0, so a configured board stays listed and
-keeps its id when its last item leaves. **The renumbering hazard is not closed** —
-names found on disk are still added to that set, so one hand-edited or restored
-item naming a fourth board (or an un-boarded file, which reads as `default`)
-inserts a name alphabetically and shifts every id after it, and `board_id` is
-still honoured when `board` is absent (create: `id_to_name.get(board_id,
-DEFAULT_BOARD)`) → #2659. An unresolvable id on update used to fall back to the
+**The board's name is its identity and `board_id` is a stable compatibility
+path.** A configured board's id comes from `app/backlog_boards.BOARDS` alone —
+its position in `sorted(BOARDS)`, so `alfie`=1, `lloyd`=2, `personal`=3 whatever
+the corpus holds — and `board_ids` gives a name found on disk that is *not* in
+`BOARDS` an id above that block, so a stray can never hold a configured board's
+id. That is #2659. The ids used to be positional over every name a file carried
+(`_board_index` assigned `idx + 1` over `sorted(names)`), so a board vanished
+when its last task moved off it — which the task modal does in one click — and a
+hand-edited or restored item naming a fourth board (or an un-boarded file, which
+reads as `default`) inserted alphabetically; either way a browser tab holding a
+board list from thirty seconds ago sent an id that was still *valid*, for a
+different board, and the item moved somewhere nobody asked for. Both shapes are
+closed now: `_board_index` seeds its counts with every name in `BOARDS` at 0, so
+a configured board stays listed when its last item leaves, and nothing on disk
+moves a configured id. Reads still never check the list, so a stray board's items
+stay visible and the stray stays filterable by its own id — which is rank-based
+among strays, safe only because `check_board` refuses a *write* to one. An unresolvable id on update used to fall back to the
 task's current board and return success — a move the user asked for that silently
 did not happen, which is the one outcome worse than an error. It is a 400 now,
 like an invalid status, and so is a *name* off `BOARDS`; a create naming no board
 lands on `DEFAULT_BOARD` = `lloyd`, which is where the guardian's alerts go, not
 on `default` — ten of those alerts sat there until 2026-09-27.
-`tests/test_backlog_board_move.py` pins the refusals and that a *name* survives a
-renumbering (#1070); nothing pins the id path against one.
+`tests/test_backlog_board_move.py` pins the refusals, that a *name* works whatever
+the board list looks like, and that an id read before a stray appeared still lands
+on the board it named; `tests/test_backlog_boards.py` pins that every board the
+list route returns — a stray included — carries a unique non-zero id that filters
+to its own rows, and that `?board_id=` still accepts a board *name*, which is how
+`agent-services/guardian/notify.py` asks for its duplicate check (#1070, #2659).
 
 `agent-services/guardian/notify.py::_backlog_task` POSTs to `task-create` after
 a rollback, which makes this route a second live writer beside the MCP one. Its

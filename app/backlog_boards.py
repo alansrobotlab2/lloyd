@@ -12,10 +12,13 @@ alerts that fell through the create route's old `"default"` fallback.
 
 Adding a board is a one-line change to `BOARDS`. Reads never check the list: a
 hand-edited file on another board still renders, so the board shows it rather
-than hiding it.
+than hiding it — and `board_ids` below is what keeps such a file from reaching
+the ids a configured board hands out.
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterable
 
 BOARDS: tuple[str, ...] = ("lloyd", "personal", "alfie")
 
@@ -26,6 +29,40 @@ DEFAULT_BOARD = "lloyd"
 
 class UnknownBoard(ValueError):
     """A write named a board that is not in `BOARDS`."""
+
+
+def board_ids(names: Iterable[str]) -> dict[str, int]:
+    """{board_name: id} for every name in `names`, allocated from `BOARDS` first.
+
+    The numeric `board_id` exists for one caller: a browser's saved board filter
+    (and any other client that read `/api/backlog/boards` earlier and kept the
+    numbers). Mission Control's modal and every file writer send the *name*. So
+    a configured board's id is its position in `sorted(BOARDS)` and nothing
+    else — `alfie=1, lloyd=2, personal=3`, whatever is on disk — and the id a
+    client read yesterday still names the same board tomorrow.
+
+    That is #2659. The ids used to be positional over every name a file
+    happened to carry, so one hand-edited or restored item naming a fourth board
+    (`board: Autonomy`, or none at all, which reads as `default`) inserted
+    alphabetically and slid `lloyd` off the id a stale tab was holding; both
+    write routes then honoured that shifted-but-valid id with a 200 and filed
+    the item on the board behind it. A reader cannot reject the causing file —
+    reads deliberately accept an unlisted board so its items stay visible — so
+    the id had to stop depending on the corpus.
+
+    A name outside `BOARDS` is still listed and still gets an id, allocated
+    above the configured block so it can never impersonate one of them. Its own
+    id is rank-based among strays, and that is safe for the one reason a
+    rank-based id is ever safe: a stray cannot be *written* (`check_board`
+    refuses it), so re-ranking one can at worst point a read filter at another
+    stray for one refresh. Configured ids, which a write does honour, are never
+    rank-based.
+    """
+    ids = {name: idx + 1 for idx, name in enumerate(sorted(BOARDS))}
+    strays = sorted({name for name in names if name not in ids})
+    for offset, name in enumerate(strays):
+        ids[name] = len(BOARDS) + 1 + offset
+    return ids
 
 
 def check_board(name: object) -> str:

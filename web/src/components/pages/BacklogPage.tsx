@@ -661,12 +661,12 @@ export default function BacklogPage() {
     setBoards(boardsData);
     let resolved: number | null;
     if (previousName) {
-      // Board ids are positional over the sorted board names, so a board
-      // appearing or vanishing renumbers every board after it — and one
-      // vanishes exactly when its last task is moved off, which the modal
-      // now does in one click. Following the id would leave the user on a tab
-      // that is quietly a different board, so follow the name; a board that is
-      // gone falls back to the default below.
+      // The board the user stands on is a name, not a number. A configured
+      // board's id has been stable since #2659, but a stray board's id is
+      // rank-based among strays, and the name is the identity the routes, the
+      // vault and `check_board` key on regardless — so re-resolve across a
+      // refresh by name. A board that has gone (its last task moved off, which
+      // the modal does in one click) falls back to the default below.
       const sameBoard = boardsData.find((b) => b.name === previousName);
       resolved = sameBoard
         ? sameBoard.id
@@ -890,12 +890,13 @@ export default function BacklogPage() {
 
   const handleSave = async (id: number, updates: Record<string, any>) => {
     await api.backlogUpdateTask(id, updates);
-    // A board move changes which tab the task belongs to, every board's
-    // task_count, and possibly the board *ids* themselves — moving the last
-    // task off a board deletes that board, and ids are positional over the
-    // sorted names. None of that is derivable from `updates`, which carries
-    // the board as a name and no board_id at all, so merging it locally would
-    // leave the card sitting on the board it just left. Refetch instead.
+    // A board move changes which tab the task belongs to and every board's
+    // task_count, and it can change the board *list* too — moving the last task
+    // off a stray board drops it from the list, and a stray's id is rank-based
+    // among strays (a configured board's id is fixed by `BOARDS`, #2659). None
+    // of that is derivable from `updates`, which carries the board as a name and
+    // no board_id at all, so merging it locally would leave the card sitting on
+    // the board it just left. Refetch instead.
     if ("board" in updates) {
       await loadData();
       return;

@@ -1012,8 +1012,10 @@ class _Board:
     body — rather than on what a stand-in would have done. `_BACKLOG_DIR` is the
     module's single directory constant and every helper here reads it as an attribute
     at call time, which is what makes one `monkeypatch.setattr` enough; the board map
-    is positional over the corpus (`app/routers/backlog.py:244`), so with one board on
-    tmp the positional id and the name agree and neither needs the real filesystem.
+    is stubbed to one board, so an id and a name can only resolve to the same thing
+    and neither needs the real filesystem. A configured board's id is not a function
+    of the corpus at all any more (`app/backlog_boards.board_ids`, #2659), so the
+    stub is a shortcut, not a workaround for drift.
     """
 
     def __init__(self, backlog_dir: Path, monkeypatch):

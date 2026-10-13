@@ -396,8 +396,10 @@ export interface BacklogTask {
   due_date: string | null
   position: number
   assigned_to_agent: boolean
-  /** Board name — the stable identity. `board_id` is positional over the
-   *  sorted board names and renumbers whenever a board appears or vanishes. */
+  /** Board name — the stable identity. `board_id` is the compatibility filter
+   *  handle: a configured board's id comes from the server's board list and not
+   *  from the corpus (`app/backlog_boards.board_ids`), so a stray board name
+   *  appearing on disk no longer renumbers it (#2659). */
   board: string
   board_id: number
   url: string

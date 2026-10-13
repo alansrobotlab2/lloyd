@@ -4,15 +4,17 @@ The task modal can now change an item's board. The board it names is the
 **name**, not the numeric ``board_id`` the listing also carries, and that is
 the whole point of these tests.
 
-``board_id`` is positional: ``_backlog_board_map`` assigns ``idx + 1`` over
-``sorted(names)``, and the names are whatever the files on disk happen to say.
-So an id is only meaningful relative to the board list it was read from, and
-that list changes shape whenever a board appears or vanishes — which is exactly
-what a board move can cause, by taking the last item off a board. A browser tab
-holding a board list from thirty seconds ago then sends an id that is still
-*valid*, for a different board, and the item lands somewhere nobody asked for.
-The name cannot drift that way; the vault, ``agent_mcp/backlog.py`` and the
-frontmatter all key on it already.
+The name cannot drift, and since #2659 neither can the id. A configured board's
+``board_id`` now comes from ``BOARDS`` alone — its position in
+``sorted(BOARDS)``, so ``alfie=1, lloyd=2, personal=3`` however many files are on
+disk (`app/backlog_boards.board_ids`) — and a board name found on disk that is
+not in ``BOARDS`` is given an id above that block, so it can never take a
+configured one. Before the fix the ids were positional over every name the files
+happened to say, so one hand-edited item naming a fourth board slid ``lloyd``
+off the id a tab that had read the list earlier was still holding, and both
+write routes honoured that shifted-but-valid id with a 200 and filed the item on
+``alfie``. The ``#2659`` section below pins both halves: a name always works,
+and an id read before the stray appeared still names the board it read.
 
 The second half is the silent no-op. ``board_id`` used to resolve through
 ``id_to_name.get(data["board_id"], fm.get("board", "default"))`` — an
@@ -48,11 +50,15 @@ class _Req:
         return self._payload
 
 
-def _write(dirpath: Path, task_id: int, *, board: str) -> Path:
+def _write(dirpath: Path, task_id: int, *, board: str | None) -> Path:
+    """One task file. ``board=None`` writes no ``board:`` key at all, which is
+    how the routes read a hand-edited or restored file — as the board literally
+    named ``default``, a name ``check_board`` refuses to write."""
+    board_line = f"board: {board}\n" if board is not None else ""
     p = dirpath / f"{task_id}-a-task.md"
     p.write_text(
         f"---\ntype: backlog\nsegment: backlog\nstatus: draft\n"
-        f"priority: medium\nboard: {board}\nblocked: false\nassigned: false\n"
+        f"priority: medium\n{board_line}blocked: false\nassigned: false\n"
         f"position: {task_id * 1000}\n---\n\n# A task\n\nBody.\n",
         encoding="utf-8",
     )
@@ -105,30 +111,34 @@ async def test_a_named_board_moves_the_item(board_dir):
 
 
 @pytest.mark.asyncio
-async def test_the_name_survives_a_renumbering_the_id_would_not(board_dir):
-    """The drift this is all for, played out.
+async def test_a_name_move_survives_the_board_list_changing_beneath_it(board_dir):
+    """The #1070 scenario, re-pinned after #2659 took the drift out of it.
 
-    The listed boards (app/backlog_boards.py) are always in the list, so only
-    a stray board a hand edit left on disk can vanish — and when one sorting
-    before the target does, every id after it shifts. `aaa` is that stray.
+    The listed boards (app/backlog_boards.py) are always in the list, so only a
+    stray board a hand edit left on disk can vanish, and a stray now sits
+    *above* the configured ids, so emptying it moves nothing. What is still
+    true, and what this pins, is that an id which stops resolving is a 400.
+
+    The node used to be called `test_the_name_survives_a_renumbering_the_id_would_not`:
+    there is no longer a renumbering for the id to fail, which is the fix.
     """
-    _write(board_dir, 1, board="aaa")     # aaa=1, alfie=2, lloyd=3, personal=4
+    _write(board_dir, 1, board="aaa")     # alfie=1, lloyd=2, personal=3, aaa=4
     _write(board_dir, 2, board="lloyd")
     item = _write(board_dir, 4, board="alfie")
 
-    # The tab read the list here: personal=4. Now `aaa` empties.
+    # A tab read the list here, when `aaa` held id 4. Now its last item moves off.
     await BR.backlog_task_update(_Req({"id": 1, "board": "alfie"}))
     assert _fm(board_dir / "1-a-task.md")["board"] == "alfie"
 
-    # Boards are now alfie=1, lloyd=2, personal=3. The stale tab's "personal"
-    # is id 4, which no longer resolves — a 400, not a silent no-op and not a
-    # wrong board.
+    # The configured ids are alfie=1, lloyd=2, personal=3 on both sides of the
+    # move. The emptied stray's 4 is gone from the map, and an id that does not
+    # resolve is a 400 — not a silent no-op, and not a wrong board.
     with pytest.raises(HTTPException) as exc:
         await BR.backlog_task_update(_Req({"id": 4, "board_id": 4}))
     assert exc.value.status_code == 400
     assert _fm(item)["board"] == "alfie", "the item must not have moved"
 
-    # The name is immune to the renumbering.
+    # A name does not care what the id list looks like.
     await BR.backlog_task_update(_Req({"id": 4, "board": "personal"}))
     assert _fm(item)["board"] == "personal"
 
@@ -218,6 +228,86 @@ async def test_create_ignores_a_blank_board_name(board_dir):
     assert resp.status_code == 200, resp.body
     created = [f for f in board_dir.glob("*.md") if not f.name.startswith("1-")][0]
     assert _fm(created)["board"] == "lloyd", "falls through to the id"
+
+
+# ── #2659: a configured board's id does not move when the corpus does ────────
+
+_CONFIGURED = ("alfie", "lloyd", "personal")   # == sorted(app.backlog_boards.BOARDS)
+
+
+def _configured_ids() -> dict:
+    """The three configured ids, as a tab that saved the board list holds them."""
+    board_map = BR._board_index()[0]
+    return {name: board_map[name] for name in _CONFIGURED}
+
+
+def test_a_configured_board_id_is_the_same_whatever_is_on_disk(board_dir):
+    """The ids are a function of `BOARDS`, not of the corpus.
+
+    Two strays appear after the first read: a hand-edited item naming a fourth
+    board (`Autonomy` — the name `check_board` refuses to *write*, which is why
+    nothing else rejects the file), and an item with no `board:` key at all,
+    which every reader calls the literal board `default`. Both used to sort in
+    among the configured names and shift every id after them, and a client
+    holding the earlier list then wrote to the wrong board.
+    """
+    _write(board_dir, 1, board="lloyd")
+    _write(board_dir, 2, board="alfie")
+    _write(board_dir, 3, board="personal")
+    before = _configured_ids()
+    assert before == {"alfie": 1, "lloyd": 2, "personal": 3}, before
+
+    _write(board_dir, 4, board="Autonomy")
+    _write(board_dir, 5, board=None)          # no board key: reads as `default`
+    after = _configured_ids()
+    assert after == before, f"a stray file renumbered the boards: {before} -> {after}"
+
+
+@pytest.mark.asyncio
+async def test_an_id_read_before_a_stray_appears_lands_on_the_board_it_named(board_dir):
+    """The mis-write itself, played out against a client holding an old list.
+
+    Today both routes file on `alfie` with a 200: the stray `Autonomy` sorts
+    first, so the tab's `lloyd` (id 2) resolves to the board behind it. A 400
+    would not help either — the id is on the list, it is simply someone else's
+    now, which is exactly why the id had to stop depending on the corpus.
+    """
+    item = _write(board_dir, 1, board="personal")
+    _write(board_dir, 2, board="alfie")
+    _write(board_dir, 3, board="personal")
+    lloyd_id = _configured_ids()["lloyd"]      # 2, from BOARDS alone
+
+    _write(board_dir, 4, board="Autonomy")     # the stray a hand edit left
+    _write(board_dir, 5, board=None)           # and a file with no board key
+
+    await BR.backlog_task_update(_Req({"id": 1, "board_id": lloyd_id}))
+    assert _fm(item)["board"] == "lloyd", \
+        "an update carrying a pre-stray id must land on the board that id named"
+
+    resp = await BR.backlog_task_create(
+        _Req({"name": "From a stale tab", "board_id": lloyd_id}))
+    assert resp.status_code == 200, resp.body
+    created = BR._backlog_find_file(json.loads(bytes(resp.body))["id"])
+    assert created is not None, "the create wrote no file"
+    assert _fm(created)["board"] == "lloyd", \
+        "a create carrying a pre-stray id must file on the board that id named"
+
+
+@pytest.mark.asyncio
+async def test_a_board_id_naming_a_stray_board_is_still_refused(board_dir):
+    """Unchanged by the fix: a stray has an id (clause 3) and is still unwritable.
+
+    `check_board` is what refuses it, so the id a stray carries can be read,
+    filtered on and refused, but never written — which is what makes the
+    stray's own id allocation safe.
+    """
+    f = _write(board_dir, 1, board="lloyd")
+    _write(board_dir, 2, board="Autonomy")
+    stray_id = BR._backlog_board_map()["Autonomy"]
+    with pytest.raises(HTTPException) as exc:
+        await BR.backlog_task_update(_Req({"id": 1, "board_id": stray_id}))
+    assert exc.value.status_code == 400
+    assert _fm(f)["board"] == "lloyd", "the item must not have moved"
 
 
 # ── The frontend contract these rest on ──────────────────────────────────────

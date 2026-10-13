@@ -307,9 +307,11 @@ def _span(start: str, end: str) -> str:
 
 
 def test_the_default_board_is_resolved_by_name_at_both_defaulting_sites():
-    """Clause 2. `boardsData[0].id` reads a positional id: `app/routers/backlog.py`
-    numbers boards by enumerating the sorted board *names*, so element 0 is
-    whichever board sorts first — here `alfie`, whose 7 items are all
+    """Clause 2. `boardsData[0].id` takes the first element of a list the route
+    orders by board *name* (`app/routers/backlog.py` sorts the names it lists; the
+    ids themselves come from `app/backlog_boards.board_ids`, and since #2659 are
+    not allocated from that order at all), so element 0 is whichever board sorts
+    first — here `alfie`, whose 7 items are all
     `status: done` and therefore all outside #1213's seven-day window, so the
     mount rendered an *empty* board — while the 1,997-task `lloyd` board sat at
     index 1.
