@@ -18,7 +18,7 @@ summary: The markdown kanban at ~/obsidian/backlog/ — one file per task, a
   four-word status vocabulary shared by five readers, the four backlog_* MCP
   tools, write-time dedupe, and the tags the unattended loop writes on itself.
 type: reference
-date: 2026-09-13
+date: 2026-10-13
 status: implemented
 
 ---
@@ -27,12 +27,15 @@ status: implemented
 
 Markdown kanban at `~/obsidian/backlog/`, read and written by the
 [[tools|MCP tools server]], the Mission Control board, the guardian, and the
-unattended triage/implement loop. 960 tasks on 2026-09-13: 948 on the `lloyd`
-board, 7 `alfie` (robot firmware), 2 `personal`, and one each on `Architecture`,
-`backlog` and `default`. The directory also holds one markdown file that is not a
-task — `verdict-log-2026-09.md`, plus a handful of `*.pre-maint.bak` copies — and
-every reader skips them, because what makes a file a task is the numeric id
-prefix on its **name**, not anything inside it.
+unattended triage/implement loop. 2,592 task files on 2026-10-13 (the dashboard's
+own count): 2,583 on the `lloyd` board, 7 `alfie` (robot firmware), 2 `personal`,
+and only 12 of the whole board open. Every other board name the 2026-09-13 census
+recorded (`Architecture`, `backlog`, `default`) is gone — the writers refuse those
+names now (see `app/backlog_boards.py` in **Frontmatter** below). The directory
+also holds files that are not tasks — `verdict-log-2026-09.md`, and a `data/`
+subdirectory of run witnesses and dry-run records, which no reader globs into
+because none recurses — and every reader skips them, because what makes a file a
+task is the numeric id prefix on its **name**, not anything inside it.
 
 The file **is** the record. There is no database, no index that has to be kept
 in sync, and no writer that holds state between calls — every reader globs the
@@ -88,7 +91,9 @@ way. #287 (`review`) and #304 (`closed`) sat in that gap from April 2026 until
 nothing migrated what was already on disk.
 
 - `PIPELINE_STATUSES` — `draft`, `up_next`, `in_progress`, `done`. Live counts
-  (2026-09-13): 456 / 68 / 0 / 432.
+  (2026-10-13, `GET /api/dashboard` → `backlog.by_status`): 6 / 0 / 6 / 2,580.
+  The 2026-09-13 census was 456 / 68 / 0 / 432; the board has since been settled
+  and swept rather than emptied by hand.
 - `CLOSED_ALIASES` — `closed`, `cancelled`, `wontfix`. Exactly the non-`done`
   members of the set `dashboard._BACKLOG_CLOSED` has carried all along, which
   is the tree's only record that those words ever meant anything. Inventing
@@ -187,7 +192,7 @@ actually on disk:
 | Field | Type | Notes |
 |---|---|---|
 | `status` | enum | `draft` \| `up_next` \| `in_progress` \| `done`. See above. |
-| `board` | string | The board's **name** is its identity. `lloyd` is Lloyd's own. |
+| `board` | string | The board's **name** is its identity, and the set of names is closed since 2026-09-27: `app/backlog_boards.py::BOARDS` = `lloyd`, `personal`, `alfie`, checked by `check_board` in every writer (`agent_mcp/backlog.py`, both create and update in `app/routers/backlog.py`, `scripts/automod/backlog.py::new_item`), which raises `UnknownBoard` rather than folding a near-miss like `Lloyd`. `DEFAULT_BOARD` is `lloyd` — where a create naming no board (the guardian's alerts) lands. Before the list existed a board was whatever string a writer typed, and 19 items across 8 boards nobody had set up accumulated, 10 of them guardian alerts. **Reads never check the list**, so a hand-edited board still renders — and it renumbers `board_id`: see #2659. |
 | `priority` | enum | `low` \| `medium` \| `high`. Both writers default `low` since 2026-09-16, and the loop's every pool sorts on it ahead of the sweep's rank (`scripts/automod/backlog.py::priority_key`); `none`, absent or unknown reads as `low`; `high` means "next": triage takes it before anything else and never holds it, the next round takes it first, and within `high` the newest wins. `round priority-backfill` writes `low` onto files that have none. Before that day MCP stamped `medium` and the HTTP route `none`, and nothing read either. |
 | `tags` | list | Coerced through `app/backlog_tags.py::normalize_tags` — see below. |
 | `blocked` / `assigned` | bool | Free-text filters on `backlog_tasks`; no machine acts on them. |
@@ -196,9 +201,9 @@ actually on disk:
 | `position` | int | `id * 1000` at creation; the board's manual ordering. |
 | `type` / `segment` | string | Both `backlog`. OKF conformance — see below. |
 | `activity_log` | list | The audit trail. See "The activity log". |
-| `parent` | int | The item this one was split from or found while implementing. Persisted from the prose first line by the clustering pass. 317 items. |
-| `group` | int | The umbrella a member was folded into (tag `grouped`). 140 items. |
-| `members` | list[int] | The items an umbrella consolidates (tag `umbrella`). 53 items. |
+| `parent` | int | The item this one was split from or found while implementing. Persisted from the prose first line by the clustering pass. 430 items (317 on 2026-09-13). |
+| `group` | int | The umbrella a member was folded into (tag `grouped`). 38 items (140 on 2026-09-13: umbrella-folding went off for the sweep on 2026-09-15 and back on the next day, and folded members were unfolded). |
+| `members` | list[int] | The items an umbrella consolidates (tag `umbrella`). 75 items (53 on 2026-09-13). |
 | `duplicate_of` | int | Written by a group triage's `duplicate_of` verdict. |
 | `acceptance_clauses` | list | The contract the review rung holds a round to, on the item and not only in the ledger — a human editing them here is editing what the grader enforces. |
 | `human_clauses` | list | What a person must do before the item closes. Kept apart so no round is asked to fake an audit. |
@@ -244,10 +249,12 @@ behind a fifteen-line helper. `tests/test_backlog_tags_shape.py` pins it.
 | Tag | Meaning |
 |---|---|
 | `spawned-by-triage` / `spawned-by-autocode` | This loop filed this item. Two earlier spellings — `spawned-by-autoimplement`, `spawned-by-selfmod` — are still **read** (`SPAWN_TAGS`), because quarantine that stopped recognising an old tag would re-admit every item carrying it to the triage pool at once. Write the newest. |
+| `spawned-by-review` / `youtube-eval` | The other two producers of loop output: the architecture reviewer (`workers/sources/arch_review.py`) and the YouTube channel digest (`workers/sources/youtube_digest.py`). Three readers, three deliberately different sets (`scripts/automod/backlog.py:89-140`): merge at write time keys on the `spawned-by-` **prefix** plus `youtube-eval`; quarantine reads `QUARANTINE_TAGS`, the union of `SPAWN_TAGS` and `EVAL_SPAWN_TAGS`; expiry and the scorecard gauge read `LOOP_SPAWN_TAGS`, the union of all three. A review finding is therefore bounded by expiry but **not** quarantined — it describes the tree as of one commit and single triage is exactly the pass that should decide whether it still holds, whereas an eval written against today's profile cannot answer the staleness question. The prefix rule is there because the enumeration is only ever the mints someone thought of in advance: measured 2026-09-17, 43 of 412 open loop-tagged items were rejected by it and the gauge undercounted the loop's own output by 10 %. |
+| `swept` / `parked` | Written by the autotriage **sweep** (`workers.sources.autotriage.sweep: true`, `sweep_batch: 8`, `select_sweep_batch`/`record_sweep_verdicts`): one pass that reads every open item once and ranks it (`worth`, `size`) instead of expiring it. Both tags are expiry-exempt; `parked` is also its own bucket in `board_health`'s `draft` partition. Group and single triage yield to the sweep while `unswept` is non-zero. |
 | `umbrella` | A consolidation item that carries `members`. Never merged by write-time dedupe. |
 | `grouped` | Folded into an umbrella; out of both pools until that umbrella lands. |
 | `blocker` | The one finding an implement round may still file as its own item. Never merged. While the item it blocks is open it is *live*: triaged first, never quarantined, held or expired (see **Blockers** below). |
-| `needs-human` | **Retired as a destination (2026-09-27).** No code adds it, and every close and take-back removes it. What it marked (a spent attempt, outstanding `human_clauses`, a protected path, a parking triage verdict) is now an entry on the item's `owed` list, settled by the `owed-check` job. See `architecture/automod.md` §3.2k. |
+| `needs-human` | **Retired as a destination (2026-09-27).** No code adds it, and every close and take-back removes it. What it marked (a spent attempt, outstanding `human_clauses`, a protected path, a parking triage verdict) is now an entry on the item's `owed` list, settled by the `owed-check` job. See `architecture/automod.md` §3.2k. Two strings in `scripts/automod/review.py` (its `post_landing` instruction and the gate's advisory for that verdict) still tell the grader the item "closes carrying `needs-human`", which nothing writes → #2658. |
 | `expired` | Closed by `expire_stale_spawns`. A human setting the status back to `draft` reopens it. |
 
 **Quarantine.** `backlog.is_quarantined` holds a self-filed item out of the
@@ -263,12 +270,17 @@ per run fixes that shape; only cutting the edge does.
 **Age no longer releases it.** The first cut let a spawned item back in at 30
 days, and by 2026-09-11 that was 291 items due to re-enter triage in October,
 each spawning ~2 more. The exits now are the ones that do not re-enter the
-queue they came out of (`released_ids`): **expiry**, and a group triage `keep`.
-`expire_stale_spawns` closes a self-filed `draft` that nothing triaged,
-implemented, clustered or tagged in `spawn_expiry_days()` (7 from config since
-2026-09-14, 14 the day before, falling back to `SPAWN_EXPIRY_DAYS` = 30) — `done`,
+queue they came out of (`released_ids`): **expiry**, a group triage `keep`, and
+since 2026-09-15 the **sweep**, which reads and ranks an item once and took over
+from expiry as the bound — a swept item is exempt, so the age rule only reaches
+what the sweep has not seen. `expire_stale_spawns` closes a self-filed `draft`
+that nothing triaged, implemented, clustered or tagged in
+`spawn_expiry_days()` (**30** in `config.yaml` since 2026-09-15; 7 from 09-14 to
+09-15, 14 before that, and the code's `SPAWN_EXPIRY_DAYS` fallback is also 30 —
+the 2026-09-13 reading of "7 from config" is what the sweep made false) — `done`,
 tagged `expired`, text kept — and never an item carrying `EXPIRY_EXEMPT_TAGS`
-(`grouped`, `umbrella`, `needs-human`, `expired`, `confirmed-held`) or a live
+(`grouped`, `umbrella`, `needs-human`, `expired`, `confirmed-held`, **`swept`**,
+**`parked`**) or a live
 blocker. The gate keys on the spawn
 tags and **not** on `draft`, which is the status of most of a stale backlog: a
 rule that expired drafts would switch the board off rather than bound it.
@@ -406,11 +418,24 @@ they are rendered by the front end, which parses a bare stamp in the viewer's zo
 
 ## Malformed YAML degrades, but never round-trips
 
-Nine items on the lloyd board (478, 519, 520, 525, 787, 866, 918, 971, 981 as
-of 2026-09-13) have an `activity_log` entry with an unterminated quote. A strict
-`yaml.safe_load` raises, every caller here wraps its parse in `except Exception:
-continue`, and those items would vanish from the listing *and* from the board's
-task count with nothing logged.
+Two ways a backlog file's front matter fails to parse, and both are worth
+knowing even though the first is now empty on this board. **(a) Broken YAML.**
+Nine items on the lloyd board (478, 519, 520, 525, 787, 866, 918, 971, 981 as of
+2026-09-13) had an `activity_log` entry with an unterminated quote. All nine are
+repaired: a strict `yaml.safe_load` of each task file's front matter, cut by the
+anchored rule below, raises on **0** of the 2,592 task files (measured
+2026-10-13). **(b) A parser that cut the
+block in the wrong place**, which is the one that was still biting in 2026-09: all
+three readers split `(front matter, body)` with `content.split("---", 2)`, so an
+item whose activity log *quotes that expression* was cut inside the quoted scalar,
+the truncated YAML raised "found unexpected end of stream", and the item was
+locked against every writer — 31 items on 2026-09-20, #1146 among them. All three
+now call `app/frontmatter.py::split_frontmatter`, which bounds the block at the
+first *line* that is exactly `---`.
+
+Either way a strict `yaml.safe_load` raises, every caller here wraps its parse in
+`except Exception: continue`, and such an item would vanish from the listing *and*
+from the board's task count with nothing logged.
 
 `agent_mcp/_shared.py::parse_frontmatter_text` is the graduated recovery all
 three parsers use: plain parse, then a retry after repairing the known
@@ -424,13 +449,21 @@ The other half is that a degraded record is fine to **show** and not fine to
 would write `_yaml_broken: true` into the file and drop every key it could not
 read — `activity_log` and the timestamps among them.
 `agent_mcp/backlog.py::save_task` returns False, `app/routers/backlog.py::_reject_broken_fm`
-raises 409, and `scripts/automod/backlog.py::update_frontmatter` refuses a file
-whose frontmatter parsed empty for the same reason. **That guard is not on every
-writer in the module**: `_apply_status` (line 1648) and `note_item` (line 1872)
-dump their parse back unguarded, and `load_item` defaults an unparseable item to
-`status='draft'`, `board=''`, which admits it to `open_items(None)` — so a status
-move on a file in this shape overwrites its frontmatter with a four-key stub
-(#1020).
+raises 409, and every writer in `scripts/automod/backlog.py` that parses and
+re-dumps calls one shared guard first, at eight sites — `update_frontmatter`,
+`_apply_status`, `note_item`, `tag_item`, `record_verdict`, `close_landed`,
+`reopen_reverted_landings` and `amend_clause`, each naming the reason in its own
+docstring. That is #1020, which this page used to record as **unfixed**:
+`_apply_status` and `note_item` dumped their parse back unguarded while `load_item`
+defaulted an unparseable item to `status='draft'`, `board=''` and so admitted it to
+`open_items(None)`, so a status move on a file in that shape overwrote its
+frontmatter with a four-key stub. The reason the guard has to sit on the writers and
+not in the reader is unchanged: `load_item` still defaults those fields, because an
+item that reads as `draft` stays visible. The module's one fence-and-dump sink
+`_write_item` cannot hold the guard (it never parses, so it cannot tell a refused
+read from a good one), which is why its three callers — `amend_clause` (since #1349),
+`settle_amendments` and `orphan_stale_amendments` — refuse before reaching it.
+Pinned by `tests/test_frontmatter_parsing.py` and `tests/test_dashboard_yaml_loader.py`.
 
 ## MCP tools (4)
 
@@ -458,7 +491,10 @@ move on a file in this shape overwrites its frontmatter with a four-key stub
   `merged_into` instead of a new id — see below.
 
 See [[tools]] for the full parameter list. The `Tools` page and
-`data/tool_overrides.yaml` are how they are switched off.
+`~/lloyd-data/data/tool_overrides.yaml` (`app/paths.py::TOOL_OVERRIDES_PATH`,
+merged over `config.yaml` by `app/config.py::_merge_tool_overrides`) are how they
+are switched off — the path moved with the runtime root, so a repo-relative
+`data/tool_overrides.yaml` names a directory that no longer exists.
 
 ## Write-time dedupe: check the board before writing
 
@@ -562,17 +598,26 @@ that a merge never loses text.
 | `POST /api/backlog/task-delete` | Unlink the file. The only destructive path. |
 
 **The board's name is its identity and `board_id` is a compatibility path.** An
-id is positional over `sorted(names)` — `_backlog_board_map` assigns `idx + 1`
-— so it renumbers whenever a board appears or vanishes, and a board vanishes
-exactly when its last task is moved off it, which the task modal does in one
-click. A browser tab holding a board list from thirty seconds ago then sends an
-id that is still *valid*, for a different board, and the item moves somewhere
-nobody asked for. An unresolvable id on update used to fall back to the task's
-current board and return success — a move the user asked for that silently did
-not happen, which is the one outcome worse than an error. It is a 400 now, like
-an invalid status. Create keeps the silent `default` fallback, since a create
-with no resolvable board still has to land somewhere.
-`tests/test_backlog_board_move.py` pins it.
+id is positional over `sorted(names)` — `_board_index` assigns `idx + 1` — so it
+renumbered whenever a board appeared or vanished, and a board vanished exactly
+when its last task was moved off it, which the task modal does in one click. A
+browser tab holding a board list from thirty seconds ago then sends an id that is
+still *valid*, for a different board, and the item moves somewhere nobody asked
+for. The modal half of that is closed: `_board_index` seeds its counts with every
+name in `app/backlog_boards.BOARDS` at 0, so a configured board stays listed and
+keeps its id when its last item leaves. **The renumbering hazard is not closed** —
+names found on disk are still added to that set, so one hand-edited or restored
+item naming a fourth board (or an un-boarded file, which reads as `default`)
+inserts a name alphabetically and shifts every id after it, and `board_id` is
+still honoured when `board` is absent (create: `id_to_name.get(board_id,
+DEFAULT_BOARD)`) → #2659. An unresolvable id on update used to fall back to the
+task's current board and return success — a move the user asked for that silently
+did not happen, which is the one outcome worse than an error. It is a 400 now,
+like an invalid status, and so is a *name* off `BOARDS`; a create naming no board
+lands on `DEFAULT_BOARD` = `lloyd`, which is where the guardian's alerts go, not
+on `default` — ten of those alerts sat there until 2026-09-27.
+`tests/test_backlog_board_move.py` pins the refusals and that a *name* survives a
+renumbering (#1070); nothing pins the id path against one.
 
 `agent-services/guardian/notify.py::_backlog_task` POSTs to `task-create` after
 a rollback, which makes this route a second live writer beside the MCP one. Its
@@ -607,7 +652,13 @@ tag-vocabulary maintenance, since no query-time consumer reads these strings.
 ## QMD integration
 
 - **Collection:** `backlog` → `/home/alansrobotlab/obsidian/backlog`, pattern
-  `**/*.md`, in `~/.config/qmd/index.yml`.
+  `**/*.md`, in `~/.config/qmd/index.yml`. `**` is recursive and the tasks are
+  flat, so the `backlog/data/` witnesses are embedded too — and the two readers
+  that turn a hit's path back into an item id (`backlog_similar`'s `_QMD_ID_RE`,
+  `scripts/automod/cluster.py`'s basename match) accept a date-stamped witness
+  like `2026-09-30.components-witness.md` as task **#2026**, which is how a
+  similarity score from a file that is not a task can become a merge target
+  → #2657.
 - The directory is *also* inside the whole-vault `subliminal` collection, which
   is how backlog items reach pre-call context retrieval — see [[subliminal]].
 - **Reachable from:** `vault_search` and `vault_recall`, which fan out over
@@ -629,17 +680,23 @@ totals by status and by board, plus `umbrellas`, `grouped`, `recent_open` and
 **Raw status counts hide the board's shape**, so `scripts/automod/backlog.py::board_health`
 is the one definition of it, and it has three readers: that `health`
 sub-object, scorecard row 13, and the board steward's `<board_health>` prompt
-block (also written onto its `board_steward` ledger row). On 2026-09-13 the
-board read 480 `draft` + 88 `up_next`; `board_health` said the drafts were 199
-triageable, 94 quarantined self-spawns, 139 members folded under an umbrella,
-32 `needs-human` and 16 triaged-and-parked, and that 87 of the 88 `up_next`
-were `ready`.
+block (also written onto its `board_steward` ledger row). The 2026-09-13 reading
+is in the `board_health` docstring and is not repeated here: this page said "199
+triageable, 94 quarantined, 87 of 88 `up_next` `ready`" and the module says ~200
+triageable, 93 quarantined and 42 of 88 `ready` — one measured table, and the
+module is where it was measured, so read it there. What the partition is for is
+unchanged. Measured 2026-10-13: `by_status` 6 `draft` / 0 `up_next` / 6
+`in_progress`, and `board_health`'s draft buckets on a read a minute later were
+3 pool + 3 quarantined + 1 parked — the count moved under the loop, which is what
+a 12-item board looks like when the pool is live rather than the instrument being
+wrong.
 
 - `draft` is a **partition**, by precedence grouped > needs-human > held (a
-  confirmation waiting for implement-pool room, `held_confirmations`) > triaged
-  (a terminal verdict in `triaged_ids`) > quarantined (`is_quarantined`, not
-  released) > pool, so a grouped self-spawn counts once and the buckets sum to
-  the total.
+  confirmation waiting for implement-pool room, `held_confirmations`) > **parked**
+  (ranked by the sweep and left alone, `is_parked`) > triaged (a terminal verdict
+  in `triaged_ids`) > quarantined (`is_quarantined`, not released) > pool, so a
+  grouped self-spawn counts once and the buckets sum to the total. `parked` is new
+  since the sweep; a reader that sums the older six buckets under-counts.
 - `up_next` splits into umbrellas and singles, `never_attempted` (no
   `backlog_implement` row), and `ready` / `unready`. `ready` is
   `ready_confirmed` — what autocode would actually take — and `unready` is the
@@ -656,6 +713,12 @@ were `ready`.
   seven hours into the future and out of the 24-hour net.
 - `implement_pool` is `{ready, bound, floor}` — the single-item triage depth
   gate's numbers (`implement_pool_bound`, [[automod]] §3.2c).
+- The object is bigger than the 2026-09 shape this page first described: it also
+  carries `sweep` (`{unswept, swept, parked, worth{high,medium,low}}`), `owed`
+  (`{items, entries, due, outside}` — the owed-check job's view, [[automod]]
+  §3.2k), `decisions` (promotions by decider and outcome over a rolling window),
+  `self_spawned_open`, `closed_needs_human` and `landed_items_7d`. A reader
+  written against the four old keys reads these as missing rather than new.
 
 It reads every item file and the ledger several times (~2 s on the live board),
 so the dashboard caches it for 60 s apart from the 10 s vault scan, and a
@@ -692,9 +755,13 @@ most active is the worst possible reading of "bounded".
 - All operations are file-based, with no lock and no atomic replace anywhere in
   the five writers — concurrency is "last writer wins on a whole file"
   (#891). It is survivable only because writes are small, rare and
-  append-shaped. "Nothing rewrites a file it could not parse" is the intent and
-  holds for `save_task`, `_reject_broken_fm` and `update_frontmatter`, but not
-  for `_apply_status`/`note_item` — see above, and #1020.
+  append-shaped. "Nothing rewrites a file it could not parse" is the intent, and
+  since #1020 it holds at every writer that parses and re-dumps (`save_task`,
+  `_reject_broken_fm`, and `scripts/automod/backlog.py::_unparsed_guard`, called by
+  eight writers there — `update_frontmatter`, `_apply_status`, `note_item`,
+  `tag_item`, `record_verdict`, `close_landed`, `reopen_reverted_landings` and
+  `amend_clause`) rather than being the exception it was when this page was last
+  reviewed.
 
 ## Migration history
 
@@ -736,7 +803,9 @@ in #220 and in the vault's 2026-03 daily notes.
   0.9 ms idle against 3.574 s during a cold load), and `task-update` refuses a
   `description` shorter than the body without `force_body_replace`. The per-file
   `(mtime_ns, size)` cache replaced "not cached, parses twice per call". Pinned in
-  `tests/test_backlog_route_{payload,body_roundtrip,offload,cache}.py` (#1199).
+  `tests/test_backlog_route_{payload,offload,cache}.py` and, for the body round-trip,
+  `tests/test_backlog_body_roundtrip.py` — the file has no `route_` in its name, which
+  the brace expansion here used to imply (#1199).
   The 2026-09-13 census below predates all of it.
 - 2026-09-13 — **stale.** Structure and guards verified accurate; refreshed the
   census (960 tasks, 456/68/0/432, relation keys 317/140/53, nine `_yaml_broken`
@@ -745,3 +814,27 @@ in #220 and in the vault's 2026-03 daily notes.
   could not parse" invariant, which `_apply_status`/`note_item` do not hold
   (#1020, #1023); the uncached whole-body list route and the board's own
   counters are #1021. Status moves outside the loop are #1023.
+- 2026-10-13 — **stale.** Re-checked every path, constant and count in the unit.
+  The headline is that **#1020 is fixed**: `_unparsed_guard` now covers
+  `_apply_status`, `note_item`, `close_landed` and `reopen_reverted_landings`
+  beside `update_frontmatter`, so "nothing rewrites a file it could not parse"
+  holds at every writer — this page recorded it as broken in two places, with two
+  now-wrong line numbers (replaced by names, which do not drift). Corrected: the
+  spawn-tag story (three sets — `SPAWN_TAGS`, `QUARANTINE_TAGS`, `LOOP_SPAWN_TAGS`
+  — with `spawned-by-review` deliberately *not* quarantined and `youtube-eval`
+  deliberately quarantined), the expiry bound (30 in `config.yaml` since
+  2026-09-15, not 7; `EXPIRY_EXEMPT_TAGS` also exempts `swept` and `parked`), the
+  sweep's `parked` bucket in `board_health`'s `draft` partition and its new
+  `swept`/`owed`/`decisions` keys, the board list as a closed set
+  (`app/backlog_boards.py`, `DEFAULT_BOARD` = `lloyd`, unknown names refused at
+  create — the "silent `default` fallback" is gone), the two front-matter failure
+  modes and `app/frontmatter.py::split_frontmatter` (#1146), the runtime-root path
+  of `tool_overrides.yaml`, one test citation, and the census (2,592 task files,
+  2,583/7/2 on the three boards, 12 open, relation keys 430/38/75, zero task files
+  failing a strict parse). Deferred the 2026-09-13 `board_health` numbers to the
+  module that measured them, where this page and the docstring disagreed
+  (87-of-88 `ready` against 42-of-88). Filed: #2657 (`backlog/data/*.md` embedded
+  by the recursive collection pattern and read as task ids by `backlog_similar`
+  and `cluster.py`), #2658 (the review prompt's retired `needs-human` promise),
+  #2659 (`board_id` still positional over names found on disk, so a hand-edited
+  board renumbers the rest).
