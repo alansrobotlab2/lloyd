@@ -2719,3 +2719,289 @@ def test_the_seven_add_no_dependency_edge_and_the_fleet_arithmetic_moves_once():
         f"{fleet} − {without} = {fleet - without} but the diagram draws {len(edges)} "
         f"edges; adding the seven adds no parent, so both numbers move by seven "
         f"together or the sentence and the picture part company")
+
+
+# ── #2631 — the two membership tables reconcile against the task-file directory ─
+#
+# Everything above this line derives its expectation from another statement in the
+# same document — the design this file's own header states, and the reason no count
+# in here rots the way a hand-copied roster does. It is also why the whole checking
+# surface was blind to the one thing the doc hand-types and no other artifact owns:
+# `test_every_job_has_one_function_and_exactly_one_write_tier` compares the two
+# tables with *each other*, so a job missing from both is symmetric and passes, and
+# `scripts/autonomy/validate_tasks.py` never opens the doc at all
+# (`git grep -c "autonomy-jobs" scripts/autonomy/validate_tasks.py` → 0, 2026-10-13).
+#
+# The drift that proves both directions: on 2026-10-12 the tables named #87 #88 #89,
+# whose task files had been removed (their run records still sit in
+# `~/lloyd-data/autonomy-runs/8[789]/`), and omitted #91–#97, whose task files were
+# live and running. #2630 repaired both halves by hand. The reconciler below is the
+# check that would have seen them, and its source of truth is the directory, because
+# the directory is what dispatches: the scheduler lists `~/obsidian/autonomy/*.md`
+# and nothing else, so a table row with no file behind it cannot run and a file with
+# no table row runs unseen.
+#
+# The one case the ghost rule must not fire on is #36, whose row at
+# `architecture/autonomy-jobs.md:823` says in prose that it is retired and whose file
+# is in `_archived/`. So the exemption is read off the row rather than typed into a
+# list: an allowlist here would be the same hand-maintained roster this section
+# exists to replace, and a ghost could buy its way back by editing this file instead
+# of writing a task file.
+#
+# Two of these nodes read the live vault and carry `@live_vault`, so the automod
+# gate deselects them (`pytest.ini:10-13`) — a nightly job files a task file, and
+# the next author's unrelated round would go red for it. They run under a bare
+# `pytest tests/`, which is what a suite pass and the owed-check job execute. The
+# three nodes above them are fixture-backed and run at the gate, which is where the
+# rule itself is proved: a check that can only be exercised against the live vault
+# is a check no rung can see fail.
+
+TASK_FILE_NAME = re.compile(r"(\d+)-.*\.md$")
+
+#: A membership row that discharges its own id: `| #36 | … Retired 2026-09-23 …`.
+#: Case-sensitive on purpose — the words *retired* and *archived* recur in prose
+#: narrating other jobs' histories, and a row that merely mentions a retirement is
+#: not that row's own retirement. Only #36's row matches in today's doc.
+RETIRED_MEMBERSHIP_ROW = re.compile(r"^\| #(\d+) \|.*\b(?:Retired|Archived)\b", re.M)
+
+
+def _task_dir() -> Path:
+    """`<vault>/autonomy`, resolved the way `tests/board_presence.py:vault_root()`
+    resolves the vault (`LLOYD_OBSIDIAN_VAULT`, else `Path.home()/"obsidian"`), so a
+    caller that redirects the vault is honoured instead of a second hard-coded path.
+    """
+    from tests.board_presence import vault_root
+
+    d = vault_root() / "autonomy"
+    assert d.is_dir(), f"{d} is not a directory, so the fleet's source of truth is unreadable"
+    return d
+
+
+def _task_file_ids(tasks_dir: Path) -> set[str]:
+    """The live fleet as ids, read off `tasks_dir`'s filenames: `{#24, …, #97}`.
+
+    Not `_archived/`: `glob` does not recurse, and an archived task is not a fleet
+    member — which is what #36's own row says, and why that row rather than this
+    directory is what discharges it.
+
+    The non-empty assertion is this file's standing positive control. A helper
+    handed a path it cannot read yields the empty set, and the empty set is the one
+    input that makes every id the doc names an offence *and* every real omission
+    invisible, in the same run.
+    """
+    ids = {f"#{m.group(1)}"
+           for m in (TASK_FILE_NAME.match(p.name) for p in tasks_dir.glob("*.md"))
+           if m}
+    assert ids, (
+        f"no `NN-*.md` task file in {tasks_dir}, so there is nothing to reconcile "
+        f"against — a fleet of zero tasks is not a fleet")
+    return ids
+
+
+def _retired_named_ids(doc_text: str) -> set[str]:
+    """Ids the doc discharges by its own row: `{#36}` in today's document.
+
+    Read off the row, never typed, for the reason given on `RETIRED_MEMBERSHIP_ROW`.
+    """
+    return {f"#{n}" for n in RETIRED_MEMBERSHIP_ROW.findall(doc_text)}
+
+
+def _job_num(job: str) -> int:
+    return int(job[1:])
+
+
+def _membership_drift(named: list[str], live: set[str],
+                      retired: set[str]) -> tuple[list[str], list[str], list[str]]:
+    """`(ghosts, unlisted, duplicated)` for one table's ids against `live`.
+
+    Three ways a hand-typed roster lies about the fleet, each a separate failure so
+    the message says which one happened:
+
+    - **ghost** — the table names an id with no live task file behind it, and that
+      id's own membership row does not say it is retired. (#87 #88 #89, 2026-10-12.)
+    - **unlisted** — a live task file whose id the table never names. (#91–#97.)
+    - **duplicate** — the id appears twice in the table, so the roster claims the
+      job holds the group twice.
+    """
+    named_set = set(named)
+    ghosts = sorted(named_set - live - retired, key=_job_num)
+    unlisted = sorted(live - named_set, key=_job_num)
+    duplicated = sorted({j for j in named if named.count(j) > 1}, key=_job_num)
+    return ghosts, unlisted, duplicated
+
+
+def _assert_no_ghosts(table: str, named: list[str], live: set[str],
+                      retired: set[str], tasks_dir: Path) -> None:
+    """Every id `table` names is dispatchable, or its own row retires it."""
+    ghosts, _, _ = _membership_drift(named, live, retired)
+    assert not ghosts, (
+        f"{table} names {', '.join(ghosts)} as a fleet member, but {tasks_dir} holds "
+        f"no {' or '.join(f'`{j[1:]}-*.md`' for j in ghosts)} — "
+        f"`test_the_departed_paper_digests_hold_no_membership_row` called exactly this "
+        f"defect for #87 #88 #89. Take the id out of both membership tables, or give "
+        f"it a task file, or mark its own group-table row "
+        f"`| #N | … Retired <date> …` as #36's does")
+
+
+def _assert_no_unlisted(table: str, named: list[str], live: set[str],
+                        tasks_dir: Path) -> None:
+    """Every live task file has a row in `table`."""
+    _, unlisted, _ = _membership_drift(named, live, set())
+    assert not unlisted, (
+        f"{tasks_dir} holds a live task file for {', '.join(unlisted)} that {table} "
+        f"never names — the omission #2630 closed for #91–#97, which ran for two "
+        f"weeks while this document claimed its membership was complete. The doc's "
+        f"bargain is that the schedule lives in the task file and the membership "
+        f"lives here")
+
+
+def _assert_listed_once(table: str, named: list[str]) -> None:
+    """No id appears in `table` more than once."""
+    _, _, duplicated = _membership_drift(named, set(named), set())
+    assert not duplicated, (
+        f"{table} lists {', '.join(duplicated)} twice, so the roster says the job "
+        f"sits in the group more than once — one row per job per table is what "
+        f"`test_every_job_has_one_function_and_exactly_one_write_tier` counts on")
+
+
+def _membership_tables() -> list[tuple[str, list[str]]]:
+    """`(table name, the ids it names)` for the two hand-typed membership tables."""
+    out: list[tuple[str, list[str]]] = []
+    for header, name in ((FUNCTIONS_HEADER, "§The functions membership table"),
+                         (TIERS_HEADER, "the write-authority tier table")):
+        named = [j for ids, _ in _table(header).values() for j in ids]
+        assert named, (
+            f"{name} parsed to no job ids at all, so any reconciliation below would "
+            f"be vacuous — the header the parser looks for is {header!r}")
+        out.append((name, named))
+    return out
+
+
+def test_the_reconciler_fails_a_table_naming_an_id_with_no_task_file(tmp_path: Path):
+    """#2631 clause 3, ghost direction, against a seeded directory.
+
+    `tmp_path` is a real directory read by the real helper, not an id set typed
+    beside the expectation: the point of the clause is that the check consults the
+    filesystem, so the fixture is files on disk and the offender is a filename that
+    is not there.
+    """
+    for name in ("24-data-pipeline.md", "30-intelligence-pipeline-scan-score.md"):
+        (tmp_path / name).write_text("---\ntitle: seeded\n---\n")
+    live = _task_file_ids(tmp_path)
+    assert live == {"#24", "#30"}, f"the seeded directory yielded {sorted(live)}"
+
+    named = ["#24", "#30", "#87"]
+    with pytest.raises(AssertionError) as err:
+        _assert_no_ghosts("the seeded membership table", named, live, set(), tmp_path)
+    assert "#87" in str(err.value), (
+        f"a ghost went un-named in its own failure: {err.value}")
+    assert "87-*.md" in str(err.value), (
+        f"the failure does not name the task file it looked for: {err.value}")
+    _assert_no_ghosts("the seeded membership table", ["#24", "#30"], live,
+                      set(), tmp_path)
+
+
+def test_the_reconciler_fails_a_live_task_file_the_tables_omit(tmp_path: Path):
+    """#2631 clause 3, unlisted direction, against a seeded directory.
+
+    #98 is the shape of #91–#97: a task file someone creates, which fails nothing in
+    the old surface because the tables are only ever compared with each other.
+    """
+    for name in ("24-data-pipeline.md", "98-seeded-watch-job.md"):
+        (tmp_path / name).write_text("---\ntitle: seeded\n---\n")
+    live = _task_file_ids(tmp_path)
+    assert live == {"#24", "#98"}, f"the seeded directory yielded {sorted(live)}"
+
+    with pytest.raises(AssertionError) as err:
+        _assert_no_unlisted("the seeded membership table", ["#24"], live, tmp_path)
+    assert "#98" in str(err.value), (
+        f"an omitted live task went un-named in its own failure: {err.value}")
+    _assert_no_unlisted("the seeded membership table", ["#24", "#98"], live, tmp_path)
+
+
+def test_the_reconciler_lets_a_retired_row_keep_its_id(tmp_path: Path):
+    """#2631 clause 1's exception, seeded: #36 stays named, and must not be flagged.
+
+    Without this the rule is unsatisfiable on today's tree — #36 is named in both
+    tables and has no live task file — and a check that cannot pass is not a check.
+    The exemption is exercised through the real row parser, because a rule with an
+    exception nobody feeds it through is an exception nobody can rely on.
+    """
+    (tmp_path / "24-data-pipeline.md").write_text("---\ntitle: seeded\n---\n")
+    live = _task_file_ids(tmp_path)
+    row = ("| #36 | daily | the vault | **Retired 2026-09-23 (#1012)** — the row and "
+           "the id stay because the group tables pin each other; its task file is in "
+           "`_archived/` and nothing dispatches it |")
+    retired = _retired_named_ids(row)
+    assert retired == {"#36"}, f"the row that retires itself did not parse: {sorted(retired)}"
+
+    _assert_no_ghosts("the seeded membership table", ["#24", "#36"], live, retired,
+                      tmp_path)
+    with pytest.raises(AssertionError) as err:
+        _assert_no_ghosts("the seeded membership table", ["#24", "#36"], live, set(),
+                          tmp_path)
+    assert "#36" in str(err.value), (
+        f"with the exemption withheld, the failure did not name #36: {err.value}")
+
+
+def test_the_reconciler_fails_a_job_listed_twice_in_one_table():
+    """#2631 clause 2's `exactly once`, as a failure rather than as a word.
+
+    `test_every_job_has_one_function_and_exactly_one_write_tier` counts tier rows,
+    but a second row for the same id in the *functions* table moves the group's
+    count without moving that node's expectation.
+    """
+    named = ["#24", "#30", "#30"]
+    with pytest.raises(AssertionError) as err:
+        _assert_listed_once("the seeded membership table", named)
+    assert "#30" in str(err.value), (
+        f"a duplicated id went un-named in its own failure: {err.value}")
+    _assert_listed_once("the seeded membership table", ["#24", "#30"])
+
+
+@live_vault
+def test_every_id_the_membership_tables_name_has_a_task_file_or_a_retired_row():
+    """#2631 clause 1, against `~/obsidian/autonomy/` as it is on disk.
+
+    The source of truth is the directory, not the doc — which is what makes this
+    node the counterpart of everything above it in this file. `@live_vault` for the
+    standing reason (`pytest.ini:10-13`): a nightly job can file or retire a task
+    file, and the automod gate must not make the next author's round red for it. Run
+    it from a worktree with
+
+        ~/lloyd/.venvs/lloyd/bin/python -m pytest \\
+            "tests/test_autonomy_jobs_doc_claims.py::test_every_id_the_membership_tables_name_has_a_task_file_or_a_retired_row" -q
+
+    #36 is the positive control: it is named in both tables and has no live task
+    file, so if its own row stopped parsing, the exemption would be silently gone and
+    this node would fail for the wrong reason — the assertion below says which.
+    """
+    tasks_dir = _task_dir()
+    live = _task_file_ids(tasks_dir)
+    retired = _retired_named_ids(_text())
+    assert "#36" in retired, (
+        "no membership row carries a Retired/Archived marker, so #36 — named in both "
+        "tables, its file in `_archived/` — would be reported as a ghost. Its row at "
+        "architecture/autonomy-jobs.md is the one case the rule exempts")
+    for name, named in _membership_tables():
+        _assert_no_ghosts(name, named, live, retired, tasks_dir)
+
+
+@live_vault
+def test_every_live_task_file_is_named_once_in_each_membership_table():
+    """#2631 clause 2, against `~/obsidian/autonomy/` as it is on disk.
+
+    39 live task files on 2026-10-13, every one of them named in both tables — the
+    state #2630 produced by hand and this node is what keeps. `@live_vault`, same
+    reason and same command as
+    `test_every_id_the_membership_tables_name_has_a_task_file_or_a_retired_row`.
+    """
+    tasks_dir = _task_dir()
+    live = _task_file_ids(tasks_dir)
+    assert len(live) >= 39, (
+        f"{tasks_dir} holds {len(live)} live task files; the last measurement "
+        f"(2026-10-13) counted 39, so the directory itself changed shape and this "
+        f"node's own reading needs re-checking before its verdict means anything")
+    for name, named in _membership_tables():
+        _assert_no_unlisted(name, named, live, tasks_dir)
+        _assert_listed_once(name, named)

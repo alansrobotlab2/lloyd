@@ -48,8 +48,9 @@ overtook the correction this paragraph carries, between 2026-09-29 and
 2026-10-11. So the range above is a floor, and the id it names carries the date
 it was the newest.
 
-**Membership below is complete as of 2026-10-12, in both directions, and the
-completeness is still not mechanical.** The seven task files #91 nightly
+**Membership below is complete as of 2026-10-12, in both directions, and since
+2026-10-13 that completeness is checked against the directory instead of
+promised.** The seven task files #91 nightly
 thinking-fidelity prevalence series, #92 vLLM prefix-miss daily, #93
 step-conformance replay, #94 referential-integrity ledger, #95 mitigation drill,
 #96 djev name-prior probe and #97 landed-outcomes daily record have their
@@ -58,14 +59,20 @@ The three paper digests #87 #88 #89 are gone from the tables below: each read
 one named arXiv paper into exactly one knowledge note, was dispatched
 interactively on 2026-09-24, and leaves no `87-*.md`, `88-*.md` or `89-*.md`
 behind in `~/obsidian/autonomy/` or in its `_archived/` — a run record outliving
-its task file does not make the job a fleet member. What has *not* changed is
-why both errors were possible: the group tables are pinned to *each other*,
-never to the directory, so a task file appearing in `~/obsidian/autonomy/`
-fails nothing and a task file vanishing from it fails nothing either. Backlog
-**#2631** owns the check that reconciles this document against the task-file
-directory; #2630 owns the content of this paragraph, which is the same failure
-#1102 caught for #86, recurring for seven jobs and, in the other direction, for
-three.
+its task file does not make the job a fleet member. What *had* to change is the
+reason both errors were possible: the two tables below are pinned to *each
+other*, never to the directory, so a task file appearing in
+`~/obsidian/autonomy/` failed nothing and a task file vanishing from it failed
+nothing either. Backlog **#2631** closed that gap: two nodes in
+`tests/test_autonomy_jobs_doc_claims.py` —
+`test_every_id_the_membership_tables_name_has_a_task_file_or_a_retired_row` and
+`test_every_live_task_file_is_named_once_in_each_membership_table` — now read
+the task-file directory as the source of truth and fail on either direction, an
+id the tables name with no `NN-*.md` behind it (unless that id's own row says it
+is retired, which is how #36 stays listed with its file in `_archived/`) and a
+live task file the tables omit. #2630 owns the content of this paragraph, which
+is the same failure #1102 caught for #86, recurring for seven jobs and, in the
+other direction, for three.
 
 ## The functions
 
