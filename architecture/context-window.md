@@ -157,7 +157,7 @@ the `<analysis>` scratchpad, and nothing else. That is a persistence channel for
 prompt injection: content the model was told to treat as data gets promoted to
 first-party instructions by the act of being summarised. A frame around it is a
 label on that promotion, not a wall against it — the row is still `assistant`, and
-whether it keeps that role is a separate ruling.
+#2029 ruled that it stays that way; the reasoning is at the end of this section.
 
 It is worse than a bare copy because of what the summariser is asked to do. Its prompt
 (`app/compaction_llm.py`) orders the model to keep user messages near-verbatim, to list
@@ -215,9 +215,21 @@ which is the one thing the same class of paper argues against — and it landed 
 
 So the open question is no longer "is there a boundary" but whether a frame a motivated
 later turn can see through is a mitigation or only a label — and that is what the
-`--rep` sweep and the benign-control comparison decide. Whether the summary row keeps its
-`assistant` role remains a separate ruling, and changing it would move every later turn's
-reading of that text.
+`--rep` sweep and the benign-control comparison decide. The other question this section
+carried is closed: the summary row **keeps its `assistant` role**, ruled on #2029, which
+is why `summary_message` still returns exactly one `{"role": "assistant", …}` row and why
+the node that pins that row pins a decision and not a default. A `user` role was rejected
+because §6 of the summariser prompt (`app/compaction_llm.py`) orders every user message
+listed verbatim *as intent*, so a summary carrying `user` would arrive as the content a
+turn is told to honour above all others — a payload folded out of a tool result would
+reach a later turn at the top of the trust ladder instead of where it came from.
+A `system` role was rejected because it would hand lossy, model-generated text
+instruction-level authority over every turn that inherits the row. The sole condition
+that reopens the question is the instrument's own number: `leak_unattributed > 0` — the
+tokens that survived *outside* the frame, arriving in Lloyd's own voice — counted over a
+window of at least 10 reps. Attribution demonstrably failing is the only result from
+which a channel change follows as evidence rather than as a guess, and a guess is the
+expensive kind of change: moving the role moves every later turn's reading of the text.
 
 ## What a rewrite costs, priced per mechanism
 

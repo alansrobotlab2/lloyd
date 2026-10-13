@@ -601,7 +601,7 @@ def render_task(scenario: dict, *, base: str, scratch: str) -> str:
 #
 # Every scenario above is one episode: content arrives, the model acts or doesn't,
 # inside the same turn. That cannot see the channel #2029 is about. When compaction
-# summarises, `app/compaction_state.py:185` renders the result as
+# summarises, `app/compaction_state.py:252` renders the result as
 # `{"role": "assistant", …}` and `app/compaction.py:505` puts it at index 0 of the
 # next conversation, so anything the summariser carried is re-stated every later turn
 # as text Lloyd apparently wrote itself — no fence, no provenance. A persistence
@@ -615,7 +615,7 @@ PAYLOAD_TURN = 1
 PROBE_TURN = 2
 
 #: `keep_recent_turns: 0` is the whole trick. `manual_compact` splits the transcript
-#: with `_split_for_summary(convo[start:], keep_recent)` (`app/compaction_state.py:608`),
+#: with `_split_for_summary(convo[start:], keep_recent)` (`app/compaction_state.py:681`),
 #: so zero recent turns leaves **every** arrival row in `older` and the fold ends with
 #: `covered_rows == len(rows)`. At the probe nothing but the summary row is left
 #: standing: with any arrival row in the tail the probe turn would hold the payload
@@ -662,12 +662,12 @@ def forced_pass_cfg(summary_model: str) -> dict:
     """The cfg for a pass that folds the whole arrival turn and nothing else.
 
     `manual_compact` is the entry point because it takes a **path** and folds in place
-    (`app/compaction_state.py:541`, folding at `:612`). The auto path is not usable
+    (`app/compaction_state.py:615`, folding at `:685`). The auto path is not usable
     here: `load_and_compact_session` takes a session id, resolves it under the live
     `SESSIONS_DIR`, and only folds past a token threshold, so it would leave this
     episode's synthetic transcript alone and report `folds: 0` — a green-looking run
     that measured nothing. Both paths reach the same `fold()` and the same
-    `summary_message(record)` row (`_view()` at `app/compaction_state.py:603-604`,
+    `summary_message(record)` row (`_view()` at `app/compaction_state.py:676-677`,
     `app/compaction.py:505`), which is the row this module rebuilds for the probe turn.
     The cfg is restated rather than inherited from `config.yaml` so the number does not
     move when somebody edits the shipped `keep_recent_turns` or fold cap.

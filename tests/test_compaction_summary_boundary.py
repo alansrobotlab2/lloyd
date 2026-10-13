@@ -12,9 +12,10 @@ What this file pins is the boundary that run bought, and nothing beyond it:
 1. `render_summary` presents the summariser's text as **quoted content from named
    rows**, under a line that says so, so a directive carried out of a folded row
    reads as a report rather than as a standing instruction;
-2. `summary_message` still returns **one row whose role is `assistant`** — the
-   channel `architecture/context-window.md` reserves to a separate ruling, and a
-   round that quietly moved it would be settling that ruling here.
+2. `summary_message` still returns **one row whose role is `assistant`** — the role
+   #2029 ruled the row keeps, recorded now in
+   `architecture/context-window.md`, so a round that quietly moved it would be
+   reopening a settled ruling on evidence the ruling does not ask for.
 
 Offline throughout. The summariser is patched where `fold` reaches it — on
 `app.compaction_llm`, at call time — so the fold, the row formatter, the record
@@ -22,6 +23,8 @@ builder and the renderer all still run; only the model's answer is a stand-in, a
 it stands in for the behaviour the 2026-10-04 run actually observed: the planted
 instruction reproduced in the summary.
 """
+import ast
+import inspect
 import sys
 from pathlib import Path
 
@@ -191,12 +194,14 @@ async def test_a_directive_that_survives_the_fold_arrives_as_attributed_content(
 async def test_the_summary_row_keeps_being_one_assistant_row(tmp_path, monkeypatch):
     """The boundary change is confined to the text.
 
-    `architecture/context-window.md` leaves the summary row's `assistant` role to a
-    separate ruling, and that ruling is not this round's to make: a frame around the
-    content mitigates the channel, it does not close it, and closing it would move
-    every later turn's reading of the text. So the row this pass produces is still a
-    single row, still `assistant`, still carrying exactly the rendered text — and the
-    attribution is inside that text, not a new row or a different channel.
+    #2029 ruled that the summary row keeps its `assistant` role, and
+    `architecture/context-window.md` now records the ruling together with the one
+    condition that reopens it (`leak_unattributed > 0` over a window of at least 10
+    reps). A frame around the content mitigates the channel without closing it, and
+    that is exactly the trade the ruling accepted, so this file pins the row rather
+    than reopening the question early. What it produces is still a single row, still
+    `assistant`, still carrying exactly the rendered text — and the attribution is
+    inside that text, not a new row or a different channel.
     """
     passed = await fold_a_planted_directive(tmp_path, monkeypatch)
     msg = CS.summary_message(passed["record"])
@@ -244,3 +249,102 @@ def test_the_persisted_summary_layer_still_puts_that_row_at_index_zero():
     assert CS.summary_message(
         {"summary": "x", "covered_rows": 1, "covered_turn_ids": ["t"],
          "covers_through_entry_id": "a"})["role"] == "assistant"
+
+
+# ── #2638: the row formatter states the ruling it already executes ───────────
+
+def test_the_row_formatter_docstring_states_the_ruling_it_executes():
+    """`summary_message` has always returned one `assistant` row; what #2638 removed is
+    the docstring that told a reader the role was still being decided.
+
+    A deferral in the docstring of the code that carries out a ruling is the same trap
+    as one in the architecture page: a later round reads "not this function's call" as
+    permission to change the call. So the prose is pinned the way the behaviour is — the
+    ruling, both rejected roles with their reasons, and the sole reopen condition are in
+    it, and neither deferral sentence survives.
+    """
+    src = inspect.getsource(CS.summary_message)
+    assert "separate ruling" not in src
+    assert "not this function's call" not in src
+    assert "``assistant``" in src, "the row's role is what the ruling is about"
+    for mark in ("top of the trust ladder",          # why `user` was rejected
+                 "instruction-level authority",      # why `system` was rejected
+                 "leak_unattributed > 0", ">=10 reps"):   # the sole reopen condition
+        assert mark in src, f"the docstring is missing {mark!r}"
+
+
+def test_the_row_formatter_did_not_grow_and_move_the_anchors_below_it():
+    """Five citations name a line of this module below `summary_message` — four in
+    `eval/run_injection_canary.py` (`:615`, `:676-677`, `:681`, and the short
+    `:685`) and one in `architecture/context-window.md` (`:562`) — and every line this
+    function's docstring gains renumbers all five.
+
+    So the shape is pinned beside the wording: 11 source lines here, one `def`, an
+    8-line docstring and two return lines, which is what #2638's replacement had to fit
+    in. A round that needs more prose in that docstring has to re-point the citations in
+    the same diff, and `test_every_citation_into_this_module_names_a_line_holding_its_symbol`
+    is what makes a missed re-point a failed test rather than a wrong comment.
+    """
+    lines = inspect.getsource(CS.summary_message).splitlines()
+    assert len(lines) == 11, (
+        f"`summary_message` is {len(lines)} source lines, so every "
+        "`compaction_state.py:NNN` citation below it has moved — re-point them here")
+
+
+#: Every citation that names a line of `app/compaction_state.py` from the two files
+#: that lean on it hardest, as (file carrying the citation, the citation exactly as it
+#: must appear there, the line number it points at, the definition in this module whose
+#: body must contain that line, and a substring that must be sitting on that line).
+#:
+#: #2638 re-pointed the five `eval/run_injection_canary.py` numbers, all of which had
+#: drifted behind the module — `:185` named the row formatter while `summary_message`
+#: was at `:252`, `:541` and `:612` named `manual_compact` while it was at `:615`,
+#: `:603-604` and `:608` were blank lines and a comment banner. Those comments are the
+#: only place the manual compaction path is explained, and no test read them: the
+#: corpus-wide sweep
+#: `tests/test_architecture_coverage_doc_claims.py::test_every_line_anchor_in_an_architecture_doc_lands_inside_a_definition`
+#: walks `architecture/*.md` only, so an anchor in `eval/` drifts in silence.
+ANCHOR_CITATIONS = [
+    ("eval/run_injection_canary.py", "app/compaction_state.py:252", 252,
+     "summary_message", "def summary_message"),
+    ("eval/run_injection_canary.py", "app/compaction_state.py:615", 615,
+     "manual_compact", "async def manual_compact"),
+    ("eval/run_injection_canary.py", "app/compaction_state.py:676-677", 676,
+     "manual_compact", "def _view"),
+    ("eval/run_injection_canary.py", "app/compaction_state.py:681", 681,
+     "manual_compact", "_split_for_summary(convo[start:]"),
+    ("architecture/context-window.md", "app/compaction_state.py:562", 562,
+     "fold", "compaction_llm.summarize_incremental"),
+    ("architecture/context-window.md", "compaction_state.py:241", 241,
+     "render_summary", 'record.get("summary")'),
+]
+
+
+def test_every_citation_into_this_module_names_a_line_holding_its_symbol():
+    """A line number in prose is a claim that expires the moment a line is inserted.
+
+    Each row of `ANCHOR_CITATIONS` is checked three ways: the citation string is still
+    the one the citing file carries, the number still falls inside the definition the
+    sentence names, and the named thing is actually on that line. The third leg is what
+    catches a re-point that "fixed" the number by moving it to a neighbouring line that
+    is merely nearby rather than the line being described.
+    """
+    root = Path(__file__).resolve().parent.parent
+    module_lines = (root / "app" / "compaction_state.py").read_text(
+        encoding="utf-8").splitlines()
+    tree = ast.parse("\n".join(module_lines))
+    spans: dict[str, tuple[int, int]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            spans[node.name] = (node.lineno, node.end_lineno or node.lineno)
+
+    for source, citation, number, definition, on_line in ANCHOR_CITATIONS:
+        text = (root / source).read_text(encoding="utf-8")
+        assert citation in text, f"{source} no longer carries the citation {citation!r}"
+        low, high = spans[definition]
+        assert low <= number <= high, (
+            f"{source} cites {citation} for `{definition}`, but that definition is "
+            f"{low}-{high} now")
+        assert on_line in module_lines[number - 1], (
+            f"{source} cites {citation} for `{definition}` — line {number} reads "
+            f"{module_lines[number - 1]!r}, which does not hold {on_line!r}")

@@ -251,12 +251,12 @@ def render_summary(record: dict) -> str:
 
 def summary_message(record: dict) -> dict:
     """The row that replaces the covered history. Same role and header as the
-    regenerate-every-turn path always used.
+    regenerate-every-turn path always used — one ``assistant`` row.
 
-    One row, one ``assistant`` role: that is the channel
-    `architecture/context-window.md` leaves to a separate ruling, and the
-    attributed frame `render_summary` adds is deliberately a change to the
-    *text* only. Whether the row keeps that role is not this function's call.
+    Ruled on #2029, recorded in `architecture/context-window.md`: it stays so.
+    ``user`` would put folded-in payload at the top of the trust ladder (§6 lists
+    user messages verbatim *as intent*); ``system``, instruction-level authority
+    over lossy text. Reopen only on ``leak_unattributed > 0`` at >=10 reps.
     """
     return {"role": "assistant",
             "content": [{"type": "text", "text": render_summary(record)}]}

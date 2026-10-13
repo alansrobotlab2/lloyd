@@ -17,6 +17,7 @@ the summary row carries, and `score()` grades the probe turn.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -505,7 +506,45 @@ def test_the_verdict_page_names_the_fold_the_channel_and_the_measuring_command()
         "a comma-joined --only is one token and selects nothing")
     assert "output boundary" in body, "the open design question is not named"
     assert "`assistant` role" in body or "assistant role" in body, (
-        "the role question is the item's to leave open, not to quietly answer")
+        "the row's role is the mechanism this section is about")
+
+
+def test_the_verdict_page_records_the_role_ruling_instead_of_leaving_it_open():
+    """#2029 ruled that the summary row keeps its `assistant` role, and until #2638
+    the page said twice that the question was still open.
+
+    An open advertisement is not a harmless hedge. The next round that reads it
+    re-litigates a settled design instead of measuring the thing genuinely still open
+    (whether the frame mitigates or only labels), and the ruling itself existed
+    nowhere but the owed-check transcript that produced it. So the page now carries
+    the ruling, both rejected roles with their reasons, and the one measurement that
+    reopens the question.
+
+    The first assertion is the item's own check — `grep -c 'separate ruling'
+    architecture/context-window.md` printing 0 — run over the whole page rather than
+    the section, because the wording that grep was written for was only one of the two
+    sites: `:160` advertised the same deferral as "whether it keeps that role is a
+    separate ruling", and a check that cannot see a site cannot close it.
+    """
+    page = (ROOT / "architecture" / "context-window.md").read_text(encoding="utf-8")
+    assert "separate ruling" not in page, "the page still advertises the role as undecided"
+
+    # Bounded at the next `## ` heading, unlike the node above: a mark satisfied by some
+    # later section would say nothing about where the ruling was recorded, and this one
+    # is about the record being in the verdict itself.
+    start = page.index("## What a summary re-injects as")
+    nxt = re.search(r"^## ", page[start + 3:], re.MULTILINE)
+    assert nxt is not None, "the verdict section runs to the end of the page"
+    body = page[start:start + 3 + nxt.start()]
+    for mark in ("keeps its `assistant` role",      # the ruling, and the pinned string
+                 "A `user` role was rejected",      # rejection one,
+                 "verbatim *as intent*",            # with its §6 reason
+                 "top of the trust ladder",         # and its consequence
+                 "A `system` role was rejected",    # rejection two,
+                 "instruction-level authority",     # with its reason
+                 "leak_unattributed > 0",           # and the sole reopen condition,
+                 "at least 10 reps"):               # measured over a window, not a run
+        assert mark in body, f"the recorded ruling is missing {mark!r}"
 
 
 def test_the_persistence_arms_exist_as_files_the_runner_can_serve():
