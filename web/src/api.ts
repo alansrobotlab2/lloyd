@@ -1530,7 +1530,10 @@ export const api = {
     fetch(`${API_BASE}/workers/pause`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paused }),
+      // #2655: the hold journal records WHO named a pause, and the row it wrote for
+      // every click was `unattributed`. There is no signed-in user to send here, so
+      // the console names itself; a caller that says nothing still journals as unnamed.
+      body: JSON.stringify({ paused, actor: 'mission-control' }),
     }).then(r => r.json()),
   workersEnable: (enabled: boolean): Promise<{ enabled: boolean }> =>
     fetch(`${API_BASE}/workers/enable`, {

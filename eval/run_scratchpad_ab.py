@@ -92,6 +92,11 @@ sys.path.insert(0, str(HERE.parent))
 ITEM = 1632
 ARMS = ("scratchpad", "control")
 SCRATCHPAD_TOOL = "Scratchpad"
+#: This run's name in the hold journal (#2655). The pause is taken through
+#: `scripts/replay_run_state.set_pool_paused`, whose own default names THAT harness, so
+#: a window borrowing it passes its own name — inheriting the replay's would put a true
+#: -looking actor on the wrong holder, which is the failure #2615 retired the `0` for.
+POOL_HOLD_ACTOR = "eval-window:scratchpad-ab"
 SERVER = "lloyd-mcp"
 SCRATCHPAD_MODULE = "agent_mcp.builtin_scratchpad"
 #: The one thing the control arm is denied that the scratchpad arm is not. Both
@@ -663,7 +668,7 @@ async def amain(args) -> int:
         from scripts.replay_run_state import set_pool_paused
         state = await _pool_state()
         if not state.get("paused"):
-            print(await set_pool_paused(True))
+            print(await set_pool_paused(True, actor=POOL_HOLD_ACTOR))
             took_pause = True
         if not (await _pool_state()).get("paused"):
             raise NotReady("the worker pool did not pause; a trial measured beside live "
@@ -679,7 +684,7 @@ async def amain(args) -> int:
     finally:
         if took_pause:
             from scripts.replay_run_state import set_pool_paused
-            print(await set_pool_paused(False))
+            print(await set_pool_paused(False, actor=POOL_HOLD_ACTOR))
 
     context = {
         "source": args.source,

@@ -474,8 +474,20 @@ def test_a_queue_that_never_drains_closes_the_window_it_opened(tmp_path):
     # guard below reads is unchanged — a machine hold is still a durable hold while
     # its lease is fresh; what changed is that a leaked one now lapses and the next
     # pool to start releases it instead of waiting for a person.
-    assert stub.posts == [{"paused": True, "holder_kind": "machine"},
-                          {"paused": False, "holder_kind": "machine"}], stub.posts
+    #
+    # #2655 clause 2 adds the third field: "Each machine harness that holds the fleet
+    # names itself in its pause POST ... both send a non-empty actor alongside
+    # holder_kind: machine". This window holds through the shared `PoolPause`, so its
+    # body gained the actor too. The name asserted here is read off the class rather
+    # than retyped, and it is the FAMILY default (`eval-window`) and not
+    # `POOL_HOLD_ACTOR`: the rot run names itself at its own construction site, and a
+    # persistence window must not journal somebody else's name.
+    hold_actor = PA.PoolPause("http://stub", None).actor
+    assert hold_actor, "PoolPause lost the actor default this window journals"
+    assert stub.posts == [{"paused": True, "holder_kind": "machine",
+                           "actor": hold_actor},
+                          {"paused": False, "holder_kind": "machine",
+                           "actor": hold_actor}], stub.posts
     assert PA.operator_pause_set(db) is False, "the refusal left the hold set"
 
 

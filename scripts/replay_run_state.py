@@ -185,8 +185,16 @@ def engine_delta(before: dict, after: dict) -> dict:
 #: the whole pool module inside a measurement script for one number.
 LEASE_REFRESH_SECONDS = 60.0
 
+#: What the hold journal reads when this harness holds the fleet (#2655). An explicit
+#: default rather than a fallback left to the route: the route answers an unnamed
+#: caller with `unattributed`, which is the honest thing for a caller that does not say
+#: — and this caller knows exactly what it is. A keyword so a window that borrows this
+#: function (`eval/run_scratchpad_ab.py`) passes its own name instead of inheriting
+#: this one, which would be a true-looking name on the wrong holder.
+POOL_HOLD_ACTOR = "replay-run-state"
 
-async def set_pool_paused(paused: bool) -> str:
+
+async def set_pool_paused(paused: bool, *, actor: str = POOL_HOLD_ACTOR) -> str:
     """Take or lift the pool pause through the route, as a MACHINE holder (#2498).
 
     `holder_kind: machine` is what makes this hold reconcilable. Before it, a POST
@@ -197,11 +205,17 @@ async def set_pool_paused(paused: bool) -> str:
     in a daily note. A machine hold whose lease goes stale is released by the next
     pool to start. The price of that protection is the lease itself, kept by
     `pool_pause` below: a run that stops refreshing it is presumed dead.
+
+    `actor` (#2655) is the other half of that attribution: the KIND said a machine
+    held the fleet, never which one, and all four rows the hold journal held on
+    2026-10-13 read `unattributed`. The lease beats go through here too, and a beat
+    appends no journal row — only a take and a lift do.
     """
     try:
         async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.post(f"{BACKEND}/api/workers/pause",
-                             json={"paused": paused, "holder_kind": "machine"})
+                             json={"paused": paused, "holder_kind": "machine",
+                                   "actor": actor})
             return f"pool paused={r.json().get('paused')} (http {r.status_code})"
     except Exception as exc:
         return f"pause({paused}) failed: {exc}"

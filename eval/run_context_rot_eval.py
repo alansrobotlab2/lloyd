@@ -45,7 +45,8 @@ GUARDS
 * `app.vllm_metrics.wait_idle(quiet_s=5)` before EVERY request; an engine
   that does not go quiet exits the run before anything is sent.
 * The worker pool is paused through `POST /api/workers/pause` as a MACHINE
-  holder (`holder_kind: machine`, #2498) with a lease refreshed every 60 s, so a
+  holder (`holder_kind: machine`, #2498) that names this run (`actor`, #2655), with a
+  lease refreshed every 60 s, so a
   landing's backend restart cannot lift it mid-run while this process is alive —
   and, unlike the operator hold it used to post, a run that is SIGKILL'd leaves a
   lease that lapses and the next pool to start releases the halt instead of
@@ -495,6 +496,19 @@ async def one_request(base: str, messages: list[dict]) -> dict:
             "output_tokens": usage.get("output_tokens"), "text": "".join(text)}
 
 
+#: What the hold journal reads when an eval measurement window holds the fleet but the
+#: run does not name itself (#2655). `PoolPause` is shared machinery:
+#: `eval/persistence_arms.py::PersistenceHold` subclasses it for the persistence,
+#: kv-dtype and egress windows, so the default says the FAMILY and not one run. A
+#: default naming `context-rot` would journal a kv-dtype hold as a rot hold — an
+#: invented attribution, which is worse than the `unattributed` #2615 retired.
+POOL_HOLD_ACTOR_DEFAULT = "eval-window"
+
+#: This run's own name in the hold journal, passed at its one construction site below
+#: so a machine row says WHICH window held the fleet (#2655).
+POOL_HOLD_ACTOR = f"{POOL_HOLD_ACTOR_DEFAULT}:context-rot"
+
+
 class PoolPause:
     """Pause the worker pool for the run; resume only a pause we took.
 
@@ -512,12 +526,17 @@ class PoolPause:
     """
 
     def __init__(self, backend: str, client, *, automod_wait_s: float = 900.0,
-                 poll_s: float = 10.0, lease_refresh_s: float = 60.0):
+                 poll_s: float = 10.0, lease_refresh_s: float = 60.0,
+                 actor: str = POOL_HOLD_ACTOR_DEFAULT):
         self.backend = backend.rstrip("/")
         self.client = client
         self.ours = False
         self.automod_wait_s = automod_wait_s
         self.poll_s = poll_s
+        # Who this hold belongs to, as the hold journal says it (#2655). `holder_kind`
+        # answers what KIND held the fleet; nothing answered which process until the
+        # caller said so.
+        self.actor = actor
         # A quarter of the pool's 300 s machine-lease window
         # (`workers.pool.MACHINE_LEASE_STALE_SECONDS`): four refreshes may be
         # missed before a live run is mistaken for a dead one.
@@ -543,9 +562,16 @@ class PoolPause:
         2026-10-09 because the pause outlived a killed harness with nothing to
         reconcile it. `holder_kind: machine` keeps the durability while the lease
         is fresh and makes the halt reconcilable once it is not.
+
+        `actor` (#2655) is the half the kind cannot answer — which process, not just
+        what species. Every row the hold journal held on 2026-10-13 read
+        `unattributed`, including the two that were already `holder_kind: machine`.
+        Lease beats re-POST through here as well and append no journal row: a beat is
+        not a new hold.
         """
         r = await self.client.post(f"{self.backend}/api/workers/pause",
-                                   json={"paused": paused, "holder_kind": "machine"},
+                                   json={"paused": paused, "holder_kind": "machine",
+                                         "actor": self.actor},
                                    timeout=10)
         r.raise_for_status()
         return r.json()
@@ -1174,7 +1200,8 @@ async def live(args) -> int:
             pass
 
     async with httpx.AsyncClient() as client:
-        pause = _NoPause() if args.no_pool_pause else PoolPause(args.backend, client)
+        pause = (_NoPause() if args.no_pool_pause else
+                 PoolPause(args.backend, client, actor=POOL_HOLD_ACTOR))
         try:
             async with pause:
                 meta["engine"] = await engine_meta(client, base)

@@ -1069,9 +1069,19 @@ def test_the_context_rot_eval_holds_the_pool_as_a_machine_and_beats_its_lease():
         # which is the import-order failure already recorded on #2498.
         sys.modules.pop(spec.name, None)
 
-    take = {"paused": True, "holder_kind": "machine"}
+    # #2655 clause 2: "Each machine harness that holds the fleet names itself in its
+    # pause POST ... both send a non-empty actor alongside holder_kind: machine". This
+    # node builds `PoolPause` without an `actor`, so the name every body below carries
+    # is the class default — read off the loaded module rather than retyped, so this
+    # node cannot stay green while that default moves. The beats are named too: clause 2
+    # says "no request either function sends omits actor", and a beat is a request this
+    # function sends.
+    take = {"paused": True, "holder_kind": "machine",
+            "actor": rot.POOL_HOLD_ACTOR_DEFAULT}
+    assert take["actor"], "PoolPause lost the actor default this clause asks for"
     assert seen[0] == take, seen
-    assert seen[-1] == {"paused": False, "holder_kind": "machine"}, seen
+    assert seen[-1] == {"paused": False, "holder_kind": "machine",
+                        "actor": rot.POOL_HOLD_ACTOR_DEFAULT}, seen
     beats = seen[1:-1]
     assert len(beats) >= 2, f"the lease heartbeat never fired: {seen}"
     assert all(b == take for b in beats), seen
@@ -1121,8 +1131,15 @@ def test_the_replay_run_keeps_the_lease_it_took_through_its_own_main(monkeypatch
 
     assert asyncio.run(replay.main()) == 0, "`main()` did not complete its run"
 
-    assert seen[0] == {"paused": True, "holder_kind": "machine"}, seen
-    assert seen[-1] == {"paused": False, "holder_kind": "machine"}, (
+    # #2655 clause 2 on the OTHER harness: "no request either function sends omits
+    # actor". Every body here — the take, the lease beats, the last resume — comes out
+    # of the shipped `set_pool_paused`, so the name asserted is that function's own
+    # default, read off the module rather than retyped: this node cannot stay green
+    # while the name it credits has moved.
+    assert seen[0] == {"paused": True, "holder_kind": "machine",
+                       "actor": replay.POOL_HOLD_ACTOR}, seen
+    assert seen[-1] == {"paused": False, "holder_kind": "machine",
+                        "actor": replay.POOL_HOLD_ACTOR}, (
         f"the run did not lift its own hold last: {seen}")
     assert all(b.get("holder_kind") == "machine" for b in seen), (
         f"a harness that posts an unattributed hold is a person's halt: {seen}")
@@ -2356,3 +2373,49 @@ def test_a_pause_that_names_no_actor_journals_a_name_and_never_zero_or_null(
     assert [r[2] for r in rows] == ["unattributed"] * 4, (
         f"an unattributed hold must read as a name, never a sentinel: {rows}")
     assert all(r[2] not in ("0", "", None) for r in rows), rows
+
+
+# ---------------------------------------------------------------------------
+# #2655 clause 3 — attribution moved to the callers; neither default moved.
+# ---------------------------------------------------------------------------
+
+
+def test_attribution_at_the_callers_left_both_pause_defaults_exactly_where_they_were(
+        monkeypatch, tmp_path):
+    """#2655 clause 3: every actor in the journal now comes from a caller, so the two
+    fallbacks have to be exactly what they were.
+
+    `tests/test_pause_actor_attribution.py` cannot say this, because every caller it
+    reads out of the shipped source names itself. This is the other half of the same
+    contract: a caller that genuinely names nobody — `eval/persistence_arms.py`'s
+    last-resort resume, a guardian vault trip, a curl copied out of a runbook — still
+    journals the literal `unattributed`, and a pause that names no kind is still a
+    person's hold, the one kind nothing ever auto-releases. The 20 h 52 m hold of
+    2026-10-09 is what a defaulted-away `person` would cost.
+
+    Pinned at three depths, because a default can move at any of them: the module
+    constant, `WorkerPool.pause`'s own signature, and what the route answers for a body
+    that names neither field.
+    """
+    from workers import pool as poolmod
+
+    assert poolmod.HOLDER_DEFAULT == poolmod.HOLDER_PERSON, (
+        "#2655 leaves HOLDER_DEFAULT alone: a pause that names no kind is a person's hold")
+    assert poolmod.PAUSE_ACTOR_DEFAULT == "unattributed", (
+        "the name for an unnamed holder is a name, not a sentinel")
+
+    pause_params = inspect.signature(poolmod.WorkerPool.pause).parameters
+    assert pause_params["holder_kind"].default == poolmod.HOLDER_PERSON, pause_params
+    assert pause_params["actor"].default is None, (
+        "a default actor on the setter would attribute every anonymous hold to a name "
+        "nobody sent, which is the invented attribution #2615 retired the `0` for")
+
+    client, pool, _ = _pause_client(monkeypatch, tmp_path)
+    taken = client.post("/api/workers/pause", json={"paused": True}).json()
+    assert taken["holder_kind"] == poolmod.HOLDER_PERSON, taken
+    lifted = client.post("/api/workers/pause", json={"paused": False}).json()
+    assert lifted["paused"] is False, lifted
+
+    assert _journal_rows(pool) == [
+        ("1", poolmod.HOLDER_PERSON, "unattributed"),
+        ("0", poolmod.HOLDER_PERSON, "unattributed")], _journal_rows(pool)
