@@ -752,3 +752,194 @@ def test_the_committed_witness_bytes_are_the_window_the_item_quotes(tmp_path, mo
             f"{mt.PARTIAL_FLAG}") in printed, printed
     assert f"newest bucket {WITNESS_DAY}: {WITNESS_ROWS} row(s), " in _skill_step2(), \
         "step 2 no longer quotes the denominator these bytes print"
+
+
+# ── #2644 clause 2: the suppressed tally, split by whether a file names the key ──
+#
+# The miner counted 12 keys and step 0's read-back listed 8 for the same night, because
+# `skill_verdicts.py check` resolves patterns by globbing `candidate-*.md` while
+# `superseded_pattern_keys` reads the ledger in process. Measured 2026-10-13: 88 of the
+# ledger's 96 terminal keys had no candidate file on disk, 7 of them gating that run. The
+# split this section pins is what turns those two numbers into one fact.
+
+sv = _load("skill_verdicts_for_2644", "scripts/skill_verdicts.py")
+
+#: Three sessions, each with one `run_bash`/`logic` error step, in one dated bucket: over
+#: `--threshold 3` on both the call count and the distinct-session count, and keyed by the
+#: miner as `run_bash/logic` (tool / error_type, from the row's own tool name) — the row
+#: shape below is the one
+#: `tests/test_skill_verdicts.py` writes for its own mining-gate tests, so the key asserted
+#: below is the key the miner mints, not one this file invented. The bucket is a fixed past
+#: date because `window_completeness` treats *today's* bucket as partial and the run's
+#: thresholds would then move with the clock (`#547`'s clock trap).
+LOGIC_SESSIONS = ("s1", "s2", "s3")
+
+
+def _logic_session_row(key: str) -> dict:
+    return {"session_key": key, "agent_id": "lloyd", "session_class": "interactive",
+            "session_start": "2026-09-12T10:10:10Z",
+            "timestamp": "2026-09-12T10:10:10Z", "tool_count": 1, "error_count": 1,
+            "has_errors": True, "tools": [], "error_tools": [
+                {"name": "run_bash", "sequence": 0, "error_type": "logic",
+                 "error_source": "protocol", "failure_class": "code_defect",
+                 "params_summary": {"command": "python3 -c x]"}}],
+            "signals": []}
+
+
+def _logic_corpus(tmp_path):
+    d = tmp_path / "corpus"
+    d.mkdir(exist_ok=True)
+    rows = [_logic_session_row(k) for k in LOGIC_SESSIONS]
+    (d / BUCKET).write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                            encoding="utf-8")
+    return d
+
+
+def _empty_store(tmp_path):
+    """An empty session store, so the class join never runs.
+
+    `effective_session_class` prefers a session file and falls back to the row's own
+    `session_class`; with none on disk these rows keep the `interactive` class a real chat
+    carries and survive the default exclusion. Which classes the exclusion admits is #493's
+    and #1143's subject, tested there.
+    """
+    store = tmp_path / "store"
+    store.mkdir(exist_ok=True)
+    return store
+
+
+def _mint(store: Path, pattern_key: str) -> None:
+    """A fresh terminal verdict for `pattern_key`, minted into a scratch ledger.
+
+    Through `record_verdict` rather than by hand, so the row is one a runbook would have
+    written. `candidates_dir` is deliberately not passed: that refusal is `cmd_record`'s
+    (#2644 clause 3), and the point of these fixtures is a key with no snapshot to cite.
+    """
+    sv.record_verdict(
+        store=store, pattern_key=pattern_key, verdict="reviewed_no_skill",
+        reason="fixture: 3 calls in 3 sessions, the pattern is a typo in a generated command",
+        evidence_cmd="grep -c '^def ' scripts/mine-trajectories.py; "
+                     "rc=$?; echo 'input_rows=3'; exit $rc",
+        occurrences=3)
+
+
+def _ledger_env(store: Path, tmp_path: Path) -> dict:
+    """Point the miner's in-process ledger lookup at `store`, and its mirror elsewhere.
+
+    `superseded_pattern_keys` reaches the ledger through `store_path(None)` — so
+    `$SKILL_VERDICTS_STORE`, not `--verdict-store` — which makes the env var the only way to
+    test the number the summary prints without touching the production ledger or its vault
+    copy (`$SKILL_VERDICTS_MIRROR` off the vault too, for the same reason).
+    """
+    return {**os.environ, "SKILL_VERDICTS_STORE": str(store),
+            "SKILL_VERDICTS_MIRROR": str(tmp_path / "mirror.jsonl")}
+
+
+def _run_mine(tmp_path, corpus, store, env=None):
+    proc = subprocess.run(
+        [sys.executable, str(MINER_PATH), "--trajectory-dir", str(corpus),
+         "--sessions-dir", str(store), "--days", "9999", "--threshold", "3",
+         "--output-dir", str(tmp_path / "out")],
+        capture_output=True, text=True, timeout=180, env=env)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def _split_lines(out: str) -> list[str]:
+    return [ln.strip() for ln in out.splitlines()
+            if ln.strip().startswith(mt.SUPERSEDED_TALLY_PREFIX)]
+
+
+def test_the_suppressed_tally_is_split_file_backed_versus_fileless(tmp_path):
+    """Clause 2: the run states its suppressed total split, so step 0's read-back and this
+    line reconcile from the two printed outputs rather than a re-derivation.
+
+    `run_bash/logic` is the blocked key and the output directory starts empty, so both halves of
+    the split are pinned by a number and not by absence: `1 (0 file-backed + 1 fileless)`,
+    with the key itself marked fileless on its per-key line below. The arithmetic is the
+    clause's whole point — `file-backed + fileless = total` has to read off one line, which
+    is what makes the miner's tally and `check`'s counts comparable units at all.
+    """
+    ledger = tmp_path / "verdicts.jsonl"
+    _mint(ledger, "run_bash/logic")
+
+    rc, out = _run_mine(tmp_path, _logic_corpus(tmp_path), _empty_store(tmp_path),
+                        env=_ledger_env(ledger, tmp_path))
+    assert rc == 0, out
+
+    assert rc == 0, out
+    lines = _split_lines(out)
+    assert len(lines) == 2 and lines[0] == lines[1], (
+        "the tally prints once on stderr and once in the SUMMARY block, and the two "
+        f"printings must never disagree: {lines}")
+    assert lines[0] == (f"{mt.SUPERSEDED_TALLY_PREFIX} 1 "
+                        f"(0 {mt.FILE_BACKED} + 1 {mt.FILELESS})"), out
+    assert any(ln.strip().startswith("superseded: run_bash/logic")
+               and f"[{mt.FILELESS}:" in ln for ln in out.splitlines()), out
+
+
+def test_a_key_whose_file_the_run_itself_wrote_still_counts_as_fileless(tmp_path):
+    """The measurement order, pinned: two runs, same corpus, same ledger, same output
+    directory — and only the second has a snapshot to find.
+
+    `write_candidate_file` writes a blocked error key too (as `status:
+    superseded_by_verdict`), so after the first run the file is on disk and the key is
+    genuinely file-backed. The first run must still call it fileless, because step 0's
+    `check` globs the directory **before** the miner runs (runbook order) and it was not
+    there for that read. Compute the split after `emit_candidates` instead of before and
+    this test goes red: every error key reads file-backed, `fileless` shrinks to the
+    sequence keys mined that night, and the two numbers step 0 and step 1 print stop being
+    the same fact — which is the gap #2644 was filed for.
+    """
+    ledger = tmp_path / "verdicts.jsonl"
+    _mint(ledger, "run_bash/logic")
+    corpus, store = _logic_corpus(tmp_path), _empty_store(tmp_path)
+    env = _ledger_env(ledger, tmp_path)
+
+    rc_first, out_first = _run_mine(tmp_path, corpus, store, env=env)
+    rc_second, out_second = _run_mine(tmp_path, corpus, store, env=env)
+
+    assert rc_first == rc_second == 0, (out_first, out_second)
+    written = list((tmp_path / "out").glob("candidate-run-bash-logic-*.md"))
+    assert len(written) == 1, (
+        "the blocked key's snapshot is written during the run — that is what makes the "
+        f"pre-write measurement load-bearing, so pin that it happens: {written}")
+    assert _split_lines(out_first)[0] == (
+        f"{mt.SUPERSEDED_TALLY_PREFIX} 1 (0 {mt.FILE_BACKED} + 1 {mt.FILELESS})"), out_first
+    assert _split_lines(out_second)[0] == (
+        f"{mt.SUPERSEDED_TALLY_PREFIX} 1 (1 {mt.FILE_BACKED} + 0 {mt.FILELESS})"), out_second
+
+
+def test_the_split_line_prints_both_halves_even_when_there_is_nothing_to_split(tmp_path):
+    """A night with no suppressed key still prints both halves.
+
+    A split that appeared only when a gap existed could not tell "no fileless keys tonight"
+    apart from "the build you ran does not compute a split" — the same reasoning behind
+    `window_denominator_line` printing `denominator unverified` rather than a bare count
+    (#1784). Fixture: a verdict-free run, so the total is 0 and both halves are 0.
+    """
+    rc, out = _run_mine(tmp_path, _logic_corpus(tmp_path), _empty_store(tmp_path))
+
+    assert rc == 0, out
+    assert _split_lines(out)[0] == (
+        f"{mt.SUPERSEDED_TALLY_PREFIX} 0 (0 {mt.FILE_BACKED} + 0 {mt.FILELESS})"), out
+    assert not any(f"[{mt.FILELESS}:" in ln for ln in out.splitlines()), out
+
+
+def test_the_runbook_states_the_tally_the_miner_prints():
+    """Cross-surface pin, and the only one that can exist here: the runbook is vault prose
+    (`skills/trajectory-skill-mining/SKILL.md`, step 1) and the line is code output, so
+    nothing greppable joins them — and `skills/nightly-skills-management/SKILL.md:56` is the
+    other reader of this tally, still quoting the bare form.
+
+    Each assertion is assembled from the miner's own constants and the text is flattened, so
+    renaming `FILELESS` or the tally prefix turns the runbook red instead of teaching two
+    runbooks to grep for a string the code stopped printing, and a markdown hard wrap cannot
+    fail a test about wording.
+    """
+    mine_text = " ".join(_vault_file(SKILL_PATH, "the mining runbook")
+                         .read_text(encoding="utf-8").split())
+
+    assert (f"{mt.SUPERSEDED_TALLY_PREFIX} N (B {mt.FILE_BACKED} + F {mt.FILELESS})"
+            in mine_text), "step 1 no longer quotes the line this file prints"
+    assert f"[{mt.FILELESS}: no candidate file names this key]" in mine_text, (
+        "step 1 no longer names the marker a per-key line carries")

@@ -5716,3 +5716,285 @@ def test_a_key_whose_corpus_is_on_the_disk_is_never_disposed_as_blind(tmp_path):
     assert rc == 0, out
     tally = repair_tally_2433(out)
     assert tally["disposed"] == 0 and tally["needs_rerecord"] == 0, out
+
+
+# ── #2644: the keys only the ledger knows about ──────────────────────────────
+#
+# `check` resolved patterns by globbing `candidate-*.md`, so a key whose dated snapshots
+# have all left the directory produced no `SKIP` line at all while its verdict went on
+# binding: measured 2026-10-13, 88 of the ledger's 96 terminal keys had no candidate file,
+# and the 7 that recurred in that night's window produced the miner's `Superseded by
+# verdict: 12` against this command's 8 — a 4-key gap nobody could see without re-deriving
+# it. Everything below is a fixture ledger and a fixture candidate directory; no test here
+# reads or writes `_pipeline/skills/`.
+
+FILELESS_KEY = "seq-2-bash-fs-read"
+NON_TERMINAL_KEY = "Edit/indent_drift"
+BACKED_KEY = "Bash/logic"
+
+
+def ledger_row(key: str, verdict: str, *, decided_at: str = "2026-09-27T08:59:13+00:00",
+               evidence_cmd: str = AUDIT_CMDS[AUDIT_SEES],
+               source_candidate: str = "") -> dict:
+    """One latest-wins row, hand-written for the same reason `write_ledger` is.
+
+    `decided_at` is well inside the 60-day reopen window, so a terminal row here binds
+    unless the test says otherwise — a fixture that hopped the expiry would make the
+    reported set empty for the wrong reason and every assertion below would pass on it.
+    """
+    return {"logged_at": decided_at, "decided_at": decided_at,
+            "pattern_key": key, "candidate": key, "occurrences": 13,
+            "verdict": verdict, "reason": f"fixture: {key} was adjudicated",
+            "scope": "project", "skill": "", "evidence_cmd": evidence_cmd,
+            "source": "trajectory-mining", "source_candidate": source_candidate}
+
+
+def read_back(store: Path, candidates: Path, capsys) -> tuple[int, str]:
+    """Run `check`'s own command and hand back its exit code and stdout."""
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = sv.main(["check", "--store", str(store), "--candidates", str(candidates)])
+    capsys.readouterr()
+    return rc, buf.getvalue()
+
+
+def write_rows(store: Path, rows: list[dict]) -> None:
+    """Append `rows` as the ledger itself, bypassing `record`.
+
+    Same reason `write_ledger` exists: `record` executes the command it is asked to store,
+    which would put a fixture's own exit codes in front of the thing under test.
+    """
+    store.parent.mkdir(parents=True, exist_ok=True)
+    with store.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+
+
+def ledger_only(out: str) -> list[str]:
+    return [ln for ln in out.splitlines() if ln.startswith(f"{sv.LEDGER_ONLY_LABEL}: ")]
+
+
+def test_check_names_a_terminal_ledger_key_that_no_candidate_file_names(tmp_path, capsys):
+    """Clause 1's fixture: three keys, one of which is terminal AND fileless, and only that
+    one is reported. The fourth possibility the clause rules out — a fileless key whose
+    rows are all non-terminal — is the third key here, and the file-backed blocked key is
+    the first, so the line cannot be a restatement of either half it sits beside."""
+    cands = tmp_path / "candidates"
+    hand_candidate(cands, "candidate-bash-logic-20261012.md", BACKED_KEY, 1)
+    store = tmp_path / "verdicts.jsonl"
+    write_rows(store, [
+        ledger_row(BACKED_KEY, "rejected_false_positive"),
+        ledger_row(FILELESS_KEY, "reviewed_no_skill",
+                   source_candidate="candidate-seq-2-bash-fs-read-20260913.md"),
+        ledger_row(NON_TERMINAL_KEY, "proposed"),
+    ])
+
+    rc, out = read_back(store, cands, capsys)
+
+    assert ledger_only(out) == [f"{sv.LEDGER_ONLY_LABEL}: 1 :: {FILELESS_KEY}"], out
+    assert NON_TERMINAL_KEY not in out, (
+        "a fileless key with a non-terminal verdict was reported as suppressed; it is not")
+    assert BACKED_KEY not in ledger_only(out)[0], (
+        "a key a candidate file names belongs in the SKIP lines, not in the ledger-only one")
+    assert rc == 0, out
+
+
+def test_the_new_line_sits_above_the_totals_and_leaves_them_last(tmp_path, capsys):
+    """Clause 1's placement half, and the reason it is a clause: the nightly greps read the
+    two counts off `splitlines()[-1]` (`scripts/skill_verdicts.py`, the comment above the
+    totals), so publishing the new number by displacing that line would break a reader that
+    never asked to be broken.
+
+    Asserted two ways because either alone is weak: position (the totals are still the last
+    line and the new line is strictly above them), and a differential — the same fixture run
+    with the fileless row deleted from the ledger must print a byte-identical totals line, so
+    the new key demonstrably enters neither count. A unit error is the trap here: the totals
+    are per FILE (one key with nine dated snapshots prints nine `SKIP` lines) and the new
+    line is per KEY, so `checked: 62` beside `ledger_only_keys: 7` is not a discrepancy.
+    """
+    cands = tmp_path / "candidates"
+    hand_candidate(cands, "candidate-bash-logic-20261012.md", BACKED_KEY, 1)
+    with_key = tmp_path / "with.jsonl"
+    without_key = tmp_path / "without.jsonl"
+    write_rows(with_key, [ledger_row(BACKED_KEY, "rejected_false_positive"),
+                           ledger_row(FILELESS_KEY, "reviewed_no_skill")])
+    write_rows(without_key, [ledger_row(BACKED_KEY, "rejected_false_positive")])
+
+    rc_with, out_with = read_back(with_key, cands, capsys)
+    rc_without, out_without = read_back(without_key, cands, capsys)
+
+    assert out_with.splitlines()[-1] == "checked: 1  skipped_by_verdict: 1", out_with
+    assert out_without.splitlines()[-1] == out_with.splitlines()[-1], (
+        "the totals moved when a fileless key appeared in the ledger")
+    assert len(ledger_only(out_with)) == 1, out_with
+    assert len(ledger_only(out_without)) == 1, (
+        "an empty report must still print the line, or a reader cannot tell 'none' from "
+        "'the version you ran does not print it'")
+    assert ledger_only(out_without)[0] == f"{sv.LEDGER_ONLY_LABEL}: 0 :: none", out_without
+    assert out_with.index(ledger_only(out_with)[0]) < out_with.index(
+        "checked: 1  skipped_by_verdict: 1"), out_with
+    assert rc_with == rc_without == 0, (out_with, rc_with, rc_without)
+
+
+def test_a_fileless_key_with_an_unrunnable_check_is_still_reported_and_the_exit_code_stays(
+        tmp_path, capsys):
+    """The positive control for "reported", and the exit-code half of clause 1, in one
+    fixture.
+
+    `check` only exercises a stored `evidence_cmd` for a key that blocked a scanned file,
+    so the one key here with a dead command is a fileless one: the exit code must be what it
+    was before this line existed (0 — nothing failed that `check` evaluates), while the key
+    is still named. Read the two halves together and they pin the asymmetry on purpose: the
+    line is a report, not a fourth verdict class. If a later edit wires the ledger-only keys
+    into the evaluator, this test goes red on the exit code, and that is a decision somebody
+    should have to defend.
+    """
+    cands = tmp_path / "candidates"
+    hand_candidate(cands, "candidate-bash-logic-20261012.md", BACKED_KEY, 1)
+    store = tmp_path / "verdicts.jsonl"
+    write_rows(store, [
+        ledger_row(BACKED_KEY, "rejected_false_positive"),
+        ledger_row(FILELESS_KEY, "rejected_unverifiable",
+                   evidence_cmd=AUDIT_CMDS[AUDIT_MISSING_FILE]),
+    ])
+
+    rc, out = read_back(store, cands, capsys)
+
+    assert ledger_only(out) == [f"{sv.LEDGER_ONLY_LABEL}: 1 :: {FILELESS_KEY}"], out
+    assert not any(ln.startswith("EVIDENCE_CMD") for ln in out.splitlines()), out
+    assert rc == 0, out
+
+
+def test_a_fileless_key_the_sixty_day_expiry_lifts_is_not_reported(tmp_path, capsys):
+    """A lifted verdict suppresses nothing, so naming its key would report a suppression the
+    pipeline is not applying. The lift rule is imported from `reopen_reason` rather than
+    restated here, and `occurrences=0` because there is no snapshot to read a current count
+    from — which is owed clause 1 of the item: a fileless key can only ever reach the expiry,
+    since nothing can measure >10x growth against a directory listing.
+
+    The gap this leaves is recorded on the item, not papered over in the test: a lifted key
+    with no file prints in NO line at all (`REOPENED` is emitted per scanned file), so the
+    night an expiry falls due reports the absence of a suppression without naming the reopen.
+    """
+    cands = tmp_path / "candidates"
+    hand_candidate(cands, "candidate-bash-logic-20261012.md", BACKED_KEY, 1)
+    store = tmp_path / "verdicts.jsonl"
+    stale = (datetime.now(tz=timezone.utc) - timedelta(days=61)).isoformat()
+    write_rows(store, [ledger_row(BACKED_KEY, "rejected_false_positive"),
+                        ledger_row(FILELESS_KEY, "reviewed_no_skill", decided_at=stale)])
+
+    rc, out = read_back(store, cands, capsys)
+
+    assert ledger_only(out) == [f"{sv.LEDGER_ONLY_LABEL}: 0 :: none"], out
+    assert rc == 0, out
+
+
+def test_the_runbook_says_step_zero_reads_the_ledger_and_carries_the_fileless_names():
+    """Clause 4: the runbook, in prose, on the surface a nightly actually executes.
+
+    Read from the vault, where the live runbook lives (`MINING_RUNBOOK`, the same path the
+    step-2 section tests above use). The three assertions are the three sentences the item
+    asked for: where step 0's skip set comes from, that the names go into the report, and
+    the unit warning that makes step 0's count and the miner's count comparable at all. The
+    token is interpolated from `sv.LEDGER_ONLY_LABEL` rather than typed, so renaming the
+    label in the code turns the runbook red instead of teaching a nightly to look for a
+    string that stopped being printed.
+    """
+    text = MINING_RUNBOOK.read_text(encoding="utf-8")
+    step0 = text[text.index("### 0."):text.index("### 1.")]
+    # Flattened, because markdown wraps mid-sentence at 80 columns and a test that pinned
+    # the wrapping would be a test of the editor's line width, not of the instruction. The
+    # sentences themselves are asserted verbatim.
+    flat = " ".join(step0.split())
+
+    assert f"the `SKIP` lines plus the `{sv.LEDGER_ONLY_LABEL}` names" in flat, flat
+    assert "never a listing of that directory" in flat, flat
+    assert "Carry those names, not just the count, into the run's result line" in flat, flat
+    assert "Both are per KEY" in flat and "totals beneath them are per FILE" in flat, flat
+    assert "is_emittable" in flat, (
+        "step 0 must also say the snapshot cannot be restored, or the next reader will "
+        "spend a run trying")
+
+
+# ── #2644 clause 3: a mint may not cite a snapshot that is gone ──────────────
+
+PRESENT_SNAPSHOT = "candidate-bash-timeout-20260909.md"
+ABSENT_SNAPSHOT = "candidate-bash-timeout-20991231.md"
+
+
+def test_record_refuses_a_source_candidate_snapshot_that_is_absent(tmp_path):
+    """Clause 3, at the in-process seam: the row is refused and nothing is appended."""
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+    (cands / PRESENT_SNAPSHOT).write_text("---\npattern: Bash/timeout\n---\n", encoding="utf-8")
+    store = tmp_path / "verdicts.jsonl"
+
+    with pytest.raises(ValueError) as exc:
+        sv.record_verdict(
+            store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
+            reason="fixture: skill bash-timeout Pattern 3 covers this signature, 13 rows",
+            evidence_cmd=declares("grep -ci 'command timed out' README.md"),
+            occurrences=13, source_candidate=ABSENT_SNAPSHOT, candidates_dir=cands)
+
+    assert str(cands / ABSENT_SNAPSHOT) in str(exc.value), (
+        "the refusal must name the path it looked at, or the reader cannot check it")
+    assert not store.exists(), "a refused mint still appended a row"
+
+
+def test_record_accepts_a_snapshot_that_is_present_and_a_provenance_that_is_not_a_path(
+        tmp_path):
+    """The two shapes the refusal must leave alone, in one fixture.
+
+    A snapshot that exists is the ordinary case and has to keep working; and the field also
+    holds provenance that was never a snapshot name — `cmd_repair`'s root-move tombstones
+    cite a moved root, a task id, a date. The guard is scoped to the `candidate-*.md` shape
+    precisely so it does not refuse a citation that reads as something else, and an empty
+    value stays legal, because 43 latest-wins keys carry no `source_candidate` at all.
+    """
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+    (cands / PRESENT_SNAPSHOT).write_text("---\npattern: Bash/timeout\n---\n", encoding="utf-8")
+
+    for source in (PRESENT_SNAPSHOT, f"{cands / PRESENT_SNAPSHOT}",
+                   "verdicts.jsonl repaired after the _pipeline wipe", ""):
+        row = sv.record_verdict(
+            store=tmp_path / "verdicts.jsonl", pattern_key="Bash/timeout",
+            verdict="reviewed_no_skill",
+            reason="fixture: skill bash-timeout Pattern 3 covers this signature, 13 rows",
+            evidence_cmd=declares("grep -ci 'command timed out' README.md"),
+            occurrences=13, source_candidate=source, candidates_dir=cands)
+        assert row["source_candidate"] == source
+
+    assert sv.absent_source_candidate("", cands) is None
+    assert sv.absent_source_candidate("notes/2026-09-27.md", cands) is None
+
+
+def test_the_record_cli_refuses_an_absent_snapshot_and_writes_nothing(tmp_path):
+    """Clause 3 across the process boundary, because this mint is typed by a person and by
+    two runbooks, never called as a Python function:
+    `skills/nightly-skill-consolidation/SKILL.md:150` and
+    `skills/trajectory-skill-mining/SKILL.md:230` both show a `--source-candidate`, so the
+    refusal has to be visible in the CLI's own exit code and stderr, and the ledger has to
+    be untouched afterwards. A scratch `--store` keeps the run off the vault mirror
+    (`_mirror_target` only mirrors the default ledger)."""
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+    store = tmp_path / "verdicts.jsonl"
+    cmd = [sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"), "record", "--store", str(store),
+           "--candidates", str(cands), "--pattern", "Bash/timeout",
+           "--verdict", "reviewed_no_skill",
+           "--reason", "fixture: 13 rows, skill bash-timeout covers this",
+           "--evidence-cmd", "echo 'fixture input_rows=1 matched=1'",
+           "--occurrences", "13", "--source-candidate", ABSENT_SNAPSHOT]
+
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=str(_ROOT))
+
+    assert out.returncode == 2, (out.stdout[-600:], out.stderr[-600:])
+    # The first stderr line in a worktree is `app.paths`' own anchor warning, so the
+    # refusal is located as a line rather than at byte 0 of the stream.
+    assert any(ln.startswith("refused:") for ln in out.stderr.splitlines()), out.stderr
+    assert str(cands / ABSENT_SNAPSHOT) in out.stderr, out.stderr
+    assert not store.exists(), (
+        "the CLI refused on stdout and appended the row anyway")

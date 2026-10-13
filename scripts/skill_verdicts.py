@@ -678,6 +678,38 @@ def carried_forward_occurrences(store: Path | str | None, pattern_key: str) -> i
         return 0
 
 
+#: The shape `source_candidate` is supposed to hold: one dated snapshot
+#: `mine-trajectories.py` wrote for the pattern this verdict decides.
+SOURCE_CANDIDATE_GLOB = "candidate-*.md"
+
+
+def absent_source_candidate(value: str, candidates_dir: Path | str) -> Path | None:
+    """The path `--source-candidate` names, when that snapshot is not there. None if it is.
+
+    A mint that cites a snapshot which no longer exists writes a verdict whose own
+    provenance cannot be opened. That is not a hypothetical: 82 of the live ledger's rows
+    cite a `candidate-*.md` that is absent (triage 2026-10-13), and seven of them are the
+    keys a nightly is suppressing right now on the strength of a file nobody can read. The
+    check is cheap and it is at the mint because nothing downstream can recover the
+    snapshot: `mine-trajectories.py` drops a sequence key in `is_emittable`
+    (`scripts/mine-trajectories.py:153-159`) *before* `write_candidate_file` runs, so for
+    that whole class no later run ever puts the file back.
+
+    Scoped to the shape rather than to any string: an empty value is allowed (the field is
+    optional and 43 latest-wins keys carry none), and so is a citation that is not a
+    snapshot name — `cmd_repair`'s tombstones cite a moved root, a task id, a date. The
+    refusal is for the one form that reads as "this file holds my evidence" and is a path.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    named = Path(text).expanduser()
+    if not fnmatch.fnmatch(named.name, SOURCE_CANDIDATE_GLOB):
+        return None
+    resolved = named if named.is_absolute() else Path(candidates_dir) / named
+    return None if resolved.is_file() else resolved
+
+
 def record_verdict(
     store: Path | str | None = None,
     pattern_key: str = "",
@@ -691,6 +723,7 @@ def record_verdict(
     *,
     require_input_rows: bool = True,
     require_body_scope: bool = True,
+    candidates_dir: Path | str | None = None,
 ) -> dict:
     """Append one decision. Never mutates an earlier line.
 
@@ -738,6 +771,20 @@ def record_verdict(
     exempt from the denominator convention is not exempt from writing an observation that
     means something.
 
+    One more refusal joins the mint-time set on 2026-10-13, and it reads the row's own
+    provenance rather than its command (#2644 clause 3): when `candidates_dir` is named and
+    `source_candidate` is shaped like a `candidate-*.md` snapshot but that file is not in
+    that directory, the append is refused, naming the path. 82 of the live ledger's rows
+    cite a snapshot that is already gone — one of the ways seven keys keep suppressing
+    mined work on evidence nobody can open — and for a sequence key no later run puts the
+    file back, because `mine-trajectories.py`'s `is_emittable` drops it before
+    `write_candidate_file` is reached. The guard is opt-in per caller for a reason: the
+    three internal mints that carry an *older* row's citation forward (`cmd_repair`'s
+    root-move rewrite, its tombstone, `cmd_sync`'s mirror copy) do not choose that path and
+    cannot restore it, and refusing them would freeze the repair pass over a ruling on the
+    82 rows that has not been made. `cmd_record` names the directory every time, so the
+    surface an agent or a runbook uses cannot decline the rule.
+
     The line lands in two trees (#772): the ledger, then the durable copy, which is
     seeded from the ledger first so a verdict recorded before the mirror existed is in
     it too. A script the new `evidence_cmd` names is copied beside the mirror.
@@ -760,6 +807,29 @@ def record_verdict(
         raise ValueError(
             "evidence_cmd is required — a verdict with no re-executable check cannot "
             "be falsified by a later run, only inherited (#525)"
+        )
+    # The provenance refusal, before the falsifier runs: a verdict whose cited snapshot is
+    # gone has already lost the thing its `reason` says it read, and executing a command
+    # beside it cannot put it back. Keyed on `candidates_dir` being named rather than on a
+    # default, so the mint that carries an OLD citation forward — `cmd_repair`'s root-move
+    # rewrite and its tombstone, `cmd_sync`'s copy — is not refused for a file it never
+    # chose to cite and cannot restore; whether those 82 rows stand is a ruling on 82
+    # verdicts (#2644's owed list), not something a mint-time rule can issue. `cmd_record`
+    # always names the directory, so the CLI cannot talk itself out of it.
+    if (candidates_dir is not None
+            and (lost := absent_source_candidate(source_candidate,
+                                                 candidates_dir)) is not None):
+        raise ValueError(
+            f"source_candidate names a snapshot that is not there: {lost} — under "
+            f"{candidates_dir}. A verdict cannot cite an evidence file that does not exist: "
+            "the row would read as checked against a candidate while nothing behind it can "
+            "be opened, which is the state #2644 found 82 live rows in and 7 keys still "
+            "suppressing nightly work on. Name the dated snapshot this decision actually "
+            "read, re-mint it from the file the miner wrote tonight, or omit "
+            "--source-candidate and let the row say it rests on other evidence. The "
+            "snapshot cannot be conjured back for a sequence key: "
+            "`mine-trajectories.py`'s `is_emittable` drops one with "
+            "`has_error_recovery: False` before `write_candidate_file` is ever reached"
         )
     if occurrences is None:
         occurrences = carried_forward_occurrences(store, pattern_key)
@@ -2694,6 +2764,72 @@ def scan_candidates(candidates_dir: Path, store: Path | str | None = None, *,
     return rows
 
 
+#: The label `check` prints for the keys only the ledger knows about (#2644). Named as
+#: a constant because two files spell it: the runbook's step 0 quotes the token a run
+#: must read, and `tests/test_skill_verdicts.py` builds that quoted line from this value,
+#: so a rename here turns the runbook red instead of teaching a nightly to look for a
+#: token the code stopped printing — the same reasoning behind
+#: `tests/test_mine_trajectories.py::test_the_runbook_reports_the_flag_instead_of_counting_buckets`.
+LEDGER_ONLY_LABEL = "ledger_only_keys"
+
+
+def ledger_only_terminal_keys(table: dict[str, dict], rows: list[dict]) -> list[str]:
+    """Latest-wins ledger keys under a terminal verdict that no scanned candidate names.
+
+    The gap this returns is the one #2644 measured on 2026-10-13: the miner printed
+    `Superseded by verdict: 12` while `check` reported 8 distinct SKIP keys, because
+    `scan_candidates` can only see what `glob("candidate-*.md")` finds and seven of the
+    twelve suppressed keys have no candidate file at all. Those seven are suppressed
+    tonight solely by the miner's in-process ledger lookup, which means the directory
+    listing step 0 was told to read has never covered them: a decision that gates mined
+    work was being honoured by a surface that cannot report it.
+
+    Terminal-only, deliberately. A fileless key whose rows are all non-terminal is an
+    undecided pattern with no snapshot, which is a fresh install or a swept scratch key,
+    not a binding decision — naming it here would tell a nightly to skip work nobody
+    rejected. The population is not seven: 88 of the live ledger's 96 terminal keys have
+    no candidate file (triage, 2026-10-13), and only the ones that recur in a mining
+    window ever reach the miner's tally, so the other 81 were invisible to both gates.
+
+    Returns sorted keys, so the printed line is stable across runs and a grep can diff
+    one night's names against the next.
+
+    The lift rule is the miner's, not a new one: a key whose verdict `reopen_reason`
+    releases is excluded, because that is exactly what `terminal_verdict` (the gate
+    `mine-trajectories.py` applies as it writes) refuses to suppress, and a line that
+    named a lifted key would report a suppression the pipeline is not applying — and
+    `skipped_by_verdict` already excludes a lifted key for the file-backed half
+    (`scan_candidates` sets `blocked` False). `occurrences=0` because there is no snapshot
+    to read a current count from, so only the 60-day expiry can lift one: a fileless key
+    has nothing to measure >10x growth against, which is owed clause 1 of #2644 and stays
+    that ruling's to settle. What that lift leaves unsaid is a known gap, recorded on the
+    item rather than papered over here: a lifted key with no file prints in no line at all
+    (`REOPENED` is emitted per scanned file), so the night its expiry falls due reports the
+    absence of a suppression without naming the reopen.
+    """
+    named = {row["pattern_key"] for row in rows}
+    return sorted(key for key, row in table.items()
+                  if is_terminal(row) and key not in named
+                  and reopen_reason(row, occurrences=0) is None)
+
+
+def ledger_only_line(keys: list[str]) -> str:
+    """The one line for those keys: `ledger_only_keys: 2 :: a, b`.
+
+    Key-level, never per file: `check`'s totals are per-FILE (`checked: 62
+    skipped_by_verdict: 62` for 8 distinct keys on the night #2644 was filed, because a
+    key with nine dated snapshots prints nine SKIP lines), and a reader reconciling that
+    62 against the miner's 12 would be comparing units. This line counts keys, which is
+    the unit the miner's tally and the ledger are both in.
+
+    It prints its `0 :: none` case too, exactly as `mirror_tally_line` prints `lagged: 0
+    disagreeing: 0`: a denominator that appears only with findings cannot distinguish a
+    night with nothing fileless from a comparison nobody ran.
+    """
+    return (f"{LEDGER_ONLY_LABEL}: {len(keys)} :: "
+            + (", ".join(keys) if keys else "none"))
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     live = store_path(args.store)
     source, fell_back = resolve_verdict_source(args.store)
@@ -2779,6 +2915,11 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(f"EVIDENCE_CMD_STRANDED_CASE {key} :: {detail}")
     if fell_back:
         print(f"verdict source: {source} (live ledger {live} is absent)")
+    # Above the totals, never among them: the runbook and the nightly greps read the two
+    # counts off `splitlines()[-1]` (see the comment on the totals line below), and this is
+    # a third number in a different unit — keys, not files — so displacing the totals to
+    # publish it would break a reader that is not looking for it (#2644 clause 1).
+    print(ledger_only_line(ledger_only_terminal_keys(table, rows)))
     print(f"checked: {len(rows)}  skipped_by_verdict: {len(skipped)}")
     return exit_code
 
@@ -3142,6 +3283,7 @@ def cmd_record(args: argparse.Namespace) -> int:
             occurrences=args.occurrences,
             decided_by=args.decided_by,
             source_candidate=args.source_candidate,
+            candidates_dir=args.candidates,
         )
     except ValueError as exc:
         print(f"refused: {exc}", file=sys.stderr)
@@ -3255,6 +3397,10 @@ def main(argv: list[str] | None = None) -> int:
              "line supersedes, so fixing a phrase cannot disarm that reopen (#736).")
     p_record.add_argument("--decided-by", dest="decided_by", default="agent")
     p_record.add_argument("--source-candidate", dest="source_candidate", default="")
+    p_record.add_argument(
+        "--candidates", default=str(DEFAULT_CANDIDATES),
+        help="candidate directory a named --source-candidate must exist in; the record "
+             "is refused when it does not (#2644 clause 3)")
     p_record.set_defaults(func=cmd_record)
 
     p_seed = with_store(sub.add_parser("seed", help="harvest existing candidate dispositions once"))

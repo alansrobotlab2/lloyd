@@ -1709,6 +1709,55 @@ def superseded_pattern_keys(patterns: list[dict], store: str | Path | None = Non
     return keys
 
 
+#: Both halves of the suppressed-key split (#2644 clause 2), named as constants because
+#: the runbook quotes the words and `tests/test_mine_trajectories.py` builds the line it
+#: quotes from these values, so a rename here turns the runbook red.
+FILE_BACKED = "file-backed"
+FILELESS = "fileless"
+#: The literal prefix of the suppressed-key tally. A runbook grep matches a prefix, not a
+#: full line, so it is a contract in itself — see
+#: `tests/test_mine_trajectories.py::test_the_runbook_states_the_tally_the_miner_prints`,
+#: which spells the runbook's quoted shape out of these three constants so a rename in this
+#: file turns the runbook red instead of leaving a nightly grepping for a dead string.
+SUPERSEDED_TALLY_PREFIX = "Superseded by verdict:"
+
+
+def superseded_split(blocked: list[str], candidates_dir: Path | str) -> tuple[list[str], list[str]]:
+    """Split suppressed keys into those a candidate file names and those none does.
+
+    The split is what makes the miner's number and step 0's read-back reconcile. On
+    2026-10-13 the two printed 12 and 8 for the same night: `superseded_pattern_keys`
+    decides from the ledger in-process, while `skill_verdicts.py check` can only report a
+    key whose `candidate-*.md` it can glob, and seven of those twelve keys had no file on
+    disk at all. A sequence pattern mined without the error-recovery flag is dropped by
+    `is_emittable` before `write_candidate_file` ever runs, so it is suppressed every night
+    and written never — permanently fileless, with nothing left for the 60-day reopen or
+    the >10x growth check to measure against.
+
+    Matched through the writer's own name rule (`candidate-{slug_for(key)}-*.md`) rather
+    than a re-spelled slug, so a file counts for a key exactly when the mint that wrote it
+    would have keyed it the same way.
+    """
+    backed: list[str] = []
+    fileless: list[str] = []
+    root = Path(candidates_dir)
+    for key in blocked:
+        pattern = f"candidate-{slug_for(key)}-*.md"
+        (backed if any(root.glob(pattern)) else fileless).append(key)
+    return backed, fileless
+
+
+def superseded_split_line(total: int, backed: int, fileless: int) -> str:
+    """`Superseded by verdict: 12 (5 file-backed + 7 fileless)`.
+
+    Both halves always printed, including `0 file-backed + 0 fileless`: a tally that shows
+    up only when a gap exists cannot tell a night with no fileless keys from a run that
+    never computed the split.
+    """
+    return (f"{SUPERSEDED_TALLY_PREFIX} {total} ({backed} {FILE_BACKED} "
+            f"+ {fileless} {FILELESS})")
+
+
 def write_candidate_file(pattern: dict, output_dir: Path, verdict_store: str | Path | None = None) -> str | None:
     """Write a single candidate markdown file. Returns the file path, or None
     if the pattern is not a skill candidate at all (`is_emittable`). The check
@@ -2350,6 +2399,18 @@ def main() -> int:
     # letting it merge a second copy — is what makes the zip below pair a pattern with
     # its own file by construction instead of by two calls agreeing.
     emitted = merge_error_patterns(all_patterns)
+    # Keys the verdict ledger blocks, and their split by whether a candidate file names
+    # them — both computed BEFORE a single write, which is the whole point of doing it
+    # here. `write_candidate_file` writes a blocked error pattern too (as
+    # `status: superseded_by_verdict`), so a split measured after `emit_candidates` would
+    # call every error key file-backed by construction and the fileless half would only
+    # ever name sequence keys that happened to be mined tonight. Step 0's `check` reads the
+    # directory as it stands *before* the miner runs (runbook order), so this is the one
+    # measurement that reconciles with it: `fileless` means "no snapshot step 0 could see",
+    # and `#2644`'s 5 + 7 = 12 is read off this instant, not off the state the run leaves
+    # behind.
+    blocked = superseded_pattern_keys(emitted)
+    backed_keys, fileless_keys = superseded_split(blocked, output_dir)
     written = emit_candidates(emitted, output_dir)
     assert len(written) == len([p for p in emitted if is_emittable(p)]), (
         "emit_candidates and its emitted-pattern list disagree, so the per-key "
@@ -2373,8 +2434,10 @@ def main() -> int:
     # One line per KEY, each naming how many mined signature buckets it gates —
     # a coarse verdict suppressing 19 patterns must not read as one judgement
     # about one pattern (#515).
-    blocked = superseded_pattern_keys(emitted)
     notes = {candidate_pattern_key(p): merge_note(p) for p in emitted}
+    # `blocked` and the split were measured above, before `emit_candidates` wrote anything:
+    # see the comment there for why the order is load-bearing (#2644 clause 2).
+    fileless_set = set(fileless_keys)
 
     for pattern, filepath in zip((p for p in emitted if is_emittable(p)), written):
         print(f"  Written: {filepath} [{candidate_pattern_key(pattern)}: "
@@ -2382,9 +2445,11 @@ def main() -> int:
     print(f"  Mined error patterns merged onto a shared key: {merged_away}",
           file=sys.stderr)
     print(f"  Suppressed as non-skill candidates: {suppressed}", file=sys.stderr)
-    print(f"  Superseded by verdict: {len(blocked)}", file=sys.stderr)
+    print(f"  {superseded_split_line(len(blocked), len(backed_keys), len(fileless_keys))}",
+          file=sys.stderr)
     for key in blocked:
-        print(f"    superseded: {key} ({notes.get(key, 'count unknown')})",
+        mark = f" [{FILELESS}: no candidate file names this key]" if key in fileless_set else ""
+        print(f"    superseded: {key} ({notes.get(key, 'count unknown')}){mark}",
               file=sys.stderr)
 
     # Write index
@@ -2403,7 +2468,7 @@ def main() -> int:
     print(f"  Candidates written:   {len(candidate_files)}")
     print(f"  Error patterns merged onto a shared key: {merged_away}")
     print(f"  Suppressed (non-skill): {suppressed}")
-    print(f"  Superseded by verdict: {len(blocked)}")
+    print(f"  {superseded_split_line(len(blocked), len(backed_keys), len(fileless_keys))}")
     print(f"  Output directory:     {output_dir}")
     print("=" * 60)
 
