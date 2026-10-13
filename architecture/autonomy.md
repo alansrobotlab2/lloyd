@@ -5,13 +5,13 @@ tags:
 - lloyd
 status: implemented
 type: reference
-timestamp: '2026-09-13T00:00:00'
+timestamp: '2026-10-13T00:00:00'
 ---
 # Autonomy System Architecture
 
 **Created:** 2026-03-22
-**Last updated:** 2026-09-13
-**Status:** Active — 32 task files, dispatched by the `scheduled-task` worker source
+**Last updated:** 2026-10-13
+**Status:** Active — 39 task files, dispatched by the `scheduled-task` worker source
 
 ## Overview
 
@@ -34,27 +34,33 @@ dispatch gated on GPU utilization, polling every 250 ms and dispatching under
 30%, so that background work never competed with a foreground turn. That loop
 is gone. `workers/pool.py` is the only dispatcher now and
 `architecture/workers.md` is its document; the surviving trace of the old model
-is the `agent_id:` field, still written on every task file (23 `memory`, 4
-`researcher`, 3 `worker`, 1 `operator`) and read by nothing that schedules.
+is the `agent_id:` field, still written on 37 of the 39 task files (24 `memory`,
+6 `worker`, 4 `researcher`, 2 `general-purpose`, 1 `operator`) and read by
+nothing that schedules.
 
 **Storage:** Vault markdown files (migrated from SQLite 2026-03-29). Task files
 at `~/obsidian/autonomy/{id}-{slug}.md`,run records at
 `~/lloyd-data/autonomy-runs/{task_id}/run_{task_id}_{YYYYmmdd_HHMMSS}.md`
-(`app.paths.AUTONOMY_RUNS_DIR`, anchored to the repo rather than the vault),and
+(`app.paths.AUTONOMY_RUNS_DIR`, anchored to `DATA_ROOT` and not to the code tree
+since the 2026-09-22 runtime-state rule, so a self-mod canary writes run records
+into its own worktree rather than the live ones),and
 a small key/value block at `~/obsidian/autonomy/_config.md` that only the
-`autonomy_config` MCP tool reads or writes. qmd indexes both collections —
+`autonomy_config` (read) and `autonomy_config_set` (write) MCP tools touch —
+nothing in the engine applies a key there, which both tools' own descriptions
+say out loud. qmd indexes both collections —
 `autonomy` over the vault directory and `autonomy-runs` over `*/run_*.md`
 (`~/.config/qmd/index.yml`).
 
-**Six readers**, where this overview used to name three (MCP tools, an MC
+**Seven readers**, where this overview used to name three (MCP tools, an MC
 extension, the idler daemon):
 
 | reader | what it does |
 |---|---|
 | `app/autonomy.py` | task-file CRUD, the due predicates, `run_task`, `compute_health` |
 | `workers/sources/scheduled_task.py` | enqueues what is due; executes a claimed item |
+| `workers/fleet_watchdog.py` | the fleet's stall alarms and the unparseable-file scan, read off the board through `dependency_resolution_set` (#1682 — see *The source*, below) |
 | `app/routers/autonomy.py` | `/api/autonomy/{run,tasks,task-write,task-delete,health,runs}` |
-| `agent_mcp/autonomy.py` | seven `autonomy_*` MCP tools |
+| `agent_mcp/autonomy.py` | eight `autonomy_*` MCP tools |
 | `app/routers/dashboard.py::_autonomy` | the overdue/held split on Mission Control |
 | `app/routers/mc_ui.py::_summarize_autonomy` | the tab summary the agent reads |
 
@@ -76,9 +82,10 @@ literal until #1692. The three shapes:
   call as `{id: 0, name: "", status: "draft"}`: 33 rows for the 32 task files on disk.
   Pinned by `tests/test_agent_mcp_autonomy_tasks_gate.py`.
 * **Re-spelled inline** — the identical pattern appears four times in the scheduler as
-  `re.match(r"\d+-", path.name)`: `recover_stuck_tasks` (`app/autonomy.py:102`),
-  `_find_task_file` (`:167`), `_all_board_tasks` (`:1012`), `_iter_task_files`
-  (`:4116`). Same behaviour, four more copies of the literal, none of them importing
+  `re.match(r"\d+-", path.name)`: `recover_stuck_tasks`, `_find_task_file`,
+  `_all_board_tasks` and `_iter_task_files` (anchors move with every landing;
+  `grep -n 're.match(r"\\d+-"' app/autonomy.py` named all four, at 102/167/1057/5002,
+  on 2026-10-13). Same behaviour, four more copies of the literal, none of them importing
   the constant. `workers/sources/scheduled_task.py` has no gate of its own; it reaches
   the fleet through `app.autonomy` and inherits these.
 * **Looser by one character** — `app/routers/dashboard.py:668`, inside `_autonomy()`,
@@ -89,7 +96,7 @@ literal until #1692. The three shapes:
   `_autonomy_next_id` and `_next_task_id`, parse the numeric prefix themselves and
   still skip the config block by literal.
 
-The walk is `glob("*.md")` and never `rglob`, which is why `_archived/` — 14 retired
+The walk is `glob("*.md")` and never `rglob`, which is why `_archived/` — 15 retired
 tasks — is invisible to the scheduler rather than merely inactive. #1594 closed a
 different divergence in this same discussion: `mc_ui._summarize_autonomy` used to gate
 on frontmatter, count a prose note as a task, and drop three real tasks whose
@@ -222,13 +229,18 @@ asked in order. Anything that answers no is a **hold**, not a failure:
    while the linter passed all 38 files. The two are silent on `weekly` +
    `0.14` (2.04% apart: two decimals of 1/7) and on `6x-daily` + `6` (the label
    is outside the map on purpose).
-4. **No failure cooldown, and the dependency is met.**
+4. **No cooldown of either kind, and the dependency is met.** Two cooldowns, in
+   this order: the infra ceiling first (`_in_infra_rest`, #1085 — a task resting
+   on `infra_rest_until` is inside both, and the weaker claim must not win the
+   explanation), then the retry cooldown.
 5. **The current hour is a preferred hour.**
 
 `hold_reason(task, all_tasks)` mirrors those gates *in the same order and
 through the same predicates*, returning the first that bites — `"no skill"`,
-the raw status, `"no frequency"`, `"failure cooldown"`, `"waiting on #42"`,
-`"outside hours 00-04,23"` — or `None`. It exists because Mission Control had
+the raw status, `"no frequency"`, `"infra ceiling (5 consecutive infra failures),
+resting until <iso>"`, `"failure cooldown"`, `"waiting on #42"`,
+`"outside hours 00-04,23"` — or `RUN_SUCCESS_HOLD`, the one sentinel that means
+the job is not late at all. It exists because Mission Control had
 grown a second, private definition of "due" out of elapsed time alone, and on
 2026-09-06 reported six tasks overdue on a night this scheduler considered none
 of them late: four nightly jobs outside their window, two paused, all six
@@ -371,8 +383,8 @@ disk today:
 | #40 Reflection: Config | #39 | 36 h |
 | #47 Dream Consolidation | #40 | — |
 | #48 Entity Resolution Sweep | #24 | — |
-| #51 Conversation Relation Linking | #56 | — |
-| #57 Trajectory Mining | #56 | — |
+| #51 Conversation Relation Linking | #56 | 12 h |
+| #57 Trajectory Mining | #56 | 12 h |
 | #58 Skill Consolidation | #57 | — |
 | #74 KG Mention Classifier | #48 | — |
 | #83 Nightly Skills Management | #58 | — |
@@ -403,10 +415,21 @@ closed, and lost that night too. Now it is due at 05:00Z. The run-record guard
 asks the same function of each success, and a completion writes `next_run` as
 the first in-window instant at or after it (`_next_run_after`), so the board
 names the slot dispatch will use. Windowless and sub-daily tasks are unchanged:
-`last_run + interval - slack`, `next_run = last_run + interval`. Fourteen of
-the 32 tasks end up with an enforced window: thirteen set
+`last_run + interval - slack`, `next_run = last_run + interval`. Twenty-one of
+the 39 tasks end up with an enforced window: twenty set
 `preferred_hours`, and #84's empty list falls through to the hour in its
 `scheduled_at`.
+
+The skip is no longer always total (#2552, 2026-10-11). When a *witnessed* block
+— the operator pool pause — covers the exact `preferred_hours` occurrence a
+windowed task lost, `window_catch_up_row` finds that loss record and the hours
+gate yields **one** out-of-window enqueue. Three conditions, and the third is
+the spend: a real window, a loss record (only a witnessed block can write one),
+and a `last_run` still older than the lost occurrence — so the grant spends
+itself against the same completion stamp every other gate reads, there is no
+second "already caught up" flag to fall out of sync, and a failed catch-up is
+retried under `_in_failure_cooldown` rather than marked done. With no loss record
+the hours gate refuses exactly as it always did.
 
 ## Failure is a state machine, not a log line
 
@@ -425,7 +448,13 @@ activity log, alert — and it splits two kinds:
   `600 × 2^(n-1)`, capped at `max(interval, 6 h)`.
 - **`infra`**: the model server hiccuped. Flat 600 s cooldown, and it never
   touches the retry budget, so an outage cannot disable the whole fleet — on
-  2026-09-01 every task returned empty for eleven hours straight. An exception
+  2026-09-01 every task returned empty for eleven hours straight. "Never
+  touches" is not "unbounded", though: after `_INFRA_CEILING` (5) consecutive
+  infra failures the task rests until its next declared period
+  (`infra_rest_until`, #1085), which spends the outage's retry attempts without
+  ever writing `status: failed`. `hold_reason`
+  prints the ceiling before the retry cooldown, for the same reason the gate
+  checks it first. An exception
   whose type name is in `_INFRA_EXC_NAMES` is infra: the httpx transport and
   socket connection errors, `ToolDiscoveryError` when the aggregator never
   answered tool discovery, and `StreamStalledError` when an engine that had
@@ -437,10 +466,14 @@ activity log, alert — and it splits two kinds:
   that fast and that silent, it is a thinking-only turn or a 200 with no
   content, not work.
 
-`_DEFAULT_MAX_RETRIES` is 5. Thirty of the 31 runnable task files carry
+`_DEFAULT_MAX_RETRIES` is 5. Thirty-three of the 39 task files carry
 `max_retries: 3`, which is also what the create path writes, so 3 is the number
-in practice; #84 carries 2, and #83 carries none, so a failure of that task
-counts against 5 rather than 3.
+in practice; #84 carries 2, and five files carry none (#82, #83, #86, #91, #92).
+On those five the scheduler and the board disagree by definition:
+`_record_failure` reads `task.get("max_retries") or _DEFAULT_MAX_RETRIES` and
+disables them at **5**, while `/api/autonomy/tasks`, the MCP reader and Mission
+Control all write `fm.get("max_retries", 3)` and print **3** — so the budget a
+human reads is not the budget that retires the task.
 
 **`last_run` means the last success; `last_attempt` means every attempt.** The
 cooldown reads "last_attempt newer than last_run" as "the most recent attempt
@@ -485,8 +518,13 @@ frontmatter, enforced by `run_task`'s `asyncio.timeout`, and
 pool's `asyncio.wait_for`. When the two were equal the **pool** timer won the
 race, cancelling `run_task` before its own handler could run: no run record, no
 activity-log line, the task file left `in_progress`. 309 such runs — 96.9
-GPU-hours, the last one on 2026-09-03 and none since — sit in `workers.db` with
-a NULL `task_id`.
+GPU-hours, the last one on 2026-09-03 and none since — were measured in
+`workers.db` with a NULL `task_id` on 2026-09-13. **They are no longer there to
+be read:** the retention sweep prunes the `runs` table, and the store measured
+2026-10-13 spans 2026-09-22 onward (676 scheduled-task rows, zero with a NULL
+`task_id`). A residue quoted from this document is a claim about a snapshot, not
+about the database — `sqlite3 ~/lloyd-data/workers.db "SELECT
+min(date(completed_at)), max(date(completed_at)) FROM runs;"` is the read.
 
 So `run_task` derives `max(60, min(declared, cap − 30))`
 (`_POOL_TIMEOUT_MARGIN`) and the task handler always wins.
@@ -748,21 +786,28 @@ regex extraction of a named field list. A task can come back degraded
 the contract — a field missing from it is lost on a degraded file, which is why
 `inner_voice` was added there and not only to the reader.
 
-**The list is the scheduler's, and only the scheduler's.** Two other readers
-parse the same files with their own shorter lists:
-`agent_mcp/autonomy.py::_parse_task_file` names 13 fields — no `preferred_hours`,
-`depends_on`, `model`, `stale_bypass_hours`, `last_attempt` or `inner_voice`,
-and one (`board_id`) the scheduler's list has never carried — and
-`app/routers/autonomy.py::_autonomy_parse` passes no fallback list at all, so a
-YAML-broken file returns `None` and vanishes from `/api/autonomy/tasks` while
-the scheduler still dispatches it. The invariant holds where it has to; the
-display and MCP paths can report a degraded task as window-less, chain-less and
-model-less, and no test pins the two lists against each other.
+**The list is one constant, and all three readers import it** (#1014, closed
+2026-09-13). `agent_mcp._shared.AUTONOMY_TASK_FIELDS` is passed as
+`fallback_fields` by the scheduler, by `agent_mcp/autonomy.py::_parse_task_file`
+and by `app/routers/autonomy.py::_autonomy_parse`. Before that each display
+reader carried its own shorter list — the MCP reader's 13 names lacked
+`preferred_hours`, `depends_on`, `model`, `stale_bypass_hours`, `inner_voice`,
+`max_retries` and seven more, and the route parsed with no fallback list at all,
+returning `None` for a YAML-broken file so the task was simply absent from the
+board while the scheduler dispatched it. The reason one list matters more than a
+tidy refactor: `_write_task_file` writes from what it read, so a degraded file
+read through a short list came back **with those fields written away** — the
+display path was a writer. The route now also flags a recovered file
+`yaml_broken: True` and refuses it at the write endpoint: visible, not
+rewritable in place.
 
 Two things guard the same failure from outside:
 `scripts/autonomy/validate_tasks.py` is a fail-loud linter (exit 1 unparseable,
-exit 2 structural), and the source's first tick after boot runs
-`_unparseable_task_files` and alerts with the filenames.
+exit 2 structural), and `workers/fleet_watchdog.py::_unparseable_task_files` runs
+as an alert with the filenames — from the watchdog, not the source (#1682), and
+every 30 min rather than once at boot, because the scan used to be one-shot per
+process and a file corrupted *after* startup then stalled silently until the
+next restart.
 
 `_update_task_field` uses the same recovering parser rather than
 `yaml.safe_load`, because it is called from the *failure* handler — the exact
@@ -787,26 +832,59 @@ which `/api/autonomy/run` turns into a 409. The manual and MCP entry points
 bypass due-checks entirely, so this guard is the only thing between an
 impatient human and two interleaved copies of #38.
 
-## The source: two health gates and a stall alarm
+## The source's two health gates, and the watchdog that holds the alarms
 
 `workers/sources/scheduled_task.py` wraps the enqueue in gates that exist
-because a wedged engine turns every due task into a ConnectError flood:
+because a wedged engine turns every due task into a ConnectError flood. **What
+it no longer holds is the fleet's alarms** (#1682, 2026-09-27): the stall alarm,
+the next_run alarm, the starving-queue clause, the operator-pause clause and the
+unparseable-file scan were about 500 lines sitting on the body of
+`enqueue_if_due`, the one call whose exception `pool.py` swallows — so
+`enabled: false` on this source disarmed every alarm the fleet has for scheduled
+work and said nothing about the disarmament. They now live in
+`workers/fleet_watchdog.py`, run from `WorkerPool._watch_fleet` beside the poison
+sweep and the service probe, on a seat that runs whether or not a worker slot is
+free and outside the per-source `try`. The watchdog reads exactly one field from
+this source's config block — `max_duration_seconds` — and never its `enabled`
+key. Deliberately left in the source: the vLLM gate and `_note_vllm_outage`,
+because #938's invariant is that an outage pauses dispatch and not the watching.
+Beside them sits `workers/dispatch_watch.py` (#1681), which watches the source
+itself through a `last_enqueue_ok` watermark the pool stamps only on a clean
+return — the only signal that survives a source raising on every tick.
 
-- **Before enqueuing at all**, a `/health` probe of the primary (`:8096`).
+The two gates that stayed:
+
+- **Before enqueuing at all**, a `/health` probe of the primary.
   Down, nothing is enqueued and no task is executed — but the tick is not
   abandoned there. The probe's verdict is taken first and acted on only after
   both stall alarms and the outage's own alert have run. Returning at the probe
   used to silence dispatch AND the watchdogs together, and left one deduped
   `logger.warning` line behind (#938): an outage stops work, it does not stop
-  watching. An outage continuous past `_VLLM_DOWN_ALERT_SECONDS` raises one
-  Discord alert of its own, which is the only route that names the model server
-  at all — `agent-services/guardian/policy.py` watches `lloyd-backend` and
-  `lloyd-mcp`, never `:8096`, and the vault tasks that probe it are autonomy
-  tasks dispatched through this gate, so they go down with it.
+  watching. An outage continuous past `_VLLM_DOWN_ALERT_SECONDS` (45 min) raises
+  one alert of its own. It is **not** the only route that names the model server:
+  `workers/service_probe.py` (#1359, #1683) co-watches the same port from the
+  pool's loop and announces `LLM Primary is not serving: :8096 closed` once its
+  grace elapses, and that grace is asserted strictly BELOW this threshold so the
+  probe always speaks first (pinned in
+  `tests/test_service_probe.py::test_the_primary_grace_always_precedes_the_dispatch_gate_alert`).
+  The two do not measure one thing — the probe watches the PORT under supervisord,
+  this gate watches `/health` — so neither can retire the other, and `_note_vllm_outage`
+  reads its elapsed minutes off the probe's streak instead of counting its own
+  ticks. `agent-services/guardian/policy.py` watches `lloyd-backend`, `lloyd-mcp`
+  and `agent-tts`, never `:8096`, and the vault tasks that probe it are autonomy
+  tasks dispatched through this gate, so they go down with it. Neither watcher
+  writes a guardian ledger row for an engine outage, by ruling (#1683): the only
+  route to one also rewrites `ALERT.md` last-writer-wins.
+  Neither endpoint is the literal `:8096` any more (#1684): `_primary_health_target`
+  derives it from the default model's `models.<name>.base_url` (then its
+  `env.ANTHROPIC_BASE_URL`) and returns the config key alongside it, so an alert
+  says which endpoint it probed and where that came from, and a port move stops
+  the fleet on a true reading rather than on a stale literal.
 - **Per task**, a probe of the engine that task actually runs on.
   `_model_health_url` resolves `model:` through `resolve_model_alias` and
-  `_get_model_env`, so a dead secondary skips only its own tasks instead of
-  turning each into a retry loop.
+  `_get_model_env`, falling back to the config-derived primary on every failure
+  leg, so a dead secondary skips only its own tasks instead of turning each into
+  a retry loop.
 - **Inside `execute`**, up to 90 s (18 × 5 s) of polling for recovery before
   spending an attempt, because the enqueue-side gate cannot help items already
   in the queue when the engine wedges under them.
@@ -817,7 +895,8 @@ back through the queue's retry path, so a single timeout became up to
 cooldown was ever consulted. By then `run_task` has already written the run
 record, bumped `failure_count` and set the cooldown.
 
-The **stall alarm** watches the opposite failure, the 2026-05-28 silent stall:
+The **stall alarm** (`workers/fleet_watchdog.py::_grossly_overdue`) watches the
+opposite failure, the 2026-05-28 silent stall:
 a task that is due *right now*, overdue by more than 2.5× its interval, and has
 **no queue row**. The queue-row exclusion is the whole point — a task sitting
 behind a saturated pool is starved for capacity, not stalled, and flagging it
@@ -825,10 +904,20 @@ forever is what fired this alarm 100 times in six days. It needs 5 consecutive
 ticks and re-alerts at most every 6 h. `_queue_starving` catches the mirror
 case (dispatch fine, workers dead) from the age of the oldest claimable item.
 
-A **second, quieter assertion** sits beside it (`_next_run_stalled`, #421,
-2026-09-12), keyed on each task's own `next_run` rather than on due-ness: any
-`up_next` task more than one whole period past its `next_run`, on a separate
-streak counter with a 24 h cooldown, so neither alarm can reset the other's. It
+A **second, quieter assertion** sits beside it
+(`workers/fleet_watchdog.py::_next_run_stalled`, #421, 2026-09-12), keyed on each
+task's own `next_run` rather than on due-ness: any task more than one whole
+period past its `next_run`, **whatever its `status`** — it used to read
+`status != "up_next"` as a skip, and that single line is why #68 sat ~50 cycles
+past its own `next_run` with the alarm built for exactly that shape reporting zero
+stalls, since an unattributed `up_next -> draft` flip is precisely how a task goes
+dark (#1121). The status is now carried in the alert instead of filtering the
+scan, and a deliberate park is declared by the file itself (`parked:` →
+`autonomy.parked_declaration`) rather than inferred from the status it shares with
+an accidental flip. Separate streak counter, 24 h cooldown, so neither alarm can
+reset the other's. The bound is one shared predicate,
+`autonomy.next_run_gap`, which `compute_health`'s `stalled` list also reads — the
+alert and the report cannot call one board two things. It
 exists because the three exclusions that make the first alarm survivable are
 exactly the shapes that sat silent for 41 h on #51 and 60 h on #40 — a
 dependent whose upstream's run was never recorded is *not due*, so the due-ness
@@ -906,15 +995,17 @@ rather than the task file: the gap list is ledger state, and a human-edited
 vault file is not somewhere a worker should be writing hourly. A run with no
 bundle counts as `runs_without_bundle` and never as clean, because a metric
 that reads its own missing input as zero is the failure mode this file has been
-burned on three times. **Today that is exactly what the pilot is, for the whole
-fleet: across 808 runs in the week to 2026-09-13, `runs_with_bundle` is 0 and
-`claims_checked` is 0.** Not because the four tasks stopped emitting claims —
-because `scheduled-task.execute` returns a hand-written result dict that never
-includes the `claims` key `pool.py` reads, so the bundle is dropped one hop
-before the verifier is called. The counting rule below is sound and its input is
-empty; #945 (umbrella #966) is the fix, and until it lands every
-`claims_checked: 0` in a report means "never measured", which is the reading the
-rule was written to force.
+burned on three times. **The pilot is measuring now** (#945 landed in
+`eafce636`): `scheduled-task.execute` used to return a hand-written result dict
+with no `claims` key, so the bundle was dropped one hop before the verifier was
+called and every `claims_checked: 0` in a report meant "never measured". The fix
+is a presence copy — `if "claims" in result: out["claims"] = result["claims"]` —
+so an absent key stays "no bundle" and an empty list stays a bundle with nothing
+in it. Measured over the seven-day window on 2026-10-13 (unclamped: 238 runs,
+`window_clamped_to_hours` null): `runs_with_bundle` 31, `claims_checked` 204,
+201 verified and 3 refuted, and `evidence_unevaluable_reason` naming the 207 runs
+that carried none. The counting rule still matters for exactly that reason: those
+207 are not clean runs, they are unmeasured ones.
 
 **A declared acceptance is graded, and decides nothing yet (#623).** A task may
 carry an `acceptance:` block — `objective_checks` drawn only from
@@ -934,16 +1025,18 @@ hand-labelled check of the grader.
 
 ## The fleet today
 
-32 task files: **31 `up_next` and one `draft`** (#85, pinned to a `model: eco`
-that no `models:` block defines) — nothing sits `in_progress` between runs,
-which is the point of the recovery path rather than a normal state. 30 run on
-`primary`, #68 on `secondary`, #85 on that undefined alias, and **no task sets
-`inner_voice: true`** — the fleet is recorded and unobserved. Fourteen more sit
-in `_archived/`, invisible to a non-recursive walk rather than merely inactive;
-three of those fourteen (#52, #59, #73) still have run rows in the seven-day
-window, because the retention sweep does not delete run history and
-`compute_health` reports a task id with no file as `task: null` and never as a
-ghost.
+39 task files measured 2026-10-13: **38 `up_next` and one `draft`** (#68 Email &
+Calendar Triage, parked on purpose by Alan on 2026-09-17 with a `parked:`
+declaration in its own file and a standing ruling that nobody restore it or
+re-file an item to re-enable it) — nothing sits `in_progress` between runs,
+which is the point of the recovery path rather than a normal state. **All 39 pin
+`model: primary`** — the `secondary` pin and the undefined-alias task this
+section used to list are both gone from the fleet — and **no task sets
+`inner_voice: true`**, so the fleet is recorded and unobserved. Fifteen retired
+tasks sit in `_archived/`, invisible to a non-recursive walk rather than merely
+inactive, and on this date **none of them has a run row in the seven-day
+window**; `compute_health` would report such a row as `task: null` and never as a
+ghost, and `idle_tasks` names the two live files that did not run (#97, #68).
 
 The nightly chain is **#38 → #42 → #39 → #40 → #47**, and two of the ids this
 document used to give were wrong: Knowledge Analysis is **#42**, never "#39a",
@@ -967,7 +1060,10 @@ reflection chain, trace2skill, and the knowledge-graph chain below.
 
 ## Config
 
-`autonomy:` in config.yaml has five keys and two of them are read:
+`autonomy:` in config.yaml carries four keys on 2026-10-13, and of the five keys
+this block recognises two are read — `ticker_enabled` is live in the code
+(`CONFIG.get("autonomy").get("ticker_enabled", True)`) but is **not written in
+config.yaml at all**, present only in the automod canary's generated config:
 
 | key | status |
 |---|---|
@@ -991,20 +1087,27 @@ edges; #60 measures the result; #82 measures whether retrieval improved.
 |----|------|------|---------|----------|------|
 | #24 | Data Pipeline | 6x/day | -- | yes | Extract facts from the `sources.paths` corpus; emit `mentions` edges with source_doc + evidence |
 | #51 | Conversation Relation Linking | daily | #56 | yes | Co-access pairs from trajectories -> `co_accessed` edges (provenance INFERRED) |
-| #48 | Entity Resolution Sweep | daily | #24 | **no** | Cluster near-duplicates, run the semantic gate, print the plan and #67's proposals. A merge is a human action |
+| #48 | Entity Resolution Sweep | daily | #24 | **CASE/PUNCT only** | Cluster near-duplicates, run the semantic gate, print the plan and #67's proposals — then apply the two mechanical shape tiers itself (`--apply --tiers CASE,PUNCT`, Alan's ruling on #990, 2026-09-16). A SUFFIX merge is still a human action |
 | #67 | Semantic Entity Resolution | weekly | -- | **no** | LLM-judge the pairs string rules cannot; write `semantic-proposals-latest.jsonl` for #48's review list |
 | #74 | KG Mention Classifier | daily | #48 | yes | Re-type `mentions` into typed relations via `edges.retype`, one transaction |
 | #60 | Knowledge Health Report | daily | -- | no | God/thin/orphan entities, contamination, provenance. **Exits 2 and alerts** on store-unreadable, below-baseline, contamination, or duplicate fact IDs |
 | #82 | Nightly Retrieval Eval | daily | -- | no | 20-query eval with production's recall defaults; records the trend |
 
-Only #51 and #74 write to the edge store outside extraction, and **nothing in
-this chain moves fact files unattended**. #48 is the one that could — it is the
-sweep that merges — but it never passes `--apply`, so its scheduled form
-reports a plan and stops; #67 proposes into
-`semantic-proposals-latest.jsonl` and stops too (its own `--apply` was retired
-2026-09-04). Everything else here reports. That split is deliberate: the
-2026-08-22 wipe and the 2026-09-03 151-merge incident were both unattended
-applies.
+#51, #74 and **#48's two mechanical tiers** write to the edge store, and since
+2026-09-16 this chain is no longer read-only: #48 ends its scheduled run with
+`--apply --tiers CASE,PUNCT`, on Alan's ruling on #990 — a case or punctuation
+variant of one name is a mechanical merge, and coverage decayed for weeks while
+that apply waited on a person. What bounds it is not a human but the shape of the
+apply: the degraded-graph refusal, the high-value exclusion, one store
+transaction, and an apply report that journals each dir outcome so a kill in the
+gap between the transaction and the fact-file half is finished by
+`--resume <that report>`. SUFFIX pairs still never apply on schedule — a suffix is
+a claim about meaning, and it needs the semantic gate's unanimous verdict *and* a
+person. #67 proposes into `semantic-proposals-latest.jsonl` and stops (its own
+`--apply` was retired 2026-09-04); #60 and #82 only measure. The
+2026-08-22 wipe and the 2026-09-03 151-merge incident were both unattended applies
+of exactly the kind #48 now performs under a narrower definition — which is the
+reason the tiers are named on the command line rather than inferred.
 
 **One store.** Edges, aliases, the entity registry and the fact index live in
 `_pipeline/vault-derived/kg.sqlite`, behind `app.kg_store`. Nothing else opens
@@ -1029,3 +1132,25 @@ it. See `architecture/knowledge-graph.md`.
   Added the second stall alarm (`_next_run_stalled`, #421) beside the due-ness
   one, and one sentence naming what the display readers do with a degraded task
   (#1014).
+- ## Review log
+
+- **2026-10-13 — `stale`.** Every gate, predicate and constant still stands; what
+  had moved is ownership and the snapshots. #1682 took the stall alarms, the
+  starving-queue clause and the unparseable-file scan out of
+  `workers/sources/scheduled_task.py` into `workers/fleet_watchdog.py` (the scan
+  is now every 30 min, not one-shot at boot), so a section written as "the source
+  and its alarm" became a section about two modules. #1014 landed and unified the
+  three `fallback_fields` lists into one imported constant, so the paragraph
+  describing two shorter display lists described a closed bug. #945 landed, so the
+  evidence pilot is no longer measuring nothing (7-day window, unclamped: 31
+  bundles, 204 claims, 3 refuted). #1121 widened `_next_run_stalled` to every
+  status, #1085 added the infra ceiling as a gate, #2552 added the one-shot
+  out-of-window catch-up, and #990 made #48 an unattended applier of CASE/PUNCT —
+  which refutes this document's "nothing in this chain moves fact files
+  unattended" outright. The residue numbers rotted too: the 309 NULL-`task_id`
+  rows are pruned (the store spans 2026-09-22 onward), no archived task has a run
+  row in the current window, and the fleet is 39 files (38 `up_next`, #68 parked),
+  all on `primary`, 21 with an enforced window, 15 retired in `_archived/`. Filed:
+  #2640 (the `max_retries` default disagreement between scheduler and board) and
+  #2641 (sibling `architecture/knowledge-graph.md` still states "applies are
+  attended" as an incident rule).
