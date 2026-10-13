@@ -53,6 +53,11 @@ RECORDER = SCRIPTS / "iv_metrics_record.py"
 #: and a test that cannot reach it would silently test the no-notify fallback.
 GUARDIAN = ROOT / "agent-services" / "guardian"
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
+#: The loaded skill that tells the nightly how to READ a row. #2654 clause 4 is a claim
+#: about this file's prose, and prose that only lives in the vault drifts from the code it
+#: describes the moment either side moves — so the sentences are pinned here, the way the
+#: task file's 0.05 bound already is.
+IV_SKILL = Path.home() / "obsidian" / "skills" / "iv-metrics-series" / "SKILL.md"
 #: The task file clause 1 requires. Globbed, not hardcoded, so renaming it does not
 #: silently un-pin every test below.
 TASK_GLOB = "86-*iv*metrics*.md"
@@ -160,8 +165,33 @@ _OBS_COLUMNS = """id, session_id, turn_id, sequence_in_turn, trigger, action,
 
 
 def _iso(moment: datetime.datetime) -> str:
-    """The stored shape: ISO with a `T`, no offset, sub-second."""
+    """The DATABASE column's shape: ISO with a `T`, no offset, sub-second (#835).
+
+    Local-naive, because `inner_voice_observations.created_at` is written local-naive and
+    `iv_grade.py`'s `WINDOW_CLAUSE` filters that column as text. Fixture rows are authored
+    in this shape and stay in it after #2654 — so does the `--since` bound the nightly
+    hands the grader, which is the bound `autonomy/86-*.md` mandates as `date -d` wall
+    clock. The *row's* shape is `_zoned` below: since #2654 the recorder stamps a zone into
+    every timestamp it appends, so the two shapes are no longer the same thing, and one
+    helper named for "the stored shape" was how they got conflated.
+    """
     return moment.isoformat(timespec="microseconds")
+
+
+def _zoned(moment: datetime.datetime) -> str:
+    """The ROW's shape since #2654: the same instant, naming this box's own offset."""
+    return moment.astimezone().isoformat(timespec="microseconds")
+
+
+def _local_instant(naive_text: str) -> datetime.datetime:
+    """The instant a naive local bound denotes — tagged, never converted.
+
+    `.astimezone()` on a naive parse is the rule #2654's recorder now applies: Python reads
+    a naive instance as local time, so the offset is appended and the instant does not
+    move. Appending `+00:00` instead is the wrong fix this helper exists to distinguish
+    from: it would shift every window by this box's offset and re-create #835.
+    """
+    return datetime.datetime.fromisoformat(naive_text).astimezone()
 
 
 def _make_repo(tmp_path: Path) -> Path:
@@ -398,10 +428,32 @@ def _numeric(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _zone_bearing(text: str) -> datetime.datetime:
+    """Parse `text` and insist it names its own zone (#2654 clause 1).
+
+    `datetime.fromisoformat` parses BOTH shapes without complaint, so "it parses" is not
+    the property — a naive value is precisely the row that forces the reader to guess. The
+    assert is on `tzinfo`/`utcoffset`, which is what "ends in an offset" means once parsed.
+    """
+    parsed = datetime.datetime.fromisoformat(text)
+    assert parsed.tzinfo is not None and parsed.utcoffset() is not None, (
+        f"{text!r} carries no UTC offset: a naive value in a machine-facing payload is "
+        f"read as UTC by every later reader, which is the #2654 defect")
+    return parsed
+
+
 def _near_local_now(text: str) -> bool:
-    """Is `text` within five minutes of the local wall clock (not the UTC one)?"""
-    then = datetime.datetime.fromisoformat(text)
-    drift = abs((datetime.datetime.now() - then).total_seconds())
+    """Is `text` within five minutes of the local wall clock (not the UTC one)?
+
+    #2654 made the row's stamps offset-bearing, so this compares the WALL-CLOCK READING
+    the text spells — `replace(tzinfo=None)` after parsing — against this box's naive
+    `now()`. Deliberately not an aware subtraction: two aware datetimes subtract by
+    *instant*, and the instants agree whether the text says `-07:00` or `+00:00`, so the
+    only way to tell "local reading" apart from "the same instant written in UTC" is to
+    read the digits. That difference is #835, and it is what this helper's name promises.
+    """
+    then = _zone_bearing(text)
+    drift = abs((datetime.datetime.now() - then.replace(tzinfo=None)).total_seconds())
     return drift < 300
 
 
@@ -441,7 +493,9 @@ def test_documented_pipeline_appends_exactly_one_json_object(tmp_path):
     # type check and leave nothing to trend.
     row = rows[0]
     assert row["llm_calls"] == 1, row
-    assert row["since"] == _iso(NOW_LOCAL - datetime.timedelta(hours=26))
+    # The bound the job HANDED in is naive local (`_iso`), and the bound the ROW stores
+    # names its zone (#2654) — same text up to the marker, same instant.
+    assert row["since"] == _zoned(NOW_LOCAL - datetime.timedelta(hours=26))
     assert _numeric(row["dropped_verdicts"]) and _numeric(row["turns"])
 
 
@@ -503,37 +557,384 @@ def test_row_exposes_the_delta_fields_as_numbers(tmp_path):
     assert row["error_total"] == 1, "rows with no error must not count as errors"
     assert row["dropped_rate"] == pytest.approx(0.5)
     assert row["timeout_by_deadline"] == {"timeout after 12.0s": 1}
-    assert row["since"] == _iso(NOW_LOCAL - datetime.timedelta(hours=26))
+    # Same bound, zone-named (#2654): the row's `since` is what a later reader parses,
+    # and a naive parse is read as UTC.
+    assert row["since"] == _zoned(NOW_LOCAL - datetime.timedelta(hours=26))
     assert row["landed_rate"] is None, "no inject in the fixture to score"
     assert row["miss_rate"] is None, "no session transcript to compare"
     assert row["models"] == ["primary"], "model names come from cost['models']"
 
 
 def test_until_is_stamped_from_the_local_clock():
-    """`until` bounds the rows, so it must be on the clock the rows are stored on.
+    """`until` bounds the rows, so it must be on the clock the rows are stored on —
+    and since #2654 it must also SAY which clock that is.
 
-    Clause 3 names the window bounds and clause 6 forbids the UTC skew from
-    silently moving them. `datetime.utcnow()` in the recorder would put `until`
-    `LOCAL_UTC_AHEAD_HOURS` ahead of the newest row it claims to bound — invisible in
-    the row, and exactly what #835 is. Asserted against the live clock rather than a
-    pinned one, because the defect is which clock, not what time.
+    Clause 3 of #460 names the window bounds and clause 6 forbids the UTC skew from
+    silently moving them. `datetime.utcnow()` in the recorder would put `until` the whole
+    offset ahead of the newest row it claims to bound — invisible in the row, and exactly
+    what #835 is. Asserted against the live clock rather than a pinned one, because the
+    defect is which clock, not what time.
 
-    The second assert is unguarded. It previously read `if UTC_OFFSET_HOURS:` on a
-    hardcoded constant, which is a permanently-true condition: the branch could never
-    be skipped, so the guard documented nothing and a fixture move that changed the
-    offset would not have flipped it. The offset is now measured, and this box could
-    in principle be UTC, where `until` and UTC coincide — so the counterfactual is
-    expressed as a distance from the *fixture's* offset, not as a truthiness test.
+    #2654 rewrote the two asserts instead of deleting them, because the naive comparison
+    they made no longer exists: subtracting an offset-bearing `until` from a naive
+    `datetime.now()` raises TypeError, and subtracting it from an aware one yields ~0 for
+    ANY correct-instant stamp, so an aware-vs-aware drift cannot tell a local reading from
+    a UTC one. The three asserts below therefore pin the three things that are now
+    separately checkable, and each one fails on a different wrong fix:
+
+      * `_zone_bearing` — no marker at all (the #2654 defect) fails here;
+      * `_near_local_now` — the wall-clock DIGITS are local. A stamp converted to UTC has
+        the right instant and the wrong digits, and fails by the offset;
+      * `utcoffset() == the local offset` — local digits tagged `+00:00`, the other wrong
+        fix, has the right digits and the wrong instant, and fails here;
+      * the instant drift — the same `+00:00` mistake, seen from the other side: the
+        stamped instant would sit the offset away from the run's own instant.
+
+    The expected digit gap is measured from the live clock rather than from
+    `LOCAL_UTC_AHEAD_HOURS`, which is the OFFSET ON THE FIXTURE DATE (2026-09-14): the two
+    differ across a DST boundary, and `until` is a stamp of today, so this property belongs
+    to whichever zone this box is in right now.
     """
     until = iv_metrics_record._local_now_text()
+    stamp = _zone_bearing(until)
+    local_offset = datetime.datetime.now().astimezone().utcoffset()
+    assert stamp.utcoffset() == local_offset, (
+        f"until={until} names a zone other than this box's local one ({local_offset}) — "
+        f"#835 keeps `until` on the clock `created_at` is written on, so #2654 only added "
+        f"the marker; converting to UTC or stamping `+00:00` moves the bound the row "
+        f"claims to state")
     assert _near_local_now(until), f"until={until} is not local wall clock"
-    now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-    drift = (now_utc - datetime.datetime.fromisoformat(until)).total_seconds()
-    expected = LOCAL_UTC_AHEAD_HOURS * 3600
-    assert abs(drift - expected) < 300, (
-        f"until is {drift/3600:.2f} h from UTC; the fixture's offset says it should "
-        f"be {expected/3600:.2f} h — a stamp in the wrong clock drifts by exactly "
-        f"the offset, so this fails only if `until` is not local")
+    # The local clock runs this many seconds AHEAD of the UTC reading of the same instant
+    # — negative behind it, the same sign convention as `LOCAL_UTC_AHEAD_HOURS` above, but
+    # measured from the live offset rather than the fixture's.
+    local_ahead_s = -local_offset.total_seconds()
+    digits_gap = (datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+                  - stamp.replace(tzinfo=None)).total_seconds()
+    assert abs(digits_gap - local_ahead_s) < 300, (
+        f"until={until} reads {digits_gap/3600:.2f} h from the UTC digits; this box's "
+        f"clock is {local_ahead_s/3600:.2f} h from them, so the digits say a stamp in the "
+        f"wrong clock — a `utcnow()` `until` sits the offset ahead of the newest row it "
+        f"bounds, which is #835")
+    instant_drift = abs((datetime.datetime.now(datetime.timezone.utc)
+                         - stamp).total_seconds())
+    assert instant_drift < 300, (
+        f"until={until} denotes an instant {instant_drift:.0f} s from the run's own — "
+        f"a local wall-clock reading tagged `+00:00` parses to exactly this, and the "
+        f"marker must name the zone the digits are already in")
+
+
+# ── #2654: every timestamp in the row names its own zone ─────────────────────
+
+
+def test_every_row_timestamp_names_its_own_zone(tmp_path):
+    """#2654 clause 1, across the real pipe: naive bounds in, zone-bearing row out.
+
+    The fixture hands the grader a naive local `--since` (`_iso`, the shape the nightly's
+    `date -d '26 hours ago'` produces) and the database's `created_at` is naive local too,
+    so `scope.since`, `first` and `last` all reach the recorder naive and `until` is
+    stamped by the recorder itself. All five fields then have to come back out of the
+    appended line parsing through `datetime.fromisoformat` to an AWARE datetime.
+
+    The assert is on awareness, not on parsability: `fromisoformat` parses both shapes
+    without complaint, and `recorded_at` already passed a parsability check before the
+    fix, which is exactly how the row could state `08:00:38+00:00` and `01:00:38` for one
+    instant and still look well-formed to every reader that had been written.
+
+    Driving the documented pipeline rather than `_row` is deliberate: the line on disk is
+    what every later reader parses, and `json.dumps`/`json.loads` is the one transformation
+    a `datetime` object never survives — the recorder stores text, so text is what has to
+    carry the zone.
+    """
+    repo = _make_repo(tmp_path)
+    _make_db(repo, [{"created_at": NOW_LOCAL - datetime.timedelta(hours=2)}])
+    out = repo / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+
+    result = _call(since=_iso(NOW_LOCAL - datetime.timedelta(hours=26)),
+                   repo=repo, out=out, extra=["--hours 26", "--no-outcome-score"])
+
+    assert result.returncode == 0, result.stderr
+    row = _rows_of(out)[0]
+    for field in ("recorded_at", "since", "until", "first", "last"):
+        value = row[field]
+        assert isinstance(value, str), f"{field}={value!r} is not timestamp text"
+        parsed = datetime.datetime.fromisoformat(value)
+        assert parsed.tzinfo is not None and parsed.utcoffset() is not None, (
+            f"{field}={value!r} parses naive: the row states an instant in a clock only "
+            f"the writer knows, and every later reader guesses (#2654)")
+
+
+def test_naming_the_zone_never_moves_the_instant(tmp_path):
+    """#2654 clause 2: the marker is the only thing that changed.
+
+    Three readings of the same row, none of which the old pins could express:
+
+      * `since` denotes the same instant as the naive bound that was handed in, and its
+        TEXT is that bound plus a suffix — so the window the job asked for is the window
+        the row records, to the second;
+      * `first`/`last` are still the data's own ends (the fixture row's `created_at`,
+        tagged), not ends re-derived in another clock;
+      * `until` is simultaneously the local wall clock (its digits) and the run's real
+        instant (its offset), which is the pair #835 and #2654 disagree about in
+        opposite directions.
+
+    A `+00:00` stamp on the local digits passes the old "is it local?" test and fails the
+    instant assert here; a wholesale UTC conversion passes the instant check and fails the
+    digits check. Neither wrong fix survives both.
+    """
+    repo = _make_repo(tmp_path)
+    created = NOW_LOCAL - datetime.timedelta(hours=2)
+    _make_db(repo, [{"created_at": created}])
+    out = repo / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    bound = _iso(NOW_LOCAL - datetime.timedelta(hours=26))
+
+    result = _call(since=bound, repo=repo, out=out,
+                   extra=["--hours 26", "--no-outcome-score"])
+    assert result.returncode == 0, result.stderr
+    row = _rows_of(out)[0]
+
+    assert row["since"].startswith(bound), (
+        f"the bound {bound!r} came back as {row['since']!r}: only an offset may be "
+        f"appended, or the window in the row stops being the window that was asked for")
+    assert datetime.datetime.fromisoformat(row["since"]) == _local_instant(bound), (
+        f"since={row['since']!r} is not the instant {bound} denotes on this box")
+    for field, naive in (("first", _iso(created)), ("last", _iso(created))):
+        assert datetime.datetime.fromisoformat(row[field]) == _local_instant(naive), (
+            f"{field}={row[field]!r} is not {naive} on this box's local clock — "
+            f"`created_at` is local-naive, so tagging it `+00:00` would move every "
+            f"window in the series by the offset and re-break #835")
+
+    until = _zone_bearing(row["until"])
+    local_offset = datetime.datetime.now().astimezone().utcoffset()
+    assert until.utcoffset() == local_offset, row["until"]
+    assert abs((datetime.datetime.now()
+                - until.replace(tzinfo=None)).total_seconds()) < 300, (
+        f"until={row['until']!r} does not read as this box's wall clock: the digits are "
+        f"the local half of #835 and converting them moved the bound 7 hours off the "
+        f"newest row it claims to bound")
+    assert abs((datetime.datetime.now(datetime.timezone.utc)
+                - until).total_seconds()) < 300, (
+        f"until={row['until']!r} denotes an instant away from the run's own — that is "
+        f"what stamping local digits `+00:00` does")
+
+
+def test_name_the_zone_only_ever_appends():
+    """The helper's whole contract, pinned directly (#2654 clause 2).
+
+    `_name_the_zone` is called on values the recorder does not control: the `--since`
+    string a model typed, `created_at` text from the database, and a `None` for a window
+    that matched no rows. Each has to come back as data rather than as a traceback, and
+    the only legal change to a parseable naive value is a suffix.
+    """
+    naive_local = "2026-09-29T01:00:00"
+    tagged = iv_metrics_record._name_the_zone(naive_local)
+    assert tagged.startswith(naive_local), (
+        f"{naive_local!r} came back {tagged!r} — the digits moved, so the window moved")
+    assert _zone_bearing(tagged) == _local_instant(naive_local), tagged
+
+    micro = "2026-10-13T01:00:38.615062"
+    assert iv_metrics_record._name_the_zone(micro).startswith(micro), (
+        "sub-second precision must survive the tag, or `until` loses the digits it had")
+
+    # Four pass-throughs: a window with no rows has no `first`/`last`; an
+    # already-offset-bearing value is already zone-bearing, and re-stamping it would be a
+    # conversion of an instant the recorder was not asked to move; a value fromisoformat
+    # cannot read is stored verbatim exactly as it was pre-#2654, so an unexpected grader
+    # shape still lands as data instead of killing the nightly; and a bare date has no time
+    # of day for an offset to describe.
+    assert iv_metrics_record._name_the_zone(None) is None
+    already = "2026-09-29T01:00:00+02:00"
+    assert iv_metrics_record._name_the_zone(already) == already
+    assert iv_metrics_record._name_the_zone("yesterday") == "yesterday"
+    # The bare date is the case the review rung caught on 2026-10-13, and it is not a
+    # harmless miss: tagging it produces `2026-09-29-07:00`, which Python 3.11+
+    # `fromisoformat` reads back as NAIVE 07:00 — the marker invents an hour, and the result
+    # is not even zone-bearing, so clause 1 would be satisfied by a value that is a lie.
+    # Measured in this tree: `fromisoformat("2026-09-29" + "-07:00")` is
+    # `datetime(2026, 9, 29, 7, 0)` with `tzinfo=None`.
+    for date_only in ("2026-09-29", "20260929"):
+        assert iv_metrics_record._name_the_zone(date_only) == date_only, (
+            f"{date_only!r} has no time of day, so naming a zone on it fabricates one")
+        reparse = datetime.datetime.fromisoformat(
+            iv_metrics_record._name_the_zone(date_only))
+        assert reparse == datetime.datetime.fromisoformat(date_only), (
+            f"tagging {date_only!r} changed what it means: {reparse!r}")
+
+
+#: Stand-in for `iv_outcome_score.py`, written into a fixture repo by the test below and
+#: never shipped. It echoes its own argv because that is the only way a test can see the
+#: bound the CHILD was handed: the real scorer filters `created_at >= ?` as TEXT against the
+#: local-naive column, so the child's bound must stay naive while the row's copy is stamped.
+_STUB_SCORER = '''"""Stub of iv_outcome_score.py: records its argv, answers with an empty week."""
+import json
+import pathlib
+import sys
+
+pathlib.Path(__file__).with_name("child-argv.txt").write_text(
+    "\\x00".join(sys.argv[1:]), encoding="utf-8")
+print(json.dumps({"label": "stub-week", "verdict": "ok", "windows": {}}))
+'''
+
+
+def _recorder_from(repo: Path, tag: str):
+    """Load a *copy* of the recorder so `__file__`-relative paths are the fixture's."""
+    (repo / "scripts").mkdir(parents=True, exist_ok=True)
+    shutil.copy(RECORDER, repo / "scripts" / "iv_metrics_record.py")
+    _copy_app_paths(repo)
+    spec = importlib.util.spec_from_file_location(
+        f"iv_metrics_record_{tag}", repo / "scripts" / "iv_metrics_record.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_stored_outcome_score_bound_names_its_zone_too(tmp_path):
+    """The weekly bound echoed into the row is a timestamp in the row (#2654's acceptance).
+
+    `weekly_outcome_score` hands its CHILD the naive local bound and stores a copy of it.
+    Both halves are pinned, because they owe different things and only one of them fails
+    loudly:
+
+    * the stored copy is what a later reader parses, so it carries the marker;
+    * the child's `--since` must stay naive, because `iv_outcome_score.py` filters
+      `created_at >= ?` as TEXT on a local-naive column — pass it `2026-10-06T03:00:00-07:00`
+      and every `created_at` sorts *below* that string, the window comes back empty, and the
+      week reads as "nothing to score" instead of as an error. That is the silent direction,
+      so the argv is asserted, not just the field.
+
+    The success branch is the nightly's normal path; the error branch (no scorer beside a
+    copied recorder) is asserted too, because a failed week is recorded rather than invented
+    and must be recorded in the same shape as a real one.
+    """
+    scored = _recorder_from(tmp_path / "with-scorer", "with_scorer")
+    scored_dir = Path(scored.__file__).resolve().parent
+    (scored_dir / "iv_outcome_score.py").write_text(_STUB_SCORER, encoding="utf-8")
+
+    week = scored.weekly_outcome_score()
+
+    assert week.get("label") == "stub-week", (
+        f"the stub scorer should have answered; a failure here means the child was never "
+        f"run and the success branch is unpinned: {week}")
+    stored = _zone_bearing(week["since"])
+    argv = Path(scored.__file__).with_name("child-argv.txt").read_text(
+        encoding="utf-8").split("\x00")
+    handed = argv[argv.index("--since") + 1]
+    assert ":" in handed and datetime.datetime.fromisoformat(handed).tzinfo is None, (
+        f"the child scorer was handed {handed!r}: it filters created_at as TEXT, so a "
+        f"marker on THAT bound silently empties the scored week instead of erroring")
+    assert stored == _local_instant(handed), (
+        f"the row says {week['since']!r} but the child was handed {handed!r} — same bound, "
+        f"same instant, only the row names its zone")
+
+    bare = _recorder_from(tmp_path / "no-scorer", "no_scorer")
+    bare_week = bare.weekly_outcome_score()
+    assert "error" in bare_week, (
+        "the fixture repo has no iv_outcome_score.py, so this must be the recorded "
+        f"failure branch the nightly actually takes: {bare_week}")
+    _zone_bearing(bare_week["since"])
+
+
+@pytest.mark.parametrize("bound", [None, "all time", "", "   "],
+                         ids=["null", "all-time-text", "empty", "blank"])
+def test_a_windowless_report_is_refused_before_any_zone_reformatting(tmp_path, bound):
+    """#2654 clause 3: adding zone parsing must not disturb the refusal that came first.
+
+    The recorder has always refused a report with no window bound — an all-time row would
+    sit in the series beside nightly rows and make every delta meaningless — and #2654
+    added a parsing pass over exactly the fields that bound lives in. The hazard is the
+    refactor that moves the parsing up, or replaces `str(since or "")` with
+    `_name_the_zone(since)` and then `fromisoformat(...)`: on `None` that is a TypeError,
+    so the nightly would report exit 1 with a traceback where it used to report exit 3 with
+    a sentence, and a future reader of the run record cannot tell "the job forgot
+    `--since`" from "the recorder is broken".
+
+    Every fixture report here also carries unparseable `first`/`last` text, so a pass that
+    reformatted before refusing would have to notice the junk first; the legal outcomes are
+    exit 3, no line written, and a stderr sentence naming the missing bound.
+    """
+    fake = tmp_path / "repo"
+    (fake / "scripts").mkdir(parents=True)
+    shutil.copy(RECORDER, fake / "scripts" / "iv_metrics_record.py")
+    _copy_app_paths(fake)
+    out = tmp_path / "series.jsonl"
+    report = {"scope": {"session": "all", "since": bound,
+                        "first": "not a timestamp", "last": "also not one"},
+              "cost": {"observations": 4, "turns": 2, "llm_calls": 4, "errors": {}}}
+
+    result = subprocess.run(
+        ["bash", "-c", f"echo {shlex.quote(json.dumps(report))}"
+                       f" | python3 scripts/iv_metrics_record.py --out '{out}'"],
+        capture_output=True, text=True, check=False, cwd=str(fake))
+
+    assert result.returncode == iv_metrics_record.EXIT_NO_INPUT, (
+        f"since={bound!r} → exit {result.returncode}, stderr={result.stderr[:200]!r}: "
+        f"a missing bound must still be the recorder's own refusal (exit "
+        f"{iv_metrics_record.EXIT_NO_INPUT}), not a crash")
+    assert "Traceback" not in result.stderr, result.stderr[:400]
+    assert "no window bound" in result.stderr, result.stderr[:200]
+    assert not out.exists(), (
+        f"a windowless report appended a row to {out}: the row's rate would sit in the "
+        f"series with no window to attribute it to")
+
+
+def test_the_skill_describes_every_row_timestamp_as_zone_bearing():
+    """#2654 clause 4: the loaded skill stated the mixed shape as the contract.
+
+    `skills/iv-metrics-series/SKILL.md` is what the nightly reads to know how to interpret
+    a row, and until #2654 it told the runner the window fields were "`T`-separated ISO
+    with no offset" and that `recorded_at` was "the one UTC timestamp in the row". A
+    code-only fix would have left that paragraph false in the one place the job is
+    instructed to obey, and a false clock rule in a skill is worse than none: the runner
+    follows it and gets the #1656 comparison wrong.
+
+    Pinned four ways, because clause 4 is a claim about prose and prose pins on sentences:
+    the two false sentences are gone, the zone-bearing rule and its worked offset are
+    present, the recipe still parses rather than string-sorts, `date -u` and SQLite
+    `datetime('now')` are still banned for `--since`, the field the #1656 bound is compared
+    against is still named as `since` and not `recorded_at` (#1771's landed substance, which
+    #2654 does not touch), and the stated shape is checked against the row `_row` actually
+    builds — so this node reddens if either side of the mixed surface moves alone, which is
+    the failure mode of a contract kept in two trees.
+
+    Reading a vault file from a test is deliberate, not an oversight of this repo's
+    boundary: it is how the 26-hour bound is already pinned in this very file
+    (`test_the_recorder_states_the_26_hour_bound_the_task_file_prints_it` asserts on
+    `~/obsidian/autonomy/`'s task text for the same reason), because the skill is a *loaded*
+    instruction — the half of the surface that lives outside git has no other witness. The
+    paragraph itself is landed through `automod_vault_land`, which validates it against the
+    real skill loader and commits a revertable sha on the vault's main.
+    """
+    assert IV_SKILL.is_file(), f"{IV_SKILL} is missing — the nightly's own instructions"
+    text = IV_SKILL.read_text(encoding="utf-8")
+
+    for gone in ("with no offset", "the one UTC timestamp in the row"):
+        assert gone not in text, (
+            f"the skill still says {gone!r}, which is the #2654 defect written down as an "
+            f"instruction")
+
+    assert "Every timestamp in the row names its own zone" in text, (
+        "the skill never states the new shape")
+    assert "-07:00" in text, "the worked pair that makes the rule checkable is missing"
+    assert "fromisoformat" in text, (
+        "the #1656 recipe must parse the two shapes it now compares, not string-sort them")
+    assert "date -u" in text and "datetime('now')" in text, (
+        "#2654 keeps the window bound local, so the ban on authoring it in UTC has to "
+        "stay in the skill that the nightly reads")
+    assert "Compare the field named `since`, not `recorded_at`" in text, (
+        "clause 4 requires the skill to keep naming `since` as the compared field")
+    assert re.search(r"""get\(["']since["']\)""", text), (
+        "the skill's own snippet must still read the `since` field")
+
+    # The prose and the code have to be the same claim. `_row` builds a row from a report
+    # whose window stamps arrive naive local, exactly as `iv_grade.py` emits them; every
+    # timestamp that row carries must be the shape the paragraph above describes. So a
+    # vault-only edit that re-softened the sentence cannot pass quietly, and neither can a
+    # code-only revert of the tag while the skill still promises a marker.
+    row = _row_1874(_REPORT_1874)
+    for field in ("recorded_at", "since", "until", "first", "last"):
+        _zone_bearing(row[field])
+    assert "Every timestamp in the row names its own zone" in text, (
+        "the skill's stated shape and the recorder's emitted shape are checked together; "
+        "if this fires, one half of the mixed surface moved alone")
 
 
 def test_row_carries_rates_as_numbers_when_the_grader_scored_something():
@@ -2106,8 +2507,7 @@ def test_the_miss_counts_are_added_without_changing_any_existing_field():
         f"missing={_KEYS_BEFORE_1874 - set(row)}")
 
     expected = {
-        "since": "2026-09-29T01:00:00", "window_hours": 26.0,
-        "first": "2026-09-29T01:04:11", "last": "2026-09-30T02:59:02",
+        "window_hours": 26.0,
         "observations": 120, "turns": 40, "llm_calls": 50,
         "dropped_verdicts": 2, "timeout_by_deadline": {"timeout after 12.0s": 2},
         "error_total": 2, "dropped_rate": pytest.approx(0.04),
@@ -2118,8 +2518,29 @@ def test_the_miss_counts_are_added_without_changing_any_existing_field():
     }
     for key, want in expected.items():
         assert row[key] == want, f"{key}: {row[key]!r} != {want!r}"
+    # The three window stamps are the only golden values #2654 moved, and they move by
+    # their zone marker and nothing else. The report above is still naive local on
+    # purpose — `iv_grade.py:445-449` echoes `--since` and `created_at` verbatim, and that
+    # local-naive window filter is out of #2654's scope — so the row's values are those
+    # same instants with this box's offset appended. #1874's own clause stays intact: a
+    # renamed key or a shifted ratio goes red in the two asserts above, and a moved
+    # INSTANT (the wrong fix, which would shift the window by the offset) goes red here.
+    for key, naive in (("since", "2026-09-29T01:00:00"),
+                       ("first", "2026-09-29T01:04:11"),
+                       ("last", "2026-09-30T02:59:02")):
+        # Both halves, because each catches a different wrong fix. Exact digits: an
+        # append-only tag leaves the text in front of the marker untouched, so a
+        # same-instant re-render (a UTC conversion, which would pass the instant assert
+        # below) goes red here. Then the instant, which a bare markerless string or a
+        # `+00:00` stamp on local digits would pass the digits test and fail.
+        assert row[key].startswith(naive), (
+            f"{key}: {row[key]!r} does not carry {naive!r}'s digits — #2654 names the zone, "
+            f"it does not rewrite the value")
+        assert _zone_bearing(row[key]) == _local_instant(naive), (
+            f"{key}: {row[key]!r} is not the instant {naive} denotes on this box")
     # `until` and `recorded_at` are clock stamps, so their shape is what is
-    # stable, not their value: local for `until` (#835), UTC for `recorded_at`.
+    # stable, not their value: the run's local instant naming its own offset for `until`
+    # (#835 for the clock, #2654 for the marker), UTC for `recorded_at`.
     assert _near_local_now(row["until"]), row["until"]
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00",
                         row["recorded_at"]), row["recorded_at"]

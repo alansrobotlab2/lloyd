@@ -44,9 +44,23 @@ with `replace(..., 'T', ' ')` before comparing, so the window is decided by the 
 the two forms cannot disagree. Local authorship is still mandatory: normalising the
 separator does nothing about an instant that was wrong to begin with.
 
-This script stores the bound it was handed verbatim and stamps `until` from the same
-local clock the rows use, so the window in the row is the window that was asked for,
-and the job that hands it the bound is told to hand it in local wall clock.
+This script still takes the bound in local wall clock and still stamps `until` from the
+same local clock the rows use, so the window in the row is the window that was asked for,
+and the job that hands it the bound is told to hand it in local wall clock (#835, and the
+ban on `date -u` in `~/obsidian/autonomy/86-*.md`).
+
+What #2654 changed is that every timestamp in the row now *names* the zone it is in.
+Before it, one payload stated one instant two ways: `recorded_at` came out
+`2026-10-13T08:00:38+00:00` while `until` came out `2026-10-13T01:00:38.615062` — the same
+instant on this UTC−7 box — and only one of the two said which clock it was read on, so
+the row's own shape required every reader to already know the convention. Now
+`since`/`until`/`first`/`last` are stamped with this machine's UTC offset
+(`2026-10-13T01:00:38.615062-07:00`) and `recorded_at` keeps its `+00:00`. Naming the zone
+is the whole fix: `_name_the_zone` only ever *appends* an offset, so the instant and the
+wall-clock reading are untouched and the local window bound stays local — tagging it
+`+00:00` instead would have shifted every window by 7 hours and re-broken #835. Rows
+appended before #2654 keep their naive shape; the series is deliberately mixed-shape, and
+`iv_metrics_mirror.py` refuses a shrinking copy, so nothing rewrites history.
 
 Exit codes: 0 normal · 2 sustained breach (see the threshold block) · 3 nothing
 usable on stdin.
@@ -165,14 +179,73 @@ def _announce_enabled() -> bool:
         "0", "false", "no", "off", "")
 
 
-def _local_now_text() -> str:
-    """`until`, in the same shape `created_at` is stored in.
+def _name_the_zone(value):
+    """Give a timestamp text the offset it is missing, without moving the instant.
 
-    Local-naive on purpose — matching the column, not the server. See the module
-    docstring and #835: `datetime.utcnow()` here would move `until` 7-8 hours
-    ahead of the newest row it is claiming to bound.
+    #2654. The row's window fields arrive naive: `since` is the `--since` string the
+    nightly handed the grader, and `first`/`last` are `inner_voice_observations.created_at`
+    verbatim (`iv_grade.py:445-449`), which this box writes local-naive. Naive text in a
+    machine-facing payload is read as UTC by every later reader, so a row carrying
+    `"until": "…T01:00:38"` beside `"recorded_at": "…T08:00:38+00:00"` states one instant
+    twice in two clocks and marks only one of them.
+
+    The rule it applies is the one `.astimezone()` applies to a naive `datetime`: Python
+    reads a naive instance as *local* time, so the offset for this box is what the value
+    was silently claiming — `2026-10-11T23:00:38` becomes
+    `2026-10-11T23:00:38-07:00`, same hour, same instant. What is *written* is that offset
+    appended to the text it was given, never a re-render of a parsed datetime: `isoformat()`
+    drops a fraction that happens to be zero, so re-serialising would silently rewrite the
+    value's digits while pretending only to label them. Appending `+00:00`, or converting to
+    UTC, would move the window's bounds by the offset and re-create #835's 7-hour hole, which
+    is the failure this helper exists to avoid; `iv_grade.py`'s `WINDOW_CLAUSE` compares
+    `--since` against the local-naive column, so the bound stays local and only gains its
+    marker.
+
+    Four cases pass through untouched, because a timestamp the recorder cannot read is not
+    a timestamp it may rewrite: `None` (a window with no rows has no `first`/`last`), a
+    value that already carries an offset (already zone-bearing — re-stamping it would be a
+    conversion), a value `fromisoformat` cannot parse (kept verbatim, exactly as pre-#2654,
+    so an unexpected grader shape still lands as data instead of a traceback), and — the one
+    that is not obvious — **a bare date with no time of day**. An offset is a statement about
+    a time of day, so there is nothing to name on `2026-09-29`, and appending one actively
+    corrupts the value: the text becomes `2026-09-29-07:00`, which Python's `fromisoformat`
+    (3.11+ reads the whole thing) hands back as **naive 07:00** — neither zone-bearing nor
+    the midnight the string meant. Measured on 2026-10-13, on the review rung's finding:
+    `fromisoformat("2026-09-29" + "-07:00")` is `datetime(2026, 9, 29, 7, 0)` with
+    `tzinfo=None`. So a bare date passes through exactly as it came, and `iv_grade.py`'s
+    `_parse_instant` plus the skill's reader both resolve it to midnight local, which keeps
+    the two readers agreeing instead of inventing a seventh hour. Time-of-day is detected by
+    a `:` in the text, which a bare date has never got.
     """
-    return datetime.datetime.now().isoformat(timespec="microseconds")
+    if not isinstance(value, str) or not value.strip():
+        return value
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if parsed.tzinfo is not None:
+        return value
+    if ":" not in value:
+        return value
+    # An aware `isoformat()` is exactly its own naive form plus the offset text, so that
+    # slice is the marker this value was missing — and `value` keeps its own digits.
+    tagged = parsed.astimezone()
+    marker = tagged.isoformat()[len(tagged.replace(tzinfo=None).isoformat()):]
+    return f"{value}{marker}"
+
+
+def _local_now_text() -> str:
+    """`until`: the run's instant, on the local clock, naming its own offset.
+
+    Local on purpose — the same clock `created_at` is stored on, not the server's. See the
+    module docstring and #835: `datetime.utcnow()` here would move `until` 7-8 hours ahead
+    of the newest row it is claiming to bound. Since #2654 the stamp carries that zone
+    instead of leaving it to be inferred: `.astimezone()` on a naive `now()` attaches this
+    box's offset and changes neither the wall-clock reading nor the instant, so
+    `until` reads `2026-10-13T01:00:38.615062-07:00` where it used to read the same text
+    with no marker beside a UTC `recorded_at`.
+    """
+    return datetime.datetime.now().astimezone().isoformat(timespec="microseconds")
 
 
 def _local_today() -> str:
@@ -296,12 +369,18 @@ def _row(report: dict, *, window_hours: float | None, threshold: float,
     dropped, error_total, by_deadline = _dropped_verdicts(report)
     return {
         # window: the bound as passed, the data's own ends, and the local instant
-        # of measurement. `until` is local because `created_at` is local (#835).
-        "since": scope.get("since"),
+        # of measurement. `until` is local because `created_at` is local (#835), and
+        # since #2654 every one of these four carries the offset it was read on
+        # (`_name_the_zone` appends a marker and never converts), so the row states one
+        # instant in one clock per field. Local is still the right clock: `iv_grade.py`'s
+        # `WINDOW_CLAUSE` compares the `--since` text against the local-naive column, and
+        # `~/obsidian/autonomy/86-*.md` mandates that bound be `date -d` wall clock — the
+        # defect was the missing marker, never the zone.
+        "since": _name_the_zone(scope.get("since")),
         "until": _local_now_text(),
         "window_hours": window_hours,
-        "first": scope.get("first"),
-        "last": scope.get("last"),
+        "first": _name_the_zone(scope.get("first")),
+        "last": _name_the_zone(scope.get("last")),
         # volumes
         "observations": int(cost.get("observations", 0) or 0),
         "turns": int(cost.get("turns", 0) or 0),
@@ -605,11 +684,18 @@ def weekly_outcome_score(days: int = OUTCOME_SCORE_EVERY_DAYS) -> dict:
     database — and the scorer keeps its own: usage.db opened read-only. The
     bound is local wall clock, like every other bound in this series (#835).
     A failure is recorded as `{"error": …}`, never as a missing week.
+
+    `since` stays naive local for the child — that is the bound `iv_outcome_score.py`
+    filters the local-naive column with, and rewriting it would move the week — while the
+    copy stored in the row is stamped with its offset (#2654), because a bound echoed into
+    a machine-facing payload is read by whoever next diffs two nights, not by the scorer
+    that was already handed the instant.
     """
     import subprocess
 
     since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime(
         "%Y-%m-%dT%H:%M:%S")
+    stored_since = _name_the_zone(since)
     script = Path(__file__).resolve().parent / "iv_outcome_score.py"
     try:
         done = subprocess.run(
@@ -618,9 +704,9 @@ def weekly_outcome_score(days: int = OUTCOME_SCORE_EVERY_DAYS) -> dict:
         )
         rep = json.loads(done.stdout)
     except Exception as exc:  # noqa: BLE001 — the row still lands
-        return {"since": since, "error": f"{type(exc).__name__}: {exc}"[:300]}
+        return {"since": stored_since, "error": f"{type(exc).__name__}: {exc}"[:300]}
     return {
-        "since": since,
+        "since": stored_since,
         "label": rep.get("label"),
         "turns_labelled": rep.get("turns_labelled"),
         "bad_turns": rep.get("bad_turns"),
@@ -669,6 +755,13 @@ def main(argv: list[str] | None = None) -> int:
         # A windowless report is "all time": its rate would sit in the series
         # beside nightly rows and make every delta meaningless. Refuse the row
         # rather than poison the trend, and fail rather than look healthy.
+        #
+        # This branch stays ABOVE every `_name_the_zone` call, which all live in `_row`
+        # and `weekly_outcome_score` below it (#2654 clause 3): the recorder must refuse a
+        # missing bound exactly as it always did — exit 3, no row — and the zone-stamping
+        # pass must never be the thing that first notices the bound is absent, because a
+        # #2654-shaped refactor could turn "refuse loudly" into a traceback or, worse, a
+        # stored row whose window is unknown.
         print("iv-metrics: report has no window bound (`since` is null) — run "
               "iv_grade.py with --since; refusing to store an all-time row",
               file=sys.stderr)
