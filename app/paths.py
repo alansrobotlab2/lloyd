@@ -139,6 +139,19 @@ TOOL_QUALITY_DIR = DATA_ROOT / "eval" / "tool-quality"
 # no gate, promotion rule or rollback path reads this file
 # (`tests/test_eval_instrument_index.py::test_no_gate_promotion_or_rollback_path_reads_the_index`).
 EVAL_INSTRUMENT_INDEX_DIR = DATA_ROOT / "eval" / "instrument-index"
+# One dated artifact per arm-A run of the substrate fuzzer (#2620): the corpus driven
+# end-to-end through the real dispatch seam, with per-domain k/N and one layer per
+# failure. `eval/substrate_fuzz/runner.py` owns the schema, writes exactly one
+# `<YYYY-MM-DD>.json` per run, and prunes its own files past
+# `runner.ARTIFACT_RETENTION_DAYS` — the same self-bounding shape as the three lines
+# above, for the same reason: the retention sweep's table is a vault file a code round
+# cannot stage (#2615), so a store that waits for that row is unbounded until someone
+# writes it. A run's scratch root is NOT declared here on purpose: arm A writes files,
+# spawns children and consumes memory, and its root is a
+# `tempfile.mkdtemp(prefix="subfuzz-")` that the run removes itself, control spill
+# included. A store that outlived the run would need a second retention rule, and the
+# artifact is the only output worth keeping.
+EVAL_SUBSTRATE_FUZZ_DIR = DATA_ROOT / "eval" / "substrate-fuzz"
 # One dated report per run of the djev name-prior probe (#2455): the probe writes
 # exactly one `name_prior_<YYYY-MM-DD>.json` and reads nothing here. It used to
 # default `--out-dir` to its own `eval/djev/` inside the code tree, which made every

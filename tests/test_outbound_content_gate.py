@@ -990,11 +990,18 @@ def test_the_unarmed_paths_on_the_real_tree_are_the_unreachable_ones():
     # replay-diff harness, whose scripted pool reaches no sender tool; 15 with
     # #1511's transcript self-hit probe; 16 with the injection canary bench
     # (eval/run_injection_canary.py, 2026-09-30); 17 with #2258's theory-fan-out
-    # replay, which builds a real diagnosis turn through make_options.
-    assert len(builds) == 17, len(builds)
+    # replay, which builds a real diagnosis turn through make_options; 18 with
+    # #2620's arm-A substrate-fuzz runner, whose envelope passes no `mcp_servers`
+    # and no splat that could — the same derived class as the two IDE helpers and
+    # the replay-diff harness, not a list (eval/substrate_fuzz/runner.py,
+    # 2026-10-13). What it dispatches is closed a different way: the corpus loader
+    # refuses any tool outside KNOWN_TOOLS, which holds no sender tool, pinned by
+    # tests/test_substrate_fuzz_safety.py::test_the_surface_arm_a_drives_names_no_sending_tool.
+    assert len(builds) == 18, len(builds)
     unreachable = sorted({b.file for b in builds if not b.sender_reachable})
     assert unreachable == ["app/routers/ide.py",
-                           "eval/run_harness_replay_diff.py"], unreachable
+                           "eval/run_harness_replay_diff.py",
+                           "eval/substrate_fuzz/runner.py"], unreachable
     assert OC.sender_unreachable_dispatch_files() == unreachable
     assert len(OC.dispatch_registry_sites()) == 14, OC.dispatch_registry_sites()  # +1: eval/diagnosis_fanout_replay.py (#2258)
     assert len(OC.GATE_ARM_POINTS) == len(
