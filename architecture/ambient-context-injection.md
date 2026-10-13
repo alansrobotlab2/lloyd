@@ -70,7 +70,7 @@ meant to receive it (#2598).
 
 The cheap tier is still sold as costing nothing, but the exact phrase "zero SDK
 cost" is not in `agent_mcp/ambient.py` — it is the first line of the
-`/api/sessions/{id}/inject-prefetch` docstring (`app/routers/sessions.py:1178`).
+`/api/sessions/{id}/inject-prefetch` docstring (`app/routers/sessions.py:1233`).
 The tool description a producer actually reads says the signal is queued "at no
 cost" (`agent_mcp/ambient.py:65`) and the module docstring says "cheap prefetch
 drain (no SDK turn)" (`:11`); this page attributed the wording to the wrong file
@@ -279,7 +279,7 @@ User turns always win, and `/cancel` never drops one: `drain_pending`'s
 is what `drain_pending=true` on that route relies on. Draining the user tier is
 the explicit `source="all"` sentinel — both tiers, ambient then user, summed
 count — and `DELETE /api/sessions/{id}` is its only caller
-(`app/routers/sessions.py:948-1002`). That route wipes the session outright, so a
+(`app/routers/sessions.py:1003-1057`). That route wipes the session outright, so a
 queued **user** turn it left behind would still run and still write nothing:
 `_append_messages` goes through `mutate_session`, which no-ops once the session
 JSON is gone — a full model turn spent on a transcript nobody will read again.
@@ -523,7 +523,7 @@ mode has no reason to block it.
   the listing predicate that is deliberately *not* the delivery predicate.
   Corrected: two drifted line pointers (`drain_pending` is
   `app/sessions_io.py:1061`, not `1030-1074`; the `DELETE` route is
-  `app/routers/sessions.py:948-1002`, not `756-785`), the "zero SDK cost"
+  `app/routers/sessions.py:1003-1057`, not `811-840`), the "zero SDK cost"
   attribution — that phrase is the `/inject-prefetch` docstring, not the tool
   description, which says "at no cost" — the override path, which is
   `$LLOYD_DATA/data/tool_overrides.yaml` rather than a file in the checkout, and

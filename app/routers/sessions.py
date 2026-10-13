@@ -155,9 +155,39 @@ async def list_sessions():
 _BACKGROUND_PLATFORM_SCAN_CEILING = 600
 
 
-@router.get("/api/background/sessions")
-async def list_background_sessions(limit: int = 100):
-    """Every run that is not a conversation: autonomy tasks and worker jobs.
+def _read_head(sf) -> str:
+    """The first `HEAD_PLATFORM_WINDOW` bytes of a session file, as text.
+
+    The one read the four-part half of the directory pays for, so it is a
+    function rather than an inline `with` for one reason: it is the seam a
+    background listing's file I/O goes through, which is what lets
+    `tests/test_session_platform_checks.py` slow it down and prove the walk is
+    not holding the event loop.
+    """
+    with sf.open("r", encoding="utf-8", errors="ignore") as fh:
+        return fh.read(HEAD_PLATFORM_WINDOW)
+
+
+def _read_session_json(sf):
+    """A whole session file parsed, or None if it cannot be read or parsed.
+
+    A session JSON carries its entire transcript, so this is the expensive read
+    — the one the row budget exists to keep rare, and the one that dominates the
+    cost of a background listing (#2650).
+    """
+    try:
+        return json.loads(sf.read_text())
+    except Exception:
+        return None
+
+
+def _collect_background_sessions(dir_path, limit: int) -> dict:
+    """Build the background listing for `dir_path`: every run that is not a conversation.
+
+    BLOCKING by design — it walks a directory of whole transcripts — and the
+    handler below is what keeps it off the event loop. Everything here is pure
+    reads over a snapshot list with no shared mutable state, so the whole body
+    can be handed to a worker thread unchanged: nothing in it is loop-local.
 
     The other half of the bifurcation, and the *complement* of `/api/sessions`
     rather than its mirror image by filename: this listing shows everything
@@ -184,13 +214,13 @@ async def list_background_sessions(limit: int = 100):
     them: `autonomy-task:39` and `autocode` are different kinds of unattended
     work and are read for different reasons.
     """
-    if not SESSIONS_DIR.exists():
-        return JSONResponse({"sessions": [], "count": 0})
+    if not dir_path.exists():
+        return {"sessions": [], "count": 0}
     try:
-        paths = sorted(SESSIONS_DIR.glob("*.json"),
+        paths = sorted(dir_path.glob("*.json"),
                        key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError as e:
-        return JSONResponse({"sessions": [], "count": 0, "error": str(e)})
+        return {"sessions": [], "count": 0, "error": str(e)}
 
     # Phase 1: decide membership, and settle as much of it as possible without
     # opening a file. A four-part name is decided free, because the shape answers
@@ -225,8 +255,7 @@ async def list_background_sessions(limit: int = 100):
     for sf in paths:
         if is_background_session_name(sf.name):
             try:
-                with sf.open("r", encoding="utf-8", errors="ignore") as fh:
-                    head = fh.read(HEAD_PLATFORM_WINDOW)
+                head = _read_head(sf)
             except OSError:
                 continue
             known = head_names_a_machine_platform(head)
@@ -241,9 +270,8 @@ async def list_background_sessions(limit: int = 100):
         if opened >= _BACKGROUND_PLATFORM_SCAN_CEILING:
             continue
         opened += 1
-        try:
-            data = json.loads(sf.read_text())
-        except Exception:
+        data = _read_session_json(sf)
+        if data is None:
             continue
         # The same predicate the chat listing applies, from the other side, so
         # "in exactly one listing" is a property of the two endpoints sharing
@@ -260,9 +288,8 @@ async def list_background_sessions(limit: int = 100):
         ts, data, sf = row
         if data is not None:
             return (ts, data, sf)
-        try:
-            fresh = json.loads(sf.read_text())
-        except Exception:
+        fresh = _read_session_json(sf)
+        if fresh is None:
             return None
         return (_last_active_ts(sf, fresh), fresh, sf)
 
@@ -315,10 +342,38 @@ async def list_background_sessions(limit: int = 100):
     # deliberately bounded. The Background tab reads none of them today; they
     # exist so `count: 150` is not silently read as "there are 150".
     chat_shaped = sum(1 for p in paths if not is_background_session_name(p.name))
-    return JSONResponse({"sessions": out, "count": len(out),
-                         "scanned": opened,
-                         "total": len(ordinary) + len(mislabelled),
-                         "unclassified": max(0, chat_shaped - opened)})
+    return {"sessions": out, "count": len(out),
+            "scanned": opened,
+            "total": len(ordinary) + len(mislabelled),
+            "unclassified": max(0, chat_shaped - opened)}
+
+
+@router.get("/api/background/sessions")
+async def list_background_sessions(limit: int = 100):
+    """Every run that is not a conversation: autonomy tasks and worker jobs.
+
+    The listing itself is `_collect_background_sessions`, and the only thing
+    this handler adds is that the walk runs on a worker thread. It used to run
+    here, inline on the event loop: 10,533 four-part session files opened for a
+    2 KB head (`_read_head`), then the 187 whole transcripts a `limit=150` page
+    reads (`_read_session_json`, via `keep + max(8, keep // 4)`). Measured on
+    this box on 2026-10-13 that held the loop for 0.741 s and 0.608 s, and
+    `/health` — which opens no file at all — answered in 0.705 s during a walk
+    against a 0.001 s idle baseline. `server.py` boots uvicorn with no
+    `workers=`, so one loop serves everything: that hold was every other
+    in-flight request's latency, including the agent's own loopback HTTP.
+    Pinning it is
+    `tests/test_session_platform_checks.py::test_the_background_listing_gives_the_loop_back_while_it_reads`.
+
+    Offloading moves where the reads happen, never what they decide: the
+    envelope, the meaning of `_BACKGROUND_PLATFORM_SCAN_CEILING` and the
+    mis-labelled exemption from clause 3 of #1064 are all
+    `_collect_background_sessions`' behaviour, unchanged, and pinned there by
+    the tests in `tests/test_api_contracts.py` and
+    `tests/test_session_platform_checks.py`.
+    """
+    return JSONResponse(
+        await asyncio.to_thread(_collect_background_sessions, SESSIONS_DIR, limit))
 
 
 @router.get("/api/sessions/{session_id}/todos")

@@ -1515,6 +1515,160 @@ async def test_the_orphans_reach_the_listing_past_both_budgets(
         "proved here is not the reach that was missing")
 
 
+# ── #2650: the background listing must hand the event loop back while it reads ─
+
+#: One deliberately-slowed session-file read, and how often the peer coroutine
+#: wakes to show whether the loop it is running on is free.
+PROBE_READ_SECONDS = 0.15
+PROBE_TICK_SECONDS = 0.02
+
+#: The reads this test's fixture drives: four four-part heads, the one
+#: chat-shaped file the read ceiling permits, and one whole-file row read for
+#: each of the four runs.
+PROBE_READS = 4 + 1 + 4
+
+
+@pytest.mark.anyio
+async def test_the_background_listing_gives_the_loop_back_while_it_reads(
+        tmp_path, monkeypatch):
+    """One request must not be able to stop every other request on this box.
+
+    `server.py` boots `uvicorn.run(app, ...)` with no `workers=`, so a single
+    event loop serves `/health`, the agent's own loopback HTTP and every chat
+    turn in flight. `list_background_sessions` used that loop to walk ~10,500
+    session files and then read the ~195 whole transcripts its row window asks
+    for — inline. Measured on this box on 2026-10-13: one call held the loop for
+    0.457 s and 0.720 s, and `/health`, which opens no file at all, answered in
+    0.705 s during a walk against a 0.0007-0.001 s idle baseline. That is a
+    stall, not a slow endpoint, and it is invisible in the endpoint's own
+    latency number.
+
+    The differential makes it visible, and both legs are load-bearing. Each leg
+    runs the same body over the same directory through the same slowed read
+    seams; the only difference is whether the body is called *on* the loop (the
+    pre-#2650 shape, reproduced here on purpose) or awaited through the
+    endpoint. A peer coroutine that wakes every 20 ms cannot advance at all
+    while the loop is held, so the inline leg asserts it does NOT tick — had it
+    ticked, the sleeps would not be holding the loop and the endpoint leg could
+    pass for the wrong reason — and the endpoint leg asserts it DOES.
+
+    Both read seams are slowed because triage put the expensive half of the hold
+    in the ROW reads (`_read_session_json` over the whole window, forced by
+    `message_count`), not the head walk: a fixture that slowed only the head
+    read would pass on a change that offloaded phase 1 and left most of the
+    0.7 s hold on the loop. The threshold below is therefore proportional to the
+    reads the leg actually paid for — a body that offloaded only the heads gets
+    4 of 9 slowed reads off the loop, ~30 ticks, and still fails it.
+    """
+    import asyncio
+    import functools
+
+    import httpx
+
+    import server
+    from app.routers import sessions as sessions_router
+
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
+
+    def _write(sid: str, platform: str, minutes_ago: int) -> str:
+        from datetime import datetime, timezone
+        path = tmp_path / f"{sid}.json"
+        stamp = time.time() - minutes_ago * 60
+        path.write_text(json.dumps({
+            "session_id": sid, "title": sid, "platform": platform,
+            "source": "autonomy-task:1",
+            "messages": [{"role": "user", "content": "one turn"}],
+            "last_active": datetime.fromtimestamp(
+                stamp, timezone.utc).isoformat().replace("+00:00", "Z"),
+        }), encoding="utf-8")
+        os.utime(path, (stamp, stamp))
+        return sid
+
+    # Four machine runs, so the row window is longer than `limit` and the newest
+    # three are what a limit=3 page must hold; and one human chat, newest of all,
+    # which the ceiling permits to be read and the predicate then refuses.
+    runs = [_write(f"20261013_07{i:02d}00_worker_a{i:03d}", "worker", i)
+            for i in range(1, 5)]
+    chat = _write("20261013_073000_ef5678", "mission-control", 0)
+
+    reads = {"n": 0}
+
+    def _slow(fn):
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            reads["n"] += 1
+            time.sleep(PROBE_READ_SECONDS)
+            return fn(*args, **kwargs)
+        return wrapped
+
+    # Slowing the two seams the body reads through is the whole instrumentation:
+    # it changes which thread the sleep lands on, never what the body computes.
+    monkeypatch.setattr(sessions_router, "_read_head",
+                        _slow(sessions_router._read_head))
+    monkeypatch.setattr(sessions_router, "_read_session_json",
+                        _slow(sessions_router._read_session_json))
+
+    ticks = {"n": 0}
+
+    async def _peer():
+        while True:
+            await asyncio.sleep(PROBE_TICK_SECONDS)
+            ticks["n"] += 1
+
+    peer = asyncio.create_task(_peer())
+    try:
+        async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=server.app),
+                base_url="http://test") as client:
+            await asyncio.sleep(PROBE_TICK_SECONDS * 3)
+
+            # ── leg 1: the body inline on the loop, which is the defect.
+            before_t, before_r = ticks["n"], reads["n"]
+            assert before_t >= 1, (
+                "the peer coroutine never ticked while the loop was idle, so "
+                "this test cannot tell a held loop from a free one")
+            sessions_router._collect_background_sessions(tmp_path, 3)
+            leg1_reads = reads["n"] - before_r
+            assert leg1_reads == PROBE_READS, (
+                f"the body paid for {leg1_reads} session reads, not "
+                f"{PROBE_READS}: the fixture no longer drives both the head walk "
+                "and the row reads, so neither leg measures the whole hold")
+            assert ticks["n"] == before_t, (
+                f"the inline body let a peer coroutine tick "
+                f"{ticks['n'] - before_t} times over {leg1_reads} slowed reads, "
+                "so those reads are not holding the loop and the endpoint leg "
+                "below would prove nothing")
+
+            # ── leg 2: the same body, awaited through the endpoint.
+            before_t, before_r = ticks["n"], reads["n"]
+            payload = (await client.get(
+                "/api/background/sessions?limit=3")).json()
+            leg2_reads = reads["n"] - before_r
+            ticks_during = ticks["n"] - before_t
+    finally:
+        peer.cancel()
+
+    assert leg2_reads == leg1_reads, (
+        f"the endpoint paid for {leg2_reads} session reads where the inline body "
+        f"paid for {leg1_reads}: the two legs are no longer the same body, so "
+        "the comparison above compares nothing")
+    assert ticks_during >= int(leg2_reads * PROBE_READ_SECONDS
+                               / PROBE_TICK_SECONDS * 0.5), (
+        f"a coroutine on the same loop advanced only {ticks_during} times while "
+        f"{leg2_reads} slowed reads ran — the walk is still on the event loop, "
+        "which is the stall #2650 is about")
+    got = [s["id"] for s in payload["sessions"]]
+    assert got == runs[:3], (
+        f"a limit=3 page offloaded off the loop returned {got}; the three "
+        f"newest machine runs must be the page, with {runs[3]} behind them and "
+        f"the human chat {chat} in no listing at all")
+    assert payload["count"] == 3, (
+        "`count` no longer counts the rows returned, on the offloaded path")
+    assert payload["scanned"] == 1, (
+        "`scanned` no longer counts only the chat-shaped reads the ceiling "
+        "bounds, on the offloaded path")
+
+
 # ── #1154 clause 2: a session body's own clock says which clock it is ────────
 
 def _has_offset(stamp: str) -> bool:
