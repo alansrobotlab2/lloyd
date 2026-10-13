@@ -50,7 +50,7 @@ These assertions read the live vault, so they can go red from a nightly skills
 pass rather than from the change under review. That is the same trade
 `tests/test_yaml_fix_skill_claims.py` makes, and it is deliberate: the gate runner
 hardcodes `-m TESTS_MARK_EXPR` where that is `"not live_vault and not
-fault_injection"` (`scripts/automod/gate.py:471`), so a marked check is deselected
+fault_injection"` (`scripts/automod/gate.py:615`), so a marked check is deselected
 from the very run meant to enforce it and pins nothing. Nothing here
 skips either — with no vault the reads fail naming the path they looked in, after
 `NO_VAULT` in that file's `:96`, and the vault is resolved as
@@ -455,20 +455,28 @@ def test_the_unread_line_names_its_label_key_headers_and_the_msg0_rule_is_indexe
     different from a transcription error (three matched, and the log's own hyphenated
     spelling sitting right there).
 
-    Clause 4 — the class rule this item writes to `lloyd/MEMORY.md` — is asserted by the
-    same node, through `_assert_msg0_rule_is_indexed()`, for a reason that is not tidiness:
-    the item's own acceptance check (b) is that this file goes from `8 passed` to
-    `9 passed`, so a second node would fail the very check that proves the change, and the
-    review rung's refusal on the first gate ("no changed test covers MEMORY.md") has to be
-    answered inside the node count the contract fixes. Nor does the vault half inherit a
-    gate-run check from elsewhere: the node that validates the live index is
-    `tests/test_prompt_surface_budget.py::test_the_live_memory_index_validates` (`:202`),
-    decorated `@vault_only` and `@live_vault` (`:200-201`), and the gate runs the suite with
-    `TESTS_MARK_EXPR = "not live_vault and not fault_injection"`
-    (`scripts/automod/gate.py:471`) — measured, that selection reports
-    `40 passed, 8 deselected` for that file and this validator is among the eight. A rule
-    can therefore reach a green gate with nothing the gate ran enforcing its shape, which
-    is the hole `_assert_msg0_rule_is_indexed()` closes.
+    Clause 4 — the class rule #1917 wrote into `lloyd/MEMORY.md` — is asserted by the same
+    node, through `_assert_msg0_rule_is_indexed()`, for a reason that is not tidiness: the
+    item's own acceptance check (b) is that this file goes from `8 passed` to `9 passed`, so
+    a second node would have failed the very check that proves the change, and the review
+    rung's refusal on its first gate ("no changed test covers MEMORY.md") had to be answered
+    inside the node count the contract fixes. #2653 kept that discipline: it changed this
+    helper's INPUT and gave it no node of its own.
+
+    What #2653 changed is where the index comes from, not what is asserted. The helper used
+    to read `~/obsidian/lloyd/MEMORY.md`, so the shape assertions below doubled as a live
+    curation report, and a nightly orphan reddened main at THIS node three times in one
+    week — #2171 (base `1d61143a`), #2613 (base `2e51d32d`, fixed by vault `ba2f10b9`) and
+    #2649 (vault `2b8ab113` -> `dcbfdcf5`). It now asserts over `_memory_root(tmp_path /
+    "index")`, so the gate still runs a real `validate_memory_index.check()` over the rule's
+    own shape — the hole #1917 closed stays closed — while the live index's STATE is
+    reported by `tests/test_prompt_surface_budget.py::test_the_live_memory_index_validates`
+    (`@vault_only @live_vault`, deselected by `TESTS_MARK_EXPR`,
+    `scripts/automod/gate.py:615`; measured today `53 passed, 8 deselected` for that file)
+    and gated where a writer can still act, at the post-write validator step of
+    `~/obsidian/skills/nightly-reflection-knowledge-write/SKILL.md:85`. Both are named
+    there so nobody
+    re-adds a live read to settle a curation debt; see `_assert_msg0_rule_is_indexed`.
     """
     rows = _skill_rows(_read_skill())
     wanted = {"of_which_embed_a_name": "of-which embed a name"}
@@ -547,25 +555,174 @@ def test_the_unread_line_names_its_label_key_headers_and_the_msg0_rule_is_indexe
         "the two failure modes must not print the same line — that sameness is the bug "
         "this node exists to keep fixed")
 
-    _assert_msg0_rule_is_indexed()
+    _assert_msg0_rule_is_indexed(_memory_root(tmp_path / "index"))
 
 
-# ── the vault half of #1917: the class rule this item writes ─────────
+# ── the class rule this item writes: pinned over an index the test owns ────
+#
+# #2653, 2026-10-13. Everything below used to read `~/obsidian/lloyd/MEMORY.md`,
+# which coupled the nightly reflection writer to the gate's hard `tests` rung with
+# no protocol between them, and it reddened main three times in one week: #2171 at
+# base `1d61143a`, #2613 at base `2e51d32d` (index line with no detail file, fixed
+# by vault `ba2f10b9`), and #2649 (topic file `memory/bash-tool-runs-bin-sh-not-bash.md`
+# written by vault `2b8ab113`, folded away by vault `dcbfdcf5`). Nothing durable
+# changed between them, and nothing durable can while the live index sits at
+# 20,463 B against the 20,480 B tight limit `check()`'s `full` mode enforces —
+# `MEMORY_TIGHTNESS = 0.80` (`app/memory_ceiling.py:114`) of the 25,600 B ceiling, the
+# product of which that file's own comment spells as 20,480. The index cannot
+# take a compliant ~150 B line, so a writer that has already created the detail
+# file is refused the line that hooks it and leaves an orphan behind. A test cannot fix
+# that by reading the file more often; it can only stop being the thing that
+# notices, and hand the noticing to a writer that can still act.
+#
+# So the index below is the test's, and the live one is checked where a nightly
+# re-inflation cannot red an unrelated round:
+# `tests/test_prompt_surface_budget.py::test_the_live_memory_index_validates`
+# (`@vault_only @live_vault`, deselected by the gate's
+# `TESTS_MARK_EXPR = "not live_vault and not fault_injection"`,
+# `scripts/automod/gate.py:615`), and `validate_memory_index.py` as the post-write
+# gate of `~/obsidian/skills/nightly-reflection-knowledge-write/SKILL.md:85`, which
+# refuses the
+# COMMIT instead of reddening a stranger. See `_assert_msg0_rule_is_indexed`.
 
-# ── the vault half: the class rule this item writes (clause 4) ───────
-
-MEMORY_INDEX = Path.home() / "obsidian" / "lloyd" / "MEMORY.md"
 MSG0_RULE = re.compile(r"messages\[0\]")
 RULE_RUNS = ("run_24_20260930_052951", "run_24_20260930_094319")
 VALIDATOR = ROOT / "scripts" / "memory" / "validate_memory_index.py"
 
+#: The slug the fixture's rule entry links to — the live one, so a reader who goes
+#: looking for the fixture's subject lands on the real detail file and not on a
+#: renamed near-miss.
+RULE_SLUG = "a-prompt-content-claim-requires-msg0"
 
-def _assert_msg0_rule_is_indexed() -> None:
-    """Clause 4, asserted from the one node this diff adds. See that node's docstring
-    for why the vault's own rule shape is checked here and not in a node of its own.
+#: A second hooked entry, so `check()` runs over something shaped like an index —
+#: several entries, several topic files, every one named by a line — and a seeded
+#: drift is one file among several rather than the only file present.
+SECOND_SLUG = "an-index-fixture-second-entry"
+
+#: The index line verbatim as the writers write it (live `MEMORY.md:140`, 248 of the
+#: 300 characters `INDEX_LINE_MAX_CHARS` allows): type tag, date, the hook, then the
+#: `→ topics/<slug>` pointer that is a topic file's only route into a prompt. It sits
+#: under a heading named for the rule with the date inside the LINE — #1917 clause 4,
+#: which is what the heading assertions in `_assert_msg0_rule_is_indexed` check.
+RULE_INDEX_LINE = (
+    "- [feedback] (2026-09-30) **A *sub-agent* prompt claim is a grep of that "
+    f"session JSON's `messages[0]`** ({RULE_RUNS[0]}, {RULE_RUNS[1]}); "
+    f"main-prompt claims need a prompt-surface journal → topics/{RULE_SLUG}")
+
+SECOND_INDEX_LINE = (
+    "- [project] (2026-10-13) The fixture carries a second hooked entry so "
+    f"`check()` is never run over a one-line index → topics/{SECOND_SLUG}")
+
+#: The detail half: the index line is the hook and this is what
+#: `memory_read(file="topics/<slug>")` pulls. Both run ids, the grepping and the
+#: retraction are the parts the assertions below look for, because they are what
+#: makes the ruling re-checkable by a reader who never sees the ledger.
+RULE_DETAIL = f"""# A prompt-content claim is a grep of that run's messages[0] (added 2026-09-30)
+
+- **The rule: a claim about what a dispatched prompt contained is made only after
+  grepping that run's own `messages[0]`, and a retraction of such a claim goes to
+  the surface the claim was filed to** — filed by the #1809 owed-check ruling of
+  2026-09-30; the two runs it names are `{RULE_RUNS[0]}` and `{RULE_RUNS[1]}`.
+- **What the two runs got wrong.** Both fired Step 2.5's
+  `STRANDED step 2.5 UNREAD: ['of_which_embed_a_name']` and at least one reported
+  the cause by describing a prompt it had never grepped; the correction was to
+  retract that sentence and grep the row instead.
+- **Scope.** A claim about the MAIN prompt needs a prompt-surface journal, not this
+  rule; this one is about a sub-agent's own session JSON.
+"""
+
+SECOND_DETAIL = """# The fixture's second entry (added 2026-10-13)
+
+Nothing here is a claim about the world. The entry exists so the fixture is an
+index of several hooked entries, which is what makes a seeded orphan or a seeded
+dangling link a drift in a real-shaped index instead of the only file in a
+directory that would pass whatever was done to it.
+"""
+
+
+def _load_pinned_validator():
+    """`scripts/memory/validate_memory_index.py`, loaded by path.
+
+    The module under test is the writers' own validator and not a copy of it: the
+    pair `app/memory_ceiling.py` / this script is documented as one rule with two
+    surfaces, so an assertion that read a duplicate definition could stay green
+    while the two drifted apart — which is what #2212 was about.
     """
-    assert MEMORY_INDEX.is_file(), _missing_tree(MEMORY_INDEX)
-    lines = MEMORY_INDEX.read_text(encoding="utf-8", errors="replace").splitlines()
+    spec = importlib.util.spec_from_file_location("validate_memory_index_pinned",
+                                                  VALIDATOR)
+    assert spec and spec.loader, f"the index validator is gone: {VALIDATOR}"
+    validator = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = validator
+    spec.loader.exec_module(validator)
+    return validator
+
+
+def _memory_root(dir_path: Path, extra: tuple[str, ...] = ()) -> Path:
+    """Build a memory root in the shape `memory_add` writes: `MEMORY.md` + `memory/<slug>.md`.
+
+    `extra` is what a test seeds to make a claim about drift. Nothing here reads or
+    writes anything outside `dir_path` — the live vault is not an input to this
+    fixture, which is the whole point of #2653.
+
+    The ceiling arm is exercised by
+    `test_the_index_fixture_detects_drift_in_both_directions`, which pushes a root
+    like this past its own tight limit by passing a smaller `ceiling`. Reaching that
+    arm the way the live index does — by being 20,463 B — would mean growing the
+    fixture into the thing #2653 stopped reading.
+    """
+    from app import memory_ceiling as mc
+
+    topics = dir_path / mc.TOPICS_SUBDIR
+    topics.mkdir(parents=True, exist_ok=True)
+    index = ("---\ntype: note\ntimestamp: '2026-10-13T09:00:00'\n---\n"
+             "# Lloyd Long-Term Memory\n\n"
+             "Index: one line per entry, the detail in the topic file it ends with.\n"
+             "\n## A prompt-content claim is a grep of that run's messages[0]\n"
+             f"{RULE_INDEX_LINE}\n"
+             "\n## The fixture carries a second hooked entry\n"
+             f"{SECOND_INDEX_LINE}\n"
+             + "".join(f"\n{line}\n" for line in extra))
+    (dir_path / "MEMORY.md").write_text(index, encoding="utf-8")
+    (topics / f"{RULE_SLUG}.md").write_text(RULE_DETAIL, encoding="utf-8")
+    (topics / f"{SECOND_SLUG}.md").write_text(SECOND_DETAIL, encoding="utf-8")
+    return dir_path
+
+
+def _assert_msg0_rule_is_indexed(index_root: Path) -> None:
+    """Clause 4 (#1917's class rule), asserted over an index this file owns.
+
+    #2653 changed WHAT this reads and not what it checks. It read the live
+    `~/obsidian/lloyd/MEMORY.md`, and that is how a nightly curation debt reddened
+    main three times in a week at a node named for label keys: #2171 (base
+    `1d61143a`), #2613 (base `2e51d32d`, fixed by vault `ba2f10b9`) and #2649 (vault
+    `2b8ab113` → `dcbfdcf5`). Live-index drift is checked now by
+    `tests/test_prompt_surface_budget.py::test_the_live_memory_index_validates`
+    (`@vault_only @live_vault`: reports, never reddens an unrelated round) and by
+    `validate_memory_index.py` as the post-write gate at
+    `~/obsidian/skills/nightly-reflection-knowledge-write/SKILL.md:85`, which forbids the
+    commit. Both are named again in that node's docstring so nobody re-adds the
+    live read here.
+
+    What is still pinned, over the fixture `_memory_root` writes: exactly one
+    `messages[0]` line, typed `[feedback]`, dated the day the #1809 ruling ordered
+    it, citing both runs; a heading named for the rule rather than for a date; the
+    REAL `validate_memory_index.check()` returning `ok` with the live ceiling; the
+    300-character bound the clause depends on as a number; and the linked detail
+    file carrying the tokens that make the ruling re-checkable.
+
+    It stays in this node rather than getting one of its own because of #1917's
+    acceptance check (b) — `8 passed` → `9 passed` — and the node count has since
+    become a floor instead (`test_the_gate_mark_expression_still_collects_every_node_in_this_file`);
+    #2653 added the one node that had to exist and raised that floor with it.
+    """
+    from app import memory_ceiling as mc
+    from app import prompt_surface as ps
+
+    validator = _load_pinned_validator()
+
+    index = index_root / "MEMORY.md"
+    assert index.is_file(), f"the fixture wrote no index at {index}"
+    lines = index.read_text(encoding="utf-8").splitlines()
     rule = [ln for ln in lines
             if ln.startswith("- ") and MSG0_RULE.search(ln)]
     assert len(rule) == 1, (
@@ -598,26 +755,17 @@ def _assert_msg0_rule_is_indexed() -> None:
         "clause 4 names the alternative: a heading named for the RULE with the date "
         "inside it, because a date-named heading cannot be found by what it says")
 
-    spec = importlib.util.spec_from_file_location("validate_memory_index_pinned",
-                                                  VALIDATOR)
-    assert spec and spec.loader, f"the index validator is gone: {VALIDATOR}"
-    validator = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = validator
-    spec.loader.exec_module(validator)
-    from app import memory_ceiling as mc
-    from app import prompt_surface as ps
-
-    report = validator.check(MEMORY_INDEX.parent, ceiling=ps.MEMORY_MD_CEILING_BYTES)
+    report = validator.check(index_root, ceiling=ps.MEMORY_MD_CEILING_BYTES)
     assert report["ok"], (
-        f"the live index fails its own validator ({report['errors']}), and this is the "
-        "node that was supposed to see it before the gate did — the `live_vault` sibling "
-        f"reports `1 deselected` on a normal round: {report}")
+        f"the fixture fails the validator the writers themselves are held to "
+        f"({report['errors']}). If the fixture is wrong, fix the fixture; if the rule "
+        "it enforces moved, that is a change to the writers' contract and belongs with "
+        f"them, not here: {report}")
 
     assert report["memory_md_bytes"] <= ps.MEMORY_MD_CEILING_BYTES
     # The 300-character bound the clause names, pinned as a NUMBER. `check()` above
     # enforces whatever `INDEX_LINE_MAX_CHARS` currently says, so if that constant moved
-    # the rule would be measured against something else and this node — the one standing
-    # in for a `live_vault`-marked validator the gate does not run — would stay green
+    # the rule would be measured against something else and this node would stay green
     # while the clause it cites said 300. Not a second measurement of the line, which
     # `check()` already made: a pin on the bound the clause depends on.
     assert mc.INDEX_LINE_MAX_CHARS == 300, (
@@ -628,7 +776,7 @@ def _assert_msg0_rule_is_indexed() -> None:
     assert slugs, (
         "the line has to point at a topic file — that pointer is what keeps one index "
         "line possible, and `check()` cannot fail on an index line that never links")
-    detail = MEMORY_INDEX.parent / mc.TOPICS_SUBDIR / f"{slugs[0]}.md"
+    detail = mc.topic_path(index_root, slugs[0])
     # `check()` also reports a dangling link; this one exists so the failure names the
     # FILE the detail should be sitting in, rather than quoting a link string.
     assert detail.is_file(), f"the linked topic file is missing: {detail}"
@@ -640,8 +788,119 @@ def _assert_msg0_rule_is_indexed() -> None:
             f"ledger: {detail}")
 
 
-#
+def test_the_index_fixture_detects_drift_in_both_directions(tmp_path):
+    """#2653: the index `_assert_msg0_rule_is_indexed` now asserts over is an
+    instrument, not a file that happens to pass.
 
+    Decoupling a test from live data is only safe if the fixture still catches what
+    the live read caught, so this seeds the two drifts that actually happened and
+    shows `check()` failing on each, naming the file or the slug. They are opposite
+    directions, and #2653's whole point is that both recurred inside a week:
+
+    * **Orphan** — a topic file with no index line. #2649's shape, and the one the
+      ceiling manufactures: `~/obsidian/lloyd/MEMORY.md` is 17 B from its 20,480 B
+      tight limit, so the append that would hook a new detail file is refused by
+      `index_tight_limit_error` AFTER the detail file is on disk. It was vault
+      `2b8ab113` that landed one and vault `dcbfdcf5` that folded it away.
+    * **Dangling link** — an index line `→ topics/<slug>` whose detail file never
+      landed. #2613's shape (fixed by vault `ba2f10b9`).
+
+    `check()` reports both (`scripts/memory/validate_memory_index.py:220-231`), and a
+    fixture that pinned only the orphan direction would leave the dangling one — the
+    direction that loses one detail rather than a whole rule — unpinned. The clean
+    root is asserted `ok` first: a fixture broken in the seed AND out of the box
+    would satisfy both asserts below for the wrong reason.
+
+    Live-index drift itself is reported by
+    `tests/test_prompt_surface_budget.py::test_the_live_memory_index_validates` and
+    gated at the writer by `~/obsidian/skills/nightly-reflection-knowledge-write/SKILL.md:85`,
+    not here — see `_assert_msg0_rule_is_indexed` for why.
+    """
+    from app import memory_ceiling as mc
+    from app import prompt_surface as ps
+
+    validator = _load_pinned_validator()
+    clean = _memory_root(tmp_path / "clean")
+    base = validator.check(clean, ceiling=ps.MEMORY_MD_CEILING_BYTES)
+    assert base["ok"], (
+        f"the fixture is not a valid index out of the box ({base['errors']}), so "
+        "nothing below can attribute a failure to a seed rather than to the fixture")
+    assert base["topic_files_unlinked"] == 0, (
+        f"{base['unlinked_topic_files']} topic files came unlinked from a clean "
+        "fixture, which is the #2649 direction already present before any seed")
+
+    # The third arm `check()` has, which a fixture this small would otherwise leave
+    # untested: the ceiling. At 664 B the index here is 2.6% of the 25,600 B the
+    # live one is measured against, so `report["ok"]` would read True whatever
+    # `ceiling` said, and the arm that MANUFACTURES #2649's orphan — refusing the
+    # append that would hook a detail file already on disk — would be the one thing
+    # this fixture never shows. It is probed the way the caller holds it, through
+    # `ceiling`, rather than by growing a 20 KB index: what is pinned is that the
+    # reading is honest and reports the file's own numbers, not that a particular
+    # size is refused.
+    assert base["memory_md_bytes"] == (clean / "MEMORY.md").stat().st_size, (
+        f"the report says {base['memory_md_bytes']} B and the file on disk is "
+        f"{(clean / 'MEMORY.md').stat().st_size} B — the size the arm is computed from "
+        "has to be the size of the index, or the live numbers this whole item is "
+        "argued from (20,463 B of 25,600 B, 17 B under the 20,480 B tight limit) are "
+        "not what the check saw")
+    assert base["memory_md_bytes"] < base["tight_limit"], (
+        f"the clean fixture sits at {base['memory_md_bytes']} B against its own tight "
+        f"limit of {base['tight_limit']} B. That is the live index's position, and a "
+        "fixture that started inside the tight zone could not show what a refusal "
+        "looks like from the outside")
+    inflated = validator.check(clean, ceiling=base["memory_md_bytes"])
+    assert not inflated["ok"], (
+        f"an index exactly at its ceiling passed `check()` (tight limit "
+        f"{inflated['tight_limit']} B): the arm that refused #2649's index line is "
+        "not being exercised by this fixture at all, so nothing here would notice it "
+        "being removed")
+    assert inflated["tight_limit"] == int(base["memory_md_bytes"] * 0.80), (
+        f"the fired limit is {inflated['tight_limit']} B, not 80% of the ceiling "
+        f"({int(base['memory_md_bytes'] * 0.80)} B) — 0.80 is `MEMORY_TIGHTNESS` at "
+        "`app/memory_ceiling.py:114` and the reason the live limit reads 20,480 B, so "
+        "if it moved, the 17-B-of-room figure this item is argued from moved with it")
+    assert any("80% of its ceiling" in e for e in inflated["errors"]), (
+        f"the refusal has to name the 80% rule it applied, because that is the number "
+        f"a nightly writer sees and reasons about; errors were: {inflated['errors']}")
+
+    orphan = _memory_root(tmp_path / "orphan")
+    (orphan / mc.TOPICS_SUBDIR / "an-orphan-topic-file.md").write_text(
+        "# An orphan, seeded to prove the check sees it\n\n"
+        "No index line names this file, which is exactly what a ceiling-refused "
+        "append leaves behind.\n", encoding="utf-8")
+    orph = validator.check(orphan, ceiling=ps.MEMORY_MD_CEILING_BYTES)
+    assert not orph["ok"], (
+        "a topic file that no index line links passed `check()` — that is the #2649 "
+        "direction, the one the ceiling manufactures, and the one that keeps a rule "
+        "that exists and is never applied out of every prompt")
+    assert orph["topic_files_unlinked"] == 1, (
+        f"the orphan seed left {orph['topic_files_unlinked']} files unlinked; the seed "
+        "added exactly one, so the count is not measuring what was seeded")
+    assert any("memory/an-orphan-topic-file.md" in e and "no index line links it" in e
+               for e in orph["errors"]), (
+        f"the failure has to name the orphaned FILE, because that is what a nightly "
+        f"writer can act on; errors were: {orph['errors']}")
+
+    dangling = _memory_root(
+        tmp_path / "dangling",
+        extra=("- [project] (2026-10-13) An entry whose detail file never landed "
+               "→ topics/a-detail-file-never-written",))
+    dang = validator.check(dangling, ceiling=ps.MEMORY_MD_CEILING_BYTES)
+    assert not dang["ok"], (
+        "an index line pointing at a topic file that does not exist passed `check()` — "
+        "that is the #2613 direction, and it is what makes an index line a lie to the "
+        "reader who follows it with `memory_read`")
+    assert any("a-detail-file-never-written" in e for e in dang["errors"]), (
+        f"the failure has to name the dangling SLUG for the same reason: errors were "
+        f"{dang['errors']}")
+    assert dang["topic_files_unlinked"] == 0, (
+        f"{dang['unlinked_topic_files']} unlinked files under a dangling-link seed, "
+        "which added no file at all — if the unlinked count can move on this seed, the "
+        "two directions are no longer told apart and one of them is unpinned")
+
+
+#
 
 # ── enforcement: the gate must actually run what is above ────────────
 
@@ -710,16 +969,18 @@ def test_the_gate_mark_expression_still_collects_every_node_in_this_file():
         f"the gate's selection ({TESTS_MARK_EXPR!r}) deselected "
         f"{sorted(set(unfiltered) - set(gated))} of this file's nodes, so they "
         "would enforce nothing at the gate")
-    # The floor is this file's own node count, raised when a node is added — not a round
-    # number sitting below it. A ">= 5" against a file of ten stays green while five
-    # nodes quietly stop being collected, and quiet non-collection is the exact rot this
-    # file exists to catch (it is how #1809's cited pins stopped enforcing). The coupling
-    # is the mechanism: adding a node here means editing this number, so a node cannot be
-    # added without being noticed and cannot be lost without going red.
-    assert len(unfiltered) >= 9, (
-        f"{len(unfiltered)} nodes collected; 9 were here when #1917 landed — the count "
-        "is the item's acceptance check (b), `8 passed` -> `9 passed`, so a node lost "
-        f"here is a check that no longer holds: {sorted(unfiltered)}")
+    # The floor is this file's EXACT node count, so adding a node means editing this
+    # number and losing one goes red the same turn. A slack floor is not a floor: this
+    # line still read `>= 9` after #2653 added a node and the file collected 10 — the
+    # review rung's refusal on this round's first gate — and quiet non-collection is the
+    # exact rot this file exists to catch (it is how #1809's cited pins stopped
+    # enforcing). The coupling it claims only exists when the number is exact.
+    assert len(unfiltered) == 10, (
+        f"{len(unfiltered)} nodes collected; the file has held 10 since #2653 added "
+        "`test_the_index_fixture_detects_drift_in_both_directions` to the 9 that were "
+        "here when #1917 landed, whose acceptance check (b) is `8 passed` -> `9 passed`. "
+        "Another number means a node was added without raising this floor, or one is gone "
+        f"and the check it pinned no longer runs: {sorted(unfiltered)}")
 
 def test_a_missing_skills_tree_fails_naming_the_path_it_looked_in(tmp_path,
                                                                  monkeypatch):
