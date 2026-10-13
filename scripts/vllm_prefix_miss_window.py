@@ -11,7 +11,11 @@ better or worse. This joins the three surfaces that do keep history, read-only:
 * the primary engine's own status lines (`agent-llm-primary.log*`, every 10 s
   while it has work): `GPU KV cache usage` and `Running: N reqs`. They are
   stamped `MM-DD HH:MM:SS` in LOCAL time with no year, so the year and zone are
-  parameters, not guesses buried in a regex.
+  parameters, not guesses buried in a regex. The `GPU KV cache size: N tokens`
+  boot lines in the same files carry that same stamp, so one decode (`_local_time`)
+  puts both on the window's clock — and both are filtered by it, because a pool
+  line read outside its own window counts a day against an engine it never ran on
+  (#2665).
 
 `engine_pressure`'s ring cannot stand in for the third: it is a deque in the
 backend process, gone at every restart. Nothing else records KV over time.
@@ -56,6 +60,25 @@ _STATUS_RE = re.compile(
     r"Avg prompt throughput: ([\d.]+) tokens/s, Avg generation throughput: ([\d.]+) tokens/s, "
     r"Running: (\d+) reqs, .*?GPU KV cache usage: ([\d.]+)%")
 _POOL_RE = re.compile(r"GPU KV cache size: ([\d,]+) tokens")
+#: The boot line's OWN stamp, in the same `INFO MM-DD HH:MM:SS` shape as a status
+#: line and with the same missing year:
+#: `(EngineCore pid=1314507) INFO 10-12 16:15:48 [kv_cache_utils.py:2320] GPU KV
+#: cache size: 484,612 tokens, ...`. Every pool line in the live rotation carries
+#: it (measured 2026-10-13: 10 of 10 across 11 files), which is what lets the
+#: pool line be window-filtered by the same clock as the status lines instead of
+#: by which file it happens to sit in — the distinction #2665 exists for.
+_POOL_STAMP_RE = re.compile(r"INFO (\d\d-\d\d \d\d:\d\d:\d\d) \[[\w.]+\.py:\d+\]")
+
+
+def _local_time(stamp: str, year: int, tz: ZoneInfo) -> float:
+    """Decode the engine's year-less LOCAL stamp into a UTC epoch.
+
+    One decode for both engine-line kinds, because a pool line filtered by a
+    different clock than the status lines beside it is how a window came to be
+    counted against a pool it never ran on (#2665).
+    """
+    return datetime.strptime(f"{year}-{stamp}", "%Y-%m-%d %H:%M:%S").replace(
+        tzinfo=tz).timestamp()
 
 
 def session_kind(sid: str) -> str:
@@ -125,17 +148,34 @@ def extract(start: str, end: str, *, data_root: Path, year: int | None = None,
     tz = ZoneInfo(engine_tz)
     samples, pools = {}, set()
     lo = min([t0 - LOOKBACK_S] + [m[6] for m in misses if m[6]])
+
+    def in_window(t: float) -> bool:
+        """The one test every engine line is read through, pool line included.
+
+        Written once because the two kinds of line used to be read by two
+        different rules: the status lines were window-filtered and the
+        `GPU KV cache size` lines were not, so a boot on any day still sitting in
+        the rotation landed in `pool_tokens` for EVERY window (#2665).
+        """
+        return lo <= t < t1 + STATUS_INTERVAL_S
+
     for path in sorted((data_root / "logs" / "services").glob("agent-llm-primary.log*")):
         with path.open(encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if (p := _POOL_RE.search(line)):
-                    pools.add(int(p.group(1).replace(",", "")))
+                    # Only a pool the engine booted with INSIDE this window and its
+                    # lookback: the boot line carries its own stamp, so it is
+                    # filtered by the same clock as the status lines below. What
+                    # more than one surviving size means for the arithmetic is
+                    # `derive`'s to say, not this loop's.
+                    st = _POOL_STAMP_RE.search(line)
+                    if st and in_window(_local_time(st.group(1), year, tz)):
+                        pools.add(int(p.group(1).replace(",", "")))
                 m = _STATUS_RE.search(line)
                 if not m:
                     continue
-                local = datetime.strptime(f"{year}-{m.group(1)}", "%Y-%m-%d %H:%M:%S")
-                t = local.replace(tzinfo=tz).timestamp()
-                if lo <= t < t1 + STATUS_INTERVAL_S:
+                t = _local_time(m.group(1), year, tz)
+                if in_window(t):
                     # [t, KV %, running, tokens the engine computed in the
                     # 10 s this line reports on: prompt + generated]
                     samples[t] = [int(t), round(float(m.group(5)), 1), int(m.group(4)),
@@ -218,6 +258,28 @@ def two_request_throughput(ex: dict, *, stall_tok_s: float = STALL_TOK_S) -> dic
 
 
 def derive(ex: dict, *, gate: float, stall_tok_s: float = STALL_TOK_S) -> dict:
+    """Every figure §10 quotes, from one extract.
+
+    The free-pool arithmetic near the end of this function is against a SINGLE
+    denominator, and `ex["pool_tokens"]` can hold more than one size: the sizes
+    come from the engine's `GPU KV cache size` boot lines inside the window, and a
+    window that spans a restart whose boot got less free memory spans two. When it
+    does, the churn denominator is the largest of them — the pool such a window
+    actually ran on, because the short boot is one restart inside it (the
+    2026-10-12 boot at 484,612 tokens covers 181 of that day's 6,622 status lines
+    and 2 of its 194 miss events, not the day). `misses_gap_churned_free_pool` is
+    therefore a LOWER BOUND on a mixed-pool window, and the size of that bound is
+    measured rather than assumed: the same gaps give 65 churned at 844,969 and 92
+    at 484,612 on that day's extract. The largest is chosen over the smallest
+    because the smallest over-claims churn — the reading that makes a re-prefill
+    look unavoidable when it was not — off a boot that covered under 3 % of the
+    window.
+
+    A window with no boot line in it or in its lookback has no denominator at all,
+    which is the ordinary case for a day the engine was not restarted. Then
+    `misses_gap_churned_free_pool` and `pool_tokens` are None: unmeasured, never
+    zero. Every other figure in here is computed without the pool and still is.
+    """
     t0, t1 = _epoch(ex["window"][0]), _epoch(ex["window"][1])
     turns = ex["turns"]
     measured = [t for t in turns if t[2] is not None]
@@ -234,10 +296,17 @@ def derive(ex: dict, *, gate: float, stall_tok_s: float = STALL_TOK_S) -> dict:
     def between(a: float, b: float) -> list[list]:
         return [s for s in samples if a <= s[0] <= b]
 
-    # One pool for the whole window, or the free-pool arithmetic below is
-    # against the wrong denominator for part of it.
-    (pool,) = ex["pool_tokens"]
-    during, gap_kv, gaps, churned = [], [], [], 0
+    # The window's pool, for the free-pool arithmetic below: `ex["pool_tokens"]`
+    # is every size this window booted with, so a window spanning a restart into a
+    # smaller KV cache has two. The denominator is then the largest, which makes
+    # `misses_gap_churned_free_pool` a lower bound — see this function's docstring,
+    # and note that `(pool,) = ex["pool_tokens"]` used to be a hard unpack here, so
+    # both a mixed window and an ordinary no-restart window (no boot line, no pool)
+    # raised instead of reporting: #2665.
+    pools = sorted(ex["pool_tokens"])
+    pool = max(pools) if pools else None
+    during, gap_kv, gaps = [], [], []
+    churned = 0 if pools else None
     for m in ex["misses"]:
         start = m[0] - m[1] / 1000
         d = between(start, m[0] + STATUS_INTERVAL_S)
@@ -256,7 +325,7 @@ def derive(ex: dict, *, gate: float, stall_tok_s: float = STALL_TOK_S) -> dict:
         # LRU: a freed prefix is reclaimed once new allocations have gone
         # through every free block ahead of it. Tokens computed in the gap
         # against the free pool at its tightest is the most it could need.
-        if sum(s[3] for s in g) >= (1 - peak) * pool:
+        if pool is not None and sum(s[3] for s in g) >= (1 - peak) * pool:
             churned += 1
     chat = [t for t in turns if t[1] == "chat"]
     out = {
