@@ -5112,3 +5112,101 @@ def test_the_sha_the_rail_exists_to_catch_is_still_caught(tmp_path):
     assert "citation_unresolved" not in stood["clauses"][0], (
         "the same token published as DATA outside the prose paths is corroborated "
         "by the tree, so the exclusion, not the route, is what was refusing it")
+
+
+# ── #2658: what a `post_landing` verdict promises must be what the closer does ─
+#
+# The rung told the grader, and the gate told the round, that a `post_landing`
+# clause closes the item "carrying `needs-human`". Nothing has written that tag on
+# a landing since 2026-09-27: `close_landed` takes it off EVERY close, and the debt
+# is an entry on the item's `owed` list that `workers/sources/owed_check.py`
+# settles. `tests/test_review_transport.py` already asserts the tag's ABSENCE on
+# exactly that path (`test_a_met_landing_with_human_clauses_closes_and_owes_them`),
+# so the prompt contradicted a passing test — and it mattered: a grader that
+# believes its verdict mints a human-facing marker grades a loose clause as good
+# news, where one told the debt has to be readable by a job later grades whether
+# the entry actually says what a person would need to find.
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def _grader_prompt(tmp_path) -> str:
+    """The grader system prompt for a plain one-clause round, folded onto one
+    line — a claim about what the prose says must not depend on where it wraps."""
+    contract = {"id": 1, "title": "t", "body": "b", "clauses": ["c"]}
+    prompt = RV.build_prompt(contract=contract, diff="", diff_truncated=False,
+                             changed_tests=[], test_counts={"passed": 5},
+                             worktree=tmp_path, run_tests=tmp_path / "rt")
+    assert "post_landing" in prompt, "the prompt lost the verdict block entirely"
+    return " ".join(prompt.split())
+
+
+def test_no_string_in_the_review_module_still_promises_the_retired_tag():
+    """`git grep -n 'needs-human' -- scripts/automod/review.py` answers 0.
+
+    Run as that command rather than as a file read, because it IS the acceptance
+    check #2658 records, and a test that reproduces the accepted command is one a
+    reader holding the item can re-run. A 0-hit grep is evidence only beside a
+    positive control, so the identical instrument first runs on `post_landing`, a
+    token the module must contain.
+    """
+    def search(pattern: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "grep", "-n", "-e", pattern, "--",
+                               "scripts/automod/review.py"],
+                              cwd=str(REPO), capture_output=True, text=True, timeout=120)
+
+    control = search("post_landing")
+    assert control.returncode == 0, (
+        f"the positive control found nothing, so the instrument, not the tree, is the "
+        f"problem: rc={control.returncode} cwd={REPO} stderr={control.stderr[:200]!r}")
+    gone = search("needs-human")
+    assert gone.returncode == 1, (
+        f"the retired tag is still named somewhere in the review rung "
+        f"(rc={gone.returncode}): {gone.stdout[:400]!r}")
+
+
+def test_the_grader_is_told_a_post_landing_clause_rides_the_owed_list(tmp_path):
+    """The instruction states the mechanism that actually runs: the clause index
+    is marked on the item, the item closes, and the confirmation becomes an `owed`
+    entry for the owed-check job. No board marker is claimed.
+
+    Every phrase here is the wording of the code that does it — `close_settled_items`
+    appends `confirm clause N now that the change is live` to the item's owed list
+    and `close_landed` strips the tag from every close — so the sentence cannot be
+    satisfied by prose that merely gestures at "someone will look".
+    """
+    prompt = _grader_prompt(tmp_path)
+
+    assert "It does not refuse the round" in prompt, "the instruction was reworded away"
+    assert "clause index is marked on the item" in prompt
+    assert "entry on its `owed` list" in prompt, "the owed list is not named where it is the mechanism"
+    assert "confirm clause N now that the change is live" in prompt, (
+        "the entry the closer actually mints is not quoted, so the grader still "
+        "cannot tell what will be asked of whom")
+    assert "`owed-check` job settles" in prompt
+    assert "writes no tag" in prompt, "the prompt never disclaims the board marker"
+    assert "needs-human" not in prompt and "closes carrying" not in prompt
+
+
+def test_the_post_landing_advisory_names_the_owed_entry_not_a_tag():
+    """The sentence the ROUND is told, under the same rule as the grader's.
+
+    `observable only after landing` is the prefix
+    `test_a_landing_clause_cannot_refuse_a_round_a_content_clause_still_can` pins
+    for the joined refusal text, so it is asserted here too rather than left to
+    drift out of one of the two surfaces.
+    """
+    parsed = {"premise": "sound", "summary": "s", "test_honesty": [],
+              "seams_unverified": [],
+              "clauses": [{"clause": 1, "verdict": "met", "note": "ran it"},
+                          {"clause": 2, "verdict": "post_landing", "note": "needs traffic"}]}
+    kind, blocking, advisory = RV._grade_entries(parsed, [])
+
+    assert kind == "pass" and not blocking, "a post_landing verdict must stay advisory"
+    assert len(advisory) == 1, f"expected only the landing advisory, got {advisory}"
+    line = advisory[0]
+    assert line.startswith("clause 2 observable only after landing: needs traffic"), line
+    assert "`owed` list" in line, "the advisory still does not name where the debt goes"
+    assert "confirm clause 2 now that the change is live" in line
+    assert "owed-check" in line
+    assert "needs-human" not in line and "tag" not in line

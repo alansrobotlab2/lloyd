@@ -2167,8 +2167,9 @@ async def _run_and_record(item, candidate, triage, budget, started,
     if landing_mismatch:
         logger.warning("backlog #%s: %s", candidate.id, landing_mismatch)
     # A path the round needed and the loop may never write. Recorded on the
-    # item, which tags it `needs-human` and holds it open — reported rather
-    # than hidden, which is what `git add -f` was.
+    # item as a `path` entry on its `owed` list, which the owed-check job
+    # settles — `record_human_paths` neither tags the item nor holds it open.
+    # Reported rather than hidden, which is what `git add -f` was.
     if outcome and outcome.get("human_paths"):
         try:
             recorded = B.record_human_paths(candidate.id, outcome["human_paths"],

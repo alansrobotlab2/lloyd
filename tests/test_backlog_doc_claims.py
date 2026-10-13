@@ -331,3 +331,79 @@ def test_every_backlog_module_the_prose_blames_actually_defines_that_symbol():
     # `cluster.py`'s `B.NEEDS_HUMAN_TAG` and every existing test still resolve it.
     from scripts.automod import backlog as loop_module
     assert loop_module.NEEDS_HUMAN_TAG == backlog_tags.NEEDS_HUMAN_TAG
+
+
+# ── #2658: who writes `needs-human`, and where a debt actually goes ──────────
+#
+# The tag table said "No code adds it". One place does, and the two prose sites
+# beside the owed mechanism said the opposite of what that mechanism is:
+# `record_human_paths` and its caller in the landing route both told a reader that
+# recording a path tags the item `needs-human` and holds it open, when the function
+# writes a `path` entry on the item's `owed` list and does neither. A sentence that
+# names the wrong destination is worse than no sentence: the reader stops looking,
+# and here they would have stopped looking at the one tag the 2026-09-27 ruling left
+# standing.
+
+
+def _tag_table_row(tag: str) -> str:
+    """One row of the tags table, by its tag cell, folded onto one line.
+
+    A whole-section check would pass with the wording sitting in another row, and
+    the row is the claim: a reader learns who writes a tag from the row for it.
+    """
+    rows = [ln for ln in DOC.read_text(encoding="utf-8").splitlines()
+            if ln.startswith(f"| `{tag}` |")]
+    assert len(rows) == 1, f"expected exactly one table row for {tag!r}, found {len(rows)}"
+    return " ".join(rows[0].split())
+
+
+def _grep_source(pathspec: str, pattern: str) -> subprocess.CompletedProcess:
+    """`git grep` over one pathspec, as a reader holding this file could run it."""
+    return subprocess.run(["git", "grep", "-n", "-e", pattern, "--", pathspec],
+                          cwd=str(ROOT), capture_output=True, text=True, timeout=120)
+
+
+def test_the_needs_human_row_names_the_writer_that_remains():
+    """The row states the ruling AND the one writer the loop keeps — clause 5.
+
+    "No code adds it" was false: `workers/sources/autocode.py` tags an umbrella it
+    closes `unnecessary`/`rejected` while its `members` are still folded, and
+    `_apply_status` subtracts a tag only when the caller names it in `remove_tags`,
+    so that tag survives its own close. A reader who believed the row would treat
+    the writer the ruling deliberately kept as a second bug to remove.
+    """
+    row = _tag_table_row("needs-human")
+
+    assert "Retired as a destination (2026-09-27)" in row, "the ruling itself was dropped"
+    assert "No code adds it" not in row, "the row still denies that any code adds the tag"
+    assert "workers/sources/autocode.py" in row, "the one live writer is not named"
+    assert "members" in row, "the row does not say the condition that writer fires on"
+    assert "owed" in row and "owed-check" in row, "the surviving destination is not named"
+    assert "#2658" not in row, "the row still points a reader at the item that fixed it"
+
+
+def test_the_human_paths_prose_no_longer_promises_a_tag_or_a_hold():
+    """What `record_human_paths` says about its own debt, and what its caller says.
+
+    The docstring is read off the function so a re-worded or deleted docstring
+    fails rather than passing on stale bytes; the caller's half is a comment, so it
+    is checked with the same `git grep` a reader can re-run, with a positive control
+    on `record_human_paths`, the call that comment sits above.
+    """
+    from scripts.automod import backlog as B
+
+    doc = " ".join((B.record_human_paths.__doc__ or "").split())
+    assert doc, "record_human_paths has no docstring to check"
+    assert "needs-human" not in doc, "the docstring still names the retired tag"
+    assert "`path` entry" in doc and "`owed` list" in doc, (
+        "the real destination of the debt is not stated")
+    assert "never a tag" in doc, "the docstring does not rule out the retired destination"
+
+    control = _grep_source("workers/sources/autocode.py", "record_human_paths")
+    assert control.returncode == 0, (
+        f"the positive control found nothing, so the instrument, not the tree, is the "
+        f"problem: rc={control.returncode} cwd={ROOT} stderr={control.stderr[:200]!r}")
+    gone = _grep_source("workers/sources/autocode.py", "needs-human")
+    assert gone.returncode == 1, (
+        f"the landing route still narrates the retired tag (rc={gone.returncode}): "
+        f"{gone.stdout[:400]!r}")

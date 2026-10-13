@@ -4270,9 +4270,11 @@ def record_human_paths(item_id: int, human_paths: list[dict],
     """Record paths a round needed and the loop may never write.
 
     `close_settled_items` treats these exactly like a human clause, which since
-    #1210 means: a `met` landing closes and the item carries `needs-human` with
-    the path named in its activity log. The debt is what survives the closure,
-    not an open row in the triage pool. Returns the paths recorded.
+    #1210 means: a `met` landing closes and each usable path is a `path` entry
+    on the item's `owed` list — written here, and the sweep's own write dedupes
+    against it — which the owed-check job settles. The debt is what survives the
+    closure, not an open row in the triage pool and never a tag. Returns the
+    paths recorded.
     """
     if not human_paths:
         return []

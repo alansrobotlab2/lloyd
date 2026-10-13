@@ -103,11 +103,13 @@ PREMISES = ("sound", "unsound")
 # nothing) or `partial` (a refusal, for a round that did the work). On the
 # 2026-09-11 scorecard that ambiguity is a large part of an 86% refusal rate.
 #
-# It is advisory at the gate and load-bearing afterwards: the clause is marked
-# on the item, `backlog.parse_outcome` accepts a `deferred`/`not_met` for that
-# index as met, and `close_settled_items` holds the item open with
-# `needs-human` exactly as a human clause does. The round lands; the claim
-# stays unmade until a person makes it.
+# It is advisory at the gate and load-bearing afterwards: the clause index is
+# marked on the item, `backlog.parse_outcome` accepts a `deferred`/`not_met` for
+# that index as met, and `close_settled_items` CLOSES the item with a
+# `confirm clause N now that the change is live` entry on its `owed` list, which
+# the owed-check job settles (`scripts/automod/owed.py`). Since 2026-09-27 that
+# debt has not been a tag a person has to notice. The round lands; the claim
+# stays unmade until the owed-check job rules on it.
 CLAUSE_VERDICTS = ("met", "partial", "unmet", "unsatisfiable", "post_landing")
 HOW_VERIFIED = ("ran", "read", "inferred")
 # A test-honesty entry is `blocking` when the test cannot fail, asserts nothing
@@ -1444,9 +1446,11 @@ against live data — is `post_landing`, not `partial` and not `unsatisfiable`. 
 Use it when the mechanism IS in the diff and looks right, and point \
 evidence_path at that mechanism; a `post_landing` with nothing to point at is \
 recorded as `partial`. It does not refuse the round: the change lands, the \
-clause is marked on the item, and the item closes carrying `needs-human` so a \
-person can find what they owe (#1210 — it used to be parked in `draft`, which \
-is the pool single-item triage reads). Reserve `unsatisfiable` for a clause no diff could EVER satisfy \
+clause index is marked on the item, the item closes, and what is still owed \
+becomes an entry on its `owed` list (`confirm clause N now that the change is \
+live`) which the `owed-check` job settles — a `post_landing` verdict writes no \
+tag (#1210 — it used to be parked in `draft`, which is the pool single-item \
+triage reads). Reserve `unsatisfiable` for a clause no diff could EVER satisfy \
 because it contradicts something — that is a defect in the contract, and its \
 remedy is an amendment, not a landing. #859 was refused twice on exactly the \
 post-landing shape and parked, with the mechanism complete on both commits.
@@ -3567,10 +3571,11 @@ def _grade_entries(parsed: dict, prechecks: list[dict],
                             f"ratifies or refuses the amendment")
         elif c["verdict"] == "post_landing":
             # Advisory at the gate: the mechanism is in the diff and pinned,
-            # and the claim itself waits for a human after the landing.
+            # and the claim itself waits for the owed-check job after the landing.
             advisory.append(f"clause {c['clause']} observable only after landing: "
-                            f"{c['note'] or '(no note)'} — the item closes carrying the "
-                            f"needs-human tag until someone confirms it")
+                            f"{c['note'] or '(no note)'} — the item closes and the debt "
+                            f"rides its `owed` list: confirm clause {c['clause']} now "
+                            f"that the change is live, for the owed-check job to settle")
         elif c["verdict"] != "met":
             tag = f" (downgraded: {'; '.join(c['downgraded'])})" if c.get("downgraded") else ""
             blocking.append(f"clause {c['clause']} {c['verdict']}{tag}: {c['note'] or '(no note)'}")

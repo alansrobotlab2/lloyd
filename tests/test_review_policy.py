@@ -54,12 +54,20 @@ def test_post_landing_is_a_clause_verdict():
 def test_a_post_landing_clause_does_not_refuse_the_round():
     """#859's exact shape: the mechanism is in the diff and correct, and the
     clause needs traffic that does not exist until it is live.
+
+    It used to close by asserting `"needs-human" in findings`, which pinned the
+    advisory's promise that the item closes carrying that tag. #2658 clause 1 and
+    clause 3 make that behaviour wrong: no landing path writes the tag since
+    2026-09-27, and the advisory has to name the `owed` entry the debt actually
+    becomes. So the assertion is inverted rather than dropped — the sentence is
+    still graded, for the opposite content.
     """
     kind, findings = RV.decide(
         _parsed(clauses=[_clause(1, "post_landing", note="needs a day of traffic")]), [])
     assert kind == "pass"
     assert "after landing" in findings
-    assert "needs-human" in findings
+    assert "confirm clause 1 now that the change is live" in findings
+    assert "needs-human" not in findings, "the advisory still names the retired tag"
 
 
 def test_a_post_landing_clause_needs_a_pinned_mechanism(tmp_path):
