@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, tools, safety]
 type: reference
 status: implemented
-date: 2026-09-13
+date: 2026-10-13
 ---
 
 # Editing safeguards: what stands between a turn and the tree
@@ -17,7 +17,7 @@ before assuming a layer can be turned off — or that it is installed.
 
 | Layer | Module | Switch | What it prevents |
 |---|---|---|---|
-| Read-before-edit and stale-file gates | `agent_mcp/builtin_fs.py` (`_read_records`, `_gate_check`) | `harness.edit_gates.enabled` | the edit that **succeeds** over another writer's change and silently reverts it |
+| Read-before-edit and stale-file gates | `agent_mcp/builtin_fs.py` (`_read_records`, `_gate_check`) | `harness.edit_gates.enabled` — the switch covers the clobber rules only; the protected-path deny-set `_gate_check` also runs refuses outside it | the edit that **succeeds** over another writer's change and silently reverts it; and, outside any switch, a write whose target is on the deny-set |
 | Diagnostics on the edit | `agent_mcp/_edit_diagnostics.py` | `harness.edit_diagnostics.python` | learning about a broken edit minutes later at the gate; reports only *introduced* pyflakes findings |
 | Blast radius on the edit | same, via `agent_mcp/code_graph.py` | `harness.edit_diagnostics.blast_radius` | changing an interface without seeing its callers in other files |
 | TypeScript diagnostics, later | `agent_mcp/_tsc_runner.py` | `harness.edit_diagnostics.typescript` | a `.tsx` edit that breaks the build; whole-project tsc is ~5 s, so it rides the drain queue |
