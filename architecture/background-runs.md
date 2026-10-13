@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, workers, autonomy, inner-voice, sessions]
 type: reference
 status: implemented
-date: 2026-09-13
+date: 2026-10-13
 ---
 
 # Background runs: recorded always, observed on request
@@ -58,6 +58,17 @@ a single autonomy run had been recorded. Recording adds ~173 a day more, so
 the directory's growth is now roughly 240 background sessions a day against
 14 chats. Most of what follows exists because of that ratio.
 
+Hold that number against §8's "~300 background sessions a day", because they
+are two different quantities and the page had better not blur them: ~240/day is
+sessions *created* (the ~173 direct-path runs plus 68 session-backed worker
+sessions from the table above), while the 306 and 298 in §8 are files whose
+mtime *fell* on a day, counted by walking `sessions/` — the second also counts a
+backfill or an edit touching an old file. Both are 2026-09 snapshots. Measured
+again 2026-10-13 by the same directory walk: 266 sessions in the preceding 24 h
+and 451 in the 24 h before that, of which 24 and 36 are autoresearch bench
+trials, a class that did not exist as a writer when these tables were cut
+(`run_bench_sdk` started recording on 2026-09-14 — §12).
+
 ## 3. Two axes
 
 **Recording** and **observation** are different things and are switched
@@ -80,7 +91,9 @@ unrecorded.
 ## 4. The recorder
 
 `app/run_recorder.py::record_events(events, *, session_id, turn_id, prompt,
-model, source)` is an async generator. It wraps an existing `run_query(...)`
+model, source, disallowed_tools)` is an async generator (`disallowed_tools` is
+the writing turn's deny list, so a spilled tool result's recovery sentence
+offers only what that run can call — #1066). It wraps an existing `run_query(...)`
 stream, persists each event, and **re-yields every event unchanged**:
 
 ```python
@@ -142,20 +155,31 @@ paths — and a second writer would have needed a second private copy. Both
 writers call the builders now, and `tests/test_transcript_entries.py` feeds
 the same events to each and asserts the entries are identical.
 
-Two optional fields stay optional, because every session on disk predates
-them: `summary` on a tool call is omitted when empty, and `is_error` on a tool
-result's stats is omitted when the writer did not see the result — the two
-reconstruct-from-the-log paths never did, and writing `false` there would turn
-"we never saw it" into "it was fine". `role="thinking"` rows keep `content`
-empty; the role is what keeps reasoning out of every transcript producer (see
+Five fields are conditional rather than always-present, because every session
+on disk predates them: `summary` on a tool call is omitted when empty, and
+`is_error` and `raw_chars` on a tool result's stats are omitted when the
+writer did not see the answer — the two reconstruct-from-the-log paths never
+did, and writing `false` there would turn "we never saw it" into "it was
+fine" (`raw_chars` is the length *before* the harness truncated or spilled
+it, which is the only size that survives a spill, since `result_chars`
+saturates at the cap). `persisted_path` is present only on a row that is a
+pointer, and `turn_id` on a user, tool-call or tool-result row is omitted when
+the writer does not know it. `role="thinking"` rows keep `content` empty; the
+role is what keeps reasoning out of every transcript producer (see
 `architecture/inner-voice.md` and `tests/test_thinking_trace_transcripts.py`).
 
-A tool result is truncated at `TOOL_RESULT_MAX_CHARS` (2000) before it is
-written, with `...(truncated)` appended. The full text went to the model; the
-transcript is the human-facing record, and a 300 kB `Read` result sitting in
-it helps nobody. Worth knowing when reading a run back: the transcript is
-faithful about *which* calls were made and lossy about the long results, so
-an audit that needs the whole of one goes to the tool's own output, not here.
+A tool result over `TOOL_RESULT_MAX_CHARS` (2000) is no longer written cut
+down to size. Since D1 (2026-09-24) `shape_tool_result_for_transcript` hands
+it to the same `maybe_spill` the live loop uses, at that lower threshold, so
+the row carries a `<persisted-output>` pointer into
+`<sid>.tool-results/<call_id>.{txt,json}` and `stats.persisted_path` names the
+file — one vocabulary with the live turn, which is also why microcompact can
+shrink the row to its header without losing the path. The old cut at 2000 with
+`...(truncated)` appended survives as the fallback only: spill switched off
+(`compaction.transcript_spill.enabled`), no session or call id to name a file
+by, or the spill write failing. So the transcript is faithful about *which*
+calls were made, and a long result is one hop away rather than gone: an audit
+that needs the whole of one follows the pointer.
 
 ## 6. One session writer
 
@@ -210,7 +234,8 @@ Four records per run, and each can reach the others.
   `setPendingFocus` + `setCurrentTab` pair §11's Runs bullet uses, so a session
   the reader's own list has never seen still opens. An empty array is the honest
   answer, not a gap: §12 lists the sources that record no transcript by design —
-  `automod-regression`, `autoresearch` among them — and a run that dies before
+  `automod-regression` among them (autoresearch *does* record, since
+  `4abc079a`) — and a run that dies before
   `create_session` names none, so those rows render no control.
   The write half long predates the read half — until 2026-09-24 nothing parsed
   either key, and this bullet's claim that one record of a run names the
@@ -340,26 +365,42 @@ listing:
   mis-labelled run under — `source` is written on a background row and blanked on a
   chat row, so an unclassified four-part session carries no platform and no source
   and only its own file can say what it is. What the budget refuses is spending
-  reads in proportion to the directory: reads are capped, membership never is.
+  *parsing* reads in proportion to the directory: the ceiling caps the half whose
+  membership the name cannot settle, membership is never capped. Be honest about
+  what that leaves open — the four-part half is opened uncapped by design, one 2 KB
+  head each, and that head is now the bulk of the cost: measured 2026-10-13 over
+  `sessions/`, **10,514 four-part files, 20.3 MiB, 153 ms per walk**, against the
+  55 ms over 3,854 files the endpoint's own comment still quotes from 2026-09-21,
+  and `BackgroundPage.tsx` polls it every 10 s (#2646).
   Budgeting *reads* rather
   than *reach* is what makes this hold on live data instead of only in a test: a rule
   bounded by a scan window silently stops applying to everything older than the
   window, and all 12 orphan sessions below sit past rank 600 in mtime order (newest
   at rank 1234, oldest at rank 3630), so the previous "open the newest 600, judge
   what you read" loop could not have returned one of them with the predicate fixed
-  or not. Measured over those 4,046 files at the tab's own limit: 521 ms for the
+  or not. Measured over those 4,045 files at the tab's own limit: 521 ms for the
   old loop, which reached 594 candidate rows in its 600 reads, and 401 ms for the
   two-phase one, which finds 3,848 candidates and builds 150 rows.
 
-What that changed is on disk: twelve sessions in four-part ids carry
+What that changed was on disk: twelve sessions in four-part ids carried
 `platform: mission-control` — eight named `20260909_1538xx_autonomy_<4hex>`,
 created within 11 seconds by the sandbox experiment above, plus four minted
 since, newest `20260917_105134_autocode_029c`. The chat listings skip a four-part
 name unread, and the Background listing used to drop them for being
-user-labelled, so they appeared in neither. They are now the Background tab's,
+user-labelled, so they appeared in neither. They became the Background tab's,
 and `_save_session_meta` stamps a newly created four-part session `worker`
 instead, so no fresh run joins the set. They hold one or two user rows each and
 are not conversations, which is why the Background tab is where they belong.
+
+**That census no longer reproduces, and the reason is the retention rule two
+paragraphs below.** Re-measured 2026-10-13 over every readable head in
+`sessions/`: **no four-part id carries a human platform at all.** The eight
+`20260909_1538xx_autonomy_*` files exist only as `.json.gz` — archived, and the
+Background endpoint globs `*.json`, so an archived member of the class is in no
+listing — and `20260917_105134_autocode_029c` exists under no suffix. So the
+class the exemption exists for is currently empty, and the exemption's promise
+("never aged out") holds for 30 days, not forever: #2647. Treat the twelve as
+the incident that motivated the rule, not as live rows to go looking for.
 
 `_scan_recent_sessions` used to keep the newest 24 files by mtime and only
 then drop non-user rows, which with 22 of the newest 24 already background
@@ -437,6 +478,7 @@ override with a literal reads as broken the one time somebody uses it.
 | `deep-research` | false | a human reads the note before anything acts on it |
 | `arch-review` | false | reviews docs and edits the one doc it was given (`f80c9d0`) |
 | `board-steward` | false | moves backlog statuses (`6d59b7c`); unset until #1015, so it was observed |
+| `owed-check` | false | the seventh session-backed source; keyed off in config.yaml, and the table's "six" predates it |
 
 **All six were off** from 2026-09-12 (`97a86cc`, cut 1 of
 senses-not-supervision; `board-steward` since #1015), pinned by
@@ -461,7 +503,8 @@ then the fallback was `True`, and `board-steward`, added with no key, was
 watched on primary every 15 minutes against the measured default while the
 tests that should have caught it named five sources and four files by hand.
 The test now discovers the session sources from `workers/sources/*.py` and
-resolves each against the shipped config, so an unkeyed seventh fails it.
+resolves each against the shipped config, so a source added without a key —
+an eighth, once `owed-check` is counted — fails it.
 
 `/api/workers/health` reports the key tri-state for the same reason — `null`
 means "not set", which for a direct-path source means "not observable", and a
@@ -490,9 +533,15 @@ needed the regex fallback keeps its opt-in. The fleet default is read through
 
 ### How the flags reach the session
 
-`create_session` writes `inner_voice` and `inner_voice_evaluate_user_turns`
-equal to each other, from the job's switch. They have to move together
-because the two kinds of turn arrive differently: a worker's prompt is posted
+`create_session` writes `inner_voice_evaluate_user_turns` equal to `inner_voice`
+when the caller passes no separate value, which is what every background path
+does — `new_worker_session` hands it the job's one switch, and
+`run_prompt_on_primary` creates its session with both off. The parameter exists
+because the two are no longer the same decision for a *created* chat stub
+(`POST /api/sessions/create` takes them apart, and refuses
+`inner_voice_evaluate_user_turns: true` without `inner_voice: true`), so read
+"equal by default" here, not "one field". They still have to move together
+for a background job, because the two kinds of turn arrive differently: a worker's prompt is posted
 to the chat endpoint as a *user* turn, where the observer fires only if
 `inner_voice_evaluate_user_turns` is set; an autonomy run attaches with
 `turn_source="ambient"`, where the master flag alone decides. A
@@ -562,12 +611,26 @@ installs:
   implemented was advertised `automod_start`. Now the endpoint unions the ban
   for any `NON_USER_PLATFORMS` session whose `source` is not in
   `AUTOMOD_DRIVER_SOURCES` (`autocode`, whose turn drives the loop on
-  purpose), at the same three sites as the grant ban.
-- **All three registry-building sites arm it** — the stream endpoint, the
-  synchronous one, and `build_ambient_turn`, where it cannot fire today
-  because `/inject` refuses a non-user session with 409. "The other endpoint
-  is the ungated one" is the bug being closed; the count is pinned in
-  `tests/test_grant_gate_session_path.py`.
+  purpose), at the same site as the grant ban — one branch of
+  `turn_options.build_turn_options`, applied to every kind but `voice`
+  (`tests/test_grant_gate_session_path.py::test_every_site_that_bans_minting_also_bans_automod`).
+- **One builder arms it, since P13.4.** This used to read "all three
+  registry-building sites — the stream endpoint, the synchronous one, and
+  `build_ambient_turn`", and the count was the pin. There is now exactly one:
+  `app/routers/turn_options.py::build_turn_options` builds the `RunOptions`,
+  the `HookRegistry`, the safety hook, the grant gate and both tool bans for
+  every turn kind — `stream`, `ambient`, `flush` and `voice` — and the
+  synchronous `POST /api/message` was deleted with that change. The
+  `kind != "voice"` branch is deliberate and is the only unarmed kind: a
+  spoken turn is always a person's, so it gets the safety floor and no grant
+  gate and no platform. "The other endpoint is the ungated one" is still the
+  bug being closed; the pin is now that `hooks = HookRegistry()`,
+  `install_default_safety_hook(hooks)` and `install_policy_hook(hooks,
+  scope=grant_scope)` each appear **once** in the builder
+  (`tests/test_grant_gate_session_path.py`), with per-kind behaviour held in
+  `tests/test_turn_options.py`. `_run_turn` still tops the registry up with
+  the deterministic turn guards, because that is where the turn id exists and
+  every kind passes through it.
 
 **It denies nothing a worker does today.** Tier 1 is everything unclassified —
 `Bash`, `Edit`, `Write`, `Read`, `backlog_write_task`, `vault_write` all pass —
@@ -614,8 +677,12 @@ volume a list would be a wall of near-identical titles in the model's context.
 
 **The tab is a recent view, not an archive.** The page requests the newest
 150 background sessions and the endpoint builds 150 rows, newest first, from the
-candidates phase 1 settled — which at ~240 a day is the last ~15 hours on screen
-and ~1½ days reachable. Two exclusions keep that window honest rather than merely
+candidates phase 1 settled — which at the ~240 a day of background sessions
+measured for this page's first draft is the last ~15 hours on screen
+and ~1½ days reachable. Re-measured 2026-10-13 from `sessions/` mtimes: 266
+sessions created in the preceding 24 h and 451 in the 24 h before that (24 and 36
+of them bench trials, §12), so the ordinary window is nearer 8-12 hours now.
+Two exclusions keep that window honest rather than merely
 recent. A row is not dropped for a value nobody read: `platform` sits ~165 bytes
 into every session file, so a cheap head read decides whether a candidate is an
 ordinary machine run (whose recency is all the tab has to offer) or a chat-shaped
@@ -623,9 +690,11 @@ or mis-labelled one, and only the ordinary pool is cut to `limit`. And the *read
 stay budgeted — `_BACKGROUND_PLATFORM_SCAN_CEILING`, 600 files, spent on the
 ambiguous chat-shaped half alone — so an aging directory cannot turn one refresh
 into a multi-second request. Every four-part file is therefore still *considered*
-for membership however old it is, which is how the 12 mis-labelled sessions get
+for membership however old it is, which is how the 12 mis-labelled sessions got
 listed at all; they are listed ahead of ordinary runs, since the tab's ordinary
-window will not reach them otherwise and nothing else lists them. Paging past
+window will not reach them otherwise and nothing else lists them. (That class is
+empty on live data now, and archiving a member ages it out after all — §8,
+#2647.) Paging past
 `limit` is not built; `unclassified` names the chat-shaped files the read budget
 could not reach, so `count: 150` cannot be read as "there are 150". Older
 transcripts stay on disk for 30 days, openable by id.
@@ -636,25 +705,39 @@ transcripts stay on disk for 30 days, openable by id.
 
 | what | why |
 |---|---|
-| autoresearch bench trials | `run_bench_sdk` persists nothing by design — "session quarantine", pinned by `test_trials_do_not_write_session_files`. A trial measures a prompt variant; it is not work anyone reviews, and hundreds of them would bury the runs that are. |
+| ~~autoresearch bench trials~~ **moved out of this table** | This row was the page's most consequential lie. `run_bench_sdk` used to persist nothing — "session quarantine", pinned by `test_trials_do_not_write_session_files`, a test that no longer exists. `4abc079a` (2026-09-14, the vault-protection landing) inverted it, because the two vault wipes this page exists to learn from were caused by trials that, by design, left no transcript naming a single command they ran. What is quarantined now is the *machine*: the trial's session id is one `agent_mcp/_tool_sandbox.py` recognises (read-only bwrap Bash, non-`readOnlyHint` tools refused), `require_tool_sandbox` refuses to start a trial without it, and **every trial is recorded** through `record_events` into a `platform: worker`, `source: bench` session — 2,544 of them live on 2026-10-13, 24% of `sessions/` (#2648). It still stays out of `messages._run_turn`: no prefetch, no post-session capture, no titler, no ambient producers. |
 | `_common.run_prompt_with_run_state` (#529) | Keeps its own per-step `state-trace.ndjson`, and has no single transcript to persist because each step's transcript is deliberately dropped. Nothing in production calls it yet. |
 | `automod-regression` | Runs its eval arms as subprocesses; there is no agent turn. |
 
 ## 13. Known limits
 
-- The twelve mis-labelled sessions (§8) are listed by the Background tab and by
-  no chat listing, which since #1064 is where they belong. The file still carries
-  `platform: mission-control`, so anything that reads that key directly instead of
-  through `is_conversation_session` still sees a human conversation.
-- `backlog-cluster` carries an `inner_voice` key it cannot use, so
-  `/api/workers/health` reports it `false` rather than `null` — observable-
-  but-off, for a source with no agent turn (§9).
-- The Background tab shows the newest 150 runs out of at most 600 scanned (§11).
-- `workers.db` now prunes `runs` at 30 d and still does not prune `queue` — the
-  horizon for those rows is a decision on #1018, not a gap nobody noticed (§8).
+- The four-part ids carrying a human platform (§8) are gone from live data, so
+  the class the Background tab's never-aged-out exemption exists for is empty
+  today. The exemption is still in the endpoint, and its real limit is now the
+  opposite of the old one: the sweep archives a background session at 30 days
+  and the endpoint globs `*.json`, so a member of that class is reachable for a
+  month and then listed by nothing (#2647).
+- `backlog-cluster` does **not** carry the key any more. `#1015` removed it and
+  `/api/workers/health` reports the source `inner_voice: null` (measured
+  2026-10-13), which is the honest answer for a source with no agent turn. An
+  earlier draft of this section said it still reported `false`; §9's account is
+  the true one.
+- The Background tab builds 150 rows, but membership is not windowed by a scan
+  count: the 600 ceiling bounds only the reads of chat-shaped names, while every
+  four-part file is opened for a 2 KB head on every 10 s poll — 10,514 reads and
+  153 ms per walk on 2026-10-13, which is the limit that actually bites (§8,
+  #2646).
+- `workers.db` prunes `runs` at 30 d **and** the terminal `queue` rows at 30 d
+  (`QUEUE_MAX_AGE_DAYS`, #1466); a live `queued`/`claimed`/`running` row is
+  never deleted whatever its age (§8). This section used to say `queue` was
+  still unpruned pending #1018, which the tree disproves.
 - Session ids are local time; an autonomy `run_id` is UTC. Both are labels,
   and the join between them is explicit (§7), but they will not line up by eye.
-- The vault-protection audit of `safety.py` is not done (§10).
+- The vault-protection follow-up closed on 2026-09-14 (§10), and `safety.py` now
+  delegates the delete/write lanes to `app/harness/protected_paths.py` with
+  `tests/test_safety_gate_discrimination.py` exercising the gate; this page is
+  not where its state is tracked — [[vault-protection]] is. What remains true is
+  §10's point: the grant gate is none of those four layers.
 
 ## Files
 
@@ -668,6 +751,7 @@ transcripts stay on disk for 30 days, openable by id.
 | `workers/pool.py` | `session_ids` on every run row |
 | `workers/queue.py` | `run_rollup_by_source` |
 | `app/routers/messages.py` | `_authority_scope_for`, `_ban_grant_minting`, the shared builders |
+| `app/routers/turn_options.py` | `build_turn_options` — the one registry/`RunOptions` builder for all four turn kinds, where the grant gate and both tool bans are armed (§10) |
 | `app/routers/sessions.py` | `/api/sessions` fast path, `/api/background/sessions` |
 | `app/routers/workers.py` | `/api/workers/health`, `/api/workers/runs`, `run_session_ids` (the §7 join, parsed) |
 | `app/post_capture.py`, `app/paths.py` | `sessions-background/` export |
@@ -682,10 +766,29 @@ transcripts stay on disk for 30 days, openable by id.
 |---|---|
 | `tests/test_transcript_entries.py` | both writers produce identical entries |
 | `tests/test_run_recorder.py` | passthrough, both direct paths, partial transcript on a killed run, `role="thinking"`, both ids set, kill switch |
-| `tests/test_grant_gate_session_path.py` | which turns are gated, the mint ban, the three sites, fail-closed store |
+| `tests/test_grant_gate_session_path.py` | which turns are gated, the mint ban, that the one builder arms each hook exactly once (per-kind behaviour in `tests/test_turn_options.py`), fail-closed store |
 | `tests/test_background_inner_voice.py` | frontmatter beats config, observer keeps the grant hook, cancel lever, closes on failure, one reader for the source switch, override merge |
 | `tests/test_session_platform_checks.py` | no hand-rolled platform check, retention agrees, the id creators |
 | `tests/test_dashboard_sections.py` | background runs do not starve the recent panel |
 | `tests/test_api_contracts.py` | `/api/background/sessions`, `/api/workers/health`, the two listings are complements, created sessions are chat-shaped |
 | `tests/test_workers_router.py` | the §7 join as a parsed `session_ids` field on `/api/workers/runs` and on `recent` in `/api/workers/health`: both meta keys unioned, one entry per transcript, `[]` for a row that names none — plus the Sources row's markup (one control per transcript, opening the mapped id), and this page's own §7 bullet naming the surface a human walks |
 | `web/src/lib/runSessions.test.ts` | the Sources panel's derivation, and that the page threads its own reader callback to the run rows (the click itself is human-only: no renderer in this vitest config) |
+
+## Review log
+
+- 2026-10-13 — **stale**. Checked every path, count, config key and named test in
+  the page against `0cbb7ea49c62`. The mechanism sections still describe the tree
+  (recorder, transcript shape, the two predicates, the joins, per-job
+  observation, the grant gate); four things had moved underneath it. §5 still
+  described a tool result as cut at 2 KB, when D1 made a long result a
+  `<persisted-output>` pointer into `<sid>.tool-results/`; §10 still counted
+  "three registry-building sites", when P13.4 collapsed them into
+  `turn_options.build_turn_options` and deleted the synchronous route; §12 still
+  said autoresearch bench trials persist nothing, when `4abc079a` inverted that
+  in favour of quarantining the machine and recording every trial; and §13's
+  Known limits contradicted §8, §9 and §10 in the same page on `queue` pruning,
+  `backlog-cluster`'s key and the vault-protection follow-up. The twelve
+  mis-labelled sessions §8 census are no longer on live data at all. Filed
+  #2646 (the endpoint's uncapped four-part head walk), #2647 (the never-aged-out
+  exemption expiring at the sweep's 30-day archive) and #2648 (the recorded
+  `source: bench` class has no life).
