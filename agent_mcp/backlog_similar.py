@@ -39,6 +39,7 @@ from pathlib import Path
 
 import yaml
 
+from app.backlog_paths import backlog_hit_id
 from app.backlog_status import OPEN_STATUSES
 
 DEDUPE_LOG = Path.home() / ".local" / "state" / "lloyd-automod" / "dedupe.jsonl"
@@ -85,7 +86,11 @@ _FM_END_RE = re.compile(r"^---[ \t]*$", re.M)
 # closed items were merge targets, rule B was unreachable for them, and the
 # lexical leg compared body prose to their raw YAML.
 _FM_LIMIT_BYTES = 65536
-_QMD_ID_RE = re.compile(r"(?:^|/)(\d+)[-_][^/]*\.md$")
+# A hit's path becomes an id only through `backlog_hit_id`, which requires it
+# to be a direct child of the collection root: the `backlog` collection is
+# `pattern: "**/*.md"`, so `backlog/data/`'s run witnesses are embedded too,
+# and this regex's `(?:^|/)` start anchor read `2026-09-30.components-witness.md`
+# as task #2026 (#2657).
 
 
 def dedupe_config() -> dict:
@@ -216,14 +221,14 @@ def semantic_candidates(text: str, *, limit: int = 6, timeout: float = 5.0) -> l
         data = qmd_query(payload, timeout=timeout)
         out: list[dict] = []
         for r in data.get("results", []) or []:
-            m = _QMD_ID_RE.search(str(r.get("file") or ""))
-            if not m:
+            iid = backlog_hit_id(r.get("file"))
+            if iid is None:
                 continue
             try:
                 score = float(r.get("score") or 0.0)
             except (TypeError, ValueError):
                 score = 0.0
-            out.append({"id": int(m.group(1)), "score": round(score, 3)})
+            out.append({"id": iid, "score": round(score, 3)})
         return out
     except Exception:  # noqa: BLE001 — fail open
         return None

@@ -461,3 +461,103 @@ def test_an_open_match_still_merges_ahead_of_a_closed_one(board, monkeypatch):
     _vec(monkeypatch, [{"id": 10, "score": 0.9}, {"id": 12, "score": 0.9}])
     out = _write(_spawn(*SAME))
     assert out["merged_into"] == 12
+
+
+# ── #2657: the `backlog` collection is recursive, the board is not ──────────
+# `~/.config/qmd/index.yml` embeds `/home/alansrobotlab/obsidian/backlog` with
+# `pattern: "**/*.md"`, so the 39 run witnesses and dry-run records under
+# `backlog/data/` are in the index with chunk-0 vectors, while the real tasks
+# are flat `{id}-{slug}.md` at the root. Both readers that turn a hit's path
+# back into an id accepted any path component starting with digits, so
+# `data/2026-09-30.components-witness.md` was task #2026 — measured on the
+# running daemon on 2026-10-13: a `vec`+`rerank` query over a witness's own
+# text answers `qmd://backlog/data/2026-10-02.2047-mirror-refresh-deadlock-witness.md`
+# at reranker **1.000**, and `semantic_candidates` returns it as `{'id': 2026,
+# 'score': 1.0}` with the nearest REAL neighbour at 0.63.
+
+#: The stored form qmd keeps for a `backlog` row: relative to the collection
+#: root, no `backlog/` prefix (`SELECT path FROM documents WHERE
+#: collection='backlog' AND path NOT LIKE '%/%' LIMIT 3` on the live index).
+#: The daemon's reply adds the scheme and the collection name.
+WITNESS_ROW = "data/2026-09-30.components-witness.md"
+WITNESS_QMD = "qmd://backlog/data/2026-10-02.2047-mirror-refresh-deadlock-witness.md"
+#: Bound at import, before the `board` fixture replaces the module attribute:
+#: the tests below need the real semantic leg running over a faked transport.
+_REAL_SEMANTIC = SIM.semantic_candidates
+
+
+def _daemon(monkeypatch, results):
+    """The qmd daemon's `/query` reply — the one process boundary
+    `semantic_candidates` crosses (`agent_mcp.vault.qmd_query`, a POST to
+    127.0.0.1:8139 that folds `meta` into `app/qmd_health.py`). `results` is
+    the daemon's own row shape, `file` spelled as it spells it."""
+    import agent_mcp.vault as V
+    monkeypatch.setattr(SIM, "semantic_candidates", _REAL_SEMANTIC)
+    monkeypatch.setattr(V, "qmd_query", lambda payload, **kw: {"results": list(results)})
+
+
+def test_a_witness_hit_yields_no_id_and_a_root_hit_still_does(monkeypatch):
+    """Clause 1: the witness at 1.0 contributes no id and no score, and the real
+    item beside it keeps its own. On the live daemon this query asked for six
+    rows and got the witness at 1.0 plus 2054/2520/2050/2036/2243 at 0.63-0.54;
+    here the same rule is shown on two rows so the assertion is exact."""
+    _daemon(monkeypatch, [{"file": f"qmd://backlog/{WITNESS_ROW}", "score": 1.0},
+                          {"file": "qmd://backlog/2054-x.md", "score": 0.63}])
+    assert SIM.semantic_candidates("anything at all") == [{"id": 2054, "score": 0.63}]
+
+
+@pytest.mark.parametrize("prefix", ["", "qmd://backlog/"])
+def test_a_hit_sitting_at_the_collection_root_maps_to_its_id_exactly_as_before(prefix, monkeypatch):
+    """Clause 4: the fix is `data/**` stops being an id, not that ids stop.
+    Both spellings a `backlog` hit arrives in — qmd's stored root-relative
+    path and the daemon's `qmd://backlog/…` — produce the ids and scores this
+    code produced before it was narrowed."""
+    _daemon(monkeypatch, [{"file": f"{prefix}2054-tokens.md", "score": 0.9},
+                          {"file": f"{prefix}363-retrieval.md", "score": 0.55}])
+    assert SIM.semantic_candidates("anything at all") == [
+        {"id": 2054, "score": 0.9}, {"id": 363, "score": 0.55}]
+
+
+def test_a_witness_only_reply_builds_no_vec_row_and_leaves_the_lexical_rows(board, monkeypatch):
+    """Clause 2: a `vec` row is built by globbing the REAL `{id}-*.md`, so it
+    carries that item's title and status with the WITNESS's reranker score —
+    which is how a score a file's own text earned ends up on a title it was
+    never compared against. Here the only reply is the witness, and the id it
+    misreads (#2026) is on disk as a closed item whose prose does not match
+    the spawn, so any row for it can only have come from the vector leg."""
+    write(board, 2026, "Rotate the guardian's voice log weekly",
+          "voice.log grows without bound in the guardian state dir.", status="done")
+    write(board, 10, *EXISTING)
+    _daemon(monkeypatch, [{"file": f"qmd://backlog/{WITNESS_ROW}", "score": 1.0}])
+    rows = SIM.similar_items(SAME[0], SAME[1], backlog_dir=board)
+    assert [r for r in rows if r["source"] in ("vec", "both")] == []
+    lexical = SIM.similar_items(SAME[0], SAME[1], backlog_dir=board,
+                                semantic=lambda text, **kw: [])
+    assert [r for r in rows if r["source"] == "lex"] == lexical, "the lexical leg is untouched"
+
+
+def test_a_witness_reply_no_longer_refuses_a_spawn_as_a_duplicate_of_a_closed_item(board, monkeypatch):
+    """The harm #2657 measured as REACHABLE: `closed_match` applies the same
+    rule A to CLOSED rows, and its caller REFUSES a `spawned-by-*` create as a
+    duplicate of that item (#1051). Here #2026 is closed with a retirement
+    decision in its activity log, which is what puts it on that path at all.
+    With the witness as the only reply, id 2026 reached `closed_match` at
+    reranker 1.0 and a spawn of a real new problem was refused as its duplicate
+    on a score the witness's own text earned against itself.
+
+    The positive control comes first and writes nothing: the same fixture, the
+    same reply shape, but the hit is item #2026's own flat file — it still
+    refuses with `closed_match.id == 2026`. So a green below cannot mean the
+    semantic leg stopped running; only the witness's claim to be an id went
+    away. Running the replaced extraction — `(?:^|/)(\\d+)[-_][^/]*\\.md$`
+    searched over the whole path — in place of `backlog_hit_id` reproduces the
+    same refusal from the witness reply, which is what makes the last assertion
+    a test of the fix and not of the fixture."""
+    write(board, 2026, *EXISTING, status="done", activity_log=RETIRED_LOG)
+    _daemon(monkeypatch, [{"file": "qmd://backlog/2026-guardians-voice-log.md", "score": 1.0}])
+    control = json.loads(BL._handle_write(_spawn(*SAME)))
+    assert control["refused"] is True and control["closed_match"]["id"] == 2026
+
+    _daemon(monkeypatch, [{"file": WITNESS_QMD, "score": 1.0}])
+    out = _write(_spawn(*SAME))
+    assert out["created"] is True and "refused" not in out and "closed_match" not in out

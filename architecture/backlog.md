@@ -46,6 +46,20 @@ in Obsidian while four programs are writing to it.
 ## Storage
 
 - **Path:** `~/obsidian/backlog/{id}-{slug}.md`, flat — no board subdirectories.
+- **Being flat is a read-side contract, not only a write-side convention.** The
+  qmd `backlog` collection indexes that directory recursively, so the run
+  witnesses and dry-run records under `backlog/data/` are embedded and
+  searchable *beside* the tasks while no reader globs the directory that way —
+  which means a reader that takes an item id from any component of a hit's path
+  reads a date-stamped witness as an item, and a similarity score a witness
+  earned against its own text ends up spent on that item's title and status.
+  `app/backlog_paths.py` is the one definition of which hit stands for which
+  item: an id is taken only from a path that is a direct child of the collection
+  root, so a `backlog/data/` row carries no id, no score and no vector. Both
+  readers that map a hit back to an item — `agent_mcp/backlog_similar.py` over
+  the daemon's reply and `scripts/automod/cluster.py` over the index's own rows —
+  go through it. The witness rows stay embedded; what changed is that nothing
+  reads an item out of them.
 - **Id:** parsed from the **filename** (`^(\d+)[-_].*\.md$`), not the
   frontmatter. A create takes `max(existing ids) + 1`. 188 legacy files still
   carry an `id:` key; no current writer emits one — `agent_mcp/backlog.py::save_task`

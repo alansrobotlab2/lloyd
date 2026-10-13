@@ -43,6 +43,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.backlog_paths import backlog_hit_id
 from scripts.automod import backlog as B
 from scripts.automod import state as S
 
@@ -154,11 +155,13 @@ def load_vectors(items: list[B.Item], *, db: Path | None = None, so: Path | None
     except Exception:  # noqa: BLE001 — degrade to the other two signals
         return {}
     for path, blob in rows:
-        m = re.match(r"^(\d+)[-_]", os.path.basename(str(path)))
-        if not m:
-            continue
-        iid = int(m.group(1))
-        if iid not in wanted:
+        # The collection is `pattern: "**/*.md"`, so this row set also holds
+        # `backlog/data/`'s run witnesses. Reading the id off
+        # `os.path.basename(path)` made every date-stamped witness item #2026,
+        # and the `out[iid] = v` below then let whichever row qmd returned last
+        # decide what that item's vector was (#2657).
+        iid = backlog_hit_id(path)
+        if iid is None or iid not in wanted:
             continue
         v = np.frombuffer(blob, dtype=np.float32)
         norm = float(np.linalg.norm(v))

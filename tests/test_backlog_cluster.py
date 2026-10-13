@@ -559,3 +559,107 @@ def test_a_rebuild_over_an_empty_pool_resets_the_age_the_gates_measure(isolated)
         "`write_clusters` has gone conditional, so the mtime the two gates read is "
         "no longer the last pass and the docstring's 'resets its age' is false "
         "again — along with the reason the 20 h branch almost never fires")
+
+
+# ── #2657: only a flat row is an item's vector ─────────────────────────────
+# `load_vectors` selects every active chunk-0 row of the `backlog` collection,
+# and that collection is `pattern: "**/*.md"` over the board directory, so the
+# 39 witnesses under `backlog/data/` are in the row set. The id came from
+# `os.path.basename(path)`, which throws away the one thing that says a row is
+# not a task — its directory — so `data/2026-09-30.components-witness.md`
+# claimed to be item #2026. Against an open #2026 the `out[iid] = v` below then
+# made whichever row qmd returned last that item's vector.
+
+WITNESS_ROW = "data/2026-09-30.components-witness.md"
+
+
+def _qmd_index(path: Path, rows: list[tuple[str, list[float]]]) -> Path:
+    """A scratch index holding the three tables `load_vectors` joins, with the
+    join key spelled `hash || '_' || seq` as the live one has it. Plain tables,
+    so the query runs without a vec0 virtual table; `so` is still the real
+    extension because `load_vectors` loads it before it selects."""
+    import sqlite3
+
+    import numpy as np
+    path.unlink(missing_ok=True)  # the caller rebuilds it per row set
+    con = sqlite3.connect(path)
+    con.executescript("create table documents(path text, hash text, collection text, active int);"
+                      "create table content_vectors(hash text, seq int);"
+                      "create table vectors_vec(hash_seq text, embedding blob);")
+    for i, (row_path, vec) in enumerate(rows):
+        con.execute("insert into documents values (?,?,'backlog',1)", (row_path, f"h{i}"))
+        con.execute("insert into content_vectors values (?,0)", (f"h{i}",))
+        con.execute("insert into vectors_vec values (?,?)",
+                    (f"h{i}_0", np.asarray(vec, dtype=np.float32).tobytes()))
+    con.commit()
+    con.close()
+    return path
+
+
+def test_load_vectors_takes_an_item_vector_only_from_its_flat_row(isolated, monkeypatch):
+    """Clause 3: fed the witness and the flat `2026-<slug>.md` row for one
+    wanted id, the vector is the flat row's in EITHER order — and a witness row
+    alone contributes no id and no vector, rather than being #2026's.
+
+    The two vectors are unit by construction, so `load_vectors`'s division by
+    the norm is a no-op and the assertion reads as the input: `[1, 0, 0, 0]` is
+    the item's, and `[0.5, 0.5, 0.5, 0.5]` — the witness normalised — is what
+    the basename match handed over whenever the witness row came last."""
+    import sqlite3
+
+    class NoVecConn(sqlite3.Connection):
+        """A connection that ignores the vec0 extension load, and nothing else.
+
+        `qmd/node_modules` is untracked (`git ls-files qmd` -> 0 files), so the
+        vec0 binary lives only in the live checkout: in a worktree, and in a
+        gate round home whose `~/lloyd` is a symlink to one, `cluster.VEC0_SO`
+        names a path that is not there, `load_vectors`'s `so.exists()` guard
+        returns `{}` before it reads a row, and this test failed on the gate
+        while passing on the live tree. Skipping the load is sound because the
+        scratch index is plain tables and the SELECT calls no vec0 function:
+        the join, `numpy.frombuffer`, the `wanted` filter and the normalisation
+        all still run over real bytes."""
+
+        def enable_load_extension(self, *args, **kwargs) -> None:
+            pass
+
+        def load_extension(self, *args, **kwargs) -> None:
+            pass
+
+    class SqliteWithoutVec0:
+        """`sqlite3` as `cluster.py` sees it, with only `connect` re-pointed."""
+
+        OperationalError = sqlite3.OperationalError
+
+        def connect(self, *args, **kwargs):
+            kwargs.setdefault("factory", NoVecConn)
+            return sqlite3.connect(*args, **kwargs)
+
+    item = B.load_item(write_item(isolated, 2026,
+                                  name="Retire the mirror refresh deadlock"))
+    assert item is not None and item.id == 2026
+    # qmd stores a root-level document by its basename, and write_item
+    # truncates the slug to 30 chars, so the flat row's path is that file name.
+    flat = item.path.name
+    items = [item]
+    witness = [1.0, 1.0, 1.0, 1.0]
+    item_vec = [1.0, 0.0, 0.0, 0.0]
+    db = isolated.parent / "index.sqlite"
+    fake_so = isolated.parent / "vec0.so"
+    fake_so.write_bytes(b"")          # satisfies `so.exists()`; see NoVecConn
+    monkeypatch.setattr(CL, "sqlite3", SqliteWithoutVec0())
+
+    for rows in ([(WITNESS_ROW, witness), (flat, item_vec)],
+                 [(flat, item_vec), (WITNESS_ROW, witness)]):
+        _qmd_index(db, rows)
+        vecs = CL.load_vectors(items, db=db, so=fake_so)
+        assert set(vecs) == {2026}, "the witness row contributed no id"
+        assert vecs[2026].tolist() == pytest.approx(item_vec), f"row order: {rows[0][0]} first"
+
+    _qmd_index(db, [(WITNESS_ROW, witness)])
+    assert CL.load_vectors(items, db=db, so=fake_so) == {}, "no id, so no vector"
+    # Positive control for the line above: the same scratch index, the same
+    # call, the one row swapped for a flat one. A `load_vectors` that cannot
+    # read this index shape at all would otherwise pass it vacuously.
+    _qmd_index(db, [(flat, item_vec)])
+    assert set(CL.load_vectors(items, db=db, so=fake_so)) == {2026}
