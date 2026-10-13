@@ -571,21 +571,199 @@ def test_the_pinned_before_total_is_the_ceiling_the_rung_uses():
         "could have converted")
 
 
-def test_the_diff_reader_the_pins_depend_on_answers_in_both_directions():
-    """A guard that reads the diff must be shown to be able to say YES.
+#: One throwaway repo, four files, one claim each — see `_round_repo`.
+_ROUND_REPO_FILES = ("untouched.py", "committed-half.py",
+                     "worktree-half.py", "added-untracked.py")
 
-    The class rule #2637's first review caught: an empty diff also passes. So the
-    reader gets a positive control from the one file that cannot leave this round's
-    diff (this pin file itself, which #2637 adds) and a negative control from a file
-    clause 4 forbids, and a reader that returns one constant for every input —
-    including `git diff --name-only HEAD` on a committed round — fails here first.
+
+def _round_repo(tmp_path: Path) -> tuple[Path, str]:
+    """A throwaway repo shaped like a graded round: `main`, a branch, one commit.
+
+    Returns `(repo, base_sha)`. The SHAPE is the point. Every claim in this file of
+    the form "this diff touches none of those files" is graded by the gate's `tests`
+    rung in a worktree whose round diff is already COMMITTED, so the control that
+    pins the reader has to be in that shape too — a committed change measured from a
+    merge-base, not an uncommitted edit measured against `HEAD`.
+
+    The four files are the four things the reader can get wrong:
+    `untouched.py` is in the base commit and nowhere else (a reader that says yes to
+    everything is caught here); `committed-half.py` is edited by the round's own
+    commit, so it is invisible to `git diff --name-only HEAD` and visible only to one
+    read from the merge-base; `worktree-half.py` is edited but uncommitted, which is
+    `round_base`'s "diffing the WORKTREE against it also covers the uncommitted half"
+    claim; `added-untracked.py` was never `git add`ed, which is what
+    `changed_paths`' second git call — `ls-files --others` — exists for.
+
+    Every git call carries its own identity, skips hooks, and is handed no config
+    file, because a positive control that only builds when a global `user.email`
+    happens to exist is one that quietly stops controlling anything the moment it
+    runs in the gate's isolated round home.
     """
-    assert S.git_touches(ROOT, ROOT / "tests" / "test_skip_inventory.py"), (
-        "the diff reader cannot see the file that adds it, which is what an empty "
-        "diff looks like from the inside")
-    assert not S.git_touches(ROOT, ROOT / "tests" / "test_voice_wake_and_turn.py"), (
+    import os
+    import subprocess
+
+    repo = tmp_path / "round-repo"
+    repo.mkdir()
+
+    def git(*args: str) -> str:
+        r = subprocess.run(
+            ["git", "-C", str(repo),
+             "-c", "user.name=skip-inventory",
+             "-c", "user.email=skip-inventory@localhost",
+             "-c", "commit.gpgsign=false", *args],
+            capture_output=True, text=True, check=False,
+            env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+                 "GIT_CONFIG_SYSTEM": os.devnull, "GIT_TERMINAL_PROMPT": "0"})
+        if r.returncode != 0:
+            raise AssertionError(
+                f"git {' '.join(args)} failed in the fixture repo: "
+                f"{r.stderr.strip()[:200]}")
+        return r.stdout.strip()
+
+    git("init", "-q", "-b", "main", ".")
+    for name in _ROUND_REPO_FILES[:3]:
+        (repo / name).write_text(f"# {name}\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "--no-verify", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    git("checkout", "-q", "-b", "automod/round")
+    (repo / "committed-half.py").write_text(
+        "# committed-half\n# edited by the round's own commit\n", encoding="utf-8")
+    git("add", "committed-half.py")
+    git("commit", "-q", "--no-verify", "-m", "the round's own commit")
+    # The two states a round is caught in between commits: a dirty tracked file and
+    # a brand-new file that has never been staged.
+    (repo / "worktree-half.py").write_text(
+        "# worktree-half\n# edited, not committed\n", encoding="utf-8")
+    (repo / "added-untracked.py").write_text("# never git-added\n", encoding="utf-8")
+    return repo, base
+
+
+def test_the_diff_reader_the_pins_depend_on_answers_in_both_directions(tmp_path):
+    """A guard that reads the diff must be shown able to say YES — on a tree it
+    builds, not on the tree it happens to be sitting in.
+
+    #2637's first review caught the class: an empty diff also passes, so the node was
+    given a positive control. The control it shipped with was this pin file itself,
+    on the argument that it "cannot leave this round's diff" — which holds only while
+    the round that ADDS the file is open. From the moment #2637 merged, every clean
+    checkout of this file has an empty tracked diff against its own merge-base: the
+    gate's base probe, live HEAD, and any round that does not touch it. So the node
+    #2637 wrote to prove its reader can say YES has answered only NO ever since, and
+    failed the base probe of round `SM_20261013_182959` at base `be413a55` — #2667.
+
+    A control has to be built to be a control. The synthetic round repo above is the
+    same shape the rung grades in, and it is checked in both directions: three files
+    the reader must name, one it must not, and the base it must measure from. What a
+    regression to each half of the reader now costs:
+
+      * `round_base` falling back to `HEAD` (the bug the module docstring names) ->
+        `committed-half.py` reads untouched;
+      * `changed_paths` losing `ls-files --others` -> `added-untracked.py` reads
+        untouched;
+      * `git_touches` answering one constant for every input -> the `untouched.py`
+        assertion, or one of the three positive ones, goes red first.
+
+    The two claims about the REAL tree are the ones that stay true on any tree, and
+    they are the ones the pins below actually rest on: a base must be nameable from
+    here, and a file clause 4 forbids must not read as touched.
+    """
+    repo, base = _round_repo(tmp_path)
+    assert S.round_base(repo) == base, (
+        f"the reader measures this round's diff from {S.round_base(repo)!r}, not from "
+        f"the merge-base with main ({base}) — every 'this diff touches X' assertion in "
+        "this file is then taken against the wrong tree")
+    for name in ("committed-half.py", "worktree-half.py", "added-untracked.py"):
+        assert S.git_touches(repo, repo / name), (
+            f"the reader cannot see {name}, which this round's repo changed — an empty "
+            "diff looks exactly like this from the inside, which is the failure "
+            "#2637's first review named")
+    assert not S.git_touches(repo, repo / "untouched.py"), (
         "the reader claims every file is touched, so 'this diff touches no "
         "machine-fact file' would be vacuous")
     assert S.round_base(ROOT) != "HEAD", (
         f"no base could be named from {ROOT}, so the diff would be read against "
         "HEAD and name nothing")
+    assert not S.git_touches(ROOT, ROOT / "tests" / "test_voice_wake_and_turn.py"), (
+        f"{ROOT} has a diff against its base that names a machine-fact file, so "
+        "`test_no_machine_fact_skip_was_deleted_to_buy_headroom` cannot be read as a "
+        "clean claim right now")
+
+
+#: Parse-only source carrying the one marker shape clause 2 names that `skip_sites`
+#: deliberately cannot see: an xfail spends no slot of the 40, so the shared reader
+#: excludes it by design. The probe is a STRING, so parsing this file never sees it as
+#: a decorator — which is exactly the asymmetry the node below leans on, and why it
+#: checks the extractor on the probe first.
+_XFAIL_MARKER_PROBE = (
+    '@pytest.mark.xfail(reason="an xfail spends none of the 40")\n'
+    "def test_an_xfail_marker():\n    assert 1 == 1\n")
+
+#: The floor on this file's test-node count: the 12 nodes it carried at base
+#: `be413a55` (measured by collecting it: 11 passed, 1 failed), plus the one #2667
+#: adds here. Deletion is the one route to clause 1's green that no skip check can
+#: see, because a deleted node skips nothing — it simply stops asking.
+MIN_TEST_NODES_AT_2667 = 13
+
+
+def _marker_leaf_names(src: str) -> list[str]:
+    """The LAST name component of every decorator applied to a function in `src`.
+
+    `@pytest.mark.xfail(...)` -> `xfail`; `@pytest.mark.skipif(c, reason=...)` ->
+    `skipif`; `@_needs_node` -> `_needs_node`. Only the name, never the arguments:
+    the same reason `skip_inventory._decorator_name` drops them — a marker's reason is
+    a string of prose ABOUT a skip, and this file's own probe tables are full of that
+    prose. Reads decorators on functions, so a string constant that merely shows a
+    marker is not seen by it.
+    """
+    out: list[str] = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for d in node.decorator_list:
+                target = d.func if isinstance(d, ast.Call) else d
+                out.append(target.id if isinstance(target, ast.Name)
+                           else getattr(target, "attr", ""))
+    return out
+
+
+def test_clause_2_green_cannot_have_come_from_a_skip_or_a_deleted_node():
+    """Clause 2: the named node PASSES — it is not skipped, xfailed, or removed.
+
+    The two cheap ways to a green run of one node are a marker on it and a deletion
+    beside it, and both are invisible to the gate's arithmetic in the way that
+    matters: an xfail spends none of the 40 skip slots, and a deleted node reports no
+    skip at all. So this node pins clause 2 over this file, which is the only file the
+    item's clause can be satisfied or faked in.
+
+    Three checks. `S.skip_sites` over the WHOLE file — the one definition of "what is
+    a skip" this suite has, and it sees a marker and an inline call alike, while
+    leaving this file's `pytest.raises(pytest.skip.Exception)` prose alone, so the
+    check costs no coverage. A marker-NAME sweep for the xfail half, shown able to say
+    YES on the probe above before it is allowed to say NO about this file. And a floor
+    on the node count, which is the direction a `skip_sites` sweep cannot walk.
+    """
+    seen = _marker_leaf_names(_XFAIL_MARKER_PROBE)
+    assert seen == ["xfail"], (
+        f"the marker reader sees {seen} on a source whose only decorator is "
+        "`@pytest.mark.xfail`, so its silence about this file would be blindness "
+        "rather than an all-clear")
+
+    src = (ROOT / "tests" / "test_skip_inventory.py").read_text(encoding="utf-8")
+    sites = S.skip_sites(src)
+    assert sites == [], (
+        f"a node in this file can still report itself skipped: {sites} — clause 2 is "
+        "that the fix makes the named tests pass, and a skip is not a pass")
+    marked = [nm for nm in _marker_leaf_names(src) if "skip" in nm or "xfail" in nm]
+    assert not marked, (
+        f"a node in this file carries {marked}, which is clause 2's exclusion by "
+        "another spelling")
+    nodes = [n.name for n in ast.parse(src).body
+             if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")]
+    assert len(nodes) >= MIN_TEST_NODES_AT_2667, (
+        f"this file now holds {len(nodes)} test nodes, under the "
+        f"{MIN_TEST_NODES_AT_2667} it held at #2667 — deleting a node is how a green "
+        "run is bought without skipping anything")
+    assert ("test_the_diff_reader_the_pins_depend_on_answers_in_both_directions"
+            in nodes), (
+        "the node clause 1 names is gone from this file, so clause 1 has been "
+        "answered by removing the question")
