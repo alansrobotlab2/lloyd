@@ -3005,3 +3005,57 @@ def test_every_live_task_file_is_named_once_in_each_membership_table():
     for name, named in _membership_tables():
         _assert_no_unlisted(name, named, live, tasks_dir)
         _assert_listed_once(name, named)
+
+
+# ── #2632 — no current sentence may claim a task file names the retired slot ──
+#
+# `autonomy/68-morning-brief-triage.md` carried `model: secondary` from 2026-04-22
+# while `secondary_enabled: false` has been in force since `551e9044` (2026-09-20).
+# This document described that line in the present tense in two places — §Ingest's
+# "the only one whose task file still names the **secondary** engine" and §#68's
+# "its `model: secondary` now names the slot" — and no node here pinned either one:
+# the checks above read the doc against other sentences of the doc, and the one fact
+# these two sentences depend on lives in another tree entirely (`~/obsidian/autonomy/`
+# plus a config flag), so retyping the front matter would have left both sentences
+# asserting an engine the box does not boot. Nothing in the gate would have noticed.
+#
+# The scan is therefore on the shapes of the two stale sentences, over `_live_prose()`
+# only. §Review log keeps its dated "2026-10-12 — `stale`" entry saying what the file
+# held that day, which is correct as written and is what the log exists for; a reader
+# who takes that entry as current is reading a date. Past tense with its date and its
+# item is also allowed in live prose — the hazard #2634 pinned stays stated, with
+# `resolve_model_alias` and **#1555** in it.
+
+#: Present-tense claims that a task file's `model:` line names the secondary engine.
+#: `*{0,2}` because the doc bolded the word once and did not bold it the other time.
+STALE_MODEL_CLAIMS = (
+    re.compile(r"still names the \*{0,2}secondary\*{0,2}"),
+    re.compile(r"`model: secondary`[^.]{0,160}\b(?:now|still)\b"),
+)
+
+
+def test_no_current_sentence_claims_a_task_file_names_the_retired_secondary_engine():
+    """#2632 clause 5: the doc's two §#68 sentences move out of the present tense.
+
+    Reverting either sentence — or writing a new one like it for some future retired
+    slot — fails this. The second assertion is the positive half: §#68 has to say the
+    value the file carries now, because a paragraph that only stops being wrong has
+    replaced a claim with a silence, and the next reader learns nothing about where
+    the job's 15-minute brief actually runs.
+    """
+    live = _flat(_live_prose())
+    offenders = [p.pattern for p in STALE_MODEL_CLAIMS if p.search(live)]
+    assert not offenders, (
+        f"current prose claims a task file names the secondary engine again "
+        f"(matched {offenders}); #2632 set `68-morning-brief-triage.md` to "
+        f"`model: primary` on 2026-10-13, so the present tense is false — say what "
+        f"it reads now, and keep any history dated and inside §Review log")
+
+    section = _parked_job_section()
+    assert "set it to `primary`" in section, (
+        "§#68 no longer states the value #68's `model:` line carries, so the "
+        "hazard's history is left with nothing to be the history of")
+    assert "validate_tasks" in live, (
+        "§#68 lost the sentence saying the linter now reports a `model:` naming a "
+        "switched-off slot — the check is the reason the stale line could not "
+        "survive a second time, and the doc is where a reader looks for that")

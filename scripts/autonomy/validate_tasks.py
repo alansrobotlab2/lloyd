@@ -79,6 +79,21 @@ try:
     from app import llm_slots  # noqa: E402
 except Exception:  # noqa: BLE001
     llm_slots = None
+# Which supervisord program each `models:` alias tracks (#2632). `requires_slot:`
+# names a program, so #1577's check could ask `llm_slots` directly; `model:` names an
+# ALIAS, and the one place the tree says which row an alias belongs to is
+# `supervisor_client._MODEL_ROW_ALIASES`. Inverting it here rather than writing
+# `{"secondary": "agent-llm-secondary"}` into this file is the same rule as above: the
+# linter must not own a table that can outlive the engine it describes. Inverted at
+# import because the check asks alias-first. None = no verdict, which is reported.
+try:
+    from app.supervisor_client import _MODEL_ROW_ALIASES as _ROW_ALIASES  # noqa: E402
+
+    MODEL_ROW_ALIASES: dict[str, str] | None = {
+        alias: program for program, alias in _ROW_ALIASES.items()
+    }
+except Exception:  # noqa: BLE001
+    MODEL_ROW_ALIASES = None
 
 DEFAULT_DIR = Path.home() / "obsidian" / "autonomy"
 # Mirrors the slug branch of autonomy._load_skill_content (:894), which is the
@@ -206,6 +221,53 @@ def slot_problem(value: str, config: dict | None, config_path: Path) -> str | No
             "booted to run it")
 
 
+def model_slot_problem(value: str, config: dict | None, config_path: Path) -> str | None:
+    """Why a `model:` value names a slot the box has switched off, or None when it does not.
+
+    The sibling of `slot_problem`, for the field that is actually populated. That one
+    reads `requires_slot:`, which NO task file declared as of 2026-10-12
+    (`grep -ln requires_slot ~/obsidian/autonomy/*.md` → nothing); this one reads
+    `model:`, which every task file that names an engine has. #68
+    `morning-brief-triage` declared `model: secondary` from 2026-04-22 while
+    `secondary_enabled: false` has been in force since 2026-09-20 (`551e9044`), and
+    both runtime guards skip it for the same reason: `slot_arm_block`
+    (app/autonomy.py:5706-5710) returns None for a task with no `requires_slot:`, and
+    the name check below cannot see a flag — `secondary` stays a key of `models:`
+    whatever the switch says.
+
+    None means nothing to say, in three different ways worth telling apart: an alias
+    no engine row tracks has no switch to be off; `agent-llm-primary` is not an
+    optional slot, so `llm_slots` reports it always enabled whatever the flags say;
+    and a slot whose flag is true is exactly what a task should name. The reported case
+    is not an arming refusal — arming #68 succeeds today, and
+    tests/test_autonomy_slot_arm_guard.py:113 pins that — it is that every run lands on
+    the primary through `resolve_model_alias` (app/config.py:500-507) while the task
+    file, and anyone reading it, believes otherwise.
+    """
+    if MODEL_ROW_ALIASES is None:
+        return (f"model '{value}' unchecked — app.supervisor_client's alias↔row map "
+                "could not be imported, so no model could be traced to a slot")
+    program = MODEL_ROW_ALIASES.get(value)
+    if program is None:
+        return None                 # no engine row tracks this alias: no switch to be off
+    if llm_slots is None:
+        return (f"model '{value}' unchecked — app.llm_slots could not be imported, so "
+                "no slot can be reported as enabled")
+    flag = llm_slots.slot_flag(program)
+    if flag is None:
+        return None                 # not an optional slot: always enabled
+    if config is None:
+        return (f"model '{value}' unchecked — {config_path} holds no readable yaml "
+                "mapping, so the slot's enabled flag could not be read")
+    if llm_slots.is_enabled(program, config):
+        return None
+    return (f"model '{value}' names a switched-off slot: {flag} is false in "
+            f"{config_path}, so {program} is not booted and `resolve_model_alias` "
+            f"routes every run of this task to the primary — the file says {value!r} "
+            "and the box serves primary; set model: to the engine it should actually "
+            "run on, or boot the slot")
+
+
 def model_names(config_path: Path) -> set[str] | None:
     """Every `model:` value the engine will accept: keys of `models:` + aliases.
 
@@ -299,7 +361,8 @@ def main() -> int:
     # so it becomes a loud per-file warning below instead of silence.
     known_models = _UNSET
     # Same for the slot enabled flags: read once, only if some file declares a
-    # requires_slot, and an unreadable mapping is reported per file — `is_enabled`
+    # requires_slot OR names a model (#2632 — both legs ask the same question of the
+    # same file), and an unreadable mapping is reported per file — `is_enabled`
     # answers False for a flag that is absent, so silence here would be a verdict.
     slot_cfg = _UNSET
 
@@ -341,6 +404,21 @@ def main() -> int:
                     f"{p.name}: model '{model}' is not a models: key or alias in "
                     f"{config_path} (known: {', '.join(sorted(known_models))})"
                 )
+            # The name check above answers "does an engine serve this name"; only the
+            # flag answers "is that engine booted". Both run, because they fail
+            # differently: `model: eco` reaches an endpoint that does not serve it,
+            # `model: secondary` reaches the PRIMARY's endpoint under a retired slot's
+            # name and every guard waves it through (#2632). Shares `slot_cfg` with the
+            # `requires_slot:` leg below — one read of the same file, one None meaning.
+            if slot_cfg is _UNSET:
+                slot_cfg = config_mapping(config_path)
+            # isinstance, not `is _UNSET`: the sentinel is an object(), and the
+            # ternary's type is what tells a reader (and pyright) that a missing
+            # config reaches the check as None rather than as something dict-ish.
+            model_cfg: dict | None = slot_cfg if isinstance(slot_cfg, dict) else None
+            problem = model_slot_problem(model, model_cfg, config_path)
+            if problem:
+                warnings.append(f"{p.name}: {problem}")
         slot = _clean(fm.get("requires_slot"))
         if slot and not _is_nullish(slot):
             # A name check cannot see this: `secondary` is a models: key whether or

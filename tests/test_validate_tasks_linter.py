@@ -172,8 +172,17 @@ def test_an_unknown_model_names_the_file_and_the_value(tmp_path):
 
 @pytest.mark.parametrize("model", ["primary", "secondary", "fast"])
 def test_a_declared_key_or_alias_is_accepted(tmp_path, model):
-    """`_get_model_env` matches a key then any alias; both must pass the linter."""
-    lint = Linter(tmp_path)
+    """`_get_model_env` matches a key then any alias; both must pass the linter.
+
+    The config spells both slot switches ON. `CONFIG` alone carries no
+    `secondary_enabled` key, and `app.llm_slots.is_enabled` answers False for a flag
+    that is absent — the same rule that makes a missing flag a real retirement on the
+    box — so under the bare fixture the #2632 arm would report `model: secondary` as a
+    switched-off slot and this node would fail for a slot verdict it never set out to
+    make. Its property is name acceptance, and a slot that is booted is the config
+    where name acceptance is the only question left.
+    """
+    lint = Linter(tmp_path, config=_slot_config(True, True))
     lint.add("7-m.md", id=7, name="m", status="up_next", frequency="daily",
              skill_name="heartbeat", model=model)
 
@@ -600,3 +609,215 @@ def test_notes_in_the_dir_are_not_linted(tmp_path):
 
     assert "Scanned 0 task files" in out
     assert code == 0, out
+
+
+# ── #2632: a `model:` naming a slot the box has switched off ─────────────────
+#
+# The `requires_slot:` arm above (#1577) guards a field NO task file declares: on
+# 2026-10-12 `grep -ln requires_slot ~/obsidian/autonomy/*.md` returned nothing at
+# all, while the one field that does carry a slot name — `model:` — was invisible to
+# it. #68 `morning-brief-triage` has declared `model: secondary` since it was created,
+# and `secondary_enabled: false` has been in force since `551e9044` (2026-09-20, "Retire
+# the secondary slot and put DiffusionGemma (djev) on GPU 2"), so the check that exists
+# could not see the one case it was written for, and the check that could not see this
+# one was guarding nothing.
+#
+# The two slot guards both key on `requires_slot:` and skip `model:` for the same
+# reason: `slot_arm_block` (app/autonomy.py:5706-5710) returns None for a task that
+# declares none, and #1577's lint read that field alone. That is not an oversight to
+# "fix" here — arming #68 is correctly *not* refused, and
+# tests/test_autonomy_slot_arm_guard.py:113 pins exactly that
+# (`assert A.slot_arm_block({"id": 68}, "up_next") is None`) and stays green. What was
+# missing is the static report: a value that routes every run to the primary through
+# `resolve_model_alias` (app/config.py:500-507) while the task file says otherwise is a
+# stale line, and the linter is where a stale line gets said out loud.
+
+#: `models:` alias → the supervisord program whose switch governs it. Restated here as
+#: the test's own expectation, not imported: the split cells in the grid below die on
+#: exactly this relation, and a test that imported the map would agree with a linter
+#: that read the wrong flag for the wrong alias. `app/supervisor_client.py:72`
+#: `_MODEL_ROW_ALIASES` is the tree's one alias↔row map and the linter imports it.
+ALIAS_PROGRAM = {"primary": "agent-llm-primary", "secondary": "agent-llm-secondary"}
+
+live_vault = pytest.mark.live_vault
+
+
+def test_a_model_naming_a_switched_off_slot_names_the_file_the_value_and_the_flag(tmp_path):
+    """One line, three facts: which file, which value, which key to change.
+
+    This is the #68 case exactly — a `draft` task file, a slot nobody boots, and a
+    name check that resolves it as clean because `secondary` is a `models:` key
+    whatever the flag says. The retired #85 case above needed `requires_slot:` to be
+    declared; this one needs only the field every task file already has.
+    """
+    lint = Linter(tmp_path, config=_slot_config(False, False))
+    lint.add("68-b.md", id=68, name="b", status="draft", frequency="daily",
+             skill_name="heartbeat", model="secondary")
+
+    code, out = lint.run()
+
+    assert code == 0, "a structural warning is a failure only under --strict"
+    line = next(ln for ln in out.splitlines() if "switched-off" in ln)
+    assert line.lstrip().startswith("68-b.md:"), line
+    assert "model 'secondary'" in line, line
+    assert "secondary_enabled" in line, "the flag a person has to flip is the point"
+    assert lint.run("--strict")[0] == 2, (
+        "the state #68 sat in for three weeks must fail the strict rung")
+
+
+@pytest.mark.parametrize("secondary_enabled,djev_enabled",
+                         [(False, False), (True, True), (False, True), (True, False)],
+                         ids=["off/off", "on/on", "off/on", "on/off"])
+def test_the_model_verdict_is_app_llm_slots_verdict_for_every_alias(
+        tmp_path, secondary_enabled, djev_enabled):
+    """Both aliases under both flags: the linter speaks iff the alias's slot is off.
+
+    The four-way grid is the one the #1577 check already runs, and it is the shape a
+    hardcoded rule dies on: `model: primary` names a program with no switch, so
+    `app.llm_slots`'s rule that a non-optional program is always enabled has to keep
+    it silent in every cell — including `off/*`, where a check that consulted
+    `secondary_enabled` for every alias would report the primary as retired. The two
+    split cells say the same about the other direction: a linter that flagged
+    `secondary` whenever `djev.enabled` disagreed would go red in `off/on`.
+
+    Both declarations go through one run, so each file's expectation is read off the
+    line its own file is named on.
+    """
+    from app import llm_slots
+
+    config = _slot_config(secondary_enabled, djev_enabled)
+    parsed = yaml.safe_load(config)
+    lint = Linter(tmp_path, config=config)
+    files = {alias: f"{n}-m.md" for n, alias in enumerate(ALIAS_PROGRAM, start=1)}
+    for alias, fname in files.items():
+        lint.add(fname, id=int(fname.split("-")[0]), name="m", status="up_next",
+                 frequency="daily", skill_name="heartbeat", model=alias)
+
+    code, out = lint.run("--strict")
+    lines = [ln for ln in out.splitlines() if "switched-off" in ln]
+
+    for alias, fname in files.items():
+        mine = [ln for ln in lines if ln.lstrip().startswith(fname + ":")]
+        assert len(mine) <= 1, f"{fname} reported twice: {mine}"
+        program = ALIAS_PROGRAM[alias]
+        enabled = llm_slots.is_enabled(program, parsed)
+        assert bool(mine) is not enabled, (
+            f"model '{alias}' (program {program}) with secondary_enabled="
+            f"{secondary_enabled}, djev.enabled={djev_enabled}: llm_slots.is_enabled "
+            f"answers {enabled}, the linter reported {mine or 'nothing'}")
+        if mine:
+            flag = llm_slots.slot_flag(program)
+            assert flag is not None, (
+                f"{program} is an optional slot with no flag to name — the line "
+                f"cannot cite one: {mine[0]}")
+            assert flag in mine[0], (
+                f"the line names a flag of its own, not the module's {flag!r}: "
+                f"{mine[0]}")
+
+    any_off = any(not llm_slots.is_enabled(ALIAS_PROGRAM[a], parsed) for a in files)
+    assert code == (2 if any_off else 0), out
+
+
+@pytest.mark.parametrize("bad_config", [
+    pytest.param("models: [this never closes\n", id="unparseable"),
+    pytest.param("secondary_enabled: true\n", id="no-models-block"),
+])
+def test_an_unreadable_or_models_less_config_leaves_the_model_check_unchecked(
+        tmp_path, bad_config):
+    """Clause 4, the `model:` half of the shape #1577 established.
+
+    `is_enabled` answers False for a flag that is merely absent, so a config that
+    cannot be read would otherwise print a retired-slot verdict nobody configured.
+    The sentence has to say `unchecked`, and must not say `switched-off` — which is
+    the same rule the `requires_slot:` arm applies, reached through the same
+    `config_mapping` read rather than a second copy of it.
+
+    Two bad shapes, because they fail differently. `unparseable` is YAML
+    `yaml.safe_load` raises on, so NEITHER leg can answer and neither does.
+    `no-models-block` is worse for a reader: the slot flags ARE readable and say the
+    secondary engine is booted, so a check that conflated the two legs would print
+    "all clear" about an alias that exists in no `models:` table at all. The name leg
+    prints `unchecked` and the slot leg stays silent — that asymmetry is the point.
+    """
+    lint = Linter(tmp_path, config=bad_config)
+    lint.add("68-b.md", id=68, name="b", status="draft", frequency="daily",
+             skill_name="heartbeat", model="secondary")
+
+    out = lint.run()[1]
+
+    assert "model 'secondary' unchecked" in out, out
+    assert "switched-off" not in out, out
+    assert lint.run("--strict")[0] == 2, "an unchecked value is not a passing value"
+
+
+def test_the_alias_to_program_map_is_the_service_registrys():
+    """The linter must derive the slot from `supervisor_client`, not from a copy.
+
+    `_MODEL_ROW_ALIASES` is where the tree says which model alias an engine row
+    tracks. If that constant is renamed or reshaped, the import in the linter falls
+    back to None and every `model:` line starts reporting `unchecked` — loud, but
+    nobody runs this linter on a schedule the way CI runs pytest, so the drift needs
+    a node that goes red here.
+    """
+    from app.supervisor_client import _MODEL_ROW_ALIASES
+    from scripts.autonomy import validate_tasks as vt
+
+    registry_map = {alias: program
+                    for program, alias in _MODEL_ROW_ALIASES.items()}
+    assert vt.MODEL_ROW_ALIASES == registry_map, (
+        f"the linter maps model aliases to programs as {vt.MODEL_ROW_ALIASES} while "
+        f"app/supervisor_client.py says {registry_map}; the map is imported rather "
+        f"than restated precisely so the two cannot disagree")
+    assert set(ALIAS_PROGRAM) <= set(registry_map), (
+        f"this file expects {sorted(ALIAS_PROGRAM)} and the registry no longer "
+        f"covers them: {sorted(registry_map)}")
+
+
+@live_vault
+def test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live(tmp_path):
+    """Clause 3's real-directory leg: 0 warnings, exit 0, over `~/obsidian/autonomy`.
+
+    The grid above proves the rule on fixtures; this proves the fleet satisfies it,
+    which is the half that could only be true after the vault half of #2632 landed
+    (`autonomy/68-morning-brief-triage.md` `model: secondary` → `primary`, vault
+    commit c467ed53). Before that flip this node was the whole point: the one file
+    naming the retired slot was #68, and the new check would have failed the strict
+    rung over a task nobody runs.
+
+    `@live_vault` for the standing reason (`pytest.ini:10-13`): the vault is written
+    by nightly jobs and by `autonomy_write_task`, so the automod gate deselects this
+    and the fixture-backed nodes carry the rule there. Run it with
+
+        ~/lloyd/.venvs/lloyd/bin/python -m pytest \\
+            tests/test_validate_tasks_linter.py -q -k real_board_lints_clean
+
+    The config is the checkout's own (`DEFAULT_CONFIG`, two levels above the script),
+    which is the config a scheduled run would read; only `--autonomy-dir`/`--skills-dir`
+    defaults are relied on, so no path is hardcoded here.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--strict"],
+        capture_output=True, text=True, timeout=180,
+    )
+    out = proc.stdout + proc.stderr
+
+    assert "structural warning" not in out, out
+    assert "unchecked" not in out, out
+    assert "✅ all task files parse and pass structural checks" in out, out
+    assert proc.returncode == 0, out
+
+    # §#68 of architecture/autonomy-jobs.md quotes this census in prose — "answers
+    # `primary` 39 times" — so it is read here rather than left to rot: the doc-claims
+    # suite cannot see the vault's front matter, and this is the only node that reads
+    # both the directory and the flags the sentence is about.
+    from scripts.autonomy import validate_tasks as vt
+    declared = [ln.strip() for p in vt.DEFAULT_DIR.glob("*.md")
+                for ln in p.read_text(errors="replace").splitlines()
+                if ln.startswith("model:")]
+    assert len(declared) == 39, (
+        f"{len(declared)} task files declare a `model:`; §#68 of the doc says 39, so "
+        f"the sentence and the fleet have parted — re-count and retype the doc")
+    assert set(declared) == {"model: primary"}, (
+        f"a task file names an engine other than the primary: {sorted(set(declared))} "
+        f"— §#68 states that every `model:` line reads `primary` as measured "
+        f"2026-10-13, the day #2632 landed the last one")

@@ -208,9 +208,11 @@ mechanism and apply to every edge above:
 What the outside world did while nobody was looking. #30 and #53 write into
 `knowledge/`; #68 writes no vault file at all — it is the only job in the fleet
 whose output is a *conversation* (an inject that expires) rather than a file,
-which is why it has a write tier of its own, and the only one whose task file
-still names the **secondary** engine — an engine retired 2026-09-20, which is
-why the job sits parked (§#68).
+which is why it has a write tier of its own. It was also the only task file that
+named the **secondary** engine, the slot retired 2026-09-20: that line read
+`model: secondary` until #2632 set it to `primary` on 2026-10-13 — the value the
+job already ran at, because `resolve_model_alias` rewrites it (§#68). The park is
+Alan's ruling of 2026-09-17, not that line.
 
 | ID | Freq | Role |
 |----|------|---|
@@ -233,14 +235,20 @@ membership.
 `morning-briefing` names two things. One is #68, whose fifteen-minute cadence is
 made to triage mail and calendar into whatever chat session Alan is actually
 sitting in. **The job is parked**: `status: draft` since Alan's ruling of
-2026-09-17, last run 2026-09-16. And its `model: secondary` now names the slot
-`551e9044` disabled on 2026-09-20 — invisible to both slot guards, since
-`slot_arm_block` and the #1577 lint read `requires_slot:` and this task has
-none, so arming it would succeed and `resolve_model_alias` would land every
-run on the *primary* under a retired slot's name — the confusion backlog
-**#1555** recorded, reachable from the one spelling both guards skip (#2632).
-Everything below describes the mechanism as designed and as it behaved while
-live. The other — the 6 am "read the
+2026-09-17, last run 2026-09-16. Its `model:` line named the slot `551e9044`
+disabled on 2026-09-20 until #2632 set it to `primary` on 2026-10-13 — the value
+`resolve_model_alias` was already routing every run to, which is the confusion
+backlog **#1555** recorded: a task claiming a retired slot's engine and receiving
+the *primary*, invisible to both slot guards, because `slot_arm_block` and the
+#1577 lint read `requires_slot:` and this task declares none — so arming it
+succeeds, which `tests/test_autonomy_slot_arm_guard.py` pins for id 68, and
+nothing ever asked the `model:` value about the flag. That blind spot is what
+#2632 closed: `scripts/autonomy/validate_tasks.py` now reports a `model:` naming
+a switched-off slot in the same one-line shape it uses for `requires_slot:`, and
+under `--strict` that warning fails the run. Measured the same day, no task file
+names the retired slot: `grep -h '^model:' ~/obsidian/autonomy/*.md` answers
+`primary` 39 times. Everything below describes the mechanism as designed and as
+it behaved while live. The other — the 6 am "read the
 overnight reports and announce a synthesis" job — no longer runs at all and no
 autonomy task binds it. Its skill is archived; an unbound copy survives as
 `~/obsidian/skills/nightly-morning-briefing/` still carrying "Runs at 6:00 AM PST
