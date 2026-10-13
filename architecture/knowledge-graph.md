@@ -209,10 +209,12 @@ fact_extractor.write_fact_file
 classify-v4-batch.py + apply-classifications-v4.py  (#74, daily)
         │  mentions -> uses / part_of / depends_on / … via edges.retype
         ▼
-entity-resolution-sweep.py  (#48, daily, DRY RUN ONLY)
-        │  clusters near-duplicates, runs the semantic gate, prints a plan
+entity-resolution-sweep.py  (#48, daily, applies CASE,PUNCT itself)
+        │  clusters near-duplicates, runs the semantic gate, prints a plan, then
+        │  ends its scheduled run with `--apply --tiers CASE,PUNCT` unattended,
+        │  on Alan's ruling on #990 (2026-09-16)
         ▼
-   a human reads the plan and runs --apply
+   the two mechanical shape tiers land nightly; a SUFFIX merge waits for a human
 ```
 
 Three other writers:
@@ -451,8 +453,20 @@ see *Tools*.
 
 1. **A corrupt store is not an empty store.** Any reader that returns "no data"
    on a read failure will eventually let a writer persist that emptiness.
-2. **Applies are attended.** #48 and #67 propose; a human runs `--apply`. Both
-   incidents were unattended applies.
+2. **A human applies anything beyond the two mechanical shape tiers.** #48 ends
+   its scheduled run with `--apply --tiers CASE,PUNCT` unattended on Alan's ruling
+   on #990 (2026-09-16), because a case or punctuation variant of one name is a
+   mechanical merge and coverage decayed for weeks while that apply waited on a
+   person. What makes those two tiers safe to leave unattended is not the absence
+   of risk — the 2026-08-22 wipe and the 2026-09-03 151-merge incident were both
+   unattended applies of exactly this shape — but the shape of the apply: the
+   degraded-graph refusal (rule 3), the high-value exclusion, one store
+   transaction, and an apply report that journals each dir outcome so a kill in
+   the gap between the transaction and the fact-file half is finished by
+   `--resume <that report>`. A SUFFIX merge needs the semantic gate's unanimous
+   verdict *and* a human, and #67 only proposes: a suffix is a claim about meaning,
+   so it is never applied on schedule, which is why the tiers are named on the
+   command line rather than inferred.
 3. **Refuse on a degraded graph.** `--apply` and `backup-graph.sh` both compare
    active edges against `graph-baseline.json` and refuse below 50%. The backup
    half no longer fails open on its own missing input: a baseline that is
@@ -699,6 +713,23 @@ overlap heuristic firing on two facts phrased alike. Both tools now take
 
 ## Review log
 
+- **2026-10-13 — #2641 fixed: the apply rule now shows its narrowing.** Two sites
+  in this file still said #48 only ever proposes and that a person is the one who
+  applies: rule 2 in §Rules that came out of the incidents, and the write-path
+  diagram, which labelled the daily run dry-run-only and ended with a human
+  reading the plan and applying it. Neither has been true since Alan's ruling on
+  #990 (2026-09-16) — step 3 of the job's own skill prompt ends every scheduled run
+  with `--apply --tiers CASE,PUNCT`, the apply reports land daily, and the run
+  records leave the gate-approved SUFFIX clusters for a person to apply — so a
+  reader who obeyed this doc was stopping the nightly write the job is authorised
+  to make. Rule 2 and the diagram now name the two mechanical tiers as unattended
+  and keep every apply beyond them, a SUFFIX merge, a human act; the narrowing, not
+  a repeal. `architecture/autonomy.md` already said this in its job roster and the
+  paragraph under it — this file was simply never brought along. Pinned by
+  `tests/test_kg_doc_claims.py::test_rule_2_says_48_applies_the_mechanical_tiers_unattended`,
+  `::test_the_write_path_diagram_shows_48_applying_the_mechanical_tiers`,
+  `::test_the_rule_names_the_narrowing_not_a_repeal` and
+  `::test_review_log_names_2641_and_both_corrected_sites`.
 - **2026-09-18 — #1236 fixed: an absent store now refuses instead of answering
   0.** The module-level reader `store()` calls `_require_database()`
   (`app/kg_store.py`) before it opens anything, so a path with no database
