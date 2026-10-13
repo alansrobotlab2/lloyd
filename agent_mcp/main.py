@@ -53,6 +53,7 @@ from agent_mcp import (
     _change_ledger,
     _injection_probe,
     _path_sandbox,
+    _resource_ceiling,
     _rpc,
     _subagent_registry,
     aggregator_auth,
@@ -920,6 +921,14 @@ async def state(request):
         # (#2338). Same reason the two sandbox keys are here: an out-of-process
         # caller reads a state rather than inferring one from `config.yaml`.
         "egress": await asyncio.to_thread(egress.status),
+        # The third thing standing under a Bash command: the memory/swap/task ceiling its
+        # process subtree runs inside (#2578). Reported from THIS process because the
+        # verdict is this process's own — it is a probe that created a real scope, cached
+        # for a minute — and read with the same `enforcing`/`fallback`/`reason` keys the
+        # two sandbox statuses above use, so `scripts/service_health_check.py` reads all
+        # three with one pattern. Unavailable says so here rather than leaving a bound
+        # that is not there.
+        "bash_resource_ceiling": await asyncio.to_thread(_resource_ceiling.status),
     })
 
 

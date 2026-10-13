@@ -25,6 +25,24 @@ wrappers fail open — no bwrap means the bare spawn, with a WARNING and `/state
 reading `protected_path_sandbox.fallback` — and neither one changes the shell,
 the cwd, the environment, the process-group semantics or the output contract.
 
+Every spawn path also runs the command inside a transient systemd scope carrying a
+memory, memory-swap and task ceiling (`agent_mcp/_resource_ceiling.py`, #2578) — the
+other half of the substrate this module exists to provide, and the half a string guard
+cannot be: a command that forks or allocates is not destructive-shaped. The scope is
+created in `lloyd.slice`, never `app.slice`, and the ceiling reports armed/unavailable on
+`/state` as `bash_resource_ceiling` rather than failing open silently, in the same
+vocabulary as the two sandbox keys below. When a limit stops a command, the tool result
+names the limit and its value.
+
+Every spawn path also runs that argv inside a transient systemd scope carrying a
+memory, memory-swap and task ceiling (`agent_mcp/_resource_ceiling.py`, #2578) — the
+other half of the substrate below, and the half a string guard can never be, because a
+command that forks or allocates is not destructive-shaped. The scope is created in
+`lloyd.slice` and never `app.slice`; the ceiling reports armed/unavailable as
+`bash_resource_ceiling` on `/state`, in the same `enforcing`/`fallback` vocabulary as the
+two sandbox keys above, and when a limit stops a command the result names the limit and
+its value rather than leaving `[exit code: 137]` to be interpreted.
+
 A foreground command that rewrites a `.py` inside a git work tree gets the
 same pyflakes delta block `Edit` does (`_bash_edit_diagnostics`, #695).
 
@@ -52,7 +70,7 @@ from typing import Any
 from mcp.types import Tool
 
 from agent_mcp import (_bash_edit_diagnostics, _bash_tree_strays, _path_sandbox,
-                       _rpc, _task_registry, _tool_sandbox)
+                       _resource_ceiling, _rpc, _task_registry, _tool_sandbox)
 from agent_mcp._shared import get_bound_session, text_result
 
 logger = logging.getLogger("lloyd-builtin-bash")
@@ -251,10 +269,17 @@ async def _bash(args: dict[str, Any]) -> str:
                 _bash_failed.set(True)
                 return json.dumps({"error": f"read-only sandbox unavailable ({sb_err}); "
                                             "not running unsandboxed"})
+            # #2578: the ceiling wraps the argv `_tool_sandbox` built, never around it.
+            # A bench or eval arm is not exempt — it is the path where a command runs on
+            # the box's own resources while a grader waits, and the item scopes the
+            # ceiling to "bench/eval arms included".
+            sb_argv, ceiling_report = _resource_ceiling.apply(
+                _tool_sandbox.bwrap_argv(command, cwd))
             proc = await asyncio.create_subprocess_exec(
-                *_tool_sandbox.bwrap_argv(command, cwd),
+                *sb_argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                env=_resource_ceiling.launcher_env(None),
                 start_new_session=True,
             )
         else:
@@ -275,12 +300,18 @@ async def _bash(args: dict[str, Any]) -> str:
             # and says so on the log and on `/state`.
             sb_argv, _ = await asyncio.to_thread(_path_sandbox.wrap, command,
                                                  cwd)
+            # #2578: outside the path sandbox's argv, so the command keeps bwrap's
+            # read-only binds AND gets a bound on what its subtree may consume. The
+            # ceiling is the other half of what this module's docstring says it is for:
+            # a runaway command is not destructive-shaped, so no string guard sees it.
+            sb_argv, ceiling_report = await asyncio.to_thread(
+                _resource_ceiling.apply, sb_argv)
             proc = await asyncio.create_subprocess_exec(
                 *sb_argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
-                env=rpc_env,
+                env=_resource_ceiling.launcher_env(rpc_env),
                 start_new_session=True,
             )
     except Exception as exc:
@@ -318,6 +349,20 @@ async def _bash(args: dict[str, Any]) -> str:
 
     rc = proc.returncode if proc.returncode is not None else -1
 
+    # #2578: the ceiling's own verdict, read off the counters the child's scope dumped
+    # at exit. This is the whole reason the reporter exists: an OOM kill reaches this
+    # function as rc=-9 (137 through a shell) with no message anywhere, and a fan-out
+    # that could not fork reaches it as whatever its shell felt like. Read from the
+    # kernel's high-water marks rather than from the exit status, and appended whether or
+    # not the command claims it succeeded — the pids cap can leave a shell that thrashed,
+    # retried and eventually exited 0, and a bound that only reports when the command
+    # agrees it failed is a bound nobody sees tripped.
+    #
+    # Nothing is appended when no limit tripped, so a benign command's output is
+    # byte-identical to what it was before the ceiling existed.
+    ceiling_note = (_resource_ceiling.finish(ceiling_report)
+                    if ceiling_report is not None else None)
+
     if rc != 0:
         # Surface non-zero exit + output. Don't wrap in JSON — the SDK
         # Bash returned the raw mixed stream so the model can read
@@ -328,11 +373,32 @@ async def _bash(args: dict[str, Any]) -> str:
         if truncated:
             suffix = f"\n[truncated]" + suffix
         _bash_failed.set(True)
-        return await _with_edit_diagnostics((output or "(no output)") + suffix, snap)
+        return await _with_edit_diagnostics(
+            (output or "(no output)") + suffix + (f"\n{ceiling_note}"
+                                                 if ceiling_note else ""), snap)
 
     if not truncated:  # otherwise the marker is already inside `output`
         output = output if output else "(no output)"
+    if ceiling_note:
+        output = f"{output}\n{ceiling_note}"
     return await _with_edit_diagnostics(output, snap)
+
+
+async def _append_ceiling_note(log_path, report) -> None:
+    """Wait for a finished background task's ceiling dump and append its line to its log.
+
+    Off the loop on purpose: `finish` waits for the in-scope reporter to write, and a
+    detached task's log is append-only, so a slow dump delays nothing the model is
+    waiting on. No line is written when no limit tripped, which is the common case and
+    leaves the log exactly what the command wrote into it.
+    """
+    try:
+        note = await asyncio.to_thread(_resource_ceiling.finish, report)
+        if note:
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n{note}\n")
+    except Exception:
+        logger.warning("background ceiling note failed", exc_info=True)
 
 
 async def _with_edit_diagnostics(text: str, snap) -> str:
@@ -389,12 +455,19 @@ async def _spawn_background(command: str, description: str, cwd: str | None = No
         sb_argv, _ = await asyncio.to_thread(_path_sandbox.wrap, command,
                                              cwd or os.getcwd(),
                                              background=True)
+        # #2578: a long task is the one the ceiling matters most for, because a runaway
+        # in a detached task has no 120 s timeout waiting for it — the deadline reaps
+        # the *record*, not the process tree, and nothing else bounded its consumption.
+        # The scope is the same one a foreground call gets; `apply` does not add
+        # `--die-with-parent`, which the path sandbox already withheld here.
+        sb_argv, _ceiling_report = await asyncio.to_thread(
+            _resource_ceiling.apply, sb_argv)
         proc = await asyncio.create_subprocess_exec(
             *sb_argv,
             stdout=log_fd,
             stderr=asyncio.subprocess.STDOUT,
             cwd=cwd or os.getcwd(),
-            env=env,
+            env=_resource_ceiling.launcher_env(env),
             close_fds=True,
         )
     except Exception as exc:
@@ -406,6 +479,14 @@ async def _spawn_background(command: str, description: str, cwd: str | None = No
 
     _task_registry.attach_process(record, proc)
     _task_registry.start_waiter(record)
+
+    if _ceiling_report is not None:
+        # #2578: a detached task's ceiling verdict has no tool result to ride on — this
+        # call returned its id before the command ran — so it goes into the task's own
+        # log, which is the file the harness tells the model to Read. The completion
+        # notification carries the exit code and this carries the reason for it, a moment
+        # later: reading the dump needs the child to be gone.
+        asyncio.create_task(_append_ceiling_note(record.output_path, _ceiling_report))
 
     return json.dumps({
         "task_id": record.task_id,
