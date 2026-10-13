@@ -63,6 +63,17 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 REPO = Path(__file__).resolve().parents[1]
 
+#: Where `write_table` puts an uptake table when the caller names no `--out`.
+#: Named as a constant, and used by `write_table` itself, so a reader that only
+#: wants to know WHERE the probe's dated artifacts live resolves it here instead
+#: of re-spelling the expression — which is what #2597's eval instrument index has
+#: to do, and the reason it can report this store's real newest date rather than a
+#: path it guessed. Deliberately NOT under `app.paths.DATA_ROOT`: the tables are
+#: tracked in git (`git ls-files eval/uptake` lists the three that exist), so this
+#: is the one store in that index living inside the code tree, and the index names
+#: it as one instead of silently skipping a path that is not under the data root.
+UPTAKE_ARTIFACT_DIR = REPO / "eval" / "uptake"
+
 #: The retrieval non-regression threshold the triaged items hard-code. It is
 #: recorded here so the code that replaces it can be pointed at what it replaced.
 RETRIEVAL_GATE_HARDCODE = 0.95
@@ -2367,7 +2378,7 @@ def write_table(table: dict[str, Any], out_dir: Path | str | None = None,
     """Emit `eval/uptake/uptake-<date>.json`. Enforces the timestamp rule."""
     if stores:
         _validate_stores(stores)
-    out = Path(out_dir) if out_dir else (REPO / "eval" / "uptake")
+    out = Path(out_dir) if out_dir else UPTAKE_ARTIFACT_DIR
     out.mkdir(parents=True, exist_ok=True)
     date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     doc = dict(table)

@@ -128,6 +128,17 @@ EVAL_BASELINES_DIR = DATA_ROOT / "eval" / "baselines"
 # it. Declaring it here is also what makes a `rm -r` aimed at the code tree never
 # reach it: it hangs off DATA_ROOT like every other store.
 TOOL_QUALITY_DIR = DATA_ROOT / "eval" / "tool-quality"
+# The eval instrument index (#2597): one dated JSONL row per run of
+# `scripts/eval_instrument_index.py`, each row a weighted composite over the
+# instruments that already emit dated artifacts, plus their maturity tier. It is
+# a store and not a checkout file for the same reason as the line above: the
+# publisher's whole claim is that it reads what is on disk, so it cannot live
+# where a `git clean` or a fixture aimed at the code tree would take it — and it
+# is the one artifact here that READS the others, which is why its own path is
+# declared like theirs rather than spelled at the call site. v1 is report-only:
+# no gate, promotion rule or rollback path reads this file
+# (`tests/test_eval_instrument_index.py::test_no_gate_promotion_or_rollback_path_reads_the_index`).
+EVAL_INSTRUMENT_INDEX_DIR = DATA_ROOT / "eval" / "instrument-index"
 # One dated report per run of the djev name-prior probe (#2455): the probe writes
 # exactly one `name_prior_<YYYY-MM-DD>.json` and reads nothing here. It used to
 # default `--out-dir` to its own `eval/djev/` inside the code tree, which made every

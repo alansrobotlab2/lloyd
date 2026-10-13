@@ -799,6 +799,16 @@ def render_text(census: dict) -> str:
 
 # ── where it lands ────────────────────────────────────────────────────────────
 
+#: The census's home relative to the data root, used by `resolve_out_dir` as the
+#: default and named so a reader that only wants to know WHERE the dated censuses
+#: are resolves it through this module. #2597's eval instrument index is that
+#: reader: it may only report an instrument at the location its own writer
+#: declares, and until now `eval/funnel` existed only inside this function body.
+#: A tuple of segments, not a joined Path, because it is relative to a root the
+#: caller supplies.
+FUNNEL_ARTIFACT_SUBDIR: tuple[str, ...] = ("eval", "funnel")
+
+
 def resolve_out_dir(cli_value: str | None = None,
                     *, data_root: Path | None = None,
                     code_root: Path | None = None) -> Path:
@@ -811,7 +821,7 @@ def resolve_out_dir(cli_value: str | None = None,
     happened to run `git add -A`.
     """
     base = Path(data_root if data_root else paths.DATA_ROOT)
-    out = Path(cli_value) if cli_value else base / "eval" / "funnel"
+    out = Path(cli_value) if cli_value else base.joinpath(*FUNNEL_ARTIFACT_SUBDIR)
     out = out.expanduser().resolve()
     forbidden = Path(code_root if code_root else paths.LLOYD_HOME).resolve()
     if out == forbidden or forbidden in out.parents:

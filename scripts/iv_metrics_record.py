@@ -86,6 +86,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 from app.paths import PIPELINE_DIR  # noqa: E402
 
+#: The series this script appends one row to, and the `--out` default below.
+#: Named so a reader that only needs to know where the Inner Voice rows live
+#: resolves it here rather than re-spelling the path: #2597's eval instrument
+#: index is that reader, and its whole claim is that it reports each instrument's
+#: OWN declared location, so a store spelled twice is a store it can get wrong.
+DEFAULT_SERIES_PATH = PIPELINE_DIR / "reflection" / "iv-metrics.jsonl"
+
 #: Dropped verdicts / LLM calls. **0.05 is Alan's ruling (#460), applied to this
 #: constant by #1288 on 2026-09-20; the task file had said 0.05 since vault
 #: 1eb0735e.** The measured baseline is 0.039 over 2026-09-01..09-12 — 353 drops over
@@ -635,7 +642,7 @@ def main(argv: list[str] | None = None) -> int:
                          f"{DEFAULT_THRESHOLD}, or $IV_METRICS_DROPPED_THRESHOLD)")
     ap.add_argument("--window-rows", type=int, default=DEFAULT_WINDOW_ROWS,
                     help="rows the median is taken over")
-    ap.add_argument("--out", default=str(PIPELINE_DIR / "reflection" / "iv-metrics.jsonl"),
+    ap.add_argument("--out", default=str(DEFAULT_SERIES_PATH),
                     help="series file to append one row to")
     ap.add_argument("--no-outcome-score", action="store_true",
                     help="skip the weekly iv_outcome_score attachment even when due")
