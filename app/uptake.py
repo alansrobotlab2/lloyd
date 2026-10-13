@@ -680,6 +680,87 @@ def _last_active_epoch(doc: Mapping[str, Any]) -> float | None:
         else ts.timestamp()
 
 
+def _msg_epoch(value: object) -> float | None:
+    """Epoch of a persisted message `ts`, or None when it cannot be read.
+
+    Never guessed: an unparseable stamp drops that message from the AGE window
+    only — its `source` is still counted — because inventing a time for a turn is
+    the failure the one-clock rule exists to stop (#2661).
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.timestamp() if dt.tzinfo else dt.replace(tzinfo=timezone.utc).timestamp()
+
+
+def _load_turn_raw(session_path: Path) -> list[tuple[str | None, str, float | None]]:
+    """Every persisted USER message in one transcript: `(source, text, ts_epoch)`.
+
+    The unfiltered twin of `_load_turns` (#2661): that reader drops an injected
+    message before a `Turn` exists, so the corpus it returns cannot say how much
+    injected traffic there was. Kept non-authoritative on purpose — the moment an
+    injected turn can be called a human turn by reading its TEXT, a system prompt
+    has become Alan's input and the count measures the prompt instead of the
+    person. So only the message-level `source` decides, the text is carried for a
+    caller's own identifier join, and the bracketed scheduler/system prefixes stay
+    entirely out of this function's job.
+    """
+    doc = read_session(session_path)
+    if not isinstance(doc, dict):
+        return []
+    out: list[tuple[str | None, str, float | None]] = []
+    for msg in doc.get("messages") or []:
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        src = msg.get("source")            # absent means no inject marker: Alan's
+        out.append((None if src is None else str(src),
+                    _text_of(msg.get("content")), _msg_epoch(msg.get("timestamp"))))
+    return out
+
+
+def human_turn_sources(root: Path | str | None = None,
+                       days: int | None = None
+                       ) -> list[tuple[str, str | None, str, float | None]]:
+    """Every user message in the corpus, tagged with its persisted inject `source`.
+
+    One enumeration shared with :func:`human_turns` on purpose: `human_turns`
+    answers "how many of these are Alan's", and only the same walk can answer
+    "and what were the rest". The split is by the message's own `source` field
+    (`inner_voice_inject`, `bg_task_notification`, `ambient`, `autonomy`, `bench`,
+    …), `None` meaning the turn has no inject marker — which is what
+    :func:`human_turns` counts as human-authored. Injected counts are the volume
+    each injector writes and are explicitly not a decision, not an answer, and not
+    a suppression of anything: `ambient` counts a queued injection that was
+    delivered, and a muted one wrote no message at all, so an injected class can
+    never be read as an escalation nobody answered (#2661).
+
+    Returns one row per user message: `(session_id, source, text, ts_epoch)`. The
+    session id and the text are there so a caller can name a session and check an
+    identifier join without walking 11,000 transcripts a second time;
+    `ts_epoch_or_None` is the message's OWN persisted `timestamp`, decoded by the
+    same rule `human_turns` uses for `Turn.ts`; a message without one is reported as
+    `None` — an absence, never an invented time. A file that fails to parse
+    contributes nothing, as in `human_turns`.
+    """
+    root = Path(root) if root else lloyd_root()
+    cutoff = None if days is None else datetime.now(timezone.utc).timestamp() - days * 86400
+    out: list[tuple[str, str | None, str, float | None]] = []
+    for p in _session_transcripts(root):
+        try:
+            if cutoff is not None and p.stat().st_mtime < cutoff:
+                continue
+        except OSError:
+            continue
+        sid = session_id(p)
+        out.extend((sid, *row) for row in _load_turn_raw(p))
+    return out
+
+
 def human_turns(root: Path | str | None = None, days: int = 30) -> list[Turn]:
     """Human-authored user turns from the last `days` of session transcripts.
 

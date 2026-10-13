@@ -697,7 +697,8 @@ def _filing_ts(item_id: int, *, backlog_dir: Path | None = None) -> float | None
 
 def filing_latency(events: list[dict], *, since: float, now: float,
                    ledger_from: float | None = None,
-                   backlog_dir: Path | None = None) -> dict[str, Any]:
+                   backlog_dir: Path | None = None,
+              human_input: dict[str, Any] | None = None) -> dict[str, Any]:
     """Signal-to-landing, split into the two waits that produce it.
 
     Three stamps per landed round, all read as one instant: the item's
@@ -848,7 +849,8 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
               repo: Path | None = None, events: list[dict] | None = None,
               horizon_days: int = HUMAN_TOUCH_DAYS,
               ledger: Path | None = None, runs_db: Path | None = None,
-              backlog_dir: Path | None = None) -> dict[str, Any]:
+              backlog_dir: Path | None = None,
+              human_input: dict[str, Any] | None = None) -> dict[str, Any]:
     """One author-split report over `events` (the ledger) and `main`'s history.
 
     `since_days=None` means the whole ledger span, which is the widest window in
@@ -956,6 +958,11 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
         "week_strata": [{"week": k, **v} for k, v in sorted(strata.items())],
         "rollback_triggers": rollback_triggers,
         "true_positives": None,
+        # The other half of the bucket (#2661), nested rather than spread through
+        # this row so no existing author-split key moves: a row re-read next month
+        # has to line up with the ones already archived. `None` when no corpus was
+        # read, so a caller that did not ask for the block pays nothing for it.
+        "human_input": human_input,
         "notes": ["later_undo_7d is one definition run on both arms (scorecard row 5's: "
                   "added lines removed by a later commit of the other arm within 7 d), so "
                   "the two intervals compare",
@@ -1024,7 +1031,590 @@ def render(row: dict[str, Any]) -> str:
         out.append(f"  {s['week']}  agent {s['agent']:>5d}   human {s['human']:>5d}")
     for n in row["notes"]:
         out.append(f"- {n}")
+    out += render_human_input(row.get("human_input"))
     return "\n".join(out)
+
+
+
+
+def _session_stamps(data_root: Path | None,
+                    corpus: list[tuple[str, str | None, str, float | None]]
+                    ) -> dict[str, float]:
+    """Each session id in `corpus` → the epoch its OWN document is stamped at.
+
+    A message's own `timestamp` is the primary stamp (59 of 59 live user messages
+    sampled 2026-10-13 carry one, and none carries `ts`); this is the FALLBACK for a
+    message that has none, and the session document's own `last_active` — read through
+    `uptake._last_active_epoch`, the same key the retention sweep ages on — is the only
+    time available then. Read only for the sessions the corpus names, so the walk is
+    bounded by the corpus rather than by the store; a session with no readable stamp
+    yields nothing, and its turns are reported as `undated_turns` rather than given an
+    invented time.
+    """
+    root = Path(data_root) if data_root else uptake.lloyd_root()
+    want = {sid for sid, _c, _x, _t in corpus}
+    out: dict[str, float] = {}
+    for path in uptake._session_transcripts(root):
+        sid = uptake.session_id(path)
+        if sid not in want:
+            continue
+        doc = uptake.read_session(path)
+        if not isinstance(doc, dict):
+            continue
+        t = uptake._last_active_epoch(doc)
+        if t is not None:
+            out[sid] = t
+    return out
+
+# ── the human input beside the compute (2026-10-13, #2661) ───────────────────
+#
+# `by_author` above prices a landing in tokens, seconds and GPU-hours, and its own
+# scoping note says the human reading a landing "is outside the automod source and
+# out of every number here". That was the honest boundary at the time; this is the
+# other half of the bucket. The move worth recreating is not a dollar split — dollars
+# are unavailable HERE (`cost_usd` is zero-filled on every usage row, so no key in
+# this file carries one and none is added) — it is putting the scarce unmeasured
+# input in the same bucket as the machine cost and dividing by the achieved outcome.
+# On this box that input is Alan's input, counted in turns and decisions because
+# those are not commensurable with GPU-hours: two columns, never one summed "total
+# cost", which would be a fabrication.
+#
+# Two rules this block keeps from the file it lives in. The denominator is an
+# ACHIEVED outcome, and one landing writes two ledger rows (`promoted` carries
+# `round_id` and no `item_id`; `item_landed` carries both), so the denominator
+# dedupes on the round and prints both row counts rather than adding them — the live
+# ledger is asymmetric (554 `promoted` against 1,089 `item_landed` rows measured
+# 2026-10-13), so a sum is wrong in a different direction every day. And the window
+# is the one the corpus COVERS, not the one asked for, the way `comparable_from`
+# labels the ledger's own start (#2510's `MIN(completed_at)` lesson).
+
+from app import uptake
+
+#: The reader of record for a human turn. Bound, not copied: uptake filters a
+#: transcript corpus already (#1848 is the price of the second reader that used to
+#: live in `uptake_probe`), and #2661's step 1(b) is "reuse it, do not write a
+#: parallel report". `human_turn_sources` is its unfiltered twin, so this block can
+#: count what the filter EXCLUDES instead of silently dropping it.
+HUMAN_TURNS_READER = uptake.human_turn_sources
+
+#: Printed verbatim in place of a number whenever no human-event class reaches the
+#: attribution floor. A made-up attention figure is worse than the honest absence it
+#: replaces, so the text IS the answer, not an apology for one.
+ATTENTION_WITHHELD = "attention budget not derivable from these joins"
+
+#: The item's own kill switch, applied to the share of human turns that name an
+#: achieved outcome.
+ATTENTION_FLOOR = 0.5
+
+#: The eight-to-twelve in `skills/backlog-triage/SKILL.md` Step 2, carried as a
+#: quoted number so the derived read can be stated AGAINST it. The cap is a human
+#: ruling: nothing here edits the skill, and no gate reads this constant.
+PROMOTION_CAP_CARRIER = "skills/backlog-triage/SKILL.md"
+PROMOTION_CAP_QUOTE = (8, 12)
+
+#: The ledger classes an escalation count is printed for. `ambient` is NOT one of
+#: them: it is delivery volume, and a MUTED injection persists no message at all, so
+#: the store cannot see non-delivery — which is why it prints beside the decision
+#: classes and is never added to them.
+HUMAN_EVENT_CLASSES = ("alert", "hand_settle", "human_paths", "review_escalated")
+ESCALATION_VOLUME_CLASS = "ambient"
+
+#: The ledger events that DISPOSITION an item — the records the answered join reads.
+#: Every name here is a live writer's own event with rows on the ledger (measured
+#: 2026-10-13 over 22,007 rows: `status_moved` 253, `backlog_retriage` 138,
+#: `item_landed` 1,090, `item_closed` 28, `hand_settle` 21, `settled` 539), and the
+#: join reaches a real share of each class: 12 of 13 `review_escalated` rows, 21 of 24
+#: `human_paths` rows. `escalation_resolved` is deliberately NOT here — it has 0 rows
+#: in those 22,007 and no writer anywhere in the tracked tree
+#: (`git grep -n escalation_resolved`), so an answer read through it is structurally
+#: zero on live traffic and would read as "Alan never answers", which is a claim about
+#: a person rather than a measurement (#2661's review, clause 3).
+ANSWER_DISPOSITION_EVENTS = ("status_moved", "backlog_retriage", "item_landed",
+                            "item_closed", "hand_settle", "settled")
+#: The tighter join, for a path a round left owed to a person: the item has to have
+#: REACHED an outcome, not merely moved.
+ANSWER_OUTCOME_EVENTS = ("item_landed", "item_closed")
+#: How long #2661's step 2 gives an escalation to be answered by a human turn:
+#: "guardian 'needs a human' escalations and whether any human turn followed within a
+#: window". A guardian `alert` row carries no `item_id` and no `round_id` (all 25 live
+#: rows), so no ledger join is possible for it and this is the only join the stores
+#: allow. Measured live 2026-10-13: 25 of 25 alerts were followed by a human turn
+#: inside this window, which is exactly the fact #593 could not see.
+ANSWER_WINDOW_S = 86_400
+#: Where an answer came from, so a reader never mistakes a transcript join for a
+#: ledger record, or a structurally-unanswerable class for an ignored one.
+ANSWER_KINDS = ("ledger_record", "transcript_join", "is_the_answer", "volume_only")
+
+#: What the two human counts are, spelled out so no reader mistakes them for one
+#: unit, and so nobody adds them to a GPU-hour.
+HUMAN_UNIT = "human-originated user turn + human decision event"
+
+
+def _week_key(ts: float) -> str:
+    """ISO `YYYY-Www`, the same week key `week_strata` prints."""
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%G-W%V")
+
+
+def _in(t: float | None, lo: float | None, hi: float | None) -> bool:
+    return t is not None and (lo is None or t >= lo) and (hi is None or t <= hi)
+
+
+def _landing_key(e: dict) -> str:
+    """One achieved outcome, whichever of the two rows is being looked at."""
+    return str(e.get("round_id") or f"item:{e.get('item_id')}"
+               if (e.get("round_id") or e.get("item_id")) else f"ts:{SC._ts(e):.0f}")
+
+
+def _outcomes(events: list[dict], *, lo: float | None, hi: float | None,
+              now: float) -> dict[str, Any]:
+    """Achieved outcomes in the window, deduped on the landing, with both row counts.
+
+    Counted as the UNION of `promoted` and `item_landed` keyed on the round: 554
+    promoted rows against 1,089 item_landed rows means an item can land with no
+    promotion row, so the union is the only denominator that is neither doubled nor
+    short.
+    """
+    keys: dict[str, float] = {}
+    promoted = landed = 0
+    for e in events:
+        ev = e.get("event")
+        if ev not in ("promoted", "item_landed"):
+            continue
+        t = SC._ts(e)
+        if not t or t > now:
+            continue
+        if ev == "promoted":
+            promoted += 1 if _in(t, lo, hi) else 0
+        else:
+            landed += 1 if _in(t, lo, hi) else 0
+        if _in(t, lo, hi):
+            keys.setdefault(_landing_key(e), t)
+    return {"outcomes": len(keys), "outcomes_promoted": promoted,
+            "outcomes_item_landed": landed, "keys": keys,
+            "stamps": sorted(keys.values())}
+
+
+def _escalations(events: list[dict], *, lo: float | None, hi: float | None, now: float,
+                 ambient_in_window: int,
+                 human_stamps: list[float] | None = None) -> dict[str, Any]:
+    """Human decision and escalation events, one line per class, never summed.
+
+    Each class is a DIFFERENT act — a guardian alarm, a settlement someone wrote by
+    hand against an item, the path a round refused and left owed to a person, a round
+    a review sent to a decider — and a single "total" would add an alarm to a ruling to
+    a delivery count and call it attention. That is also the number gameable in the
+    worst direction (an agent that stops surfacing things lowers its own measured
+    attention cost), so no line here prints a sum: `escalations` is the one
+    measurement, and the flat `human_event_opened_by_class` is read back out of it
+    rather than counted a second time.
+
+    `answered` names the record it came from, per class, and `answer_kind` says where
+    that record lives:
+
+    * `review_escalated` / `human_paths` — `ledger_record`. Joined on `item_id`, not
+      `round_id`, because 6 of the 24 live `human_paths` rows carry a null `round_id`
+      and a round-keyed join silently loses that quarter of the class. The joining
+      record must be AT OR AFTER the escalation, so a landing from before it cannot
+      answer it.
+    * `hand_settle` — `is_the_answer`. Its own `outcome` field IS the disposition
+      (live vocabulary measured 2026-10-13 over its 21 rows: `close` 9, `reopen` 9,
+      `ruling,reopen` 1, `settled,recheck,recheck` 1, `settled,close` 1), so there is
+      no answer to look for and printing one would double-count the act. It carries
+      `outcome`, never `decision`.
+    * `alert` — `transcript_join`. Its rows carry no `item_id` and no `round_id`, so
+      the only answer the stores can show is the item's own definition: did a
+      human-originated turn follow within `ANSWER_WINDOW_S`. The complement is printed
+      as `stalled_no_human_turn_24h`, which is the instrument for #593's finding
+      (escalations going unanswered "with no human turn in any cycle").
+    * `ambient` — `volume_only`, printed beside the classes and never added to one.
+
+    A zero therefore always arrives with the record that would have made it nonzero:
+    `answered 0/2 — a status_moved|… row naming the same item_id at or after it` is a
+    measurement, while a bare `answered 0` reads as an accusation about a person.
+    """
+    human_stamps = sorted(human_stamps or [])
+
+    def dedupe(rows: list[dict]) -> dict[str, dict]:
+        got: dict[str, dict] = {}
+        for e in rows:
+            got.setdefault(_landing_key(e) if (e.get("round_id") or e.get("item_id"))
+                           else f"row{SC._ts(e):.0f}", e)
+        return got
+
+    def later_record(item_id: object, ts: float, names: tuple[str, ...]) -> dict | None:
+        """The first record of `names` that dispositions `item_id` at or after `ts`.
+
+        `None` is an absence, not a zero: an escalation whose item has moved on carries
+        no answer, and an escalation about an item that has not moved carries the same
+        nothing — which is why every caller also prints the join it used.
+        """
+        if item_id is None:
+            return None
+        for e in events:
+            if e.get("item_id") == item_id and e.get("event") in names \
+                    and SC._ts(e) >= ts:
+                return e
+        return None
+
+    esc: dict[str, dict[str, Any]] = {}
+    outside: dict[str, int] = {}
+    for name in HUMAN_EVENT_CLASSES:
+        every = dedupe([e for e in events
+                        if e.get("event") == name and SC._ts(e) <= now])
+        inw = [e for _k, e in every.items() if _in(SC._ts(e), lo, hi)]
+        outside[name] = len(every) - len(inw)
+        row: dict[str, Any] = {"opened": len(inw), "answered": None}
+        if name == "hand_settle":
+            outcomes: dict[str, int] = {}
+            for e in inw:
+                got = str(e.get("outcome") or "(no outcome)")
+                outcomes[got] = outcomes.get(got, 0) + 1
+            row["answer_kind"] = "is_the_answer"
+            row["answer_join"] = ("no answer sought: the row IS the settlement, whose own "
+                                  "`outcome` field carries the disposition")
+            row["outcomes"] = dict(sorted(outcomes.items()))
+        elif name == "review_escalated":
+            row["answered"] = sum(1 for e in inw
+                                  if later_record(e.get("item_id"), SC._ts(e),
+                                                  ANSWER_DISPOSITION_EVENTS))
+            row["answer_kind"] = "ledger_record"
+            row["answer_join"] = ("a " + "|".join(ANSWER_DISPOSITION_EVENTS)
+                                  + " row naming the same item_id at or after it")
+            row["routed_to_named_decider"] = sum(1 for e in inw if e.get("decider"))
+        elif name == "human_paths":
+            row["answered"] = sum(1 for e in inw
+                                  if later_record(e.get("item_id"), SC._ts(e),
+                                                  ANSWER_OUTCOME_EVENTS))
+            row["answer_kind"] = "ledger_record"
+            row["answer_join"] = ("an " + "|".join(ANSWER_OUTCOME_EVENTS)
+                                  + " row naming the same item_id at or after it "
+                                  "(joined on item_id: round_id is null on 6 of the 24 "
+                                  "live rows)")
+        else:  # alert — no item_id, no round_id, so no ledger join exists to make
+            ans = sum(1 for e in inw
+                      if any(SC._ts(e) <= t <= SC._ts(e) + ANSWER_WINDOW_S
+                             for t in human_stamps))
+            row["answered"] = ans
+            row["answer_kind"] = "transcript_join"
+            row["answer_join"] = ("no ledger record answers an alert (its rows carry no "
+                                  "item_id or round_id), so the answer is a "
+                                  f"human-originated turn within {ANSWER_WINDOW_S // 3600} h")
+            row["stalled_no_human_turn"] = len(inw) - ans
+        esc[name] = row
+    esc[ESCALATION_VOLUME_CLASS] = {
+        "opened": ambient_in_window, "answered": None,
+        "answer_kind": "volume_only",
+        "answer_join": ("not an escalation: delivered injection volume; a muted "
+                        "injection persists no message, so the store cannot see "
+                        "non-delivery")}
+    outside[ESCALATION_VOLUME_CLASS] = 0
+    return {"escalations": esc,
+            "human_event_opened_by_class": {k: v["opened"] for k, v in esc.items()},
+            "classes_outside_window": outside,
+            "note": ("counts are per class and are never summed; `answer_kind` names "
+                     "whether the answer is a ledger record, a transcript join, the "
+                     "row itself, or nothing at all")}
+
+
+def _attribution(human_rows: list[tuple[str, float]],
+                 keys: dict[str, float]) -> dict[str, Any]:
+    """Do the counted human turns NAME one of the counted achieved outcomes?
+
+    Two denominators were wrong in the first cut of this function and both are fixed
+    by construction here, so this records why they cannot come back:
+
+    * the numerator and denominator now come from the SAME rows the block prints —
+      `human_rows` is the counted human turns, not every user message with no inject
+      marker. Reading the unfiltered corpus instead made the live line claim 3640/8414
+      human turns while the headline above it said 139: the extra 8,275 are turns in
+      sessions uptake already excludes (autonomy runs, benches), and an attribution
+      denominator that disagrees with the printed turn count makes the floor a
+      measurement of the wrong corpus.
+    * `keys` is the WINDOW's landing keys, the same set `outcomes` counts. Joining
+      against every key the ledger holds while dividing by a windowed denominator is
+      how the same line came out `951/873 outcomes are named = 1.0893` — a share above
+      1, which is not a share. `named` is drawn from `keys`, so both shares here are
+      at most 1 and the test node pins it.
+
+    The test is by identifier, on the human turns only: a turn containing `#2661` or
+    `SM_20261013_195356` is about an outcome whatever its intent — ruling, dismissal or
+    question. That is the most generous join the stores allow, because a transcript
+    carries no role label: a share that fails here fails for want of identifiers, not
+    for want of interpretation. Both readings print, and the stricter governs, because
+    clearing only one of them is the ambiguity a made-up attention figure would hide
+    behind. Measured live 2026-10-13: 0 of the 139 counted turns names an outcome,
+    which is why the withheld text is the live answer.
+    """
+    round_re = re.compile(r"\b(SM_\d{8}_\d{6})\b")
+    item_re = re.compile(r"#(\d{2,6})\b")
+    #: `promoted` rows key on the round, `item_landed` rows on `item:NNNN` (see
+    #: `_landing_key`); a human types `#2401`, not `item:2401`, so both spellings of a
+    #: key are looked up while the answer stays the key itself.
+    want = {(k[5:] if k.startswith("item:") else k): k for k in keys}
+    matched = 0
+    named: set[str] = set()
+    for text, _t in human_rows:
+        hits = ({*round_re.findall(text or ""), *item_re.findall(text or "")}
+                & set(want))
+        if hits:
+            matched += 1
+            named |= {want[h] for h in hits}
+    human_n = len(human_rows)
+    outcomes = len(keys)
+    share = round(matched / human_n, 4) if human_n else None
+    outcome_share = round(len(named) / outcomes, 4) if outcomes else None
+    return {"attribution_share": share, "attributable_turns": matched,
+            "n_human_turns": human_n, "attribution_outcome_share": outcome_share,
+            "attribution_outcomes_named": len(named), "attribution_outcomes": outcomes,
+            "attribution_floor": ATTENTION_FLOOR,
+            "clears": bool(share is not None and outcome_share is not None
+                           and share >= ATTENTION_FLOOR
+                           and outcome_share >= ATTENTION_FLOOR)}
+
+
+def human_input_block(*, now: float | None = None, days_requested: float = 30,
+                      data_root: Path | None = None, ledger: Path | None = None,
+                      corpus: list[tuple[str, str | None, str, float | None]] | None = None,
+                      events: list[dict] | None = None) -> dict[str, Any]:
+    """The human side of the bucket, over the window the corpus actually covers.
+
+    Two reads of the transcripts, both uptake's, each used for what only it can give:
+
+    * `uptake.human_turns` — the human TURN COUNT, and the window. Its rows also carry
+      the turn's text, which is what the attribution join is run over, so the
+      attribution denominator is the same set of turns the headline prints.
+    * `corpus`, `HUMAN_TURNS_READER`'s output (`uptake.human_turn_sources`) —
+      `(session_id, source, text, ts)` for every persisted user message, including the
+      injected ones `human_turns` drops. Only the injected rows are read from it, as the
+      volume each injector writes keyed by its message `source`; a `None` source there is
+      uptake's "no inject marker", never added to a human count.
+
+    `days_requested` is quoted, never applied to the transcripts: the window is the
+    covered span of the human turns, which is shorter than any number asked for until the
+    corpus ages that far. Nothing here reads the checkout or writes anything: it is a
+    read of transcripts, the ledger and (through uptake) nothing else.
+    """
+    from scripts.automod import state as S
+    now = now if now is not None else datetime.now(timezone.utc).timestamp()
+    events = S.ledger_rows(ledger or S.LEDGER_PATH) if events is None else events
+    if corpus is None:
+        # `data_root` is the DATA root: uptake's own enumeration resolves
+        # `<root>/sessions/*.json[.gz]`, so the root is handed over as-is and a
+        # test points the whole block at a fixture tree.
+        corpus = HUMAN_TURNS_READER(root=data_root, days=None)
+    # The human count comes from `human_turns` itself — the authoritative reader,
+    # which also drops non-interactive sessions and scheduler-prefixed turns. The
+    # unfiltered corpus is used only for the volumes it cannot give: how much of
+    # each injected class there was. Two counts, one reader each, never a second
+    # filter that could drift from the first (#1848).
+    # `days` is an mtime pre-filter, not a window: 100_000 days is every transcript
+    # on the box, and the window below is the corpus's own covered span.
+    turns = uptake.human_turns(root=data_root, days=100_000)
+    session_stamp = _session_stamps(data_root, corpus)
+    human = [(t.session, t.ts, session_stamp.get(t.session), t.user_text)
+             for t in turns]
+    dated = [(sid, (uptake._msg_epoch(ts) if ts else fallback), text)
+             for sid, ts, fallback, text in human]
+    undated = len(human) - sum(1 for _s, t, _x in dated if t is not None)
+    #: The block's ONE human-turn measurement: every count, ratio, escalation answer
+    #: and attribution share below is read out of these (epoch, text) rows, so the
+    #: headline n and the attribution denominator cannot be two different corpora.
+    in_window = [(t, text) for _s, t, text in dated if t is not None and t <= now]
+    counted = [t for t, _x in in_window]
+    lo, hi = (min(counted), max(counted)) if counted else (None, None)
+    n_human = len(in_window)
+    injected: dict[str, int] = {}
+    for _sid, source, _x, _t in corpus:
+        if source is not None:
+            injected[source] = injected.get(source, 0) + 1
+    ambient = injected.get(ESCALATION_VOLUME_CLASS, 0)
+    out = _outcomes(events, lo=lo, hi=hi, now=now)
+    # The alert join reads the SAME stamp list the counts above were made from, so the
+    # answered arm and the turn count cannot disagree about when Alan was at the box.
+    esc = _escalations(events, lo=lo, hi=hi, now=now, ambient_in_window=ambient,
+                       human_stamps=counted)
+    att = _attribution([(text, t) for t, text in in_window], out["keys"])
+    weeks: dict[str, dict[str, int]] = {}
+    for t, _x in in_window:
+        weeks.setdefault(_week_key(t), {"human_turns": 0, "outcomes": 0})["human_turns"] += 1
+    for t in out["stamps"]:
+        weeks.setdefault(_week_key(t), {"human_turns": 0, "outcomes": 0})["outcomes"] += 1
+    blk: dict[str, Any] = {
+        "author_of_record": HUMAN,
+        "human_unit": HUMAN_UNIT,
+        "window_covered_start": _iso(lo) if lo else None,
+        "window_covered_end": _iso(hi) if hi else None,
+        "window_covered_days": (round((hi - lo) / 86_400, 2) if lo and hi else None),
+        "window_requested_days": days_requested,
+        "human_turns": n_human,
+        "undated_turns": undated,
+        "turn_stamp_source": ("message `timestamp`, else the session document's own "
+                              "stamp; a turn with neither is an absence, never an "
+                              "invented time"),
+        "injected_turns_by_source": injected,
+        "outcomes": out["outcomes"],
+        "outcomes_promoted": out["outcomes_promoted"],
+        "outcomes_item_landed": out["outcomes_item_landed"],
+        "k_n": f"{n_human}/{out['outcomes']}",
+        "touches_per_outcome": (round(n_human / out["outcomes"], 4)
+                                if out["outcomes"] and n_human else None),
+        "outcomes_per_touch": (round(out["outcomes"] / n_human, 4) if n_human else None),
+        "weeks": [{"week": k, **v,
+                   "touches_per_outcome": (round(v["human_turns"] / v["outcomes"], 3)
+                                           if v["outcomes"] else None)}
+                  for k, v in sorted(weeks.items())],
+        "human_supply_turns_per_week": (round(n_human / max(1, len(weeks)), 2)
+                                        if n_human else None),
+        "attention_budget": None,
+        "promotion_cap": {"quote": list(PROMOTION_CAP_QUOTE),
+                          "carrier": PROMOTION_CAP_CARRIER,
+                          "modified_by_this_code": False},
+        **esc, **{k: v for k, v in att.items() if k != "clears"},
+    }
+    # The per-outcome ratio is the attribution-DEPENDENT one, so it is gated on the
+    # join; `outcomes_per_touch` is not — both of its counts come straight off the
+    # stores and are true with no attribution at all.
+    blk["human_touches_per_outcome"] = (
+        blk["touches_per_outcome"] if att["clears"] else None)
+    if att["clears"]:
+        blk["attention_budget"] = {
+            "median_human_touches_per_promoted_item": blk["touches_per_outcome"],
+            "measured_weekly_human_supply": blk["human_supply_turns_per_week"]}
+    else:
+        blk["attention_budget"] = ATTENTION_WITHHELD
+        blk["withheld_reason"] = (
+            "no human-event class reached the attribution floor on the attribution "
+            "line above, so no per-outcome or attention figure is printed; the fleet "
+            "counts stand")
+    return blk
+
+
+def attention_line(blk: dict[str, Any]) -> str:
+    """The derived read on the promotion cap, or the literal that replaces it.
+
+    Below the floor this returns ONLY the withheld text — no decimals, no "but
+    roughly" — because the sentence's whole job is to be unquotable as a number.
+    """
+    if blk.get("attention_budget") == ATTENTION_WITHHELD or not isinstance(
+            blk.get("attention_budget"), dict):
+        return ATTENTION_WITHHELD
+    per = blk["touches_per_outcome"]
+    supply = blk["human_supply_turns_per_week"]
+    lo, hi = PROMOTION_CAP_QUOTE
+    return (f"{per} human turns per achieved outcome x the quoted cap {lo}-{hi} = "
+            f"{round(per * lo, 1)}-{round(per * hi, 1)} turns/wk against a measured "
+            f"supply of {supply} turns/wk; the cap itself is a human ruling in "
+            f"{PROMOTION_CAP_CARRIER} and this code does not change it")
+
+
+def attention_cap(*, up_next: int | None, cap: tuple[int, int] = PROMOTION_CAP_QUOTE,
+                  n_human_turns: float | None = None) -> str:
+    """The cap's own read, stated as a comparison and never as a target.
+
+    The 2026-10-13 reading is `up_next` = 4 against a quoted 8-12, so the honest
+    sentence is "cap not binding", not a recommendation to promote more.
+    """
+    n = "" if n_human_turns is None else f" n={n_human_turns}"
+    if up_next is None:
+        return f"cap {cap[0]}-{cap[1]}: up_next not read, so no comparison{n}"
+    if up_next >= cap[0]:
+        return (f"cap {cap[0]}-{cap[1]} reached: up_next={up_next}{n} — the queue is "
+                f"at the cap, which is the only thing this instrument can say about it")
+    return (f"cap {cap[0]}-{cap[1]}: cap not binding, up_next={up_next}{n} — the "
+            f"measured queue is below the quoted number, so nothing here argues for "
+            f"moving it")
+
+
+def render_escalations(blk: dict[str, Any]) -> list[str]:
+    """One line per class: opened, answered where a record answers it, and the join.
+
+    The join is printed even when the answer is zero, because a bare `answered 0` is
+    what reads as "Alan never answers" — the same figure with its join named is a
+    statement about the ledger. Classes whose answer is not a lookup (`hand_settle`,
+    whose own row is the disposition; `ambient`, which is volume) print their nature in
+    place of a number rather than a zero that would misrepresent them.
+    """
+    lines: list[str] = []
+    for cls, row in sorted((blk.get("escalations") or {}).items()):
+        opened = row.get("opened")
+        kind = row.get("answer_kind")
+        ans = row.get("answered")
+        bits = [f"  {cls} opened {opened}"]
+        if isinstance(ans, int):
+            bits.append(f" | answered {ans}/{opened}")
+        elif kind == "is_the_answer":
+            bits.append(" | the row IS the settlement")
+        elif kind == "volume_only":
+            bits.append(" | not an escalation")
+        if kind:
+            bits.append(f" ({kind})")
+        if row.get("stalled_no_human_turn") is not None:
+            bits.append(f" | stalled with no human turn in the window "
+                        f"{row['stalled_no_human_turn']}")
+        if row.get("routed_to_named_decider") is not None:
+            bits.append(f" | routed to a named decider "
+                        f"{row['routed_to_named_decider']}")
+        if row.get("outcomes"):
+            bits.append(" | outcomes " + ", ".join(f"{k}={v}"
+                                                   for k, v in row["outcomes"].items()))
+        bits.append(f" — join: {row.get('answer_join')}")
+        lines.append("".join(bits))
+    return lines
+
+
+def render_human_input(blk: dict[str, Any] | None) -> list[str]:
+    """The block's lines, appended under the author split. Empty without a block."""
+    if not blk:
+        return []
+    out = ["", f"Human input (author of record: {blk.get('author_of_record')}, "
+               f"n={blk.get('human_turns')})"]
+    out.append(f"- window COVERED: {blk.get('window_covered_start')} → "
+               f"{blk.get('window_covered_end')} = {blk.get('window_covered_days')} d "
+               f"(asked for {blk.get('window_requested_days')} d; the corpus reach is "
+               f"the window)")
+    out.append(f"- human turns {blk.get('human_turns')} (n={blk.get('human_turns')}) | "
+               f"human decision events by class (below) | achieved outcomes "
+               f"promoted+item_landed {blk.get('outcomes')} (n={blk.get('outcomes')}) "
+               f"[rows {blk.get('outcomes_promoted')} promoted / "
+               f"{blk.get('outcomes_item_landed')} item_landed, deduped on the round]")
+    out.append(f"- touches per outcome {blk.get('touches_per_outcome')} | outcomes per "
+               f"touch {blk.get('outcomes_per_touch')} | human touches per outcome "
+               f"{blk.get('human_touches_per_outcome')} (attribution-gated)")
+    if blk.get("undated_turns"):
+        out.append(f"- undated turns {blk.get('undated_turns')}: no message `ts` and no "
+                   f"session stamp — counted as an absence, given no invented time")
+    inj = ", ".join(f"{k}={v}" for k, v in sorted(blk.get("injected_turns_by_source", {}).items()))
+    out.append(f"- injected turns (not a human act, never in the turn count): {inj or '(none)'}")
+    out += render_escalations(blk)
+    att = (f"- attribution: {blk.get('attributable_turns')}/{blk.get('n_human_turns')} "
+           f"human turns name an achieved outcome = {blk.get('attribution_share')}, and "
+           f"{blk.get('attribution_outcomes_named')}/{blk.get('attribution_outcomes')} "
+           f"outcomes are named = {blk.get('attribution_outcome_share')}; floor "
+           f"{blk.get('attribution_floor')}")
+    out.append(att)
+    out.append(f"- attention budget: {attention_line(blk)}")
+    if blk.get("withheld_reason"):
+        out.append(f"  ({blk['withheld_reason']})")
+    cap = blk.get("promotion_cap") or {}
+    out.append(f"- promotion cap {cap.get('quote')} quoted from "
+               f"{cap.get('carrier')}: modified by this code = "
+               f"{cap.get('modified_by_this_code')}")
+    return out
+
+
+def human_input_path() -> Path:
+    from scripts.automod import state as S
+    # Same rule as `landed_outcomes_path`: beside the outcome rows in the automod
+    # state dir, never inside the checkout, where the guardian alerts hourly (#1667).
+    return S.STATE_DIR / "human_input.jsonl"
+
+
+def record_human_input(blk: dict[str, Any], path: Path | None = None) -> Path:
+    path = path or human_input_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(blk, sort_keys=True) + "\n")
+    return path
 
 
 def landed_outcomes_path() -> Path:
@@ -1048,14 +1638,22 @@ def main(argv=None) -> int:
     ap.add_argument("--since", default="all",
                     help="window: all (the ledger's span), 21d, 36h, 2w")
     ap.add_argument("--json", action="store_true", help="print the row as JSON")
+    ap.add_argument("--days", type=int, default=30,
+                    help="transcript window for the human-input block; the block "
+                         "prints the window that corpus actually COVERED, which is "
+                         "shorter than any number asked for here (#2661)")
     ap.add_argument("--record", action="store_true",
                     help=f"append the row to {landed_outcomes_path()}")
     args = ap.parse_args(argv)
     from scripts.automod import state as S
     days = None if args.since.strip().lower() in ("all", "0") else SC.parse_since(args.since)
     events = S.ledger_rows(S.LEDGER_PATH)
-    row = by_author(events=events, since_days=days, ledger=S.LEDGER_PATH,
-                    runs_db=_workers_db())
+    now = datetime.now(timezone.utc).timestamp()
+    # The block reads the transcript corpus, whose reach is shorter than any
+    # `--days`; `human_input_block` prints the window it actually COVERED.
+    blk = human_input_block(now=now, days_requested=float(args.days), events=events)
+    row = by_author(now=now, events=events, since_days=days, ledger=S.LEDGER_PATH,
+                    runs_db=_workers_db(), human_input=blk)
     print(json.dumps(row, indent=2, sort_keys=True) if args.json else render(row))
     if args.record:
         print(f"\nrecorded → {record(row)}")
