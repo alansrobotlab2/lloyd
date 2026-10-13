@@ -1,0 +1,34 @@
+{"path": "tests/test_trajectory_extraction.py", "reason": "no trajectories dir on this machine", "n": 1}
+{"path": "tests/test_trajectory_extraction.py", "reason": "no trajectories dir on this machine", "n": 1}
+{"path": "tests/test_intel_pipeline_body.py", "reason": "neither witness day file is on this box, so the fixtures cannot be re-derived here — the digest assertions still run and still pin the bytes", "n": 1}
+{"path": "tests/test_intel_pipeline_body.py", "reason": "the scored day file these fixtures were cut from is not on this box — the behaviour nodes still run over the committed bytes", "n": 1}
+{"path": "tests/test_trajectory_extraction.py", "reason": "no trajectories dir on this machine", "n": 2}
+{"path": "tests/test_automod_regression.py", "reason": "noise floor not measured on this machine", "n": 1}
+{"path": "tests/test_uptake.py", "reason": "secondary_enabled is false: the slot this measures is retired and the alias now resolves to primary, so a run here would score the wrong engine. Re-enable the slot to re-take Step 2's measurement.", "n": 1}
+{"path": "tests/test_desktop_module.py", "reason": "live desktop test; set LLOYD_LIVE_DESKTOP=1", "n": 1}
+{"path": "tests/test_desktop_module.py", "reason": "live desktop test; set LLOYD_LIVE_DESKTOP=1", "n": 1}
+{"path": "tests/test_eval_scorer.py", "reason": "no baseline runs recorded yet", "n": 1}
+{"path": "tests/test_eval_ceiling_fields.py", "reason": "retrieval eval needs a live engine and LLOYD_CI=1; nothing sets LLOYD_CI on this box (scripts/, workers/, agent-services/ all 0 hits), so this is a permanent skip here, not a transient one — the written-baseline contract is covered hermetically by test_a_measured_ceiling_survives_the_json_round_trip_into_summary_overall; stands in for with_artifact, which 3 nodes take (test_baseline_carries_ceiling_label_agreement_and_normalized, test_seed_side_anchorless_fields_present_and_unmodified, test_raw_values_unchanged_by_the_ceiling)", "n": 1}
+{"path": "tests/test_eval_ceiling_fields.py", "reason": "retrieval eval needs a live engine and LLOYD_CI=1; nothing sets LLOYD_CI on this box (scripts/, workers/, agent-services/ all 0 hits), so this is a permanent skip here, not a transient one — the written-baseline contract is covered hermetically by test_a_measured_ceiling_survives_the_json_round_trip_into_summary_overall; stands in for without_artifact -> test_no_artifact_emits_ceiling_null_with_a_reason and its 2 sibling nodes", "n": 1}
+{"path": "tests/test_eval_ceiling_fields.py", "reason": "retrieval eval needs a live engine and LLOYD_CI=1; nothing sets LLOYD_CI on this box (scripts/, workers/, agent-services/ all 0 hits), so this is a permanent skip here, not a transient one — the written-baseline contract is covered hermetically by test_a_measured_ceiling_survives_the_json_round_trip_into_summary_overall; stands in for without_artifact -> test_no_artifact_emits_ceiling_null_with_a_reason and its 2 sibling nodes", "n": 1}
+{"path": "tests/test_eval_ceiling_fields.py", "reason": "retrieval eval needs a live engine and LLOYD_CI=1; nothing sets LLOYD_CI on this box (scripts/, workers/, agent-services/ all 0 hits), so this is a permanent skip here, not a transient one — the written-baseline contract is covered hermetically by test_a_measured_ceiling_survives_the_json_round_trip_into_summary_overall; stands in for with_artifact, which 3 nodes take (test_baseline_carries_ceiling_label_agreement_and_normalized, test_seed_side_anchorless_fields_present_and_unmodified, test_raw_values_unchanged_by_the_ceiling)", "n": 1}
+{"path": "tests/test_worker_capability_allowlist.py", "reason": "recording mode only (LLOYD_RECORD_CAPABILITY_BASELINE=1)", "n": 1}
+{"path": "tests/test_turn_options.py", "reason": "recording mode only (LLOYD_RECORD_TURN_OPTIONS=1)", "n": 1}
+{"path": "tests/test_voice_wake_and_turn.py", "reason": "smart-turn model not present", "n": 3}
+{"path": "tests/test_voice_wake_and_turn.py", "reason": "turn-1-mini model not present", "n": 4}
+{"path": "tests/test_voice_wake_and_turn.py", "reason": "smart-turn model not present", "n": 1}
+{"path": "tests/test_voice_wake_and_turn.py", "reason": "streaming model not present", "n": 1}
+{"path": "tests/test_speaker_id_backend.py", "reason": "CAM++ model not fetched (/home/alansrobotlab/lloyd-work/SM_20261013_041452/home/lloyd/agent-services/models/campplus/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx)", "n": 1}
+{"path": "tests/test_speaker_id_backend.py", "reason": "CAM++ model not fetched (/home/alansrobotlab/lloyd-work/SM_20261013_041452/home/lloyd/agent-services/models/campplus/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx)", "n": 1}
+{"path": "tests/test_speaker_id_backend.py", "reason": "CAM++ model not fetched (/home/alansrobotlab/lloyd-work/SM_20261013_041452/home/lloyd/agent-services/models/campplus/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx)", "n": 1}
+{"path": "tests/test_qmd_fork_landing.py", "reason": "/home/alansrobotlab/lloyd-work/SM_20261013_041452/home/lloyd/qmd is not on disk here, so the fork's package.json cannot be read; the outer-tree legs above do not depend on it", "n": 1}
+{"path": "tests/_live_data.py", "reason": "the fold's live displacement set at /home/alansrobotlab/lloyd-data/_pipeline/vault-derived/kg.sqlite holds 0 displacements, below the 1-displacement floor under which this guard cannot discriminate either way", "n": 1}
+{"path": "tests/test_retrieval_seed_anchoring.py", "reason": "no entity-vector index at /home/alansrobotlab/lloyd-work/SM_20261013_041452/home/lloyd-data/_pipeline/vault-derived/entity-vectors: build it with scripts/memory/build_entity_vectors.py (or point LLOYD_ENTITY_VECTORS at one)", "n": 1}
+{"path": "tests/test_wrapup_tooling.py", "reason": "no override file (a worktree or a fresh clone)", "n": 1}
+{"path": "tests/test_voice_streaming_asr.py", "reason": "parakeet-realtime-eou-120m not present", "n": 1}
+{"path": "tests/test_voice_streaming_asr.py", "reason": "parakeet-realtime-eou-120m not present", "n": 1}
+{"path": "tests/test_voice_streaming_asr.py", "reason": "parakeet-realtime-eou-120m not present", "n": 1}
+{"path": "tests/test_voice_streaming_asr.py", "reason": "parakeet-realtime-eou-120m not present", "n": 1}
+{"path": "tests/test_voice_streaming_asr.py", "reason": "parakeet-realtime-eou-120m not present", "n": 1}
+{"path": "tests/test_voice_asr_hotwords.py", "reason": "Parakeet model not fetched", "n": 1}
+{"path": "tests/test_voice_asr_hotwords.py", "reason": "Parakeet model not fetched", "n": 1}

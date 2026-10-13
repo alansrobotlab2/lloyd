@@ -897,3 +897,41 @@ def test_the_skip_ceiling_the_pins_now_live_under_is_still_forty(tmp_path, monke
     assert ok2 is True, (
         f"a run at exactly the ceiling — the shape a suite at its non-pin baseline "
         f"lands in once the pins execute — was failed: {detail2}")
+
+
+def test_the_skip_ceiling_survives_a_round_that_buys_headroom_elsewhere(tmp_path, monkeypatch):
+    """#2637: the headroom came from converting skips, never from moving the rail.
+
+    Three checks, the first against the shipped FILE rather than the imported
+    object, because the failure this guards is a future round quietly doing the
+    cheap thing — editing `PYTEST_MAX_SKIPPED` upward instead of fixing the node
+    that skips:
+
+    * the ceiling reads 40 in the source, so a bump that keeps the constant's
+      name still goes red;
+    * one skip above it is still refused, with the skips message, so the rail
+      that burned #2636's own round is intact;
+    * a run at 38 is accepted, because the target is margin under the ceiling,
+      not pressure against it.
+    """
+    g, _calls, _script = _gate(tmp_path, monkeypatch)
+    src = (Path(__file__).resolve().parents[1] / "scripts" / "automod"
+           / "gate.py").read_text(encoding="utf-8")
+    ceiling = re.findall(r"^PYTEST_MAX_SKIPPED = (\d+)$", src, re.M)
+    assert ceiling == ["40"], (
+        f"gate.py should assign PYTEST_MAX_SKIPPED = 40 exactly once, got "
+        f"{ceiling} — raising the ceiling is Alan's ruling (#2214), not a "
+        "round's convenience")
+    assert G.PYTEST_MAX_SKIPPED == 40
+
+    def counts_with(skipped: int) -> dict:
+        return {"passed": 18600, "failed": 0, "errors": 0, "xfailed": 1,
+                "tests_skipped": skipped, "collected": 18601 + skipped,
+                "workers": 8, "parallel_only_failures": 0}
+
+    ok, detail, _ = g._tests_pass(counts_with(G.PYTEST_MAX_SKIPPED + 1), None, {})
+    assert ok is False and "skipped" in detail, detail
+    assert str(G.PYTEST_MAX_SKIPPED + 1) in detail, (
+        f"the refusal does not name the count it refused: {detail}")
+    ok38, _, _ = g._tests_pass(counts_with(38), None, {})
+    assert ok38 is True, "a suite at 38 skips must pass: #2637 wants margin, not limit"

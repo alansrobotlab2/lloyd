@@ -36,6 +36,16 @@ from intel_pipeline.models import FeedItem, ScoredItem  # noqa: E402
 from intel_pipeline.scanners import github_scanner as gh_mod  # noqa: E402
 from intel_pipeline.scanners import youtube_scanner as yt_mod  # noqa: E402
 
+# #2637: `skip_sites` — the one definition of "what is a skip" shared by this file's
+# witness-node check and `tests/test_skip_inventory.py`'s converted-node check. Named
+# path insert rather than pytest's `prepend` import mode, because a helper that depends
+# on an import detail nobody verified is a helper that silently stops resolving, and
+# `tests/` is not a package (no `__init__.py`).
+_TESTS_DIR = str(Path(__file__).resolve().parent)
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
+import skip_inventory as S  # noqa: E402
+
 LIMIT = body_mod.SUMMARY_LIMIT
 ELL = body_mod.ELLIPSIS
 PHRASE = "Thank you for your interest in sending a pull request"
@@ -2145,11 +2155,48 @@ assert len(DEVDAY_WITNESS) == 468, (
 _RAW_FEEDS_DIR = Path.home() / "lloyd-data" / "_pipeline" / "vault-derived" / "memory" / "feeds" / "raw"
 
 
-@pytest.mark.skipif(
-    not (_RAW_FEEDS_DIR / "2026-10-03.jsonl").exists()
-    and not (_RAW_FEEDS_DIR / "2026-10-01.jsonl").exists(),
-    reason="neither witness day file is on this box, so the fixtures cannot be re-derived "
-           "here — the digest assertions still run and still pin the bytes")
+#: Each witness fixture's own committed shape, measured 2026-10-13 with `wc -l -c` over
+#: `tests/fixtures/` and `sha256sum` over the same bytes. These are the figures a fixture has
+#: whatever the box holds, which is what makes #2637's absent branch an assertion instead of a
+#: skip: the source comparison needs the day file, the provenance of the committed bytes does not.
+_WITNESS_SELF_SHAPE = {
+    "intel_cta_witness_2143.jsonl": (1, 929, "75112cf3dc6b63edd0a4275e04b3406764f978103385e8"
+                                                     "84199c33f218440da2"),
+    "intel_sponsor_witness_2143.jsonl": (1, 880, "3209320ef549dc58d9a42756ace983731fa1818c7596"
+                                                 "81f72955fa44405a4a3b"),
+    "intel_bare_domain_witness_2224.jsonl": (1, 1177, "922009855041ea24b96e7bbef89708315efb833"
+                                                      "1cff9ac6360c074c8cc056796"),
+    "intel_bare_email_witness_2224.jsonl": (1, 1099, "bfb864319a9fadb01cba6a47e46e91dc29a9bbe68"
+                                                     "40fbfc1fbe67da305d2d337"),
+}
+
+
+def _assert_fixture_is_still_its_own_bytes(name: str, item_id: str) -> None:
+    """Assert the committed fixture's own shape: one row, its byte count, its digest, its id.
+
+    The branch that runs when the day file it was cut from is off the box — which is every
+    gate round, because `scripts/automod/worktree.py::HOME_LINK_SKIP` excludes `lloyd-data`
+    from a round's home. It is not the weaker branch: a fixture edited, re-flowed or
+    re-serialised in the repo fails on the digest here with no source needed. What it cannot
+    see is a fixture that drifted *together with* its source, and that is what the present
+    branch is for.
+    """
+    import hashlib
+    _fixture_witness_row(name, item_id)          # pins the one-line shape and the id
+    raw = (REPO_ROOT / "tests" / "fixtures" / name).read_text(encoding="utf-8")
+    lines, bytes_, sha = _WITNESS_SELF_SHAPE[name]
+    assert len(raw.splitlines()) == lines, (
+        f"{name} is {len(raw.splitlines())} lines, not the {lines} it was committed as — a "
+        "witness fixture is one stored row, so a second line is a second row nobody extracted")
+    got_bytes = len(raw.encode(encoding="utf-8"))
+    assert got_bytes == bytes_, (
+        f"{name} is {got_bytes} bytes against the {bytes_} measured 2026-10-13: the committed "
+        "witness bytes have been rewritten")
+    assert hashlib.sha256(raw.encode(encoding="utf-8")).hexdigest() == sha, (
+        f"{name}'s digest moved: these bytes are no longer the ones #2143/#2224 copied, and "
+        "every node reading them is testing bytes nobody measured")
+
+
 def test_the_witness_fixtures_are_still_the_rows_stored_under_those_ids():
     """The fixtures are copies, so a copy needs checking against its source.
 
@@ -2166,8 +2213,13 @@ def test_the_witness_fixtures_are_still_the_rows_stored_under_those_ids():
     A row whose SUMMARY changed under the same id is the failure that matters, and that is what
     is asserted exactly.
 
-    It skips when both day files are gone rather than passing vacuously; the digest assertions
-    in the behaviour nodes are the part that runs everywhere.
+    Two states, one report (#2637). With the day file present the node is what it always was:
+    the fixture's row compared byte-for-byte against the stored row under that id. With it
+    absent — every gate round, and any box whose feed scanner has aged those days out — the
+    node asserts the fixture's OWN committed figures instead of skipping, so it lands in the
+    suite's pass column with something that can still fail. The skip this replaces was counted
+    in the 40 that `PYTEST_MAX_SKIPPED` allows the whole suite, which is how a node that
+    reports nothing ended up spending a slot a node that reports something needs.
     """
     for name, day, item_id, needle, lines_at_extraction in (
         ("intel_cta_witness_2143.jsonl", "2026-10-03.jsonl",
@@ -2177,21 +2229,27 @@ def test_the_witness_fixtures_are_still_the_rows_stored_under_those_ids():
     ):
         source = _RAW_FEEDS_DIR / day
         if not source.exists():
-            continue
-        raw_lines = source.read_text(encoding="utf-8").splitlines()
-        assert len(raw_lines) >= lines_at_extraction, (
-            f"{day} holds {len(raw_lines)} lines, fewer than the {lines_at_extraction} it "
-            "held when the fixture was cut — a day file does not shrink on its own, so it "
-            "was rewritten and the extract figure the constants name is no longer one an "
-            "extract reproduces")
-        hits = [json.loads(ln) for ln in raw_lines if needle in ln]
-        assert len(hits) == 1, (
-            f"{needle!r} matches {len(hits)} rows in {day}, not the one row the fixture is")
-        assert hits[0]["id"] == item_id
-        fixture = _fixture_witness_row(name, item_id)
-        assert hits[0]["summary"] == fixture["summary"], (
-            f"{name} has drifted from the row stored under {item_id}: the fixture is now a "
-            "lookalike, and the nodes that read it are testing bytes nobody measured")
+            # #2637: this used to be a bare `continue` — and the whole node skipped when BOTH
+            # day files were gone, which is every gate round, since `HOME_LINK_SKIP` in
+            # `scripts/automod/worktree.py` keeps `lloyd-data` out of a round's home. A copy
+            # with no source here is not a copy with no provenance: the committed bytes still
+            # have a line count, a byte count and a digest, and those are asserted.
+            _assert_fixture_is_still_its_own_bytes(name, item_id)
+        else:
+            raw_lines = source.read_text(encoding="utf-8").splitlines()
+            assert len(raw_lines) >= lines_at_extraction, (
+                f"{day} holds {len(raw_lines)} lines, fewer than the {lines_at_extraction} it "
+                "held when the fixture was cut — a day file does not shrink on its own, so it "
+                "was rewritten and the extract figure the constants name is no longer one an "
+                "extract reproduces")
+            hits = [json.loads(ln) for ln in raw_lines if needle in ln]
+            assert len(hits) == 1, (
+                f"{needle!r} matches {len(hits)} rows in {day}, not the one row the fixture is")
+            assert hits[0]["id"] == item_id
+            fixture = _fixture_witness_row(name, item_id)
+            assert hits[0]["summary"] == fixture["summary"], (
+                f"{name} has drifted from the row stored under {item_id}: the fixture is now a "
+                "lookalike, and the nodes that read it are testing bytes nobody measured")
 
 
 def test_the_stored_2026_10_03_row_loses_its_cta_and_keeps_its_opening_sentence(intel_state):
@@ -2567,10 +2625,6 @@ assert len(_BARE_EMAIL_WITNESS) == 494, (
 _SCORED_FEEDS_DIR = _RAW_FEEDS_DIR.parent
 
 
-@pytest.mark.skipif(
-    not (_SCORED_FEEDS_DIR / "intel-2026-10-04.jsonl").exists(),
-    reason="the scored day file these fixtures were cut from is not on this box — the "
-           "behaviour nodes still run over the committed bytes")
 def test_the_two_2224_fixtures_are_still_the_rows_stored_under_those_ids():
     """The fixtures are copies, so each is checked against its source, as #2143's are.
 
@@ -2579,19 +2633,33 @@ def test_the_two_2224_fixtures_are_still_the_rows_stored_under_those_ids():
     is being scored and does not shrink, so equality would go red at the next run for a
     reason that is not a defect. A row whose SUMMARY changed under the same id is the failure
     that matters, and that is what is asserted exactly.
+
+    Two states, one report (#2637), the same shape as the #2143 pair above: absent source,
+    assert the fixtures' own committed figures; present source, compare them against it.
     """
+    targets = (
+        ("intel_bare_domain_witness_2224.jsonl",
+         "youtube:UC6QNjBn6KMq5-pe3OE11zZg:3cjnyL0_fMI", "tinyurl.com/38pdkzuc"),
+        ("intel_bare_email_witness_2224.jsonl",
+         "youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:9CGsq3A590Q", "wesroth@smoothmedia.co"),
+    )
     source = _SCORED_FEEDS_DIR / "intel-2026-10-04.jsonl"
+    if not source.exists():
+        # #2637: this node used to be skipif-gated on that file, so wherever it was not on
+        # disk — every gate round, since `HOME_LINK_SKIP` in `scripts/automod/worktree.py`
+        # keeps `lloyd-data` out of a round's home, and any box whose scanner aged
+        # 2026-10-04 out — the node reported nothing and spent one of the 40 skip slots
+        # `PYTEST_MAX_SKIPPED` counts across the whole suite. A copy with no source still has
+        # its own committed line count, byte count and digest: asserted here.
+        for name, item_id, _needle in targets:
+            _assert_fixture_is_still_its_own_bytes(name, item_id)
+        return
     raw_lines = source.read_text(encoding="utf-8").splitlines()
     assert len(raw_lines) >= 31, (
         f"intel-2026-10-04.jsonl holds {len(raw_lines)} lines, fewer than the 31 it held "
         "when the fixtures were cut, so it was rewritten and 31 is no longer the figure an "
         "extract reproduces")
-    for name, item_id, needle in (
-        ("intel_bare_domain_witness_2224.jsonl",
-         "youtube:UC6QNjBn6KMq5-pe3OE11zZg:3cjnyL0_fMI", "tinyurl.com/38pdkzuc"),
-        ("intel_bare_email_witness_2224.jsonl",
-         "youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:9CGsq3A590Q", "wesroth@smoothmedia.co"),
-    ):
+    for name, item_id, needle in targets:
         hits = [json.loads(ln) for ln in raw_lines if needle in ln]
         assert len(hits) == 1, (
             f"{needle!r} matches {len(hits)} rows in intel-2026-10-04.jsonl, not the one row "
@@ -2600,6 +2668,72 @@ def test_the_two_2224_fixtures_are_still_the_rows_stored_under_those_ids():
         assert hits[0]["summary"] == _fixture_witness_row(name, item_id)["summary"], (
             f"{name} has drifted from the row stored under {item_id}: the nodes that read "
             "it would be testing bytes nobody measured")
+
+
+#: The two nodes #2637 converted from data-root skips to two-state reports.
+_WITNESS_SOURCE_NODES = (
+    "test_the_witness_fixtures_are_still_the_rows_stored_under_those_ids",
+    "test_the_two_2224_fixtures_are_still_the_rows_stored_under_those_ids",
+)
+
+
+def test_no_data_root_skip_is_left_on_the_witness_source_nodes():
+    """#2637 clause 2, checked structurally rather than trusted.
+
+    Two halves, both read out of this file's own SYNTAX rather than its bytes:
+
+    * no skip marker and no inline skip call survives anywhere in it. Both
+      guards this round removed were keyed on a `lloyd-data` day file, and a
+      data-root skip is exactly what #2637 is about: it spends one of the 40 skip
+      slots `PYTEST_MAX_SKIPPED` gives the whole suite to report nothing, on every
+      gate round, because `HOME_LINK_SKIP` in `scripts/automod/worktree.py` keeps
+      `lloyd-data` out of a round's home.
+    * each converted node still carries an `if not <day file>.exists():` arm that
+      calls `_assert_fixture_is_still_its_own_bytes`. That is the difference between
+      a converted node and a guard quietly replaced by a bare `return`: the absent
+      state has to assert the fixture's own line count, byte count and digest.
+
+    The first half runs through `tests/skip_inventory.py::skip_sites`, the one reader
+    `tests/test_skip_inventory.py` also uses on the five nodes converted at other call
+    sites. This file used to carry its own AST walk for it while the sibling's version
+    was blind to markers — #2637's second review named that split — and two definitions
+    of "what is a skip" is two things to get wrong, one of which reads as a clean
+    suite. The probe that proves the reader can see a marker lives beside it:
+    `test_the_skip_needle_sees_a_marker_and_leaves_an_assertion_alone`.
+    """
+    import ast
+    src = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    # Read from the syntax, not the bytes: the first draft of this node substring-
+    # searched the file for the very names it forbids and reddened on its own docstring.
+    sites = S.skip_sites(src)
+    assert not sites, (
+        f"a skip is back in this file: {sites} — #2637 removed the two keyed on "
+        "the witness day files, and a data-root skip reports nothing on every gate "
+        "round while costing one of the 40 the whole suite is allowed")
+
+    by_name = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    for name in _WITNESS_SOURCE_NODES:
+        node = by_name.get(name)
+        assert node is not None, (
+            f"{name} is no longer a top-level node of this file, so nothing here "
+            "pins the state it reports in")
+        arms = [n for n in ast.walk(node)
+                if isinstance(n, ast.If)
+                and isinstance(n.test, ast.UnaryOp)
+                and isinstance(n.test.op, ast.Not)
+                and any(isinstance(c, ast.Call)
+                        and getattr(c.func, "attr", getattr(c.func, "id", None)) == "exists"
+                        for c in ast.walk(n.test))
+                and any(isinstance(c, ast.Call)
+                        and getattr(c.func, "id", None)
+                        == "_assert_fixture_is_still_its_own_bytes"
+                        for st in n.body for c in ast.walk(st))]
+        assert arms, (
+            f"{name} has no absent-day-file arm that asserts the fixtures' own "
+            "figures — a node that only reports when the day file is on disk is "
+            "the skip this round removed, wearing different clothes")
 
 
 def test_the_stored_bare_domain_row_loses_its_tinyurl_block(intel_state):
@@ -2909,8 +3043,9 @@ def test_a_github_body_with_a_bare_email_or_a_scheme_less_host_is_not_touched(in
 
 #: The vault copy of the scored day file, committed as #2224's witness (vault `b03e15e5`).
 #: `backlog/data/…`, not the runtime `_SCORED_FEEDS_DIR`, is the bytes clause 6 asked to
-#: have history: the runtime feed is a retention-sweep target, and the node that checks the
-#: fixtures against it skips precisely when it is gone.
+#: have history: the runtime feed is a retention-sweep target, so the node that checks the
+#: fixtures against it cannot rely on it being there — since #2637 it asserts the fixtures'
+#: own committed figures when it is not, instead of skipping.
 _COMMITTED_WITNESS = (Path.home() / "obsidian" / "backlog" / "data"
                       / "intel-2026-10-04.jsonl")
 
@@ -2920,12 +3055,14 @@ def test_the_committed_witness_bytes_are_the_feed_the_fixtures_were_cut_from():
     """Clause 6's other half: the copy in the vault is the file, not a summary of it.
 
     The runtime node above (`test_the_two_2224_fixtures_are_still_the_rows_stored_under`
-    `_those_ids`) reads `lloyd-data/_pipeline/…/feeds/intel-2026-10-04.jsonl` and is
-    `skipif`-gated on that file existing — which is the exact situation this clause exists
-    for, since a day feed is a retention target. So the figure the clause re-derives
-    (`wc -l < backlog/data/intel-2026-10-04.jsonl` -> 31, the count the fixtures were cut
-    against on 2026-10-05) and the two rows themselves are read here, from the bytes that
-    have history.
+    `_those_ids`) reads `lloyd-data/_pipeline/…/feeds/intel-2026-10-04.jsonl`, and a day feed
+    is a retention target, so it cannot treat that file as certain — since #2637 it asserts
+    the fixtures' own committed figures when the file is gone rather than skipping. That is
+    the same situation this clause exists for from the other side: the committed copy is what
+    the runtime node's absent branch and this one both ultimately rest on. So the figure the
+    clause re-derives (`wc -l < backlog/data/intel-2026-10-04.jsonl` -> 31, the count the
+    fixtures were cut against on 2026-10-05) and the two rows themselves are read here, from
+    the bytes that have history.
 
     Read-only on the vault, hence `live_vault`: a later job rewriting the committed witness
     reddens this on the Pre-Flight rung that does run the mark, rather than silently

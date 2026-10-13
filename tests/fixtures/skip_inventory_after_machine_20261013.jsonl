@@ -1,0 +1,16 @@
+{"path": "tests/test_voice_streaming_asr.py", "reason": "parakeet-realtime-eou-120m not present", "n": 1}
+{"path": "tests/test_voice_streaming_asr.py", "reason": "parakeet-realtime-eou-120m not present", "n": 1}
+{"path": "tests/test_voice_streaming_asr.py", "reason": "parakeet-realtime-eou-120m not present", "n": 1}
+{"path": "tests/test_voice_asr_hotwords.py", "reason": "Parakeet model not fetched", "n": 1}
+{"path": "tests/test_voice_asr_hotwords.py", "reason": "Parakeet model not fetched", "n": 1}
+{"path": "tests/test_voice_streaming_asr.py", "reason": "parakeet-realtime-eou-120m not present", "n": 1}
+{"path": "tests/test_voice_streaming_asr.py", "reason": "parakeet-realtime-eou-120m not present", "n": 1}
+{"path": "tests/test_speaker_id_backend.py", "reason": "CAM++ model not fetched (/home/alansrobotlab/lloyd-work/SM_20261013_041452/home/lloyd/agent-services/models/campplus/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx)", "n": 1}
+{"path": "tests/test_speaker_id_backend.py", "reason": "CAM++ model not fetched (/home/alansrobotlab/lloyd-work/SM_20261013_041452/home/lloyd/agent-services/models/campplus/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx)", "n": 1}
+{"path": "tests/test_speaker_id_backend.py", "reason": "CAM++ model not fetched (/home/alansrobotlab/lloyd-work/SM_20261013_041452/home/lloyd/agent-services/models/campplus/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx)", "n": 1}
+{"path": "tests/test_desktop_module.py", "reason": "live desktop test; set LLOYD_LIVE_DESKTOP=1", "n": 1}
+{"path": "tests/test_desktop_module.py", "reason": "live desktop test; set LLOYD_LIVE_DESKTOP=1", "n": 1}
+{"path": "tests/test_voice_wake_and_turn.py", "reason": "smart-turn model not present", "n": 3}
+{"path": "tests/test_voice_wake_and_turn.py", "reason": "turn-1-mini model not present", "n": 4}
+{"path": "tests/test_voice_wake_and_turn.py", "reason": "smart-turn model not present", "n": 1}
+{"path": "tests/test_voice_wake_and_turn.py", "reason": "streaming model not present", "n": 1}

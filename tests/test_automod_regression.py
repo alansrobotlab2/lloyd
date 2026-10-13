@@ -758,7 +758,19 @@ def test_the_recorded_noise_floor_is_what_the_code_expects():
     against, or with a σ so small it under-floors the metric again.
     """
     if not R.NOISE_PATH.exists():
-        pytest.skip("noise floor not measured on this machine")
+        # Two-branch instead of a skip (#2637), for the same reason as every
+        # other conversion in this round: the `tests` rung's suite-wide ceiling
+        # is 40 and this box sits at 39-41, so this node's skip was competing
+        # with real work for the same budget. The absent state still has a
+        # check that can fail: the floor is derived per metric over an armed
+        # list, and a σ-less artifact is only harmless while that list is
+        # non-empty — an emptied `ARMED_METRICS` would silently disarm every
+        # metric again, which is exactly the 2026-09-21 failure this node
+        # exists to catch.
+        assert R.ARMED_METRICS, (
+            "no noise-floor artifact on this box AND no armed metric: the floor "
+            "guards nothing, so this node would be vacuous rather than unevaluated")
+        return
     noise = json.loads(R.NOISE_PATH.read_text())
     n = int((noise.get("metrics") or {}).get("n_queries", {}).get("mean") or 0)
     assert n > 0, "the artifact publishes no denominator, so no floor can be checked"

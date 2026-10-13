@@ -1,0 +1,334 @@
+{
+ "_witness": {
+  "extracted": [
+   "run header",
+   "set block",
+   "dev correct/correct_strict for the all-category and single_session cells of each arm",
+   "the prefetch vs prefetch_rel paired comparison"
+  ],
+  "label_status_hits_in_original": 0,
+  "not_extracted": "the 1068 per-question rows and the prefetch context dump; no figure quoted in #2170 depends on them",
+  "purpose": "#2170 clause-6 witness: a published LloydMemEval artifact exactly as it stood before the label_status gate — absolute correct/correct_strict rates, no label-quality field of any kind.",
+  "source_bytes": 1630965,
+  "source_file": "/home/alansrobotlab/lloyd-data/eval/1480/runs/lloydmemeval-baseline-2026-09-25.json",
+  "source_lines": 40320,
+  "source_sha256": "d47f3b73c63e8917c205f274d7dbba66adcb046ef3e44437d115643e7eb40366",
+  "why_it_matters": "The set is v1, whose own audit (eval/memory_eval/v1/AUDIT.md — 35 of 333 labels opened, 3 defective, Wilson 95% [3.0%, 22.4%]) states in terms that this is 35 of 333, not the human review #1471's closure asks for. This artifact published correct=0.6367 for prefetch_rel with no label-quality field anywhere in its 1.6 MB. After #2170 every artifact's set block carries label_status, a pilot version publishes its measured defect rate and Wilson interval beside those rates, and a pilot version with no recorded audit is refused before a single rate exists."
+ },
+ "dev": {
+  "closed_book": {
+   "all": {
+    "correct": {
+     "ci": [
+      0.1284,
+      0.2181
+     ],
+     "k": 45,
+     "mde_80": 0.0908,
+     "n": 267,
+     "rate": 0.1685
+    },
+    "correct_strict": {
+     "ci": [
+      0.0287,
+      0.0815
+     ],
+     "k": 13,
+     "mde_80": 0.0727,
+     "n": 267,
+     "rate": 0.0487
+    }
+   },
+   "single_session": {
+    "correct": {
+     "ci": [
+      0.1247,
+      0.3329
+     ],
+     "k": 12,
+     "mde_80": 0.2139,
+     "n": 57,
+     "rate": 0.2105
+    },
+    "correct_strict": {
+     "ci": [
+      0.0491,
+      0.2112
+     ],
+     "k": 6,
+     "mde_80": 0.1611,
+     "n": 57,
+     "rate": 0.1053
+    }
+   }
+  },
+  "history": {
+   "all": {
+    "correct": {
+     "ci": [
+      0.9324,
+      0.9795
+     ],
+     "k": 257,
+     "mde_80": 0.0727,
+     "n": 267,
+     "rate": 0.9625
+    },
+    "correct_strict": {
+     "ci": [
+      0.7901,
+      0.8782
+     ],
+     "k": 224,
+     "mde_80": 0.0891,
+     "n": 267,
+     "rate": 0.839
+    }
+   },
+   "single_session": {
+    "correct": {
+     "ci": [
+      0.9369,
+      1.0
+     ],
+     "k": 57,
+     "mde_80": 0.1574,
+     "n": 57,
+     "rate": 1.0
+    },
+    "correct_strict": {
+     "ci": [
+      0.8105,
+      0.9619
+     ],
+     "k": 52,
+     "mde_80": 0.1574,
+     "n": 57,
+     "rate": 0.9123
+    }
+   }
+  },
+  "prefetch": {
+   "all": {
+    "correct": {
+     "ci": [
+      0.4608,
+      0.5798
+     ],
+     "k": 139,
+     "mde_80": 0.1211,
+     "n": 267,
+     "rate": 0.5206
+    },
+    "correct_strict": {
+     "ci": [
+      0.2443,
+      0.3532
+     ],
+     "k": 79,
+     "mde_80": 0.1107,
+     "n": 267,
+     "rate": 0.2959
+    }
+   },
+   "single_session": {
+    "correct": {
+     "ci": [
+      0.5194,
+      0.76
+     ],
+     "k": 37,
+     "mde_80": 0.2505,
+     "n": 57,
+     "rate": 0.6491
+    },
+    "correct_strict": {
+     "ci": [
+      0.4159,
+      0.6663
+     ],
+     "k": 31,
+     "mde_80": 0.2614,
+     "n": 57,
+     "rate": 0.5439
+    }
+   }
+  },
+  "prefetch_rel": {
+   "all": {
+    "correct": {
+     "ci": [
+      0.5775,
+      0.6921
+     ],
+     "k": 170,
+     "mde_80": 0.1166,
+     "n": 267,
+     "rate": 0.6367
+    },
+    "correct_strict": {
+     "ci": [
+      0.3582,
+      0.4756
+     ],
+     "k": 111,
+     "mde_80": 0.1195,
+     "n": 267,
+     "rate": 0.4157
+    }
+   },
+   "single_session": {
+    "correct": {
+     "ci": [
+      0.6866,
+      0.8887
+     ],
+     "k": 46,
+     "mde_80": 0.2071,
+     "n": 57,
+     "rate": 0.807
+    },
+    "correct_strict": {
+     "ci": [
+      0.5018,
+      0.7448
+     ],
+     "k": 36,
+     "mde_80": 0.2531,
+     "n": 57,
+     "rate": 0.6316
+    }
+   }
+  }
+ },
+ "dev_comparisons": [
+  {
+   "a": "prefetch",
+   "b": "prefetch_rel",
+   "by_category": {
+    "all": {
+     "a": 0.5206,
+     "b": 0.6367,
+     "ci": [
+      0.0637,
+      0.1685
+     ],
+     "diff": 0.1161,
+     "discordant": 0.206,
+     "mde_80": 0.0752,
+     "n": 267,
+     "p": 0.0004,
+     "significant": true
+    },
+    "knowledge_update": {
+     "a": 0.5283,
+     "b": 0.7736,
+     "ci": [
+      0.1321,
+      0.3585
+     ],
+     "diff": 0.2453,
+     "discordant": 0.2453,
+     "mde_80": 0.1656,
+     "n": 53,
+     "p": 0.0002,
+     "significant": true
+    },
+    "multi_session": {
+     "a": 0.6458,
+     "b": 0.7708,
+     "ci": [
+      0.0,
+      0.25
+     ],
+     "diff": 0.125,
+     "discordant": 0.2083,
+     "mde_80": 0.1775,
+     "n": 48,
+     "p": 0.0698,
+     "significant": false
+    },
+    "preference": {
+     "a": 0.5962,
+     "b": 0.6538,
+     "ci": [
+      -0.0577,
+      0.1731
+     ],
+     "diff": 0.0577,
+     "discordant": 0.1731,
+     "mde_80": 0.1601,
+     "n": 52,
+     "p": 0.402,
+     "significant": false
+    },
+    "single_session": {
+     "a": 0.6491,
+     "b": 0.807,
+     "ci": [
+      0.0351,
+      0.2807
+     ],
+     "diff": 0.1579,
+     "discordant": 0.2632,
+     "mde_80": 0.1811,
+     "n": 57,
+     "p": 0.0192,
+     "significant": true
+    },
+    "temporal": {
+     "a": 0.2105,
+     "b": 0.2105,
+     "ci": [
+      -0.0877,
+      0.0877
+     ],
+     "diff": 0.0,
+     "discordant": 0.1404,
+     "mde_80": 0.139,
+     "n": 57,
+     "p": 1.0,
+     "significant": false
+    }
+   },
+   "metric": "correct"
+  }
+ ],
+ "run": {
+  "answerer": {
+   "base_url": "http://127.0.0.1:8096",
+   "max_tokens": 4096,
+   "model": "Qwen3.8-Flash-Next-nvfp4",
+   "seed": "sha256(question id)",
+   "temperature": 0.6,
+   "thinking": "on (engine default)",
+   "top_p": 0.95
+  },
+  "arms": [
+   "closed_book",
+   "history",
+   "prefetch",
+   "prefetch_rel"
+  ],
+  "created": "2026-09-26T00:07:25+00:00",
+  "eval": "LloydMemEval",
+  "item": "#1480",
+  "judge": {
+   "first_pass": "rules (deterministic alias match)",
+   "model": "djev:DiffusionGemma-26B-A4B-NVFP4",
+   "settles": "mixed / unmatched answers"
+  },
+  "label": "baseline-2026-09-25",
+  "min_category_n": 20,
+  "n_rows": 1068,
+  "wall_s": 1872.6
+ },
+ "set": {
+  "generator_model": "Qwen3.8-Flash-Next-nvfp4",
+  "n_dev": 267,
+  "n_holdout": 66,
+  "root": "/home/alansrobotlab/lloyd/.claude/worktrees/agent-a79ab91a2b8095bcb/eval/memory_eval/v1",
+  "set_sha": "9cf67d045c38a8c3721151f9002ccce2a9419bfe039b950da55cc29990854eca",
+  "version": "v1"
+ }
+}

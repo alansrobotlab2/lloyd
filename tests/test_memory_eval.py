@@ -1365,11 +1365,27 @@ def test_the_vault_witness_of_the_unbounded_baseline_reproduces_its_quoted_numbe
 
     A missing copy is a skip, not a pass: the bytes live in the vault repo, which
     this suite does not own, so their absence is someone else's pending action."""
+    # The baseline is committed (#2637), so this node asserts its full claim on
+    # every run instead of skipping when the vault copy is not in the working
+    # tree. 6,560 bytes of recorded measurement is what the item and the note
+    # quote; the node used to spend a skip out of the suite-wide ceiling of 40
+    # (this box runs 39-41) to say nothing at all whenever the vault was mid-
+    # rewrite. The vault copy is still authoritative when present: it is read
+    # first, and the committed extract only stands in for it, so a rewrite of
+    # the baseline still goes red when the vault is there and the two agree.
     src = Path.home() / "obsidian" / "backlog" / "data" / \
         "lloydmemeval-baseline-2026-09-25.json"
-    if not src.exists():
-        pytest.skip(f"{src} is not in the vault working tree (vault commit b7edff28)")
-    art = json.loads(src.read_text())
+    committed = (Path(__file__).resolve().parent / "fixtures" /
+                 "session_witness_lloydmemeval_baseline_2026-09-25.json")
+    assert committed.exists(), (
+        f"{committed} is missing, so this node has no baseline at all — the "
+        "vault copy is absent too, which is the state that used to be skipped")
+    art = json.loads((src if src.exists() else committed).read_text())
+    if src.exists():
+        assert json.loads(src.read_text()) == json.loads(committed.read_text()), (
+            f"{src} and the committed extract disagree: the baseline was "
+            "rewritten in the vault without re-deriving the fixture, so the "
+            "numbers the item quotes have two versions")
     witness = art["_witness"]
 
     assert art["set"]["version"] == "v1"

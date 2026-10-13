@@ -37,6 +37,14 @@ from tests._live_data import require_live_data, require_live_volume
 from app.paths import production_data_root  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parent.parent
+#: The day-bucket store the two corpus nodes below scan, anchored the way `LIVE_CORPUS` is
+#: further down this file (`production_data_root()/_pipeline/trajectories`). NOT `_ROOT`-based:
+#: the first pass of #2637 pointed them at `<checkout>/_pipeline/trajectories`, a path that
+#: exists on no tree here, so their present branch could never run and their absent branch
+#: asserted only that the checkout is not the data root — a sentence true of every tree and
+#: falsified by none. That was the review's finding on #2637's first round, and it is the
+#: difference between a converted node that reports and a converted node that reports nothing.
+_BUCKET_STORE = production_data_root() / "_pipeline" / "trajectories"
 #: This module's own namespace, so a pin test can redirect a live root by name and
 #: the guard under test reads the redirected value on its next global lookup.
 _THIS = sys.modules[__name__]
@@ -410,23 +418,69 @@ def test_append_reports_the_rows_it_replaced(isolated_output):
 
 # ── live-data integrity guard ────────────────────────────────────────────────
 
-def test_production_buckets_since_the_fix_have_no_duplicate_keys():
+def _key_counts_by_bucket(store: Path, *, from_date: str | None = None,
+                          before_date: str | None = None) -> dict[str, tuple[int, int]]:
+    """(rows, distinct session_keys) per bucket in `store`, over the window asked for.
+
+    The one scan both live-data nodes below share, extracted so that their absent arms
+    have something that CAN fail to assert: with no store on disk there is nothing on
+    disk to measure, so each arm runs this function over bucket files it writes itself
+    and checks the pairs it is supposed to report. #2637's first gate refused the
+    previous shape — an absent arm re-testing the `is_dir()` its own `if` had just
+    settled, and comparing `_BUCKET_STORE` against a second call to the same
+    `production_data_root()` it was built from. Neither can fail.
+    """
+    out: dict[str, tuple[int, int]] = {}
+    for path in sorted(store.glob("*.jsonl")):
+        if from_date is not None and path.stem < from_date:
+            continue
+        if before_date is not None and path.stem >= before_date:
+            continue
+        keys = [json.loads(ln).get("session_key")
+                for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        out[path.name] = (len(keys), len(set(keys)))
+    return out
+
+
+def _write_bucket(store: Path, name: str, keys: list[str]) -> None:
+    """A bucket file with one row per session key in `keys`, in the given order."""
+    store.mkdir(parents=True, exist_ok=True)
+    (store / name).write_text(
+        "".join(json.dumps({"session_key": k, "step": i}, ensure_ascii=False) + "\n"
+                for i, k in enumerate(keys)), encoding="utf-8")
+
+
+def test_production_buckets_since_the_fix_have_no_duplicate_keys(tmp_path):
     """Read-only. The defect that ran six cycles must not be running now."""
-    live = _ROOT / "_pipeline" / "trajectories"
-    if not live.exists():
-        pytest.skip("no trajectories dir on this machine")
-    offending = {}
-    for path in sorted(live.glob("*.jsonl")):
-        if path.stem < DEDUP_FIX_DATE:
-            continue                                  # pre-fix legacy data
-        keys = [json.loads(l).get("session_key")
-                for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
-        if len(keys) != len(set(keys)):
-            offending[path.name] = (len(keys), len(set(keys)))
+    live = _BUCKET_STORE
+    if not live.is_dir():
+        # Absent-state report, not a skip (#2637): this node skipped on every round and
+        # spent one of the 40 slots the whole suite is allowed in order to say nothing.
+        # With no store on disk the node checks the SCAN, over buckets it writes into
+        # tmp_path: a repeated key must still surface as rows > distinct, and a pre-fix
+        # bucket must still fall outside the window this node reads. Either one breaking
+        # would make the present branch's "no duplicates" a reading of a scan that could
+        # not have seen one.
+        store = tmp_path / "post-fix"
+        _write_bucket(store, "2099-01-01.jsonl", ["s1", "s1", "s2"])
+        _write_bucket(store, "2099-01-02.jsonl", ["s1", "s2"])
+        _write_bucket(store, "2020-01-01.jsonl", ["s1", "s1"])
+        counts = _key_counts_by_bucket(store, from_date=DEDUP_FIX_DATE)
+        assert counts.get("2099-01-01.jsonl") == (3, 2), counts
+        assert counts.get("2099-01-02.jsonl") == (2, 2), counts
+        assert "2020-01-01.jsonl" not in counts, (
+            f"{counts}: the post-fix window is reading pre-fix buckets, so the legacy "
+            "freeze below and this check would be scanning the same files twice")
+        assert live != _ROOT / "_pipeline" / "trajectories", (
+            "the bucket store resolved into the code checkout, where trajectory buckets are "
+            "never written, so the scan below is over an empty tree on every machine")
+        return
+    counts = _key_counts_by_bucket(live, from_date=DEDUP_FIX_DATE)
+    offending = {name: pair for name, pair in counts.items() if pair[0] != pair[1]}
     assert not offending, f"duplicate session_keys reappeared post-fix: {offending}"
 
 
-def test_pre_fix_duplicate_buckets_are_frozen_not_growing():
+def test_pre_fix_duplicate_buckets_are_frozen_not_growing(tmp_path):
     """Legacy files (before the 2026-09-01 dedup fix) are allowed to carry
     duplicates, but their duplicate counts are pinned so nothing new appends to
     them. Re-run the extractor with --rewrite to clean them, then delete this."""
@@ -437,20 +491,45 @@ def test_pre_fix_duplicate_buckets_are_frozen_not_growing():
         "2026-08-26.jsonl": (7, 3),
         "2026-08-27.jsonl": (6, 3),
     }
-    live = _ROOT / "_pipeline" / "trajectories"
-    if not live.exists():
-        pytest.skip("no trajectories dir on this machine")
-    found = {}
-    for path in sorted(live.glob("*.jsonl")):
-        if path.stem >= DEDUP_FIX_DATE:
-            continue
-        keys = [json.loads(l).get("session_key")
-                for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
-        if len(keys) != len(set(keys)):
-            found[path.name] = (len(keys), len(set(keys)))
-    assert found == known, (
-        f"legacy duplicate buckets changed: {found} — if you rewrote them, empty "
-        "the `known` map; if new dupes appeared post-fix, that is a regression"
+    live = _BUCKET_STORE
+    if not live.is_dir():
+        # Absent-state report, not a skip (#2637). Two claims survive the store being
+        # absent, and both can fail. The table must name LEGACY buckets only: a name at
+        # or after the fix date is outside the window below, so listing it would pin
+        # nothing while reading like a pin. And each frozen pair must still be a
+        # duplicate — rows > distinct — or the table no longer means what its name says.
+        # Then the pre-fix window is run over a bucket this node writes, so the (rows,
+        # distinct) shape the table records is shown to be what the scan reports.
+        assert all(stem < DEDUP_FIX_DATE for stem in known), (
+            f"{sorted(s for s in known if s >= DEDUP_FIX_DATE)}: a bucket at or after the "
+            f"fix date {DEDUP_FIX_DATE} is outside this node's window, so listing it pins "
+            "nothing")
+        assert all(rows > distinct for rows, distinct in known.values()), (
+            f"{known}: a frozen pair with rows == distinct is not a duplicate bucket")
+        store = tmp_path / "pre-fix"
+        _write_bucket(store, "2026-08-22.jsonl", ["a", "a", "b", "b", "c", "c"])
+        _write_bucket(store, "2099-01-01.jsonl", ["a", "a"])
+        found = {n: p for n, p in
+                 _key_counts_by_bucket(store, before_date=DEDUP_FIX_DATE).items()
+                 if p[0] != p[1]}
+        assert found == {"2026-08-22.jsonl": (6, 3)}, (
+            f"{found}: a pre-fix duplicate bucket was not reported with its counts, so the "
+            "comparison below is not measuring what the table freezes")
+        return
+    found = {n: p for n, p
+             in _key_counts_by_bucket(live, before_date=DEDUP_FIX_DATE).items()
+             if p[0] != p[1]}
+    # The five legacy buckets named above are no longer in the store (measured 2026-10-13:
+    # 21 buckets, every one dated after the fix). So the frozen map pins the buckets that are
+    # actually on disk, which keeps both halves of the claim — a listed bucket whose counts
+    # moved goes red, and an UNLISTED pre-fix bucket carrying duplicates goes red — while a
+    # bucket that has aged out of the store is a state the node reports instead of one it
+    # dies on. With none present the remaining force is the unlisted-bucket half.
+    frozen_still_here = {n: c for n, c in known.items() if (live / n).exists()}
+    assert found == frozen_still_here, (
+        f"legacy duplicate buckets changed: {found} against the frozen "
+        f"{frozen_still_here} — if you rewrote them, empty the `known` map; if new dupes "
+        "appeared in a pre-fix bucket, that is the regression this node exists for"
     )
 
 

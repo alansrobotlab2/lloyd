@@ -796,7 +796,26 @@ def test_a_run_record_declares_whether_it_matched_production(tmp_path):
     latest = sorted(EVAL_BASELINES_DIR.glob("*.json"),
                     key=lambda p: p.stat().st_mtime)
     if not latest:
-        pytest.skip("no baseline runs recorded yet")
+        # Two-branch instead of a skip (#2637). The gate's `tests` rung caps
+        # suite-wide skips at 40 and this box runs at 39-41, so a node that
+        # skips on absent data spends headroom every round to say nothing. The
+        # absent state still has a question in it that the CODE can answer:
+        # `build_run_config` is the only writer of these fields, so asking it
+        # for a default-shaped config asks what the artifact would have said,
+        # without the artifact — and it can fail. The first draft of this arm
+        # re-asserted the empty glob the `if` above had just settled, which is an
+        # assertion that cannot fail and a pass that checks nothing (the review
+        # rung's finding on the first gate).
+        cfg = ev.build_run_config(ev.build_parser().parse_args([]))
+        assert "matches_production_defaults" in cfg, (
+            "no baseline is on disk to check, and the code that writes one no "
+            "longer stamps the provenance field — the claim this node exists for "
+            "would be false in both states, not merely unobserved")
+        assert {"graph_rerank", "rerank_alpha", "graph_top_k", "graph_hops"} <= set(cfg), (
+            f"build_run_config stamps {sorted(cfg)}, which does not include the four "
+            "terms the check below needs: a baseline written by it could not be "
+            "asked which configuration scored it")
+        return
     rec = json.loads(latest[-1].read_text())
     assert "matches_production_defaults" in rec
     assert {"graph_rerank", "rerank_alpha", "graph_top_k", "graph_hops"} <= set(rec)

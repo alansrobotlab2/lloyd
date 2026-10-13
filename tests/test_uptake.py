@@ -2351,10 +2351,20 @@ def test_live_engine_scores_the_corpus_and_reports_every_way_precision_was_measu
     # taken out of service, which is a fact about the tree, read from the same
     # tracked switch the gate's worktree reads.
     if not CONFIG.get("secondary_enabled", False):
-        pytest.skip(
-            "secondary_enabled is false: the slot this measures is retired and "
-            "the alias now resolves to primary, so a run here would score the "
-            "wrong engine. Re-enable the slot to re-take Step 2's measurement.")
+        # Two-branch instead of a skip (#2637). The old node's reason claimed
+        # "the alias now resolves to primary" in prose and then skipped, so the
+        # claim was never tested and the suite paid a skip out of a 40-skip
+        # ceiling to assert nothing. The retired state has an assertion that is
+        # worth its runtime: the resolver must actually route the alias to
+        # primary. If a future edit flips `secondary_enabled` without updating
+        # this node, the present-state branch below runs; if a future edit makes
+        # the disabled path resolve somewhere else, this fires.
+        from app.config import resolve_model_alias
+        assert resolve_model_alias("secondary") == "primary", (
+            "secondary_enabled is false but the alias no longer resolves to "
+            "primary, so the retired-slot reasoning this node is built on is "
+            "wrong and the measurement below would score the wrong engine")
+        return
 
     # No skip, and no environment opt-out. An earlier shape asserted whichever
     # branch it landed in and recorded nothing about which, so a gate run that
