@@ -1287,6 +1287,17 @@ async def _starving_alerts(q, monkeypatch, tmp_path):
     only be the starving clause: with no task files neither `overdue` nor the
     `next_run` scan has anything to name. That isolation is load-bearing here —
     the alternative is a tick that scans and re-arms the LIVE board.
+
+    "Fresh process" has meant both halves of the due-ness instant since #2662. The
+    `_state` patch below clears the in-process one, but the instant's cooldown now also
+    lives in this very queue's watermark table, which is exactly what survives a
+    restart — and this file's caller asks twice over ONE `q` fixture
+    (`test_a_pool_built_fresh_on_a_paused_database_alerts_by_the_pause`: paused alert,
+    then the resumed control), so a second call that left the row in place would be a
+    process that had already alerted and must stay silent. That hold is the behaviour
+    #2662 installs, tested in tests/test_fleet_watchdog.py; here it would read as the
+    resume falling back to the age-only sentence never happening. Cleared through the
+    queue's public API, the same API the alarm reads.
     """
     from app import autonomy
     import workers.fleet_watchdog as fw
@@ -1300,6 +1311,7 @@ async def _starving_alerts(q, monkeypatch, tmp_path):
                                        "stall_alerted_at": None,
                                        "nextrun_streak": 0,
                                        "nextrun_alerted_at": None})
+    q.wm_delete(fw.NAME, fw._STALL_WM_KEY)
     alerts: list[str] = []
 
     async def _capture(msg):

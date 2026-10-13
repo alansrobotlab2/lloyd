@@ -4805,19 +4805,31 @@ def _age_an_operator_pause(q, *, hours: float) -> str:
 
 
 async def _starve_alerts(aut, monkeypatch, tmp_path, q):
-    """One real tick over a starving queue; returns the alerts it posted.
+    """One real tick over a starving queue, from a fresh alarm process's point of
+    view; returns the alerts it posted.
 
     Only what leaves the process is stubbed — the vLLM health socket and the
     Discord post — exactly as the stall-alarm tests above do. The task dir is the
     `aut` fixture's empty one, so neither `overdue` nor the `next_run` scan can
     contribute a part to the message, and the alert under test is the starving
     clause alone.
+
+    "Fresh alarm process" now means both halves of the due-ness instant cleared, and
+    that is #2662's doing: `seed_state` below resets `_state["stall_alerted_at"]`, but
+    the instant's cooldown since #2662 also lives in the queue's own watermark table,
+    which outlives the process. A caller ticking the SAME queue twice — as
+    `test_a_starving_queue_with_no_pause_alerts_byte_identically` does, to compare the
+    never-paused sentence with the lifted-pause one — would otherwise have its second
+    round held by the first round's alert, which is precisely the hold this instant now
+    installs, and a helper that hands back "a board with no prior alert" has to mean
+    it. Cleared through the queue's public API, the same API the alarm reads.
     """
     import workers.sources.scheduled_task as st
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
     seed_state(monkeypatch, unparseable_scan_at=_scan_not_due(),
                stall_streak=fw._STALL_ALARM_TICKS, stall_alerted_at=None,
                nextrun_streak=0, nextrun_alerted_at=None)
+    q.wm_delete(fw.NAME, fw._STALL_WM_KEY)
     alerts: list[str] = []
 
     async def _capture(msg):

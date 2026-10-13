@@ -897,13 +897,285 @@ async def test_an_absent_or_unreadable_watermark_alerts_as_it_does_today(
         f"'never alerted': {alerts}")
 
 
+# ── #2662 — the due-ness alarm's 6 h cooldown died with the process that set it ──
+#
+# `_state["stall_alerted_at"]` was in-process only, so a restart answered "never
+# alerted", the streak recount from `_STALL_ALARM_TICKS` started at zero, and the same
+# continuing stall posted again. Re-counted on 2026-10-13 against the anchor #1797's
+# tripwire names — `grep -h '^\S* \S* \[ERROR\] lloyd-workers.fleet_watchdog: autonomy
+# scheduler may be stalled' ~/lloyd-data/logs/server.err*` — the corpus holds 20 posts
+# over 41.9 h (2026-10-11 16:17:42 → 2026-10-13 10:14:02) and ALL 19 consecutive gaps
+# land inside `_STALL_ALERT_INTERVAL_SECONDS`: the largest is 4.52 h, so the interval
+# held zero times out of nineteen. The smallest, 0.80 h, is one stall posting twice —
+# 16:17:42 and 17:05:56 both read `oldest claimable queue item is 185 min old` — and 31
+# `Worker pool started` lines sit in the same window. #1797 gated sibling persistence on
+# "one real stall posts twice inside its 6 h cooldown"; it posted twice inside it
+# nineteen times over, so these nodes are the pre-committed action, not a proposal.
+#
+# What is deliberately NOT persisted is `nextrun_parked_logged_at`: `:1125` is a
+# `logger.warning` that reaches no person, and #1735's rationale is the route to a
+# person. One node below pins that the parked-only scan cannot spend the DUE-NESS
+# instant either (#1661), which is the half that has to survive persistence.
+
+
+#: The age of the starving head in this section. 6 h is over 3x the widest
+#: `max_duration_seconds` this source has carried (3600 s since 2026-09-03), so the
+#: queue starves under the live config and under the 1800 s fallback alike — and
+#: `_starving_queue` asserts the figure it measured instead of assuming one.
+_STARVING_HEAD_MINUTES = 360
+
+
+def _starving_queue(tmp_path, name: str) -> WorkQueue:
+    """A real queue the due-ness alarm is entitled to alarm on, and nothing else.
+
+    On a real file for the same reason the two-process nodes above are: what has to be
+    survived is the death of the process holding `_state`, so the queue has to outlive
+    it. Both attribution asserts are the fixture's promise — with no task file to see,
+    `_grossly_overdue` and `_next_run_stalled` answer nothing, so every alert counted
+    in a node below can only be the due-ness starve clause. Call this BEFORE writing
+    any task to the board, or the second assert sees that task.
+    """
+    db = _aged_queued_row(tmp_path / name, minutes=_STARVING_HEAD_MINUTES)
+    q = WorkQueue(db)
+    assert fw._queue_starving(q, fw._max_duration_seconds()) > 0, (
+        f"a {_STARVING_HEAD_MINUTES} min old claimable row is not starvation at "
+        f"max_duration_seconds={fw._max_duration_seconds()}, so no alert below fires "
+        "and every silence asserted here would be vacuous")
+    assert fw._grossly_overdue(q) == [] and fw._next_run_stalled(q) == [], (
+        "the board is not empty of task-side findings, so an alert counted below "
+        "would not be attributable to the due-ness starve clause")
+    return q
+
+
+def _names_the_starving_head(msg: str) -> bool:
+    """Does this alert read as the due-ness starve clause, naming the head's age?
+
+    Matched on the sentence rather than on the substring "stalled" so a `next_run`
+    alert — which begins "N task(s) more than one period past their own next_run" —
+    could never satisfy it, and on the printed minutes so an alert that named a
+    different cause could not either.
+    """
+    import re
+    m = re.search(r"autonomy scheduler may be stalled: .*oldest claimable queue item "
+                  r"is (\d+) min old", msg)
+    return bool(m) and int(m.group(1)) >= _STARVING_HEAD_MINUTES - 1
+
+
+async def test_a_restart_inside_the_cooldown_does_not_re_post_the_due_ness_alarm(
+        board, monkeypatch, tmp_path):
+    """Clause 1: one alert per 6 h, measured across two processes on one queue.
+
+    The first process carries the assertion the class rule demands before any silence
+    is claimed — exactly one `autonomy scheduler may be stalled`, naming the starving
+    head by its age. Against that, a second process holding the module's DEFAULT
+    surveillance state ticks `_STALL_ALARM_TICKS` again over the SAME starving queue:
+    its streak reaches the threshold on its own, so the only thing that can hold the
+    message back is the instant the first process recorded.
+
+    At base this node was the 20-post corpus in miniature: the second process re-posted,
+    which is exactly the 0.80 h between two posts naming the same 185 min head.
+    """
+    _pacing_constants_unchanged()
+    q = _starving_queue(tmp_path, "due-ness-restart.db")
+
+    first = _fresh_process_state(monkeypatch)
+    alerts = _watch_alerts(monkeypatch)
+    for _ in range(fw._STALL_ALARM_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 1 and _names_the_starving_head(alerts[0]), (
+        f"the first process did not post exactly one due-ness alert naming the "
+        f"starving head, so the silence below would be measuring nothing: {alerts}")
+    assert first["stall_alerted_at"] is not None, alerts
+
+    second = _fresh_process_state(monkeypatch)
+    assert second["stall_alerted_at"] is None, (
+        "the fixture did not hand the second process a fresh cooldown")
+    for _ in range(fw._STALL_ALARM_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 1, (
+        f"a process with a fresh `_state` re-posted the due-ness alert inside "
+        f"{fw._STALL_ALERT_INTERVAL_SECONDS}s (6 h) of the first one — the defect that "
+        f"posted 20 times in 41.9 h with all 19 gaps inside the cap: {alerts}")
+
+
+async def test_the_due_ness_alert_instant_is_durable_queue_state_under_its_own_key(
+        board, monkeypatch, tmp_path):
+    """Clause 2: the hold above is a row on the queue, not a memory in the process.
+
+    Read back through the queue's public API (`wm_keys`/`wm_get`) on a SECOND
+    `WorkQueue` object over the same file — a new connection over the same database is
+    as close as a test comes to the new process the corpus actually had, and it is the
+    boundary the value has to cross. Two things are pinned, because "a row exists" is
+    not the claim: the instant is the one it posted, so the durable row is correct and
+    not merely present; and it is under a key that is NOT `_NEXTRUN_WM_KEY`, because
+    two alarms sharing one row would let a 24 h alert mute a 6 h one and back, and one
+    global instant PER ALARM is the policy this file has always held.
+    """
+    _pacing_constants_unchanged()
+    q = _starving_queue(tmp_path, "due-ness-durable.db")
+
+    _fresh_process_state(monkeypatch)
+    alerts = _watch_alerts(monkeypatch)
+    for _ in range(fw._STALL_ALARM_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 1 and _names_the_starving_head(alerts[0]), alerts
+    posted = fw._state["stall_alerted_at"]
+    assert posted is not None, alerts
+
+    rows = _durable_alert_instants(WorkQueue(q.db_path))
+    assert len(rows) == 1, (
+        f"the due-ness instant is not one readable instant under source {fw.NAME!r}: "
+        f"{rows} — a restart cannot read what the public API does not show")
+    key, durable = rows[0]
+    assert key != fw._NEXTRUN_WM_KEY, (
+        f"the due-ness alarm wrote the `next_run` alarm's row ({key}), so the two "
+        "cooldowns are one row and either alarm can spend the other's silence")
+    assert durable == posted, (
+        f"the row holds {durable} but the alert posted {posted} — the durable instant "
+        "is not the instant a person was told about")
+
+
+async def test_the_persisted_due_ness_instant_is_a_cooldown_not_a_mute(
+        board, monkeypatch, tmp_path):
+    """Clause 3: an aged row alerts again, and so does no row at all.
+
+    Both shapes fail the same way if persistence is written as a mute, so both are
+    here. Aged: the row is pushed past `_STALL_ALERT_INTERVAL_SECONDS` through `wm_set`
+    with an older instant as its value, which is the same write the alarm itself makes
+    — no raw SQL against `workers.db`, so what is aged is the row the alarm reads and
+    not a copy of it. Absent: a queue that never wrote a row, the shape every one of
+    the 20 corpus posts met, and the behaviour the alarm has to keep byte-identical. A
+    fresh process before each, because the in-process cache would otherwise answer
+    without the row being consulted at all.
+    """
+    _pacing_constants_unchanged()
+
+    q = _starving_queue(tmp_path, "due-ness-aged.db")
+    _fresh_process_state(monkeypatch)
+    alerts = _watch_alerts(monkeypatch)
+    for _ in range(fw._STALL_ALARM_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 1, f"the first alert did not fire: {alerts}"
+    rows = _durable_alert_instants(q)
+    assert len(rows) == 1, rows
+    key, posted = rows[0]
+    aged = posted - dt.timedelta(seconds=fw._STALL_ALERT_INTERVAL_SECONDS + 60)
+    q.wm_set(fw.NAME, key, aged.isoformat())
+
+    _fresh_process_state(monkeypatch)
+    for _ in range(fw._STALL_ALARM_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 2, (
+        f"a persisted due-ness instant older than "
+        f"{fw._STALL_ALERT_INTERVAL_SECONDS}s (6 h) did not alert again, so the "
+        f"watermark is a permanent mute: {alerts}")
+
+    absent = _starving_queue(tmp_path, "due-ness-absent.db")
+    assert _durable_alert_instants(absent) == [], "the fixture started with a row"
+    _fresh_process_state(monkeypatch)
+    never_alerted = _watch_alerts(monkeypatch)
+    for _ in range(fw._STALL_ALARM_TICKS):
+        await fw.tick(absent)
+    assert len(never_alerted) == 1 and _names_the_starving_head(never_alerted[0]), (
+        f"with no durable row the alarm stopped firing, which is a mute wearing a "
+        f"cooldown's clothes: {never_alerted}")
+
+
+async def test_an_unreadable_due_ness_watermark_still_alerts_the_starving_queue(
+        board, monkeypatch, tmp_path):
+    """Clause 4: a watermark that cannot be read reads as "never alerted".
+
+    `wm_get` raises on every call. The tick has to complete anyway: this runs inside
+    the loop that enqueues the whole fleet, so an alarm's own read failure taking that
+    loop down would be the larger incident, and muting the alarm because the cooldown
+    row is unreadable would hide the stall the row exists to pace. Same shape as the
+    `next_run` node above, which is the point — the two alarms now share one read
+    function and have to share its failure behaviour too.
+    """
+    _pacing_constants_unchanged()
+    q = _starving_queue(tmp_path, "due-ness-unreadable.db")
+
+    def _boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(WorkQueue, "wm_get", _boom)
+    _fresh_process_state(monkeypatch)
+    alerts = _watch_alerts(monkeypatch)
+    await fw.tick(q)          # the read is on the alert path; must not raise here
+    for _ in range(fw._STALL_ALARM_TICKS - 1):
+        await fw.tick(q)
+    assert len(alerts) == 1 and _names_the_starving_head(alerts[0]), (
+        f"an unreadable watermark stopped the due-ness alarm rather than being read as "
+        f"'never alerted': {alerts}")
+
+
+async def test_a_parked_only_scan_leaves_the_due_ness_cooldown_untouched(
+        board, monkeypatch, tmp_path):
+    """Clause 5: #1661 holds through persistence — a park cannot buy 6 h of silence.
+
+    Phase one is a real starvation, and it is there to give phase two something to
+    preserve: without a due-ness instant on the queue, "unchanged" would be comparing
+    an absent row with itself. Phase two retires the starved row — raw SQL on a fixture
+    row the fixture itself aged — and leaves one late task that declares its own park,
+    which is the steady state of this fleet (#68 is parked by a standing ruling). It
+    then ticks `_STALL_NEXTRUN_TICKS`, enough for the scan to CONFIRM the lateness and
+    reach the parked branch, so the silence asserted below is a suppression and not an
+    alarm with nothing to see.
+
+    Three things then hold together: the parked-only scan posts nothing; the due-ness
+    instant is identical to the one phase one wrote, key included; and the count of
+    durable instants under this source stays at one — which is also the assertion that
+    the parked branch did not take up persisting its own log slot here, the scope call
+    #1735's docstring already made and this item leaves to a human ruling.
+    """
+    _pacing_constants_unchanged()
+    q = _starving_queue(tmp_path, "due-ness-parked.db")
+
+    _fresh_process_state(monkeypatch)
+    alerts = _watch_alerts(monkeypatch)
+    for _ in range(fw._STALL_ALARM_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 1 and _names_the_starving_head(alerts[0]), (
+        f"phase one spent no due-ness alert, so phase two has no cooldown instant to "
+        f"leave alone: {alerts}")
+    before = _durable_alert_instants(q)
+    assert len(before) == 1, before
+
+    write_task(board, 711, frequency="daily", status="draft", last_run=None,
+               next_run=_ago(days=3), parked="parked by Alan's 2026-09-17 ruling")
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE queue SET state='done' WHERE state='queued'")
+        conn.commit()
+    flagged = fw._next_run_stalled(q)
+    assert [(e["id"], bool(fw._parked_note(e))) for e in flagged] == [(711, True)], (
+        "phase two is not a parked-only board, so an empty alert list would say "
+        f"nothing about the suppression: {flagged}")
+    assert fw._queue_starving(q, fw._max_duration_seconds()) == 0.0, (
+        "the queue is still starving, so phase two's silence is the starvation alarm "
+        "declining to fire rather than a park declining to spend anything")
+
+    _fresh_process_state(monkeypatch)
+    for _ in range(fw._STALL_NEXTRUN_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 1, (
+        f"a board whose every late task declares its own park reached the alert "
+        f"route: {alerts}")
+    assert _durable_alert_instants(q) == before, (
+        "the parked-only scan advanced or replaced the due-ness cooldown instant, so a "
+        "park has bought the 6 h of silence the next genuinely overdue task needs")
+    assert fw._state["nextrun_parked_logged_at"] is not None, (
+        "the parked branch never took its log slot, so the phase above may have ticked "
+        "past the branch it is supposed to be suppressing")
+
+
 # ── #2342 — the stall line may not blame dispatch for a run the records already name ──
 #
 # The scan that raises the `next_run` alarm reasoned from row and queue state only:
 # `hours` from `autonomy.next_run_gap`, `hold` from `autonomy.hold_reason`, `queued`
 # from live queue rows. `git grep -n 'autonomy-runs|workers.db|list_runs' --
 # workers/fleet_watchdog.py` returned exactly one hit before this section existed, at
-# the docstring of `_last_nextrun_alert` warning against raw SQL — so the file read no
+# the docstring of `_last_alert_instant` (then `_last_nextrun_alert`) warning against
+# raw SQL — so the file read no
 # run record. That is how a task that HAD run got the sentence "nothing holds it;
 # dispatch did not enqueue it": `~/lloyd-data/autonomy-runs/79/run_79_20261006_051105.md`
 # carries `status: success` / `completed_at: 2026-10-06T05:17:08+00:00` while
