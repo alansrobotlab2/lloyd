@@ -1,4 +1,4 @@
-"""The promotion gate: twelve rungs, cheapest first, every one fails closed.
+"""The promotion gate: thirteen rungs, cheapest first, every one fails closed.
 
 "Fails closed" is not a slogan here — it is the reason `_rung` catches every
 exception and records it as a FAILED rung. With no human review tier, a rung
@@ -23,8 +23,15 @@ without the prose being renumbered.
                           outside the binary allowlist, a diff over the changed-
                           line ceiling. Records into report + ledger; blocks
                           nothing until a soak of real landings says it may.
-  2 static         ~8s    compileall, import smoke, pyflakes delta
-  3 pyright       ~1-30s  OBSERVE-ONLY type-check delta (scripts/automod/
+  2 code_rules     ~2s    OBSERVE-ONLY code-shape rules over the round's changed
+                          .py files (scripts/automod/code_rules.py + its .toml):
+                          every rule cites the incident or doc claim it encodes,
+                          an uncited rule is a load error, and the matcher is
+                          stdlib `ast` — one module's tree at a time, so no
+                          cross-file flow and no taint. Records into report +
+                          ledger; blocks nothing, and no round in #2574 flips one.
+  3 static         ~8s    compileall, import smoke, pyflakes delta
+  4 pyright       ~1-30s  OBSERVE-ONLY type-check delta (scripts/automod/
                           typecheck.py): pyright over the round's changed .py
                           files plus the inbound callers of its changed
                           module-level symbols — the same run at HEAD and at the
@@ -34,10 +41,10 @@ without the prose being renumbered.
                           touched, which is what pyflakes cannot and #528
                           explicitly does not do. Recorded; blocks nothing until
                           a soak of real rounds says it may.
-  4 frontend       ~5s    CONDITIONAL rung: the tsc delta and a vite
+  5 frontend       ~5s    CONDITIONAL rung: the tsc delta and a vite
                           build over the round's `web/` paths, recorded
                           as SKIPPED when no `web/` path changed.
-  5 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
+  6 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
                           workers (~600 s serial) + a collected-count floor.
                           A failure under load is re-run serially before it
                           is believed; a real one re-probes the failing files
@@ -45,29 +52,28 @@ without the prose being renumbered.
                           a failure that is not the round's (pre-existing or
                           flaky, in a file the diff did not touch) PASSES the
                           rung, recorded and filed as a `red-tree` item
-  6 prompt_surface cond.  CONDITIONAL rung: the scored behavioural
+  7 prompt_surface cond.  CONDITIONAL rung: the scored behavioural
                           check on what the model is told, run only for
                           a prompt-surface diff.
-  7 review      60-180s   a second reader: a fresh session on the LIVE
+  8 review      60-180s   a second reader: a fresh session on the LIVE
                           backend grades the diff against the item's
                           acceptance clauses (scripts/automod/review.py).
                           Refuses with findings; the premise verdict decides
                           whether the item is retried or handed to a human.
                           Skipped (recorded) only when no item is bound.
-  8 venv        0-300s    only when requirements changed (reflink + uv)
-  9 canary_boot   ~30s    both /health green, tool floor, config-follows-code
- 10 canary_smoke  ~30s    one real turn, sentinel through a real Bash call
+  9 venv        0-300s    only when requirements changed (reflink + uv)
+ 10 canary_boot  ~30s    both /health green, tool floor, config-follows-code
+ 11 canary_smoke ~30s    one real turn, sentinel through a real Bash call
                           (recorded as SKIPPED when the engine is unreachable;
                            `skip_smoke` is refused while it answers)
- 11 drill         ~90s    only when the diff touches the rollback path
+ 12 drill        ~90s    only when the diff touches the rollback path
 
-`frontend` (4) and `prompt_surface` (6) are numbered where they run rather than
+`frontend` (5) and `prompt_surface` (7) are numbered where they run rather than
 listed beside the ladder, because a rung that is unnumbered is a rung a citation
-cannot point at. Of the twelve, `vet` and `pyright` are the only rungs that
-read the change set itself rather than the behaviour it produces, and the only
-two deliberately written not to block: each records into the round event and
-waits for a soak of real rounds
-before either is allowed to refuse one. A type checker is in this ladder because
+cannot point at. `vet`, `code_rules` and `pyright` are the three rungs that read
+the change set itself rather than the behaviour it produces, and the three
+deliberately written not to block: each records into the round event and waits
+for a soak of real landings before any of them is allowed to refuse one. A type checker is in this ladder because
 the analyser is cheap, deterministic and cannot be argued with, which is exactly
 what a loop with no human review tier needs; it is observe-only because nobody
 has yet measured how often it is right.
@@ -94,6 +100,7 @@ from pathlib import Path
 from app import lint_findings
 from scripts.automod import canary as C
 from scripts.automod import canary_smoke as CS
+from scripts.automod import code_rules as CR
 from scripts.automod import frontend_layout as _fe_layout
 from scripts.automod import frontend_probe as _fe_probe
 from scripts.automod import layout_fixture as _layout_fixture
@@ -1402,6 +1409,20 @@ class Gate:
                                 "counts": p.get("counts") or {},
                                 "labels": p.get("labels") or [],
                                 "totals": p.get("totals") or {}}
+        # The code-shape rules' record beside the vet's and pyright's, same shape
+        # for the same reason (#2574): its acceptance is a rate over live traffic
+        # — did it run on every landing with python changes, and how many of its
+        # hits were real — and a rate needs every row. `gate.json` goes with the
+        # worktree, which is the finding #679 left behind and this copies. A round
+        # that changed no python still writes the row: "ran, found no python" is a
+        # denominator, not a blank.
+        if (res.data or {}).get("code_rules"):
+            c = res.data["code_rules"]
+            event["code_rules"] = {"status": c.get("status"),
+                                   "observe_only": True,
+                                   "counts": c.get("counts") or {},
+                                   "labels": c.get("labels") or [],
+                                   "totals": c.get("totals") or {}}
         if not self._quiet_skip(name, res.data or {}, ok):
             S.append_event(event)
         if ok:
@@ -1507,7 +1528,13 @@ class Gate:
         # subtract, and a new type error is worth minutes rather than hours —
         # which is why it sits before anything in the suite runs. Observe-only,
         # so its position is about the record, not about what can fail.
+        # `code_rules` rides immediately behind `vet` for the reason `vet` is
+        # there: both read only what preflight resolved (the base, the worktree),
+        # both cost seconds, both are observe-only judgements of the change set
+        # itself rather than of the behaviour it produces — so both report before
+        # anything in the ladder executes the candidate.
         ladder = [("preflight", self.rung_preflight), ("vet", self.rung_vet),
+                  ("code_rules", self.rung_code_rules),
                   ("static", self.rung_static),
                   ("pyright", self.rung_pyright),
                   ("frontend", self.rung_frontend),
@@ -1811,6 +1838,73 @@ class Gate:
         more = f" (+{len(res.violations) - 6} more)" if len(res.violations) > 6 else ""
         return True, (f"observe-only: {len(res.violations)} violation(s) — "
                       f"{listed}{more}"), data
+
+    def rung_code_rules(self):
+        """OBSERVE-ONLY code-shape rules over the round's changed `.py` files (#2574).
+
+        `vet` asks whether the change set is structurally what the round claims;
+        `static` and `pyright` ask whether it parses and type-checks. Neither can
+        say "this *shape* must not appear in a diff" about anything project-
+        specific, so every code-shape defect this repo has recorded — a naive
+        local timestamp in a machine-facing payload, a second writer of the
+        knowledge graph, a guardian import that can never be staged — was
+        defended only by somebody remembering the class. `code_rules.toml` is the
+        surface where the class is written down, each rule citing the incident or
+        doc claim that produced it, and this rung runs them over the round's diff
+        on every round.
+
+        Observe-only, on #2574's own split and #679's precedent: a hit never
+        fails a round, and flipping a rule to blocking is a human ruling after a
+        soak of at least 20 landings, not a commit to the rule file. The runner
+        reads its rules from **its own checkout** — the live tree, since the gate
+        always runs from the live tree — so a round cannot widen or narrow the
+        rules it is judged by.
+
+        Like `vet`, it never reports clean for a pass that could not run: an
+        unreadable base, an unreadable file or a rule file the loader refuses
+        reads `CODE RULES UNEVALUATED` in the detail and `status: unevaluated` in
+        the data, so the soak's denominator comes off the ledger rather than from
+        hope.
+        """
+        # Declared, not inferred. Without the annotation `res` is the join of the two
+        # assignments below, and the `except` arm's `dict[str, str]` is what every later
+        # read gets: `res.get("totals")` typed `str | None` and the rung's own summary line
+        # indexed a string with `'suppression_markers'` — four pyright findings on the
+        # observe-only rung's report path. An unparameterised `dict` is the type both arms
+        # actually satisfy, and it is what `CR.run` returns.
+        res: dict
+        try:
+            res = CR.run(self.base, self.worktree)
+        except Exception as exc:                # noqa: BLE001 - read this
+            # `_rung` turns an exception that escapes a rung into a FAILED rung, which is
+            # right for every other rung and wrong here: this one may never block, by the
+            # item's own acceptance clause. Without this arm a corrupt rule file, a
+            # matcher that raises on a shape nobody planted, or a worktree that vanishes
+            # mid-scan blocks the round for the fault of the instrument that is not
+            # allowed to block — the inverse of the gap these rules exist to close,
+            # where a `# noqa` cannot silence a rule. So the crash is recorded as
+            # `unevaluated` with its type and message, which is also the only way the
+            # soak learns the rule file is broken rather than clean.
+            res = {"status": CR.UNEVALUATED,
+                   "reason": f"the runner raised {type(exc).__name__}: {exc}"}
+        data = {"code_rules": dict(res, observe_only=True)}
+        if res.get("status") != CR.EVALUATED:
+            return True, (f"observe-only: CODE RULES UNEVALUATED "
+                          f"({res.get('reason') or 'no reason given'}) — no "
+                          "verdict of any kind"), data
+        hits = res.get("hits") or []
+        totals = res.get("totals") or {}
+        marker = (f"; {totals['suppression_markers']} suppression marker(s) "
+                  "counted, none honoured") if totals.get("suppression_markers") else ""
+        if not hits:
+            return True, (f"observe-only: clean — 0 hit(s) over "
+                          f"{totals.get('files', 0)} changed .py file(s), "
+                          f"{res.get('rules_loaded', 0)} rule(s){marker}"), data
+        listed = "; ".join(h["message"] for h in hits[:6])
+        more = f" (+{len(hits) - 6} more)" if len(hits) > 6 else ""
+        allowed = len(res.get("allowed") or [])
+        allow = f"; {allowed} in the rule file's allowlist" if allowed else ""
+        return True, (f"observe-only: {len(hits)} hit(s) — {listed}{more}{allow}"), data
 
     def rung_static(self):
         r = _run([str(self.python), "-m", "compileall", "-q", str(self.worktree)], timeout=300)

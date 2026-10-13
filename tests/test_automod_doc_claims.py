@@ -978,7 +978,7 @@ def test_architecture_states_the_loop_axis_and_stops_naming_the_check_behavioura
 #: spellings it needs are enumerated here rather than in the shared table — and
 #: the count itself comes from `Gate.run`, so adding a rung means adding the word
 #: for the new total and nothing else.
-RUNG_NUMBERS = {**NUMBER_WORDS, "eleven": 11, "twelve": 12}
+RUNG_NUMBERS = {**NUMBER_WORDS, "eleven": 11, "twelve": 12, "thirteen": 13}
 
 
 def _real_ladder(monkeypatch) -> list[str]:

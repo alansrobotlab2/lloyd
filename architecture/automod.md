@@ -2094,7 +2094,7 @@ the worktree that `gate.py` and `promote.py` refuse when dirty.
 
 ## 4. The gate
 
-Twelve rungs, cheapest first, short-circuiting. **Every rung fails closed** —
+Thirteen rungs, cheapest first, short-circuiting. **Every rung fails closed** —
 `_rung` catches exceptions and records them as failures, because with no human
 review tier a rung that errors and reads as "didn't fail" silently removes a
 check.
@@ -2106,6 +2106,7 @@ candidate that weakens the gate is judged by the old gate.
 |---|---|---|
 | preflight | ~0s | dirty tree, moved base, merge commits, out-of-scope paths; an item with no clauses, a code diff with no test |
 | vet | <1s | **observe-only (#679)**: a tracked file non-empty at base and empty at HEAD, a newly-added binary outside the allowlist, a diff over `automod.gate.max_diff_lines`. Records to `gate.json` and the ledger; blocks nothing during the soak |
+| code_rules | ~2s | **observe-only (#2574)**: a code shape `scripts/automod/code_rules.toml` declares forbidden, run as stdlib `ast` matchers over the round's changed `.py` files — five rules, each citing the incident or doc claim it encodes, an uncited rule refused by the loader. Hits ride `gate.json` and the landing event; blocks nothing during the soak, and flipping one is a human ruling |
 | static | ~2s | syntax errors, **import failures**, new pyflakes findings |
 | pyright | ~1-30s | **observe-only (#2450)**: a new pyright finding in the round's changed `.py` files *or in an unchanged file that calls what they changed* — the caller a signature break breaks that the diff never touched. Same run at HEAD and at the round's base, reported as the multiset difference (rule+symbol+file, never line), vendored fork excluded. Records to `gate.json` and the ledger; blocks nothing during the soak |
 | frontend | ~5s | new tsc errors, a broken vite build (only when `web/` changed) |

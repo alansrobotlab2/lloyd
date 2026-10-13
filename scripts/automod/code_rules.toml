@@ -1,0 +1,128 @@
+# Code-shape rules the landing gate checks on every self-mod round (#2574).
+#
+# This is the surface where Lloyd states, in the tree, that a code shape must
+# never appear in a diff — mechanically, in any round, with the incident that
+# produced it sitting next to the pattern. Before #2574 the only defence against
+# repeating a recorded code-shape defect was that a human, or the `review` grader
+# on a good day, remembered the class.
+#
+# Loader and matcher implementations: `scripts/automod/code_rules.py`. The runner
+# is stdlib `ast` only and reports observe-only (#2574's own split, copied from
+# #679): nothing here can fail a round. Flipping a rule to blocking is a human
+# ruling after the soak, not a commit to this file.
+#
+# The three rules every candidate had to clear to get in here (item #2574 step 2):
+#   (a) its exception list is nameable in one line;
+#   (b) it scores zero violators at HEAD, or the exceptions are written below;
+#   (c) it names the incident or doc claim it encodes. An uncited rule is a load
+#       error, and the loader refuses it — not a warning, not a tuning.
+# Rules that did NOT qualify and why, so nobody re-derives the census:
+#   a bare `datetime.now()` anywhere — 101 sites across app/, agent_mcp/,
+#     scripts/, workers/ at HEAD 2026-10-11. An open set; a rule on the shape
+#     would flag legitimate code in any round that touches those files.
+#   an `except Exception:` whose body is a `pass` on the NEXT line — 132 sites.
+#     Open set, so this file's rule is the same-line form only (2 sites).
+#   a date filter comparing an epoch float where the row is an ISO string — needs
+#     cross-expression semantics an `ast` pattern match cannot express. Not faked
+#     with a name grep.
+#   `kg.sqlite` as a literal anywhere — 20+ files; the store-ownership property
+#     is over an open set. The rule below is the narrower `sqlite3.connect(...)`
+#     call that names the store, which scores 1 allowlisted site.
+# Cap: `MAX_RULES` in code_rules.py is 8. The item's ceiling.
+
+[meta]
+version = 1
+
+[[rule]]
+id = "guardian-import-hygiene"
+matcher = "guardian_nonstdlib_import"
+summary = """the guardian is staged as a flat snapshot of its own directory and runs \
+on /usr/bin/python3, so an import that is not stdlib or not a module beside it is \
+a watchdog that dies at boot on the machine that is already down."""
+cite = """CLAUDE.md §Automod, 'Rules before touching it': 'The guardian is a \
+systemd unit, stdlib-only on /usr/bin/python3, never imports app/' and 'A module \
+it imports must live in that directory or it is not staged (§7)'."""
+scope = ["agent-services/guardian/*.py"]
+allow = []
+
+[[rule]]
+id = "opens-kg-store-outside-kg-store"
+matcher = "opens_kg_store"
+summary = """the knowledge graph has one owner: opening its store from anywhere \
+else reaches past `app.kg_store`'s WAL/busy_timeout and its rebuild-transaction \
+protocol, which is the same class as 2026-09-10's MEMORY.md clobber — a second \
+writer that no single reader can see."""
+cite = """CLAUDE.md §Knowledge graph: '`app.kg_store` is the only writer of the \
+store — no script, router or fixture writes or opens it for a mutation.' The one \
+allowed opener, the guardian's read-only `count_kg_rows` tripwire, is named there \
+and opens no handle through `sqlite3.connect` on a restated path (#1525)."""
+scope = ["**/*.py"]
+exclude = ["app/kg_store.py"]          # the owner
+allow = [
+    { path = "tests/test_data_home.py", why = """§3's tripwire test: it opens a \
+kg.sqlite it just created inside its own tmp_path scratch tree (#642), so the live \
+store is never touched. Named here rather than scoped out because the doc claim \
+above covers fixtures.""" },
+]
+
+[[rule]]
+id = "broad-except-swallow-same-line"
+matcher = "broad_except_swallow_same_line"
+summary = """an `except <broad>: pass` on one line discards the exception where a \
+reader cannot see it; the shape this encodes is a run that did nothing and exited \
+0 being read as a clean run."""
+cite = """#2574 step 2, which measured this as the only closed-set survivor of its \
+three expected survivors (2 sites, 1 file, HEAD 2026-10-11), for the class #1667 \
+is on the record about: a run that appended nothing and exited 0, indistinguishable \
+from success. The multi-line form of the same shape is 132 sites at HEAD and is \
+deliberately NOT this rule."""
+scope = ["**/*.py"]
+allow = [
+    { path = "app/sessions_io.py", why = """two queue drains (the ambient-queue \
+dedup cap and its `AMBIENT_QUEUE_CAP` trim) where the event `put_nowait` is \
+best-effort and the turn is already marked preempted; both measured at HEAD \
+2026-10-11 and both are the whole shape's population.""" },
+]
+
+[[rule]]
+id = "naive-now-in-artifact-name"
+matcher = "naive_now_in_artifact_name"
+summary = """a no-arg `datetime.now()` is local wall clock, so a name or path \
+built from one and read back by a later job is a naive timestamp in a \
+machine-facing payload — every later reader takes it as UTC."""
+cite = """#548's findings for round SM_20260916_022959: a `--rerender` flag took \
+`datetime.now()` for both the artifact filename and its `captured:` line and so \
+minted a second committed table claiming a capture time it never captured. The \
+same class is the loaded-memory rule of 2026-09-21 ('a naive local timestamp \
+inside a machine-facing payload is read as UTC by every later reader')."""
+# Scope is the code the supervisor runs. The census measured 12 sites of this
+# shape at HEAD 2026-10-11; 9 are in `tests/` and `eval/` (a date in a filename a
+# human reads, not a payload a job parses) and 3 in one-off `scripts/` writers
+# (`benchmark.py`, `memory/kg_migrate_to_sqlite.py`, `memory/kg_rebuild.py`) — all
+# 12 are enumerated on #2574, and widening this scope is that census's owed ruling,
+# not a commit to this line.
+scope = ["app/**", "agent_mcp/**", "workers/**", "server.py", "scripts/automod/**",
+         "agent-services/**/*.py"]
+allow = []
+
+[[rule]]
+id = "exports-lloyd-data-to-process-environ"
+matcher = "process_environ_lloyd_data"
+summary = """exporting the live data root into the process environment from \
+ordinary code makes every child of that process — including a child running a \
+worktree's code — write live data, which is the leak the data-root rules exist to \
+prevent."""
+cite = """architecture/data-home.md §3: 'Nothing exports `LLOYD_DATA` in \
+production, and nothing should', with its owners named there as the gate, the \
+canary and the test suite; restated in CLAUDE.md §Runtime data lives in \
+~/lloyd-data, never in the tree ('Never export it from a shell profile or a \
+launcher')."""
+scope = ["**/*.py"]
+allow = [
+    { path = "tests/conftest.py", why = """the test suite is the third owner \
+architecture/data-home.md §3 names: it points a test run at a scratch root for the \
+whole process, which is what makes the live tree unreadable to the suite.""" },
+    { path = "tests/test_youtube_artifact_phase.py", why = """restores a value it \
+saved from its own process on teardown (#2519's scratch-root test); a save/restore \
+inside one pytest process, not an export.""" },
+]

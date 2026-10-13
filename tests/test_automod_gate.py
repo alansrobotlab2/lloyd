@@ -90,7 +90,7 @@ class _StubGate(G.Gate):
 # about as much, and is the only rung that judges the change set itself instead
 # of the behaviour it produces — so it runs before anything executes the
 # candidate. It is observe-only (#679): it records, it never fails.
-RUNGS = ("preflight", "vet", "static", "pyright", "frontend", "tests", "prompt_surface",
+RUNGS = ("preflight", "vet", "code_rules", "static", "pyright", "frontend", "tests", "prompt_surface",
          "review", "venv", "canary_boot", "canary_smoke", "drill")
 ALL_PASS = {n: (True, "ok", {}) for n in RUNGS}
 
@@ -126,7 +126,7 @@ def test_a_failing_rung_short_circuits_the_expensive_ones(monkeypatch):
     g = _StubGate(outcomes)
     report = g.run()
     assert not report.ok
-    assert g.called == ["preflight", "vet", "static"]
+    assert g.called == ["preflight", "vet", "code_rules", "static"]
     assert "canary_boot" not in g.called
 
 
@@ -3307,3 +3307,206 @@ def test_the_pyright_record_rides_the_round_event_and_cannot_lose_a_round(
     assert ev[0]["pyright"]["counts"] == {"reportCallIssue": 1}
     assert ev[0]["pyright"]["labels"] == ["reportCallIssue:caller.py"]
     assert ev[0]["pyright"]["totals"]["new_findings"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The code-shape rule rung (#2574): every round, observe-only, and durable
+# ---------------------------------------------------------------------------
+
+def _code_rules_round(tmp_path, monkeypatch, *, mode: str = "violation"):
+    """A real Gate over a scratch repo whose head commit does or does not plant one.
+
+    `mode="violation"` adds a guardian module importing a third-party package —
+    the shape `guardian-import-hygiene` exists for, because the guardian is
+    staged as a flat snapshot of its own directory and runs on system python.
+    `mode="clean"` adds an ordinary python file none of the five rules matches.
+
+    Same harness as `_vet_round` for the same reason: what is under test is the
+    ladder's behaviour around this rung, so the other rungs are stubbed and the
+    one under test is the real method over a real git repo.
+    """
+    root = tmp_path / "wt"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+    for k, v in (("user.email", "rules@example.invalid"), ("user.name", "rules")):
+        subprocess.run(["git", "-C", str(root), "config", k, v], check=True)
+    (root / "app").mkdir()
+    (root / "app" / "service.py").write_text("def handle(e):\n    return e\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "base"], check=True)
+    base = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    if mode == "violation":
+        gdir = root / "agent-services" / "guardian"
+        gdir.mkdir(parents=True)
+        (gdir / "planted.py").write_text("import json\nimport yaml\n\nGO = json\n",
+                                         encoding="utf-8")
+        subject = "planted a non-stdlib guardian import"
+    elif mode == "clean":
+        (root / "app" / "added.py").write_text("ANSWER = 42\n", encoding="utf-8")
+        subject = "an ordinary change"
+    elif mode == "nopython":
+        (root / "README.md").write_text("docs only\n", encoding="utf-8")
+        subject = "a round that touches no python"
+    else:
+        raise AssertionError(f"unknown mode {mode!r}")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", subject], check=True)
+
+    events: list[dict] = []
+    monkeypatch.setattr(G.S, "append_event", events.append)
+    monkeypatch.setattr(G.W, "round_dir", lambda *a, **k: tmp_path / "round")
+    g = G.Gate("SM_CODE_RULES_ROUND", root, base)
+    return g, events
+
+
+def _stub_everything_but_code_rules(g, monkeypatch):
+    for name in ("preflight", "vet", "static", "pyright", "frontend", "tests",
+                 "prompt_surface", "review", "venv", "canary_boot", "canary_smoke",
+                 "drill"):
+        monkeypatch.setattr(g, f"rung_{name}", lambda n=name: (True, f"stub {n}", {}))
+
+
+def test_the_ladder_runs_the_code_rules_rung_and_a_hit_blocks_nothing(tmp_path, monkeypatch):
+    """Clause 5, end to end: the real ladder, the real rung, a real git repo.
+
+    Three things are pinned at once, because each has been the missing one on a
+    previous observe-only rung: the ladder calls it on every round; the hit rides
+    the report; and a hit cannot turn a round red (#2574 forbids any round in
+    this item from flipping a rule to blocking).
+    """
+    g, events = _code_rules_round(tmp_path, monkeypatch)
+    _stub_everything_but_code_rules(g, monkeypatch)
+
+    report = g.run()
+
+    assert report.ok, "an observe-only rung must never decide a round"
+    rows = [r for r in report.rungs if r.name == "code_rules"]
+    assert len(rows) == 1, [r.name for r in report.rungs]
+    rung = rows[0]
+    assert rung.ok is True
+    assert rung.detail.startswith("observe-only:"), rung.detail
+    cr = rung.data["code_rules"]
+    assert cr["observe_only"] is True
+    assert cr["status"] == "evaluated"
+    assert cr["counts"] == {"guardian-import-hygiene": 1}, cr["counts"]
+    assert cr["labels"] == ["guardian-import-hygiene:agent-services/guardian/planted.py"]
+    assert cr["hits"][0]["line"] == 2, cr["hits"]
+
+    ev = [e for e in events if e.get("rung") == "code_rules"]
+    assert len(ev) == 1, events
+    assert ev[0]["ok"] is True
+    assert ev[0]["code_rules"]["counts"] == {"guardian-import-hygiene": 1}
+    assert ev[0]["code_rules"]["labels"] == [
+        "guardian-import-hygiene:agent-services/guardian/planted.py"]
+    assert ev[0]["code_rules"]["observe_only"] is True
+
+
+def test_a_clean_round_records_the_code_rules_rung_ran(tmp_path, monkeypatch):
+    """The soak's denominator is "the rung ran", which needs a green record too."""
+    g, events = _code_rules_round(tmp_path, monkeypatch, mode="clean")
+    _stub_everything_but_code_rules(g, monkeypatch)
+    report = g.run()
+
+    assert [r.name for r in report.rungs if r.name == "code_rules"] == ["code_rules"]
+    clean = [e for e in events if e.get("rung") == "code_rules"]
+    assert len(clean) == 1, events
+    assert clean[0]["code_rules"]["counts"] == {}
+    assert clean[0]["code_rules"]["observe_only"] is True
+    # A count that only appears with findings cannot be a denominator.
+    assert clean[0]["code_rules"]["totals"]["files"] == 1
+
+
+def test_a_round_with_no_python_still_writes_the_code_rules_row(tmp_path, monkeypatch):
+    """Clause 5's last clause: a skipped round writes a row, so "ran" is readable.
+
+    The false-flag rate the owed soak reports is hits over landings-with-python;
+    a landing that wrote nothing because it changed no `.py` is a different thing
+    from a landing the rung never ran on, and only a row on both keeps them apart.
+    """
+    g, events = _code_rules_round(tmp_path, monkeypatch, mode="nopython")
+    _stub_everything_but_code_rules(g, monkeypatch)
+    report = g.run()
+
+    assert report.ok
+    rows = [r for r in report.rungs if r.name == "code_rules"]
+    assert len(rows) == 1
+    assert rows[0].ok is True
+    ev = [e for e in events if e.get("rung") == "code_rules"]
+    assert len(ev) == 1, events
+    assert ev[0]["code_rules"]["status"] == "evaluated"
+    assert ev[0]["code_rules"]["totals"]["files"] == 0
+
+
+def test_a_code_rules_rung_that_could_not_run_is_unevaluated_not_clean(tmp_path, monkeypatch):
+    """The `vet` discipline at the new seam: an unread round never reads as clean."""
+    g, _ = _code_rules_round(tmp_path, monkeypatch)
+    monkeypatch.setattr(G.CR, "run", lambda *a, **k: {
+        "status": "unevaluated", "reason": "could not enumerate the round's files"})
+    ok, detail, data = g.rung_code_rules()
+    assert ok is True, "an unevaluated rule pass is a finding about the gate, not a red round"
+    assert data["code_rules"]["status"] == "unevaluated"
+    assert "UNEVALUATED" in detail and "could not enumerate" in detail
+    assert "clean" not in detail, "an unread change set must never read as clean"
+
+
+def test_the_code_rules_record_is_compact(tmp_path, monkeypatch):
+    """The durable event carries the counts, not the prose.
+
+    The event rides the ledger forever; `vet`'s record is compact for exactly that
+    reason and #679's finding is the one being copied, so the shape is asserted
+    rather than trusted.
+    """
+    g, events = _code_rules_round(tmp_path, monkeypatch)
+    _stub_everything_but_code_rules(g, monkeypatch)
+    g.run()
+    ev = [e for e in events if e.get("rung") == "code_rules"][0]
+    assert set(ev["code_rules"]) == {"status", "observe_only", "counts", "labels",
+                                     "totals"}
+
+
+def test_a_crash_inside_the_rule_runner_costs_the_round_nothing(tmp_path, monkeypatch):
+    """The one arm `mode="corrupt"` cannot reach, and the one that would have made this
+    rung the thing it exists to prevent.
+
+    A corrupt rule file is refused by the loader and comes back as a result
+    (`status: unevaluated`), so the existing node exercises the returned-unevaluated
+    path. This one makes the runner itself raise, which is the path where `_rung`'s
+    standing rule — "an erroring rung is a FAILED rung" — and this rung's standing rule
+    — "a hit can never fail the gate" — collide. Whichever way that resolved, the other
+    half of the item was a lie: a rung that blocks on its own internal error is the
+    `# noqa`-shaped failure this whole surface is built to make impossible, just moved
+    from the code to the instrument.
+
+    Asserted in both directions: the ladder completes and the row is written, AND the
+    row says so — because swallowing the exception into a clean-looking record would
+    satisfy the first two asserts and would make the soak's denominator a fiction.
+    """
+    g, events = _code_rules_round(tmp_path, monkeypatch)
+    _stub_everything_but_code_rules(g, monkeypatch)
+
+    def explode(_base, _tree):
+        raise RuntimeError("the worktree vanished mid-scan")
+    monkeypatch.setattr(G.CR, "run", explode)
+
+    report = g.run()                           # must NOT raise, must NOT stop
+    assert report.ok, "a rung that crashed inside an observe-only check decided the round"
+
+    row = [r for r in report.rungs if r.name == "code_rules"]
+    assert len(row) == 1, [r.name for r in report.rungs]
+    assert row[0].ok is True, row[0].detail
+    assert row[0].data["code_rules"]["observe_only"] is True
+    cr = row[0].data["code_rules"]
+    assert cr["status"] == G.CR.UNEVALUATED, cr
+    assert "RuntimeError" in cr["reason"] and "vanished mid-scan" in cr["reason"], cr
+    assert "hits" not in cr, "a crashed run must not carry a hit list"
+    assert "the ladder stopped at" not in row[0].detail
+    ev = [e for e in events if e.get("rung") == "code_rules"]
+    assert len(ev) == 1 and ev[0]["code_rules"]["status"] == G.CR.UNEVALUATED, ev
+    # The detail is where a human reads it. It has to name the state, say there is no
+    # verdict, and above all not read as a clean round — a soak of 20 landings that
+    # silently contains 20 blind ones is worse than no rung at all, and "clean" is the
+    # word that would cause it.
+    assert "UNEVALUATED" in row[0].detail, row[0].detail
+    assert "no verdict" in row[0].detail, row[0].detail
+    assert "clean" not in row[0].detail, row[0].detail

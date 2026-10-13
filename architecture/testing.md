@@ -12,7 +12,7 @@ date: 2026-09-24
 ([[automod]]) and by hand from a throwaway worktree. This doc is about the
 suite's own structure: the two kinds of test in it, the rule for tests that read
 data off the machine, and the isolation the parallel runner requires. The gate's
-twelve rungs and the promotion flow are in [[automod]].
+thirteen rungs and the promotion flow are in [[automod]].
 
 ## Never run the suite against the production tree
 
