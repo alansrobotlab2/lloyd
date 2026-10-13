@@ -1127,3 +1127,96 @@ def test_the_parity_check_catches_a_dead_skill_route():
     assert not any(rx.match("/api/skill-toggle") and "POST" in ms for rx, ms in table)
     assert not any(rx.match("/api/skill-content") and "POST" in ms for rx, ms in table)
     assert any(rx.match("/api/skill-content") and "GET" in ms for rx, ms in table)
+
+
+# ── #2640: `max_retries` on the row is the budget that retires the task ───────
+#
+# `GET /api/autonomy/tasks` is what Mission Control renders, and until #2640 the
+# row's `max_retries` came from a reader-local default of 3 while
+# `app/autonomy.py::_record_failure` computed the budget as the declared value or
+# `_DEFAULT_MAX_RETRIES`. For a task file with no `max_retries:` key — #82, #83,
+# #86, #91, #92, all `up_next` and `daily`, four of them with a `last_run` on
+# 2026-10-12 and #86 already one failure deep — the board therefore printed a
+# budget two failures shorter than the one the scheduler would apply. #86's own
+# `failure_count: 1` is the shape: it had spent a failure against a budget its
+# file never names, and the board's answer about that budget was wrong.
+
+KEYLESS_TASK_MD = """---
+id: 86
+name: nightly iv metrics series
+status: up_next
+frequency: daily
+skill_name: iv-metrics-series
+timeout_seconds: 600
+failure_count: 1
+---
+
+# body
+
+## Activity Log
+"""
+
+DECLARED_TASK_MD = """---
+id: 84
+name: declared budget task
+status: up_next
+frequency: daily
+skill_name: some-skill
+timeout_seconds: 600
+max_retries: 2
+failure_count: 0
+---
+
+# body
+
+## Activity Log
+"""
+
+
+async def test_autonomy_tasks_reports_the_schedulers_retry_budget_for_a_keyless_file(
+        client, tmp_path, monkeypatch):
+    """Clause 1, measured at the endpoint: the row and the recorder cannot part.
+
+    The assertion is against `autonomy.max_retries_budget` over the scheduler's
+    own parse of the same bytes — not against a literal — because the property
+    #2640 asked for is "the number the board prints is the number `_record_failure`
+    would apply", which stays true whatever the constant is. The declared twin in
+    the same directory is the discriminator: a projection that simply printed the
+    default for every row would fail on it, and that is the failure mode the fix
+    could have shipped as (raising most of the fleet's budget from 3 to 5 inside a
+    board-truthfulness change).
+
+    Both autonomy-dir globals are moved, as `#870`'s test above does: the endpoint
+    lists from `autonomy_router._AUTONOMY_DIR` and gates against
+    `autonomy.AUTONOMY_DIR`, and leaving the second one pointed at the live vault
+    would make this assert against whatever is scheduled today.
+    """
+    from app import autonomy
+    from app.routers import autonomy as autonomy_router
+
+    (tmp_path / "86-nightly-iv-metrics-series.md").write_text(KEYLESS_TASK_MD)
+    (tmp_path / "84-declared-two.md").write_text(DECLARED_TASK_MD)
+    monkeypatch.setattr(autonomy_router, "_AUTONOMY_DIR", tmp_path)
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tmp_path)
+
+    r = await client.get("/api/autonomy/tasks")
+    assert r.status_code == 200
+    rows = {t["id"]: t for t in r.json()["tasks"]}
+    assert set(rows) == {84, 86}, f"fixtures not listed: {sorted(rows)}"
+
+    keyless_path = tmp_path / "86-nightly-iv-metrics-series.md"
+    parsed = autonomy._parse_task_file(keyless_path)
+    assert "max_retries" not in parsed, (
+        "the fixture grew the key, so the row would be reading the file and the "
+        "fallback would be unobserved")
+    assert rows[86]["max_retries"] == autonomy.max_retries_budget(parsed), (
+        f"the board printed {rows[86]['max_retries']!r} where the scheduler "
+        f"applies {autonomy.max_retries_budget(parsed)}")
+    assert rows[86]["max_retries"] == autonomy._DEFAULT_MAX_RETRIES
+    # The number this endpoint used to print for exactly this file.
+    assert rows[86]["max_retries"] != 3, (
+        "the row still carries the reader-local default of 3 that #2640 is about")
+
+    assert rows[84]["max_retries"] == 2, (
+        "a declared budget was overridden by the default — the fix must not "
+        "change any task's real budget")

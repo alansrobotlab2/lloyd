@@ -4035,7 +4035,7 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
                "failure_kind": kind, "failure_count": failures},
     )
 
-    max_retries = int(task.get("max_retries") or _DEFAULT_MAX_RETRIES)
+    max_retries = max_retries_budget(task)
     fields: dict = {"status": "up_next", "last_attempt": completed_at,
                     "updated": completed_at}
     disabled = False
@@ -4192,6 +4192,45 @@ RUN_TRIGGER: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
     "autonomy_run_trigger", default=None)
 _ACTIVE_RUN: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "autonomy_active_run", default=None)
+
+
+
+def max_retries_budget(task: dict) -> int:
+    """The consecutive-failure budget `_record_failure` will apply to `task`.
+
+    One computation for one number, read by the scheduler AND by both read
+    projections (`app/routers/autonomy.py::_autonomy_parse` for
+    `GET /api/autonomy/tasks`, which is what Mission Control renders, and
+    `agent_mcp/autonomy.py::_parse_task_file` for `autonomy_tasks` /
+    `autonomy_get_task`). Before #2640 each of those two projections defaulted the
+    field to a literal 3 of its own while this module retired a key-less task at
+    `_DEFAULT_MAX_RETRIES`, so on the five task files carrying no `max_retries:`
+    key — #82, #83, #86, #91, #92 as measured on 2026-10-13, #86 already one
+    failure deep — the budget a person read was not the budget that disabled the
+    task, and it was wrong in the direction that handed the task two extra
+    failures.
+
+    Nothing about retirement moves: a file declaring `max_retries: N` is still
+    disabled at N, one omitting the key still at `_DEFAULT_MAX_RETRIES`. Only the
+    two fallbacks changed, from a re-typed literal to this function, which reads
+    the constant at call time — so a later change to the constant is reflected on
+    both surfaces with no further edit.
+    `tests/test_autonomy_fallback_field_parity.py` pins that property, and
+    `tests/test_autonomy_failure_alert.py` pins the retirement halves.
+
+    A falsy declared value is the scheduler's case, not a display nicety:
+    `int(0 or _DEFAULT_MAX_RETRIES)` is `_DEFAULT_MAX_RETRIES`, and the projection
+    now says exactly what the recorder will do.
+
+    Placed here, inside the failure-accounting block rather than beside the
+    constant at the top of the module: live prose in
+    `architecture/autonomy-jobs.md` and three nodes in
+    `tests/test_autonomy_jobs_doc_claims.py` cite `app/autonomy.py` lines by
+    number, and an insertion next to `_DEFAULT_MAX_RETRIES` moves every one of
+    them out from under the symbol it names. That drift is priced in this repo —
+    which is itself the finding #2640 leaves behind.
+    """
+    return int(task.get("max_retries") or _DEFAULT_MAX_RETRIES)
 
 
 async def charge_death_without_verdict(task_id, exc: BaseException, *,

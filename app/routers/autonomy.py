@@ -13,6 +13,16 @@ from fastapi.responses import JSONResponse
 
 from agent_mcp._shared import (
     AUTONOMY_TASK_FIELDS, parse_frontmatter_text, with_body_contract)
+# #2640: the retirement budget the board prints has to be the budget the
+# scheduler applies, so it comes from the scheduler's own computation rather than
+# a default re-typed in this file. Imported, not copied — the same reason
+# `agent_mcp/autonomy.py` imports `_TASK_NAME_RE` from here: a number that has to
+# be re-typed at each surface is a number that will drift. Every other reach this
+# module makes into `app.autonomy` is handler-local, which is fine for a verb a
+# single route calls; this is a field that must be right on every row of every
+# listing, where a handler-local import would only move the failure from a loud
+# one at boot to a per-request one.
+from app.autonomy import max_retries_budget
 
 
 router = APIRouter()
@@ -128,7 +138,15 @@ def _autonomy_parse(path: Path) -> dict | None:
             "skill_name": fm.get("skill_name", fm.get("skill_path")) or None,
             "model": fm.get("model") or None,
             "timeout_seconds": fm.get("timeout_seconds", 1800),
-            "max_retries": fm.get("max_retries", 3),
+            # #2640: this projection used to default the field to its own literal
+            # 3, so a task file with no `max_retries:` key read as a 3-failure
+            # budget here while `_record_failure` retired it at 5 — the budget a
+            # human read in Mission Control was not the budget that disabled the
+            # task, in the direction that handed the task two extra failures. One
+            # number now, from the scheduler's own function over its own constant,
+            # shared with the MCP reader. The ban on re-typing a default here is
+            # pinned by `tests/test_autonomy_fallback_field_parity.py`.
+            "max_retries": max_retries_budget(fm),
             "failure_count": fm.get("failure_count") or 0,
             "last_attempt": _to_iso(fm.get("last_attempt")),
             # #1085's infra ceiling. These two are not decoration on the row: the

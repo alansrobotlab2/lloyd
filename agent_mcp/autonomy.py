@@ -33,6 +33,14 @@ from agent_mcp._shared import (
 # listings disagreeing again, and a test pins it.
 from app.routers.autonomy import _TASK_NAME_RE
 
+# The retirement budget, from the scheduler that spends it. This reader used to
+# default the field to 3 while `app/autonomy.py` retired a key-less task at 5, so
+# every `autonomy_tasks` / `autonomy_get_task` answer understated the budget of a
+# file with no `max_retries:` key — to the one reader a human or another agent
+# consults to ask why a task is still running (#2640). Imported for the same
+# reason as `_TASK_NAME_RE` above: one value, one place it is written.
+from app.autonomy import max_retries_budget
+
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 
 
@@ -115,7 +123,13 @@ def _parse_task_file(path: Path) -> dict | None:
             # not make this module a writer of them.
             "infra_failure_count": frontmatter.get("infra_failure_count", 0),
             "infra_rest_until": _to_iso(frontmatter.get("infra_rest_until")),
-            "max_retries": frontmatter.get("max_retries", 3),
+            # #2640, and the same argument as the two fields above: this
+            # projection is the only thing an agent across the process boundary
+            # can read, and it printed 3 for a file with no `max_retries:` key
+            # while the scheduler retired that file at 5. Both surfaces now call
+            # the scheduler's own `max_retries_budget`, so one file cannot have
+            # two budgets — which is what the API row asserts against this one.
+            "max_retries": max_retries_budget(frontmatter),
             "notify_on_complete": frontmatter.get("notify_on_complete", True),
             "preferred_hours": frontmatter.get("preferred_hours", []),
             "last_attempt": _to_iso(frontmatter.get("last_attempt")),

@@ -1603,3 +1603,153 @@ async def test_four_charged_pool_deaths_append_exactly_one_fast_failure_line(
     assert read_task(aut, 91)["failure_count"] == 4, (
         "the alert fired over deaths that never reached the retry budget, which "
         "means the loop is still running underneath the sentence about it")
+
+
+# ── #2640 clause 4: the fix was to two read projections, and to nothing else ───
+#
+# #2640 is a board-truthfulness change: `app/routers/autonomy.py` and
+# `agent_mcp/autonomy.py` stopped defaulting `max_retries` to a literal 3 of their
+# own and started calling `autonomy.max_retries_budget`, the function
+# `_record_failure` already used. The hazard of writing that fix is the opposite
+# direction — a change that made the READ side authoritative and quietly moved
+# when tasks actually stop: the fleet's own convention is `max_retries: 3` (33 of
+# the 39 files declared it at triage on 2026-10-13), so a projection that printed
+# the default instead of the declared value, or a recorder re-pointed at 3, would
+# have re-timed the whole fleet inside a commit that claimed only to be relabelling
+# a column. These four are the assertions that it did not: the disable point of a
+# declared file, of a key-less file, and the two create routes' separate habits.
+
+async def test_a_declared_budget_still_disables_at_exactly_the_declared_number(aut):
+    """`max_retries: 2` means the task stops at its second failure, not at 5.
+
+    The declared value is the file's instruction to the scheduler, and it wins
+    over the default on both sides of the read/write split — `tests/
+    test_autonomy_fallback_field_parity.py` pins that for the projections, this
+    pins it for the recorder that acts.
+    """
+    write_task(aut, 1, name="Declared two", max_retries=2)
+
+    for idx in range(1):
+        await _fail(aut, read_task(aut, 1),
+                    run_id=f"run_1_20261013_11000{idx}", seconds=0.3)
+    after_one = read_task(aut, 1)
+    assert after_one["status"] == "up_next", (
+        "a task with a 2-failure budget retired on its first — the default "
+        "overrode the declared value in the wrong direction")
+    assert after_one["failure_count"] == 1
+
+    await _fail(aut, after_one, run_id="run_1_20261013_110010", seconds=0.3)
+    assert read_task(aut, 1)["status"] == "failed", (
+        "the second failure of a `max_retries: 2` task did not retire it")
+
+
+async def test_a_keyless_file_still_disables_at_the_default_and_not_at_three(aut):
+    """The budget #86 actually has, unchanged by a fix that only relabels the board.
+
+    #86 (nightly-iv-metrics-series) carried no `max_retries:` key and a
+    `failure_count: 1` at triage, while the board, the MCP row and Mission Control
+    all read 3 for it — which would retire it two failures early if anyone took
+    the printed number as the operative one. The operative number is the scheduler
+    default, and this proves the fix did not move it: four failures leave the task
+    running, the fifth retires it.
+    """
+    write_task(aut, 86, name="nightly iv metrics series", max_retries=None)
+    assert "max_retries" not in read_task(aut, 86), (
+        "write_task stopped dropping a None, so the fixture is no longer key-less")
+    assert aut.max_retries_budget(read_task(aut, 86)) == aut._DEFAULT_MAX_RETRIES
+
+    for idx in range(aut._DEFAULT_MAX_RETRIES - 1):
+        await _fail(aut, read_task(aut, 86),
+                    run_id=f"run_86_20261013_1200{idx:02d}", seconds=0.3)
+
+    still_running = read_task(aut, 86)
+    assert still_running["failure_count"] == aut._DEFAULT_MAX_RETRIES - 1
+    assert still_running["status"] == "up_next", (
+        f"a key-less task retired at {still_running['failure_count']} failures — "
+        "the board's old literal 3 has become the operative budget, which is a "
+        "fleet-wide re-timing dressed as a display fix")
+
+    await _fail(aut, still_running, run_id="run_86_20261013_120099", seconds=0.3)
+    assert read_task(aut, 86)["status"] == "failed", (
+        "the key-less task never retired even at the default")
+
+
+class _StubRequest:
+    """Just enough `Request` for `autonomy_task_write`, whose only use is `.json()`."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+
+async def test_the_http_create_route_still_stamps_an_explicit_three(aut, monkeypatch,
+                                                                     tmp_path):
+    """The HTTP create path is a writer of 3, not a reader defaulting to it.
+
+    #2640's own triage refused to let this line be "fixed" alongside the two
+    projections: the create handler's `data.get` default is the value WRITTEN into
+    a new file's frontmatter, not a read fallback, so re-pointing it at the
+    scheduler's constant would have raised every future task's retirement budget
+    from 3 to 5 — a fleet-wide scheduling change hiding inside a board-truthfulness
+    fix, against the convention 33 of 39 files declare. It stays, and this is what
+    stays. The last assertion is the point of keeping it: because the field is
+    written down, the new file's budget is 3 on every surface as a DECLARATION,
+    which is the same number the board used to print here by accident.
+    """
+    from app.routers import autonomy as ROUTER
+
+    dirn = tmp_path / "created"
+    dirn.mkdir()
+    monkeypatch.setattr(ROUTER, "_AUTONOMY_DIR", dirn)
+
+    response = await ROUTER.autonomy_task_write(
+        _StubRequest({"name": "freshly created task", "frequency": "daily"}))
+    assert response.status_code == 200
+    new_id = json.loads(response.body)["task"]["id"]
+
+    path = next(dirn.glob(f"{new_id}-*.md"))
+    written = yaml.safe_load(path.read_text(encoding="utf-8").split("---\n", 2)[1])
+    assert written["max_retries"] == 3, (
+        f"the create route wrote {written.get('max_retries')!r}; #2640 changed no "
+        "create behaviour, and 3 here is the fleet's declared convention")
+    assert ROUTER._autonomy_parse(path)["max_retries"] == 3
+    assert aut.max_retries_budget(aut._parse_task_file(path)) == 3, (
+        "the budget the scheduler will apply is not the one the file declares")
+
+
+def test_the_mcp_writer_still_omits_an_unset_max_retries_key(aut, monkeypatch,
+                                                             tmp_path):
+    """The other create path, whose habit is the source of the ambiguity.
+
+    `_write_task_file` puts `task_dict.get("max_retries")` into its updates map and
+    then drops every `None`-valued key, so `autonomy_write_task` creating a task
+    without the field writes a file with no key at all — which is how the five
+    key-less files got made, and why their board budget had to become the
+    scheduler's default rather than the other way round. Both halves stay: the key
+    is still omitted when unset, and still written when set. A round that "fixed"
+    the ambiguity by making the MCP writer stamp 3 would have changed when those
+    tasks retire, which #2640 explicitly leaves to a human ruling.
+    """
+    import agent_mcp.autonomy as MCP
+
+    dirn = tmp_path / "mcp-written"
+    dirn.mkdir()
+    monkeypatch.setattr(MCP, "AUTONOMY_DIR", dirn)
+
+    path = MCP._write_task_file({"id": 86, "name": "nightly iv metrics series",
+                                 "status": "up_next", "frequency": "daily"})
+    written = yaml.safe_load(path.read_text(encoding="utf-8").split("---\n", 2)[1])
+    assert "max_retries" not in written, (
+        "the MCP writer stopped omitting an unset key, so every MCP-created task "
+        "now silently declares 3 — a retirement change, not a board fix")
+    assert MCP._parse_task_file(path)["max_retries"] == aut._DEFAULT_MAX_RETRIES, (
+        "a key-less file no longer projects the default it will be retired at")
+
+    MCP._write_task_file({"id": 86, "name": "nightly iv metrics series",
+                          "status": "up_next", "frequency": "daily",
+                          "max_retries": 4})
+    updated = yaml.safe_load(path.read_text(encoding="utf-8").split("---\n", 2)[1])
+    assert updated["max_retries"] == 4, (
+        "an explicit budget no longer reaches the file")

@@ -1190,3 +1190,104 @@ def test_the_architecture_paragraph_about_the_stall_alarm_names_its_two_doors():
     assert "blocked-by #38, which failed at 2026-10-08T05:04:09Z" in line, line
     assert "blocked-by #38, which failed at 2026-10-08T05:04:09Z" in section, (
         "the doc's example sentence and the printed one have drifted apart")
+
+
+# ── #2640: one budget per file, across every reader this tool answers ─────────
+#
+# Both MCP rows come out of `_parse_task_file`, and until #2640 that projection
+# carried its own default of 3 for `max_retries` while `app/autonomy.py` retired a
+# key-less task at `_DEFAULT_MAX_RETRIES`. So `autonomy_tasks` and
+# `autonomy_get_task` — the one reader an agent consults to ask why a task is
+# still running — reported a two-failure-shorter budget than the recorder would
+# apply, for each of the five live files that carry no key (#82, #83, #86, #91,
+# #92). The task file itself is not reachable across the process boundary, so a
+# wrong number here is not checkable by the reader that quotes it.
+
+KEYLESS_86 = """---
+id: 86
+name: nightly iv metrics series
+status: up_next
+frequency: daily
+skill_name: iv-metrics-series
+failure_count: 1
+---
+
+# body
+
+## Activity Log
+"""
+
+DECLARED_84 = """---
+id: 84
+name: declared budget task
+status: up_next
+frequency: daily
+skill_name: some-skill
+max_retries: 2
+---
+
+# body
+
+## Activity Log
+"""
+
+
+def test_every_surface_prints_the_schedulers_budget_for_one_keyless_file(
+        autonomy_tree, monkeypatch):
+    """Clause 2: `autonomy_tasks`, `autonomy_get_task` and the board row, one file.
+
+    All three over the same bytes, in one test, because the property is that they
+    cannot differ: the fix had to touch two projections in two processes, and a
+    change that moved only one of them would have produced two numbers where the
+    item asked for one. The comparison is against the scheduler's own
+    `max_retries_budget` of its own parse, so it holds whatever the constant is.
+
+    The declared twin is what makes this able to fail in the useful direction: a
+    projection changed to print the default for every row would pass a key-less
+    assertion and silently rewrite the budget of every task that declares one.
+    """
+    import asyncio as _asyncio
+
+    from app import autonomy as SCHED
+
+    _write(autonomy_tree, **{
+        "86-nightly-iv-metrics-series.md": KEYLESS_86,
+        "84-declared-two.md": DECLARED_84,
+    })
+    # The board lists from its own global; left alone it would enumerate the live
+    # vault and the comparison would be between two different directories.
+    monkeypatch.setattr(ROUTER, "_AUTONOMY_DIR", autonomy_tree)
+    monkeypatch.setattr(SCHED, "AUTONOMY_DIR", autonomy_tree)
+
+    parsed = SCHED._parse_task_file(autonomy_tree / "86-nightly-iv-metrics-series.md")
+    assert parsed is not None
+    assert "max_retries" not in parsed, (
+        "the fixture carries the key, so nothing below observes a fallback")
+    budget = SCHED.max_retries_budget(parsed)
+    assert budget == SCHED._DEFAULT_MAX_RETRIES
+
+    listed = {t["id"]: t for t in _tasks_via_mcp_seam()}
+    get_row = json.loads(
+        _asyncio.run(MCP.call_tool("autonomy_get_task", {"id": 86})
+                     ).content[0].text)["task"]
+    board = {r["id"]: r for r in
+             json.loads(_asyncio.run(ROUTER.autonomy_tasks()).body)["tasks"]}
+
+    assert listed[86]["max_retries"] == budget, (
+        f"autonomy_tasks printed {listed[86]['max_retries']!r}, the scheduler "
+        f"retires at {budget}")
+    assert get_row["max_retries"] == budget, (
+        f"autonomy_get_task printed {get_row['max_retries']!r}, the scheduler "
+        f"retires at {budget}")
+    assert board[86]["max_retries"] == budget, (
+        f"the board row printed {board[86]['max_retries']!r} for the same file")
+    assert listed[86]["max_retries"] != 3, (
+        "the MCP rows still carry the reader-local default #2640 removes")
+
+    get_84 = json.loads(
+        _asyncio.run(MCP.call_tool("autonomy_get_task", {"id": 84})
+                     ).content[0].text)["task"]
+    assert (listed[84]["max_retries"], get_84["max_retries"],
+            board[84]["max_retries"]) == (2, 2, 2), (
+        "a declared budget was replaced by the default: the fix must report the "
+        "file's own number, never overwrite it")

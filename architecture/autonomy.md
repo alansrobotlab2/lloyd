@@ -466,14 +466,27 @@ activity log, alert — and it splits two kinds:
   that fast and that silent, it is a thinking-only turn or a 200 with no
   content, not work.
 
-`_DEFAULT_MAX_RETRIES` is 5. Thirty-three of the 39 task files carry
-`max_retries: 3`, which is also what the create path writes, so 3 is the number
-in practice; #84 carries 2, and five files carry none (#82, #83, #86, #91, #92).
-On those five the scheduler and the board disagree by definition:
-`_record_failure` reads `task.get("max_retries") or _DEFAULT_MAX_RETRIES` and
-disables them at **5**, while `/api/autonomy/tasks`, the MCP reader and Mission
-Control all write `fm.get("max_retries", 3)` and print **3** — so the budget a
-human reads is not the budget that retires the task.
+`_DEFAULT_MAX_RETRIES` is 5, and it is the only default the field has anywhere.
+`max_retries_budget()` is the single function that turns a task dict into that
+budget: `_record_failure` charges against it, and both read projections call the
+same function — `app/routers/autonomy.py::_autonomy_parse` for
+`GET /api/autonomy/tasks` (which is what Mission Control renders), and
+`agent_mcp/autonomy.py::_parse_task_file` for `autonomy_tasks` /
+`autonomy_get_task`. So a file declaring `max_retries: N` is retired at N and
+shows N everywhere, and a file declaring no key is retired at
+`_DEFAULT_MAX_RETRIES` and shows **that** number everywhere — including the five
+files that carry none (#82, #83, #86, #91, #92). That is the property #2640
+exists to hold: until it, each of those two readers defaulted the field to a
+literal 3 of its own, so on a key-less file the budget a person read was not the
+budget that disabled the task, and it was wrong in the direction that handed the
+task two extra failures. The two create paths are declarations, not second
+defaults, and they still differ deliberately: the HTTP create route stamps an
+explicit `max_retries: 3` into the new file's frontmatter, while the MCP writer
+omits an unset key — which is what makes an MCP-created task key-less, and why
+it now reads 5 on the board for the 5 failures it actually gets.
+`tests/test_autonomy_fallback_field_parity.py` pins both projections to the
+constant, so a future change to the number moves the scheduler and every surface
+in the same commit or fails.
 
 **`last_run` means the last success; `last_attempt` means every attempt.** The
 cooldown reads "last_attempt newer than last_run" as "the most recent attempt

@@ -34,6 +34,7 @@ that holds, and the only one worth pinning, is that the readers agree.
 from __future__ import annotations
 
 import datetime
+import inspect
 import sys
 from pathlib import Path
 
@@ -387,3 +388,143 @@ def test_the_board_hold_assertion_bites_on_an_incomplete_projection(ceilinged_di
     assert "infra ceiling" not in (row["blocked"] or ""), (
         "the hold survived an incomplete projection, so the board test above "
         "was not sensitive to the field at all")
+
+
+# ── #2640: one DEFAULT for `max_retries`, read from the scheduler's constant ──
+#
+# Everything above is about which FIELDS a reader recovers. This is about the
+# VALUE a reader prints for one of them — the same failure shape one layer up.
+# `app/autonomy.py` computed a task's retirement budget as
+# `int(task.get("max_retries") or _DEFAULT_MAX_RETRIES)` with
+# `_DEFAULT_MAX_RETRIES = 5`, while each of the two projections defaulted the
+# field to a literal 3 of its own. For a task file that declares no
+# `max_retries:` key — #82, #83, #86, #91, #92 as measured on 2026-10-13, four
+# of them with a `last_run` the previous day — the board row, the MCP row and
+# Mission Control printed **3** while `_record_failure` was going to retire the
+# task at **5**: the budget a person read was not the budget that acted, wrong
+# in the direction that handed the task two extra failures. Nothing about
+# retirement moved (that half is pinned in
+# `tests/test_autonomy_failure_alert.py`); what moved is that both fallbacks are
+# now `autonomy.max_retries_budget`, the scheduler's own function over its own
+# constant, which is what these tests pin and what makes a re-typed literal
+# impossible to reintroduce quietly.
+
+KEYLESS_TASK_FILE = """---
+id: 86
+name: nightly iv metrics series
+status: up_next
+frequency: daily
+skill_name: iv-metrics-series
+---
+
+# body
+
+## Activity Log
+"""
+
+
+@pytest.fixture
+def keyless_file(tmp_path) -> Path:
+    """A task file declaring no `max_retries:` at all — the five live files' shape."""
+    path = tmp_path / "86-nightly-iv-metrics-series.md"
+    path.write_text(KEYLESS_TASK_FILE, encoding="utf-8")
+    return path
+
+
+def test_both_projections_answer_with_the_budget_the_scheduler_will_apply(keyless_file):
+    """One key-less file, three readers, one number — #2640's acceptance check.
+
+    The comparison is not `5`: it is `SCHED.max_retries_budget(...)`, the value
+    `_record_failure` charges the streak against, so the assertion holds what it
+    claims (the surfaces match the scheduler) whatever the constant is today. The
+    scheduler's own parse is the positive control: it must NOT carry the key, or
+    the number below is being read off the file and the fallback is unobserved —
+    which is exactly how the old bug stayed invisible for so long.
+    """
+    declared = SCHED._parse_task_file(keyless_file)
+    assert declared is not None
+    assert "max_retries" not in declared, (
+        "the fixture grew a `max_retries:` key, so every assertion below is "
+        "reading the file rather than a fallback")
+    budget = SCHED.max_retries_budget(declared)
+
+    board = ROUTER._autonomy_parse(keyless_file)
+    mcp = MCP._parse_task_file(keyless_file)
+
+    assert board["max_retries"] == budget, (
+        f"GET /api/autonomy/tasks prints {board['max_retries']!r} while the "
+        f"scheduler retires this file at {budget}")
+    assert mcp["max_retries"] == budget, (
+        f"the MCP row prints {mcp['max_retries']!r} while the scheduler retires "
+        f"this file at {budget}")
+    assert board["max_retries"] == mcp["max_retries"], (
+        "the two surfaces print different budgets for one file")
+    # The number that used to be printed. Asserting against the constant here
+    # keeps the check honest if the constant ever moves: what is banned is a
+    # second, reader-local default, not the digit 5.
+    assert SCHED._DEFAULT_MAX_RETRIES == budget
+
+
+def test_a_change_to_the_constant_moves_both_projections_with_no_further_edit(
+        keyless_file, monkeypatch):
+    """Clause 3's actual property: the fallback is a reference, not a copy.
+
+    A projection that read `_DEFAULT_MAX_RETRIES` once at import time, or that
+    re-typed the literal, would keep printing the old number after the constant
+    moved — the drift that made this bug possible in the first place. Nine is
+    chosen so it cannot collide with the constant's real value or with the 3 the
+    readers used to print.
+    """
+    assert SCHED._DEFAULT_MAX_RETRIES != 9, (
+        "the fixture's discriminator is now the constant's real value")
+    monkeypatch.setattr(SCHED, "_DEFAULT_MAX_RETRIES", 9)
+
+    assert ROUTER._autonomy_parse(keyless_file)["max_retries"] == 9, (
+        "the board's fallback did not follow the constant, so it is a copy")
+    assert MCP._parse_task_file(keyless_file)["max_retries"] == 9, (
+        "the MCP row's fallback did not follow the constant, so it is a copy")
+
+
+def test_a_declared_value_still_prints_itself_on_both_projections(tmp_path):
+    """The fallback is a fallback: a file that names its own budget wins.
+
+    Most of the fleet declares its own budget — 33 of the 39 task files declared
+    `max_retries: 3` when #2640 was triaged on 2026-10-13, and the HTTP create
+    route still writes that value into every new file. If the shared function
+    overrode a declared value, the "truthful board" fix would have silently
+    raised most of the fleet's budget to 5 instead.
+    """
+    path = tmp_path / "84-declared-two.md"
+    path.write_text(
+        "---\nid: 84\nname: declared budget\nstatus: up_next\n"
+        "frequency: daily\nmax_retries: 2\n---\n\n# body\n", encoding="utf-8")
+
+    assert ROUTER._autonomy_parse(path)["max_retries"] == 2
+    assert MCP._parse_task_file(path)["max_retries"] == 2
+    assert SCHED._parse_task_file(path)["max_retries"] == 2
+
+
+def test_neither_projection_re_types_a_default_anymore():
+    """The shape, not just the value: both projections must CALL the scheduler.
+
+    A value test can be satisfied by someone who re-types `5` after the constant
+    moves. This one cannot: the shared call has to be in the projection, and a
+    reader-local default has to be gone — including in a comment, because the
+    acceptance grep is over text, and the sentence that quotes the old spelling is
+    indistinguishable from having reintroduced it.
+
+    The two banned spellings are ASSEMBLED, not written out: #2640's acceptance
+    check is a `git grep` for the reader-default spelling coming back with no
+    hits, and a literal written here would fail that check from the very test
+    that forbids it.
+    """
+    banned = ('max_retries' + '", 3', "max_retries" + "', 3")
+    for label, fn in (("board", ROUTER._autonomy_parse),
+                      ("MCP", MCP._parse_task_file)):
+        src = inspect.getsource(fn)
+        assert "max_retries_budget(" in src, (
+            f"the {label} projection no longer calls the scheduler's "
+            "`max_retries_budget`, so its default is its own again")
+        for needle in banned:
+            assert needle not in src, (
+                f"the {label} projection re-types a default: {needle!r}")

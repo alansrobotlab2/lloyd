@@ -4874,3 +4874,83 @@ def test_arch_review_rail_4_names_the_thing_that_enforces_it():
     assert ("`sed -i`" in residual or "`cp`" in residual), residual[:300]
     for reporter in ("revert_live_ledger_writes", "live_strays"):
         assert reporter in residual, (reporter, residual[:300])
+
+
+# ── #2640: autonomy.md documented the retry disagreement instead of a default ──
+#
+# `architecture/autonomy.md` was the artifact that MADE this bug survivable. Its
+# failure section said, in print, that "`_DEFAULT_MAX_RETRIES` is 5", that 33 of
+# the 39 task files carry `max_retries: 3`, and that on the five files carrying no
+# key "the scheduler and the board disagree by definition" — a true sentence that
+# described two numbers where one was due, and the reason the wrong one could
+# stand for years: the doc, the board, the MCP row and Mission Control all agreed
+# with each other on 3, and only the recorder disagreed. #2640 collapsed them onto
+# one constant, so the section had to stop narrating a disagreement and state a
+# default. What this node pins is that it states the default the CODE has, not a
+# number the prose remembers: the expected value is read out of `app/autonomy.py`,
+# so a later change to the constant that forgets the page goes red here rather
+# than re-creating the drift with the doc now one step further from the truth.
+
+def test_the_autonomy_page_states_one_retry_default_rather_than_a_disagreement():
+    text = _text("autonomy.md")
+    section = _section(text, "Failure is a state machine, not a log line")
+    code = (ROOT / "app" / "autonomy.py").read_text(encoding="utf-8")
+
+    code_m = re.search(r"^_DEFAULT_MAX_RETRIES = (\d+)$", code, re.MULTILINE)
+    assert code_m, (
+        "the retry default is no longer a plain module constant, so this node is "
+        "no longer reading the number the scheduler uses — re-point it, do not "
+        "delete it")
+    default = int(code_m.group(1))
+
+    doc_m = re.search(r"`_DEFAULT_MAX_RETRIES` is (\d+)", section)
+    assert doc_m, (
+        "the failure section no longer states the default beside its own constant "
+        "name, which is the form that can be checked against the code at all")
+    assert int(doc_m.group(1)) == default, (
+        f"the page says {doc_m.group(1)} while `app/autonomy.py` says {default}: "
+        "the doc has drifted from the scheduler, which is the #2640 defect in its "
+        "newest form")
+
+    # One computation, named, and the two projections that now call it. Naming
+    # the function is what keeps a reader from re-typing a default again: the
+    # sentence has to point at something that exists.
+    assert "max_retries_budget" in section, (
+        "the page does not name the one function that turns a task dict into a "
+        "budget, so the next editor has nothing to call")
+    assert "def max_retries_budget(" in code, (
+        "the page names a function the scheduler does not have (#1520's defect)")
+    for surface in ("app/routers/autonomy.py", "agent_mcp/autonomy.py"):
+        assert surface in section, (
+            f"the page does not say which projection reads the budget from "
+            f"`{surface}`, so its claim of one number is unlocated")
+
+    # The disagreement is gone from the present tense. `disagree` is banned
+    # outright because every form of that sentence — "disagree by definition",
+    # "the two surfaces disagree" — is the doc giving up rather than fixing;
+    # `fm.get` is banned because quoting the reader's own default was how the old
+    # paragraph told the story. Past tense about the retired bug is allowed: a
+    # page that silently forgets why a constant is shared invites someone to
+    # "simplify" it back into a literal.
+    assert "disagree" not in section, (
+        "the section is back to describing two numbers as a standing state")
+    assert "fm.get" not in section, (
+        "the section quotes a reader-local default again")
+    assert not re.search(r"prints?\s+\*\*3\*\*|\bprint\w*\s+3\b", section), (
+        "the section still tells a reader that a surface prints the old default")
+
+    # And the five key-less files are described by what they now show. Before
+    # #2640 the same five ids appeared as the exception list that proved the
+    # disagreement; the ids staying put while the claim about them flips is the
+    # whole of the fix, so the ids are pinned too — a rewrite that quietly drops
+    # them would leave no record of which files the property is about.
+    assert re.search(r"(?:declaring|carries?|carry) no(?: `max_retries:`)? key",
+                     section) or "carry none" in section, (
+        "the page no longer describes what happens to a file with no key")
+    for task_id in ("#82", "#83", "#86", "#91", "#92"):
+        assert task_id in section, (
+            f"{task_id} has left the page: the key-less files must be named as "
+            "showing the default, not remembered as an exception")
+    assert re.search(r"no key is retired at\s+`_DEFAULT_MAX_RETRIES`", section), (
+        "the page does not say a key-less file is retired AT the default it "
+        "shows, which is the sentence the other four clauses exist to make true")
