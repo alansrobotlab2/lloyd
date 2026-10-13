@@ -144,6 +144,15 @@ ARM_A, ARM_RETRY, ARM_B = "A", "A-retry", "B"
 #: may not do is make an ordinary case look over budget.
 DEFAULT_TOKEN_CEILING = 200_000
 
+#: Why a per-theory row was refused (#2635). Deliberately NOT the ceiling's word:
+#: a `kind: ceiling` row with `reason: "token-ceiling"` means the fan-out was
+#: shortened because the money ran out, and `report` prints that spend story. A
+#: theory that ran, cost its tokens and answered in prose is the other failure
+#: class entirely — Pienaar's fourth — and folding it into the ceiling row would
+#: let a study read "budget too small" from a run whose model simply refused to
+#: cite. `no-claims` is the raise's own complaint, kept as a recorded fact.
+REFUSAL_NO_CLAIMS = "no-claims"
+
 
 class RecordError(Exception):
     """A row that would not prove what the clause says it proves."""
@@ -559,18 +568,41 @@ def validate_theories(theories: Sequence[Any]) -> list[str]:
     return texts
 
 
+def empty_claims(row: dict) -> bool:
+    """Whether a per-theory investigation row carries no claims at all.
+
+    ONE definition, read twice (#2635): `validate_investigation` raises on it, and
+    arm B's loop records it as a refusal instead of raising. Two spellings of "did
+    it hand back nothing" would drift, and the drift is the bad kind — a row that
+    fails one check and passes the other gets ranked with no evidence under it, or
+    gets a refusal label the record cannot support.
+
+    This is deliberately narrower than "the validator raised". A claim with no
+    citation is a broken instrument, not a declined theory, and still raises.
+    """
+    claims = row.get("claims")
+    return not isinstance(claims, list) or not claims
+
+
+def no_claims_message(slot: Any) -> str:
+    """The complaint, in the one wording both the raise and the refusal row use."""
+    return (f"theory {slot!r} handed back no claims — "
+            "a prose conclusion is not evidence to rank")
+
+
 def validate_investigation(row: dict) -> list[dict]:
     """A per-theory row must carry claims with citations, not a conclusion.
 
     Pienaar's fourth failure class is a sub-agent handing back a prose summary;
     the ranking is only over evidence if the record cannot hold anything else.
+    Since #2635 arm B turns the no-claims raise into a recorded refusal row before
+    it gets here — the theory is not ranked either way, it just no longer cancels
+    the case — while every other refusal this function makes still raises.
     """
-    claims = row.get("claims")
-    if not isinstance(claims, list) or not claims:
-        raise RecordError(f"theory {row.get('slot')!r} handed back no claims — "
-                          "a prose conclusion is not evidence to rank")
+    if empty_claims(row):
+        raise RecordError(no_claims_message(row.get("slot")))
     out = []
-    for claim in claims:
+    for claim in row["claims"]:
         text = str((claim or {}).get("claim") or "").strip()
         cites = (claim or {}).get("citations")
         if not text or not isinstance(cites, list) or not cites:
@@ -629,7 +661,8 @@ def rank_candidate_text(slot: str, claims: Sequence[dict]) -> str:
 
 def rank_theories(case: dict, evidence: dict[str, list[dict]], *,
                  slots: Sequence[str],
-                 rank_fn: Callable[[str, Sequence[str]], Any]) -> dict:
+                 rank_fn: Callable[[str, Sequence[str]], Any],
+                 refused: Sequence[str] = ()) -> dict:
     """Rank the fan-out and persist the argmax order, never a score.
 
     `rank_fn` is the production `app.djev.rank` in a live run and a stub in a
@@ -643,12 +676,35 @@ def rank_theories(case: dict, evidence: dict[str, list[dict]], *,
     in position 0 for every case would hand it a standing advantage — the
     rotation in `slot_labels` only moves the prior if the position moves with
     the label.
+
+    `refused` (#2635) names the slots recorded with the zero-claim reason — a
+    theory whose investigation handed back prose instead of citable evidence.
+    The evidence map already tolerates their absence (a slot missing from
+    `evidence` simply ranks as empty), so the only thing to change is who is
+    handed to the engine at all: a candidate with no evidence under it is a
+    slot whose only content is its own label, which is precisely what
+    `validate_investigation` used to raise to keep out of the ranking. The
+    exclusion is of REFUSED slots only. A slot the token ceiling cut off before
+    it was dispatched stays in the list, because the ceiling row already says
+    what happened to it and #2258 pinned that fan-out shape; #2635 is about a
+    theory that ran and answered nothing.
     """
     by_slot = {s: (evidence.get(s) or []) for s in slots}
-    pairs = sorted(by_slot.items(), key=lambda item: item[0])
+    pairs = sorted((item for item in by_slot.items() if item[0] not in set(refused)),
+                   key=lambda item: item[0])
     candidates = [rank_candidate_text(slot, claims) for slot, claims in pairs]
     query = (f"Which candidate root cause does the collected evidence support for: "
              f"{case.get('input') or ''}")
+    if not candidates:
+        # Nothing was evidenced, so there is nothing to order and calling the
+        # engine would ask it to choose among bare labels. Recorded rather than
+        # raised (#2635): the case must still reach its verdict row so it enters
+        # `report`'s denominator as the measured zero it is, not as an absence.
+        return {"kind": "rank", "ok": False,
+                "reason": f"no-evidence: every dispatched theory refused "
+                          f"({REFUSAL_NO_CLAIMS!r}); nothing was ranked",
+                "order": [], "chosen_slot": None, "chosen_cause": None,
+                "refused": sorted(set(refused))}
     rows = rank_fn(query, candidates)
     if rows is None or (rows is not None and not isinstance(rows, list)):
         return {"kind": "rank", "ok": False,
@@ -694,6 +750,15 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
     one in flight: the bound is "stop at the ceiling, overshoot by at most one
     theory", and the refusal is recorded as a row so the study can see the fan-
     out was cut short rather than reading three theories that never ran.
+
+    A theory that came back and handed over prose is cut short by a different
+    cause, and since #2635 it is recorded the same way instead of raising: one
+    `kind: refusal` row with `reason: "no-claims"`, its own `tokens`, and the
+    theories that DID produce evidence going on to the ranking and the verdict
+    row. Before that the raise propagated out of `run` — `cmd_run` guarded
+    nothing — so case 1 of a 21-key pass killed the remaining 20 and wrote no
+    `verdict` row for itself, which made it invisible to `report`'s denominator
+    rather than merely unscored.
     """
     case_key = case["key"]
     seq = 0
@@ -713,14 +778,34 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
     evidence: dict[str, list[dict]] = {s: [] for s in labels}
     spent = 0
     stopped = None
+    refused: list[str] = []
     for entry in theory_rows:
         if spent >= token_ceiling:
             stopped = "token-ceiling"
             break
         result = await investigate(case, entry["theory"])
-        claims = validate_investigation({**result, "slot": entry["slot"]})
         tokens = int(result.get("tokens") or 0)
         spent += tokens
+        probed = {**result, "slot": entry["slot"]}
+        if empty_claims(probed):
+            # Recorded, not raised (#2635). The raise's purpose survives — the slot
+            # is added to `refused`, so `rank_theories` never hands it to the engine
+            # and nothing unevidenced is ranked — but a theory's answer is no longer
+            # allowed to be a case's, and a case's is not allowed to be the pass's.
+            # The tokens it did cost go on the row, so the spend the study reports
+            # includes the dispatch that produced nothing.
+            refused.append(entry["slot"])
+            writer.append({"seq": next_seq(), "run_id": run_id, "case_key": case_key,
+                           "arm": ARM_B, "kind": "refusal", "ts": _now(),
+                           "slot": entry["slot"], "tokens": tokens,
+                           "reason": REFUSAL_NO_CLAIMS,
+                           "detail": no_claims_message(entry["slot"])})
+            continue
+        # Everything the validator still refuses — a claim with no citation is a
+        # broken instrument rather than a declined theory, and `validate_theories`
+        # still refuses a non-disjoint theory set — keeps raising, and `cmd_run`
+        # now contains it at the arm instead of letting it take the pass.
+        claims = validate_investigation(probed)
         evidence[entry["slot"]] = claims
         writer.append({"seq": next_seq(), "run_id": run_id, "case_key": case_key,
                        "arm": ARM_B, "kind": "tool", "ts": _now(),
@@ -732,15 +817,24 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
                        "reason": stopped, "tokens_spent": spent,
                        "token_ceiling": token_ceiling})
 
-    ranking = rank_theories(case, evidence, slots=labels, rank_fn=rank_fn)
+    ranking = rank_theories(case, evidence, slots=labels, rank_fn=rank_fn,
+                            refused=refused)
     if ranking["ok"]:
         ranking["chosen_cause"] = theory_for(ranking["chosen_slot"], theory_rows)
+    if refused:
+        ranking["refused"] = sorted(refused)
     writer.append({"seq": next_seq(), "run_id": run_id, "case_key": case_key,
                    "arm": ARM_B, "ts": _now(), **ranking})
     verdict = {"seq": next_seq(), "run_id": run_id, "case_key": case_key,
                "arm": ARM_B, "kind": "verdict", "ts": _now(),
                "chosen_cause": ranking.get("chosen_cause") or "",
                "order": ranking.get("order") or [], "tokens": spent}
+    if refused:
+        # Which of the three the top-1 was actually chosen among. `report` scores
+        # this verdict like any other, so the denominator stays honest by counting
+        # the case; this is how a reader sees the case was graded on two theories
+        # rather than three without going back through the refusal rows.
+        verdict["refused"] = sorted(refused)
     writer.append(verdict)
     return verdict
 
@@ -1252,20 +1346,56 @@ async def cmd_run(args) -> int:
     writer = RowWriter(Path(args.rows))
     run_id = f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     ceiling = args.ceiling
+    # #2635: one case's outcome may not cancel the pass. Both arms raise on
+    # purpose — arm A refuses to record an empty cause, and arm B's validator
+    # still refuses anything that is not citable evidence — and until now nothing
+    # here guarded either, so the traceback left in `2258/smoke-b.log` propagated
+    # out of `run` at theory 2 of case 1: the remaining 20 graded keys never ran,
+    # and the dead case wrote no `verdict` row, which makes it ABSENT from
+    # `report`'s denominator rather than counted as the miss it is. Guarded per
+    # ARM, not just per case, because arm A dying also cancelled that same case's
+    # arm B — the half of the comparison the study exists to make.
+    failed: list[str] = []
+
+    async def attempt(label: str, make):
+        try:
+            return await make()
+        except Exception as exc:  # noqa: BLE001 — #2635: the pass outlives one arm
+            failed.append(label)
+            print(f"[2258] FAILED {label}: {type(exc).__name__}: {exc}")
+            print(f"[2258] {label} recorded no verdict row, so `report` will not "
+                  f"count it; the remaining cases continue")
+
     for case in cases:
+        key = case["key"]
         if ARM_A in arms:
-            await run_case_a(case, investigate=investigate_live, writer=writer,
-                             run_id=run_id, token_ceiling=ceiling)
+            await attempt(f"{key} {ARM_A}",
+                          lambda c=case: run_case_a(c, investigate=investigate_live,
+                                                    writer=writer, run_id=run_id,
+                                                    token_ceiling=ceiling))
         if ARM_RETRY in arms:
-            await run_case_a(case, investigate=investigate_live, writer=writer,
-                             run_id=run_id, arm=ARM_RETRY, token_ceiling=ceiling)
+            await attempt(f"{key} {ARM_RETRY}",
+                          lambda c=case: run_case_a(c, investigate=investigate_live,
+                                                    writer=writer, run_id=run_id,
+                                                    arm=ARM_RETRY,
+                                                    token_ceiling=ceiling))
         if ARM_B in arms:
-            verdict = await run_case_b(case, generate=generate_theories_live,
-                                       investigate=investigate_live,
-                                       rank_fn=rank_live, writer=writer,
-                                       run_id=run_id, token_ceiling=ceiling)
-            print(f"[2258] {case['key']} B chose: {str(verdict['chosen_cause'])[:90]}")
+            verdict = await attempt(
+                f"{key} {ARM_B}",
+                lambda c=case: run_case_b(c, generate=generate_theories_live,
+                                          investigate=investigate_live,
+                                          rank_fn=rank_live, writer=writer,
+                                          run_id=run_id, token_ceiling=ceiling))
+            if verdict is not None:
+                print(f"[2258] {key} B chose: {str(verdict['chosen_cause'])[:90]}")
     print(f"[2258] rows appended to {args.rows} (run {run_id})")
+    if failed:
+        # Non-zero, and `launch-pass.sh` logs it as `PASS_EXIT=n`. `set -u` is the
+        # only shell option there, so the number is recorded rather than fatal —
+        # which is the point: a pass that lost an arm must not look like a clean
+        # one to whoever reads the log in the morning.
+        print(f"[2258] {len(failed)} arm-run(s) failed: {', '.join(failed)}")
+        return 1
     return 0
 
 

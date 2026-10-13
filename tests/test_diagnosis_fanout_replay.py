@@ -409,9 +409,24 @@ def test_arm_b_writes_three_theories_before_any_evidence_row(tmp_path):
     assert verdict["kind"] == "verdict" and verdict["chosen_cause"]
 
 
-def test_a_second_duplicate_theory_or_a_prose_conclusion_is_refused(tmp_path):
-    """Fan-out with a duplicate theory is pure cost, and a summary is not evidence."""
-    from eval.diagnosis_fanout_replay import RowWriter, run_case_b
+def test_a_second_duplicate_theory_still_raises_and_a_prose_answer_is_recorded(tmp_path):
+    """Fan-out with a duplicate theory is pure cost, so it still raises; a theory
+    that handed back a summary is #2635, and that one is now recorded.
+
+    The two halves were one node because both came out of the validators as a
+    `RecordError`, and the second half is precisely the raise #2635 removed: on
+    2026-10-12 it propagated out of `run` at theory 2 of case 1 and killed the rest
+    of the pass (`2258/smoke-b.log`: `RecordError: theory 'c2' handed back no
+    claims`). The duplicate half keeps raising and writes nothing — a theory set
+    that is not disjoint means the generator is broken before any money is spent —
+    while three prose answers become three refusal rows and the case still finishes
+    with its own rank and verdict rows. What is pinned here is that the raise this
+    file has always had did not quietly vanish along with the one that had to go;
+    `test_a_theory_that_hands_back_no_claims_is_recorded_and_the_fan_out_continues`
+    pins the refusal row's shape.
+    """
+    from eval.diagnosis_fanout_replay import (RowWriter, THEORIES_PER_CASE,
+                                              run_case_b)
 
     claims = {"a": [{"claim": "x", "citations": [{"path": "p.py"}]}]}
     dup = ["same thing", "same thing", "different"]
@@ -426,11 +441,34 @@ def test_a_second_duplicate_theory_or_a_prose_conclusion_is_refused(tmp_path):
     async def prose(case, theory):
         return {"tool": "Task", "claims": [], "tokens": 10}
 
+    asked = []
+
+    def no_engine_to_choose_from(query, candidates):
+        asked.append(list(candidates))
+        return [{"index": 0}]
+
     theories = ["one", "two", "three"]
-    with pytest.raises(RecordError):
-        asyncio.run(run_case_b(_cases(1)[0], generate=_fake_arm_b(theories, {})[0],
-                               investigate=prose, rank_fn=_rank_stub([0, 1, 2]),
-                               writer=RowWriter(tmp_path / "rows2.jsonl"), run_id="t3"))
+    rows_path = tmp_path / "rows2.jsonl"
+    verdict = asyncio.run(run_case_b(
+        _cases(1)[0], generate=_fake_arm_b(theories, {})[0], investigate=prose,
+        rank_fn=no_engine_to_choose_from, writer=RowWriter(rows_path), run_id="t3",
+        token_ceiling=99_000))
+    rows = [json.loads(l) for l in rows_path.read_text().splitlines()]
+    assert [r["kind"] for r in rows] == (["theories"] + ["refusal"] * THEORIES_PER_CASE
+                                         + ["rank", "verdict"]), (
+        "three prose answers must be three refusal rows and then this case's own rank "
+        f"and verdict rows, not a raise: {[r['kind'] for r in rows]}")
+    assert not asked, (
+        f"the engine was handed {asked} candidates when every theory refused — with no "
+        "evidence under any of them the candidate list is bare labels, which is what "
+        "the refusal exists to keep out of a ranking")
+    rank_row = next(r for r in rows if r["kind"] == "rank")
+    assert rank_row["ok"] is False and rank_row["reason"].startswith("no-evidence"), (
+        f"the all-refused rank row reads {rank_row['reason']!r}; it must name the "
+        "refusals rather than blame the engine")
+    assert verdict["kind"] == "verdict" and verdict["refused"] == sorted(
+        slot_labels(_cases(1)[0]["key"])), (
+        "the all-refused case wrote a verdict row that does not say all three refused")
 
 
 def test_the_fan_out_stops_at_the_matched_token_ceiling(tmp_path):
@@ -1185,3 +1223,406 @@ def test_report_grading_the_real_sequence_end_to_end_needs_no_engine(tmp_path):
         capture_output=True, text=True, timeout=300, cwd=str(REPO))
     assert proc2.returncode == 3, proc2.stdout + proc2.stderr
     assert "baseline N 21 != graded N 98" in proc2.stdout, proc2.stdout
+
+
+
+
+# ── #2635: a theory's answer is not a case's, and a case's is not the pass's ───
+#
+# The route to #2623 clause 4 was blocked on this. `validate_investigation` raises
+# `RecordError` on a theory that handed back prose, `run_case_b` called it unguarded
+# inside the theory loop, and `cmd_run` guarded nothing — so on 2026-10-12 theory 2
+# of case 1 of the arm-B smoke run raised, the process died at 1,078 seconds of
+# engine time, and the case wrote no `verdict` row. Absence is worse than a miss for
+# this study: `latest_verdicts` keys on `kind: verdict` rows and `score` takes each
+# arm's N from those alone, so an aborted case is not scored as wrong — it is not in
+# the denominator at all, and `report` cannot even say the arm was run.
+#
+# The nodes below keep the raise's purpose (nothing unevidenced is ranked) and take
+# away its reach. Mechanism is NOT claimed by any of them: `_engine_turn` surfaces no
+# `stop_reason`, so a zero-claim theory may be truncation (#2624's class, budgets
+# still short) or an honest empty answer. The rows record only that a theory was
+# dispatched, cost tokens, and produced no citable claim.
+
+def _one_case(key: str) -> dict:
+    """One fixture case under a key of the caller's choosing.
+
+    The keys the crashed pass uses are `flaky-SM_*`, and using the real one makes a
+    row's slot labels the real rotation (`slot_labels` hashes the key) rather than a
+    fixture's.
+    """
+    return dict(_cases(1)[0], key=key)
+
+
+def _arm_b(tmp_path, *, key="flaky-SM_20261001_034449", rows_name="rows.jsonl",
+           refuse=(), spend=None, rank_fn=None, ceiling=99_000):
+    """Run arm B once over one case, with the theories in `refuse` answering in prose.
+
+    Returns (case, slots, dispatched, rows, verdict). `dispatched` is the slot order
+    the investigator was called in, which is how the tests below distinguish "the
+    fan-out continued" from "the fan-out ended and something else wrote the rows".
+    A refusal costs its own tokens by default (1,000 against the 10,000 an evidenced
+    theory costs) so a row's spend can be attributed to the dispatch that earned it.
+    """
+    from eval.diagnosis_fanout_replay import RowWriter, run_case_b
+
+    case = _one_case(key)
+    slots = slot_labels(key)
+    theories = [f"theory {i}" for i in range(THEORIES_PER_CASE)]
+    cost = {s: (spend or {}).get(s, 10_000) for s in slots}
+    dispatched: list[str] = []
+
+    async def generate(c):
+        return list(theories)
+
+    async def investigate(c, theory):
+        slot = slots[theories.index(theory)]
+        dispatched.append(slot)
+        if slot in refuse:
+            return {"tool": "Task", "claims": [], "tokens": cost[slot]}
+        return {"tool": "Task",
+                "claims": [{"claim": f"{slot}: the config drifted",
+                            "citations": [{"path": "app/config.py", "line": 12}]}],
+                "tokens": cost[slot]}
+
+    rows_path = tmp_path / rows_name
+    verdict = asyncio.run(run_case_b(case, generate=generate, investigate=investigate,
+                                     rank_fn=rank_fn or _rank_stub([0, 1]),
+                                     writer=RowWriter(rows_path), run_id="t2635",
+                                     token_ceiling=ceiling))
+    rows = [json.loads(l) for l in rows_path.read_text().splitlines()]
+    return case, slots, dispatched, rows, verdict
+
+
+def test_a_theory_that_hands_back_no_claims_is_recorded_and_the_fan_out_continues(
+        tmp_path):
+    """Clause 1: the refused theory becomes a row carrying its `slot`, its `tokens`
+    and a refusal reason, and the theories after it are still investigated.
+
+    This is the 2026-10-12 smoke scenario: `2258/smoke-b.jsonl` holds a `theories`
+    row and ONE `tool` row (149,520 tokens) and nothing else, because
+    `RecordError: theory 'c2' handed back no claims` propagated out at theory 2. The
+    third theory never ran, so the record could not distinguish a weak arm B from an
+    arm B that had not been measured.
+    """
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    case, slots, dispatched, rows, _ = _arm_b(tmp_path, key=key, refuse=(slots[1],),
+                                              spend={slots[1]: 1_000})
+    assert dispatched == slots, (
+        f"the fan-out dispatched {dispatched} of {slots}: a refused theory must not "
+        "cancel the dispatch after it")
+
+    refusals = [r for r in rows if r["kind"] == "refusal"]
+    assert len(refusals) == 1, f"expected one refusal row, got {len(refusals)}"
+    row = refusals[0]
+    assert row["slot"] == slots[1], f"the refusal names slot {row['slot']!r}"
+    assert row["arm"] == "B" and row["case_key"] == key, (
+        "a refusal row without the arm and the case key cannot be attributed to a case, "
+        "which is what makes it reportable at all")
+    assert row["tokens"] == 1_000, (
+        f"the refusal carries {row['tokens']} tokens; the refused dispatch cost 1,000 "
+        "and dropping that spend understates what the arm paid to learn nothing")
+    assert row["reason"] == replay.REFUSAL_NO_CLAIMS == "no-claims", (
+        f"reason reads {row['reason']!r}")
+    assert "handed back no claims" in row["detail"], (
+        "the row lost the validator's own complaint, so a reader cannot tell which "
+        "refusal this was from any other")
+    assert [r["slot"] for r in rows if r["kind"] == "tool"] == [slots[0], slots[2]], (
+        "the two evidenced theories did not both get a per-theory row")
+    assert [r for r in rows if r["kind"] == "tool" and not r["claims"]] == [], (
+        "an empty per-theory row was written beside the refusal — two records of the "
+        "same nothing, one of them styled as evidence")
+    assert sum(int(r.get("tokens") or 0) for r in rows
+               if r["kind"] == "tool") + sum(int(r.get("tokens") or 0) for r in refusals) \
+        == 21_000, "the case's recorded spend must include the refused dispatch"
+
+
+def test_a_case_whose_theory_refused_still_reaches_its_verdict_row(tmp_path):
+    """Clause 2: the case ends with a `kind: verdict` row, because being absent from
+    the denominator is not the same as being measured and losing.
+
+    `latest_verdicts` keys only on `kind: verdict` rows and `score` derives each
+    arm's N from those: the 2026-10-12 smoke case left no verdict row, so `report`
+    could not have reported arm B's top-1 at all. The verdict row is the difference
+    between a study with N=1 and one with N=0.
+    """
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    case, _, _, rows, verdict = _arm_b(tmp_path, key=key, refuse=(slots[1],),
+                                       spend={slots[1]: 1_000})
+    assert [r["kind"] for r in rows] == ["theories", "tool", "refusal", "tool",
+                                         "rank", "verdict"], (
+        f"the run's row sequence was {[r['kind'] for r in rows]} — the refusal belongs "
+        "inside the fan-out, before the rank row, or nothing was ranked")
+    assert rows[-1]["kind"] == "verdict" and rows[-1]["case_key"] == key
+    assert verdict["kind"] == "verdict" and verdict["tokens"] == 21_000, (
+        f"the verdict's spend reads {verdict['tokens']}; the refused theory's 1,000 is "
+        "part of what the case cost")
+    assert verdict["refused"] == [slots[1]], (
+        "the verdict row must say which slot it did not choose among, or a two-theory "
+        "case reads to a later reader as a three-theory one")
+    scored = replay.score(rows, [case])
+    assert scored["arms"]["B"]["n"] == 1, (
+        f"arm B's N is {scored['arms']['B']['n']} with a verdict row on disk; a refusal "
+        "may not move the denominator")
+    assert scored["arms"]["A"]["n"] == 0, (
+        "arm B's refusal leaked into arm A's N — the two arms are scored per arm")
+
+
+def test_a_refused_theory_is_never_handed_to_the_ranking_engine(tmp_path):
+    """Clause 3: the candidate list `rank_fn` receives has no entry for a refused
+    slot, so recording the refusal keeps the raise's entire purpose.
+
+    `rank_theories` already tolerated a partial evidence map (`by_slot` defaulted a
+    missing slot to `[]`), so the pre-fix behaviour was worse than a raise at the
+    ranking would have been: the refused slot contributed a candidate whose text was
+    its own bare label — `rank_candidate_text` with no claims is exactly `"[c2]"` —
+    an unevidenced contender competing on nothing, which is the thing
+    `validate_investigation` exists to keep out.
+    """
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    seen: list[list[str]] = []
+
+    def spy(query, candidates):
+        seen.append(list(candidates))
+        return [{"index": i, "score": 0.9 - 0.1 * i} for i in range(len(candidates))]
+
+    case, _, _, rows, verdict = _arm_b(tmp_path, key=key, refuse=(slots[1],),
+                                       rank_fn=spy)
+    assert seen, "the ranking was never called, so the candidate list proves nothing"
+    candidates = seen[0]
+    assert len(candidates) == THEORIES_PER_CASE - 1, (
+        f"the engine was handed {len(candidates)} candidates for {THEORIES_PER_CASE} "
+        "theories, one of which refused")
+    assert candidates.count(f"[{slots[1]}]") == 0 and not any(
+        c == f"[{slots[1]}]" for c in candidates), (
+        f"the refused slot {slots[1]} is still a candidate — that text is a bare "
+        "label with no claim under it")
+    assert not [c for c in candidates if c.strip() == c.split("]")[0] + "]"], (
+        f"a candidate carried no claims: {[c[:20] for c in candidates]}")
+    assert [c.split("]")[0] + "]" for c in candidates] == sorted(
+        [c.split("]")[0] + "]" for c in candidates]), (
+        "the survivors must keep the sorted-by-slot order the per-case rotation "
+        "argument depends on; dropping a middle slot must not reshuffle the others")
+    assert verdict["order"] and slots[1] not in verdict["order"], (
+        f"the persisted order still names the refused slot: {verdict['order']}")
+    rank_row = next(r for r in rows if r["kind"] == "rank")
+    assert rank_row.get("refused") == [slots[1]], (
+        "the rank row does not record that a slot was excluded, so the ordering looks "
+        "like a three-way choice")
+
+
+def test_a_refusal_is_not_reported_as_a_token_ceiling(tmp_path):
+    """Clause 4: `no-claims` and `token-ceiling` are different facts about different
+    causes, and one row kind each — in both directions.
+
+    A `kind: ceiling` row with `reason: "token-ceiling"` means the fan-out ran out of
+    money, which `report` prints as a spend story and #2258 pinned as a fan-out cut
+    short by compute. A theory that ran, cost its tokens and answered in prose is
+    Pienaar's fourth class. Fold the two together and a study whose model simply
+    declined to cite gets read as one whose budgets are still short — the wrong
+    follow-up to file, and #2624's budget work would be pointed at the wrong problem.
+    """
+    from eval.diagnosis_fanout_replay import REFUSAL_NO_CLAIMS
+
+    assert REFUSAL_NO_CLAIMS != "token-ceiling", (
+        "the two reasons were collapsed into one word, so the record can no longer "
+        "separate a declined theory from an out-of-budget fan-out")
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    _, _, _, refused_rows, _ = _arm_b(tmp_path, key=key, refuse=(slots[1],),
+                                      rows_name="refused.jsonl")
+    assert [r["reason"] for r in refused_rows if r["kind"] == "refusal"] \
+        == [REFUSAL_NO_CLAIMS]
+    assert not [r for r in refused_rows if r["kind"] == "ceiling"], (
+        "a fan-out shortened by a refusal wrote a ceiling row: the case was not over "
+        "budget, it was refused")
+    assert not [r for r in refused_rows if r["kind"] == "refusal"
+                and r.get("reason") == "token-ceiling"]
+
+    # The other direction, on the same fixture: a fan-out that runs out of money
+    # records the ceiling and no refusal, and nothing is marked refused.
+    theories = [f"theory {i}" for i in range(THEORIES_PER_CASE)]
+    claims = {"a": [{"claim": "x", "citations": [{"path": "p.py"}]}]}
+    generate, investigate = _fake_arm_b(theories, {t: claims["a"] for t in theories},
+                                        tokens=10_000)
+    from eval.diagnosis_fanout_replay import RowWriter, run_case_b
+    tight = tmp_path / "tight.jsonl"
+    # 15,000 against 10,000 per dispatch: one theory runs, the check before the
+    # second sees the spend already over, and the fan-out stops for money.
+    asyncio.run(run_case_b(_one_case(key), generate=generate, investigate=investigate,
+                           rank_fn=_rank_stub([0]), writer=RowWriter(tight),
+                           run_id="t2635e", token_ceiling=15_000))
+    tight_rows = [json.loads(l) for l in tight.read_text().splitlines()]
+    assert [r["reason"] for r in tight_rows if r["kind"] == "ceiling"] == ["token-ceiling"]
+    assert not [r for r in tight_rows if r["kind"] == "refusal"], (
+        "an over-ceiling fan-out recorded a refusal beside its ceiling row")
+
+
+# ── clause 5: the pass outlives one case's arm ────────────────────────────────
+
+THEORY_SET = ["the flake", "the config", "the slot collision"]
+
+
+def _drive_pass(tmp_path, monkeypatch, capsys, *, arms, keys, fail_theory_set=False,
+                fail_case=None, fail_arm=None):
+    """Run the real `cmd_run` over several cases with only its ENGINE calls replaced.
+
+    The arm functions themselves are NOT stubbed: `run_case_a`, `run_case_b`,
+    `validate_theories`, `validate_investigation` and `RowWriter` all run, so what
+    the clause asserts — that the other cases' ROWS still get written — is the real
+    writer's output and not a fake's return value. Only the three live callables are
+    patched (`cmd_run` looks them up as module globals at call time).
+
+    `fail_arm`/`fail_case` choose which arm raises, and it raises through the real
+    validator: `fail_arm="B"` makes arm B generate a duplicate theory, so
+    `validate_theories` raises `RecordError`; `fail_arm="A"` makes arm A's single
+    trace return a claim with no text, which is the empty-cause `RuntimeError` at the
+    arm's own guard.
+    """
+    import argparse
+
+    cases_path = tmp_path / "cases.jsonl"
+    cases_path.write_text("".join(json.dumps(_one_case(k)) + "\n" for k in keys),
+                          encoding="utf-8")
+    calls: list[tuple[str, str]] = []
+    good = [{"claim": "the config drifted", "citations": [{"path": "p.py", "line": 1}]}]
+
+    async def generate(case):
+        calls.append(("generate", case["key"]))
+        if fail_arm == ARM_B and fail_case == case["key"] and fail_theory_set:
+            return [THEORY_SET[0], THEORY_SET[0], THEORY_SET[2]]   # not disjoint
+        return list(THEORY_SET)
+
+    async def investigate(case, theory):
+        # Which arm is calling is readable from the argument: `run_case_b` passes the
+        # generated theory (:786) and `run_case_a` passes the case's OWN claimed cause
+        # (:854), so anything outside the generated set is arm A's single dispatch.
+        # Keying the arm-A failure on the case alone would poison arm B's rows for the
+        # same case, which is a different bug than the one this node is about.
+        arm_a = theory == (case.get("claimed_cause") or "")
+        if not arm_a and theory not in THEORY_SET:
+            raise AssertionError(f"arm B was handed an unexpected theory {theory!r}")
+        slot = "single" if arm_a else slot_labels(case["key"])[THEORY_SET.index(theory)]
+        calls.append((slot, case["key"]))
+        if fail_arm == ARM_A and fail_case == case["key"] and arm_a:
+            # Non-empty list, citations present, but no claim TEXT: the validator
+            # passes it and the arm's own guard refuses to record an empty cause.
+            return {"tool": "Task", "tokens": 100,
+                    "claims": [{"claim": "   ", "citations": [{"path": "p.py",
+                                                               "line": 1}]}]}
+        return {"tool": "Task", "tokens": 100, "claims": good}
+
+    def rank(query, candidates):
+        return [{"index": i, "score": 0.9 - 0.1 * i} for i in range(len(candidates))]
+
+    monkeypatch.setattr(replay, "generate_theories_live", generate)
+    monkeypatch.setattr(replay, "investigate_live", investigate)
+    monkeypatch.setattr(replay, "rank_live", rank)
+    rows_path = tmp_path / "pass.jsonl"
+    # `--only` is `nargs="*"` at the parser (:1483): a list of keys, not the comma
+    # string `launch-pass.sh` builds with `$(cat graded-keys.txt)`.
+    code = asyncio.run(replay.cmd_run(argparse.Namespace(
+        cases=str(cases_path), arms=arms, ceiling=99_000, only=list(keys),
+        rows=str(rows_path))))
+    rows = ([json.loads(l) for l in rows_path.read_text().splitlines()]
+            if rows_path.exists() else [])
+    return code, calls, rows, capsys.readouterr().out
+
+
+def test_one_cases_failure_does_not_cancel_the_remaining_cases(tmp_path, monkeypatch,
+                                                              capsys):
+    """Clause 5: `cmd_run` guards each arm of each case, names the failure on stdout,
+    and the remaining cases still run AND still write their rows.
+
+    The 2026-10-12 crash is the shape: `2258/smoke-b.log` ends in `RecordError:
+    theory 'c2' handed back no claims` on case 1 with `SMOKE_B_EXIT=1`, the remaining
+    graded keys never ran, and `2258/rows.jsonl` still does not exist. The guard is
+    per ARM rather than per case so one arm's failure cannot skip that same case's
+    other arm, and the exit code stays non-zero because `launch-pass.sh` records
+    `PASS_EXIT=$?` and a pass that lost an arm must not read as a clean one to
+    whoever opens the log at six in the morning.
+
+    The raise here is arm B's own `RecordError` from `validate_theories` — a theory
+    set that is not disjoint — which is what still raises after #2635 moved the
+    zero-claim case onto a refusal row. The guard does not care which of the arm's
+    refusals it is containing.
+    """
+    keys = ("flaky-SM_20261001_034449", "flaky-SM_SECOND", "landkill-SM_THIRD")
+    code, calls, rows, out = _drive_pass(
+        tmp_path, monkeypatch, capsys, arms="A,A-retry,B", keys=keys,
+        fail_arm=ARM_B, fail_case=keys[0], fail_theory_set=True)
+
+    for arm in (ARM_A, ARM_RETRY, ARM_B):
+        for key in keys[1:]:
+            verdicts = [r for r in rows if r["kind"] == "verdict"
+                        and r["arm"] == arm and r["case_key"] == key]
+            assert len(verdicts) == 1, (
+                f"{arm} wrote {len(verdicts)} verdict rows for {key}; after {keys[0]} "
+                f"raised, the pass reached {len({k for _, k in calls})} of {len(keys)} "
+                "cases and the rest must be recorded, not skipped")
+    assert not [r for r in rows if r["case_key"] == keys[0] and r["arm"] == ARM_B
+                and r["kind"] == "verdict"], (
+        "the failing case's arm B wrote a verdict row it did not earn")
+    assert [r for r in rows if r["case_key"] == keys[0] and r["arm"] == ARM_A
+            and r["kind"] == "verdict"], (
+        "the failing case's own arm A rows were rolled back; a case that lost one arm "
+        "still has the others recorded")
+    assert f"FAILED {keys[0]} {ARM_B}" in out, (
+        f"stdout never named the failed case and its arm: {out!r}")
+    assert "RecordError" in out, "the failure's type was swallowed"
+    assert code == 1, f"exit {code}; a pass that lost an arm exits non-zero"
+    assert f"1 arm-run(s) failed: {keys[0]} {ARM_B}" in out, (
+        "the closing line does not count the failures, so a 21-key pass can lose three "
+        "arms and still print one summary")
+
+
+def test_arm_as_no_cause_failure_also_lets_the_remaining_cases_run(tmp_path,
+                                                                  monkeypatch,
+                                                                  capsys):
+    """Clause 5's other half, which the item's own premise would have skipped.
+
+    "Arm A cannot hit this" is true only of the `RecordError`: arm A raises
+    `RuntimeError` itself when its single trace returned no non-empty claim, and
+    `cmd_run` guarded that either — so arm A's failure cancelled that same case's arm
+    B, which is the half of the A-versus-B comparison #2623 clause 4 exists to
+    measure.
+    """
+    keys = ("flaky-SM_A_FAIL", "flaky-SM_B_SURVIVES")
+    code, calls, rows, out = _drive_pass(
+        tmp_path, monkeypatch, capsys, arms="A,B", keys=keys,
+        fail_arm=ARM_A, fail_case=keys[0])
+    b_verdicts = [r for r in rows if r["kind"] == "verdict" and r["arm"] == ARM_B]
+    assert [r["case_key"] for r in b_verdicts] == list(keys), (
+        f"arm B wrote verdicts for {[r['case_key'] for r in b_verdicts]}; arm A's raise "
+        "must not cancel that case's own arm B, which is the half of the comparison "
+        "the study measures")
+    assert [r for r in rows if r["kind"] == "verdict"
+            and r["arm"] == ARM_A and r["case_key"] == keys[1]], (
+        "the case after the failure did not record its arm A")
+    assert not [r for r in rows if r["arm"] == ARM_RETRY], (
+        "an arm that was not asked for wrote rows")
+    assert f"FAILED {keys[0]} {ARM_A}" in out and "RuntimeError" in out
+    assert code == 1
+
+
+def test_a_pass_where_nothing_raises_still_exits_zero(tmp_path, monkeypatch, capsys):
+    """The other side of clause 5's exit code: containing a failure may not invent one.
+
+    #2623 clause 4 is a single launch of a ~23.6-engine-hour pass whose only report
+    is `PASS_EXIT=$?` in `2258/run.log`. A guard that exited non-zero on a complete
+    run would spend that night, report a failure, and read like the bug it replaced.
+    """
+    keys = ("flaky-SM_ONE", "flaky-SM_TWO")
+    code, calls, rows, out = _drive_pass(tmp_path, monkeypatch, capsys,
+                                         arms="A,A-retry,B", keys=keys)
+    assert code == 0, "a pass in which nothing raised must exit 0"
+    verdicts = [(r["arm"], r["case_key"]) for r in rows if r["kind"] == "verdict"]
+    assert sorted(verdicts) == sorted((a, k) for a in (ARM_A, ARM_RETRY, ARM_B)
+                                      for k in keys), (
+        f"the pass recorded {len(verdicts)} verdicts, want {len(keys)} x 3 arms")
+    assert "arm-run(s) failed" not in out
+    assert out.count("B chose:") == len(keys), (
+        "the per-case arm-B line is printed once per case, not once per arm")
