@@ -47,6 +47,7 @@ test_dispatch_spawns_detached_and_returns_immediately` pins for a first-time ale
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -209,7 +210,9 @@ def test_the_body_names_the_count_as_a_number_and_not_only_in_words(tmp_path, mo
     wording that makes a reader distrust the rest of the sentence.
 
     NOT because this sentence is spoken. `utterance_for` composes the utterance from
-    `body.split(chr(10))[0]` alone (`agent-services/guardian/speak.py:534`), and the loss
+    `body.split(chr(10))[0]` alone — `agent-services/guardian/speak.py`, its
+    `rest = speakable(...)` line, named by symbol rather than by address because every
+    docstring edit above it moves an address — and the loss
     sentence is the body's SECOND line — so what the synthesiser the guardian just
     recovered actually says is the first line plus `Restarted; started;`, and this count
     reaches the room only inside the loss-naming re-speak of clause 2, never in the
@@ -231,11 +234,14 @@ def test_only_the_first_body_line_is_spoken():
     """Where the recovery alert stops being a written record and becomes speech.
 
     #2264 adds its loss sentence as the body's SECOND line, and `utterance_for` composes
-    from `body.split(chr(10))[0]` (`agent-services/guardian/speak.py:534`, the line that
-    builds `first_body`), so the utterance the recovered synthesiser will play is the title
-    line plus the first body line and no more. That is the reason clause 1 and clause 2 are
-    two clauses and not one: the count is the written witness, and the only thing that
-    reaches the room's ears is the replay of the lost words.
+    from `body.split(chr(10))[0]` (the `rest = speakable(...)` line of
+    `agent-services/guardian/speak.py` — named by variable, not by address, because an
+    address in that file moves under every docstring edit above it, and this citation had
+    already drifted three lines from the bytes it meant), so the utterance the recovered
+    synthesiser will play is the title line plus the first body line and no more. That is
+    the reason clause 1 and clause 2 are two clauses and not one: the count is the written
+    witness, and the only thing that reaches the room's ears is the replay of the lost
+    words.
 
     The node is a check on THIS diff's boundary, not a restatement of the helper: a future
     `utterance_for` that read the whole body would start playing multi-line alert bodies —
@@ -276,9 +282,11 @@ def test_the_recovery_re_speaks_the_newest_lost_utterance_once(tmp_path, monkeyp
     assert LOST_2 in texts, f"the newest loss was not re-dispatched: {texts}"
     assert texts.count(LOST_2) == 1, f"the loss was re-said more than once: {texts}"
     # One utterance, not the burst: `occurrences` says how much was lost, and the re-say
-    # is the newest thing only. Reading out the whole `said` list is #2264 owed 2 —
-    # Alan's ruling after one real recovery — and re-saying a stale line is the outcome
-    # he was asked to weigh, so the older text staying un-spoken is the shipped policy.
+    # is the newest thing only. Reading the whole `said` list out was ruled OUT on
+    # 2026-10-13 (#2264's owed question, closed by the owed-check on #2469): the record is
+    # one per-burst overwrite capped at `speak.LOSS_TEXT_KEEP`, so most of a long burst is
+    # gone from it before any recovery could read it out, and re-saying a hours-stale line
+    # is the outcome that was weighed and declined. This assert is that ruling as a check.
     assert LOST not in texts, f"the replay spoke more than the newest loss: {texts}"
 
 
@@ -337,7 +345,9 @@ def test_the_re_speak_argv_replays_through_the_worker_cli_byte_for_byte(tmp_path
     # argparse ever moved --text behind `--`. This is the argv-crossing node, so it is where
     # that belongs. What this node deliberately does NOT do is sweep `utterance_for`'s
     # levels: the leading token is always `Critical.` / `Guardian alert.` / the config's
-    # `lead` (`speak.py:528-531`), so no level can produce a dash, and a loop over four
+    # `lead` (`utterance_for`'s `lead = ...` statement in agent-services/guardian/speak.py,
+    # named by statement because the address this citation carried has since moved), so no
+    # level can produce a dash, and a loop over four
     # levels asserting it cannot was the review's advisory on round SM_20261006_023308 —
     # ceremony that passes whatever the diff does.
     assert not seen["text"].startswith("-"), seen["text"]
@@ -453,9 +463,10 @@ def test_quiet_hours_withhold_the_re_speak_and_owe_it_to_the_next_recovery(tmp_p
     level — if the re-speak ever moved to a level the quiet window does not withhold, the
     empty-spawn assertion below is what notices, because the worker would spawn.
 
-    The older text staying un-spoken is #2264 owed 2 and is not touched here: the owed
-    question is whether the whole burst should be read out, and this node is about whether
-    the burst survives the night at all.
+    The older text staying un-spoken is settled policy and is not touched here: reading
+    the whole burst out was ruled out on 2026-10-13 (#2264's owed question, closed by the
+    owed-check on #2469). What this node owns is the other half — whether the burst
+    survives the night at all — which holds whichever way that one had gone.
     """
     g = _guardian(tmp_path, monkeypatch)
     rec = _lose(g.gdir, LOST, LOST_2)
@@ -555,16 +566,21 @@ def test_a_re_speak_whose_synthesis_later_fails_still_spends_the_burst(tmp_path,
     `read_loss_record(state_dir)` was tried here and changed nothing, because the detached child
     has not run yet at the moment its parent records the burst as spent. The parent holds no
     signal that the words got through, so "owe it again after a failed synthesis" is reachable
-    only by having the CHILD hand the burst back — and that is the change #2264 owed 2 asks a
-    human to weigh, not one this node can quietly make for him.
+    only by having the CHILD hand the burst back — and that is exactly the mechanism change
+    the 2026-10-13 ruling REJECTED (#2264's owed question, closed by the owed-check on
+    #2469) as a retry-loop risk, rather than one this node could quietly make.
 
-    What the limit costs is stated here rather than smoothed over, because it is the thing a
-    human has to weigh: after this burst the written alert says `The newest was said again on
-    an earlier recovery`, which credits the ATTEMPT rather than the hearing. The truth
-    survives in the two files the failed worker writes — `voice-loss.md` counts the attempt as
-    a second lost utterance and `voice.log` carries its `synth failed` line — and whether a
-    re-speak should instead be owed again after a failed synthesis is the same family of
-    question as #2264 owed 2, which is Alan's call after one real recovery, not this node's.
+    What the limit costs is stated here rather than smoothed over, because the cost is real
+    now that the question is closed, not only while it was open: after this burst the
+    written alert says `The newest was said again on an earlier recovery`, which credits the
+    ATTEMPT rather than the hearing. The truth survives in the two files the failed worker
+    writes — `voice-loss.md` counts the attempt as a second lost utterance and `voice.log`
+    carries its `synth failed` line. Whether a re-speak should instead be owed again after a
+    failed synthesis went out with the rest of #2264's owed question and was answered NO on
+    2026-10-13 (closed by the owed-check on #2469). What the ruling leaves open is its own
+    re-open condition — a live recovery on a burst of five or more whose single re-speak
+    demonstrably left texts the room needed — and that is evidence for a person to weigh,
+    not a call this node makes.
     """
     g = _guardian(tmp_path, monkeypatch)
     _dead_endpoint(monkeypatch)
@@ -878,3 +894,151 @@ def test_the_committed_restart_window_witness_still_sums_to_the_reported_gap(tmp
     _lose(g.gdir, LOST)
     g._recover_infra(REASON)
     assert "1 spoken alert did not reach the speakers" in g.alerts[0]["body"]
+
+
+# ── #2669: the settled ruling is IN the docstring, and the open question is nowhere ──
+#
+# #2264's owed question — re-speak ONE alert per burst or read the whole burst out, and
+# whether a burst is owed back after a failed synthesis — was ruled on 2026-10-13 by the
+# owed-check on #2469: the shipped policy stays, and both alternatives are REJECTED. The
+# prose offering it as an open Alan call survived the ruling, because a docstring can
+# carry a decided question as an undecided one and nothing in the tree notices: deleting
+# the phrase reddened no node (no doc-claim test reads `speak.py`), so the fix needed a
+# node of its own or the correction was written rather than pinned.
+#
+# Two nodes, because the two ways this rots are opposite directions: the ruling missing
+# from the file that states it, and the pointer to it still being owed somewhere else.
+
+REPO_ROOT = GUARDIAN_DIR.parent.parent
+
+#: The fragment that meant "Alan has not decided this yet". `#2264` alone cites where the
+#: policy came from and stays; the word `owed` beside it claims the decision is still
+#: pending. Spelled in two pieces on purpose: this file is one of the files the walk
+#: below reads, and a needle written whole would match its own scanner — a node that
+#: could never pass is worse than no node, because the next author deletes it.
+CLOSED_QUESTIONS = ("#2264" + " owed",)
+
+#: The walk's bounds. Both trees also hold a 9 MB `.onnx` model and a fixture `.db`, and
+#: reading those is I/O rather than a search for prose; `.git` and `__pycache__` hold no
+#: prose either. Measured over both trees: 1057 files scanned in ~0.1 s.
+_SCAN_SKIP = {".git", "node_modules", "__pycache__"}
+_SCAN_MAX_BYTES = 1_000_000
+
+
+def _scanned_sources() -> list[tuple[str, str]]:
+    """Every source file under `agent-services/` and `tests/`, as (relpath, text)."""
+    out: list[tuple[str, str]] = []
+    for tree in ("agent-services", "tests"):
+        root = REPO_ROOT / tree
+        for p in sorted(root.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(REPO_ROOT)
+            if _SCAN_SKIP & set(rel.parts):
+                continue
+            try:
+                if p.stat().st_size > _SCAN_MAX_BYTES:
+                    continue
+                out.append((str(rel), p.read_text(encoding="utf-8", errors="ignore")))
+            except OSError:
+                continue
+    return out
+
+
+def test_the_settled_re_speak_ruling_leaves_no_open_question_in_the_tree():
+    """The closed ruling is never again offered as a question Alan has not answered.
+
+    The acceptance witness for #2669 is `git grep` over `agent-services/` and `tests/`
+    for the needle above, and it has to return zero hits — and a grep a human runs once
+    is a grep that comes back wrong later. Walking the tree here rather than shelling out
+    to git keeps the check readable by anything that has the files: a gate round home and
+    a tarball of the tree both have the prose and neither has a repository to grep.
+
+    **The positive control is asserted, not commented.** A scan that read nothing and a
+    scan that found nothing look identical, and a 0-hit grep against a path that never
+    resolved is the classic false green, so two assertions say the walk really covered
+    the prose it claims to: the two files that carried the pointer are in the scanned
+    set, and at least one scanned file still mentions `#2264` — the rewritten comments
+    cite the ruling by id, so telling the pointer apart from a bare `#2264` is a real
+    discrimination over bytes that were read, not an artefact of never opening the file.
+
+    **What this deliberately does NOT clean up.** `agent-services/bin/flash-next-preempt-step.sh`
+    and `agent-services/bin/flash-next-run-arm.sh` carry `#1268 owed 2`, and
+    `tests/test_knowledge_health_stale_facts.py` carries `#2475 owed 2`. Those are two
+    other items' still-open second entries; #2669 settled only #2264's, and deleting a
+    pointer to an open question is this round answering something nobody ruled on.
+    """
+    scanned = _scanned_sources()
+    rel = {name for name, _ in scanned}
+    for named in ("agent-services/guardian/speak.py",
+                  "tests/test_guardian_recovery_respeak.py"):
+        assert named in rel, (
+            f"{named} is not in the scanned set, so this node is asserting about "
+            f"nothing — REPO_ROOT resolved to {REPO_ROOT}")
+    mentions = [name for name, text in scanned if "#2264" in text]
+    assert mentions, (
+        f"the walk saw {len(scanned)} files and not one mentions #2264 at all, so the "
+        "zero-hit assertion below cannot mean the pointer is gone: "
+        f"REPO_ROOT={REPO_ROOT}")
+    offenders = sorted(
+        (name, text.count(q))
+        for name, text in scanned
+        for q in CLOSED_QUESTIONS if q in text)
+    assert not offenders, (
+        "a live file still offers the re-speak ruling as a question Alan has not "
+        f"answered, which re-litigates a closed decision on every read: {offenders}")
+
+
+def test_the_replay_docstring_states_the_ruling_as_settled_policy():
+    """The policy, its date and its reason, pinned in the words that state them.
+
+    A docstring that says "this is Alan's call" is an instruction to a future reader to
+    re-open it, so the wording is the artefact under test here, not decoration. Each
+    fragment asserted is one clause of the 2026-10-13 ruling, and the numbers in it are
+    pinned against the constants they name rather than against a line number: growing
+    this file moves every `file:line` citation into it, which is how the three citations
+    in this file's own prose got stale, so the pair below (`LOSS_TEXT_KEEP == 5` in the
+    docstring AND in the module, and the cap applied inside `_record_loss`'s source) is
+    what makes the prose wrong at the same moment the code moves instead of quietly late.
+
+    **What is NOT asserted.** No full sentence is pinned, so this node survives a
+    rewording that keeps every claim; it fails on a removed date, a dropped reason, or a
+    policy that stopped saying which of the two alternatives was rejected and why.
+    """
+    src = (GUARDIAN_DIR / "speak.py").read_text(encoding="utf-8")
+    assert "2026-10-13" in src, "speak.py no longer carries the ruling's date at all"
+    doc = inspect.getdoc(speak.replay_latest_loss) or ""
+    assert doc, "replay_latest_loss has no docstring to state the policy in"
+
+    # The ruling, as a decision with a date rather than a hanging question.
+    assert "2026-10-13" in doc, (
+        f"the date the policy was settled is gone from the docstring, so a reader cannot "
+        f"tell decided from pending: {doc[:200]!r}")
+    # What the policy IS, clause by clause.
+    assert "said[0]" in doc, "the docstring stopped naming which text the burst re-speaks"
+    assert "one attempt per burst" in doc, (
+        "the one-attempt limit is the shipped answer to a failed synthesis; without it "
+        "the docstring invites a retry loop back in")
+    assert "only on a truthy" in doc, (
+        "the cursor rule is what stops a withheld attempt spending a burst it never "
+        "spoken — 'successful' alone is not the same instruction as 'truthy dispatch'")
+    assert "never spend the burst" in doc, (
+        "quiet hours and the master mute owing the burst forward is the half the shipped "
+        "policy rests on")
+
+    # And why the whole-burst alternative was rejected: the record's own cap, in numbers
+    # that have to move together with the code they describe.
+    assert "REJECTED" in doc, (
+        "the docstring names no decision, only a preference — the whole-burst read-out "
+        "was ruled out on 2026-10-13, not left to taste")
+    assert "per-burst overwrite" in doc, (
+        "the reason a burst cannot be read out in full is its shape: one record per "
+        "burst, refreshed in place")
+    assert "LOSS_TEXT_KEEP = 5" in doc, (
+        "the docstring stopped naming the cap by name and value, which is the whole "
+        "argument against reading the burst out")
+    assert speak.LOSS_TEXT_KEEP == 5, (
+        "the constant moved and the prose did not — move the docstring's number with it")
+    assert "LOSS_TEXT_KEEP" in inspect.getsource(speak._record_loss), (
+        "the cap is no longer applied where the burst is written, so 'the record cannot "
+        "hold the whole burst' is a claim about a file nobody writes that way")

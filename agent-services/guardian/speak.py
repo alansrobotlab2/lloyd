@@ -376,11 +376,31 @@ def replay_latest_loss(record: dict, state_dir: Path, *, window: float) -> bool:
     is composing an alert body from this record one line later — the two must be about
     the same burst.
 
-    Newest is `said[0]` because `_record_loss` prepends, and newest is the right pick on
-    merit too: the oldest thing a burst can name is a `Rolled back` line about a deploy
-    that is now hours stale, and re-saying that is worse than the chirp that already
-    sounded (#2264 owed 2 is Alan's call on whether the whole burst should ever be read
-    out — one alert is the shipped policy).
+    **One alert per burst is settled policy, ruled 2026-10-13** — the owed question
+    #2264 left, closed by the owed-check on #2469 — and it is three clauses: re-speak
+    exactly one utterance, the newest lost text (`said[0]`, newest because `_record_loss`
+    prepends and because the oldest thing a burst can name is a `Rolled back` line about
+    a deploy that is now hours stale); make exactly one attempt per burst; and let the
+    cursor advance only on a truthy `dispatch`. Quiet hours and the master mute return
+    False here and never spend the burst, so a later recovery still owes it.
+
+    Reading the whole `said` list out was REJECTED by that ruling, on the shape of the
+    record rather than on taste: `voice-loss.md` is a per-burst overwrite capped at five
+    texts (`LOSS_TEXT_KEEP = 5`, applied by `_record_loss` — named by symbol, because an
+    address in this file moves every time a docstring above it grows). A burst is
+    therefore not a backlog: the 2026-10-05 15:15-16:17 five were already overwritten by
+    that burst's own 18:05/18:13 pair, so a whole-burst read-out could only re-say
+    hours-stale `Landed:` lines, which is worse than the chirp that already sounded.
+
+    Re-owing the burst after a failed synthesis was REJECTED in the same ruling, for a
+    related reason: this process holds no outcome signal for the detached worker it has
+    just spawned, so handing the burst back would be a mechanism change with retry-loop
+    risk rather than a condition tweak. The mute and the quiet-hours paths keep owing the
+    burst forward instead. Both re-open on the one condition the ruling names: a live
+    recovery on a burst whose `occurrences` is 5 or more, whose single re-speak
+    demonstrably leaves texts the room needed. As of 2026-10-13 the re-speak had never
+    fired in production at all — no cursor file has ever been written, and `voice.log`
+    holds no `Re-said` line — so measured gain for either alternative was zero.
 
     The cursor moves ONLY on a successful spawn. Quiet hours and the master mute both
     return False without saying anything, and stamping a burst that was never re-said
