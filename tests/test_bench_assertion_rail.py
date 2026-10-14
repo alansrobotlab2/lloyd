@@ -60,7 +60,13 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from scripts.autoresearch import judge  # noqa: E402
 
-SID = "20261006_2286_rail_test"
+#: A minted web-chat id, so `live_git_writes.attended_session` proves a person is
+#: watching it. That is deliberate and it is load-bearing from #2718 on: the nodes
+#: above the #2718 section assert the refusal that names `TABLE_REL` and the row
+#: shape, and only an ATTENDED session is given that instruction now — a background
+#: one is told to stage its rows instead (see the #2718 section, and
+#: `tests/test_bench_mine_source.py` for the tool-surface half).
+SID = "20261006_223612_2286ab"
 CORPUS_REL = "obsidian/lloyd/bench"
 
 #: A real id in the real table: #2285 authored 5 `{id, text}` rows for it on
@@ -543,3 +549,165 @@ def test_every_lane_that_can_write_into_the_corpus_asks_the_rail():
     assert len(lanes) == 4, (
         "the lane enumeration changed shape; the module docstring's table and the "
         "Bash-lane node have to be re-read against it")
+
+
+# ── #2718: the remedy is worded for the reader who can carry it out ──────────
+#
+# Everything above this line asserts the verdict: a keyless task is refused on four
+# lanes. These nodes assert something the rail did not have on 2026-10-13, which is
+# that the WORDS of the missing-key refusal differ by who is being told. They have to,
+# because the refusal is the one text in the system a refused session is guaranteed to
+# read, and its remedy half used to be "add a `<id>:` key to
+# `eval/autoresearch_assertions.yaml`, then retry" for every session alike. Session
+# `20261013_225121_benchmine_2a67` obeyed that instruction with a `python3` heredoc
+# through `Bash` and appended 8 lines to the tracked table of the live checkout, after
+# the very Write this rail refuses had been denied to it. The table sat dirty on `main`
+# until it was reverted by hand on 2026-10-14.
+
+#: The incident session's id, verbatim. It needs no record on disk to be unattended:
+#: `live_git_writes.attended_session` refuses a recognised background run name on the
+#: name alone, and `is_background_session_id("20261013_225121_benchmine_2a67")` is True.
+BENCHMINE_SID = "20261013_225121_benchmine_2a67"
+
+#: The path the incident wrote through a shell, spelled exactly as the constant spells
+#: it. Asserted absent from a background refusal, and present in every other one.
+TABLE_PATH = RAIL.TABLE_REL
+
+
+def test_an_unattended_session_is_told_to_stage_its_rows_and_not_to_retry():
+    """Clause 3: the refusal a worker turn sees names neither the table nor a retry.
+
+    Three things at once, because the incident turn is a demonstration of what happens
+    when any one of them is missing. The PATH has to go: it is the address of a tracked
+    file, and a session that is being refused one lane will use another one it still
+    holds — the transcript's msg 46 is the model reasoning its way from the path to the
+    heredoc. The "then retry" has to go, because retrying a write this rail refuses is
+    what produced the empty final reply of that turn. And the sentence that stays has to
+    say where the assertion rows DO go, or the turn has nothing left to do with them:
+    the staged draft's own body, which is what a round reads next.
+    """
+    reason = RAIL.assertion_key_defect(KEYLESS_ID, BENCHMINE_SID)
+    assert reason, "an unkeyed task went unrefused"
+    assert KEYLESS_ID in reason, reason
+    assert TABLE_PATH not in reason, (
+        f"a background session was handed the address of a tracked file: {reason}")
+    assert "autoresearch_assertions" not in reason, reason
+    assert "then retry" not in reason and "Add a" not in reason, reason
+    assert "staged draft" in reason, reason
+    assert "automod round" in reason, reason
+    assert "id:" in reason and "text:" in reason, (
+        f"the row shape is still the thing being asked for: {reason}")
+
+
+def test_an_attended_session_still_gets_the_table_and_the_row_shape():
+    """Clause 4: the one lane that can land the edit keeps the actionable instruction.
+
+    Re-wording the refusal for everyone would have "fixed" the incident by costing a
+    person the only sentence that tells them what to do, so this node is the pairing
+    that keeps the branch honest: same rail, same missing key, a minted web-chat id
+    instead of a worker-run name, and the table-naming half is byte-for-byte what it
+    was before #2718 — path, `id:`/`text:` shape, and the retry.
+    """
+    reason = RAIL.assertion_key_defect(KEYLESS_ID, SID)
+    assert TABLE_PATH in reason, reason
+    assert "id:" in reason and "text:" in reason, reason
+    assert "then retry" in reason, reason
+    assert "staged draft" not in reason, reason
+
+
+def test_a_round_worktree_session_keeps_the_table_instruction_and_scratch_does_not(tmp_path):
+    """The second case of `can_land_table_edit`, decided by the session's start cwd.
+
+    A round is not attended — `attended_session` refuses its `_autocode`-shaped run name
+    like any other background run — and it is exactly the writer that must be told the
+    file's name, because authoring the rows in its worktree is the job the whole
+    self-modification loop exists for. So the branch reads `start_cwd`
+    (`app/session_cwd`, stamped by `scripts/automod/round.py`).
+
+    Two records that differ ONLY in the directory, so the node fails if the branch ever
+    decides from the id's spelling: `round-in-worktree` starts in
+    `…/lloyd-work/SM_20261014_190755/home/lloyd` and gets the table;
+    `scratch-outside` starts in a plain temp directory and gets the staged-draft answer.
+    Neither id is attended on its own shape, so the only thing separating the two
+    answers is the stamped cwd.
+    """
+    from app import session_cwd
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    for sid, cwd in (("round-in-worktree",
+                      tmp_path / "lloyd-work" / "SM_20261014_190755" / "home" / "lloyd"),
+                     ("scratch-outside", tmp_path / "plain-scratch")):
+        cwd.mkdir(parents=True)
+        (sessions / f"{session_cwd.safe_name(sid)}.json").write_text(
+            json.dumps({"session_id": sid, "start_cwd": str(cwd)}), encoding="utf-8")
+
+    monkey_seam = session_cwd.SESSIONS_DIR
+    try:
+        session_cwd.SESSIONS_DIR = sessions
+        assert RAIL.can_land_table_edit("round-in-worktree") is True
+        assert RAIL.can_land_table_edit("scratch-outside") is False
+        round_reason = RAIL.assertion_key_defect(KEYLESS_ID, "round-in-worktree")
+        scratch_reason = RAIL.assertion_key_defect(KEYLESS_ID, "scratch-outside")
+    finally:
+        session_cwd.SESSIONS_DIR = monkey_seam
+    assert TABLE_PATH in round_reason, round_reason
+    assert TABLE_PATH not in scratch_reason, scratch_reason
+
+
+async def test_the_write_lane_hands_the_staging_answer_to_a_bench_mine_session(home,
+                                                                                monkeypatch):
+    """The branch has to reach the lane the miner actually calls, not just the function.
+
+    Patched on `agent_mcp._shared`, which is where the rail resolves a session it was
+    not handed — the same resolution `record_refusal` already used before this change,
+    so the lane needed no edit to acquire the branch and cannot forget to pass it. The
+    refusal is asserted on the error RESULT of a real `Write` call, and the file is
+    asserted absent: a refusal that told the truth and wrote the file anyway is not a
+    refusal.
+    """
+    import agent_mcp._shared as shared
+
+    monkeypatch.setattr(shared, "get_bound_session", lambda: BENCHMINE_SID)
+    target = corpus(home) / f"{KEYLESS_ID}.md"
+    res = await FS.call_tool("Write", {"file_path": str(target),
+                                       "content": _task_text(KEYLESS_ID)})
+    assert _refused(res) is True, _text(res)
+    reason = _error(res)
+    assert KEYLESS_ID in reason, reason
+    assert TABLE_PATH not in reason, reason
+    assert "staged draft" in reason, reason
+    assert not target.exists(), "refused in words, written in fact"
+
+
+def test_neither_wording_is_cut_from_the_actionable_half():
+    """Both wordings arrive whole, measured against the transport's own cap.
+
+    `agent_mcp._shared._err` caps a tool error at 500 characters, so that cap is the
+    bound here, and the stress case is the longest task id the live bench corpus carries
+    on the machine running this node. The numbers the module docstring quotes — 463
+    characters attended, 416 background, with a 49-character id — were measured this way
+    on 2026-10-14; they are printed rather than hard-asserted so that a longer task id
+    added next month moves the print, not the build. What IS asserted is the property the
+    prose exists to claim: neither wording reaches the cap, and the rendered denial
+    arrives with no truncation marker, because both remedies sit at the tail ("then
+    retry" for a round, "do not retry this write" for a worker).
+    """
+    import agent_mcp._shared as shared
+
+    bench = Path.home() / CORPUS_REL
+    ids = [q.stem for q in bench.glob("bench_*.md")]
+    if not ids:
+        pytest.skip(f"no bench corpus at {bench} to stress the wording with")
+    longest = max(ids, key=len)
+    measured = {}
+    for can_land in (True, False):
+        reason = RAIL._missing_key(longest, can_land)
+        measured[can_land] = len(reason)
+        assert len(reason) < 500, (can_land, len(reason), reason)
+        rendered = shared._err(reason)["error"]
+        assert "truncated" not in rendered, (can_land, rendered[-80:])
+        assert rendered.endswith(reason), (
+            f"the denial arrives cut, and the tail is where the remedy is: {reason[-60:]}")
+    print(f"longest id {longest!r} ({len(longest)} chars): "
+          f"attended {measured[True]}, background {measured[False]}")

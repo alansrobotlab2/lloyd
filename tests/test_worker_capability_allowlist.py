@@ -1493,3 +1493,107 @@ def test_autotriage_is_declared_without_joining_the_untrusted_fleet_table():
     for src in UNTRUSTED:
         env = caps.envelope_for(src)
         assert env is None or set(env) <= POOL, src
+
+
+# ── #2718: bench-mine — the source whose ceiling IS the fix ──────────────────
+#
+# Every other declaration in this file narrowed a surface that happened to be wide.
+# This one closes a hole that was open *because* the surface was wide. On 2026-10-13
+# session `20261013_225121_benchmine_2a67` (a `bench_027` loser mine) tried to `Write` a
+# bench draft, the bench-assertion rail refused it and told it to add the missing key to
+# `eval/autoresearch_assertions.yaml` and retry, and the turn obeyed: a `python3` heredoc
+# through `Bash` appended 8 lines to that tracked file of the live checkout (msg 46's own
+# reasoning: "the rail explicitly told me to add the key and retry — that is the way
+# forward"). The source declared nothing, so `envelope_for` answered None and the turn
+# shipped the floor-only compile, which contains `Write`, `Edit` and `Bash`. Its contract
+# is text-to-staging (`_TASK_SCHEMA`: "Output ONLY the full markdown file content"), so
+# the ceiling below is not a judgement about how much a miner needs; it is the contract.
+#
+# Deliberately NOT done, and named so the next reader does not "finish" it:
+# `agent_mcp/_tool_sandbox.py` still keeps `benchmine` out of
+# `SANDBOXED_BACKGROUND_SLUGS`, which is a fleet-wide read-only hammer that would also
+# refuse every non-`readOnlyHint` MCP tool and `Scratchpad`. The item's triage measured
+# that blast radius as larger than the hole.
+
+_REPO = Path(__file__).resolve().parents[1]
+BENCH_NAME = "bench-mine"
+BENCH_ENVELOPE = ["Glob", "Grep", "Read", "Scratchpad", "recall_observation"]
+#: Anything here that survived into the compile is a way back into a file. `Bash` is on
+#: the list because the incident's write was a shell heredoc, not because a shell is a
+#: file-mutating tool by name.
+BENCH_FORBIDDEN = {"Write", "Edit", "Bash", "NotebookEdit", "apply_patch"}
+
+
+def test_bench_mine_declares_a_write_free_ceiling_and_no_longer_returns_none():
+    """#2718 clause 1: the lookup answers a ceiling, and the ceiling has no write path.
+
+    Three things, because `is not None` alone is the weak half of this clause — an
+    envelope that declared `Write` would satisfy it. (a) The lookup answers, so the
+    miner's compile is the ceiling and not the floor. (b) No write-capable name is
+    reachable: the five names are `READ_FILES` (Read/Grep/Glob) plus `TURN_STATE`
+    (Scratchpad, recall_observation), nothing else — and `ToolSearch` is among the names
+    the ceiling does NOT grant, which is the point of a compile this small: a miner turn
+    has no route to load an MCP tool it was not given. (c) None of those five reaches a durable
+    external write through the registry — the matrix computes that independently, so a
+    name that gained a mutating capability later is caught here rather than in this
+    comment.
+    """
+    env = caps.envelope_for(BENCH_NAME)
+    assert env is not None, (
+        "bench-mine declares no capability set: an undeclared source compiles the "
+        "floor-only surface, which is where Write and Bash came from")
+    assert env == BENCH_ENVELOPE, env
+    assert not (set(env) & BENCH_FORBIDDEN), env
+    assert set(caps.SOURCE_CAPABILITIES[BENCH_NAME]) == {"READ_FILES", "TURN_STATE"}, \
+        caps.SOURCE_CAPABILITIES[BENCH_NAME]
+    durable = {n for n in set(env) & (set(TIER2_TOOLS) | set(TIER3_TOOLS))}
+    assert durable == set(), (
+        f"a durable-external name is in the miner's ceiling: {sorted(durable)}")
+    # The ruling this round did NOT take: a per-source ceiling, not a fleet-wide one. A
+    # sibling worker source is still undeclared, so `bench-mine` was not swept in with a
+    # wider change, and the queue order for the rest is still owed (#2269 owed entry 2).
+    assert "arch-review" not in caps.SOURCE_CAPABILITIES
+
+
+def test_the_bench_mine_ceiling_leaves_the_miner_its_reads_and_its_scratchpad():
+    """The other edge: the ceiling is narrow, and it is not narrower than the job.
+
+    The prompt the source ships says "Read that file with the Read tool"
+    (`workers/sources/bench_mine.py`, the loser-mine prompt), so `Read` has to survive or
+    the ceiling breaks the job — and `Scratchpad` has to survive because it is not in
+    `agent_mcp/annotations.py`'s `READ_ONLY` set, which is exactly why the item's triage
+    ruled out routing this through the read-only sandbox instead.
+    """
+    env = set(caps.envelope_for(BENCH_NAME))
+    for name in ("Read", "Grep", "Glob", "Scratchpad", "recall_observation"):
+        assert name in env, name
+    src = (_REPO / "workers" / "sources" / "bench_mine.py").read_text(encoding="utf-8")
+    assert "Read that file with the Read tool" in src, (
+        "the miner prompt no longer tells the turn to Read, so the Read in this ceiling "
+        "is no longer pinned to a prompt line — re-derive what the turn needs")
+
+
+def test_the_bench_mine_declare_still_ships_the_automod_ban_and_the_rollover():
+    """The one thing the ceiling may not take away, stated as an assertion.
+
+    A capability ceiling is an ALLOW list, and the prompt's claim is that the ban is not
+    a ban-shaped surprise inside it: `workers/sources/_common.py` unions
+    `WORKER_AUTOMOD_BAN` into `disallowed_tools` on every worker compile regardless of
+    source, and `test_scheduled_task_ceiling…` (same file, above) is the same control for
+    the first declared source. If the ban were expressed as "absent from the ceiling", a
+    later widening could put an automod name back with nothing else noticing; here it is
+    not in the ceiling AND the ban is still dispatched-refused, and the tool-rollover
+    names in the ban are still refused as names.
+    """
+    env = set(caps.envelope_for(BENCH_NAME))
+    assert not (env & set(C.WORKER_AUTOMOD_BAN)), sorted(env & set(C.WORKER_AUTOMOD_BAN))
+    opts = C._worker_run_options(8, source=BENCH_NAME)
+    assert opts.allowed_tools == caps.envelope_for(BENCH_NAME)
+    assert sorted(set(opts.disallowed_tools) & set(C.WORKER_AUTOMOD_BAN)) == \
+        sorted(C.WORKER_AUTOMOD_BAN), opts.disallowed_tools
+    for name in list(C.WORKER_AUTOMOD_BAN) + [
+            "sessions_spawn", "cron", "gateway", "agents_list", "session_send",
+            "session_status", "agents_list"]:
+        assert _dispatch(opts, name) is not None, (
+            f"{name} dispatched on a miner turn — the ban is no longer reaching this "
+            "source, which is the asymmetry the ceiling was supposed to keep")

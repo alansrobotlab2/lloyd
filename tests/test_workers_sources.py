@@ -1894,14 +1894,18 @@ async def test_a_turn_with_no_deny_list_gets_no_such_block(worker_turn_post):
     Asserted as equality on the text, not absence of a phrase: the block is
     *absent* for a turn with no list, not merely empty.
 
-    The source is `bench-mine`, which declares no capability set and passes no
+    The source is `failure-ledger`, which declares no capability set and passes no
     list — a turn to which nothing about the policy applies, which is the shape
-    this node was written for. `autotriage` used to be that shape; since #2671 it
-    declares a ceiling, so its turn is told a sentence, and the sentence it is
-    told is asserted beside this one rather than substituted for it.
+    this node was written for. Two sources used to be that shape and are not
+    anymore: `autotriage`, since #2671, has the asserted sentence beside this node;
+    `bench-mine` got its ceiling in #2718, because that one's floor compile is what
+    let a miner turn write a tracked file of the live checkout. What remains true
+    here is the renderer's rule, and it needs only ONE source that still declares
+    nothing — which is why the exemplar is a source from the ten still waiting on
+    the owed-check ruling (#2269 owed entry 2), not a source this round changed.
     """
     out = await C.run_prompt_in_session("classify the item", title="t",
-                                        source="bench-mine")
+                                        source="failure-ledger")
 
     assert worker_turn_post[0]["text"] == "classify the item"
     assert out["stop_reason"] == "end_turn", "the stub did not close the turn"

@@ -42,12 +42,16 @@ scope, which is what makes its ceiling widen-able per task rather than per fleet
 `autotriage` is the second (#2671), taking the ruling's own first place, because
 it is the largest undeclared surface by volume — 1615 runs in the week to
 2026-10-13 against 622 for `owed-check` and 438 for `autocode` — and it reaches
-the same 26 durable-external names under the deny union alone. The remaining
-eleven —
+the same 26 durable-external names under the deny union alone. `bench-mine` is
+the third (#2718) — not by volume but because for that source the ceiling IS the
+fix: its 2026-10-13 turn edited a tracked file of the live checkout through
+`Bash` because a refusal told it to, and a source whose contract is
+text-to-staging has a write path to take away that no prompt sentence removes.
+The remaining ten —
 arch-review, autocode, automod-regression, autoresearch, backlog-cluster,
-bench-mine, board-steward, cost-investigate, failure-ledger,
+board-steward, cost-investigate, failure-ledger,
 frontend-probe-canary, owed-check — wait for the owed-check ruling (#2269's owed
-entry 2) on their order. That eleven is read off the registry, not off #2471's
+entry 2) on their order. That ten is read off the registry, not off #2471's
 roster text, which predates `board-steward`, `owed-check` and `cost-investigate`
 (#2510, 2026-10-10) existing, listed `autotriage` while it was still undeclared,
 and omits `session-distill` from its list of undeclared sources, which has been
@@ -410,6 +414,66 @@ SOURCE_CAPABILITIES: dict[str, tuple[str, ...]] = {
         "READ_FILES", "READ_VAULT", "READ_MEMORY", "FILE_BACKLOG", "TURN_STATE",
         "Bash", "Write", "Edit", "automod_status",
         "skills_search", "skills_read",
+    ),
+
+    # `workers/sources/bench_mine.py` — the miner that authors a bench task from a
+    # losing eval run. Its contract is TEXT: `workers/sources/bench_mine.py:534`
+    # (`_TASK_SCHEMA`) says "Output ONLY the full markdown file content", and
+    # `write_staging_note` is what lands it, in Python, after the turn.
+    #
+    # **Why this ceiling exists: on 2026-10-13 the missing declaration was the bug.**
+    # Session `20261013_225121_benchmine_2a67` ignored that contract and called
+    # `Write` on `~/obsidian/lloyd/bench/bench_029_recall_user_fact_two_topic_reads.md`.
+    # The #2286 bench-assertion rail refused it (`app/harness/bench_authoring.py`), and
+    # the refusal told it to "Add a `bench_029_…:` key … then retry" to
+    # `eval/autoresearch_assertions.yaml` — the right remedy for an automod round
+    # working in its worktree, the wrong one for a background session whose cwd is the
+    # live checkout. The transcript shows it reasoning its way there (msg 46: "the rail
+    # explicitly told me to add the key and retry — that is the way forward") and then
+    # appending 8 lines to the tracked table with a `python3 - <<'PY'` heredoc through
+    # `Bash` (msg 48, `is_error: false`). The file sat dirty on `main` until it was
+    # reverted by hand on 2026-10-14.
+    #
+    # **Why the tool surface is half the fix and the wording is the other half.** The
+    # same turn, refused the same words, will reach for whatever lane it still holds —
+    # so `Bash` going away without the refusal changing leaves a background session
+    # being instructed to edit a file it is being told not to write, and the refusal
+    # changing without `Bash` going away leaves the lane. Both are in #2718; the text
+    # side is `app/harness/bench_authoring.py`'s session branch.
+    #
+    # **The census, counted (`bench-mine`: 126 retained session files as of
+    # 2026-10-14, 1652 tool calls).** The 5%-of-files line is 6 files. ABOVE the line,
+    # both declared: `Read` 108 files / 403 calls, `Bash` 117 files / 1223 calls.
+    # BELOW it: `Write` 17 files / 17 calls, `Grep` 3 files / 6 calls, `ToolSearch` 2,
+    # `Glob` 1 file / 1 call.
+    #
+    # **`Bash` is above the line and is still out, and that is the whole item.** The
+    # doctrine says above-the-line means the declaration has to explain the exclusion
+    # rather than follow the census, and this is that explanation. What the 1223 calls
+    # ARE: `head`/`grep`/`ls`/`echo`/`sed -n`/`cat`/`find`/`wc`/`tail`/`sort` — reads
+    # that `Read`/`Grep`/`Glob` cover — plus /tmp scratch (`mkdir -p /tmp/…` 17 calls,
+    # `cat > /tmp/…` 3). What is NOT in the census is any reason the job has to have a
+    # shell: the one write into the tracked tree in 126 sessions is the heredoc above,
+    # and the prompt never asks for a shell — `workers/sources/bench_mine.py:594` says
+    # "Read that file with the Read tool". Dropping `Bash` therefore costs a miner the
+    # ability to `cat` a file it can `Read`, which 108 of the 126 sessions already
+    # preferred, and removes the only lane that ever dirtied the checkout.
+    #
+    # **`Write` is above the line too, and is out for the same kind of reason.** Of its
+    # 17 calls, 8 aimed at the bench corpus and ALL EIGHT were refused by the #2286 rail
+    # (`is_error: true` on every one) — the call is the defect, not the job — and the
+    # other 9 were `/tmp` scratch the contract never asked for. A miner that could write
+    # a bench file would write it into a corpus it is not allowed to land into; staging
+    # is a Python call after the turn.
+    #
+    # No tier-2/3 durable-external name is in this base by rule (#2671 clause 2): the
+    # `FILE_BACKLOG` group's `backlog_write_task`, which `autotriage` deliberately
+    # carries, is out here because the miner files nothing — it stages. `ToolSearch` is
+    # below the line and out with it: a load-deferred-tools affordance on a 5-name
+    # ceiling discovers nothing this envelope would not have refused anyway
+    # (`_allow_list_hidden` builds the wire catalog from the same set).
+    "bench-mine": (
+        "READ_FILES", "TURN_STATE",
     ),
 }
 

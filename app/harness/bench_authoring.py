@@ -42,6 +42,22 @@ directory appears. `tests/test_bench_assertion_rail.py` pins both the four refus
 the invariant that keeps them from drifting apart: every lane that asks the write
 deny-set asks this rail too.
 
+**The remedy is worded for the reader who can carry it out (#2718).** One property, four
+lanes — but the *missing key* refusal used to be one string for every session that hit
+it, and its remedy was "add a `<id>:` key to `eval/autoresearch_assertions.yaml`, then
+retry". That is right for the one writer that can edit a tracked file of the code
+checkout — an automod round, in its worktree — and it is an instruction a background
+session must not receive, because on 2026-10-13 one did receive it and obeyed: session
+`20261013_225121_benchmine_2a67` appended 8 lines to the tracked table with a `python3`
+heredoc through `Bash`, after the `Write` it had attempted was refused by this very rail.
+So `_missing_key` now asks `can_land_table_edit`, which is
+`app.harness.live_git_writes.attended_session` plus the round-worktree case, and answers
+a session that cannot land the edit with where its rows DO go — the staged draft — and
+with an explicit do-not-retry / do-not-edit-the-table-through-another-tool. Both halves
+matter and only one of them is this file: the same words aimed at a session that still
+holds `Bash` reach the same heredoc, which is why #2718 declares a write-free ceiling for
+`bench-mine` in `app/harness/capabilities.py` at the same time.
+
 Deliberately **stricter than the test it pre-empts**: the coverage node exempts an entry
 marked `graded: true`, and the rail does not. `graded: true` is the escape hatch the
 class of items exists to catch — #1968's `test_bench_023_resolves_to_authored_checks_and_
@@ -99,8 +115,13 @@ def frontmatter_id(content: str | None) -> str:
     return match.group(1) if match else ""
 
 
-def assertion_key_defect(task_id: str) -> str:
+def assertion_key_defect(task_id: str, session_id: str | None = None) -> str:
     """"" when the table carries real assertion rows for `task_id`; else why not.
+
+    `session_id` says who is being told, and only changes the WORDS of the missing-key
+    answer (#2718, see `can_land_table_edit`); the verdict itself is the same for every
+    session. Left empty it resolves the calling session the same way `record_refusal`
+    already does, so no lane has to thread it and no lane can forget it.
 
     The answer is the judge's own answer — `judge.load_assertions()` for the table and
     `judge.assertions_for()` for the resolution — so the rail cannot disagree with the
@@ -133,7 +154,7 @@ def assertion_key_defect(task_id: str) -> str:
             + ("" if os.path.isfile(table_path) else " and is not present at that path"))
     entry = table.get(task_id)
     if entry is None:
-        return _missing_key(task_id, table_path)
+        return _missing_key(task_id, can_land_table_edit(session_id))
     try:
         rows = judge.assertions_for({"id": task_id}, table)
     except Exception as exc:  # noqa: BLE001
@@ -153,8 +174,14 @@ def assertion_key_defect(task_id: str) -> str:
 
 
 def bench_write_defect(path: str, cwd: str | None = None,
-                       claimed_id: str = "", content: str | None = None) -> str:
+                       claimed_id: str = "", content: str | None = None,
+                       session_id: str | None = None) -> str:
     """"" when writing `path` is allowed; the refusal reason when it is a keyless task.
+
+    `session_id` reaches only the wording of a missing-key refusal; empty resolves the
+    calling session. Every lane calls this with the first four arguments and nothing
+    else, which is what keeps #2718's branch from being a rule each surface has to
+    remember to pass.
 
     `path` may be vault-relative (`lloyd/bench/…`, as `vault_write` gets it), absolute,
     `~`-prefixed or relative to `cwd` — resolution is `bench_corpus.corpus_target`'s,
@@ -186,26 +213,114 @@ def bench_write_defect(path: str, cwd: str | None = None,
     if not BENCH_TASK_FILE_RE.match(name):
         return ""
     stem = name[:-len(".md")]
-    defect = assertion_key_defect(stem)
+    defect = assertion_key_defect(stem, session_id)
     if defect:
         return defect
     extra = (claimed_id or "").strip() or frontmatter_id(content)
     if extra and extra != stem:
-        return assertion_key_defect(extra)
+        return assertion_key_defect(extra, session_id)
     return ""
 
 
-def _missing_key(task_id: str, table_path: str) -> str:
-    """The refusal, written to survive its own transport.
+#: One path component of an automod round's tree: `~/lloyd-work/SM_20261014_190755/…`,
+#: the layout `scripts/automod/worktree.py:round_dir` dictates. Matched on the component
+#: and not on `Path.home()/lloyd-work` because a check that runs inside a round sees a
+#: redirected `HOME` (`worktree.round_home`'s own docstring: that redirection is the
+#: whole isolation model), and the component shape is the same either way.
+_ROUND_DIR_RE = re.compile(r"(^|/)lloyd-work/SM_[0-9]{8}_[0-9]{6}(/|$)")
+
+
+def _round_worktree_session(sid: str,
+                            sessions_dir: "os.PathLike | str | None" = None) -> bool:
+    """Whether this session started inside a self-modification round's worktree.
+
+    Read off the session record's `start_cwd` through `app.session_cwd.read`, the
+    existing reader for that key, because the round's own state
+    (`~/.local/state/lloyd-automod/rounds/`) names a worktree and not a session, and a
+    refusal is raised in a tool process that knows only the session id.
+    `scripts/automod/round.py:155` stamps the round's turn with `directory=<worktree>`,
+    so the recorded start directory is `…/lloyd-work/SM_<ts>/home/lloyd` (#2718). That
+    reader is also what sanitises the id and drops a value pointing inside the live
+    checkout, so this predicate inherits both instead of re-implementing either;
+    `sessions_dir` is its test seam.
+    """
+    if not sid or ":" in sid:
+        return False
+    try:
+        from app import session_cwd
+        cwd = session_cwd.read(sid, sessions_dir=sessions_dir)
+    except Exception:  # noqa: BLE001 — an unreadable record is not proof of a round
+        return False
+    return bool(_ROUND_DIR_RE.search(cwd or ""))
+
+
+def can_land_table_edit(session_id: str | None = None) -> bool:
+    """Whether the session being told may itself edit `TABLE_REL`, and so should be told to.
+
+    Two cases, and one predicate each. **Attended**, from
+    `app/harness/live_git_writes.attended_session` — that predicate and no other, so the
+    rail does not grow a second notion of who is a person (#2718's own triage named the
+    reuse; `agent_mcp/_tool_sandbox` was rejected for the same reason). **An automod
+    round**, which edits the table in its own worktree and is the lane the whole
+    self-modification loop exists to serve; a round has to be told the file's name or it
+    cannot author the rows at all.
+
+    Everyone else — a worker turn, an autonomy job, an MCP aggregator session, a
+    colon-prefixed subagent — gets the answer that sends its assertion rows out with the
+    draft instead of into a tracked file. On a failure to decide, that is the answer too:
+    the branch that never tells a session to open a tracked file of the code checkout is
+    the one to take when the predicate itself could not run.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        try:
+            from agent_mcp._shared import get_bound_session
+            sid = str(get_bound_session() or "").strip()
+        except Exception:  # noqa: BLE001 — no bound session is the unattended case
+            sid = ""
+    try:
+        from app.harness.live_git_writes import attended_session
+        if attended_session(sid):
+            return True
+    except Exception:  # noqa: BLE001 — see the docstring: fail to the safe wording
+        logger.debug("bench_assertion_rail: attended_session unavailable",
+                     exc_info=True)
+        return False
+    return _round_worktree_session(sid)
+
+
+def _missing_key(task_id: str, can_land: bool) -> str:
+    """The refusal, written to survive its own transport and to fit its reader.
 
     `_shared._err` cuts a tool error at 500 characters, and the actionable half is the
     half that must not be cut: a refusal that loses its `id:`/`text:` shape sends the
     writer back to the test file to work out what was asked, which is the diagnosis step
-    this rail replaces. So the table is named by its repo-relative path (`TABLE_REL`,
-    which is unambiguous and 60 characters shorter than the absolute one, and is what
-    the refusal tells you to open in an automod round anyway), and the whole message is
-    measured below 380 characters with the id substituted.
+    this rail replaces. So the table is named by its repo-relative path (`TABLE_REL`, 33
+    characters against the 59 of this box's absolute one, and unambiguous because there
+    is one checkout), and both wordings are measured against the transport rather than
+    assumed short: substituting the longest task id in the real bench corpus
+    (`bench_025_skill_invocation_never_ran_resume_chain`, 49 characters) gives 463
+    characters for the attended answer and 416 for the background one, both under the
+    cut. The node `test_neither_wording_is_cut_from_the_actionable_half`, in
+    `tests/test_bench_assertion_rail.py`, re-measures both.
+
+    Two wordings, one verdict (#2718). The table-naming half is kept verbatim for the
+    sessions that can act on it, because re-wording it would cost the only lane that can
+    land the edit its actionable instruction. For everyone else the same sentence is the
+    hazard: on 2026-10-13 a bench-mine turn read it as permission to edit the tracked
+    table and did, through `Bash`, after its `Write` was refused here. So the background
+    wording names no path, gives no "add a key and retry", says where the rows DO go —
+    the staged draft's own body, which is what a round later reads — and closes the
+    "find another lane" door the transcript showed the model walking through.
     """
+    if not can_land:
+        return (
+            f"{task_id} has no assertion set, and this session cannot add one: the "
+            "assertion table is a tracked file of the code checkout, which only an "
+            "automod round may edit. Put the rows in the staged draft's own body as "
+            "`- id: <check-id>` / `text: <one falsifiable check>` lines and a round "
+            "lands them from there. Do not retry this write, and do not edit the table "
+            "through another tool.")
     return (
         f"{task_id} has no assertion set in {TABLE_REL}: an unkeyed task scores on the "
         "SCALAR rubric while every keyed task scores binary, and the two are averaged "

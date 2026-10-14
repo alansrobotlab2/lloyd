@@ -262,22 +262,22 @@ def test_the_report_surface_prints_the_envelopes_on_demand():
 
 
 def test_declaring_a_source_moves_the_undeclared_row_count_and_named_no_more():
-    """#2671: the row count this round was to move, and the source it moved for.
+    """The exact row count belongs with the rounds that moved it: #2671, then #2718.
 
     The node above deliberately stops at `>= 10` — it predates the roster
     growing and shrinking, and a fleet-wide report test is the wrong place for an
-    exact count that any new source changes. The exact number belongs with the
-    round that changed it: #2671 declared `autotriage`, one of the twelve
-    undeclared sources and the largest of them by volume, so the report now
-    prints ELEVEN
-    `worker-source-declares-no-capability-set` rows and `autotriage` is named in
-    none of them. Both halves matter: a count alone would also be 11 if a
-    different source had gone and `autotriage` stayed, and an absent name alone
-    would be satisfied by a declaration that also deleted a source.
+    exact count that any new source changes. The exact number lives here instead.
+    Twelve sources were undeclared; #2671 declared `autotriage`, the largest of
+    them by volume, taking the report to ELEVEN
+    `worker-source-declares-no-capability-set` rows, and #2718 declared
+    `bench-mine`, taking it to TEN. Neither name is in any of those rows. Both
+    halves matter: a count alone would also be ten if a different pair of sources
+    had gone and these two stayed, and an absent name alone would be satisfied by
+    a declaration that also deleted a source.
 
     The count is read off the compiled findings, not off a grep of the table: the
     findings block is what the exit code is computed from, so a report that
-    printed eleven while the findings still held twelve would be the bug, not the
+    printed ten while the findings still held eleven would be the bug, not the
     proof.
     """
     from app.harness.capabilities import SOURCE_CAPABILITIES
@@ -287,27 +287,38 @@ def test_declaring_a_source_moves_the_undeclared_row_count_and_named_no_more():
     assert "autotriage" not in undeclared, (
         "autotriage still declares no capability set — the entry in "
         "app/harness/capabilities.py is what this row is about")
-    assert len(undeclared) == 11, undeclared
+    assert "bench-mine" not in undeclared, (
+        "bench-mine still declares no capability set, which is the precondition of "
+        "the 2026-10-13 live-tree write: with no ceiling `envelope_for` answers None, "
+        "the turn ships the floor-only surface, and Write and Bash are in it")
+    assert len(undeclared) == 10, undeclared
     assert "autotriage" in SOURCE_CAPABILITIES
     matrix = G.capability_matrix(ROOT)
     assert matrix["autotriage"]["declared"] is True, matrix["autotriage"]
     assert matrix["autotriage"]["n_allowed"] == 19, matrix["autotriage"]
     assert matrix["autotriage"]["durable_reach"] == [], matrix["autotriage"]
-    # The registry itself did not move, so the 11 is a declaration and not a
-    # deletion: 16 registered sources, 5 of them declared.
+    # #2718's row. `n_allowed` is 5 because the ceiling is two groups — `READ_FILES`
+    # (Read/Grep/Glob/ToolSearch) and `TURN_STATE` — and `durable_reach` being empty
+    # is the table's own way of saying this source can no longer write anything.
+    assert matrix["bench-mine"]["declared"] is True, matrix["bench-mine"]
+    assert matrix["bench-mine"]["n_allowed"] == 5, matrix["bench-mine"]
+    assert matrix["bench-mine"]["durable_reach"] == [], matrix["bench-mine"]
+    # The registry itself did not move, so the ten missing rows are declarations and
+    # not a deletion: 16 registered sources, 6 of them declared.
     assert len(matrix) == 16, sorted(matrix)
-    assert sum(1 for c in matrix.values() if c["declared"]) == 5
+    assert sum(1 for c in matrix.values() if c["declared"]) == 6
 
     out = subprocess.run([sys.executable, str(SCRIPT), "--capabilities"],
                          cwd=str(ROOT), capture_output=True, text=True, timeout=180)
     assert out.returncode == 0, out.stderr[-2000:]
-    assert out.stdout.count("worker-source-declares-no-capability-set") == 11, \
+    assert out.stdout.count("worker-source-declares-no-capability-set") == 10, \
         out.stdout[-3000:]
     # The other half of the clause, read off the printed rows themselves: of the
-    # eleven findings lines, none names the source this round declared. A count
-    # alone cannot tell which source left the set.
+    # ten findings lines, none names a source either round declared. A count
+    # alone cannot tell which sources left the set.
     finding_lines = [ln for ln in out.stdout.splitlines()
                      if "worker-source-declares-no-capability-set" in ln]
-    assert len(finding_lines) == 11, finding_lines
-    assert not [ln for ln in finding_lines if "autotriage" in ln], finding_lines
+    assert len(finding_lines) == 10, finding_lines
+    assert not [ln for ln in finding_lines
+                if "autotriage" in ln or "bench-mine" in ln], finding_lines
     assert "worker sources with a capability envelope: 16" in out.stdout
