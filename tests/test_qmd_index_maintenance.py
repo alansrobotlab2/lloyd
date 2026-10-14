@@ -1329,6 +1329,27 @@ def _listing(d: Path) -> dict[str, int]:
     return {p.name: p.stat().st_size for p in sorted(d.iterdir()) if p.is_file()}
 
 
+#: The two WAL sidecars, which an acting run may now legitimately reset (#2709).
+WAL_SIDECARS = ("index.sqlite-wal", "index.sqlite-shm")
+
+
+def _without_sidecars(sizes: dict[str, int]) -> dict[str, int]:
+    """A directory listing minus the two WAL sidecars.
+
+    Five stray-retention nodes below reproduce the 2026-10-03 pile — whose `index.sqlite`
+    is 48 MB against a REAL 882 MB WAL, because the witness copies the live sizes so the
+    retention rule is measured against the file set that was actually at risk — and
+    compare the whole directory before and after an acting `main()` to prove the run
+    deleted nothing. Since #2709 that acting path checkpoints a WAL past the 16 MiB
+    reclaim floor, which these piles are: the WAL legitimately goes to zero, and the
+    comparison has to be about the STRAYS, which is what every one of these nodes is
+    actually claiming. `index.sqlite` itself is still compared byte for byte, and the
+    nodes that pin the trio as untouched (":1528", ":1867" — small fixtures under the
+    floor) are untouched by this helper and still assert the WAL's size.
+    """
+    return {k: v for k, v in sizes.items() if k not in WAL_SIDECARS}
+
+
 #: The live trio, present in every fixture below: strays are what is beside them.
 LIVE_TRIO = [("index.sqlite", 4000, 0.0), ("index.sqlite-wal", 3000, 0.0),
              ("index.sqlite-shm", 200, 0.0)]
@@ -2383,7 +2404,8 @@ def test_a_keep_list_glob_holds_every_candidate_it_matches_and_plans_nothing(
     sr = report["stray_retention"]
     assert sr["planned"] == [], "a glob that matches every candidate has to plan nothing"
     assert sr["deleted"] == [] and sr["deleted_bytes"] == 0, sr
-    assert _listing(d) == before, "a fully held directory must come out file-for-file equal"
+    assert _without_sidecars(_listing(d)) == _without_sidecars(before), \
+        "a fully held directory must come out file-for-file equal on its strays"
     assert sr["kept"] == ["index.sqlite.bak-a"], sr
     assert sorted(sr["keep_list"]["held"]) == ["index.sqlite.bak-m", "index.sqlite.bak-z"], sr
     assert sr["keep_list"]["entries"] == 1, "one entry, whatever number of files it held"
@@ -2616,7 +2638,32 @@ def test_an_absent_or_blank_keep_list_reproduces_the_plan_measured_before_the_fe
         + pile[older + "-shm"]["bytes"]), sr
     assert sr["held_for_person"] == [], sr
     after = _listing(d)
-    assert set(before) - set(after) == {older, older + "-wal", older + "-shm"}, (
+    # #2709: this pile is 48 MB of main against a real 882 MB WAL, so the acting path
+    # now TRIES to checkpoint it. When that checkpoint completes, TRUNCATE leaves no
+    # `-wal` file behind at all, and the reset earned its way out of this comparison —
+    # what the node claims is about the STRAYS the pre-keep-list rule was about to
+    # unlink, and that claim is unchanged. When the attempt errors instead (the witness
+    # pile's `index.sqlite` is a size-accurate copy, not a readable database, so SQLite
+    # answers `file is not a database`), nothing was removed and the set must still be
+    # exact. Both branches are asserted rather than one being forgiven.
+    wc = report["wal_checkpoint"]
+    freed = set(before) - set(after)
+    if wc["busy"] == 0:
+        assert wc["log"] == 0 and wc["checkpointed"] == 0, wc
+        assert (d / "index.sqlite-wal").exists() is False, (
+            "a completed TRUNCATE that left the WAL on disk is not the reset #2709 wants")
+        freed -= set(WAL_SIDECARS)
+    else:
+        # Not a completed reset: either it was refused or it was never attempted. This
+        # pile's `index.sqlite` is a size-accurate copy whose first 16 bytes are not
+        # SQLite's magic, and opening a connection to such a file makes SQLite UNLINK
+        # the -wal with nothing checkpointed — so the header check has to refuse before
+        # the connect, and the WAL has to still be here afterwards.
+        assert wc["attempted"] is False, wc
+        assert "not a SQLite database" in wc["reason"], wc
+        assert (d / "index.sqlite-wal").exists(), (
+            f"a refused checkpoint removed the WAL anyway: {wc}")
+    assert freed == {older, older + "-wal", older + "-shm"}, (
         "the acting run freed exactly the older copy and its sidecars, as it did before the "
         "keep-list existed")
     assert after[newest] == pile[newest]["bytes"], "the kept copy is untouched"
@@ -2855,7 +2902,8 @@ def test_a_seeded_glob_holds_the_copy_the_rule_was_about_to_unlink_on_the_pile_i
         f"the rule before this change planned {planned} and a seeded glob has to stop it: "
         f"{sr['planned']}")
     assert sr["deleted"] == [] and sr["deleted_bytes"] == 0, sr
-    assert _listing(d) == before, "an acting run holding a keep-list copy still deleted something"
+    assert _without_sidecars(_listing(d)) == _without_sidecars(before), \
+        "an acting run holding a keep-list copy still deleted something"
     assert sr["keep_list"]["entries"] == 1 and sr["keep_list"]["held"] == [planned], sr
     assert sr["kept"] == base_plan["kept"], (
         "the newest copy is kept by rule 1, not by the keep-list: the two reasons stay apart")
@@ -3157,7 +3205,8 @@ def test_the_morning_line_counts_live_side_indexes_apart_and_keeps_the_keep_list
     assert not ({h["name"] for h in sr["held_for_person"]}
                 & {e["name"] for e in sr["live_side_indexes"]}), (
         "a name is in two buckets, so the two counts are not apart")
-    assert sr["planned"] == [] and sr["deleted"] == [] and _listing(d) == before, (
+    assert (sr["planned"] == [] and sr["deleted"] == []
+            and _without_sidecars(_listing(d)) == _without_sidecars(before)), (
         "counting a file live handed it to the delete path")
 
 
@@ -4662,3 +4711,340 @@ def test_a_board_holding_no_witness_fails_the_node_that_looks_for_it(monkeypatch
     reason = str(excinfo.value)
     assert str(board / LOSS_WITNESS_VAULT_REL) in reason and str(LOSS_WITNESS) in reason, (
         f"a disagreeing board copy failed without naming both files: {reason}")
+
+
+# ---------------------------------------------------------------------------
+# #2709 — the live index's WAL is reset by an acting scheduled run, or the run
+# says exactly what stopped it. Eight nightly reports (2026-10-01…10-14) read
+# wal/main at 99.5–100.6 % with `before` and `after` byte-equal, because the only
+# `PRAGMA wal_checkpoint` in the repo that touches a qmd index checkpoints the
+# SIDE copy inside `swap_side_copy`, which is gated behind an interactive stdin
+# (#2458) and so is unreachable from the scheduler.
+
+
+# Fixture sizes, chosen against BOTH gates in `checkpoint_live_wal`: one row is a
+# 4 KiB randomblob, so MAIN_ROWS ~= 31 MiB of main and WAL_ROWS ~= 23 MiB of WAL — past
+# the 16 MiB reclaim floor, at a ratio of ~0.7 which is the shape the box has reported
+# since 2026-10-01. A build of this size measured 0.4 s on this machine.
+MAIN_ROWS = 7_500
+WAL_ROWS = 5_000
+
+
+def _wal_bearing_index(index: Path, *, main_rows: int, wal_rows: int):
+    """A real WAL-mode index at `index`, held open the way the qmd daemon holds its.
+
+    Returns the connection and it must stay referenced by the caller: SQLite
+    checkpoints and DELETES the `-wal` file when the last connection closes, so a
+    fixture that closed everything would measure a WAL of zero and prove nothing.
+    Each row is one `randomblob(4096)`, so N rows is about N x 4 KiB of pages: the
+    trigger reads the WAL's SIZE and nothing about the table's shape, and a repeating
+    TEXT column would compress its way out of a meaningful file at fixture scale.
+    """
+    import sqlite3
+    from itertools import repeat
+
+    index.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(index)
+    con.execute("PRAGMA journal_mode=WAL")
+    # Without this the fixture is a lie. SQLite auto-checkpoints a WAL past ~1000
+    # pages AT COMMIT, which copies every frame into main and RESTARTS the log: the
+    # file keeps its high-water size but holds zero valid frames, so a later TRUNCATE
+    # answers `(0, 0, 0)` — a success nobody paid for — and no reader can be busy
+    # because there is nothing left to checkpoint. A first draft of this file passed
+    # its truncation node on exactly that empty WAL. Turning the auto-checkpoint off
+    # is what leaves 4,504 real frames for the acting path to move.
+    con.execute("PRAGMA wal_autocheckpoint=0")
+    con.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY, body TEXT)")
+    con.executemany("INSERT INTO docs (body) VALUES (randomblob(4096))",
+                    repeat((), main_rows))
+    con.commit()
+    # Fold the first block into main so the file has a size to be a ratio against,
+    # then leave the second block in the WAL — the 2026-10-14 shape.
+    con.execute("PRAGMA journal_mode=DELETE")   # folds the first block into main
+    con.execute("PRAGMA journal_mode=WAL")
+    con.executemany("INSERT INTO docs (body) VALUES (randomblob(4096))",
+                    repeat((), wal_rows))
+    con.commit()
+    return con
+
+
+def _acting_run(monkeypatch, tmp_path, index: Path) -> tuple[int, dict]:
+    """Run `main()`'s acting path against `index`, with everything off-box stubbed.
+
+    Prune, embed, health and the CLI are stubs, and `inspect_index` is a stub —
+    which is the point: the checkpoint must read the footprint for itself, because
+    on the box it runs on a nightly run whose `inspect_index` answer is about vec0
+    slots and says nothing about how long it has been since the WAL was reset.
+    """
+    monkeypatch.setattr(m, "INDEX", index)
+    monkeypatch.setattr(m, "LIVE_CONFIG", tmp_path / "live-config.json")
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reports")
+    # `main()` asks twice — once before the mutating section, once after — so this
+    # measures the footprint at call time rather than returning one frozen dict:
+    # before/after in the report are then two readings of the live file, which is
+    # exactly the pair the 10-14 report carried as identical bytes.
+    def _inspect(index=None):
+        return {"ok": True, "slots": 1024, "slots_known": True, "used_slots": 4,
+                "rows_total": 4, "files_total": 1, "content_tables": ["docs"],
+                "orphan_ratio": 0.0, "vectors_orphaned": 0,
+                "footprint": m.index_footprint(index or m.INDEX), "error": None}
+
+    monkeypatch.setattr(m, "inspect_index", _inspect)
+    monkeypatch.setattr(m, "pending_after_action", lambda retries=0: 0)
+    # `orphan_ratio` 0.0 and `vectors_orphaned` 0 are what `need_prune` reads, and
+    # `pending_embeddings` 0 is what `need_embed` reads, so both verdicts come out
+    # False without stubbing a function that does not exist — which matters here:
+    # the checkpoint has to fire on a night with no prune and no embed work, because
+    # that is the night #2709 was measured on.
+    monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
+    monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
+    monkeypatch.setattr(m, "config_drift", lambda *a, **k: {
+        "drift": [], "drift_count": 0, "resync_command": "stub", "error": None})
+    monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py"])
+    rc = m.main()
+    reports = sorted((tmp_path / "reports").glob("*.json"))
+    assert len(reports) == 1, f"expected exactly one report, got {reports}"
+    return rc, json.loads(reports[0].read_text())
+
+
+def test_an_acting_run_truncates_the_live_wal_it_was_given(tmp_path, monkeypatch):
+    """Clause 1: the acting path checkpoints the LIVE index, and the WAL file obeys.
+
+    Nothing here monkeypatches the checkpoint itself — the index is a real WAL-mode
+    database on disk and the assertion is its size on disk afterwards, because what
+    #2709 was filed about is a number in a report that never moved.
+    """
+    index = tmp_path / "qmd" / "index.sqlite"
+    held = _wal_bearing_index(index, main_rows=MAIN_ROWS, wal_rows=WAL_ROWS)
+    try:
+        wal = index.parent / "index.sqlite-wal"
+        assert wal.stat().st_size > m.WAL_TRUNCATE_MIN_BYTES, (
+            f"the fixture's WAL is {wal.stat().st_size} B, under the reclaim floor, "
+            "so this node would read a skip and call it a truncation")
+        rc, report = _acting_run(monkeypatch, tmp_path, index)
+        after = wal.stat().st_size
+    finally:
+        held.close()
+    assert rc == 0, "a checkpoint must not change the job's exit code"
+    wc = report["wal_checkpoint"]
+    assert wc["attempted"] is True, wc
+    assert wc["busy"] == 0, f"SQLite refused its own checkpoint: {wc}"
+    assert wc["log"] == 0 and wc["checkpointed"] == wc["log"], (
+        f"a TRUNCATE that completed leaves no log frames: {wc}")
+    assert after == 0, f"WAL file on disk is {after} B after a completed truncate"
+    assert wc["wal_after_bytes"] == 0, wc
+
+
+def test_a_blocked_checkpoint_refuses_naming_the_holder_and_costs_the_job_nothing(
+        tmp_path, monkeypatch):
+    """Clause 2: busy is a refusal with a named holder, not a failure and not a stop.
+
+    The holder here is this test process, which is honest: `open_handle_holders`
+    reports what `/proc/*/fd` measured, and the reader that blocked the checkpoint
+    IS a process holding the file. The 2026-10-14 measurement found no holder at
+    all; the node below pins that case too, because a fix that assumes a holder
+    exists to blame cannot report the empty set it will meet on this box.
+    """
+    import os
+    import sqlite3
+
+    index = tmp_path / "qmd" / "index.sqlite"
+    held = _wal_bearing_index(index, main_rows=MAIN_ROWS, wal_rows=WAL_ROWS)
+    reader = sqlite3.connect(index, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM docs")
+    try:
+        wal = index.parent / "index.sqlite-wal"
+        before = wal.stat().st_size
+        rc, report = _acting_run(monkeypatch, tmp_path, index)
+        after = wal.stat().st_size
+        wc = report["wal_checkpoint"]
+        assert wc["attempted"] is True, wc
+        assert wc["busy"] == 1, (
+            "fixture failed to hold the read mark, so there was no refusal to "
+            "record — this node would pass by never testing anything")
+        assert after == before, f"a busy checkpoint must leave the WAL alone: {wc}"
+        holders = wc["holders"]
+        assert holders, f"refusal named no holder at all: {wc}"
+        flat = [pid for pids in holders.values() for pid in pids]
+        assert os.getpid() in flat, (
+            f"the blocking process is not named among the measured holders: {holders}")
+        assert rc == 0, f"a refused checkpoint failed the job: {report}"
+        assert "supervisorctl" not in json.dumps(report["actions"]), (
+            "the refusing run reached for a service restart")
+    finally:
+        reader.rollback()
+        reader.close()
+        held.close()
+
+
+def test_a_refusal_with_no_measured_holder_says_so_instead_of_naming_nobody(
+        tmp_path, monkeypatch):
+    """Clause 2's empty case: the scan returning nothing is recorded, not invented.
+
+    This is the box's actual state on 2026-10-14 — `/proc/*/fd`, `/proc/*/maps` and
+    `fuser` all found zero processes on the index while the WAL sat at 100.5 % — so
+    the string is what a reader on this machine will actually see.
+    """
+    import sqlite3
+
+    index = tmp_path / "qmd" / "index.sqlite"
+    held = _wal_bearing_index(index, main_rows=MAIN_ROWS, wal_rows=WAL_ROWS)
+    reader = sqlite3.connect(index, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM docs")
+    try:
+        monkeypatch.setattr(m, "open_handle_holders", lambda paths: {})
+        rc, report = _acting_run(monkeypatch, tmp_path, index)
+        wc = report["wal_checkpoint"]
+        assert wc["busy"] == 1, f"fixture did not force a busy: {wc}"
+        assert wc["holders"] == {}, wc
+        assert "no holder found" in str(wc["refusal"]).lower(), (
+            f"an empty scan produced no refusal that says so: {wc}")
+        assert rc == 0, report
+    finally:
+        reader.rollback()
+        reader.close()
+        held.close()
+
+
+def test_the_report_carries_the_triple_sqlite_answered_and_not_a_restated_footprint(
+        tmp_path, monkeypatch):
+    """Clause 3: `(busy, log, checkpointed)` is SQLite's own answer, with both sizes.
+
+    The 10-14 report was useless as evidence because `before` and `after` were the
+    same measurement of the same bytes and nothing said whether an action was even
+    attempted. So the no-checkpoint case has to say that in words, and the numbers
+    here are read back off the WAL file rather than trusted from the report.
+    """
+    index = tmp_path / "qmd" / "index.sqlite"
+    held = _wal_bearing_index(index, main_rows=MAIN_ROWS, wal_rows=WAL_ROWS)
+    wal = index.parent / "index.sqlite-wal"
+    before_bytes = wal.stat().st_size
+    assert before_bytes > m.WAL_TRUNCATE_MIN_BYTES, before_bytes
+    try:
+        rc, report = _acting_run(monkeypatch, tmp_path, index)
+        wc = report["wal_checkpoint"]
+    finally:
+        held.close()
+    assert wc["wal_before_bytes"] == before_bytes, (
+        f"the report's before-size is not the WAL that was on disk: {wc} vs "
+        f"{before_bytes}")
+    assert report["before"]["footprint"]["wal"] == before_bytes, (
+        "the report's own before-footprint disagrees with the file, which is the "
+        "10-14 shape this item was filed about")
+    assert report["after"]["footprint"]["wal"] == 0, (
+        "the report still restates the old footprint after a reset that the file "
+        f"itself agrees happened: {report['after']['footprint']}")
+    for key in ("busy", "log", "checkpointed", "wal_before_bytes", "wal_after_bytes",
+                "trigger", "min_bytes", "ratio"):
+        assert key in wc, f"the report is missing SQLite's `{key}`: {wc}"
+    assert isinstance(wc["busy"], int) and wc["log"] is not None, wc
+    assert wc["wal_before_bytes"] > 0 and wc["wal_after_bytes"] == 0, wc
+    assert wc["reason"], f"no sentence says what happened: {wc}"
+
+
+def test_below_the_trigger_no_checkpoint_is_attempted_and_the_wal_is_left_alone(
+        tmp_path, monkeypatch):
+    """Clause 4: a small WAL is not checkpointed every night, and the report names the
+    line the decision was made against.
+
+    This fixture is under the ABSOLUTE floor, which is the gate that fires first and
+    the one that keeps #1598's rule — the live trio is never this job's to touch —
+    enforceable against a kilobyte-scale WAL. The node below tests the ratio line on
+    its own, with a WAL past the floor but proportionally normal.
+    """
+    index = tmp_path / "qmd" / "index.sqlite"
+    held = _wal_bearing_index(index, main_rows=400, wal_rows=2)
+    try:
+        wal = index.parent / "index.sqlite-wal"
+        before = wal.stat().st_size
+        rc, report = _acting_run(monkeypatch, tmp_path, index)
+        wc = report["wal_checkpoint"]
+        assert wc["attempted"] is False, f"checkpointed a WAL at {wc['ratio']}: {wc}"
+        assert wc["wal_before_bytes"] < m.WAL_TRUNCATE_MIN_BYTES, wc
+        assert "reclaim floor" in wc["reason"], (
+            f"a below-the-floor skip did not name the floor: {wc}")
+        assert wal.stat().st_size == before, (
+            "a below-trigger run still touched the WAL on disk")
+    finally:
+        held.close()
+    assert wc["trigger"] == m.WAL_TRUNCATE_TRIGGER, wc
+    assert 0 <= wc["ratio"] < m.WAL_TRUNCATE_TRIGGER, wc
+
+
+def test_a_wal_past_the_floor_but_proportionally_normal_is_left_alone(tmp_path,
+                                                                      monkeypatch):
+    """Clause 4's ratio line, tested apart from the floor so each is a real gate.
+
+    A WAL big enough to clear the 16 MiB floor but under half of main is a database
+    taking ordinary write traffic, and taking its write lock nightly to reclaim it is
+    the cost #2709 does not authorise. Both numbers must still be in the report: the
+    whole complaint was a report that could not be audited after the fact.
+    """
+    index = tmp_path / "qmd" / "index.sqlite"
+    # ~66 MiB of main against ~23 MiB of WAL: past the 16 MiB floor, under the
+    # 50 % ratio line — the one combination that can only be skipped by the ratio.
+    held = _wal_bearing_index(index, main_rows=16_000, wal_rows=5_000)
+    try:
+        wal = index.parent / "index.sqlite-wal"
+        before = wal.stat().st_size
+        assert before > m.WAL_TRUNCATE_MIN_BYTES, before
+        rc, report = _acting_run(monkeypatch, tmp_path, index)
+        wc = report["wal_checkpoint"]
+        assert wc["attempted"] is False, (
+            f"checkpointed a WAL at ratio {wc['ratio']} (floor {wc['min_bytes']}): {wc}")
+        assert wal.stat().st_size == before, "a below-trigger run touched the WAL"
+    finally:
+        held.close()
+    assert wc["trigger"] == m.WAL_TRUNCATE_TRIGGER, wc
+    assert 0 <= wc["ratio"] < m.WAL_TRUNCATE_TRIGGER, wc
+    assert wc["reason"], wc
+
+
+def test_the_trigger_is_a_stated_fraction_and_the_observed_shape_is_past_it():
+    """Clause 4's other half: the line is stated, and 2026-10-14 was over it.
+
+    The fixture-free assertion is deliberate. Eight consecutive nightly reports
+    measured wal/main between 0.995 and 1.006, so a trigger that only fires above
+    1.0 would have let all eight through; 0.5 fires on that shape with 2x to spare
+    and stays clear of an ordinary in-flight WAL.
+    """
+    assert m.WAL_TRUNCATE_TRIGGER == 0.5, m.WAL_TRUNCATE_TRIGGER
+    assert m.WAL_TRUNCATE_MIN_BYTES == 16 * 1024 * 1024, m.WAL_TRUNCATE_MIN_BYTES
+    assert 0.995 > m.WAL_TRUNCATE_TRIGGER and 1.006 > m.WAL_TRUNCATE_TRIGGER
+    # 804 MiB was the smallest WAL the reports measured (2026-10-12), 50x the floor.
+    assert 804 * 1024 * 1024 > m.WAL_TRUNCATE_MIN_BYTES
+
+
+def test_a_main_file_that_is_not_a_database_is_refused_before_any_open(tmp_path):
+    """The header check is the one line in `checkpoint_live_wal` that cannot be wrong.
+
+    Against a main file SQLite cannot parse, `connect` plus the PRAGMA raises `file is
+    not a database` — and by then SQLite has already UNLINKED the `-wal`, so every
+    frame in it is gone with nothing checkpointed. This round's own fixtures proved it
+    by deleting an 882 MB WAL that way, which is why the check is a header read and not
+    a try/except around the connect: the exception is the too-late place to decide. The
+    pile must be past both gates, or the node would be measuring the reclaim floor.
+    """
+    index = tmp_path / "qmd" / "index.sqlite"
+    index.parent.mkdir(parents=True)
+    for name, size in (("index.sqlite", 20 * 1024 * 1024),
+                       ("index.sqlite-wal", 30 * 1024 * 1024)):
+        with open(index.parent / name, "wb") as fh:
+            fh.truncate(size)                  # sparse: size only, no bytes written
+    with open(index, "r+b") as fh:
+        fh.write(b"not a database at all!!!")  # 22 bytes; the first 16 are not magic
+    fp = m.index_footprint(index)
+    assert fp["wal"] > m.WAL_TRUNCATE_MIN_BYTES, (
+        f"the WAL is under the reclaim floor, so this would measure the floor: {fp}")
+    assert fp["wal"] / fp["main"] > m.WAL_TRUNCATE_TRIGGER, (
+        f"the ratio is under the trigger, so this would measure the ratio: {fp}")
+
+    wc = m.checkpoint_live_wal(index)
+
+    assert wc["attempted"] is False, wc
+    assert "not a SQLite database" in wc["reason"], wc
+    assert (index.parent / "index.sqlite-wal").exists(), (
+        "the WAL was removed by a run that checkpointed nothing")
+    assert wc["busy"] is None and wc["log"] is None, wc

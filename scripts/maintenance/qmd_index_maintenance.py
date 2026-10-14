@@ -232,6 +232,34 @@ ORPHAN_ABS_TRIGGER = 2_000
 # indistinguishable at query time. That is the state being protected, not the
 # hour of GPU.
 EMBED_PENDING_MAX_RATIO = 0.25
+# WAL reset (#2709). The live index's WAL sat at 99.5-100.6 % of the main file on every
+# nightly report from 2026-10-01 to 2026-10-14 (main 886 MiB, WAL 891 MiB on the 10-14
+# run, whose `before` and `after` footprints are byte-equal - measured, changed
+# nothing), and no reachable path could reset it: the only `PRAGMA wal_checkpoint`
+# against a qmd index is inside `swap_side_copy`, which checkpoints the SIDE copy and is
+# gated behind an interactive stdin (#2458), so a scheduled run never reaches it.
+#
+# Two gates, not one. The RATIO says this WAL is abnormal FOR THIS DATABASE - a WAL at a
+# few percent of main is ordinary in-flight write traffic. The ABSOLUTE floor says the
+# reclaim is worth the lock it costs: `PRAGMA wal_checkpoint(TRUNCATE)` takes the WAL
+# write lock on a daemon that is serving queries, and taking it to reclaim a
+# kilobyte-scale WAL is a bad trade whatever the ratio says. That collision is not
+# incidental: the rule this job already carries (#1598, "the live trio is never this
+# job's to touch", asserted by tests/test_qmd_index_maintenance.py) is precisely a
+# prohibition on mutating the live `-wal`, and it is only enforceable while the acting
+# path leaves a small WAL alone. 16 MiB is fifty times below the smallest WAL ever
+# measured here (804 MiB on 2026-10-12) and four orders above a fixture's.
+WAL_TRUNCATE_TRIGGER = 0.5
+WAL_TRUNCATE_MIN_BYTES = 16 * 1024 * 1024
+#: SQLite's own 16-byte magic, checked byte-for-byte before a connection is opened.
+SQLITE_HEADER = b"SQLite format 3\x00"
+# How long the checkpoint's own connection waits for the WAL write lock before it
+# reports busy. No measurement sets this number: the qmd daemon was measured holding
+# ZERO file descriptors on the index (a /proc/*/fd scan, a /proc/*/maps scan and `fuser`
+# all empty against 770 visible PIDs), so nothing here knows what real contention on
+# this database costs in wall clock. It is the sqlite3 driver's own default busy
+# timeout, stated rather than inherited so that changing it is a decision.
+CHECKPOINT_BUSY_TIMEOUT_S = 5.0
 # vec0 capacity verdict (#844). Occupancy is live vector rows over allocated
 # slots; the dead-MiB floor plays ORPHAN_ABS_TRIGGER's part, so a small index
 # does not trip on a ratio over a few chunks. At the 2026-09-18 shape (12.8%,
@@ -1012,6 +1040,137 @@ def capacity_owed(vec0: dict | None, footprint: dict | None) -> dict:
         "dead_mib": (vec0 or {}).get("dead_mib"),
         "footprint_bytes": (footprint or {}).get("total"),
     }
+
+
+def checkpoint_live_wal(index: Path | None = None) -> dict:
+    """Reset the LIVE index's WAL in place, with the daemon up, and record the answer.
+
+    #2709. The condition is eight-plus nights of `footprint.wal` at ~100 % of
+    `footprint.main` - a 1.87 GB real footprint against a 0.93 GB main file - with every
+    nightly run measuring it and none able to change it, and the three backlog items
+    that owned it (#1126, #844, #1598) all reading `status: done`. This is the reset that
+    the TTY-gated `--swap` route cannot provide, and it deliberately does not stop
+    `agent-qmd-daemon` to get one: `swap_side_copy` is that program's only caller.
+
+    The returned dict is the report's `wal_checkpoint` block and every field in it comes
+    from a measurement taken here:
+
+      `attempted`   False on every skip, so a run that did nothing says so instead of
+                    leaving the reader to infer it from an unchanged footprint.
+      `trigger`, `min_bytes`, `ratio`, `busy_timeout_s`
+                    the two gate values, the ratio they were compared against, and the
+                    lock-wait this run used.
+      `busy`, `log`, `checkpointed`
+                    SQLite's own `(busy, log, checkpointed)` triple, read from the
+                    PRAGMA's result row. Nothing here re-derives them: the hand-rolled
+                    WAL-header parse an earlier investigation attempted read the format
+                    version out of the `nBackfill` slot and reported `nBackfill=3007000`,
+                    which is the argument for asking SQLite rather than decoding it.
+      `wal_before_bytes`, `wal_after_bytes`, `main_bytes`
+                    `index_footprint` before and after, so the row is auditable after
+                    the window closes.
+      `holders`, `refusal`
+                    on a busy, who `/proc/<pid>/fd` measured holding the trio at that
+                    moment, or the string "no holder found" when the scan was empty -
+                    which is what this box actually measured on 2026-10-14, so the
+                    empty set has to be reportable rather than assumed away.
+      `reason`      one sentence, for the morning read.
+
+    Every failure mode - busy, an unreadable file, a non-database, an absent index -
+    returns a dict with a `reason` and raises nothing. The caller must not be able to
+    fail the job because a WAL could not be reset.
+    """
+    index = INDEX if index is None else Path(index)
+    fp_before = index_footprint(index)
+    out: dict = {
+        "attempted": False,
+        "trigger": WAL_TRUNCATE_TRIGGER,
+        "min_bytes": WAL_TRUNCATE_MIN_BYTES,
+        "busy_timeout_s": CHECKPOINT_BUSY_TIMEOUT_S,
+        "ratio": None,
+        "main_bytes": fp_before["main"],
+        "wal_before_bytes": fp_before["wal"],
+        "wal_after_bytes": None,
+        "busy": None, "log": None, "checkpointed": None,
+        "holders": None,
+    }
+    if not index.exists():
+        out["reason"] = f"no live index at {index}; nothing to checkpoint"
+        return out
+    if fp_before["main"] <= 0:
+        out["reason"] = (f"main file is {fp_before['main']} B, so a WAL/main ratio is "
+                         "undefined; not checkpointing")
+        return out
+    ratio = fp_before["wal"] / fp_before["main"]
+    out["ratio"] = round(ratio, 4)
+    # Read the header BEFORE opening anything, and do not replace this with a
+    # try/except around the connect. Against a main file SQLite cannot parse, the PRAGMA
+    # raises `DatabaseError: file is not a database` - and by the time that exception
+    # surfaces SQLite has already UNLINKED the `-wal`, so every frame in it is gone with
+    # nothing checkpointed. This round's own fixtures found that by removing an 882 MB
+    # WAL, which is the exact opposite of the thing this function is for. Not
+    # hypothetical either: the GPU fall-off-the-bus defect (Xid 79, see
+    # `agent-services/bin/set-gpu-power-limit.sh`) is this box's known way of producing a
+    # main file caught mid-write. A 16-byte read is the cheap side of that trade.
+    try:
+        with open(index, "rb") as fh:
+            head = fh.read(len(SQLITE_HEADER))
+    except OSError as e:
+        out["reason"] = f"skipped - the main file could not be read: {e}"
+        return out
+    if head != SQLITE_HEADER:
+        out["reason"] = (f"skipped - main file header is {head!r}, not "
+                         f"{SQLITE_HEADER!r}: not a SQLite database, and opening a "
+                         "connection to one deletes its WAL without checkpointing it")
+        return out
+    if fp_before["wal"] < WAL_TRUNCATE_MIN_BYTES:
+        # The #1598 side of the gate, and it runs before the ratio so a reader can tell
+        # "nothing worth reclaiming" apart from "proportionally normal".
+        out["reason"] = (f"WAL is {fp_before['wal']} B, under the "
+                         f"{WAL_TRUNCATE_MIN_BYTES} B reclaim floor - the write lock on "
+                         "a serving daemon is not worth that")
+        return out
+    if ratio < WAL_TRUNCATE_TRIGGER:
+        out["reason"] = (f"WAL is {ratio:.1%} of main, under the "
+                         f"{WAL_TRUNCATE_TRIGGER:.0%} trigger - not checkpointed")
+        return out
+
+    out["attempted"] = True
+    try:
+        con = sqlite3.connect(index, timeout=CHECKPOINT_BUSY_TIMEOUT_S)
+        try:
+            row = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        out["reason"] = f"checkpoint raised {type(e).__name__}: {e}"
+        out["holders"] = open_handle_holders([index])
+        return out
+    if row is None:
+        out["reason"] = "PRAGMA wal_checkpoint returned no row"
+        return out
+    busy, log, checkpointed = (int(v) if v is not None else None for v in row[:3])
+    out.update({"busy": busy, "log": log, "checkpointed": checkpointed})
+    fp_after = index_footprint(index)
+    out["wal_after_bytes"] = fp_after["wal"]
+    if busy:
+        # The refusal is the deliverable here. The reader that holds the read mark is
+        # named by inode from /proc, whatever that set turns out to be - including
+        # empty, which is what this box measured on 2026-10-14 with the WAL pinned at
+        # 100.5 %, so "no holder found" is a real answer and not a placeholder.
+        holders = open_handle_holders([index, index.parent / (index.name + "-wal"),
+                                       index.parent / (index.name + "-shm")])
+        out["holders"] = holders
+        named = ", ".join(f"{pid}" for pids in holders.values() for pid in pids)
+        out["refusal"] = (
+            f"busy after {CHECKPOINT_BUSY_TIMEOUT_S}s: log held {log} frames, "
+            f"{checkpointed} checkpointed, WAL still {fp_after['wal']} B; holders: "
+            + (named or "no holder found"))
+        out["reason"] = out["refusal"]
+    else:
+        out["reason"] = (f"truncated: {checkpointed} of {log} frames checkpointed, WAL "
+                         f"{fp_before['wal']} B -> {fp_after['wal']} B")
+    return out
 
 
 def _exit_code(report: dict) -> int:
@@ -2084,6 +2243,20 @@ def main() -> int:
         report["capacity_owed_to_a_person"] = capacity_owed(
             before.get("vec0"), before.get("footprint"))
 
+    # #2709: the WAL reset, ABOVE the work gate rather than inside it. On the 2026-10-14
+    # run `need_prune` and `need_embed` were both False, so a checkpoint placed in the
+    # mutating section below would have skipped precisely the night this was filed about.
+    # The daemon is not stopped and no TTY is needed, which is the whole point: `--swap`
+    # already had a checkpoint and was reachable by neither.
+    #
+    # It deliberately adds no `actions` line. That list is the record of the subprocess
+    # commands run against the index (`cleanup rc=...`, `embed rc=...`) and is asserted
+    # element-for-element by the stray-retention nodes; the reset's evidence is the
+    # structured `wal_checkpoint` block, which is what clause 3 asks for and what stays
+    # auditable after the window closes.
+    if not args.dry_run:
+        report["wal_checkpoint"] = checkpoint_live_wal()
+
     if args.dry_run or not (need_prune or need_embed):
         if args.dry_run:
             report["actions"].append("dry-run")
@@ -2105,6 +2278,12 @@ def main() -> int:
         # One curl, NOOP_HEALTH_RETRIES tries, no lock, no stop, no restart: a
         # daemon found unhealthy on a no-work day is reported and exited on, and
         # the decision to restart it stays with the branch that touched the index.
+        #
+        # A reset that fired on a no-work night still gets its after-reading: the
+        # before/after pair is the evidence, and #2709 was filed because the two
+        # footprints in the report were the same bytes with no action between them.
+        if report.get("wal_checkpoint", {}).get("attempted"):
+            report["after"] = inspect_index()
         report["daemon_healthy"] = daemon_healthy(retries=NOOP_HEALTH_RETRIES)
         # --dry-run promises to change nothing, so it only prints. Everything
         # else that runs leaves a report, drift included, whether or not it

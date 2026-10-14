@@ -292,6 +292,33 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   reasons a file survives apart: measured reader, keep-list, live handle, outside the
   series. Whether `rebuild-20261004.sqlite` should be deleted at all is still #844's
   ruling to make, and this change does not make it.
+- **An acting run resets the WAL it has been reporting (#2709).** The
+  nightly report's `footprint` main + `-wal` + `-shm` (#844) sat at 99.5–100.6 %
+  WAL-to-main on all fourteen reports 2026-10-01…10-14 — ~1.87 GB of real footprint
+  against a 0.93 GB main file — with the 10-14 run's `before` and `after` byte-equal.
+  The acting path no longer leaves that file alone: `checkpoint_live_wal()` runs above
+  the work gate (not inside the mutating section, because on 10-14 both `need_prune`
+  and `need_embed` were False and the night in question would have been skipped), on a
+  connection opened on `INDEX`, daemon up, no TTY — which is what distinguishes it from
+  the checkpoint that already existed inside `swap_side_copy` against the *side* copy,
+  behind the interactive-stdin gate of #2458. Two conditions must hold before it fires:
+  `footprint.wal` past 50 % of `footprint.main` (`WAL_TRUNCATE_TRIGGER`), and past a
+  16 MiB absolute floor (`WAL_TRUNCATE_MIN_BYTES`), because a TRUNCATE takes the WAL
+  write lock on a serving daemon and a kilobyte-scale WAL is not worth that — which is
+  also what keeps this job's older rule, that the live trio is not its to touch, true
+  for every small WAL. `--dry-run` never reaches it.
+  The report gains a `wal_checkpoint` block whose numbers come from SQLite rather than
+  from decoded file bytes: the `(busy, log, checkpointed)` triple the PRAGMA itself
+  answers, plus before/after `footprint.wal`, both gate values and the observed ratio.
+  `attempted: false` plus a sentence is what a run that did nothing reports, so an
+  unchanged footprint can no longer be read as an action. A busy result is a refusal,
+  not a failure: the job still exits on daemon health, the daemon is not stopped, and
+  `holders` names what `/proc/<pid>/fd` measured at that instant — or the string
+  `no holder found`, which is the honest reading on this box, where a `/proc/*/fd` scan,
+  a `/proc/*/maps` scan and `fuser` all came back empty on 2026-10-14 with the WAL
+  pinned at 100.5 %. Whether the resident WAL costs query latency is still unmeasured,
+  and whether such a stall should be charged to the transport instead of the task is
+  still owed.
 - **A rerank that could not run says so.** No VRAM for a ranking context used to
   be an HTTP 200 with fusion-order results; `meta.reranked` is false, the daemon
   counts it and never caches a fallback score, and `app/qmd_health.py` logs and
@@ -359,6 +386,16 @@ the build rather than the setting is what changed.
 - tests: `test_qmd_single_build.py`, `test_qmd_index_template.py`, `test_qmd_index_maintenance.py`, `test_qmd_fork_landing.py`, `test_qmd_query_shape.py`, `test_qmd_health.py`, `test_qmd_maintenance_health.py`, `test_service_health_check_qmd.py`, `test_qmd_doc_claims.py`
 
 ## Review log
+
+- **2026-10-14 — §5 only: the WAL reset #2709 added.** One new bullet, describing
+  `checkpoint_live_wal()` in `scripts/maintenance/qmd_index_maintenance.py` — where it
+  runs in the acting path, the two conditions that gate it (a 50 % WAL-to-main ratio and
+  a 16 MiB absolute floor), the `wal_checkpoint` block it writes, and why a busy result
+  is recorded rather than fatal. Everything else on this page still carries the
+  2026-09-25 date below; nothing outside that bullet was re-read on this pass. The
+  claim it does NOT make is the important one: whether a resident WAL costs query
+  latency has never been measured, so the bullet says the file is reset and stays quiet
+  about what resetting it buys beyond the ~0.9 GB of disk.
 
 - **2026-09-25** — `current`. Re-checked against the tree, both configs and
   the running daemon: fork at `079c9c9` on `lloyd`, level with `origin/lloyd`;
