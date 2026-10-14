@@ -79,6 +79,36 @@ _STALL_ALERT_INTERVAL_SECONDS = 6 * 3600
 # streak is a separate counter so neither alarm can reset the other's.
 _STALL_NEXTRUN_TICKS = 5
 _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS = 24 * 3600
+#: How far past its OWN `next_run` an upstream may sit, with a `success` newest run
+#: record, before its lateness is a reason to name the chain: half an hour. #2695.
+#:
+#: A completion is what moves `next_run` (`app/autonomy.py`, `next_run_gap`'s own
+#: docstring), so between an upstream's launch and its finish its stamp is behind by
+#: exactly the length of its run — and on the 05:00 nightly chain that window is the
+#: whole 05:00-05:09 slot the watchdog's own tick lands in. Without a threshold here,
+#: `up_hours > 0` admitted the dependent every single night: 2026-10-08 through
+#: 2026-10-13 each carry the alert, #42 named at 0.1 h behind an upstream that was
+#: four minutes into a run that finished eight minutes later. An alarm that fires on
+#: the arithmetic of a healthy chain is not an alarm, and its 24 h cooldown made it a
+#: metronome.
+#:
+#: What the grace does NOT touch is the other disjunct. A newest run record that is
+#: not a `success` opens the door at any lateness, including none, because that is the
+#: fault #2417 was built for — #38 dying at 05:04:09Z on 2026-10-08 and its three
+#: dependents going 6.2 h / 3.4 h / 2.7 h late behind it, unpinned byte for byte by
+#: `test_a_dependent_three_hours_behind_a_failed_upstream_is_flagged`. Sibling in
+#: reasoning: `MISSING_ARTIFACT_GRACE_HOURS` (`grep -n '^MISSING_ARTIFACT_GRACE_HOURS'
+#: app/autonomy.py`) bounds a hold that no longer has a thing to wait for, the same
+#: shape of judgement on the dispatch side; and the width here is a first estimate,
+#: not a ruling — whether 30 min fits chains whose runs routinely exceed it is the
+#: owed measurement on #2695.
+#:
+#: One scan says so in the log per suppressed chain, unsuppressed by any cooldown:
+#: the window this closes is at most `_NEXTRUN_UPSTREAM_GRACE_HOURS` long, so the
+#: record cannot repeat the way the declared-park log could, and that log's 24 h slot
+#: is what keeps "nothing is late" and "everything late was parked" two sentences
+#: rather than this one's budget.
+_NEXTRUN_UPSTREAM_GRACE_HOURS = 0.5
 #: Where the `next_run` alarm's last-reached-a-person instant is persisted: the
 #: queue's own watermark table, under this source, in the same row pattern the
 #: operator pause uses (`workers/pool.py:PAUSE_WM_SOURCE`). See
@@ -294,15 +324,21 @@ def _upstream_block(task: dict, gap: dict, resolution: list[dict], now) -> dict:
 
     The verdict is `late_or_dead`, and it is the union of those two facts and
     nothing else: the newest record is not a `success`, OR the upstream is itself
-    past its own `next_run`. On a chain that ran on time neither holds — the
-    completion writer advances `next_run` at completion (`next_run_gap`'s own
-    docstring, `app/autonomy.py`), so a healthy upstream has a `success` newest
-    record AND a stamp still in the future. That is what keeps this tightening from
-    re-creating the noise #2342 retired: an early report here always means the
-    upstream is demonstrably not done, never merely that the dependent is late. A
-    `paused` or `draft` upstream that last completed cleanly is therefore NOT named
-    early — its lateness is a decision somebody wrote down, and the one-period
-    bound still catches it.
+    past its own `next_run` by more than `_NEXTRUN_UPSTREAM_GRACE_HOURS`. The second
+    disjunct's threshold is #2695, and it exists because the stamp is not a health
+    signal on its own: `next_run` moves at COMPLETION (`next_run_gap`'s own
+    docstring, `app/autonomy.py`), so an upstream that launched on time and is still
+    running has a stamp behind it by exactly the length of that run. On the 05:00
+    nightly chain the watchdog's tick lands inside that window every single morning,
+    which made `> 0` a line the fleet could not stop printing — six nights running,
+    about a chain that completed minutes later each time.
+
+    What the grace lets through is unchanged in kind: an early report here still
+    means the upstream has not finished what the dependent is waiting on, either
+    because its newest record says so or because it is late doing it. A `paused` or
+    `draft` upstream that last completed cleanly is still NOT named early — its
+    lateness is a decision somebody wrote down, and the one-period bound still
+    catches it.
 
     Two shapes answer `{}`: no `depends_on` (no chain to name), and a `depends_on`
     whose id names no task file — #558's case, where the hold is already held and
@@ -328,6 +364,25 @@ def _upstream_block(task: dict, gap: dict, resolution: list[dict], now) -> dict:
         return {}
     up_hours = autonomy.next_run_gap(up, now=now)["hours_past_next_run"]
     status, when, run_id = autonomy.newest_run_record(up_id)
+    # Only the STAMP disjunct carries the grace, and only when the record is clean:
+    # a `success` newest record plus a stamp minutes behind is a chain mid-flight,
+    # which is the shape `_NEXTRUN_UPSTREAM_GRACE_HOURS` exists to hold shut. The
+    # record disjunct is untouched, so a dead upstream opens this door at any
+    # lateness and `late_or_dead` says so with the same words it always used.
+    late_or_dead = (status != autonomy.RUN_STATUS_SUCCESS
+                    or (up_hours is not None
+                        and up_hours > _NEXTRUN_UPSTREAM_GRACE_HOURS))
+    if not late_or_dead and status == autonomy.RUN_STATUS_SUCCESS:
+        # The grace is what closed the door: the upstream IS past its own `next_run`,
+        # just not by enough to say so. One record names both ends of the chain and
+        # the minutes, so a reader of the log can see the suppression and the size of
+        # it — and no alert, which is the whole point of #2695.
+        logger.warning(
+            "nextrun stall alarm did not name the chain #%s -> #%s: the upstream's "
+            "newest run record is a success and it sits %.0f min past its own "
+            "next_run, inside the %.1f h grace",
+            task.get("id"), up.get("id"), (up_hours or 0.0) * 60.0,
+            _NEXTRUN_UPSTREAM_GRACE_HOURS)
     return {
         "upstream_id": up.get("id"),
         "upstream_status": status,
@@ -339,8 +394,7 @@ def _upstream_block(task: dict, gap: dict, resolution: list[dict], now) -> dict:
                         .strftime("%Y-%m-%dT%H:%M:%SZ") if when else ""),
         "upstream_run": run_id,
         "upstream_hours_past": up_hours,
-        "late_or_dead": (status != autonomy.RUN_STATUS_SUCCESS
-                         or (up_hours is not None and up_hours > 0)),
+        "late_or_dead": late_or_dead,
     }
 
 
@@ -763,8 +817,10 @@ def _blocked_note(entry: dict) -> str:
       2026-10-08T05:04:09Z`, the shape #2417's report asked for, with the upstream's
       own lateness appended when it has one, since "failed and not retried" is the
       whole news;
-    * a `success` record and a stamp behind — nothing upstream is broken except its
-      clock, so the lateness IS the finding;
+    * a `success` record and a stamp behind it by more than the grace — nothing
+      upstream is broken except its clock, so the lateness IS the finding. Since #2695
+      this branch cannot be reached by a run that is merely still going: the minutes
+      have to exceed `_NEXTRUN_UPSTREAM_GRACE_HOURS` first;
     * no readable record at all, which is not the same thing as a success and says
       so rather than going quiet.
 

@@ -5537,6 +5537,175 @@ def test_the_alert_head_counts_a_short_late_row_separately_from_the_bound(
     assert "blocked-by #38" in msg, msg
 
 
+# ── #2695: a chain that is mid-run is not a chain that is late ────────────────
+#
+# The nightly chain of 2026-10-08 through 10-13: `autonomy/38` → `42` → `39`/`40`, all
+# `daily`, each dependent declaring `stale_bypass_hours: 36`. Every morning the tick
+# lands at 05:02-05:04Z, which is inside #38's own run (it launches 05:00:10-05:00:58
+# and completes 05:05:18-05:09:06, `~/lloyd-data/autonomy-runs/38/`), and a completion
+# is what moves `next_run` — so at the tick #38's stamp is minutes behind and #42's is
+# minutes behind too. `_upstream_block`'s stamp disjunct was `up_hours > 0`, so the
+# chain was admitted on every one of those six mornings and the alert said #42 was
+# "held: waiting on #38 (inside its 36 h stale_bypass window: #38 ran 23.9 h ago),
+# blocked-by #38, which is 0.1h past its own next_run" about a run that finished eight
+# minutes later. The instant is `~/obsidian/memory/2026-10-13.md:28`, written 05:04Z;
+# the chain completed anyway 12 min after its own `next_run`
+# (`~/lloyd-data/autonomy-runs/42/run_42_20261014_050642.md`).
+
+#: The tick's instant: 05:04Z, four minutes after #38 launches.
+NIGHT_TICK = dt.datetime(2026, 10, 14, 5, 4, tzinfo=dt.timezone.utc)
+#: #38's previous completion, 23.9 h before that tick — the figure the alert printed.
+NIGHT_UP_LAST_RUN = NIGHT_TICK - dt.timedelta(hours=23, minutes=54)
+
+
+def _mid_flight_chain(aut, *, up_minutes_past=4, dep_minutes_past=6):
+    """The nightly board as the watchdog actually sees it, seeded at `NIGHT_TICK`.
+
+    #38 is `daily` with a `success` newest run record — it is NOT broken — and its own
+    `next_run` is `up_minutes_past` behind, which is what it means for a run to still
+    be going. #42 is `daily`, `up_next`, `depends_on: 38`, `stale_bypass_hours: 36`,
+    and `dep_minutes_past` behind its own stamp, so the one-period bound has not
+    reached it and #2417's door is the only thing that could name it.
+    """
+    write_task(aut, 38, last_run=NIGHT_UP_LAST_RUN.isoformat(),
+               next_run=(NIGHT_TICK
+                         - dt.timedelta(minutes=up_minutes_past)).isoformat())
+    _record(aut, 38, "run_38_20261013_050021", status="success",
+            completed_at=NIGHT_UP_LAST_RUN.isoformat())
+    write_task(aut, 42, depends_on=38, stale_bypass_hours=36,
+               last_run=(NIGHT_TICK - dt.timedelta(hours=23,
+                                                   minutes=30)).isoformat(),
+               next_run=(NIGHT_TICK
+                         - dt.timedelta(minutes=dep_minutes_past)).isoformat())
+
+
+def _chain_door(aut, monkeypatch):
+    """#2417's door, read directly, for #42 on whatever board is seeded.
+
+    Read through `_upstream_block` rather than only through the scan, because the scan
+    of a suppressed board is empty and an empty scan is also what a board produces when
+    the door was never consulted. This answers the question the grace is about: was the
+    upstream's stamp behind, and did the door open anyway?
+    """
+    _pin(aut, monkeypatch, when=NIGHT_TICK)
+    dep = aut._parse_task_file(aut._find_task_file(42))
+    gap = aut.next_run_gap(dep, now=NIGHT_TICK)
+    assert gap["hours_past_next_run"] is not None and gap["past_next_run"] is False, (
+        f"the dependent is not the shape #2417's door is keyed on: {gap!r}")
+    return fw._upstream_block(dep, gap, aut.dependency_resolution_set(), NIGHT_TICK)
+
+
+def test_a_dependent_behind_an_upstream_still_running_its_daily_slot_is_not_flagged(
+        aut, monkeypatch, tmp_path):
+    """#2695 clause 1: minutes of stamp behind a `success` record is arithmetic, not a hold.
+
+    The morning board, at the tick. The door has to answer `late_or_dead: False` even
+    though the upstream's stamp is 4 min behind, because a run in progress is the
+    ordinary state of a `daily` task at its own launch minute and the watchdog's tick
+    is in that window every single day — six mornings of the alert are the premise, not
+    a hypothetical. Then the scan names nobody, so the message a person would have
+    received contains neither the short-row clause nor the `inside its 36 h
+    stale_bypass window` detail, which is the line that reached
+    `~/obsidian/memory/2026-10-08.md:26` through `2026-10-13.md:28`.
+
+    The assertions on the door's own fields are what keep the empty scan honest: the
+    board IS late by minutes, the upstream's record IS a success, so the silence below
+    is the grace answering and not a fixture that stopped being late.
+    """
+    _mid_flight_chain(aut)
+    blocked = _chain_door(aut, monkeypatch)
+
+    assert blocked["upstream_status"] == "success" and blocked["upstream_run"], (
+        f"the fixture's upstream is not mid-run behind a clean record: {blocked!r}")
+    assert 0.06 <= blocked["upstream_hours_past"] <= 0.07, (
+        "the upstream's stamp is not the minutes-behind the nightly tick actually "
+        f"finds: {blocked['upstream_hours_past']!r}")
+    assert blocked["late_or_dead"] is False, (
+        "the door named a chain whose upstream is four minutes into a run that is "
+        f"going fine: {blocked!r}")
+
+    flagged = _chain_flagged(aut, tmp_path)
+    assert flagged == {}, (
+        "a dependent minutes late behind an upstream that is still running its daily "
+        f"slot was reported — the nightly line #2695 is about: {sorted(flagged)}")
+    msg = fw._nextrun_alert_message(list(flagged.values()))
+    for phrase in ("less than one period", "inside its 36 h stale_bypass window"):
+        assert phrase not in msg, (
+            f"the alert a person receives still says {phrase!r}: {msg!r}")
+
+
+def test_a_failed_upstream_opens_the_door_at_minutes_of_lateness_too(
+        aut, monkeypatch, tmp_path):
+    """#2695 clause 2: the grace is on the stamp disjunct only, and the record disjunct is untouched.
+
+    Same board, same 3 h late dependent, and #38's newest run record says `failed`
+    while its stamp is only 20 min behind — inside `_NEXTRUN_UPSTREAM_GRACE_HOURS`. A
+    grace that reached this disjunct would re-ship the silence #2417 was filed for, so
+    the row must arrive and the sentence must be #2417's own: the failure named, and
+    the minutes appended because there are some.
+
+    Beside it, the incident fixture at its 6.2 h: the sentence
+    `test_a_dependent_three_hours_behind_a_failed_upstream_is_flagged` pins byte for
+    byte is re-asserted here rather than trusted, because that node is the reason this
+    grace may not widen to the record disjunct and a change that quietly moved its
+    numbers would otherwise be green on both.
+    """
+    _pin(aut, monkeypatch, when=CHAIN_WHEN)
+    _late_chain(aut, up_status="failed",
+                up_next_run="2026-10-08T10:55:00+00:00")
+    flagged = _chain_flagged(aut, tmp_path, "graced-failure.db")
+    assert 42 in flagged, (
+        "a dependent behind a FAILED upstream was suppressed because the upstream's "
+        f"stamp was only 20 min behind: {sorted(flagged)}")
+    assert fw._stall_line(flagged[42]) == (
+        "#42 (task42) is 3.0h past its next_run — held: waiting on #38, "
+        "blocked-by #38, which failed at 2026-10-08T05:04:09Z and is 0.3h past "
+        "its own next_run"
+    ), f"the grace reached the record disjunct: {fw._stall_line(flagged[42])!r}"
+
+    _late_chain(aut)     # the 2026-10-08 incident board again, 6.2 h on the stamp
+    incident = _chain_flagged(aut, tmp_path, "incident.db")
+    assert fw._stall_line(incident[42]) == (
+        "#42 (task42) is 3.0h past its next_run — held: waiting on #38, "
+        "blocked-by #38, which failed at 2026-10-08T05:04:09Z and is 6.2h past "
+        "its own next_run"
+    ), f"#2417's own sentence moved: {fw._stall_line(incident[42])!r}"
+
+
+def test_a_success_upstream_past_the_grace_still_names_its_chain(
+        aut, monkeypatch, tmp_path):
+    """#2695 clause 3: past the grace, the nightly line is exactly the line it was.
+
+    One number moves — #38's stamp goes from 4 min to 45 min behind, so it is late by
+    more than it is running — and everything else is the board above. The row must come
+    through #2417's door (`past_period` False, so the one-period bound did not move),
+    and the sentence must still carry the detail the suppressed case was stripped of:
+    `held: waiting on #38 (inside its 36 h stale_bypass window: #38 ran 23.9 h ago)`
+    plus the blocked-by clause, 0.8 h being what the alarm's one-decimal formatter says
+    of 45 minutes. A grace that suppressed this too would be the same alarm with a
+    longer fuse, and the genuinely-slipped night #2695's acceptance asks about would
+    never be reported at all.
+    """
+    _mid_flight_chain(aut, up_minutes_past=45)
+    blocked = _chain_door(aut, monkeypatch)
+    assert blocked["late_or_dead"] is True and blocked["upstream_status"] == "success", (
+        "45 minutes past a `success` upstream's own next_run did not open the door: "
+        f"{blocked!r}")
+
+    flagged = _chain_flagged(aut, tmp_path)
+    assert 42 in flagged and flagged[42]["past_period"] is False, (
+        "the row did not come through #2417's door: "
+        f"{ {k: flagged[k].get('past_period') for k in flagged} }")
+    assert fw._stall_line(flagged[42]) == (
+        "#42 (task42) is 0.1h past its next_run — held: waiting on #38 (inside its "
+        "36 h stale_bypass window: #38 ran 23.9 h ago), blocked-by #38, which is "
+        "0.8h past its own next_run"
+    ), f"the genuine hold is not the line it was: {fw._stall_line(flagged[42])!r}"
+    msg = fw._nextrun_alert_message(list(flagged.values()))
+    assert "less than one period" in msg, (
+        f"the head stopped describing a row inside its period: {msg!r}")
+
+
 # ── A preferred_hours occurrence lost under an operator pause (#2552) ────────
 #
 # The datum, from `workers.db` and `~/lloyd-data/autonomy-runs/`: the pool was

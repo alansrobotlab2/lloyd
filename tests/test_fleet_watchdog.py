@@ -629,6 +629,89 @@ async def test_the_nextrun_alarm_keeps_its_own_streak_and_24h_cooldown(
         f"(24 h) cooldown: {alerts}")
 
 
+async def test_a_row_the_grace_suppressed_is_logged_once_and_posts_nothing(
+        board, monkeypatch, tmp_path, caplog):
+    """#2695 clause 4: when the grace is what closed the door, the tick logs it and posts nothing.
+
+    The nightly board at the tick's instant: #38 `daily`, its newest run record a
+    `success` completed 23.9 h ago, its own `next_run` four minutes behind because a
+    completion is what moves that stamp and it is mid-run; #42 `daily`, `up_next`,
+    `depends_on: 38`, `stale_bypass_hours: 36`, six minutes behind its own stamp, so
+    the one-period bound of #421 has it nowhere and #2417's door is the only way in.
+
+    The alerting condition is seeded one tick away — streak at
+    `_STALL_NEXTRUN_TICKS - 1` with both cooldown slots clear — so an empty `alerts`
+    list below can only be the grace answering, not a watchdog that had not yet counted
+    to five. And the cooldown is asserted unspent afterwards: the same shape #1661's
+    declared-park suppression keeps, because a benign row must not spend the one alert
+    a genuinely slipped night still needs.
+
+    What the log record owes is the reader's half: the dependent, the upstream, and how
+    far past the upstream's own `next_run` it sat. Without it a silent alert and a
+    suppressed one are the same sentence, which is the failure mode this file's
+    declared-park node exists to prevent.
+    """
+    import logging
+
+    write_task(board, 38, frequency="daily",
+               last_run=_ago(hours=23, minutes=54), next_run=_ago(minutes=4))
+    _run_record(38, "run_38_20261013_050021",
+                completed_at=_ago(hours=23, minutes=54))
+    write_task(board, 42, frequency="daily", depends_on=38, stale_bypass_hours=36,
+               last_run=_ago(hours=23, minutes=30), next_run=_ago(minutes=6))
+    q = WorkQueue(tmp_path / "grace.db")
+    # The board has to be live for the silence below to mean anything: the dependent IS
+    # past its own `next_run`, its upstream's stamp IS behind, and it is the grace and
+    # not an empty board that answers `late_or_dead: False`.
+    dep = autonomy._parse_task_file(autonomy._find_task_file(42))
+    blocked = fw._upstream_block(dep, autonomy.next_run_gap(dep),
+                                 autonomy.dependency_resolution_set(),
+                                 dt.datetime.now(dt.timezone.utc))
+    assert (blocked["upstream_status"], blocked["late_or_dead"]) == ("success", False), (
+        f"the door did not close on the grace for the reason this node is about: {blocked!r}")
+    assert blocked["upstream_hours_past"] > 0, (
+        "the upstream is not past its own next_run at all, so there was nothing for "
+        f"the grace to suppress: {blocked!r}")
+
+    _streak_at_alerting_threshold(monkeypatch, stall_streak=0,
+                                  nextrun_streak=fw._STALL_NEXTRUN_TICKS - 1)
+    alerts = _watch_alerts(monkeypatch)
+    assert fw._last_alert_instant(q, fw._NEXTRUN_WM_KEY, "next_run") is None, (
+        "the cooldown slot was already spent by another test's tick, so `no alert` "
+        "below would not distinguish the grace from a cooldown")
+
+    # `caplog.records` spans the whole test, and the door read above is a real call to
+    # the function that logs — so the count below is measured from here, not from the
+    # test's start.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=fw.logger.name):
+        await fw.tick(q)
+
+    assert alerts == [], (
+        "the nightly line is still posted: a dependent six minutes behind an "
+        f"upstream that is mid-run behind a success record: {alerts}")
+    assert fw._state["nextrun_streak"] == 0, (
+        "the streak kept counting, so the scan still named the chain and the empty "
+        f"alert list is the cooldown, not the grace: {fw._state['nextrun_streak']}")
+    assert fw._last_alert_instant(q, fw._NEXTRUN_WM_KEY, "next_run") is None, (
+        "the suppressed row spent the 24 h alert slot, which is the night a genuinely "
+        "slipped chain goes unreported")
+
+    suppressions = [r for r in caplog.records
+                    if "did not name the chain" in r.getMessage()]
+    assert len(suppressions) == 1, (
+        "one suppressed chain must be exactly one log record — zero leaves a silent "
+        f"alert indistinguishable from a healthy board: {[r.getMessage() for r in suppressions]}")
+    said = suppressions[0].getMessage()
+    assert "#42" in said and "#38" in said, (
+        f"the record does not name both ends of the chain: {said!r}")
+    assert "4 min past its own next_run" in said, (
+        "the record does not say how far past the upstream's own next_run it sat, "
+        f"which is the number a reader weighs the grace against: {said!r}")
+    assert suppressions[0].levelno == logging.WARNING, (
+        f"the suppression is not at the level the route precedent uses: {said!r}")
+
+
 async def test_the_parse_scan_keeps_its_30_minute_cadence(
         board, monkeypatch, tmp_path):
     """Clause 4, third reader: the scan still scans on its 30 min slot, not per tick.
