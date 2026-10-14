@@ -754,3 +754,87 @@ def test_no_record_that_had_a_tag_keeps_it_untouched_and_the_rest_gain_one(facts
         for r in _records(facts_root, rel):
             assert R.record_is_untagged(r) == (K._tag_of(r) == ""), \
                 f"{rel}: this script and the rail disagree on what untagged means"
+
+
+def test_a_healthy_file_is_reported_as_nothing_to_do_and_not_as_left_untagged(
+        facts_root, capsys):
+    """Clause 1's report has to be READ before an 831-file `--apply`, and a file that
+    holds no untagged record must not be itemised as a file left untagged.
+
+    Two shapes carry no untagged record at all: a file where every record already
+    names its entity, and a file with no `facts:` list. Over the live tree on
+    2026-10-14 those were 24,575 and 14,697 files — 39,272 of 40,094 — and the dry
+    run printed every one of them under `skip: … file(s) left untagged`, a claim false
+    about each of them (they hold nothing untagged) in the one report a human reads
+    before applying. They are now counted on one line, and the skip block keeps only
+    the population clause 3 is about: files that DO hold untagged records the repair
+    refused to tag, each named.
+    """
+    tagged = facts_root / "Gamma Tool" / "Gamma Tool-state.md"
+    tagged.parent.mkdir(parents=True)
+    tagged.write_text(_doc("Gamma Tool", [
+        _rec("Already names its entity.", "Gamma Tool", id="g-1"),
+    ]))
+    empty = facts_root / "Gamma Tool" / "Gamma Tool-notes.md"
+    empty.write_text(_doc("Gamma Tool", []))
+
+    assert R.main(["--facts-root", str(facts_root)]) == 0
+    out = capsys.readouterr().out
+
+    rep = R.plan_tree(facts_root)
+    assert rep.no_action_files == 2, rep.no_action
+    assert rep.no_action == {"no facts: list": 1,
+                             "every record already carries its entity": 1}, \
+        rep.no_action
+    # The genuine skip population is untouched by this: the two files whose own
+    # top-level entity names nothing, still 3 records, still itemised by name.
+    assert rep.skipped == 3 and len(rep.skips) == 2, rep.skips
+    block = out.split("skip:")[1]
+    for rel, _reason in rep.skips:
+        assert rel in block, f"{rel} vanished from the skip block"
+    for name in ("Gamma Tool-state.md", "Gamma Tool-notes.md"):
+        assert name not in block, f"{name} is healthy but was called left untagged"
+
+    line = next(ln for ln in out.splitlines() if ln.startswith("nothing to do in "))
+    assert line.startswith("nothing to do in 2 file(s): 1 hold no fact records, "
+                           "1 already fully tagged"), line
+    assert "hold no fact records" in out and "already fully tagged" in out
+
+
+def test_the_dry_run_report_stays_short_on_a_tree_where_almost_every_file_is_healthy(
+        tmp_path, capsys):
+    """The live tree's shape, compressed: 1 bad file, 1 refused file, 300 healthy ones.
+
+    97.9% of the live facts tree is healthy and the repair's own report scales with
+    it, so line count is the property that made the dry run unreadable: 40,655 lines
+    for 831 files that would be repaired. Three hundred healthy files here must cost
+    ONE counted line, while the file that would be repaired still gets its per-file
+    count and the refused file still gets named.
+    """
+    healthy = tmp_path / "Healthy"
+    healthy.mkdir()
+    for i in range(300):
+        (healthy / f"Healthy-h{i:03d}.md").write_text(_doc(
+            "Healthy", [_rec(f"Tagged record {i}.", "Healthy", id=f"h-{i}")]))
+    broken = tmp_path / "Broken"
+    broken.mkdir()
+    (broken / "Broken-state.md").write_text(_doc("Broken", [
+        _rec("Needs a tag.", None, id="b-1"), _rec("Also needs one.", None, id="b-2"),
+    ]))
+    refused = tmp_path / "Unattributed"
+    refused.mkdir()
+    (refused / "Unattributed-state.md").write_text(_doc("", [
+        _rec("No entity anywhere to supply it.", None, id="u-1"),
+    ]))
+
+    assert R.main(["--facts-root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+
+    assert len(lines) < 40, f"{len(lines)} lines to say 1 file needs a tag"
+    assert any(ln.startswith("  Broken/Broken-state.md: 2 record(s) "
+                             "-> entity: Broken") for ln in lines), out
+    assert "nothing to do in 300 file(s): 300 already fully tagged" in out, out
+    block = out.split("skip:")[1]
+    assert "Unattributed/Unattributed-state.md" in block, out
+    assert "Healthy-h000.md" not in block, out

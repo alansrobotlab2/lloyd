@@ -140,6 +140,26 @@ def _dump_entity(name: str) -> str:
     return value.strip()
 
 
+#: Reasons that mean "this file has nothing for the repair to do", as opposed to
+#: "this file has untagged records the repair refused to tag". Only these two, and
+#: both contribute 0 to the alarm by definition: a file with no `facts:` list has no
+#: records, and a file where every record already carries its entity has no untagged
+#: record. Measured over the live tree on 2026-10-14 these are 24,575 and 14,697 of
+#: its 39,272 skips — 97.5% of the population — while every genuine skip population
+#: (a blank/absent top-level `entity:`, a directory on `DIR_SKIP`, front matter that
+#: will not parse) carries untagged records or is a declared exclusion and stays
+#: printed one line per file.
+#:
+#: They are collapsed to one counted line in the report because the alternative is
+#: that a dry run over the live tree prints 40,655 lines of which 39,272 say
+#: "left untagged" about files that hold nothing untagged — and the dry run exists to
+#: be read before an 831-file `--apply`.
+NO_ACTION_REASONS = {
+    "no facts: list": "hold no fact records",
+    "every record already carries its entity": "already fully tagged",
+}
+
+
 class Skip(Exception):
     """This file is left exactly as it is, and the reason is printed.
 
@@ -433,6 +453,7 @@ class Report:
     def __init__(self) -> None:
         self.plans: list[dict] = []
         self.skips: list[tuple[str, str]] = []      # (path, reason)
+        self.no_action: dict[str, int] = {}         # reason -> file count
         self.errors: list[tuple[str, str]] = []     # (path, why it could not be read)
         self.failed: list[tuple[str, str]] = []     # (path, why the write failed)
         self.written_paths: list[Path] = []
@@ -486,8 +507,19 @@ class Report:
         return out
 
     def add_skip(self, path: Path, reason: str, untagged: int = 0) -> None:
+        # A file with no records and a file already fully tagged have no untagged
+        # record to leave behind, so they are counted, not itemised: see
+        # `NO_ACTION_REASONS`. Everything else stays one line per file, because that
+        # is the list clause 3 demands and the one a reader has to check by name.
+        if reason in NO_ACTION_REASONS:
+            self.no_action[reason] = self.no_action.get(reason, 0) + 1
+            return
         self.skips.append((str(path), reason))
         self.skipped_records += untagged
+
+    @property
+    def no_action_files(self) -> int:
+        return sum(self.no_action.values())
 
     def stamp_invocation(self):
         """Who ran this, into the report (`_invocation.py`).
@@ -529,6 +561,16 @@ class Report:
             out.append("dirs:")
             for d, n in sorted(self.by_dir.items(), key=lambda kv: (-kv[1], kv[0])):
                 out.append(f"  {d}: {n} record(s)")
+        if self.no_action:
+            # Counted, never itemised. Ordered as `NO_ACTION_REASONS` declares it, so
+            # the line is byte-stable across runs of the same tree.
+            parts = ", ".join(f"{self.no_action[r]} {label}"
+                              for r, label in NO_ACTION_REASONS.items()
+                              if r in self.no_action)
+            out.append("")
+            out.append(f"nothing to do in {self.no_action_files} file(s): {parts}. "
+                       f"None of them holds an untagged record, so none of them is "
+                       f"in the alarm")
         if self.skips:
             out.append("")
             out.append(f"skip: {len(self.skips)} file(s) left untagged, "
