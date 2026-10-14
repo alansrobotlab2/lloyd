@@ -14,7 +14,9 @@ and "a 9-rung gate" in a summary table, and both rotted inside 24 hours of
 the doc's own `date:`; each has an owner (the autonomy board, the gate's
 ladder list) that `autonomy-jobs.md` refuses to copy for the same reason. So
 the index may not state a fleet or a rung count as a bare integer. Exempt, and
-deliberately not matched by the pattern: the GPU table (hardware, three rows),
+deliberately not matched by the pattern: the GPU table (hardware, five rows
+since 2026-10-07 — and its row count is pinned by
+`tests/test_infrastructure_gpu_inventory.py`, not by this exemption),
 the retired-name list under "Retired" (a fixed historical set), and the
 `~8,700-test suite` figure, which is an order of magnitude with a tilde, not
 a count of a set with an enumerable owner.

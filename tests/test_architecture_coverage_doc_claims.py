@@ -625,6 +625,10 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
   'bin/start-qwen3-tts.sh':
    ('other-tree: a sub-path of `agent-services/`, the directory the'
     'section is about, so the real file is `agent-services/bin/...`'),
+  'bin/start-qwen3-tts-omni.sh':
+   ('other-tree: a sub-path of `agent-services/`, the directory the'
+    'section is about, so the real file is `agent-services/bin/...`'
+    '; #2697 added the row for the omni TTS'),
   'bin/start-qwen38-flash-next.sh':
    ('other-tree: a sub-path of `agent-services/`, the directory the'
     'section is about, so the real file is `agent-services/bin/...`'),
