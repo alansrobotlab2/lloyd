@@ -3579,3 +3579,172 @@ def test_growing_one_exemption_list_reddens_the_rail():
         "the verdict still complains when both lists carry the entry and the sentence "
         "says the number they carry, so a legitimate eighth exemption could never be "
         "landed")
+
+
+# ── #2722: the runner job's own schedule and prune, checked from the repo ────
+#
+# The task file and its skill are vault paths and land through
+# `automod_vault_land`, so nothing in the vault can carry a test. What the repo
+# *can* do is read those two published definitions and refuse them when they
+# stop meaning what the item asked for — which is what the two nodes below do.
+
+_RETAG_JOB = "98-retag-untagged-facts.md"
+_ALARM_JOB = "60-knowledge-health-report.md"
+_RETAG_SKILL = Path("retag-untagged-facts") / "SKILL.md"
+
+
+def _front_matter(name: str) -> dict:
+    """The job's own fields, as the scheduler's reader would take them."""
+    import yaml
+
+    text = (Path.home() / "obsidian" / "autonomy" / name).read_text(encoding="utf-8")
+    fm = text.split("---", 2)
+    assert len(fm) == 3, f"{name} has no front matter to read a schedule from"
+    return yaml.safe_load(fm[1])
+
+
+def test_the_retag_runner_declares_its_own_rate_and_an_earlier_hour_than_the_alarm():
+    """Clause 2: the repair is ordered before the report that reads its tree.
+
+    Both halves are needed and neither is decoration. `frequency:` has to be on
+    the file itself: #24 — the job #98 names as its parent — runs `6x-daily`, so a
+    child that inherited a rate would be scheduled six times a day against a
+    nightly repair, and `validate_tasks.py` treats a contradicting
+    `runs_per_day:` as exactly that error. And the hour is the only ordering the
+    scheduler enforces here, because `depends_on` cannot bound a child of a
+    6x-daily parent.
+
+    The hour is machine-local, not UTC: `_is_preferred_hour` compares
+    `_local_hour()` to the list (`app/autonomy.py:2150`), and #60's own pair —
+    hour 4, `next_run` 11:00Z — proves the frame on a UTC-7 box. So the test
+    compares the declared hours to each other, which is frame-free, and refuses
+    any file that quietly redefines what its number means.
+    """
+    import yaml
+
+    runner = _front_matter(_RETAG_JOB)
+    alarm = _front_matter(_ALARM_JOB)
+
+    assert runner.get("frequency"), (
+        f"{_RETAG_JOB} declares no frequency of its own, so its rate would come from "
+        f"a default rather than from a decision — #24, the parent it names, is 6x-daily")
+    assert runner["frequency"] == alarm["frequency"] == "daily", (
+        f"runner {runner['frequency']!r} vs alarm {alarm['frequency']!r}: the report "
+        f"that reads the repaired tree has to be the same night's")
+    assert not runner.get("runs_per_day") or runner["runs_per_day"] == 1, (
+        f"runs_per_day: {runner.get('runs_per_day')!r} contradicts a daily rate, which "
+        f"is the shape validate_tasks.py calls out")
+
+    runner_hours, alarm_hours = runner.get("preferred_hours"), alarm.get("preferred_hours")
+    assert runner_hours and alarm_hours, (
+        "ordering this job against the alarm is the hour, not depends_on: #24 has no "
+        "window, so the dependency cannot bound when the child becomes eligible")
+    assert min(alarm_hours) == 4, (
+        f"the alarm job's window moved to hour {min(alarm_hours)}; the clause's 'before "
+        f"the Knowledge Health Report' is stated against hour 4 and has to move with it")
+    assert min(runner_hours) < min(alarm_hours), (
+        f"runner hour {min(runner_hours)} is not earlier than the alarm's "
+        f"{min(alarm_hours)}: the report would read the un-repaired tree and the alarm "
+        f"buys one more red night, which is the whole point of the ordering")
+
+    body = (Path.home() / "obsidian" / "autonomy" / _RETAG_JOB).read_text(encoding="utf-8")
+    assert "_local_hour" in body, (
+        f"{_RETAG_JOB} states an hour without naming the frame it is measured in; the "
+        f"gate compares machine-local hours, so a UTC reading of the same number is a "
+        f"different night")
+    assert yaml.safe_load(
+        body.split("---", 2)[1]
+    )["next_run"].endswith("+00:00"), "next_run has to be the UTC form"
+
+
+def test_the_runner_keeps_seven_snapshots_and_cannot_reach_the_store_or_a_quarantine(tmp_path):
+    """Clause 3: the prune is a number, and it is pointed only at snapshots.
+
+    Step 4 of `skills/retag-untagged-facts/SKILL.md` is what bounds the store this
+    job opens: the facts tree is 40,411 `.md` files, and
+    `scripts/groundskeeper/retention-sweep.py` has no pattern for `facts-snapshot-*`,
+    so an unpruned nightly `cp -al` grows forever. Reading the command out of the
+    skill rather than restating it is deliberate — the run executes the skill's
+    line, so that is the line worth breaking here.
+
+    Two failure modes are the expensive ones, and both are checked: a keep-count
+    that drifts (the store grows, silently), and a glob that also matches its
+    neighbours — `facts/` is the live store and `facts-quarantine-*` is the
+    2026-09-23 incident's evidence, and an `rm -rf` that reached either would be a
+    second incident on the night of a repair.
+    """
+    skill = (Path.home() / "obsidian" / "skills" / _RETAG_SKILL).read_text(encoding="utf-8")
+    kept = re.search(r"[Kk]eep[s]? (?:exactly )?(\d+) ", skill)
+    assert kept, "the prune step states no keep-N as a number, so nothing bounds the store"
+    n = int(kept.group(1))
+    assert n == 7, f"the skill keeps {n} snapshots; clause 3 is stated as the newest 7"
+
+    command = re.search(r"ls -1d facts-snapshot-\*/[^\n]*?xargs -r rm -rf --", skill)
+    assert command, (
+        "the prune step no longer prints the command it runs, so this test would be "
+        "checking a shape the runner does not execute")
+
+    root = tmp_path / "vault-derived"
+    (root / "facts" / "Entity").mkdir(parents=True)
+    (root / "facts" / "Entity" / "Entity-state.md").write_text("the live store\n")
+    quarantine = root / "facts-quarantine-20260923T070837Z"
+    quarantine.mkdir()
+    (quarantine / "held.md").write_text("the 2026-09-23 incident's evidence\n")
+    snapshots = [f"facts-snapshot-20261013T{i:02d}0000Z" for i in range(10)]
+    for name in snapshots:
+        (root / name / "Entity").mkdir(parents=True)
+        (root / name / "Entity" / "Entity-state.md").write_text("linked bytes\n")
+
+    subprocess.run(command.group(0), shell=True, cwd=root, check=True)
+
+    left = sorted(p.name for p in root.glob("facts-snapshot-*"))
+    assert left == sorted(snapshots[-n:]), (
+        f"kept {left}; the prune must drop the oldest {10 - n} and keep the newest "
+        f"{n} by name order, which is the timestamp order")
+    assert (root / "facts" / "Entity" / "Entity-state.md").read_text() == "the live store\n", (
+        "the prune touched the live facts tree")
+    assert (quarantine / "held.md").exists(), (
+        "the prune reached facts-quarantine-*: that glob has to match snapshots only")
+
+
+def test_the_runner_definition_orders_snapshot_then_apply_then_the_scan():
+    """Clause 1's ORDER, pinned in the repo rather than read off a vault path.
+
+    The runner is three commands plus a prune, and the order is the whole of its
+    safety: an apply that runs before `cp -al` rewrites up to 831 files with no
+    witness of what they said beforehand, and a prune that ran before the scan
+    would have deleted the snapshot the scan's reading is compared against. The
+    two nodes above check the job's rate, its hour and its prune command — none
+    of them can see an order, so a definition that quietly reordered the steps
+    would still pass both.
+
+    Both surfaces are checked because both reach the worker: `_build_task_prompt`
+    (`app/autonomy.py`) renders the skill body together with the front-matter
+    `description`, so a body that says snapshot-first beside a description that
+    lists the apply first is a live contradiction, not a documentation slip. The
+    deletion marker differs per surface for a reason — the skill states the prune
+    as the command it runs (`rm -rf`), the description states it as prose
+    ("keeping the newest 7") — and the skill's own "snapshot, then apply, then
+    log, then prune" line is why the word `prune` cannot serve as a marker there.
+    """
+    runner = _front_matter(_RETAG_JOB)
+    assert runner["skill_name"] == "retag-untagged-facts", (
+        f"the task names skill {runner['skill_name']!r}, so the definition this test "
+        f"reads is not the one the scheduler renders into the prompt")
+
+    core = ("cp -al", "retag_untagged_facts.py --apply", "kg_hygiene.scan")
+
+    skill = (Path.home() / "obsidian" / "skills" / _RETAG_SKILL).read_text(encoding="utf-8")
+    body = skill.split("---", 2)[2]
+    steps = [body.index(m) for m in core] + [body.index("rm -rf")]
+    assert steps == sorted(steps), (
+        f"the skill's steps sit at {steps}, not in the order snapshot → apply → scan → "
+        f"prune: an apply ahead of the snapshot leaves an 831-file rewrite unwitnessed, "
+        f"and a prune ahead of the scan deletes the witness")
+
+    desc = runner["description"]
+    said = [desc.index(m) for m in core] + [desc.index("keeping the newest 7")]
+    assert said == sorted(said), (
+        f"the task's own `description` orders the steps as {said}, and that field is "
+        f"rendered into the prompt beside the skill, so the two definitions have to "
+        f"agree on the order rather than merely both be present")

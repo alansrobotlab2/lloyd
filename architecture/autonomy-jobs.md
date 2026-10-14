@@ -39,14 +39,26 @@ job is for, what it reads and writes, what it must not do, and what has already
 gone wrong with it.
 
 Jobs are numbered by their task id and that numbering is historical, not
-ordered: ids run 24 through 97 or beyond, with gaps where tasks were retired
-(2026-10-12). Which ids are live is `GET /api/autonomy/tasks`'s business, not
+ordered: ids run 24 through 98 or beyond, with gaps where tasks were retired
+(2026-10-12). #98, the retag-untagged-facts runner, is the newest and was filed
+2026-10-14. Which ids are live is `GET /api/autonomy/tasks`'s business, not
 this document's. Typing a ceiling here has been wrong twice inside a week: the
 bound stopped at 85 while 86 was already running nightly, #1102 corrected it to
-86, and #87–#90 overtook that correction inside three days. #91–#97 then
-overtook the correction this paragraph carries, between 2026-09-29 and
-2026-10-11. So the range above is a floor, and the id it names carries the date
-it was the newest.
+86, and #87–#90 overtook that correction inside three days; #91–#97 overtook the
+correction this paragraph carries between 2026-09-29 and 2026-10-11. So the
+range above is a floor, and the id it names carries the date it was the newest.
+
+**A filed task and an armed task are two different things, and the two kinds of
+statement below follow different ones.** The membership tables take the task
+*directory* as their source of truth, because the directory is what dispatches: #98
+is filed, so it already has its row in both tables and the counts beside those rows
+include it. The dependency arithmetic follows the fleet that actually runs instead —
+#98 declares `depends_on: 24` while it sits `status: draft`, so the wiring diagram
+still draws the ten arrows #1520 verified and §The wiring keeps its own dated count.
+Arming the job is what adds the eleventh arrow and moves that sentence one, and
+sending a filed task to `up_next` is a dispatch-affecting edit an unattended round
+may not make, which is why that step is a person's. Which state an id is in is
+`GET /api/autonomy/tasks`'s business, as above.
 
 **Membership below is complete as of 2026-10-12, in both directions, and since
 2026-10-13 that completeness is checked against the directory instead of
@@ -55,6 +67,9 @@ thinking-fidelity prevalence series, #92 vLLM prefix-miss daily, #93
 step-conformance replay, #94 referential-integrity ledger, #95 mitigation drill,
 #96 djev name-prior probe and #97 landed-outcomes daily record have their
 entries, in [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97).
+#98 retag untagged facts has its row, and the reason a repaired-the-record job
+belongs beside #48 rather than beside the watchers, under
+[Canonicalize](#canonicalize-48-67-84-98).
 The three paper digests #87 #88 #89 are gone from the tables below: each read
 one named arXiv paper into exactly one knowledge note, was dispatched
 interactively on 2026-09-24, and leaves no `87-*.md`, `88-*.md` or `89-*.md`
@@ -81,7 +96,7 @@ other direction, for three.
 | [Ingest](#ingest-68-30-53) | #68 #30 #53 | turn outside signal into internal state |
 | [Distil](#distil-38-42-39-40-47--56-57-58-83--54) | #38 #42 #39 #40 #47 · #56 #57 #58 #83 · #54 | read what we already have, write something more useful than the sum of it |
 | [Build the graph](#build-the-graph-24-51-74) | #24 #51 #74 | turn documents and trajectories into facts and typed edges |
-| [Canonicalize](#canonicalize-48-67-84) | #48 #67 #84 | make what is already stored agree with itself |
+| [Canonicalize](#canonicalize-48-67-84-98) | #48 #67 #84 #98 | make what is already stored agree with itself |
 | [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
 | [Bound entropy](#bound-entropy-79-81-78-80-90) | #79 #81 #78 #80 · #90 | stop the stores rotting or growing without limit |
 | [Measure](#measure-60-82-70-36-76-86) | #60 #82 #70 #36 #76 #86 | say whether any of it is working |
@@ -99,7 +114,7 @@ the row answers the permission question, never the size question:
 
 | Tier | Jobs | |
 |---|---|---|
-| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #48 · #92 #93 #94 | 24 |
+| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #48 #98 · #92 #93 #94 | 25 |
 | Injects expiring context unattended | #68 | 1 |
 | Proposes; an operator applies | #67 #84 | 2 |
 | Reports only | #60 #82 #70 #78 #80 #36 #86 #90 · #91 #95 #96 #97 | 12 |
@@ -109,8 +124,10 @@ The rows answer "may it write while nobody is watching", not "how much may it
 write". **#48 is in the top tier because it does write** — aliases, edge
 rewrites and moved fact files, every night — and what holds that to name-shape
 variants is the guard rail layer described under
-[Canonicalize](#canonicalize-48-67-84), not the tier; its two group mates, #67
-and #84, stay in the propose row because they stop at a file of proposals.
+[Canonicalize](#canonicalize-48-67-84-98), not the tier. Its group mates split
+the same way the heading's own table says: #67 and #84 stay in the propose row
+because they stop at a file of proposals, and #98 joins #48 at the top because
+it rewrites fact files on the same tree unattended the moment anyone arms it.
 
 Two consequences the function grouping makes visible and the chain grouping did
 not:
@@ -180,7 +197,11 @@ grouping those three jobs sat in one list and the alternation was invisible.
 29 of the 39 tasks (2026-10-12) declare no dependency at all: ten jobs name a
 parent, one each, and those ten are exactly the arrows drawn above. None of
 #91–#97 declares a parent, so the arrows are the same ten #1520 verified and the
-pair moved by seven together.
+pair moved by seven together. #98 is the newest file and the only one that
+declares a parent without being drawn: `depends_on: 24`, filed `status: draft`,
+so it is not in the fleet the diagram counts — arming it adds an eleventh arrow
+and takes one off the 29, which is the armed-state move the fleet-bound
+paragraph above already carries.
 
 ### Two holes in the wiring
 
@@ -658,7 +679,7 @@ signals, trace2skill reads the tool-call record, and #54 reads the vault itself.
 What each of these writes is the grouping, not whether it writes: #24 produces
 entities and `mentions` edges; #51 adds co-access edges from the trajectory
 record; #74 re-types what #24 left untyped, after
-[Canonicalize](#canonicalize-48-67-84) has settled the names underneath. These
+[Canonicalize](#canonicalize-48-67-84-98) has settled the names underneath. These
 are the only jobs that **create** edges and entities. #48 writes the same store
 unattended every night too — it rewrites edges onto the surviving name, writes
 aliases and moves fact files — but it creates no entity and no relation, only a
@@ -691,7 +712,7 @@ system python on a staged snapshot, so it can import neither `app.kg_store` nor
 
 ---
 
-## Canonicalize: #48, #67, #84
+## Canonicalize: #48, #67, #84, #98
 
 Make what is already stored agree with itself — one name per entity, no
 contradictory claims. **What this group may change is a name, never a fact**, and
@@ -705,6 +726,7 @@ asymmetry is the group's defining property, not an accident of scheduling.
 | #48 | daily | #24 | Name-shape clustering; **applies** the `CASE`/`PUNCT` shape merges unattended (`--apply --tiers CASE,PUNCT`). The apply is **one store transaction** — the aliases and every edge rewrite — followed by a fact-file half that runs outside that transaction and is **resumable**: each variant's dir outcome is journalled into the apply report as it completes, and a kill in the gap is finished by `--resume <the apply report>`, which replays only the pending `dir_operations`. Suffix pairs never apply on schedule: they need a unanimous definition-based verdict from the semantic gate *and* a human to pass the tier |
 | #67 | weekly | — | LLM-judges the pairs string rules cannot — differently-spelled names, abbreviations, path variants. ~40 min/run. Writes `semantic-proposals-latest.jsonl` for #48's review list; strict guard rails downgrade questionable merges to alias-only |
 | #84 | daily | — | Fact-quality pass: reads the corrections log and recent-write drift, pairs contradictions, reports which claims an independent reason condemns |
+| #98 | daily | #24 | Repair the one fact-tag defect the rail can count: records stored with an empty `entity`, which silently drop out of entity recall while looking healthy in the file. Snapshots the facts tree with `cp -al` **first**, then `retag_untagged_facts.py --apply` — **entity tags only**, never a text, date or provenance edit — then reads the rail's own count back and prunes snapshots keeping the newest 7. **Filed and not yet armed:** `status: draft`, so no run exists and none of its numbers is a measurement. `preferred_hours: [3]` — one hour ahead of #60's `[4]`, both read as machine-local hours, which is the frame `_is_preferred_hour` compares — is what orders it against the report; its `depends_on: 24` is an ordering *statement* only, since #24 runs six times a day |
 
 **#48 moves fact files unattended, and only for the tiers that are mechanical.**
 Step 3 of `skills/entity-resolution-sweep/SKILL.md` — the prompt the scheduler
@@ -728,6 +750,33 @@ operator act. The rails are the whole point of the arrangement, since the
 unattended applies — and the symbol-variant names (`C` / `C++` / `C#`) that the
 first automatic apply merged, and a revert then undid, are why the line sits at
 *mechanical* rather than at *whatever the judge approves*.
+
+**#98 applies a repair, and the ruling that says the loop may run it is not this
+page's.** The defect it fixes is the one the measurement rail can count and no
+job repaired: fact records stored with an empty `entity`, which fall out of
+entity recall while the file still looks healthy. `scripts/memory/retag_untagged_facts.py`
+has been able to repair them since 2026-10-13 and has never run, because its
+contract named an operator for `~/lloyd-data`; the owed-check ruling that closed
+#2686 on 2026-10-14 decided the remaining work was a scheduled run on this box
+rather than a human task, which is the same answer #990 gave #48. So the write
+joins the top tier, and it is bounded the way #48's is — **entity tags only**,
+never a text, a date or a provenance field. Two duties are new to it and both
+live in `skills/retag-untagged-facts/SKILL.md` rather than here. It snapshots the
+facts tree with `cp -al` **before** the apply, because unlike #48 it has no
+per-item journal and no `--resume`: a hardlink tree is the whole undo, costs links
+rather than bytes, and holds its pre-apply bytes through the repair only because
+the repair renames a new inode over each file it touches — the property
+`test_a_hardlink_snapshot_still_holds_the_pre_apply_bytes_after_the_apply` pins,
+since a snapshot that silently tracked the write would be worse than none. And it
+prunes what it creates, keeping the newest 7, because no other mechanism bounds
+that root — `scripts/groundskeeper/retention-sweep.py` has no pattern for
+`facts-snapshot-*`, so an unpruned nightly snapshot of a 40,411-file tree is an
+unbounded store opened on the very night a count was scheduled to come down. Its
+report reads the count back through the rail (#60's scan) and not through its own
+plan, because the plan is a strict superset of what the rail counts — 3,209
+records in 831 files against 3,206 in 830 on the 2026-10-14 dry run — and any
+check written as an equality between the two fails on arithmetic instead of on
+the repair.
 
 **#84 exits 2 rather than report zero** when the graph cannot be read — the
 monitor rule it shares with #60, stated under

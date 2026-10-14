@@ -29,6 +29,7 @@ owns the rail, and is not duplicated here.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import shutil
 import yaml
@@ -838,3 +839,69 @@ def test_the_dry_run_report_stays_short_on_a_tree_where_almost_every_file_is_hea
     block = out.split("skip:")[1]
     assert "Unattributed/Unattributed-state.md" in block, out
     assert "Healthy-h000.md" not in block, out
+
+
+# ── #98 clause 4: the runner's snapshot is a witness, not an alias of the damage ──
+
+def test_a_hardlink_snapshot_still_holds_the_pre_apply_bytes_after_the_apply(
+        facts_root, tmp_path):
+    """The one property `skills/retag-untagged-facts/SKILL.md` step 1 bets the run on.
+
+    The daily runner (#98, #2722) snapshots a 40,411-file facts tree with `cp -al`
+    immediately before `--apply`, and a hardlink is only a witness — rather than a
+    second name for the bytes the repair is about to change — because the repair
+    never writes into the linked file: `atomic_write_text` writes a temp and
+    `os.replace`s *that* inode over the target (`app/atomic_io.py:104`, the replace
+    at `:135`). So the snapshot's entry keeps
+    pointing at the pre-apply inode and the before-state survives its own repair.
+
+    The failure this pins is the quiet one: had the repair written in place, both
+    names would have come back saying what the repair says, the run's report would
+    have quoted a before-state that no longer existed anywhere, and nothing except
+    this test could tell the difference. A hardlink that tracks the write is worse
+    than no snapshot, because it looks like evidence.
+
+    Links rather than copies for the same reason the skill uses `cp -al`: a copy of
+    that tree is paid for in bytes every night, a link only in inodes.
+    """
+    snap = tmp_path / "facts-snapshot-TEST"          # a sibling, as on the box
+    shutil.copytree(facts_root, snap, copy_function=os.link)
+
+    rel = "Wild API/Wild API-state.md"
+    live, kept = facts_root / rel, snap / rel
+    before = kept.read_text(encoding="utf-8")
+    # What the runner's witness is supposed to hold: the whole tree, pre-apply.
+    before_all = _snapshot(snap)
+    ino_before = os.stat(kept).st_ino
+    assert os.stat(live).st_ino == ino_before, (
+        "the snapshot is a copy, not a link — not the mechanism the skill runs")
+    assert R.record_is_untagged(_rec_by_id(_records(snap, rel), "wild-1")), (
+        "the sampled record is not the damage the rail counts, so it witnesses "
+        "nothing")
+
+    rep = R.apply_tree(facts_root, reindexer=lambda *, paths, **kw: {
+        "files": len(list(paths)), "rows_total": 13})
+    assert [str(p) for p in rep.written_paths], (
+        "the apply wrote nothing, so there is no witness to test")
+    assert str(live) in [str(p) for p in rep.written_paths], rep.written_paths
+
+    # The witness is intact: the same inode, the same bytes, still the damage.
+    assert os.stat(kept).st_ino == ino_before
+    assert kept.read_text(encoding="utf-8") == before
+    assert R.record_is_untagged(_rec_by_id(_records(snap, rel), "wild-1")), (
+        "the snapshot tracked the write — it is an alias of the repair, not a "
+        "witness of what was there before")
+    # ...and the live tree is the thing that moved: a new inode, and the tag.
+    assert os.stat(live).st_ino != ino_before, (
+        "atomic_write_text did not rename a new inode over the target")
+    assert _rec_by_id(_records(facts_root, rel), "wild-1")["entity"] == "Wild API"
+    # Every file in the snapshot is still the before-state, not just the sampled
+    # one: the repair moved inodes out from under the links and left each link
+    # holding what it linked.
+    assert _snapshot(snap) == before_all, (
+        "the snapshot tree drifted while the apply ran — it is no witness")
+    # The control that makes that a claim rather than a tautology: the live tree
+    # did NOT stay the before-state. Had the repair written in place, the two
+    # assertions above could not both be true of the same bytes.
+    assert _snapshot(facts_root)[rel] != before_all[rel], (
+        "the live file never changed, so the snapshot proves nothing about the write")
