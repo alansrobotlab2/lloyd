@@ -1182,3 +1182,171 @@ def test_the_canary_registry_row_names_the_endpoint_state_as_what_sets_the_arm()
         "says must carry it")
     assert (ROOT / "eval" / "egress_arms.py").is_file(), (
         "the row points at a window runner that is not in the tree")
+
+
+# ── #2678: the `tool_choice: "none"`-with-tools property, stated as measured ──
+#
+# P6(b)'s max-turns wrap-up ships `models: [primary]` on one engine property:
+# the build still renders the `tools` array into the prompt when
+# `tool_choice: "none"`. The doc attributed that verification to vLLM 0.28.1
+# while the primary answered `0.31.1rc1…`, so the switch shipped on a
+# measurement taken on a build that no longer serves, and the correction that
+# filed the re-verification left the sentence reading "has not been re-measured
+# on it… the flag is absent from its serve args, so the default is expected to
+# hold" — an inference about a flag standing in for behaviour, in the doc a
+# future reader consults. The property is now measured on the live build
+# (`eval/tool_choice_none_probe.py`, 2026-10-14), so these nodes pin the doc to
+# saying it measured something, and to saying it on the build it measured it on.
+
+#: The build the primary answers on `/version`, and the date the property was
+#: re-measured on it. Both come from the probe's own report, which prints the
+#: build it decided against.
+TC_NONE_BUILD = "0.31.1rc1.dev260+ga98247ab4"
+TC_NONE_MEASURED_ON = "2026-10-14"
+
+P6_HEADING = "### P6 — `tool_choice` levers"
+STRUCTURED_VERDICTS_HEADING = "### Structured verdicts (the finalizer)"
+P6B_BULLET = "- **(b) Max-turns wrap-up**"
+SV_TOOLS_BULLET = "- **The extra request must send the identical"
+
+#: The two spans as they read before #2678, verbatim, as the controls' inputs.
+#: Each ban below has to fire on the pre-fix prose and stay quiet on the shipped
+#: prose, or a green here is a scan that found nothing to grade.
+OLD_P6B_PENDING_SENTENCE = (
+    "The build serving the primary today is `0.31.1rc1.dev260+ga98247ab4` and "
+    "that property has not been re-measured on it (filed 2026-10-14); the flag is "
+    "absent from its serve args, so the default is expected to hold, but this "
+    "switch ships on the strength of the older measurement.")
+OLD_WARM_UP_WARNING = ("`cached_tokens` reads 0 for the first two requests of any "
+                       "prefix on this engine")
+
+#: Sentences that present the property as an expectation rather than a reading.
+#: The class is the whole item: a flag grepped out of a serve-args list,
+#: asserted to imply a behaviour nobody measured, in the prose every future
+#: round reads before touching the switch.
+UNMEASURED_CLAIM_RES = [
+    re.compile(r"has\s+not\s+(?:yet\s+)?been\s+re-?measured", re.I),
+    re.compile(r"(?:expected|should)\s+to\s+hold", re.I),
+    re.compile(r"on the strength of the (?:older|previous|earlier)\s+measurement", re.I),
+]
+
+#: The stale warm-up warning, and what replaces it: `cached_tokens` reads 0 for
+#: the FIRST request of a fresh prefix (measured 2026-10-14: 0 on the first
+#: request, 3,200 on every later one that kept the prefix), so a reader told
+#: "the first two" discounts a real signal for a second request and, worse,
+#: expects a 0 that the build never sends.
+WARM_UP_TWO_REQUESTS_RE = re.compile(r"cached_tokens[^\n]{0,120}first\s+two", re.I)
+#: `first(?! two)` is the whole difference being graded: the old warning and the
+#: new one agree that the field reads 0 early, and differ only on how many
+#: requests stay at 0. Requiring `fresh` inside the window keeps the claim about
+#: a fresh prefix, which is what makes it a warning rather than a discount.
+WARM_UP_FIRST_REQUEST_RE = re.compile(
+    r"cached_tokens[^\n]{0,160}first(?! two)[^\n]{0,60}request[^\n]{0,60}fresh",
+    re.I)
+
+
+def _flat_bullet(text: str, start: str) -> str:
+    """One `- **…**` bullet, whitespace-flattened, from `start` to the next
+    bullet or heading.
+
+    Flattened because this doc wraps at ~80 columns, so a claim straddles three
+    lines and a one-line grep is a false zero (the #1786 failure). The end
+    marker is asserted to exist, so a bullet that runs to the end of the file
+    rather than ending is caught instead of silently grading the rest of the doc.
+    """
+    lines = text.splitlines()
+    hits = [i for i, ln in enumerate(lines) if ln.lstrip().startswith(start)]
+    assert len(hits) == 1, (
+        f"{start!r} matched {len(hits)} lines in "
+        f"{DOC.relative_to(ROOT)}; the bullet graded below is only trustworthy "
+        "if the anchor reads exactly one")
+    out = [lines[hits[0]]]
+    for ln in lines[hits[0] + 1:]:
+        if ln.lstrip().startswith("- ") or ln.startswith("#"):
+            break
+        out.append(ln)
+    body = " ".join(" ".join(out).split())
+    assert body, f"{start!r} has an empty body — deleted, not fixed"
+    return body
+
+
+def test_p6b_states_the_none_with_tools_property_as_measured_on_the_live_build():
+    """#2678 clause 3: P6(b) reports a measurement, with its build and date.
+
+    Three things have to be true together or the sentence is the old one in a
+    new shape: it says the word measured, it names the build string the primary
+    answers today, and it names that build beside a date. A bullet could say
+    "measured" about the 0.28.1 run only and stay honest about history while
+    leaving the live switch unverified, so the build and the date are pinned in
+    the same window.
+    """
+    bullet = _flat_bullet(_section(DOC_TEXT, P6_HEADING), P6B_BULLET)
+    for pattern in UNMEASURED_CLAIM_RES:
+        assert not pattern.search(bullet), (
+            "P6(b) is back to presenting an inference as the state of the "
+            f"property: {pattern.search(bullet).group(0)!r}")
+    assert any(p.search(OLD_P6B_PENDING_SENTENCE) for p in UNMEASURED_CLAIM_RES), (
+        "the bans above do not fire on the pre-fix sentence, so they are a ban "
+        "on nothing")
+    assert re.search(r"\bmeasured\b", bullet, re.I), (
+        "P6(b) no longer says the property was measured at all")
+    assert TC_NONE_BUILD in bullet, (
+        f"P6(b) does not name {TC_NONE_BUILD}, the build the primary answers on "
+        "`/version`, so its claim cannot be traced to a build")
+    assert TC_NONE_MEASURED_ON in bullet, "no date on the measurement"
+    assert abs(bullet.index(TC_NONE_BUILD) - bullet.index(TC_NONE_MEASURED_ON)) < 240, (
+        "the date and the build are in different halves of the bullet; a reader "
+        "cannot tell which measurement the date dates")
+    # The instrument the bullet points at has to be in the tree, and has to be
+    # the one that decides on prompt_tokens rather than cache warm state.
+    assert "eval/tool_choice_none_probe.py" in bullet, (
+        "P6(b) tells a reader to re-measure without naming the instrument")
+    probe = (ROOT / "eval" / "tool_choice_none_probe.py")
+    assert probe.is_file(), "the instrument P6(b) points at is not in the tree"
+    assert "prompt_tokens" in probe.read_text(encoding="utf-8"), (
+        "the probe no longer reads the field the verdict is decided on")
+    # And the shipped state it states beside that: `models` still lists the
+    # engine this was measured on, read the way the runtime reads it.
+    wrapup = ((CONFIG.get("harness") or {}).get("max_turns_wrapup") or {})
+    for alias in (wrapup.get("models") or []):
+        assert f"[{alias}]" in bullet or f"`{alias}`" in bullet, (
+            f"harness.max_turns_wrapup ships {alias!r} and P6(b) does not say so")
+
+
+def test_the_structured_verdicts_bullet_dates_the_property_and_warms_up_correctly():
+    """#2678 clause 4: the 1.19 s / 25.00 s bullet names its build, and the
+    warm-up warning counts one request, not two.
+
+    The two numbers in that bullet are the reason the property matters, and they
+    were produced on 0.28.1. Left undated they read as the current engine's
+    cost, which is how the same build string came to be quoted twice in this doc
+    after the engine moved. The warm-up warning is the second half: the doc told
+    readers `cached_tokens` reads 0 for the first TWO requests of any prefix,
+    and the 2026-10-14 run reads 0 on the first and 3,200 on every later request
+    that kept the prefix — a reader following the stale version discards a real
+    miss, and the probe exists precisely because `cached_tokens` is the field
+    that cannot be trusted cold.
+    """
+    bullet = _flat_bullet(_section(DOC_TEXT, STRUCTURED_VERDICTS_HEADING),
+                          SV_TOOLS_BULLET)
+    for figure in ("1.19", "25.00"):
+        assert figure in bullet, f"the {figure} s figure has left the bullet"
+    assert TC_NONE_BUILD in bullet, (
+        f"the bullet quotes {TC_NONE_BUILD} costs without naming the build")
+    assert TC_NONE_MEASURED_ON in bullet, "no date beside the figures"
+    assert bullet.index("25.00") < bullet.index(TC_NONE_BUILD), (
+        "the build string sits before the figures instead of dating them, so the "
+        "sentence reads as if 0.31.1 produced the 1.19 s run")
+
+    assert not WARM_UP_TWO_REQUESTS_RE.search(bullet), (
+        "the warm-up warning is back to two requests, which is the claim "
+        "2026-10-14 refuted")
+    assert WARM_UP_TWO_REQUESTS_RE.search(OLD_WARM_UP_WARNING), (
+        "the two-request ban does not fire on the pre-fix warning: it is a ban on "
+        "nothing")
+    assert WARM_UP_FIRST_REQUEST_RE.search(bullet), (
+        "the bullet no longer says what cached_tokens does on a fresh prefix, "
+        "which is the trap it exists to warn about")
+    assert not WARM_UP_FIRST_REQUEST_RE.search(OLD_WARM_UP_WARNING), (
+        "the first-request requirement also matches the old warning, so it would "
+        "be satisfied by the prose this item fixed")

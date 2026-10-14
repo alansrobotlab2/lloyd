@@ -594,9 +594,20 @@ turn ends, restating its conclusion as a JSON object
   production shape (four tools-bearing iterations on a 180k conversation, then
   one finalizer): keeping tools reuses 177,600 of 180,068 tokens and takes
   1.19 s; dropping them reuses nothing and takes **25.00 s**. 21x, for one
-  object. `eval/measurements/finalizer-2026-09-08.md` has the runs, and the
-  two ways to measure this wrongly — `cached_tokens` reads 0 for the first two
-  requests of any prefix on this engine, and an alternating A/B ends up
+  object. `eval/measurements/finalizer-2026-09-08.md` has the runs (vLLM
+  0.28.1, measured 2026-09-08). The property itself was re-measured 2026-10-14
+  on the build serving the primary today, `0.31.1rc1.dev260+ga98247ab4`:
+  `"none"` with a two-tool array attached renders the same 7,982-token prompt
+  as `"auto"` and emits no tool call, against 7,639 with `tools` dropped — the
+  343 tokens of tool schema are still inside the prompt at `"none"`.
+  `eval/tool_choice_none_probe.py` re-runs that and decides on
+  `usage.prompt_tokens`, which needs no warm cache; re-run it after every
+  engine rebuild and record the build beside the result. The two ways to
+  measure this wrongly: `cached_tokens` reads 0 for the **first request of a
+  fresh prefix** (measured 2026-10-14 on the same build — 0 on the first
+  request, 3,200 on every later request that kept the prefix), so one cold
+  moment reads exactly like a dropped-tools failure and `prompt_tokens` is the
+  instrument that cannot be fooled that way; and an alternating A/B ends up
   caching both shapes, which is not what production does.
 - **It is skipped unless `stop_reason` is `stop`/`end_turn`.** Forcing a
   verdict out of a turn that died at `max_turns` recreates the failure
@@ -1299,14 +1310,19 @@ byte-identical — the property the finalizer already relies on for `"none"`.
   column). No drain or budget anchor runs on that request. **Per engine**:
   `models` resolves to base URLs (`mcp_discovery.max_turns_wrapup_kwargs`) and
   the loop wraps up only when the run's own `base_url` is listed. Shipped
-  `[primary]`: verified on vLLM 0.28.1, which honoured `"none"` with tools
-  present (`exclude_tools_when_tool_choice_none` false, no tool parser attached
-  — verified for `finalizer.py`). The build serving the primary today is
-  `0.31.1rc1.dev260+ga98247ab4` and that property has not been re-measured on
-  it (filed 2026-10-14); the flag is absent from its serve args, so the default
-  is expected to hold, but this switch ships on the strength of the older
-  measurement. The llama.cpp secondary is not verified and is
-  left out; add it only after checking `none` there. Task children splat the
+  `[primary]`, and the property is measured on that engine as of 2026-10-14: the
+  build serving the primary is `0.31.1rc1.dev260+ga98247ab4`, on which `"none"`
+  with a two-tool array attached renders the same 7,982-token prompt as `"auto"`
+  and emits no tool call, against 7,639 with `tools` dropped — 343 tokens of
+  schema still rendered, so the wrap-up stays a byte-identical continuation of
+  the turn's prefix. `eval/tool_choice_none_probe.py` is that measurement,
+  decided on `usage.prompt_tokens`; the property is per-build, so re-run it after
+  every engine rebuild and record the build beside the result. The same shape was
+  first verified for `finalizer.py` on vLLM 0.28.1 (2026-09-08:
+  `exclude_tools_when_tool_choice_none` false, no tool parser attached — that
+  flag still defaults false in this build and is absent from its serve args). The
+  llama.cpp secondary is not verified and is left out; add it only after checking
+  `none` there. Task children splat the
   same kwargs, so a child that exhausts its budget returns its wrap-up as
   `response` marked `truncated`. Not wired into `_worker_run_options`
   (`run_prompt_on_primary`), whose `TurnResult.ok` reads non-empty text as
@@ -2149,6 +2165,20 @@ the one rung with no in-band handle; its reasoning is persisted as
 `tests/test_compaction_recall_eval.py`.
 
 ## Review log
+
+- **2026-10-14 — `measured`.** #2678: the `tool_choice: "none"`-with-tools
+  property that P6(b) and §Structured verdicts both rest on is now measured on
+  the live build instead of inferred from its serve args — 7,982 prompt tokens
+  at `"none"` and the same 7,982 at `"auto"` with one two-tool array attached,
+  7,639 with `tools` dropped (343 tokens of schema still rendered), and no tool
+  call emitted, on `0.31.1rc1.dev260+ga98247ab4`. The instrument is
+  `eval/tool_choice_none_probe.py`, which decides on `usage.prompt_tokens`
+  because that needs no warm cache (offline tests:
+  `tests/test_tool_choice_none_probe.py`), and the §Structured verdicts warm-up
+  warning is corrected with it: `cached_tokens` reads 0 for the **first**
+  request of a fresh prefix, not the first two.
+  `harness.max_turns_wrapup` keeps `models: [primary]` — the contingency that
+  the switch might have to go empty is closed by the measurement.
 
 - **2026-10-14 — `stale`.** Checked every path, test name, config key and
   constant the doc states against the tree at `7006dc07` (all 57 test paths and

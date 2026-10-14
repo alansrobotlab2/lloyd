@@ -15,11 +15,23 @@ The trap, and the rule that follows from it
 the system message, so dropping `tools` changes the rendered prompt *from
 the first token* and vLLM re-prefills the entire conversation — on a 100k
 turn that is the most expensive thing this module could possibly do, for a
-one-object answer. Verified against the installed vLLM 0.28.1:
+one-object answer. Measured 2026-09-08 on vLLM 0.28.1
+(`eval/measurements/finalizer-2026-09-08.md`):
 `exclude_tools_when_tool_choice_none` defaults False, `tool_choice: "none"`
 yields plain content with no tool parser attached, `response_format.type ==
 "json_schema"` maps to the guided decoder, and the grammar applies after
 `</think>` (`enable_in_reasoning` is False), so thinking can stay on.
+
+Re-verified 2026-10-14 on 0.31.1rc1.dev260+ga98247ab4
+-----------------------------------------------------
+`tool_choice: "none"` with the tools array attached renders the same prompt as
+`"auto"` — 7,982 `prompt_tokens` against 7,639 with `tools` dropped, so the
+343 tokens of tool schema are still inside the prompt at `"none"` — and emits
+no tool call. `eval/tool_choice_none_probe.py` re-measures it and decides on
+`usage.prompt_tokens`, which needs no warm cache. The property is per-build, so
+this is the sentence that goes stale if a rebuild starts dropping `tools` at
+`"none"`: re-run the probe after every rebuild and record the build beside the
+result.
 
 Why thinking is not switched off here (#1431)
 ---------------------------------------------

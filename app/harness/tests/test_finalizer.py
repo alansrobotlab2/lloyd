@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 
 import pytest
 
@@ -869,3 +870,92 @@ async def test_an_uncapped_copy_of_any_of_the_eight_falls_back_to_the_budget_adv
         assert "raise harness.finalizer.max_tokens" in error, (
             f"{name} open again and still not told it might need more room: {error!r}")
         assert F.should_resample_divergence(error, schema) is False, name
+
+
+# ── #2678: the module docstring's engine attribution ─────────────────────────
+#
+# The docstring stated the identical-tools rule as "Verified against the
+# installed vLLM 0.28.1". That was true of the build installed when it was
+# written and became false the day the box moved to `0.31.1rc1.dev260` — with no
+# test to notice, because nothing in the tree could tell a claim about *the
+# installed* build from a claim about a dated one. The property is per-build, so
+# the docstring has to say which build it was measured on and which one last
+# re-checked it; `eval/tool_choice_none_probe.py` is the instrument that keeps it
+# honest after the next rebuild.
+
+TC_NONE_BUILD = "0.31.1rc1.dev260+ga98247ab4"
+TC_NONE_MEASURED_ON = "2026-10-14"
+MEASUREMENT_DATE = "2026-09-08"
+
+#: The attribution this replaces, verbatim, as the control's input.
+OLD_ATTRIBUTION = "Verified against the installed vLLM 0.28.1"
+
+#: A claim about whichever build happens to be installed. Banned outright: the
+#: wording is the bug, not the number in it — "vLLM 0.99.9" phrased this way
+#: would rot exactly the same way.
+INSTALLED_BUILD_RE = re.compile(r"the\s+installed\s+vLLM", re.I)
+
+
+def _module_prose() -> str:
+    """`finalizer.py`'s module docstring, whitespace-flattened, read through `ast`.
+
+    Not a whole-file grep: the module mentions `tool_choice` and build strings in
+    code as well as prose, and the docstring wraps each claim over three lines, so
+    a one-line `in` check is a false zero in both directions.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path(F.__file__).read_text(encoding="utf-8")
+    got = ast.get_docstring(ast.parse(src))
+    assert got, "finalizer.py has no module docstring to read"
+    return " ".join(got.split())
+
+
+def test_the_module_docstring_dates_its_engine_rather_than_calling_it_installed():
+    """The rule this module rests on is named with the build it was measured on."""
+    prose = _module_prose()
+    assert not INSTALLED_BUILD_RE.search(prose), (
+        "the docstring is back to trusting whatever build is installed: "
+        f"{INSTALLED_BUILD_RE.search(prose).group(0)!r}")
+    assert INSTALLED_BUILD_RE.search(OLD_ATTRIBUTION), (
+        "the ban above does not fire on the sentence it replaced, so it is a ban "
+        "on nothing")
+    # The original measurement, dated and attributed to the build it ran on.
+    assert MEASUREMENT_DATE in prose, "the 09-08 measurement lost its date"
+    assert "0.28.1" in prose, "the build the 09-08 run was made on has gone unnamed"
+    assert abs(prose.index(MEASUREMENT_DATE) - prose.index("0.28.1")) < 80, (
+        "the date and the build are in different sentences, so the docstring no "
+        "longer says which run produced which figure")
+    assert "eval/measurements/finalizer-2026-09-08.md" in prose, (
+        "the artifact the dated measurement lives in is no longer pointed at")
+
+
+def test_the_module_docstring_names_the_build_that_re_verified_the_property():
+    """#2678 clause 5: the re-measurement is recorded where the rule is stated.
+
+    Naming the build is not decoration — `decide` in the probe fails on an engine
+    that will not name itself, for the same reason: a measurement that cannot say
+    which build it came from cannot be quoted, and this docstring is what a future
+    round reads before it changes the request the finalizer sends.
+    """
+    prose = _module_prose()
+    assert TC_NONE_BUILD in prose, (
+        f"the docstring does not name {TC_NONE_BUILD}, the build serving the "
+        "primary, so the rule still rests on the 2026-09-08 run alone")
+    assert TC_NONE_MEASURED_ON in prose, "the re-verification has no date"
+    window = prose[max(0, prose.index(TC_NONE_BUILD) - 200):prose.index(TC_NONE_BUILD) + 400]
+    assert re.search(r"re-?verif|re-?measur", window, re.I), (
+        "the build string is named without saying it is a re-verification")
+    assert "none" in window and "tool_choice" in window, (
+        "the re-verification no longer says what was checked on that build")
+    # The instrument has to be the one that can actually re-run the check.
+    assert "eval/tool_choice_none_probe.py" in prose, (
+        "the docstring tells a future round to re-check without naming the probe")
+    from pathlib import Path
+
+    root = Path(F.__file__).resolve().parents[2]
+    assert (root / "eval" / "tool_choice_none_probe.py").is_file(), (
+        "the probe the docstring points at is not in the tree")
+    assert (root / "eval" / "measurements" / "finalizer-2026-09-08.md").is_file(), (
+        "the 09-08 artifact the docstring cites is not in the tree")
