@@ -546,6 +546,27 @@ def _in_stamp_cohort(fact: dict, cohort: dict | None) -> bool:
             and _created_at_day(fact) == cohort["date"])
 
 
+def _on_stamp_cohort_date(fact: dict, cohort: dict | None) -> bool:
+    """Did this fact's own `created_at` land on the stamp cohort's dominant date?
+
+    A fact stamped 2026-09-23 was not recorded on 2026-09-23: that is the day the
+    field was re-derived (#2179), and 64.8% of active rows carry it. On 2026-11-22
+    every one of those rows turns 60 days old and enters the rotted bucket of
+    `stale_age_split` in a single night, which is what this tag is for — the split is
+    allowed to name that part as provenance without moving a single row out of the
+    count.
+
+    False whenever the attribution would be a guess: no cohort (the hand-written
+    corpus, the store whose dates are genuinely spread), or no parseable `created_at`
+    on this row. A `False` from a missing date is not a claim that the row is decay —
+    the same rows are `None` in `record_age` for the same reason — and where a row is
+    both rotted and untagged this sub-count stays silent rather than imply a residual.
+    """
+    if not cohort:
+        return False
+    return _created_at_day(fact) == cohort["date"]
+
+
 def find_stale_facts(entities: dict, now: datetime, threshold_days: int) -> list[dict]:
     """Active facts whose oldest usable date is older than threshold_days.
 
@@ -592,6 +613,12 @@ def find_stale_facts(entities: dict, now: datetime, threshold_days: int) -> list
                         "preview": preview,
                         "age_days": age,
                         "record_age": record_age_days(fact, now),
+                        # #2674: whether the record's rot is its own age or the
+                        # re-derivation stamp's. Read from the `cohort` this call
+                        # computed once at the top — recomputing it per fact would
+                        # re-scan 153,528 rows per stale row.
+                        STALE_STAMP_TAG_KEY: _on_stamp_cohort_date(
+                            fact, cohort),
                     })
     return stale
 
@@ -645,6 +672,27 @@ STALE_RECORD_AGE_LABEL = "record age (the record's own `created_at`)"
 STALE_ARRIVED_KEY, STALE_ROTTED_KEY, STALE_RECORD_UNSEEN_KEY = (
     "arrived_stale", "record_aged", "record_age_unseen")
 
+#: The three states, in the order the line prints them. `sum(split[k] for k in
+#: STALE_AGE_KEYS) == len(stale_facts)` is the invariant #2475 shipped and
+#: `_stale_age_split_line` still asserts; the stamp sub-count below is deliberately
+#: NOT in it, which is why the sum is taken over this tuple and not over
+#: `split.values()`.
+STALE_AGE_KEYS = (STALE_ARRIVED_KEY, STALE_ROTTED_KEY, STALE_RECORD_UNSEEN_KEY)
+
+#: The fourth key `stale_age_split` returns: of the rows counted as rotted, how many
+#: are there because their own `created_at` is the 2026-09-23 re-derivation stamp
+#: (#2674). A SUB-count of `record_aged`, never a fourth state: it annotates the rot
+#: figure, it does not partition the rows again, so it stays out of `STALE_AGE_KEYS`
+#: and out of the sum invariant. 2026-11-22 is when it stops being 0 — the day the
+#: stamp itself turns 60 — and a reader who cannot see it reads 12,737 rebuild rows
+#: as one night of decay, which is #2475's misread arriving one bucket over.
+STALE_ROTTED_STAMP_KEY = "record_aged_on_stamp_date"
+
+#: The tag `find_stale_facts` puts on every row it returns, and the only route by
+#: which the split can know a row is stamp-dated: `stale_age_split` receives rows,
+#: not facts, so a created_at dropped on the way through cannot be recovered there.
+STALE_STAMP_TAG_KEY = "created_on_stamp_date"
+
 
 def stale_age_split(stale_facts: list[dict]) -> dict:
     """{arrived already stale / the record itself is older / record age unseen} over the
@@ -662,21 +710,37 @@ def stale_age_split(stale_facts: list[dict]) -> dict:
     own record age cannot be established is neither new nor old, and folding it into either
     count would be an unsupported claim about it. It prints beside the other two for the same
     reason #2179 prints the stamp cohort above this section instead of folding it in.
+    
+    One extra key beside those three: STALE_ROTTED_STAMP_KEY, of the rows counted as
+    rotted how many are there because their own `created_at` is the stamp cohort's
+    dominant date (#2674). It is a SUB-count of `record_aged` — never a fourth state,
+    and no row moves — so `sum(split[k] for k in STALE_AGE_KEYS)` still equals the
+    number of rows passed in. Callers that total the states must therefore read
+    `STALE_AGE_KEYS`, not `split.values()`: this key is in the dict precisely so the
+    rot figure can name its own provenance on 2026-11-22, when 12,737 rebuild rows
+    enter the bucket in one night.
     """
-    arrived = rotted = unseen = 0
+    arrived = rotted = unseen = rotted_stamp = 0
     for sf in stale_facts:
         record_age = sf.get("record_age")
         if record_age is None:
             unseen += 1
         elif record_age >= STALE_DAYS_THRESHOLD:
             rotted += 1
+            # Counted inside the rotted branch only, so the sub-count can never be a
+            # partition of the other two states even if a row were tagged wrongly.
+            # `.get(..., False)`: a row built by hand or by an older caller has no
+            # tag, and an untagged rotted row is unattributed, not stamped.
+            rotted_stamp += bool(sf.get(STALE_STAMP_TAG_KEY, False))
         else:
             arrived += 1
     return {STALE_ARRIVED_KEY: arrived, STALE_ROTTED_KEY: rotted,
-            STALE_RECORD_UNSEEN_KEY: unseen}
+            STALE_RECORD_UNSEEN_KEY: unseen,
+            STALE_ROTTED_STAMP_KEY: rotted_stamp}
 
 
-def _stale_age_split_line(stale_facts: list[dict]) -> str:
+def _stale_age_split_line(stale_facts: list[dict],
+                          cohort: dict | None = None) -> str:
     """`STALE_AGE_SPLIT: 24,234 arrived already stale, 0 the record itself is older, …`.
 
     `arrived + rotted + unseen == len(stale_facts)` is asserted, not assumed: the whole value
@@ -687,17 +751,40 @@ def _stale_age_split_line(stale_facts: list[dict]) -> str:
     The trailing clause is the sentence that keeps the total from being read as a backlog. A
     bare count rots into `stale: 24,234` in someone's summary within a week, which is how the
     number became a standing instruction to review 24k facts in the first place.
+    
+    From #2674 the rotted figure can carry a stamp clause naming the cohort's own date:
+    "of which K share the <date> re-derivation stamp (rebuild provenance, not decay; the
+    residual is the decay signal)". It is printed when `cohort` is given AND at least
+    one rotted row is tagged `created_on_stamp_date`, and the clause states the residual
+    rather than assuming it, so a partial attribution still tells the reader what is
+    left over. Two cases print no clause and the line is otherwise byte-identical: no
+    cohort (the hand-written corpus, a store whose `created_at` dates are genuinely
+    spread), or rotted rows that carry no tag. `cohort` is the caller's — the section
+    computes it once for its own cohort line and passes it here, because the row tag
+    says WHICH rows are stamp-dated and only the cohort says the DATE to name.
     """
     split = stale_age_split(stale_facts)
-    total = sum(split.values())
+    total = sum(split[k] for k in STALE_AGE_KEYS)
     assert total == len(stale_facts), (
         f"the split counts {total} of {len(stale_facts)} stale rows, so the numbers under "
         "it cannot be read against the section total")
+    # The attribution. Printed whenever there is a cohort to name AND at least one
+    # rotted row tagged stamp-dated; silent otherwise. A partial attribution is the
+    # honest case, not the risky one — the clause states the residual as the decay
+    # signal, which is what a reader needs on 2026-11-23 onward, when the bucket holds
+    # the cohort plus rows whose records genuinely aged. Silence there is what would
+    # let a rebuild cohort read as one night of decay.
+    attribution = ""
+    stamped = split[STALE_ROTTED_STAMP_KEY]
+    if cohort and stamped:
+        attribution = (
+            f" — of which {stamped:,} share the {cohort['date']} re-derivation "
+            f"stamp (rebuild provenance, not decay; the residual is the decay signal")
     return (
         f"STALE_AGE_SPLIT: {split[STALE_ARRIVED_KEY]:,} arrived already stale — counted by "
         f"{STALE_CLAIM_AGE_LABEL}, recorded inside the {STALE_DAYS_THRESHOLD}-day window —, "
         f"{split[STALE_ROTTED_KEY]:,} where {STALE_RECORD_AGE_LABEL} itself passes "
-        f"{STALE_DAYS_THRESHOLD} days (the rot signal), "
+        f"{STALE_DAYS_THRESHOLD} days{attribution} (the rot signal), "
         f"{split[STALE_RECORD_UNSEEN_KEY]:,} with no parseable `created_at` to date the "
         "record by. The first count tracks INGEST volume, not rot; the second is the one "
         "that says knowledge is going stale.")
@@ -1162,7 +1249,7 @@ def generate_report(
     # Always printed, including at a zero total: a line that vanishes with the stale count
     # cannot distinguish "no stale facts" from "no split shipped", and 0 rot is exactly the
     # reading worth having when the total is large.
-    lines.append(_stale_age_split_line(stale_facts))
+    lines.append(_stale_age_split_line(stale_facts, stamp_cohort))
     lines.append("")
 
     # The stamp cohort first, because it is the reason the two numbers under it are not

@@ -1232,6 +1232,18 @@ def test_a_fact_recorded_this_week_carries_both_ages_and_they_differ(tmp_path):
     assert khr.record_age_days({"created_at": _iso(3), "event_date": _iso(400)}, NOW) == 3
 
 
+def _states(split: dict) -> dict:
+    """{the three states} of a split, dropping #2674's sub-count.
+
+    `record_aged_on_stamp_date` is a breakdown of `record_aged`, not a fourth state,
+    so the nodes that pin this dict by exact equality read it through here. The sum
+    invariant lives on `STALE_AGE_KEYS`, which excludes the sub-count by
+    construction — that difference IS the difference between annotating a bucket and
+    partitioning it.
+    """
+    return {k: split[k] for k in khr.STALE_AGE_KEYS if k in split}
+
+
 def test_the_split_counts_two_halves_that_sum_to_the_total(tmp_path):
     """Clause 2: a corpus holding one arrived-stale fact, one that rotted in place and one
     whose record age cannot be established splits 1 / 1 / 1, and the counts sum to the total.
@@ -1264,9 +1276,10 @@ def test_the_split_counts_two_halves_that_sum_to_the_total(tmp_path):
 
     assert len(stale) == 3, stale
     split = khr.stale_age_split(stale)
-    assert split == {khr.STALE_ARRIVED_KEY: 1, khr.STALE_ROTTED_KEY: 1,
+    assert _states(split) == {khr.STALE_ARRIVED_KEY: 1, khr.STALE_ROTTED_KEY: 1,
                      khr.STALE_RECORD_UNSEEN_KEY: 1}, split
-    assert sum(split.values()) == len(stale), "the halves must account for every row"
+    assert sum(split[k] for k in khr.STALE_AGE_KEYS) == len(stale), \
+        "the halves must account for every row"
 
     line = next(ln for ln in _stale_section(_report(
         khr.load_entities(root))).splitlines() if "STALE_AGE_SPLIT" in ln)
@@ -1283,15 +1296,15 @@ def test_the_split_counts_two_halves_that_sum_to_the_total(tmp_path):
     # An empty corpus splits to three zeros and the line still prints, so "no stale facts"
     # and "no split shipped" stay two different readings of the section.
     empty = khr.stale_age_split([])
-    assert empty == {khr.STALE_ARRIVED_KEY: 0, khr.STALE_ROTTED_KEY: 0,
+    assert _states(empty) == {khr.STALE_ARRIVED_KEY: 0, khr.STALE_ROTTED_KEY: 0,
                      khr.STALE_RECORD_UNSEEN_KEY: 0}, empty
-    assert sum(empty.values()) == 0
+    assert sum(empty[k] for k in khr.STALE_AGE_KEYS) == 0
     assert "0 arrived already stale" in khr._stale_age_split_line([])
 
     # All-ingest, the live store's shape today: the rot half is 0 and that IS the report.
     all_arrived = [{"age_days": 400, "record_age": 1}, {"age_days": 250, "record_age": 5},
                    {"age_days": 90, "record_age": THRESH - 1}]
-    assert khr.stale_age_split(all_arrived) == {khr.STALE_ARRIVED_KEY: 3,
+    assert _states(khr.stale_age_split(all_arrived)) == {khr.STALE_ARRIVED_KEY: 3,
                                                khr.STALE_ROTTED_KEY: 0,
                                                khr.STALE_RECORD_UNSEEN_KEY: 0}, \
         "a zero rot count must survive the split intact: it is the finding, not a gap"
@@ -1328,9 +1341,12 @@ def test_the_section_header_names_which_age_the_total_is_and_which_is_rot(tmp_pa
                              script_src.index("# --- Section 7")]
     for label in ("STALE_CLAIM_AGE_LABEL", "STALE_RECORD_AGE_LABEL"):
         assert label in section_src, f"the section never uses {label}"
-    assert "_stale_age_split_line(stale_facts)" in section_src, (
-        "the split is not printed by the section that prints the total, so the two counts "
-        "an operator sums are not the two counts that were measured")
+    # #2674 added a second argument — the cohort the section already computed — so the
+    # pin matches the call by its first argument and its closing paren rather than by
+    # an exact string that a legitimate extra argument would break.
+    assert "_stale_age_split_line(stale_facts, stamp_cohort)" in section_src, (
+        "the split is not printed by the section that prints the total with the cohort "
+        "that explains it, so the stamp sub-count cannot name its date")
 
 
 def test_the_report_skill_describes_the_shipped_stale_semantics():
@@ -1391,3 +1407,237 @@ def test_the_report_skill_describes_the_shipped_stale_semantics():
     assert "ingest" in bflat.lower(), "and the claim-age half as the ingest-driven one"
     # The numbers the skill quotes are the ones the measured split produced, not invented.
     assert "24,234" in bflat and "0" in bflat, bflat[:300]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# #2674 — the stamp-dated part of the rot count, before 2026-11-22
+#
+# `record_age` turning 60 is the rot signal, and on one night 12,737 rows cross it
+# for a reason that is not decay: the 2026-09-23 re-derivation stamp (#2179) turns 60
+# days old on 2026-11-22. The live figures measured 2026-10-13: 25,814 stale rows,
+# `stale_age_split` → {arrived_stale 25,814, record_aged 0, record_age_unseen 0}, and
+# exactly 12,737 of the stale rows carry `created_at` on the cohort date. Left alone,
+# the Stale Facts section reads that as one night of decay — #2475's own misread
+# arriving one bucket over. These nodes pin the ANNOTATION: the rotted count keeps
+# every row, and names how much of it the rebuild is responsible for.
+#
+# The process boundary is the section: `generate_report` measures the cohort once for
+# its own STALE_STAMP_COHORT line and now hands that same measurement to
+# `_stale_age_split_line`, so the date in the sub-count is the date in the cohort line
+# rather than a second reading that can disagree with it.
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: The re-derivation stamp, 200 days before this file's fixed clock, so a row created
+#: on it is already rotted and the crossing itself is not what a node has to simulate.
+STAMP_DAY = (NOW - timedelta(days=200)).date().isoformat()
+#: A claim old enough to be stale on `event_date` whatever its record age is.
+_STAMP_EVENT_DAY = (NOW - timedelta(days=300)).date().isoformat()
+
+
+def _stamp_corpus(with_cohort: bool = True) -> dict:
+    """Two stale rows, one stamped and one genuinely aged, plus the cohort if asked.
+
+    `with_cohort=False` is the hand-written case `stale_stamp_cohort` refuses: with a
+    thousand rows less in it no date clears `STALE_DOMINANT_DATE_FLOOR`, so there is
+    no cohort to attribute anything to.
+
+    The stamped row carries an `event_date`, which is what keeps it a STALE ROW rather
+    than a cohort member — `_in_stamp_cohort` excludes an undated stamped fact from the
+    stale list altogether, and a row that is not in the list cannot be rotted. The
+    aged row is dated by nothing but a `created_at` on its own calendar day, which is
+    the shape of real decay.
+    """
+    entities = {
+        "Stamped": [{"category": "state", "facts": [
+            {"fact": "the run wrote 41 documents",
+             "created_at": f"{STAMP_DAY}T04:24:54+00:00",
+             "event_date": _STAMP_EVENT_DAY, "status": "active"}]}],
+        "GenuinelyAged": [{"category": "state", "facts": [
+            {"fact": "an entity graph restored to 12,131 relationships",
+             "created_at": _iso(300), "status": "active"}]}],
+    }
+    if with_cohort:
+        entities["Rebuilt"] = [{
+            "category": "state",
+            "facts": [{"fact": f"re-derived row {n}",
+                       "created_at": f"{STAMP_DAY}T00:00:0{n % 10}+00:00",
+                       "status": "active"} for n in range(COHORT)]}]
+    return entities
+
+
+def _tagged_stale(with_cohort: bool = True) -> list[dict]:
+    return khr.find_stale_facts(_stamp_corpus(with_cohort), NOW, THRESH)
+
+
+def test_every_stale_row_is_tagged_with_whether_its_own_created_at_is_the_stamp_date():
+    """Clause 1: the tag is on every row, and it is that ROW's date, not the cohort's.
+
+    Two stale rows, both rotted, one stamped and one not: a cohort that named the
+    whole rotted bucket as rebuild provenance would be the same error in the other
+    direction, so the tag is per row and the split's sub-count is what sums it.
+
+    `False` without a cohort is not a claim that the row is decay — with no dominant
+    date there is nothing to attribute to — and a row whose `created_at` will not
+    parse is `False` for the same reason it is `None` in `record_age`.
+    """
+    rows = _tagged_stale()
+    assert len(rows) == 2, rows
+    assert all(khr.STALE_STAMP_TAG_KEY in r for r in rows), (
+        "a row without the tag is indistinguishable from a row the selector decided "
+        "is not stamped")
+    by_entity = {r["entity"]: r for r in rows}
+    assert by_entity["Stamped"][khr.STALE_STAMP_TAG_KEY] is True
+    assert by_entity["GenuinelyAged"][khr.STALE_STAMP_TAG_KEY] is False
+    assert all(r["record_age"] >= THRESH for r in rows), (
+        "both rows are rotted, so the sub-count is the only thing separating them")
+
+    # No cohort: the same two rows, and the tag is False on both rather than missing.
+    uncohorted = {r["entity"]: r for r in _tagged_stale(with_cohort=False)}
+    assert khr.stale_stamp_cohort(_stamp_corpus(False)) is None, (
+        "the corpus meant to have no dominant date grew one, so the False below is "
+        "not testing the branch it names")
+    assert all(r[khr.STALE_STAMP_TAG_KEY] is False
+               for r in uncohorted.values()), uncohorted
+
+
+def test_the_selector_measures_the_cohort_once_per_call_not_once_per_stale_row():
+    """Clause 1's other half, and the one a future edit is most likely to break.
+
+    Reading the cohort per row would re-scan every active record for every stale row —
+    25,814 × 153,528 on the live store. `find_stale_facts` measures it once above the
+    walk; this counts the calls to prove the tag came from that measurement.
+    """
+    calls = []
+    real = khr.stale_stamp_cohort
+
+    def counting(entities):
+        calls.append(1)
+        return real(entities)
+
+    khr.stale_stamp_cohort = counting
+    try:
+        rows = khr.find_stale_facts(_stamp_corpus(), NOW, THRESH)
+    finally:
+        khr.stale_stamp_cohort = real
+    assert len(rows) == 2 and len(calls) == 1, (
+        f"the cohort was measured {len(calls)} times for a call returning "
+        f"{len(rows)} stale rows; per-row measurement is O(stale x active)")
+
+
+def test_the_stamp_sub_count_is_inside_the_rotted_state_and_the_states_still_sum():
+    """Clause 2: a breakdown of one bucket, not a fourth bucket.
+
+    The three states still account for every row passed in — the sum #2475 shipped and
+    `_stale_age_split_line` asserts is taken over `STALE_AGE_KEYS`, which excludes this
+    key by construction. And the sub-count cannot exceed the bucket it describes, which
+    is what stops a tag landing on an arrived-stale row from being read as rot.
+    """
+    rows = _tagged_stale()
+    split = khr.stale_age_split(rows)
+    assert split[khr.STALE_ROTTED_STAMP_KEY] == 1
+    assert split[khr.STALE_ROTTED_KEY] == 2
+    assert sum(split[k] for k in khr.STALE_AGE_KEYS) == len(rows), (
+        "the states stopped accounting for every row")
+    assert split[khr.STALE_ROTTED_STAMP_KEY] <= split[khr.STALE_ROTTED_KEY]
+
+    # A stamped tag on a row that is NOT rotted must not reach the sub-count: it is
+    # counted where it belongs (arrived already stale) and simply not attributed.
+    arrived = [{khr.STALE_STAMP_TAG_KEY: True, "age_days": 400, "record_age": 1}]
+    s2 = khr.stale_age_split(arrived)
+    assert s2[khr.STALE_ARRIVED_KEY] == 1
+    assert s2[khr.STALE_ROTTED_STAMP_KEY] == 0
+    assert sum(s2[k] for k in khr.STALE_AGE_KEYS) == 1
+
+
+def test_the_rot_line_names_the_stamp_date_and_says_the_residual_is_the_decay_signal():
+    """Clauses 3 and 4, together: rot 2, of which 1 is the rebuild.
+
+    Asserted on the printed line rather than on a dict, because the line is the whole
+    deliverable — it is what the nightly report writes and what a reader on 2026-11-22
+    will either be told or not be told. The date has to be the cohort's own
+    (`cohort['date']`, the date `flip_date` is derived from), and the sentence has to
+    say both halves: the sub-count is rebuild provenance, the residual is decay.
+    """
+    rows = _tagged_stale()
+    cohort = khr.stale_stamp_cohort(_stamp_corpus())
+    line = khr._stale_age_split_line(rows, cohort)
+    assert f"2 where {khr.STALE_RECORD_AGE_LABEL} itself passes {THRESH} days" in line, line
+    assert f"of which 1 share the {STAMP_DAY} re-derivation stamp" in line, line
+    assert "rebuild provenance, not decay" in line, line
+    assert "residual is the decay signal" in line, line
+    assert f"2 where {khr.STALE_RECORD_AGE_LABEL} itself passes {THRESH} days —" in line, (
+        "the clause must sit inside the rotted figure, not after the sentence")
+
+
+def test_the_clause_prints_on_a_partial_attribution_and_is_silent_with_no_cohort():
+    """Clause 4's second half, and the case the crossing day itself is NOT.
+
+    No cohort — the hand-written corpus, or a store whose `created_at` dates are
+    genuinely spread — prints the rot figure with no clause and does not raise: the
+    line is byte-identical to what it printed before this sub-count existed. The
+    third case below is the one that matters from 2026-11-23: a cohort, and rotted
+    rows it cannot name (the 09-24…09-30 rebuild tail, ~5,972 rows, all under the
+    share gate). Silence there would present a stamp cohort and its residual as one
+    undifferentiated rise, so the clause prints and states the residual.
+    """
+    rows = _tagged_stale(with_cohort=False)
+    line = khr._stale_age_split_line(rows)
+    assert "of which" not in line, line
+    assert f"2 where {khr.STALE_RECORD_AGE_LABEL} itself passes {THRESH} days" in line, line
+
+    # A cohort given, nothing attributed: nothing to say, and the line is unchanged.
+    cohort = khr.stale_stamp_cohort(_stamp_corpus())
+    plain = [{"age_days": 400, "record_age": 400}]
+    assert (khr._stale_age_split_line(plain, cohort)
+            == khr._stale_age_split_line(plain)), (
+        "a cohort with no stamped rows changed the line, which is the no-cohort case's "
+        "contract as much as the cohort case's")
+
+    # Partial: one stamped, one genuinely rotted, both inside a real cohort corpus.
+    mixed = _tagged_stale() + [{khr.STALE_STAMP_TAG_KEY: False,
+                                "age_days": 500, "record_age": 500}]
+    partial = khr._stale_age_split_line(mixed, cohort)
+    assert "of which 1 share" in partial and "residual is the decay signal" in partial, partial
+
+
+def test_the_section_prints_the_sub_count_with_the_date_its_own_cohort_line_prints():
+    """The boundary: one cohort measurement, two lines, no second reading.
+
+    `generate_report` measures the cohort for STALE_STAMP_COHORT and passes the same
+    dict to `_stale_age_split_line`. If the two lines ever disagree about which date is
+    the stamp, the section argues with itself about provenance on the day the question
+    matters most, so this asserts the end-to-end report rather than the helper.
+    """
+    section = _stale_section(_stamp_report(_stamp_corpus()))
+    flat = " ".join(section.split())
+    stamp_line = next(ln for ln in section.splitlines()
+                      if ln.startswith("STALE_STAMP_COHORT"))
+    cohort_date = re.search(r"`created_at: (\d{4}-\d{2}-\d{2})`", stamp_line).group(1)
+    split_line = next(ln for ln in section.splitlines()
+                      if ln.startswith("STALE_AGE_SPLIT"))
+    assert f"of which 1 share the {cohort_date} re-derivation stamp" in split_line, (
+        split_line[:400])
+    assert "rebuild provenance, not decay" in flat
+    assert "0 with no parseable" in split_line, (
+        "the annotation must move nobody: both rotted rows carry a parseable "
+        "`created_at` and stay in the rot bucket")
+
+
+def test_the_skill_names_the_stamp_sub_count_of_the_rot_figure():
+    """Clause 5: the bullet has to carry the sub-count, or the rise is carried onward.
+
+    Task #60's prompt is this file, so on 2026-11-22 the model reads the bullet and the
+    line. A bullet that still calls the second count flatly "the rot signal" invites a
+    report saying 12,737 facts went stale overnight, which is the sentence this item
+    exists to prevent.
+    """
+    import app.data_root as _dr
+    src = (_dr.vault_root() / "skills" / "knowledge-health-report"
+           / "SKILL.md").read_text(encoding="utf-8")
+    i = src.index("- **Stale facts**")
+    bullet = " ".join(src[i:src.index("\n-", i + 1)].split())
+    assert "re-derivation stamp" in bullet, bullet[:400]
+    assert "rebuild provenance" in bullet and "decay signal" in bullet, bullet[:400]
+    assert "2026-11-22" in bullet, (
+        "the bullet has to name the day the rot number stops being zero, or a reader "
+        "meeting the rise has no way to expect it")
