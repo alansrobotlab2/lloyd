@@ -135,6 +135,13 @@ ROW_KEYS = frozenset({
 #: supports. Bump it whenever a reading rule changes meaning.
 SCORER_GENERATION = 2
 
+#: Top-level key holding the per-turn dispute verdicts this run computed (#2717).
+#: A CONSTANT rather than a literal because a consumer must be able to ask for the
+#: map without copying a string that the writer is free to rename:
+#: `scripts/memory_revision_candidates.py` reads it through this name, and the two
+#: disagreeing silently is the same failure this key exists to prevent.
+DISPUTE_MAP_KEY = "dispute_verdicts"
+
 #: What each row field means, in the artifact's own words. `build_uptake_table`
 #: emits this on every table, and `scripts/uptake_probe.py` no longer carries its own
 #: copy: the glossary used to live in the writer's `main()` and it was **false**
@@ -144,6 +151,19 @@ SCORER_GENERATION = 2
 #: constant under it, and a note row's was its *title*. The table is the only
 #: thing a consumer reads, so the correction belongs here and not in a comment.
 GLOSSARY = {
+    "dispute_verdicts": "the per-turn verdict map THIS run computed: turn_id -> "
+                        "`true` (disputed), `false` (cleared) or `null` (screened, "
+                        "the engine answered nothing). `corpus.dispute_turn_ids` is "
+                        "the true-valued subset, and `turn_id` is `<session>#<ordinal>` "
+                        "in this run's own turn list, so it reconstructs WHICH runs were "
+                        "disputed and is not a durable event id (#2717). A table "
+                        "written before this field existed carries no map and a "
+                        "consumer must say `unavailable`, not zero.",
+    "dispute_turn_ids": "turn_ids of `dispute_verdicts` whose verdict is true — the "
+                        "denominator every `dispute_rate` on an entry row divides into. "
+                        "`verdict_keyed_on` names the key; the counts in `corpus` say how "
+                        "many turns were classified, how many went unanswered and how "
+                        "many were never screened.",
     "dispute_rate": "disputes / present_in_turns. An UPPER BOUND for "
                     "always-in-force memory entries, since those are in every prompt.",
     "weighted_disputes": "disputes discounted by lexical overlap (word-set Jaccard "
@@ -2131,7 +2151,7 @@ def build_uptake_table(
         "by_presence_source": _by_presence_source(entries),
     }
 
-    return {
+    table = {
         "probe_timestamp": _now(),
         "corpus": {
             "turns": len(turns), "disputes": len(disputed),
@@ -2140,6 +2160,10 @@ def build_uptake_table(
             "engine_unanswered": unresolved,
             "unscreened_turns": len(turns) - len(dispute_flags),
             "dispute_rate_over_turns": round(len(disputed) / len(turns), 4) if turns else 0.0,
+            # The disputed half of the map, spelled out, so the denominator a row's
+            # `dispute_rate` divides into is IN the artifact rather than derivable only
+            # from `dispute_verdicts` (#2717).
+            "dispute_turn_ids": sorted(disputed_ids),
         },
         "coverage": coverage,
         "entries": entries,
@@ -2155,7 +2179,15 @@ def build_uptake_table(
         # alone, and the reason a floor-only skill row and a title-only note row
         # both read as measured signal.
         "glossary": GLOSSARY,
+        # The whole verdict map this run computed, keyed by `turn_id` (#2717). The
+        # counts in `corpus` and the per-row `disputes` say HOW MANY of an item's runs
+        # were disputed; nothing else in the artifact said WHICH, so the join "this
+        # item was retrieved for that run, and that run went badly" was not
+        # reconstructible from a table at all. Sorted, so two runs over one corpus
+        # write byte-identical files.
+        DISPUTE_MAP_KEY: dict(sorted(dispute_flags.items())),
     }
+    return table
 
 
 # -------------------------------------------------------- retrieval gate ----
