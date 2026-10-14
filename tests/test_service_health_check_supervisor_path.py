@@ -38,11 +38,18 @@ What this file pins:
    except arm had already computed, and left out of both sides of `Overall: N/M` the way
    an advisory row is. A row the checker never got to read is not evidence about the
    service named on it.
+3. That the json counters add up over the row from (2) (#2693). `format_json` asserted
+   `healthy + unhealthy + advisory == total_services` while `unverified` existed only as
+   a per-row flag, so the row sat inside `total_services` and inside none of the three
+   numbers a consumer reads. The last four nodes here pin the emitted `unverified`
+   counter, the four-way partition, and the precedence that keeps a row flagged both
+   `advisory` and `unverified` inside `advisory` alone.
 
 The stand-in binaries here are written to disk and exec'd for real. The one thing not
 patched is `subprocess` itself.
 """
 import ast
+import json
 import os
 import sys
 import types
@@ -353,3 +360,130 @@ def test_a_read_that_timed_out_is_a_graded_answer_not_an_unverified_one(shc, mon
     assert "unverified" not in row, row
     assert row["healthy"] is False, row
     assert shc._scored_rows([row]) == [row], "a timeout left the fraction"
+
+
+# ── #2693: the json counters must account for every row they are summed against ──
+
+#: The four top-level counters `format_json` emits, which together are supposed to
+#: say how many of `total_services` rows they describe.
+COUNTERS = ("healthy", "unhealthy", "advisory", "unverified")
+
+
+def _row(name: str, **fields) -> dict:
+    """One result row, the shape `check_service` returns, plus whatever `fields` say.
+
+    Defaults to a graded row measured DOWN (`exit_code` 3, no flag). An unverified row
+    is `status="unverified", exit_code=-1, unverified=True`, which is exactly the dict
+    `check_service`'s `OSError` arm builds; an advisory row carries `advisory=True` and
+    its own `verdict`.
+    """
+    row = {"name": name, "category": "lloyd", "healthy": False, "status": "STOPPED",
+           "exit_code": 3}
+    row.update(fields)
+    return row
+
+
+def test_the_json_counters_account_for_every_row_including_the_unverified_one(shc):
+    """Clauses 1 and 2: a top-level `unverified` counter, and four that add up.
+
+    The fixture is the mixed case #2693 measured — one graded healthy row, one graded
+    fault, one advisory row, one row that never reached its check. Before the fix the
+    emitted object had no `unverified` key at all: its counters came to
+    `healthy 1, unhealthy 1, advisory 1` against `total_services 4`, so the row sat
+    inside the total and inside none of the three numbers a consumer reads, while the
+    docstring asserted those three summed to it.
+    """
+    rows = [
+        _row("lloyd-backend", healthy=True, status="RUNNING", exit_code=0),
+        _row("lloyd-mcp", status="STOPPED", exit_code=3),
+        _row("ca-trust", category="ca", healthy=True, status="stale", exit_code=0,
+             advisory=True, verdict="warn"),
+        _row("supervisorctl status", status="unverified", exit_code=-1,
+             output="[Errno 2] No such file or directory", unverified=True),
+    ]
+    doc = json.loads(shc.format_json(rows, {"lloyd": "degraded"}))
+
+    assert "unverified" in doc, f"no counter for the row the three miss: {sorted(doc)}"
+    assert doc["unverified"] == 1, doc
+    # `total_services` keeps its meaning (#2693 names shrinking it as the wrong fix;
+    # tests/test_service_health_check_coverage.py:645 pins it from the CLI side).
+    assert doc["total_services"] == len(doc["services"]) == 4, doc
+    assert (doc["healthy"], doc["unhealthy"], doc["advisory"]) == (1, 1, 1), doc
+    assert (doc["healthy"] + doc["unhealthy"] + doc["advisory"] + doc["unverified"]
+            == doc["total_services"]), doc
+
+
+def test_a_row_flagged_both_advisory_and_unverified_is_counted_exactly_once(shc):
+    """Clause 3: `advisory` takes the row and `unverified` does not also bill it.
+
+    `_advisory_rows` selects on the `advisory` flag alone while `_scored_rows` excludes
+    on either flag, so the both-flagged row is already inside `advisory`; a counter
+    written plainly as "rows with `unverified`" would claim it a second time and push
+    the four counters ABOVE `total_services` — the failure mode this fix could have
+    shipped with. `format_text` still names such a row under both its headings, which is
+    right for a person reading the report and is not this arithmetic.
+    """
+    rows = [
+        _row("lloyd-backend", healthy=True, status="RUNNING", exit_code=0),
+        _row("ca-trust", category="ca", status="unverified", exit_code=-1,
+             advisory=True, verdict="warn", unverified=True),
+    ]
+    doc = json.loads(shc.format_json(rows, {}))
+
+    assert doc["advisory"] == 1, doc
+    assert doc["unverified"] == 0, f"the both-flagged row was billed twice: {doc}"
+    assert doc["unhealthy"] == 0, f"the row leaked into the graded count: {doc}"
+    assert doc["total_services"] == len(doc["services"]) == 2, doc
+    assert sum(doc[k] for k in COUNTERS) == doc["total_services"], doc
+
+
+@pytest.mark.parametrize("flags", [
+    {},
+    {"advisory": True},
+    {"unverified": True},
+    {"advisory": True, "unverified": True},
+], ids=["neither-flag", "advisory", "unverified", "both-flags"])
+def test_no_combination_of_the_two_flags_moves_the_counters_off_the_row_count(shc,
+                                                                             flags):
+    """The property behind clause 3, over every combination of the two flags.
+
+    One graded healthy row plus one row carrying `flags`, four times over: the counters
+    must land ON `total_services`, never above it (a row counted twice) and never below
+    it (a row counted nowhere — which is what was filed). The no-flag id is the control:
+    that row belongs in `healthy`/`unhealthy`, so neither new counter may move on it.
+    """
+    rows = [_row("lloyd-backend", healthy=True, status="RUNNING", exit_code=0),
+            _row("probe", **flags)]
+    doc = json.loads(shc.format_json(rows, {}))
+
+    assert doc["total_services"] == len(doc["services"]) == 2, doc
+    assert sum(doc[k] for k in COUNTERS) == doc["total_services"], (flags, doc)
+
+
+def test_the_printed_json_reports_the_counter_a_cli_consumer_parses(shc, monkeypatch,
+                                                                   tmp_path, capsys):
+    """The stdout seam: the printed text is the only form a caller of the script holds.
+
+    One `SERVICES` entry whose command cannot exec — the stand-in is on disk at mode
+    644, so the module's own unstubbed `subprocess.run` raises the same `OSError` family
+    the live defect raised — and `main()` really runs and really prints. Asserting on
+    what it printed rather than on a dict is the point: a key present in the object but
+    absent from the emitted JSON, or a consumer that reads `total_services` and the
+    three counters out of that text, is exactly what #2693 was filed about.
+    """
+    _stub(shc, monkeypatch, tmp_path, body="exit 0\n", executable=False)
+    monkeypatch.setattr(shc, "SERVICES", {
+        "probe-service": {"command": [str(tmp_path / "supervisorctl"), "-c",
+                                      str(tmp_path / "supervisord.conf"), "status",
+                                      "probe-service"],
+                          "category": "lloyd"}})
+    monkeypatch.setattr(sys, "argv", ["service_health_check.py", "--services",
+                                      "probe-service", "--format", "json"])
+    shc.main()
+    printed = capsys.readouterr().out
+    doc = json.loads(printed)
+
+    assert '"unverified": 1' in printed, printed
+    assert doc["services"][0]["unverified"] is True, doc
+    assert doc["total_services"] == len(doc["services"]) == 1, doc
+    assert sum(doc[k] for k in COUNTERS) == doc["total_services"], doc

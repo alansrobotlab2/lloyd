@@ -1373,6 +1373,18 @@ def _advisory_rows(results: list) -> list:
     return [r for r in results if r.get("advisory")]
 
 
+def _unverified_rows(results: list) -> list:
+    """The unverified rows no other counter has already claimed (#2693).
+
+    `advisory` wins, and it has to: `_advisory_rows` selects on the `advisory` flag
+    alone while `_scored_rows` excludes on either flag, so a row carrying both flags
+    is already inside the `advisory` count. A counter spelled plainly as
+    `sum(1 for r in results if r.get("unverified"))` would bill that row twice and
+    let the four json counters sum ABOVE `total_services`.
+    """
+    return [r for r in results if r.get("unverified") and not r.get("advisory")]
+
+
 def _scored_rows(results: list) -> list:
     """The rows the verdict is arithmetic over.
 
@@ -1441,13 +1453,20 @@ def format_text(results: list, summary: dict) -> str:
 def format_json(results: list, summary: dict) -> str:
     """Format results as JSON.
 
-    `unhealthy` is faults only: an advisory row goes into its own count, so
-    `healthy + unhealthy + advisory == total_services` and a caller that reads just
-    `unhealthy` is not told the box is broken by a retired certificate. The row
-    itself, with its `verdict` and its two fingerprints, is always in `services`.
+    `unhealthy` is faults only: an advisory row goes into its own count, so a caller
+    that reads just `unhealthy` is not told the box is broken by a retired
+    certificate, and a row whose command never started goes into `unverified` for the
+    same reason — it is the checker's own miss, not a service being down (#2652). The
+    four counters partition the rows, so
+    `healthy + unhealthy + advisory + unverified == total_services`, where
+    `unverified` counts the unverified rows that are not also advisory (a row
+    carrying both flags is counted once, under `advisory`) and `total_services` is
+    every entry in `services`. The row itself, with its `verdict` and its two
+    fingerprints, is always in `services`.
     """
     scored = _scored_rows(results)
     advisory = _advisory_rows(results)
+    unverified = _unverified_rows(results)
     healthy_count = sum(1 for r in scored if r["healthy"])
 
     output = {
@@ -1456,6 +1475,7 @@ def format_json(results: list, summary: dict) -> str:
         "healthy": healthy_count,
         "unhealthy": len(scored) - healthy_count,
         "advisory": len(advisory),
+        "unverified": len(unverified),
         "services": results,
         "summary": summary
     }
