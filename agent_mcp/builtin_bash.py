@@ -49,6 +49,11 @@ same pyflakes delta block `Edit` does (`_bash_edit_diagnostics`, #695).
 A background session's foreground command that leaves a git-ignored path in the
 live checkout is told so on the same result (`_bash_tree_strays`).
 
+A failing command whose output carries `no such column: <name>` against a store
+under the data root gets that table's real columns on one more line, read off the
+store at that instant (`_bash_schema_hint`, #2703). It adds nothing when the table
+or store cannot be recovered, and it opens every store read-only.
+
 Background mode (``run_in_background=true``) spawns the command with
 stdout/stderr redirected to a file under ``~/lloyd-data/_pipeline/tasks/``,
 returns the task id and output path immediately, and lets the harness
@@ -69,8 +74,9 @@ from typing import Any
 
 from mcp.types import Tool
 
-from agent_mcp import (_bash_edit_diagnostics, _bash_tree_strays, _path_sandbox,
-                       _resource_ceiling, _rpc, _task_registry, _tool_sandbox)
+from agent_mcp import (_bash_edit_diagnostics, _bash_schema_hint, _bash_tree_strays,
+                       _path_sandbox, _resource_ceiling, _rpc, _task_registry,
+                       _tool_sandbox)
 from agent_mcp._shared import get_bound_session, text_result
 
 logger = logging.getLogger("lloyd-builtin-bash")
@@ -373,9 +379,14 @@ async def _bash(args: dict[str, Any]) -> str:
         if truncated:
             suffix = f"\n[truncated]" + suffix
         _bash_failed.set(True)
-        return await _with_edit_diagnostics(
-            (output or "(no output)") + suffix + (f"\n{ceiling_note}"
-                                                 if ceiling_note else ""), snap)
+        text = (output or "(no output)") + suffix + (f"\n{ceiling_note}"
+                                                    if ceiling_note else "")
+        # #2703: a `no such column` against a runtime store answers with that
+        # table's real columns, read off the store at this instant, so the guesser
+        # cannot re-guess. Applied before the diagnostics so the line sits with the
+        # error it explains; adds nothing when the schema cannot be proven.
+        text = await _with_schema_hint(text, command, cwd)
+        return await _with_edit_diagnostics(text, snap)
 
     if not truncated:  # otherwise the marker is already inside `output`
         output = output if output else "(no output)"
@@ -409,6 +420,21 @@ async def _with_edit_diagnostics(text: str, snap) -> str:
         return await asyncio.to_thread(_bash_edit_diagnostics.append, text, snap)
     except Exception:
         logger.warning("bash edit diagnostics failed", exc_info=True)
+        return text
+
+
+async def _with_schema_hint(text: str, command: str, cwd: str | None) -> str:
+    """`text` plus one column line for a wrong-column sqlite error, off the loop.
+
+    Threaded because it opens a database, and the pool holds write locks on
+    `workers.db`: a synchronous open on the event loop would stall every other
+    dispatch in this process on a lock the tool has no business waiting for. The
+    plain text comes back on any failure, including this wrapper's own.
+    """
+    try:
+        return await asyncio.to_thread(_bash_schema_hint.append, text, command, cwd)
+    except Exception:
+        logger.warning("bash schema hint failed", exc_info=True)
         return text
 
 
