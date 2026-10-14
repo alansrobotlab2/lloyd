@@ -927,3 +927,255 @@ def test_the_gate_selection_collects_the_drift_witness_and_it_reaches_a_verdict(
     assert "xfail" not in out.lower(), f"{node} was xfailed rather than run: {out[-800:]}"
     assert "1 passed" in out, f"{node} did not reach a pass: {out[-1500:]}"
     assert run.returncode == 0, f"pytest exited {run.returncode}: {out[-1500:]}"
+
+
+# ---------------------------------------------------------------------------
+# #2708 — a skip the run declared in its own terminal report is not a dropped stage
+#
+# Why this section exists: task 39's 2026-10-11 run wrote its completion report and, in that
+# report's `Not written, with reasons` block, named `conversation-patterns-latest.md` as
+# deliberately not written with the guard output pasted under it — the second of the two options
+# `skills/nightly-reflection-knowledge-write/steps-2b-2f.md` offers. The escalation gate read
+# neither the block nor the licence, filed #2705 as a dropped stage, and the draft asserted the
+# run had produced no evidence of its own choice. The de-escalation below stops the draft; the
+# report line stays, because "the trace names no write" remains true even when the run explains
+# itself, and it is the replay's job to say what the trace shows.
+#
+# The fixtures are side by side on purpose: clause 3's corpus is clause 1's with one word changed
+# in the report — the run names *other* files and never the missing basename, which is the
+# #2502 2026-10-07 shape that must keep filing. A de-escalation that cannot tell those two
+# reports apart is an amnesty, not a fix.
+# ---------------------------------------------------------------------------
+
+#: The artifact the fixture task publishes every night and the faulty night does not — the shape
+#: that fired, task 39's `conversation-patterns-latest.md`.
+POINTER_ARTIFACT = "patterns-latest.md"
+
+#: The same task's terminal report, under a basename no per-task path table knows. The detector
+#: has to reach it through the baseline's learned artifact steps, which is only checkable if the
+#: name means nothing to the code.
+RUN_REPORT = "midnight-summary-latest.md"
+
+#: §2e's own heading, as the skill words it and as `tests/test_skill_reflection_archive.py` pins
+#: that wording in prose against a future edit of the skill. The detector anchors on this literal
+#: so the two surfaces move together or one of these tests goes red.
+NOT_WRITTEN_HEADING = "## Not written, with reasons"
+
+
+def _declared_report(*, names: list[str], written: list[str] = ()) -> str:
+    """A terminal report: a not-written block naming `names`, then a section after the block
+    naming the files in `written` as written."""
+    block = "\n".join(f"- **`{name}`** — not written; its handoff section was empty."
+                      for name in names)
+    after = "\n".join(f"- `{name}` — written, archive copy taken." for name in written)
+    return (f"# Midnight summary\n\n## Files written\n\n- `{RUN_REPORT}`.\n\n"
+            f"{NOT_WRITTEN_HEADING}\n\n{block}\n\n## Archive copies\n\n{after}\n")
+
+
+def _pointer_replay(tmp_path: Path, *, report_text: str | None, stray_text: str | None = None,
+                    report_by_every_run: bool = True, faulty_at: int = 5, count: int = 6,
+                    report_stamp: str = "inside", pointer_elsewhere: bool = False):
+    """Six runs of one task, replayed through the real loaders.
+
+    Every run writes its terminal report — that is the artifact the baseline learns, and the one
+    the detector reads to find a declared skip — and every run except the faulty one also
+    publishes the pattern pointer, so `write:patterns-latest.md` is expected of the faulty run by
+    the same support arithmetic the other corpora here use.
+
+    `report_text` is what is on disk at the report's learned path when the replay runs; with
+    `report_by_every_run=False` no run's trace names that write, so the task's baseline holds no
+    learned report artifact even though the file sits there. `stray_text` is what is on disk in a
+    scratch note only the faulty run writes — a path the baseline never learned, because one run
+    in six is not a shape. Returns the replay result, so a test asserts on the same dicts
+    `escalation_targets` was handed.
+
+    `report_stamp` is the report file's mtime, the evidence the check reads: `inside` (the
+    default) stamps it one minute before the ledger's `completed_at` for these runs, where a
+    report the run itself wrote has to fall; `stale` stamps it the previous evening, a report this
+    run did not write. The window is not invented here — `_write_corpus` defaults every row to
+    `started_at` 2026-09-10T05:00:00+00:00 and `completed_at` 05:12:00+00:00, which is what the
+    two fixtures below assert against."""
+    root = tmp_path / "corpus"
+    reflection = root / "reflection"
+    report_dir = reflection / "summaries"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report = report_dir / RUN_REPORT
+    pointer = reflection / POINTER_ARTIFACT
+    stray = reflection / "scratch-note-latest.md"
+    if report_text is not None:
+        report.write_text(report_text, encoding="utf-8")
+    if stray_text is not None:
+        stray.write_text(stray_text, encoding="utf-8")
+    specs = []
+    for i in range(count):
+        faulty = i == faulty_at
+        # Every run writes a running notes file, so `tool:Write` is a step no shape here drops:
+        # with `report_by_every_run=False` the faulty run would otherwise make no write call at
+        # all, and the corpus would flag two steps — leaving a test unable to say which one the
+        # escalation gate acted on, which is the property every other corpus in this file has.
+        calls = [base._tool("Read", path=str(reflection / "handoff-latest.md"), seq=1),
+                 base._tool("Write", path=str(reflection / "notes-latest.md"), seq=2)]
+        seq = 3
+        if report_by_every_run:
+            calls.append(base._tool("Write", path=str(report), seq=seq))
+            seq += 1
+        if stray_text is not None and faulty:
+            calls.append(base._tool("Write", path=str(stray), seq=seq))
+            seq += 1
+        if not faulty:
+            calls.append(base._tool("Write", path=str(pointer), seq=seq))
+        elif pointer_elsewhere:
+            # The #2502 swap shape on top of a declared skip: this run wrote a same-named file at
+            # a directory its task's history never writes the artifact to, and also named the
+            # basename in its not-written block. The step stays unsatisfied (wrong directory), so
+            # a deviation exists and `same_name_elsewhere` is populated — the one combination the
+            # reason chain used to resolve in favour of the draft.
+            swapped = root / "vault-derived" / "conversation"
+            swapped.mkdir(parents=True, exist_ok=True)
+            calls.append(base._tool("Write", path=str(swapped / POINTER_ARTIFACT), seq=seq))
+        specs.append({"run_id": f"run_dp_{i}",
+                      "session_key": f"2026091{i}_0500{i}0_autonomy_dp{i}",
+                      "status": "success", "source": base.TASK,
+                      "task_id": int(base.TASK.rsplit(":", 1)[1]), "calls": calls})
+    traj, db = base._write_corpus(root, specs)
+    # The ledger rows exist only now, so the report's mtime — the evidence the check reads — can
+    # only be placed relative to them here. `_write_corpus` stamps every row 2026-09-10T05:00:00
+    # to 05:12:00+00:00, so `inside` is 05:11:00 and `stale` the evening before the run started.
+    stamp = {"inside": "2026-09-10T05:11:00+00:00",
+             "stale": "2026-09-09T22:00:00+00:00"}[report_stamp]
+    epoch = datetime.fromisoformat(stamp).timestamp()
+    os.utime(report, (epoch, epoch))
+    return sc.replay(trajectory_dir=traj, db_path=db)
+
+
+def test_a_declared_skip_beats_the_swap_shape_it_must_not_reopen(tmp_path, capsys):
+    """Clause 1 against #2502, in the one case where the two suppressions can collide. The run
+    declared the basename in its not-written block *and* left a same-named file at a directory the
+    task's history never writes it to, so the deviation carries `written_elsewhere` and used to be
+    reasoned `artifact_written_at_other_path` — an escalable reason — which files exactly the draft
+    #2708 is about, with `written_elsewhere: (none)` as far as the reader can see it. The declared
+    skip now decides the reason, and the swap survives as printed evidence rather than as a draft:
+    de-escalation has to remove the accusation, never the observation."""
+    result = _pointer_replay(tmp_path, report_text=_declared_report(names=[POINTER_ARTIFACT]),
+                             pointer_elsewhere=True)
+    flagged = _flagged(result)
+    assert _steps(flagged[0]) == [f"write:{POINTER_ARTIFACT}"], _steps(flagged[0])
+    deviation = flagged[0]["deviations"][0]
+    assert deviation["reason"] == sc.REASON_DECLARED_SKIP, deviation["reason"]
+    assert deviation["declared_in"].endswith(RUN_REPORT), deviation["declared_in"]
+    elsewhere = deviation["written_elsewhere"]
+    assert elsewhere == [str(tmp_path / "corpus" / "vault-derived" / "conversation"
+                          / POINTER_ARTIFACT)], elsewhere
+    assert sc.escalation_targets(result) == [], sc.escalation_targets(result)
+    sc.print_replay(result)
+    printed = capsys.readouterr().out
+    assert f"written at another path instead: {elsewhere}" in printed, printed
+    assert f"reason={sc.REASON_DECLARED_SKIP}" in printed, printed
+
+
+def test_a_skip_named_in_the_runs_own_report_is_reasoned_out_and_files_no_draft(tmp_path):
+    """Clause 1, and the false alarm #2705 is made of. The run dropped the pointer and named
+    exactly that basename inside its report's not-written block, so the deviation carries a reason
+    outside `ESCALABLE_REASONS` and the escalation gate has no target for it."""
+    result = _pointer_replay(tmp_path, report_text=_declared_report(names=[POINTER_ARTIFACT]))
+    flagged = _flagged(result)
+    assert _steps(flagged[0]) == [f"write:{POINTER_ARTIFACT}"], _steps(flagged[0])
+    reason = flagged[0]["deviations"][0]["reason"]
+    assert reason == sc.REASON_DECLARED_SKIP, reason
+    assert sc.REASON_DECLARED_SKIP not in sc.ESCALABLE_REASONS
+    assert sc.escalation_targets(result) == []
+    backlog = tmp_path / "backlog"
+    assert sc.file_escalations(result, backlog_dir=backlog) == []
+    assert _drafts(backlog) == []
+
+
+def test_a_declared_skip_is_still_printed_and_still_counted_as_flagged(tmp_path, capsys):
+    """Clause 2: de-escalation suppresses the draft, never the observation. The run is still in
+    `runs_flagged` and `deviations`, `print_replay` still prints its missing step, and the reason
+    on that printed line is the new one — which is what lets a reader tell "declared" from
+    "unexplained" without opening the report."""
+    result = _pointer_replay(tmp_path, report_text=_declared_report(names=[POINTER_ARTIFACT]))
+    assert result["runs_flagged"] == 1, result["deviations"]
+    assert result["deviations"] == 1
+    assert any(r["run_id"] == f"run_dp_{5}" and r["deviations"] for r in result["reports"])
+    sc.print_replay(result)
+    printed = capsys.readouterr().out
+    assert "run_dp_5" in printed, printed
+    assert f"missing 'write:{POINTER_ARTIFACT}'" in printed, printed
+    assert f"reason={sc.REASON_DECLARED_SKIP}" in printed, printed
+
+
+def test_the_2502_shape_a_skip_the_report_never_named_still_files(tmp_path):
+    """Clause 3, the regression pair to the test above. Same corpus, same heading, same block —
+    the report names two *other* files and never the missing basename, which is what task 39's
+    2026-10-07 report did. That run filed, and it still must: naming some skip is not naming this
+    one, and #2502 exists precisely because that night's pointer went unpublished with no
+    declaration."""
+    result = _pointer_replay(tmp_path, report_text=_declared_report(
+        names=["tool-patterns-latest.md", "user-profile-latest.md"]))
+    flagged = _flagged(result)
+    assert _steps(flagged[0]) == [f"write:{POINTER_ARTIFACT}"]
+    assert flagged[0]["deviations"][0]["reason"] == sc.REASON_MISSING
+    targets = sc.escalation_targets(result)
+    assert [t["step"] for t in targets] == [f"write:{POINTER_ARTIFACT}"]
+    backlog = tmp_path / "backlog"
+    assert len(sc.file_escalations(result, backlog_dir=backlog)) == 1
+    assert len(_drafts(backlog)) == 1
+
+
+@pytest.mark.parametrize("shape", ["named_outside_the_block", "no_learned_report",
+                                   "declared_only_in_an_unlearned_file",
+                                   "report_predates_the_run"])
+def test_nothing_else_de_escalates(tmp_path, shape):
+    """Clause 4, the four shapes that must keep filing. A report that mentions the basename only
+    outside the not-written block has not declared a skip — §2e's licence is a named block, and
+    matching the string anywhere in a report would excuse a run that wrote the file and a run that
+    bragged about it alike. A task whose baseline learned no report artifact at all cannot be
+    de-escalated by a report, so the old behaviour has to be all that changes. And a declaration
+    in a file only the faulty run wrote is not a report: the artifact the detector reads is one the
+    *baseline* learned, which is why no per-task path table is needed and why one run in six does
+    not qualify. And a report on disk whose mtime is the previous evening is somebody else's
+    report: the trace names the write, the file was never touched by this run, and the declaration
+    inside it cannot be this run's — the shape the window's `started` bound exists for."""
+    silence = _declared_report(names=["tool-patterns-latest.md"])
+    if shape == "named_outside_the_block":
+        text = _declared_report(names=["tool-patterns-latest.md"], written=[POINTER_ARTIFACT])
+        result = _pointer_replay(tmp_path, report_text=text)
+    elif shape == "no_learned_report":
+        result = _pointer_replay(tmp_path, report_text=_declared_report(names=[POINTER_ARTIFACT]),
+                                 report_by_every_run=False)
+    elif shape == "report_predates_the_run":
+        # The same report text and the same learned write in the trace, an mtime the previous
+        # evening. `run_report_paths` still names the path, so the only thing refusing to read it
+        # is the window; the identical corpus stamped one minute before `completed_at` de-escalates
+        # instead, which is the pair that makes that bound the difference rather than decoration.
+        result = _pointer_replay(tmp_path, report_text=_declared_report(names=[POINTER_ARTIFACT]),
+                                 report_stamp="stale")
+    else:
+        # The report itself declares nothing; the declaration is in the note only this run wrote.
+        result = _pointer_replay(tmp_path, report_text=silence,
+                                 stray_text=_declared_report(names=[POINTER_ARTIFACT]))
+    flagged = _flagged(result)
+    assert _steps(flagged[0]) == [f"write:{POINTER_ARTIFACT}"], (shape, _steps(flagged[0]))
+    assert flagged[0]["deviations"][0]["reason"] == sc.REASON_MISSING, shape
+    assert [t["step"] for t in sc.escalation_targets(result)] == [f"write:{POINTER_ARTIFACT}"]
+    backlog = tmp_path / "backlog"
+    assert len(sc.file_escalations(result, backlog_dir=backlog)) == 1, shape
+
+
+def test_the_declaration_is_read_only_inside_the_not_written_block():
+    """The matcher's own edges, pinned beside the corpus tests above because clause 4's first
+    shape depends on them: the block is a heading-bounded region, not a substring search, and the
+    name inside it is compared the way every other artifact name in this module is — through
+    `normalized_basename`, so a report that names `patterns-2026-10-11.md` declares the skip on
+    `patterns-<date>.md`."""
+    text = _declared_report(names=[POINTER_ARTIFACT], written=["handoff-latest.md"])
+    assert sc.declared_skip_in_report(text, POINTER_ARTIFACT)
+    assert not sc.declared_skip_in_report(text, "handoff-latest.md"), \
+        "a name after the block closed was read as a declaration"
+    assert not sc.declared_skip_in_report(text, "no-such-latest.md")
+    dated = ("# Midnight summary\n\n"
+             f"{NOT_WRITTEN_HEADING}\n\n- `patterns-2026-10-11.md` — not written.\n")
+    assert sc.declared_skip_in_report(dated, "patterns-<date>.md")
+    assert not sc.declared_skip_in_report(
+        "# Midnight summary\n\n## Files written\n\n- `p-latest.md`\n", "p-latest.md")

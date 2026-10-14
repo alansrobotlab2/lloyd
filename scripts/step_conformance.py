@@ -161,6 +161,16 @@ DIR_COMPONENTS = 2
 REASON_MISSING = "missing_structural_step"
 REASON_OTHER_PATH = "artifact_written_at_other_path"
 REASON_WITNESSED = "disk_witnessed_write_not_in_trace"
+# `declared_skip_in_run_report` never files either, and it is the one suppression that reads what
+# the run said about itself (#2708). It applies when the artifact is absent and the run's own
+# terminal report — an artifact of the same task, reached through that task's baseline — names
+# this basename inside its not-written declaration. That declaration is a sanctioned outcome, not
+# an excuse the detector invented: `skills/nightly-reflection-knowledge-write/steps-2b-2f.md`
+# offers a stage whose input turned out to be empty exactly two endings, perform the write or name
+# that exact file in the report's `Not written, with reasons` block. So the absence is a decision
+# with a record, and the deviation stays reported all the same, because the trace still shows no
+# write where the task's other runs show one.
+REASON_DECLARED_SKIP = "declared_skip_in_run_report"
 ESCALABLE_REASONS = (REASON_MISSING, REASON_OTHER_PATH)
 
 #: The margin on the disk witness's window. `started_at` is when the queue claimed the run and
@@ -656,14 +666,19 @@ class Deviation:
     learned_from: list[str]
     learned_from_n: int
     baseline_runs: int
-    #: Which of the three cases this is (`REASON_*`), and the two pieces of evidence #2502
-    #: added: the disk witness that may excuse the deviation, and the paths the same-named
-    #: artifact was written to instead. Defaults keep a deviation built from an older report
-    #: file scoring-compatible: no reason recorded, nothing witnessed, nothing elsewhere.
+    #: Which of the four cases this is (`REASON_*`), and the pieces of evidence #2502 and #2708
+    #: added: the disk witness that may excuse the deviation, the paths the same-named
+    #: artifact was written to instead, and the report that declared it not written. Defaults keep
+    #: a deviation built from an older report file scoring-compatible: no reason recorded, nothing
+    #: witnessed, nothing elsewhere, nothing declared.
     reason: str = REASON_MISSING
     witnessed: bool = False
     disk_witness: dict | None = None
     written_elsewhere: list[str] = field(default_factory=list)
+    #: The report that declared this artifact not written when `reason` is
+    #: `declared_skip_in_run_report` (#2708); `""` on every other reason. A path and not a
+    #: quotation: the reader has the file, and a quotation is one more thing a draft can truncate.
+    declared_in: str = ""
 
     def to_json(self) -> dict:
         return {
@@ -686,6 +701,7 @@ class Deviation:
             "witnessed": self.witnessed,
             "disk_witness": dict(self.disk_witness) if self.disk_witness else None,
             "written_elsewhere": list(self.written_elsewhere),
+            "declared_in": self.declared_in,
         }
 
 
@@ -970,6 +986,150 @@ def _end_time(run: RunRecord | None, trace: Trace, now: datetime):
     return _parse_ts(trace.trace_ts, assume_local=True) or now
 
 
+#: The opening words of the heading a run's not-written declaration sits under. §2e of the
+#: knowledge-write skill gives a stage whose input turned out to be empty exactly two endings —
+#: perform the write, or "name that exact file in the completion report's `Not written, with
+#: reasons` block" — and `tests/test_skill_reflection_archive.py` pins that sentence as prose on
+#: the skill. The detector anchors on the same literal so the two surfaces move together: if the
+#: skill is ever re-worded, this heading stops matching, every declared skip files a draft again,
+#: and the regression is visible in the escalation queue rather than hidden in the code. Matching
+#: the opening words rather than the whole title tolerates a trailing colon or an added qualifier.
+NOT_WRITTEN_HEADING = "not written"
+
+#: A markdown heading: level, then the title.
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+
+#: A name-looking word inside a report's not-written block. Deliberately excludes the markup a
+#: report wraps around a path — `**`conversation-patterns-latest.md`**` has to yield the name,
+#: not the asterisks — and a shell fragment cannot survive `normalized_basename` regardless.
+REPORT_NAME_TOKEN_RE = re.compile(r"[A-Za-z0-9_./+<>%$-]+")
+
+#: Ceiling on what the declared-skip reader will open. A terminal report in this fleet is a few
+#: kilobytes; the limit exists so a trace that captured `/dev/sda` or a multi-megabyte dump in a
+#: `file_path` cannot turn a nightly replay into a disk stall. Past it the declaration is simply
+#: not found, which is the pre-#2708 behaviour rather than a crash.
+MAX_DECLARATION_READ_BYTES = 2 * 1024 * 1024
+
+
+def _not_written_blocks(text: str) -> list[str]:
+    """The bodies of every not-written declaration section in a report.
+
+    A section runs from its heading to the next heading of the same or a shallower level, so the
+    declaration is a bounded region rather than a substring: the point of clause 4 of #2708 is
+    that a report which merely *mentions* the basename somewhere else has not declared a skip.
+    """
+    blocks: list[str] = []
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        heading = _HEADING_RE.match(lines[index])
+        index += 1
+        if heading is None:
+            continue
+        level = len(heading.group(1))
+        if not heading.group(2).strip().lower().startswith(NOT_WRITTEN_HEADING):
+            continue
+        body: list[str] = []
+        while index < len(lines):
+            following = _HEADING_RE.match(lines[index])
+            if following is not None and len(following.group(1)) <= level:
+                break
+            body.append(lines[index])
+            index += 1
+        blocks.append("\n".join(body))
+    return blocks
+
+
+def declared_skip_in_report(text: str, basename: str) -> bool:
+    """Does this report declare that ``basename`` was deliberately not written?
+
+    True only for a name inside a not-written block. Searching the whole report instead would read
+    "we wrote ``x-latest.md`` this night, unlike the 2026-10-07 run, which did not write
+    ``x-latest.md``" as a declaration, and would excuse a run that wrote the artifact in the same
+    breath as one that did not. Names are compared the way every other artifact name in this
+    module is — through `normalized_basename` — which is what lets a report that names
+    `patterns-2026-10-11.md` declare the skip on a learned step of `patterns-<date>.md`, and keeps
+    this comparison unable to disagree with the step id it is excusing.
+    """
+    wanted = normalized_basename(basename)
+    if not wanted:
+        return False
+    for block in _not_written_blocks(text):
+        for token in REPORT_NAME_TOKEN_RE.findall(block):
+            if normalized_basename(token) == wanted:
+                return True
+    return False
+
+
+def run_report_paths(baseline: TaskBaseline, trace: Trace) -> list[str]:
+    """Where to look for this run's own terminal report: paths *this run's* trace names, for
+    artifacts the *baseline* learned the task writes.
+
+    Two halves, and each is what makes the other safe. Keeping only steps in
+    `baseline.expected_steps` means an artifact one run happened to write is never treated as its
+    report — that is why a declaration scribbled into a scratch note this run alone produced
+    cannot excuse it. Taking the path from the run's own captures, rather than from
+    `corroborated()`, means the file read is the copy *this* run wrote, not an earlier night's
+    copy still sitting at the learned `-latest.md` path.
+
+    Nothing here selects a path by task: which artifacts may serve as a report is derived per task
+    from that task's own learned baseline, so there is no per-task path table to maintain over an
+    open set of tasks. #2708's fixture deliberately names its report something no such table would
+    contain, which is the only way to test that property.
+    """
+    paths: list[str] = []
+    for base, raws in (trace.write_paths or {}).items():
+        if f"write:{base}" not in set(baseline.expected_steps):
+            continue
+        for raw in sorted(raws):
+            if raw and raw not in paths:
+                paths.append(raw)
+    return paths
+
+
+def skip_declared_in_run_report(baseline: TaskBaseline, trace: Trace, step: str,
+                                window: tuple[datetime, datetime],
+                                *, grace_seconds: int = DEFAULT_GRACE_SECONDS) -> str:
+    """The path of a report this run wrote that declares ``step``'s artifact not written; `""` if
+    none does.
+
+    Only the deviation's own path can answer, so this runs on the escalable-looking cases alone —
+    a handful of small reads per flagged run, never a corpus-wide scan.
+
+    `window` is the run's own `[started_at, completed_at]`, and a report is read only if its
+    `mtime` falls inside that window widened by `grace_seconds` — the same bound and the same
+    widening `artifact_disk_witness` uses, for the same reason: it is the only test that separates
+    "this run wrote this file" from "a file with this name exists". A nightly report that survived
+    from the previous night sits at the same path with an older stamp, and a replay scores runs
+    days old, so a bound measured against *now* would refuse the real case — the report the flagged
+    run actually wrote is stamped 2026-10-11 08:14:49Z inside that run's window
+    [08:00:28Z, 08:15:02Z] and 3 days before any replay of it runs. Both readings of an old stamp
+    are conservative in the same direction: the witness refuses to credit a run's write, this
+    refuses to credit its declaration.
+    """
+    basename = artifact_basename(step)
+    if not basename:
+        return ""
+    started, ended = window
+    for raw in run_report_paths(baseline, trace):
+        path = _expand(raw)
+        try:
+            stamp = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        except (OSError, ValueError, OverflowError):
+            continue
+        if not started <= stamp <= ended + timedelta(seconds=grace_seconds):
+            continue
+        try:
+            if path.stat().st_size > MAX_DECLARATION_READ_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if declared_skip_in_report(text, basename):
+            return str(path)
+    return ""
+
+
 def score_run(
     trace: Trace,
     run: RunRecord | None,
@@ -1025,8 +1185,26 @@ def score_run(
                 learned_artifact_path(baseline.artifact_paths, step), started, ended,
                 grace_seconds=grace_seconds,
             )
+        # #2708 clause 1: a write step the run *declared* it would not produce. The run's own
+        # terminal report — an artifact of this same task, reached through that task's baseline —
+        # naming this basename in its not-written block is the second of the two endings §2e
+        # licenses, so there is nothing to adjudicate. Ranked against the other suppressions by
+        # what each one makes the draft false about: the witness outranks it, because a disk stamp
+        # inside the run's window says the artifact exists and no sentence can un-write that; it
+        # outranks `elsewhere`, because #2708 clause 1 is about the run's own account of the
+        # basename and a run that named it did not drop it silently — a same-named file at an
+        # unlearned directory stays recorded on the deviation as `written_elsewhere` and stays
+        # printed, which is where a swap is still visible (clause 2's principle: de-escalation
+        # removes the draft, never the observation). Asked only for write steps, because a missing
+        # `read:` or `tool:` step has no licence to be declared away.
+        declared = ""
+        if witness is None and step.startswith(ESCALATE_PREFIX):
+            declared = skip_declared_in_run_report(
+                baseline, trace, step, (started, ended), grace_seconds=grace_seconds)
         if witness is not None:
             reason = REASON_WITNESSED
+        elif declared:
+            reason = REASON_DECLARED_SKIP
         elif elsewhere:
             reason = REASON_OTHER_PATH
         else:
@@ -1051,6 +1229,7 @@ def score_run(
             witnessed=witness is not None,
             disk_witness=witness,
             written_elsewhere=elsewhere,
+            declared_in=declared,
         )
         (report.pending if state == "pending" else report.deviations).append(deviation)
     for step in baseline.ordered(present & expected):
@@ -1528,11 +1707,20 @@ def escalation_targets(result: dict) -> list[dict]:
     suppressed. The run ids the expectation was learned from ride along, because the draft is a
     handoff and the evidence is the handoff.
 
-    The witness is the third suppression, and it suppresses a claim rather than a signal: the
-    draft would assert that this run produced no artifact, and an mtime inside the run's own
-    window at the path that task's history writes it to disproves that sentence. What survives
-    in the report is the true residue — the trace names no write where the task's other runs
-    name one, which is a gap in what `steps_from_tools` can read and is printed, not filed."""
+    Two of the four reason strings file (`ESCALABLE_REASONS`). `disk_witnessed_write_not_in_trace`
+    does not, and suppresses a claim rather than a signal: the draft would assert that this run
+    produced no artifact, and an mtime inside the run's own window at the path that task's history
+    writes it to disproves that sentence. Neither does `declared_skip_in_run_report` (#2708), which
+    suppresses an accusation: the draft would call the absence a dropped stage, and a run that
+    named that exact basename inside its own report's not-written block did the other thing §2e
+    permits — filing it asks a human to adjudicate a decision the run already recorded, which is
+    the false alarm #2705 is made of. That holds over the #2502 swap shape too: a run that declared
+    the basename and also left a same-named file at an unlearned directory is de-escalated, and its
+    `written_elsewhere` paths are still printed on the deviation, so the swap is reported and only
+    the draft is withdrawn. What survives in the report for both is the true residue: the trace
+    names no write where the task's other runs name one, which is printed and not filed. The
+    reason travels to this function inside the deviation's own JSON, so the gate below cannot
+    disagree with the scoring that set it."""
     out: list[dict] = []
     for report in result.get("reports") or []:
         if recorded_failure(report.get("run_status")):
@@ -1540,6 +1728,13 @@ def escalation_targets(result: dict) -> list[dict]:
         for deviation in report.get("deviations") or []:
             step = str(deviation.get("step") or "")
             if not escalates(step):
+                continue
+            # The reason is what scoring decided, carried here in the deviation's own JSON, so the
+            # gate cannot disagree with the judgement it is suppressing. `witnessed` is checked
+            # separately as well, and not redundantly: a deviation restored from a report file
+            # written before reasons existed comes back as REASON_MISSING with its `witnessed`
+            # flag intact, and the older of the two readings is the one that stays safe.
+            if (deviation.get("reason") or REASON_MISSING) not in ESCALABLE_REASONS:
                 continue
             if deviation.get("witnessed"):
                 continue
@@ -1726,6 +1921,11 @@ def print_replay(result: dict) -> None:
                     f" [{witness['window_start']}, {witness['window_end']}]"
                     f" ±{witness['grace_seconds']}s — not escalated: the artifact moved during"
                     " this run, the trace just never named the write"
+                )
+            if dev.get("declared_in"):
+                print(
+                    f"    declared not written in {dev['declared_in']} — not escalated: the run"
+                    " named this exact artifact in its own report's not-written block"
                 )
             print(f"    expected_steps={dev['expected_steps']}")
 
