@@ -21,29 +21,36 @@ derived from the output that source declares, from which the envelope is
 one it already was; nothing here gates a call.
 
 **Where a declared set comes from.** Not from a guess about what a job "would
-want": the four sets below are the union of (a) every tool name the source's
+want": the five sets below are the union of (a) every tool name the source's
 own prompt or RESULT block instructs the turn to call, and (b) every tool name
 the retained session transcripts of that source show it actually calling —
 counted over `~/lloyd-data/sessions` on 2026-10-06 (101 `youtube-digest`
-sessions/982 calls, 45 `deep-research`/1777, 54 `session-distill`/560) and, for
-`scheduled-task`, on 2026-10-09 (566 `*_autonomy_*.json` session files, 13,512
-calls; #2471's >5%-of-files rule is the 29-file line). A tool
+sessions/982 calls, 45 `deep-research`/1777, 54 `session-distill`/560), for
+`scheduled-task` on 2026-10-09 (566 `*_autonomy_*.json` session files, 13,512
+calls; #2471's >5%-of-files rule is the 29-file line), and for `autotriage` on
+2026-10-14 (1734 `*_autotriage_*.json`/`.json.gz` files, 32,814 calls, the same
+>5%-of-files rule giving an 87-file line; #2671). A tool
 is in a set because the job reached for it or its contract names it; `remember`
 is the counter-example that shows the measurement working — 19 `deep-research`
 calls named it, no such tool is served today, and a deny list could never have
 noticed.
 
-**Queue order for the rest (#2471 clause 6).** One source per round is this
-roster's own risk rule. `scheduled-task` is declared first because it is the
-largest undeclared surface — its turn reaches all 26 durable-external names
-under the deny union alone — and because it is the only source with a per-job
-authority scope, which is what makes its ceiling widen-able per task rather
-than per fleet. The remaining eleven — arch-review, autocode,
-automod-regression, autoresearch, autotriage, backlog-cluster, bench-mine,
-board-steward, failure-ledger, frontend-probe-canary, owed-check — wait for
-the owed-check ruling (#2269's owed entry 2) on their order; that roster
-text predates `board-steward` and `owed-check` existing, and omits
-`session-distill` from its list of undeclared sources, which has been
+**Queue order for the rest (#2471 clause 6, ordered by its owed entry 2).** One
+source per round is this roster's own risk rule. `scheduled-task` was the first of
+that queue to be declared, because it is the only source with a per-job authority
+scope, which is what makes its ceiling widen-able per task rather than per fleet.
+`autotriage` is the second (#2671), taking the ruling's own first place, because
+it is the largest undeclared surface by volume — 1615 runs in the week to
+2026-10-13 against 622 for `owed-check` and 438 for `autocode` — and it reaches
+the same 26 durable-external names under the deny union alone. The remaining
+eleven —
+arch-review, autocode, automod-regression, autoresearch, backlog-cluster,
+bench-mine, board-steward, cost-investigate, failure-ledger,
+frontend-probe-canary, owed-check — wait for the owed-check ruling (#2269's owed
+entry 2) on their order. That eleven is read off the registry, not off #2471's
+roster text, which predates `board-steward`, `owed-check` and `cost-investigate`
+(#2510, 2026-10-10) existing, listed `autotriage` while it was still undeclared,
+and omits `session-distill` from its list of undeclared sources, which has been
 declared since #2269.
 
 **The residual risk this does not remove, stated plainly.** An untrusted-ingest
@@ -337,6 +344,71 @@ SOURCE_CAPABILITIES: dict[str, tuple[str, ...]] = {
         "memory_add", "memory_replace", "memory_remove",
         "autonomy_get_task",
         "research_stats", "research_list", "research_propose",
+        "skills_search", "skills_read",
+    ),
+    "autotriage": (
+        # Census 2026-10-14 over `~/lloyd-data/sessions/*_autotriage_*.json` and
+        # the same suffix `.gz`: 1734 files, all parsed, 32,814 tool calls; the
+        # >5%-of-files rule is the 87-file line. Above it: Bash 1714 (98.8%),
+        # backlog_write_task 1176 (67.8%), Read 455 (26.2%), Grep 191 (11.0%),
+        # backlog_get_task 180 (10.4%) — all five are in the base, and
+        # `tests/test_worker_capability_allowlist.py::
+        # test_autotriage_gets_a_declared_ceiling_its_turn_options_carry` asserts
+        # that floor rather than describing it.
+        #
+        # Below the line, declared anyway with the file count that justified it:
+        # `Write` 62 files / 104 calls, and 100 of those 104 wrote a `/tmp/*.py`
+        # verification script (the other 4 wrote a scratch probe under
+        # `tmp-workdir`, `lloyd-scratch` and `_pipeline`, and none a vault note) —
+        # the prompt's own ceiling bullet, "the ONE cheap check that decides the
+        # premise", is that script and nothing else,
+        # `backlog_tasks` 27, `Scratchpad` 24 as `TURN_STATE`, `automod_status`
+        # 21 (`WORKER_AUTOMOD_BAN` names the nine loop DRIVERS and this read-only
+        # status tool is not among them; a triage verdict on an item that cites a
+        # round needs to read it), `Edit` 13, `Glob` 8 and `skills_search` 6 and
+        # `skills_read` 4 (the skill protocol every worker prompt ships with),
+        # `vault_read` 6 and `vault_search` 3 as `READ_VAULT`, `memory_read` 3 as
+        # `READ_MEMORY`, `vault_recall` as that set's retrieval leg the census
+        # never had to reach for. `backlog_boards` and `recall_observation` come
+        # in as the same set legs (#2471's rule: a base missing a declared
+        # family's siblings corrupts a compacted turn rather than narrowing it).
+        #
+        # Declared as `Write`/`Edit` by NAME and not as `FILE_NOTE`, on purpose:
+        # the set is `{Write, vault_write}`, and `vault_write` is excluded —
+        # 0 of 1734 files wrote a vault note, and the fleet's precedent (#2471)
+        # keeps the validated vault route automation-only. Taking the set would
+        # have silently re-declared, on the source that runs the triage loop, the
+        # kind of durable write this round exists to remove; `Edit`, which the set
+        # does not contain, is listed because 13 files used it (one of them on a
+        # backlog note, the rest on scratch probes).
+        #
+        # Excluded below the line, recorded rather than dropped quietly because
+        # owed-check rules on the width of this base after a week of runs: the
+        # autonomy plane (`autonomy_tasks` 6, `autonomy_get_task` 5,
+        # `autonomy_health` 1) and the ambient/harness controls
+        # (`ambient_decide` 6, `SetGoal` 3, `TodoWrite` 2,
+        # `session_inject_context` 1) — reads whose absence makes a turn report
+        # it could not look, not a turn that stops filing; and the web
+        # (`http_request` 3, `http_fetch` 2), the research queue
+        # (`autoresearch_status` 3, `research_stats` 1), the decision engine
+        # (`djev_status` 4, `djev_rank` 2) and the code graph
+        # (`graph_explain`/`graph_affected` 1 each), the same exclusions #2471
+        # recorded for `scheduled-task`. Three census names are not in the served
+        # roster at all — `backlog_search` 1, `verdict_block` 1, `Bash_1` 1 —
+        # hallucinated spellings a declared set can only refuse, and `expand`
+        # would have raised on them at import.
+        #
+        # No tier-2/3 durable-external name is in this base by rule (#2671
+        # clause 2): the 26 the deny union alone left reachable — `email_send`
+        # through `tasks_update`, and `autonomy_write_task` — are refused by the
+        # envelope on a triage turn. Unlike `scheduled-task` there is no per-job
+        # widening crack to close here: `_per_job_grant_widening`
+        # (workers/sources/_common.py) returns `()` for any source but
+        # `scheduled-task`, and `grant_scope_for` mints an `autonomy-task:<id>`
+        # scope for nothing else, so no live grant row can ever add a mail-plane
+        # name to this source's ceiling — the base is the whole ceiling.
+        "READ_FILES", "READ_VAULT", "READ_MEMORY", "FILE_BACKLOG", "TURN_STATE",
+        "Bash", "Write", "Edit", "automod_status",
         "skills_search", "skills_read",
     ),
 }

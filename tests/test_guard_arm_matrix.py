@@ -259,3 +259,55 @@ def test_the_report_surface_prints_the_envelopes_on_demand():
     # Every un-narrowed source is named in the findings block, once.
     assert "capability findings" in out.stdout
     assert out.stdout.count("worker-source-declares-no-capability-set") >= 10
+
+
+def test_declaring_a_source_moves_the_undeclared_row_count_and_named_no_more():
+    """#2671: the row count this round was to move, and the source it moved for.
+
+    The node above deliberately stops at `>= 10` — it predates the roster
+    growing and shrinking, and a fleet-wide report test is the wrong place for an
+    exact count that any new source changes. The exact number belongs with the
+    round that changed it: #2671 declared `autotriage`, one of the twelve
+    undeclared sources and the largest of them by volume, so the report now
+    prints ELEVEN
+    `worker-source-declares-no-capability-set` rows and `autotriage` is named in
+    none of them. Both halves matter: a count alone would also be 11 if a
+    different source had gone and `autotriage` stayed, and an absent name alone
+    would be satisfied by a declaration that also deleted a source.
+
+    The count is read off the compiled findings, not off a grep of the table: the
+    findings block is what the exit code is computed from, so a report that
+    printed eleven while the findings still held twelve would be the bug, not the
+    proof.
+    """
+    from app.harness.capabilities import SOURCE_CAPABILITIES
+
+    undeclared = sorted(f.target for f in G.capability_findings(ROOT)
+                        if f.reason == G.FINDING_UNDECLARED_ENVELOPE)
+    assert "autotriage" not in undeclared, (
+        "autotriage still declares no capability set — the entry in "
+        "app/harness/capabilities.py is what this row is about")
+    assert len(undeclared) == 11, undeclared
+    assert "autotriage" in SOURCE_CAPABILITIES
+    matrix = G.capability_matrix(ROOT)
+    assert matrix["autotriage"]["declared"] is True, matrix["autotriage"]
+    assert matrix["autotriage"]["n_allowed"] == 19, matrix["autotriage"]
+    assert matrix["autotriage"]["durable_reach"] == [], matrix["autotriage"]
+    # The registry itself did not move, so the 11 is a declaration and not a
+    # deletion: 16 registered sources, 5 of them declared.
+    assert len(matrix) == 16, sorted(matrix)
+    assert sum(1 for c in matrix.values() if c["declared"]) == 5
+
+    out = subprocess.run([sys.executable, str(SCRIPT), "--capabilities"],
+                         cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.count("worker-source-declares-no-capability-set") == 11, \
+        out.stdout[-3000:]
+    # The other half of the clause, read off the printed rows themselves: of the
+    # eleven findings lines, none names the source this round declared. A count
+    # alone cannot tell which source left the set.
+    finding_lines = [ln for ln in out.stdout.splitlines()
+                     if "worker-source-declares-no-capability-set" in ln]
+    assert len(finding_lines) == 11, finding_lines
+    assert not [ln for ln in finding_lines if "autotriage" in ln], finding_lines
+    assert "worker sources with a capability envelope: 16" in out.stdout

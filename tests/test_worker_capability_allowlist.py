@@ -40,6 +40,7 @@ from pathlib import Path
 
 import pytest
 
+import workers.sources.autotriage as autotriage
 import workers.sources.deep_research as deep_research
 import workers.sources.session_distill as session_distill
 import workers.sources.youtube_digest as youtube_digest
@@ -65,21 +66,51 @@ UNTRUSTED = ("session-distill", "youtube-digest", "deep-research")
 #: tool whose whole job is mutating something outside this machine's filesystem.
 SINGLE_REFUSALS = ("email_send", "contacts_delete", "calendar_delete_event")
 
+#: The source #2671 declares. It is NOT an untrusted-ingest source — its turn's
+#: input is Lloyd's own backlog, which this fleet already trusts enough to
+#: implement from — so it joins `UNTRUSTED` and
+#: `capabilities.UNTRUSTED_INGEST_SOURCES` nowhere here: widening the fleet's
+#: most-protected list is its own round's ruling, and the row-count claim that
+#: moves with this one is the guard matrix's, pinned in
+#: `tests/test_guard_arm_matrix.py`.
+TRIAGE_SOURCE = "autotriage"
+
 #: What each source's own job writes. `youtube-digest`'s are the two its prompt
 #: names (`Write`/`vault_write` for the note, `fact_add` for the entity);
 #: `session-distill`'s is the fact write the distiller exists to make, plus
 #: `Bash`, which is how it reads the transcripts it distils (344 of the 560 tool
 #: calls in its 54 retained sessions, every one in the last fortnight).
+#: `autotriage`'s three (#2671) are the whole triage loop's output surface:
+#: `backlog_write_task` (the verdict append and the one item it may file, in
+#: 1176 of its 1734 retained sessions), `Read` (455 files) and `Bash` (1714 —
+#: the one cheap check that decides a premise). A source in this table without
+#: a declared set is a node that cannot pass, which is the point: the table is
+#: the census of what a declaration must never strip. The node passes for an
+#: undeclared source too, so its non-vacuity is the paired refusal node on the
+#: same turn — `test_autotriage_base_refuses_every_durable_external_name_by_name`.
 JOBS_MUST_STILL_WORK = {
     "session-distill": ("fact_add", "Bash", "Read"),
     "youtube-digest": ("vault_write", "Write", "fact_add", "backlog_write_task"),
     "deep-research": ("vault_write", "fact_add", "http_fetch"),
+    TRIAGE_SOURCE: ("backlog_write_task", "Read", "Bash"),
 }
+
+#: Every source the dispatch node below covers, read back out of the table so a
+#: key can be added to the census without joining the parameterization
+#: (#2671's triage finding: the node was parameterized over `UNTRUSTED` alone,
+#: so declaring a fourth source pinned nothing about its own writes surviving).
+JOB_TABLE_SOURCES = tuple(sorted(JOBS_MUST_STILL_WORK))
 
 SOURCE_MODULES = {
     "session-distill": session_distill,
     "youtube-digest": youtube_digest,
     "deep-research": deep_research,
+    # #2671. `autotriage` has no module-level `DISALLOWED`: its single-item and
+    # group paths pass no `extra_disallowed` at all, so the `getattr` below
+    # compiles exactly what those two turn shapes ship. Its third path narrows
+    # by `SWEEP_DISALLOWED`, which is its own node below rather than a value
+    # folded into the shared table — the artifact measures a source's base.
+    "autotriage": autotriage,
 }
 
 #: The pool as a worker would see it: the committed roster, which is what
@@ -333,7 +364,7 @@ def test_the_envelope_refuses_the_legacy_spelling_too():
 
 # ── Clause 3: the job's own writes still go through ─────────────────────────
 
-@pytest.mark.parametrize("source", UNTRUSTED)
+@pytest.mark.parametrize("source", JOB_TABLE_SOURCES)
 def test_each_source_still_dispatches_the_writes_its_own_job_does(source):
     """The whole failure mode of an allow-list is a job that quietly lost a tool.
 
@@ -343,6 +374,14 @@ def test_each_source_still_dispatches_the_writes_its_own_job_does(source):
     reached the MCP layer, which is the only claim this node makes: the grant
     gate, the safety tier of a particular `Bash` command and the content gate
     are other layers with their own suites.
+
+    The parameterization is the table's own key set, not `UNTRUSTED`: this is
+    the node #2671's triage named as the gap a declaration can hide behind,
+    because a source that is declared but absent from here pins nothing about
+    its writes surviving, and for `autotriage` the symptom of that is the
+    triage loop going quiet rather than an error. The control that this is not
+    a vacuous pass is the paired refusal node on the same turn
+    (`test_autotriage_base_refuses_every_durable_external_name_by_name`).
     """
     opts = _options(source)
     for tool in JOBS_MUST_STILL_WORK[source]:
@@ -412,12 +451,16 @@ def test_a_source_that_declares_nothing_keeps_todays_compile():
 # ── The seam: worker pool → backend, two processes, one envelope ────────────
 
 def _post_body(source: str, extra: list[str], monkeypatch) -> dict:
-    """The JSON body `_stream` would POST, captured at the transport.
+    """The JSON body `run_prompt_in_session` posts for a source, at the transport.
 
     `httpx.AsyncClient` is the socket, not the mechanism under test: what is
     being checked is that the pool's declared envelope is *in the bytes* the
     backend reads. The reply is a single `done` event so the SSE reader exits the
     way it does on a finished turn.
+
+    Every session-backed source goes through this one function — the two ingest
+    sources from their own `_stream`, and `autotriage` from all three of its turn
+    shapes (#2671) — so this one capture covers all of them.
     """
     import httpx
 
@@ -467,13 +510,18 @@ def _post_body(source: str, extra: list[str], monkeypatch) -> dict:
 def test_the_loopback_post_carries_the_envelope_the_backend_applies(monkeypatch):
     """One seam, both ends, in one test.
 
-    `youtube-digest` and `deep-research` do not build their options in the pool:
-    they POST to the backend, which builds them in another process from this
-    body and nothing else — the same seam `grant_scope` (#534) and
+    `youtube-digest`, `deep-research` and `autotriage` do not build their options
+    in the pool: they POST to the backend, which builds them in another process
+    from this body and nothing else — the same seam `grant_scope` (#534) and
     `effect_scope` (#544) had to be crossed on their own, for the same reason.
     So a change that stopped at `_worker_run_options` would have shipped an
-    envelope for the sources that read a bundle off disk and none for the two
-    that read the internet. This node takes the body the real `_stream` builds
+    envelope for the sources that read a bundle off disk and none for the ones
+    that read the internet or the board. #2671 adds `autotriage` to this loop
+    because that is where its ceiling actually binds: all three of its turn
+    paths (`execute` single-item, `_execute_group`, `_execute_sweep`) go through
+    `run_prompt_in_session` with `source=NAME`, so a base that never crossed the
+    POST would leave 1615 runs a week on the deny union while every in-process
+    node above stayed green. This node takes the body the real `_stream` builds
     and hands it to the real `build_turn_options`, which is the only thing
     standing between the pool's declaration and the turn that runs.
     """
@@ -482,7 +530,7 @@ def test_the_loopback_post_carries_the_envelope_the_backend_applies(monkeypatch)
     from app.routers import messages as M
     from app.routers import turn_options as topts
 
-    for source in ("youtube-digest", "deep-research"):
+    for source in ("autotriage", "youtube-digest", "deep-research"):
         extra = list(getattr(SOURCE_MODULES[source], "DISALLOWED", ()))
         body = _post_body(source, extra, monkeypatch)
         assert body.get("allowed_tools"), (
@@ -1214,3 +1262,234 @@ def test_the_default_mode_is_shadow_and_an_unknown_value_stays_shadow(
     assert sc.mode() == "shadow"
     monkeypatch.setenv(sc.MODE_ENV, "enforce")
     assert sc.mode() == "enforce"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  #2671: autotriage gets a declared ceiling.
+#
+#  The denominator, recorded once here so every number below is re-checkable:
+#  every `*_autotriage_*.json` and `*_autotriage_*.json.gz` under
+#  `~/lloyd-data/sessions` on 2026-10-14 — 1734 files, all parsed, 32,814 tool
+#  calls, counted as distinct FILES containing a name (the #2471 denominator rule).
+#  The >5%-of-files line is 87 files. Above it: Bash 1714, backlog_write_task
+#  1176, Read 455, Grep 191, backlog_get_task 180. Its volume is why this source
+#  went first among the undeclared twelve — 1615 runs in `workers.db` since
+#  2026-10-06, against 622 for owed-check and 438 for autocode.
+# ════════════════════════════════════════════════════════════════════════════
+#: The five names the census puts above the 87-file line. This is the floor the
+#: declaration has to clear, so it is asserted rather than narrated: a later
+#: round that narrowed the base past one of these turns the triage loop off at
+#: the tool it cannot work without, and this is the node that says so.
+TRIAGE_CENSUS_ABOVE_LINE = ("Bash", "backlog_write_task", "Read", "Grep",
+                            "backlog_get_task")
+
+#: The four names clause 2 names. Chosen because none is in autotriage's declared
+#: base and each is durable-outside-the-box: mail, contacts, calendar, and the
+#: autonomy mutator whose file the fleet itself schedules.
+TRIAGE_REFUSED_BY_NAME = ("email_send", "contacts_delete",
+                          "calendar_delete_event", "autonomy_write_task")
+
+
+def _triage_opts():
+    """`autotriage`'s real single-item options, through the one compiler."""
+    return C._worker_run_options(4, source=TRIAGE_SOURCE)
+
+
+def _triage_sweep_opts():
+    """The same base narrowed the way the sweep path narrows it."""
+    return C._worker_run_options(
+        4, source=TRIAGE_SOURCE, extra_disallowed=list(autotriage.SWEEP_DISALLOWED))
+
+
+def test_autotriage_gets_a_declared_ceiling_its_turn_options_carry():
+    """Clause 1: `envelope_for` stops returning None, and the options carry it.
+
+    Before #2671 this source reached 133 of the 147-name served pool — every
+    name the deny union forgot to name, including 26 that write outside the box.
+    The ceiling is the census: the five above-line names, plus the below-line
+    names that are the job's own surface (`Write` 62 files / 104 calls, 100 of
+    them a `/tmp/*.py` verification script the prompt's own ceiling bullet
+    instructs and the other 4 a scratch probe elsewhere; `backlog_tasks` 27;
+    `Scratchpad` 24; `automod_status` 21, which the fleet bans the loop DRIVERS of
+    but not this read-only status tool; `Edit` 13; `skills_search` 6;
+    `vault_read` 6; `skills_read` 4; `vault_search` 3; `memory_read` 3), expressed
+    as the existing families where a family is what it means — `READ_FILES`,
+    `READ_VAULT`, `FILE_BACKLOG`, `TURN_STATE`, `READ_MEMORY`.
+
+    What is deliberately NOT here, with its census count, is in the entry in
+    `SOURCE_CAPABILITIES` beside the tuple; the owed-check ruling on whether the
+    base was wide enough reads that record.
+    """
+    env = caps.envelope_for(TRIAGE_SOURCE)
+    assert isinstance(env, list) and env, \
+        "autotriage is still compiled from the deny list alone"
+    assert env == sorted(set(env))
+    assert env, "envelope_for returned an empty list"
+    assert all(n in POOL for n in env), sorted(n for n in env if n not in POOL)
+    for name in TRIAGE_CENSUS_ABOVE_LINE:
+        assert name in env, (
+            f"{name} is above the census's 87-file line and left the base")
+    # Read-only over Lloyd's own stores, below the line but plainly the job.
+    for name in ("Write", "Edit", "backlog_tasks", "Scratchpad", "automod_status",
+                 "Glob", "skills_search", "skills_read", "vault_read",
+                 "vault_search", "memory_read", "backlog_get_task",
+                 "backlog_write_task", "Read", "Grep", "Bash"):
+        assert name in env, name
+    assert "vault_write" not in env, \
+        "the vault route is automation-only; autotriage called it 0/1734 times"
+
+    opts = _triage_opts()
+    assert opts.allowed_tools == env, opts.allowed_tools
+    # The compile actually narrows: nothing the standing bans deny is in the
+    # base, and the reach is the base, not the pool.
+    denied = {normalize_tool_name(d) for d in (opts.disallowed_tools or [])}
+    assert not (denied & set(env)), sorted(denied & set(env))
+    assert _reach_after(opts) == set(env), (
+        len(_reach_before(opts)), len(_reach_after(opts)))
+
+
+@pytest.mark.parametrize("tool", TRIAGE_REFUSED_BY_NAME)
+def test_autotriage_base_refuses_every_durable_external_name_by_name(tool):
+    """Clause 2: the ceiling reaches no tier-2/3 durable-external name, by name.
+
+    This is the only test node that pins it for `autotriage` (#2624 was the
+    fleet-wide one, and it was green with this source undeclared because the
+    matrix exempts an undeclared source from the durable-external row — there is
+    no base to grade). The refusal is asserted as the envelope's own text rather
+    than any refusal, because three of these four are ALSO refused on an
+    unattended turn by the grant gate, and a node that accepted "denied" from
+    either rail would have been green before the declaration existed — the
+    vacuous-pass trap #2671's review rung exists to catch. The paired node below
+    is the control that the message is not a coincidence.
+    """
+    declared = caps.SOURCE_CAPABILITIES[TRIAGE_SOURCE]
+    reach = caps.expand(declared)
+    assert tool not in reach
+    assert not caps.durable_external(reach), sorted(caps.durable_external(reach))
+    evt = _dispatch(_triage_opts(), tool)
+    assert evt is not None, f"{tool} still dispatches on a triage turn"
+    assert "not available on this turn" in evt["content"], evt["content"]
+
+
+def test_the_durable_names_autotriage_lost_are_ones_an_undeclared_source_keeps():
+    """The control for the node above: the same refusal on `arch-review`'s options.
+
+    `arch-review` declares nothing, so its turn still reaches all four names.
+    Three of them are refused at dispatch by the GRANT gate on any unattended
+    turn, which is exactly why the control is asserted as reachability, not as a
+    dispatch: on a reachability control "it was refused" would pass on both
+    turns and prove nothing. The one name the grant gate does NOT refuse on a
+    worker-scoped turn — `autonomy_write_task`, tiered by destination, which a
+    bare call does not supply — is asserted as a dispatch control as well: it
+    reaches the MCP layer on arch-review's turn and is refused by the envelope on
+    a triage turn, with the envelope's own message.
+    """
+    arch = C._worker_run_options(4, source="arch-review")
+    assert arch.allowed_tools is None, \
+        "the control turned declared; this node is no longer a control"
+    for tool in TRIAGE_REFUSED_BY_NAME:
+        assert tool in _reach_after(arch), (
+            f"{tool} is unreachable on an undeclared turn, so the triage "
+            "envelope refused nothing that was not already gone")
+        assert tool not in _reach_after(_triage_opts()), tool
+
+    evt_declared = _dispatch(_triage_opts(), "autonomy_write_task")
+    assert evt_declared is not None
+    assert "not available on this turn" in evt_declared["content"], \
+        evt_declared["content"]
+    assert _dispatch(arch, "autonomy_write_task") is None, (
+        "autonomy_write_task is no longer grant-refused-but-reachable on an "
+        "unattended turn; the dispatch control has to be re-picked")
+    for tool in ("email_send", "contacts_delete", "calendar_delete_event"):
+        evt = _dispatch(arch, tool)
+        assert evt is not None and "grant" in evt["content"], (
+            f"{tool} on an undeclared turn was refused by something other than "
+            "the grant gate: "
+            f"{(evt or {}).get('content', 'dispatched')}")
+
+
+def test_the_baseline_row_for_autotriage_reads_declared_with_no_durable_external():
+    """Clause 4: the committed artifact describes the NEW triage compile.
+
+    #2471's round pinned this invariant for the fleet (the artifact must not be a
+    record of an older code state); this is the same claim pinned for the one row
+    this round moved. `n_allowed == reachable_after` is what "the ceiling is what
+    binds" means in the artifact's own terms, and 26 durable-external names
+    dropping to 0 is the exposure #2671 existed to close.
+    """
+    art = _table()
+    row = art["sources"][TRIAGE_SOURCE]
+    base = art["sources"]["arch-review"]      # an undeclared row, for contrast
+    assert base["declared"] is False, "an undeclared control row turned declared"
+    assert row["declared"] is True, (
+        "autotriage is still undeclared in the artifact — re-record: "
+        "LLOYD_RECORD_CAPABILITY_BASELINE=1 pytest tests/"
+        "test_worker_capability_allowlist.py")
+    assert row["n_allowed"] == row["reachable_after"], row
+    assert row["durable_external_after"] == [], row["durable_external_after"]
+    assert row["reachable_after"] < row["reachable_before"], row
+    assert set(row["durable_external_before"]) - set(row["durable_external_after"]), row
+
+
+def test_the_sweep_narrowing_reaches_the_post_rather_than_widening_the_base(
+        monkeypatch):
+    """The read-only sweep keeps its narrowing across the one real seam.
+
+    `envelope_for` subtracts `extra_disallowed` AFTER expanding the base, so
+    declaring `FILE_BACKLOG` writes for the single-item and group paths could in
+    principle have re-widened the sweep — the exact leak #2671 had to be checked
+    against. It does not: the body the shipped `run_prompt_in_session` builds for
+    the sweep's arguments carries the narrowed list, and the three writes the
+    sweep forbids are absent from the ceiling the turn is advertised as well as
+    from its deny floor — the leak would have been a ceiling that named them
+    while the deny floor refused them, because the turn is *told* the ceiling
+    (#1066). On the sweep turn `backlog_write_task`, `Write` and `Edit` are
+    refused by the deny floor's own message, as they have always been, while
+    `Read`, `Grep` and `Bash` still dispatch. The sweep prompt says
+    `SWEEP_DISALLOWED` makes the turn read-only "at every turn shape", which this
+    node is the evidence for.
+    """
+    posted = _post_body(TRIAGE_SOURCE, list(autotriage.SWEEP_DISALLOWED),
+                        monkeypatch)
+    assert posted["platform"] == "worker", posted
+    assert posted["allowed_tools"] == caps.envelope_for(
+        TRIAGE_SOURCE, list(autotriage.SWEEP_DISALLOWED)), posted["allowed_tools"]
+    assert set(posted["allowed_tools"]) < set(
+        caps.envelope_for(TRIAGE_SOURCE)), posted["allowed_tools"]
+    for name in ("Write", "Edit", "backlog_write_task", "vault_write",
+                 "autonomy_write_task"):
+        assert name not in posted["allowed_tools"], name
+    # And the turn shape with no narrowing keeps the writes the sweep forbids —
+    # so the ceiling is one base narrowed per turn shape, not a second ceiling
+    # nobody declared.
+    plain = _post_body(TRIAGE_SOURCE, [], monkeypatch)
+    assert plain["allowed_tools"] == caps.envelope_for(TRIAGE_SOURCE), \
+        plain["allowed_tools"]
+    for name in ("Write", "Edit", "backlog_write_task"):
+        assert name in plain["allowed_tools"], name
+
+    opts = _triage_sweep_opts()
+    for name in ("Write", "Edit", "backlog_write_task"):
+        evt = _dispatch(opts, name)
+        assert evt is not None and "disabled by configuration" in evt["content"], \
+            (name, (evt or {}).get("content", "dispatched"))
+    for name, args in (("Read", None), ("Bash", {"command": "ls"}),
+                       ("Grep", None)):
+        assert _dispatch(opts, name, args=args) is None, name
+
+
+def test_autotriage_is_declared_without_joining_the_untrusted_fleet_table():
+    """The scope line #2671 drew: one source, and not onto the protected list.
+
+    `autotriage` reads Lloyd's own backlog, not the internet, so it is not an
+    untrusted-ingest source; the item's sixth clause is "one source only this
+    round", and widening the fleet's most-protected roster is a different
+    round's ruling. What IS asserted is the direction the ceiling moves for the
+    sources that were already declared: their compiles are untouched, because
+    every name in the new base is either a family or a name no ban reaches.
+    """
+    assert TRIAGE_SOURCE not in UNTRUSTED
+    assert TRIAGE_SOURCE not in caps.UNTRUSTED_INGEST_SOURCES
+    for src in UNTRUSTED:
+        env = caps.envelope_for(src)
+        assert env is None or set(env) <= POOL, src

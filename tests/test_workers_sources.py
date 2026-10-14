@@ -1833,6 +1833,12 @@ async def test_the_deny_list_is_named_in_the_turn_it_denies(worker_turn_post):
 
     The list must arrive *as the value*, not as prose written next to it: the
     tool name below is one no source declares, so nothing could have typed it.
+
+    `autotriage` has carried a declared envelope since #2671, so this turn is
+    told two sentences rather than one and the assertion reads the deny block
+    only — the same bound #2269 put on the digest node below, for the same
+    reason: the capability sentence legitimately names `Bash`, and it is not the
+    block this node is about.
     """
     await C.run_prompt_in_session(
         "classify the item", title="t", source="autotriage",
@@ -1840,11 +1846,12 @@ async def test_the_deny_list_is_named_in_the_turn_it_denies(worker_turn_post):
 
     text = worker_turn_post[0]["text"]
     assert DENY_HEADING in text, "the turn was never told a deny list exists"
-    assert "Zzz_Tool" in text and "Yyy_Tool" in text, text
+    block = text.partition(DENY_HEADING)[2].split(C.CAPABILITY_HEADING)[0]
+    assert "Zzz_Tool" in block and "Yyy_Tool" in block, block
     # And nothing else: a stale `Bash` pasted into the renderer would render for
     # every worker, which is the per-source restriction the deny list exists to
     # keep per-source.
-    assert "Bash" not in text, "the block names a tool this turn was not denied"
+    assert "Bash" not in block, "the block names a tool this turn was not denied"
     assert text.startswith("classify the item"), "the job's own prompt was displaced"
 
 
@@ -1886,11 +1893,46 @@ async def test_a_turn_with_no_deny_list_gets_no_such_block(worker_turn_post):
 
     Asserted as equality on the text, not absence of a phrase: the block is
     *absent* for a turn with no list, not merely empty.
+
+    The source is `bench-mine`, which declares no capability set and passes no
+    list — a turn to which nothing about the policy applies, which is the shape
+    this node was written for. `autotriage` used to be that shape; since #2671 it
+    declares a ceiling, so its turn is told a sentence, and the sentence it is
+    told is asserted beside this one rather than substituted for it.
     """
+    out = await C.run_prompt_in_session("classify the item", title="t",
+                                        source="bench-mine")
+
+    assert worker_turn_post[0]["text"] == "classify the item"
+    assert out["stop_reason"] == "end_turn", "the stub did not close the turn"
+
+
+async def test_a_declared_source_is_told_its_closed_list_and_no_deny_block(
+        worker_turn_post):
+    """#2671's other half of the same renderer: a ceiling is stated, not implied.
+
+    `autotriage` passes no `extra_disallowed` at all on its single-item and group
+    paths, so before its ceiling existed its turn was told nothing whatsoever
+    about its tool policy and found any refusal by making one (#1066's count of
+    zero refusals from sources that pass no list is exactly this population). Now
+    the turn is told the closed list; what it is still NOT told is a deny block,
+    because it has no `extra_disallowed` to name. The list is read from the
+    compile rather than typed, so a renderer printing a stale one fails here.
+    """
+    from app.harness.capabilities import envelope_for
+
     out = await C.run_prompt_in_session("classify the item", title="t",
                                         source="autotriage")
 
-    assert worker_turn_post[0]["text"] == "classify the item"
+    text = worker_turn_post[0]["text"]
+    assert DENY_HEADING not in text, "a deny block appeared for a source with none"
+    head, _, rest = text.partition(C.CAPABILITY_HEADING)
+    assert rest, "the turn was never told its capability set"
+    assert head == "classify the item\n\n", repr(head)
+    for name in envelope_for("autotriage"):
+        assert name in rest, name
+    for name in ("email_send", "contacts_delete", "autonomy_write_task"):
+        assert name not in rest, name
     assert out["stop_reason"] == "end_turn", "the stub did not close the turn"
 
 
