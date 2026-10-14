@@ -2547,17 +2547,22 @@ def test_the_compared_column_is_the_baselines_and_the_quoted_numbers_are_theirs(
                 assert total == have_rows, (
                     f"{preset}: the doc says {total} rows, the artifacts have "
                     f"{have_rows}")
-    # `sidecar` joined the set on 2026-10-07 with #2349, which built the arm and
-    # could not run it: the figure it exists to produce needs the real primary
-    # engine, so no `compaction*.json` has ever held a `sidecar` row. The rail
-    # above re-derives every `no` from the tracked artifacts, so this literal is
-    # the only thing that can be stale here — and the row it names says so too.
+    # `sidecar` sat in this set from 2026-10-07 (#2349 built the arm and could
+    # not run it: the figure it exists to produce needs the real primary engine)
+    # until #2682 ran the `tool_clear,sidecar` pair on 2026-10-14. It is no
+    # longer never-run, so the set is the seven presets that still have no row
+    # in any tracked artifact — and `sidecar` being absent here is now the rail
+    # that refuses a doc which puts the arm back in the never-run column while
+    # `compaction-recall-sidecar-pair-pass*-2026-10-14.json` hold its twenty-four
+    # rows each (the `compaction-recall-` prefix is what makes those two files
+    # committable at all — see SIDECAR_PAIR_PASS1).
+    # The rail above re-derives every `no` from the tracked artifacts, so this
+    # literal is the only thing that can be stale here.
     assert {name for name, (mark, _k, _t) in rows.items() if mark == "no"} == {
         "self_record", "observation", "production_self_record",
-        "production_observation", "rung4", "rung4_lossy", "rung4_self_record",
-        "sidecar"}, (
-        "the never-run set changed shape; the doc's 'not yet run anywhere' "
-        "sentence and the baselines have to be read together again")
+        "production_observation", "rung4", "rung4_lossy", "rung4_self_record"}, (
+        "the never-run set changed shape; the doc's not-yet-run column and the "
+        "baselines have to be read together again")
 
     # What is scored against what — the thing clause 2 asks a reader to be able
     # to tell — named in the prose and present in the artifact.
@@ -2621,6 +2626,353 @@ def test_the_compared_column_is_the_baselines_and_the_quoted_numbers_are_theirs(
     assert any(mark == "yes" and kept != measured.get(name, (0, 0))[1]
                for name, (mark, kept, _t) in false_rows.items()), (
         "the kept-count comparison cannot see an inflated count")
+
+
+#: The #2168 `tool_clear`/`sidecar` pair (#2682), run 2026-10-14 the way the
+#: runner's own header requires: two passes over ONE scratch `--data-root`, the
+#: first recording the reduction into `<sid>.microcompact-reduced.json`, the
+#: second applying it at read time. Both are tracked because the write-up quotes
+#: them, and the write-up is the only prose that reads them.
+#: The pair's two artifacts. The `compaction-recall-` prefix is not decoration:
+#: `.gitignore:141` ignores `eval/baselines/*` and un-ignores only a named set, of
+#: which `!eval/baselines/compaction-recall-*.json` is the line that covers this
+#: eval. An artifact named `compaction-sidecar-pair-pass1-*.json` — the shape this
+#: round first reached for — is invisible to `git add`, so the pair would have
+#: looked committed while being one `git clean` from nowhere. The assertion below
+#: is that trap, not a style rule, and it asks `git ls-files` whether the three
+#: paths are in the index instead of matching these constants' own names against
+#: the carve-out: a name-based assert is green while the ignore rule or the index
+#: moves underneath it, which is the only way the trap can actually spring.
+SIDECAR_PAIR_PASS1 = EVAL / "baselines/compaction-recall-sidecar-pair-pass1-2026-10-14.json"
+SIDECAR_PAIR_PASS2 = EVAL / "baselines/compaction-recall-sidecar-pair-pass2-2026-10-14.json"
+SIDECAR_PAIR_WRITEUP = (
+    EVAL / "measurements/compaction-recall-sidecar-pair-2026-10-14.md")
+
+#: The sentence a pass two that applied nothing would leave behind: both arms
+#: compacted the same prompt, so nothing about the flag was measured, and a reader
+#: left with only two rates ranks them. #2682's first attempt ended in exactly
+#: this state. It is now a refusal (`applied > 0`) rather than a disclosure, so the
+#: only thing this constant still pins is the reverse error — the prose calling a
+#: pair that did apply its reduction by that name.
+SIDECAR_PAIR_NULL = "the pair is vacuous"
+
+
+def _arm_rows(doc: dict, arm: str) -> list[dict]:
+    return [r for r in doc["rows"] if r["arm"] == arm]
+
+
+def _sidecar_applied(doc: dict) -> int:
+    """Reductions the `sidecar` rows of one artifact applied at read time.
+
+    This is the one predicate #2682 clause 1 turns on. A row is a single turn, and
+    `load_and_compact_session` runs before that turn's relief can book anything, so
+    pass one can only book into `<sid>.microcompact-reduced.json` and pass two is
+    the first load that can apply: pass two's sidecar rows all reading 0 means both
+    arms compacted the identical prompt and the pair compared nothing.
+    """
+    return sum(int(r.get("sidecar_applied") or 0) for r in _arm_rows(doc, "sidecar"))
+
+
+def _tool_clear_applied(doc: dict) -> int:
+    """The same sum over the arm the read-time reduction is not wired into.
+
+    Non-zero here means the comparison was not one switch apart, so no delta
+    between the two arms could be attributed to `microcompact_reduction_sidecar`.
+    """
+    return sum(int(r.get("sidecar_applied") or 0)
+               for r in _arm_rows(doc, "tool_clear"))
+
+
+def _require_pass_two_applied(p2: dict) -> int:
+    """Refuse a pass two that applied its reduction to no row, and return the count.
+
+    #2682's first attempt died in this state: a single run over a fresh root books
+    nothing yet (a row is one turn, and `load_and_compact_session` runs before that
+    turn's relief can record anything), so every `sidecar` row reads
+    `sidecar_applied == 0` and the two arms are the same prompt graded twice. The
+    pair's whole answer is the applied count, so the count is a gate here and not a
+    figure to quote — `test_the_sidecar_pair_rail_refuses_a_vacuous_pass_two` runs
+    an artifact in that state through this function.
+    """
+    applied = _sidecar_applied(p2)
+    assert applied > 0, (
+        f"pass two applied the reduction to 0 of {len(_arm_rows(p2, 'sidecar'))} "
+        "sidecar rows, so the `sidecar` arm compacted the same prompt as "
+        "`tool_clear` and its two rates are one prompt graded twice: the pair is "
+        "vacuous and its numbers may not be recorded as a comparison of the flag")
+    return applied
+
+
+def _require_arms_one_switch_apart(doc: dict, pass_no: str) -> None:
+    """Refuse an artifact whose two arms differ by more than the flag.
+
+    `tool_clear` never opens the sidecar record, so it can neither book a reduction
+    nor apply one; `sidecar` must consult it on every row. An artifact failing
+    either half turns the delta between the two arms into something other than the
+    effect of `microcompact_reduction_sidecar`.
+    """
+    for arm, want_flag in (("tool_clear", False), ("sidecar", True)):
+        rows = _arm_rows(doc, arm)
+        assert rows, f"{pass_no} has no {arm} rows"
+        for r in rows:
+            assert (r.get("turn_start") or {}).get(
+                "microcompact_sidecar") is want_flag, (
+                f"{pass_no}: a {arm} row read microcompact_sidecar="
+                f"{(r.get('turn_start') or {}).get('microcompact_sidecar')!r}, so "
+                "the two arms are no longer one switch apart")
+    assert _tool_clear_applied(doc) == 0, (
+        f"{pass_no}: a `tool_clear` row applied "
+        f"{_tool_clear_applied(doc)} reduction(s), so the comparison is not one "
+        "switch apart and no delta between the arms belongs to the flag")
+
+
+def test_the_sidecar_pair_is_two_passes_over_one_root_said_so_in_the_doc():
+    """Clauses 1, 2, 3 and 4 of #2682, every figure re-derived from the rows.
+
+    What this node exists for is the one way the recorded pair could be worth
+    nothing: a pass-two run that never applied its own reduction graded the same
+    prompt twice, and the two rates off it read as a comparison of the flag. So
+    nothing here is transcribed — including the applied count the write-up quotes,
+    which means a future pair has to rewrite the prose, not just drop in new
+    artifacts. The vacuous state is refused outright, and the node beside this one
+    mutates a copy of the committed pass two to prove the rail fires on it:
+
+      * all three files are in git's index, which is what makes "committed
+        artifact" mean something under an ignored directory;
+      * both artifacts hold rows for both presets, and pass two replayed pass
+        one's own sessions — same keys AND same content hashes;
+      * both were closed by the same full-grid invocation, so their `args` and
+        their 12-entry `sessions` block name one grid and not the 3-session
+        chunks that filled them, and both were graded against one loopback
+        primary, which is the seam no test here crosses;
+      * the one switch separating `sidecar` from `tool_clear` is visible on
+        every row (`turn_start.microcompact_sidecar`), and no `tool_clear` row
+        anywhere applied a reduction;
+      * the recording pass applied nothing, which is what makes this two passes
+        over one root rather than one run relabelled, while pass two applied at
+        least one reduction — the pair's central predicate, as a refusal;
+      * `architecture/measurement.md`'s `sidecar` row is `yes`, and the
+        write-up's rates, kept counts, applied count and the branch those rates
+        select are all re-derived from the pass-two artifact.
+    """
+    # Tracked before anything else — and asked of git, not of these constants' own
+    # names. `eval/baselines/*` is ignored wholesale (.gitignore:141) and
+    # `!eval/baselines/compaction-recall-*.json` (:144) is the only carve-out that
+    # covers this eval, so an artifact under any other stem is invisible to
+    # `git add`: the pair would sit untracked beside a green rail reading it off
+    # disk, one `git clean` from nowhere. Pattern-matching the two paths this file
+    # already chose can only restate that rule and cannot see it, or the index,
+    # moving underneath the constant — `git ls-files` reads the index itself.
+    want_tracked = [SIDECAR_PAIR_PASS1, SIDECAR_PAIR_PASS2, SIDECAR_PAIR_WRITEUP]
+    rel_tracked = [str(p.relative_to(ROOT)) for p in want_tracked]
+    listed = set(_git_lines("ls-files", "--", *rel_tracked))
+    for rel in rel_tracked:
+        assert rel in listed, (
+            f"{rel} is on disk but `git ls-files` does not list it, so the pair "
+            "the doc's `yes` cell and the write-up's figures rest on is not in "
+            "the tree at all: .gitignore:141 ignores `eval/baselines/*` and line "
+            "144 un-ignores only `eval/baselines/compaction-recall-*.json`")
+
+    p1 = json.loads(SIDECAR_PAIR_PASS1.read_text(encoding="utf-8"))
+    p2 = json.loads(SIDECAR_PAIR_PASS2.read_text(encoding="utf-8"))
+
+    # One root, not two grids. `--data-root` is deliberately absent from `args`
+    # (`_write` drops it), so the session content hashes are the only
+    # in-artifact evidence that pass two replayed what pass one recorded.
+    fingerprint = [(s["key"], s["sha256"]) for s in p1["sessions"]]
+    assert fingerprint and fingerprint == [
+        (s["key"], s["sha256"]) for s in p2["sessions"]], (
+        "the two artifacts are not the same sessions, so they are not two passes "
+        "over one --data-root and the pair measures nothing")
+    assert p1["args"]["arms"] == p2["args"]["arms"] == "tool_clear,sidecar"
+    assert p1["args"]["tools_snapshot"] == p2["args"]["tools_snapshot"], (
+        "the two passes graded different tool schemas")
+    # The one process boundary every graded row crossed: each driver POSTed to the
+    # already-running primary over loopback HTTP (#2682 forbids booting a second
+    # `agent-llm-primary`, and a pair graded against two engines is not one
+    # measurement). No test can cross that seam itself — it needs the live 95 GB
+    # engine — so what the rail does is read the endpoint each artifact recorded and
+    # require one loopback host for both passes.
+    assert (p1["args"]["base_url"] == p2["args"]["base_url"]
+            and p1["args"]["base_url"].startswith("http://127.0.0.1:")), (
+        f"the passes report {p1['args']['base_url']!r} and "
+        f"{p2['args']['base_url']!r}: only one loopback primary may have graded "
+        "the pair, or the two arms were measured on different engines")
+    assert p1["args"]["out"] != p2["args"]["out"], (
+        "both runs wrote the same --out: the second resumed the first's rows "
+        "instead of re-running the grid over the recorded root")
+    assert not p1["args"]["dry"] and not p2["args"]["dry"]
+
+    # The grid each artifact was finalised by. `_write` records `args` and the
+    # `sessions` block from the invocation that last ran, and neither pass could
+    # be run as one 24-row process (a full-grid process was OOM-killed by the
+    # 16 G background-Bash scope at 21 rows on 2026-10-13), so each was filled by
+    # 3-session chunks and then closed by one full-grid invocation with every row
+    # already recorded — which runs nothing and only reaches `_write` after the
+    # loop. Without that closing call both artifacts would report the chunk's
+    # `sessions: 3` and one size, and the pair would be two grids that happen to
+    # share a root. These are the closing invocation's own numbers.
+    for pass_no, doc in (("pass one", p1), ("pass two", p2)):
+        a = doc["args"]
+        assert (a["sessions"], a["sizes"], a["depths"], a["seed"]) == (
+            6, "90000,130000", "0.1,0.5,0.85", 600), (
+            f"{pass_no}'s artifact was closed by a {a['sessions']}-session "
+            f"--sizes {a['sizes']} invocation, not the default 12-session grid")
+        assert a["probe"] == "late" and a["shape"] == "auto" and not a["pointer"], (
+            f"{pass_no}'s artifact is not the default shape/probe/pointer grid")
+        assert len(doc["sessions"]) == 12, (
+            f"{pass_no}: {len(doc['sessions'])} sessions recorded, not 12")
+        assert len(doc["rows"]) == 24, (
+            f"{pass_no}: {len(doc['rows'])} rows, not 12 sessions x 2 arms")
+
+    for pass_no, doc in (("pass one", p1), ("pass two", p2)):
+        _require_arms_one_switch_apart(doc, pass_no)
+
+    # The recording pass. A row is one turn, and `load_and_compact_session`
+    # runs before that turn's relief can book anything, so pass two is where a
+    # reduction first lands — and nothing on pass one may have.
+    assert _sidecar_applied(p1) == 0, (
+        f"the pass-one artifact applied {_sidecar_applied(p1)} reduction(s), so it "
+        "is not the recording pass and the pair is not two passes over one root")
+
+    # Clause 1's central predicate, as a refusal and not a figure to quote. The
+    # first revision of this rail summed the same field only to print it and then
+    # tolerated a zero by asking the write-up for the word "vacuous", which left the
+    # one state this pair exists to escape — both arms compacting the identical
+    # prompt — able to be committed green. A vacuous pass two is refused by
+    # `_require_pass_two_applied`, and
+    # `test_the_sidecar_pair_rail_refuses_a_vacuous_pass_two` runs that state back
+    # through the same function instead of trusting it never happens.
+    applied = _require_pass_two_applied(p2)
+    writeup = _flat(SIDECAR_PAIR_WRITEUP.read_text(encoding="utf-8"))
+    # Both arms' two recall rates, at the precision the write-up quotes them,
+    # read out of the artifact that produced them.
+    for arm in ("tool_clear", "sidecar"):
+        s = p2["summary"][arm]
+        for measure in ("distinctive", "ambiguous"):
+            assert f"{s[measure]['rate']:.2f}" in writeup, (
+                f"the write-up never quotes {arm}'s {measure} rate "
+                f"{s[measure]['rate']:.2f} from the pass-two artifact")
+        assert str(s["kept"]) in writeup, (
+            f"the write-up never names how many {arm} rows were kept")
+    # The applied count is the figure that says whether the pair measured anything
+    # at all, so it stands beside the rates and is re-derived, not transcribed. And
+    # the prose may not hedge the other way either: calling a pair that did apply
+    # its reduction "vacuous" talk a reader into re-running a measurement that
+    # exists. Clause 4's ban on reporting a tie off an all-zero pass two is now
+    # carried by the `applied > 0` refusal above — no all-zero pass two can be
+    # committed at all, so no write-up can reach a tie to report.
+    assert f"applied {applied} reductions" in writeup, (
+        f"the write-up does not state the {applied} reductions pass two applied")
+    assert SIDECAR_PAIR_NULL not in writeup, (
+        f"the write-up says {SIDECAR_PAIR_NULL!r} while the pass-two artifact "
+        f"beside it applied {applied} reductions: the prose has to describe the "
+        "pair that was actually measured")
+    # Which of the two branches the figures select, recomputed rather than copied:
+    # the count of measures on which `sidecar` came out BELOW `tool_clear` is what
+    # decides whether the ship-on round is owed or the negative is recorded, and a
+    # write-up that states the wrong one sends the next reader down the wrong path.
+    below = sum(1 for m in ("distinctive", "ambiguous")
+                if p2["summary"]["sidecar"][m]["rate"]
+                < p2["summary"]["tool_clear"][m]["rate"])
+    assert f"{below} of the two measures came out below" in writeup, (
+        f"the artifact puts {below} of the two measures below `tool_clear` and the "
+        "write-up does not say so, so the branch it selects is not the one the "
+        "committed rows support")
+
+    # The doc's never-run column, retired in the same commit as the artifacts.
+    _, body = recall_section(_text("measurement.md"))
+    assert preset_rows(body)["sidecar"][0] == "yes", (
+        "measurement.md still marks the sidecar preset never-run while the pair "
+        "is tracked under eval/baselines/")
+
+
+def test_every_test_node_the_sidecar_pair_writeup_cites_exists():
+    """The re-key list a flip round will be handed has to name nodes that exist.
+
+    The write-up's closing paragraph is the only place the flip round's work list
+    lives — #2487 closed and cannot host one — so a node name that is not in the
+    tree is not a typo there, it is an instruction to re-key a test that does not
+    exist while the ones that do stay red. This round shipped exactly that defect:
+    the prose cited `test_microcompact_defaults_are_conservative` and
+    `test_microcompact_off_when_fraction_is_zero`, neither of which has ever been in
+    `tests/test_compaction.py`, when the real pair is
+    `test_the_shipped_default_does_not_consult_the_sidecar_at_all` (def :721) and
+    `test_one_runs_options_value_arms_the_read_time_half_too` (def :1971). The
+    gate's review rung then cited `app/harness/options.py` line 728 — the assert line
+    of a node this prose had failed to name — against a 375-line file, and the round
+    went ungraded twice.
+
+    Only a whole backtick-wrapped `test_*` token counts as a citation, so a path
+    like `tests/test_compaction.py` is not mistaken for a node. Defined names come
+    out of the index with `git grep`, so the check follows a rename instead of
+    restating a list of them.
+    """
+    body = SIDECAR_PAIR_WRITEUP.read_text(encoding="utf-8")
+    cited = set(re.findall(r"`(test_[a-z0-9_]+)`", body))
+    assert cited, (
+        f"no `test_*` node citation at all in {SIDECAR_PAIR_WRITEUP.name}, so this "
+        "node graded nothing — the prose stopped naming the nodes clause 5 relies on")
+    defined = {line.removeprefix("def ")
+               for line in _git_lines("grep", "-h", "-o", r"def test_[a-z0-9_]*",
+                                      "--", "tests/")}
+    assert defined, (
+        "`git grep` found no test nodes in tests/ at all, so the corpus read "
+        "failed rather than the citation resolving")
+    missing = sorted(cited - defined)
+    assert not missing, (
+        f"{SIDECAR_PAIR_WRITEUP.name} cites node(s) no tracked test file defines: "
+        f"{', '.join(missing)} — the flip round would be told to re-key tests that "
+        "do not exist while the real ones stay red")
+
+
+def test_the_sidecar_pair_rail_refuses_a_vacuous_pass_two():
+    """Clause 1's `> 0` predicate, shown able to fail on a copy of the artifact.
+
+    The review of this round's first attempt named the defect exactly: the node
+    summed `sidecar_applied` purely to quote the number, and at zero asked the
+    write-up for the word "vacuous" instead of failing — so the state the pair was
+    run to escape was the one state the rail could not refuse. A `> 0` assert nobody
+    has seen fire is the same kind of claim as the sentence it replaced, so the
+    three mutations below go back through the guards themselves. The committed pass
+    two holds twelve `sidecar` rows at `sidecar_applied: 1` and twelve `tool_clear`
+    rows at 0, and each mutation changes one of those two facts:
+
+      * every `sidecar` row emptied to 0 — the vacuous pair, which
+        `_require_pass_two_applied` has to refuse;
+      * every `sidecar` row switched to `microcompact_sidecar: False`, an arm that
+        never opened the record being scored as though it had;
+      * one `tool_clear` row applying a reduction, which
+        `_require_arms_one_switch_apart` has to refuse.
+
+    The unmutated copy is required to pass first: a guard that rejected everything
+    would satisfy this node as well as one that can see the difference.
+    """
+    p2 = json.loads(SIDECAR_PAIR_PASS2.read_text(encoding="utf-8"))
+    _require_arms_one_switch_apart(p2, "pass two")
+    assert _require_pass_two_applied(p2) > 0, (
+        "the guards refuse the committed artifact itself, so the refusals below "
+        "would be about the mutation and nothing else")
+
+    emptied = json.loads(json.dumps(p2))
+    for r in _arm_rows(emptied, "sidecar"):
+        r["sidecar_applied"] = 0
+    assert _sidecar_applied(emptied) == 0, (
+        "the mutation could not empty pass two's applied count, so it is not the "
+        "vacuous state being tested")
+    with pytest.raises(AssertionError, match="vacuous"):
+        _require_pass_two_applied(emptied)
+
+    blind = json.loads(json.dumps(p2))
+    for r in _arm_rows(blind, "sidecar"):
+        r["turn_start"]["microcompact_sidecar"] = False
+    with pytest.raises(AssertionError, match="no longer one switch apart"):
+        _require_arms_one_switch_apart(blind, "pass two")
+
+    contaminated = json.loads(json.dumps(p2))
+    _arm_rows(contaminated, "tool_clear")[0]["sidecar_applied"] = 1
+    with pytest.raises(AssertionError, match="row applied"):
+        _require_arms_one_switch_apart(contaminated, "pass two")
 
 
 def test_the_two_senses_of_arm_are_separated_in_the_prose_and_the_tree():
