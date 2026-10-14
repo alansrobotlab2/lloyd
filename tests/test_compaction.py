@@ -1868,8 +1868,12 @@ def test_turning_the_knob_on_is_what_the_shipped_default_is_not(tmp_path, monkey
     assert on["microcompacted"] < off["microcompacted"], (
         "the two resolutions cleared the same number of rows: the knob changes nothing")
     assert "file 0 line 0" not in handed[-1]["call_000"], handed[-1]["call_000"][:200]
-    assert read_reduced_calls(sid) == ("call_000", "call_001"), (
-        "reading through the knob must not consume what it read")
+    assert read_reduced_calls(sid) == ("call_000", "call_001", "call_002",
+                                       "call_003", "call_004"), (
+        "reading through the knob must not consume what it read, and #2689 gave "
+        "the clearing pass a write of its own: the two ids named by the seed are "
+        "still there untouched, plus the three rows THIS run reduced, which a "
+        "second turn start may now replay instead of re-dropping")
 
 
 def test_a_second_turn_start_pass_books_no_re_clear_for_the_ids_the_sidecar_named(
@@ -1918,16 +1922,20 @@ def test_a_second_turn_start_pass_books_no_re_clear_for_the_ids_the_sidecar_name
                                           microcompact_sidecar=True))
 
     assert calls == [sid, sid], calls
-    # Pass one clears three rows and the sidecar replays two; pass two, reading the
-    # file pass one wrote, books NONE of them (#2348 clause 2). The replay still fires
-    # on pass two, so its `microcompact_reduced` is the same 2 — the replay is not what
-    # went to zero, and both numbers reach the record (clause 1).
+    # Pass one clears three rows and the sidecar replays the two it was seeded
+    # with; pass two, reading the file pass one wrote, books NONE of them as
+    # clears (#2348 clause 2 — a repeat of the same rows every turn is what made
+    # the bucket unattributable). What #2689 changed is the OTHER number: pass one
+    # now also books the three rows IT reduced to header-and-path form, so pass
+    # two replays five instead of the same two, and the three rows it used to
+    # re-drop from the session row arrive already reduced. The bytes are the same
+    # either way — the comparison at the bottom of this node is what pins that.
     assert first["microcompacted"] == 3, first
     assert first["microcompact_reduced"] == 2, first
     assert second["microcompacted"] == 0, (
         "the ids the first pass cleared were booked again: "
         f"{second['microcompacted']}")
-    assert second["microcompact_reduced"] == 2, second
+    assert second["microcompact_reduced"] == 5, second
     assert read_cleared_calls(sid) == ("call_002", "call_003", "call_004"), (
         f"the pre-pass recorded the wrong ids as its own: {read_cleared_calls(sid)}")
     for run in (0, 1):
@@ -1936,13 +1944,19 @@ def test_a_second_turn_start_pass_books_no_re_clear_for_the_ids_the_sidecar_name
                                         handed[run]["call_001"]))
         assert both_reduced, (
             f"run {run + 1} did not receive the two named rows pre-reduced")
-    # The pass that READS the reduction state must not become its writer of reduction
-    # state. Compared list by list rather than by whole file bytes, because #2348 added a
-    # second list to this file: whole-byte equality with the seed would now contradict
-    # clause 2 instead of stating this invariant.
-    assert read_reduced_calls(sid) == seeded, (
-        f"the read-time pass rewrote the replayable list: held {seeded}, now holds "
-        f"{read_reduced_calls(sid)}")
+    # What this file must never gain is an id the read-time pass cannot emit
+    # byte-for-byte, so the invariant is about CONTENT, not about the file being
+    # frozen. #2348 pinned it as equality with the seed because at that time the
+    # pre-pass could not reduce a row at all — the newest-`keep_recent_tools`
+    # exemption (see the node above `test_the_shipped_relief_window_is_unchanged`)
+    # made every row this function could touch out of reach, so a written list
+    # would have had to be a rewrite of the read half's own input. #2689 made the
+    # pre-pass a writer of ITS reductions, so the load-bearing half is now that
+    # relief's seed survives it intact, and the assertion below names both.
+    assert read_reduced_calls(sid) == tuple(seeded) + (
+        "call_002", "call_003", "call_004"), (
+        f"the pass did not preserve the seed {seeded} and book exactly the three "
+        f"rows it reduced: {read_reduced_calls(sid)}")
 
     off = _run(load_and_compact_session(p, model="qwen", mode_override="truncate",
                                         microcompact_sidecar=False))
@@ -2095,3 +2109,55 @@ def test_relief_writing_reductions_keeps_the_pre_pass_cleared_list(
     payload = json.loads(reduction_sidecar_path(sid).read_text())
     assert payload["cleared_call_ids"] == ["call_002", "call_003", "call_004"]
     assert payload["reduced_call_ids"] == ["call_000"]
+
+
+def test_the_shipped_relief_window_is_shared_by_both_sidecar_arms():
+    """#2689 clause 3: the window that decides which rows relief may reduce is
+    the shipped one, and no eval arm carries a private copy of it.
+
+    The cheap way to make the `sidecar` arm book a reduction was to give that
+    arm a smaller `keep_recent_tools` so its own turn would reach the spilled
+    row. It is the wrong way twice over: relief runs inside the turn of BOTH
+    arms, so an arm-specific window changes what each arm's prompt says and the
+    measured pair is no longer one switch apart — the property
+    `test_the_sidecar_arm_is_tool_clear_plus_the_reduction_switch` in
+    `tests/test_compaction_recall_eval.py` exists to pin; and it would ship a
+    production relief behaviour change to make an eval artifact non-vacuous.
+
+    So the numbers are read where production keeps them — the module constant
+    relief's default and the `RunOptions` field the turn arms — and the arms are
+    checked for a kwarg of their own. Read as declarations, not as a call with
+    default arguments: a call cannot show that nobody passed a different number.
+    """
+    from pathlib import Path
+
+    from app.harness.microcompact import DEFAULT_KEEP_RECENT_TOOLS
+    from app.harness.options import RunOptions
+
+    assert DEFAULT_KEEP_RECENT_TOOLS == 15, (
+        f"relief's shipped window moved to {DEFAULT_KEEP_RECENT_TOOLS}, which "
+        "changes which rows the turn-start pre-pass and relief may reduce for "
+        "every session, not just the eval's")
+    assert RunOptions.__dataclass_fields__[
+        "intra_turn_microcompact_keep_recent"].default == 15, (
+        "the window the turn arms is no longer the one the eval's placement of "
+        "the spilled row is derived from")
+    arms_src = (Path(__file__).resolve().parent.parent
+                / "eval" / "run_compaction_recall_eval.py").read_text()
+    assert "keep_recent_tools=" not in arms_src, (
+        "an eval arm now passes its own relief window, so the two arms differ "
+        "in more than the sidecar switch")
+    # The pre-pass and relief take their window from DIFFERENT sources — the
+    # turn-start pass from config's `microcompact.keep_recent_tools`, relief from
+    # the `RunOptions` field above — and both ship 15. Pinned as text because a
+    # `config.yaml` this test does not read is the one thing that could widen
+    # either silently, and the eval's placement of the spilled row is derived
+    # from the constant, so a widened window turns
+    # `test_the_generated_spill_row_lands_outside_the_shipped_keep_window` red
+    # instead of quietly emptying the artifact again.
+    compaction_src = (Path(__file__).resolve().parent.parent
+                      / "app" / "compaction.py").read_text()
+    assert 'keep_recent_tools=int(mc_cfg.get("keep_recent_tools", 15))' \
+        in compaction_src, (
+        "the turn-start pre-pass's window is no longer config's value with the "
+        "shipped 15 as its fallback")

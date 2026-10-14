@@ -136,22 +136,27 @@ ARMS
 
 THE SIDECAR ARM'S ONE ROW
 -------------------------
-Every `tool`-shape session now ends with one Read whose whole-file body is
-over `tool_result_spill.SPILL_THRESHOLD_CHARS` (50,000) — `_spill_turn` — and
-`run_one` writes the session file through `route_spilled_results`, the same
-`maybe_spill` the live loop applies to a tool result before storing it: the
-row on disk carries a real `<persisted-output>` pointer naming a real file
-under `sessions/<sid>.tool-results/`. That is the row relief reduces and
+Every `tool`-shape session now carries one Read whose whole-file body is over
+`tool_result_spill.SPILL_THRESHOLD_CHARS` (50,000) — `_spill_turn` — placed by
+`_spill_slot` at least `DEFAULT_KEEP_RECENT_TOOLS + 1` tool rows back from the
+end of the filler rather than last, and `run_one` writes the session file
+through `route_spilled_results`, the same `maybe_spill` the live loop applies to
+a tool result before storing it: the row on disk carries a real
+`<persisted-output>` pointer naming a real file under
+`sessions/<sid>.tool-results/`. That is the row the compaction pass reduces and
 records, and the row a later pass can replay — #2511, which replaced the
-sub-threshold filler that made this pair vacuous.
+sub-threshold filler that made this pair vacuous. #2689 moved it out of the
+newest-`keep_recent_tools` window the pass may not touch, which is the second
+half of that vacuity: a row inside the window is no candidate at any grid size,
+so the `sidecar` arm booked nothing on any session of the 2026-10-13/14 grid.
 
 A row is still one turn — `load_and_compact_session` runs BEFORE the turn's
-relief can record anything — so `--arms tool_clear,sidecar` is a TWO-PASS
+relief gets a look at it — so `--arms tool_clear,sidecar` is a TWO-PASS
 procedure over the SAME `--data-root`, and the pair is read pass two against
 pass two:
 
-  * the first pass records: the turn's relief reduces the spilled pointer row
-    and, under `sidecar` only, books its call id into
+  * the first pass records: that same call reduces the spilled pointer row to
+    its header and, under `sidecar` only, books its call id into
     `sessions/<sid>.microcompact-reduced.json`. No row has a prior record, so
     every first-pass row applies nothing;
   * the second pass applies: re-run the same grid over that root and the
@@ -740,12 +745,44 @@ def _filler_turn(i: int, rng: random.Random, corpus: list[Path], root: Path,
 _SPILL_BODY_CAP = 2 * 50_000
 
 
+def _spill_slot(turns: list[list[dict]]) -> int:
+    """Where `_spill_turn` goes among the filler turns (#2689).
+
+    The LATEST slot that still leaves one more tool row behind the spill row
+    than relief keeps inline — `DEFAULT_KEEP_RECENT_TOOLS + 1` = 16 at the
+    shipped window of 15 — derived from the constant rather than written as 16,
+    so the placement follows the window instead of silently drifting from it.
+    Selection is arithmetic (`cutoff = len(compactable_indices) - keep_count`
+    in `app/harness/microcompact.py`) and both passes read that same shipped 15,
+    so a row with 15 or fewer rows behind it is no candidate for any pass, at
+    any grid size, depth or seed. That is what made the sidecar arm unbookable.
+
+    A filler shorter than the window returns 0 — the earliest slot, which puts
+    the row as far from the end as that session can. `--sizes 12000` is such a
+    session: booking nothing there is correct, not a miss.
+    """
+    from app.harness.microcompact import DEFAULT_KEEP_RECENT_TOOLS
+
+    rows_behind = DEFAULT_KEEP_RECENT_TOOLS + 1
+    seen = 0
+    for k in range(len(turns) - 1, -1, -1):
+        seen += sum(1 for m in turns[k] if m.get("role") == "tool")
+        if seen >= rows_behind:
+            return k
+    return 0
+
+
 def _spill_turn(i: int, corpus: list[Path], root: Path) -> list[dict] | None:
     """The session's spilled row (#2511): a Read whose rendered whole-file
-    body exceeds `SPILL_THRESHOLD_CHARS`, appended as the session's LAST
-    filler turn so the turn-start pass leaves it a raw pointer (it is inside
-    the recent-keep set) and relief is the pass that reduces it — the
-    mid-turn shape #2168's read-time pass exists for.
+    body exceeds `SPILL_THRESHOLD_CHARS`.
+
+    `build_session` places it `_spill_slot` tool rows back from the end of the
+    filler — outside the newest-`keep_recent_tools` window, not inside it — so a
+    compaction pass can select it: the turn-start pre-pass is then the first
+    reducer and, under `sidecar`, the pass that records the call id for the
+    read-time pass to replay (#2689). Relief is the reducer only in production's
+    other case, a row still inside the window at turn start that ages out
+    mid-turn.
 
     The picked file is the corpus's SMALLEST member over the threshold: a
     raw body over it renders over it (`_read_render` only grows the text),
@@ -983,14 +1020,16 @@ def build_session(seed: int, target_tokens: int, depth: float,
         turns.append(t)
         i += 1
     if shape == "tool":
-        # #2511: the session's spilled row, LAST among the filler so the
-        # turn-start pass leaves it a raw pointer for relief to reduce. It
-        # is placed before `at` is computed, so `depth` counts it like any
-        # other turn.
+        # #2511: the session's spilled row. #2689 moved it from LAST among the
+        # filler to `_spill_slot` — far enough back that a compaction pass can
+        # select it at the shipped window. Only its position moves: the turn
+        # list, its size and every token total are what they were, `counted` is
+        # a sum over messages, and it is still inserted before `at` is computed,
+        # so `depth` counts it like any other turn.
         sp = _spill_turn(i, corpus, root)
         if sp is not None:
             total += counted(sp)
-            turns.append(sp)
+            turns.insert(_spill_slot(turns), sp)
             i += 1
     at = min(len(turns), max(0, round(depth * len(turns))))
     turns.insert(at, planted_msgs)

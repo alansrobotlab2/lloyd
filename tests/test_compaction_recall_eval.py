@@ -1195,21 +1195,22 @@ def _pair_two_passes(spill_corpus, tmp_path, monkeypatch, spy):
     the engine stubbed at `run_query` — the second-pass-over-the-same-root
     shape the sidecar comparison is read in (#2168, #2511).
 
-    The stubbed turn drives relief itself (`loop._intra_turn_microcompact`
-    with the row's own `RunOptions`) over the loaded history plus 16 synthetic
-    recent tool rows, which push the session's spilled row — generated recent,
-    so the turn-start pass leaves it a raw pointer — out of relief's keep set.
-    A stub engine that answers without any tool activity gives relief no
-    mid-turn shape to reduce, and relief is the only writer of
-    `reduced_call_ids`, the list the read-time pass replays. `spy` wraps
-    `apply_reduction_sidecar` (which `app.compaction` lazy-imports from this
-    module, so patching it here patches the read-time pass itself) and records
-    `(session_id, applied)` per call.
+    The stubbed turn answers the probe and does nothing else. #2689 deleted the
+    16 synthetic recent tool rows this stub used to append and the
+    `loop._intra_turn_microcompact` call it used to make with them: they existed
+    to push the generated spilled row out of the newest-`keep_recent_tools` keep
+    set so the pair would book something, which measured the injection rather
+    than the generator — the shipped generator placed the row INSIDE that window,
+    so the pair it stood in for booked nothing on every session of the
+    2026-10-13/14 grid. The row now reaches the pass from the generator's own
+    placement, and `app.compaction`'s turn-start pre-pass is the writer of its
+    `reduced_call_ids` entry. `spy` wraps `apply_reduction_sidecar` (which
+    `app.compaction` lazy-imports from this module, so patching it here patches
+    the read-time pass itself) and records `(session_id, applied)` per call.
 
     Returns the (arm, pass) -> row map and the spy's records."""
     import app.harness.loop as L
     import app.harness.microcompact as mc
-    import app.transcript_entries as te
 
     root, files = spill_corpus
     s = R.build_session(21, 60_000, 0.5, root=root, corpus=files)
@@ -1234,18 +1235,9 @@ def _pair_two_passes(spill_corpus, tmp_path, monkeypatch, spy):
         monkeypatch.setattr(mc, "apply_reduction_sidecar", _spy)
 
     async def fake_run_query(history, opts):
-        msgs = list(history)
-        for k in range(16):
-            cid = f"call_probe_{k}"
-            msgs.append({"role": "assistant", "content": "",
-                         "tool_calls": [te.build_tool_call(
-                             cid, "Read", json.dumps({"file_path": "/p.py"}))]})
-            msgs.append({"role": "tool", "tool_call_id": cid,
-                         "content": "probe filler line\n" * 8})
-        L._intra_turn_microcompact(
-            msgs, options=opts, meter=None, keep_recent=15,
-            tool_count=sum(1 for m in msgs if m.get("role") == "tool"),
-            iteration=20)
+        # No tool activity and no relief pass of its own: the turn exists to
+        # consume the prompt, and the reduction the pair measures happens in
+        # `app.compaction`'s turn-start pre-pass, which `run_one` really calls.
         yield {"type": "result",
                "response_text": f"CODENAME: {s.planted.passphrase}\n"
                                 f"PORT: {s.planted.port}",
@@ -1276,8 +1268,10 @@ def test_a_generated_session_spills_a_pointer_row_the_arm_records(spill_corpus,
     `<persisted-output>` pointer (and the spill file it names exists), and
     after the turn that call id sits in
     `sessions/<sid>.microcompact-reduced.json` — the record a later row
-    replays. The `sidecar` arm's row is the one checked end to end, because
-    relief records only under its switch."""
+    replays. The `sidecar` arm's row is the one checked end to end because the
+    writer — `app.compaction`'s turn-start pre-pass, since #2689 placed the row
+    outside the keep window it used to sit inside — books only under that
+    arm's switch."""
     import re
 
     from app.harness.microcompact import read_reduced_calls
@@ -1287,8 +1281,8 @@ def test_a_generated_session_spills_a_pointer_row_the_arm_records(spill_corpus,
                                        spy=False)
     cids = _spilled_call_ids(s)
     assert cids, (
-        "the generator still emits only sub-threshold slices, so relief has "
-        "no pointer row to record and the pair stays vacuous")
+        "the generator still emits only sub-threshold slices, so there is "
+        "no pointer row for a pass to record and the pair stays vacuous")
 
     sid = f"pt-eval-c600-{s.key}-sidecar"
     doc = json.loads((tmp_path / "d" / "sessions" / f"{sid}.json").read_text())
@@ -1306,6 +1300,70 @@ def test_a_generated_session_spills_a_pointer_row_the_arm_records(spill_corpus,
     assert cids[0] in read_reduced_calls(sid), (
         "the spilled call id is not in the sidecar record after the turn, "
         "so a second pass over the same root has nothing to replay")
+
+
+def test_the_generated_spill_row_lands_outside_the_shipped_keep_window(
+        spill_corpus, tmp_path, monkeypatch):
+    """#2689 clause 1: the SHIPPED generator, at a grid size and unchanged
+    shipped window, puts its one `<persisted-output>` row far enough back that
+    relief can select it, and the pass that reduces it books the call id.
+
+    `90_000` is a real grid size (the `90k` of `s600-90k-d10`), not a fixture
+    size. The condition that makes a session reachable is arithmetic, not a size
+    name: the filler needs `DEFAULT_KEEP_RECENT_TOOLS + 1` tool rows, which even
+    a 12 000-token session's has (19), and `_spill_slot` takes the earliest slot
+    when it does not. The booking is
+    read out of `microcompact` called the way `app.compaction`'s turn-start
+    pre-pass calls it — shipped `keep_recent_tools`, `legacy_count_rule=False`,
+    `token_budget=None` — because selection is arithmetic
+    (`cutoff = len(compactable_indices) - keep_count`): a row inside the newest
+    15 is not a candidate for any pass, which is what made the two-pass pair
+    vacuous. No row is injected here to move that window; that fabrication is
+    the rail this node replaces.
+    """
+    from app.harness.microcompact import DEFAULT_KEEP_RECENT_TOOLS, microcompact
+    from app.harness.tool_result_spill import PERSISTED_OUTPUT_TAG
+
+    def tool_text(m: dict) -> str:
+        c = m.get("content")
+        return c if isinstance(c, str) else "".join(
+            b.get("text", "") for b in c or [] if isinstance(b, dict))
+
+    root, files = spill_corpus
+    sid = "pt-eval-s2689-90k-sidecar"
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path / "d"))
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR",
+                        tmp_path / "d" / "sessions")
+    s = R.build_session(21, 90_000, 0.5, root=root, corpus=files)
+    cids = _spilled_call_ids(s)
+    assert cids, (
+        "the corpus has a file over `SPILL_THRESHOLD_CHARS` but the generated "
+        "session has no over-threshold row, so there is no pointer to place")
+
+    routed = R.route_spilled_results(s.messages, sid)
+    tool_rows = [i for i, m in enumerate(routed) if m.get("role") == "tool"]
+    pointers = [i for i in tool_rows
+                if PERSISTED_OUTPUT_TAG in tool_text(routed[i])]
+    assert len(pointers) == 1, (
+        f"expected exactly one routed pointer row, found {len(pointers)} at "
+        f"{pointers} of {len(tool_rows)} tool rows")
+    rows_after = [i for i in tool_rows if i > pointers[0]]
+    assert len(rows_after) >= DEFAULT_KEEP_RECENT_TOOLS + 1, (
+        f"the spilled row has {len(rows_after)} tool rows after it, inside "
+        f"relief's newest-{DEFAULT_KEEP_RECENT_TOOLS} keep set, so no pass can "
+        "ever reduce it")
+
+    booked: list[str] = []
+    out, _cleared = microcompact(
+        routed, keep_recent_tools=DEFAULT_KEEP_RECENT_TOOLS,
+        legacy_count_rule=False, token_budget=None, session_id=sid,
+        reduced_calls_out=booked)
+    assert booked == [cids[0]], (
+        f"the shipped pass booked {booked}, not the spilled row {cids[0]!r}, "
+        "so the read-time half of #2168 still has nothing to replay")
+    reduced = tool_text(out[pointers[0]])
+    assert "preview dropped" in reduced and len(reduced) < 400, (
+        f"the booked row was not reduced to its header: {reduced[:120]!r}")
 
 
 def test_the_second_pass_applies_the_recorded_reduction_under_sidecar_only(
@@ -1393,3 +1451,55 @@ def test_the_sidecar_header_states_the_two_pass_procedure():
         "the header still does not state the two-pass procedure")
     assert "sidecar_applied" in sec, (
         "the header does not name the record each row leaves behind")
+
+
+def test_the_module_describes_the_placement_the_generator_performs():
+    """#2689: the module header and `_spill_turn`'s docstring used to describe
+    the shape that made the sidecar pair vacuous — the spilled row as "the
+    session's LAST filler turn", "inside the recent-keep set", a row "relief
+    reduces and records". A header that mis-states the generator is how the
+    2026-10-13/14 artifact, in which no row on earth could be reduced, read for
+    two days as a measurement of the reduction switch, so the prose is pinned
+    against the code's own constant here rather than left to drift again.
+
+    The pin is on the SHAPE WORDS, not on the sentences: what must not come back
+    is a claim that the row is last, or that relief is its recorder, while
+    `_spill_slot` puts it outside the window the pass may select from.
+    """
+    from app.harness.microcompact import DEFAULT_KEEP_RECENT_TOOLS
+
+    header = R.__doc__ or ""
+    spill_doc = R._spill_turn.__doc__ or ""
+    slot_doc = R._spill_slot.__doc__ or ""
+    low = header.lower()
+    assert "last filler turn" not in spill_doc.lower() and "last among" not in (
+        spill_doc.lower()), (
+        "`_spill_turn`'s docstring still describes the row as the session's last "
+        "filler turn, the shape `build_session` no longer builds")
+    assert "outside" in spill_doc and "keep_recent_tools" in spill_doc, (
+        "`_spill_turn` no longer says where the row is placed, so a reader "
+        "cannot tell which pass reduces it")
+    assert "DEFAULT_KEEP_RECENT_TOOLS" in slot_doc, (
+        "`_spill_slot` must name the window its slot is derived from, or the "
+        "number in it is a magic constant again")
+    assert "default_keep_recent_tools" in low, (
+        "the header does not say which window the row is placed outside of")
+    assert "the turn's relief reduces" not in low, (
+        "the header still names relief as the row's recorder, which is the "
+        "misdescription that hid the vacuity")
+    assert "first pass" in low and "second pass" in low and "sidecar_applied" in (
+        header), "the header no longer states the two-pass procedure"
+    # And the arithmetic the prose claims, measured on the helper itself: a
+    # filler long enough to hold the window has the row placed with at least one
+    # more tool row behind it than relief keeps inline.
+    filler = [[{"role": "tool", "tool_call_id": f"c{k}", "content": "x"}]
+              for k in range(DEFAULT_KEEP_RECENT_TOOLS * 3)]
+    at = R._spill_slot(filler)
+    rows_behind = sum(1 for t in filler[at:] if t[0]["role"] == "tool")
+    assert rows_behind >= DEFAULT_KEEP_RECENT_TOOLS + 1, (
+        f"`_spill_slot` placed the row with {rows_behind} tool rows behind it, "
+        f"inside the newest-{DEFAULT_KEEP_RECENT_TOOLS} window")
+    assert R._spill_slot([[{"role": "tool", "tool_call_id": "c0",
+                            "content": "x"}]]) == 0, (
+        "a filler shorter than the window must take the earliest slot, not a "
+        "slot that does not exist")

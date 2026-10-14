@@ -669,6 +669,7 @@ async def load_and_compact_session(
     # clearing sticky from one turn to the next.
     sidecar_applied = 0
     cleared_this_pass: list[str] = []
+    reduced_this_pass: list[str] = []
     already_cleared: tuple[str, ...] = ()
     sidecar_on = False
     if cfg["microcompact"].get("enabled", True):
@@ -681,6 +682,7 @@ async def load_and_compact_session(
                 microcompact,
                 read_cleared_calls,
                 record_cleared_calls,
+                record_reduced_calls,
             )
             # ONE switch source (#2348 clause 3), resolved ONCE here so the two
             # halves cannot disagree. Relief's writer reads the caller's RunOptions
@@ -759,6 +761,12 @@ async def load_and_compact_session(
                 # makes today — no skip set, no collector, no file.
                 already_cleared=(already_cleared if sidecar_on else ()),
                 cleared_calls_out=(cleared_this_pass if sidecar_on else None),
+                # #2689: the rows THIS pass reduces to header-and-path form.
+                # `microcompact` hands back exactly the ids whose new bytes it can
+                # rebuild from the pointer alone, so this is the same set relief
+                # books mid-turn, from the pass that gets there first for any row
+                # already outside the newest-`keep_recent_tools` window.
+                reduced_calls_out=(reduced_this_pass if sidecar_on else None),
             )
             micro_cleared += pass_cleared
             if sidecar_on and cleared_this_pass:
@@ -766,6 +774,14 @@ async def load_and_compact_session(
                 # half: with the shipped default False no sidecar file is created at
                 # all, so nothing reaches real traffic before #2168's ruling.
                 record_cleared_calls(path.stem, cleared_this_pass)
+            if sidecar_on and reduced_this_pass:
+                # #2689: the replayable list's second writer, same gate. Without it
+                # a row this pass reduced is re-dropped from the session row at the
+                # next turn start and nothing is ever recorded for the read-time pass
+                # to apply — the reason every `sidecar` row of the 2026-10-13/14 grid
+                # read `sidecar_applied: 0`. `record_reduced_calls` merges rather than
+                # overwrites, so relief's records survive a pass that reduced nothing.
+                record_reduced_calls(path.stem, reduced_this_pass)
         except Exception as e:  # noqa: BLE001
             logger.warning("microcompact pre-pass failed: %s", e)
 
