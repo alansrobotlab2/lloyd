@@ -1156,6 +1156,16 @@ rows = djev.rank(query, shortlist)   # ≤16 (max_n, at most 32), else ValueErro
    set. It starts with `threshold=None` and `label_mass_floor=None`.
 2. Add the seam name to `djev_shadow.SEAMS`, and give it a line under
    `djev.shadow.seams` in config.yaml. A seam absent from that map is **on**.
+   Then write the name into the two places **this page** restates the roster, or
+   the next reader learns the old set: the seam line in the opening diagram,
+   under `app/djev_shadow.py`'s arrows, whose names must be exactly `SEAMS`; and
+   the `summary:` in the frontmatter above, which may count the seams only if the
+   count still equals `SEAMS` — dropping the number there is the cheaper edit,
+   and is what `architecture/index.md`'s Covers row now does. Forgetting either
+   used to be silent: `index.md` carried "three shadow seams" after the fourth
+   seam landed, and #2699 is the page's own count sitting next to a roster of
+   four. `tests/test_djev_doc_claims.py` reads `SEAMS` and fails both copies, so
+   now it is a red test instead of a stale page.
 3. Call `djev_shadow.shadow(...)` **where production's decision is made**, with
    `actual` = what production decided. Pass anything that needs I/O as a
    callable. Wrap the call in `try/except: pass`: a recorder may never reach

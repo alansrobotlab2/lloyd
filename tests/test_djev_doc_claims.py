@@ -432,3 +432,281 @@ def test_no_claim_dates_the_seam_earlier_than_its_first_row():
             f"{name} dates something in the seam's history to {early[0]}, before "
             "the first `action_review` row at 2026-09-25 — a row dated earlier "
             "than that belongs to another seam")
+
+
+# ── #2699: the roster has one owner, and this page restates it twice ─────────
+
+#: `SEAMS` in `app/djev_shadow.py` is the only place the roster is written — the
+#: recorder iterates it, `stats()` reports per it, §9.4 counts its gated subset,
+#: and §9.3 sends a contributor to it — but this page states the set twice more in
+#: prose: a count in the frontmatter `summary:`, and the names in the opening
+#: diagram. Neither was graded by anything. `grep -c SEAMS` on this file read 0
+#: while five modules read `SEAMS` for behaviour, so the doc agreed with its owner
+#: by luck. That is the state that reproduces the defect by itself:
+#: `architecture/index.md` carried "three shadow seams" — the number from the
+#: commit that first wired three, until a review deleted the integer,
+#: and §9.3 step 2 never said the page also lists the set, so a contributor
+#: following the procedure made it stale in two fresh places.
+_NUMBER_WORDS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                 "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+#: A number counts the seams only when the noun stands beside it, and the number
+#: may be a figure or a word — the corpus writes owned counts both ways. Tab and
+#: space only, never a newline: a count and its noun are one phrase, not two lines
+#: of prose that happen to end and begin near each other.
+_SEAM_COUNT = re.compile(
+    r"\b(?:(\d{1,2})|(" + "|".join(_NUMBER_WORDS) + r"))"
+    r"[ \t]+shadow[ \t]+seams?\b", re.IGNORECASE)
+
+#: A bare lower identifier — a diagram token that can be a seam name, as opposed
+#: to the prose continuations that share the visual line (`(the`, `model's`).
+_BARE_NAME = re.compile(r"[a-z_][a-z0-9_]*\Z")
+
+
+def _doc_text() -> str:
+    """The doc, read through the module global so a control can aim it at a copy."""
+    return DOC.read_text(encoding="utf-8")
+
+
+def _fenced(text: str) -> str:
+    """The concatenation of every ``` fenced block: the diagrams, not the prose.
+
+    The roster is drawn in a diagram, and a node that scanned the whole file would
+    meet the §6.1 heading and §9.3's step text as well, neither of which is the
+    copy under test here.
+    """
+    return "\n".join(text.split("```")[1::2])
+
+
+def _frontmatter_summary(text: str) -> str:
+    """The frontmatter's `summary:` value, with its wrapped lines folded together.
+
+    Folding is what makes the number findable: the shipped value breaks mid-list,
+    so a line-scoped reader sees half a sentence and reports a clean sweep of a doc
+    it never parsed.
+    """
+    front = text.split("---", 2)[1]
+    started = re.search(r"^summary:[ \t]*", front, re.M)
+    assert started, (
+        "the doc's frontmatter has no `summary:` key, so the copy of the roster "
+        "this node exists to grade has moved rather than been fixed")
+    rest = front[started.end():]
+    stop = re.search(r"^[A-Za-z_][\w-]*:", rest, re.M)
+    return " ".join((rest[:stop.start()] if stop else rest).split())
+
+
+def _summary_seam_counts(text: str) -> list[int]:
+    """Every count the `summary:` attaches to the words `shadow seams`.
+
+    An empty list is a passing answer, not a vacuous one: a page may name the set
+    without counting it, which is what `architecture/index.md`'s Covers row does
+    now, and a count that drifts can never be.
+    """
+    return [int(digits) if digits else _NUMBER_WORDS[word.lower()]
+            for digits, word in _SEAM_COUNT.findall(_frontmatter_summary(text))]
+
+
+def _roster_line(text: str, seams) -> str:
+    """The fenced line that lists the seam names, found by the roster itself.
+
+    Located through the owner rather than a literal so the line is still found after
+    a seam lands or leaves: it is the line carrying the most seam names. A roster
+    split across two lines then reports its missing half loudly instead of agreeing
+    with a page that stopped listing.
+    """
+    names = set(seams)
+    lines = [ln for ln in _fenced(text).splitlines() if ln.strip()]
+    return max(lines, key=lambda ln: sum(1 for t in ln.split() if t in names),
+               default="")
+
+
+def _diagram_roster(text: str, seams) -> list[str]:
+    """The seam names the diagram lists, in the order it lists them.
+
+    Read as the run of bare identifiers from the first seam name onward, because
+    the same visual line also carries prose from the columns to its left. An empty
+    answer means the doc names no seam at all, which the caller reads as every seam
+    missing — never as a comparison with nothing to compare.
+    """
+    names = set(seams)
+    tokens = _roster_line(text, seams).split()
+    first = next((i for i, t in enumerate(tokens) if t in names), None)
+    assert first is not None, (
+        "the diagram no longer names any seam, so the roster this page draws has "
+        f"gone: none of {sorted(names)} appears on a fenced line. §9.3 sends a new "
+        "seam to the diagram; a page listing none is not a page in agreement with "
+        "`SEAMS`")
+    run = []
+    for token in tokens[first:]:
+        if not _BARE_NAME.match(token):
+            break
+        run.append(token)
+    return run
+
+
+def test_the_doc_names_exactly_the_seams_the_shadow_recorder_declares():
+    """Clauses 1 and 2: both copies on this page are the owner's set, not a memory.
+
+    The roster is `djev_shadow.SEAMS`, so it is read and never re-typed — nothing
+    below holds a seam name or a count literal. Two shapes of drift are refused. A
+    count that is not `len(SEAMS)` is the defect #2699 was filed on, and a page may
+    also name the set with no count at all, which is the fix `index.md` took, so an
+    empty count list passes here on purpose. A name the diagram dropped, a name it
+    invented, and a name it lists twice are each refused by name, because the
+    diagram is the copy a reader copies the roster FROM.
+    """
+    from app import djev_shadow
+
+    seams = tuple(djev_shadow.SEAMS)
+    text = _doc_text()
+
+    counts = _summary_seam_counts(text)
+    stale = [c for c in counts if c != len(seams)]
+    assert not stale, (
+        f"the `summary:` counts the shadow seams {stale} while `SEAMS` holds "
+        f"{len(seams)}: {seams}. Either agree or drop the number — the Covers row in "
+        "`architecture/index.md` names the set with no integer and needs nobody to "
+        "keep it true")
+
+    roster = _diagram_roster(text, seams)
+    missing = sorted(set(seams) - set(roster))
+    extra = sorted(set(roster) - set(seams))
+    twice = sorted({t for t in roster if roster.count(t) > 1})
+    assert not (missing or extra or twice), (
+        f"the diagram's seam roster {roster} is not the roster the recorder declares: "
+        f"missing={missing} undocumented={extra} listed_twice={twice}. §9.3 step 2 "
+        "sends a new seam to the diagram as well as to `SEAMS`")
+
+
+def test_the_seam_roster_check_can_see_a_doc_that_lost_a_seam(tmp_path, monkeypatch):
+    """Clause 3's control: the green above has to mean agreement, not an empty scan.
+
+    Three seeds, each aimed at a half that could go vacuous. The summary counts one
+    seam more than the owner has — built from `_NUMBER_WORDS` and the match itself,
+    so the seed is derived and survives the shipped number changing. The diagram
+    loses a seam, taken as `SEAMS[0]` rather than spelled, and the check has to name
+    it. And the roster is widened by one name with the doc left exactly as shipped,
+    which is what a real fifth seam looks like on the morning before anybody draws
+    it: `index.md` sat in exactly that state for the fourth seam's whole life.
+    """
+    import sys
+
+    from app import djev_shadow
+
+    seams = tuple(djev_shadow.SEAMS)
+    shipped = _doc_text()
+    here = sys.modules[__name__]
+
+    matched = _SEAM_COUNT.search(shipped)
+    assert matched, (
+        "the shipped summary names no seam count, so the count half of the check has "
+        "nothing to seed and its green is unearned")
+    wider_word = next(w for w, n in _NUMBER_WORDS.items() if n == len(seams) + 1)
+    bumped = matched.group(0).replace(matched.group(1) or matched.group(2),
+                                      wider_word)
+    over = tmp_path / "over.md"
+    over.write_text(shipped[:matched.start()] + bumped + shipped[matched.end():],
+                    encoding="utf-8")
+    monkeypatch.setattr(here, "DOC", over)
+    seeded = _summary_seam_counts(_doc_text())
+    assert seeded == [len(seams) + 1], (
+        f"a summary seeded to count {wider_word} shadow seams read as {seeded!r}: "
+        "the count in the frontmatter is not being read at all")
+
+    dropped = seams[0]
+    line = _roster_line(shipped, seams)
+    thinned = tmp_path / "thinned.md"
+    thinned.write_text(shipped.replace(line, line.replace(dropped, "", 1), 1),
+                       encoding="utf-8")
+    monkeypatch.setattr(here, "DOC", thinned)
+    lost = set(seams) - set(_diagram_roster(_doc_text(), seams))
+    assert lost == {dropped}, (
+        f"a diagram seeded without `{dropped}` read as {lost!r}: the roster in the "
+        "diagram is not being read")
+
+    widened = seams + (f"seam_{len(seams) + 1}",)
+    assert set(widened) - set(_diagram_roster(shipped, widened)) == {widened[-1]}, (
+        "a roster widened by one name with the doc unchanged went unreported, so a "
+        "real fifth seam would land green")
+    assert _summary_seam_counts(shipped) != [len(widened)], (
+        "the shipped count matched a roster the owner does not have")
+
+
+#: What §9.3 step 2 must name, as the step words them: the two places on this page a
+#: new seam has to be written into. Fragments rather than a whole sentence, so the
+#: pin survives rewording and dies on losing the instruction.
+STEP2_PLACES = ("summary:", "diagram")
+
+
+def _procedure(text: str) -> str:
+    """§9.3 "Adding a seam", up to §9.4 — the procedure, not the chapter.
+
+    Bounded on both sides because `tests/conftest.py` cites §9.3 by step NUMBER, so a
+    step inserted above the one it names silently re-points that citation at different
+    instructions.
+    """
+    return _section(text, "### 9.3 Adding a seam").split("\n### 9.4")[0]
+
+
+def _step(text: str, number: int) -> str:
+    """One numbered step, cut at the next one — so a neighbour cannot vouch for it."""
+    started = re.search(rf"^{number}[.] ", text, re.M)
+    assert started, f"the procedure has no step {number}: {text[:80]!r}"
+    rest = text[started.end():]
+    nxt = re.search(rf"^{number + 1}[.] ", rest, re.M)
+    return rest[:nxt.start()] if nxt else rest
+
+
+def test_the_seam_procedure_sends_a_new_seam_to_the_page_as_well_as_the_code():
+    """Clause 4: the procedure is why the defect recurs, so the procedure gets pinned.
+
+    Step 2 always said to add the name to `djev_shadow.SEAMS`; it never said this page
+    lists the set too, which is how a contributor who followed §9.3 exactly still left
+    the count and the diagram behind — the shape #2699 records. The pin is that the two
+    places are NAMED, plus the test that enforces them, so the instruction cannot be
+    shortened back to its code-only half unnoticed. The step's LENGTH is not pinned and
+    its neighbours are not renumbered: conftest cites step 5, and step 5 is still step
+    5.
+    """
+    step = _step(_procedure(_doc_text()), 2)
+    assert "`djev_shadow.SEAMS`" in step, (
+        f"step 2 no longer sends a new seam to `SEAMS` at all: {step!r}")
+    for place in STEP2_PLACES:
+        assert place in step, (
+            f"step 2 no longer names {place!r}, one of the two places on this page a "
+            "new seam must be written into. Losing it is how #2699 happened: the step "
+            f"read {step!r}")
+    assert "test_djev_doc_claims.py" in step, (
+        "step 2 no longer says which test enforces the page's two copies, so the next "
+        f"contributor has no way to find the red they just caused: {step!r}")
+
+
+def test_the_index_parity_check_still_never_reads_a_rosters_owner():
+    """Clause 5's boundary, pinned from this file rather than by editing #2700's.
+
+    `tests/test_architecture_index_parity.py` owns `_OWNED_COUNT` and #2700 is widening
+    it to number words; two rounds editing that constant would collide, and nothing
+    here touches it. What is asserted instead is the reason this node cannot live
+    there: that check counts words in `index.md` and never reads a code owner, so it
+    can never answer "does the page still match `SEAMS`". And `index.md`'s live rows
+    must not regain a count of their own — the integer there was deleted by the
+    `arch-review: doc:index — stale` commit, whose own Review-log quotation of "three
+    shadow seams" is the record of doing it, and that file's verbatim log test keeps
+    the quotation in place.
+    """
+    parity = (ROOT / "tests" / "test_architecture_index_parity.py").read_text(
+        encoding="utf-8")
+    assert "import djev_shadow" not in parity, (
+        "the index parity check now reads the seam owner, which is this node's job; "
+        "two places reading one owner is how this round and #2700 collide")
+
+    index = (ROOT / "architecture" / "index.md").read_text(encoding="utf-8")
+    live = index.split("## Review log")[0]
+    hit = _SEAM_COUNT.search(live)
+    assert hit is None, (
+        f"index.md's live text counts the shadow seams again "
+        f"({hit.group(0)!r}) after the doc:index review deleted it; an unowned count "
+        "is what this item is about — name the set instead")
+    assert "three shadow seams" in index, (
+        "the Review-log entry recording that deletion has gone, and "
+        "`test_architecture_index_parity.py` forbids rewriting the log")
