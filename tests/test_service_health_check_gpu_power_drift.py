@@ -149,19 +149,38 @@ def test_a_mixed_set_degrades_the_category_and_rides_both_formatters(tmp_path):
 
 
 def test_the_cli_runs_the_pairs_under_its_own_category():
-    """`--category deploy --format json` reaches the real pairs. Only the shape
-    is asserted: what is installed on the box running the suite is not the
-    suite's to decide, and every verdict is one of the three named words."""
+    """`--category deploy --format json` reaches the real pairs, and the pairs are
+    still exactly the two of them under the keys the formatters print them under.
+
+    Only the shape is asserted: what is installed on the box running the suite is not
+    the suite's to decide.
+
+    The set assertion this node used to make — `set(rows) == {deployed:the two pairs}` —
+    was the `deploy` heading being the same thing as the byte pairs. #2714's acceptance
+    puts a second family of rows under that heading: "the new rows carry category
+    `deploy` … and the two existing byte-pair rows keep their current keys and count so
+    the formatters and the category summary still need no special case". So the pairs are
+    now asserted as the pairs — their keys, and that there are two — and the `unitlink:`
+    family is asserted as the other family sharing the heading. Verdict words widened
+    with the new family: `copy`, `wrongtarget` and the `unknown` of a check that could
+    not read its own exclusion list, none of which is a byte comparison.
+    """
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), "--category", shc.DEPLOY_CATEGORY, "--format", "json"],
         capture_output=True, text=True, timeout=30, check=True)
     payload = json.loads(proc.stdout)
     rows = {s["name"]: s for s in payload["services"]}
-    assert set(rows) == {f"deployed:{UNIT}", f"deployed:{SCRIPT_NAME}"}
+    pairs = {n: r for n, r in rows.items() if n.startswith("deployed:")}
+    assert sorted(pairs) == sorted({f"deployed:{UNIT}", f"deployed:{SCRIPT_NAME}"}), (
+        "clause 5: the byte-pair rows must keep their keys and their count, or every "
+        "caller that reads them by name breaks")
+    units = [n for n in rows if n.startswith("unitlink:")]
+    assert units, f"the #2714 rows are absent from the heading they were filed under: {sorted(rows)}"
     for row in rows.values():
         assert row["category"] == shc.DEPLOY_CATEGORY
-        assert row["status"].split(":")[0] in {"ok", "drift", "missing"}, row["status"]
-        assert row["healthy"] is row["status"].startswith("ok:")
+        assert row["status"].split(":")[0] in {
+            "ok", "drift", "missing", "copy", "wrongtarget", "unknown"}, row["status"]
+        assert row["healthy"] is row["status"].startswith("ok:"), row["status"]
 
 
 
@@ -198,9 +217,13 @@ LIVE_275_450_275 = {0: 275.0, 1: 450.0, 2: 275.0}
 # `check_path_sandbox` is on this list from #2320 onward: clause 5 of that item puts the
 # substrate row on the DEFAULT run, so a driven `main()` here would otherwise carry it and
 # the exact row-name lists below would be a claim about the power rows that one new
-# sibling had quietly falsified.
+# sibling had quietly falsified. `check_unit_file_links` joins it for #2714 for exactly
+# that reason and in exactly that way: its rows ride the default run too, under
+# `DEPLOY_CATEGORY`, so the `gpu-power:0/1/2` lists below are only true of the power rows
+# while this sibling is silenced with the others.
 SIBLING_CHECKS = ("check_deployed_copies", "check_ca_trust",
-                  "check_unit_enabledness", "check_path_sandbox")
+                  "check_unit_enabledness", "check_path_sandbox",
+                  "check_unit_file_links")
 
 
 def _fresh():
@@ -215,7 +238,7 @@ def _fresh():
     return shc
 
 
-def _drive(shc, monkeypatch, capsys, declared, live, argv_extra=()):
+def _drive(shc, monkeypatch, capsys, declared, live, argv_extra=(), keep=(), fmt="json"):
     """Run `main()` over injected sides and return its parsed `--format json`.
 
     Through `main()` rather than the check alone because the two things clause 5
@@ -223,8 +246,16 @@ def _drive(shc, monkeypatch, capsys, declared, live, argv_extra=()):
     the whole wiring rule at :1169-1199 applies to it) and that it reaches the JSON
     payload with no new flag. The clause-1 and clause-2 summaries come from `main`'s
     own arithmetic for the same reason — a word this file typed would prove nothing.
+
+    `keep` names a sibling this node wants left running: #2714's clause 5 drives the
+    unit-file rows onto the SAME heading as the byte pairs and has to have both of them
+    actually produce rows to say anything about a shared heading. `fmt` exists for the
+    same node — "the formatters need no special case" is a claim about the text output,
+    which is the one thing a JSON-only driver cannot reach.
     """
     for name in SIBLING_CHECKS:
+        if name in keep:
+            continue
         monkeypatch.setattr(shc, name, lambda *a, **k: [])
     monkeypatch.setattr(shc, "derived_supervisor_rows", lambda *a, **k: [])
     monkeypatch.setattr(shc, "_switched_off", lambda *a, **k: set())
@@ -233,9 +264,10 @@ def _drive(shc, monkeypatch, capsys, declared, live, argv_extra=()):
     monkeypatch.setattr(shc, "CATEGORIES", dict(shc.CATEGORIES, **{"all": []}))
     monkeypatch.setattr(shc, "_declared_power_limits", lambda: declared)
     monkeypatch.setattr(shc, "_live_power_limits", lambda: live)
-    monkeypatch.setattr(sys, "argv", [str(shc.__file__), "--format", "json", *argv_extra])
+    monkeypatch.setattr(sys, "argv", [str(shc.__file__), "--format", fmt, *argv_extra])
     shc.main()
-    return json.loads(capsys.readouterr().out)
+    out = capsys.readouterr().out
+    return out if fmt == "text" else json.loads(out)
 
 
 def test_a_hand_raised_card_names_its_index_live_and_declared_watts(monkeypatch,
@@ -528,3 +560,103 @@ def test_the_declared_side_is_read_through_the_shell_guard():
 #: The guard's real answer shape on a box wired like the unit in the tree.
 DECL_275_450_275_TEXT = ("Environment=GPU_POWER_LIMIT_W=300 GPU_POWER_LIMIT_W_0=275 "
                          "GPU_POWER_LIMIT_W_1=450 GPU_POWER_LIMIT_W_2=275\n")
+
+
+# ---------------------------------------------------------------------------
+# #2714 — the `deploy` heading is now shared, and sharing it must cost nothing
+# ---------------------------------------------------------------------------
+
+def _borrowed_unit_rows(tmp_path):
+    """Real rows from the real identity check, over #2714's synthetic fleet.
+
+    The fleet lives in `tests/test_service_health_check_unit_links.py` and is loaded
+    from there rather than restated here, because "the formatters and the category
+    summary still need no special case" is only a claim if the rows flowing into them are
+    the ones `check_unit_file_links` actually builds — not two dicts this file typed by
+    hand. Same route `tests/test_unit_enabledness_route.py` takes to borrow the enabled
+    guard's own runner: a loader by path, since neither file is a package.
+
+    One healthy row and one unhealthy one, which is the mixed case a shared heading has
+    to survive: `synth-a.service` is a link into the tree, `synth-b.service` the plain
+    copy the item is about.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "unit_links_for_power",
+        ROOT / "tests" / "test_service_health_check_unit_links.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    fleet = mod._Fleet(tmp_path / "units")
+    fleet.track("synth-a.service")
+    fleet.link_to_tree("synth-a.service")
+    fleet.track("synth-b.service")
+    fleet.copy("synth-b.service")
+    return fleet.rows()
+
+
+def test_the_unit_rows_share_the_deploy_heading_without_costing_the_pairs(
+        tmp_path, monkeypatch, capsys):
+    """#2714 clause 5, through `main()`: the new rows carry category `deploy` and are
+    returned on a whole-fleet run and on `--category deploy` but not on a `--services`
+    ask, and the two byte-pair rows keep their keys and count so the formatters and the
+    category summary still need no special case.
+
+    The pairs are injected as the pairs — same names `DEPLOYED_COPIES` produces, both
+    `ok` — beside the unit rows, so this node grades the heading they share rather than
+    the box they would be read from. Four things fall out of `main`'s own output and none
+    of them is a word this file typed: the power rows keep their three names and their count
+    beside the shared heading; the mixed set is
+    counted by the existing arithmetic — 7 rows, 6 healthy, `Deploy: degraded` — with no
+    new branch; `--category deploy` carries pairs and units together; and `--services`
+    carries neither, which is the clause's absence half and the same wiring rule #1108,
+    #2135 and #2320 each had to satisfy. The text format is run too, because a formatter
+    that needed a special case would show up there and nowhere else.
+    """
+    shc = _fresh()
+    unit_rows = _borrowed_unit_rows(tmp_path)
+    assert [r["name"] for r in unit_rows] == ["unitlink:synth-a.service",
+                                              "unitlink:synth-b.service"], unit_rows
+    # Built BEFORE the patch, by the real function: a lambda that reached
+    # `shc.check_deployed_copies` would be calling the lambda and recursing, and the rows
+    # have to be the real function's rows for the shared heading to mean anything.
+    pair_rows = shc.check_deployed_copies([
+        _pair(tmp_path, UNIT, "same\n", "same\n"),
+        _pair(tmp_path, SCRIPT_NAME, "same\n", "same\n")])
+    assert [r["name"] for r in pair_rows] == [f"deployed:{UNIT}",
+                                              f"deployed:{SCRIPT_NAME}"], pair_rows
+    monkeypatch.setattr(shc, "check_deployed_copies", lambda *a, **k: list(pair_rows))
+    monkeypatch.setattr(shc, "check_unit_file_links", lambda *a, **k: list(unit_rows))
+    keep = ("check_deployed_copies", "check_unit_file_links")
+
+    fleet = _drive(shc, monkeypatch, capsys, DECL_275_450_275, LIVE_275_450_275, keep=keep)
+    # Multiset, not position: the clause says the rows are RETURNED on a whole-fleet run,
+    # and `main` appends the deploy block ahead of the wattage block, so an exact order
+    # here would be a claim about two unrelated lines of :1516 rather than about the
+    # heading they share. Names and counts are what clause 5 pins.
+    assert sorted(s["name"] for s in fleet["services"]) == sorted([
+        "gpu-power:0", "gpu-power:1", "gpu-power:2",
+        f"deployed:{UNIT}", f"deployed:{SCRIPT_NAME}",
+        "unitlink:synth-a.service", "unitlink:synth-b.service"]), fleet["services"]
+    assert fleet["summary"][shc.DEPLOY_CATEGORY] == "degraded", fleet["summary"]
+    assert fleet["summary"][shc.GPU_POWER_CATEGORY] == "healthy", fleet["summary"]
+    assert fleet["total_services"] == 7 and fleet["healthy"] == 6, fleet
+
+    asked = _drive(shc, monkeypatch, capsys, DECL_275_450_275, LIVE_275_450_275,
+                   argv_extra=("--category", shc.DEPLOY_CATEGORY), keep=keep)
+    assert sorted(s["name"] for s in asked["services"]) == sorted([
+        f"deployed:{UNIT}", f"deployed:{SCRIPT_NAME}",
+        "unitlink:synth-a.service", "unitlink:synth-b.service"]), asked["services"]
+    assert asked["healthy"] == 3 and asked["total_services"] == 4, asked
+
+    services = _drive(shc, monkeypatch, capsys, DECL_275_450_275, LIVE_275_450_275,
+                      argv_extra=("--services", "lloyd-backend"), keep=keep)
+    # `--services lloyd-backend` answers a question about a programme, so it still
+    # carries that programme's row — what must be absent is this heading's two families.
+    assert [s["name"] for s in services["services"]
+            if s["name"].startswith(("unitlink:", "deployed:"))] == [], services["services"]
+    assert shc.DEPLOY_CATEGORY not in services["summary"], services["summary"]
+
+    text = _drive(shc, monkeypatch, capsys, DECL_275_450_275, LIVE_275_450_275,
+                  keep=keep, fmt="text")
+    assert f"[✓] deployed:{UNIT}" in text, text
+    assert "[✗] unitlink:synth-b.service" in text, text
+    assert f"{shc.DEPLOY_CATEGORY.capitalize()}: degraded" in text, text

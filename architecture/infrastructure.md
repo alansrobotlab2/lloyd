@@ -376,7 +376,10 @@ units were placed before the last run and sit there as plain `-rw-r--r--`
 copies, not symlinks: `lloyd-cert-renew.*`, `lloyd-egress-window.*`,
 `lloyd-persistence-window.*`, `thunderbird.service` and `voxtype.service`. For
 those the sentence above is not yet true, and #1109's "tracked and linked"
-holds only for its first half (#2714). `thunderbird.service`
+holds only for its first half (#2714), which
+`scripts/service_health_check.py` (`check_unit_file_links`, category `deploy`, in the
+default run) now reports as a failing row per tracked unit file rather than leaving it
+unmentioned. `thunderbird.service`
 and `voxtype.service` are both `WantedBy=graphical-session.target` (Thunderbird hosts the
 `thunderbird-mcp` extension its 40 tools bridge over; voxtype is push-to-talk),
 so `enable` runs them with the desktop, not via supervisord. One unit is a gap

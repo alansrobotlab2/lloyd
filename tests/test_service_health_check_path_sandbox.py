@@ -310,8 +310,11 @@ def test_the_state_url_and_headers_come_from_the_aggregator_module(monkeypatch):
 # check: `--services` must not produce it, and `--format json` must carry the same healthy flag
 # the text row printed.
 
+# `check_unit_file_links` joins the list for #2714: its rows ride the default run under
+# the `deploy` category, so `Overall:` would otherwise count eighteen rows this file never
+# asked for and the one-row arithmetic below would read as a substrate fault.
 SIBLING_CHECKS = ("check_deployed_copies", "check_ca_trust", "check_unit_enabledness",
-                  "check_gpu_power_limit")
+                  "check_gpu_power_limit", "check_unit_file_links")
 
 
 def _drive(module, monkeypatch, capsys, payload, fmt="json", argv_extra=()):

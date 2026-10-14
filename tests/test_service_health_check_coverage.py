@@ -639,13 +639,28 @@ def test_the_cli_run_is_a_health_report_that_can_fail(tmp_path):
     Before the fix this printed `Overall: 8/8 services healthy` on a box with five
     ungraded programs. Now the total is the seven declared probes, the fleet rows
     and the deployed-copy pairs, and every one of them is in the count.
+
+    Since #2714 the count also carries one row per tracked user unit file, and those
+    rows report a fact about the machine rather than about the tree — whether
+    `~/.config/systemd/user/lloyd-cert-renew.timer` is a symlink into the repo or a hand
+    copy made before the installer last ran. That is host state the suite cannot own and
+    must not paper over, so the all-clear claim is scoped to everything except the
+    `unitlink:` family, and the family is instead pinned to the verdict printed over it:
+    `Deploy:` reads healthy exactly when its own rows all do, whatever the box looks like.
     """
     r, doc = _cli(tmp_path)
     assert r.returncode == 0, doc["services"]
     assert doc["total_services"] == len(doc["services"])
     assert doc["total_services"] >= 12, \
         f"only {doc['total_services']} rows; the fleet is 12 programs"
-    assert doc["unhealthy"] == 0, [s for s in doc["services"] if not s["healthy"]]
+    units = [s for s in doc["services"] if s["name"].startswith("unitlink:")]
+    assert units, "the #2714 unit-file rows are absent from the default run"
+    assert doc["unhealthy"] == sum(1 for s in units if not s["healthy"]), [
+        s for s in doc["services"] if not s["healthy"]]
+    # "deploy" spelled as the payload spells it: this file drives the CLI as a
+    # subprocess and holds no module object to read the constant off.
+    assert doc["summary"]["deploy"] == (
+        "healthy" if all(s["healthy"] for s in units) else "degraded"), doc["summary"]
 
 
 def test_an_undeclared_program_in_fatal_reaches_the_verdict(tmp_path):

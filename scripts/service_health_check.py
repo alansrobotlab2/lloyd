@@ -556,6 +556,29 @@ DEPLOYED_COPIES = (
      Path("/usr/local/sbin/set-gpu-power-limit.sh")),
 )
 
+# The other half of "is what runs the thing in the tree?" (#2714). The two pairs above
+# are the only files the installer does NOT link, so they are compared byte for byte;
+# every other unit in `agent-services/systemd/` is deployed as a symlink INTO the tree,
+# which is what makes `architecture/infrastructure.md`'s "editing the repo copy is the
+# deploy" true. A plain copy of a unit placed by hand before the last installer run is
+# byte-identical to the tree and therefore invisible to a sha256 compare — which is
+# precisely how five tracked units on this box (eight deployed files: `lloyd-cert-renew.*`,
+# `lloyd-egress-window.*`, `lloyd-persistence-window.*`, `thunderbird.service`,
+# `voxtype.service`) sat under a `Deploy: healthy` heading while a repo edit to any of
+# them landed nowhere. For those units the property is file IDENTITY, not content.
+USER_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
+SYSTEMD_UNIT_TREE = _TREE / "agent-services" / "systemd"
+INSTALL_SERVICES = _TREE / "agent-services" / "setup" / "install-services.sh"
+#: `SYSTEM_SCOPE_UNITS=(nvidia-power-limit.service)`, `install-services.sh:49`. Read from
+#: the installer instead of restated here, for `_switched_off`'s reason: the installer
+#: owns that list, and a unit added to it must not need an edit to this file to stop
+#: being flagged for the gap the installer leaves on purpose.
+SYSTEM_SCOPE_RE = re.compile(r"^SYSTEM_SCOPE_UNITS=\(([^)]*)\)", re.MULTILINE)
+#: The installer's own two globs, one level deep — and one level is the exclusion:
+#: `agent-services/systemd/system/` holds the root-scope units installed by hand
+#: (`lloyd-data-snapshot-prune.*`), which no user unit directory ever receives.
+UNIT_GLOBS = ("*.service", "*.timer")
+
 # The private CA the browser arm has to trust. `scripts/install-ca.sh --check`
 # existed with a test and no production caller (#1668), so the drift it detects —
 # the CA re-minted on 09-22 while the NSS nickname kept the retired key — stayed
@@ -911,6 +934,142 @@ def check_deployed_copies(pairs=DEPLOYED_COPIES) -> list:
             "deployed": str(deployed),
         })
     return results
+
+
+def _system_scope_units(installer: Path = INSTALL_SERVICES) -> Optional[set]:
+    """The unit names `install-services.sh` declines to link, or `None` if unreadable.
+
+    `None` is deliberately not an empty set. A checker that could not read the exclusion
+    list and graded the whole directory anyway would file `missing:` against
+    `nvidia-power-limit.service` — the one unit whose absence from the user manager is
+    the intended state, graded on its real path by `check_deployed_copies` — and clause
+    4 of #2714 exists to make that unreportable. The caller answers with one loud row.
+    """
+    try:
+        text = Path(installer).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    line = SYSTEM_SCOPE_RE.search(text)
+    if line is None:
+        return None
+    return {name.strip("\"'") for name in line.group(1).split() if name.strip("\"'")}
+
+
+def _link_target(link: Path) -> Path:
+    """Where a symlink points, resolved the way `realpath` resolves it.
+
+    `readlink` rather than `resolve()` on the link itself because the answer the row has
+    to print is the target the link NAMES: resolving the link would follow an arbitrary
+    chain and report the far end of it. A relative target is relative to the link's own
+    directory, which is why it is joined to `link.parent` before being resolved.
+    """
+    raw = Path(os.readlink(link))
+    return (raw if raw.is_absolute() else link.parent / raw).resolve()
+
+
+def _unit_link_row(name: str, healthy: bool, status: str, tracked, deployed,
+                   target: Optional[str] = None, prefix: str = "unitlink:") -> dict:
+    """One graded row in `check_service`'s shape, so both formatters and the category
+    summary carry it with no special case — #1108's reasoning, reused verbatim because
+    these rows share the `deploy` heading those two do.
+
+    `prefix` names the row after the unit file it graded. The one row that grades no
+    unit file — the exclusion list could not be read — passes an empty one, so nobody
+    can mistake "nothing was checked" for a verdict about a file.
+    """
+    row = {"name": f"{prefix}{name}",
+           "status": status,
+           "healthy": healthy,
+           "exit_code": 0 if healthy else 1,
+           "output": status,
+           "category": DEPLOY_CATEGORY,
+           "tracked": str(tracked),
+           "deployed": str(deployed)}
+    if target is not None:
+        row["target"] = target
+    return row
+
+
+def check_unit_file_links(tree_dir: Path = SYSTEMD_UNIT_TREE,
+                          deployed_dir: Path = USER_UNIT_DIR,
+                          installer: Path = INSTALL_SERVICES) -> list:
+    """One graded row per tracked user-scope unit file: is the copy that runs the tree's
+    own file, or a stand-in that will never follow it?
+
+    The installer's loop (`install-services.sh:55-75`) links every `*.service` and
+    `*.timer` in `tree_dir` into `deployed_dir`, so after it has run the deployed path is
+    a symlink to the tracked file and editing the repo copy IS the deploy. Anything else
+    at that path means the running unit is a different object from the tracked one:
+
+    * a symlink resolving to the tracked file — `ok`. Resolution decides, not how the
+      link was written, so a hand-made relative link passes.
+    * a symlink resolving elsewhere — `wrongtarget`, naming the target. Same fault with a
+      dangling target, which must not be read as healthy and must not raise.
+    * a regular file — `copy`. The bytes usually match the tree (all eight on this box do
+      today), which is exactly why this is not a byte question: the reader cannot fix it
+      by reinstalling content, only by re-establishing the link.
+    * nothing at all — `missing`. The installer never linked it, so the unit is not
+      installed and never ran.
+
+    The graded set is the two globs evaluated when the call is made, so a unit added to
+    the directory is graded without anyone editing this file, and the walk goes repo to
+    deploy only: a deployed unit nobody tracked (`lloyd-graph-backup.*`,
+    `freeclip-a2dp-fix.service`) gets no row, which is the membership-not-equality rule
+    `tests/test_data_home.py` already makes about that timer. The `SYSTEM_SCOPE_UNITS`
+    names and anything under `system/` are never reported; `system/` is excluded by the
+    globs being one level deep, which is the same reason the installer never sees it.
+    """
+    skip = _system_scope_units(installer)
+    if skip is None:
+        # A check that cannot tell a deliberate gap from a stale copy has no business
+        # reporting either way, and `check_unit_enabledness`'s "looked at nothing" row is
+        # the precedent for saying so rather than grading everything or nothing.
+        return [_unit_link_row(
+            "unit-file-identity", False,
+            f"unknown: the units the installer declines to link could not be read from "
+            f"{installer} — no unit file was graded, so this row is the finding",
+            installer, deployed_dir, prefix="")]
+
+    tree_dir, deployed_dir = Path(tree_dir), Path(deployed_dir)
+    rows = []
+    for pattern in UNIT_GLOBS:
+        for tracked in sorted(tree_dir.glob(pattern)):
+            if tracked.name in skip:
+                continue
+            want = tracked.resolve()
+            deployed = deployed_dir / tracked.name
+            if deployed.is_symlink():
+                target = _link_target(deployed)
+                if target == want:
+                    rows.append(_unit_link_row(
+                        tracked.name, True,
+                        f"ok: {deployed} is a link to the tracked unit {tracked}",
+                        tracked, deployed))
+                else:
+                    rows.append(_unit_link_row(
+                        tracked.name, False,
+                        f"wrongtarget: {deployed} is a link to {target}, not to the tree "
+                        f"— the unit that runs is not {tracked}; re-link it with "
+                        f"agent-services/setup/install-services.sh",
+                        tracked, deployed, str(target)))
+                continue
+            if deployed.exists():
+                what = ("a plain copy" if deployed.is_file()
+                        else "an entry that is neither a link nor a regular file")
+                rows.append(_unit_link_row(
+                    tracked.name, False,
+                    f"copy: {deployed} is {what}, not a link to the tree — editing "
+                    f"{tracked} changes nothing that runs; re-link it with "
+                    f"agent-services/setup/install-services.sh",
+                    tracked, deployed))
+            else:
+                rows.append(_unit_link_row(
+                    tracked.name, False,
+                    f"missing: {deployed} is not installed, so the installer has never "
+                    f"linked the tracked unit {tracked} — run "
+                    f"agent-services/setup/install-services.sh",
+                    tracked, deployed))
+    return rows
 
 
 def _declared_power_limits(runner=subprocess.run):
@@ -1513,8 +1672,13 @@ def main():
             results.append(check_service(name, SERVICES[name]))
     # The deployed-copy pairs ride with the full check and with their own
     # category; a `--services` ask names supervisor programs and gets only those.
+    # The unit-file identity rows ride in the same block because they grade the same
+    # question — is the deployed thing the tracked thing? — and the units the pairs above
+    # deliberately exclude are exactly the ones it symlinks (#2714). They share the
+    # `deploy` heading, so one heading is what a reader gets for both halves.
     if not args.services and args.category in (None, DEPLOY_CATEGORY):
         results.extend(check_deployed_copies())
+        results.extend(check_unit_file_links())
     # The CA trust guard rides with the full check and with its own category, on the
     # same rule as the deployed copies: an ask that names supervisor programs gets
     # only those. No `LLOYD_NSS_DB` is set here, so the check reads the store the
