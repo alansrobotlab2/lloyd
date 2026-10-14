@@ -33,22 +33,22 @@ already uses; arch-review refreshes that one).
 |---|---|
 | [[infrastructure]] | host, GPUs, supervisord programs, systemd units, ports, remote access |
 | [[vllm]] | the primary engine end to end: the served config, the GPU and its power clamp, FP8 KV, YaRN (built, off), the tuning knobs, the benchmarks |
-| [[djev]] | GPU 2's structured-decision engine: serving, the wire protocol, the client and its two trust flags, three tools, the schema registry, the shadow seams, the eval arm, the calibration that says rank with it and do not gate on it |
+| [[djev]] | GPU 2's structured-decision engine: serving, the wire protocol, the client and its trust flags and tools, the schema registry, the shadow seams, the eval arm, the calibration that says rank with it and do not gate on it |
 
 ## The agent
 
 | Doc | Covers |
 |---|---|
 | [[harness]] | `run_query`: events, the position-0 rule, preserved thinking, tool pool, summaries, thinking trace, finalizer, subagents |
-| [[context-window]] | the four layers that fit a session to the model's window: microcompaction, the persisted summary, LLM summarisation, truncate — one token meter with three readers, the manual `/compact`, and the prefix-cache misses each fold costs |
-| [[authority-surfaces]] | every guard in one list, in the order an action meets it: the Bash denies, protected trees and the write deny-set, the tool sandbox, unattended tool bans, grants, egress, the browser guard, RPC policy, the desktop lease, and where one rule is spelled twice |
+| [[context-window]] | the layers that fit a session to the model's window: microcompaction, the persisted summary, LLM summarisation, truncate — one token meter and the code that reads it, the manual `/compact`, and the prefix-cache misses each fold costs |
+| [[authority-surfaces]] | every guard in a single list, in the order an action meets it: the Bash denies, protected trees and the write deny-set, the tool sandbox, unattended tool bans, grants, egress, the browser guard, RPC policy, the desktop lease, and where one rule is spelled twice |
 | [[guard-coverage]] | the union of what no guard on this box sees, each with the mechanism and the command that proves it: interactive turns, the tool-result and model/provider channels, the injection probe's own limits, hook-only labels, nested RPC, and the mode typo that let a silently-off guard read as a clean window |
 | [[threat-model]] | the seams an instruction that did not come from Alan crosses, each stated as a capability and mapped to the module that decides it, with the threats nothing controls published as an open set — and a retrospective scoring the model against this box's own written-up incidents, whose raw coverage is reported beside the number that survives the predate test |
 | [[tools]] | the lloyd-mcp aggregator: routes and credential, the dispatch path in order, tool properties and what each decides, every tool with its properties |
 | [[desktop]] | desktop computer use: `desktop_capture`/`desktop_act` over Alan's real Hyprland desktop, the lease only a human grants from the Desktop tab, chat sessions only, screenshots as refs never base64 |
 | [[editing-safeguards]] | read-before-edit gates, edit diagnostics and blast radius, the change and effect ledgers, the code graph |
 | [[data-home]] | runtime data outside the code tree since the 09-22 deletion: `~/lloyd-data`, the `DATA_ROOT` resolver and who gets which root, the delete guard, hourly read-only snapshots, the data tripwire, restore |
-| [[vault-protection]] | the 09-10/09-12 vault wipes and the four layers after them: the bench/eval tool sandbox, the wholesale-delete check, the guardian's vault tripwire and sync gate, 15-minute snapshots |
+| [[vault-protection]] | the 09-10/09-12 vault wipes and the layers after them: the bench/eval tool sandbox, the wholesale-delete check, the guardian's vault tripwire and sync gate, 15-minute snapshots |
 | [[inner-voice]] | deterministic turn guards on every turn, plus an opt-in terminal review and the loop that measures it |
 | [[subliminal]] | pre-call context retrieval: skills, facts, vault docs, sessions, backlog |
 | [[qmd]] | the vault search engine: Lloyd's fork, the daemon, index, config and models, its REST API, maintenance, eval pins |
@@ -61,9 +61,9 @@ already uses; arch-review refreshes that one).
 
 | Doc | Covers |
 |---|---|
-| [[memory]] | the four-verb memory surface and the fact-improvement loop |
+| [[memory]] | the memory verbs and the fact-improvement loop |
 | [[knowledge-graph]] | markdown facts plus the one SQLite edge/alias/entity store behind `app.kg_store` |
-| [[research-pipeline]] | the topic registry (`research.db`): its states, its two producers, and why retries live there rather than in the work queue |
+| [[research-pipeline]] | the topic registry (`research.db`): its states, its producers, and why retries live there rather than in the work queue |
 
 ## Unattended work
 
@@ -75,7 +75,7 @@ already uses; arch-review refreshes that one).
 | [[autonomy]] | the scheduled-task mechanism: its due-gates, failure backoff, the deadline anchor, run records, fleet health |
 | [[autonomy-jobs]] | what each scheduled job is *for* — the reflection chain, trace2skill, the graph chain, vault hygiene, inbound signal |
 | [[automod]] | self-modification: worktree, the gate ladder, review rung, promoter, guardian rollback, triage/implement, clustering, group triage |
-| [[testing]] | the test suite: synthetic vs live-data tests and the rule for the second, when a live check is retired rather than skipped, the gate's three floors and why the skip cap is not the thing to raise, marks the gate deselects, parallel isolation |
+| [[testing]] | the test suite: synthetic vs live-data tests and the rule for the second, when a live check is retired rather than skipped, the gate's floors and why the skip cap is not the thing to raise, marks the gate deselects, parallel isolation |
 | [[measurement]] | the eval and bench surface: each arm and what it scores, the repo root versus `$LLOYD_DATA/eval/baselines/`, the bench task corpus, and the one arm that stands between a round and landing |
 | [[backlog]] | the markdown kanban at `~/obsidian/backlog/` and its tools |
 | [[arch-review]] | the pass that keeps these docs honest: a picklist of docs and functional groups, one session each, the doc edits itself |
@@ -84,7 +84,7 @@ already uses; arch-review refreshes that one).
 
 | Doc | Covers |
 |---|---|
-| [[mission-control]] | the tabs and the four lists that must agree on them, the dashboard endpoint, sessions and titles, the agent's view of the UI, the browser SSRF guard |
+| [[mission-control]] | the tabs and the lists that must agree on them, the dashboard endpoint, sessions and titles, the agent's view of the UI, the browser SSRF guard |
 | [[browser-side-panel]] | the Chrome side panel: one Lloyd session per tab and page, created only by "Check it out, Lloyd", the URL rule behind "same page", the loopback call that needs no client cert, and why the built output in git will not load on its own |
 
 ## GPU allocation
