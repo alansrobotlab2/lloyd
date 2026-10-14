@@ -59,9 +59,10 @@ logger = logging.getLogger(__name__)
 try:
     from scripts.autoresearch.bench_runner_sdk import _classify_result
     from scripts.autoresearch.judge import CHECK_TYPES, _score_objective
+    from scripts.step_conformance import artifact_basenames
     _IMPORT_ERROR: Optional[str] = None
 except Exception as _e:  # pragma: no cover - exercised only on a broken tree
-    _classify_result = CHECK_TYPES = _score_objective = None
+    _classify_result = CHECK_TYPES = _score_objective = artifact_basenames = None
     _IMPORT_ERROR = f"{type(_e).__name__}: {_e}"[:300]
 
 #: The key the grade rides under, on the run's `meta` and on the result dict
@@ -146,6 +147,17 @@ class DispatchTrace:
     runner's own `_classify_result` rather than a second list of deny markers.
     A call with no result (the run ended mid-dispatch) is counted as made.
 
+    Each filed call also carries `writes`: the artifact basenames the call's own
+    arguments named, read by `scripts.step_conformance.artifact_basenames` — the
+    same extractor the T+1 replay runs, so the two cannot disagree about what
+    counted as a write. The target is on the `tool_call` (`args_dict`,
+    `app/harness/events.py`), which is why a call that was refused records none:
+    it dispatched nothing that touched a file. This is what makes
+    `artifact_written` gradeable in-run (#2706) instead of only in a replay, and
+    it is deliberately not a substitute for "the file is on disk" — the
+    disk-side witness for a declared output is `app/autonomy.py`'s
+    `_declared_artifact_evidence`, and the two readings are complementary.
+
     `observe` sits inside the run's own event loop, so it never raises: a
     failure is kept and the grade becomes `grader_error` instead.
     """
@@ -153,7 +165,7 @@ class DispatchTrace:
     def __init__(self) -> None:
         self.tool_calls: list[dict] = []
         self.denied_calls: list[dict] = []
-        self._pending: dict[str, str] = {}
+        self._pending: dict[str, tuple[str, dict]] = {}
         self.error: Optional[str] = None
 
     def observe(self, evt: dict) -> None:
@@ -165,10 +177,12 @@ class DispatchTrace:
     def _observe(self, evt: dict) -> None:
         etype = evt.get("type")
         if etype == "tool_call":
-            self._pending[evt.get("call_id", "")] = evt.get("name", "")
+            args = evt.get("args_dict")
+            self._pending[evt.get("call_id", "")] = (
+                evt.get("name", ""), args if isinstance(args, dict) else {})
         elif etype == "tool_result":
-            name = evt.get("name") or self._pending.get(evt.get("call_id", ""), "")
-            self._pending.pop(evt.get("call_id", ""), None)
+            pending_name, args = self._pending.pop(evt.get("call_id", ""), ("", {}))
+            name = evt.get("name") or pending_name
             content = evt.get("content")
             if isinstance(content, list):
                 content = " ".join(
@@ -178,10 +192,17 @@ class DispatchTrace:
             if kind:
                 self.denied_calls.append({"name": name, "deny_kind": kind})
             else:
-                self.tool_calls.append({"name": name})
+                self.tool_calls.append({"name": name,
+                                        "writes": artifact_basenames(name, args)})
 
     def as_trace(self, final_text: str) -> dict:
-        unanswered = [{"name": n} for n in self._pending.values()]
+        # A call whose result never arrived is counted as made — the rule
+        # `tool_called` already applies — and so its write target counts, in the
+        # same deliberate direction: a run killed by the clock mid-write is not
+        # the run `artifact_written` exists to catch, and failing a run that did
+        # write its artifact is the worse of the two errors.
+        unanswered = [{"name": n, "writes": artifact_basenames(n, a)}
+                      for n, a in self._pending.values()]
         return {"final_text": final_text or "",
                 "tool_calls": self.tool_calls + unanswered,
                 "denied_calls": list(self.denied_calls),
@@ -196,6 +217,27 @@ def _block_text(content) -> str:
         return "".join(str(b.get("text", "")) if isinstance(b, dict) else str(b)
                        for b in content)
     return ""
+
+
+def _call_args(fn: dict) -> dict:
+    """A transcripted tool call's arguments, as the dict the live event carried.
+
+    The transcript keeps them as the JSON string that was replayed to the engine
+    (`app/run_recorder.py`), so a regrade of an old run
+    (`scripts/autonomy/regrade_runs.py`) sees the same write targets the run saw
+    live — the alternative is a check that exists only for runs not yet graded.
+    Unparseable or truncated arguments are no write target rather than an error:
+    a call whose JSON the recorder cut off is a fact about that transcript, and
+    the trace still has to rebuild.
+    """
+    raw = fn.get("arguments")
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw or "{}")
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def trace_from_transcript(messages: list[dict]) -> dict:
@@ -216,9 +258,11 @@ def trace_from_transcript(messages: list[dict]) -> dict:
         if role == "assistant":
             for tc in m.get("tool_calls") or []:
                 cid = tc.get("call_id") or tc.get("id") or ""
-                name = (tc.get("function") or {}).get("name", "")
+                fn = tc.get("function") or {}
+                name = fn.get("name", "")
                 names[cid] = name
-                dispatch.observe({"type": "tool_call", "call_id": cid, "name": name})
+                dispatch.observe({"type": "tool_call", "call_id": cid, "name": name,
+                                  "args_dict": _call_args(fn)})
             text = _block_text(m.get("content")).strip()
             if text:
                 terminal = text

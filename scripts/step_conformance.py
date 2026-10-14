@@ -239,6 +239,98 @@ def normalized_dir(raw) -> str:
     return "/".join(DATE_RE.sub("<date>", p) for p in tail)
 
 
+#: The keys a dispatched call may name its file with, in precedence order:
+#: `Write`/`Edit`/`Read` use `file_path`, the vault tools `path`, the notebook
+#: editor `notebook_path`. First truthy one wins, which is the order the tools
+#: themselves are read in.
+PATH_KEYS = ("file_path", "path", "notebook_path")
+
+
+def _path_target(params) -> str:
+    """The file a non-Bash call names, or "". `params` may be anything a trace holds."""
+    params = params if isinstance(params, dict) else {}
+    for key in PATH_KEYS:
+        target = params.get(key)
+        if target:
+            return str(target)
+    return ""
+
+
+def write_targets(name, params) -> list:
+    """Every path capture in one dispatched call that means "this call writes here".
+
+    The one grammar for both readers of a run's writes: `steps_from_tools` below
+    (the replay's step ids) and `app.run_acceptance.DispatchTrace` (which feeds
+    the in-run acceptance check `artifact_written`, #2706). ONE function is the
+    point: two copies of this grammar is how the in-run grader and the T+1 replay
+    start answering different questions about the same run — which is exactly how
+    task 94's 2026-10-13 run came to pass every declared check while writing
+    nothing.
+
+    A file tool contributes its target only when the tool is a writer (a `Read`
+    of a path is not a write of it). A `Bash` call contributes each redirect
+    target, plus, for `touch|tee|cp|mv|install`, the first path-looking token
+    after the writer word. That last rule is carried as published, including that
+    a `cp SRC DST` contributes SRC: it is the corpus as measured — task 94's
+    learned `write:referential-integrity-latest.md` comes from its
+    `cp …/referential-integrity-latest.md …/$(date -u +%F).md`, whose *source* is
+    the artifact. Making it read the destination would rename published step ids
+    and make the labelled `validate` numbers incomparable with the ones already
+    published, so it is a decision for a person, not a side effect of this round.
+    """
+    out: list = []
+    params = params if isinstance(params, dict) else {}
+    target = _path_target(params)
+    if target and name in WRITE_TOOLS:
+        out.append(target)
+    if name == "Bash":
+        command = str(params.get("command") or "")
+        for match in REDIRECT_RE.finditer(command):
+            out.append(match.group(1))
+        writer = WRITER_RE.search(command)
+        if writer:
+            for token in command[writer.start():].split()[1:]:
+                if token.startswith(("-", ">")):
+                    continue
+                # Only an explicit path is evidence: a bare `cp foo` would name a file
+                # that lives in the caller's cwd, which a basename cannot resolve.
+                if "/" not in token:
+                    continue
+                # The scan keeps going past a token whose basename the sanitizer
+                # blanks or files as generic, and stops at the first usable one. The
+                # predicate has to be this exact one and not merely `"/" in token`,
+                # because it selects WHICH token is the write: the corpus has a
+                # nightly `… | tee /tmp/preflight-$(date +%s).txt; … ls -t
+                # /tmp/preflight-*.txt` whose first slashed token normalizes to "" —
+                # break there and the published `write:preflight-*.txt` step for the
+                # 2026-09-25 reflection-signals run disappears. Re-derived over all
+                # 8,770 trajectory runs on 2026-10-14: this line is what made the
+                # extraction byte-identical to the one it replaced.
+                base = normalized_basename(token)
+                if base and base not in GENERIC_BASENAMES:
+                    out.append(token)
+                    break
+    return out
+
+
+def artifact_basenames(name, params) -> list:
+    """The normalized artifact basenames one dispatched call writes.
+
+    `write_targets`' captures through `normalized_basename` and minus
+    `GENERIC_BASENAMES` — the same two filters that make a step id mean something
+    (`normalized_basename`), so a run that "wrote" `null` proves nothing here
+    either. This is what `artifact_written` is graded against (#2706 clause 4):
+    comparing on these means a run's `foo-2026-10-14.md` and a declared
+    `foo-<date>.md` are one name to the grader and to the replay alike.
+    """
+    out: list = []
+    for raw in write_targets(name, params):
+        base = normalized_basename(raw)
+        if base and base not in GENERIC_BASENAMES and base not in out:
+            out.append(base)
+    return out
+
+
 def corroborated(counts: dict) -> list:
     """The artifact paths a task's baseline treats as *where that artifact lives*.
 
@@ -431,31 +523,15 @@ def steps_from_tools(tools, write_paths: dict | None = None) -> list[str]:
         name = tool.get("name") or ""
         params = tool.get("params_summary") or {}
         add(f"tool:{name}")
-        target = params.get("file_path") or params.get("path") or params.get("notebook_path")
-        if target:
+        target = _path_target(params)
+        if target and name in READ_TOOLS:
             base = normalized_basename(target)
             if base and base not in GENERIC_BASENAMES:
-                if name in WRITE_TOOLS:
-                    add_write(base, target)
-                elif name in READ_TOOLS:
-                    add(f"read:{base}")
-        if name == "Bash":
-            command = str(params.get("command") or "")
-            for match in REDIRECT_RE.finditer(command):
-                base = normalized_basename(match.group(1))
-                if base and base not in GENERIC_BASENAMES:
-                    add_write(base, match.group(1))
-            writer = WRITER_RE.search(command)
-            if writer:
-                for token in command[writer.start():].split()[1:]:
-                    if token.startswith(("-", ">")):
-                        continue
-                    base = normalized_basename(token)
-                    # Only an explicit path is evidence: a bare `cp foo` would name a file
-                    # that lives in the caller's cwd, which the step id cannot resolve.
-                    if "/" in token and base and base not in GENERIC_BASENAMES:
-                        add_write(base, token)
-                        break
+                add(f"read:{base}")
+        for raw in write_targets(name, params):
+            base = normalized_basename(raw)
+            if base and base not in GENERIC_BASENAMES:
+                add_write(base, raw)
     return steps
 
 

@@ -217,7 +217,7 @@ NOT_MEASURABLE = _NotMeasurable()
 #: the type that would have been invisible without this line.
 CHECK_TYPES = frozenset({
     "contains", "regex", "tool_called", "tool_not_called", "max_tool_calls",
-    "attempt_not_made", "find_all",
+    "attempt_not_made", "find_all", "artifact_written",
 })
 
 #: Check types whose verdict is a claim about tool behaviour, and which are
@@ -226,6 +226,7 @@ CHECK_TYPES = frozenset({
 #: keeps a plain pass/fail.
 TOOL_BEHAVIOUR_CHECKS = frozenset({
     "tool_called", "tool_not_called", "attempt_not_made", "max_tool_calls",
+    "artifact_written",
 })
 
 #: Why a check was excluded, as recorded on the trial. One string, so a ledger
@@ -413,6 +414,26 @@ def _names_in(trace: dict[str, Any], key: str) -> list[str]:
     return [c.get("name", "") for c in (trace.get(key) or []) if isinstance(c, dict)]
 
 
+def _artifact_writes_in(trace: dict[str, Any]) -> list[str]:
+    """The artifact basenames this trace's DISPATCHED calls wrote (#2706).
+
+    `tool_calls` only, never `denied_calls`: a call the harness refused wrote
+    nothing, and the refusal is positive evidence the artifact is absent rather
+    than a second way to satisfy the check. The `writes` key on a call entry is
+    what `app.run_acceptance.DispatchTrace` records there, built by
+    `scripts.step_conformance.artifact_basenames` — one extractor for the in-run
+    grader and the replay.
+    """
+    out: list[str] = []
+    for call in (trace.get("tool_calls") or []):
+        if not isinstance(call, dict):
+            continue
+        for base in (call.get("writes") or []):
+            if base and base not in out:
+                out.append(str(base))
+    return out
+
+
 def _has_dispatch_record(trace: dict[str, Any]) -> bool:
     """Does this trace record tool behaviour well enough to reason from?
 
@@ -434,7 +455,7 @@ def _has_dispatch_record(trace: dict[str, Any]) -> bool:
 def _match_check(check: dict[str, Any], trace: dict[str, Any]) -> Any:
     """Grade one objective check. Returns True, False, or `NOT_MEASURABLE`.
 
-    The third state exists because the four `TOOL_BEHAVIOUR_CHECKS` describe
+    The third state exists because the `TOOL_BEHAVIOUR_CHECKS` describe
     dispatch, and a trace with no dispatch record cannot support either
     polarity of them (#416). There is deliberately no prose fallback anywhere:
     text that names a tool is not evidence a tool ran.
@@ -479,6 +500,22 @@ def _match_check(check: dict[str, Any], trace: dict[str, Any]) -> Any:
             return len(tools_called) <= int(val)
         except (TypeError, ValueError):
             return False
+    if ctype == "artifact_written":
+        # Whether the run produced the file it existed to produce, read off the
+        # paths its own dispatched calls named. Neither of the two proxies that
+        # let task 94's 2026-10-13 run through: call VOLUME (it dispatched 49 of
+        # them, on unrelated work) or its summary LINE (the task's own skill
+        # file prints the required sentence as a literal example). Comparison is
+        # on normalized basenames, so a nightly `foo-2026-10-14.md` answers a
+        # declared `foo-<date>.md` here exactly as it does in the replay.
+        if not _has_dispatch_record(trace):
+            return NOT_MEASURABLE
+        from scripts.step_conformance import normalized_basename
+        wanted = normalized_basename(val)
+        if not wanted:
+            return False
+        return wanted in {normalized_basename(w)
+                          for w in _artifact_writes_in(trace)}
     # Unknown type: fail closed, and it is a bug in this file rather than a typo
     # in a task — the corpus validator imports `CHECK_TYPES`, so a task cannot
     # declare a type the judge has not listed. A type added to `CHECK_TYPES`

@@ -23,7 +23,9 @@ import yaml
 
 from app import autonomy
 from app.run_acceptance import (DispatchTrace, false_completion_rate, grade_run,
-                                parse_acceptance)
+                                parse_acceptance, trace_from_transcript)
+from scripts.autoresearch import judge
+from scripts.step_conformance import steps_from_tools
 from workers.pool import WorkerPool, normalize_result
 from workers.queue import QueueItem, WorkQueue
 
@@ -282,3 +284,239 @@ async def test_the_adapter_names_the_grade_so_its_whitelist_cannot_drop_it(monke
     norm = normalize_result(item, out)
     assert norm["status"] == "success"
     assert norm["meta"]["acceptance_grade"] == {"grade": "graded_fail"}
+
+
+# ── #2706: `artifact_written` — the mandated artifact, off the dispatch record ──
+#
+# Task 94's 2026-10-13 run never executed task 94. Its first action was an Edit
+# of `~/obsidian/memory/mental-models.md`, it wrote neither
+# `~/obsidian/autonomy/referential-integrity-latest.md` nor the dated copy, and
+# it discharged every check the task declares: `tool_called: Bash` was paid for
+# by 49 unrelated Bash calls, and the `regex` check matches a run that only
+# recites the summary line. No declared check can see a path, so nothing in-run
+# could tell — the missing artifact surfaced only in the T+1 trajectory replay.
+# These four tests pin the check that can.
+
+ARTIFACT = "referential-integrity-latest.md"
+ARTIFACT_CHECK = {"objective_checks": [{"type": "artifact_written", "value": ARTIFACT}]}
+
+#: The numbers `skills/referential-integrity-ledger/SKILL.md` itself prints as
+#: its example, so this is exactly the recital the task's `regex` check cannot
+#: tell apart from having done the work.
+RECITED = ("referential integrity: run 44 | 200 cites, 12 dangling, 4 exempt, "
+           "n/a newly dangling")
+
+#: Task 94's real nightly pair, from its trajectory rows: the resolver writes
+#: `-latest.md` through a `--report` flag, and the second command copies it to a
+#: dated archive. The second is where the artifact basename appears as a path
+#: capture, which is why the check fires on this run and not only on a `Write`.
+TASK_94_COMMANDS = [
+    'cd ~/lloyd && python3 -m scripts.maintenance.referential_integrity '
+    f'--report ~/obsidian/autonomy/{ARTIFACT}; echo "EXIT=$?"',
+    'mkdir -p ~/obsidian/autonomy/referential-integrity && '
+    f'cp ~/obsidian/autonomy/{ARTIFACT} '
+    '~/obsidian/autonomy/referential-integrity/$(date -u +%F).md && '
+    'ls -1 ~/obsidian/autonomy/referential-integrity/*.md | wc -l',
+    f"grep -m1 'newly dangling' ~/obsidian/autonomy/{ARTIFACT}",
+]
+
+
+def _stream(specs) -> list[dict]:
+    """`[(name, args), …]` or `[(name, args, result), …]` as a harness event stream.
+
+    The `tool_call` carries `args_dict` exactly as `app.harness.events.tool_call`
+    emits it: the write target rides on the call, never on the result. Results
+    are `ok` unless the spec names one.
+    """
+    events: list[dict] = []
+    for i, spec in enumerate(specs, start=1):
+        name, args = spec[0], spec[1]
+        result = spec[2] if len(spec) > 2 else "ok"
+        events += [{"type": "tool_call", "call_id": f"c{i}", "name": name,
+                    "args_json": json.dumps(args), "args_dict": args},
+                   {"type": "tool_result", "call_id": f"c{i}", "name": name,
+                    "content": result}]
+    return events
+
+
+def _trace_stream(specs, text: str = RECITED) -> dict:
+    trace = DispatchTrace()
+    for e in _stream(specs):
+        trace.observe(e)
+    return trace.as_trace(text)
+
+
+def _writes(trace: dict) -> list[str]:
+    """Every artifact basename the trace's dispatched calls record, in order."""
+    return [b for call in trace["tool_calls"] for b in call["writes"]]
+
+
+def test_artifact_written_is_kept_and_graded_off_the_dispatch_record():
+    """Clause 1: a task may declare it, and the verdict is the record's.
+
+    `parse_acceptance` must keep it as a measurable check rather than file it
+    `invalid` — an unlisted type is a task graded `acceptance_invalid` on every
+    run, which is the same silence in a different costume. And the check must
+    answer off the dispatch record: the recital of the exact summary line the
+    task wants, with no write, is the run that fooled task 94's own checks.
+    """
+    spec = parse_acceptance({"acceptance": ARTIFACT_CHECK})
+    assert spec["checks"] == ARTIFACT_CHECK["objective_checks"]
+    assert spec["invalid"] == []
+
+    off_task = _trace_stream(
+        [("Edit", {"file_path": "/home/alansrobotlab/obsidian/memory/mental-models.md",
+                   "old_string": "a", "new_string": "b"})])
+    grade = grade_run({"acceptance": ARTIFACT_CHECK}, off_task)
+    assert grade["grade"] == "graded_fail"
+    assert grade["checks"] == [{"type": "artifact_written", "value": ARTIFACT,
+                                "passed": False}]
+
+    written = _trace_stream(
+        [("Write", {"file_path": f"/home/alansrobotlab/obsidian/autonomy/{ARTIFACT}"})])
+    assert grade_run({"acceptance": ARTIFACT_CHECK}, written)["grade"] == "graded_pass"
+
+
+def test_forty_unrelated_bash_calls_do_not_discharge_it_and_a_redirect_equals_a_write():
+    """Clause 2: the target is per call, so volume is not evidence.
+
+    Forty dispatched `Bash` calls on unrelated commands is the 2026-10-13 shape
+    and still fails, while one `Write` of a path and one `Bash >` of that same
+    path satisfy the check identically — tool substitution must not move the
+    verdict, which is the same rule the replay's step identity runs on.
+    """
+    busy = _trace_stream([("Bash", {"command": f"grep -rn memory_ceiling app/ | head -{i}"})
+                          for i in range(40)],
+                         text=RECITED)
+    assert len(busy["tool_calls"]) == 40
+    assert _writes(busy) == []
+    assert grade_run({"acceptance": ARTIFACT_CHECK}, busy)["grade"] == "graded_fail"
+
+    via_write = grade_run({"acceptance": ARTIFACT_CHECK}, _trace_stream(
+        [("Write", {"file_path": f"/home/a/obsidian/autonomy/{ARTIFACT}"})]))
+    via_bash = grade_run({"acceptance": ARTIFACT_CHECK}, _trace_stream(
+        [("Bash", {"command": "python3 -m scripts.maintenance.referential_integrity "
+                              f"--report /tmp/body.md > ~/obsidian/autonomy/{ARTIFACT}"})]))
+    assert via_write["checks"] == via_bash["checks"] == [
+        {"type": "artifact_written", "value": ARTIFACT, "passed": True}]
+
+
+@pytest.mark.parametrize("command,expected", [
+    (f"echo hi > ~/obsidian/autonomy/{ARTIFACT}", [ARTIFACT]),
+    (f"touch ~/obsidian/autonomy/{ARTIFACT}", [ARTIFACT]),
+    (f"cat /tmp/body.md | tee ~/obsidian/autonomy/{ARTIFACT}", [ARTIFACT]),
+    (f"cp ~/obsidian/autonomy/{ARTIFACT} ~/archive/2026-10-14.md", [ARTIFACT]),
+    # `cp`/`mv`/`install` contribute their FIRST path token, which for a copy
+    # *into* the artifact is the source and not the destination. That asymmetry
+    # is the published grammar of `scripts/step_conformance.py` (`WRITER_RE` plus
+    # the token loop in `steps_from_tools`), reused rather than re-decided here so
+    # the in-run grader and the replay cannot disagree (#2706 clause 4). It is
+    # what makes task 94's nightly `cp latest → dated` discharge the artifact.
+    ("cp /tmp/staged.md ~/obsidian/autonomy/%s" % ARTIFACT, ["staged.md"]),
+    ("mv /tmp/staged.md ~/obsidian/autonomy/%s" % ARTIFACT, ["staged.md"]),
+    ("install -m 644 /tmp/staged.md ~/obsidian/autonomy/%s" % ARTIFACT, ["staged.md"]),
+    ("python3 -m scripts.maintenance.referential_integrity "
+     f"--report ~/obsidian/autonomy/{ARTIFACT}", []),
+    # The writer scan keeps going past a token whose basename the sanitizer
+    # blanks, and stops at the first usable one. Breaking at the first token
+    # containing a `/` instead reads `/tmp/preflight-$(date` as the write, gets
+    # nothing usable from it, and the run's real step disappears — the shape
+    # 9 of 8,770 corpus runs had when this was re-derived on 2026-10-14.
+    ("nightly.sh 2>&1 | tee /tmp/preflight-$(date +%s).txt | head -3; "
+     "ls -t /tmp/preflight-*.txt | head -1", ["preflight-*.txt"]),
+])
+def test_the_write_targets_captured_are_the_replays_own_grammar(command, expected):
+    """Clause 2 and 4 together, one Bash command at a time.
+
+    The declared `--report <path>` shape captures nothing: no redirect, no
+    writer word, so a run that stops after the resolver is graded_fail today —
+    the over-fire question the item owes a week of live traffic to settle.
+    """
+    assert _writes(_trace_stream([("Bash", {"command": command})])) == expected
+
+
+def test_a_refused_write_never_discharges_it_and_no_record_is_not_measurable():
+    """Clause 3: a refused call stays in `denied_calls` and wrote nothing.
+
+    The rail refusing a write is the harness proving the artifact is *not*
+    there, so it cannot also be the evidence that it is. And with no dispatch
+    record there is no verdict either way: `artifact_written` sits in
+    `TOOL_BEHAVIOUR_CHECKS` beside `tool_called`, so the empty trace records
+    `not_measurable` — a run that merely recited the summary line in prose is
+    excluded, not credited.
+    """
+    refused = _trace_stream(
+        [("Write", {"file_path": f"/home/a/obsidian/autonomy/{ARTIFACT}"},
+          "Tool call denied: protected path")])
+    assert refused["tool_calls"] == []
+    assert [d["name"] for d in refused["denied_calls"]] == ["Write"]
+    assert grade_run({"acceptance": ARTIFACT_CHECK}, refused)["grade"] == "graded_fail"
+
+    prose_only = {"final_text": RECITED, "tool_calls": [], "denied_calls": [],
+                  "tool_trace_authoritative": False}
+    grade = grade_run({"acceptance": ARTIFACT_CHECK}, prose_only)
+    assert grade["grade"] == "not_measurable"
+    assert grade["checks"] == [{"type": "artifact_written", "value": ARTIFACT,
+                                "passed": None}]
+    assert "artifact_written" in judge.TOOL_BEHAVIOUR_CHECKS
+
+
+def test_the_basename_comparison_is_the_ones_the_replay_uses():
+    """Clause 4: one basename grammar, so grader and replay cannot diverge.
+
+    Comparison goes through `scripts/step_conformance.py`'s `normalized_basename`,
+    which elides a date stamp so a nightly artifact is one name: a write of
+    `conversation-patterns-2026-10-14.md` satisfies
+    `artifact_written: conversation-patterns-<date>.md`. The stronger half is the
+    second assertion — the same calls fed to the replay's own `steps_from_tools`
+    must yield the same basename set, because two extractors is how a check and
+    a T+1 report start grading different runs.
+    """
+    dated = {"objective_checks": [{"type": "artifact_written",
+                                   "value": "conversation-patterns-<date>.md"}]}
+    written = _trace_stream([("Write", {
+        "file_path": "/home/alansrobotlab/obsidian/knowledge/conversation/"
+                     "conversation-patterns-2026-10-14.md"})])
+    assert grade_run({"acceptance": dated}, written)["grade"] == "graded_pass"
+
+    trace = _trace_stream([("Bash", {"command": c}) for c in TASK_94_COMMANDS])
+    assert grade_run({"acceptance": ARTIFACT_CHECK}, trace)["grade"] == "graded_pass"
+    mine = sorted(set(_writes(trace)))
+    replay = sorted(s[len("write:"):] for s in steps_from_tools(
+        [{"name": name, "params_summary": {"command": cmd}, "sequence": i}
+         for i, (name, cmd) in enumerate([("Bash", c) for c in TASK_94_COMMANDS])])
+        if s.startswith("write:"))
+    assert mine == replay == [ARTIFACT]
+
+
+def _transcript(args_raw: str, name: str = "Bash") -> list[dict]:
+    """One tool call and its result, as `app/run_recorder.py` writes a session.
+
+    The seam that matters here: on disk the arguments are the JSON *string* that
+    was replayed to the engine, not the `args_dict` the live event carried."""
+    return [{"role": "user", "content": "run the sweep"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"call_id": "c1", "type": "function",
+                 "function": {"name": name, "arguments": args_raw}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "3"},
+            {"role": "assistant", "content": RECITED}]
+
+
+def test_a_regraded_transcript_reaches_the_same_verdict_as_a_live_run():
+    """`scripts/autonomy/regrade_runs.py` grades old runs off their transcript.
+
+    If the rebuilt trace lost the arguments, the check would exist only for runs
+    nobody has regraded — and re-grading the 2026-10-13 run is precisely what
+    anyone who learns about it will do. Truncated arguments (a recorder's cut,
+    or a model's unfinished call) are no write target, not a crash: the trace
+    still has to rebuild.
+    """
+    nightly = grade_run({"acceptance": ARTIFACT_CHECK}, trace_from_transcript(
+        _transcript(json.dumps({"command": TASK_94_COMMANDS[1]}))))
+    assert nightly["grade"] == "graded_pass"
+    unrelated = grade_run({"acceptance": ARTIFACT_CHECK}, trace_from_transcript(
+        _transcript(json.dumps({"command": "grep -rn memory_ceiling app/ | head -5"}))))
+    assert unrelated["grade"] == "graded_fail"
+    cut = '{"command": "cp ~/obsidian/autonomy/' + ARTIFACT + ' /tmp/x'
+    assert grade_run({"acceptance": ARTIFACT_CHECK},
+                     trace_from_transcript(_transcript(cut)))["grade"] == "graded_fail"

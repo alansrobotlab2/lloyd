@@ -49,19 +49,25 @@ from scripts.autoresearch import judge
 DENY_KINDS = ("bench_corpus_deny", "hook_deny", "config_disabled", "cancelled")
 
 
-def trace(text="final answer", status="success", calls=None, auth=False, denied=None):
+def trace(text="final answer", status="success", calls=None, auth=False, denied=None,
+          writes=None):
     """A trial's trace. `auth=True` stamps the sdk arm's
     `tool_trace_authoritative`, so a test that means "the harness recorded what
     dispatched" says so. The default is the direct arm: a populated `calls` list
     still counts as a dispatch record on its own, an empty one is the shape that
     carries no evidence at all (#416). `denied` is a list of
     `(tool_name, deny_kind)` pairs the gate refused, which the sdk arm records in
-    `denied_calls` and never in `tool_calls`."""
+    `denied_calls` and never in `tool_calls`. `writes` is the artifact basenames
+    the run wrote (#2706), put on the last dispatched call the way
+    `app.run_acceptance.DispatchTrace` puts them on its own `tool_calls` entries;
+    which call carried them is a question no check asks."""
     tr = {
         "status": status,
         "final_text": text,
         "tool_calls": [{"name": n} for n in (calls or [])],
     }
+    if writes and tr["tool_calls"]:
+        tr["tool_calls"][-1]["writes"] = list(writes)
     if denied is not None:
         tr["denied_calls"] = [{"name": n, "deny_kind": k} for n, k in denied]
     if auth:
@@ -321,11 +327,13 @@ def test_not_measurable_is_falsy_but_never_a_verdict():
 
 
 #: The trace the walk below grades every declared check type against: one that can
-#: answer all of them — it dispatched `Grep`, refused `Write`, and says so with the
-#: stamp. An empty trace would be answered with NOT_MEASURABLE by the four
-#: tool-behaviour types and the walk would prove nothing (#416).
+#: answer all of them — it dispatched `Grep` and wrote `handoff-<date>.md`, refused
+#: `Write`, and says so with the stamp. An empty trace would be answered with
+#: NOT_MEASURABLE by the five tool-behaviour types and the walk would prove
+#: nothing (#416).
 ANSWERABLE_TRACE = trace("done 42", calls=["Grep"],
-                         denied=[("Write", "hook_deny")], auth=True)
+                         denied=[("Write", "hook_deny")], auth=True,
+                         writes=["handoff-<date>.md"])
 
 #: For each declared type: the check value, the verdict it must produce on
 #: `ANSWERABLE_TRACE`, and why that is the verdict. A type with no branch in
@@ -345,6 +353,9 @@ EXPECTED_VERDICTS: dict[str, tuple[str, bool, str]] = {
     "find_all": ("gold_member", True, "no gold items and no bullet submitted: "
                                       "\"none\" is the right answer to a zero-item "
                                       "set (#647)"),
+    "artifact_written": ("handoff-<date>.md", True, "the dispatched Grep recorded "
+                                                    "that basename as its write "
+                                                    "(#2706)"),
 }
 
 
