@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts" / "memory"))
 import kg_hygiene  # noqa: E402
+from app.kg_store import parse_fact_file
 
 
 def _fact_file(root: Path, dirname: str, category: str, facts: list[tuple[str, str]],
@@ -579,3 +580,48 @@ def test_the_rail_still_counts_a_blank_tag_and_the_floor_is_still_half_a_percent
         "the alarm has to stay red over the frozen population — the expected state "
         "after this fix, per #2503")
     assert kg_hygiene.scan_entity_dir(root / "general")[1]["facts"] == 6
+
+
+# ── #2676 clause 5: the repair declares nothing the rail does not already count ──
+
+def test_the_repair_agrees_with_the_rail_record_for_record_and_the_floor_holds(
+        blank_tree):
+    """The one clause that makes the quiet alarm mean something.
+
+    An alarm silenced by narrowing what counts as untagged is worse than a red one:
+    the rail would keep reporting a clean corpus while the records that started the
+    incident are still there. So this pins both halves in one place — the threshold
+    still `UNTAGGED_ALARM_SHARE = 0.5` and the three states #2474 shipped
+    (key absent, value blank, value whitespace-only) still all count — and then
+    checks the NEW consumer against the rail rather than beside it:
+    `retag_untagged_facts` may only ever plan a record this scanner already counts.
+
+    The agreement is per record, over a tree built for the disagreement case: the
+    fixture holds all three untagged shapes AND a tagged record in the same files, so
+    a predicate that drifted one way or the other shows up as a set difference here
+    instead of as a share that happens to land on the same number.
+    """
+    from scripts.memory import retag_untagged_facts as retag
+
+    assert kg_hygiene.UNTAGGED_ALARM_SHARE == 0.5, (
+        "the number moved: #2676's ruling is to repair the records, not to raise "
+        "the threshold that decides whether they are an alarm")
+
+    root = blank_tree
+    u = kg_hygiene.scan(root=root)["untagged"]
+    assert (u["facts"], u["records"], u["floor_pct"], u["over_floor"]) == (
+        6, 10, 0.5, True), u
+
+    rail, repair = [], []
+    for d in sorted(root.iterdir()):
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.md")):
+            _fm, recs = parse_fact_file(f)
+            for rec in recs:
+                if kg_hygiene._tag_of(rec) == "":
+                    rail.append((str(f), rec.get("fact")))
+                if retag.record_is_untagged(rec):
+                    repair.append((str(f), rec.get("fact")))
+    assert rail == repair, (set(rail) ^ set(repair))
+    assert len(rail) == 6, rail
