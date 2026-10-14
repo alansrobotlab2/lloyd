@@ -20,11 +20,21 @@ since 2026-10-07 — and its row count is pinned by
 the retired-name list under "Retired" (a fixed historical set), and the
 `~8,700-test suite` figure, which is an order of magnitude with a tilde, not
 a count of a set with an enumerable owner.
+
+The third half is multiplicity. Both directions above read the index into a `set`
+of stems, so a doc listed once and a doc listed twice are the same green — which is
+how "The agent" table came to carry `[[desktop]]` in two rows, at lines 48 and 59 of
+that revision, with two different and equally true Covers cells until `8ac21903`
+(2026-10-14) deleted the second. So one row per doc is asserted over the rows themselves, counted over
+table rows only: `index.md` also names `[[desktop]]` in the Review-log entry that
+records that deletion, and a whole-file count would report the survivor as the
+duplicate and invite a "fix" that rewrites the log.
 """
 
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -36,6 +46,11 @@ INDEX = ARCH / "index.md"
 _LINK = re.compile(r"\[\[([a-z0-9-]+)\]\]")
 #: A hand-typed count of a set that has an owner elsewhere in the tree.
 _OWNED_COUNT = re.compile(r"\b\d+\s*-?\s*(?:scheduled\s+jobs?|rungs?)\b", re.I)
+#: A `[[slug]]` heading a table row — the first cell, and nothing else in it.
+#: `[ \t]` rather than `\s` so a match cannot cross a line boundary: multiplicity
+#: below is a property of rows, and `_LINK` over the whole text would also count
+#: the Review-log prose that records a duplicate being deleted.
+_ROW_LINK = re.compile(r"^[ \t]*\|[ \t]*\[\[([a-z0-9-]+)\]\][ \t]*\|", re.M)
 
 
 def _docs_on_disk() -> set[str]:
@@ -45,6 +60,32 @@ def _docs_on_disk() -> set[str]:
 
 def _docs_linked() -> set[str]:
     return set(_LINK.findall(INDEX.read_text(encoding="utf-8")))
+
+
+def _row_first_cells(text: str) -> list[str]:
+    """Every `[[slug]]` that heads a table row, in file order, repeats included.
+
+    A list and not a set, deliberately: `_docs_linked()` is a set, so a doc listed
+    once and a doc listed twice are the same green to every node above it. That is
+    how `index.md` came to carry `[[desktop]]` in two rows of "The agent" table, at
+    lines 48 and 59 of that revision, with two different Covers cells, both true, so
+    no reader could tell which one describes the doc. `8ac21903` (2026-10-14) deleted
+    the second of them;
+    the repeats-included list is what makes that shape checkable at all.
+    """
+    return _ROW_LINK.findall(text)
+
+
+def _duplicate_row_cells(text: str) -> list[str]:
+    """Each stem heading more than one table row, once each, sorted.
+
+    Empty means one row per doc; it names the repeated stem, never just a count,
+    because the reader's job is to go merge two Covers cells and needs to know
+    which doc to open. Scoped to rows so the Review-log sentence that records a
+    duplicate having been deleted does not read as a second listing of it.
+    """
+    counts = Counter(_row_first_cells(text))
+    return sorted(stem for stem, seen in counts.items() if seen > 1)
 
 
 #: The section that records a retirement. Its heading is matched by prefix so the
@@ -104,6 +145,50 @@ def test_every_index_link_names_a_doc_on_disk():
         f"{sorted(dangling)} — a retired doc goes under 'Retired', not in a table")
 
 
+def test_no_doc_is_listed_in_more_than_one_table_row():
+    """One doc, one row: the set-based checks above cannot see a doc listed twice.
+
+    `index.md` had `[[desktop]]` heading two rows of "The agent" table with two
+    different Covers cells — "the lease only a human grants" and "a lease a human
+    grants from the Desktop tab" — both true, so which cell describes the doc was
+    unanswerable. It arose by re-adding the row instead of editing it, which is
+    exactly the drift a membership test cannot see: the node above asks only whether
+    the stem is in the link set at all.
+    """
+    dupes = _duplicate_row_cells(INDEX.read_text(encoding="utf-8"))
+    assert dupes == [], (
+        f"architecture docs heading more than one table row in index.md: {dupes} — "
+        "fold the two Covers cells into one row; a doc with two rows has no single "
+        "description, and a reader cannot tell which row is stale")
+
+
+def test_the_row_scope_is_what_keeps_the_review_log_from_reading_as_a_duplicate():
+    """The count is over rows, and that scoping is load-bearing on today's index.
+
+    `[[desktop]]` is named twice in `index.md`: once as the first cell of its row in
+    "The agent" table, once in the Review log recording that the duplicate row had
+    been deleted. A count over the file would report the survivor as a duplicate and
+    invite someone to "fix" it by rewriting the Review-log entry — which
+    `test_the_retired_section_says_git_history_is_the_only_copy_left` exists to
+    forbid. So the log stays untouched, and this node is the proof that the row
+    anchor, not the prose, is what makes the check above green.
+    """
+    text = INDEX.read_text(encoding="utf-8")
+    cells = _row_first_cells(text)
+    named, rows = _LINK.findall(text).count("desktop"), cells.count("desktop")
+    assert rows == 1, (
+        f"[[desktop]] heads {rows} table row(s) of index.md, expected exactly 1 — "
+        + ("two rows is the shape this file exists to catch" if rows > 1 else
+           "the desktop row has left the tables, so this node no longer measures "
+           "what its name claims and belongs with the retired-name checks"))
+    # What a whole-file count would have seen beside it: the same stem named more
+    # often than it heads a row, i.e. prose the row anchor correctly excludes.
+    assert named > rows, (
+        f"index.md names [[desktop]] {named} time(s) and rows head it {rows} time(s): "
+        "with no Review-log mention beside the row there is nothing for the row "
+        "anchor to exclude, so this node's scoping is asserted but never exercised")
+
+
 def test_the_index_states_no_count_of_a_set_with_an_owner():
     hits = [m.group(0) for m in _OWNED_COUNT.finditer(INDEX.read_text(encoding="utf-8"))]
     assert hits == [], (
@@ -130,6 +215,33 @@ def test_the_parity_check_can_see_a_missing_doc(tmp_path, monkeypatch):
     assert _OWNED_COUNT.findall("each of the 32 scheduled jobs; the 9-rung gate; 9 rungs") == [
         "32 scheduled jobs", "9-rung", "9 rungs"]
     assert _OWNED_COUNT.findall("the ~8,700-test suite; 3 rows; 2026-09-11") == []
+
+
+def test_the_parity_check_can_see_a_duplicate_row():
+    """Negative control, duplicate direction: the check must be able to fail.
+
+    The control above only exercises the missing-row direction, which is how the
+    set-based extractors stayed a green blind spot for the whole life of the
+    duplicate desktop row. So the same discipline here, on a synthetic index: a stem
+    heading two rows must be reported by name, one row must not be, and the extractor
+    must be shown to see rows at all — otherwise `_duplicate_row_cells` returning `[]`
+    everywhere, including from a regex that matched nothing, would satisfy both.
+    """
+    twice = "| [[alpha]] | a |\n| [[alpha]] | different cell |\n"
+    assert _row_first_cells(twice) == ["alpha", "alpha"], (
+        "the row extractor matched nothing, so an empty duplicate list below is "
+        "the scanner being blind, not the index being clean")
+    assert _duplicate_row_cells(twice) == ["alpha"], (
+        "two rows heading with [[alpha]] and the check reported nothing")
+    assert _duplicate_row_cells("| [[alpha]] | a |\n| [[beta]] | b |\n") == [], (
+        "one row per doc must report nothing; a check that fires on the clean shape "
+        "is a check that gets deleted")
+    # The row anchor, not the file: a stem named in prose beside its single row is
+    # the live index's own shape (the desktop row and its Review-log entry).
+    assert _duplicate_row_cells(
+        "| [[alpha]] | a |\n\nProse carried [[alpha]] in two rows.\n") == [], (
+        "prose naming a stem is being counted as a second table row, which would "
+        "make the Review log read as a duplicate of the row it describes")
 
 
 def test_a_retired_doc_is_named_under_retired_and_linked_from_no_table():
