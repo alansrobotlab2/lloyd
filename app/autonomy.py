@@ -16,6 +16,7 @@ import functools
 import json
 import re
 import subprocess
+import time
 import logging
 import os
 import threading
@@ -822,6 +823,73 @@ def _record_phrase(task_id: int, run_id: str, record_ok: bool, *,
         return f"[full: {rel}]" if style == "full" else f"see {rel}"
     return (f"RUN RECORD COULD NOT BE READ — {run_id} left no readable non-empty "
             f"file; expected at {rel} (#1567)")
+
+
+# How much of a completed tool result a killed run's record carries, and how many
+# results it carries. Long enough for the recorder's own verdict line and the
+# mirror's row count, which are what the 2026-10-13/14 iv-metrics timeouts were
+# killed on, and short enough that `cat`ing the record stays one screen.
+LAST_TOOL_RESULT_TAIL_CHARS = 700
+LAST_TOOL_RESULTS_KEPT = 2
+
+
+def _tail_of_result(content: str) -> str:
+    """The last `LAST_TOOL_RESULT_TAIL_CHARS` of a result, with the cut named."""
+    content = (content or "").strip()
+    if not content:
+        return ""
+    if len(content) <= LAST_TOOL_RESULT_TAIL_CHARS:
+        return content
+    tail = content[-LAST_TOOL_RESULT_TAIL_CHARS:]
+    return f"[…{len(content) - len(tail)} chars earlier]\n{tail}"
+
+
+def _last_tool_result_section(last_tool_results: list) -> str:
+    """The record body's `## Last completed tool result` block, or "" if there is none.
+
+    #2704. A wall-clock kill used to carry only what the run SAID — `tool_errors`,
+    filled from error results alone — so a run whose artefact had landed seconds
+    earlier was indistinguishable from one that had done nothing: task #86 appended
+    its iv-metrics row 4-12 s into each of the four runs this item names, then hung
+    ~285 s waiting for a first token, and every one of those records read
+    `stop_reason/usage/num_turns: null` with `changes_files: 0`.
+
+    The TAIL is the part that matters: a recorder prints its verdict last, so the end
+    of the result is the line that says `BREACH iv-metrics: since=… llm_calls=741
+    rate=0.0688`, and the end of the mirror's is `iv-metrics-mirror: copied
+    source=32 mirror_was=31 rows`. The acceptance judge grades `regex`/`contains`
+    against `trace["final_text"]` (`scripts/autoresearch/judge.py:444-451`), which is
+    empty on this death, so grading the timeout path as it stands answers
+    `graded_fail` for the wrong reason; this section is the one surface where that
+    evidence reaches a reader who cannot open the session JSON.
+
+    Every entry the caller passes carries non-blank text by construction — a clean
+    result is recorded only when its content has bytes in it — so the newest entry is
+    the newest result that could SAY something, not merely the most recent one. The
+    distinction matters because a two-deep list of RAW results would let two silent
+    steps after the recorder push the only proof of a landed row out of the section,
+    which is the failure this block exists to prevent. The `if not body` guard below
+    is a belt on that brace, not the mechanism.
+    """
+    if not last_tool_results:
+        return ""
+    newest_name, newest = last_tool_results[-1]
+    body = _tail_of_result(newest)
+    if not body:
+        return ""
+    parts = ["\n\n## Last completed tool result before the kill\n\n"
+             f"Tool: `{newest_name or 'unnamed'}` — the run had reached this and was "
+             "waiting on something else when its wall clock expired.\n\n"
+             f"```\n{body}\n```"]
+    if len(last_tool_results) > 1:
+        prior_name, prior = last_tool_results[-2]
+        prior_body = _tail_of_result(prior)
+        if prior_body:
+            parts.append("\n\nOne step earlier, tool "
+                         f"`{prior_name or 'unnamed'}` — kept because a run's "
+                         "artefact is often written by the step before the one that "
+                         f"last spoke:\n\n```\n{prior_body}\n```")
+    return "".join(parts)
 
 
 def _write_run_record(task_id: int, run_id: str, status: str,
@@ -4761,6 +4829,24 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 logger.warning("Task #%s: could not attach the observer: %s",
                                task_id, exc)
         final_response = ""
+        # #2704: the two facts a wall-clock kill used to lose. A run cut off here
+        # records `stop_reason/usage/num_turns: null` because those arrive only on
+        # the `result` event, which a killed run never sees, so its record read
+        # exactly like a run that died before it started: task #86's four nightly
+        # timeouts each had a landed iv-metrics row 4-12 s in, and nothing in the
+        # ledger said so. `last_event_at` is the clock that separates "wedged idle
+        # for 260 s waiting on the engine" from "cut off mid tool loop", and
+        # `tool_calls_dispatched` is the half of that the age alone cannot give —
+        # an idle-since-44 s run and a run at its 20th Bash call both have no
+        # `result` event. Both are stamped on the record and into `meta_json`.
+        # `last_tool_results` is what the run demonstrably DID: the tail of its last
+        # completed non-error tool results, which is where the recorder's own verdict
+        # line and the mirror's row count live (the pre-image ledger sees Write/Edit
+        # only, so a run that appends through Bash leaves no file-level witness at
+        # all — `changes_files: 0` for a run that wrote two files).
+        last_event_at = time.monotonic()
+        tool_calls_dispatched = 0
+        last_tool_results: list[tuple[str, str]] = []
         # The run's TERMINAL assistant block: the text of the last
         # `assistant_message` event that carried any. `final_response` is the
         # join of every `text_delta` of every iteration, so a run that narrated
@@ -4797,6 +4883,11 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             )
             async with asyncio.timeout(timeout):
                 async for evt in recorded:
+                    # #2704: every event is proof the run was alive, including a
+                    # `text_delta` — the last thing task #86's 2026-10-14 attempt
+                    # ever said was a thinking block 41 s after its last tool
+                    # result, and the kill came 257 s after THAT.
+                    last_event_at = time.monotonic()
                     if evt["type"] in ("tool_call", "tool_result"):
                         dispatch.observe(evt)
                     # #2619: an alarm a script exited with must reach the run
@@ -4844,8 +4935,44 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                                 for b in content
                             )
                         tool_errors.append(str(content)[:600])
+                    if evt["type"] == "tool_call":
+                        # Counted here rather than read off `dispatch`, which files a
+                        # call only when its result lands: a run killed between
+                        # dispatching a call and receiving it has dispatched N and
+                        # completed N-1, and the difference is the shape of the death.
+                        tool_calls_dispatched += 1
+                    elif evt["type"] == "tool_result" and not evt.get("is_error"):
+                        # Completed and clean: the run demonstrably got this far. An
+                        # error result is never the witness — those already leave as
+                        # `tool_errors`, and one that could be an error would read as
+                        # the recorder's verdict when it is a traceback. Two are kept,
+                        # newest last: #86's artefact is written by ONE command whose
+                        # recorder verdict and mirror summary are two results, and
+                        # carrying only the newest would show `copied source=32` while
+                        # the line saying the row was APPENDED (`BREACH iv-metrics: …
+                        # rate=0.0688`) stayed in the session JSON nobody opens.
+                        #
+                        # A BLANK result is not kept at all. "The last completed
+                        # non-error result" is not the same fact as "the last thing the
+                        # run proved": a recorder that prints its verdict and is
+                        # followed by two steps that print nothing would push the only
+                        # witness of a landed row out of a two-deep list of raw
+                        # results. Filtering at the collection site is what makes the
+                        # depth mean "the last two results that could say something",
+                        # and it keeps the section from quoting an empty fence. Pinned
+                        # by test_a_silent_step_after_the_recorder_does_not_erase_the_
+                        # witness.
+                        content = str(evt.get("content") or "")
+                        if content.strip():
+                            last_tool_results.append((str(evt.get("name") or ""),
+                                                      content))
+                            del last_tool_results[:-LAST_TOOL_RESULTS_KEPT]
         except asyncio.TimeoutError:
-            logger.warning("Task #%s timed out after %ds", task_id, timeout)
+            # #2704: say what the run demonstrably did before saying it failed.
+            idle_seconds = round(time.monotonic() - last_event_at, 1)
+            logger.warning("Task #%s timed out after %ds (%.1fs since its last "
+                           "harness event, %d tool call(s) dispatched)",
+                           task_id, timeout, idle_seconds, tool_calls_dispatched)
             partial = (f"## Partial response before timeout\n\n{final_response}"
                        if final_response else "(no output before timeout)")
             errs = ("\n\n## Tool/script errors before timeout\n\n"
@@ -4854,12 +4981,18 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             return await _record_failure(
                 task, task_id, run_id, started_at, now,
                 summary=f"timed out after {timeout}s",
-                body=f"## Prompt\n\n{prompt[:500]}...\n\n{partial}{errs}",
+                body=(f"## Prompt\n\n{prompt[:500]}...\n\n{partial}{errs}"
+                      + _last_tool_result_section(last_tool_results)),
                 kind="task",
                 extra={"timeout": True, "timeout_seconds": timeout,
                        "stop_reason": stop_reason, "usage": usage,
                        "num_turns": num_turns, "tool_errors": len(tool_errors),
-                       "session_id": session_id},
+                       "session_id": session_id,
+                       # The two keys a reader of `runs.meta_json` needs to tell a
+                       # wedged-idle death from a busy one without opening the
+                       # session JSON — which the fleet's own watchdog cannot do.
+                       "idle_seconds": idle_seconds,
+                       "tool_calls_dispatched": tool_calls_dispatched},
             )
         except asyncio.CancelledError:
             # The worker pool cancels via asyncio.wait_for. CancelledError is a

@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, AsyncIterator
 
 import httpx
@@ -43,6 +44,33 @@ logger = logging.getLogger("lloyd-harness-client")
 # What `_next_line` returns when the cancel won the race. A distinct object,
 # not `None` or `""`: an empty string is a real SSE line (the frame separator).
 _CANCELLED = object()
+
+
+async def _warn_first_line_silent(model: str, url: str, after_s: float,
+                                  started: float) -> None:
+    """Say out loud that a stream has produced NOTHING at all for `after_s` seconds.
+
+    #2704. Silence before the first SSE line is legal — prefill emits no bytes and
+    the secondary slot serialises behind `--parallel 1` — so this must not abort
+    anything: the bound that fires here is the task's own wall clock, and killing a
+    queued request would turn a slow night into a failed run. But the same silence
+    is also what killed autonomy task #86 four times in six nights at 08:00 while
+    task #39 held the engine: `timeout = httpx.Timeout(timeout_s, read=None, ...)`
+    below leaves `read` unbounded, and `_next_line` is handed `chunk_timeout_s` only
+    once a line has arrived, so time-to-first-line had no clock and no log line at
+    all. A WARNING naming the model, the URL and the seconds waited is the whole
+    change; a reader grepping the log can now tell "queued behind another job" from
+    "wedged", which is the difference between infra and task.
+    """
+    # No try/except around the sleep: the caller cancels this task the moment a line
+    # arrives, and swallowing that CancelledError would misreport the cancellation as
+    # handled. A cancelled witness prints nothing, which is the point — the wait was
+    # normal.
+    await asyncio.sleep(after_s)
+    logger.warning(
+        "stream_chat: no FIRST SSE line from %s for model %s after %.1fs "
+        "(request NOT aborted — pre-first-line silence is legal, but nothing else "
+        "bounds it: #2704)", url, model, time.monotonic() - started)
 
 
 async def _next_line(
@@ -215,6 +243,15 @@ async def stream_chat(
                 asyncio.ensure_future(cancel_event.wait())
                 if cancel_event is not None else None
             )
+            # #2704: the pre-first-line witness, armed here and disarmed the moment a
+            # line arrives. `chunk_timeout_s <= 0` (the flag off) means no witness
+            # either — one knob for both silences, and a fleet that turned the stall
+            # detector off has not asked for a second one it cannot disable.
+            first_line_watch: "asyncio.Future[Any] | None" = None
+            watch_started = time.monotonic()
+            if chunk_timeout_s > 0:
+                first_line_watch = asyncio.ensure_future(_warn_first_line_silent(
+                    model, url, chunk_timeout_s, watch_started))
             try:
                 while True:
                     try:
@@ -238,6 +275,9 @@ async def stream_chat(
                             lines_seen,
                         )
                         break
+                    if lines_seen == 0 and first_line_watch is not None:
+                        first_line_watch.cancel()
+                        first_line_watch = None
                     lines_seen += 1
                     if cancel_event is not None and cancel_event.is_set():
                         logger.info("stream_chat: cancel_event set, breaking")
@@ -256,5 +296,10 @@ async def stream_chat(
                     except json.JSONDecodeError as exc:
                         raise ParseError(f"malformed SSE chunk: {exc}", raw=data)
             finally:
+                # A stream that ended, errored or was cancelled before its first line
+                # must not leave the witness running to speak about it later: the
+                # request is gone by then and its death has its own record.
+                if first_line_watch is not None and not first_line_watch.done():
+                    first_line_watch.cancel()
                 if cancel_wait is not None and not cancel_wait.done():
                     cancel_wait.cancel()

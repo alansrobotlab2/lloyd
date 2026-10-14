@@ -23,9 +23,12 @@ module global, so patching it isolates all three.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from app import autonomy
 from workers import pool as worker_pool
@@ -355,3 +358,256 @@ def test_a_genuinely_stuck_task_is_still_recovered_after_the_fix(endpoint_dir,
         encoding="utf-8")
     assert "22" in [str(t) for t in autonomy.recover_stuck_tasks()]
     assert "Recovered from in_progress" in (endpoint_dir / "22-really-stuck.md").read_text()
+
+
+# ── #2704: what a wall-clock kill is allowed to say about itself ─────────────
+#
+# Autonomy task #86 (nightly iv-metrics) died at its 300 s cap on four of its last
+# six scheduled runs — `run_86_20261010_151159`, `run_86_20261012_080047`,
+# `run_86_20261013_080034`, `run_86_20261014_080101` — while the slowest SUCCESS in
+# the same window took 55.3 s, 18 % of the cap. The cap is therefore not the defect
+# and these nodes do not touch it. What they pin is the other half of what triage
+# measured: the artefact lands 4-12 s into every killed run (`iv-metrics.jsonl`
+# `recorded_at: 2026-10-14T08:01:13` against `started_at: 2026-10-14T08:01:01`), and
+# the run then hangs ~285 s on a final-turn request that never gets its first SSE
+# token — yet the record said only `stop_reason/usage/num_turns: null`, `tool_errors:
+# 0`, `changes_files: 0`. Four nights of a job that produced its row read, in the
+# only place anyone looks, as four nights of a job that did nothing.
+#
+# `tests/test_autonomy_discovery_infra_kind.py` owns the ADDITIVITY half (clause 3):
+# the charge, the retry budget and the Activity Log line must not move. What lives
+# here is the witness itself.
+
+# Two lines copied out of the real 2026-10-14 attempt, from the two Bash steps of
+# the task's own `description:` command — the recorder (which appends the row) and
+# the mirror (which copies it into the vault). They are the payload clause 2 is about.
+RECORDER_RESULT = ("BREACH iv-metrics: since=2026-10-13T08:00:00+00:00 "
+                   "llm_calls=741 rate=0.0688 rows=1 appended")
+MIRROR_RESULT = "iv-metrics-mirror: copied source=32 mirror_was=31 rows"
+
+
+def _wedged_after_the_artefact(hang_seconds: float):
+    """A `run_query` stand-in: the artefact lands, then the stream goes silent.
+
+    The shape is #86's, read off its own session file
+    (`20261014_010101_autonomy_d953.json`): two tool results by t≈0, a `thinking`
+    delta a moment later, then nothing until the kill — the last real tool result at
+    01:01:40.487 local, the next event the kill at 01:06:01.763. `run_query` is
+    patched at the seam `run_task` iterates, so the code under test is `run_task`'s
+    own `asyncio.timeout` arm and not a hand-built call into `_record_failure`.
+    """
+    def _fake(messages, options):
+        async def _gen():
+            yield {"type": "tool_call", "name": "Bash", "call_id": "c1",
+                   "input": {"command": "python -m scripts.iv_metrics_probe"}}
+            yield {"type": "tool_result", "name": "Bash", "call_id": "c1",
+                   "content": RECORDER_RESULT, "is_error": False}
+            yield {"type": "tool_call", "name": "Bash", "call_id": "c2",
+                   "input": {"command": "python scripts/iv_metrics_mirror.py"}}
+            yield {"type": "tool_result", "name": "Bash", "call_id": "c2",
+                   "content": MIRROR_RESULT, "is_error": False}
+            await asyncio.sleep(0.4)      # the last thing the run ever said
+            yield {"type": "text_delta", "text": "Now the closing turn…"}
+            await asyncio.sleep(hang_seconds)
+            yield {"type": "result", "stop_reason": "end_turn", "usage": {},
+                   "num_turns": 3}
+        return _gen()
+    return _fake
+
+
+@pytest.fixture
+def kill_env(tmp_path, monkeypatch):
+    """Task #86's file, a redirected run-record tree, and no transports.
+
+    `failure_count: 1` of `max_retries: 3` is the state #86 was in on 2026-10-14
+    (`server.err.1:89407` logged `Task #86 failed (task, 3/5)` for the third one), so
+    the arithmetic the clause-3 node checks is a move from 1, not from 0.
+    """
+    runs = tmp_path / "autonomy-runs"
+    tasks = tmp_path / "autonomy"
+    runs.mkdir()
+    tasks.mkdir()
+    monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", runs)
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tasks)
+
+    import app.discord_notify as discord_notify
+
+    async def _no_alert(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(discord_notify, "discord_alert", _no_alert)
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt",
+                        lambda **_kw: "sys", raising=False)
+    # The task must carry a `skill_name` to be dispatchable at all (`run_task`
+    # returns an error dict without one, before the flip to in_progress), but this
+    # file is about the timeout arm, not about a real SKILL.md's wording — so the
+    # content is stubbed rather than read out of the vault.
+    monkeypatch.setattr(autonomy, "_load_skill_content",
+                        lambda _name: "# iv-metrics protocol\n")
+    (tasks / "86-nightly-iv-metrics-series.md").write_text(
+        "---\n"
+        "id: 86\n"
+        "name: nightly-iv-metrics-series\n"
+        "status: up_next\n"
+        "priority: medium\n"
+        "trigger: scheduler\n"
+        "frequency: 1d @ 08:00\n"
+        "skill_name: iv-metrics-series\n"
+        "model: primary\n"
+        "timeout_seconds: 1\n"
+        "max_retries: 3\n"
+        "failure_count: 1\n"
+        "---\n\n# nightly iv-metrics\n\n## Activity Log\n\n- created\n",
+        encoding="utf-8")
+    return SimpleNamespace(runs=runs, tasks=tasks)
+
+
+def _killed_record(kill_env):
+    path = next((kill_env.runs / "86").glob("run_*.md"))
+    text = path.read_text(encoding="utf-8")
+    return yaml.safe_load(text.split("---")[1]), text
+
+
+@pytest.mark.asyncio
+async def test_a_wall_clock_kill_records_the_idle_gap_and_the_tools_it_sent(
+        kill_env, monkeypatch):
+    """Clause 1: idle-when-killed and dispatched-tool count, on both stores.
+
+    The two numbers are what separates the two deaths that used to look identical:
+    #86 wedged idle for ~257 s waiting for a first token, versus a run cut off mid
+    tool loop with its cap genuinely spent working. `idle_seconds` is measured from
+    the last harness EVENT (a `text_delta` counts — #86's last was a thinking block),
+    so here it must land near 0.6 s: the stream's final event is 0.4 s in and the cap
+    is 1 s. An implementation that stamped the whole wall clock, or the time of the
+    last TOOL result instead of the last event, would satisfy the field's name and
+    still be blind — the first reads 1.0, the second 0.6 + 0.4 = 1.0.
+    """
+    monkeypatch.setattr("app.harness.run_query", _wedged_after_the_artefact(30))
+
+    out = await autonomy.run_task(86)
+
+    fm, _ = _killed_record(kill_env)
+    assert fm["timeout"] is True and fm["timeout_seconds"] == 1, fm
+    idle = fm["idle_seconds"]
+    assert isinstance(idle, (int, float)) and 0.4 <= idle < 0.95, (
+        f"`idle_seconds` is {idle!r}; the run's last event was 0.4s into a 1s cap, so "
+        "the gap at the kill is ~0.6s — 1.0 would be the whole cap, 0.0 would be no "
+        "measurement at all")
+    assert idle < fm["duration_seconds"], (
+        f"idle {idle} >= duration {fm['duration_seconds']}: the field is the run's "
+        "length, not the silence at its end")
+    assert fm["tool_calls_dispatched"] == 2, (
+        f"{fm['tool_calls_dispatched']!r} tool calls for a stream that emitted two "
+        "`tool_call` events before going quiet")
+    assert out["meta"]["idle_seconds"] == idle
+    assert out["meta"]["tool_calls_dispatched"] == 2, out["meta"]
+    # The second store. `scheduled_task.execute` hands `result["meta"]` to the pool
+    # whole (workers/sources/scheduled_task.py:460) and the pool writes
+    # `json.dumps(norm["meta"])` into `runs.meta_json` (workers/pool.py:1791), so
+    # these keys reaching `meta_json` is a property of THIS dict's contents — the
+    # query a reader re-runs is `select meta_json from runs where task_id='86'`.
+    from workers.pool import normalize_result
+    from workers.queue import QueueItem
+    item = QueueItem(id=1, source="scheduled-task", kind="run", priority=50,
+                     payload={"task_id": 86}, dedup_key=None, state="running",
+                     attempts=1, enqueued_at="", claimed_at=None, claimed_by=None,
+                     completed_at=None, error=None)
+    norm = normalize_result(item, {**out, "task_id": "86"})
+    assert json.loads(json.dumps(norm["meta"]))["idle_seconds"] == idle
+    assert json.loads(json.dumps(norm["meta"]))["tool_calls_dispatched"] == 2
+
+
+@pytest.mark.asyncio
+async def test_the_killed_record_carries_the_last_thing_the_run_proved(
+        kill_env, monkeypatch):
+    """Clause 2: the recorder's verdict line and the mirror's row count are readable.
+
+    Under a named heading, in the record BODY, because that is the file a person
+    opens at 03:00 (`autonomy-runs/86/<run>.md`) and the session JSON is not it. The
+    newest completed non-error result is the mirror's `source=32 mirror_was=31 rows`;
+    the recorder's `BREACH … llm_calls=741 rate=0.0688` is the step before it, which
+    is why the section keeps two — task #86 writes its artefact with one command whose
+    two steps print those two lines. An error result is never the witness: those
+    already leave as `tool_errors`, and a traceback would read as the verdict.
+    """
+    monkeypatch.setattr("app.harness.run_query", _wedged_after_the_artefact(30))
+
+    await autonomy.run_task(86)
+
+    _fm, text = _killed_record(kill_env)
+    heading = "## Last completed tool result before the kill"
+    assert heading in text, text[-800:]
+    assert MIRROR_RESULT in text, "the newest result did not reach the record"
+    assert RECORDER_RESULT in text, (
+        "only the newest result was kept, so the line that says the row was APPENDED "
+        "is still only in the session JSON")
+    assert text.index(RECORDER_RESULT) > text.index(heading), (
+        "the evidence is above its own heading, so it is not the section")
+    assert "## Last completed tool result" not in text.split(heading, 1)[0]
+
+
+@pytest.mark.asyncio
+async def test_a_kill_with_no_completed_tool_result_says_so_without_lying(
+        kill_env, monkeypatch):
+    """The witness is a fact, not a format: no completed result, no section.
+
+    A run killed inside its first turn has nothing to show, and inventing an empty
+    heading would put a `## Last completed tool result before the kill` block in front
+    of a reader expecting to find the artefact there.
+    """
+    def _silent(messages, options):
+        async def _gen():
+            await asyncio.sleep(30)
+            yield {"type": "result", "stop_reason": "end_turn"}
+        return _gen()
+
+    monkeypatch.setattr("app.harness.run_query", _silent)
+
+    await autonomy.run_task(86)
+
+    fm, text = _killed_record(kill_env)
+    assert "Last completed tool result" not in text, text[-800:]
+    assert fm["tool_calls_dispatched"] == 0 and fm["idle_seconds"] >= 0.9, fm
+
+
+@pytest.mark.asyncio
+async def test_a_silent_step_after_the_recorder_does_not_erase_the_witness(
+        kill_env, monkeypatch):
+    """Depth is counted in results that could SAY something, not in raw results.
+
+    The section keeps two completed non-error results, newest last, because task #86
+    writes its artefact with one command whose recorder verdict and mirror summary are
+    two results. But a two-deep list of RAW results has a failure mode that defeats the
+    whole block: a run whose recorder prints `BREACH iv-metrics: … rate=0.0688` and then
+    runs two steps that print nothing — `cd …`, a `test -s`, a `systemctl is-active` —
+    ends with two blank results, and the recorder's line is out of the section exactly
+    when the reader needs it. So a blank result is not collected at all, and the
+    witness here is the recorder's own line with the two silent steps named as the
+    tools that followed.
+    """
+    def _recorder_then_silence(messages, options):
+        async def _gen():
+            yield {"type": "tool_call", "name": "Bash", "call_id": "c1",
+                   "input": {"command": "python -m scripts.iv_metrics_probe"}}
+            yield {"type": "tool_result", "name": "Bash", "call_id": "c1",
+                   "content": RECORDER_RESULT, "is_error": False}
+            for call_id, cmd in (("c2", "test -s iv-metrics.jsonl"),
+                                 ("c3", "systemctl is-active lloyd-agent-worker")):
+                yield {"type": "tool_call", "name": "Bash", "call_id": call_id,
+                       "input": {"command": cmd}}
+                yield {"type": "tool_result", "name": "Bash", "call_id": call_id,
+                       "content": "", "is_error": False}
+            await asyncio.sleep(0.4)
+            await asyncio.sleep(30)
+            yield {"type": "result", "stop_reason": "end_turn"}
+        return _gen()
+
+    monkeypatch.setattr("app.harness.run_query", _recorder_then_silence)
+
+    await autonomy.run_task(86)
+
+    _fm, text = _killed_record(kill_env)
+    assert RECORDER_RESULT in text, (
+        "two blank tool results evicted the only proof that the row was appended: "
+        + text[-500:])
+    assert "## Last completed tool result before the kill" in text

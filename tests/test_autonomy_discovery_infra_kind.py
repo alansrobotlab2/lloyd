@@ -794,3 +794,143 @@ def test_the_architecture_page_names_the_stall_class_beside_the_transport_errors
     assert "StreamStalledError" in infra, (
         "the page does not name the stall class beside the transport errors, so "
         "the prose still reads as excluding what the set now includes")
+
+
+# ── #2704: the timeout witness must not move the charge ─────────────────────
+#
+# `tests/test_autonomy_timeout.py` gained three nodes that make a wall-clock kill
+# describe itself — idle-when-killed, dispatched tool count, the tail of the last
+# completed tool result. This node is the other half of that change, and it lives
+# here because this file is the one that owns who PAYS for a death: adding a witness
+# to a record is only safe if the charge, the retry budget and the line in the task's
+# Activity Log are bit-for-bit what they were. A run that produced its artefact and
+# then hung is still a failed run; the point of #2704 is that the record now says so
+# USEFULLY, not that it stops saying it.
+#
+# Task #86 is the subject because it is the live case: `failure_count: 3` of
+# `max_retries: 5` on 2026-10-14 (`server.err.1:89407` logged
+# `Task #86 failed (task, 3/5)`), two more nightly timeouts and the schedule retires
+# itself. Whether those timeouts should be charged to the transport instead — the
+# `kind: infra` split this file exists for, and which would stop them spending the
+# budget — is the ruling this item owes AFTER landing, and deliberately not a change
+# this round may make. Hence: `kind == task`, and the counter moves.
+
+_TIMEOUT_TASK = """---
+id: 86
+name: nightly-iv-metrics-series
+status: up_next
+priority: medium
+trigger: scheduler
+frequency: 1d @ 08:00
+skill_name: iv-metrics-series
+model: primary
+timeout_seconds: 1
+max_retries: 5
+failure_count: 3
+---
+
+# nightly iv-metrics series
+
+## Activity Log
+
+- created
+"""
+
+
+@pytest.fixture()
+def budget_env(tmp_path, monkeypatch):
+    """A dispatchable #86 at 3/5, with no transports and no SKILL.md read."""
+    from app import autonomy as A
+
+    runs = tmp_path / "autonomy-runs"
+    tasks = tmp_path / "autonomy"
+    runs.mkdir()
+    tasks.mkdir()
+    monkeypatch.setattr(A, "AUTONOMY_RUNS_DIR", runs)
+    monkeypatch.setattr(A, "AUTONOMY_DIR", tasks)
+    monkeypatch.setattr(A, "_load_skill_content", lambda _name: "# protocol\n")
+
+    import app.discord_notify as discord_notify
+
+    async def _no_alert(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(discord_notify, "discord_alert", _no_alert)
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt",
+                        lambda **_kw: "sys", raising=False)
+    (tasks / "86-nightly-iv-metrics-series.md").write_text(_TIMEOUT_TASK,
+                                                           encoding="utf-8")
+    return SimpleNamespace(runs=runs, tasks=tasks)
+
+
+@pytest.mark.asyncio
+async def test_a_witnessed_timeout_is_still_charged_to_the_task_exactly_as_before(
+        budget_env, monkeypatch, caplog):
+    """Clause 3: the witness is additive — same status, kind, summary, budget, line.
+
+    Everything below is the pre-#2704 contract, asserted at the moment the new fields
+    are also present: `status: failed`, `failure_kind: task`, the summary verbatim
+    `timed out after 1s` (NOT the summary with the idle gap appended to it — the board
+    and the stall alarms print `summary`, and a summary that grew a clause would move
+    every one of those surfaces), `failure_count` 3 → 4 of `max_retries: 5`, and the
+    Activity Log's `Run <id> — FAILED (task): <summary>` note. If the owed ruling
+    later re-charges a pre-first-token stall to infra, THIS node is the one that
+    changes, and it changes deliberately rather than as a side effect of a witness.
+    """
+    import asyncio
+    import re
+
+    import yaml
+
+    from app import autonomy as A
+
+    def _wedged(messages, options):
+        async def _gen():
+            yield {"type": "tool_call", "name": "Bash", "call_id": "c1",
+                   "input": {"command": "python -m scripts.iv_metrics_probe"}}
+            yield {"type": "tool_result", "name": "Bash", "call_id": "c1",
+                   "content": "BREACH iv-metrics: since=2026-10-13T08:00:00+00:00 "
+                              "llm_calls=741 rate=0.0688 rows=1 appended",
+                   "is_error": False}
+            await asyncio.sleep(0.4)   # the last thing the run ever said
+            await asyncio.sleep(30)    # the first token that never came
+            yield {"type": "result", "stop_reason": "end_turn"}
+        return _gen()
+
+    monkeypatch.setattr("app.harness.run_query", _wedged)
+
+    out = await A.run_task(86)
+
+    assert out["status"] == "failed", out
+    assert out["failure_kind"] == "task", (
+        "the timeout stopped being charged to the task, which is the ruling this item "
+        "OWES after landing and is not free to make while adding a witness")
+
+    record = next((budget_env.runs / "86").glob("run_*.md"))
+    fm = yaml.safe_load(record.read_text(encoding="utf-8").split("---")[1])
+    # `_record_failure` hands `_failure_summary` the text it received, and that
+    # function head-slices it (`app/autonomy.py:772`). The board row, the fleet
+    # watchdog's grep and this task's own stall alarm all print this field, so the
+    # witness had better ride in the BODY and the new keys than be welded onto it.
+    assert fm["summary"] == "timed out after 1s", fm
+    assert fm["status"] == "failed" and fm["failure_kind"] == "task", fm
+    assert fm["timeout"] is True and fm["timeout_seconds"] == 1, fm
+    assert re.search(r"timed out after 1s", record.read_text(encoding="utf-8")), (
+        "the summary no longer reads as it did before the witness was added")
+    # The new fields are HERE, beside the old ones rather than replacing any.
+    assert isinstance(fm["idle_seconds"], (int, float)), fm
+    assert fm["tool_calls_dispatched"] == 1, fm
+
+    task_text = (budget_env.tasks / "86-nightly-iv-metrics-series.md").read_text(
+        encoding="utf-8")
+    assert re.search(r"^failure_count: 4$", task_text, re.M), (
+        "a witnessed timeout did not spend one unit of the retry budget, which is the "
+        "one behavioural promise this round must not silently break")
+    # The shape `append_activity_line` writes and the daily triage greps: an ISO-Z
+    # stamp, `Run <run_id> — FAILED (task): <summary>`, and the record citation.
+    assert re.search(r"^- \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: Run run_86_\d{8}_\d{6} "
+                     r"— FAILED \(task\): timed out after 1s "
+                     r"\[full: autonomy-runs/86/run_86_\d{8}_\d{6}\.md\]$",
+                     task_text, re.M), (
+        "the Activity Log line changed shape; the stall alarms and the daily triage "
+        "read it verbatim: " + task_text.splitlines()[-1])

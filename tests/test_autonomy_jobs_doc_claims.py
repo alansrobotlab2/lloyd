@@ -802,7 +802,8 @@ def test_the_pilot_frozenset_citation_resolves_to_the_line_it_names():
     way its predecessor did — the code moving under the prose fails here first. That is
     not hypothetical: #2675 widened the roster to seven and wrote its per-id reasons
     above the definition, which moved it from 2818 to 2830, and this node followed the
-    code instead of failing that change.
+    code instead of failing that change. #2704 moved it again, to 2898, by adding
+    `_last_tool_result_section` above it — the same follow-the-code move, made again.
     """
     funcs = _functions_section()
     assert "`EVIDENCE_PILOT_TASK_IDS" in funcs, (
@@ -3196,7 +3197,7 @@ def _citation_drift(text: str) -> tuple[int, int, list[str]]:
     """`(instances, distinct, drift lines)` for one slice of the document.
 
     Two counts because the doc cites one number twice: live prose holds 8 citation
-    instances over 7 distinct `path:line` pairs, `app/autonomy.py:2830` appearing in
+    instances over 7 distinct `path:line` pairs, `app/autonomy.py:2898` appearing in
     both §The functions and §Evidence pilot. A vacuity guard on the instances alone
     would not notice the second citation being deleted, and one on the distinct count
     alone would not notice a citation being added without a symbol beside it.
@@ -3263,7 +3264,7 @@ def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
 
     Eight citation instances over seven distinct files-and-numbers, in today's live
     prose
-    (`app/autonomy.py:2830` twice, then `tests/test_worker_evidence.py:677`,
+    (`app/autonomy.py:2898` twice, then `tests/test_worker_evidence.py:677`,
     `tests/test_skill_tool_names.py:150`, `scripts/skill_lint.py:281`,
     `agent_mcp/skills.py:87`, `app/routers/backlog.py:812` and
     `web/src/components/pages/BacklogPage.tsx:572`). The eighth distinct citation in
@@ -3282,7 +3283,7 @@ def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
     assert (instances, distinct) == (8, 7), (
         f"the citation resolver saw {instances} citations ({distinct} distinct) in "
         f"live prose; today there are 8 instances over 7 distinct `path:line` pairs "
-        f"(`app/autonomy.py:2830` in two sections), so either this document's citation "
+        f"(`app/autonomy.py:2898` in two sections), so either this document's citation "
         f"shape changed or the pattern in CITATION did — a resolver that matches "
         f"nothing reports no drift, which is not a clean result")
 
@@ -3322,9 +3323,9 @@ def test_the_resolver_ignores_a_citation_that_lives_only_in_the_dated_review_log
     requirement. (b) The SAME citation and symbol, fed as live prose, DOES drift, so
     "not reported" is the scope doing the work rather than a blind pattern: the
     2026-09-12 entry cites `app/autonomy.py:710` for `EVIDENCE_PILOT_TASK_IDS`, which
-    is defined at `app/autonomy.py:2830` today (#2675 moved it there from 2818 by
+    is defined at `app/autonomy.py:2898` today (#2675 moved it there from 2818 by
     writing the roster's per-id reasons above it) — seed that sentence as live prose
-    and it drifts, naming 2830. (c) The two existing nodes that keep the log's
+    and it drifts, naming 2898. (c) The two existing nodes that keep the log's
     history honest (`test_the_pilot_frozenset_citation_resolves_to_the_line_it_names`
     forbidding the number in live prose, `test_the_dated_review_log_entry_keeps_what_was_true_that_day`
     requiring it in the log) still assert their own pair of claims — this node neither
