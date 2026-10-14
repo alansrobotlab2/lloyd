@@ -30,8 +30,10 @@ later: the same rows, a rate 1.7× higher, and the other branch chosen.
 
 from __future__ import annotations
 
+import ast
 import collections
 import json
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -371,7 +373,6 @@ def test_the_analysis_tiers_with_the_gate_and_not_with_its_own_patterns(monkeypa
         "the tier — so the number reported is not the gate's answer for this call")
 
     import inspect
-    import re
 
     src = inspect.getsource(C)
     assert "re.compile" not in src, "the analysis grew its own command patterns"
@@ -403,6 +404,9 @@ MARKER = Path.home() / "obsidian" / "backlog" / "data" / \
 #: The seam's own first row, and the file's head row, which is a `rerank` row.
 SEAM_FIRST_ROW = "2026-09-25T18:45:16Z"
 HARNESS_DOC = Path(__file__).resolve().parents[1] / "architecture" / "harness.md"
+#: This repo's root, for the two nodes at the end of the file that read the
+#: calibration pair's prose off disk instead of trusting what is loaded.
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def marker() -> dict:
@@ -464,9 +468,16 @@ def test_the_quoted_figures_recompute_from_the_witness_bytes(tmp_path):
     committed bytes, so the ruling does not depend on a file that keeps growing.
 
     Tier-dependent axes are NOT asserted, deliberately: tiering a `Bash` row
-    needs the session transcript, and the groundskeeper gzips those at 30 days
-    (`scripts/groundskeeper/retention-sweep.py:264`), so pinning them would put a
-    permanent ruling on a retention timer. An empty transcripts dir is passed for
+    needs the session transcript, and the groundskeeper gzips a transcript once
+    its run has been quiet for `BACKGROUND_SESSION_ARCHIVE_AGE_DAYS`, 30 days —
+    the arm `_archive_age_for` takes for every session this corpus names, since
+    each of its rows is a `platform: worker` background run (`NON_USER_PLATFORMS`)
+    and none of its sources is a bench one. An ordinary chat conversation is a
+    different store on a longer timer, and that horizon is NOT the one here. So
+    pinning the tier axis to the live join would put a permanent ruling on that
+    retention timer; the axis is pinned instead from the extract's own bytes, by
+    `test_the_tier_axis_recomputes_from_the_witness_bytes`, so the witness does
+    not need re-extracting every month. An empty transcripts dir is passed for
     that reason; the label, outcome, source and hook axes — which need only these
     bytes, and carry the branch argument — are asserted exactly."""
     rows, integrity = C.load_corpus(WITNESS, tmp_path / "no-transcripts")
@@ -553,8 +564,12 @@ def test_the_recorder_and_the_transcript_writer_agree_on_what_the_analysis_reads
 def test_the_tier_axis_recomputes_from_the_witness_bytes():
     """Clause 6's decisive half, and the one an extract could get wrong: a tier
     needs the command string, which lives in the transcripts, which the
-    groundskeeper gzips at 30 days (`retention-sweep.py:252-264`). So the witness
-    carries `recovered_arguments` for the positives, and this node runs the SAME
+    groundskeeper gzips after `BACKGROUND_SESSION_ARCHIVE_AGE_DAYS`, 30 days —
+    the horizon `_archive_age_for` returns for a `platform: worker` background
+    run, which is what every session in this corpus is; the longer ordinary-chat
+    store is not the one that expires this evidence, and the extract does not
+    have to be rebuilt when the gzips fire. So the witness carries
+    `recovered_arguments` for the positives, and this node runs the SAME
     verification the live join runs — `matches_digest` first, tier second — over
     those bytes.
 
@@ -769,3 +784,157 @@ async def test_a_row_the_seam_actually_wrote_is_a_row_the_analysis_can_tier(
             "writes, so the whole cross-tab would be counting the wrong key")
     finally:
         djev_shadow.reset_for_tests()
+
+
+# ── #2679: the retention rule is cited by constant, never by line ────────────
+#
+# Both clause-6 docstrings above justified leaving the tier axis unpinned from the
+# live transcript join by pointing at a line of the retention sweep: old line 264
+# in the first, the span 252-264 in the second (the site the item never named).
+# Neither line is about sessions any more. Commit 3b438c45 inserted store 19's
+# docstring ahead of the sweep's constants, so both numbers now land inside the
+# facts-quarantine and pause_journal stores' prose. The rule itself is
+# `_archive_age_for` in `scripts/groundskeeper/retention-sweep.py`, and the
+# horizon that applies here is the background one, 30 days, because every session
+# the witness names is `platform: worker` — not the longer ordinary-chat horizon,
+# which is what the item's "change 30 to 90" prescription would have planted.
+#
+# These two nodes hold that prose in place. They are the only new nodes here, and
+# the change rewrites no existing test body — prose and nothing but.
+
+#: The citation shape that rotted: the sweep named by a line number. That file's
+#: store docstrings grow, every number below them moves, and the pointer silently
+#: starts naming a different store — the `file:line` class recorded at
+#: `memory/learnings` for line citations.
+RETENTION_LINE_CITATION_RE = re.compile(r"retention-sweep\.py:[0-9]")
+#: The ordinary-chat horizon constant, and only that one. The left boundary is
+#: load-bearing: the background constant's name ENDS with the chat constant's, so
+#: a pattern that looks for it followed by any non-underscore fires on every
+#: correct use of the background one, and the naive form of that check cannot
+#: coexist with clause 2, which requires the background constant to be named twice.
+#: Split across two literals because a node that bans a string cannot hold that
+#: string: the file it reads is this one.
+CHAT_HORIZON_CITATION_RE = re.compile(r"(?<![A-Z_])SESSION_ARCHIVE_" r"AGE_DAYS")
+#: The analysis and the test that pins it. Both halves carry the 30-day figure in
+#: prose, so the ban covers the pair, not only the file the item named.
+CALIBRATION_PAIR = ("tests/test_action_review_calibration.py",
+                    "eval/djev/action_review_calibration.py")
+#: The two clause-6 nodes whose docstrings give the retention reason.
+RETENTION_DOC_NODES = ("test_the_quoted_figures_recompute_from_the_witness_bytes",
+                       "test_the_tier_axis_recomputes_from_the_witness_bytes")
+#: The horizon this corpus falls under, spelled once so both nodes ask for it.
+BACKGROUND_CONSTANT = "BACKGROUND_SESSION_ARCHIVE_AGE_DAYS"
+#: The figure where clause 2 asks for it: beside the name, in the same breath. A
+#: bare `"30" in docstring` cannot fail in the case that matters — prose that says
+#: 130 days satisfies it, and so does a constant in one sentence and a stray "30"
+#: in another — so the pair is matched as the phrase the docstrings use.
+HORIZON_FIGURE_RE = re.compile(re.escape(BACKGROUND_CONSTANT) + "`?, 30 days")
+
+
+def _docstrings_of(names: tuple[str, ...]) -> dict[str, str]:
+    """Each named node's docstring, read out of this file's own AST, so a node
+    renamed away drops out of the map instead of being checked against a copy of
+    prose nothing runs."""
+    tree = ast.parse(Path(__file__).resolve().read_text(encoding="utf-8"))
+    return {n.name: (ast.get_docstring(n) or "")
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name in names}
+
+
+def test_the_calibration_pair_cites_the_sweep_by_symbol_and_never_by_line():
+    """#2679 clause 1: neither half of the calibration pair points at the retention
+    sweep by line number, and neither names the ordinary-chat horizon constant.
+
+    Both patterns are seeded with the text they replaced, so a guard that stopped
+    matching cannot read as a clean file — which is the case a ban-list cannot tell
+    apart from success on its own.
+    """
+    for rel in CALIBRATION_PAIR:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert not RETENTION_LINE_CITATION_RE.search(text), (
+            f"{rel} points at the retention sweep by line number again; that file's "
+            "docstrings grow, the number moves, and the pointer names somebody "
+            f"else's store — cite `{BACKGROUND_CONSTANT}` or `_archive_age_for`")
+        assert not CHAT_HORIZON_CITATION_RE.search(text), (
+            f"{rel} names the ordinary-chat horizon constant. Every session this "
+            "corpus names is `platform: worker`, so the rule that expires its "
+            "transcripts is the 30-day background arm, not the chat one")
+    for was in ("the groundskeeper gzips those at 30 days "
+                "(`scripts/groundskeeper/retention-sweep.py:" "264`), so pinning",
+                "the groundskeeper gzips at 30 days "
+                "(`retention-sweep.py:" "252-264`). So the witness"):
+        assert RETENTION_LINE_CITATION_RE.search(was), (
+            f"{was!r} does not trip the citation pattern, so the loop over the "
+            "pair is matching nothing and passes whatever the files say")
+    assert CHAT_HORIZON_CITATION_RE.search("30 d (`SESSION_ARCHIVE_" "AGE_DAYS`)"), (
+        "the chat-horizon pattern no longer matches the bare constant either, so "
+        "the check over the pair above is matching nothing")
+    assert not CHAT_HORIZON_CITATION_RE.search(f"30 d (`{BACKGROUND_CONSTANT}`)"), (
+        "the chat-horizon pattern fired on the background constant, whose name ends "
+        "with the chat one — that reading rejects the fix clause 2 asks for, so the "
+        "left boundary is the entire point of the pattern")
+
+
+def test_both_retention_docstrings_name_the_constant_and_the_session_class():
+    """#2679 clauses 2 and 3: each clause-6 docstring states the horizon by
+    constant and says which class of session that horizon runs on.
+
+    Counted, not sampled: exactly the two named nodes must carry the constant.
+    Otherwise a rename or a deleted docstring shortens the list the loop walks,
+    and a loop over a list that quietly lost its second entry is the same vacuous
+    green the node above seeds against.
+
+    Both names are then resolved against the sweep itself, which is the half a
+    line-number pointer could never offer: a line says nothing about whether the
+    rule still lives there, and a symbol fails the moment it is renamed or its
+    value moves — which is the drift this whole item is about.
+    """
+    sweep = (ROOT / "scripts" / "groundskeeper" / "retention-sweep.py").read_text(
+        encoding="utf-8")
+    assert re.search(rf"^{BACKGROUND_CONSTANT} = 30$", sweep, re.MULTILINE), (
+        f"the docstrings say 30 days and name `{BACKGROUND_CONSTANT}`, but the "
+        "sweep no longer defines it at 30: the horizon the ruling's expiry rests on "
+        "has moved, and one of the two has to be corrected")
+    assert re.search(r"^def _archive_age_for\(", sweep, re.MULTILINE), (
+        "`_archive_age_for` is no longer the symbol that chooses the horizon, so "
+        "both docstrings point at a rule somebody renamed")
+    docs = _docstrings_of(RETENTION_DOC_NODES)
+    assert len(docs) == len(RETENTION_DOC_NODES), (
+        f"only {sorted(docs)} of the two clause-6 nodes is still in this file, so "
+        "the retention prose is being counted over a shorter list than the clause "
+        "describes")
+    named = sorted(n for n, d in docs.items() if BACKGROUND_CONSTANT in d)
+    assert named == sorted(RETENTION_DOC_NODES), (
+        f"{named} name `{BACKGROUND_CONSTANT}` beside the 30-day figure; both "
+        "retention docstrings must, or the figure is a bare number again and the "
+        "next reader has to re-derive which of the sweep's three archive horizons "
+        "it was read off")
+    for name, doc in docs.items():
+        flat = " ".join(doc.split())
+        assert "_archive_age_for" in flat, (
+            f"{name} states the horizon without the symbol that chooses it, so a "
+            "reader cannot check which arm of the sweep the number came from")
+        assert "platform: worker" in flat, (
+            f"{name} does not say the session class the horizon runs on. Without "
+            "it the 30 days reads either as 're-extract the witness every month' or "
+            "as 'the ordinary-chat store applies', and both readings are wrong")
+        assert HORIZON_FIGURE_RE.search(flat), (
+            f"{name} does not put the figure beside the name it belongs to "
+            "(``" + BACKGROUND_CONSTANT + "``, 30 days). A number and a constant "
+            "that sit in different sentences are the same stale pointer wearing "
+            "different clothes")
+    half_fixed = {
+        RETENTION_DOC_NODES[0]: "gzips those at 30 days, constant unnamed",
+        RETENTION_DOC_NODES[1]: f"gzips at 30 days (`{BACKGROUND_CONSTANT}`)",
+    }
+    assert ([n for n, d in half_fixed.items() if BACKGROUND_CONSTANT in d]
+            == [RETENTION_DOC_NODES[1]]), (
+        "the count above could not tell a half-fixed file from a fixed one")
+    assert HORIZON_FIGURE_RE.search("`" + BACKGROUND_CONSTANT + "`, 30 days"), (
+        "the adjacency pattern no longer matches the phrasing both docstrings use, "
+        "so the loop above is matching nothing")
+    for wrong in ("`" + BACKGROUND_CONSTANT + "`, 130 days",
+                  "gzips at 30 days, the constant named nowhere near it"):
+        assert not HORIZON_FIGURE_RE.search(wrong), (
+            f"{wrong!r} trips the adjacency pattern and should not: the figure is "
+            "either not 30 or not the one attached to the constant")
