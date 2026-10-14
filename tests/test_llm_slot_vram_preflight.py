@@ -23,9 +23,19 @@ preflight, so that is the layer pinned here.
 Nothing here touches a real GPU or a real engine. Each boot runs against a
 PATH-shimmed ``nvidia-smi`` and a fake engine binary, and the guard's own
 path-override defaults (``LLAMA_SERVER``, ``VLLM_VENV``, ``MODEL_DIR``,
-``MODEL_FILE``, ``GPU_UTIL``, ``OVERHEAD_MIB``) exist so the script can be driven to
+``MODEL_FILE``, ``GPU_UTIL``, ``OVERHEAD_MIB``, and for the decider
+``DECIDER_VENV`` and ``DECIDER_MODEL_DIR``) exist so the script can be driven to
 its guard at all — before #1316 ``LLAMA_SERVER`` was hardcoded, which left no way to
 reach the check without building llama.cpp and letting it try.
+
+Three launchers share GPU 2 and are driven here. Two of them are slots the backend
+knows: the secondary and djev, whose either/or ``_sync_llm_slots`` enforces at the
+flag level. The third is ``start-decider.sh`` (#2716), which no flag can arm — it is
+absent from ``app/llm_slots.py::_SLOTS`` and from ``config.yaml``, and its own unit
+says so (``agent-services/supervisor/conf.d/agent-decider.conf:5-8``: "started and
+stopped by hand", serving ``:8012``). For that launcher the preflight is not one of
+two guards, it is the only one: nothing above it can see the card or the other
+tenants, so its guard is pinned from the same mocked reading as the other two.
 
 Design points this suite deliberately pins:
 
@@ -33,17 +43,19 @@ Design points this suite deliberately pins:
    guard on the llama.cpp path only would leave the vLLM branch to crash exactly as
    before (``--gpu-memory-utilization 0.90`` against an occupied card is the same
    ``alloc_tensor_range`` failure);
-2. the need is *measured* — GGUF bytes + KV + overhead for llama.cpp, and for vLLM
-   the same ``GPU_UTIL`` variable that feeds the flag, never a transcribed comment
-   (the ~21.7 GiB in the script's budget comment is prose);
-3. the two scripts share the reading via ``agent-services/bin/gpu-mem.sh``, so they
-   cannot disagree about one card;
+2. the need is *measured* — GGUF bytes + KV + overhead for llama.cpp, weights +
+   headroom for the decider, and for vLLM the same ``GPU_UTIL`` variable that feeds
+   the flag, never a transcribed comment (the ~21.7 GiB in the script's budget
+   comment, and the 19.6 GiB in the decider's, are prose);
+3. all three scripts share the reading via ``agent-services/bin/gpu-mem.sh``, so
+   they cannot disagree about one card;
 4. a sufficient reading still boots — the shipped default must clear its own guard,
    or the guard has silently disabled the slot;
-5. an unmeasurable card must NOT refuse here: this slot is optional, so a driver
-   fault must not be promoted into an engine outage. ``start-djev.sh`` is the
-   opposite case, and its own refusal still fires on the same mocked reading — see
-   the last test.
+5. an unmeasurable card must NOT refuse for the *optional secondary*: a driver fault
+   must not be promoted into an engine outage on the one slot whose off state is the
+   designed one. ``start-djev.sh`` is the opposite case, and ``start-decider.sh``
+   takes the same posture as djev and for the same reason — a hand start onto a card
+   someone believes they just freed. Both still fire on the same mocked reading.
 
 Run: pytest tests/test_llm_slot_vram_preflight.py -q   (no GPU, no vLLM)
 """
@@ -61,6 +73,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BINDIR = ROOT / "agent-services" / "bin"
 START_SECONDARY = BINDIR / "start-secondary.sh"
 START_DJEV = BINDIR / "start-djev.sh"
+START_DECIDER = BINDIR / "start-decider.sh"
 GPU_MEM = BINDIR / "gpu-mem.sh"
 
 # The shipped llama.cpp defaults: MAX_LEN 262144 at 20 KiB/token (the KV term the
@@ -81,6 +94,30 @@ VLLM_NEED_MIB = 22119
 GPU2 = "2"
 DJEV_HOLDER = "2063085, 24010 MiB, VLLM::EngineCore"
 SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# ── The decider (#2716) ────────────────────────────────────────────────
+# The fake checkpoint's apparent weight total, in MiB. It stands in for the shipped
+# 35b's weights without the 19.6 GiB download: `du -sm --apparent-size` of one
+# truncated file is what the script's own need is built from (:140-142), so any
+# figure here is one the guard can be tested against — and 19600 is close enough to
+# the real budget that the shipped default's fit against a real card is the fit
+# being asserted.
+DECIDER_WEIGHTS_MIB = 19600
+DECIDER_HEADROOM_MIB = 2048         # HEADROOM_MIB's shipped default (:101)
+DECIDER_NEED_MIB = DECIDER_WEIGHTS_MIB + DECIDER_HEADROOM_MIB          # 21648
+DECIDER_SPARE_ON_CARD_MIB = CLAUSE4_CARD_MIB - DECIDER_NEED_MIB        # 2928
+# What the unit's `command=` line and the script's own `${PORT:-8012}` agree on
+# (agent-services/supervisor/conf.d/agent-decider.conf:1, start-decider.sh:91).
+DECIDER_PORT = "8012"
+# The `die`s that fire before the card guard is reached: no venv (:134), the import
+# probe (:135-136), the checkpoint's two JSON files (:137-138), the weight sum
+# (:141). Any of these exits 2 like a refusal does, so a boot that died on one is
+# indistinguishable from a refusal unless the messages are checked for. The fourth is
+# listed for detection rather than for use: `set -e -o pipefail` aborts the `du`
+# pipeline at :140 before :141 can print, so a no-shard checkpoint currently exits 1
+# silently — see the last node in this file.
+DECIDER_PREFLIGHT_DIES = ("no venv at", "does not import", "no checkpoint at",
+                          "no safetensors under")
 
 
 def _executable(path: Path, body: str) -> Path:
@@ -217,6 +254,120 @@ def boot(tmp_path, shim_dir):
             "execed": marker.read_text() if marker.exists() else "",
         }
     return run
+
+
+@pytest.fixture
+def decider_fakes(tmp_path):
+    """A fake decider install: the four files that stand between `start-decider.sh`
+    and its card guard, none of which exists on this box.
+
+    The script dies three times before it reads the card — ``[[ -x "$PY" ]]`` (:134),
+    ``$PY -c "import decider.serve_vllm"`` (:135-136) and the checkpoint test
+    (:137-138) — and a fourth if the weight sum comes out zero (:141). Two of those
+    are not satisfiable by the ``boot`` fixture's fakes: the checkpoint test wants
+    ``decider_config.json`` as well as ``config.json``, and the weight sum needs a
+    real ``*.safetensors`` for ``du`` to size. So this builds all four:
+
+      * ``$DECIDER_VENV/bin/python`` — executable, and silent. The script runs it
+        once, for the import probe; it writes no marker, so ``execed`` below means
+        the *serve* step was reached and nothing else.
+      * ``$DECIDER_VENV/bin/uvicorn`` — the fake engine. The script ``exec``s this
+        path by name (:181), so a refusal that reached it would be visible.
+      * ``$DECIDER_MODEL_DIR/config.json`` + ``decider_config.json``, and one
+        ``*.safetensors`` truncated to ``weights_mib`` — sparse, so a 19600 MiB
+        apparent size costs no disk and no 19.6 GiB download, and ``du -sm
+        --apparent-size`` reads back exactly the number the test asked for.
+
+    The two overrides are the whole route in: nothing here consults
+    ``.venvs/vllm-decider`` or ``llm/models``, both absent on this box, and
+    ``test_the_decider_never_looks_outside_its_fakes`` pins that by checking the
+    paths the script actually served and died on are the tmp ones.
+    """
+    def build(*, weights_mib=DECIDER_WEIGHTS_MIB):
+        home = tmp_path / "decider-home"
+        venv = home / "decider-venv"
+        model = home / "decider-model"
+        marker = tmp_path / "decider-exec.txt"
+        if marker.exists():
+            marker.unlink()
+        model.mkdir(parents=True, exist_ok=True)
+        (model / "config.json").write_text('{"architectures": ["DeciderForCausalLM"]}')
+        (model / "decider_config.json").write_text('{"layout": "plain"}')
+        weights = model / "model-00001-of-00001.safetensors"
+        weights.write_bytes(b"")
+        os.truncate(weights, weights_mib * 1024 * 1024)
+        _executable(venv / "bin" / "python", "#!/usr/bin/env bash\nexit 0\n")
+        _executable(venv / "bin" / "uvicorn", f"""
+            #!/bin/bash
+            # The serve step's own argv plus the two env vars the script exports for
+            # the app: the checkpoint reaches the engine through DECIDER_MODEL, not
+            # through a --model flag, so without this line nothing in the transcript
+            # could say which checkpoint this boot would have loaded.
+            echo "uvicorn $* | DECIDER_MODEL=${{DECIDER_MODEL:-}} V=${{DECIDER_VARIANT:-}}" >> {marker}
+            exit 0
+        """)
+        return {"home": home, "venv": venv, "model": model, "marker": marker}
+    return build
+
+
+@pytest.fixture
+def boot_decider(decider_fakes, shim_dir):
+    """Boots ``start-decider.sh`` against those fakes and the shimmed ``nvidia-smi``.
+
+    Reports ``rc``, the merged output, what the fake engine was exec'd with, and
+    whether the run ever got past the script's own preflight dies — which matters
+    because every one of those dies exits 2 exactly like the refusal does, so a
+    fixture that quietly stopped building its fakes would look like a passing refusal
+    test. The PATH deliberately carries the shim first: the script prepends its own
+    ``$VENV/bin`` and ``/opt/cuda/bin``, neither of which has an ``nvidia-smi`` here,
+    and a real one on the path would read this box's actual card and make every
+    figure below whatever the tenants happened to be using.
+    """
+    def run(*, weights_mib=DECIDER_WEIGHTS_MIB, env_extra=None, overrides=None,
+            direct=False, broken=None, script=START_DECIDER):
+        fakes = decider_fakes(weights_mib=weights_mib)
+        env = {
+            "HOME": str(fakes["home"]),
+            "PATH": f"{shim_dir}:{SYSTEM_PATH}",
+            "GPU": GPU2,
+            "PORT": DECIDER_PORT,
+            "DECIDER_VENV": str(fakes["venv"]),
+            "DECIDER_MODEL_DIR": str(fakes["model"]),
+        }
+        if env_extra:
+            env.update(env_extra)
+        if overrides:
+            env.update(overrides)
+        argv = [str(script)] if direct else ["/bin/bash", str(script)]
+        proc = subprocess.run(argv, env=env, cwd=str(fakes["home"]),
+                              capture_output=True, text=True, timeout=90)
+        out = proc.stdout + proc.stderr
+        die = next((d for d in DECIDER_PREFLIGHT_DIES if d in out), None)
+        if broken is not None:
+            assert die == broken, (
+                f"expected the run to die on the {broken!r} preflight, got "
+                f"die={die!r} rc={proc.returncode}: {out[-500:]}")
+        return {
+            "rc": proc.returncode,
+            "out": out,
+            "execed": (fakes["marker"].read_text()
+                       if fakes["marker"].exists() else ""),
+            "preflight_die": die,
+        }
+    return run
+
+
+def _reached_the_guard(r):
+    """Fail unless the boot got past the preflight and actually ran the card guard.
+
+    Without this an assert on ``rc == 2`` is satisfied by a missing fake checkpoint
+    just as well as by a refusal, and the guard could regress to a no-op with the
+    whole decider suite green.
+    """
+    assert r["preflight_die"] is None, (
+        f"the run died in the preflight ({r['preflight_die']!r}) instead of reaching "
+        f"the card guard, so it proved nothing about it: {r['out'][-500:]}")
+    return r
 
 
 def _helper_probe(body: str, tmp_path, path_dirs, shim_env=None):
@@ -438,15 +589,222 @@ def test_unreadable_card_cannot_fabricate_a_measurement(shim, boot):
 # Clause 3: one shared helper, and the djev refusal still fires on it.
 # ---------------------------------------------------------------------------
 
-def test_both_start_scripts_read_the_card_from_one_helper():
-    """Neither script may inline the query, and both must source the helper.
+# ---------------------------------------------------------------------------
+# The decider (#2716): the third GPU-2 tenant, the one no flag can arm.
+# ---------------------------------------------------------------------------
+
+def test_the_decider_refuses_a_card_held_by_another_tenant(shim, boot_decider):
+    """Clause 1 of #2716: a held card means a refusal, both figures, and no exec.
+
+    This is the launcher the other 18 nodes cannot see. It has no flag in
+    ``config.yaml``, is absent from ``app/llm_slots.py::_SLOTS``, and its own unit
+    says it "is started and stopped by hand"
+    (``agent-services/supervisor/conf.d/agent-decider.conf:5-8``), so
+    ``server.py``'s ``_sync_llm_slots`` never arbitrates it and the VRAM check is the
+    only thing between a hand ``supervisorctl start agent-decider`` and a second
+    tenant on a single-tenant card. Nothing above it would notice the regression; a
+    vLLM ``alloc_tensor_range`` crash on an occupied card is what "noticing" looks
+    like here, which is the failure #1316 was filed against for the secondary.
+    """
+    r = boot_decider(env_extra=shim(free=20))
+    _reached_the_guard(r)
+    assert r["rc"] == 2, f"guard did not refuse on 20 MiB free (rc={r['rc']}): {r['out'][-600:]}"
+    assert not r["execed"], f"refused but still exec'd the engine: {r['execed']}"
+    # Both figures on the refusal line, so the tail of supervisord's log names the
+    # shortfall without the reader hunting the banner for the card line.
+    assert (f"has 20 MiB free, this needs {DECIDER_NEED_MIB}" in r["out"]), r["out"][-600:]
+    assert f"({20} MiB free of {CLAUSE4_CARD_MIB})" in r["out"], r["out"][-600:]
+    # The one-tenant rule, and the concrete way out of it: unlike the secondary's
+    # refusal this one cannot name a flag of its own (it has none), so the fix it
+    # offers is the other tenant's flag or its stop command.
+    assert "GPU 2 holds one tenant" in r["out"], r["out"][-600:]
+    assert "djev.enabled: false" in r["out"], "must name the counterpart flag to flip"
+    assert "supervisorctl stop agent-djev" in r["out"], "or the hand stop that frees the card"
+    assert DJEV_HOLDER in r["out"], "must show what is holding the card"
+
+
+def test_the_deciders_need_is_measured_from_the_checkpoint(shim, boot_decider):
+    """Clause 2 of #2716: need = measured weight bytes + HEADROOM_MIB, never a comment.
+
+    ``start-decider.sh``'s header budgets "NVFP4 weights, resident as Marlin 19.6
+    GiB", and a guard that costed that sentence would keep working right up to the
+    checkpoint swap that made it wrong — the same defect #1316 named in the
+    secondary's ~21.7 GiB comment. So the figure is moved twice here: a different
+    fake weight total must move the printed need, and so must ``HEADROOM_MIB``.
+    """
+    default = boot_decider(env_extra=shim(free=20))
+    _reached_the_guard(default)
+    assert f"weights {DECIDER_WEIGHTS_MIB} + headroom {DECIDER_HEADROOM_MIB}" \
+           f" = {DECIDER_NEED_MIB} MiB" in default["out"], default["out"][-600:]
+
+    lighter_mib = 12000
+    lighter = boot_decider(weights_mib=lighter_mib, env_extra=shim(free=20))
+    _reached_the_guard(lighter)
+    assert f"this needs {lighter_mib + DECIDER_HEADROOM_MIB}." in lighter["out"], \
+        "the need must follow the checkpoint's measured size: " + lighter["out"][-600:]
+    assert "19.6" not in lighter["out"], "the header's GiB prose must not be the need"
+
+    tall_headroom = boot_decider(env_extra=shim(free=20),
+                                 overrides={"HEADROOM_MIB": "4096"})
+    _reached_the_guard(tall_headroom)
+    assert f"this needs {DECIDER_WEIGHTS_MIB + 4096}." in tall_headroom["out"], \
+        "HEADROOM_MIB must be the other term: " + tall_headroom["out"][-600:]
+
+
+def test_a_decider_start_one_mib_short_refuses_and_an_exact_one_boots(shim,
+                                                                      boot_decider):
+    """Clause 2's boundary from both sides: ``free < need``, not ``<=``.
+
+    One MiB below the need refuses; a reading exactly equal to it boots. The
+    refuse-only tests would still pass if the comparison became ``<=``, and the
+    failure that ships then is a launcher that refuses the exact-fit start it exists
+    to make — the same off-by-one #1316's review caught on the secondary's vLLM
+    ceiling, arriving from the other direction.
+    """
+    short = boot_decider(env_extra=shim(free=DECIDER_NEED_MIB - 1))
+    _reached_the_guard(short)
+    assert short["rc"] == 2 and not short["execed"], (
+        f"one MiB short of the need must refuse: rc={short['rc']} "
+        f"execed={short['execed']!r}")
+    assert f"has {DECIDER_NEED_MIB - 1} MiB free, this needs {DECIDER_NEED_MIB}" \
+        in short["out"], short["out"][-600:]
+
+    exact = boot_decider(env_extra=shim(free=DECIDER_NEED_MIB))
+    _reached_the_guard(exact)
+    assert exact["rc"] == 0, (
+        f"a start with exactly its need was refused: rc={exact['rc']} "
+        f"{exact['out'][-500:]}")
+    assert "uvicorn" in exact["execed"], f"exact fit never reached the exec: {exact['out'][-500:]}"
+    assert "refusing to start" not in exact["out"]
+
+
+@pytest.mark.parametrize("broken", ["fail", "nonnumeric", "empty"],
+                         ids=["nvidia-smi-exits-nonzero", "nvidia-smi-non-numeric",
+                              "nvidia-smi-replies-nothing"])
+def test_an_unmeasurable_card_kills_the_decider_instead_of_booting_it(
+        shim, boot_decider, broken):
+    """Clause 3 of #2716: here the decider takes djev's side, not the secondary's.
+
+    Design point 5 (top of this file) lets ``start-secondary.sh`` warn and boot on an
+    unreadable card, because that slot is optional and ``secondary_enabled: false``
+    is a designed state — a driver fault must not be promoted into an engine outage
+    there. The decider's posture is the opposite one, and it is the defensible
+    choice rather than an oversight: it has no flag and no designed-off state, so
+    the only time it is ever started is by hand, onto a card somebody believes they
+    have just freed by stopping djev. A fabricated measurement at that moment is the
+    one failure that double-books a single-tenant card, and nothing above this script
+    is there to notice. So an unmeasurable card is a death, as it is for
+    ``start-djev.sh`` — which is why this asserts the die and not a warning.
+    """
+    kw = ({"fail": 1} if broken == "fail" else
+          {"free": "N/A"} if broken == "nonnumeric" else {"empty": 1})
+    r = boot_decider(env_extra=shim(**kw))
+    _reached_the_guard(r)
+    assert r["rc"] == 2, f"booted on an unread card (rc={r['rc']}): {r['out'][-500:]}"
+    assert "no readable gpu 2" in r["out"].lower(), r["out"][-500:]
+    assert not r["execed"], f"refused the reading and exec'd anyway: {r['execed']}"
+    assert "MiB free" not in r["out"], (
+        "printed a free figure it never read: " + r["out"][-500:])
+    assert "holds one tenant" not in r["out"], (
+        "the refusal advice is for a card it measured; a death names no holders")
+
+
+def test_the_deciders_shipped_default_clears_its_own_guard(shim, boot_decider):
+    """Clause 4 of #2716: a whole card free, the default reaches its serve step.
+
+    A guard that refused every legitimate boot would keep this suite green — every
+    refusal assertion above would still hold — so this is the node that tells a
+    guard from a disabled launcher. It also carries the arithmetic the launcher
+    exists to do: 19600 MiB of weights plus 2048 of headroom is 21648 against a
+    24576 MiB card, which fits with 2928 MiB to spare, so a real 35b start on a card
+    somebody has just freed is not refused by its own budget.
+
+    The exec is asserted down to ``decider.serve_vllm:app`` and ``--port 8012``,
+    because the whole point of reaching the serve step is the engine line: the unit
+   's ``command=`` runs this script, so the port the script defaults to is the port
+    anything could later read as "the decider is up".
+    """
+    assert DECIDER_NEED_MIB == 21648 and DECIDER_SPARE_ON_CARD_MIB == 2928
+    r = boot_decider(env_extra=shim(free=CLAUSE4_CARD_MIB))
+    _reached_the_guard(r)
+    assert r["rc"] == 0, f"a legitimate start was blocked: rc={r['rc']} {r['out'][-600:]}"
+    assert "refusing to start" not in r["out"]
+    assert "uvicorn decider.serve_vllm:app" in r["execed"], r["execed"]
+    assert f"--port {DECIDER_PORT}" in r["execed"], \
+        f"the shipped default port changed: {r['execed']}"
+
+
+def test_the_decider_never_looks_outside_its_fakes(shim, boot_decider, tmp_path):
+    """Every new node above reached the guard through the two overrides, and nothing else.
+
+    This box has no ``.venvs/vllm-decider`` and no checkpoint under ``llm/models``
+    (#2713's hazard (a)), so if a fake ever stopped being wired up the script would
+    fall back to those defaults, die with "no checkpoint at ...", exit 2, and every
+    refusal test here would read that as its own passing refusal. So this pins the
+    two things that make the suite honest: the checkpoint the script served is the
+    tmp one — the ``DECIDER_MODEL`` the fake engine reports being handed is the
+    witness, since the banner prints the model's *size*, never its path, and the
+    exec line carries no ``--model`` flag — and the preflight deaths before the guard
+    are still reachable, each naming the tmp path it looked for rather than a repo
+    default. A run that dies early has to say so out loud; exiting 2 in character
+    would let every refusal node below pass on a broken fixture.
+    """
+    r = boot_decider(env_extra=shim(free=CLAUSE4_CARD_MIB, apps=""))
+    assert r["rc"] == 0, r["out"][-400:]
+    fake_model = str(tmp_path / "decider-home" / "decider-model")
+    assert f"DECIDER_MODEL={fake_model} " in r["execed"], (
+        "the checkpoint the serve step was handed must be the fake one: "
+        + r["execed"][-400:])
+    for real in ("vllm-decider", "llm/models", "Mapika-decider"):
+        assert real not in r["out"] + r["execed"], (
+            f"consulted the real {real} path: {(r['out'] + r['execed'])[-500:]}")
+
+    missing_venv = tmp_path / "no-such-venv"
+    missing_model = tmp_path / "no-such-model"
+    missing_model.mkdir()
+    empty_model = tmp_path / "empty-model"
+    empty_model.mkdir()
+    (empty_model / "config.json").write_text("{}")
+    (empty_model / "decider_config.json").write_text("{}")
+    silent_venv = tmp_path / "silent-venv"
+    _executable(silent_venv / "bin" / "python", "#!/usr/bin/env bash\nexit 1\n")
+
+    for overrides, die in (
+            ({"DECIDER_VENV": str(missing_venv)}, "no venv at"),
+            ({"DECIDER_VENV": str(silent_venv)}, "does not import"),
+            ({"DECIDER_MODEL_DIR": str(missing_model)}, "no checkpoint at")):
+        dead = boot_decider(broken=die, overrides=overrides)
+        assert dead["rc"] != 0 and not dead["execed"], (
+            f"{die} must stop the script before any engine: {dead['out'][-400:]}")
+        assert str(tmp_path) in dead["out"], (
+            f"{die} must name the path it was pointed at, not a repo default: "
+            + dead["out"][-400:])
+
+    # The fourth preflight — a checkpoint dir whose glob finds no weight shard — is
+    # asserted fail-closed only, because that is all it is today. `set -e -o
+    # pipefail` aborts on the failing `du … | awk` inside the command substitution at
+    # :140, so the `die "no safetensors under $MODEL"` at :141 never runs for the case
+    # it was written for: the script exits 1 having printed nothing. It still cannot
+    # reach an engine, which is the property this suite owns. The missing diagnosis is
+    # a launcher defect recorded on #2716, not something to pin as intended.
+    no_shards = boot_decider(overrides={"DECIDER_MODEL_DIR": str(empty_model)})
+    assert no_shards["rc"] != 0 and not no_shards["execed"], (
+        "a checkpoint with no weight shards must not reach the engine: "
+        + no_shards["out"][-400:])
+
+
+def test_all_three_gpu2_launchers_read_the_card_from_one_helper():
+    """No launcher may inline the query, and all three must source the helper.
 
     Counted over the whole file text, not per call site, because the defect is two
     private copies of one measurement: the field list, the ``--id`` form and the
-    whitespace-stripping all have to move together or the two guards diverge.
+    whitespace-stripping all have to move together or the two guards diverge. The
+    third member is ``start-decider.sh``, added by #2716 — before that its card
+    reading was the one the sweep could not see, which is precisely how a fourth
+    private copy would have arrived.
     """
     assert GPU_MEM.exists(), "the shared reader must live under agent-services/bin/"
-    for script in (START_SECONDARY, START_DJEV):
+    for script in (START_SECONDARY, START_DJEV, START_DECIDER):
         text = script.read_text()
         assert text.count("--query-gpu") == 0, \
             f"{script.name} queries the card itself; it must go through gpu-mem.sh"
