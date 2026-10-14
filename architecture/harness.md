@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, harness]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-10-14
 ---
 
 # The agent harness
@@ -39,6 +39,8 @@ below.
 | `tool_result_spill.py` | tool results over 50k chars spilled to `sessions/<sid>.tool-results/` and replaced inline by a `<persisted-output>` marker naming the file |
 | `finalizer.py` | one extra completion under a JSON schema after the turn (`final_schema`) |
 | `run_state.py` | schema-validated execution state for long *worker* turns (#529): a step's patch rides the `final_schema` path, `Σ` is merged with null-deletion, the reasoning is discarded, and every applied and rejected patch goes to `state-trace.ndjson`. Imported by `workers/sources/_common.py`, not by the router — and explicitly **not** for the interactive loop, where rewriting state every step is directly opposed to keeping position 0 stable |
+| `capabilities.py` | each worker source's declared capability set, from which its envelope is `pool − allowed` rather than a hand-listed deny (#2269); `scheduled-task` is the only source with a per-job widening so far (#2471, #2670/#2671 wire `run_task` to its ceiling in shadow mode) |
+| `tool_roster.py` | the served tool names as a committed snapshot, so a typo in a declared capability set is an exception at boot; regenerate with `scripts/refresh_tool_roster.py` — a tool added upstream is absent from here until someone does |
 | `errors.py` | `HarnessError` (base), `ParseError`, `ToolDispatchError`, `MaxTurnsExceeded`, `ContextOverflowError`, `StreamStalledError`, `ToolDiscoveryError` |
 
 ## Invariants worth knowing before touching it
@@ -132,11 +134,13 @@ resolution, and neither is visible from the call site:
   deliberately.
 
 The Inner Voice observer runs on the primary (`inner_voice.model`, pinned
-there after that episode) at **the priority of the turn it watches** —
-`attach_observer_for_turn` passes `options.priority` straight through, so a
-chat's observer runs at 0 instead of queueing at the configured `1` behind
-every worker iteration. vLLM orders equal priorities by arrival, so an
-observer call still cannot preempt the turn that spawned it.
+there after that episode) at **the priority of the turn it watches, one step
+lower on an unattended one** — `_observer_priority` returns `options.priority`
+for a chat, so its observer runs at 0 instead of queueing at the configured `1`
+behind every worker iteration, and `options.priority + 1` for a platform in
+`sessions_io.NON_USER_PLATFORMS`, because a worker round's second-opinion call
+has no human waiting on its first token. vLLM orders equal priorities by
+arrival, so an observer call still cannot preempt the turn that spawned it.
 
 A `Task` subagent resolves nothing of its own — it inherits the calling
 turn's model and base URL, below.
@@ -195,7 +199,11 @@ The harness also carries its own unit suite *inside the package*, at
 `app/harness/tests/` — `test_loop_inject_ordering.py`,
 `test_parallel_dispatch.py`, `test_dispatch_split.py`, `test_stream_stall.py`,
 `test_finalizer.py`, `test_preserve_thinking.py`, `test_state_anchor.py`,
-`test_tool_search.py`, `test_loop_tool_search.py`, `test_harness_unit.py`.
+`test_tool_search.py`, `test_loop_tool_search.py`, `test_harness_unit.py`, and
+since then `test_loop_tool_surface.py` (the P9 surface split),
+`test_tool_choice_levers.py`, `test_shrink_arguments.py`,
+`test_context_meter.py`, `test_overflow_recovery.py`, `test_stream_retry.py`,
+`test_loop_invariants.py` (P1) and `test_telemetry.py` (P11).
 Both directories run under `pytest`; a change to `loop.py` usually breaks
 something in the second one first.
 
@@ -261,12 +269,13 @@ ignores the other's field *silently*:
 
 | Engine | Reads | Ignores |
 |---|---|---|
-| vLLM 0.28 (primary) | `reasoning` | `reasoning_content` |
-| llama.cpp (secondary, Qwen3.6) | `reasoning_content` | `reasoning` |
+| vLLM (primary) — measured on 0.28; the build serving `:8096` today is `0.31.1rc1.dev260+ga98247ab4`, see [[vllm]] §10 | `reasoning` | `reasoning_content` |
+| llama.cpp (secondary, Qwen3.6) — measured when `secondary_enabled` was true | `reasoning_content` | `reasoning` |
 
 vLLM accepts both on the wire but only populates the template from
-`reasoning` (`entrypoints/chat_utils.py:2000`); Qwen3.6's own
-`chat_template.jinja:91` reads `reasoning_content` and never looks at
+`reasoning` (`entrypoints/chat_utils.py:2000`, an upstream citation); the
+served model's own `agent-services/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP4/chat_template.jinja`
+reads `reasoning_content` and never looks at
 `reasoning`. Sending one spelling preserves thinking on one engine and quietly
 discards it on the other, which is the exact failure this mechanism exists to
 prevent. The builder is `_assistant_message_for_history`. `_prune_reasoning`
@@ -606,10 +615,22 @@ turn ends, restating its conclusion as a JSON object
   verdicts (41%) came back as well-formed JSON cut mid-string inside
   `check`/`evidence` — 13 of them `confirmed`, the verbose verdicts that
   matter — and every one was recorded `output is not JSON`, the same message a
-  model writing prose would get. The default is 4096 now, `finalizer.py` names
+  model writing prose would get. The budget shipped at 8192
+  (`harness.finalizer.max_tokens`, and `RunOptions.finalizer_max_tokens`
+  defaults to the same), `finalizer.py` names
   a truncation as one (`finish_reason: length`, or an unclosed `{`), and the
   ledger carries `finalizer_tokens` per verdict so the budget is a number
   beside the failure rather than a regex rate to be inferred.
+
+One thing decides it after the fact, added since (#2370, and #2493 for what the
+re-ask costs): `finalizer.should_resample_divergence` draws the same prefix
+**once more** when a completion runs to the cap under a schema that caps every
+field — the bytes are inter-token whitespace inside one value the grammar
+admits, so nothing about the request was wrong and a second draw is the
+cheapest fix — and refuses to when the truncation was a budget one (another
+8192 tokens on the same answer) or the schema was unbounded (the field genuinely
+needed room). It keys off the message's own phrase, `DIVERGENCE_MARKER`, not off
+any error at all, so an HTTP failure or prose-instead-of-JSON is not re-drawn.
 
 `TRIAGE_VERDICT_SCHEMA` is built from `VERDICTS`/`SURFACES` rather than
 restated — one list, or a new verdict lands in the grammar and not the
@@ -871,7 +892,8 @@ reader quoting one should not label it the other. `tests/test_action_review_cali
 source and hook axes from them, recomputes the **tier** axis from them too, and fails if
 the file's digest stops matching its marker's. Tiering a `Bash` row needs its command
 string, which lives only in the session transcript, and the groundskeeper gzips
-transcripts at 30 days (`scripts/groundskeeper/retention-sweep.py:252-264`), so a ruling
+session transcripts once past `SESSION_ARCHIVE_AGE_DAYS` (90 d for chat
+sessions; 30 d for background, 7 d for a bench run), so a ruling
 that depended on them would quietly stop being checkable; carrying the recovered
 arguments is what lets the witness stand in for the transcripts. The order the join runs
 in is load-bearing, and the test follows it: `args_digest` first, `effective_tier`
@@ -1169,10 +1191,12 @@ run past the truncation threshold).
   handshake count/avg/max) is on `/health/deep` under `mcp.pools`.
   `tests/test_mcp_pool_discovery_refresh.py`.
 
-### P4 — bounded, typed long-term memory (build half; deploy gated on the eval)
+### P4 — bounded, typed long-term memory (deployed 2026-09-25; see the landing below)
 
-`lloyd/MEMORY.md` is 73,002 B against a 73,728 B ceiling and ~18k tokens on
-every user turn. The proposal is an index: one typed line per entry, the detail
+What it opened with: `lloyd/MEMORY.md` at 73,002 B against a 73,728 B ceiling
+and ~18k tokens on every user turn. That is history now — the ceiling
+(`prompt_surface.MEMORY_MD_CEILING_BYTES`) has since been set to the index
+ceiling, 25,600 B, and the indexed file measured 20,463 B on 2026-10-13. The proposal is an index: one typed line per entry, the detail
 in `~/obsidian/lloyd/memory/<slug>.md` topic files that are pulled, never
 rendered. This landing is additive; production prompts are byte-identical.
 
@@ -1275,9 +1299,13 @@ byte-identical — the property the finalizer already relies on for `"none"`.
   column). No drain or budget anchor runs on that request. **Per engine**:
   `models` resolves to base URLs (`mcp_discovery.max_turns_wrapup_kwargs`) and
   the loop wraps up only when the run's own `base_url` is listed. Shipped
-  `[primary]`: vLLM 0.28.1 honours `"none"` with tools present
-  (`exclude_tools_when_tool_choice_none` false, no tool parser attached —
-  verified for `finalizer.py`). The llama.cpp secondary is not verified and is
+  `[primary]`: verified on vLLM 0.28.1, which honoured `"none"` with tools
+  present (`exclude_tools_when_tool_choice_none` false, no tool parser attached
+  — verified for `finalizer.py`). The build serving the primary today is
+  `0.31.1rc1.dev260+ga98247ab4` and that property has not been re-measured on
+  it (filed 2026-10-14); the flag is absent from its serve args, so the default
+  is expected to hold, but this switch ships on the strength of the older
+  measurement. The llama.cpp secondary is not verified and is
   left out; add it only after checking `none` there. Task children splat the
   same kwargs, so a child that exhausts its budget returns its wrap-up as
   `response` marked `truncated`. Not wired into `_worker_run_options`
@@ -1319,13 +1347,16 @@ recorded nothing.
 - `tests/test_compaction_manual.py`,
   `tests/test_session_queue.py::test_a_compact_request_waits_behind_the_running_turn_and_a_row_appended_meanwhile_survives`.
 
-### P5 — skills index with descriptions; body by tool (build half; deploy gated on the eval)
+### P5 — skills index with descriptions; body by tool (shipped: descriptions on, pull off)
 
-Ships with today's behaviour byte for byte; the eval decides the flips.
+Built byte-identical to today's behaviour, with the eval deciding the flips —
+which it has: `desc_push` shipped 2026-09-25 (`skills.index.descriptions: true`,
+`72f678d5`) and `desc_pull` was measured and rejected.
 
 - **Index** (`prompt_builder._load_skills_index` → `_skills_index_lines`,
-  `skills.index` in config.yaml). `descriptions: false` (default) is the
-  names-only line, pinned by `test_off_is_bytewise_today`. On: one
+  `skills.index` in config.yaml). `descriptions: false` is the *code* default and
+  stays the names-only line, pinned by `test_off_is_bytewise_today`; config.yaml
+  ships it `true`. On: one
   `- name — description` line per skill, the description being `/api/skills`'
   field whitespace-folded and clipped at `max_description_chars` (100); who gets
   one is decided by 30-day use (`offers + loaded + loaded_by_read`, scanned once
@@ -1354,9 +1385,13 @@ Ships with today's behaviour byte for byte; the eval decides the flips.
   charged past its own probed prefix; `--queries eval/skill_match_queries.yaml`
   loads the 51 labelled turns; column `right_skill_reached` (injected, or
   `skills_read(expected)` in the trace), contrasts against `injected`, and
-  `pull_lost_vs_push` for the decision rule. Not run live yet:
-  `--n 100 --arms injected,injected_aa,desc_push,desc_pull --label skills-index`
-  in a paused-pool window. `tests/test_skills_index_descriptions.py`,
+  `pull_lost_vs_push` for the decision rule. Run 2026-09-25
+  (`--n 100 --arms injected,injected_aa,desc_push,desc_pull --label skills-index`,
+  51 labelled turns × 4 arms, pool paused): `desc_push` +0.02
+  `right_skill_reached` and 0.00 judge, so it shipped; `desc_pull` −0.22
+  (CI −0.34…−0.10) and 12 expected skills lost against `desc_push` for 1 gained,
+  so the pull switch stays off — `eval/measurements/skills-index-2026-09-25.md`.
+  `tests/test_skills_index_descriptions.py`,
   `tests/test_skill_injection_telemetry.py`.
 
 ### P3 — memory flush before compaction (ships off)
@@ -1806,11 +1841,13 @@ P6's max-turns wrap-up (`harness.max_turns_wrapup`, primary only); P8's
 fan-out for the `read-only` profile (`parallel_safe`); D10's deny-list
 (`non_compactable_tools`); D7's one retry; and P1 rollout step 1,
 `session_state: system_tail` (`ca7eb481`, 2026-09-25). **Ships in shadow**: P10
-(`action_review.mode`, `injection_probe.mode`). **Ships off / as today**:
+(`action_review.mode`, `injection_probe.mode`). **Deployed since**: P4's memory
+index (`memory.render_overflow: annotate` in config.yaml, not `render_all`) with
+the ceiling lowered to the index's 25,600 B, and P5's
+`skills.index.descriptions: true`. **Ships off / as today**:
 D2's `compaction.persist_summary`, P3's `compaction.memory_flush.enabled`,
-P1's `prompt_layout` `freeze_memory` and `replay_injected_context`, P4's memory
-index (`memory.render_overflow: render_all`, today's full render), P5's
-`skills.index.descriptions`, P6's `echo_guard.mode: nudge`, P9's
+P1's `prompt_layout` `freeze_memory` and `replay_injected_context`, P6's
+`echo_guard.mode: nudge`, P9's
 `harness.rpc.enabled`, and the general `parallel_tool_calls`.
 
 **Pending measurements and decisions** (each deploys only on a measured gain;
@@ -1821,10 +1858,10 @@ a negative result is a clean `rejected`):
 - **D2** — `eval/run_compaction_recall_eval.py` `summary_legacy` vs
   `summary_persisted`, then `persist_summary: true`.
 - **P3** — the same eval's `memory_flush` arm, then `memory_flush.enabled`.
-- **P4** — the memory index A/B (`eval/run_memory_trim_ab.py`); on a win, the
-  render flip, the MEMORY.md ceiling change and the vault patch.
-- **P5** — the skills eval's `desc_push` / `desc_pull` arms, then
-  `skills.index.descriptions` and the pull switch.
+- **P4** — done 2026-09-25: the index landed, the render flip is `annotate`, the
+  ceiling became the index's, and the vault patch applied.
+- **P5** — done 2026-09-25 for `desc_push` (`skills.index.descriptions: true`);
+  `desc_pull` measured and rejected, so the pull switch is closed, not pending.
 - **P1** — step 1 (`system_tail`, shipped 2026-09-25 in `ca7eb481`) is done;
   what is left is the `user_tail` A/B (`brain1.turn_start_prefix`), then
   `freeze_memory`.
@@ -2110,3 +2147,27 @@ the one rung with no in-band handle; its reasoning is persisted as
 `rung4`, `rung4_lossy`, `rung4_self_record`. Tests: `tests/test_compaction.py`
 (stubs, idempotence, the route), `tests/test_recall_observation.py`,
 `tests/test_compaction_recall_eval.py`.
+
+## Review log
+
+- **2026-10-14 — `stale`.** Checked every path, test name, config key and
+  constant the doc states against the tree at `7006dc07` (all 57 test paths and
+  every `app/`/`agent_mcp/`/`scripts/` path resolve; the config keys and the
+  P-schedule's shipped states are the parts that had moved). Corrected in
+  place: the finalizer budget (8192, not 4096 — `options.finalizer_max_tokens`
+  and `harness.finalizer.max_tokens` agree), the Inner Voice observer's priority
+  (one step lower on an unattended turn, not the turn's own), P4 and P5's
+  shipped state (both deployed 2026-09-25; the closing summary still listed
+  `render_overflow: render_all` and `skills.index.descriptions` as off, against
+  the doc's own P4/P5 sections), the P4 opening's MEMORY.md size and ceiling,
+  the P10 transcript-retention horizon and its `retention-sweep.py:252-264`
+  citation (chat sessions are `SESSION_ARCHIVE_AGE_DAYS` 90 d; those lines are
+  a docstring now), the `chat_template.jinja:91` citation (the only template in
+  the tree is the served Qwen3.8 one), and the two engine-build attributions —
+  the primary answers 0.31.1rc1 where the doc says 0.28/0.28.1, so P6(b)'s
+  `tool_choice: "none"` verification is now dated to the build it was made on
+  and re-verification is filed. Added: the finalizer's divergence re-ask
+  (#2370/#2493), `capabilities.py` and `tool_roster.py` to the module map —
+  the per-source capability envelope (#2269/#2471) is a live part of how a
+  worker turn's tools are decided and the doc named neither — and the eight
+  post-September files in `app/harness/tests/`.
