@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, index]
 type: reference
 status: implemented
-date: 2026-09-14
+date: 2026-10-14
 ---
 
 # Lloyd — architecture index
@@ -33,7 +33,7 @@ already uses; arch-review refreshes that one).
 |---|---|
 | [[infrastructure]] | host, GPUs, supervisord programs, systemd units, ports, remote access |
 | [[vllm]] | the primary engine end to end: the served config, the GPU and its power clamp, FP8 KV, YaRN (built, off), the tuning knobs, the benchmarks |
-| [[djev]] | GPU 2's structured-decision engine: serving, the wire protocol, the client and its two trust flags, three tools, the schema registry, three shadow seams, the eval arm, the calibration that says rank with it and do not gate on it |
+| [[djev]] | GPU 2's structured-decision engine: serving, the wire protocol, the client and its two trust flags, three tools, the schema registry, the shadow seams, the eval arm, the calibration that says rank with it and do not gate on it |
 
 ## The agent
 
@@ -45,7 +45,7 @@ already uses; arch-review refreshes that one).
 | [[guard-coverage]] | the union of what no guard on this box sees, each with the mechanism and the command that proves it: interactive turns, the tool-result and model/provider channels, the injection probe's own limits, hook-only labels, nested RPC, and the mode typo that let a silently-off guard read as a clean window |
 | [[threat-model]] | the seams an instruction that did not come from Alan crosses, each stated as a capability and mapped to the module that decides it, with the threats nothing controls published as an open set — and a retrospective scoring the model against this box's own written-up incidents, whose raw coverage is reported beside the number that survives the predate test |
 | [[tools]] | the lloyd-mcp aggregator: routes and credential, the dispatch path in order, tool properties and what each decides, every tool with its properties |
-| [[desktop]] | desktop computer use: `desktop_capture`/`desktop_act` over Alan's real Hyprland desktop, the lease only a human grants, chat sessions only, screenshots as refs never base64 |
+| [[desktop]] | desktop computer use: `desktop_capture`/`desktop_act` over Alan's real Hyprland desktop, the lease only a human grants from the Desktop tab, chat sessions only, screenshots as refs never base64 |
 | [[editing-safeguards]] | read-before-edit gates, edit diagnostics and blast radius, the change and effect ledgers, the code graph |
 | [[data-home]] | runtime data outside the code tree since the 09-22 deletion: `~/lloyd-data`, the `DATA_ROOT` resolver and who gets which root, the delete guard, hourly read-only snapshots, the data tripwire, restore |
 | [[vault-protection]] | the 09-10/09-12 vault wipes and the four layers after them: the bench/eval tool sandbox, the wholesale-delete check, the guardian's vault tripwire and sync gate, 15-minute snapshots |
@@ -56,7 +56,6 @@ already uses; arch-review refreshes that one).
 | [[ambient-context-injection]] | how background producers surface context into the active chat |
 | [[skills]] | on-demand SKILL.md procedures from the vault |
 | [[voice]] | the whole voice-to-voice round trip: LiveKit transport, wake word, ASR, speaker id, the cloned TTS voice and its client-side shaping |
-| [[desktop]] | desktop computer use: capture freely, act only on a lease a human grants from the Desktop tab; chat sessions only; screenshots as refs, never base64 |
 
 ## Memory and knowledge
 
@@ -73,10 +72,10 @@ already uses; arch-review refreshes that one).
 | [[workers]] | one SQLite queue, N asyncio workers in the backend, every source |
 | [[workers-jobs]] | one entry per worker source: what wakes it, what it writes, and what it is actually doing |
 | [[background-runs]] | every background run is recorded; Inner Voice observation is opt-in; the Background tab |
-| [[autonomy]] | the scheduled-task mechanism: the five due-gates, failure backoff, the deadline anchor, run records, fleet health |
+| [[autonomy]] | the scheduled-task mechanism: its due-gates, failure backoff, the deadline anchor, run records, fleet health |
 | [[autonomy-jobs]] | what each scheduled job is *for* — the reflection chain, trace2skill, the graph chain, vault hygiene, inbound signal |
 | [[automod]] | self-modification: worktree, the gate ladder, review rung, promoter, guardian rollback, triage/implement, clustering, group triage |
-| [[testing]] | the ~8,700-test suite: synthetic vs live-data tests and the rule for the second, when a live check is retired rather than skipped, the gate's three floors and why the skip cap is not the thing to raise, marks the gate deselects, parallel isolation |
+| [[testing]] | the test suite: synthetic vs live-data tests and the rule for the second, when a live check is retired rather than skipped, the gate's three floors and why the skip cap is not the thing to raise, marks the gate deselects, parallel isolation |
 | [[measurement]] | the eval and bench surface: each arm and what it scores, the repo root versus `$LLOYD_DATA/eval/baselines/`, the bench task corpus, and the one arm that stands between a round and landing |
 | [[backlog]] | the markdown kanban at `~/obsidian/backlog/` and its tools |
 | [[arch-review]] | the pass that keeps these docs honest: a picklist of docs and functional groups, one session each, the doc edits itself |
@@ -90,11 +89,18 @@ already uses; arch-review refreshes that one).
 
 ## GPU allocation
 
+Five cards, not three, since 2026-10-07. The owner of the card-by-card map —
+every program on each card, its VRAM, and the `CUDA_DEVICE_ORDER` trap — is
+[[infrastructure]] § GPUs, and the per-card power clamp with the PCI bus id
+each index is lives in [[vllm]] §2. This table is the glance map.
+
 | GPU | Hardware | Serves |
 |---|---|---|
-| 0 | RTX 3090 24 GB | TTS, voice worker, qmd |
+| 0 | RTX 3090 24 GB | desktop compositor, the legacy TTS server (`agent-tts`, :8090), the LiveKit voice worker, qmd embeddings |
 | 1 | RTX PRO 6000 96 GB | primary LLM (vLLM) |
-| 2 | RTX 3090 24 GB | secondary LLM (llama.cpp) |
+| 2 | RTX 3090 24 GB | djev (DiffusionGemma on vLLM) — or the secondary LLM, llama.cpp, if that slot is re-armed; never both |
+| 3 | RTX 3090 24 GB | the TTS the voice path actually uses (`agent-tts-omni`, :8093) since 2026-10-09 |
+| 4 | RTX 3090 24 GB | nothing pinned to it yet |
 
 ## Retired (in git history alone)
 
@@ -160,3 +166,24 @@ the tree, and its text is recoverable from git history alone, at
   #1102 (#86, in `autonomy-jobs.md`). Nothing checks this page's own listing
   against the directory it describes, and six sibling docs carry no `status:`
   the convention recognises — #1103, #1104.
+- **2026-10-14 — `stale`.** The GPU allocation table described a different
+  machine: three rows when `2e08e6d3` (2026-10-07) took the box to five cards,
+  GPU 2 credited to the llama.cpp secondary although `agent-djev.conf` has held
+  that card since 2026-09-20 with `agent-llm-secondary.conf` at
+  `autostart=false`, and no row at all for the card a spoken reply is
+  synthesised on (`agent-tts-omni`, `:8093`, since 2026-10-09). It disagreed
+  with this page's own [[djev]] row, which says GPU 2 is djev's. Three counts
+  the page had hand-typed went the same way and are now stated by their owners
+  with no integer: "three shadow seams" (`SEAMS` in `app/djev_shadow.py` has
+  four, and [[djev]] says four), "the five due-gates" (`_is_task_due` walks a
+  longer refusal list, and [[autonomy-jobs]] names no count), and
+  "~8,700-test suite" ([[testing]] measures ~9,600). The agent table also
+  carried [[desktop]] in two rows with two different Covers cells; the second
+  is gone and its "from the Desktop tab" detail folded into the survivor. The
+  36-doc link parity, the eleven retired names, `b94be171` and the `git show`
+  recovery command all still check out. Filed #2697 (the five-card inventory
+  [[infrastructure]] never learned about), #2698 (four prose copies of the
+  tenant map, three of them behind), #2699 (the seam roster has one owner and
+  two prose restatements), #2700 (the no-owned-count guard matches digits, so
+  "five due-gates" was never visible to it) and #2701 (the parity check is
+  set-based and cannot see a doc listed twice).
