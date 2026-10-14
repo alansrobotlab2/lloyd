@@ -3964,7 +3964,7 @@ def _append_fast_failure_alert(task: dict, task_id, durations: list[float]) -> b
     is history: before #1592 an unconfigured `discord_alert` only logged a warning
     and returned, so #85's disable alert "fired" and reached nobody. That is not
     live behaviour — since #1592 the unconfigured branch logs the warning and hands
-    the message to `_survive_the_dropped_alert` (app/discord_notify.py:131-134),
+    the message to `_survive_the_dropped_alert` (app/discord_notify.py:493-496),
     which appends it to today's daily note. The bypass stands on two reasons that
     hold whatever the transport is configured to do. Routing this line through
     `discord_alert` would deliver it as a "Scheduler alert not delivered" alarm

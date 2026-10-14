@@ -897,3 +897,111 @@ def test_the_skill_prose_names_the_component_and_every_verdict_state():
         "the skill must state that a nothing-examined ledger is not a clean result")
     assert shc.DAILY_NOTE_APPENDS_NOTHING == "nothing-examined", (
         "the skill text quotes this state name literally")
+
+
+# ------------------------------------- #2694 cl. 4 / cl. 5: the fold above this ---
+#
+# Two nodes, one per clause, and both drive the REAL fold: `app/discord_notify.py`'s
+# daily-note fold (#2694) bounds how many alarm lines reach the note, and this file is
+# the only place its two constraints on this layer are checkable. It is a fold with a
+# state file, so both nodes set `LLOYD_DAILY_NOTE_FOLD_STATE` alongside this file's
+# note-dir and ledger redirects: without the third variable the fold skips itself
+# (`_fold_unavailable`, #2213's pair seen from the suppressing side) and both nodes
+# would pass for the wrong reason — a silently-skipped precondition being exactly the
+# mistake #2213 was filed about.
+
+_FOLD_STALL = ("autonomy scheduler may be stalled: oldest claimable queue item is "
+               "185 min old")
+
+
+def _arm_the_fold(monkeypatch, tmp_path):
+    """Point the fold at this test's tmp_path, and pin the live box's transport."""
+    from app import discord_notify as dn
+    monkeypatch.setenv(dn.DAILY_NOTE_FOLD_STATE_ENV, str(tmp_path / "fold.json"))
+    monkeypatch.setattr(dn, "CONFIG",
+                        {"discord": {"home_channel": None, "token": ""}},
+                        raising=False)
+    return dn
+
+
+def test_a_folded_repeat_writes_no_line_so_the_leg_has_no_row_to_call_lost(
+        witness, monkeypatch, tmp_path):
+    """Clause 4: the collapse only ever appends or stays silent.
+
+    The reason a bound on this surface may not be a rewrite is this file's own leg:
+    every confirmed append leaves a row carrying its line's sha, and the leg books
+    `line-lost` / exit 3 for a row whose sha matches no line of its note. A collapse
+    that edited the earlier line to append `x3` would therefore manufacture a false
+    "a confirmed alert line vanished" outage on every day it ran — a red daily-note
+    alert invented by the fix for a noise problem.
+
+    So the second fire of the family writes NOTHING: one bullet in the note, one row
+    in the ledger, and the leg walks that ledger against the note as it exists after
+    the collapsed run and reports all-witnessed. `rows_examined == 1` is half the
+    assertion; a ledger that had grown a row for a line nobody wrote would report
+    `0 lost` just as happily if the collapse had also rewritten the note, and this is
+    the shape the leg would then call `1 of 2 rows lost`.
+    """
+    import asyncio
+
+    dn = _arm_the_fold(monkeypatch, tmp_path)
+    asyncio.run(dn.discord_alert(_FOLD_STALL))
+    asyncio.run(dn.discord_alert(_FOLD_STALL.replace("185 min", "250 min")))
+
+    note = witness["notes"] / f"{_today()}.md"
+    lines = _alert_lines(note)
+    rows = _rows(witness["ledger"])
+    assert len(lines) == 1, (
+        f"two fires of one alarm family left {len(lines)} lines, so the fold did not "
+        "stay silent on the repeat: " + " | ".join(lines))
+    assert len(rows) == 1, (
+        f"the collapsed repeat left {len(rows)} witness rows; a line that was never "
+        "written must not be witnessed, or the leg is checking a line that cannot "
+        "exist and reports a loss every day the fold runs")
+
+    result = shc.check_daily_note_appends(ledger=witness["ledger"])
+    assert result["rows_examined"] == 1, result
+    assert result["rows_lost"] == 0, result["lost"]
+    assert result["state"] == shc.DAILY_NOTE_APPENDS_GREEN, result["detail"]
+
+
+def test_the_fold_above_the_writer_leaves_its_repeat_ruling_intact(
+        witness, monkeypatch, tmp_path):
+    """Clause 5: the collapse lives above `append_daily_alert_line`, not inside it.
+
+    #1727's ruling — two calls carrying one body are two note lines and two ledger
+    rows, because a presence test used as a dedupe key dropped 12 legitimate re-fires
+    out of 13 — is pinned by
+    `test_identical_repeats_each_get_a_row_even_when_their_sha_is_one_value` and stays
+    green. What this node adds is the interference check that item's clause asks for:
+    the fold is ARMED and has already folded that family today when the writer is
+    called twice with one body. If the bound had been put in the writer, the second
+    call here would return without a line and without a row; the fold is one function
+    call higher up, so both land, the two rows carry one sha, and the leg still calls
+    all three lines present.
+    """
+    import asyncio
+
+    dn = _arm_the_fold(monkeypatch, tmp_path)
+    asyncio.run(dn.discord_alert(_FOLD_STALL))
+    asyncio.run(dn.discord_alert(_FOLD_STALL.replace("185 min", "250 min")))
+
+    note = witness["notes"] / f"{_today()}.md"
+    assert len(_alert_lines(note)) == 1, (
+        "the fold did not fold before the writer was exercised, so this node would "
+        "pass with the collapse anywhere")
+
+    body = "**Scheduler alert not delivered** (twice): the same body both times"
+    assert A.append_daily_alert_line(body) is True
+    assert A.append_daily_alert_line(body) is True, (
+        "a pre-write presence check has appeared in the writer")
+
+    rows = _rows(witness["ledger"])
+    assert len(_alert_lines(note)) == 3, (
+        f"{len(_alert_lines(note))} note lines for 1 folded fire + 2 writer calls")
+    assert len(rows) == 3, f"{len(rows)} rows for 3 confirmed appends"
+    assert len({row["line_sha256"] for row in rows}) == 2, (
+        "the two identical writer calls did not leave one sha twice, so the ledger is "
+        f"no longer recording what was written: {[r['line_sha256'] for r in rows]}")
+    result = shc.check_daily_note_appends(ledger=witness["ledger"])
+    assert result["rows_examined"] == 3 and result["rows_lost"] == 0, result
