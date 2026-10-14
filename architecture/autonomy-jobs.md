@@ -128,14 +128,23 @@ not:
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
   apparatus. `workers/evidence.py` is the correction and the scheduler module
   `app/autonomy.py` is where its pilot set lives (`EVIDENCE_PILOT_TASK_IDS =
-  frozenset({38, 42, 39, 40, 53})` at `app/autonomy.py:2818` in that module, pinned by
-  `tests/test_worker_evidence.py`) — 5 of the 23 jobs that write durable state
+  frozenset({24, 38, 39, 40, 42, 53, 56})` at `app/autonomy.py:2830` in that module, pinned by
+  `tests/test_worker_evidence.py`) — 7 of the 23 jobs that write durable state
   unattended. #53 Documentation Digester joined on 2026-10-09 (#2482), the first
   widening since #902 scoped the pilot to the reflection chain: that job's run of
   2026-10-09 filed a `priority: high` backlog item (#2478) over an audit database, a
   table and a row count that have never existed on this box, and emitted no claims
   block at all — so there was nothing for the verifier to refute, which is exactly the
-  hole the widening closes. The pilot has verdicts now: since
+  hole the widening closes. #24 Data Pipeline and #56 Nightly Trajectory Extraction
+  joined on 2026-10-14 (#2675), the two writers #902 had named as the same shape one
+  step out: #24 is 6x-daily and its own activity line is a per-run count
+  (`files_processed=133 facts=4969 failed=1048` on 2026-10-13) that had never been
+  bound to disk, and #56 writes one dated JSONL per day of session tool-call
+  trajectories and states how many sessions it wrote every run. #81 QMD Index
+  Maintenance is held out by that same ruling rather than overlooked: what it would
+  claim is the qmd embedding index's own state, which none of the four check kinds
+  reads, so scoring it would be a false negative and not a gap.
+  The pilot has verdicts now: since
   #945 copied each run's `claims` key through `workers/sources/scheduled_task.py`
   into the pool, `workers/pool.py` grades the claims as the run record is
   written. On 2026-09-26 `GET /api/autonomy/health?days=7` reported 22 claims
@@ -420,10 +429,16 @@ defect was never a crash, it was a confident number: a handoff reporting the
 graph "restored to 12,131 relationships" against a same-night health report
 reading zero; counts of 96/21 where disk held 121/64; a 13,503-byte file called
 "307KB". `workers/evidence.py` is the structural fix and its pilot set is exactly
-this chain plus #53, which joined 2026-10-09 (#2482) —
-`EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40, 53})`
-(`app/autonomy.py:2818`, not inside the verifier's own file, and pinned there by
-`tests/test_worker_evidence.py:663`), a literal frozenset so
+this chain plus #53, which joined 2026-10-09 (#2482), plus #24 Data Pipeline and
+#56 Nightly Trajectory Extraction, which joined 2026-10-14 (#2675) as the two
+writers #902 named and left for a later ruling — #24 is 6x-daily and its activity
+line is a per-run count that had never been bound to disk, #56 reports how many
+sessions it wrote into one dated JSONL per day. #81 QMD Index Maintenance is held
+out by that same ruling: what it would claim is the qmd embedding index's own
+state, which none of the four check kinds can read —
+`EVIDENCE_PILOT_TASK_IDS = frozenset({24, 38, 39, 40, 42, 53, 56})`
+(`app/autonomy.py:2830`, not inside the verifier's own file, and pinned there by
+`tests/test_worker_evidence.py:677`), a literal frozenset so
 widening it is a change someone reads. The verifier is **stdlib-only and never
 LLM-judged**, because a model grading its own claims is the narration this
 replaces one layer up; and **a claim that cannot be evaluated is `insufficient`,
@@ -446,9 +461,11 @@ coverage, not plumbing — 68 of those 72 runs carry no bundle at all, because o
 these four tasks emit a claims block. #902 (coverage: 4 of the fleet's
 unattended writers) and #945 (this severance) are both closed; the first
 `insufficient` verdict is still unobserved. **Widened 2026-10-09 (#2482):** #53
-Documentation Digester is in the set now, so five tasks emit a claims block, and its
-first live refutation is what the widening was for — the digester had filed a
-high-priority item over an audit store with no row in it anywhere on this box.
+Documentation Digester joined, so five tasks emitted a claims block on the day of that
+measurement, and its first live refutation is what the widening was for — the digester
+had filed a high-priority item over an audit store with no row in it anywhere on this
+box. **Widened again 2026-10-14 (#2675):** #24 Data Pipeline and #56 Nightly Trajectory
+Extraction joined, so seven tasks emit one now.
 
 **#47 Dream Consolidation** is the weekly synthesizer on the tail. It does not
 re-read raw sessions — that is the chain's job — it merges near-duplicate topics
@@ -1252,7 +1269,10 @@ decide what gets worked on next.
 - **2026-10-12 — `stale`.** Re-verified against `3b438c45` and the live
   `~/obsidian/autonomy/`. The wiring holds: exactly the ten `depends_on` edges
   the diagram draws exist, and `EVIDENCE_PILOT_TASK_IDS` really is
-  `app/autonomy.py:2818` pinned at `tests/test_worker_evidence.py:663`.
+  `app/autonomy.py:2830` pinned at `tests/test_worker_evidence.py:677` (both numbers
+  retyped on 2026-10-14, the drift-in-place this file's own 2026-10-12 pass does to a
+  stale pointer: #2675 widened the roster to seven and wrote its per-id reasons above
+  the definition, which moved it from 2818, and moved the pin's assert from 663).
   Membership does not: seven live tasks (#91–#97) have no entry here at all,
   #87–#89 are named as live members with no task file behind them, and #68 is
   parked (`draft`, last run 2026-09-16) with a `model: secondary` that names a

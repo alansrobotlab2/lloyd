@@ -792,14 +792,17 @@ def test_the_bare_spelling_still_appears_on_exactly_twelve_lines():
 def test_the_pilot_frozenset_citation_resolves_to_the_line_it_names():
     """#1520 clause 1. §The functions cited `app/autonomy.py:710`, which is
     `RUN_SUMMARY_CAP = 300` inside the comment about tail-slicing a run summary —
-    nothing to do with evidence — while the frozenset it meant is at
-    `app/autonomy.py:2104`, where §Distil has pointed since #1102. A reader who walked
-    to 710 came back concluding the pilot was documented somewhere it is not.
+    nothing to do with evidence — while the frozenset it meant was at
+    `app/autonomy.py:2104` then, where §Distil had pointed since #1102. A reader who
+    walked to 710 came back concluding the pilot was documented somewhere it is not.
 
     The expectation is `app/autonomy.py` itself, not a remembered number: the line the
     prose names must BE the definition, with the members the prose quotes, and the
     test file it calls a pin must assert that set. So the citation cannot rot the
-    way its predecessor did — the code moving under the prose fails here first.
+    way its predecessor did — the code moving under the prose fails here first. That is
+    not hypothetical: #2675 widened the roster to seven and wrote its per-id reasons
+    above the definition, which moved it from 2818 to 2830, and this node followed the
+    code instead of failing that change.
     """
     funcs = _functions_section()
     assert "`EVIDENCE_PILOT_TASK_IDS" in funcs, (
@@ -822,9 +825,15 @@ def test_the_pilot_frozenset_citation_resolves_to_the_line_it_names():
     assert "`tests/test_worker_evidence.py`" in window, (
         f"the pilot sentence no longer names the test that pins the set: {window[:160]!r}")
     pin = (ROOT / "tests" / "test_worker_evidence.py").read_text()
-    assert re.search(r"EVIDENCE_PILOT_TASK_IDS == frozenset\(\{38, 42, 39, 40, 53\}\)", pin), (
+    # The roster the doc quotes, in the shape the pin writes it — the members moved
+    # onto their own line when #2675 widened the pilot to seven, so the match allows
+    # the wrap and still refuses any other membership.
+    assert re.search(
+        r"EVIDENCE_PILOT_TASK_IDS\s*==\s*frozenset\(\s*\{24, 38, 39, 40, 42, 53, 56\}\s*\)",
+        pin), (
         "the doc says tests/test_worker_evidence.py pins the pilot set, and that file "
-        "no longer asserts it — the citation has become a promise nothing keeps")
+        "no longer asserts the seven-member set the doc quotes — the citation has "
+        "become a promise nothing keeps")
     assert "app/autonomy.py:710" not in _live_prose(), (
         "`app/autonomy.py:710` is still cited in current prose; only the dated 2026-09-12 "
         "§Review log entry may carry it, as the error that was corrected there")
@@ -3187,7 +3196,7 @@ def _citation_drift(text: str) -> tuple[int, int, list[str]]:
     """`(instances, distinct, drift lines)` for one slice of the document.
 
     Two counts because the doc cites one number twice: live prose holds 8 citation
-    instances over 7 distinct `path:line` pairs, `app/autonomy.py:2818` appearing in
+    instances over 7 distinct `path:line` pairs, `app/autonomy.py:2830` appearing in
     both §The functions and §Evidence pilot. A vacuity guard on the instances alone
     would not notice the second citation being deleted, and one on the distinct count
     alone would not notice a citation being added without a symbol beside it.
@@ -3254,7 +3263,7 @@ def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
 
     Eight citation instances over seven distinct files-and-numbers, in today's live
     prose
-    (`app/autonomy.py:2818` twice, then `tests/test_worker_evidence.py:663`,
+    (`app/autonomy.py:2830` twice, then `tests/test_worker_evidence.py:677`,
     `tests/test_skill_tool_names.py:150`, `scripts/skill_lint.py:281`,
     `agent_mcp/skills.py:87`, `app/routers/backlog.py:812` and
     `web/src/components/pages/BacklogPage.tsx:572`). The eighth distinct citation in
@@ -3273,7 +3282,7 @@ def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
     assert (instances, distinct) == (8, 7), (
         f"the citation resolver saw {instances} citations ({distinct} distinct) in "
         f"live prose; today there are 8 instances over 7 distinct `path:line` pairs "
-        f"(`app/autonomy.py:2818` in two sections), so either this document's citation "
+        f"(`app/autonomy.py:2830` in two sections), so either this document's citation "
         f"shape changed or the pattern in CITATION did — a resolver that matches "
         f"nothing reports no drift, which is not a clean result")
 
@@ -3313,8 +3322,9 @@ def test_the_resolver_ignores_a_citation_that_lives_only_in_the_dated_review_log
     requirement. (b) The SAME citation and symbol, fed as live prose, DOES drift, so
     "not reported" is the scope doing the work rather than a blind pattern: the
     2026-09-12 entry cites `app/autonomy.py:710` for `EVIDENCE_PILOT_TASK_IDS`, which
-    is defined at `app/autonomy.py:2818` today — seed that sentence as live prose and
-    it drifts, naming 2818. (c) The two existing nodes that keep the log's
+    is defined at `app/autonomy.py:2830` today (#2675 moved it there from 2818 by
+    writing the roster's per-id reasons above it) — seed that sentence as live prose
+    and it drifts, naming 2830. (c) The two existing nodes that keep the log's
     history honest (`test_the_pilot_frozenset_citation_resolves_to_the_line_it_names`
     forbidding the number in live prose, `test_the_dated_review_log_entry_keeps_what_was_true_that_day`
     requiring it in the log) still assert their own pair of claims — this node neither
@@ -3340,7 +3350,14 @@ def test_the_resolver_ignores_a_citation_that_lives_only_in_the_dated_review_log
     assert len(seeded_drift) == 1, (
         f"a live-prose sentence citing :710 for `EVIDENCE_PILOT_TASK_IDS` must drift, "
         f"or the exclusion above is a blind spot rather than a scope: {seeded_drift}")
-    assert "app/autonomy.py:2818" in seeded_drift[0], seeded_drift[0]
+    # The number the drift must name is READ from the source, not remembered: the
+    # pilot frozenset moved from 2818 to 2830 when #2675 wrote its roster reasons
+    # above the definition, and a hardcoded expectation here would have reported
+    # that legitimate move as a resolver failure.
+    where = next(n for n, text in
+                 enumerate((ROOT / "app" / "autonomy.py").read_text().splitlines(), 1)
+                 if text.startswith("EVIDENCE_PILOT_TASK_IDS = frozenset("))
+    assert f"app/autonomy.py:{where}" in seeded_drift[0], seeded_drift[0]
 
 
 #: The two exemption lists the §linters paragraph quantifies, in the files it names.

@@ -2812,10 +2812,22 @@ def _build_task_prompt(task: dict, skill_content: str) -> str:
 # far has been a skill instruction ("verify on disk before claiming"), which
 # binds only a willing model.
 #
-# The pilot is these five tasks and nothing else, which is why this is a literal
+# The pilot is these seven tasks and nothing else, which is why this is a literal
 # set rather than a config key: widening it is a change someone reads, and retiring
-# it deletes five lines. #53 joined 2026-10-09, the widening #2482 asked for.
-EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40, 53})
+# it deletes seven lines. Membership, and why each id is here:
+#   #38 #42 #39 #40 - the reflection chain, the original four (#525).
+#   #53 Documentation Digester - joined 2026-10-09, the widening #2482 asked for,
+#     after one of its runs filed a high-priority item over an audit store that has
+#     no row anywhere on this box.
+#   #24 Data Pipeline - joined 2026-10-14 (#2675). A 6x-daily unattended writer whose
+#     activity line is a per-run count (`files_processed=133 facts=4969 failed=1048`
+#     on 2026-10-13), the kind of number that has never once been bound to disk.
+#   #56 Nightly Trajectory Extraction - joined the same day. It dumps tool-call
+#     trajectories into one dated JSONL per day under `_pipeline/trajectories/`, so it
+#     states how many sessions it wrote every run and has asserted that unverified.
+#   #81 QMD Index Maintenance is held out on purpose: what it would claim is the qmd
+#     embedding index's own state, which none of the four check kinds can read.
+EVIDENCE_PILOT_TASK_IDS = frozenset({24, 38, 39, 40, 42, 53, 56})
 
 
 def _evidence_pilot(task_id) -> bool:

@@ -404,7 +404,13 @@ claims your summary makes:
                "key": "rows_written", "expected": 25}}}},
   {{"claim": "the health report shows zero active relationships",
     "check": {{"kind": "regex", "path": "_pipeline/reflection/knowledge-health-2026-09-09.md",
-               "pattern": "^\\\\| Active relationships \\\\| 0 \\\\|$", "expect": "match"}}}}
+               "pattern": "^\\\\| Active relationships \\\\| 0 \\\\|$", "expect": "match"}}}},
+  {{"claim": "the digester state has a checked_at for the claude_code_cli tool",
+    "check": {{"kind": "json_key", "path": "_pipeline/doc-digester-state.json",
+               "key": "deployed.claude_code_cli.checked_at"}}}},
+  {{"claim": "the digester state carries 11 checked_at timestamps",
+    "check": {{"kind": "count_eq", "path": "_pipeline/doc-digester-state.json",
+               "measure": "matches", "pattern": "\\"checked_at\\":", "expected": 11}}}}
 ]}}
 ```
 
@@ -413,6 +419,18 @@ Rules:
   `count_eq` (`measure`: `files` with an optional `glob`, `bytes`, `lines`,
   `matches` with a `pattern`), `json_key` (dotted `key`, optional `expected`),
   `regex` (`expect`: `match` or `absent`).
+- Over a JSON body, name a nested value with a DOTTED `json_key` (`deployed.claude_code_cli.checked_at`),
+  never a pattern that has to guess the file's indentation. `count_eq` with
+  `measure: matches` and `regex` both run the pattern with `re.MULTILINE`, so `^`
+  means start of a LINE — and a key inside an indented JSON body never starts one, so
+  `^"checked_at":` matches nothing in a file holding 11 of them. A claim refuted that
+  way was refuted by its anchor, not by its number, so drop the anchor, or match the
+  indentation the file actually has (`^\\s+"checked_at":` does). The `$` end-anchor is
+  safe: it matches before the trailing newline too.
+- `json_key` compares `expected` to the parsed value with plain equality, so it has to
+  carry the file's JSON type: a number is `41`, not `"41"`, a boolean is `true`, not
+  `"true"`. A quoted 7 against an unquoted 7 comes back `refuted` while the file
+  agrees with you completely.
 - Bind ONLY numbers and files you actually read this run. A stdlib verifier
   re-runs every check against the disk when this run's ledger row is written;
   anything that does not match is recorded as `refuted` and handed to the next

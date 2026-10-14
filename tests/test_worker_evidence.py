@@ -562,12 +562,16 @@ async def test_execute_forwards_the_claims_a_pilot_run_emitted(monkeypatch):
 async def test_execute_adds_no_claims_key_for_a_task_outside_the_pilot(monkeypatch):
     """#945 clause 1's other half. `run_task` omits the key for a non-pilot
     task, and the adapter must not invent one: presence is the pool's scope
-    switch, so inventing it would score an un-piloted task as checked."""
+    switch, so inventing it would score an un-piloted task as checked.
+
+    Task #81 (QMD Index Maintenance), deliberately: #24 and #56 joined the pilot
+    on 2026-10-14, so they can no longer stand for "outside it".
+    """
     out = await _drive_real_execute(monkeypatch,
                                     final_response=_pilot_artifact_text(),
-                                    pilot=False, task_id=24)
+                                    pilot=False, task_id=81)
     assert "claims" not in out
-    assert out["task_id"] == "24"
+    assert out["task_id"] == "81"
 
 
 async def test_the_pilot_claims_survive_from_the_source_into_the_pool(monkeypatch):
@@ -599,10 +603,10 @@ async def test_a_pilot_that_emitted_nothing_normalizes_to_a_list_not_none(monkey
     assert pilot_norm["claims"] == []
 
     other_norm = normalize_result(
-        _item(payload={"task_id": 24}, source="scheduled-task"),
+        _item(payload={"task_id": 81}, source="scheduled-task"),
         await _drive_real_execute(monkeypatch,
                                   final_response=report_without_block,
-                                  pilot=False, task_id=24))
+                                  pilot=False, task_id=81))
     assert other_norm["claims"] is None
 
 
@@ -649,7 +653,7 @@ async def test_a_pilot_run_reaches_the_ledger_with_a_bundle(tmp_path, monkeypatc
 
 # ── Pilot scoping and prompt carry-forward ─────────────────────────────────
 
-def test_the_pilot_is_the_reflection_chain_plus_the_doc_digester_and_nothing_else():
+def test_the_pilot_is_the_reflection_chain_plus_the_digester_and_two_writers_and_nothing_else():
     """The set, and the instruction each member's run is actually handed.
 
     #53 joined on 2026-10-09 (#2482): its run `run_53_20261009_113528.md` filed a
@@ -659,15 +663,27 @@ def test_the_pilot_is_the_reflection_chain_plus_the_doc_digester_and_nothing_els
     have been refuted, because nothing was bound — `grep -c '```evidence'` on the run
     is 0. It is now a pilot member, so the same stdlib verifier that grades the
     reflection chain grades its numbers too.
+
+    #24 and #56 joined on 2026-10-14 (#2675), the two writers #902 named as the same
+    shape: a 6x-daily job whose activity line is `files_processed=133 facts=4969
+    failed=1048`, and a daily job that reports how many sessions it wrote into one
+    dated JSONL. Both had asserted a count every run with 0 blocks on disk.
+
+    Asserted as an exact set, not a subset: after three widenings a subset-only check
+    could no longer tell that a member had been dropped. And #81 stays out — its
+    state is the qmd embedding index's own, which none of the four check kinds reads,
+    so it is the negative control now that #24 is inside.
     """
-    assert autonomy.EVIDENCE_PILOT_TASK_IDS == frozenset({38, 42, 39, 40, 53})
-    for tid in (38, 42, 39, 40, 53):
+    assert autonomy.EVIDENCE_PILOT_TASK_IDS == frozenset(
+        {24, 38, 39, 40, 42, 53, 56})
+    for tid in (24, 38, 39, 40, 42, 53, 56):
+        assert autonomy._evidence_pilot(tid)
         block = autonomy._evidence_prompt(tid, gaps=[])
         assert "Evidence claims" in block
         assert evidence.FENCE_TAG in block
-    # The emitters that filed the fabricated item are still outside: a job that
-    # asserts nothing must not be scored as checked-and-clean (#525).
-    assert autonomy._evidence_prompt(24, gaps=[]) == ""
+    # The writer still outside is #81, and a job that asserts nothing verifiable
+    # must not be scored as checked-and-clean (#525).
+    assert autonomy._evidence_prompt(81, gaps=[]) == ""
     assert autonomy._evidence_prompt(None, gaps=[]) == ""
 
 
@@ -1252,3 +1268,180 @@ async def test_a_piloted_run_that_asserted_nothing_still_lands_a_bundle_row(
     assert autonomy._row_claims(row) is not None
     assert autonomy.claim_artifact_rollup([row])["runs_with_bundle"] == 1
     assert autonomy.claim_artifact_rollup([row])["runs_without_bundle"] == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  The JSON claim shape that faked a refutation (#2675)
+#
+#  #2675 widens the pilot to #24 and #56 and fixes the one claim shape that both
+#  of those writers will hit on their first run: a check over a JSON body. The
+#  process boundary here is the instruction the model reads and the stdlib
+#  verifier that grades what it wrote, and it is asserted across both sides: the
+#  guidance is only real if `verify_claim` — the shipped verifier, not a
+#  re-implementation — returns `refuted` for the pattern the instruction tells the
+#  model not to write and `verified` for the one it tells the model to write.
+#  The roster half of the change crosses a second boundary (the docs cite the
+#  frozenset by path:line and `tests/test_autonomy_jobs_doc_claims.py` reads both
+#  sides); it is pinned there, not here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: A doc-digester state file at fixture size, in the live file's shape: nested
+#: `deployed.<tool>.checked_at`, a `gateway_probe` block, `last_pass_utc` last so
+#: its line ends at the value with no trailing comma. The real
+#: `~/lloyd-data/_pipeline/doc-digester-state.json` is 288 lines / 92,466 bytes
+#: with 11 `checked_at` timestamps; this fixture is the same shape holding 6,
+#: dumped with `indent=2` exactly as the digester writes it.
+DIGESTER_STATE = {
+    "deployed": {
+        "claude_code_cli": {"checked_at": "2026-10-13T00:38:10Z",
+                            "installed": "2.1.296"},
+        "llama_cpp_8091": {"checked_at": "2026-10-13T00:38:10Z"},
+        "vllm_djev": {"checked_at": "2026-10-13T00:38:10Z"},
+        "vllm_omni_8093": {"checked_at": "2026-10-13T00:38:10Z"},
+        "vllm_primary_8096": {"checked_at": "2026-10-13T00:38:10Z"},
+    },
+    "gateway_probe": {"checked_at": "2026-10-13T00:38:10Z",
+                      "surface_used": "autonomy-runs/**/*.md (rglob)"},
+    "sources": {"knowledge": {"docs": 12}, "plans": {"docs": 3}},
+    "last_pass_utc": "2026-10-13T00:38:10Z",
+}
+CHECKED_AT_COUNT = 6
+
+
+@pytest.fixture()
+def digester_state(tmp_path):
+    p = tmp_path / "_pipeline" / "doc-digester-state.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps(DIGESTER_STATE, indent=2) + "\n")
+    return tmp_path
+
+
+def _count(pattern: str, expected: int) -> dict:
+    return {"claim": f"the state file has {expected} matches",
+            "check": {"kind": "count_eq",
+                      "path": "_pipeline/doc-digester-state.json",
+                      "measure": "matches", "pattern": pattern,
+                      "expected": expected}}
+
+
+def test_an_anchored_pattern_over_the_indented_json_body_is_refuted_and_the_unanchored_one_verifies(
+        digester_state):
+    """Both halves of the rule, measured over the shape that faked it.
+
+    `count_eq` (`measure: matches`) and `regex` run `re.findall(pattern, text,
+    re.MULTILINE)`, so `^` is a line start and every key in an indented JSON body
+    sits behind at least two spaces. The anchored claim is therefore refuted by a
+    file that says exactly what was claimed — `observed 0` on six timestamps — and
+    a run record that read that verdict as "the number is wrong" would have filed
+    an item against a correct count. The unanchored form, and the form that matches
+    the indentation instead of pretending it is not there, both verify against the
+    same bytes.
+    """
+    anchored = verify_claim(_count('^"checked_at":', CHECKED_AT_COUNT),
+                            root=digester_state)
+    assert anchored["status"] == "refuted"
+    assert anchored["observed"] == 0, (
+        "an anchored pattern over an indented key line has to be the one that "
+        "fails, or the instruction below is warning about nothing")
+
+    unanchored = verify_claim(_count('"checked_at":', CHECKED_AT_COUNT),
+                              root=digester_state)
+    assert unanchored["status"] == "verified"
+    assert unanchored["observed"] == CHECKED_AT_COUNT
+
+    indent_aware = verify_claim(_count(r'^\s+"checked_at":', CHECKED_AT_COUNT),
+                                root=digester_state)
+    assert indent_aware["status"] == "verified"
+
+    # `$` is not the problem: it matches before the line's newline, so an
+    # end-anchored claim over the same file's last key verifies.
+    end_anchored = verify_claim(
+        _count('"last_pass_utc": "2026-10-13T00:38:10Z"$', 1),
+        root=digester_state)
+    assert end_anchored["status"] == "verified"
+
+
+def test_a_dotted_json_key_names_the_nested_value_the_digester_actually_writes(
+        digester_state):
+    """The other half of the same instruction: a nested value is a dotted key.
+
+    `deployed.claude_code_cli.checked_at` is the live path. It verifies with the
+    value, verifies on presence with no `expected`, and refutes only when the value
+    really differs — which is what makes it the form the model should reach for
+    instead of a pattern that has to guess indentation.
+    """
+    def claim(key, expected=None):
+        check = {"kind": "json_key",
+                 "path": "_pipeline/doc-digester-state.json", "key": key}
+        if expected is not None:
+            check["expected"] = expected
+        return {"claim": f"state[{key}]", "check": check}
+
+    v = verify_claim(claim("deployed.claude_code_cli.checked_at",
+                           "2026-10-13T00:38:10Z"), root=digester_state)
+    assert v["status"] == "verified" and v["observed"] == "2026-10-13T00:38:10Z"
+    assert verify_claim(claim("gateway_probe.checked_at"),
+                        root=digester_state)["status"] == "verified"
+    assert verify_claim(claim("sources.knowledge.docs", 12),
+                        root=digester_state)["status"] == "verified"
+    assert verify_claim(claim("deployed.nope.checked_at"),
+                        root=digester_state)["status"] == "refuted"
+
+
+def test_a_json_key_expected_of_the_wrong_json_type_is_refuted_where_the_value_agrees(
+        tmp_path):
+    """The type rule, measured. `_check_json_key` compares with plain `==`.
+
+    The state file holds an int, the model quotes it as a string — the file and the
+    claim then disagree by JSON type alone and the verdict is `refuted`, which a
+    model reading only "refuted" will report as a wrong count. `7` and `"7"` are the
+    same fact to a model and different facts to `==`.
+    """
+    (tmp_path / "pipeline.json").write_text(json.dumps({"rows_written": 41}))
+    quoted = verify_claim(
+        {"claim": "41 rows written",
+         "check": {"kind": "json_key", "path": "pipeline.json",
+                   "key": "rows_written", "expected": "41"}}, root=tmp_path)
+    assert quoted["status"] == "refuted" and quoted["observed"] == 41
+    typed = verify_claim(
+        {"claim": "41 rows written",
+         "check": {"kind": "json_key", "path": "pipeline.json",
+                   "key": "rows_written", "expected": 41}}, root=tmp_path)
+    assert typed["status"] == "verified"
+
+
+def test_the_claims_instruction_works_the_json_shape_that_broke_and_states_why():
+    """#2675 clause 3: the instruction the model is handed carries the case, not
+    just a rule about it.
+
+    Parsed rather than grepped where it matters — the worked examples have to stay
+    valid JSON, because a model copies this block literally and an example that does
+    not parse is an instruction that cannot be followed. Then the two claims the
+    guidance rests on are named by their load-bearing tokens: `re.MULTILINE` (why
+    `^` fails, and why `$` does not) and `plain equality` (why the JSON type of
+    `expected` is part of the claim).
+    """
+    block = evidence.CLAIMS_INSTRUCTION.split("```evidence\n")[1].split("\n```")[0]
+    claims = json.loads(block)["claims"]
+    assert len(claims) == 6, (
+        "the worked-example block is what a model imitates; it parses today into 6 "
+        "claims, and a broken brace here ships an instruction nobody can follow")
+    json_body = [c["check"] for c in claims
+                 if str(c["check"].get("path", "")).endswith(".json")]
+    dotted = [c for c in json_body
+              if c["kind"] == "json_key" and "." in str(c.get("key", ""))]
+    assert dotted, "no dotted json_key example over a JSON body"
+    assert dotted[0]["key"] == "deployed.claude_code_cli.checked_at"
+    unanchored = [c for c in json_body
+                  if c["kind"] in ("count_eq", "regex")
+                  and not str(c.get("pattern", "")).startswith("^")]
+    assert unanchored, "no unanchored pattern example over a JSON body"
+    assert unanchored[0]["measure"] == "matches"
+    # The rule text, by its load-bearing tokens.
+    assert "re.MULTILINE" in evidence.CLAIMS_INSTRUCTION
+    assert "`$` end-anchor" in evidence.CLAIMS_INSTRUCTION
+    assert "plain equality" in evidence.CLAIMS_INSTRUCTION
+    # And every member of the pilot is handed exactly this.
+    for tid in (24, 38, 39, 40, 42, 53, 56):
+        assert autonomy._evidence_prompt(tid, gaps=[]) == \
+            evidence.CLAIMS_INSTRUCTION
