@@ -59,7 +59,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
+import inspect
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -483,6 +486,128 @@ async def test_a_cors_preflight_passes_and_a_bare_options_does_not(reached):
     assert trusted_bare.status_code == 405, (
         f"bare OPTIONS from {TAILNET} returned {trusted_bare.status_code}; the "
         "router's 405 is its pre-existing answer and the gate must not change it")
+
+
+# ── #2715: the authority the preflight exception cites has to resolve ────────
+
+#: A citation into the installed starlette package, as the gate's comment writes
+#: it: `starlette/<path>.py[:NN[-MM]]`. Only starlette is matched, because the same
+#: comment cites `tests/test_api_client_gating.py` and `tests` is a directory of
+#: this repo rather than an installed distribution — a pattern over every
+#: `a/b.py:NN` would ask `find_spec("tests")` about it and report the helper's own
+#: limits as rot.
+_STARLETTE_CITATION = re.compile(r"starlette/[\w./-]+\.py(?::\d+(?:-\d+)?)?")
+
+#: The citation `server.py`'s preflight comment carried until #2715: starlette's
+#: CORS module filed under a plural `middlewares` directory the distribution has
+#: never shipped, next to the name of a preflight helper it has never defined.
+#: It is the negative control for the helper below. The two halves are joined at
+#: runtime so the tree-wide absence check #2715 is graded with keeps returning
+#: nothing even though this file has to name the string to resolve it — a fix that
+#: left the bad citation standing in the test written to catch it would leave a
+#: reader no way to tell that from a round that never tried.
+STALE_CORS_CITATION = "starlette/middleware" + "s/cors.py"
+
+
+def _installed_starlette_file(citation: str) -> tuple[Path, tuple[int, int] | None] | None:
+    """`starlette/middleware/cors.py:91` → the file, and the span it anchors to; None if absent.
+
+    The search root is the package's own directory as `importlib.util.find_spec`
+    reports it, never a `.venvs/lloyd/lib/python3.12/site-packages/...` literal.
+    That is the whole reason for the helper: the gate rebuilds its test venv only
+    when `requirements.txt`/`requirements.lock` change, so an interpreter-relative
+    path written at authoring time names a tree the run that would notice a moved
+    module is not standing in, and the answer has to come from the interpreter
+    that is answering.
+
+    None is the answer this exists to produce. `test_architecture_coverage_doc_claims.py`
+    resolves its citations against the checkout, the vault and the data root, and
+    none of those contains `site-packages`, so nothing ever graded the gate's own
+    comment — which is how one plural-directory spelling of this module sat in the
+    code for a month behind a doc exemption whose stated reason named the wrong
+    package as well (#2715). That spelling is `STALE_CORS_CITATION`, which the node
+    after the passing one resolves through here and expects not to find.
+    """
+    pkg, _, rest = citation.partition("/")
+    spec = importlib.util.find_spec(pkg)
+    assert spec is not None and spec.origin, (
+        f"{pkg} is not importable in this interpreter, so `{citation}` could not be "
+        "checked either way — this is the helper failing, not the citation rotting")
+    anchor = citation.split(":", 1)[1] if ":" in citation else ""
+    start_txt, _, end_txt = anchor.partition("-")
+    span = (int(start_txt), int(end_txt or start_txt)) if start_txt.isdigit() else None
+    for search in (spec.submodule_search_locations or []):
+        candidate = Path(search) / rest.partition(":")[0]
+        if candidate.is_file():
+            return candidate, span
+    return None
+
+
+def test_the_starlette_citation_in_the_preflight_comment_resolves_in_the_package():
+    """#2715 clauses 1 and 2: the gate states its authority and that authority is there.
+
+    `ApiPeerGate` decides which untrusted peers get an answer at all, and its one
+    exception — a real CORS preflight — is justified by pointing at starlette for
+    the definition of "real". Until this round that pointer named a plural
+    directory and a helper symbol, and the installed package (starlette 1.3.1,
+    `requirements.lock:163`) has the CORS module under a singular `middleware/` and
+    defines no such symbol, so a reader checking whether Lloyd's exception and
+    starlette's agree could reach neither half of it. No existing check could have
+    caught that: the citation lives in a comment, and the doc-citation node's roots
+    stop outside `site-packages`.
+
+    So the citation is read back out of the loaded gate's own source — comment and
+    code cannot then disagree about which file they name — and resolved through
+    `find_spec`. Three things are pinned: the comment still names
+    `access-control-request-method` as the field starlette keys on; the cited file
+    exists in the installed package; and the anchored line really is the branch
+    that tests that header, which is what a starlette bump that moves the file or
+    rewrites the test now reports.
+    """
+    comment = inspect.getsource(server.ApiPeerGate.__call__)
+    assert "access-control-request-method" in comment, (
+        "the preflight comment no longer names the header that distinguishes a "
+        "preflight from a bare OPTIONS, which is the whole justification for the "
+        "exception the branch implements")
+    cited = [m.group(0) for m in _STARLETTE_CITATION.finditer(comment)]
+    assert cited, (
+        "the preflight comment cites no starlette module: the exception is now "
+        "asserting its own definition, which is the uncheckable state #2715 opened")
+    cors = [c for c in cited if c.startswith("starlette/middleware/cors.py")]
+    assert cors, (
+        f"the preflight comment cites {cited} — the preflight answer comes from "
+        "starlette's CORS middleware, so that is the module the comment has to name")
+    for citation in cited:
+        resolved = _installed_starlette_file(citation)
+        assert resolved is not None, (
+            f"the gate's comment cites `{citation}`, which is no file of the "
+            "installed starlette package: a reader following the peer gate's one "
+            "exception lands nowhere and cannot check what it defers to")
+        path, span = resolved
+        assert span is not None, (
+            f"`{citation}` carries no line anchor, so the claim that starlette "
+            "tests that header there has nothing to be checked against")
+        line = path.read_text(encoding="utf-8", errors="replace").splitlines()[span[0] - 1]
+        assert "access-control-request-method" in line.lower() and "OPTIONS" in line, (
+            f"the comment says starlette keys the preflight on that header at "
+            f"`{citation}`, but the installed file's line {span[0]} is {line.strip()!r}")
+
+
+def test_the_starlette_citation_helper_reports_a_module_the_package_does_not_have():
+    """The resolver above has to be able to say no, or it grades nothing.
+
+    `STALE_CORS_CITATION` is the citation this round deleted from `server.py`: the
+    CORS module filed under a plural directory starlette has never shipped. It goes
+    through the same helper from the same `find_spec` root and has to come back
+    unresolved. That single assert is what turns the passing node above from a
+    tautology into a check — the same shape as
+    `test_a_cors_preflight_passes_and_a_bare_options_does_not`, which pins the
+    gated bare `OPTIONS` beside the preflight it lets through.
+    """
+    assert _installed_starlette_file(STALE_CORS_CITATION) is None, (
+        f"`{STALE_CORS_CITATION}` resolved inside the installed package, so the "
+        "helper is answering from somewhere other than `find_spec` and every "
+        "resolution above is vacuous")
 
 
 # ── clause 5: the control that works today keeps working ────────────────────
@@ -979,7 +1104,6 @@ def _url_literal_paths(src: str) -> list[str]:
     `re.sub` replaces `{...}` with a placeholder because `urlsplit` does not care
     what the host interpolates to, only where the path begins.
     """
-    import re
     from urllib.parse import urlsplit
 
     paths = []

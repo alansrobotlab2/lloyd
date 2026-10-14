@@ -619,17 +619,18 @@ be able to ask "is it alive" from a peer the gate refuses; a watchdog asking
 mirror image of that list and are also exact paths (`DOCS_PATHS`:
 `/openapi.json`, `/docs`, `/redoc`, `/docs/oauth2-redirect`): denied to an
 untrusted peer with byte-identical `{"detail":"Not Found"}` body, so closing
-them adds no new oracle for which surfaces exist (#2090, #2312). A CORS preflight is let through from any
-peer — a browser sends one with no custom headers, so refusing it breaks a
-trusted client and proves nothing — but only a real preflight, recognised by
-`Access-Control-Request-Method` the same way starlette's own CORS middleware
-recognises one (`middlewares/cors.py:91` — an upstream module, exempted from the
-path check for exactly that reason, which is also why nobody noticed the spelling
-is wrong: the installed starlette keeps the file under a **singular** directory
-name and has no `is_preflight` symbol to point at, and `server.py:295` still
-cites it that way — #2715). A bare `OPTIONS`, which no browser
-sends, is gated: passed through it reaches the router and its 405-vs-404 answer
-would tell an untrusted peer which API paths exist.
+them adds no new oracle for which surfaces exist (#2090, #2312). A CORS preflight
+is let through from any peer — a browser sends one with no custom headers, so
+refusing it breaks a trusted client and proves nothing — but only a real
+preflight, recognised by `Access-Control-Request-Method` the same way starlette's
+own CORS middleware recognises one: the inline `if method == "OPTIONS" and
+"access-control-request-method" in headers` inside `CORSMiddleware.__call__`
+(`starlette/middleware/cors.py:91` — a module of the installed starlette package
+rather than a path in this repository, which is why it is exempted from the path
+check, and `tests/test_api_client_gating.py` resolves it against the package the
+interpreter actually loaded). A bare `OPTIONS`, which no browser sends, is gated:
+passed through it reaches the router and its 405-vs-404 answer would tell an
+untrusted peer which API paths exist.
 
 `ApiPeerGate` is a plain ASGI middleware rather than
 `@app.middleware("http")`, and that is load-bearing: `/api/*` is not HTTP-only.

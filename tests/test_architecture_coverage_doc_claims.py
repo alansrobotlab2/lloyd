@@ -641,12 +641,15 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
   'conf/livekit.yaml':
    ('other-tree: a sub-path of `agent-services/`, so the file the'
     'row means is `agent-services/conf/livekit.yaml`'),
-  'middlewares/cors.py:91':
-   ('other-tree: a module inside the upstream vLLM package the line'
-    'is cited from, not a path in this repository'),
   'scripts/qmd-watcher.sh':
    ('other-tree: a sub-path of `agent-services/`, so the file is'
     '`agent-services/scripts/qmd-watcher.sh`'),
+  'starlette/middleware/cors.py:91':
+   ('other-tree: a module of the starlette distribution installed in this'
+    'interpreter\'s site-packages, which no citation root covers; the line'
+    'is the middleware\'s inline preflight test, and'
+    '`tests/test_api_client_gating.py` resolves the spelling this page and'
+    'the gate comment cite'),
  },
  'knowledge-graph.md': {
   'facts-rebuild/':

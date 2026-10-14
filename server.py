@@ -292,7 +292,15 @@ class ApiPeerGate:
         # router and hands an untrusted peer a 405-vs-403 oracle for which API
         # paths exist. `access-control-request-method` is the field that
         # distinguishes the two, and it is what starlette's own CORS middleware
-        # keys on (`middlewares/cors.py`, `is_preflight`).
+        # keys on: its preflight branch is the inline test
+        # `if method == "OPTIONS" and "access-control-request-method" in
+        # headers` inside `CORSMiddleware.__call__`
+        # (`starlette/middleware/cors.py:91`) — a module of the installed
+        # starlette package, with no helper function of its own to name.
+        # `tests/test_api_client_gating.py` resolves that citation against the
+        # package this interpreter actually loaded, so a starlette bump that
+        # moves the file or the line fails the suite instead of stranding the
+        # next reader on a path that never existed.
         if scope_type == "http" and scope.get("method") == "OPTIONS" \
                 and b"access-control-request-method" in {
                     name for name, _ in scope.get("headers") or []}:
