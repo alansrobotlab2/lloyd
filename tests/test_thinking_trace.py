@@ -26,9 +26,12 @@ thought — is pinned in `test_preserved_thinking.py` and
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import gzip
 import json
 import re
+import shutil
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +41,7 @@ from typing import Iterable
 import pytest
 
 from app.data_root import production_data_root
+from app.uptake import SESSION_ARCHIVE_SUFFIX, SESSION_SUFFIXES, read_session
 from app.harness import loop as loop_mod
 from app.harness.options import RunOptions
 from app.routers._messages_thinking import _build_thinking_entry
@@ -463,6 +467,49 @@ def test_a_hand_labelled_healthy_trace_is_not_flagged(block):
     assert not flag_fabricated_reasoning(block)
 
 
+def labelled_session_messages(store: Path, name: str) -> list[dict]:
+    """The messages of a hand-labelled session, live or archived.
+
+    The two suffixes and the gzip-transparent reader are `app.uptake`'s (#1848), not
+    restated here: the groundskeeper's `sweep_sessions` gzips `<id>.json` to
+    `<id>.json.gz` and unlinks the original on a policy that is gzip and never
+    delete, so an archive is the only copy a session will ever have, and uptake
+    learned the hard way that a reader of `*.json` alone turns every weekly sweep
+    into a silent label expiry. A hand-labelled sample is the same kind of claim
+    about the same store, so it resolves through the same constants rather than a
+    second copy of the rule that can drift from the first.
+
+    `*.json` first, and it wins — the state a sweep interrupted between
+    `gzip.open(...)` and `path.unlink()` leaves behind holds two copies, and the
+    live one is the current prose. That is `uptake._session_transcripts`' precedence
+    for the same reason, and `test_a_session_in_both_forms_is_read_from_the_live_copy`
+    is what pins it here.
+
+    Three states, three different claims, because collapsing them sends a reader
+    hunting for a deletion that never happened:
+      * absent in both forms — the label names nothing, which is the fiction
+        `test_the_hand_labels_match_the_store_they_were_read_out_of` exists to catch;
+      * present but unparseable — a damaged transcript, which is data loss;
+      * present — and the caller checks the excerpt against it.
+    """
+    for suffix in SESSION_SUFFIXES:
+        path = store / f"{name}{suffix}"
+        if path.is_file():
+            doc = read_session(path)
+            assert doc is not None, (
+                f"{name}: {path.name} is in the store but does not parse, so the "
+                f"label cannot be checked against it — that is a damaged "
+                f"transcript, not an absent session")
+            messages = doc.get("messages")
+            assert isinstance(messages, list), (
+                f"{name}: {path.name} holds no messages list to check a label "
+                f"against")
+            return messages
+    raise AssertionError(
+        f"{name}: the labelled session is not in the store in either "
+        f"{' or '.join(SESSION_SUFFIXES)} form")
+
+
 def test_the_hand_labels_match_the_store_they_were_read_out_of():
     """Every hand-labelled block is really in the file its label names.
 
@@ -472,19 +519,159 @@ def test_the_hand_labels_match_the_store_they_were_read_out_of():
     the reasoning of the session named beside it, so a label that no longer
     corresponds to anything fails here instead of quietly becoming fiction. It
     skips with the store, exactly as the live-store guard does.
+
+    It reads each session in whichever form the store is holding it. The groundskeeper
+    archives an inactive transcript to `<id>.json.gz` after
+    `BENCH_SESSION_ARCHIVE_AGE_DAYS = 7` days for a bench session (30 for a background
+    run, 90 for a conversation — `scripts/groundskeeper/retention-sweep.py`), so a
+    bench label is archived a week after its session stops being touched and nothing
+    is ever deleted. Reading `*.json` alone made this node fire on the sweep instead
+    of on the rot it is looking for: of the four sessions labelled 2026-09-25, the
+    bench one had been gzipped and its three siblings were still live, and the
+    archived copy says precisely what the label says it says.
     """
     root = production_data_root() / "sessions"
     if not root.is_dir():
         pytest.skip(f"no session store under {root.parent} — a fresh bench")
     for name, block in [*_HAND_LABELLED_FABRICATIONS, *_HAND_LABELLED_CLEAN]:
-        path = root / f"{name}.json"
-        assert path.is_file(), f"{name}: the labelled session is not in the store"
-        msgs = (json.loads(path.read_text(errors="replace")) or {}).get("messages")
+        msgs = labelled_session_messages(root, name)
         assert any(isinstance(m, dict)
                    and block[:120] in (m.get("reasoning") or "")
                    for m in msgs), (
             f"{name}: the labelled excerpt is not verbatim in that session any "
             f"more, so its label needs re-reading: {block[:80]!r}")
+
+
+#: Two synthetic blocks for the archived-store fixtures below: one only in the
+#: archived copy, one only in a live copy that appears afterwards.
+_ARCHIVED_ONLY_REASONING = ("The archived copy's reasoning, present in the store "
+                            "only as `*.json.gz`.")
+_LIVE_ONLY_REASONING = ("The live copy's reasoning, which supersedes the archive "
+                        "for the same session id.")
+
+
+def _store_with_archived_session(tmp_path: Path, name: str, reasoning: str) -> Path:
+    """A store holding `name` in archived form only — the shape `sweep_sessions` leaves.
+
+    The archive is named through `SESSION_ARCHIVE_SUFFIX` and gzip-copied out of the
+    live file before it is unlinked, which is the writer's order of operations. The
+    tie between that suffix and the writer's own bytes is asserted by
+    `test_the_archive_name_read_here_is_the_name_the_sweep_writes`, so nothing here
+    depends on this file having guessed the name right.
+    """
+    store = tmp_path / "sessions"
+    store.mkdir(parents=True, exist_ok=True)
+    live = store / f"{name}.json"
+    live.write_text(json.dumps({
+        "session_id": name,
+        "messages": [{"role": "user", "content": "what is 17*23?"},
+                     {"role": "thinking", "content": [], "reasoning": reasoning}],
+    }))
+    archived = store / f"{name}{SESSION_ARCHIVE_SUFFIX}"
+    with gzip.open(archived, "wb") as dst, live.open("rb") as src:
+        shutil.copyfileobj(src, dst)
+    live.unlink()
+    return store
+
+
+def test_a_label_naming_an_archived_session_is_still_verified(tmp_path):
+    """The guard follows the sweep instead of being tripped by it.
+
+    The failure this pins is the real one: `20260925_132101_bench_990c`, labelled
+    2026-09-25 and gzipped by the weekly sweep within a week of that, read as "the
+    labelled session is not in the store" while its archived copy sat in the same
+    directory holding the labelled text verbatim. So the store here holds the
+    session ONLY as an archive and asserts that shape first — a fixture that left
+    the live file in place would test nothing, because the old reader passed on it.
+    """
+    store = _store_with_archived_session(
+        tmp_path, "20261001_000000_bench_arch", _ARCHIVED_ONLY_REASONING)
+    assert not (store / "20261001_000000_bench_arch.json").exists(), (
+        "the fixture has to be the archived-only shape the sweep leaves behind, "
+        "or it reproduces the state the reader already handled")
+    msgs = labelled_session_messages(store, "20261001_000000_bench_arch")
+    assert [m["reasoning"] for m in msgs
+            if isinstance(m, dict) and m.get("reasoning")] == [
+        _ARCHIVED_ONLY_REASONING], (
+        "the label check reads the archive's messages, or it did not read the "
+        "archive at all")
+
+
+def test_a_session_in_both_forms_is_read_from_the_live_copy(tmp_path):
+    """An interrupted sweep leaves two copies, and the live one is the current prose.
+
+    Same precedence `uptake._session_transcripts` documents: reading both would let
+    the older archived text answer a label that the newer transcript has already
+    moved on from, which is the fiction this node is supposed to catch rather than
+    paper over.
+    """
+    store = _store_with_archived_session(
+        tmp_path, "20261001_000000_bench_both", _ARCHIVED_ONLY_REASONING)
+    (store / "20261001_000000_bench_both.json").write_text(json.dumps({
+        "session_id": "20261001_000000_bench_both",
+        "messages": [{"role": "thinking", "content": [],
+                      "reasoning": _LIVE_ONLY_REASONING}],
+    }))
+    reasoning = [m.get("reasoning")
+                 for m in labelled_session_messages(
+                     store, "20261001_000000_bench_both")
+                 if isinstance(m, dict)]
+    assert reasoning == [_LIVE_ONLY_REASONING], reasoning
+
+
+def test_a_label_naming_nothing_says_absent_and_a_damaged_copy_says_damaged(tmp_path):
+    """The archived-aware reader can still fail, and names each state correctly.
+
+    A change that turned a red into a green by accepting every state would be the
+    same failure as skipping the node, so both remaining states get their own
+    claim: a session in neither form is absence, and a copy that exists but will
+    not parse is damage — the sentence "not in the store" would send a reader to
+    look for a deletion that never happened.
+    """
+    store = tmp_path / "sessions"
+    store.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(AssertionError) as absent:
+        labelled_session_messages(store, "20260101_000000_ghost")
+    message = str(absent.value)
+    assert "20260101_000000_ghost" in message, message
+    assert ".json" in message and SESSION_ARCHIVE_SUFFIX in message, (
+        f"an absence has to name both forms it looked for: {message}")
+
+    damaged = store / f"20260101_000001_damaged{SESSION_ARCHIVE_SUFFIX}"
+    damaged.write_bytes(b"\x1f\x8b not a deflate stream")
+    with pytest.raises(AssertionError) as broken:
+        labelled_session_messages(store, "20260101_000001_damaged")
+    message = str(broken.value)
+    assert "does not parse" in message, message
+    assert "not in the store" not in message, (
+        f"a damaged copy must not be reported as an absent session: {message}")
+
+
+def test_the_archive_name_read_here_is_the_name_the_sweep_writes():
+    """The process boundary this fix crosses, tied to the writer's own source.
+
+    The writer is a separate script — `scripts/groundskeeper/retention-sweep.py`,
+    run by the groundskeeper out of this process — so no import connects the two
+    halves and a grep of this file cannot see the other side. Read the writer's
+    `sweep_sessions` body out of the script itself and require it to build the
+    archive path with the same suffix this reader resolves: change the archived
+    name over there and this node reddens here, which is the only way the seam can
+    be watched from this side. (What the sweep actually does to a file is pinned
+    by `tests/test_retention_sweep.py::test_stale_session_gzipped_and_roundtrips`.)
+    """
+    script = (Path(__file__).resolve().parents[1]
+              / "scripts" / "groundskeeper" / "retention-sweep.py")
+    src = script.read_text(encoding="utf-8")
+    writer = next(
+        (ast.get_source_segment(src, node) for node in ast.parse(src).body
+         if isinstance(node, ast.FunctionDef) and node.name == "sweep_sessions"),
+        None)
+    assert writer, f"sweep_sessions is no longer a top-level function in {script}"
+    assert f'with_suffix("{SESSION_ARCHIVE_SUFFIX}")' in writer, (
+        f"`sweep_sessions` no longer names its archive with "
+        f"{SESSION_ARCHIVE_SUFFIX!r}, so the reader in this file is resolving a "
+        f"form the writer never writes: {writer.splitlines()[-8:]}")
 
 
 # ------------------------------------------------------------- the scan itself

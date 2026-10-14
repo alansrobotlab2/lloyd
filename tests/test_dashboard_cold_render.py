@@ -46,6 +46,7 @@ import ast
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -70,7 +71,7 @@ from scripts.automod import backlog as B
 #: copy is the thing that goes stale, and this file's last two calibrations each
 #: left one behind (the 1,142-file board and the 1,450-file one, both of which
 #: the bound then walked past).
-CALIBRATED_BOARD_FILES = 2180
+CALIBRATED_BOARD_FILES = 2628
 
 #: Bytes of `promotions.jsonl` the calibrated cycle decoded, for the same
 #: reason. NOT part of the denominator — the budget scales with the board, not
@@ -82,76 +83,135 @@ CALIBRATED_BOARD_FILES = 2180
 #: no drift-test warning.
 CALIBRATED_LEDGER_BYTES = 28_960_660
 
-#: The later of the two measured tails, in seconds.
+#: The cold cycles `COLD_P90_S` is derived from: two serial sets measured over the
+#: board named by `CALIBRATED_BOARD_FILES`, each entry a pair of the 1-minute load
+#: average the node printed beside them (`machine at measurement: load 1/5/15 =`)
+#: and the durations in seconds, in the order they ran.
 #:
-#:     measured 2026-10-05 from 19acea6c in a round worktree, 32 cores
+#: They are data rather than a sentence because the constant used to be a literal
+#: typed beside a prose table quoting the same measurements, and the only rail on it
+#: read `COLD_BUDGET_S == COLD_P90_S * COLD_BUDGET_MARGIN` — the budget's own
+#: definition, so the rail could not fail and could not notice a p90 that had
+#: quietly absorbed the margin. `COLD_P90_S` is now computed from these cycles, and
+#: `test_the_calibration_table_and_the_cycles_it_records_agree` re-derives every
+#: figure the table below quotes from them too, so the prose, the cycles and the
+#: number the dashboard is charged are one measurement and not three claims.
+_CALIBRATION_CYCLES_S: tuple[tuple[str, tuple[float, ...]], ...] = (
+    ("5.01-6.82", (6.81, 6.85, 6.80, 6.91, 6.92, 6.87, 6.83, 6.80)),
+    ("5.33-5.56", (6.65, 6.84, 6.53, 6.62, 6.71, 6.68)),
+)
+
+
+def _median_s(samples):
+    """Middle of the sorted samples: the mean of the two middles for an even count."""
+    ordered = sorted(samples)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[middle])
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def _p90_nearest_rank(samples):
+    """The value at rank ceil(0.9 n) of the sorted samples.
+
+    Nearest-rank rather than an interpolation, because that is the convention every
+    row of this calibration's table has reported its p90 by: with 8 samples the rank
+    is the maximum, and with 6 it is the maximum too. Integer arithmetic so the rank
+    cannot land between two samples on a float boundary.
+    """
+    ordered = sorted(samples)
+    rank = (9 * len(ordered) + 9) // 10
+    return float(ordered[min(rank, len(ordered)) - 1])
+
+
+#: The larger of the two measured tails, in seconds.
+#:
+#:     measured 2026-10-14 from 53a7fd11 in a round worktree, 32 cores
 #:     board  = CALIBRATED_BOARD_FILES item files (the numeric-name subset);
 #:              all fourteen runs below printed that count
-#:     ledger = the live store, reached directly because the serial runs below
-#:              carried no `LLOYD_AUTOMOD_STATE`, so `S.LEDGER_PATH` was the real
-#:              state dir's own file. NOT "repointed as in every gate run":
-#:              `tests/board_presence.py` repoints only when the configured state
-#:              dir holds NO ledger, and a gate run's round state dir holds one of
-#:              its own — 3,888 bytes in this round's — so the corpus a gate
-#:              decodes is that small file and these durations are not its shape.
-#:              Those runs decoded 29,188,189 bytes in the first four and
-#:              29,194,126 in the rest — 0.8% above `CALIBRATED_LEDGER_BYTES`,
-#:              which this re-base deliberately left alone: that centre is pinned
-#:              by equality in
+#:     ledger = the live store. `tests/board_presence.py` repoints it only when
+#:              the configured state dir holds NO ledger, and the state dir this
+#:              round was launched into was new and held none, so `S.LEDGER_PATH`
+#:              fell through to the real file: all fourteen runs printed
+#:              `REPOINTED: ... promotions.jsonl has no ledger, so the cycle reads
+#:              the live one instead` over a 29,444,519-byte store. That is NOT
+#:              the shape a gate run decodes — a gate's round state dir holds a
+#:              ledger of its own, and those runs read that small file instead.
+#:              This live size is +1.7% on `CALIBRATED_LEDGER_BYTES`, inside the
+#:              drift band, and this re-base deliberately left the centre alone:
+#:              that centre is pinned by equality in
 #:              `tests/test_retention_sweep.py` (where #2043's whole case is that
 #:              the fold lands the store inside the band around THAT number) and
 #:              #2071 ruled the centre is not the drift-drift lever. The durations
-#:              below are of the real store at its real size; the budget those runs
-#:              printed was still the old one, and a duration does not care which
-#:              budget it was read against.
-#:     serial, 8 runs, load 4.84-5.80:  min 6.78  median 7.16  p90 7.79  max 7.79
-#:     serial, 6 runs, load 5.36-5.70:  min 6.89  median 7.04  p90 7.18  max 7.18
+#:              below are of the real store at its real size; the budget those
+#:              runs printed was still the old one, and a duration does not care
+#:              which budget it was read against.
+#:     serial, 8 runs, load 5.01-6.82:  min 6.80  median 6.84  p90 6.92  max 6.92
+#:     serial, 6 runs, load 5.33-5.56:  min 6.53  median 6.67  p90 6.84  max 6.84
 #:
 #: p90 is nearest-rank, the convention the row this table replaces reported it
 #: by, so with 8 samples it is the maximum and the 6-sample set's p90 is its
-#: maximum too. Their later p90 is the 8-run set's and that is this constant.
+#: maximum too. The constant is the LARGER of the two tails rather than the later
+#: one, which is what its predecessor was: this number is the floor a gate's
+#: `-n 8` ladder then lands on top of, so of two honest sets the higher p90 is
+#: the one that cannot redden the node on a window that happened to be quiet.
+#:
+#: The net effect in the unit this check is really about: the bound tightens from
+#: 4.5 ms per item file to 3.3 ms, because the board grew 20.5% while the measured
+#: tail came in 11% under the one this number replaces.
 #:
 #: What this table does not have is an `xdist -n 8 --dist loadfile` full-suite
 #: row, and it cannot be given one by a gate run. The calibration this one
-#: replaces recorded such a row — 7.64 s printed by the node's own line against
-#: a serial p90 of 7.52, a 1.6% parallel penalty — and set its constant to that
-#: sample. This constant is instead the later of two serial sets measured with no
-#: gate in flight, and the gate's `tests` rung cannot add a duration to it: that
-#: rung runs `-n 8 --dist loadfile` WITHOUT `-s`, and pytest discards a PASSING
-#: test's captured stdout, so the node's `cold cycle:` line never reaches the log
-#: that passed 16156 tests at head `e43c28df` (34 skipped, 496.4 s).
-#: Checked rather than assumed: three `-n 8 --dist loadfile -s` passes over this
-#: file (load 3.96-4.27, 25 passed each) printed no `cold cycle:` line either, and
-#: `--durations=3` under the same shape printed no durations report — xdist
-#: forwards neither a passing worker test's stdout nor the durations table. So the
-#: gate's pass is a BOUND, not a measurement: by this node's own rule (one breach
-#: buys one more cold sample, two breaches fail) clearing the ladder says the
-#: first sample came in at or under `COLD_BUDGET_S`, which says the serial p90
-#: plus a full 25% margin absorbed whatever the parallel penalty is, and by how
-#: much is not something the ladder can tell anyone. What it would take to
-#: measure the row is a serial `-s` run of this file while a suite-wide `-n 8`
-#: pass is loading the box, which is the shape of the number, not of the constant.
+#: replaces advertised one and no artifact on this machine contains it; what its
+#: re-base recorded for it — "`-n 8 --dist loadfile` over the whole suite, twice
+#: on each of two shapes" — is now unrepeatable as described, because that rung
+#: runs `-n 8 --dist loadfile` WITHOUT `-s`, and pytest discards a PASSING test's
+#: captured stdout, so this node's `cold cycle:` line never reaches the log. The
+#: claim that retired that row was written here as inference ("almost certainly")
+#: and was tested against reality afterwards: three `-n 8 --dist loadfile -s`
+#: passes over this file printed nothing either, and `--durations=3` printed no
+#: durations table, because xdist forwards neither. What was checked this time is
+#: the bound itself: one `-n 8 --dist loadfile` pass over this file at the new
+#: budget went green, which by this node's own rule (one breach buys one more cold
+#: sample, two breaches fail) proves no more than that it did not breach twice in a
+#: row under eight workers, and leaves the margin itself unprinted. Nothing here
+#: claims to know how the retired row got its number.
 #:
 #: It is also why the assert below tells a re-baser to run "`-n 8` runs over the
 #: real board" while this table has no such row: under that shape the node's line
-#: surfaces only when it FAILS — a breach is exactly when pytest prints it — so a
-#: parallel sample you can actually read off a gate is a worst case, not a
-#: typical one. Nothing here claims to know how the retired row got its number.
+#: surfaces only when it FAILS — a breach is exactly when pytest prints it, which
+#: is how the re-base that wrote the retired row read its parallel numbers at all
+#: — so a parallel sample a re-baser can actually read off a gate is a worst case
+#: rather than a typical one. A parallel set is therefore a ceiling to check the
+#: budget against, not a distribution to take a p90 from, and it is in that
+#: capacity that the pass named above was run. This round repeated the silent
+#: shape once more (`-n 8 --dist loadfile -s`, green, nothing printed), and the
+#: one parallel duration that did surface came from a node measuring a cycle for
+#: its own purposes: `-n 8 --dist load -s -r a`, which forwards every worker's
+#: output and so is heavier than the gate's rung, put a cold cycle at 10.077 s —
+#: 46% over this p90. That is the size of the contention this constant does not
+#: claim to absorb, and the reason the 25% margin plus the retry in
+#: `enforce_cold_cycle_budget` are the whole protection rather than this table
+#: being a picture of a gate run.
 #:
-#: To restore the value this one replaced, restore its inputs: the board of
-#: 1,804 item files and the ledger centre it was walked over, measured
-#: 2026-09-30 from abe3360a.
+#: To restore the value this one replaced, restore its inputs: the board of 2,180
+#: item files and the 29,188,189-byte live ledger it was walked over, measured
+#: 2026-10-05 from 19acea6c, which came out at 7.79 s.
 #:
-#: What none of those rows capture is contention, and this re-base shows the
-#: machine's contribution at the tail rather than the middle: the same code over
-#: the same corpus came in at median 7.16 s in one set and 7.04 s in the other
-#: (1.7% apart, with overlapping 1-minute load averages) but 0.61 s apart at
-#: p90 — 8.5%. That is why a single sample on a 3%-margin bound was never
-#: stable, and why the constant is a p90 over eight runs and not the fastest
-#: cycle: the gate's tests rung adds eight workers on top of whatever else the
-#: box is doing, and the ledger carries 17 rows naming this node as a
-#: parallel-only failure up to 2026-09-29 (triage on #1858), with no code change
-#: behind any of them.
+#: What none of those rows capture is contention, and this re-base's own margin
+#: sits inside a range rather than on a point: the load average at measurement was
+#: 5.01-6.82 across all fourteen cycles on 32 cores, while a gate's `tests` rung
+#: puts eight pytest workers on the same box. That is the real gap between these
+#: two sets and the gate — their medians were 6.84 and 6.67 and their p90s 6.92
+#: and 6.84, so this window measured no tail blowout between two sets (1.2% apart
+#: at the tail, 2.5% apart at the middle) — which is why the constant is still a
+#: p90 over eight runs and not the fastest cycle, and why `COLD_BUDGET_MARGIN` is
+#: not the only thing standing between a quiet serial measurement and a red gate.
+#: The ledger rows that proved that are not decoration: at a 9.55 s budget the
+#: machine's own history records fourteen rows whose failure line carried the
+#: parallel-only marker and one whose measured duration was 9.68 s, and the same
+#: corpus carries 17 rows naming this node as a parallel-only failure up to
+#: 2026-09-29 (triage on #1858), with no code change behind any of them.
 #:
 #: The budget is deliberately NOT padded to absorb an arbitrary load spike. A
 #: number high enough for that would sit near the 15.22 s cost the check exists to
@@ -159,21 +219,29 @@ CALIBRATED_LEDGER_BYTES = 28_960_660
 #: sample in `enforce_cold_cycle_budget`, plus the load average and xdist worker id
 #: the node prints beside every duration, so a red that survives the retry says
 #: whether the machine was the problem or the code was.
-COLD_P90_S = 7.79
+#:
+#: Derived rather than typed: the larger of the two rows' p90s, computed from
+#: `_CALIBRATION_CYCLES_S` below the table's own numbers. A re-baser replaces the
+#: cycles, and the constant, the budget and the per-file charge all follow; the node
+#: that reads the table against those cycles is what says so if the prose was left
+#: behind.
+COLD_P90_S = max(_p90_nearest_rank(cycles) for _, cycles in _CALIBRATION_CYCLES_S)
 
 #: Stated margin over that p90 (#1858 clause 1): 25%, arithmetic rather than the
 #: "~30% headroom" the 2026-09-25 re-base claimed in prose. It has to cover the
 #: worker contention the re-measurement does not absorb, and it has to stay far
 #: enough under the 15.22 s triage cost that a real regression still trips it —
-#: at 1.25 the budget is 9.74 s and the triage cost is 56% higher, so the check
+#: at 1.25 the budget is 8.65 s and the triage cost is 76% higher, so the check
 #: still means something. A re-baser changes the table and, if they must, this
 #: number; the budget itself follows arithmetically.
 COLD_BUDGET_MARGIN = 1.25
 
 #: Budget for one cold cycle over the board named by `CALIBRATED_BOARD_FILES`,
 #: charged per file by `cold_budget_for_board`. The value this re-base replaced
-#: was 9.55 s, on a board of 1,804 item files with the old ledger centre; to
-#: restore it, restore those two inputs and the p90 they sat on. Before that,
+#: was 9.74 s, on a board of 2,180 item files walked over a live ledger of
+#: 29,188,189 bytes, measured 2026-10-05 from 19acea6c; to restore it, restore
+#: those two inputs and the p90 they sat on. Before that, 9.55 s was the budget on
+#: a board of 1,804 item files with the old ledger centre. Before that,
 #: 8.0 s was the calibration on a 1,450-file board with a 6,286,192-byte ledger,
 #: where the node measured 6.02 s and 6.16 s (round SM_20260925_205059's review
 #: run, 2026-09-25, load average 11). Triage baseline: 15.22 s over 1,142 files,
@@ -1165,6 +1233,59 @@ def test_the_budget_is_the_measured_p90_times_the_stated_margin():
     assert COLD_BUDGET_S >= COLD_P90_S, (
         f"the budget {COLD_BUDGET_S} is below the p90 it was derived from "
         f"{COLD_P90_S}")
+
+
+def test_the_calibration_table_and_the_cycles_it_records_agree():
+    """The `COLD_P90_S` table and `_CALIBRATION_CYCLES_S` are one measurement.
+
+    Three surfaces used to hold this calibration: the measured durations, the prose
+    table quoting them, and the constant the budget is charged from — and the only
+    rail on that constant read `COLD_BUDGET_S == COLD_P90_S * COLD_BUDGET_MARGIN`,
+    which is the budget's own definition, so it could not fail and could not notice a
+    p90 typed with the margin already folded into it. The cycles are in the file as
+    data now: each table row is re-derived here from the set it names, and the
+    constant has to equal the largest p90 this file's own table quotes. A re-baser who
+    edits one of the three surfaces and not the others reddens this node instead of
+    shipping a budget nothing measures.
+
+    Figures are compared with a 0.011 s tolerance because the table quotes them to
+    two decimals and an even-count median of two-decimal samples sits on a rounding
+    boundary: the 6-cycle set's median is 6.665 s, which prints as 6.66 or 6.67
+    depending on the float, and the row quotes 6.67.
+    """
+    rows = re.findall(
+        r"^#: {5}serial, (\d+) runs, load (\d+\.\d+-\d+\.\d+):"
+        r" +min (\d+\.\d+) +median (\d+\.\d+) +p90 (\d+\.\d+) +max (\d+\.\d+)$",
+        Path(__file__).read_text(encoding="utf-8"), re.MULTILINE)
+    assert len(rows) == len(_CALIBRATION_CYCLES_S), (
+        f"the table quotes {len(rows)} serial rows and `_CALIBRATION_CYCLES_S` holds "
+        f"{len(_CALIBRATION_CYCLES_S)} sets of cycles: the two halves are compared "
+        f"row against set, so they have to be the same size to mean anything")
+
+    quoted_p90 = []
+    for (n, load, q_min, q_med, q_p90, q_max), (row_load, cycles) in zip(
+            rows, _CALIBRATION_CYCLES_S):
+        where = f"the load {row_load} row"
+        assert int(n) == len(cycles), (
+            f"{where}: it says {n} runs and the recorded set is {len(cycles)} "
+            f"durations long")
+        assert load == row_load, (
+            f"{where}: its load range is {load!r} and the recorded one is "
+            f"{row_load!r}")
+        for label, have, quoted in (
+                ("min", min(cycles), float(q_min)),
+                ("median", _median_s(cycles), float(q_med)),
+                ("p90", _p90_nearest_rank(cycles), float(q_p90)),
+                ("max", max(cycles), float(q_max))):
+            assert abs(have - quoted) <= 0.011, (
+                f"{where} ({len(cycles)} cycles): its {label} is {quoted} and those "
+                f"cycles give {have:.3f}")
+        quoted_p90.append(float(q_p90))
+
+    assert COLD_P90_S == pytest.approx(max(quoted_p90), abs=0.011), (
+        f"COLD_P90_S is {COLD_P90_S} and the largest p90 this file's table quotes is "
+        f"{max(quoted_p90)}: the constant is the larger of the two measured tails, so "
+        f"one of the two was changed without the other")
 
 
 def test_the_per_file_charge_reproduces_the_calibration_and_scales_from_it():
