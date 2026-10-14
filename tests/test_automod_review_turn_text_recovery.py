@@ -31,6 +31,7 @@ from tests.test_automod_review import (FIVE, _asked_from, _confirm, _met_answer,
 FIXTURE = (Path(__file__).resolve().parent / "fixtures"
            / "vault_review_turn_text_2026-10-14-item2720.jsonl")
 D5A3 = "20261014_142621_review_d5a3"
+D9A9 = "20261014_142122_review_d9a9"
 FORTY = "20261014_142156_review_40c8"
 ZERO73 = "20261014_142229_review_0f73"
 DIV_ERR = ("finalizer failed: generation diverged at 8192 tokens — every field this schema "
@@ -386,3 +387,96 @@ def test_a_failure_row_carries_the_verdicts_it_rescued_beside_its_failure_kind(
     assert clauses[0]["verdict"] == "met" and clauses[0]["recovered"] is True, clauses[0]
     assert [c["verdict"] for c in clauses[1:]] == ["ungraded"] * 4, clauses
     assert RV.RECOVERY_TAG in why, why
+
+
+# ── the #2721 re-offer: the chunk bound had no test on the whole-chunk path ───
+
+def test_a_whole_chunk_failure_credits_only_the_indices_that_chunk_asked_for():
+    """Recovery may credit an index this generation was ASKED about, and nothing else.
+
+    The rescue's own docstring (`review.py:1956-1958`) promises that an entry outside
+    `chunk` is dropped, and the drop is implemented at `:1987` — but every recorded
+    transcript in the fixture file above is passed with the chunk that produced it
+    (d9a9 answers `n` 1,2,3; 40c8 answers 4,5; 0f73 answers 5; d5a3 answers 1), so
+    the promise was never asserted on the shape #2720 is: `only=None`, the whole
+    chunk failed. Measured by mutation — delete the `continue` at `:1987` and the
+    only node in this tree that notices is the `only=missing` gap-filling case,
+    because that is the only path a test ever handed an out-of-chunk index.
+
+    Three entries in one object, three fates: 5 was asked and answered, 1 belongs to
+    another chunk of the same contract, 7 is no clause of it at all.
+    """
+    text = _turn_text([
+        {"clause": 5, "verdict": "met", "evidence_path": "skills/x/SKILL.md",
+         "how_verified": "read", "note": "asked, and answered"},
+        {"clause": 1, "status": "met", "evidence_path": "skills/x/SKILL.md",
+         "note": "answered out of turn: another chunk owns index 1"},
+        {"n": 7, "verdict": "met", "evidence_path": "skills/x/SKILL.md"},
+    ])
+
+    got = RV.recover_grading_from_turn_text(text, [4, 5])
+
+    assert got is not None, "the object is readable; only its indices are out of bounds"
+    assert [c["clause"] for c in got["clauses"]] == [5], (
+        "recovery credited an index this chunk never asked about, so the row would "
+        "carry a verdict for a clause nobody graded here")
+    assert got["premise"] == "sound", "the premise reading survives the dropped rows"
+
+
+@pytest.mark.parametrize("transcript,chunk", [(D9A9, [4, 5]), (FORTY, [1, 2, 3]),
+                                              (ZERO73, [4])])
+def test_a_real_transcript_never_answers_for_a_chunk_it_was_not_asked_about(
+        transcripts, transcript, chunk):
+    """Three real transcripts, each handed a chunk that is not its own: no verdicts.
+
+    d9a9 answers 1,2,3; 40c8 answers 4,5; 0f73 answers 5. None of them may credit
+    anything for the chunk named beside it — the parametrisation is what makes the
+    bound a rule rather than one lucky pairing.
+    """
+    got = RV.recover_grading_from_turn_text(transcripts[transcript]["turn_text"], chunk)
+
+    # Nothing creditable is NO rescue at all: `:2004` returns None on an empty entry
+    # list, which leaves the caller's rows `ungraded` and the row's kind exactly what
+    # a no-object failure would have left it — the land stays refused.
+    assert got is None, (
+        f"{transcript} answered for a chunk it was never asked about: "
+        f"{[c['clause'] for c in (got or {}).get('clauses', [])]}")
+
+
+def test_a_refused_review_stamps_rescued_rows_only_for_the_chunk_that_rescued_them(
+        isolated, monkeypatch, tmp_path):
+    """The land-level half: a decoder-graded clause must not wear the rescue marker.
+
+    Chunk [1,2,3] restates cleanly through the guided decoder; chunk [4,5] fails
+    with a turn text answering clause 4 AND clause 1. With the bound in place clause
+    1's verdict is the decoder's and its row carries no `recovered` key, clause 4 is
+    rescued and marked, and clause 5 — asked, never answered — stays `ungraded`. With
+    the bound dead the rescued object re-states clause 1 and its row reads as though
+    it survived only because its text was mined, which is #2721 clause 5's
+    distinguishability promise failing in the opposite direction: the marker would
+    point at the wrong clause.
+    """
+    texts = _five_clause_item(isolated, 723, tmp_path)
+    detect = _asked_from(texts)
+
+    def replay(**kw):
+        slice_ = detect(kw["prompt"])
+        if slice_ == [1, 2, 3]:
+            return _met_answer([1, 2, 3])
+        return {"ok": False, "error": DIV_ERR, "text": _turn_text([
+            {"clause": 4, "verdict": "met", "evidence_path": "skills/x/SKILL.md",
+             "how_verified": "read"},
+            {"clause": 1, "verdict": "met", "evidence_path": "skills/x/SKILL.md",
+             "how_verified": "read"}])}
+    monkeypatch.setattr(RV, "run_grader", replay)
+    kind, why, clauses = RV.grade_vault(item_id=723, paths=["skills/x/SKILL.md"],
+                                        diff="+x", vault=isolated)
+
+    by_clause = {c["clause"]: c for c in clauses}
+    assert kind != "pass", "one chunk never answered; the land has to stay refused"
+    assert "recovered" not in by_clause[1], (
+        "a clause the guided decoder graded is stamped as rescued from turn text")
+    assert by_clause[4]["verdict"] == "met" and by_clause[4].get("recovered") is True
+    assert by_clause[5]["verdict"] == "ungraded", (
+        "clause 5 was asked in the failed chunk and answered by nobody")
+    assert RV.RECOVERY_TAG in (why or ""), why
