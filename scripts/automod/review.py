@@ -66,6 +66,7 @@ import urllib.request
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Sequence
 
 from scripts.automod import testpaths as TP
 
@@ -1847,6 +1848,186 @@ def _per_call_phrase(size: int) -> str:
     return f"{int(size)} clause{'s' if int(size) != 1 else ''} per call"
 
 
+# ── #2721: grade a generation from its own turn text when its restatement fails ──
+#
+# The guided restatement (#2459's transport, `app/harness/loop.py::_maybe_finalize`) is a
+# SECOND generation whose only job is to re-encode an answer the turn already gave. On
+# 2026-10-14 all five grading generations of item #2720's vault review lost that second
+# generation — three diverged at the 8192-token cap, two came back with content the
+# finalizer could not read, one of them the empty string — and `vault_round.land` then
+# reverted a verified 30-line skill edit with `clauses: []` on the row. The five session
+# transcripts are on disk under `~/lloyd-data/sessions/` (`20261014_142122_review_d9a9`,
+# `_142156_review_40c8`, `_142229_review_0f73`, `_142432_review_1abe`, `_142621_review_d5a3`),
+# and EVERY one of them ends with a fenced JSON object that `json.loads` accepts, carrying
+# `premise: "sound"` and `met` verdicts. The judgement existed five times over; the
+# transcription was the only thing that failed. These helpers read the first-hand answer.
+
+#: The index keys those five transcripts actually use. `clause` is what the schema asks
+#: for; `id` and `n` are what the model writes when it is transcribing its own prose.
+#: `_clause_index` is deliberately NOT widened to these: `parse_review` reports
+#: `clauses_unreadable` naming the keys a guided answer used, which is a designed
+#: diagnostic for the decoder's output, and normalising there would silence it.
+RECOVERED_INDEX_KEYS = ("clause", "id", "n")
+
+#: ... and the verdict keys. `status` was emitted by `20261014_142156_review_40c8`.
+RECOVERED_VERDICT_KEYS = ("verdict", "status")
+
+#: Verdict words a recovered entry may carry. Anything else is dropped rather than
+#: defaulted: an unknown word in a verdict slot is not a verdict.
+RECOVERED_VERDICTS = ("met", "partial", "unmet", "retry", "unsatisfiable", "post_landing")
+
+#: Marks a grading whose verdicts came from turn text rather than the guided decoder. It
+#: is a PREFIX on the findings so it survives `vault_round`'s `[:600]`/`[:800]` clips, and
+#: it is the only place a reader learns that the transcription had to be rescued.
+RECOVERY_TAG = "recovered-from-turn-text"
+
+
+def _json_objects_in(text: str) -> list[dict]:
+    """Every JSON object a turn's prose offers, in the order it appears.
+
+    A fenced ```json block first — every one of the five transcripts ends with one — then a
+    bare object if the grader emitted raw JSON. Each is parsed independently, so one
+    malformed block cannot hide a well-formed one beside it.
+    """
+    out: list[dict] = []
+    for blob in re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S):
+        try:
+            obj = json.loads(blob)
+        except Exception:  # noqa: BLE001 — a block that is not JSON is simply not a candidate
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    for start in _balanced_object_starts(text):
+        try:
+            obj = json.loads(text[start:_matching_brace(text, start)])
+        except Exception:  # noqa: BLE001 — prose braces are not candidates
+            continue
+        if isinstance(obj, dict) and obj not in out:
+            out.append(obj)
+    return out
+
+
+def _balanced_object_starts(text: str) -> list[int]:
+    """Every `{` in the turn, in order — a grader that emits raw JSON has no fence to find."""
+    return [i for i, ch in enumerate(text) if ch == "{"]
+
+
+def _matching_brace(text: str, start: int) -> int:
+    """Index just past the `}` that closes the `{` at `start`, or the text's end.
+
+    Nesting-aware, because a review object is two levels deep (`clauses` is a list of
+    objects): the last `}` in the file is the right close for the first `{` only when the
+    braces balance, which is exactly what a runaway generation does not guarantee.
+    """
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(text)
+
+
+def _recovered_field(raw: dict, keys: Sequence[str]) -> Any:
+    """The first of `keys` the entry carries with a non-empty value."""
+    for key in keys:
+        if key in raw and str(raw.get(key) or "").strip() != "":
+            return raw[key]
+    return None
+
+
+def recover_grading_from_turn_text(text: object, chunk: Sequence[int],
+                                   *, only: "Sequence[int] | None" = None) -> "dict | None":
+    """The clause verdicts in a generation's own answer, normalised to the review shape.
+
+    `only` narrows which indices may be recovered — the gap-filling case, where the guided
+    answer already graded some clauses and a recovered entry for one of them could only
+    DOWNGRADE a verdict the decoder produced from a stricter schema. `None` means the whole
+    chunk, which is the case #2720 is: the restatement failed outright, so nothing in that
+    generation's answer has been transcribed at all.
+
+    Returns None — meaning "recover nothing, keep today's kind and row" — unless an object
+    parses, states `premise: sound|unsound` the way a review must, and carries at least one
+    entry for an index in `chunk`. Three rules, each answering a way this could invent a
+    verdict:
+
+    * an entry whose index falls OUTSIDE `chunk` is dropped. The prompt asked for this
+      slice only; crediting a clause the call did not grade would let one generation
+      answer the whole contract from whatever its prose wandered into.
+    * the index and verdict keys are read through :data:`RECOVERED_INDEX_KEYS` /
+      :data:`RECOVERED_VERDICT_KEYS`, because that is what these graders measurably write.
+    * a recovered `met` with no `evidence_path` becomes `partial`, carrying the reason.
+      `parse_review` would have downgraded it; recovery must not mint what the schema's own
+      prompt threatens ("a `met` without evidence_path ... will be downgraded").
+    """
+    body = text if isinstance(text, str) else ""
+    if not body.strip():
+        return None
+    wanted = set(int(i) for i in (only if only is not None else chunk))
+    allowed = wanted & set(int(i) for i in chunk)
+    entries: list[dict] = []
+    premise = ""
+    for obj in _json_objects_in(body):
+        cand = str(obj.get("premise") or "").strip().lower()
+        if cand in ("sound", "unsound"):
+            premise = cand
+        rows = obj.get("clauses")
+        if not isinstance(rows, list):
+            continue
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            idx = _recovered_field(raw, RECOVERED_INDEX_KEYS)
+            try:
+                idx = int(idx)
+            except (TypeError, ValueError):
+                continue
+            if idx not in allowed:
+                continue
+            verdict = str(_recovered_field(raw, RECOVERED_VERDICT_KEYS) or "").strip().lower()
+            if verdict not in RECOVERED_VERDICTS:
+                continue
+            row = {"clause": idx, "verdict": verdict}
+            for field in ("evidence_path", "evidence_line", "test_node_id",
+                          "how_verified", "note"):
+                if raw.get(field) not in (None, ""):
+                    row[field] = raw[field]
+            if verdict == "met" and not str(row.get("evidence_path") or "").strip():
+                row["verdict"] = "partial"
+                row["downgraded"] = ["recovered `met` with no evidence_path"]
+                row["note"] = _clip("recovered `met` with no evidence_path: "
+                                    + str(row.get("note") or ""), 300)
+            entries.append(row)
+    if not entries or premise == "":
+        return None
+    entries.sort(key=lambda e: e["clause"])
+    return {"premise": premise, "clauses": entries, "recovered_from_turn_text": True}
+
+
+def recovered_findings_prefix(indices: Sequence[int], failed: str = "") -> str:
+    """The provenance line for a grading rescued from turn text, prefixed to findings."""
+    return (f"[{RECOVERY_TAG}: clause(s) {_idx_text(sorted(set(indices)))} read from the "
+            f"generation's own turn text because its guided restatement "
+            f"{'(' + failed + ')' if failed else 'failed'}] ")
+
+
+def _generation_restatement_failed(error: object) -> str:
+    """Why the guided restatement is unusable, in the few words a findings prefix can carry.
+
+    Every word here comes out of the finalizer's own error string — `generation diverged at
+    8192 tokens`, `output is not JSON` — so the prefix attributes the rescue to the real
+    symptom instead of a paraphrase of it.
+    """
+    text = str(error or "")
+    for marker in ("generation diverged", "output is not JSON", "incomplete"):
+        if marker in text:
+            return marker
+    return "restatement unusable" if text else ""
+
+
+
 #: Worst-first order for AND-ing several answers about ONE clause index.
 _WORST_FIRST = ("retry", "unsatisfiable", "unmet", "post_landing", "partial", "met")
 
@@ -2065,6 +2246,11 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     answered: list[list[int]] = []          # slices that came back clean, in ask order
     objs: list[dict] = []                   # the answer object for each of those slices
     generations: list[list[int]] = []       # every generation this grading issued
+    # #2721: which clause indices were read out of a generation's turn text because its
+    # guided restatement was unusable, and the symptom that forced it. A list for the
+    # reason as well as the indices so `ask` can set it without a `nonlocal` declaration.
+    recovered: list[int] = []
+    recovered_reason: list[str] = []
 
     # #2459: the counts of the MOST RECENT generation. `ask` is the only place a
     # generation happens, it runs sequentially, and it returns the moment one
@@ -2085,11 +2271,66 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
         if usage_out is not None and kind in GRADER_FAILURE_KINDS:
             usage_out.clear()
             usage_out.update(last_usage)
-        return kind, why, (clauses if clauses is not None else [])
+        rows = (clauses if clauses is not None
+                else (_partial_rows() if recovered else []))
+        if recovered:
+            # The same marker the graded path writes, on the failure rows too: a review
+            # that rescued SOME clauses still failed overall, and whoever reads the row
+            # has to tell one from the other.
+            return kind, (recovered_findings_prefix(
+                recovered, "; ".join(recovered_reason)) + why), rows
+        return kind, why, rows
+
+    def _partial_rows() -> list[dict]:
+        """Rows for whatever the usable slices DID answer, when the grading failed.
+
+        #2721 clause 1: a row reading `clauses: []` while one generation's turn text
+        carried a verdict is a row that throws the judgement away twice. These rows come
+        from the SAME `merge_grading_chunks` + `parse_review` pair the graded path uses
+        ( -- same `n_clauses`, `require_tests=False` and `changed_paths`), so a
+        rescued `met` meets the path and citation rails rather than a second set of
+        them. The list stays EMPTY when nothing usable came back, which is what keeps a
+        genuinely ungraded review's row byte-identical to the shipped one. The
+        `post_landing` rewrite and the waived-rail notes the graded path adds are
+        deliberately not applied: a refused review records what was read, it does not
+        certify a clause."""
+        if not objs:
+            return []
+        merged, _why = merge_grading_chunks(answered, objs)
+        if not isinstance(merged, dict) or not merged.get("clauses"):
+            return []
+        try:
+            parsed = parse_review(merged, worktree=vault, changed_tests=[],
+                                  n_clauses=n_clauses, require_tests=False,
+                                  changed_paths=list(paths))
+        except Exception:  # noqa: BLE001  (a refusal row must not fail on its own rows)
+            return []
+        if not isinstance(parsed, dict) or not parsed.get("clauses"):
+            return []
+        graded = {c["clause"]: c["verdict"] for c in parsed["clauses"]}
+        # Only clauses the merged object ACTUALLY answered become rows. `parse_review` pads
+        # a clause no slice answered with a downgrade of its own, and that padding is not a
+        # verdict this review earned: `ungraded` is the honest word for it, and it is what
+        # keeps a rescued 1-of-5 reading as 1-of-5 rather than as 5 graded clauses.
+        answered_idx = {c["clause"] for c in merged["clauses"]
+                        if isinstance(c, dict) and isinstance(c.get("clause"), int)}
+        return [{"clause": i,
+                 "verdict": graded.get(i, "ungraded") if i in answered_idx else "ungraded",
+                 **({"recovered": True} if i in recovered else {})}
+                for i in range(1, n_clauses + 1)]
 
     def ask(chunk: list[int]) -> tuple[dict | None, list[int], tuple[str, str] | None]:
         """One generation over `chunk`: its answer, the clause indices it earned,
-        and the failure it produced (`None` when there was none)."""
+        and the failure it produced (`None` when there was none).
+
+        #2721 adds one step: when the guided restatement is unusable — diverged past its
+        token cap, `incomplete` against this chunk, or an answer that is not JSON at all —
+        the generation's own turn text is read for the verdict object it already contained
+        (`recover_grading_from_turn_text`), an outage included — `grader_outage` keys on
+        the SHAPE of the error, and a timeout that fired after the turn had written its
+        object left that object readable. An outage that delivered nothing readable still
+        reports the outage kind with no clause rows, so #2421's streak is unchanged.
+        """
         generations.append(list(chunk))
         prompt = build_vault_prompt(contract=contract, paths=paths, diff=diff, vault=vault,
                                     landing_clauses=[i for i in landing if i in chunk],
@@ -2103,39 +2344,79 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
         # with no frame at all is what makes the ledger row omit the keys.
         last_usage.clear()
         last_usage.update(finalizer_usage(res))
+        failure: "tuple[str, str] | None" = None
+        obj: dict = {}
         if not res["ok"]:
             if generation_diverged(res.get("error")):
                 # Not `skipped`. A diverged grading is this item's named failure,
                 # and `vault_round.land` writes it `blocking: true` so a second
                 # one refuses the land rather than committing a verdict-less row —
-                # but only once `answer` has tried a smaller call for it.
-                return None, [], (GRADER_DIVERGED,
-                                  f"grader generation diverged answering clause(s) "
-                                  f"{_idx_text(chunk)} ({_per_call_phrase(len(chunk))}): "
-                                  f"{res.get('error')}")
-            if grader_outage(res.get("error")):
+                # but only once `answer` has tried a smaller call for it. #2721:
+                # the kind survives only if the turn text holds no verdict object.
+                failure = (GRADER_DIVERGED,
+                           f"grader generation diverged answering clause(s) "
+                           f"{_idx_text(chunk)} ({_per_call_phrase(len(chunk))}): "
+                           f"{res.get('error')}")
+            elif grader_outage(res.get("error")):
                 # Checked AFTER divergence and BEFORE the catch-all below, so the only
                 # rows this can change are the ones that today collapse into
                 # `skipped`: #2341's post-shrink divergence rail and #955's six
                 # labelled abstentions are untouched by this branch. The incident
                 # row reads `finalizer failed: ReadTimeout: ` — a transport name with
                 # no judgement attached to it, which is what the classifier keys on.
-                return None, [], (GRADER_OUTAGE,
-                                  f"grader unreachable answering clause(s) "
-                                  f"{_idx_text(chunk)} ({_per_call_phrase(len(chunk))}): "
-                                  f"{res.get('error')}")
-            return None, [], ("skipped", f"grader did not answer: {res.get('error')}")
-        obj = res["structured"] if isinstance(res["structured"], dict) else {}
-        if str(obj.get("premise") or "").strip().lower() not in ("sound", "unsound"):
-            # #955's six wordings stay six wordings: an object that is not a
-            # review at all is a different abstention from a review that left a
-            # clause out, and collapsing them is what that test exists to stop.
-            return None, [], ("skipped", "grader returned an unusable object")
+                #
+                # #2721 moved this off the early return. The reasoning for that return —
+                # "an outage never delivered a turn, so there is no turn text" — is true of
+                # a completion that never arrived and false of every outage: `grader_outage`
+                # keys on the SHAPE of the error, and a `ReadTimeout` that fired AFTER the
+                # turn had written its verdict object left that object in the session file
+                # exactly as a divergence does. An unreadable outage still reports the
+                # identical kind, text and empty clause list, because `failure` is left
+                # untouched whenever recovery finds nothing — which is what keeps #2421's
+                # streak and the abstention that ends it counting what they counted before.
+                failure = (GRADER_OUTAGE,
+                           f"grader unreachable answering clause(s) "
+                           f"{_idx_text(chunk)} ({_per_call_phrase(len(chunk))}): "
+                           f"{res.get('error')}")
+            # #2721's second symptom is here rather than a bare return: #2720's attempt 2
+            # reached this arm with `output is not JSON ('')` and a parseable object sat in
+            # that turn's text the whole time. The wording is untouched for the case where
+            # recovery finds nothing, so #955's six labelled abstentions still read as they
+            # did — see the test that pins the empty-completion row.
+            else:
+                failure = ("skipped", f"grader did not answer: {res.get('error')}")
+        else:
+            cand = res["structured"] if isinstance(res["structured"], dict) else {}
+            if str(cand.get("premise") or "").strip().lower() in ("sound", "unsound"):
+                obj = cand
+            else:
+                # #955's six wordings stay six wordings: an object that is not a
+                # review at all is a different abstention from a review that left a
+                # clause out, and collapsing them is what that test exists to stop.
+                failure = ("skipped", "grader returned an unusable object")
+
         # A REPEAT is not an ungraded clause (#2442). The grader answers one index
         # once per subject, which is what a clause spanning two files asks for; the
         # entries are AND-ed by `merge_grading_chunks`. Only a MISSING index is a call
         # that did not grade, and that arm is unchanged: its indices stay out of `ok`
         # so `answer` re-asks exactly them at a smaller size.
+        missing = clause_answer_gaps(chunk, obj)[0] if obj else list(chunk)
+        if missing:
+            rec = recover_grading_from_turn_text(
+                res.get("text"), chunk, only=(missing if obj else None))
+            if rec is not None:
+                # Narrowed to the missing indices, so a clause the guided decoder DID
+                # transcribe is never re-graded by the rescue.
+                obj = {**obj,
+                       "premise": obj.get("premise") or rec["premise"],
+                       "clauses": [*(obj.get("clauses") or []), *rec["clauses"]]}
+                recovered.extend(int(e["clause"]) for e in rec["clauses"])
+                why = _generation_restatement_failed(res.get("error"))
+                if why and why not in recovered_reason:
+                    recovered_reason.append(why)
+                failure = None
+        if failure is not None:
+            return None, [], failure
         missing, _repeated = clause_answer_gaps(chunk, obj)
         ok = [i for i in chunk if i not in set(missing)]
         if missing:
@@ -2264,6 +2545,15 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     # distinction that decides whether to edit one runbook or both.
     subs = {c["clause"]: c["sub_verdicts"] for c in parsed["clauses"]
             if isinstance(c.get("sub_verdicts"), list)}
+    # #2721: the row must be able to say WHICH verdicts came from the guided decoder and
+    # which had to be read out of a generation's own turn text. Prefixed on the FIRST
+    # finding rather than appended as a new entry, because `vault_round.land` adds the
+    # shrink note to `findings[0]` and a tag that arrives second would be written over the
+    # one that survived. Unset when no restatement failed, so a grading the decoder
+    # produced reads exactly as it did before this change.
+    if recovered:
+        findings = recovered_findings_prefix(
+            recovered, "; ".join(recovered_reason)) + (findings or "")
     # One row per clause of the contract as it stood when graded, so a reader
     # needs no second lookup of a contract that may have changed since; a
     # clause the grader never reached is `ungraded`, which is not `met`. A

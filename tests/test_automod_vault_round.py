@@ -7271,3 +7271,91 @@ async def test_the_witness_finding_survives_the_mcp_tool_boundary(vault, tmp_pat
     # path — the fixture's own name is the part that survives either rendering.
     assert WITNESS_FIXTURE in payload["witness_findings"][0], payload["witness_findings"]
     assert _events("vault_land")[-1]["witness_findings"] == payload["witness_findings"]
+
+
+# ---------------------------------------------------------------- #2721: the recovery tag
+# reaches the row. `grade_vault` marks a rescued grading with `RV.RECOVERY_TAG` as a PREFIX
+# of its findings (pinned by tests/test_automod_review_turn_text_recovery.py); `_note_reviewed`
+# is what writes those findings into the `vault_review` ledger row, joining them with "; " and
+# clipping the whole at 800 characters. A tag that arrived as a SECOND finding would be
+# clipped away on a long refusal and the row would read as an ordinary grading again.
+
+
+def _rescued_findings(indices, *, failed="generation diverged at 8192 tokens", pad=""):
+    """The findings string a rescued grading reports, from the real producer.
+
+    Built by `RV.recovered_findings_prefix`, the same call `grade_vault` makes — so the tag
+    under test is the shipped one, its real length and spelling, not a string this file
+    invents. `pad` is grader prose, to put real pressure on the row's 800-char clip.
+    """
+    return (RV.recovered_findings_prefix(indices, failed) + pad
+            + "; clause 1 is met on the evidence cited")
+
+
+def test_a_row_scored_from_recovered_turn_text_is_distinguishable_from_one_the_decoder_wrote(
+        vault, items, monkeypatch):
+    """#2721 clause 5, across `land()` -> `_vault_review` -> the ledger row.
+
+    Two landings of one item, graded by stubs that differ only in whether the verdicts came
+    out of a generation's prose: the rescued row's `findings` carries the tag and names both
+    the clauses read from turn text and the symptom that forced it; the guided row's carries
+    neither. Everything the land decision keys on is IDENTICAL in the two rows — same kind,
+    same five `met` clauses, both letting the landing through — which is precisely why the
+    findings text has to be the thing that tells them apart.
+    """
+    write_item(items, 1, ["c1", "c2", "c3", "c4", "c5"])
+    clauses = [{"clause": i, "verdict": "met"} for i in range(1, 6)]
+    # `GRADER` answers with the `(kind, findings, clauses)` tuple `grade_vault` returns.
+    rescued = ("pass", _rescued_findings([1, 2, 3]), clauses)
+    monkeypatch.setattr(V, "GRADER", lambda **kw: rescued)
+    (vault / "skills" / "x").mkdir(parents=True)
+    (vault / "skills" / "x" / "SKILL.md").write_text("first\n", encoding="utf-8")
+    assert V.land(["skills/x/SKILL.md"], "skill: x (#1)", item_id=1)["ok"] is True
+    row_rescued = _events("vault_review")[-1]
+
+    monkeypatch.setattr(V, "GRADER", lambda **kw:
+                        ("pass", "each clause read off the staged diff", clauses))
+    (vault / "skills" / "x" / "SKILL.md").write_text("second\n", encoding="utf-8")
+    assert V.land(["skills/x/SKILL.md"], "skill: x again (#1)", item_id=1)["ok"] is True
+    row_graded = _events("vault_review")[-1]
+
+    assert RV.RECOVERY_TAG in row_rescued["findings"], row_rescued["findings"]
+    assert "clause(s) 1, 2, 3" in row_rescued["findings"], row_rescued["findings"]
+    assert "generation diverged at 8192 tokens" in row_rescued["findings"], row_rescued
+    assert RV.RECOVERY_TAG not in row_graded["findings"], row_graded["findings"]
+    assert row_graded["kind"] == row_rescued["kind"] == "pass", (row_graded, row_rescued)
+    assert ([c["verdict"] for c in row_rescued["clauses"]]
+            == [c["verdict"] for c in row_graded["clauses"]] == ["met"] * 5)
+
+
+def test_the_recovery_tag_survives_the_shrink_note_and_the_800_char_clip(vault, items,
+                                                                         monkeypatch):
+    """A rescued grading that ALSO shrank keeps both notes, and the tag is the one that lasts.
+
+    `_note_reviewed` appends the shrink note to `findings[0]` and clips the join at 800
+    characters, so the two notes share one string: the shrink note has survived that clip
+    since #2341 by sitting in front, and this puts 400 characters of grader prose in front of
+    THAT to show the tag rides along rather than being the first thing cut. A provenance
+    marker clipped off a row is a row that claims to be an ordinary grading, which is the
+    failure #2720's ledger is evidence of.
+    """
+    write_item(items, 1, ["c1", "c2", "c3", "c4", "c5"])
+    # The real composition order: `grade_vault` puts the shrink note in FRONT of the
+    # failure text and the recovery tag in front of that (pinned in
+    # tests/test_automod_review_turn_text_recovery.py), so this is one string, as it is there.
+    findings = (RV.recovered_findings_prefix([4, 5], "generation diverged at 8192 tokens")
+                + "[clause(s) 4, 5 asked at 2 clauses per call shrank to 1 clause per call] "
+                + "clause 5 is unmet: " + "detail " * 60)
+    monkeypatch.setattr(V, "GRADER", lambda **kw: (
+        "retry", findings,
+        [{"clause": 4, "verdict": "met"}, {"clause": 5, "verdict": "unmet"}]))
+    (vault / "skills" / "x").mkdir(parents=True)
+    (vault / "skills" / "x" / "SKILL.md").write_text("first\n", encoding="utf-8")
+    with pytest.raises(V.VaultRoundError, match="review sent it back"):
+        V.land(["skills/x/SKILL.md"], "skill: x (#1)", item_id=1)
+    row = _events("vault_review")[-1]
+    assert row["kind"] == "retry", row       # `retry`, not a grader failure
+    assert RV.RECOVERY_TAG in row["findings"], row["findings"]
+    assert "clause(s) 4, 5" in row["findings"], row["findings"]
+    assert "shrank to 1 clause per call" in row["findings"], row["findings"]
+    assert len(row["findings"]) <= 800, len(row["findings"])
