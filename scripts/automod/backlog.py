@@ -3621,6 +3621,13 @@ def settled_landings(ledger: Path) -> list[dict]:
     turn's word stands as it always has. This is the one case where a reported
     outcome is set aside, and it is set aside only for a second reader's
     all-`met` verdict on the exact change.
+
+    **A vault turn whose bytes HEAD already held is a landing too** (#2691). It
+    reports `kind: "held_by_head"` — a committed landing carries no `kind` — and
+    its `commit` is the taking sha from the land's `held_by`, not a sha the turn
+    made. `held_by_head_landing` is that predicate, and
+    `workers/sources/autocode._vault_landed_since` reads the same one at turn end
+    so the close lands before the reconcile on either route.
     """
     ungated = ungated_rescued_rounds(ledger)
     settled = {str(d.get("commit") or ""): d
@@ -3654,6 +3661,15 @@ def settled_landings(ledger: Path) -> list[dict]:
                                       _ledger_events(ledger, "vault_revert", require_item=False)}
         return vault_review_outcome(ledger, vault, lands=memo["lands"],
                                     reverted=memo["vault_reverted"])
+
+    def vault_rows() -> list[dict]:
+        # #2691: `held_by_head_landing` reads both event types — the refusal and
+        # the review that graded the contract the refusal is about. Built once
+        # for the whole pass, like the maps above.
+        if "vrows" not in memo:
+            memo["vrows"] = (_ledger_events(ledger, "vault_land", require_item=False)
+                             + _ledger_events(ledger, "vault_review", require_item=False))
+        return memo["vrows"]
 
     out: list[dict] = []
     for d in _ledger_events(ledger, "backlog_implement"):
@@ -3699,6 +3715,27 @@ def settled_landings(ledger: Path) -> list[dict]:
                         "vault": False})
             continue
         if not vault:
+            # #2691: no commit of its own, but HEAD already holds every path the
+            # land named — a concurrent job's pre-flight snapshot committed the
+            # round's in-flight bytes, and the author's `automod_vault_land`
+            # correctly refused with `held_by` naming the taking sha (#2175).
+            # With the vault review's all-`met` grading beside it, the work is
+            # on `main`; before this branch nothing read that, so the item fell
+            # through to `("spent", …)`, went to `draft` with "its one
+            # unattended attempt is spent", and was re-triaged. One predicate,
+            # shared with the turn-end sweep in `workers/sources/autocode.py`.
+            if rid or surface_of(d) != "vault":
+                continue
+            held = held_by_head_landing(vault_rows(), int(d["item_id"]),
+                                        session_id=str(d.get("session_id") or "") or None)
+            # #575's guarantee holds on this path too: a refusal the turn can
+            # substantiate outranks a second reader's `met`.
+            if held is None or (usable and reported not in (None, "", "met")):
+                continue
+            out.append({"item_id": int(d["item_id"]), "round_id": "",
+                        "commit": held["commit"], "settled_at": d.get("created_at"),
+                        "landed_ts": d.get("ts"), "vault": True, "kind": HELD_BY_HEAD,
+                        "outcome": outcome if usable else held["outcome"]})
             continue
         # #1910: the vault branches take `usable`, the same test the code-round
         # path above takes, not the bare truthiness of the reported word. #575's
@@ -3854,6 +3891,116 @@ def vault_review_outcome(ledger: Path, vault_commits: list[str], *,
                                  "evidence": f"vault review of {sha[:8]}"}
                                 for i in sorted(verdicts)],
             "summary": f"the vault review of {sha[:8]} graded all {n} clause(s) met"}
+
+
+#: The `kind` a `settled_landings` row carries for the #2691 shape: the vault
+#: land committed nothing because HEAD already held every path it named, and the
+#: vault review had graded the whole contract `met`. A committed landing carries
+#: no `kind` at all, so `row.get("kind")` tells the two apart.
+HELD_BY_HEAD = "held_by_head"
+
+
+def held_by_head_landing(rows, item_id: int, *, session_id: str | None = None) -> dict | None:
+    """The #2691 landing for one item from ledger rows: `{kind, commit, paths,
+    held_by, outcome}`, or None when the item is not in that shape.
+
+    #2175 made the refusal legible — a `vault_land` with `ok: false` and
+    `held_by: {path -> the sha that last committed it}`, written when
+    `git diff --cached --quiet` says the named paths already match HEAD — and
+    stopped there. Nothing downstream ever read `held_by` (`git log -S'held_by'
+    -- scripts/automod/ workers/sources/` names only `249a2f5e`), so an item
+    whose bytes were in `main` and whose review had graded every clause `met`
+    still fell through `implement_outcomes` to `("spent", …)` and was moved to
+    `draft` with "its one unattended attempt is spent", then re-triaged: #2684
+    spent three passes on content durable since 07:12:26Z. This is that
+    consumer-side half.
+
+    What has to hold, read over `rows` (any iterable of ledger events; each
+    route passes what it has — `settled_landings` the whole ledger's
+    `vault_land`/`vault_review` rows, `autocode` the turn's own window):
+
+      * the item's NEWEST `vault_land` is `ok: false` with a non-empty `held_by`
+        that covers **every** path the land named. Coverage is the equality
+        proof: `_held_by_head` yields no entry for a path git never committed
+        (#2175 clause 4), so a path nobody took has no sha to record and the
+        item is left exactly where it is today;
+      * no `ok: true` `vault_land` for the item post-dates that refusal — a
+        committed landing is a normal landing, read by `vault_review_outcome`;
+      * the item's NEWEST `vault_review` is `kind: pass`, `blocking: false`,
+        `verdict_shortfall` empty, and carries a clause row for each of 1..n
+        with every verdict `met`.
+
+    The grading comes from the `vault_review` event, NOT from
+    `vault_review_outcome`: that reader takes the per-clause rows off an **ok**
+    land row keyed by commit and returns None on an empty commit list, which is
+    exactly this shape (`review: "skipped"`, no commit). #2287 (reviews `retry`
+    carrying `partial`s) and #2649 (`diverged` then `retry`) are the boundary
+    this refuses: not all-met, still spent, still moved to `draft`.
+
+    Rows are attributed by `item_id`, or by `session_id` when a row carries no
+    item id at all — 56 of the 172 `vault_land` rows on 2026-09-21 carry none.
+    A row that DOES name an item is never matched by session: a continued
+    session carries several items, and borrowing another item's refusal to close
+    this one is the false close this route must not make.
+
+    `commit` is the taking sha. Every named path taken by one snapshot shares
+    one sha (that is the shape in the ledger); when they differ, the sha behind
+    the most named paths wins, ties going to the land row's own path order, and
+    the whole map rides on the returned dict and the ledger row.
+    """
+    sid = str(session_id or "")
+
+    def mine(e: dict) -> bool:
+        return e.get("item_id") == item_id or (
+            e.get("item_id") is None and bool(sid) and str(e.get("session_id") or "") == sid)
+
+    lands = [e for e in rows if e.get("event") == "vault_land" and mine(e)]
+    if not lands:
+        return None
+    newest = max(lands, key=lambda e: float(e.get("ts") or 0))
+    stamp = float(newest.get("ts") or 0)
+    if newest.get("ok") or newest.get("commit"):
+        return None
+    held = newest.get("held_by")
+    if not isinstance(held, dict) or not held:
+        return None
+    paths = [str(p) for p in (newest.get("paths") or [])]
+    if not paths or not set(paths) <= set(str(k) for k in held):
+        return None
+    if any(e.get("ok") and e.get("commit") and float(e.get("ts") or 0) > stamp for e in lands):
+        return None
+
+    reviews = [e for e in rows if e.get("event") == "vault_review" and mine(e)]
+    if not reviews:
+        return None
+    last = max(reviews, key=lambda e: float(e.get("ts") or 0))
+    if str(last.get("kind") or "") != "pass" or last.get("blocking"):
+        return None
+    if str(last.get("verdict_shortfall") or ""):
+        return None
+    verdicts: dict[int, str] = {}
+    for c in (last.get("clauses") or []):
+        try:
+            verdicts[int(c["clause"])] = str(c["verdict"])
+        except (KeyError, TypeError, ValueError):
+            return None
+    n = len(verdicts)
+    if not n or set(verdicts) != set(range(1, n + 1)) or any(v != "met" for v in verdicts.values()):
+        return None
+
+    sha_map = {p: str(held[p]) for p in paths}
+    sha = max(paths, key=lambda p: sum(1 for q in paths if sha_map[q] == sha_map[p]))
+    return {"kind": HELD_BY_HEAD, "commit": sha_map[sha], "paths": paths,
+            "held_by": sha_map,
+            "outcome": {"acceptance": "met", "landed": True, "source": "vault_review",
+                        "deferred_to": [], "spawned": [],
+                        "clause_outcomes": [{"clause": i, "outcome": "met", "deferred_to": [],
+                                             "evidence": f"vault review, content held by {sha_map[sha]}"}
+                                            for i in sorted(verdicts)],
+                        "summary": (f"the vault review graded all {n} clause(s) met and HEAD "
+                                    f"already holds every named path from {sha_map[sha]} — a "
+                                    "commit that is not this turn's took the bytes, so that sha "
+                                    "is recorded as the landing")}}
 
 
 def code_review_outcome(ledger: Path, round_id: str) -> dict | None:
@@ -4092,7 +4239,16 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
             refused = outcome.get("item_verdict_refused")
             stood_in = {"vault_review": "the vault review", "code_review": "the review rung"}.get(
                 str(outcome.get("source") or ""))
-            if stood_in:
+            if landing.get("kind") == HELD_BY_HEAD:
+                # #2691. The sha has to be in the sentence, not only in the
+                # marker: a reader of the item must be able to tell that the
+                # content reached `main` through someone else's commit and that
+                # this route recorded it deliberately.
+                why = ("the vault review graded every acceptance clause met, and HEAD already "
+                       f"holds every path the land named from {landing['commit']} — a commit "
+                       "that is not this turn's took the bytes, so that sha is recorded as the "
+                       "landing and nothing was re-implemented")
+            elif stood_in:
                 why = (f"{stood_in} graded every acceptance clause met; "
                        + (f"the turn's own `{refused}` was not taken, because its round landed"
                           if refused else "the turn ended without reporting an outcome"))
@@ -4134,6 +4290,11 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
                "vault": landing["vault"], "reason": why[:300],
                "acceptance_source": outcome.get("source") or "round",
                "human_clauses": human + paths_owed}
+        if landing.get("kind"):
+            # #2691: `held_by_head` on the row, so a later reader can tell a
+            # landing whose content arrived in someone else's commit from one
+            # this turn made. Absent means committed, as it always did.
+            row["kind"] = landing["kind"]
         if dry_run:
             done.append({**row, "written": False})
         else:

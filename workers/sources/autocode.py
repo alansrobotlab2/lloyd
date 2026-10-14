@@ -1785,10 +1785,28 @@ def _vault_commits_since(events: list[dict], item_id: int, since_ts: float,
 
 def _vault_landed_since(item_id: int, since_ts: float,
                         session_id: str | None = None) -> bool:
-    """Whether a `vault_land` for this item succeeded at or after `since_ts`."""
-    from scripts.automod import state as S
-    return bool(_vault_commits_since(S.read_events(limit=500), item_id, since_ts,
-                                     session_id=session_id))
+    """Whether this turn put its work on `main` at or after `since_ts`, by either
+    of the two shapes that means.
+
+    The first is the obvious one: a `vault_land` that succeeded, returning its
+    shas. The second is #2691's — the land was refused with `held_by` because
+    HEAD already held every path it named (a concurrent job's pre-flight
+    snapshot committed the round's bytes), with the vault review's all-`met`
+    grading beside it. That turn ended with `vault_commits: []` and no round, so
+    without this the close below never ran and the reconciler moved the item to
+    `draft` for a content that had been durable for minutes.
+
+    Both routes call the same predicate: `scripts.automod.backlog.
+    held_by_head_landing` is what the fleet sweep's `settled_landings` reads, and
+    the turn-end sweep feeds it its own window of rows. Two readers of one
+    property is how #575's two-minute re-offer happened.
+    """
+    from scripts.automod import backlog as B, state as S
+    events = S.read_events(limit=500)
+    if _vault_commits_since(events, item_id, since_ts, session_id=session_id):
+        return True
+    recent = [e for e in events if float(e.get("ts") or 0) >= since_ts]
+    return B.held_by_head_landing(recent, item_id, session_id=session_id) is not None
 
 
 # Continuation defaults; each is `workers.sources.autocode.<key>`.

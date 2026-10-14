@@ -4978,3 +4978,48 @@ def test_a_landing_that_leaves_the_item_open_still_owes_its_recorded_checks(isol
     assert closed["status"] == "done"
     assert [e["what"] for e in O.entries_of(closed) if e["kind"] == "check"] == [OWED_CHECK], \
         "owed exactly once across the left-open write and the close"
+
+
+# ── #2691: a vault land refused because HEAD already held its paths ─────────
+
+def test_a_held_by_head_close_records_the_taking_sha_as_its_landing(isolated):
+    """#2691 clause 2: the item closed by the refusal route carries the sha that
+    took its paths — the same full sha in the `automod_landed` marker, on the
+    `item_landed` row that closed it, in its activity note and in its body.
+
+    #2684 on 2026-10-14 is the measured instance: its bytes reached `main` in
+    `b0248328` at 07:12:26Z through the pipeline's pre-flight sweep, its vault
+    review graded all five clauses `met` at 07:14:03Z, its own `automod_vault_land`
+    refused at 07:22:27Z naming that sha in `held_by`, and at 07:27:42Z the item
+    moved to `draft` with "its one unattended attempt is spent" because no reader
+    existed. Two more triage passes were spent on content durable since 07:12:26Z.
+    """
+    taking = _sha(2684)
+    path = "skills/retrieval-eval/SKILL.md"
+    p = write_item(isolated, 2684, status="in_progress")
+    S.append_event({"event": "backlog_triage", "item_id": 2684, "verdict": "confirmed",
+                    "surface": "vault", "check": "ls", "evidence": "e", "acceptance": "a; b",
+                    "acceptance_clauses": ["a", "b"]}, path=S.LEDGER_PATH)
+    S.append_event({"event": "vault_review", "item_id": 2684, "kind": "pass",
+                    "blocking": False, "verdict_shortfall": "", "paths": [path],
+                    "clauses": [{"clause": 1, "verdict": "met"},
+                                {"clause": 2, "verdict": "met"}]}, path=S.LEDGER_PATH)
+    S.append_event({"event": "vault_land", "ok": False, "item_id": 2684, "commit": None,
+                    "review": "skipped", "review_reason": "the grader does not run on a refusal",
+                    "paths": [path], "held_by": {path: taking}}, path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": 2684, "phase": "finished",
+                    "round_id": None, "surface": "vault", "vault_commits": [],
+                    "stop_reason": "stop", "num_turns": 48, "outcome": None},
+                   path=S.LEDGER_PATH)
+    assert B.held_by_head_landing(S.read_events(path=S.LEDGER_PATH), 2684)["commit"] == taking
+    got = {g["item_id"]: g for g in B.close_settled_items(S.LEDGER_PATH)}
+    assert got[2684]["closed"] is True, got[2684]
+    fm = _fm(p)
+    assert fm["status"] == "done" and fm["automod_landed"] == taking
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_landed"][-1]
+    assert ev["commit"] == taking, "the closing row names the same sha the marker does"
+    assert ev["kind"] == "held_by_head" and ev["vault"] is True and ev["acceptance"] == "met", ev
+    assert taking in fm["activity_log"][-1], "the note says whose commit the content is in"
+    assert taking in p.read_text(), "the body section the close writes names it too"
+    assert [m for m in S.read_events(path=S.LEDGER_PATH)
+            if m.get("event") == "status_moved" and m.get("to") == "draft"] == []

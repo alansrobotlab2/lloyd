@@ -663,3 +663,287 @@ def test_a_mixed_surface_landing_is_left_to_the_code_rung(isolated):
     got = {g["item_id"]: g for g in B.close_settled_items(S.LEDGER_PATH)}
     assert got[903]["closed"] is True, \
         "closing on the turn's word is wrong for a vault item and right for this one"
+
+
+# ── #2691: the land refused because HEAD already held every path it named ───
+#
+# A concurrent job's no-pathspec pre-flight sweep commits the round's in-flight
+# bytes; the author's `automod_vault_land` then correctly refuses and names the
+# taking sha in `held_by` (#2175's fix `249a2f5e`). What #2175 did not do is
+# reach the consumer: `git log -S'held_by' -- scripts/automod/ workers/sources/`
+# names that one commit and no reader. So #2684's review graded all five clauses
+# `met` at 07:14:03Z, its content had been on `main` since 07:12:26Z, and at
+# 07:27:42Z the item was moved to `draft` with "its one unattended attempt is
+# spent" and re-triaged. Measured over the whole ledger: 3 finished rows in that
+# shape (#2287, #2649, #2684) and all 3 moved to `draft`; only #2684's review was
+# an all-`met` pass, so only that one was a wrong close. `held_by_head_landing`
+# is the reader, and `settled_landings` and `autocode._vault_landed_since` both
+# go through it.
+
+#: #2684's taking sha, from its `vault_land` row: `autonomy-data-pipeline:
+#: pre-flight 2026-10-14 (unattributed dirty state)` at 07:12:26Z, whose body
+#: lists this path among the 13 it says it did not author.
+TAKEN_SHA = "b0248328"
+TAKEN_PATH = "skills/retrieval-eval/SKILL.md"
+
+#: The exact reason `reconcile_statuses` wrote for #2684 at 07:27:42Z.
+SPENT_REASON = "its one unattended attempt is spent"
+
+CLAUSES5 = [f"clause {i}" for i in range(1, 6)]
+
+
+def _held_by_head_turn(item_id, *, paths=(TAKEN_PATH,), held_by=None, surface="vault",
+                       review=("pass", MET5), outcome=None, session_id="s"):
+    """#2684's three rows in its own order: the vault review that graded the
+    contract, the land that refused with `held_by` because HEAD already held
+    every path it named (`ok: false`, no commit, `review: "skipped"` — the
+    grader does not run on a refusal), and the finished turn whose
+    `vault_commits` is empty and which opened no round."""
+    kind, clauses = review
+    _ev(event="vault_review", item_id=item_id, kind=kind, blocking=False,
+        verdict_shortfall="", paths=list(paths), clauses=list(clauses))
+    _ev(event="vault_land", ok=False, item_id=item_id, commit=None, review="skipped",
+        review_reason="the grader does not run on a refusal", paths=list(paths),
+        held_by=dict(held_by if held_by is not None else {p: TAKEN_SHA for p in paths}))
+    _ev(event="backlog_implement", item_id=item_id, phase="finished", round_id=None,
+        surface=surface, vault_commits=[], session_id=session_id, outcome=outcome)
+
+
+def _triaged(d: Path, item_id, clauses=CLAUSES5, surface="vault"):
+    write_item(d, item_id, clauses=list(clauses))
+    _ev(event="backlog_triage", item_id=item_id, verdict="confirmed", surface=surface,
+        check="ls", evidence="e", acceptance="; ".join(clauses), acceptance_clauses=list(clauses))
+
+
+# ── clause 1: settled_landings reports it, as a landing of its own kind ─────
+
+def test_a_held_by_head_refusal_is_a_landing_with_its_own_kind(isolated):
+    """#2684 verbatim, read by `settled_landings`: a landing whose commit is not
+    the turn's, reported with a `kind` a committed landing does not carry.
+
+    The grading comes from the `vault_review` event, and the reason it has to is
+    asserted here too: `vault_review_outcome` reads per-clause rows off an **ok**
+    land row keyed by commit, so on this shape — no commit, `review: "skipped"` —
+    it returns None and the all-`met` grading would be invisible."""
+    _triaged(isolated, 2684)
+    _held_by_head_turn(2684)
+    assert B.vault_review_outcome(S.LEDGER_PATH, []) is None, \
+        "the old reader cannot see this grading: no commit to key on"
+    landed = {d["item_id"]: d for d in B.settled_landings(S.LEDGER_PATH)}
+    assert 2684 in landed, "the refusal is a landing now"
+    row = landed[2684]
+    assert row["kind"] == B.HELD_BY_HEAD == "held_by_head"
+    assert row["commit"] == TAKEN_SHA, "the taking sha, which is the content on main"
+    assert row["round_id"] == "" and row["vault"] is True
+    assert row["outcome"]["acceptance"] == "met"
+    assert [c["clause"] for c in row["outcome"]["clause_outcomes"]] == [1, 2, 3, 4, 5]
+    # A committed landing of the same pass carries no `kind` at all, which is
+    # what makes this one tellable.
+    _ev(event="vault_review", item_id=902, kind="pass", blocking=False,
+        clauses=[{"clause": 1, "verdict": "met"}])
+    _ev(event="vault_land", ok=True, commit="bbb2", item_id=902, paths=["skills/x/SK.md"],
+        review="pass", review_clauses=[{"clause": 1, "verdict": "met"}],
+        landing_clauses=[{"clause": 1, "verdict": "met", "commit": "bbb2"}])
+    _ev(event="backlog_implement", phase="finished", item_id=902, round_id="",
+        surface="vault", vault_commits=["bbb2"],
+        outcome={"landed": True, "acceptance": "met", "clause_outcomes": [],
+                 "deferred_to": [], "spawned": [], "summary": "it landed"})
+    committed = {d["item_id"]: d for d in B.settled_landings(S.LEDGER_PATH)}[902]
+    assert "kind" not in committed, committed
+
+
+def test_the_close_names_the_taking_sha_and_no_draft_row_is_written(isolated):
+    """The other half of #2684: the item is closed, the sha is in the marker and
+    in the ledger row and in the note, and the `draft` row that cost it a second
+    and third triage is never written."""
+    p = write_item(isolated, 2684, clauses=CLAUSES5)
+    _ev(event="backlog_triage", item_id=2684, verdict="confirmed", surface="vault",
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=CLAUSES5)
+    _held_by_head_turn(2684)
+    got = {g["item_id"]: g for g in B.close_settled_items(S.LEDGER_PATH)}
+    assert got[2684]["closed"] is True, got[2684]
+    fm = _fm(p)
+    assert fm["status"] == "done" and fm["automod_landed"] == TAKEN_SHA
+    ev = _events("item_landed")[-1]
+    assert ev["commit"] == TAKEN_SHA and ev["kind"] == "held_by_head", ev
+    assert TAKEN_SHA in fm["activity_log"][-1], "the note says where the content came from"
+    moved = [m for m in _events("status_moved") if m.get("to") == "draft"]
+    assert moved == [], f"a held-by-HEAD close must not write {SPENT_REASON!r}: {moved}"
+    B.reconcile_statuses(S.LEDGER_PATH)
+    assert _fm(p)["status"] == "done", "the reconcile leaves a closed item closed"
+    assert [m for m in _events("status_moved") if m.get("to") == "draft"] == []
+
+
+# ── clause 3: the implement route itself, and its counterfactual ────────────
+
+def _run_held_by_head_turn(d: Path, monkeypatch, item_id, clauses=("a", "b")):
+    """`execute` over #2684's turn: the triage, the all-`met` review, the
+    `held_by` refusal, and a turn that ends with nothing to report. Its own
+    end-of-turn sweep is the route under test."""
+    p = write_item(d, item_id, clauses=list(clauses))
+    _ev(event="backlog_triage", item_id=item_id, verdict="confirmed", surface="vault",
+        check="ls", evidence="e", acceptance="; ".join(clauses),
+        acceptance_clauses=list(clauses))
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
+
+    async def fake(prompt, **kw):
+        _ev(event="vault_review", item_id=item_id, kind="pass", blocking=False,
+            verdict_shortfall="", paths=[TAKEN_PATH],
+            clauses=[{"clause": i, "verdict": "met"} for i in range(1, len(clauses) + 1)])
+        _ev(event="vault_land", ok=False, item_id=item_id, commit=None, review="skipped",
+            paths=[TAKEN_PATH], held_by={TAKEN_PATH: TAKEN_SHA})
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 48,
+                "errors": []}
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+    asyncio.run(I.execute(type("Q", (), {"payload": {}})()))
+    return p
+
+
+def test_the_turn_end_closes_a_held_by_head_landing_before_the_reconcile(isolated, monkeypatch):
+    """#2684's 07:27:40Z→07:27:42Z, end to end through `execute`. The turn ends
+    with `vault_commits: []` and no round, so the gate that decides whether to
+    sweep at all is the one that had to learn this shape; without it the
+    reconcile wrote the spent-draft row two seconds later."""
+    p = _run_held_by_head_turn(isolated, monkeypatch, 2684)
+    fin = [e for e in _events("backlog_implement") if e.get("phase") == "finished"][-1]
+    assert fin["vault_commits"] == [] and not fin["round_id"] and fin["surface"] == "vault"
+    fm = _fm(p)
+    assert fm["status"] == "done" and fm["automod_landed"] == TAKEN_SHA
+    assert [m for m in _events("status_moved") if m.get("to") == "draft"] == []
+    assert B.select_confirmed(S.LEDGER_PATH) is None, "nothing left for the next round to take"
+
+
+def test_the_same_rows_with_the_close_suppressed_still_spend_the_item(isolated, monkeypatch):
+    """The counterfactual clause 3 asks for: same rows, predicate forced to
+    abstain, and the exact `draft` row #2684 got is written again. Without this
+    node the node above would pass for any reason at all."""
+    monkeypatch.setattr(B, "held_by_head_landing", lambda *a, **k: None)
+    p = _run_held_by_head_turn(isolated, monkeypatch, 2684)
+    fm = _fm(p)
+    assert fm["status"] == "draft" and "automod_landed" not in fm
+    moved = [m for m in _events("status_moved") if m.get("to") == "draft"]
+    assert len(moved) == 1 and SPENT_REASON in moved[0]["reason"], moved
+
+
+def test_both_routes_read_the_property_through_one_predicate(isolated, monkeypatch):
+    """The #575 lesson, stated as a shape: one property, one predicate. The
+    turn-end gate must not keep its own copy of the rule, because two readers of
+    one property is what re-offered a landed item two minutes after it landed."""
+    seen = []
+    real = B.held_by_head_landing
+
+    def spy(rows, item_id, **kw):
+        seen.append(item_id)
+        return real(rows, item_id, **kw)
+
+    monkeypatch.setattr(B, "held_by_head_landing", spy)
+    assert I._vault_landed_since(2684, 0.0) is False, "no rows at all: no landing"
+    _held_by_head_turn(2684)
+    assert I._vault_landed_since(2684, 0.0, session_id="s") is True
+    assert 2684 in seen, "the turn-end gate asked the shared predicate"
+
+
+# ── clauses 4 and 5: the negatives that keep this from being a rubber stamp ─
+
+@pytest.mark.parametrize("kind,clauses,label", [
+    ("retry", MET5[:4] + [{"clause": 5, "verdict": "partial"}],
+     "#2287/#2649: a `retry` carrying a `partial`"),
+    ("diverged", MET5[:2], "#2649's first row: not a pass at all"),
+    ("skipped", [], "a grader that answered nothing: no clause rows to count"),
+], ids=["retry-partial", "diverged", "skipped-empty"])
+def test_a_review_that_is_not_an_all_met_pass_still_spends_the_item(isolated, kind, clauses, label):
+    """The boundary the close must not cross. Both of the other two ledger items
+    in this shape (#2287, #2649) had non-all-met reviews, and their move to
+    `draft` was correct — this branch stays out of their way."""
+    write_item(isolated, 2287, clauses=CLAUSES5)
+    _ev(event="backlog_triage", item_id=2287, verdict="confirmed", surface="vault",
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=CLAUSES5)
+    _held_by_head_turn(2287, review=(kind, clauses))
+    assert B.held_by_head_landing(_events("vault_land") + _events("vault_review"),
+                                  2287, session_id="s") is None, label
+    assert {d["item_id"] for d in B.settled_landings(S.LEDGER_PATH)} == set(), label
+    assert B.close_settled_items(S.LEDGER_PATH) == []
+    assert B.implement_outcomes(S.LEDGER_PATH)[2287][0] == "spent", label
+    want = {int(k): v for k, v in B.desired_statuses(S.LEDGER_PATH).items()}
+    assert want[2287][0] == "draft" and SPENT_REASON in want[2287][1]
+
+
+def test_a_refusal_that_covers_only_some_named_paths_closes_nothing(isolated):
+    """#2175 clause 4's producer-side rule, read on the consumer side:
+    `_held_by_head` yields no entry for a path git never committed, so a partially
+    covered refusal is not proof HEAD holds the round's work. Nothing is closed
+    and no sha is recorded — the item stays exactly where it is today."""
+    p = write_item(isolated, 2692, clauses=CLAUSES5)
+    _ev(event="backlog_triage", item_id=2692, verdict="confirmed", surface="vault",
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=CLAUSES5)
+    _held_by_head_turn(2692, paths=[TAKEN_PATH, "knowledge/new-note.md"],
+                       held_by={TAKEN_PATH: TAKEN_SHA})
+    assert B.held_by_head_landing(_events("vault_land") + _events("vault_review"),
+                                  2692, session_id="s") is None
+    assert {d["item_id"] for d in B.settled_landings(S.LEDGER_PATH)} == set()
+    assert B.close_settled_items(S.LEDGER_PATH) == []
+    fm = _fm(p)
+    assert "automod_landed" not in fm and TAKEN_SHA not in str(fm)
+    assert fm["status"] == "up_next", "left where it is today, not closed on half a witness"
+
+
+def test_a_self_healed_round_is_left_to_the_normal_closer(isolated):
+    """17 of the 20 refusals that name a taking sha self-healed because another
+    named path landed `ok: true` in the same turn, so `vault_commits` was non-empty
+    and the ordinary route ran. This branch fires only when EVERY named path is
+    held, and stays out when one landed."""
+    write_item(isolated, 2287, clauses=CLAUSES5)
+    _ev(event="backlog_triage", item_id=2287, verdict="confirmed", surface="vault",
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=CLAUSES5)
+    _held_by_head_turn(2287)
+    _ev(event="vault_land", ok=True, item_id=2287, commit="cc01", review="pass",
+        ts=(_events("vault_land")[-1]["ts"] or 0) + 1, paths=["skills/other/SKILL.md"],
+        review_clauses=MET5)
+    assert B.held_by_head_landing(_events("vault_land") + _events("vault_review"),
+                                  2287, session_id="s") is None, \
+        "a committed landing beside it is the normal reader's to see"
+
+
+def test_another_items_refusal_is_never_borrowed(isolated):
+    """`item_id` is optional on the `automod_vault_land` tool, so a continued
+    session carries rows that name no item at all (86 of the 403 `vault_land` rows
+    in the live ledger, measured 2026-10-14) beside rows that name one. A row
+    naming SOMEONE ELSE's item must not be matched by session — that would buy a
+    close for content this item never wrote — while a row naming no item is still
+    matched by session, as `_vault_commits_since` has always done."""
+    write_item(isolated, 2693, clauses=["a"])
+    _ev(event="backlog_triage", item_id=2693, verdict="confirmed", surface="vault",
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=["a"])
+    _held_by_head_turn(999)
+    rows = _events("vault_land") + _events("vault_review")
+    assert B.held_by_head_landing(rows, 2693, session_id="s") is None, \
+        "#999 named itself; the session does not make it #2693's"
+    _ev(event="vault_review", kind="pass", blocking=False, verdict_shortfall="",
+        session_id="s", paths=[TAKEN_PATH], clauses=[{"clause": 1, "verdict": "met"}])
+    _ev(event="vault_land", ok=False, commit=None, review="skipped", session_id="s",
+        paths=[TAKEN_PATH], held_by={TAKEN_PATH: TAKEN_SHA})
+    rows = _events("vault_land") + _events("vault_review")
+    got = B.held_by_head_landing(rows, 2693, session_id="s")
+    assert got and got["commit"] == TAKEN_SHA, "a row naming no item is the session's"
+
+
+def test_the_short_sha_held_by_carries_is_recorded_as_it_stands(isolated):
+    """`_held_by_head` asks git with `--format=%h`, so the sha this route records is
+    the SHORT form: #2684's refusal row carries `b0248328`, eight characters, where
+    `git rev-parse` prints forty. It is recorded exactly as the row carried it — the
+    marker, the closing row and the note all hold the same string, and the item is
+    still landed afterwards, not re-read as an attempt spent because the sha came
+    in short."""
+    p = write_item(isolated, 2684, clauses=CLAUSES5)
+    _ev(event="backlog_triage", item_id=2684, verdict="confirmed", surface="vault",
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=CLAUSES5)
+    _held_by_head_turn(2684)
+    assert len(TAKEN_SHA) == 8, "the fixture is the shape git actually returns here"
+    got = {g["item_id"]: g for g in B.close_settled_items(S.LEDGER_PATH)}
+    assert got[2684]["closed"] is True, got[2684]
+    fm = _fm(p)
+    assert fm["automod_landed"] == TAKEN_SHA
+    assert _events("item_landed")[-1]["commit"] == TAKEN_SHA
+    B.reconcile_statuses(S.LEDGER_PATH)
+    assert _fm(p)["status"] == "done", "a short sha is still a landing to the reconcile"
+    assert [m for m in _events("status_moved") if m.get("to") == "draft"] == []
