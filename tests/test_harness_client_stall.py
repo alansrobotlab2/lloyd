@@ -13,32 +13,46 @@ engine; the run was killed by its own 300 s wall clock at 08:06:01 local and the
 learned nothing about why. Three lines made that undiagnosable, and the first two are
 what this file pins:
 
-    timeout = httpx.Timeout(timeout_s, read=None, connect=10.0)          # client.py:187
+    timeout = httpx.Timeout(timeout_s, read=None, connect=10.0)          # client.py:188
     raw = await _next_line(lines, cancel_wait,
-                           chunk_timeout_s if lines_seen else 0.0)       # client.py:258
+                           chunk_timeout_s if lines_seen else 0.0)       # client.py:260
 
 set httpx's READ timeout to None, so `timeout_s` (600 s default,
 `app/harness/options.py:77`) bounds connect/write/pool only, and hand `_next_line` a
-deadline of 0.0 — no deadline — until a line has arrived. `grep -rn "chunk_timeout"
-tests/*.py` returned 0 hits before this file: neither the 60 s bound nor the exemption
-was pinned by anything.
+deadline of 0.0 — no deadline — until a line has arrived. The exemption itself is not
+unpinned, and an earlier draft of this docstring said it was: `git grep -n chunk_timeout
+-- tests` finds nothing at the top level but the real pins sit one directory over in
+`app/harness/tests/test_stream_stall.py` — `:98 test_gap_after_first_line_raises` holds
+the 60 s bound and `:112 test_slow_first_line_is_not_a_stall` holds the pre-first-line
+exemption, both by driving `stream_chat` in-process with a scripted transport. What
+neither file had, and what this one adds, is a witness for the exempt window: those two
+nodes prove the silence is legal and the gap after line one is not, and nothing before
+this file proved a long silence was ever NOTICED.
 
-The change pinned here is a WARNING and nothing more: naming the model, the URL and the
-seconds waited, without aborting the request or raising. Aborting would convert a slow
-night into a failed run, which is the opposite of what a job queued behind another job
-needs — and the owed ruling on whether such a stall should be charged to the transport
-rather than to the task is explicitly not this round's to make.
+The behaviour pinned here is a WARNING and nothing more: naming the model, the URL and
+the seconds waited, without aborting the request or raising. Aborting would convert a
+slow night into a failed run, which is the opposite of what a job queued behind another
+job needs — and the owed ruling on whether such a stall should be charged to the
+transport rather than to the task is explicitly not this round's to make. One node is
+not behavioural: the last one reads `loop.py` to prove the knob actually reaches the
+call, because a witness no caller enables is worth exactly nothing and every
+behavioural node in this file stays green either way.
 """
 
 import asyncio
 import json
 import logging
 import re
+from pathlib import Path
 
 import pytest
 
 from app.harness.client import stream_chat
 from app.harness.errors import StreamStalledError
+
+#: Production's only caller of `stream_chat`. The last node in this file reads its
+#: source instead of running it, because what that node pins is a call-site claim.
+_LOOP_PY = Path(__file__).resolve().parents[1] / "app" / "harness" / "loop.py"
 
 MODEL = "qwen3.6-27b"
 BASE_URL = "http://127.0.0.1:8001"
@@ -198,8 +212,8 @@ async def test_the_first_line_disarms_the_witness_and_the_mid_chunk_bound_still_
     """The exemption keeps its exact shape: unbounded before line one, bounded after it.
 
     Tokens started and then stopped — the wedge `stream_chunk_timeout_seconds` was added
-    for, pinned by `tests/test_harness_streaming.py:55`
-    `test_stream_stall_guard_catches_a_wedge_without_a_disconnect`. The new witness must
+    for, pinned by `app/harness/tests/test_stream_stall.py:98`
+    `test_gap_after_first_line_raises`. The new witness must
     not swallow that, and must not speak either: this node holds line one fast and the
     following gap long, and expects `StreamStalledError` with no FIRST-line warning. That
     pair is what says the two detectors did not trade places.
@@ -272,3 +286,83 @@ async def test_turning_the_chunk_timeout_off_turns_the_witness_off_too(monkeypat
     assert [c["choices"][0]["delta"].get("content") for c in chunks] == ["still fine",
                                                                         None]
     assert _warnings(caplog) == [], caplog.text
+
+
+def _call_arguments(src: str, open_paren: int) -> dict[str, str]:
+    """The keyword arguments of the call whose `(` sits at `open_paren`.
+
+    A regex over the call's text is not enough and this helper exists because of it:
+    production passes `chunk_timeout_s=getattr(options, "stream_chunk_timeout_s", 0.0)`,
+    and `[^,)]+` stops at the first comma INSIDE the getattr and reports the option as
+    missing. Splitting on top-level commas only, with nesting and string literals
+    tracked, is what reads a multi-line argument correctly — and the whole point of
+    reading it is that a real call site is allowed to be multi-line.
+    """
+    parts, cur, depth, quote = [], [], 0, None
+    i = open_paren
+    while i < len(src):
+        ch = src[i]
+        if quote:
+            cur.append(ch)
+            if ch == quote and src[i - 1] != "\\":
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+            cur.append(ch)
+        elif ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+            cur.append(ch)
+        elif ch == "," and depth == 1:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    parts.append("".join(cur))
+    out: dict[str, str] = {}
+    for part in parts:
+        name, sep, value = part.strip().partition("=")
+        if sep and re.fullmatch(r"[A-Za-z_]\w*", name):
+            out[name] = " ".join(value.split())
+    return out
+
+
+def test_the_loop_hands_stream_chat_the_configured_knob():
+    """Clause 4's word "configured" is a plumbing claim, and it was pinned nowhere.
+
+    Every node above passes `chunk_timeout_s` to `stream_chat` directly, so the margin
+    the warning exists to buy — 60 s from `harness.stream_chunk_timeout_seconds`
+    (`config.yaml:517`) against a 300 s task cap, which is what makes #86's 285 s of
+    silence reportable instead of merely fatal — rests on one argument at the production
+    call site that no test read. `app/harness/tests/test_stream_stall.py:150
+    test_config_key_reaches_run_options` proves the config key is READ into `RunOptions`,
+    and this file proves the client acts on its parameter, but the hand-off between them
+    was unasserted: hardcoding `chunk_timeout_s=0.0` there, or dropping the argument and
+    letting the signature's `0.0` default win, ships the witness dead on arrival with
+    every node above still green.
+
+    Source-scoped, and deliberately so — the claim is "the call passes the knob", not
+    "a string exists somewhere in loop.py". The search window is the argument list of
+    the `stream_chat(` call itself, so the same text sitting on an unrelated call, or a
+    `chunk_timeout_s=0.0` in this one, is red.
+    """
+    src = _LOOP_PY.read_text(encoding="utf-8")
+    calls = [m.start() for m in re.finditer(r"\bstream_chat\(", src)]
+    assert len(calls) == 1, (
+        f"expected one stream_chat call site in loop.py, found {len(calls)} — this node "
+        "pins the only production caller, so a second caller means it must grow a loop")
+    args = _call_arguments(src, src.index("(", calls[0]))
+    knob = {k: v for k, v in args.items() if k == "chunk_timeout_s"}
+    assert knob, (
+        "the stream_chat call no longer passes chunk_timeout_s at all, so the "
+        "signature's 0.0 default applies and the pre-first-line witness can never fire "
+        f"in production. It is called with: {sorted(args)}")
+    value = knob["chunk_timeout_s"]
+    assert "stream_chunk_timeout_s" in value, (
+        f"stream_chat's stall knob is no longer the configured option — the argument is "
+        f"`chunk_timeout_s={value}`, which makes the 60 s margin a hardcoded one, or 0")

@@ -873,11 +873,18 @@ async def test_a_witnessed_timeout_is_still_charged_to_the_task_exactly_as_befor
     `timed out after 1s` (NOT the summary with the idle gap appended to it — the board
     and the stall alarms print `summary`, and a summary that grew a clause would move
     every one of those surfaces), `failure_count` 3 → 4 of `max_retries: 5`, and the
-    Activity Log's `Run <id> — FAILED (task): <summary>` note. If the owed ruling
-    later re-charges a pre-first-token stall to infra, THIS node is the one that
-    changes, and it changes deliberately rather than as a side effect of a witness.
+    Activity Log's `Run <id> — FAILED (task): <summary>` note — and the two stderr
+    lines `server.err` gets, the NEW one naming the idle gap and the dispatched count,
+    and the OLD escalation line the witness still routes through unchanged. "Additive"
+    is a claim about four surfaces at once — front matter, `runs.meta_json`, the
+    activity log and the log stream — and a node that checks the first three while
+    taking `caplog` as a parameter and never reading it has pinned three of four. If
+    the owed ruling later re-charges a pre-first-token stall to infra, THIS node is
+    the one that changes, and it changes deliberately rather than as a side effect of
+    a witness.
     """
     import asyncio
+    import logging
     import re
 
     import yaml
@@ -898,6 +905,10 @@ async def test_a_witnessed_timeout_is_still_charged_to_the_task_exactly_as_befor
         return _gen()
 
     monkeypatch.setattr("app.harness.run_query", _wedged)
+    # Name the logger and the level rather than trusting the ambient one, so the two
+    # lines below are captured whatever the rest of the suite left on `lloyd-autonomy`
+    # — the same form tests/test_autonomy_dependency_bypass.py:104 uses.
+    caplog.set_level(logging.WARNING, logger="lloyd-autonomy")
 
     out = await A.run_task(86)
 
@@ -920,6 +931,36 @@ async def test_a_witnessed_timeout_is_still_charged_to_the_task_exactly_as_befor
     # The new fields are HERE, beside the old ones rather than replacing any.
     assert isinstance(fm["idle_seconds"], (int, float)), fm
     assert fm["tool_calls_dispatched"] == 1, fm
+
+    # The stderr half of "additive", which nothing else in this repo pins: `server.err`
+    # is what the watchdog reads and what a human at 08:06 sees, and #86's death was
+    # invisible there — `grep d953` over the 01:01:40→01:06:02 window is 699 lines and
+    # zero hits. The witness added exactly one line; this reads it out of the log
+    # stream itself, so a refactor that moved it into the record only is still red.
+    lines = [(r.levelno, r.getMessage()) for r in caplog.records
+             if r.name == "lloyd-autonomy"]
+    warns = [m for lvl, m in lines if lvl == logging.WARNING and "timed out" in m]
+    assert len(warns) == 1, f"expected exactly one timeout WARNING, got {warns}"
+    assert re.match(r"^Task #86 timed out after 1s \(\d+\.\d+s since its last "
+                    r"harness event, 1 tool call\(s\) dispatched\)$", warns[0]), (
+        "the new line stopped naming both witnesses — the idle gap and the dispatched "
+        f"count — which is the whole content of the addition: {warns[0]!r}")
+
+    # And the line that was already there, byte-for-byte the one every other task
+    # failure prints: `_record_failure` escalates through the shared
+    # `Task #<id> failed (<kind>, <n>/<max>): <summary>` at app/autonomy.py:4245, whose
+    # live shape this item quotes (`Task #86 failed (task, 3/5)`). The witness routes
+    # through it rather than around it, so the escalation and the fleet's grep for
+    # `failed (task,` keep working. 3 → 4 of max_retries 5, the same bump the task
+    # front matter shows below.
+    errors = [m for lvl, m in lines if lvl == logging.ERROR]
+    escalates = [m for m in errors if m.startswith("Task #86 failed (task, ")]
+    assert escalates, (
+        "a witnessed timeout no longer reaches the shared escalation line, so the "
+        f"retry-budget warning is unpinned: {errors}")
+    assert escalates == ["Task #86 failed (task, 4/5): timed out after 1s"], (
+        "the escalation line changed shape or count — it is the same call every task "
+        f"failure makes, and the summary must not have grown a clause: {escalates}")
 
     task_text = (budget_env.tasks / "86-nightly-iv-metrics-series.md").read_text(
         encoding="utf-8")
