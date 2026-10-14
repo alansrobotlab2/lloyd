@@ -21,6 +21,14 @@ quietly grade whatever box it happens to run on — the same reason
 tests/test_cert_renew_units.py declines to pin enabledness, and why no node in this
 file asserts anything about the machine running it.
 
+#2702 widened that boundary rather than adding a new one: the guard now asks
+`systemctl --user show` for the arming evidence of a timer whose `is-enabled` verdict
+already failed, and the same stub answers it (see STUB for the two tables and the
+asymmetric defaults). Nothing here changed its refusal: the evidence a node can pin is
+what the guard prints given a stated `show` answer, never what this box's timer
+actually reports — `never-armed` is pinned by telling the stub the property is empty,
+which is the only way a marker can appear at all.
+
 Run: .venvs/lloyd/bin/python -m pytest tests/test_unit_enabledness_check.py
 """
 import ast
@@ -46,32 +54,70 @@ import json, os, sys
 
 # Stand-in for `systemctl`, with the real command's semantics: `is-enabled <unit>`
 # prints the state and exits 0 only for `enabled`; any other state prints and exits
-# non-zero. Every argv is appended to STUB_LOG so a test can assert what was ASKED,
-# not just what came back.
+# non-zero. Since #2702 the guard asks a second question — `show -l -p LastTriggerUSec
+# -p ActiveState <unit>`, for the arming evidence of a timer that failed that verdict —
+# so this stub answers that form too. It prints the properties SORTED BY NAME, which for
+# the guard's request order is the reverse of it, because that is what the real command
+# does on this box: `show -p LastTriggerUSec -p ActiveState` answers ActiveState first.
+# Answering out of request order is what turns the guard's by-key parsing from an
+# assumption into something a node can watch fail. Every argv is appended to STUB_LOG so
+# a test can assert what was ASKED, not just what came back.
 #
-# STUB_STATES maps a unit name to the state to answer, with two lookups beyond an
-# exact hit: a `*.suffix` key matches any unit ending in that suffix, and
-# `__default__` answers everything else (an unlisted unit answers `enabled`).
+# STUB_STATES maps a unit name to the `is-enabled` answer; STUB_SHOW maps it to the
+# properties `show` should print, or to the string "error" for a call that fails outright
+# (non-zero exit, a message on stderr, nothing on stdout). Both tables have two lookups
+# beyond an exact hit: a `*.suffix` key matches any unit ending in that suffix, and
+# `__default__` answers everything else.
+#
+# The two defaults are NOT symmetric, on purpose. An unlisted unit answers `is-enabled`
+# `enabled` — the pass case, so a node that cares about one unit need not describe the
+# rest. An unlisted unit answers `show` as an ARMED timer (ActiveState=active plus a
+# real-looking instant), so a node that expects `never-armed` or `no-answer` can only get
+# there by asking for a no-value property: no default can produce a marker, which is what
+# keeps a marker assertion from passing on a stub that was never configured.
 argv = sys.argv[1:]
 with open(os.environ["STUB_LOG"], "a") as fh:
     fh.write(json.dumps(argv) + "\\n")
 
 states = json.loads(os.environ.get("STUB_STATES", "{}"))
+shown = json.loads(os.environ.get("STUB_SHOW", "{}"))
+
+ARMED = {"ActiveState": "active", "LastTriggerUSec": "Mon 2026-10-12 06:23:01 PDT"}
 
 
-def answer(unit):
-    if unit in states:
-        return states[unit]
-    for key, state in states.items():
+def lookup(table, unit, fallback):
+    if unit in table:
+        return table[unit]
+    for key, value in table.items():
         if key.startswith("*") and unit.endswith(key[1:]):
-            return state
-    return states.get("__default__", "enabled")
+            return value
+    return table.get("__default__", fallback)
 
 
 if argv[:2] == ["--user", "is-enabled"] and len(argv) == 3:
-    state = answer(argv[2])
+    state = lookup(states, argv[2], "enabled")
     print(state)
     raise SystemExit(0 if state == "enabled" else 1)
+
+if argv[:2] == ["--user", "show"]:
+    props, unit = [], ""
+    rest = iter(argv[2:])
+    for arg in rest:
+        if arg in ("-p", "--property"):
+            props.append(next(rest, ""))
+        elif arg.startswith("--property="):
+            props.append(arg.split("=", 1)[1])
+        elif arg in ("-l", "--full", "--no-pager"):
+            continue
+        else:
+            unit = arg
+    answer = lookup(shown, unit, ARMED)
+    if answer == "error":
+        sys.stderr.write("stub systemctl: show failed for %r\\n" % (unit,))
+        raise SystemExit(4)
+    for prop in sorted(props):
+        print("%s=%s" % (prop, answer.get(prop, "")))
+    raise SystemExit(0)
 
 sys.stderr.write("stub systemctl: unstubbed invocation %r\\n" % (argv,))
 raise SystemExit(2)
@@ -79,10 +125,12 @@ raise SystemExit(2)
 
 
 def _run(unit_dir: Path, states: dict, tmp_path: Path, tag: str = "run",
-         require_query: bool = True):
+         require_query: bool = True, show: dict | None = None):
     """Execute the script for real, with a stub `systemctl` first on PATH.
 
-    Returns (CompletedProcess, combined stdout+stderr lines, argv the stub saw).
+    `states` answers `is-enabled` and `show` answers the arming-evidence `show` call
+    (#2702); both default to the stub's own defaults, which are asymmetric on purpose —
+    see STUB. Returns (CompletedProcess, combined stdout+stderr lines, argv the stub saw).
     """
     bin_dir = tmp_path / f"bin-{tag}"
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -95,6 +143,7 @@ def _run(unit_dir: Path, states: dict, tmp_path: Path, tag: str = "run",
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     env["STUB_LOG"] = str(log)
     env["STUB_STATES"] = json.dumps(states)
+    env["STUB_SHOW"] = json.dumps(show or {})
 
     proc = subprocess.run([str(SCRIPT), "--unit-dir", str(unit_dir)],
                           capture_output=True, text=True, env=env, cwd=str(ROOT))
@@ -129,6 +178,35 @@ def _denominator(out: list[str]) -> int:
 
 def _fail_lines(out: list[str]) -> list[str]:
     return [line for line in out if line.startswith("FAIL ")]
+
+
+def _fail_line_for(out: list[str], unit: str) -> str:
+    """The exactly-one FAIL line naming `unit`.
+
+    Every clause below is asserted against a line, so each node first has to prove the
+    line exists and is unique: an `in` against a comprehension that came back empty is a
+    green that proves nothing about a hint nobody was shown.
+    """
+    named = [line for line in _fail_lines(out) if unit in line]
+    assert len(named) == 1, (
+        f"expected exactly one FAIL line naming {unit}, got {named} "
+        f"in {_fail_lines(out)}")
+    return named[0]
+
+
+def _row_lines(out: list[str]) -> list[str]:
+    """The `unit<TAB>verdict` rows — the lines the health route parses into graded rows.
+
+    The shape is `scripts/service_health_check.py`'s own `_UNITS_ROW_RE`
+    (`^(\\S+\\.timer)\\t(\\S+)$`), so a line that gained any trailing text stops being a row
+    here exactly where it stops being one on the health route.
+    """
+    return [line for line in out if re.fullmatch(r"\S+\.timer\t\S+", line)]
+
+
+def _asked_about(queries: list, verb: str) -> list[str]:
+    """The units the stub saw under `systemctl --user <verb> ...`, in call order."""
+    return [q[-1] for q in queries if q[1] == verb]
 
 
 def test_the_script_is_executable_and_prints_a_verdict_line_per_repo_timer(tmp_path):
@@ -344,6 +422,227 @@ def test_the_remediation_arms_the_timer_and_points_by_content(tmp_path):
         assert re.search(r"enable (?!--now)\S*\.timer", line) is None, \
             f"bare `enable` does not arm a timer: {line}"
     assert not [line for line in out if re.search(r"SETUP\.md:\d+", line)], out
+
+
+def test_the_fail_line_names_the_last_trigger_instant_or_never_armed(tmp_path):
+    """#2702 clause 1: the FAIL line carries the unit's `LastTriggerUSec`, and prints the
+    literal `never-armed` instead of a blank when that property comes back with no value.
+
+    Three miss units share one run so each rendering is the difference between answers
+    rather than the only answer available: `fired.timer` has an instant, `never.timer`
+    has the empty string systemd renders for an unset timestamp (which is what
+    `systemctl --user show -l -p LastTriggerUSec lloyd-egress-window.timer` printed when
+    #2702 was triaged), and `unset.timer` has `n/a`, systemd's other no-value spelling.
+    Both no-value forms have to reach `never-armed`: this guard runs on goliath as well as
+    here, and a marker that fires on only one box's rendering leaves the other reading
+    `LastTriggerUSec=` and blaming the guard.
+
+    Two things keep this falsifiable rather than tautological. The stub answers the two
+    properties sorted by name — the reverse of the order the script asks for them, which
+    is what the real command does on this box — so a line that renders BOTH fields under
+    the right label is evidence the guard read them by key and not by position. And the
+    stub's default for an unconfigured unit is an armed timer with a real instant, so
+    `never-armed` cannot appear except from a property this node asked to be empty; a
+    guard that printed the default instead of reading the answer would print the instant.
+
+    The blank itself is ruled out by shape, not only by the marker being present: no FAIL
+    line may carry `LastTriggerUSec=` followed by a non-space.
+    """
+    unit_dir = _unit_names(tmp_path, "alpha.timer", "fired.timer", "never.timer",
+                           "unset.timer")
+    show = {
+        "fired.timer": {"ActiveState": "inactive",
+                        "LastTriggerUSec": "Wed 2026-10-14 02:12:27 PDT"},
+        "never.timer": {"ActiveState": "inactive", "LastTriggerUSec": ""},
+        "unset.timer": {"ActiveState": "inactive", "LastTriggerUSec": "n/a"},
+    }
+
+    proc, out, _ = _run(
+        unit_dir, {"fired.timer": "disabled", "never.timer": "disabled",
+                   "unset.timer": "disabled"}, tmp_path, tag="trigger", show=show)
+
+    assert proc.returncode != 0, out
+    assert _denominator(out) == 4, out
+
+    fired = _fail_line_for(out, "fired.timer")
+    assert "LastTriggerUSec=Wed 2026-10-14 02:12:27 PDT" in fired, fired
+    assert "ActiveState=inactive" in fired, fired
+    for unit in ("never.timer", "unset.timer"):
+        line = _fail_line_for(out, unit)
+        assert "LastTriggerUSec=never-armed" in line, line
+        assert "n/a" not in line, f"the raw no-value spelling leaked: {line}"
+    for line in _fail_lines(out):
+        assert re.search(r"LastTriggerUSec=\S", line), f"a blank instant: {line}"
+    assert not [line for line in _fail_lines(out) if "alpha.timer" in line], out
+
+
+def test_the_same_fail_line_separates_a_running_timer_from_a_stopped_one(tmp_path):
+    """#2702 clause 2: `ActiveState` rides on that same FAIL line, so a unit FILE that is
+    disarmed while the loaded timer still runs reads differently from a timer that is
+    genuinely not running.
+
+    The two miss units are given the SAME `LastTriggerUSec`, which is what makes this a
+    comparison instead of a word-lookup: assert each line's `ActiveState` token and then
+    assert the two lines are identical once the unit name and that one token are
+    normalised away. A node that only checked the word appeared would still pass if the
+    value were hardcoded, and would not notice the field being decorative — and the
+    distinction it carries is the one #2702's triage had to reconstruct by hand: `disable`
+    without `--now` leaves a `disabled` unit reading `ActiveState=active` until the user
+    manager next restarts (a stop that has not happened yet), while an installed-but-
+    never-armed timer reads `inactive` (an action that never happened).
+
+    The third unit is the no-value case: `ActiveState=n/a` renders as the literal
+    `no-answer` rather than as a blank, so an evidence read that could not ask still says
+    so on the same line.
+    """
+    unit_dir = _unit_names(tmp_path, "running.timer", "stopped.timer", "blind.timer")
+    same_instant = "Wed 2026-10-14 02:12:27 PDT"
+    show = {
+        "running.timer": {"ActiveState": "active", "LastTriggerUSec": same_instant},
+        "stopped.timer": {"ActiveState": "inactive", "LastTriggerUSec": same_instant},
+        "blind.timer": {"ActiveState": "n/a", "LastTriggerUSec": same_instant},
+    }
+
+    proc, out, _ = _run(unit_dir, {"*.timer": "disabled"}, tmp_path, tag="state",
+                        show=show)
+
+    assert proc.returncode != 0, out
+    assert _denominator(out) == 3, out
+
+    running = _fail_line_for(out, "running.timer")
+    stopped = _fail_line_for(out, "stopped.timer")
+    assert re.search(r"ActiveState=active\b", running) and \
+        "ActiveState=inactive" not in running, running
+    assert re.search(r"ActiveState=inactive\b", stopped) and \
+        "ActiveState=active," not in stopped, stopped
+
+    def normalised(line: str, unit: str) -> str:
+        return line.replace(unit, "UNIT").replace(
+            re.search(r"ActiveState=\S+", line).group(0), "STATE")
+
+    assert normalised(running, "running.timer") == normalised(stopped, "stopped.timer"), \
+        f"{running}\n{stopped}"
+
+    blind = _fail_line_for(out, "blind.timer")
+    assert "ActiveState=no-answer" in blind, blind
+    assert "n/a" not in blind, blind
+    for line in (running, stopped, blind):
+        assert "LastTriggerUSec=Wed 2026-10-14 02:12:27 PDT" in line, line
+
+
+def test_the_evidence_is_asked_only_of_the_timers_that_already_failed(tmp_path):
+    """#2702's own cost limit, pinned from the stub's query log.
+
+    The arming question is asked of a timer only after `is-enabled` has already failed it:
+    one `show` per miss, none at all on a green run. That is both the guard's contract with
+    systemd (`service_health_check.py` runs it with a 30-second timeout, and the whole-fleet
+    health pass is not the place to add a round trip per healthy unit) and the reason
+    `test_the_script_is_executable_and_prints_a_verdict_line_per_repo_timer` can still assert
+    its query set by name: if the evidence call fired per timer, the argvs the stub logged
+    would no longer be one per timer.
+
+    The green run is the load-bearing half — an all-enabled fleet must ask `show` nothing.
+    The red run then pins which units were asked, that each was asked once, and that the
+    argv really carries both properties and the unit.
+    """
+    unit_dir = _unit_names(tmp_path, "alpha.timer", "beta.timer", "gamma.timer")
+
+    green, green_out, green_queries = _run(unit_dir, {}, tmp_path, tag="greenask")
+    assert green.returncode == 0, green_out
+    assert _asked_about(green_queries, "is-enabled") == \
+        ["alpha.timer", "beta.timer", "gamma.timer"], green_queries
+    assert _asked_about(green_queries, "show") == [], (
+        f"an all-enabled run went asking systemd for arming evidence: "
+        f"{green_queries}")
+
+    red, red_out, red_queries = _run(unit_dir, {"beta.timer": "disabled",
+                                                "gamma.timer": "disabled"},
+                                     tmp_path, tag="redask")
+    assert red.returncode != 0, red_out
+    assert sorted(_asked_about(red_queries, "show")) == ["beta.timer", "gamma.timer"], \
+        red_queries
+    assert _asked_about(red_queries, "is-enabled") == \
+        ["alpha.timer", "beta.timer", "gamma.timer"], red_queries
+    for argv in (q for q in red_queries if q[1] == "show"):
+        assert argv[:2] == ["--user", "show"], argv
+        assert "LastTriggerUSec" in argv and "ActiveState" in argv, argv
+
+
+def test_an_evidence_read_that_fails_leaves_the_verdict_and_remediation_alone(tmp_path):
+    """The new question must not be allowed to change the old answer.
+
+    `show` can fail while `is-enabled` succeeds at saying `disabled` — a unit that is not
+    loaded, a manager that is not listening for that query. The guard discards that call's
+    stderr, because `service_health_check.py` folds this script's stderr into the same text
+    it greps for rows and FAIL lines, so a tool error printed here would land in the parsed
+    stream as a line about nothing. What the line must still do is name the miss, say in
+    words that it could not ask, and print the arming command; and the run must still exit
+    non-zero. A marker for "we could not read it" is a report, not a pass.
+
+    The `stub systemctl` assertion is the load-bearing one for the stderr claim: the stub
+    writes that message to stderr and exits non-zero for a unit whose `show` answer is
+    `error`, so if the guard ever stopped discarding it, it would show up in the combined
+    output this helper returns.
+    """
+    unit_dir = _unit_names(tmp_path, "alpha.timer", "broken.timer")
+
+    proc, out, _ = _run(unit_dir, {"broken.timer": "disabled"}, tmp_path,
+                        tag="brokenshow", show={"broken.timer": "error"})
+
+    assert proc.returncode != 0, f"an unreadable evidence read passed the guard: {out}"
+    assert _denominator(out) == 2, out
+    assert _row_lines(out) == ["alpha.timer\tenabled", "broken.timer\tdisabled"], out
+    assert len(_fail_lines(out)) == 1, out
+
+    line = _fail_line_for(out, "broken.timer")
+    assert "ActiveState=no-answer" in line, line
+    assert "LastTriggerUSec=never-armed" in line, line
+    assert re.search(r"enable --now broken\.timer\b", line), line
+    assert not [ln for ln in out if "stub systemctl" in ln], (
+        f"the evidence call's stderr reached the parsed output: {out}")
+
+
+def test_a_grown_fail_line_leaves_the_row_and_denominator_contract_intact(tmp_path):
+    """#2702 clause 3: the output the health route parses is byte-comparable with before.
+
+    `scripts/service_health_check.py` reads this script four ways — `^(\\S+\\.timer)\\t(\\S+)$`
+    for the rows, `^checked \\d+ timers?: .*$` for the denominator, `^FAIL (\\S+\\.timer) ` for
+    which rows to fail, and the exit code for the verdict — and `test_unit_enabledness_route.py`
+    pins that the rows carry the denominator line verbatim. The evidence therefore had to
+    land on the FAIL line and nowhere else: appended to a row it would break the tab regex,
+    whose verdict group cannot hold a space, and a second denominator-shaped line would
+    make the single-line assertion below, and the route's copy of the count, go red.
+
+    So this node runs one red fleet and pins the whole contract in one place: the rows are
+    exactly the three `unit<TAB>is-enabled-answer` lines with nothing appended, there is
+    exactly one `checked N timers: M enabled, K not enabled` line and it carries the true
+    counts, it still precedes the FAIL lines, the exit code is 1, and each FAIL line still
+    offers `enable --now <unit>` and never the bare form #2537 removed.
+    """
+    unit_dir = _unit_names(tmp_path, "alpha.timer", "beta.timer", "gamma.timer")
+
+    proc, out, _ = _run(unit_dir, {"beta.timer": "disabled", "gamma.timer": "disabled"},
+                        tmp_path, tag="contract")
+
+    assert proc.returncode == 1, f"{proc.returncode}: {out}"
+    assert sorted(_row_lines(out)) == ["alpha.timer\tenabled", "beta.timer\tdisabled",
+                                       "gamma.timer\tdisabled"], out
+    for line in _row_lines(out):
+        assert "ActiveState" not in line and "LastTriggerUSec" not in line, line
+
+    totals = [line for line in out if line.startswith("checked ")]
+    assert totals == ["checked 3 timers: 1 enabled, 2 not enabled"], out
+    assert _denominator(out) == 3, out
+
+    fails = _fail_lines(out)
+    assert len(fails) == 2, fails
+    assert out.index(totals[0]) < min(out.index(line) for line in fails), out
+    for unit in ("beta.timer", "gamma.timer"):
+        assert re.search(rf"enable --now {re.escape(unit)}\b",
+                         _fail_line_for(out, unit)), unit
+    for line in fails:
+        assert re.search(r"enable (?!--now)\S*\.timer", line) is None, \
+            f"bare `enable` does not arm a timer: {line}"
 
 
 def test_the_command_this_line_prints_is_runnable(tmp_path):

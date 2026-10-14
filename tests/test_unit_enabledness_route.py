@@ -42,15 +42,19 @@ ALL_ENABLED = (
     "beta.timer\tenabled\n"
     "checked 2 timers: 2 enabled, 0 not enabled\n"
 )
+# Mirrors the guard's failure output byte for byte — including the arming evidence #2702
+# added to the FAIL line, which is what
+# `test_the_failure_fixture_is_the_line_the_guard_actually_prints` checks rather than
+# trusting. The caller parses only the `FAIL <unit> ` prefix, so the prefix is all that
+# has to stay faithful for the rows to grade; the mirror is here so the caller is graded
+# against a line a red run really prints — timestamp and its spaces included — and not
+# against the line some earlier round remembered.
 ONE_DISABLED = (
     "alpha.timer\tenabled\n"
     "beta.timer\tdisabled\n"
     "checked 2 timers: 1 enabled, 1 not enabled\n"
-    # Mirrors the guard's FAIL line byte for byte as of #2537, which moved the
-    # remediation to `enable --now` (the arming form) and dropped its stale
-    # `SETUP.md:1520` pointer. The caller parses only the `FAIL <unit> ` prefix, so
-    # what has to stay faithful is that prefix, not the prose after it.
-    "FAIL beta.timer is not enabled — run: systemctl --user enable --now beta.timer "
+    "FAIL beta.timer is not enabled — armed evidence: ActiveState=inactive, "
+    "LastTriggerUSec=never-armed — run: systemctl --user enable --now beta.timer "
     "(SETUP.md carries the enable route for each repo timer)\n"
 )
 NOTHING_LOOKED_AT = (
@@ -237,3 +241,40 @@ def test_every_row_carries_the_scripts_own_denominator(monkeypatch, capsys, stan
     for row in rows:
         assert line in row["status"], row["status"]
     assert sum(1 for r in rows if not r["healthy"]) == text.count("\nFAIL ")
+
+
+def test_the_failure_fixture_is_the_line_the_guard_actually_prints(tmp_path):
+    """The seam between these two files: this suite grades rows it never runs.
+
+    Every node above feeds `check_unit_enabledness` a stand-in that prints a hand-written
+    copy of the guard's output, because the alternative is reading this box's unit state.
+    That makes each fixture an assertion ABOUT the guard, and an unenforced one: #2702
+    lengthened the FAIL line with an `ActiveState` value and a timestamp that contains
+    spaces, and a fixture left holding the old shape would have kept this file green while
+    the caller was graded against a message no red run produces.
+
+    So the mirror is checked, not trusted. tests/test_unit_enabledness_check.py already
+    owns a way to run the real guard without touching the host — a stub `systemctl` first
+    on `PATH`, answering from a table the node dictates — so its `_run` is loaded and
+    pointed at the same two units these fixtures name, with the stub's `show` table set to
+    the never-armed reading `ONE_DISABLED` carries. Both fixtures are compared, because a
+    guard that grew lines only on the green path would otherwise still read as faithfully
+    mirrored here.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "lloyd_unit_enabledness_check", ROOT / "tests" / "test_unit_enabledness_check.py")
+    check = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(check)
+
+    unit_dir = check._unit_names(tmp_path, "alpha.timer", "beta.timer")
+    cases = [
+        (ALL_ENABLED, {}, {}, 0, "mgreen"),
+        (ONE_DISABLED, {"beta.timer": "disabled"},
+         {"beta.timer": {"ActiveState": "inactive", "LastTriggerUSec": ""}}, 1, "mred"),
+    ]
+    for want, states, show, expected_rc, tag in cases:
+        proc, out, _ = check._run(unit_dir, states, tmp_path, tag=tag, show=show)
+        assert proc.returncode == expected_rc, f"{tag}: exit {proc.returncode}: {out}"
+        assert out == [ln.strip() for ln in want.splitlines() if ln.strip()], (
+            f"{GUARD.name} prints {out}, but this suite grades rows built from {want!r}: "
+            f"update the fixture to match the guard, not this assertion")
