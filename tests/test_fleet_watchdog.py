@@ -1722,3 +1722,382 @@ def test_the_stall_alarm_reads_the_kind_from_the_row_not_from_a_second_counter(t
     legacy.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY, "1")
     assert "(person hold)" in fw._operator_pause_clause(legacy), (
         "a database with no holder row alarms as the kind that is never auto-released")
+
+
+# ── #2692 — the queue-age clause names its source, and an outranked wait says so ──
+#
+# The command this section's premise rests on, run again on 2026-10-14 against the live
+# logs (`~/lloyd-data/logs/server.err*`, eleven rotated files). The second grep is the
+# load-bearing part: every post is written TWICE, once as this module's ERROR line and
+# once as a `lloyd-server: discord_alert` echo of the same text, so the bare first grep
+# counts 44 LINES for 22 POSTS and any figure read off it is double the truth.
+#
+#   grep -hF 'autonomy scheduler may be stalled' server.err* | grep -F 'fleet_watchdog:'
+#
+# It answers 22 posts of the due-ness alarm, and 18 of those 22 are the age-only sentence
+# — no source named — running from 2026-10-11 16:17:42 (185 min) through
+# 2026-10-12 23:58:32 (915 min) to 2026-10-14 02:05:42 (196 min), which is to say it was
+# still firing six hours before this line was written. The four files the item grepped
+# (`server.err{,.1,.2,.3}`) hold 5 of the 18; the 915 min one is in `server.err.4`.
+#
+# Two independent signals say those 18 were not stalls. First, the ages FALL across
+# consecutive posts on 2026-10-13 — 892, 570, 456, then 185 min — and a head age can only
+# fall if the head row is being claimed and replaced by a younger one; a stalled pool's
+# head age rises monotonically. Second, the shape on the queue itself: an `owed-check` row
+# at priority 72 waiting while the pool drains work from the eleven sources whose rows ALL
+# sit numerically above it (max(priority) below 72 for every one; no source spans 72, and
+# no row in the store is at priority 1 or 2 — the `priority=1`/`priority=2` arguments at
+# workers/sources/autotriage.py:1165 and owed_check.py:355 belong to
+# `run_prompt_in_session`, which is the model-request priority of the session, not the
+# priority of a queue row, so they are not in this ranking at all). The
+# alarm held the source name in hand — `pending_wait_by_source()`
+# is keyed by source, and the max that produces the number is taken over its VALUES — and
+# threw the key away one line before printing it.
+
+
+#: The one config number the starving clause weighs, pinned rather than inherited. The
+#: live value read through the loader on 2026-10-14:
+#: `workers.sources.get_sources_config()["scheduled-task"]["max_duration_seconds"]` is
+#: 3600, and `fw._max_duration_seconds()` — which weighs that source and no other —
+#: returns 3600. So the threshold AND the claim window below are 3 x 3600 = 10800 s =
+#: 180 min, and every age in this section clears that threshold.
+_STARVE_MAX_DURATION_S = 3600
+_STARVE_WINDOW_MIN = 3 * _STARVE_MAX_DURATION_S // 60
+
+#: Both ages below are real posts, not round numbers: 915 min is the 2026-10-12 23:58:32
+#: line (`server.err.4`), 456 min the 2026-10-13 10:14:02 one. The older is the head the
+#: clause has to name, the younger a `scheduled-task` row, so the alarm's own source is
+#: waiting too and naming the familiar one instead of the oldest is a visible failure.
+_STARVE_HEAD_MIN = 915
+_STARVE_YOUNGER_MIN = 456
+
+
+def _starve_config(monkeypatch):
+    """Pin `max_duration_seconds` to the live 3600 s, so the window is 180 min here
+    whatever the box's `sources.yaml` says on the day the test runs."""
+    monkeypatch.setattr(
+        sources, "get_sources_config",
+        lambda: {"scheduled-task":
+                 _NoEnabledKeyConfig({"max_duration_seconds": _STARVE_MAX_DURATION_S})},
+        raising=False)
+
+
+def _age_queued_row(q, *, row_id: int, minutes: int) -> None:
+    """Wind a queued row's `enqueued_at` back, because the age IS the fixture and
+    `WorkQueue.enqueue` stamps it from the wall clock on every public write."""
+    aged = (dt.datetime.now(dt.timezone.utc)
+            - dt.timedelta(minutes=minutes)).isoformat()
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE queue SET enqueued_at=? WHERE id=?", (aged, row_id))
+        conn.commit()
+
+
+def _claim_rows(q, *, source: str, n: int, age_min: int = 0,
+                hold: tuple[str, ...] = ("owed-check", "scheduled-task")) -> None:
+    """Have the pool claim `n` rows of one source, `age_min` minutes in the past.
+
+    Through `claim_next`, not raw SQL: `claimed_at` is that method's column to write
+    (workers/queue.py:829), so the fixture leaves the same trace a real worker does —
+    state `claimed`, `claimed_at` stamped, `attempts` bumped. `hold` are the sources
+    whose rows must stay queued: it keeps the starving heads unclaimed, which is the
+    whole state under test — work going out of the queue past a row that stays. The
+    rows this claims are at priority 55 and the held head at 72, so the head is never
+    the one handed out even when its own source is the one being drained. Only
+    `claimed_at` is wound back, and only when `age_min` says so, because the age of
+    that column is the second half of the fixture.
+    """
+    for i in range(n):
+        assert q.enqueue(source=source, kind=f"{source}:row",
+                         payload={"i": i}, priority=55) is not None
+    for _ in range(n):
+        item = q.claim_next("w-2692", exclude_sources=list(hold))
+        assert item is not None and item.source == source, (
+            f"the pool did not hand out a {source} row, so the claim evidence this "
+            f"section turns on was never written: {item}")
+    if age_min:
+        aged = (dt.datetime.now(dt.timezone.utc)
+                - dt.timedelta(minutes=age_min)).isoformat()
+        with sqlite3.connect(str(q.db_path)) as conn:
+            conn.execute("UPDATE queue SET claimed_at=? WHERE source=?",
+                         (aged, source))
+            conn.commit()
+
+
+def _starve_head(q: WorkQueue) -> int:
+    """Put the waiting row on the board and wind its age to the one that posted.
+
+    Separate from `_starved_board_queue` because one fixture has to build the claims
+    BEFORE this row exists: `claim_next` ranks on the EFFECTIVE priority, and the
+    aging credit (#2496, 15 points per 6 h) pulls a 915 min row from 72 down to ~34,
+    above everything fresh — so an aged head cannot be walked past from the same
+    source, and the state where a source claims rows while its own head waits is only
+    reachable by ageing the head after those claims are made.
+    """
+    head = q.enqueue(source="owed-check", kind="owed-check:clause",
+                     payload={"item_id": 2690, "apply": True}, priority=72)
+    _age_queued_row(q, row_id=head, minutes=_STARVE_HEAD_MIN)
+    return head
+
+
+def _starved_board_queue(tmp_path, name: str, *, head: bool = True) -> WorkQueue:
+    """A queue in the state that produced the five false posts, and nothing else.
+
+    An `owed-check` head at priority 72 (the live figure on 2026-10-14: five
+    `owed-check` rows queued at 72, oldest 171 min) aged 915 min, and a younger aged
+    `scheduled-task` row, so the alarm's own source is waiting too and the clause has
+    to pick the OLDER one rather than the familiar one. No claims here — each node
+    adds its own — and no task file, so `_grossly_overdue` and `_next_run_stalled`
+    answer nothing and every alert counted below is the due-ness starve clause.
+    `head=False` builds the same board one step earlier, for a fixture that has to
+    claim rows before the head is old enough to win them.
+    """
+    q = WorkQueue(tmp_path / name)
+    if head:
+        _starve_head(q)
+    younger = q.enqueue(source="scheduled-task", kind="heartbeat", payload=None)
+    _age_queued_row(q, row_id=younger, minutes=_STARVE_YOUNGER_MIN)
+    if head:
+        _assert_starving(q)
+    return q
+
+
+def _assert_starving(q: WorkQueue) -> None:
+    """The fixture's two standing premises, checked wherever the board is finished."""
+    assert fw._queue_starving(q, _STARVE_MAX_DURATION_S) > 3 * _STARVE_MAX_DURATION_S, (
+        f"a {_STARVE_HEAD_MIN} min head is not starvation at 3 x "
+        f"{_STARVE_MAX_DURATION_S} s, so no alert below could fire")
+    assert fw._grossly_overdue(q) == [] and fw._next_run_stalled(q) == [], (
+        "the board is not empty of task-side findings, so an alert counted below "
+        "would not be attributable to the due-ness starve clause")
+
+
+async def test_an_outranked_wait_names_its_source_and_says_priority_starvation(
+        board, monkeypatch, tmp_path):
+    """Clauses 1 + 2: the line names the waiting source, and blames the priority order.
+
+    The state is the live one: an `owed-check` head 915 min old, three `autotriage`
+    rows claimed inside the 180 min window, and nothing else wrong with the fleet. At
+    base this posts `autonomy scheduler may be stalled: oldest claimable queue item is
+    915 min old` — which names no source and accuses the one process the evidence
+    clears, because three rows went out of that queue inside the window.
+    """
+    _starve_config(monkeypatch)
+    q = _starved_board_queue(tmp_path, "outranked.db")
+    _claim_rows(q, source="autotriage", n=3)
+
+    alerts = _watch_alerts(monkeypatch)
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(q)
+
+    assert len(alerts) == 1, f"expected exactly the one due-ness alert: {alerts}"
+    msg = alerts[0]
+    assert "owed-check" in msg, (
+        f"the clause still does not say which source is waiting: {msg}")
+    assert f"{_STARVE_HEAD_MIN} min old" in msg, (
+        f"the age of the waiting row left the clause, and it is the symptom a reader "
+        f"acts on: {msg}")
+    assert "outranked" in msg and "priority" in msg, (
+        f"the clause does not attribute the wait to the priority order: {msg}")
+    assert "stalled" not in msg.lower(), (
+        f"the word that accuses the scheduler survived on a board where the pool "
+        f"claimed three rows inside the window: {msg}")
+    assert "autotriage" in msg, (
+        f"the clause does not name the work being claimed ahead of the wait: {msg}")
+    assert f"inside {_STARVE_WINDOW_MIN} min" in msg, (
+        f"the clause does not bound the claim it counts with the window it weighed them "
+        f"in, and without the {3 * _STARVE_MAX_DURATION_S // 60} min a reader cannot "
+        f"tell an outranked queue from a stalled one: {msg}")
+
+
+async def test_a_wait_with_nothing_claimed_in_the_window_keeps_today_s_sentence(
+        board, monkeypatch, tmp_path):
+    """Clause 3's half that lives here: no claims in the window, today's bytes.
+
+    Same board, same ages, the only difference being that the three `autotriage`
+    claims sit at 400 min — outside the 180 min window, so nothing proves the pool is
+    taking work, and the alarm has to keep the sentence
+    `agent-services/guardian/detect.py:243` watches. Character for character,
+    including the absence of the source name: an attribution this file cannot
+    establish must not leak into the genuine-stall case.
+    """
+    _starve_config(monkeypatch)
+    q = _starved_board_queue(tmp_path, "unclaimed.db")
+    _claim_rows(q, source="autotriage", n=3, age_min=400)
+
+    alerts = _watch_alerts(monkeypatch)
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(q)
+
+    assert alerts == ["autonomy scheduler may be stalled: "
+                      f"oldest claimable queue item is {_STARVE_HEAD_MIN} min old"], (
+        f"a genuine stall — nothing claimed inside the window — stopped printing the "
+        f"sentence the guardian watch keys on: {alerts}")
+
+
+async def test_claims_by_the_waiting_source_itself_do_not_explain_the_wait(
+        board, monkeypatch, tmp_path):
+    """The exclusion that keeps this an attribution and not an excuse.
+
+    If the head's OWN source were claiming rows while the head sat unclaimed, that is
+    not priority starvation — `claim_next` takes the best-ranked claimable row, so a
+    same-source claim past an older sibling is the anomaly, not the alibi. The claims
+    read therefore excludes the waiting source, and the alarm stays the honest
+    accusation it is today.
+    """
+    _starve_config(monkeypatch)
+    # The claims are `owed-check`'s own, which is the case that must NOT be read as
+    # someone else being ahead of it, so they are made first and the head is aged in
+    # afterwards — see `_starve_head` for why the order is forced.
+    q = _starved_board_queue(tmp_path, "self-claimed.db", head=False)
+    _claim_rows(q, source="owed-check", n=2, hold=("scheduled-task",))
+    _starve_head(q)
+    _assert_starving(q)
+
+    alerts = _watch_alerts(monkeypatch)
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(q)
+
+    assert len(alerts) == 1, alerts
+    msg = alerts[0]
+    assert "priority starvation" not in msg, (
+        f"the waiting source's own claims were read as proof that someone else is "
+        f"ahead of it: {msg}")
+    assert msg == ("autonomy scheduler may be stalled: "
+                   f"oldest claimable queue item is {_STARVE_HEAD_MIN} min old"), msg
+
+
+async def test_the_starvation_wording_still_posts_once_and_spends_the_instant(
+        board, monkeypatch, tmp_path):
+    """Clause 4: attribution, never suppression — one alert, cooldown spent, restart quiet.
+
+    Everything clause 2 changes is the WORDS. The alert still goes exactly once, the
+    instant still lands on the queue under the due-ness key BEFORE the send (the
+    #1704 ordering), and a second process with a fresh `_state` over the same starving
+    queue still has nothing to say — the persistence #2662 added, re-pinned on the new
+    wording rather than inherited from the old one.
+    """
+    _pacing_constants_unchanged()
+    _starve_config(monkeypatch)
+    q = _starved_board_queue(tmp_path, "starved-cooldown.db")
+    _claim_rows(q, source="autotriage", n=3)
+
+    first = _fresh_process_state(monkeypatch)
+    alerts = _watch_alerts(monkeypatch)
+    for _ in range(fw._STALL_ALARM_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 1, (
+        f"the starvation wording did not post exactly one alert: {alerts}")
+    assert "owed-check" in alerts[0] and "stalled" not in alerts[0].lower(), alerts[0]
+    posted = first["stall_alerted_at"]
+    assert posted is not None, (
+        "the starvation wording posted without recording the instant, so the next "
+        "process is handed a fresh 6 h — the exact defect #2662 closed")
+
+    rows = _durable_alert_instants(WorkQueue(q.db_path))
+    assert [(k, v) for k, v in rows if k == fw._STALL_WM_KEY] == [(fw._STALL_WM_KEY,
+                                                                  posted)], (
+        f"the due-ness instant is not the one a person was told about: {rows}")
+
+    second = _fresh_process_state(monkeypatch)
+    assert second["stall_alerted_at"] is None, (
+        "the fixture did not hand the second process a fresh cooldown")
+    for _ in range(fw._STALL_ALARM_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 1, (
+        f"a process with a fresh `_state` re-posted the starvation alert inside "
+        f"{fw._STALL_ALERT_INTERVAL_SECONDS}s of the first: {alerts}")
+
+
+async def test_the_source_attribution_is_read_on_the_alert_path_and_never_per_tick(
+        board, monkeypatch, tmp_path):
+    """A call-count rail: the claim read belongs to the alert, not to the tick.
+
+    `_operator_pause_clause` earned its "computed on the alert path only" line because
+    the watchdog ticks every minute and an alarm that costs a database read per tick is
+    an alarm that quietly becomes the tick's dominant cost. The starvation clause reads
+    `queue.claimed_at`, and `claimed_at` has no index of its own, so that read is a scan
+    of the `queue` table — 9,520 rows on this box 2026-10-14. A healthy tick must not
+    pay it, and a cooled-down tick must not either: the cooldown zeroes `starving` before
+    the message is built, and a finding nobody is being told about has no source to look
+    up.
+    """
+    _starve_config(monkeypatch)
+    q = _starved_board_queue(tmp_path, "alert-path.db")
+    _claim_rows(q, source="autotriage", n=3)
+
+    reads: list[str] = []
+    real = WorkQueue.claims_by_source
+
+    def _counted(self, since_iso, exclude_source=None):
+        reads.append(self and "claims_by_source")
+        return real(self, since_iso, exclude_source=exclude_source)
+
+    monkeypatch.setattr(WorkQueue, "claims_by_source", _counted)
+    alerts = _watch_alerts(monkeypatch)
+
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(q)
+    assert len(reads) == 1, (
+        f"an alerting tick read the claim counts {len(reads)} times; the clause names "
+        f"one source from one aggregate, so one read is the whole cost: {alerts}")
+
+    reads.clear()
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(q)                       # cooldown engaged — nothing is posted
+    assert reads == [], (
+        f"the cooldown swallowed the finding and the read came anyway: {len(reads)}. "
+        f"A finding nobody is being told about has no source to look up, and this is "
+        f"the tick that runs every minute")
+
+    reads.clear()
+    alerts.clear()
+    empty = WorkQueue(tmp_path / "healthy.db")
+    for _ in range(fw._STALL_ALARM_TICKS):
+        await fw.tick(empty)
+    assert reads == [], (
+        f"a healthy tick — nothing overdue, nothing waiting — paid {len(reads)} claim "
+        f"reads, so the scan is on the per-tick path: {alerts}")
+    assert alerts == [], f"a healthy board must post nothing: {alerts}"
+
+
+async def test_an_overdue_only_alert_names_no_source_and_binds_no_starvation_clause(
+        board, monkeypatch, tmp_path):
+    """The overdue-only arm: a task-side finding alone must still build a message.
+
+    Every other node in this section reaches the alert with BOTH findings present, and
+    an alert block that binds its starvation wording only inside the waiting-row branch
+    breaks HERE instead — an overdue task with a quiet queue is the common case, and it
+    is the shape that takes the `head` line without ever running the branch that defines
+    the clause it interpolates. The alarm must come out as today's task-side sentence,
+    with no source named and no claim read paid.
+    """
+    # The overdue arm weighs `last_run` against the frequency interval, not `next_run`
+    # (`_grossly_overdue`: a task with no `last_run` is skipped outright), so both are
+    # set 30 days back — past 10x a daily interval, which is the threshold.
+    write_task(board, 971, status="up_next", frequency="daily",
+               next_run=_ago(days=30), last_run=_ago(days=30))
+    q = WorkQueue(tmp_path / "quiet-queue.db")
+    assert fw._queue_starving(q, _STARVE_MAX_DURATION_S) == 0.0, (
+        "the queue is not quiet, so this node would not be testing the overdue-only arm")
+
+    reads: list[str] = []
+    real = WorkQueue.claims_by_source
+
+    def _counted(self, since_iso, exclude_source=None):
+        reads.append("claims_by_source")
+        return real(self, since_iso, exclude_source=exclude_source)
+
+    monkeypatch.setattr(WorkQueue, "claims_by_source", _counted)
+    alerts = _watch_alerts(monkeypatch)
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(q)
+
+    assert len(alerts) == 1, f"expected the one overdue alert: {alerts}"
+    msg = alerts[0]
+    assert msg.startswith("autonomy scheduler may be stalled: "), msg
+    assert "task(s) due and overdue" in msg, msg
+    assert "priority starvation" not in msg and "owed-check" not in msg, msg
+    assert "claimable queue item" not in msg, (
+        f"a quiet queue must not contribute a waiting-row clause: {msg}")
+    assert reads == [], (
+        f"an alert with no waiting row still paid a claim read: {reads}")

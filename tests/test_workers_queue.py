@@ -1887,3 +1887,71 @@ def test_the_marker_sits_inside_the_cap_not_beyond_it(q):
     assert len(stored) == SUMMARY_MAX_CHARS
     assert stored.endswith(SUMMARY_MARKER)
     assert set(stored[:-len(SUMMARY_MARKER)]) == {"s"}
+
+
+def test_claims_by_source_counts_claims_inside_the_window_and_skips_one_source(q):
+    """`claims_by_source` is the read the stall alarm's whole accusation rests on.
+
+    The watchdog's starvation clause puts "N rows of X claimed inside 180 min" in a
+    person-facing alert, so this predicate is a boundary that claim crosses: a count off
+    `queue.claimed_at`, the column `claim_next` stamps on every claim — not off `runs`,
+    where a row appears only when a job FINISHES, so a fleet holding a hundred in-flight
+    items would answer zero there and read as a stalled pool. Rows are claimed through
+    `claim_next` itself, so the fixture leaves exactly what a worker leaves behind (state
+    `claimed`, `claimed_at` stamped, `attempts` bumped). The predicate takes NO state
+    filter, and that is the boundary this node exists to hold: a claim is stamped once and
+    never rewritten, whereas a row's state moves on, and every one of the 426 claims in
+    the 12 h window that produced the five false posts sits in `completed` now (the oldest
+    `completed` row in that store dates to 2026-09-22, so nothing folded them away). A
+    version of this query restricted to `claimed`/`running` answers ZERO for that window —
+    so the node completes two of the claimed rows through `mark_completed` and requires the
+    counts to stand, because "the fleet claimed this work" must not depend on how fast the
+    outranking job finished.
+    """
+    waiting = q.enqueue(source="owed-check", kind="owed-check:clause",
+                        payload={"item_id": 2692}, priority=72)
+    for i in range(3):
+        assert q.enqueue(source="autotriage", kind="autotriage:ticket",
+                         payload={"i": i}) is not None
+    assert q.enqueue(source="board-steward", kind="board-steward:pass",
+                     payload={}) is not None
+    claimed = []
+    for _ in range(4):
+        item = q.claim_next("w-1", exclude_sources=["owed-check"])
+        assert item is not None and item.source != "owed-check"
+        claimed.append(item)
+    waits = q.pending_wait_by_source()
+    assert waits["owed-check"]["max_wait_seconds"] > 0 and (
+        q.get(waiting).state == "queued"), (
+        "the row that was waiting stopped being a waiting row, so the state below is "
+        "not the one the alarm reads")
+
+    window = (datetime.now(timezone.utc) - timedelta(minutes=180)).isoformat()
+    assert q.claims_by_source(window) == [("autotriage", 3), ("board-steward", 1)], (
+        "the busiest source has to lead, because the alert names whichever row is "
+        "first, and a tie broken by SQLite would change the name a person is given")
+    assert q.claims_by_source(window, exclude_source="autotriage") == [
+        ("board-steward", 1)], (
+        "excluding a source has to remove it entirely — that exclusion is how the "
+        "alarm stops a waiting source from becoming its own evidence of being "
+        "outranked")
+    assert q.claims_by_source(datetime.now(timezone.utc).isoformat()) == [], (
+        "the window is a `>=` on the instant the alarm computes, so an instant taken "
+        "at now has to leave nothing inside it")
+    assert q.claims_by_source("0001-01-01T00:00:00+00:00") == (
+        [("autotriage", 3), ("board-steward", 1)]), (
+        "the window is the only filter here, so an instant older than this database "
+        "has to answer the same totals as the 180 min one")
+
+    # Now let two of the four claimed rows FINISH, through `mark_completed` — the
+    # transition every one of those 426 real claims has already made. A predicate that
+    # filtered on `claimed`/`running` would lose both rows here and the alert would
+    # silently fall back to accusing the scheduler as soon as the outranking work got
+    # fast rather than slow.
+    assert len(claimed) == 4, claimed
+    q.mark_completed(claimed[0].id)
+    q.mark_completed(claimed[1].id)
+    after = q.claims_by_source(window)
+    assert after == [("autotriage", 3), ("board-steward", 1)], (
+        f"two rows finished and the counts of claims moved: a claim is a fact that "
+        f"happened, not a state a row is in now — {after}")

@@ -1336,6 +1336,48 @@ class WorkQueue:
                 entry["over_bound_count"] += 1
         return out
 
+    def claims_by_source(
+        self, since_iso: str, exclude_source: Optional[str] = None
+    ) -> list[tuple[str, int]]:
+        """How many rows each source had CLAIMED since `since_iso`, busiest first.
+
+        Reads `queue.claimed_at`, which `claim_next` stamps on every claim — not
+        `runs.started_at`, because a run row is written when a job FINISHES, so a fleet
+        mid-flight on a hundred items answers zero there and reads as a stalled pool.
+        `claimed_at` is also the column the watchdog's own lease findings
+        (`stale_leases`) weigh, so this reads the trace the rest of the alert reads.
+
+        NO state filter, deliberately, because filtering on state is what made the
+        evidence disappear: a claim is a fact stamped once and never rewritten, while a
+        row's state moves on. Measured on this box 2026-10-14 over the 12 h window that
+        produced the five false posts — `select source, count(*) from queue where
+        claimed_at >= '2026-10-13T04:00:00' and claimed_at < '2026-10-14T04:00:00'
+        group by source` — 426 claims from 14 sources, and every one of those rows sits
+        in `completed` now except a single quarantined one. A predicate restricted to
+        `claimed`/`running` answers **zero** for that window, which would have handed
+        the alarm back its false accusation the moment the outranking work finished; and
+        `autotriage` runs in about a minute, so on a busy board in-flight rows are a
+        handful at any instant. Terminal rows are not folded out on any cadence that
+        would matter here: the oldest `completed` row in the store dates to
+        2026-09-22.
+
+        `ORDER BY n DESC, source ASC` is a total order, so a caller naming the top entry
+        names the same source on every tick rather than whichever one SQLite returned
+        first today.
+
+        `exclude_source` drops one source from the count — for the watchdog's stall
+        alarm, where the source whose OWN row is waiting is not evidence that someone
+        else got ahead of it.
+        """
+        sql = "SELECT source, COUNT(*) AS n FROM queue WHERE claimed_at >= ?"
+        args: list = [since_iso]
+        if exclude_source is not None:
+            sql += " AND source <> ?"
+            args.append(exclude_source)
+        sql += " GROUP BY source ORDER BY n DESC, source ASC"
+        with self._connect() as conn:
+            return [(r["source"], r["n"]) for r in conn.execute(sql, args)]
+
     # ── Runs ──────────────────────────────────────────────────────────────
 
     def record_run(

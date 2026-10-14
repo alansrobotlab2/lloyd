@@ -4,7 +4,8 @@ Three alarms and one scan live here, and none of them is about enqueuing:
 
 - the grossly-overdue / starving-queue stall alarm (#24/#48/#75, #1550), with the
   operator-pause clause that says when a held pool, not a stuck scheduler, owns a
-  backlog;
+  backlog, and the queue clause that names which source is waiting and says priority
+  starvation when the pool is demonstrably claiming other work (#2692);
 - the second stall assertion (#421), keyed on each task's own `next_run`, on its own
   streak and its own 24 h cooldown;
 - the unparseable-task-file scan (#939), on its own 30 min cadence, which is the only
@@ -836,6 +837,107 @@ def _queue_starving(queue: WorkQueue, max_duration: int) -> float:
     return oldest if oldest > 3 * max_duration else 0.0
 
 
+def _oldest_wait(queue: WorkQueue) -> tuple[float, str | None]:
+    """The longest wait on the queue, and WHICH SOURCE is serving it.
+
+    The same read `_queue_starving` makes, with the key it discards. `waits` is keyed by
+    source, so carrying the name costs nothing, and one line of the produced alert is the
+    reason it has to be carried: a post reading `oldest claimable queue item is 915 min
+    old` names nobody, so a reader cannot tell a queue that stopped moving from a
+    low-priority stream sitting behind a busy high-priority one — and those two want
+    opposite actions. Same exception rule: an unreadable queue is `(0.0, None)`, which
+    never crosses the threshold, so a watchdog never alarms on its own failure to read.
+    """
+    try:
+        waits = queue.pending_wait_by_source()
+    except Exception:
+        return 0.0, None
+    if not waits:
+        return 0.0, None
+    source, entry = max(waits.items(), key=lambda kv: kv[1]["max_wait_seconds"])
+    return float(entry["max_wait_seconds"]), source
+
+
+def _outranked_clause(
+    queue: WorkQueue, starving: float, starving_source: str | None,
+    max_duration: int,
+) -> str:
+    """A clause naming the work being claimed ahead of the waiting row, or "".
+
+    Empty string UNLESS the fleet is demonstrably claiming: some source other than the
+    waiting one has rows in `claimed` or `running` stamped inside the same
+    3 x `max_duration` window the wait is weighed against. That is what "the pool is
+    taking work" means, read off `queue.claimed_at` — the column `claim_next` stamps on
+    every claim — rather than inferred from run rows, which only appear when a job
+    finishes. The waiting source is excluded from the count on purpose: an `owed-check`
+    row claiming work while its own older sibling waits is the anomaly (the pool takes
+    the best-ranked claimable row), not evidence that someone is ahead of it.
+
+    The alarm drops the word "stalled" whenever this clause is non-empty, because on that
+    board the word is false. Measured on this box 2026-10-14 with the command at the head
+    of `tests/test_fleet_watchdog.py`'s #2692 section — which pipes through
+    `grep -F fleet_watchdog:` because each post is written TWICE, once as this module's
+    ERROR line and once as a `lloyd-server: discord_alert` echo, so a bare `grep -c`
+    returns 44 lines for 22 posts — 22 posts of this alarm over the eleven rotated
+    `server.err*` files, 18 of them age-only and 4 carrying the #1550 pause clause. The
+    18 run from 2026-10-11 16:17:42 (185 min) to 2026-10-14 02:05:42 (196 min), and both
+    of those instants are the endpoints of all 22 posts too: 892, 570, 456 then 185
+    minutes across 2026-10-13 is a head age that FALLS, which is only possible while the
+    head is being claimed and replaced. A stalled pool's head age rises. What keeps its
+    bytes exactly is the case this returns "" for: a queue nothing has claimed, whose
+    sentence `agent-services/guardian/detect.py:243` cites as the chronic signature and
+    which
+    `tests/test_autonomy_scheduler.py::test_a_starving_queue_with_no_pause_alerts_byte_identically`
+    pins.
+
+    What makes the clause decidable rather than a judgement call is that the claim count
+    is a fact about the queue. On this box 2026-10-14, `select source, min(priority),
+    max(priority), count(*) from queue group by source` puts ELEVEN sources wholly above
+    `owed-check`'s 72 — every one of their rows beats it, because max(priority) is below 72
+    for all eleven and NO source spans the 72 line at all (so this is not the min()
+    projection outranking on one lucky row), and no row in the store sits at priority 1 or 2
+    (the `priority=1` / `priority=2` arguments at `workers/sources/autotriage.py:1165` and
+    `workers/sources/owed_check.py:355` are `run_prompt_in_session`'s model-request
+    priority, not a queue row's, so they are not in this ranking):
+    `scheduled-task` 20-50, `autocode` 40, `autotriage` 40-55, `youtube-digest` 45,
+    `autoresearch` 60, `arch-review` 62, `backlog-cluster` 65, `board-steward` 68, and
+    `automod-regression`, `deep-research` and `session-distill` at 70. What actually makes
+    the wait is the aggregate rate, not any one of them: 426 claims from 14 sources between
+    2026-10-13T04:00 and 2026-10-14T04:00, 384 of them not `owed-check`'s own. A source's
+    rows inherit its configured priority at enqueue (`int(src_cfg.get("priority", ...))`),
+    so this ranking is the one `sources.yaml` holds today, not a property of these rows.
+
+    Computed on the alert path only, for the same reason `_operator_pause_clause` is: the
+    read is `SELECT source, COUNT(*) ... WHERE claimed_at >= ? GROUP BY source`, and
+    `claimed_at` carries no index of its own, so the cost is a scan of the `queue` table —
+    9,520 rows on this box 2026-10-14, which at alert-path frequency is nothing, and which
+    is why the read is not hoisted into the tick's ordinary path.
+    """
+    if starving < 3 * max_duration or starving_source is None:
+        return ""
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    since = (now - _dt.timedelta(seconds=3 * max_duration)).isoformat()
+    try:
+        claims = queue.claims_by_source(since, exclude_source=starving_source)
+    except Exception:
+        # A claims read that will not answer is not evidence the pool is busy. The
+        # sentence falls back to the one that accuses nothing beyond the wait itself,
+        # and the alarm is never silenced: this branch changes the words, not the post.
+        return ""
+    if not claims:
+        return ""
+    leader, count = claims[0]
+    ahead = f"{count} {leader} row" + ("s" if count != 1 else "")
+    others = len(claims) - 1
+    if others:
+        ahead += f", plus work from {others} other source" + ("s" if others != 1 else "")
+    return (
+        f" — priority starvation: it is outranked by higher-priority work,"
+        f" {ahead} claimed inside {3 * max_duration // 60} min"
+    )
+
+
 def _operator_pause_clause(queue: WorkQueue) -> str:
     """A clause naming an engaged operator pause and how long it has been held.
 
@@ -1072,12 +1174,22 @@ async def tick(queue: WorkQueue) -> None:
     max_dur = _max_duration_seconds()
     overdue = await loop.run_in_executor(None, _grossly_overdue, queue)
     starving = await loop.run_in_executor(None, _queue_starving, queue, max_dur)
+    # `_queue_starving` keeps its `(queue, max_duration) -> float` signature: `tick`
+    # calls it positionally through `run_in_executor`, three test files call it
+    # directly, and tests/test_autonomy_scheduler.py replaces it with a two-argument
+    # spy that asserts the value stays a number. So the source of that same wait comes
+    # from a second read — taken only once there IS a wait to name, and only on this
+    # alert path, never as a per-tick cost (#2692).
+    starving_source = None
     if overdue or starving:
         _state["stall_streak"] += 1
         now = _dt.datetime.now(_dt.timezone.utc)
         # Read off the queue as well as out of `_state` (#2662): the pool restarts
         # ~12x a day, and an instant that dies with the process let the same
-        # continuing stall post 20 times in 41.9 h with every gap inside 6 h.
+        # sentence re-post on every fresh boot — six posts of one finding in 21 h
+        # on 2026-10-10/11, four in 15 h on 2026-10-09. Read BEFORE the streak check,
+        # and an unreadable read still alerts (None): a transient lock may lose a
+        # cooldown, it may not silence the alarm.
         last_alert = _last_alert_instant(queue, _STALL_WM_KEY, "due-ness")
         due_for_alert = (last_alert is None or
                          (now - last_alert).total_seconds() >= _STALL_ALERT_INTERVAL_SECONDS)
@@ -1086,13 +1198,46 @@ async def tick(queue: WorkQueue) -> None:
             # #1704 fixed for the alarm beside it: a send that fails still spends
             # the cooldown rather than handing the next process a fresh 6 h.
             _record_alert_instant(queue, _STALL_WM_KEY, now, "due-ness")
+            # #2692: the source of the oldest wait comes from a second read of
+            # `pending_wait_by_source()` because `_queue_starving` keeps its
+            # `(queue, max_duration) -> float` signature — `tick` calls it positionally
+            # through `run_in_executor`, three test files call it directly, and
+            # `tests/test_autonomy_scheduler.py` replaces it with a two-argument spy that
+            # asserts the value stays a number. Like `_operator_pause_clause` below, this
+            # read belongs to the alert and never to the tick.
             parts = []
+            # The age above came from `_queue_starving`, and the streak, the cooldown and
+            # the printed number all weigh that one reading. The source is the only fact
+            # this second read adds, so the age is deliberately NOT re-derived here: if the
+            # head row were claimed in between, re-deriving could drop the wait under the
+            # threshold and post an alert whose parts list holds NO finding at all — a
+            # message ending at its own colon. Keeping the confirmed age costs something
+            # smaller and self-healing instead: at worst one post names a source that
+            # stopped waiting a moment earlier. And the race can never invent the word
+            # "stalled", because that prefix is only chosen when this clause is empty,
+            # which requires claims this tick can see.
+            outranked = ""
+            if starving:
+                _, starving_source = await loop.run_in_executor(
+                    None, _oldest_wait, queue)
             if overdue:
                 parts.append(f"{len(overdue)} task(s) due and overdue "
                              f">{_STALL_INTERVAL_MULT}x their interval with no queue row "
                              f"(ids: {overdue[:15]})")
             if starving:
-                parts.append(f"oldest claimable queue item is {starving/60:.0f} min old")
+                # Name the source the age belongs to ONLY where the queue can prove the
+                # pool is taking work. Without that proof the clause below is today's
+                # string character for character — the guardian watch at
+                # `agent-services/guardian/detect.py:243` cites it, and
+                # `test_a_starving_queue_with_no_pause_alerts_byte_identically` pins its
+                # bytes — so a source name never leaks into the genuine-stall case.
+                outranked = _outranked_clause(queue, starving, starving_source, max_dur)
+                if outranked:
+                    parts.append(f"the {starving_source} stream has a claimable row "
+                                 f"{starving/60:.0f} min old{outranked}")
+                else:
+                    parts.append(f"oldest claimable queue item is "
+                                 f"{starving/60:.0f} min old")
             # #1550: attribute a starving queue to a held pool before attributing it
             # to anything. Computed on the alert path only — one indexed read of the
             # watermark row, not a per-tick cost — and empty unless an operator pause
@@ -1100,7 +1245,13 @@ async def tick(queue: WorkQueue) -> None:
             pause_clause = _operator_pause_clause(queue)
             if pause_clause:
                 parts.append(pause_clause)
-            msg = "autonomy scheduler may be stalled: " + "; ".join(parts)
+            # The clause above can name what the wait actually is, and then the word
+            # that accuses the scheduler is false on that board: an alert that said
+            # both would be two findings arguing with each other. So the prefix moves
+            # with it. The else branch is today's prefix character for character.
+            head = ("queue behind higher-priority work: " if outranked
+                    else "autonomy scheduler may be stalled: ")
+            msg = head + "; ".join(parts)
             logger.error("%s", msg)
             await _alert(msg)
     else:
