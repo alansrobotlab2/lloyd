@@ -98,7 +98,7 @@ each index is lives in [[vllm]] §2. This table is the glance map.
 |---|---|---|
 | 0 | RTX 3090 24 GB | desktop compositor, the legacy TTS server (`agent-tts`, :8090), the LiveKit voice worker, qmd embeddings |
 | 1 | RTX PRO 6000 96 GB | primary LLM (vLLM) |
-| 2 | RTX 3090 24 GB | djev (DiffusionGemma on vLLM) — or the secondary LLM, llama.cpp, if that slot is re-armed; never both |
+| 2 | RTX 3090 24 GB | `agent-djev` (DiffusionGemma on vLLM) — or the secondary LLM, llama.cpp (`agent-llm-secondary`, un-armed), or `agent-decider` (:8012, hand-started); one tenant at a time |
 | 3 | RTX 3090 24 GB | the TTS the voice path actually uses (`agent-tts-omni`, :8093) since 2026-10-09 |
 | 4 | RTX 3090 24 GB | nothing pinned to it yet |
 
