@@ -4529,6 +4529,15 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     # Declared out here so the `finally` at the bottom can always close it,
     # including when the run fails before the observer is attached.
     iv_state = None
+    # #2670: this turn's compiled capability ceiling and the tool names it
+    # actually reached for. Both declared before the try so the `finally` can
+    # write the one shadow row whatever the exit path — a run that times out or
+    # raises is exactly the run whose tool use the enforcement denominator needs.
+    # None until the ceiling compiles, and the ledger stays silent for a run that
+    # never got as far as a tool surface (it dispatched no turn, so it is not a
+    # missing measurement — see `TurnSurface.witness` for the denominator rule).
+    ceiling_surface = None
+    called_tool_names: list[str] = []
 
     try:
         from app.harness import run_query, RunOptions
@@ -4622,6 +4631,26 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         install_turn_guards(task_hooks, platform="autonomy",
                             source=str(task.get("name") or ""))
 
+        # #2670: the declared `scheduled-task` ceiling, compiled through the
+        # fleet's one compile point (`app.harness.capabilities.envelope_for`) and
+        # widened by this job's OWN live grant rows — read through
+        # `capabilities.live_grant_names(default_store(), grant_scope)`, after
+        # `sync_task_grants` materialized the ones its file declares. The scope is
+        # the same string `install_policy_hook` and `install_outbound_content_gate`
+        # were armed with above, so the ceiling, the grant gate and the content
+        # gate all answer for one identity rather than three spellings of it.
+        #
+        # Shadow mode — the default, and what ships — leaves `allowed_tools` as
+        # None, which is what the harness means by "no allow-list": the dispatch
+        # set stays the deny floor built above, byte for byte, so no scheduled
+        # task loses a tool in this commit. What the ceiling WOULD have refused is
+        # recorded in the `finally` at the bottom instead, and enforcement is a
+        # later commit that the recorded rows license.
+        from app.scheduled_ceiling import compile_surface
+        ceiling_surface = compile_surface(
+            grant_scope=grant_scope, task_id=task_id,
+            disallowed_tools=disallowed_tools)
+
         # ONE number for the cap and for the warning about the cap. The harness
         # stops the run at `max_turns` (`app/harness/loop.py`), and the anchor
         # below counts down to it; read twice, the two drift and the warning
@@ -4639,6 +4668,15 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             max_turns=max_turns,
             mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
             disallowed_tools=disallowed_tools,
+            # #2670: the declared ceiling for this source, or None in shadow mode.
+            # Not the deny floor re-spelled — `disallowed_tools` above is unchanged
+            # by this line and stays the layer that refuses the grant-mint tool and
+            # whatever the operator switched off. `enforce` mode puts the compiled
+            # envelope here; `shadow` puts None here, and None is the value this
+            # field had before the line existed, so a shadow turn's dispatch set is
+            # today's set. The one thing that changed in shadow is that the ceiling
+            # is now COMPILED at all, which is what makes the ledger row writable.
+            allowed_tools=ceiling_surface.allowed_tools,
             # A scheduled task has nobody at Mission Control; see
             # agent_mcp.annotations.hidden_on_surface.
             surface="worker",
@@ -4775,6 +4813,13 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                             last_block = evt["text"]
                     elif evt["type"] == "tool_call":
                         saw_tool_call = True
+                        # #2670: the name, for the ceiling's would-strip record.
+                        # Every `tool_call` the model emitted is collected,
+                        # including a call some other rail then refused — a
+                        # refused call is still evidence the job reached for the
+                        # name, which is exactly what the enforcement rate counts.
+                        called_tool_names.append(
+                            str(evt.get("name") or ""))
                     elif evt["type"] == "result":
                         stop_reason = evt.get("stop_reason")
                         usage = evt.get("usage")
@@ -5013,6 +5058,16 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                    "session_id": session_id},
         )
     finally:
+        # One row per scheduled-task turn, whatever the exit path above was.
+        # In shadow mode this write is the entire point of the compile: a turn
+        # that dispatched today's set and recorded nothing is indistinguishable
+        # from a turn that ran with no ceiling at all, and the rate the flip to
+        # enforcement is gated on is a count over these rows. Idempotent and
+        # non-raising by contract, so it cannot cost a run that already finished
+        # its work; a run that died before `compile_surface` stays out of the
+        # denominator because it dispatched nothing.
+        if ceiling_surface is not None:
+            ceiling_surface.witness(called_tool_names, run_id=run_id)
         # Always. A turn that ends any way other than through the `result`
         # event leaves non-terminal judgments running against a dead turn,
         # where they write observation rows and can append an inject to a

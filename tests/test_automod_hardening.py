@@ -1950,3 +1950,164 @@ async def test_a_vault_land_with_no_ack_in_its_arguments_fabricates_nothing(
     assert "ack" not in seen[0], (
         f"the handler invented an ack of {seen[0]['ack']!r}; an unacknowledged land "
         "must make the call it made before the parameter existed")
+
+
+# ===========================================================================
+# 9. #2670: the vault-landing exception is one name wide, and the ban holds
+# ===========================================================================
+#
+# Wiring `autonomy.run_task` to the declared `scheduled-task` ceiling would have
+# stripped `automod_vault_land` from the nightly vault-landing jobs, because the
+# tool is a standing worker ban and a ban enters neither a declared capability set
+# nor a grant widening. `capabilities.SCOPE_BAN_EXCEPTIONS` is the crack that
+# makes the wiring possible: one ban name, one scope family, only under a live
+# grant row for exactly that scope. These nodes are what keeps the crack from
+# becoming the door — the other eight names in the ban are the loop itself.
+
+#: The eight banned names the exception does NOT cover: everything in the ban
+#: except `automod_vault_land`. Named in full rather than computed from the tuple,
+#: so a ninth name added to `WORKER_AUTOMOD_BAN` shows up here as an omission in
+#: the set-difference node below instead of quietly joining the exception list.
+LOOP_CONTROL_TOOLS = (
+    "automod_start", "automod_gate", "automod_gate_wait", "automod_land",
+    "automod_abort", "automod_amend_clause", "automod_rollback",
+    "automod_vault_revert",
+)
+
+
+def _grant_store(tmp_path):
+    """A real grant store on a real file, pointed at by the env var every grant
+    suite uses. Unset, `default_store()` resolves to the production `workers.db`,
+    and a test that mints a row there writes live authority."""
+    from app.harness.policy import GrantStore
+    store = GrantStore(tmp_path / "grants.db")
+    return store
+
+
+def test_an_autonomy_task_scope_is_refused_every_loop_tool_it_is_not_the_exception_of(
+        tmp_path, monkeypatch):
+    """Clause 5: a live grant row is not a skeleton key, not even for the banned
+    names a human mints on purpose.
+
+    The worst case is drawn deliberately: rows minted for ALL EIGHT loop tools for
+    one `autonomy-task:<id>` scope, and the ceiling compiled from those rows. One
+    name gets in — the exception's — and the eight that drive the self-modification
+    loop stay out of the envelope, which is the only thing a scheduled turn will
+    ever be dispatched under once enforcement starts.
+
+    Read the mode boundary honestly: in shadow mode (the shipped default) the turn
+    is dispatched under today's deny floor, which has never named these eight, so
+    nothing here refuses them ON THIS TURN YET — that is #2670's clause 2 and the
+    reason the shadow ledger exists. What this node pins is that the exception
+    added no route in: at flip, the ceiling refuses all eight for this scope, and
+    `automod_vault_land` is the only banned name it will not.
+    """
+    from app.harness import capabilities as caps
+    from app.harness.capabilities import UnknownCapability, live_grant_names
+    grants = _grant_store(tmp_path)
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(grants.db_path))
+    scope = "autonomy-task:77"
+    for tool in LOOP_CONTROL_TOOLS + ("automod_vault_land",):
+        grants.mint(scope=scope, tool_pattern=tool, issued_by="Alan",
+                    expires_at="2099-01-01T00:00:00+00:00", note="fixture")
+    widening = live_grant_names(grants, scope)
+    assert set(widening) == set(LOOP_CONTROL_TOOLS) | {"automod_vault_land"}, (
+        "the rows did not all read back live, so the compile below would be "
+        "widening nothing and every assertion in here would pass vacuously")
+    env = set(caps.envelope_for("scheduled-task", grant_widening=widening,
+                                scope=scope))
+    assert "automod_vault_land" in env, "the exception itself stopped working"
+    leaked = sorted(set(LOOP_CONTROL_TOOLS) & env)
+    assert leaked == [], (
+        f"a live grant row admitted loop-control tools to a scheduled task's "
+        f"ceiling: {leaked} — the ban's whole purpose is that no scheduled turn "
+        f"can open, gate, land or roll back a self-modification round")
+    # And a SOURCE may not declare any of them either, exception scope or not:
+    # `expand` is the fleet-wide rule and this crack is deliberately not in it.
+    for tool in LOOP_CONTROL_TOOLS + ("automod_vault_land",):
+        with pytest.raises(UnknownCapability):
+            caps.expand((tool,))
+
+
+def test_the_envelope_refuses_the_loop_tools_on_the_turn_that_holds_the_exception(
+        tmp_path, monkeypatch):
+    """The same property at the dispatch gate, under enforcement.
+
+    An envelope is only a policy until `_pre_dispatch` reads it, and every
+    dispatch claim in this file's own house style runs the real function. Under
+    `enforce` a scheduled turn that holds the vault-landing exception is refused
+    `automod_start` and `automod_land` by the ceiling, with the ceiling's own
+    message — the exception buys the one tool, never the loop.
+    """
+    import asyncio
+    from app.harness import capabilities as caps
+    from app.harness.capabilities import live_grant_names
+    from app.harness.hooks import HookRegistry
+    from app.harness.loop import _pre_dispatch
+    from app.harness.options import RunOptions
+    from app.harness.tool_search import LoadedToolSet
+    grants = _grant_store(tmp_path)
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(grants.db_path))
+    scope = "autonomy-task:77"
+    grants.mint(scope=scope, tool_pattern="automod_vault_land",
+                issued_by="Alan", expires_at="2099-01-01T00:00:00+00:00",
+                note="fixture")
+    allowed = caps.envelope_for("scheduled-task",
+                                grant_widening=live_grant_names(grants, scope),
+                                scope=scope)
+    opts = RunOptions(model="primary", allowed_tools=allowed,
+                      hooks=HookRegistry())
+
+    def _dispatch(name: str):
+        return asyncio.run(_pre_dispatch(
+            tc={"id": "call_1", "function": {"name": name}, "_args_dict": {}},
+            options=opts, session_id="s",
+            loaded_set=LoadedToolSet(enabled=False, catalog=[], loaded=set())))
+
+    assert _dispatch("automod_vault_land") is None, (
+        "the exception's own tool must dispatch, or the nightly vault lander "
+        "breaks the moment enforcement starts")
+    for tool in LOOP_CONTROL_TOOLS:
+        refusal = _dispatch(tool)
+        assert refusal is not None, f"{tool} dispatched under the ceiling"
+        assert "not available on this turn" in str(refusal), (
+            f"{tool} was refused by something other than the envelope")
+
+
+def test_the_worker_automod_ban_tuple_itself_is_untouched_by_the_exception():
+    """Clause 5's second half: the crack is in the ceiling, not in the ban.
+
+    `automod_vault_land` stays banned where the ban is defined and read — the
+    worker pool's deny compile, the chat router's arm for non-user sessions, and a
+    `Task` child's inheritance all still see all nine names. Parsing the tuple out
+    of the file rather than trusting the import is the point: the claim is about
+    what the shipped list says, and an exception that migrated INTO the ban file
+    would be exactly the drift this catches.
+    """
+    import ast
+    import app.tool_bans as TB
+    src = (ROOT / "app" / "tool_bans.py").read_text()
+    tree = ast.parse(src)
+    banned: dict[str, list[str]] = {}
+    for node in tree.body:
+        if (isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and isinstance(node.value, ast.Tuple)):
+            banned[node.target.id] = [ast.literal_eval(e)
+                                      for e in node.value.elts]
+    assert "WORKER_AUTOMOD_BAN" in banned, "the ban is no longer a literal tuple"
+    assert sorted(banned["WORKER_AUTOMOD_BAN"]) == sorted(
+        TB.WORKER_AUTOMOD_BAN), "the file and the import disagree"
+    assert set(banned["WORKER_AUTOMOD_BAN"]) == set(LOOP_CONTROL_TOOLS) | {
+        "automod_vault_land"}, "the ban's nine names changed"
+    assert "autonomy-task" not in src and "SCOPE_BAN_EXCEPTIONS" not in src, (
+        "the scope exception leaked into the ban file — it belongs in "
+        "capabilities, where the widening that consults it lives")
+    # The ban's other readers still get the same object, not a copy: the worker
+    # pool's deny compile (`workers/sources/_common.py`), the chat router's arm
+    # for non-user sessions, and a `Task` child's inheritance — pinned by name in
+    # `test_worker_turns_cannot_drive_the_loop` and `test_subagents_cannot_drive_the_loop`.
+    import workers.sources._common as C
+    assert C.WORKER_AUTOMOD_BAN is TB.WORKER_AUTOMOD_BAN
+    for tool in LOOP_CONTROL_TOOLS + ("automod_vault_land",):
+        assert tool in TB.WORKER_AUTOMOD_BAN

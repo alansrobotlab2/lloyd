@@ -762,3 +762,455 @@ def test_widening_is_per_job_and_cannot_smuggle(tmp_path, monkeypatch, request):
             f"{smuggled!r} reached this turn's advertised set from a row that "
             "does not license it")
     assert "Bash" in opts.allowed_tools, "the negatives took the base set with them"
+
+
+# ══════════════════ #2670: the ceiling reaches the live scheduled-task turn ══════════════════
+#
+# Everything above is the ceiling as the WORKER POOL compiles it. What follows is
+# the ceiling reaching the one turn that had never been under it:
+# `app/autonomy.py::run_task`, which predates this machinery and assembled its own
+# `RunOptions` off a deny floor (`_get_disallowed_tools()` + the grant-mint ban).
+# `scheduled-task` therefore had a declared 33-name ceiling and no denominator: no
+# turn was ever compiled against it, so the seven-day check #2471 owes could not
+# be computed at all. #2670 wires the turn to `envelope_for` in SHADOW mode — the
+# ceiling is compiled and every name it would have refused is recorded to a durable
+# ledger, while the turn is still dispatched under exactly the set it was
+# dispatched under before this commit.
+#
+# Process boundaries this section crosses, each with a node below:
+#   run_task → `RunOptions` (in-process, and the seam the clause is about): the
+#     dispatched set is asserted through the real `_pre_dispatch`, never a spy.
+#   `capabilities.envelope_for` → run_task: asserted with a counting proxy that
+#     delegates to the real function, because "the ceiling is what reaches the
+#     options" is a claim about ONE SPECIFIC CALL and its arguments, not about a
+#     value that could have been assembled anywhere.
+#   run_task → the ceiling ledger: a file under the data root that a DIFFERENT
+#     process — the owed-check job, days later — reads to decide whether
+#     enforcement may start. Asserted as bytes at a path, in the shape that reader
+#     parses, not as an in-memory call.
+SCHED_SOURCE = "scheduled-task"
+SCHED_TASK_ID = 77
+
+#: A tier-2 durable-external name the declared ceiling does NOT contain: the name
+#: a nightly job's model reaches for when it wants to mail a report, and the row
+#: in the ledger that says so. NOT usable as a dispatch probe — `run_task` arms the
+#: policy hook with the task's grant scope, so an ungranted tier-2 call is refused
+#: by the GRANT gate on a scheduled turn whatever the ceiling says, and this file's
+#: own rule is that a refusal by an unrelated rail is not a measurement of the
+#: envelope. Asserted, not assumed, at the bottom of
+#: `test_a_shadow_turn_is_dispatched_under_exactly_todays_deny_floor`.
+OUTSIDE_CEILING = "email_send"
+
+#: The dispatch probe: a real served tool the 33-name ceiling excludes that no
+#: other rail on this turn objects to (tier-1, not a standing ban, not grant-
+#: gated), so a `None` from `_pre_dispatch` below means the ENVELOPE allowed it and
+#: a refusal names the envelope. `browser_navigate` is the desktop/browser family,
+#: which no scheduled task has ever had a reason to hold.
+DISPATCH_PROBE = "browser_navigate"
+
+
+def _sched_task(**over) -> dict:
+    task = {"id": SCHED_TASK_ID, "name": "Nightly vault landing",
+            "skill_name": "nightly-vault-maintenance", "status": "up_next",
+            "timeout_seconds": 300}
+    task.update(over)
+    return task
+
+
+@pytest.fixture()
+def sched_turn(tmp_path, monkeypatch):
+    """One real `run_task` turn, with everything it would write OUTSIDE the
+    ceiling isolated and the ceiling itself left completely real.
+
+    The stubs are the run's side effects on the fleet (task frontmatter, run
+    records, sessions, event log) — nothing that a clause below reads. The
+    ledger and the grant store are pointed at `tmp_path` rather than stubbed:
+    the row's whole job is to outlive this process, so it is written and read
+    back as bytes, and the grant rows are what the widening reads, so they are
+    real rows in a real sqlite file (`LLOYD_GRANT_DB` is the knob every other
+    grant suite uses; unset, `default_store()` resolves to the production
+    `workers.db`, which a test must never open for writing).
+    """
+    (tmp_path / "config.yaml").write_text(
+        "agent:\n  max_turns: 60\nmodel:\n  default: primary\n")
+    from app import autonomy
+    monkeypatch.setattr(autonomy, "LLOYD_HOME", tmp_path)
+    for name in ("_update_task_field", "_append_activity_log"):
+        monkeypatch.setattr(autonomy, name, lambda *a, **k: None)
+    # `_record_phrase`'s return is concatenated into the failure note, so this
+    # stub answers with the empty string rather than None.
+    monkeypatch.setattr(autonomy, "_record_phrase", lambda *a, **k: "")
+    monkeypatch.setattr(autonomy, "_write_run_record",
+                        lambda **kw: {"status": "recorded"})
+    monkeypatch.setattr(autonomy, "_get_model_env",
+                        lambda *a, **k: {"ANTHROPIC_BASE_URL":
+                                        "http://127.0.0.1:8096"})
+    monkeypatch.setattr(autonomy, "_load_skill_content",
+                        lambda sn: "# fixture skill body")
+    monkeypatch.setattr(autonomy, "_task_inner_voice", lambda t: False)
+    monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", tmp_path / "events")
+    monkeypatch.setattr("app.event_log.BLOBS_DIR", tmp_path / "events" / "blobs")
+    from app.harness.policy import GrantStore
+    grants = GrantStore(tmp_path / "grants.db")
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(grants.db_path))
+    ledger = tmp_path / "scheduling" / "scheduled-ceiling.jsonl"
+    from app import scheduled_ceiling as sc
+    monkeypatch.setenv(sc.LEDGER_ENV, str(ledger))
+    monkeypatch.delenv(sc.MODE_ENV, raising=False)
+    return {"root": tmp_path, "grants": grants, "ledger": ledger}
+
+
+def _drive_sched_turn(monkeypatch, task, *, calls, mode=None, spy=None):
+    """Run one `run_task` turn whose model calls `calls`, and hand back its options.
+
+    The harness is the only stub: `run_query` yields the events a turn that made
+    those calls would have streamed. Everything between that stub and the ledger
+    file is production code, including the ceiling compile, the options and the
+    row write.
+    """
+    import asyncio
+    import app.harness as harness_mod
+    from app import autonomy
+    from app import scheduled_ceiling as sc
+
+    if mode is not None:
+        monkeypatch.setenv(sc.MODE_ENV, mode)
+    events: list[dict] = []
+    for i, name in enumerate(calls):
+        events.append({"type": "tool_call", "call_id": f"c{i}", "name": name})
+        events.append({"type": "tool_result", "call_id": f"c{i}", "name": name,
+                       "content": "ok"})
+    events.append({"type": "text_delta", "text": "done"})
+    events.append({"type": "result", "stop_reason": "stop", "num_turns": 1,
+                   "usage": {}})
+    captured: dict = {}
+
+    async def _run_query(messages, options):
+        captured["options"] = options
+        for evt in events:
+            yield evt
+
+    monkeypatch.setattr(harness_mod, "run_query", _run_query)
+    monkeypatch.setattr(autonomy, "_find_task_file",
+                        lambda tid: Path("task.md"))
+    monkeypatch.setattr(autonomy, "_parse_task_file", lambda p: dict(task))
+    if spy is not None:
+        real = caps.envelope_for
+
+        def _proxy(source, extra_disallowed=(), *, grant_widening=(), scope=""):
+            result = real(source, extra_disallowed,
+                          grant_widening=grant_widening, scope=scope)
+            spy.append({"source": source,
+                        "extra_disallowed": list(extra_disallowed or ()),
+                        "grant_widening": tuple(grant_widening), "scope": scope,
+                        "result": result})
+            return result
+
+        monkeypatch.setattr(caps, "envelope_for", _proxy)
+    result = asyncio.run(autonomy.run_task(task["id"]))
+    assert result.get("success"), result
+    return captured["options"]
+
+
+def test_run_task_compiles_its_tool_set_through_envelope_for(sched_turn,
+                                                             monkeypatch):
+    """Clause 1: the `envelope_for` call is what the turn is built from.
+
+    Asserted about the call, not about a number: same source, same grant scope as
+    the policy hook was armed with, widening read as the live rows for exactly
+    this task's scope. A locally-assembled list of the right length would pass a
+    value assertion and fail this one.
+    """
+    from app.harness.capabilities import live_grant_names
+    spy: list[dict] = []
+    scope = f"autonomy-task:{SCHED_TASK_ID}"
+    sched_turn["grants"].mint(
+        scope=scope, tool_pattern=OUTSIDE_CEILING, issued_by="Alan",
+        expires_at="2099-01-01T00:00:00+00:00", note="fixture")
+    opts = _drive_sched_turn(monkeypatch, _sched_task(), calls=["Bash"],
+                             spy=spy)
+    assert len(spy) == 1, f"expected exactly one ceiling compile, got {spy}"
+    call = spy[0]
+    assert call["source"] == SCHED_SOURCE
+    assert call["scope"] == scope == opts.grant_scope, (
+        "the ceiling was compiled for a different identity than the grant gate "
+        "was armed with — the envelope and the gate would be answering for "
+        "different jobs")
+    assert call["grant_widening"] == live_grant_names(sched_turn["grants"],
+                                                     scope)
+    assert OUTSIDE_CEILING in call["grant_widening"], (
+        "a live grant row for this task did not reach the widening, so the "
+        "envelope would be the base set and the job's own authority invisible")
+    assert call["extra_disallowed"], (
+        "the ceiling must be narrowed by the deny floor the same turn carries, "
+        "not compiled beside it")
+    assert opts.allowed_tools is None, (
+        "clause 2: the shipped default is shadow, and shadow must not dispatch "
+        "an allow-list")
+    assert len(spy[0]["result"]) == 33 + 1, (
+        "the declared ceiling is 33 names; this turn's envelope is that plus the "
+        "one live grant row, which is the widening working as designed")
+
+
+def test_the_compiled_envelope_is_what_reaches_run_options_under_enforce(
+        sched_turn, monkeypatch):
+    """Clause 1's other edge: when enforcement is on, that same call's result IS
+    `RunOptions.allowed_tools` — the wiring is not shadow-only decoration.
+
+    #2670's owed entry 1 asks the later enforcing commit to assert
+    `allowed_tools == envelope_for(...)`. It is pinned here as well, because the
+    line that would break is this one, and a wiring that only works in the mode
+    nobody dispatches under is the failure mode this file exists to catch.
+    """
+    spy: list[dict] = []
+    opts = _drive_sched_turn(monkeypatch, _sched_task(), calls=["Bash"],
+                             mode="enforce", spy=spy)
+    assert len(spy) == 1, spy
+    assert opts.allowed_tools == spy[0]["result"]
+    assert opts.allowed_tools == caps.envelope_for(
+        SCHED_SOURCE, opts.disallowed_tools,
+        scope=f"autonomy-task:{SCHED_TASK_ID}")
+
+
+def test_a_shadow_turn_is_dispatched_under_exactly_todays_deny_floor(
+        sched_turn, monkeypatch):
+    """Clause 2: no scheduled task loses a tool in this commit.
+
+    Not asserted as `allowed_tools is None` alone — that would be true of a
+    compile that never happened. The dispatched set is computed the way the loop
+    computes it (`_reach_after`) and compared to the deny floor's reach
+    (`_reach_before`), and a tier-2 tool the ceiling excludes is put through the
+    real `_pre_dispatch`: in shadow it goes through to the MCP layer, which is
+    what "unchanged from today" means operationally.
+    """
+    assert OUTSIDE_CEILING not in (caps.envelope_for(SCHED_SOURCE) or []), (
+        "the control below is only a control if the ceiling excludes the name")
+    opts = _drive_sched_turn(monkeypatch, _sched_task(),
+                             calls=["Bash", OUTSIDE_CEILING])
+    assert _reach_after(opts) == _reach_before(opts)
+    assert _allowed_names(opts) is None
+    assert DISPATCH_PROBE not in (caps.envelope_for(SCHED_SOURCE) or [])
+    assert _dispatch(opts, DISPATCH_PROBE) is None, (
+        "a shadow turn must still dispatch a name the ceiling would strip — "
+        "refusing it here is the regression clause 2 forbids")
+    # The rail this probe deliberately avoids, named so the probe above cannot be
+    # read as "scheduled tasks can send email": the grant gate already refuses an
+    # ungranted tier-2 call on a scheduled turn, ceiling or no ceiling.
+    grant_refusal = _dispatch(opts, OUTSIDE_CEILING)
+    assert grant_refusal is not None and "grant" in str(grant_refusal)
+
+
+def test_the_same_turn_under_enforce_proves_the_shadow_assertion_is_not_vacuous(
+        sched_turn, monkeypatch):
+    """The control for the node above: one env var, and the same tool is refused.
+
+    Without this the equality above could be describing a ceiling that was never
+    compiled. Under `enforce` the dispatched set is the envelope intersected with
+    the floor, strictly smaller than the floor's reach, and `_pre_dispatch`
+    refuses `email_send` with the envelope's own message.
+    """
+    opts = _drive_sched_turn(monkeypatch, _sched_task(), calls=["Bash"],
+                             mode="enforce")
+    reach = _reach_after(opts)
+    assert reach < _reach_before(opts)
+    assert reach == _reach_before(opts) & _allowed_names(opts)
+    refusal = _dispatch(opts, DISPATCH_PROBE)
+    assert refusal is not None and "not available on this turn" in str(refusal)
+
+
+def _sched_rows(sched_turn) -> list[dict]:
+    from app import scheduled_ceiling as sc
+    return sc.read_rows(sched_turn["ledger"])
+
+
+def test_a_shadow_turn_records_the_names_the_ceiling_would_strip(sched_turn,
+                                                                monkeypatch):
+    """Clause 3: one durable row per shadow turn, naming what fell outside.
+
+    This is the artifact enforcement is gated on, and shadow is precisely the
+    mode that leaves no trace in the transcript: nothing refused the call, so
+    the session file of a shadow turn is byte-identical to one with no ceiling.
+    A row per turn, with the date, the task id, the scope, the mode and the
+    out-of-envelope names.
+    """
+    import datetime
+    opts = _drive_sched_turn(monkeypatch, _sched_task(),
+                             calls=["Bash", "Read", OUTSIDE_CEILING])
+    assert opts.allowed_tools is None
+    rows = _sched_rows(sched_turn)
+    assert len(rows) == 1, f"exactly one row per turn, got {rows}"
+    row = rows[0]
+    assert row["task_id"] == SCHED_TASK_ID
+    assert row["grant_scope"] == f"autonomy-task:{SCHED_TASK_ID}"
+    assert row["mode"] == "shadow"
+    assert row["date"] == datetime.datetime.now(
+        datetime.timezone.utc).date().isoformat()
+    assert row["would_strip"] == [OUTSIDE_CEILING]
+    assert row["n_would_strip"] == 1
+    assert row["envelope_size"] == 33
+
+
+def test_a_turn_whose_calls_are_all_inside_the_ceiling_writes_a_row_with_no_names(
+        sched_turn, monkeypatch):
+    """Clause 3's other half, and the one the 5% rate depends on.
+
+    A clean turn must be a ROW with an empty name list, not the absence of a
+    row: the flip gate divides would-strip occurrences by turns, and writing
+    only the interesting turns would silently shrink the denominator to the set
+    of failures, which is how a rate gets published as 100% of nothing.
+    """
+    _drive_sched_turn(monkeypatch, _sched_task(), calls=["Bash", "Read"])
+    rows = _sched_rows(sched_turn)
+    assert len(rows) == 1, rows
+    assert rows[0]["would_strip"] == []
+    assert rows[0]["n_would_strip"] == 0
+    assert "compile_error" not in rows[0]
+
+
+def test_every_turn_writes_exactly_one_row_including_the_ones_that_crash(
+        sched_turn, monkeypatch):
+    """Clause 3's "exactly one": two clean turns are two rows, and a run that
+    raises mid-turn still writes its row.
+
+    The row is written in `run_task`'s `finally`, and the exit paths there are
+    six (success, timeout, cancel, empty response, infra failure, exception). A
+    row written on the success path only would drop exactly the runs whose tool
+    use most needs measuring, and the rate would be computed over the traffic
+    that behaved.
+    """
+    import asyncio
+    import app.harness as harness_mod
+    from app import autonomy
+
+    _drive_sched_turn(monkeypatch, _sched_task(), calls=["Bash"])
+    _drive_sched_turn(monkeypatch, _sched_task(), calls=["Bash", "Read"])
+    rows = _sched_rows(sched_turn)
+    assert len(rows) == 2, rows
+    assert [r["n_would_strip"] for r in rows] == [0, 0]
+
+    async def _run_query_boom(messages, options):
+        yield {"type": "tool_call", "call_id": "c0", "name": OUTSIDE_CEILING}
+        raise RuntimeError("engine died mid-turn")
+
+    monkeypatch.setattr(harness_mod, "run_query", _run_query_boom)
+    monkeypatch.setattr(autonomy, "_find_task_file", lambda tid: Path("task.md"))
+    monkeypatch.setattr(autonomy, "_parse_task_file",
+                        lambda p: _sched_task(failure_count=0, max_retries=9))
+    asyncio.run(autonomy.run_task(SCHED_TASK_ID))
+    rows = _sched_rows(sched_turn)
+    assert len(rows) == 3, f"the crashed turn owes a row too, got {rows}"
+    assert rows[-1]["would_strip"] == [OUTSIDE_CEILING]
+    # A run id, not a unique one: `run_77_<second>` collides when three turns run
+    # inside one second, which only a test does.
+    assert rows[-1]["run_id"] and rows[-1]["mode"] == "shadow"
+
+
+def test_a_task_that_declares_the_vault_land_grant_is_never_counted_as_would_strip_it(
+        sched_turn, monkeypatch):
+    """Clause 4, end to end: the nightly vault-landing job is not a would-strip.
+
+    The whole reason this exception exists. The task file declares the grant,
+    `sync_task_grants` materializes the row, the widening reads it back for this
+    scope, and a turn that calls `automod_vault_land` is recorded as clean. Strip
+    the exception and this is the job the ceiling would have broken at flip time —
+    the regression `capabilities.py` warned about in prose for four days.
+    """
+    task = _sched_task(grants=[{"tool": "automod_vault_land",
+                                "expires_at": "2099-01-01T00:00:00+00:00",
+                                "issued_by": "Alan", "note": "vault lander"}])
+    _drive_sched_turn(monkeypatch, task,
+                      calls=["Bash", "vault_write", "automod_vault_land"])
+    rows = _sched_rows(sched_turn)
+    assert len(rows) == 1, rows
+    assert rows[0]["would_strip"] == [], (
+        "a job whose own frontmatter declares the tool must not be counted as "
+        "reaching outside its ceiling")
+    assert rows[0]["envelope_size"] == 34, (
+        "33 declared names plus the granted exception, and nothing else")
+
+
+def test_an_autonomy_task_scope_with_a_live_row_compiles_the_exception_in(
+        sched_turn):
+    """Clause 4, at the compile: the exception is reachable, but only through a
+    live row for THAT scope — never through the source, and never across jobs.
+
+    `expand` still refuses a standing ban in a declared set (the anti-smuggling
+    rule #2471 chose deliberately), so a widening is the only route, and
+    `_widening_names` drops standing bans unless the scope prefix is in
+    `SCOPE_BAN_EXCEPTIONS`. Both halves are asserted here: the row admits the
+    tool, and its absence — or another job's row — does not.
+    """
+    from app.harness.capabilities import live_grant_names
+    scope = f"autonomy-task:{SCHED_TASK_ID}"
+    base = caps.envelope_for(SCHED_SOURCE)
+    assert "automod_vault_land" not in base
+    # The class from the module object, not the one this file imported at load
+    # time: another suite reloads `app.harness.capabilities`, and a reloaded
+    # module's `UnknownCapability` is a different object from the stale binding —
+    # which shows up as this assertion "failing" on an exception it did raise.
+    with pytest.raises(caps.UnknownCapability):
+        caps.expand(("automod_vault_land",))
+    sched_turn["grants"].mint(
+        scope=scope, tool_pattern="automod_vault_land", issued_by="Alan",
+        expires_at="2099-01-01T00:00:00+00:00", note="fixture")
+    widening = live_grant_names(sched_turn["grants"], scope)
+    assert widening == ("automod_vault_land",)
+    env = caps.envelope_for(SCHED_SOURCE, grant_widening=widening, scope=scope)
+    assert "automod_vault_land" in env
+    assert len(env) == len(base) + 1
+    # The same row, read for a job that does not hold it, widens nothing.
+    assert live_grant_names(sched_turn["grants"], "autonomy-task:9999") == ()
+    assert "automod_vault_land" not in caps.envelope_for(
+        SCHED_SOURCE, grant_widening=(), scope="autonomy-task:9999")
+    # An expired row is not a licence: `live_grant_names` is the reader, and it
+    # filters on expiry, so the exception cannot outlive the grant that earned it.
+    sched_turn["grants"].mint(
+        scope="autonomy-task:99", tool_pattern="automod_vault_land",
+        issued_by="Alan", expires_at="2020-01-01T00:00:00+00:00",
+        note="fixture, expired")
+    assert live_grant_names(sched_turn["grants"], "autonomy-task:99") == ()
+
+
+def test_no_worker_source_envelope_names_the_vault_land_exception():
+    """Clause 4's other half: the exception is a per-job crack, not a hole.
+
+    Every declared source's envelope is compiled the way the worker pool compiles
+    it — unscoped — and none of them may name the tool. This is also the node that
+    keeps the baseline artifact honest: `scheduled-task`'s row there is built by
+    the same unscoped call, so the exception cannot have quietly widened the
+    fleet's published numbers.
+    """
+    for source in sorted(caps.SOURCE_CAPABILITIES):
+        env = caps.envelope_for(source)
+        assert env is not None and "automod_vault_land" not in env, source
+    for source in sorted(caps.SOURCE_CAPABILITIES):
+        env = caps.envelope_for(SCHED_SOURCE,
+                                grant_widening=("automod_vault_land",),
+                                scope=f"worker:{source}")
+        assert "automod_vault_land" not in env, source
+    assert caps.scoped_ban_exceptions("worker:scheduled-task") == frozenset()
+    assert caps.scoped_ban_exceptions("") == frozenset()
+    assert caps.scoped_ban_exceptions("autonomy-task:7") == frozenset(
+        {"automod_vault_land"})
+
+
+def test_the_default_mode_is_shadow_and_an_unknown_value_stays_shadow(
+        monkeypatch):
+    """The switch fails toward "record only", in both directions of a mistake.
+
+    Unset is shadow, `SHADOW` is shadow (case-insensitive by intent), and a typo
+    is shadow rather than enforcement — a mis-typed env var must not be the act
+    that starts refusing a fleet's tools. The mode is written into every row, so
+    an operator who does set `enforce` by hand is still visible in the evidence
+    the flip gate reads.
+    """
+    from app import scheduled_ceiling as sc
+    monkeypatch.delenv(sc.MODE_ENV, raising=False)
+    assert sc.mode() == "shadow"
+    monkeypatch.setenv(sc.MODE_ENV, "SHADOW")
+    assert sc.mode() == "shadow"
+    monkeypatch.setenv(sc.MODE_ENV, "enforce-now")
+    assert sc.mode() == "shadow"
+    monkeypatch.setenv(sc.MODE_ENV, "enforce")
+    assert sc.mode() == "enforce"

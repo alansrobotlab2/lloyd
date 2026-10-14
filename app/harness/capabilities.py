@@ -147,7 +147,49 @@ def _standing_bans() -> frozenset[str]:
                      for n in (*WORKER_AUTOMOD_BAN, *WORKER_GRANT_MINT_BAN))
 
 
-def _widening_names(grant_widening) -> set[str]:
+#: The ONE standing ban a per-job scope may be licensed for, keyed by the scope
+#: prefix that may hold it (#2670, clause 3).
+#:
+#: `automod_vault_land` is not a loop-control tool: it commits vault bytes
+#: already staged on disk, which is what the nightly knowledge jobs' whole job
+#: is. It is the single census name the `scheduled-task` ceiling had to exclude
+#: for that reason (the 2026-10-09 census: 9.4% of files — 53 of the 566 then
+#: retained, every logged call succeeding — the denominator moves with
+#: retention, so the SHAPE to check is "the exception exists and names its
+#: evidence", not this fraction), and leaving it excluded is what made the
+#: ceiling un-wireable into the live turn. The other eight names in
+#: `WORKER_AUTOMOD_BAN` are the loop itself — open a round, gate it, land it,
+#: abort it, roll it back — and stay refused on every scope, grant row or not:
+#: `tests/test_automod_hardening.py::test_an_autonomy_task_scope_is_refused_every_loop_tool_it_is_not_the_exception_of`
+#: is the node that keeps this dict from growing by accretion.
+#:
+#: Reaching an exception requires a LIVE `authority_grants` row for exactly that
+#: scope (`live_grant_names` is the only producer of `grant_widening`), so this
+#: is not a scope-wide relaxation: with no row, the ban bites identically.
+#: `worker:*` scopes are in no key here, so no worker source's envelope can ever
+#: name the tool.
+SCOPE_BAN_EXCEPTIONS: dict[str, frozenset[str]] = {
+    "autonomy-task:": frozenset({"automod_vault_land"}),
+}
+
+
+def scoped_ban_exceptions(scope) -> frozenset[str]:
+    """Ban names THIS scope can be licensed for, by prefix — empty for `worker:*`.
+
+    Consulted only by `_widening_names`, never by `expand`: a SOURCE may still
+    not declare a standing ban as a capability, because a source's declaration is
+    fleet-wide and a licence is one job's. That asymmetry is the whole design —
+    `expand` still raises for `automod_vault_land` in a declared set.
+    """
+    text = str(scope or "")
+    out: set[str] = set()
+    for prefix, names in SCOPE_BAN_EXCEPTIONS.items():
+        if text.startswith(prefix):
+            out |= set(names)
+    return frozenset(out)
+
+
+def _widening_names(grant_widening, *, scope: str = "") -> set[str]:
     """Which grant-named tools may join an already-resolved ceiling (#2471).
 
     Deliberately NOT routed through `expand`: a grant row is runtime data, and
@@ -166,9 +208,18 @@ def _widening_names(grant_widening) -> set[str]:
     bug" doctrine is a property of what a SOURCE may hold, and a row is not a
     source widening itself — it is one job's named licence, and it cannot put
     a standing worker ban on any turn's catalog.
+
+    `scope` (#2670) is the one crack in that rule, and it is a narrow one: the
+    drop still applies to every ban name except
+    `SCOPE_BAN_EXCEPTIONS[<scope prefix>]`, which admits exactly
+    `automod_vault_land` for an `autonomy-task:<id>` scope holding a live row
+    for it. The exception lands the tool in the ceiling ONLY; the deny floor and
+    the policy hook beside it are untouched by this module, so a turn that is
+    dispatched under the tool still answers to the tier ladder, and a scope with
+    no row gets the pre-#2670 compile byte for byte.
     """
     served = registered_tool_names()
-    banned = _standing_bans()
+    banned = _standing_bans() - scoped_ban_exceptions(scope)
     out: set[str] = set()
     for token in grant_widening or ():
         text = str(token).strip()
@@ -254,9 +305,11 @@ SOURCE_CAPABILITIES: dict[str, tuple[str, ...]] = {
         # 7.8%, backlog_get_task 6.9%, backlog_tasks 6.7% — and ONE census
         # name deliberately excluded: `automod_vault_land` (9.4%, 53 files,
         # every logged call succeeding) is a standing worker ban, so `expand`
-        # refuses to declare it, and the live `run_task` turn cannot yet be
-        # put under this ceiling without stripping it from the nightly
-        # vault-landing jobs — see the note under this dict.
+        # still refuses to declare it, and it enters an envelope only through
+        # `SCOPE_BAN_EXCEPTIONS` — a live grant row for one `autonomy-task:<id>`
+        # scope, never the base set, so a job with no row is measured against
+        # this ceiling without it and the nightly vault-landing jobs are never
+        # counted as would-stripped. See the note under this dict.
         #
         # Below the line, by family or prompt, each with its census file
         # count: the sets' sibling legs (Grep 17, Glob 2, vault_search 3,
@@ -288,20 +341,22 @@ SOURCE_CAPABILITIES: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# **Why this ceiling is not yet wired into `autonomy.run_task` (#2471).** A
+# **How this ceiling reaches the live scheduled-task turn (#2471 → #2670).** A
 # scheduled task's live turn is built in `app/autonomy.py::run_task`, which
 # predates the envelope machinery and assembles its own `RunOptions` (#534's
 # comment says so). Its deny floor is config's `disabled_tools` + the
 # grant-mint ban — NOT `WORKER_AUTOMOD_BAN` — which is why 53 census files
 # show `automod_vault_land` succeeding there while no worker source may name
-# it. Putting `run_task` under this base would strip that tool from the
-# nightly vault-landing jobs, because a standing ban cannot enter a declared
-# set or a widening. Wiring the live turn to this ceiling therefore waits on
-# a ruling about the automod ban's right shape for `autonomy-task:<id>`
-# scopes; it is recorded on #2471, not silently skipped. This round's
-# ceiling — compile, matrix row, baseline artifact, per-job widening — is
-# what the item's five clauses grade, and they grade it at the fleet's single
-# compile point, `workers/sources/_common.py::_worker_run_options`.
+# it. That asymmetry was what made this ceiling un-wireable: putting the turn
+# under the base alone would have stripped the tool from the nightly
+# vault-landing jobs, because a standing ban enters neither a declared set nor
+# a widening. `SCOPE_BAN_EXCEPTIONS` above is the ruling that closed it, and
+# `app/scheduled_ceiling.compile_surface` is the wiring: `run_task` compiles
+# through `envelope_for("scheduled-task", grant_widening=live_grant_names(...))`
+# with its own `autonomy-task:<id>` scope, and until seven shadow days say
+# otherwise it dispatches `allowed_tools=None` — today's deny floor, unchanged —
+# while recording what the ceiling would have refused. See
+# `app/scheduled_ceiling.py` for the mode switch and the ledger.
 
 #: The sources whose entire input is text somebody else wrote: a transcript
 #: off the internet, a fetched page, another agent's session file. This is the
@@ -324,21 +379,23 @@ def durable_external(names) -> frozenset[str]:
 
 
 def envelope_for(source: str | None, extra_disallowed=(), *,
-                 grant_widening=()) -> list[str] | None:
+                 grant_widening=(), scope: str = "") -> list[str] | None:
     """This source's allow-list, normalised, or None when it declared none.
 
-    The single compile point for both worker turn shapes — `_worker_run_options`
-    hands the result straight to `RunOptions.allowed_tools`, and
-    `run_prompt_in_session` carries the same value across the loopback POST to
-    `app/routers/turn_options.py`, which is where a session-backed source's
-    options are actually built. One derivation, so the set a turn is *told*
-    about cannot differ from the one it is dispatched under.
+    The single compile point for every turn shape that declares one —
+    `_worker_run_options` hands the result straight to
+    `RunOptions.allowed_tools`, `run_prompt_in_session` carries the same value
+    across the loopback POST to `app/routers/turn_options.py`, which is where a
+    session-backed source's options are actually built, and
+    `app.scheduled_ceiling.compile_surface` compiles the live scheduled-task
+    turn with it (#2670). One derivation, so the set a turn is *told* about
+    cannot differ from the one it is dispatched under.
 
     `extra_disallowed` is subtracted so a caller that forbids a tool for one
-    call — `eval/run_scratchpad_ab.py`'s two arms, a source's own `DISALLOWED` —
-    narrows the envelope too. Without that the two layers would disagree and
-    the deny layer wins at dispatch, which is safe but leaves the turn told it
-    may call something it may not.
+    call — `eval/run_scratchpad_ab.py`'s two arms, a source's own `DISALLOWED`,
+    the scheduled task's deny floor — narrows the envelope too. Without that the
+    two layers would disagree and the deny layer wins at dispatch, which is safe
+    but leaves the turn told it may call something it may not.
 
     `grant_widening` (#2471) is the set of tool names the CALLING job holds a
     live `authority_grants` row for — per job, never across jobs, and read
@@ -348,11 +405,18 @@ def envelope_for(source: str | None, extra_disallowed=(), *,
     subtracted from by `extra_disallowed` like everything else: a tool the
     operator disabled is not advertised even under a live grant, because the
     MCP server is not serving it and P3 would refuse it.
+
+    `scope` (#2670) is which job's identity that widening was read under, and it
+    is only ever read by `_widening_names`, which uses it to decide whether a
+    standing ban may be licensed for this scope at all. Omitted — every worker
+    compile, the baseline artifact and the guard matrix — it is the empty
+    string, no exception applies, and the result is the pre-#2670 compile.
     """
     declared = SOURCE_CAPABILITIES.get(str(source or ""))
     if declared is None:
         return None
-    allowed = set(expand(declared)) | _widening_names(grant_widening)
+    allowed = set(expand(declared)) | _widening_names(grant_widening,
+                                                      scope=scope)
     for name in extra_disallowed or ():
         allowed.discard(normalize_tool_name(name))
     return sorted(allowed)
