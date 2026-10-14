@@ -575,6 +575,7 @@ voice *change*. So a voice change needs the guardian re-staged
 | 8096 | primary LLM |
 | 8181 | qmd — listening on `[::1]` only, so an IPv4-literal probe is refused by a daemon that is up and serving `/health`. `scripts/service_health_check.py::http_check` therefore tries every address the name resolves to instead of assuming IPv4 loopback, because a healthy service reported dead is worse than not probing |
 | 8500 | lloyd-mcp |
+| 8501 | `lloyd-agent-worker` — the loopback wake-miss rig only: the aiohttp server `WakeMissCapture` starts inside `agent-services/livekit_worker.py` (`/healthz` plus the two label routes), which the backend proxies. Bound to loopback, and not the voice path — 8501 answering says nothing about whether voice works |
 | 8765 | the Thunderbird extension's bridge |
 | 18080 / 18500 | the automod **canary**: a candidate backend and aggregator booted from the round's worktree by the gate |
 
@@ -691,6 +692,24 @@ triage and implementation ([[automod]]), research, digests and session
 mining. The systemd timers above are the only wall-clock schedules.
 
 ## Review log
+
+- **2026-10-14 — current for the two tables that answer "what is running"
+  (#2712, round SM_20261014_164921).** §Ports carried no `8501` row while
+  §Process management credited that port to `lloyd-agent-worker`, so the tables
+  disagreed in the one way a reader can act on: choosing an engine by port, the
+  wake-miss rig could not be found at all. Fix: the row above, and both tables are
+  now read against `agent-services/supervisor/conf.d/` by
+  `tests/test_infrastructure_gpu_inventory.py` — the 14 `[program:…]` headers
+  against the program table (`[group:lloyd-mc]` contributes no program, and its
+  three members each have a conf of their own, which the test re-checks rather
+  than assumes), and the `environment=…PORT=…` serving ports — 8010, 8011, 8012,
+  8091, with `VLLM_PORT=`'s 5300/5310 excluded by key name and re-checked as ports
+  no program is credited with — against §Ports, counting a cell that spells two
+  ports as two ports, which the single-port shape this file used for its one
+  §Ports lookup did not. The wider roster-owner question (the four prose copies
+  #2698 named, [[vllm]] §2's Serves column) is left on #2712 for the owed-check
+  pass, not decided here. Nothing else on this page was re-read on this pass:
+  every other section still carries the dates below.
 
 - **2026-10-14 — stale.** The later pass of the day: this one read the sections
   the #2697 entry below explicitly declined to re-read. Wrong against the tree:

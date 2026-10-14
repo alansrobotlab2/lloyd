@@ -32,6 +32,28 @@ Each harvester asserts it extracted something, and
 `test_the_row_harvester_can_report_a_missing_card` feeds this file a table with
 GPU 3 and 4 deleted: a green from a regex that matched nothing is the failure
 mode the doc's own review log records.
+
+#2712 extends the same discipline to the two tables that answer "what is
+running", which until now were pinned by nothing but one hardcoded row about the
+omni TTS. `6ed8753c` (2026-10-14, "arch-review: doc:infrastructure — stale")
+added the `agent-djev` and `agent-decider` program rows and their `8010 / 8011`
+and `8012` port rows — 100 insertions in one file with **no test file**, which is
+the unpinned hand-edit this item is about: the symptom fixed, the mechanism
+untouched. So the expected set is now derived from `conf.d/` itself (the 14
+`[program:…]` files, not `lloyd-mc.conf`, which is a `[group:…]`), the serving
+ports from those confs' `environment=…PORT=…` (8010, 8011, 8012, 8091 — not
+`VLLM_PORT=`, which is 5300/5310, an internal vLLM port no §Ports row carries),
+and the port rows are read as cells, because `| 7880 / 7881 |`,
+`| 8010 / 8011 |` and `| 18080 / 18500 |` spell two ports where the
+`^\\|\\s*(\\d+)\\s*\\|` shape this file used for them sees nothing at all.
+
+The direction is one-way on purpose: §Ports legitimately lists ports no conf
+declares (`8765` is the Thunderbird bridge, `18080 / 18500` the automod canary),
+so requiring a conf for every row is unsatisfiable, while
+requiring a row for every program and every serving port is the check that was
+missing. Its one live gap was `8501`, listed in §Process management for
+`lloyd-agent-worker` and absent from §Ports — a reader of the port table alone
+could not find the thing at all.
 """
 
 from __future__ import annotations
@@ -294,3 +316,304 @@ def test_process_and_ports_tables_record_the_omni_tts():
     assert port_rows, "the port table stopped parsing"
     assert port in port_rows, f"§Ports has no {port} row; a reader concludes voice is 8090"
     assert "omni" in port_rows[port].lower(), f"§Ports' {port} row names no engine: {port_rows[port]!r}"
+
+
+# --- clause 5-8: conf.d owns the program and port tables (#2712) ------------
+
+CONF_DIR = ROOT / "agent-services" / "supervisor" / "conf.d"
+
+#: A supervisor program section. A `[group:…]` header is deliberately absent: a
+#: group is a label on programs that each have their own conf, not a process, and
+#: `lloyd-mc.conf` is only `[group:lloyd-mc]` with
+#: `programs=lloyd-backend,lloyd-frontend,lloyd-mcp`.
+_PROGRAM_HEADER = re.compile(r"^\[program:([a-z0-9-]+)\]", re.M)
+_GROUP_HEADER = re.compile(r"^\[group:([a-z0-9-]+)\]", re.M)
+_GROUP_MEMBERS = re.compile(r"^programs=(.+)$", re.M)
+#: Any `…PORT="…"` a conf sets in `environment=`, so `PORT` and `STRUCTURED_PORT`
+#: are harvested as served ports and `VLLM_PORT` is filtered out by name below.
+_ENV_PORT = re.compile(r'\b([A-Z_]*PORT)="(\d+)"')
+#: Ports a conf sets for a process it *starts* rather than serves. `VLLM_PORT` is
+#: an env vLLM reads for its own socket — 5300 under djev, 5310 under the decider —
+#: and neither appears in either table: `grep -n "5300\|5310"
+#: architecture/infrastructure.md` lands on one Review-log line and no row, because
+#: nothing connects to them. This set is a name list, so the node below derives the
+#: exclusion's safety instead of trusting it: an excluded port must not be one the
+#: program table itself credits to a program.
+_INTERNAL_PORT_KEYS = frozenset({"VLLM_PORT"})
+#: A program table row, keyed by backticked name. The key may carry the group
+#: prefix `supervisorctl status` prints (`lloyd-mc:lloyd-backend`), which is
+#: stripped — see `_program_rows`.
+_PROGRAM_ROW = re.compile(r"^\|\s*`([a-z0-9:_-]+)`\s*\|(.*)$")
+#: A §Ports row's first cell, which may spell several ports: `| 7880 / 7881 |`.
+_PORT_ROW = re.compile(r"^\|\s*([^|]+?)\s*\|(.*)$")
+#: The shape this file used before #2712 for its one §Ports lookup. Kept as a
+#: named thing so the blind spot can be *asserted* rather than asserted about.
+_ONE_PORT_ROW = re.compile(r"^\|\s*(\d+)\s*\|(.*)$")
+_PORT_NUM = re.compile(r"\b\d{4,5}\b")
+
+
+def _conf_programs() -> dict[str, str]:
+    """{program name: conf filename} for every `[program:…]` header in conf.d/.
+
+    Read from section headers, not filenames, because the two are not the same
+    set today: 15 `*.conf`, 14 programs, and the file that is not a program is
+    `lloyd-mc.conf`.
+    """
+    found: dict[str, str] = {}
+    for path in sorted(CONF_DIR.glob("*.conf")):
+        for name in _PROGRAM_HEADER.findall(path.read_text(encoding="utf-8")):
+            found[name] = path.name
+    assert found, f"no [program:…] header anywhere under {CONF_DIR}"
+    return found
+
+
+def _conf_groups() -> dict[str, list[str]]:
+    """{group name: [member programs]} from every `[group:…]` conf."""
+    out: dict[str, list[str]] = {}
+    for path in sorted(CONF_DIR.glob("*.conf")):
+        text = path.read_text(encoding="utf-8")
+        members = _GROUP_MEMBERS.search(text)
+        for group in _GROUP_HEADER.findall(text):
+            out[group] = (sorted(m.strip() for m in members.group(1).split(","))
+                          if members else [])
+    return out
+
+
+def _program_rows(text: str) -> dict[str, list[str]]:
+    """§Process management's rows keyed by bare program name, cells as a list.
+
+    A row for a grouped program is spelled the way `supervisorctl status` prints
+    it — ``lloyd-mc:lloyd-backend`` — so the prefix is stripped rather than
+    hardcoded, and `_conf_programs()`'s exclusion of the group conf costs nothing.
+    """
+    rows: dict[str, list[str]] = {}
+    for ln in _section(text, "## Process management").splitlines():
+        m = _PROGRAM_ROW.match(ln)
+        if not m:
+            continue
+        name = m.group(1).rsplit(":", 1)[-1]
+        assert name not in rows, (
+            f"§Process management lists {name} twice, once at least as "
+            f"{m.group(1)!r}; the key would silently collapse and a missing row "
+            "would read as present")
+        rows[name] = [c.strip() for c in m.group(2).split("|")]
+    assert rows, "§Process management's table stopped parsing"
+    return rows
+
+
+def _programs_without_rows(text: str) -> list[str]:
+    """Program names conf.d declares that `text`'s program table has no row for.
+
+    Split out and taking any text so the mutation node below can hand it a table
+    with a row deleted: a green here has to be attributable to rows existing, not
+    to a regex that matched nothing.
+    """
+    return sorted(set(_conf_programs()) - set(_program_rows(text)))
+
+
+def _conf_ports() -> dict[str, tuple[str, str]]:
+    """{port: (conf filename, environment key)} for every `…PORT="…"` in conf.d.
+
+    `PORT=` is the port a launcher binds: `PORT="${PORT:-8010}"` and
+    `STRUCTURED_PORT="${STRUCTURED_PORT:-8011}"` in `start-djev.sh`,
+    `PORT="${PORT:-8012}"` in `start-decider.sh`, and `PORT="8091"` handed to
+    `start-secondary.sh`. Today: 8010, 8011, 8012, 8091 served, plus 5300 and 5310
+    under `VLLM_PORT=`.
+    """
+    seen: dict[str, list[tuple[str, str]]] = {}
+    for path in sorted(CONF_DIR.glob("*.conf")):
+        for key, port in _ENV_PORT.findall(path.read_text(encoding="utf-8")):
+            seen.setdefault(port, []).append((path.name, key))
+    for port, who in seen.items():
+        assert len(who) == 1, f"port {port} is declared by more than one conf: {who}"
+    return {port: who[0] for port, who in seen.items()}
+
+
+def _serving_and_internal_ports() -> tuple[dict[str, str], dict[str, str]]:
+    """(serving, internal) port maps, split by environment key name.
+
+    Both are port -> "<conf> <KEY>" so a failure names where the port came from,
+    and the filter on the *key* lives in these two lines and nowhere else.
+    """
+    declared = _conf_ports()
+    serving = {p: f"{c} {k}" for p, (c, k) in declared.items()
+               if k not in _INTERNAL_PORT_KEYS}
+    internal = {p: f"{c} {k}" for p, (c, k) in declared.items()
+                if k in _INTERNAL_PORT_KEYS}
+    assert serving, f"no conf under {CONF_DIR} declares a served PORT="
+    return serving, internal
+
+
+def _documented_ports(text: str) -> dict[str, str]:
+    """§Ports rows as {port: what the row says}, counting ports a cell shares.
+
+    The first cell spells two ports in `| 7880 / 7881 |`, `| 8010 / 8011 |` and
+    `| 18080 / 18500 |`, and the one-port shape `_ONE_PORT_ROW` matches skips all
+    three cells whole. On today's doc the cell count is 17 ports and the one-port
+    shape sees 11 of them; the six it misses include djev's `8010` and `8011`, so a
+    check keyed on that shape would report the engine
+    `scripts/service_health_check.py` probes as undocumented. The assertion below
+    is what keeps that from coming back as a "simplification".
+    """
+    out: dict[str, str] = {}
+    one_port_only: set[str] = set()
+    for ln in _section(text, "## Ports").splitlines():
+        m = _ONE_PORT_ROW.match(ln)
+        if m:
+            one_port_only.add(m.group(1))
+        m = _PORT_ROW.match(ln)
+        if not m:
+            continue
+        for port in _PORT_NUM.findall(m.group(1)):
+            assert port not in out, f"§Ports has two rows for {port}"
+            out[port] = m.group(2).strip()
+    assert out, "§Ports' table stopped parsing"
+    assert set(out) - one_port_only, (
+        f"every §Ports port is one the single-port shape sees too, so shared-cell "
+        f"rows like '| 8010 / 8011 |' are being skipped, not counted ({len(out)} "
+        f"ports, all also matched by {_ONE_PORT_ROW.pattern})")
+    return out
+
+
+def _ports_the_program_table_credits(text: str) -> dict[str, set[str]]:
+    """{program: ports} from the Ports column of §Process management's rows."""
+    ports = {name: set(_PORT_NUM.findall(cells[0]))
+             for name, cells in _program_rows(text).items() if cells}
+    assert any(ports.values()), "no program row names a port at all"
+    return ports
+
+
+def test_every_program_conf_d_declares_has_a_row_in_the_process_management_table():
+    """§Process management is written against the confs, not the other way round.
+
+    The expected set is the 14 `[program:…]` headers in `conf.d/`, so adding a
+    15th conf and forgetting the doc is the failure this catches — the exact
+    shape of `6ed8753c`, which added `agent-djev` and `agent-decider` to the
+    table 100 insertions after the confs existed, with no test in the commit.
+    `lloyd-mc.conf` contributes nothing because it declares no program: it is
+    `[group:lloyd-mc]`, and all three of its members have confs of their own,
+    which the loop below re-checks rather than assumes. Row count and program
+    count are then tied exactly, so the green is "14 names, 14 rows", not "some
+    rows parsed".
+    """
+    programs, groups = _conf_programs(), _conf_groups()
+    assert len(programs) == 14, (
+        f"conf.d declares {len(programs)} programs, not the 14 this node's "
+        "docstring and the module docstring name. Count them again with "
+        "`grep -l '^\\[program:' agent-services/supervisor/conf.d/*.conf | wc -l`, "
+        "write the row the new program is missing, then update the number in both "
+        "docstrings")
+    for group, members in groups.items():
+        assert members, f"{group}.conf has a [group:] header with no programs= line"
+        assert group not in programs, (
+            f"{group} is both a group and a program name; the group conf's "
+            "exclusion would then hide a real program")
+        for member in members:
+            assert member in programs, (
+                f"[group:{group}] names {member}, which has no [program:] conf of "
+                "its own — ignoring group files would drop it from the roster")
+    rows = _program_rows(INFRA.read_text(encoding="utf-8"))
+    assert len(rows) == len(programs), (
+        f"§Process management has {len(rows)} program rows for {len(programs)} "
+        f"confs; a name appearing twice or a row keyed differently hides a gap")
+    missing = _programs_without_rows(INFRA.read_text(encoding="utf-8"))
+    assert not missing, (
+        f"programs with a conf and no §Process management row: {missing} — a reader "
+        "of this doc cannot find, restart or disarm them")
+
+
+def test_the_program_row_harvester_can_report_a_missing_program():
+    """Negative control: delete one row from the real table, the gap must be named.
+
+    Same discipline as `test_the_row_harvester_can_report_a_missing_card` for the
+    GPU table. The deleted row is `agent-djev`, the engine `djev.enabled: true`
+    switches on and `scripts/service_health_check.py:116` probes — the program
+    whose row was in fact missing from this table until `6ed8753c` added it by
+    hand, so the mutation is not hypothetical, it is last week.
+    """
+    text = INFRA.read_text(encoding="utf-8")
+    gone = "agent-djev"
+    lines = text.splitlines(keepends=True)
+    dropped = [i for i, ln in enumerate(lines)
+               if (m := _PROGRAM_ROW.match(ln)) and m.group(1).rsplit(":", 1)[-1] == gone]
+    assert len(dropped) == 1, f"expected one §Process management row naming {gone}, got {dropped}"
+    del lines[dropped[0]]
+    mutated = "".join(lines)
+    assert len(_program_rows(mutated)) == len(_program_rows(text)) - 1, (
+        "deleting the row did not reach the table")
+    reported = _programs_without_rows(mutated)
+    assert gone in reported, (
+        f"{gone} has a conf and no row after the mutation, and the harvester said "
+        f"{reported!r}")
+    assert gone not in _programs_without_rows(text), (
+        f"{gone} is already missing a row on the real table, so this node is "
+        "reporting a live gap rather than proving it can see one")
+
+
+def test_every_serving_port_a_conf_declares_has_a_row_in_the_ports_table():
+    """§Ports must carry the ports conf.d binds, and never gain a port from them.
+
+    One direction, deliberately: `8765` is the Thunderbird bridge and
+    `18080 / 18500` the automod canary, rows for things that are not supervisor
+    programs at all, so "every §Ports row has a conf" is unsatisfiable and asking
+    it would train the next reader to delete the check.
+
+    The harvest is filtered to the serving ports — 8010, 8011, 8012, 8091 — and
+    `VLLM_PORT=` is left out by key name. That exclusion is derived, not trusted:
+    5300 and 5310 are checked *not* to be ports the program table credits to a
+    program, which is what makes them internal; the moment a conf names a real
+    served port `VLLM_PORT=`, this node goes red instead of silently dropping it.
+    """
+    serving, internal = _serving_and_internal_ports()
+    text = INFRA.read_text(encoding="utf-8")
+    documented = _documented_ports(text)
+    missing = sorted(set(serving) - set(documented))
+    assert not missing, (
+        f"serving ports with no §Ports row: {missing} — "
+        + "; ".join(f"{p} from {serving[p]}" for p in missing)
+        + "; a reader choosing an engine by port cannot find them")
+    credited = {p for ports in _ports_the_program_table_credits(text).values()
+                for p in ports}
+    overlap = sorted(set(internal) & credited)
+    assert not overlap, (
+        f"{overlap} is set as VLLM_PORT= and is also a port §Process management "
+        "credits to a program, so it is served after all and belongs in §Ports")
+
+
+def test_the_ports_table_covers_every_port_the_program_table_lists():
+    """Every port §Process management names has a §Ports row, 8501 included.
+
+    The two tables are read by different questions — "what restarts it" and "what
+    answers on this port" — and today they disagreed once: `lloyd-agent-worker`'s
+    8501, the loopback `WakeMissCapture` aiohttp rig in
+    `agent-services/livekit_worker.py` that the backend proxies `/api/voice/ww_miss`
+    to, sat in the program table (`architecture/infrastructure.md:281`) and in no
+    §Ports row, so `grep -n "8501" architecture/infrastructure.md` printed one
+    line and the port table alone could not find the thing. The row is checked
+    through `_documented_ports`, the same cell-counting parse the conf-driven
+    check uses, and then mutated out: a port documented in a single row has to be
+    the row that fails if it goes.
+    """
+    text = INFRA.read_text(encoding="utf-8")
+    credited = _ports_the_program_table_credits(text)
+    documented = _documented_ports(text)
+    missing = sorted({p for ports in credited.values() for p in ports} - set(documented))
+    assert not missing, (
+        f"§Process management names ports {missing} that §Ports has no row for — "
+        "the two tables answer different questions and have to agree anyway")
+    assert credited.get("lloyd-agent-worker") == {"8501"}, credited.get("lloyd-agent-worker")
+    assert "8501" in documented, "the 8501 row this item added is gone from §Ports"
+    assert "lloyd-agent-worker" in documented["8501"], (
+        f"§Ports' 8501 row does not name the program that owns it: {documented['8501']!r}")
+    assert not [ln for ln in text.splitlines() if ln.startswith("| 8501 ")][1:], (
+        "more than one §Ports row starts at 8501")
+
+    lines = text.splitlines(keepends=True)
+    dropped = [i for i, ln in enumerate(lines) if ln.startswith("| 8501 ")]
+    assert len(dropped) == 1, f"expected exactly one 8501 row, got {dropped}"
+    del lines[dropped[0]]
+    mutated = _documented_ports("".join(lines))
+    assert "8501" not in mutated, "the deleted 8501 row is still being documented"
+    assert len(mutated) == len(documented) - 1, (
+        f"deleting one row cost {len(documented) - len(mutated)} ports: the parse "
+        "is reading cells it should not")
