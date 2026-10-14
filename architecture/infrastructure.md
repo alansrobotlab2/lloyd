@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, infrastructure, supervisord, systemd]
 type: reference
 status: implemented
-date: 2026-09-14
+date: 2026-10-14
 ---
 
 # Infrastructure
@@ -18,14 +18,14 @@ what to back up); this is the running shape.
 
 | Property | Value |
 |---|---|
-| OS | Omarchy (Arch Linux), kernel 7.1 |
+| OS | Omarchy (Arch Linux), kernel 7.2 |
 | CPU / RAM | 32 threads / 251 GiB |
 | Production tree | `~/lloyd` — a saved file is a deploy |
 | Development clone | `~/lloyd-sandbox` (remotes `origin` = GitHub, `live` = `~/lloyd`), lands as a PR |
 | Automod worktrees | `~/lloyd-work/SM_<stamp>/`, cut from live `main` per round |
 | Vault | `~/obsidian` (Obsidian Sync, headless via `agent-obsidian-sync`) |
 | Secrets | `.env` (gitignored), expanded into `config.yaml` `${VAR}` placeholders at boot |
-| Python venvs | `.venvs/lloyd` (backend, aggregator, voice worker), `vllm-flash-next-main-1012` (primary, served), `vllm-flash-next-main` (the 09-17 build, revert target), `vllm-qwen38-flash-next` and `vllm-qwen3.8` (alternate primary builds), `qwen3-tts` |
+| Python venvs | `.venvs/lloyd` (backend, aggregator, voice worker), `vllm-flash-next-main-1012` (primary, served), `vllm-flash-next-main` (the 09-17 build, revert target), `vllm-djev` (djev's engine), `vllm-omni` (the voice TTS's), `qwen3-tts`. Two more are named by launchers and **not installed**: `vllm-qwen38-flash-next` and `vllm-qwen3.8` — see §Model slots |
 | State outside the repo | `~/.local/state/lloyd-automod/` (ledger, rounds, clusters), `~/.local/state/lloyd-guardian/` (pinned guardian snapshot), `~/.local/share/<channel>/` (youtube `seen.json`) |
 
 ## GPUs
@@ -67,7 +67,7 @@ servers is answering for voice — and the header now says so;
 |---|---|---|---|
 | 0 | RTX 3090 | 24 GB | Qwen3-TTS on the vendored server (`agent-tts`, `:8090`) — the **fallback** engine since 2026-10-09, still autostarted and still pinned here, so its row stays even though voice answers from GPU 3; the LiveKit voice worker, qmd embeddings (`agent-qmd-daemon`, `agent-qmd-watcher`) |
 | 1 | RTX PRO 6000 Blackwell | 96 GB | the primary LLM, vLLM (`agent-llm-primary`) |
-| 2 | RTX 3090 | 24 GB | djev, DiffusionGemma on vLLM (`agent-djev`) at `GPU_UTIL=0.97` since 2026-09-20 — or the secondary LLM, llama.cpp (`agent-llm-secondary`, ~21.7 GB) if that slot is re-armed; never both, see [[djev]] |
+| 2 | RTX 3090 | 24 GB | djev, DiffusionGemma on vLLM (`agent-djev`) at `GPU_UTIL=0.97` since 2026-09-20 — or the secondary LLM, llama.cpp (`agent-llm-secondary`, ~21.7 GB) if that slot is re-armed; never both, see [[djev]]. A third conf (`agent-decider`, `GPU="2"`) names this card too and has nothing that arms it — #2713 |
 | 3 | RTX 3090 | 24 GB | Qwen3-TTS 1.7B on vLLM-Omni (`agent-tts-omni`, `:8093`) — the TTS the voice path actually uses since 2026-10-09, UUID-pinned to this card by both its conf and its launcher; its two `VLLM::StageEngineCoreProc` stages are the ~9.6 GB resident here, see [[voice]] |
 | 4 | RTX 3090 | 24 GB | **nothing pinned to it** — no `conf.d` program names this card and no compute app holds it. Added 2026-10-07 alongside GPU 3, and written out rather than left off, so a reader never has to choose between "spare card" and "the doc lost a row" |
 
@@ -96,7 +96,14 @@ check, and those checks are the only reason this table can be trusted.
 |---|---|---|---|---|
 | `primary` | 8096 | vLLM, venv `vllm-flash-next-main-1012` | Qwen3.8-Flash-Next NVFP4, FP8 KV | `agent-llm-primary` |
 | `secondary` | 8091 | llama.cpp `llama-server`, `--parallel 1` | Qwen3.6-35B-A3B UD-Q3_K_XL | `agent-llm-secondary` |
+| — | 8010 + 8011 | vLLM (`.venvs/vllm-djev`) with a structured-decision server in front | DiffusionGemma 26B-A4B NVFP4 | `agent-djev` |
 | — | 8090 | Qwen3-TTS (`.venvs/qwen3-tts`) | cloned voice `clone:dave_cullen` | `agent-tts` |
+
+The djev row has no alias on purpose: it is not in `models:`, nothing routes a
+*turn* there and `resolve_model_alias` has never heard of it — `config.yaml`'s
+`djev:` block carries its two URLs and `app/llm_slots.py` its switch. It is in
+this table because it holds the GPU-2 occupancy an alias could otherwise have
+taken, and since 2026-09-20 it is the one that is switched on.
 
 The primary's own configuration, tuning and benchmarks are [[vllm]]; what
 follows is what holds for the slots as a set.
@@ -122,10 +129,17 @@ change while the process lives.
 
 ### `secondary_enabled` outranks supervisord
 
-`server.py::_sync_secondary_llm_state` reconciles the program against that
+`server.py::_sync_llm_slots` reconciles the program against that
 flag on every backend boot, so the conf's own `autostart=true` is not the
 deciding vote — leaving the flag false silently stopped the secondary three
-seconds after each backend restart. It reroutes the *callers* too:
+seconds after each backend restart. It is one hook for both GPU-2 slots (the
+`djev.enabled` half arrived later, and the config key keeps its old name because
+renaming it would silently un-guard every canary already on disk), and it holds
+the cards' mutual-exclusion rule: with both flags true it starts **neither** and
+logs the conflict, because starting the second one OOMs a 24 GiB card. The
+per-slot question is answered in one place, `app/llm_slots.py`, so the dashboard,
+the Services tab and the agent's own service counts cannot each keep their own
+table. It reroutes the *callers* too:
 `config.resolve_model_alias` rewrites `secondary` to `primary` while the flag
 is false, logged once per name because it is otherwise undetectable. Inner
 Voice's config said `model: secondary` from 2026-05-07 and ran on the primary
@@ -154,18 +168,20 @@ that dropped `LANGUAGE_MODEL_ONLY=0` (#1420, [[desktop]]).
 ever reports; restarting a slot is precisely the operation that would have
 swapped the model in the first place.
 
-Three venvs can serve the primary's model family, which is why `VLLM_VENV` is
-pinned in the conf rather than left to the launcher: `vllm-flash-next-main-1012`
-(what the program names; the undated `vllm-flash-next-main` is the 09-17 build
-kept as the revert target, with the same fp8 QSA path),
-`vllm-qwen38-flash-next` (the PLE-offload-worker build — and the launcher's
-*own* fallback default — but a dropped `VLLM_VENV` no longer reaches BF16:
-the conf still exports `KV_CACHE_DTYPE=fp8`, that build's QSA kernel has no
-fp8 path, and the guard at `:526-531` exits 1. It boots BF16 only if both
-variables go), and
-`vllm-qwen3.8`, which belongs to the 27B revert target at
-`start-qwen3.8-27b-nvfp4.sh`. `SETUP.md` Part 4 (venvs) and Part 9 (LLM
-models) carry the builds and the weights.
+Two venvs **on this box** can serve the primary's model family, which is why
+`VLLM_VENV` is pinned in the conf rather than left to the launcher:
+`vllm-flash-next-main-1012` (what the program names) and the undated
+`vllm-flash-next-main`, the 09-17 build kept as the revert target with the same
+fp8 QSA path. The launcher's *own* fallback default
+(`start-qwen38-flash-next.sh:199`) is `.venvs/vllm-qwen38-flash-next`, and a
+dropped `VLLM_VENV` still does not reach BF16 — it exits 1 one check earlier, at
+the venv-exists guard `:239-243`, because that venv is no longer installed; had
+it been, the fp8 QSA guard at `:578-581` would still have refused it, since the
+conf exports `KV_CACHE_DTYPE=fp8` and that build's QSA kernel has no fp8 path.
+`vllm-qwen3.8` is the same story one slot over: it is the default in
+`start-qwen3.8-27b-nvfp4.sh:84` (the 27B revert target) and is likewise absent.
+Both revert targets are therefore a rebuild, not a variable — `SETUP.md` Part 4
+(venvs) and Part 9 (LLM models) carry the builds and the weights.
 
 ## Process management
 
@@ -256,7 +272,9 @@ by name, because that is still the slice whose pressure kills.
 | `lloyd-mc:lloyd-frontend` | 5173 | Vite dev server (HTTPS). It is the front door, not the thing behind one: it proxies `/api` to the backend and `/livekit` to the SFU | `npm --prefix web run dev` |
 | `lloyd-mc:lloyd-mcp` | 8500 | the MCP aggregator `Server("lloyd")`, Streamable HTTP at `/mcp`; `/state`, `/health`, `/changes` | `python -m agent_mcp.main` |
 | `agent-llm-primary` | 8096 | vLLM, Qwen3.8-Flash-Next, FP8 KV | `bin/start-qwen38-flash-next.sh` |
-| `agent-llm-secondary` | 8091 | llama-server, Qwen3.6-35B-A3B | `bin/start-secondary.sh` |
+| `agent-llm-secondary` | 8091 | llama-server, Qwen3.6-35B-A3B — **disarmed** since 2026-09-20 (`secondary_enabled: false`), which is why GPU 2 answers for djev | `bin/start-secondary.sh` |
+| `agent-djev` | 8010 + 8011 | DiffusionGemma 26B-A4B on vLLM, with the structured-decision server on 8011; the GPU-2 tenant that is switched on (`djev.enabled: true`) | `agent-services/bin/start-djev.sh` |
+| `agent-decider` | 8012 | a third GPU-2 tenant that is only a conf and a launcher: no config flag, absent from `app/llm_slots.py`, so nothing can arm it and the two-flags rule does not cover it (#2713) | `agent-services/bin/start-decider.sh` |
 | `agent-tts` | 8090 | Qwen3-TTS API on the vendored server — the fallback voice engine since 2026-10-09 (GPU 0) | `bin/start-qwen3-tts.sh` |
 | `agent-tts-omni` | 8093 | Qwen3-TTS 1.7B Base on vLLM-Omni — the TTS voice mode uses since 2026-10-09 (GPU 3, UUID-pinned); two engines, so `/health` answers only at the end of a ~2.5 min boot | `bin/start-qwen3-tts-omni.sh` |
 | `agent-livekit-server` | 7880 | LiveKit SFU; signal/WS bind `0.0.0.0` (`conf/livekit.yaml` `bind_addresses`) and it is the **advertised ICE address** (`rtc.node_ip`) that resolves to the Tailscale address at boot | `bin/start-livekit-server.sh` |
@@ -343,19 +361,30 @@ each. Stop the hands before moving the floor.
 | `lloyd-graph-backup.timer` | user timer, 05:30 | `scripts/backup/backup-graph.sh` — the knowledge-graph store |
 | `lloyd-data-snapshot.timer` | user timer, hourly | `scripts/backup/snapshot-data.sh` — read-only btrfs snapshot of `~/lloyd-data` into `~/.lloyd-data-snapshots` ([[data-home]]) |
 | `lloyd-data-snapshot-prune.timer` | **system** timer, daily, root | `/usr/local/sbin/prune-data-snapshots.sh` — 48 hourly + 14 daily. Root because the user cannot delete a read-only snapshot, which is the point; installed by hand (`SETUP.md`), so it lives in `agent-services/systemd/system/` and is not symlinked |
+| `lloyd-vault-backup.timer` | user timer, every 15 min | `scripts/backup/backup-vault.sh` — a git snapshot of the vault kept outside it, at `Nice=15` and idle IO class because a snapshot is never urgent |
+| `lloyd-cert-renew.timer` | user timer, 04:17 | `scripts/renew-tailnet-cert.sh`. The tailnet leaf is a 90-day Let's Encrypt cert and Vite picks it **by existence, not validity**, so an expired one is served as confidently as a live one and the only symptom is every tailnet client failing TLS; the script is inert outside its 14-day window (#1727) |
+| `lloyd-persistence-window.timer` | user timer, 02:10 | `eval/run_persistence_arms.sh` — ten reps of the three persistence arms with dispatch held. Not an autonomy task by construction: the driver refuses while any queue row is in flight, and a dispatched run *is* such a row |
+| `lloyd-egress-window.timer` | user timer, 06:23 | the egress two-arm canary window (`eval/egress_arms.py`), same constraint, hence its own `--drain-wait 3600`. Answers `is-enabled` → **disabled** today; that half is #2702 |
 | `thunderbird.service` | user service | Thunderbird itself, hosting the `thunderbird-mcp` extension and its bridge on `:8765` |
 | `nvidia-power-limit.service` | system service, root scope | GPU power clamp, via `/usr/local/sbin/set-gpu-power-limit.sh`. Declares 275 W for every 3090 (the fallback) and **450** W for GPU 1. GPU 1, the Xid-79 card, was raised to 450 W on 2026-09-17 (#1107). It had been set to 450 W by hand twice before that, and each boot reset it to the 400 W the unit declared at the time. A hand-set `-pl` still lasts only until the next boot, so compare the unit's `Environment=` against `nvidia-smi` |
 
-Unit files live in `agent-services/systemd/` and `install-services.sh:36`
-**symlinks** every `.service` and `.timer` in that directory into
-`~/.config/systemd/user/`, so editing the repo copy is the deploy. `thunderbird.service`
-and `voxtype.service` are tracked here and linked like every other unit (#1109,
-fixed) — both are `WantedBy=graphical-session.target` (Thunderbird hosts the
+Unit files live in `agent-services/systemd/` and
+`agent-services/setup/install-services.sh:55-72` **symlinks** every `.service`
+and `.timer` in that directory into `~/.config/systemd/user/`, so editing the
+repo copy is the deploy — *after the installer has been re-run*. Five tracked
+units were placed before the last run and sit there as plain `-rw-r--r--`
+copies, not symlinks: `lloyd-cert-renew.*`, `lloyd-egress-window.*`,
+`lloyd-persistence-window.*`, `thunderbird.service` and `voxtype.service`. For
+those the sentence above is not yet true, and #1109's "tracked and linked"
+holds only for its first half (#2714). `thunderbird.service`
+and `voxtype.service` are both `WantedBy=graphical-session.target` (Thunderbird hosts the
 `thunderbird-mcp` extension its 40 tools bridge over; voxtype is push-to-talk),
-so `enable` runs them with the desktop, not via supervisord. Two units are still
-gaps rather than design: the groundskeeper and graph-backup timers exist only as
-plain untracked files under `~/.config/systemd/user/`, so a rebuild from
-`SETUP.md` loses them. The root-only `nvidia-power-limit.service` is skipped
+so `enable` runs them with the desktop, not via supervisord. One unit is a gap
+rather than a stale copy: `lloyd-graph-backup.{service,timer}` (05:30) exists
+only as a plain untracked file under `~/.config/systemd/user/`, so a rebuild
+from `SETUP.md` loses it. (A groundskeeper timer was listed beside it until this
+pass — no such unit exists in the repo or on disk.) The root-only
+`nvidia-power-limit.service` is skipped
 by that glob (`SYSTEM_SCOPE_UNITS` in `install-services.sh`, #1108) — it used
 to be linked into the user manager, where it can never clamp anything; the copy
 that runs is a hand install at `/etc/systemd/system/`, and
@@ -537,12 +566,14 @@ voice *change*. So a voice change needs the guardian re-staged
 |---|---|
 | 5173 | Vite (TLS) |
 | 7880 / 7881 | LiveKit — signal HTTP and its TCP fallback (`conf/livekit.yaml`: `bind_addresses: [0.0.0.0]`, `rtc.tcp_port: 7881`) |
+| 8010 / 8011 | djev — vLLM's OpenAI surface and `/metrics`, and the structured-decision server in front of it. `scripts/service_health_check.py` probes **8011**, not 8010: an open 8011 means the whole stack came up, an open 8010 during a cold boot does not |
+| 8012 | the unarmed `agent-decider` slot (#2713) — listed so a reader who finds it listening knows who put it there |
 | 8080 | backend |
 | 8090 | Qwen3-TTS on the vendored server (`agent-tts`) — the fallback voice engine |
 | 8091 | secondary LLM |
 | 8093 | Qwen3-TTS on vLLM-Omni (`agent-tts-omni`) — the TTS voice mode actually speaks through |
 | 8096 | primary LLM |
-| 8181 | qmd — listening on `[::1]` only, so an IPv4-literal probe exits 7 against a healthy daemon (`scripts/service_health_check.py:122`) |
+| 8181 | qmd — listening on `[::1]` only, so an IPv4-literal probe is refused by a daemon that is up and serving `/health`. `scripts/service_health_check.py::http_check` therefore tries every address the name resolves to instead of assuming IPv4 loopback, because a healthy service reported dead is worse than not probing |
 | 8500 | lloyd-mcp |
 | 8765 | the Thunderbird extension's bridge |
 | 18080 / 18500 | the automod **canary**: a candidate backend and aggregator booted from the round's worktree by the gate |
@@ -555,8 +586,13 @@ regenerates and so invalidates every client cert signed by the old CA), and
 `scripts/mint-client-cert.sh <device>` mints a per-device cert and records
 its sha256 in `clients.json`. If a publicly-trusted Tailscale cert has been
 provisioned for the MagicDNS name (`tailscale cert <name>`) Vite prefers it,
-because it is trusted by every device with no CA to install; today none is on
-disk, so the private server cert is what is served.
+because it is trusted by every device with no CA to install. One **is** on disk
+(`agent-services/cert/goliath.taile37041.ts.net.crt`, a 90-day Let's Encrypt leaf
+valid to 2026-12-19 when this was read), so that leaf — not the private CA's
+server cert — is what Vite serves. The selection is by **existence, not
+validity**, which is why `lloyd-cert-renew.timer` exists: an expired leaf is
+served as confidently as a live one and the only symptom is every tailnet client
+failing TLS (#1727).
 
 **mTLS itself was dropped on 2026-06-14.** iOS Chrome and every other
 third-party iOS browser cannot present keychain identities for mutual TLS —
@@ -575,11 +611,19 @@ first address it does not trust, so a client cannot prepend a trusted hop).
 `/health` and `/health/deep` are the entire
 pre-auth surface, as exact paths (`PRE_AUTH_PATHS`), because a watchdog has to
 be able to ask "is it alive" from a peer the gate refuses; a watchdog asking
-`/api/health` gets the gate, not a 404. A CORS preflight is let through from any
+`/api/health` gets the gate, not a 404. FastAPI's four docs routes are the
+mirror image of that list and are also exact paths (`DOCS_PATHS`:
+`/openapi.json`, `/docs`, `/redoc`, `/docs/oauth2-redirect`): denied to an
+untrusted peer with byte-identical `{"detail":"Not Found"}` body, so closing
+them adds no new oracle for which surfaces exist (#2090, #2312). A CORS preflight is let through from any
 peer — a browser sends one with no custom headers, so refusing it breaks a
 trusted client and proves nothing — but only a real preflight, recognised by
 `Access-Control-Request-Method` the same way starlette's own CORS middleware
-recognises one (`middlewares/cors.py:91`). A bare `OPTIONS`, which no browser
+recognises one (`middlewares/cors.py:91` — an upstream module, exempted from the
+path check for exactly that reason, which is also why nobody noticed the spelling
+is wrong: the installed starlette keeps the file under a **singular** directory
+name and has no `is_preflight` symbol to point at, and `server.py:295` still
+cites it that way — #2715). A bare `OPTIONS`, which no browser
 sends, is gated: passed through it reaches the router and its 405-vs-404 answer
 would tell an untrusted peer which API paths exist.
 
@@ -647,6 +691,29 @@ triage and implementation ([[automod]]), research, digests and session
 mining. The systemd timers above are the only wall-clock schedules.
 
 ## Review log
+
+- **2026-10-14 — stale.** The later pass of the day: this one read the sections
+  the #2697 entry below explicitly declined to re-read. Wrong against the tree:
+  the venv inventory named `vllm-qwen38-flash-next` and `vllm-qwen3.8`, neither
+  installed, and omitted `vllm-djev` and `vllm-omni`, both of which serve a
+  program named elsewhere on this page; `_sync_secondary_llm_state` is
+  `_sync_llm_slots` now, one hook for both GPU-2 slots holding the
+  both-flags-true-start-neither rule; djev itself was in §GPUs and nowhere else,
+  so the program and port tables still read as though `:8091` were GPU 2's only
+  occupant; §Remote access said no tailnet leaf was on disk when
+  `goliath…ts.net.crt` has been there since 2026-09-29 and is the cert Vite
+  actually serves; four tracked timers (`vault-backup`, `cert-renew`,
+  `persistence-window`, `egress-window`) were missing from the unit table, the
+  "groundskeeper timer" named as a gap exists in neither the repo nor on disk,
+  and "editing the repo copy is the deploy" is false for the five units that
+  predate the installer's last run and sit as plain copies (#2714). Line-level
+  citations corrected: the installer's line anchor, the qmd probe, the launcher's
+  fp8 guard, and starlette's CORS module path (kept as the exempted span the path
+  check knows, with what is actually installed said beside it). Re-read and unchanged: the §GPUs
+  pin inventory and the five-conf count, `startsecs` 900/25/15, the
+  OOM/memwatch/`lloyd.slice` history, the 180/150 GiB boot floors, the
+  alert-fan-out and spoken-channel section, and the peer gate apart from the two
+  sentences above. Filed #2712, #2713, #2714, #2715.
 
 - **2026-10-14 — current for the GPU inventory and the tables that name the
   voice TTS (#2697).** §GPUs carried three rows against a five-card box: the two
