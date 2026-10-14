@@ -767,6 +767,18 @@ def test_the_post_start_carries_force_because_a_same_day_rerun_would_otherwise_r
     assert target.parent == RC.OUT_DIR, \
         "the dated name resolves inside the tracked report dir, beside the 2026-10-04 one"
 
+    # The tracked dir before this node runs a child. What the node is owed about that
+    # dir is that its three child writes — all aimed at `tmp_path` — left it exactly as
+    # they found it, and the snapshot is how that is measured. The shipped node said it
+    # as an absence (`not (RC.OUT_DIR / today).exists()`), which held only while today
+    # had no report; `1cdb06bd` (#2397) committed real ones, and from the first day that
+    # runs on this checkout after one of them the node went red over a file it had not
+    # written. The subject of the node —
+    # the `--force` the unit carries, and the same-day refusal it is there for — passed
+    # throughout, which is why the claim below is about the writes and not about the
+    # calendar.
+    tracked_before = {p.name: p.read_bytes() for p in RC.OUT_DIR.iterdir()}
+
     head, target2 = argv[:2], tmp_path / f"run-{today}{RC.REPORT_SUFFIX}"
     same_day = head + ["report", "--write", "--out", str(target2)]
     writes = [same_day,               # rep 10 finished, first window of the day
@@ -784,8 +796,10 @@ def test_the_post_start_carries_force_because_a_same_day_rerun_would_otherwise_r
         f"the second window was refused for a different reason: {ran[1].stderr[-300:]}"
     assert target2.is_file() and REPORT_TABLE_HEADER in target2.read_text(encoding="utf-8"), \
         "the third write, the one shaped like the unit's, overwrote and left a table"
-    assert not (RC.OUT_DIR / f"run-{today}{RC.REPORT_SUFFIX}").exists(), \
-        "this node must never create the file the first real window is owed"
+    assert {p.name: p.read_bytes() for p in RC.OUT_DIR.iterdir()} == tracked_before, \
+        "a write aimed at tmp_path touched the tracked measurement dir: the unit's own " \
+        "target is that dir, and a node that dirties it cannot tell its own artifact " \
+        "from a real window"
 
 
 def test_the_unit_reaches_neither_override_on_any_surface_systemd_reads():
