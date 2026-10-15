@@ -681,21 +681,34 @@ def _canary_run(tmp_path: Path, *, run_rc: int, cmp_rc: int,
     ends with the arm script's literal tail line so `reaches done` is measured,
     not inferred.
 
-    Two things stand in for the runtime the block really runs in. `LLOYD_DATA` is
+    Three things stand in for the runtime the block really runs in. `LLOYD_DATA` is
     the directory the arm's bench results and engine log already come from
     (`${LLOYD_DATA:-$HOME/lloyd-data}/logs/services/`), so the persisted verdict
     lands where a sweep's throughput already lands. The stub serves `--json-out`
     with `cmp_payload`, which is what the real `compare` writes there; for a
     refused compare (rc>=2) it writes nothing, because `main` raises
     `ProbeRefused` before it reaches the write — the block must therefore tolerate
-    an absent payload, which is pinned in tests/test_engine_output_probe.py.
+    an absent payload, which is pinned in tests/test_engine_output_probe.py. And
+    `TMPDIR` is this test's own scratch directory: the env below is a REPLACEMENT,
+    not an overlay, so before #2776 carried no `TMPDIR` and the block's
+    `${TMPDIR:-/tmp}` resolved to the machine's real `/tmp` on every call site —
+    which is where 1,016 `flash-next-canary-<pid>.json` payloads came from on
+    2026-10-15, all of them byte-identical to `CANARY_PAYLOAD_DIVERGED`. A test
+    that leaves its scratch in a shared directory is not hermetic, and the #2776
+    nodes below count this one to say whether the block cleaned up after itself.
 
     `skip_bench=True` appends the arm script's OWN `SKIP_BENCH` block, so the run
     really does exit there: a verdict written after it is then not on disk.
+
+    Calling this twice with the same `tmp_path` runs two arms against one fakeroot
+    and one CANARY_LOG, which is what clause 1 of #2776 needs to show two payload
+    processes and one directory; the fakeroot's directories are therefore created
+    `exist_ok`.
     """
     root = tmp_path / "fakeroot"
-    (root / ".venvs/lloyd/bin").mkdir(parents=True)
-    (root / "eval/engine_output/idle").mkdir(parents=True)
+    (root / ".venvs/lloyd/bin").mkdir(parents=True, exist_ok=True)
+    (root / "eval/engine_output/idle").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tmpdir").mkdir(parents=True, exist_ok=True)
     (root / "eval/engine_output/idle/20261012T041722Z_idle1012-5.json").write_text("{}\n")
     payload = tmp_path / "cmp-payload.json"
     if cmp_payload is None:
@@ -759,8 +772,49 @@ exit 9
         env={"PATH": "/usr/bin:/bin", "STUB_RUN_RC": str(run_rc),
              "STUB_CMP_RC": str(cmp_rc), "STUB_CMP_PAYLOAD": str(payload),
              "LLOYD_DATA": str(tmp_path / "lloyd-data"),
+             "TMPDIR": str(tmp_path / "tmpdir"),
              "SKIP_BENCH": "1" if skip_bench else "0",
              "STUB_EMIT_RECORD": "1" if emit_record else "0"})
+
+
+def _canary_scratch(tmp_path: Path) -> list[str]:
+    """The payload files the block left in the TMPDIR it was given, by name.
+
+    Counted inside the directory `_canary_run` pinned rather than walked over all of
+    `tmp_path`: the harness's own fixture lives at `<tmp_path>/cmp-payload.json` and
+    is NOT the block's scratch — it is what the stub `cp`s FROM, and it outlives every
+    run by design. Globbing the whole `tmp_path` would count the harness's file as a
+    leak and pass the wrong thing.
+    """
+    return sorted(p.name for p in (tmp_path / "tmpdir").glob("flash-next-canary-*.json"))
+
+
+def _canary_lines(tmp_path: Path) -> list[dict]:
+    """Every verdict line on `flash-next-canary.jsonl` this far, count deliberately
+    NOT asserted.
+
+    `_canary_verdicts` above asserts exactly one line, which is the right thing for a
+    node that ran once and the wrong thing for #2776's, which runs the same fakeroot
+    two or three times to watch the payload count. Those nodes assert the count
+    themselves, next to the claim each is making, rather than borrowing a helper whose
+    assertion belongs to a different question.
+    """
+    p = tmp_path / "lloyd-data/logs/services/flash-next-canary.jsonl"
+    return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+def _trap_lines(text) -> list[str]:
+    """The lines of `text` that ARE a trap statement, as opposed to prose that
+    mentions one.
+
+    Counting the substring `"trap "` over the fold would count the sentences above the
+    cleanup explaining why it is an EXIT trap and why it is `-f` — which is how this
+    node first read three traps in a file that installs one. Bash's `trap … EXIT` is a
+    single slot, so what has to be exactly one is the statement.
+    """
+    lines = text.splitlines() if isinstance(text, str) else list(text)
+    return [ln.strip() for ln in lines if ln.strip().startswith("trap ")]
 
 
 def _canary_verdicts(tmp_path: Path) -> list[dict]:
@@ -1015,3 +1069,195 @@ def test_the_canary_verdict_not_being_written_never_aborts_the_arm(tmp_path):
         "an unpersisted verdict that is not reported is the silent-blind state "
         "this item exists to close: " + r.stdout)
     assert not (tmp_path / "lloyd-data/logs").exists()
+
+
+# --- #2776: the payload is scratch, and scratch gets removed -------------------
+
+def test_two_canary_runs_leave_nothing_in_the_dir_they_were_given(tmp_path):
+    """#2776 clause 1: two arms through the fold, two verdict lines, zero payloads.
+
+    The payload path is per-process (`flash-next-canary-$$`), so a run that does not
+    remove it contributes one file to `/tmp` forever: 1,016 of them at 821 bytes each
+    on 2026-10-15, on a tmpfs sitting at 81% of its inode budget, and
+    `scripts/groundskeeper/retention-sweep.py` has no rung naming the pattern — only a
+    manual inode sweep ever removed them, and the count was back inside a day.
+
+    Two runs, not one, because one run proves only that a single pid's file went: the
+    payload path is per-`$$`, so two runs is two payload processes, and the second
+    run's own `3 of 21 prompts past their idle floor` echo — printed from the
+    compare's output, which only ran because a payload was written — is the witness it
+    did read one before the trap took it out.
+    """
+    first = _canary_run(tmp_path, run_rc=0, cmp_rc=1)
+    assert first.returncode == 0, first.stderr
+    after_first = _canary_scratch(tmp_path)
+    assert after_first == [], (
+        "the payload outlived the process that wrote it: " + repr(after_first))
+    second = _canary_run(tmp_path, run_rc=0, cmp_rc=1)
+    assert second.returncode == 0, second.stderr
+    assert _canary_scratch(tmp_path) == [], (
+        "the second run's payload is still there: " + repr(_canary_scratch(tmp_path)))
+    lines = _canary_lines(tmp_path)
+    assert len(lines) == 2, (
+        "a cleanup that drops a verdict is worse than the leak it fixes; got "
+        + str(lines))
+    assert {l["decision"] for l in lines} == {"past-floor"}, (
+        "the fixture is 3 diverged against the `idle` reference's floor of 1, so the "
+        "verdict word this pair must carry twice is `past-floor`, and a cleanup that "
+        "changed it changed the decision logic: " + str(lines))
+    assert {l["diverged"] for l in lines} == {3}, lines
+    assert ": 3 of 21 prompts past their idle floor" in second.stdout, (
+        "the second run must have read a payload of its own — the path is per-`$$`, "
+        "so two runs means two payload processes, and an empty scratch directory "
+        "after that is the removal doing its job twice: " + second.stdout)
+
+
+def test_the_paths_that_never_reach_a_decision_also_leave_nothing(tmp_path):
+    """#2776 clause 2: the `run` refusal and the `SKIP_BENCH` exit clean up too, and
+    neither one moves the ledger by a line.
+
+    Both are paths where an inline `rm` below the persist block would never run — the
+    first exits on the captured `RUN_RC`, the second is the arm script's own
+    `exit 0`, which this harness appends for real. The trap is `-f`: on the `run`
+    refusal `compare` never ran, so there is no file, and a plain `rm` there exits 1
+    inside an EXIT trap under `set -e`, which would turn a clean could-not-decide arm
+    into a failed one.
+
+    The two verdicts are the ones those paths wrote before this change and the ones
+    they write after it: the `run` refusal still persists its line (with
+    `compare_rc: null`, because compare was never called — the same absent-is-the-
+    signal reading as clause 3), and the `SKIP_BENCH` path still persists its verdict
+    before exiting, which `test_the_verdict_survives_the_skipped_bench_exit` already
+    pins on its own. One line each, no more, no less.
+    """
+    refused = _canary_run(tmp_path, run_rc=2, cmp_rc=0)
+    assert refused.returncode == 0, (
+        "an EXIT-trap `rm` on a path that was never written must not fail the step "
+        f"under `set -e`: {refused.stderr}")
+    assert _canary_scratch(tmp_path) == [], _canary_scratch(tmp_path)
+    lines = _canary_lines(tmp_path)
+    assert len(lines) == 1, lines
+    assert lines[0]["decision"] == "could-not-decide", lines
+    assert lines[0]["run_rc"] == 2 and lines[0]["compare_rc"] is None, (
+        "compare was never called on this path, so the field stays absent-to-null "
+        f"exactly as it did before the cleanup: {lines[0]}")
+    assert lines[0]["diverged"] is None, lines
+
+    skipped = _canary_run(tmp_path, run_rc=0, cmp_rc=1, skip_bench=True)
+    assert skipped.returncode == 0, skipped.stderr
+    assert "=== arm fp8kv done ===" in skipped.stdout, skipped.stdout
+    assert _canary_scratch(tmp_path) == [], _canary_scratch(tmp_path)
+    lines = _canary_lines(tmp_path)
+    assert len(lines) == 2, (
+        f"SKIP_BENCH must add exactly its own verdict, not zero and not two: {lines}")
+    assert lines[1]["decision"] == "past-floor" and lines[1]["diverged"] == 3, lines[1]
+
+
+def test_the_removal_keeps_both_meanings_of_the_payload(tmp_path):
+    """#2776 clause 3: `absent = could-not-decide` survives, because the block reads
+    the payload before the trap removes it.
+
+    Two runs, the two meanings the payload carries:
+
+    - refused compare (`cmp_rc=2`): the real `compare` raises `ProbeRefused` before it
+      reaches `--json-out`, so the file is never written. The ledger must still say
+      `could-not-decide` with `compare_rc: 2` and `diverged: null`. That is the
+      semantics the header names, and it is what a missing file has always meant.
+    - deciding compare (`cmp_rc=1`): the ledger's `diverged: 3` and its `worst_prompt`
+      are read out of the payload — `payload.get("diverged")` and
+      `_worst(payload.get("rows"))`, which takes `rows[0]` and carries that row's
+      `reasons` — so a line that still carries all of it while the scratch directory
+      is empty is the proof the read happened before the removal. That is why the trap
+      is on EXIT and not inline above the persist block: the payload is the only place
+      those bytes exist, and the persist heredoc is the only reader this repo has.
+    """
+    refused = _canary_run(tmp_path, run_rc=0, cmp_rc=2)
+    assert refused.returncode == 0, refused.stderr
+    lines = _canary_lines(tmp_path)
+    assert len(lines) == 1, lines
+    assert lines[0]["decision"] == "could-not-decide", lines
+    assert lines[0]["compare_rc"] == 2 and lines[0]["diverged"] is None, (
+        f"a compare that refused writes no payload; the verdict must say so exactly "
+        f"as it did before removal: {lines[0]}")
+
+    decided = _canary_run(tmp_path, run_rc=0, cmp_rc=1)
+    assert decided.returncode == 0, decided.stderr
+    lines = _canary_lines(tmp_path)
+    assert len(lines) == 2, lines
+    assert lines[1]["decision"] == "past-floor" and lines[1]["diverged"] == 3, lines[1]
+    assert lines[1]["worst_prompt"]["prompt"] == "sys_summary", (
+        f"`worst_prompt` is `_worst(payload['rows'])` — rows[0] of the payload, which "
+        f"is where the comparator put the worst prompt. A payload read after the "
+        f"removal could only yield null: {lines[1]}")
+    assert lines[1]["worst_prompt"]["reasons"] == [
+        "agreement 0.412 < floor 0.950",
+        "token logprob delta 0.44 > floor 0.1"], (
+        "these strings exist only inside the payload's rows, so a ledger line still "
+        "carrying them is the proof the read happened before the removal: "
+        + str(lines[1]["worst_prompt"]))
+    assert _canary_scratch(tmp_path) == [], (
+        "the deciding run kept its payload, so this verdict cannot be attributed to "
+        "a read that happened before the removal: " + repr(_canary_scratch(tmp_path)))
+
+
+def test_the_removal_is_inside_the_fold_the_harness_actually_runs(tmp_path):
+    """#2776 clause 4: the fold markers are the whole difference between shipping a
+    cleanup and testing one.
+
+    The arm route runs `flash-next-canary-step.sh` as a file, so a `trap` anywhere in
+    it would execute there. What the block under test is, is the span
+    `_canary_block()` lifts — the same span the `|| echo` guard in `flash-next-run-arm.sh`
+    quotes — and a trap below the fold's end marker, where the step's own trailing
+    `exit 0` lives, would be shipped untested by every node in this file.
+
+    The whole script carries exactly ONE trap: a second one would overwrite the first,
+    since bash's `trap … EXIT` replaces rather than appends.
+    """
+    blk = _canary_block()
+    assert "trap 'rm -f -- \"$CANARY_CMP_JSON\"' EXIT" in blk, (
+        "the fold the harness executes does not remove the payload; " + blk)
+    assert blk.index("CANARY_CMP_JSON=") < blk.index("trap 'rm -f"), (
+        "the trap must be installed after the path exists, or it removes nothing")
+    assert _trap_lines(blk) == ["""trap 'rm -f -- "$CANARY_CMP_JSON"' EXIT"""], (
+        "the fold must install exactly one EXIT trap statement; prose about traps is "
+        f"not a trap: {_trap_lines(blk)}")
+    script = CANARY_STEP.read_text()
+    assert _trap_lines(script.splitlines()) == _trap_lines(blk.splitlines()), (
+        "a second EXIT trap anywhere in the step silently replaces the cleanup, "
+        "because bash's EXIT trap is a single slot")
+
+    # Executed, not just read: the node above proves membership, this proves effect.
+    r = _canary_run(tmp_path, run_rc=0, cmp_rc=1)
+    assert r.returncode == 0, r.stderr
+    assert len(_canary_lines(tmp_path)) == 1
+    assert _canary_scratch(tmp_path) == [], _canary_scratch(tmp_path)
+
+
+def test_the_canary_harness_writes_nothing_to_the_machines_real_tmp(tmp_path, monkeypatch):
+    """The harness half of #2776, and the reason a leak this size survived: `_canary_run`
+    hands the child a REPLACEMENT env, and an env with no `TMPDIR` makes the block's
+    `${TMPDIR:-/tmp}` resolve to the real `/tmp`.
+
+    So the block was never wrong — a per-`$$` scratch path is correct behaviour — the
+    test was writing into a shared directory. Every one of the 1,016 payloads counted
+    on 2026-10-15 was byte-identical to `CANARY_PAYLOAD_DIVERGED`, which no production
+    file can be, because its `venv` is `/x/.venvs/lloyd`: the suite produced all of
+    them, and `~/lloyd-data/logs/services/flash-next-canary.jsonl` carried three
+    verdict lines, last written 2026-10-12.
+
+    Counted on the real directory rather than asserted on the env dict, because the
+    claim worth pinning is where the bytes landed. The delta is this node's own, so a
+    pre-existing population is the baseline and not the finding.
+    """
+    before = len(list(Path("/tmp").glob("flash-next-canary-*.json")))
+    r = _canary_run(tmp_path, run_rc=0, cmp_rc=1)
+    assert r.returncode == 0, r.stderr
+    after = len(list(Path("/tmp").glob("flash-next-canary-*.json")))
+    assert after == before, (
+        f"a canary test run added {after - before} file(s) to the machine's real "
+        f"/tmp ({before} -> {after}); the harness env must carry TMPDIR, and the "
+        "block must remove what it writes there")
+    assert _canary_scratch(tmp_path) == [], (
+        "the pinned TMPDIR is where it belongs and the trap still has to take it "
+        "out: " + repr(_canary_scratch(tmp_path)))
+    assert len(_canary_lines(tmp_path)) == 1

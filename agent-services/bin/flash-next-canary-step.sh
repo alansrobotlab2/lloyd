@@ -70,6 +70,29 @@ CANARY_LOG="${LLOYD_DATA:-$HOME/lloyd-data}/logs/services/flash-next-canary.json
 # when it decides, so the file being ABSENT is itself the could-not-decide signal
 # — a stale or empty one would read as a comparator that said 0 diverged.
 CANARY_CMP_JSON="${TMPDIR:-/tmp}/flash-next-canary-$$.json"
+# The payload is scratch, and scratch is removed on every exit path (#2776). It sat
+# unremoved from the first arm run: one file per process id, 821 bytes each, 1,016 of
+# them in `/tmp` on 2026-10-15 when that tmpfs was at 81% of its inode budget, and
+# nothing in `scripts/groundskeeper/retention-sweep.py` names the pattern — only a
+# manual inode sweep ever deleted them, and the count was back inside a day. Most of
+# that population came from this repo's own test harness, whose replaced env carried no
+# `TMPDIR`, so `${TMPDIR:-/tmp}` resolved to the real `/tmp` on every pytest run.
+#
+# On EXIT, not inline below the persist block, because the paths that never reach a
+# verdict have to clean up too, and an EXIT trap is the only form that covers the
+# `set -e` abort as well as the plain `exit 0`. It is `-f` rather than plain `rm` for
+# the same reason the statuses above are captured on the call: on the path where
+# `run` refused the corpus, `compare` never ran and the file was never written, and a
+# plain `rm` there exits 1, which under `set -e` turns a clean could-not-decide arm
+# into a failed one — an instrument that costs the arm is exactly what this fold's
+# non-fatal rule forbids. Removing it cannot weaken the `absent = could-not-decide`
+# signal above: the ONE reader of this path is the heredoc below, which runs before
+# the trap does, so a comparator that decided still persists its `diverged` count and
+# worst prompt and one that refused still sees no file and persists `diverged: null`.
+# And no later arm can inherit a stale payload: the path is per-`$$`, and both callers
+# (`flash-next-run-arm.sh`, `eval/kv_dtype_arm.py`) read only the JSONL, never this
+# file — `tests/test_flash_next_launcher.py`'s #2776 nodes pin all of it under bash.
+trap 'rm -f -- "$CANARY_CMP_JSON"' EXIT
 # Each status is captured on the call itself (`|| RC=$?`) rather than by reading
 # `$?` on the next line: that form aborts under `set -e`, and this script's header
 # could gain the flag one day the way every other script's did. Same reason the
