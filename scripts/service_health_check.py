@@ -574,9 +574,20 @@ INSTALL_SERVICES = _TREE / "agent-services" / "setup" / "install-services.sh"
 #: owns that list, and a unit added to it must not need an edit to this file to stop
 #: being flagged for the gap the installer leaves on purpose.
 SYSTEM_SCOPE_RE = re.compile(r"^SYSTEM_SCOPE_UNITS=\(([^)]*)\)", re.MULTILINE)
+#: `HOST_LOCAL_UNITS=(...)` in the same installer: one deployed unit name per line,
+#: the one-line why as that line's `#` comment (#2756). Read for the same reason as
+#: `SYSTEM_SCOPE_RE` above — the list owner carries the why, and recording a
+#: disposition must never need an edit to this file. The two arrays are the
+#: installer's two opposite gaps: `SYSTEM_SCOPE_UNITS` is a tracked unit the
+#: installer refuses to place into the user manager; `HOST_LOCAL_UNITS` is a live
+#: deployed unit the repo deliberately refuses to own.
+HOST_LOCAL_RE = re.compile(r"^HOST_LOCAL_UNITS=\(([^)]*)\)", re.MULTILINE)
 #: The installer's own two globs, one level deep — and one level is the exclusion:
 #: `agent-services/systemd/system/` holds the root-scope units installed by hand
 #: (`lloyd-data-snapshot-prune.*`), which no user unit directory ever receives.
+#: The same one-level rule bounds the deployed-side walk (#2756): systemd's own
+#: `timers.target.wants/` symlinks and `*.d` drop-in directories live below the
+#: unit files, and a directory is never a unit.
 UNIT_GLOBS = ("*.service", "*.timer")
 
 # The private CA the browser arm has to trust. `scripts/install-ca.sh --check`
@@ -955,6 +966,36 @@ def _system_scope_units(installer: Path = INSTALL_SERVICES) -> Optional[set]:
     return {name.strip("\"'") for name in line.group(1).split() if name.strip("\"'")}
 
 
+def _host_local_dispositions(installer: Path = INSTALL_SERVICES) -> dict:
+    """The deployed units the repo deliberately does not own, as `{name: one-line why}`.
+
+    The read shape is `SYSTEM_SCOPE_RE`'s own — regex-extract a declared array from
+    the installer rather than restate it here — because the property that makes that
+    work is that there is no second copy to forget: a disposition added to
+    `install-services.sh` takes effect with no edit to this file (#2756). An
+    unreadable installer or a missing array is the empty dict, not `None`: an empty
+    disposition set grades every orphan `untracked:`, which is the right answer when
+    nobody has recorded any disposition — and unlike the exclusion list it cannot
+    misfile a deliberate gap, because the unit it declines to excuse is the unit the
+    row then names. `check_unit_file_links` has already refused to grade anything at
+    all when the installer could not be read, so this reader never runs blind.
+    """
+    try:
+        text = Path(installer).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    block = HOST_LOCAL_RE.search(text)
+    if block is None:
+        return {}
+    out = {}
+    for line in block.group(1).splitlines():
+        entry, _, why = line.partition("#")
+        name = entry.strip().strip("\"'")
+        if name:
+            out[name] = why.strip()
+    return out
+
+
 def _link_target(link: Path) -> Path:
     """Where a symlink points, resolved the way `realpath` resolves it.
 
@@ -1011,13 +1052,20 @@ def check_unit_file_links(tree_dir: Path = SYSTEMD_UNIT_TREE,
     * nothing at all — `missing`. The installer never linked it, so the unit is not
       installed and never ran.
 
-    The graded set is the two globs evaluated when the call is made, so a unit added to
-    the directory is graded without anyone editing this file, and the walk goes repo to
-    deploy only: a deployed unit nobody tracked (`lloyd-graph-backup.*`,
-    `freeclip-a2dp-fix.service`) gets no row, which is the membership-not-equality rule
-    `tests/test_data_home.py` already makes about that timer. The `SYSTEM_SCOPE_UNITS`
-    names and anything under `system/` are never reported; `system/` is excluded by the
-    globs being one level deep, which is the same reason the installer never sees it.
+    Both globs are evaluated when the call is made, so a unit added to either
+    directory is graded without anyone editing this file, and the walk runs both
+    directions. Repo to deploy grades each tracked unit as above. Deploy to repo
+    (#2756) grades every `*.service`/`*.timer` living in `deployed_dir` with no
+    same-named tracked file as `orphanunit:<name>`: an `untracked:` fault — nothing
+    in the repo owns the unit that runs — unless the name carries a disposition in
+    the installer's `HOST_LOCAL_UNITS`, which reads ok and quotes the one-line why.
+    The reverse walk reads unit files, not directories, and stays one level deep:
+    systemd's armed-timer symlinks under `timers.target.wants/` and any `*.d`
+    drop-in directories produce no row and no duplicate, and a tracked unit's own
+    deployed symlink is graded once, by the forward walk. A `SYSTEM_SCOPE_UNITS`
+    name always collides with its tracked tree file, so the reverse walk never
+    reports one; anything under `system/` is excluded by the globs being one level
+    deep, which is the same reason the installer never sees it.
     """
     skip = _system_scope_units(installer)
     if skip is None:
@@ -1031,6 +1079,11 @@ def check_unit_file_links(tree_dir: Path = SYSTEMD_UNIT_TREE,
             installer, deployed_dir, prefix="")]
 
     tree_dir, deployed_dir = Path(tree_dir), Path(deployed_dir)
+    # Every name the tree owns, exclusions included: a SYSTEM-scope name collides
+    # with its tracked file here, which is what keeps the reverse walk from ever
+    # filing an orphan row for a unit `check_deployed_copies` grades on its real
+    # path. Evaluated at call time, like the forward glob.
+    tracked_names = {p.name for pattern in UNIT_GLOBS for p in tree_dir.glob(pattern)}
     rows = []
     for pattern in UNIT_GLOBS:
         for tracked in sorted(tree_dir.glob(pattern)):
@@ -1069,6 +1122,30 @@ def check_unit_file_links(tree_dir: Path = SYSTEMD_UNIT_TREE,
                     f"linked the tracked unit {tracked} — run "
                     f"agent-services/setup/install-services.sh",
                     tracked, deployed))
+
+    dispositions = _host_local_dispositions(installer)
+    for pattern in UNIT_GLOBS:
+        for deployed in sorted(deployed_dir.glob(pattern)):
+            if deployed.is_dir() or deployed.name in tracked_names:
+                continue
+            want = tree_dir / deployed.name
+            why = dispositions.get(deployed.name)
+            if why is None:
+                rows.append(_unit_link_row(
+                    deployed.name, False,
+                    f"untracked: {deployed} is live in {deployed_dir} and tracked "
+                    f"nowhere in the repo — no {want} exists, so nothing in git owns "
+                    f"the unit that runs; fix it by tracking the unit under "
+                    f"agent-services/systemd/ or recording a disposition with a "
+                    f"one-line why in {installer}'s HOST_LOCAL_UNITS",
+                    want, deployed, prefix="orphanunit:"))
+            else:
+                rows.append(_unit_link_row(
+                    deployed.name, True,
+                    f"ok: {deployed} is tracked nowhere in the repo by a disposition "
+                    f"in {installer}" + (f": {why}" if why else
+                                         " carrying no why on its line"),
+                    want, deployed, prefix="orphanunit:"))
     return rows
 
 

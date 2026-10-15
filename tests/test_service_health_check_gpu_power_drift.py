@@ -163,7 +163,13 @@ def test_the_cli_runs_the_pairs_under_its_own_category():
     now asserted as the pairs — their keys, and that there are two — and the `unitlink:`
     family is asserted as the other family sharing the heading. Verdict words widened
     with the new family: `copy`, `wrongtarget` and the `unknown` of a check that could
-    not read its own exclusion list, none of which is a byte comparison.
+    not read its own exclusion list, none of which is a byte comparison. #2756 added a
+    third family under the same heading — `orphanunit:` rows for deployed units the
+    repo does not track, printing `untracked:` when they carry no disposition, the word
+    its acceptance clause 1 requires ("states it is tracked nowhere in the repo",
+    pinned in `tests/test_service_health_check_unit_links.py`) — so the word set
+    widened again. The property is unchanged: every row carries a word this file
+    knows, and a word nobody added still fails here.
     """
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), "--category", shc.DEPLOY_CATEGORY, "--format", "json"],
@@ -179,7 +185,8 @@ def test_the_cli_runs_the_pairs_under_its_own_category():
     for row in rows.values():
         assert row["category"] == shc.DEPLOY_CATEGORY
         assert row["status"].split(":")[0] in {
-            "ok", "drift", "missing", "copy", "wrongtarget", "unknown"}, row["status"]
+            "ok", "drift", "missing", "copy", "wrongtarget", "unknown",
+            "untracked"}, row["status"]
         assert row["healthy"] is row["status"].startswith("ok:"), row["status"]
 
 

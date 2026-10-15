@@ -645,16 +645,23 @@ def test_the_cli_run_is_a_health_report_that_can_fail(tmp_path):
     `~/.config/systemd/user/lloyd-cert-renew.timer` is a symlink into the repo or a hand
     copy made before the installer last ran. That is host state the suite cannot own and
     must not paper over, so the all-clear claim is scoped to everything except the
-    `unitlink:` family, and the family is instead pinned to the verdict printed over it:
+    host-state families, and they are instead pinned to the verdict printed over them:
     `Deploy:` reads healthy exactly when its own rows all do, whatever the box looks like.
+    #2756 added the third host-state spelling under the same heading — `orphanunit:`
+    rows for deployed units the repo does not track, whose count is a fact about the
+    box, not the tree — so the family tuple widened. Nothing about the invariant
+    weakened: every row outside these families must still be healthy, and within them
+    the count and the heading are still pinned exactly.
     """
     r, doc = _cli(tmp_path)
     assert r.returncode == 0, doc["services"]
     assert doc["total_services"] == len(doc["services"])
     assert doc["total_services"] >= 12, \
         f"only {doc['total_services']} rows; the fleet is 12 programs"
-    units = [s for s in doc["services"] if s["name"].startswith("unitlink:")]
-    assert units, "the #2714 unit-file rows are absent from the default run"
+    units = [s for s in doc["services"]
+             if s["name"].startswith(("unitlink:", "orphanunit:"))]
+    assert any(s["name"].startswith("unitlink:") for s in units), \
+        "the #2714 unit-file rows are absent from the default run"
     assert doc["unhealthy"] == sum(1 for s in units if not s["healthy"]), [
         s for s in doc["services"] if not s["healthy"]]
     # "deploy" spelled as the payload spells it: this file drives the CLI as a

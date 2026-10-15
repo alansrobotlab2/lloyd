@@ -20,6 +20,15 @@ unit added to the directory is graded with nobody editing the checker, and a tes
 on this box's own eighteen user-scope files could not show that. The one node that does
 touch the real tree asserts only what stays true whichever way the deploy directory
 falls, because the owed installer re-run is going to move those verdicts.
+
+#2756 turned the walk around. A unit that lives in the deploy directory with no
+same-named tracked file behind it is now graded too, as `orphanunit:<name>`:
+`untracked:` and unhealthy — nothing in the repo owns the unit that runs — unless the
+name carries a disposition in the installer's `HOST_LOCAL_UNITS` array, which the row
+reads ok and quotes the one-line why written as that array's comment. The node that
+pinned the old one-way blind spot, `test_a_deployed_unit_the_tree_does_not_track_gets_no_row`,
+is replaced by `test_a_deployed_unit_the_tree_does_not_track_gets_exactly_one_row_each`;
+its "deliberately out of scope" reading of #2714 no longer holds.
 """
 
 from __future__ import annotations
@@ -111,6 +120,24 @@ class _Fleet:
                         encoding="utf-8")
         return path
 
+    def host_local(self, name: str, why: str) -> None:
+        """Record a disposition the way the real installer records one (#2756):
+        `HOST_LOCAL_UNITS=(...)` with one deployed unit name per line and the one-line
+        why as that line's `#` comment, read back by `_host_local_dispositions`.
+        """
+        self.installer.write_text(
+            INSTALLER_STUB + f"HOST_LOCAL_UNITS=(\n    {name}  # {why}\n)\n",
+            encoding="utf-8")
+
+    def deployed_subdir(self, name: str) -> Path:
+        """A directory inside the deploy directory. systemd itself maintains these —
+        `timers.target.wants/` holds the armed symlinks, `<unit>.d/` the drop-ins —
+        and none of them is a unit file the reverse walk may read.
+        """
+        path = self.deployed / name
+        path.mkdir(parents=True)
+        return path
+
     def rows(self) -> list:
         return shc.check_unit_file_links(tree_dir=self.tree,
                                         deployed_dir=self.deployed,
@@ -158,14 +185,19 @@ def test_a_unit_this_box_has_never_had_is_graded_with_no_edit_to_the_checker(fle
         "directory")
 
 
-def test_a_deployed_unit_the_tree_does_not_track_gets_no_row(fleet):
-    """Clause 1's direction: the check walks repo to deploy, never the reverse.
+def test_a_deployed_unit_the_tree_does_not_track_gets_exactly_one_row_each(fleet):
+    """#2756 clauses 1 and 4, replacing #2714's pinned blind spot: the walk now goes
+    deploy→repo as well, and every planted unit that lives in the deploy directory
+    with no same-named tracked file produces exactly one row, named `orphanunit:<name>`,
+    whose status names the deployed path and states it is tracked nowhere in the repo.
 
-    `lloyd-graph-backup.{service,timer}` and `freeclip-a2dp-fix.service` live on this
-    box and are tracked nowhere, which #2714 puts deliberately out of scope — the same
-    membership-not-equality ruling `tests/test_data_home.py:1355` already makes about
-    that timer. An untracked plain copy and a dangling one are both planted here: the
-    tree carries one tracked unit, and that unit is the only row.
+    The three files this box really has are the planted ones: two plain copies
+    (`lloyd-graph-backup.{service,timer}`) and a dangling symlink
+    (`freeclip-a2dp-fix.service`) — a dangling link is still a live directory entry,
+    so it is graded too and must not raise. No disposition is recorded here, so all
+    three rows are unhealthy; the disposition half of the rule is its own node, and
+    the duplicate-proof half against systemd's own subdirectories is the node after
+    this one.
     """
     fleet.track("alpha.service")
     fleet.link_to_tree("alpha.service")
@@ -173,7 +205,141 @@ def test_a_deployed_unit_the_tree_does_not_track_gets_no_row(fleet):
     fleet.copy("lloyd-graph-backup.timer", TIMER_BODY)
     fleet.link("freeclip-a2dp-fix.service", fleet.tree / "nowhere.service")
 
-    assert fleet.names() == {"unitlink:alpha.service"}
+    rows = fleet.rows()
+    assert len(rows) == len({r["name"] for r in rows}), (
+        "a deployed unit produced more than one row: "
+        f"{sorted(r['name'] for r in rows)}")
+    assert fleet.names() == {
+        "unitlink:alpha.service",
+        "orphanunit:lloyd-graph-backup.service",
+        "orphanunit:lloyd-graph-backup.timer",
+        "orphanunit:freeclip-a2dp-fix.service"}
+
+    for name in ("lloyd-graph-backup.service", "lloyd-graph-backup.timer",
+                 "freeclip-a2dp-fix.service"):
+        row = next(r for r in rows if r["name"] == f"orphanunit:{name}")
+        assert row["healthy"] is False and row["exit_code"] == 1, row
+        assert row["category"] == shc.DEPLOY_CATEGORY, row
+        assert str(fleet.deployed / name) in row["status"], row
+        assert "tracked nowhere in the repo" in row["status"], row
+
+
+def test_the_reverse_walk_reads_unit_files_one_level_deep_not_directories(fleet):
+    """#2756 clause 2: the armed-timer symlinks under `timers.target.wants/` and a
+    `*.d` drop-in directory produce no extra and no duplicate row, and a tracked
+    unit's own deployed symlink is counted once, by the forward walk.
+
+    This box keeps seven symlinks in `timers.target.wants/`; the planted one points
+    at the top-level unit also planted here, so it is the strongest duplicate the
+    deployed side can offer. `alpha.service.d` is the drop-in beside the unit it
+    extends, and `stray.service` is a DIRECTORY named like a unit — the one thing a
+    bare name-glob would hand back as a row. The expected set is what proves all
+    three exclusions at once: any leak shows up as a name or a duplicate.
+    """
+    fleet.track("alpha.service")
+    fleet.link_to_tree("alpha.service")
+    fleet.copy("lloyd-graph-backup.timer", TIMER_BODY)
+    wants = fleet.deployed_subdir("timers.target.wants")
+    (wants / "lloyd-graph-backup.timer").symlink_to(
+        fleet.deployed / "lloyd-graph-backup.timer")
+    dropin = fleet.deployed_subdir("alpha.service.d")
+    (dropin / "override.conf").write_text("[Service]\n", encoding="utf-8")
+    fleet.deployed_subdir("stray.service")
+
+    assert fleet.names() == {
+        "unitlink:alpha.service",
+        "orphanunit:lloyd-graph-backup.timer"}, fleet.names()
+
+
+def test_an_untracked_deployed_unit_appearing_after_the_first_call_is_still_graded(fleet):
+    """#2756 clause 2's call-time half: the deployed set is globbed when the check is
+    called, so a unit dropped into the directory between calls is graded on the next
+    one with nobody editing the checker — the same property the first node pins for
+    the tree side.
+    """
+    fleet.track("alpha.service")
+    fleet.link_to_tree("alpha.service")
+    assert "orphanunit:dropped-in-later.timer" not in fleet.names()
+
+    fleet.copy("dropped-in-later.timer", TIMER_BODY)
+    assert "orphanunit:dropped-in-later.timer" in fleet.names(), (
+        "a unit dropped into the deploy directory after the first call was not "
+        "graded, so the deployed set is not globbed at call time")
+
+
+def test_an_orphan_with_a_recorded_disposition_reads_ok_and_quotes_its_why(fleet):
+    """#2756 clause 3: an orphan named in the installer's `HOST_LOCAL_UNITS` is a
+    deliberate gap rather than drift — the row reads ok and quotes the one-line why
+    carried as the array's comment, read from the installer's source the same way
+    `SYSTEM_SCOPE_UNITS` is. An orphan the list does not name still reads unhealthy.
+
+    The disposition and its absence are asserted in one node because the whole rule
+    is the difference between the two rows: a list that made every orphan ok, or one
+    whose comment the row never quotes, fails here.
+    """
+    fleet.track("alpha.service")
+    fleet.link_to_tree("alpha.service")
+    fleet.copy("freeclip-a2dp-fix.service")
+    fleet.copy("lloyd-graph-backup.service")
+    fleet.host_local("freeclip-a2dp-fix.service",
+                     "host workaround for the FreeClip-2 buds; no Lloyd script owns it")
+
+    rows = {r["name"]: r for r in fleet.rows()}
+    assert set(rows) == {"unitlink:alpha.service",
+                         "orphanunit:freeclip-a2dp-fix.service",
+                         "orphanunit:lloyd-graph-backup.service"}
+    ok = rows["orphanunit:freeclip-a2dp-fix.service"]
+    assert ok["healthy"] is True and ok["exit_code"] == 0, ok
+    assert ok["status"].startswith("ok:"), ok
+    assert str(fleet.deployed / "freeclip-a2dp-fix.service") in ok["status"], ok
+    assert "host workaround for the FreeClip-2 buds" in ok["status"], ok
+    fault = rows["orphanunit:lloyd-graph-backup.service"]
+    assert fault["healthy"] is False and fault["exit_code"] == 1, fault
+
+
+def test_an_undispositioned_orphan_turns_the_deploy_heading_degraded_through_main(
+        fleet, monkeypatch, capsys):
+    """#2756 clause 3's consequence, through `main()`: the undispositioned orphan is a
+    graded member of the `deploy` category, so the heading word the reader gets is
+    `degraded` while no disposition names it, and `healthy` once every orphan in the
+    directory carries one.
+
+    The rows are the real function's rows over the synthetic fleet — the patch only
+    re-points its three path arguments, and the real function is captured BEFORE the
+    patch because a lambda that reached the module attribute would call itself — and
+    `check_deployed_copies` is silenced because its byte pairs read `/etc`, which is
+    not this heading's question here. Same drive shape
+    `tests/test_service_health_check_path_sandbox.py::_drive` uses: argv in, stdout
+    out, the payload's own `summary` read back.
+    """
+    fleet.track("alpha.service")
+    fleet.link_to_tree("alpha.service")
+    fleet.copy("lloyd-graph-backup.timer", TIMER_BODY)
+
+    real = shc.check_unit_file_links
+
+    def _deploy_payload():
+        monkeypatch.setattr(shc, "check_unit_file_links",
+                            lambda: real(tree_dir=fleet.tree,
+                                         deployed_dir=fleet.deployed,
+                                         installer=fleet.installer))
+        monkeypatch.setattr(shc, "check_deployed_copies", lambda: [])
+        monkeypatch.setattr(shc, "_switched_off", lambda: set())
+        monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--category",
+                                          shc.DEPLOY_CATEGORY, "--format", "json"])
+        shc.main()
+        return json.loads(capsys.readouterr().out)
+
+    doc = _deploy_payload()
+    assert sorted(s["name"] for s in doc["services"]) == [
+        "orphanunit:lloyd-graph-backup.timer",
+        "unitlink:alpha.service"], doc["services"]
+    assert doc["summary"][shc.DEPLOY_CATEGORY] == "degraded", doc["summary"]
+
+    fleet.host_local("lloyd-graph-backup.timer",
+                     "owed a tracking ruling (#2756); live on one box only")
+    doc = _deploy_payload()
+    assert doc["summary"][shc.DEPLOY_CATEGORY] == "healthy", doc["summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +557,8 @@ def test_the_default_constants_point_at_the_repo_tree_and_the_user_unit_dir():
     No verdict is asserted: what is linked on the machine running the suite is not the
     suite's to decide, and the owed re-run of the installer is going to move every one
     of the five plain copies. What is box-independent is the denominator — one row per
-    tracked user-scope unit file in the tree, the exclusions removed and nothing else —
+    tracked user-scope unit file in the tree, the exclusions removed, plus one row per
+    unit file living in the deploy directory that the tree does not track (#2756) —
     and the row shape, which is what keeps the two formatters and the category summary
     free of a special case.
     """
@@ -400,12 +567,17 @@ def test_the_default_constants_point_at_the_repo_tree_and_the_user_unit_dir():
 
     rows = shc.check_unit_file_links()
     assert rows, "the default run graded no unit at all"
-    want = {f"unitlink:{p.name}"
-            for pattern in ("*.service", "*.timer")
-            for p in shc.SYSTEMD_UNIT_TREE.glob(pattern)}
+    tracked = {p.name
+               for pattern in ("*.service", "*.timer")
+               for p in shc.SYSTEMD_UNIT_TREE.glob(pattern)}
+    want = {f"unitlink:{name}" for name in tracked}
     want -= {f"unitlink:{name}" for name in shc._system_scope_units()}
+    want |= {f"orphanunit:{p.name}"
+             for pattern in ("*.service", "*.timer")
+             for p in shc.USER_UNIT_DIR.glob(pattern)
+             if not p.is_dir() and p.name not in tracked}
     assert {r["name"] for r in rows} == want, (
-        "the graded set drifted away from the tree it is supposed to glob")
+        "the graded set drifted away from the two directories it is supposed to glob")
 
     for row in rows:
         assert row["category"] == shc.DEPLOY_CATEGORY, row
@@ -423,7 +595,9 @@ def test_the_default_cli_run_grades_the_units_under_the_deploy_category():
     function that returns the right rows and is wired to nothing would pass every other
     node in this file. Clause 5's presence-and-absence rule is pinned in
     `tests/test_service_health_check_gpu_power_drift.py`, which owns the byte pairs this
-    shares a category heading with.
+    shares a category heading with. Whether THIS box currently has an untracked unit is
+    host state, so #2756's `orphanunit:` rows are shape-checked where they appear and
+    never presence-asserted here.
     """
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), "--category", shc.DEPLOY_CATEGORY,
@@ -436,3 +610,10 @@ def test_the_default_cli_run_grades_the_units_under_the_deploy_category():
     for row in units:
         assert row["status"].split(":")[0] in {"ok", "missing", "copy", "wrongtarget"}, (
             row["status"])
+    for row in payload["services"]:
+        if not row["name"].startswith("orphanunit:"):
+            continue
+        assert row["category"] == shc.DEPLOY_CATEGORY, row
+        assert row["status"].split(":")[0] in {"ok", "untracked"}, row
+        assert row["healthy"] is row["status"].startswith("ok:"), row
+        assert "tracked nowhere in the repo" in row["status"], row
