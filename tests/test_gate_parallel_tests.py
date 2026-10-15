@@ -115,6 +115,41 @@ def test_a_failure_that_survives_the_serial_re_run_is_judged_as_it_always_was(tm
     assert "are new in this round" in detail and real in detail
 
 
+def test_a_long_flake_list_compacts_the_sentence_and_nothing_but_the_sentence(tmp_path, monkeypatch):
+    """#2726 clause 4: the sentence was shrunk so the blame fits the 2000-char cap
+    the runner puts on the STORED detail, and `data` is where a long node list
+    belongs. Nothing moved out of the rung's machine-readable output to make the
+    sentence fit — `parallel_only_failures`, `failed_node_ids` and `new_failures`
+    are the values this rung returned before the sentence changed.
+
+    Forty load flakes in one file and one real failure in another: the file count
+    stays under `PARALLEL_RETRY_MAX_FILES`, so the flakes are attributed to load
+    exactly as the one-flake case above does, and only their number differs.
+    """
+    g, _calls, script = _gate(tmp_path, monkeypatch)
+    flakes = [f"tests/test_edit_diagnostics.py::test_a_cross_file_break_names_its_caller[{i}]"
+              for i in range(40)]
+    real = "tests/test_mine.py::test_i_broke_this"
+    monkeypatch.setattr(G, "_reconfirm_candidate_failures",
+                        lambda python, root, ids, **k: ([], "repeats off for this node"))
+    script.append((1, "".join(f"FAILED {n} - AssertionError\n" for n in flakes + [real])
+                      + "41 failed, 5894 passed, 13 skipped in 71s\n"))
+    script.append((1, f"FAILED {real} - assert False\n1 failed, 60 passed in 3s\n"))
+    monkeypatch.setattr(G, "_failures_at_base", lambda *a, **k: (
+        set(), "probed 2 file(s) at base: none failing"))
+    ok, detail, data = g.rung_tests()
+
+    assert ok is False
+    assert data["parallel_only_failures"] == flakes, "the load list is not trimmed for prose"
+    assert data["failed_node_ids"] == [real]
+    assert data["new_failures"] == [real]
+    assert data["failed"] == 1 and data["passed"] == 5934, "41 parallel failures, 1 real"
+    assert data["serial_retry_files"] == ["tests/test_edit_diagnostics.py", "tests/test_mine.py"]
+    # The sentence, meanwhile, names who it blames and costs less than the cap.
+    assert "are new in this round" in detail and real in detail
+    assert len(detail) < 2000, f"raw detail is {len(detail)} chars: {detail[:120]}"
+
+
 def test_a_parallel_failure_that_names_no_file_re_runs_the_whole_suite_serially(tmp_path, monkeypatch):
     """A crashed worker, an INTERNALERROR, a timeout: nothing to re-ask by name."""
     g, calls, script = _gate(tmp_path, monkeypatch)

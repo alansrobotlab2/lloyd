@@ -179,6 +179,38 @@ def test_a_tests_pass_carries_its_pre_existing_failures_onto_the_ledger(monkeypa
     assert "external_blocker" not in ev
 
 
+def test_a_failing_tests_rung_puts_the_blamed_ids_on_the_ledger_event(monkeypatch):
+    """#2726: the event is the half that outlives the round dir — `gate.json` is
+    copied by the landing and deleted with the worktree, which is the reason the
+    runner copies these keys at all — and for a FAILING `tests` rung it copied
+    only the ids the rung does NOT blame. Both `event=gate`/`rung=tests` rows for
+    round SM_20261014_233144 in `promotions.jsonl` are exactly 500 characters,
+    carry neither the attribution phrase nor either of the two nodes that round
+    broke, and one of them carries no node-list key at all.
+
+    The counterfactual to `test_a_tests_pass_carries_its_pre_existing_failures_onto_the_ledger`
+    above, which is the same mechanism on the pass side.
+    """
+    events: list[dict] = []
+    monkeypatch.setattr(G.S, "append_event", lambda e, *a, **k: events.append(e))
+    blamed = ["tests/test_architecture_coverage_doc_claims.py::test_a_route_is_listed",
+              "tests/test_architecture_coverage_doc_claims.py::test_a_tool_is_listed"]
+    outcomes = dict(ALL_PASS)
+    outcomes["tests"] = (False, f"all 2 failure(s) are new in this round ({', '.join(blamed)})", {
+        "new_failures": blamed,
+        "failed_node_ids": blamed + ["tests/test_pre.py::test_already_broken"],
+        "pre_existing_failures": ["tests/test_pre.py::test_already_broken"],
+        "parallel_only_failures": [f"tests/test_x.py::t{i}" for i in range(60)]})
+    assert not _StubGate(outcomes).run().ok
+    ev = next(e for e in events if e["rung"] == "tests")
+    assert ev["ok"] is False
+    assert ev["new_failures"] == blamed, "the blamed ids ride the event, not just gate.json"
+    assert ev["pre_existing_failures"] == ["tests/test_pre.py::test_already_broken"]
+    # `parallel_only_failures` is a load fact, not a blame, and 60 ids do not
+    # belong in the ledger: it stays in the report's `data`.
+    assert "parallel_only_failures" not in ev
+
+
 def test_a_skipped_optional_rung_writes_no_ledger_row_but_stays_in_the_report(monkeypatch):
     """~1,900 zero-second rows a week said only "not this round". `gate.json`
     keeps every rung; the ledger keeps what something reads — and `drill` is
@@ -1525,6 +1557,123 @@ def test_named_ids_are_whole_and_capped():
     assert "tests/test_x.py::test_19" in text and "tests/test_x.py::test_20" not in text
     assert text.endswith("+5 more (all in data.failed_node_ids)")
     assert G._name_ids(ids[:2]) == "tests/test_x.py::test_0, tests/test_x.py::test_1"
+
+
+# ---------------------------------------------------------------------------
+# The verdict the gate STORES, not the one the rung function returns (#2726)
+#
+# `RungResult` is built with `str(detail)[:2000]` in the runner — one level ABOVE
+# the rung function — so every assertion written as `ok, detail, data =
+# g.rung_tests()` grades a string the gate never stored. Round SM_20261014_233144
+# is what that blind spot cost: `data.parallel_only_failures` was 9544 characters,
+# the interpolated counts dict pushed the stored detail to exactly 2000, the
+# attribution sentence appended after it was cut off entirely, and of the node ids
+# still visible in `gate.json`, 8 came from the flaky list the rung had just
+# excluded from blame and 0 from the 2 it blamed. Same head, earlier run of the
+# same round, an 8-entry flake list: the sentence survived. Legible or illegible on
+# unrelated flake volume.
+#
+# Every node below therefore drives `_rung` and reads `report.rungs[...]`.
+# ---------------------------------------------------------------------------
+
+FLAKE_FILE = "tests/test_load_flickers.py"
+REAL_FAILURES = ["tests/test_architecture_coverage_doc_claims.py::test_a_route_is_listed",
+                 "tests/test_intel_pipeline_body.py::test_a_footer_is_stripped_before_the_clip"]
+
+
+def _gate_with_a_long_flake_list(tmp_path, monkeypatch, *, n_flakes: int = 40,
+                                 probe_note: str = "probed 3 file(s) at base: none failing"):
+    """A Gate whose scripted pytest run fails two real tests beside `n_flakes`
+    load flakes in a third file — the exact shape `_run_suite` turns into
+    `parallel_only_failures` — and is then driven through the runner, so the
+    string the assertions below read is the one written to `gate.json`.
+
+    Forty node ids is the item's own floor, and their repr inside the counts dict
+    is what overruns the budget; nothing here fakes a long string to get there.
+    `probe_note` is the other thing the trail interpolates verbatim, and a base
+    probe naming sixty files really is that long.
+    """
+    events: list[dict] = []
+    monkeypatch.setattr(G.S, "append_event", lambda e, *a, **k: events.append(e))
+    # Its own per-base red set, the same isolation `_private_red_set` gives the
+    # nodes above: two throwaway bases committed in the same second share a sha,
+    # and one node's cached probe would answer another's.
+    monkeypatch.setattr(G.S, "RED_SET_PATH", tmp_path / "red_set.json")
+    monkeypatch.setattr(G, "_gate_cfg",
+                        lambda key, default: 8 if key == "test_workers" else default)
+    monkeypatch.setattr(G, "_failures_at_base", lambda *a, **k: (set(), probe_note))
+    monkeypatch.setattr(G, "_reconfirm_candidate_failures",
+                        lambda python, root, ids, **k: ([], "repeats off for this node"))
+    wt = tmp_path / "wt"
+    (wt / "tests").mkdir(parents=True)
+    g = G.Gate("SM_LONGFLAKE", wt, "b" * 40, live_root=tmp_path)
+    g.python = Path(sys.executable)
+    monkeypatch.setattr(g, "_child_env", lambda root=None, *, isolate_home=False: {})
+    flakes = [f"{FLAKE_FILE}::test_the_suite_flickers_under_eight_xdist_workers[{i}]"
+              for i in range(n_flakes)]
+    script = [(1, "".join(f"FAILED {n} - AssertionError\n" for n in flakes + REAL_FAILURES)
+                  + f"{len(flakes) + len(REAL_FAILURES)} failed, 5890 passed, "
+                    "13 skipped in 72s\n"),
+              (1, "".join(f"FAILED {n} - assert False\n" for n in REAL_FAILURES)
+                  + "2 failed, 60 passed in 3s\n")]
+
+    def run(cmd, cwd=None, env=None, timeout=900.0):
+        if cmd[1:3] == ["-c", "import xdist"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        rc, out = script.pop(0)
+        return subprocess.CompletedProcess(cmd, rc, out, "")
+    monkeypatch.setattr(G, "_run", run)
+    return g, events, flakes
+
+
+def test_a_long_flake_list_cannot_eclipse_the_blame_in_the_stored_detail(tmp_path, monkeypatch):
+    """Clause 1 and 2 of #2726: with a raw detail over the cap, the stored detail
+    still carries the attribution sentence and every node id the rung blames,
+    whole."""
+    g, _events, flakes = _gate_with_a_long_flake_list(tmp_path, monkeypatch)
+
+    assert g._rung("tests", g.rung_tests) is False, "the scripted run must fail the rung"
+    rung = [r for r in g.report.rungs if r.name == "tests"][0]
+
+    # The precondition that makes the rest mean something: this run really did
+    # produce a load list bigger than the entire budget it used to consume
+    # (9544 characters in the round that motivated this node). Interpolated
+    # inline, as it was until #2726, it leaves no room for the sentence at all.
+    assert len(str(rung.data["parallel_only_failures"])) > G.DETAIL_MAX_CHARS
+    assert len(rung.detail) <= G.DETAIL_MAX_CHARS
+    assert "are new in this round" in rung.detail, rung.detail[-120:]
+    for nid in rung.data["new_failures"]:
+        assert nid in rung.detail, f"the rung blames {nid} and its verdict names no such node"
+    # The inversion of the artifact: the forty ids the rung declared NOT the
+    # round's no longer take the room the two blamed ids need.
+    assert not [f for f in flakes if f in rung.detail], "unblamed flakes refilled the budget"
+    assert rung.data["parallel_only_failures"] == flakes, "the list still ships whole, in data"
+
+
+def test_the_pytest_tail_is_what_a_long_verdict_gives_up_and_not_the_blame(tmp_path, monkeypatch):
+    """Ordering alone does not save a verdict that is simply longer than the cap,
+    so the second half of #2726 is which half gets cut. The pytest tail is output
+    a reader can reproduce from the run; the blamed node ids exist nowhere else in
+    the sentence, so the tail goes and says it went.
+
+    A base probe naming sixty files supplies the overlength trail here — the same
+    interpolation, from the other contributor the rung writes into it.
+    """
+    note = "probed at base: " + ", ".join(
+        f"tests/test_architecture_coverage_doc_claims_{n}.py" for n in range(60))
+    g, _events, _flakes = _gate_with_a_long_flake_list(
+        tmp_path, monkeypatch, n_flakes=2, probe_note=note)
+
+    assert g._rung("tests", g.rung_tests) is False
+    rung = [r for r in g.report.rungs if r.name == "tests"][0]
+
+    assert len(note) > G.DETAIL_MAX_CHARS // 2, note[:80]
+    assert rung.detail.endswith(G.VERDICT_TAIL_NOTE), rung.detail[-120:]
+    assert len(rung.detail) <= G.DETAIL_MAX_CHARS, "the runner had to clip a trimmed verdict"
+    assert "are new in this round" in rung.detail
+    for nid in rung.data["new_failures"]:
+        assert nid in rung.detail, nid
+    assert rung.data["base_probe"] == note, "the note was shortened in the sentence, not the data"
 
 
 def test_a_test_the_round_added_does_not_hide_the_pre_existing_ones(tmp_path):

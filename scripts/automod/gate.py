@@ -119,6 +119,32 @@ PYTEST_MAX_SKIPPED = 40
 UV_BIN = Path.home() / ".local" / "bin" / "uv"
 
 
+# The cap on a rung's STORED detail (#2726). Named because the cap is the thing
+# a `tests` verdict has to fit inside: it is applied here in the runner, one
+# level above the rung function, so a rung can write a legible verdict and the
+# round can still read a truncated one.
+DETAIL_MAX_CHARS = 2000
+# What a cut is allowed to end with. A bare `[:2000]` ended mid-identifier in
+# round SM_20261014_233144 (`...test_the_words_knob_escalates_and_n`), and a
+# clipped node id reads as the name of a test that does not exist — the exact
+# shape that made round SM_20260913_165927 invent a test file and file blocker
+# #1093 against the gate for it.
+DETAIL_CLIP_NOTE = " …[rung detail clipped here — the blame is above, full node lists in its data]"
+# What a `tests` verdict says when it gave up part of the pytest tail to keep its
+# own blame inside that budget (#2726). The tail is the expendable half: output a
+# reader can reproduce from the run, against node ids the sentence is the only
+# place they are named in order.
+VERDICT_TAIL_NOTE = " …[pytest tail shortened so the blame above stays whole]"
+
+
+def _clip_detail(text: str, limit: int = DETAIL_MAX_CHARS) -> str:
+    """Cut a rung detail to `limit`, saying so at the cut rather than ending on
+    half a node id."""
+    if len(text) <= limit:
+        return text
+    return text[:max(0, limit - len(DETAIL_CLIP_NOTE))].rstrip() + DETAIL_CLIP_NOTE
+
+
 @dataclass
 class RungResult:
     name: str
@@ -660,6 +686,38 @@ def _name_ids(ids: list[str], cap: int = 20) -> str:
     shown = ", ".join(ids[:cap])
     return shown + (f", +{len(ids) - cap} more (all in data.failed_node_ids)"
                     if len(ids) > cap else "")
+
+
+# A list this long is a fact about `data`, not a fact about the verdict.
+_DETAIL_LIST_MAX_IN_PROSE = 6
+
+
+def _detail_counts(counts: dict) -> dict:
+    """The suite counts as they may be interpolated into a rung DETAIL (#2726).
+
+    A list value too long to read in a sentence is replaced by its length and the
+    place the ids really are; the rung's own `data` keeps every one whole. The
+    rule is about the size of a value, not the name of a key, because `counts` is
+    an open set — `parallel_only_failures`, `serial_retry_files`,
+    `parallel_failures`, `pin_findings` and whatever the parser grows next all
+    arrive at the same interpolation, and an allowlist of which keys are allowed
+    to be bulky is a guard that fails the first time someone adds one.
+
+    Round SM_20261014_233144 is why: interpolating `counts` verbatim put 9544
+    characters of load flakes in front of the sentence that named the two tests
+    the round actually broke, and the 2000-char cap (`DETAIL_MAX_CHARS`) cut the
+    sentence off. The stored verdict then named eight flaky nodes and no blamed
+    one — the opposite of its own conclusion.
+
+    Never mutates `counts`: the rung's data is built from that same dict.
+    """
+    out = {}
+    for key, val in (counts or {}).items():
+        if isinstance(val, (list, tuple, dict)) and len(val) > _DETAIL_LIST_MAX_IN_PROSE:
+            out[key] = f"<{len(val)} entries — whole list in this rung's data>"
+        else:
+            out[key] = val
+    return out
 
 
 # How many times a candidate failure that the base probe did NOT reproduce is
@@ -1347,7 +1405,8 @@ class Gate:
             # An erroring rung is a FAILED rung. Reading it as "didn't fail"
             # would silently remove a check, and there is no human tier here.
             ok, detail, data = False, f"{type(exc).__name__}: {exc}", {}
-        res = RungResult(name, ok, str(detail)[:2000], time.time() - started, data or {})
+        res = RungResult(name, ok, _clip_detail(str(detail)), time.time() - started,
+                         data or {})
         self.report.rungs.append(res)
         # `external_blocker` rides on the event, not only in the report:
         # `gate.json` lives in the round dir and is deleted with the worktree,
@@ -1366,7 +1425,14 @@ class Gate:
         # Whose failures a `tests` pass (or a mixed failure) carried, for the
         # same reason: the scorecard counts red-tree passes, and the next round
         # is told which ids are not its own, long after `gate.json` is gone.
-        for key in ("pre_existing_failures", "flaky_node_ids"):
+        # `new_failures` joined the list for #2726: the list above was the whole
+        # of what survived, so the durable row of a FAILED `tests` rung named
+        # only the nodes the round was cleared of. Both `rung=tests` rows for
+        # round SM_20261014_233144 in `promotions.jsonl` are exactly the 500
+        # characters of `detail` above and carry no blamed node at all — which is
+        # the same blind spot as #1610 (a truncated gate payload is not a
+        # verdict), reached now inside the gate's own artifact.
+        for key in ("new_failures", "pre_existing_failures", "flaky_node_ids"):
             ids = (res.data or {}).get(key)
             if ids:
                 event[key] = list(ids)[:self.EVENT_ID_CAP]
@@ -2628,6 +2694,30 @@ class Gate:
             print(f"[warn] could not close a healed red-tree item: {exc}")
             return []
 
+    def _tests_verdict(self, blame: str, counts: dict, trail: str) -> str:
+        """A failing `tests` verdict, in the order a reader needs it (#2726).
+
+        The blame FIRST, the statistics after it. The old order — `pytest failed
+        ({counts})`, with the attribution appended behind it — meant the part that
+        survived the runner's cap was the stats dict, and that dict carries every
+        node list the run produced. In round SM_20261014_233144 the stored detail
+        was 2000 characters of load flakes that ended mid-identifier: it named
+        eight nodes the rung had just declared NOT the round's, and none of the two
+        it blamed. A verdict that has to fit a budget says what it is blaming
+        first.
+
+        And if even that does not fit, the pytest tail is what goes
+        (`VERDICT_TAIL_NOTE`), never the sentence. What is left is still over
+        `DETAIL_MAX_CHARS` only when the named blame alone is that long — more
+        nodes than `_name_ids` names — and its ids are in `data.failed_node_ids`.
+        """
+        head = f"{blame}\npytest failed ({_detail_counts(counts)})."
+        text = f"{head} {trail}"
+        room = DETAIL_MAX_CHARS - len(head) - len(VERDICT_TAIL_NOTE) - 1
+        if len(text) > DETAIL_MAX_CHARS and room > 0:
+            text = f"{head} {trail[:room].rstrip()}{VERDICT_TAIL_NOTE}"
+        return text
+
     def _tests_failed(self, text: str, counts: dict, only: list[str] | None):
         """Judge a red run: whose failures are these?
 
@@ -2712,28 +2802,28 @@ class Gate:
                                                       if k not in counts},
                                                    "_lead": lead})
         if not conclusive and node_ids and not new:
-            return False, (f"pytest failed ({counts}): every failure outside the round's own "
-                           f"files was unexplained, and the base probe could not say whose "
-                           f"they are — failing closed. {probe_note}. {flaky_note}\n"
-                           f"{tail[-600:]}"), data
+            return False, self._tests_verdict(
+                "every failure outside the round's own files was unexplained, and the base "
+                "probe could not say whose they are — failing closed",
+                counts, f"{probe_note}. {flaky_note}\n{tail[-600:]}"), data
         if flaky:
             # Some failures flickered and some did not: the round still owns
             # the ones that failed every repeat. Only the flaky ones come out of
             # the count, so the number the round reads is the number it caused.
             data["new_failures"] = new
-            return False, (f"pytest failed ({counts}): {len(new)} of "
-                           f"{len(node_ids)} failures are new in this round "
-                           f"({_name_ids(new)}); {len(flaky)} passed a repeat run "
-                           f"and are FLAKY ({_name_ids(flaky)}). {probe_note}. "
-                           f"{flaky_note}\n{tail[-600:]}"), data
+            return False, self._tests_verdict(
+                f"{len(new)} of {len(node_ids)} failures are new in this round "
+                f"({_name_ids(new)}); {len(flaky)} passed a repeat run and are FLAKY "
+                f"({_name_ids(flaky)})",
+                counts, f"{probe_note}. {flaky_note}\n{tail[-600:]}"), data
         if node_ids and pre_existing:
             data["new_failures"] = new
-            return False, (f"pytest failed ({counts}): {len(new)} of "
-                           f"{len(node_ids)} failures are new in this round "
-                           f"({_name_ids(new)}); the rest predate it "
-                           f"({_name_ids(pre_existing)} — not yours"
-                           + (f", tracked by item #{red_item}" if red_item else "")
-                           + f"). {probe_note}\n{tail[-600:]}"), data
+            return False, self._tests_verdict(
+                f"{len(new)} of {len(node_ids)} failures are new in this round "
+                f"({_name_ids(new)}); the rest predate it "
+                f"({_name_ids(pre_existing)} — not yours"
+                + (f", tracked by item #{red_item}" if red_item else "") + ")",
+                counts, f"{probe_note}\n{tail[-600:]}"), data
         # Nothing reproduces at base: every failure is this round's. Say so
         # in the same field the mixed case uses, so a reader of the report
         # never has to infer the delta from its absence — and name the
@@ -2744,10 +2834,13 @@ class Gate:
         # blocker #1093 against the gate for it.
         data["new_failures"] = new
         if node_ids:
-            return False, (f"pytest failed ({counts}): all {len(node_ids)} failure(s) are "
-                           f"new in this round ({_name_ids(node_ids)}). {probe_note}\n"
-                           f"{tail[-600:]}"), data
-        return False, f"pytest failed ({counts}): {tail[-900:]}\n{probe_note}", data
+            return False, self._tests_verdict(
+                f"all {len(node_ids)} failure(s) are new in this round "
+                f"({_name_ids(node_ids)})",
+                counts, f"{probe_note}\n{tail[-600:]}"), data
+        return False, self._tests_verdict(
+            "pytest's output named no failing node, so this rung cannot say which tests broke",
+            counts, f"{tail[-900:]}\n{probe_note}"), data
 
     def rung_review(self):
         """A second reader grades the diff against the item's clauses.
