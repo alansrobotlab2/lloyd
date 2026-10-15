@@ -5902,6 +5902,104 @@ def test_the_catch_up_is_spent_by_the_run_it_caught_up(aut, monkeypatch, tmp_pat
         "window_lost:42:2026-10-09T22:00"], "the record must outlive the catch-up"
 
 
+def test_a_windowed_task_with_no_dependency_catches_up_on_the_loss_row(
+        aut, monkeypatch, tmp_path):
+    """#2552's ruling pinned at the grant: the ROW authorises, not `depends_on`.
+
+    Every other fixture in this section declares `depends_on: 38`, because the
+    occurrence lost on 2026-10-10 belonged to the nightly chain (#42 waiting on #38).
+    The ruling that came out of it — the out-of-window catch-up is keyed on the
+    witnessed loss row and on nothing else — was therefore pinned only by tasks that
+    happened to have a dependency. Adding a `depends_on` term to `window_catch_up_row`
+    would have left all three existing catch nodes green, which is the shape of a
+    test that cannot fail.
+
+    So the task here is a lone `daily` `up_next` job with a real window, no
+    `depends_on` key in its front matter, and no upstream task file on the board for
+    it to be waiting on. The body runs refusal first and grant second, in that order:
+    the same task at the same pinned instant with the ledger EMPTY, which is the
+    2026-10-10 answer reproduced — the hours gate holds (clause 2) — and then with one
+    witnessed row seeded, which is where the grant has to answer (clause 1). The row
+    is seeded directly with `q.wm_set` rather than by a `fleet_watchdog` tick — the
+    recorder has its own tests, and a tick here would leave it ambiguous which of the
+    two mechanisms produced the pass.
+
+    Window, clock and stamps are the incident's own values, pinned the same way the
+    chain's are: local hour 8 at UTC-7, i.e. 15:10Z, two hours after the window closed.
+
+    Clause 3 is the front-matter assertion below; clause 4 is that this node is the
+    only thing the diff adds, so the three catch nodes above it are the ones that
+    already existed and `pytest tests/test_autonomy_scheduler.py -q -k catch` selects
+    all four.
+    """
+    from workers.queue import WorkQueue
+
+    task_path = write_task(aut, 99, preferred_hours=_WINDOW,
+                           last_run="2026-10-08T09:18:03+00:00",
+                           next_run="2026-10-09T09:18:03+00:00")
+    monkeypatch.setattr(aut, "_local_hour", lambda: 8)
+    monkeypatch.setattr(aut, "_local_tz", lambda: _INCIDENT_TZ)
+    _pin(aut, monkeypatch, when=_LOSS_NOW)
+    q = WorkQueue(str(tmp_path / "workers.db"))
+    monkeypatch.setattr("workers.queue.configured_db_path",
+                        lambda: tmp_path / "workers.db")
+
+    # Clause 3: the fixture is the no-dependency shape, so this node cannot drift
+    # into being a second copy of the chain fixtures above. Checked on the FILE, not
+    # only on the parsed dict — a key the loader invented would be caught by the
+    # second assertion, and a key the writer kept would be caught by the first.
+    assert "depends_on" not in yaml.safe_load(task_path.read_text().split("---\n")[1]), (
+        "the task file now carries a depends_on, so this node is exercising the "
+        "dependency shape it exists to rule out")
+    t99 = read_task(aut, 99)
+    assert "depends_on" not in t99, (
+        "the scheduler's own parse of the file produced a dependency the front matter "
+        "does not declare, so the two assertions above are not the same fact")
+
+    window_open = dt.datetime.fromisoformat("2026-10-10T05:00:00+00:00")
+    window_close = dt.datetime.fromisoformat("2026-10-10T12:00:00+00:00")
+    assert aut._is_preferred_hour(t99) is False, (
+        "the window is open at the pinned instant, so the refusal below is not an "
+        "out-of-window refusal at all")
+    assert aut._parse_iso(t99["last_run"]) < window_close, (
+        "the task's stamp post-dates the lost occurrence's close, which is the spend "
+        "predicate `window_catch_up_row` applies, so the spend rather than the missing "
+        "row would be what refuses in the first half")
+
+    # Clause 2, and the node's FIRST half: no witnessed loss, and the hours gate
+    # holds exactly as it did before #2552 — the answer the board actually gave on
+    # 2026-10-10.
+    assert q.wm_keys(aut.WINDOW_LOSS_WM_SOURCE) == [], (
+        "the fixture's ledger is not empty, so the None below proves nothing")
+    assert aut.window_catch_up_row(t99, now=_LOSS_NOW) is None
+    assert [t["id"] for t in aut.get_due_tasks(now=_LOSS_NOW)] == []
+    assert _chain_hold_reason(aut, 99) == "outside hours 00-04,22-23"
+
+    # Clause 1, and the node's SECOND half: one witnessed block covering the
+    # occurrence, and the same task is dispatched out of window. Nothing about it has
+    # a dependency to hold on to.
+    q.wm_set(aut.WINDOW_LOSS_WM_SOURCE, "window_lost:99:2026-10-09T22:00",
+             json.dumps({"task_id": 99, "window_hours": "00-04,22-23",
+                         "window_open": "2026-10-10T05:00:00+00:00",
+                         "window_close": "2026-10-10T12:00:00+00:00",
+                         "pause_since": _HOLD_SINCE,
+                         "recorded_at": _LOSS_NOW.isoformat()}))
+    assert aut._parse_iso(_HOLD_SINCE) < window_open, (
+        "the pause named by the row does not reach back across the window's opening, "
+        "so this is not a block that covered the occurrence")
+
+    row = aut.window_catch_up_row(read_task(aut, 99), now=_LOSS_NOW)
+    assert row is not None, (
+        "a windowed task with no `depends_on` got no catch-up from a row that "
+        "authorises one: the grant has grown a dependency term")
+    assert row["task_id"] == 99 and row["window_close"] == "2026-10-10T12:00:00+00:00", row
+    assert [t["id"] for t in aut.get_due_tasks(now=_LOSS_NOW)] == [99], (
+        "the ledger row exists and the grant returned it, but the scan still refuses "
+        "the task: the hours gate is not being bypassed at the dispatch")
+    assert _chain_hold_reason(aut, 99) is None, (
+        "`get_due_tasks` dispatched #99 while the board still said it was held")
+
+
 def test_no_pause_held_across_the_occurrence_leaves_the_window_in_force(
         aut, monkeypatch, tmp_path):
     """Clause 2. Same board, same clock, no operator pause: the window still holds.
