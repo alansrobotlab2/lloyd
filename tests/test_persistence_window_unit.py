@@ -310,10 +310,28 @@ def test_the_execstart_is_a_direct_exec_of_the_script_and_not_an_enqueue():
 
 # ── clause 3: one quiet hour, argued against the box's other schedules ──
 
-def test_the_timer_fires_once_a_day_at_one_hour_and_catches_up():
-    """Clause 3, first half: exactly one `OnCalendar=`, `Persistent=true` so a box
-    that was asleep when the window was due still runs one, and `timers.target` so
-    the user manager actually starts it once enabled."""
+def test_the_timer_fires_once_a_week_on_monday_and_catches_up():
+    """#2754 clause 2, replacing the node that asserted `value.startswith("*-*-* ")`
+    with the message "daily, not weekday-scoped". That node did its job — it refused
+    this change until someone rewrote it with the reason attached — and the daily form
+    it enforced is the thing #2754 bounds: two fires measured 34 min of held dispatch
+    and ~190 KB of tracked rows each, committed nightly forever.
+
+    The weekly spec goes in the day-of-week field: `Mon *-*-* 02:10:00`. The other
+    spelling of "weekly-ish" is a trap that reads like the fix — `*-*-1 02:10:00` puts
+    the `1` in the day-of-MONTH field, so it is not weekly at all — which is why the
+    date field has to stay three wildcards and the `Mon` token has to be there as a
+    token, not inferred from an absence. `test_systemd_itself_reads_the_cadence_as_weekly_not_monthly`
+    asks systemd to confirm both readings; the fullmatch here is what stops a regression
+    from re-introducing the trap.
+
+    What this node does NOT change is the rest of clause 3's arithmetic, because #2754
+    is a cadence-only change: the 01:00-02:59 band, the minute bound that keeps the
+    span clear of the 06:00 retrieval eval, `Persistent=true`, `timers.target`, and the
+    300 s jitter the 02:15 latest start is computed from. The band is argued from the
+    box's schedule (the comment the node below reads), not from how often the window
+    runs, and `Persistent=true` matters more at one slot a week, not less: a suspend
+    across Monday now costs the week's window rather than the night's."""
     cp = _parse(TIMER)
     lines = [l.strip() for l in TIMER.read_text(encoding="utf-8").splitlines()
              if l.strip().startswith("OnCalendar=")]
@@ -321,7 +339,8 @@ def test_the_timer_fires_once_a_day_at_one_hour_and_catches_up():
     assert cp.get("Timer", "Persistent").lower() == "true"
     assert cp.get("Install", "WantedBy") == "timers.target"
     value = cp.get("Timer", "OnCalendar")
-    assert value.startswith("*-*-* "), f"daily, not weekday-scoped: {value}"
+    assert re.fullmatch(r"Mon \*-\*-\* \d{2}:\d{2}:\d{2}", value), \
+        f"weekly in the day-of-week field with the date field left wild: {value!r}"
     hh, mm = value.split()[-1].split(":")[:2]
     assert 1 <= int(hh) <= 2, \
         f"the slot must sit in the 01:00-02:59 band that has no nightly writes, no " \
@@ -329,6 +348,116 @@ def test_the_timer_fires_once_a_day_at_one_hour_and_catches_up():
     assert int(mm) <= 15, f"start early: from the latest start the 300 s jitter allows " \
         f"(02:15) the ~3 h 20 m span must still end clear of the 06:00 retrieval eval: " \
         f"{value}"
+    assert _systemd_seconds(cp.get("Timer", "RandomizedDelaySec")) == 300, \
+        "the jitter is the 300 s every latest-start figure in these two units is " \
+        "computed from; widening it moves 02:15 and with it the drain's headroom"
+
+
+def test_systemd_itself_reads_the_cadence_as_weekly_not_monthly():
+    """The unit file's grammar is systemd's, not mine, so the claim that distinguishes
+    this round's spec from the trap spec is asked of systemd.
+
+    `systemd-analyze calendar` is a pure parser — it normalizes an expression and prints
+    when it would next elapse, touching no manager and no state — and its `Normalized
+    form:` line is a deterministic function of the input. Three readings, all asserted:
+
+      * the unit's own value normalizes to itself, day-of-week token intact;
+      * `*-*-1 02:10:00` normalizes to `*-*-01 02:10:00`, a day-of-MONTH spec — twelve
+        fires a year, on the 1st, of a window that means to run fifty-two;
+      * `Mon *-*-* 02:10:00`, the form #2754 lands, keeps `Mon` in the normalized form.
+
+    The `Next elapse:` line the same command prints is deliberately NOT asserted: it is
+    a function of the wall clock, and a test that reads it goes red on its own without
+    the unit changing. This is the boundary the item's triage measured by hand
+    (`Normalized form: *-*-01`, next elapse 2026-11-01, against `Mon 2026-10-19` for the
+    day-of-week form) and that a reader of this repo cannot otherwise re-check.
+    """
+    def normalized(expr: str) -> str:
+        proc = subprocess.run(["systemd-analyze", "calendar", expr],
+                              capture_output=True, text=True, timeout=30, check=True)
+        line = next(l for l in proc.stdout.splitlines() if "Normalized form:" in l)
+        return line.split("Normalized form:")[1].strip()
+
+    value = _parse(TIMER).get("Timer", "OnCalendar")
+    assert normalized(value) == value == "Mon *-*-* 02:10:00", \
+        f"systemd reads the shipped cadence as something other than a Monday: {value!r}"
+    assert normalized("*-*-1 02:10:00") == "*-*-01 02:10:00", \
+        "the day-of-month form is monthly, and if systemd ever stops saying so this " \
+        "node's reasoning needs re-deriving, not just its expected string"
+    assert normalized("Mon *-*-* 02:10:00").split()[0] == "Mon"
+
+
+def _setup_section(heading: str) -> str:
+    """One `###` section of SETUP.md, heading to the next heading of the same level."""
+    text = SETUP.read_text(encoding="utf-8")
+    start = text.index(heading)
+    rest = text[start + len(heading):]
+    nxt = re.search(r"^### ", rest, re.MULTILINE)
+    return rest[:nxt.start()] if nxt else rest
+
+
+def test_the_cadence_prose_is_weekly_and_carries_the_measured_cost():
+    """#2754 clause 3: the prose says what the timer now does, and the number that made
+    the cadence worth bounding is quoted as a measurement.
+
+    The old text was right about the hour and wrong about the cadence: `Description=Nightly
+    Lloyd persistence-arm window`, and an argument that the slot was chosen because the
+    queue "was busy at 02:10 on 18 of the 20 nights the run store covers" — a reason to
+    pick 02:10, dressed as a reason to run at 02:10 every day. So three things are pinned
+    per surface, and only the surfaces that describe this window:
+
+      1. the `[Unit] Description` calls it weekly, not nightly;
+      2. no line in either unit, or in SETUP.md's persistence section, claims THIS window
+         is nightly or daily — except as a borrowed job title. `#82 nightly-retrieval-eval`
+         and `#92 nightly-iv-metrics` are autonomy job NAMES, and the 06:00 and 05:00
+         bounds they set are why the drain has a number instead of a preference; the item
+         flagged the first as a pin a careless rewrite would break, and the second is the
+         same class in the service's other paragraph. A blanket word ban would have to be
+         broken to be satisfiable, so the exemption is these two titles and nothing else:
+         the assert quotes the whole line, so a line that smuggles "nightly" in as
+         cadence rather than as a name still fails.
+      3. the cost that motivated the bound is stated with its figures: 34 min of held
+         dispatch per fire (34m42s on 2026-10-13 and 34m01s on 2026-10-14, from
+         `journalctl --user -u lloyd-persistence-window.service`), the 3 h 20 m the
+         `ExecStart` arithmetic allows as the ceiling above it, and 30 rows / ~190 KB
+         (190,226 B and 188,556 B) appended to the git-tracked rows corpus per window.
+
+    Those two hold figures are not interchangeable and the old prose carried only the
+    larger one. 12000 s is what the drain plus ten reps could occupy; 34 min is what the
+    two fires actually held dispatch. A cadence argued from the ceiling is a cadence
+    argued from a budget, and that is how a nightly commitment looked affordable here.
+
+    SETUP.md's enable route is checked again here — with its cadence comment, not just
+    its command — because `test_setup_md_carries_the_enable_route` pins the command
+    string, and a rewrite that fixed the command's comment to say "daily" while the unit
+    fired Mondays would leave that node green.
+    """
+    desc = _parse(TIMER).get("Unit", "Description")
+    assert "nightly" not in desc.lower(), f"the Description still names a cadence: {desc!r}"
+    assert re.search(r"(?i)weekly|monday", desc), \
+        f"the Description must name the cadence the timer now has: {desc!r}"
+
+    surfaces = {"timer": _comments(TIMER), "service": _comments(SERVICE),
+                "SETUP.md": _setup_section("### The persistence-arm window")}
+    for label, prose in surfaces.items():
+        for line in prose.splitlines():
+            if "night" in line.lower() or "daily" in line.lower():
+                assert "nightly-retrieval-eval" in line, \
+                    f"{label} claims a cadence for this window: {line.strip()}"
+        assert "34 min" in prose, f"{label} never states the measured dispatch hold"
+        assert "190" in prose, f"{label} never states the tracked bytes per window"
+        assert re.search(r"(?i)week|monday", prose), \
+            f"{label} still describes some other cadence than the shipped one"
+    assert "3 h 20 m" in surfaces["timer"], \
+        "the ceiling stays in the timer's own sizing — it is what the 06:00 bound is " \
+        "checked against, and the measured 34 min is its subordinate, not its replacement"
+    assert "30 rows" in surfaces["SETUP.md"], \
+        "the row count is the figure a reader of SETUP.md can act on (retention, #2194's " \
+        "denominator); the byte count alone hides that a window is 30 rows of corpus"
+    assert re.search(r"enable --now lloyd-persistence-window\.timer\s+#\s*[^\n]*Monday",
+                     _setup_section("### The persistence-arm window")), \
+        "the enable route's comment must carry the new cadence; the command itself is " \
+        "pinned verbatim by test_setup_md_carries_the_enable_route"
 
 
 def test_the_timer_comment_names_the_scheduled_work_the_hour_avoids():

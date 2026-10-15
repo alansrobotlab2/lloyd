@@ -385,16 +385,31 @@ def test_the_timer_hour_is_after_every_named_fire_and_clear_of_the_sibling_ceili
         if t == TIMER:
             continue
         for k, v in _parse(t.read_text(encoding="utf-8")).get("Timer", []):
+            # A daily calendar, and only a daily one: the date field is all wildcards.
+            # #2754 moved the persistence window to `Mon *-*-* 02:10:00`, and since
+            # systemd's grammar puts the day-of-week FIRST, that unit is no longer a
+            # daily fire and no longer belongs in this set — it is covered below, by the
+            # sibling's ceiling, which is the stronger statement. The floor drops with
+            # it, 3 -> 2: the count is here to catch the family disappearing (a node
+            # comparing one fire against nothing still passes its comparisons), and two
+            # daily fires are what the directory has now.
             if k == "OnCalendar" and re.fullmatch(r"\*-\*-\* \d{2}:\d{2}:\d{2}", v):
-                others[t.name] = v.split()[1]
-    assert len(others) >= 3, others
+                others[t.name] = v.split()[-1]
+    assert len(others) >= 2, others
+    assert SIBLING_TIMER.name not in others, \
+        "the persistence window is weekly since #2754; if it is back in the daily set " \
+        "the cadence changed and its hour has to re-appear in the comparisons below"
     for name, fire in others.items():
         oh, om = [int(x) for x in fire.split(":")[:2]]
         assert (hh, mm) > (oh, om), f"{TIMER.name} at {hh:02d}:{mm:02d} precedes {name} at {fire}"
         assert mm != om or hh != oh, f"{name} fires on the same minute"
 
+    # `[-1]`, not `[1]`: with the day-of-week prefix #2754 added, index 1 is the date
+    # field `*-*-*`, and `int("*")` raised ValueError out of this node — a cadence change
+    # in another unit arriving as an error here, with nothing in the message saying which
+    # field it tripped on.
     sh, sm = [int(x) for x in dict(_parse(SIBLING_TIMER.read_text(encoding="utf-8"))["Timer"])
-              ["OnCalendar"].split()[1].split(":")[:2]]
+              ["OnCalendar"].split()[-1].split(":")[:2]]
     sib_to = _secs(dict(_parse(SIBLING_SERVICE.read_text(encoding="utf-8"))["Service"])
                    ["TimeoutStartSec"])
     assert hh * 60 + mm >= sh * 60 + sm + sib_to // 60, (

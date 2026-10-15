@@ -14,6 +14,14 @@ Documentation=file:///home/alansrobotlab/lloyd/eval/run_persistence_arms.sh
 # tests/conftest.py refuses against the production tree, and the window needs the
 # live aggregator and the engine. systemd is the caller that is neither (#2428).
 #
+# Cadence lives in the timer and is weekly as of #2754, because the cost of one fire is
+# measured, not assumed: 34 min of held dispatch (34m42s on 2026-10-13, 34m01s on
+# 2026-10-14 -- `journalctl --user -u lloyd-persistence-window.service`), 30 rows /
+# ~190 KB (190,226 B and 188,556 B) appended to the tracked rows file below, and one dated
+# report. Everything in this file stays as it was: the drain, the ten reps, the 4 h start
+# timeout. A Monday window needs the same 4 h as a window on any other day of the week --
+# the budget is a function of the reps and the drain, never of how often it runs.
+#
 # Deliberately NO LLOYD_CANARY_ROWS and NO LLOYD_CANARY_REPORT here. Unset is what
 # leaves every rep on the tracked eval/measurements/injection-canary/rows.jsonl --
 # the file the leak-rate denominator behind #2194's owed entries is read from. A
@@ -41,8 +49,9 @@ Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Why the drain is 4200 s and not the driver's 900 s default: a straggler still
 # running at 02:10 is the normal case here, not the exception. Of the 898 autocode
 # runs in the 14 days to 2026-10-12, 642 outlived 900 s and the longest ran 3552 s,
-# and the queue was busy at 02:10 on 18 of the 20 nights the run store covers -- so
-# 900 s was a nightly refusal -- the one fire this unit has had is that refusal,
+# and the queue was busy at 02:10 on 18 of the 20 days the run store covers -- so
+# 900 s was a refusal of the drain itself, not of the hour -- the fire this unit has
+# completed on its old cadence is that refusal,
 # `refused: queue still busy after 900s: {'in_flight': 1, 'autocode:running': 1}` over
 # a 15min 2.5s wall clock (`journalctl --user -u lloyd-persistence-window.service`) --
 # and 4200 s clears the observed 3552 s straggler with 648 s to spare.
@@ -97,8 +106,8 @@ TimeoutStartSec=4h
 # actually succeeded.
 #
 # systemd runs ExecStartPost only after ExecStart exits 0, and that is the half that
-# keeps a bad night quiet: the window's one fire to date refused its 900 s drain and
-# left at exit 2, and wrote no empty report. The timeout above covers this step too, and
+# keeps a bad window quiet: the fire that refused its 900 s drain left at exit 2 and
+# wrote no empty report. The timeout above covers this step too, and
 # the step costs it 0.07 s -- the render's measured wall clock over the shipped corpus
 # on 2026-10-12.
 ExecStartPost=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python /home/alansrobotlab/lloyd/eval/run_injection_canary.py report --write --force

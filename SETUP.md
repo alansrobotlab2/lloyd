@@ -1410,7 +1410,7 @@ window and records the damage as normal.
 ### The persistence-arm window
 
 ```bash
-systemctl --user enable --now lloyd-persistence-window.timer   # 10 persistence-arm reps, daily 02:10
+systemctl --user enable --now lloyd-persistence-window.timer   # 10 persistence-arm reps, Mondays 02:10
 ```
 
 `lloyd-persistence-window.service` is tracked beside it and lands through
@@ -1424,12 +1424,23 @@ it either (`tests/conftest.py` refuses the production tree, and the window needs
 aggregator and engine), so systemd is the invoker; the unit's own header carries the
 mechanism. The explicit `--drain-wait 4200` is what outlasts a straggler round: 642 of
 the 898 autocode runs in the 14 days to 2026-10-12 ran past the 900 s default (longest
-3552 s), and the queue was busy at 02:10 on 18 of the 20 nights the run store covers.
+3552 s), and the queue was busy at 02:10 on 18 of the 20 days the run store covers.
 02:10 is the one gap whose far end still clears the 06:00 retrieval eval with that
-budget — 12000 s from the latest jittered start 02:15 is 05:35 — after the nightly
-reflection chain; the 04:00 health report and the 05:00 qmd index maintenance are
+budget — 12000 s from the latest jittered start 02:15 is 05:35 — after the reflection
+chain; the 04:00 health report and the 05:00 qmd index maintenance are
 pool-dispatched and queue behind the hold, and the 05:30 graph backup is a store copy
 with no engine in it.
+
+The **weekly** cadence is #2754, and it is a cost measurement rather than a scheduling
+preference: one fire holds dispatch for 34 min (34m42s on 2026-10-13, 34m01s on
+2026-10-14) and appends 30 rows / ~190 KB to the git-tracked
+`eval/measurements/injection-canary/rows.jsonl` plus one dated report beside it. Run
+every morning, that was a morning of held dispatch and a growing tracked corpus with
+nothing in this unit that self-disables and no retention store covering that directory
+(`scripts/groundskeeper/retention-sweep.py` names no `injection-canary` entry — the
+retention gap is a separate open question, not solved by running less often). The hour,
+the drain and the ten reps are unchanged; `Persistent=true` still catches a fire the box
+missed by sleeping, which on a weekly timer can now be up to a week late.
 
 ### The egress-arms window
 

@@ -1,7 +1,23 @@
 [Unit]
-Description=Nightly Lloyd persistence-arm window (#2428)
+Description=Weekly (Monday) Lloyd persistence-arm window (#2428, bounded by #2754)
 
 [Timer]
+# Weekly, Mondays at 02:10 (#2754, which bounded the morning-after-morning slot this
+# timer had been armed with). The
+# cadence, not the hour, is what changed, and the cadence moved on a measurement of what
+# one window costs: 34 min of held dispatch per fire (34m42s on 2026-10-13, 34m01s on
+# 2026-10-14, `journalctl --user -u lloyd-persistence-window.service`), and 30 rows /
+# ~190 KB (190,226 B and 188,556 B) appended to the git-tracked
+# eval/measurements/injection-canary/rows.jsonl plus one dated report, every time. A
+# window a morning was therefore ~190 KB and a morning of held dispatch, with no
+# self-disabling in this unit and no retention store covering that directory
+# (`scripts/groundskeeper/retention-sweep.py` has no `injection-canary` entry), so the
+# bound is on how often, and the corpus it grows is owed its own retention ruling. What
+# does NOT change: the hour, the 4200 s drain, the ten reps. ~3 h 20 m is what the drain
+# plus the reps can occupy (12000 s), which is a ceiling and not the observed 34 min —
+# the morning-after-morning slot had been sized from the ceiling, which is how holding
+# dispatch every morning looked affordable.
+#
 # 02:10 local. The one gap on this box that ends early enough for the ~3 h 20 m this
 # window now needs -- 4200 s of drain plus ten reps at the driver's thirteen minutes
 # of engine each (eval/persistence_arms.py, `canary_cmd`) = 12000 s, with
@@ -15,7 +31,7 @@ Description=Nightly Lloyd persistence-arm window (#2428)
 #     knowledge-write, #56 trajectory-extraction). A straggler still running at
 #     02:10 is what the 4200 s drain exists to wait for, and that straggler is the
 #     common case rather than the tail: the queue was busy at 02:10 on 18 of the 20
-#     nights the run store covers, and 642 of the 898 autocode runs in the 14 days to
+#     days the run store covers, and 642 of the 898 autocode runs in the 14 days to
 #     2026-10-12 outlived the 900 s this drain used to have (longest 3552 s) -- the
 #     one fire this window has had is a refusal on exactly that.
 #   * AHEAD of #82 nightly-retrieval-eval at 06:00, which is the bound and not one of
@@ -35,7 +51,11 @@ Description=Nightly Lloyd persistence-arm window (#2428)
 # behind the hold, being a user timer, which is tolerable because the backup copies the
 # KG store and touches no engine. So 05:30 is not the bound; 06:00 is.
 # Jitter like the precedent's, so the start never lands on the hourly snapshot.
-OnCalendar=*-*-* 02:10:00
+# The `Mon` is the cadence and the `*-*-*` is deliberately wild: `*-*-1 02:10:00` reads
+# like a weekly spec but puts the 1 in the day-of-MONTH field, and systemd normalizes it
+# to `*-*-01`, firing on the 1st of each month (asserted by
+# tests/test_persistence_window_unit.py::test_systemd_itself_reads_the_cadence_as_weekly_not_monthly).
+OnCalendar=Mon *-*-* 02:10:00
 Persistent=true
 RandomizedDelaySec=300
 
