@@ -756,3 +756,160 @@ def test_the_committed_witness_rows_show_which_prior_the_gate_retired():
     assert noop[prior]["fact"] == on[prior]["fact"], (
         "the legs hold different texts for the prior, so the pair is not paired")
     assert any("evnt-001" in k for k in noop), "the event file's rows are committed too"
+
+
+LEG_HEADERS = REPLAY_DOC / "leg-headers.jsonl"
+
+
+def _witness_facts(mode: str) -> dict[str, dict]:
+    """The committed fact rows of the witness entity for one leg, keyed file::id."""
+    path = REPLAY_DOC / f"witness-entity-facts-{mode}.jsonl"
+    return {f"{r['file']}::{r['id']}": r
+            for r in (json.loads(l) for l in path.read_text(encoding="utf-8").splitlines())}
+
+
+def _rendered(block_lines: list[str], fact: dict) -> list[str]:
+    """The block lines showing `fact`'s text at the confidence it is stored at.
+
+    Both legs hold a near-identical pair for `stat-002` — the replayed supersession
+    differs from it by one trailing clause and 0.1 of confidence — so matching the
+    text alone would let the superseded line and its replacement satisfy the same
+    assertion. The rendered confidence is what tells them apart.
+    """
+    return [ln for ln in block_lines
+            if fact["fact"].strip() in ln
+            and f"(confidence: {fact['confidence']})" in ln]
+
+
+def _render_line(fact: dict) -> str:
+    """The `<facts>` line a committed fact row renders to, as the dump wrote it."""
+    return (f"- [Hornet.dev] {fact['fact'].strip()} "
+            f"(confidence: {fact['confidence']})")
+
+
+# Which fact of the witness entity occupies each of the three rendered lines, per leg.
+# `noop` keeps two priors inside the cap; `on` retired them and the cap fills with the
+# next-ranked active facts. Ordered, because the clause is about the RENDERED block and
+# a set equality would pass on a leg that ranked them differently.
+WITNESS_ORDER = {
+    "noop": ("stat-005", "stat-002", "stat-001"),
+    "on": ("stat-005", "stat-004", "stat-006"),
+}
+
+
+def test_the_witness_block_is_each_legs_ranked_top_three_in_order():
+    """The witness block, pinned line by line and in order, from the committed rows.
+
+    `FACT_MAX_PER_ENTITY` is 3, so the whole of what the gate can change for
+    `lme-kn-013` is which three of `Hornet.dev`'s facts occupy these slots. Rebuilding
+    each line from `witness-entity-facts-<leg>.jsonl` — text and stored confidence —
+    rather than comparing the two dumps to each other means this fails if a leg's block
+    is regenerated from a tree the gate did not write, if the cap changes, or if the
+    ordering changes, none of which a diff of the dumps notices on its own.
+
+    It also pins that `Hornet.dev-event.md::evnt-001`, the prior the acceptance clause
+    names, is in NEITHER block: the ledger shows that write took `add` and expired
+    nothing, and scored with the shipped selection over this question's real prompt
+    (`app.prefetch._rank_entity_facts(pf._get_facts_sync('Hornet.dev')['facts'],
+    pf._fact_query_tokens(q.prompt), 'relevance')`) it ranks #8 of the entity's 10
+    active facts behind `stat-002` at #2 and `stat-001` at #3 — so expiring it could
+    not move a rendered block for any of the 53 questions.
+    """
+    for leg, ids in WITNESS_ORDER.items():
+        path = BLOCKS_NOOP if leg == "noop" else BLOCKS_ON
+        facts = _witness_facts(leg)
+        lines = [ln for ln in _dump_rows(path)[WITNESS] if "[Hornet.dev]" in ln]
+        expected = [_render_line(facts[f"Hornet.dev/Hornet.dev-state.md::{i}"])
+                    for i in ids]
+        assert lines == expected, (
+            f"the {leg} leg's rendered Hornet.dev block is not the ranked top three "
+            f"the committed rows say: {lines}")
+    noop, on = _dump_rows(BLOCKS_NOOP), _dump_rows(BLOCKS_ON)
+    named = _render_line(_witness_facts("noop")[
+        "Hornet.dev/Hornet.dev-event.md::evnt-001"])
+    assert all(named not in _dump_rows(p)[WITNESS] for p in (BLOCKS_NOOP, BLOCKS_ON)), (
+        "evnt-001 renders in a witness block, which refutes the note's correction "
+        "that the prior the clause names never reaches one")
+    assert noop[WITNESS] != on[WITNESS], (
+        "the witness block is identical across legs, so the pair measures nothing")
+
+
+def test_the_note_quotes_the_witness_block_bytes_it_cites():
+    """The note's excerpt is checked against the bytes, not retyped from memory.
+
+    A measurement note that paraphrases its own evidence is how a block diff becomes
+    folklore: the excerpt below is the whole content of the claim, and a reader who
+    cannot find those exact lines in the committed dump has no way to tell a
+    paraphrase from a fabrication.
+    """
+    note = (REPLAY_DOC.parent / "fact-write-gate-b-2026-10-15.md").read_text(
+        encoding="utf-8")
+    for leg, ids in WITNESS_ORDER.items():
+        facts = _witness_facts(leg)
+        for i in ids:
+            line = _render_line(facts[f"Hornet.dev/Hornet.dev-state.md::{i}"])
+            assert line in note, (
+                f"the note quotes no such line for {leg}/{i}: {line!r}")
+
+
+def test_the_block_line_the_gate_moves_is_the_pinned_prior_not_the_named_event():
+    """Clause 3's carrier, read off the committed rows, line by line.
+
+    The clause names `Hornet.dev-event.md::evnt-001` as the prior whose expiry is
+    what the witness block shows. It cannot be, and this pins the two independent
+    reasons so the correction is not carried as prose. (1) The ledger: that write
+    took `add` in both legs and expired nothing. (2) Selection, which is the new
+    finding: scored with the shipped function over the real prompt —
+    `app.prefetch._rank_entity_facts(facts, _fact_query_tokens(q.prompt),
+    "relevance")` on `Hornet.dev`'s 10 active facts — `evnt-001` is #8 of 10 while
+    `stat-002` is #2, and `FACT_MAX_PER_ENTITY` is 3, so no retirement of
+    `evnt-001` reaches a rendered block for ANY of the 53 questions. What the `on`
+    leg stamps and the block therefore loses is `stat-002`'s own line.
+    """
+    noop_f, on_f = _witness_facts("noop"), _witness_facts("on")
+    noop, on = _dump_rows(BLOCKS_NOOP), _dump_rows(BLOCKS_ON)
+    prior, named = ("Hornet.dev/Hornet.dev-state.md::stat-002",
+                    "Hornet.dev/Hornet.dev-event.md::evnt-001")
+    assert _rendered(noop[WITNESS], noop_f[prior]), (
+        "the `noop` leg does not render the prior the ledger says it kept, so the "
+        "witness block's difference comes from somewhere other than the gate")
+    assert not _rendered(on[WITNESS], on_f[prior]), (
+        "the `on` leg still renders the prior it stamped expired: that block was "
+        "rendered from a tree the gate never wrote into")
+    for leg, lines in (("noop", noop[WITNESS]), ("on", on[WITNESS])):
+        assert not _rendered(lines, noop_f[named]), (
+            f"{named} renders in the {leg} leg's block, which refutes the note's "
+            f"correction that the prior the clause names never reaches the block")
+
+
+def test_no_committed_path_of_either_leg_resolves_under_the_live_data_root():
+    """Clause 4 in the file the clause names: every committed path is off the live root.
+
+    The note's own command lines are checked in `tests/test_fact_write_gate.py`; what
+    is checked here is the machine-written half — the `fact_snapshot` / `facts_root`
+    each leg's dump and header row records — because those are what the runner wrote
+    itself, and a `--fact-snapshot` typo that fell back to the live store would show
+    up here and nowhere else. The live root is named by its canonical location, not
+    through `production_data_root()`: a checkout in a worktree gets its own
+    `.lloyd-data`, so inside a round that function IS the tree the pair was built in,
+    and reading it would pass on `main` and fail in the tree that must be checked.
+    """
+    live = str(Path.home() / "lloyd-data")
+    checked = 0
+    for path in (BLOCKS_NOOP, BLOCKS_ON, LEG_HEADERS):
+        assert path.is_file(), f"{path} is committed evidence of the pair"
+        for line in path.read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            for key in ("fact_snapshot", "facts_root", "prefetch_corpus"):
+                value = row.get(key)
+                if not value:
+                    continue
+                checked += 1
+                assert not str(value).startswith(live), (
+                    f"{path.name} records {key}={value} under the live data root")
+                assert "~/lloyd-data" not in str(value), (
+                    f"{path.name} names the live root by its tilde form: {value}")
+    assert checked >= 6, (
+        f"only {checked} committed paths carried a facts tree — the dumps and the "
+        f"per-leg headers each have one, so the check has drifted off the artifact")
+

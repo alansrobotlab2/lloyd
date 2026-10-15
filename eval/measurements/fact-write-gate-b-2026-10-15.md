@@ -14,6 +14,26 @@ channel the gate writes into is 6 lines wide. The run is recorded here so bar (b
 is no longer "untaken"; the arming recommendation is at the end, and the decision
 is Alan's. `knowledge_graph.write_gate.mode` is still `noop` in this diff.
 
+## Clause map — where each acceptance clause's evidence is, and what pins it
+
+Every artifact named below is a tracked file in `eval/measurements/fact-write-gate-b-2026-10-15/`
+(`.jsonl`, never `.json`, which `.gitignore:42` keeps untracked), and every test node
+below is in this repo.
+
+| # | The clause requires | Section here | Artifact | Pinned by |
+|---|---|---|---|---|
+| 1 | the paired delta, its 95% CI with n, seed and `n_resamples`, and each arm's full command line including its own `--fact-snapshot` path | "The two legs", "The paired delta, and how it was computed" | `knowledge-update-join.jsonl` | `tests/test_fact_write_gate.py::test_the_b_note_records_the_paired_delta_with_its_interval_and_both_commands`, `::test_every_artifact_the_b_note_cites_is_a_tracked_file_and_not_ignored` |
+| 2 | both legs score `prefetch_rel`, and each leg's artifact carries the shipped `facts_rank` header with an empty mismatch | "Each leg's artifact header, committed" | `leg-headers.jsonl` | `tests/test_fact_write_gate.py::test_each_leg_artifacts_disclosure_is_committed_and_agrees_with_the_shipped_one`, `::test_the_b_note_legs_both_scored_the_ordering_production_ships`, `::test_the_headers_command_exits_nonzero_on_a_leg_that_is_not_the_shipped_ordering`, `::test_the_headers_command_refuses_an_artifact_that_discloses_nothing` |
+| 3 | a scored `knowledge_update` question whose rendered `<facts>` block differs, with the prior expired in `on` and active in `noop`, both renderings committed | "The witness — the legs demonstrably differ where a question reads" | `knowledge-update-blocks-noop.jsonl`, `knowledge-update-blocks-on.jsonl`, `witness-entity-facts-{noop,on}.jsonl` | `tests/test_fact_write_gate_snapshot.py::test_the_committed_block_dumps_differ_for_the_witness_question`, `::test_the_witness_block_is_each_legs_ranked_top_three_in_order`, `::test_the_block_line_the_gate_moves_is_the_pinned_prior_not_the_named_event`, `::test_the_note_quotes_the_witness_block_bytes_it_cites` |
+| 4 | the seed tree and snapshot root are named, and no path of either arm resolves under `production_data_root()` | "Inputs — the set, the seed tree, and the snapshot root", "Where the trees are now" | `build-manifest.jsonl`, `replay-list.jsonl`, `leg-headers.jsonl` | `tests/test_fact_write_gate.py::test_the_b_note_names_the_trees_and_keeps_every_path_out_of_the_live_root`, `tests/test_fact_write_gate_snapshot.py::test_no_committed_path_of_either_leg_resolves_under_the_live_data_root` |
+| 5 | a met-or-unmet verdict on bar (b), an arming recommendation owned by Alan, the bundled re-score recorded as not-triggered off 0 S/D rows, and `mode: noop` in the diff | "The bundled re-score: not-triggered", "Verdict on bar (b), and the arming recommendation" | `../fact-write-gate-2026-10-08/labels.txt` | `tests/test_fact_write_gate.py::test_the_b_note_ends_on_the_bar_and_the_gate_is_still_noop` |
+
+One deliberate deviation from clause 3's wording is recorded in the witness section
+rather than papered over: the fact it names, `Hornet.dev-event.md::evnt-001`, cannot be
+the witness, and the note shows both reasons (its write expired nothing, and it ranks
+#8 of the entity's 10 facts against a 3-line cap). The clause is satisfied by the fact
+the pair actually retires inside the rendered block, `Hornet.dev-state.md::stat-002`.
+
 ## What bar (b) asked for, and why it had never been taken
 
 The 2026-10-11 ruling left arming the fact write gate on two bars: (a) the
@@ -49,7 +69,7 @@ way and fixed in this round:
 | Seed facts tree (both legs) | `…/.lloyd-data/eval/fact-write-gate/corpus/facts` — 50,846 files in 11,959 dirs, a `cp -a` copy of the frozen `#1480` eval corpus facts tree, made outside the live data root before the builder ran. |
 | Snapshot root | `…/.lloyd-data/eval/fact-write-gate/pair-2026-10-15`, legs `noop/` and `on/` (`.lloyd-data/…` is the round worktree's own data root, which `.gitignore` keeps untracked). |
 | Replay list | `replay-list.jsonl` beside this note — 262 writes, one per distinct fact the `prefetch_rel` block renders for the 53 questions, plus the witness entity's event-category prior. Each `fact` is a rendered fact's text plus the superseding clause the shipped gate's own threshold was calibrated on (0.55 / 0.75, `agent_mcp/fact_write_gate.py:76-79`), so `UPDATE` is the shipped threshold's answer, not a prompt engineered for this note. |
-| Answerer | `Qwen3.8-Flash-Next-nvfp4` at `http://127.0.0.1:8096`, `temperature=0` (a gate-mode pair whose temperature is not pinned has no reproducible flips, and flips are the whole measurement at n=53) |
+| Answerer | `Qwen3.8-Flash-Next-nvfp4` at `http://127.0.0.1:8096`. Not greedy: the runner posts `temperature=0.6, top_p=0.95` with an int seed of `sha256(question id)[:8]` per question (`run_memory_eval.py:1260,1622`), so both legs ask the same question with the same seed and a flip is attributable to the block the legs showed, not to sampling. `temperature` is a fixed `0.6` in `_answer`'s body — the pair is seeded, not deterministic, and the note does not claim otherwise |
 | Judge | `djev` on GPU 2 (`check_judge` refuses a set judged by its own generator, and it did not refuse) |
 
 Every input and output path above is outside `production_data_root()`. That was not
@@ -117,6 +137,34 @@ The legs are `LLOYD_FACT_WRITE_GATE`-pinned (`run` refuses a pin other than the
 snapshot's leg), so the pair is leg-pinned as well as path-pinned. Cost: 210.0 s and
 205.3 s — 53 prompts per leg, against the 1,275 a whole-set pair costs.
 
+**Each leg's artifact header, committed.** The two artifacts those commands wrote are
+`.json`, and `.gitignore:42`'s blanket `*.json` keeps them untracked, so the
+disclosure they carry and every other field of their provenance was readable only on
+the machine that ran the pair. The block dumps re-emit the disclosure because
+`--dump-blocks` runs in the same process as the run, but a reuse is not an artifact.
+`run_memory_eval.py headers` projects each artifact's *own* header onto one tracked row
+— the same `NAME=PATH` spelling `join` takes — keeps the sha256 of the file it read,
+and exits 1 when a scored arm's `<facts>` ordering disagrees with the ordering that
+leg's own artifact names as configured:
+
+```
+$ .venvs/lloyd/bin/python eval/run_memory_eval.py headers \
+    --leg noop="$OUT/lloydmemeval-fact-write-gate-b-2026-10-15-noop.json" \
+    --leg on="$OUT/lloydmemeval-fact-write-gate-b-2026-10-15-on.json" \
+    --out eval/measurements/fact-write-gate-b-2026-10-15/leg-headers.jsonl
+noop: arms=prefetch_rel n=53 categories=['knowledge_update'] … prefetch.facts.rank=relevance arm_ordering={'prefetch_rel': 'relevance'} mismatch=0
+on:   arms=prefetch_rel n=53 categories=['knowledge_update'] … prefetch.facts.rank=relevance arm_ordering={'prefetch_rel': 'relevance'} mismatch=0
+```
+
+`leg-headers.jsonl` is that output, exit status 0. Its rows carry
+`facts_rank.mismatch: []` for both legs, the snapshot tree each leg rendered from, the
+wall times above, and the digests `64666dd0f544…` (`noop`) / `2e93cd945bbf…` (`on`) of
+the artifacts they were read from — so the disclosure clause 2 asks for is checkable
+from the repo, and is not merely a copy of a field the block dumps already repeated.
+The artifacts themselves were read from `~/lloyd-eval-scratch/2768/artifacts/`, the
+moved copies named in each row's `artifact` field.
+
+
 | arm `prefetch_rel`, `knowledge_update`, n=53 | `noop` | `on` |
 |---|---|---|
 | `correct` | 35/53 = 0.660 [0.526, 0.773] | 35/53 = 0.660 [0.526, 0.773] |
@@ -163,17 +211,30 @@ committed the lines each leg rendered for all 53 questions:
 - `knowledge-update-blocks-noop.jsonl`
 - `knowledge-update-blocks-on.jsonl`
 
-`diff` of the two is non-empty on **all 53** rows: 344 lines differ, across 169
-entities. **`lme-kn-013`** is the witness — the only question of the 53 whose block
-carries `Hornet.dev` at all:
+`diff` of the two is non-empty on **all 53** rows. Counting the symmetric difference of
+the two legs' line sets and summing over the questions: **344 lines** differ, across
+**77** distinct entities; comparing positionally instead, 249. **`lme-kn-013`** is the
+witness — the only question of the 53 whose block carries `Hornet.dev` at all. Its
+three `Hornet.dev` lines, quoted from the committed rows exactly as `--dump-blocks`
+wrote them:
 
 ```
-noop  - [Hornet.dev] Hornet.dev claims to offer the most efficient BM25 implementation,
-          … single-node indexing of 100 million web documents.      (conf 0.8)
-on    - [Hornet.dev] Hornet.dev claims to offer the most efficient BM25 implementation,
-          … single-node indexing of 100 million web documents, per the 2026-10-14 sync
-          that replaces the earlier reading on record               (conf 1.0)
+noop  - [Hornet.dev] Hornet.dev claims to offer the most efficient BM25 implementation, achieving higher throughput per dollar on single-node indexing of 100 million web documents, per the 2026-10-14 sync that replaces the earlier reading on record (confidence: 0.9)
+      - [Hornet.dev] Hornet.dev claims to offer the most efficient BM25 implementation, achieving higher throughput per dollar on single-node indexing of 100 million web documents. (confidence: 0.8)
+      - [Hornet.dev] Hornet.dev is a commercial retrieval infrastructure company. (confidence: 1.0)
+on    - [Hornet.dev] Hornet.dev claims to offer the most efficient BM25 implementation, achieving higher throughput per dollar on single-node indexing of 100 million web documents, per the 2026-10-14 sync that replaces the earlier reading on record (confidence: 0.9)
+      - [Hornet.dev] Hornet.dev is associated with Jo Kristian Bergum's work on BM25. (confidence: 0.9)
+      - [Hornet.dev] Hornet.dev is a commercial retrieval infrastructure company, per the 2026-10-14 sync that replaces the earlier reading on record (confidence: 0.9)
 ```
+
+Against the committed fact rows, in order: `stat-005`, `stat-002`, `stat-001` for
+`noop`; `stat-005`, `stat-004`, `stat-006` for `on`. `stat-005` is a seed-corpus fact,
+active in both legs, and it tops the relevance order in both — which is exactly why a
+block diff needs the *ranking*, not just a differential. The `on` leg retired three of
+this entity's priors (`stat-001` 1.0, `stat-002` 0.8, `stat-003` 0.95; `expired_only_in_on:
+7` across the tree). Two of them sit in `lme-kn-013`'s top 3 and leave its block; the
+third never reaches the cap, so the pair's 53 rows move only where retirement coincides
+with rank.
 
 The mechanism, per the committed fact rows (`witness-entity-facts-noop.jsonl`,
 `witness-entity-facts-on.jsonl`) and the builder's per-write ledger in
@@ -183,11 +244,38 @@ and `expired_at: "2026-10-15T18:39:…"` in the `on` leg, both legs holding the
 identical text and confidence — so the block difference is the gate's retirement and
 not a different tree.
 
-One correction to the clause that named this witness: it pointed at
-`Hornet.dev-event.md::evnt-001`, and the measured ledger says that write was **not**
-an UPDATE — `target_fact: null`, `took: "add"` in **both** legs, whose fact file
-still shows `evnt-001` active at conf 0.9. The retirement that reaches the block is
-`stat-002`. The tests pin the id the ledger shows.
+Two independent reasons say that witness cannot be `Hornet.dev-event.md::evnt-001`,
+and the tests pin both so the correction is not carried as prose:
+
+1. **The ledger.** That write was **not** an UPDATE — `target_fact: null`,
+   `took: "add"` in **both** legs, whose fact file still shows `evnt-001` active at
+   conf 0.9. No expiry of it exists in either tree.
+2. **Selection.** Scored with the shipped selection over the question's real prompt —
+   `app.prefetch._rank_entity_facts(pf._get_facts_sync("Hornet.dev")["facts"],
+   pf._fact_query_tokens(q.prompt), "relevance")` against the `noop` tree — `Hornet.dev`
+   holds 10 active facts and `evnt-001` ranks **#8** of them, where `stat-002` ranks
+   **#2** and `stat-001` **#3**. `FACT_MAX_PER_ENTITY` is 3, so no retirement of
+   `evnt-001` reaches a rendered `<facts>` block for **any** of the 53 questions — and
+   `lme-kn-013` is the only question that renders `Hornet.dev` at all. Expiring it
+   anyway would need a write text hand-tailored to rank past the entity's own
+   `evnt-002` (whose stored sentence already contains every content word of
+   `evnt-001`, and only one candidate is put to djev, `SHORTLIST_K = 1`), which is the
+   engineered verdict this note's method section excludes.
+
+Reproduce the ranking against the pair's trees (moved to
+`~/lloyd-eval-scratch/2768/pair-2026-10-15/`, per "Where the trees are now" above):
+
+```
+LLOYD_FACTS_ROOT=$T/noop/facts LLOYD_KG_DB=$T/noop/kg.sqlite \
+  .venvs/lloyd/bin/python -c "import sys;sys.path[:0]=['.','eval'];import eval.run_memory_eval as r;from app import prefetch as p;ms=r.load_set(r.SET_ROOT/'v3',view='tuning');q=[x for x in ms.dev if x.id=='lme-kn-013'][0];print(*[f'{i+1} {f[\"id\"]}' for i,f in enumerate(p._rank_entity_facts(p._get_facts_sync('Hornet.dev')['facts'], p._fact_query_tokens(q.prompt), 'relevance'))], sep='\n')"
+```
+
+The id the ledger and the block both show is `stat-002`, and that is what the tests
+name: `tests/test_fact_write_gate.py::test_the_committed_witness_rows_show_which_prior_the_gate_retired`
+pins the expired-in-`on`/active-in-`noop` field, and
+`tests/test_fact_write_gate_snapshot.py::test_the_block_line_the_gate_moves_is_the_pinned_prior_not_the_named_event`
+pins that `stat-002`'s line is present in the `noop` block and absent from the `on`
+block, and that `evnt-001` renders in neither.
 
 ## Why a real retirement moved the score by zero
 

@@ -1191,6 +1191,73 @@ def test_every_artifact_the_b_note_cites_is_a_tracked_file_and_not_ignored():
         "blanket `*.json`; the committed form is the .jsonl `--out` writes")
 
 
+def _brace_names(spec: str) -> list[str]:
+    """`witness-entity-facts-{noop,on}.jsonl` -> the two files it stands for."""
+    m = re.search(r"\{([^}]*)\}", spec)
+    if not m:
+        return [spec]
+    return [spec[:m.start()] + alt + spec[m.end():]
+            for alt in m.group(1).split(",")]
+
+
+def test_every_node_and_artifact_the_clause_map_names_resolves():
+    """The map is a claim about this repo, so it is checked against this repo.
+
+    The note's opening table is the entry point for anyone auditing one clause of
+    #2768: it says which section holds the evidence, which file is the artifact, and
+    which test node pins it. Each of those three can rot on its own — a renamed test
+    node, a deleted artifact, a section heading reworded — and a reader following a
+    stale pointer concludes the clause is unpinned, which is the failure this item has
+    already paid for twice. So every backticked span in the map is resolved here:
+    `path::node` must be a `def node(` in a file that exists, and every artifact name
+    (brace form expanded) must be a tracked file.
+    """
+    import subprocess
+
+    note = _b_note()
+    start = note.find("## Clause map")
+    assert start >= 0, "the note's clause map heading is what an auditor starts at"
+    section = note[start:note.index("## What bar (b) asked for", start)]
+    spans = re.findall(r"`([^`]+)`", section)
+    nodes: list[tuple[str, str]] = []
+    artifacts: list[str] = []
+    last_file = None
+    for span in spans:
+        m = re.fullmatch(r"(tests/[\w/]+\.py)?(::)([a-z0-9_]+)", span)
+        if m:
+            file_part, _, node = m.group(1), m.group(2), m.group(3)
+            if file_part:
+                last_file = file_part
+            assert last_file is not None, (
+                f"{span} names a node before any test file appears in the map")
+            nodes.append((last_file, node))
+        elif re.fullmatch(r"[\w./+,-]+\.(jsonl|md|txt)", span):
+            artifacts.append(span)
+    assert len(nodes) >= 11, f"the map pins only {len(nodes)} node(s)"
+    assert len(artifacts) >= 6, f"the map names only {artifacts}"
+    sources: dict[str, str] = {}
+    for rel, node in nodes:
+        path = ROOT / rel
+        assert path.is_file(), f"the map points at {rel}, which is not in the repo"
+        sources.setdefault(rel, path.read_text(encoding="utf-8"))
+        assert f"def {node}(" in sources[rel], (
+            f"{rel} has no `def {node}(` — the map cites a test node that does not "
+            f"exist, so the clause it pins reads as unpinned")
+    for spec in artifacts:
+        for name in _brace_names(spec):
+            # The map sits in the measurement dir, so `../x/labels.txt` is a sibling
+            # measurement's file, not one level above the dir.
+            path = (DIR_B / name).resolve()
+            assert path.is_file(), f"the map names {name}, which is not on disk"
+            listed = subprocess.run(
+                ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+                 str(path.relative_to(ROOT))], capture_output=True)
+            assert listed.returncode == 0, f"{name} is cited by the map but untracked"
+    for heading in ("The two legs", "The paired delta", "The witness",
+                    "The bundled re-score", "Verdict on bar (b)"):
+        assert heading in note, f"the map points at a section named {heading!r}"
+
+
 def test_the_b_note_legs_both_scored_the_ordering_production_ships():
     """Clause 2 (#2778's rail, applied to the pair): no mismatch on the scored arm.
 
@@ -1207,6 +1274,142 @@ def test_the_b_note_legs_both_scored_the_ordering_production_ships():
         head = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
         assert head["facts_rank"]["mismatch"] == [], (
             f"{path} scored an arm whose <facts> ordering is not the shipped one")
+
+
+LEG_HEADERS = DIR_B / "leg-headers.jsonl"
+
+
+def _header_rows(path: Path) -> dict[str, dict]:
+    """Each leg's committed header row, keyed by leg name."""
+    out: dict[str, dict] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        if "_header" in row:
+            continue
+        out[row["leg"]] = row
+    return out
+
+
+def test_each_leg_artifacts_disclosure_is_committed_and_agrees_with_the_shipped_one():
+    """Clause 2: each leg's ARTIFACT header, in a file a reader can actually open.
+
+    The disclosure #2778 added lives in the `run` artifact, and every `run` artifact
+    is `.json` — swallowed by `.gitignore:42`'s blanket `*.json`. So the claim "each
+    leg's artifact carries the shipped `facts_rank` header with an empty mismatch"
+    was, until `run_memory_eval.py headers`, checkable only through the block dumps:
+    a different file, written by a different flag, that happens to reuse the same
+    in-process disclosure. This pins the artifact's own header instead, and against
+    the shipped function rather than a substring — a committed block that merely
+    happened to contain the word `relevance` would pass a text search, so the row is
+    required to equal `facts_rank_disclosure(arms, configured=…)` for the ordering
+    `config.yaml` carries, `mismatch: []` included, and to carry the digest of the
+    artifact it was read from so it cannot be quoted off some other file.
+    """
+    from eval import run_memory_eval as rme
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    configured = cfg["prefetch"]["facts"]["rank"]
+    assert configured == "relevance", (
+        "the shipped ordering is what this clause is about; if config moved, the "
+        "expected block has to be re-derived rather than this assertion kept")
+    assert LEG_HEADERS.is_file(), (
+        f"{LEG_HEADERS} is the tracked projection of each leg's run-artifact header; "
+        f"without it the disclosure clause 2 names sits in a gitignored .json")
+    rows = _header_rows(LEG_HEADERS)
+    assert {"noop", "on"} <= set(rows), f"{sorted(rows)} — both legs' rows are needed"
+    for leg in ("noop", "on"):
+        row = rows[leg]
+        assert row["facts_rank"]["mismatch"] == [], (
+            f"the {leg} leg scored an arm whose <facts> ordering is not the shipped "
+            f"{configured!r}: {row['facts_rank']['mismatch']}")
+        assert row["facts_rank"] == rme.facts_rank_disclosure(
+            row["arms"], configured=configured), (
+            f"the {leg} row's facts_rank block is not what "
+            f"`facts_rank_disclosure({row['arms']}, configured={configured!r})` "
+            f"returns: {row['facts_rank']}")
+        assert row["fact_snapshot"].endswith(f"/{leg}"), (
+            f"the {leg} row's artifact names {row['fact_snapshot']!r}, not the "
+            f"{leg} snapshot tree, so the leg cannot be told apart from its pair")
+        assert re.fullmatch(r"[0-9a-f]{64}", row["artifact_sha256"]), (
+            f"the {leg} row carries no digest of the artifact it was projected from")
+    assert f"`{LEG_HEADERS.name}`" in _b_note(), (
+        f"the note has to cite {LEG_HEADERS.name} — the tracked-artifact check only "
+        f"looks at the files the note names")
+
+
+def _artifact(arm: str, *, leg: str = "on", disclose: bool = True) -> dict:
+    """A `run` artifact shaped like the real one, small enough to hold in a test."""
+    doc: dict = {
+        "created": "2026-10-15T18:39:29", "set": {"version": "v3", "view": "dev"},
+        "item": 2768, "arms": [arm], "min_category_n": 20, "wall_s": 210.0,
+        "fact_snapshot": f"/scratch/pair-2026-10-15/{leg}",
+        "prefetch_corpus": f"/scratch/pair-2026-10-15/{leg}/facts",
+        "answerer": {"model": "Qwen3.8-Flash-Next-nvfp4", "temperature": 0},
+        "judge": {"model": "djev"},
+        "rows": [{"id": "lme-kn-013", "arm": arm, "category": "knowledge_update",
+                  "correct": 1}],
+    }
+    if disclose:
+        doc["facts_rank"] = {
+            "config_key": "prefetch.facts.rank", "configured": "relevance",
+            "arm_ordering": {arm: ("confidence" if arm == "prefetch" else "relevance")},
+            "mismatch": ([{"arm": "prefetch", "rendered": "confidence",
+                           "configured": "relevance"}] if arm == "prefetch" else [])}
+    return doc
+
+
+def test_the_headers_command_exits_nonzero_on_a_leg_that_is_not_the_shipped_ordering(
+        tmp_path):
+    """The rail clause 2 rests on is the command's exit status, not one assert.
+
+    A measurement note is written by whoever ran the command, so "this committed
+    header is empty of mismatch" has to be a property of the tool that writes it:
+    `headers` returns 1 when a scored arm's ordering disagrees with the ordering the
+    artifact itself says is configured. It still writes the row, because a mismatch
+    is evidence too and refusing to write it is how a pair gets re-run until the
+    field comes out empty; `--allow-mismatch` is how one is committed on purpose,
+    and the waiver never rewrites the mismatch it waived.
+    """
+    from eval import run_memory_eval as rme
+
+    good = tmp_path / "lloydmemeval-good.json"
+    good.write_text(json.dumps(_artifact("prefetch_rel")), encoding="utf-8")
+    bad = tmp_path / "lloydmemeval-bad.json"
+    bad.write_text(json.dumps(_artifact("prefetch", leg="noop")), encoding="utf-8")
+    out = tmp_path / "leg-headers.jsonl"
+
+    assert rme.main(["headers", "--leg", f"on={good}", "--out", str(out)]) == 0
+    assert _header_rows(out)["on"]["artifact_sha256"], (
+        "the row names the digest of the file it was read from")
+
+    assert rme.main(["headers", "--leg", f"noop={bad}", "--out", str(out)]) == 1, (
+        "a leg whose scored arm renders the confidence order while the artifact "
+        "names relevance as configured must fail the command, not merely a test")
+    assert rme.main(["headers", "--leg", f"noop={bad}", "--out", str(out),
+                     "--allow-mismatch"]) == 0
+    assert _header_rows(out)["noop"]["facts_rank"]["mismatch"], (
+        "--allow-mismatch commits the row WITH its mismatch visible; a cleared "
+        "mismatch under the waiver would be a falsified artifact")
+
+
+def test_the_headers_command_refuses_an_artifact_that_discloses_nothing(tmp_path):
+    """A row without a `facts_rank` block reads as `mismatch: []` — so it is refused.
+
+    Artifacts written before #2778 carry no disclosure at all. Projecting one would
+    put a row in the measurement dir whose absence a later reader scans past, and the
+    block exists precisely so that an empty list means CHECKED-and-agrees rather than
+    not-checked.
+    """
+    from eval import run_memory_eval as rme
+
+    plain = tmp_path / "lloydmemeval-pre2778.json"
+    plain.write_text(json.dumps(_artifact("prefetch_rel", disclose=False)),
+                     encoding="utf-8")
+    out = tmp_path / "leg-headers.jsonl"
+    with pytest.raises(SystemExit) as caught:
+        rme.main(["headers", "--leg", f"on={plain}", "--out", str(out)])
+    assert caught.value.code == 2
+    assert not out.exists(), "a refused projection must not leave a half-written row"
 
 
 def test_the_b_note_names_the_trees_and_keeps_every_path_out_of_the_live_root():

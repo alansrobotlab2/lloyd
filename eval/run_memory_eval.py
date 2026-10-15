@@ -110,6 +110,14 @@ Usage (quality run: shared primary lock; the primary answers every question):
       --label rawspan-2026-09-27
     .venvs/lloyd/bin/python eval/run_memory_eval.py export-sessions --out DIR
     .venvs/lloyd/bin/python eval/run_memory_eval.py recall-retrieval [--out F]  # no model: #1485 A/B
+    # #2768: a gate-mode pair is one arm across two processes, so its delta comes
+    # from `join`, and its provenance from `headers` — the artifacts themselves are
+    # `.json`, which `.gitignore` keeps untracked. `headers` exits 1 when a scored
+    # arm's `<facts>` ordering is not the one that arm's artifact calls configured.
+    .venvs/lloyd/bin/python eval/run_memory_eval.py join \\
+      --leg noop=A.json --leg on=B.json --arm prefetch_rel --out JOIN.jsonl
+    .venvs/lloyd/bin/python eval/run_memory_eval.py headers \\
+      --leg noop=A.json --leg on=B.json --out HEADERS.jsonl
 """
 from __future__ import annotations
 
@@ -2282,6 +2290,107 @@ def join_cli(argv: list[str] | None = None) -> dict:
     return res
 
 
+#: The header fields `headers` projects from a `run` artifact onto one tracked row.
+#: The scored material (`rows`, `dev`, `eval`, `dev_comparisons`, `judge_agreement`)
+#: is deliberately absent: that is what `join` reads, and a projection carrying it
+#: would just be the artifact again under an extension git can see. What stays is the
+#: provenance a reader needs in order to trust a rate quoted from the artifact: which
+#: set, which arms, which facts tree, which ordering each arm was shown (#2778),
+#: which model answered, and how long the leg took.
+HEADER_FIELDS = ("created", "set", "item", "label", "label_quality", "fact_snapshot",
+                 "prefetch_corpus", "facts_rank", "answerer", "judge", "arms",
+                 "min_category_n", "question_filter", "wall_s")
+
+
+def leg_header_row(artifact: dict, *, leg: str, path: Path | None = None) -> dict:
+    """One leg's committed evidence row: its artifact's own header, plus its digest.
+
+    `#2768`'s measurement dir is the last place a paired run's provenance can live,
+    and a `run` artifact cannot be put in it: `.gitignore`'s blanket `*.json` keeps
+    every artifact untracked, so the `facts_rank` block #2778 put in the header was
+    readable only on the machine that ran the pair. This is the projection that
+    survives: the header's own fields, unchanged, with the sha256 of the file they
+    were read from so a quoted row cannot have come from a different artifact.
+
+    An artifact with no `facts_rank` block is refused rather than projected.
+    Artifacts written before #2778 have none, and a row without one reads exactly
+    like a row whose mismatch came back empty — which is the absence this exists to
+    make visible, so reproducing it would be the failure mode, not a limitation.
+    """
+    if "facts_rank" not in artifact:
+        raise ValueError(
+            f"{path or 'the artifact'} carries no `facts_rank` block: it predates "
+            f"#2778, so it cannot say which `<facts>` ordering its scored arm was "
+            f"shown. Projecting it would put a row in the measurement record whose "
+            f"missing block reads as an empty mismatch.")
+    row: dict = {"leg": leg, "artifact": str(path) if path is not None else None}
+    if path is not None and Path(path).is_file():
+        row["artifact_sha256"] = _sha256(Path(path))
+    for key in HEADER_FIELDS:
+        if key in artifact:
+            row[key] = artifact[key]
+    scored = artifact.get("rows") or []
+    row["n_rows"] = len(scored)
+    row["categories"] = sorted({str(r.get("category")) for r in scored})
+    return row
+
+
+def headers_cli(argv: list[str] | None = None) -> int:
+    """`headers`: each leg's `run`-artifact header, as a tracked `.jsonl` row (#2768).
+
+    The exit status is the rail, not a log line: 0 when no leg's scored `<facts>` arm
+    disagrees with the ordering that leg's own artifact names as configured, 1 when
+    one does. The rows are written either way, because a mismatch is evidence too and
+    a command that refuses to write one is a command that gets re-run until the field
+    comes out empty — so the waiver is `--allow-mismatch`, which changes the exit
+    status and nothing in the row.
+    """
+    ap = argparse.ArgumentParser(prog="run_memory_eval.py headers")
+    ap.add_argument("--leg", action="append", required=True, metavar="NAME=PATH",
+                    help="LEGNAME=/path/to/lloydmemeval-<label>.json, once per leg — "
+                         "the same spelling `join` takes, so the two commands are "
+                         "handed the same pair")
+    ap.add_argument("--out", required=True,
+                    help="`.jsonl` to write: one `_header` row, then one row per leg")
+    ap.add_argument("--allow-mismatch", action="store_true",
+                    help=f"exit 0 even when a scored arm's `<facts>` ordering is not "
+                         f"the configured one ({CONFIG_FACTS_RANK_KEY})")
+    args = ap.parse_args(argv)
+    rows: list[dict] = []
+    for spec in args.leg:
+        if "=" not in spec:
+            ap.error(f"--leg wants NAME=PATH, got {spec!r}")
+        name, path = (part.strip() for part in spec.split("=", 1))
+        if not name or not path:
+            ap.error(f"--leg wants a non-empty NAME and PATH, got {spec!r}")
+        try:
+            rows.append(leg_header_row(read_artifact(path), leg=name, path=Path(path)))
+        except ValueError as exc:
+            ap.error(str(exc))
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"_header": "run_memory_eval headers",
+                             "fields": list(HEADER_FIELDS)}) + "\n")
+        for row in rows:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    for row in rows:
+        rank = row["facts_rank"]
+        print(f"{row['leg']}: arms={','.join(row['arms'])} n={row['n_rows']} "
+              f"categories={row['categories']} fact_snapshot={row['fact_snapshot']} "
+              f"{rank['config_key']}={rank['configured']} "
+              f"arm_ordering={rank['arm_ordering']} "
+              f"mismatch={len(rank['mismatch'])}")
+    bad = [row["leg"] for row in rows if row["facts_rank"]["mismatch"]]
+    if bad and not args.allow_mismatch:
+        print(f"HEADERS FAIL: {', '.join(bad)} scored a `<facts>` arm whose ordering "
+              f"is not the configured one. The rows are written — read the mismatch — "
+              f"but a note may not cite them as the shipped ordering without "
+              f"--allow-mismatch")
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv.pop(0) if argv and not argv[0].startswith("-") else "run"
@@ -2301,6 +2410,8 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "join":
         join_cli(argv)
         return 0
+    if cmd == "headers":
+        return headers_cli(argv)
     if cmd == "prefetch-retrieval":
         prefetch_retrieval(argv)
         return 0
