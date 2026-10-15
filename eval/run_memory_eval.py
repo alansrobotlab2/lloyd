@@ -170,6 +170,26 @@ RAWSPAN_COUNT_KEYS = ("n_selected", "n_unresolved_source", "n_no_span",
 #: artifact's shape depend on the injection.
 PREFETCH_META_KEYS = ("facts_conf", "facts_rel", "facts_rawspan", "prefetch_ms",
                       "rawspan_counts")
+#: Which `<facts>` ordering each scored arm renders (#2778). Exactly these three
+#: arms put a `<facts>` block in front of the model: `build_messages` hands
+#: `closed_book` nothing, `history` a conversation block, the `vault_recall` arms
+#: documents, and #1516's arm a `<next-session-notes>` envelope — so this map is
+#: also the list of arms the artifact may name an ordering for, and an arm
+#: outside it has no facts block to have an ordering.
+#:
+#: It is a constant and not an inference from the config: `prefetch_blocks`
+#: passes `rank=` explicitly to each `_search_fact_records` call, so which order
+#: an arm shows is settled inside this file no matter what `prefetch.facts.rank`
+#: says. That is exactly the asymmetry #2778 discloses — the map is fixed, the
+#: config key is not, and nothing before this change compared the two.
+FACTS_ARM_ORDERING = {"prefetch": "confidence", "prefetch_rel": "relevance",
+                      PREFETCH_RAWSPAN_ARM: "relevance"}
+#: The config key production reads to order `<facts>` —
+#: `app.prefetch._facts_rank_mode`, `config.yaml` `prefetch.facts.rank`. Named
+#: once because both the artifact and the summary line have to quote it, and a
+#: disclosure pointing at a key that does not exist is worse than none: the
+#: reader checks the wrong key and concludes the run was honest.
+CONFIG_FACTS_RANK_KEY = "prefetch.facts.rank"
 #: The `vault_recall` arms (#1485): the tool's documents for the question, with
 #: the episodic floor off / on. They need a qmd index whose `sessions`
 #: collection holds the set's sessions (`export-sessions`, then a prepared pin);
@@ -1059,8 +1079,12 @@ def prefetch_blocks(q: Question) -> dict:
     """The prefetch renderings for one question, off one selection each.
 
     `prefetch` and `prefetch_rel` are the same facts in two orders — confidence
-    order (today's shipped behaviour) and query-relevance order (#1482 rider 1) —
-    with every other byte of the block shared. `prefetch_rawspan` is the
+    order and query-relevance order (#1482 rider 1) — with every other byte of
+    the block shared. Neither name means "the shipped one": production renders
+    whichever order `config.yaml` `prefetch.facts.rank` carries, and this runner
+    renders both regardless, so the artifact's `facts_rank` block is what says
+    which order a given arm showed and whether that is the configured one
+    (#2778). `prefetch_rawspan` is the
     relevance arm's records rendered as the source text behind them (#1556), and
     it takes them from the SAME `_search_fact_records` call that produced the
     relevance lines: identical selection there is a property of this code path,
@@ -1299,7 +1323,7 @@ METRICS = ("correct", "correct_strict", "mentioned", "stale", "abstain", "eviden
 #: list buried in `run` cannot be pinned by a test.
 #:
 #: The #1516 pair is BOTH shipped rankings, not just the old one: production
-#: orders `<facts>` by relevance (`config.yaml`: `prefetch.rank: relevance`), so
+#: orders `<facts>` by relevance (`config.yaml`: `prefetch.facts.rank: relevance`), so
 #: a CI that clears 0 against `prefetch` alone would compare the channel with an
 #: arm no live turn renders. `prefetch` stays in the list because it is the arm
 #: the channel's own docstring names, and because the pair against the
@@ -1391,6 +1415,58 @@ def judge_agreement(rows: list[dict]) -> dict:
             "rate": round(agree / len(pairs), 4) if pairs else None,
             "by_rules": {rv: {lab: sum(1 for a, b in pairs if a == rv and b == lab)
                               for lab in DJEV_CRITERIA} for rv in ("correct", "stale")}}
+
+
+def effective_facts_rank() -> str:
+    """The `<facts>` ordering a live turn would render right now (#2778).
+
+    Read through `app.prefetch._facts_rank_mode` rather than by re-parsing the
+    YAML here: this value is a claim about what production renders, and a second
+    reader of `prefetch.facts.rank` would be free to disagree with production
+    about what a missing or unreadable key means. `_facts_rank_mode` answers
+    `confidence` for an absent key, an unparseable config and any value outside
+    the two names — its own docstring calls confidence "the default, and every
+    failure" — so a disclosure that answers `confidence` in exactly those cases
+    is reporting the same thing the live renderer will do, including when the
+    config is broken.
+    """
+    try:
+        from app import prefetch as pf
+        return "relevance" if pf._facts_rank_mode() == "relevance" else "confidence"
+    except Exception:  # noqa: BLE001 — an unreachable config is production's failure too
+        return "confidence"
+
+
+def facts_rank_disclosure(arms: list[str], configured: str | None = None) -> dict:
+    """The artifact's `facts_rank` block: what each scored arm was shown, in
+    which order, and whether that is the order production uses (#2778).
+
+    The problem this exists for is a quiet one. `--arms` defaults to
+    `closed_book,history,prefetch`; `prefetch` renders the confidence order
+    unconditionally (`FACTS_ARM_ORDERING`); `config.yaml` ships
+    `prefetch.facts.rank: relevance`. So the default run scores a fact ordering
+    no live turn renders, and both the artifact and the printed summary were
+    silent about it — which let a note label the confidence arm "prefetch
+    (today)". Disclosure rather than re-defaulting, because adding
+    `prefetch_rel` to the defaults would double the scored prompts of every
+    default run and re-baseline every artifact ever compared to them.
+
+    `arm_ordering` lists only arms that render a `<facts>` block, in the order
+    `--arms` named them; `closed_book`/`history`/the recall arms/`sleep_notes`
+    render none and are absent, not listed-as-none. `mismatch` is one entry per
+    scored facts arm whose ordering is not the configured one, naming the arm and
+    both orderings, and is the empty list when no scored arm disagrees — an empty
+    list is emitted rather than the key omitted, so "checked and agrees" is never
+    readable as "not checked".
+    """
+    rank = effective_facts_rank() if configured is None else (
+        "relevance" if configured == "relevance" else "confidence")
+    ordering = {a: FACTS_ARM_ORDERING[a] for a in arms if a in FACTS_ARM_ORDERING}
+    return {"config_key": CONFIG_FACTS_RANK_KEY,
+            "configured": rank,
+            "arm_ordering": ordering,
+            "mismatch": [{"arm": a, "rendered": o, "configured": rank}
+                         for a, o in ordering.items() if o != rank]}
 
 
 def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=None,
@@ -1542,6 +1618,13 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
                   "settles": "mixed / unmatched answers" if use_djev else "nothing (rules only)"},
         "arms": arms, "min_category_n": MIN_CATEGORY_N, "wall_s": wall,
         "prefetch_corpus": os.environ.get("LLOYD_FACTS_ROOT"),
+        # #2778: which `<facts>` ordering each scored arm was shown, and whether
+        # that is what `prefetch.facts.rank` ships. Sits in the header beside the
+        # other per-run provenance (`fact_snapshot`, `sleep_notes_store`,
+        # `prefetch_corpus`) for the same reason: a reader quoting a rate has to
+        # pass the fact that the arm they are quoting may not be the shipped
+        # ordering on the way to it. Emitted on every run, mismatch or not.
+        "facts_rank": facts_rank_disclosure(arms),
         # Which file the #1516 arm's notes went through, so a reader can tell a
         # run that used the channel from one that only named it, and can see for
         # itself that it was never the live one.
@@ -1633,6 +1716,17 @@ def _print_summary(report: dict) -> None:
             c = blk[cat]
             print(f"  {cat:17s} strict {_fmt(c['correct_strict'])}  evid {_fmt(c['evidence_in_context'])}  "
                   f"use {_fmt(c['use_rate'])}")
+    # #2778: the ordering each scored arm was shown, beside the scores computed
+    # from it. One line per arm whose ordering is not the configured one, and no
+    # line at all when every scored arm agrees — a standing "all match" line
+    # would train a reader to skip the whole block, and then the mismatching line
+    # is skipped with it.
+    fr = report.get("facts_rank") or {}
+    for m in fr.get("mismatch") or []:
+        print(f"\nfacts rank: [{m['arm']}] scored the {m['rendered']} order of <facts>, but "
+              f"{fr.get('config_key', CONFIG_FACTS_RANK_KEY)}={fr['configured']} — a live turn "
+              f"renders the {fr['configured']} order, so {m['arm']}'s numbers above are not a "
+              f"measurement of the shipped ordering")
     for comp in report.get("dev_comparisons") or []:
         a = comp["by_category"]["all"]
         if not a.get("insufficient"):

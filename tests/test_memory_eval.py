@@ -1811,3 +1811,212 @@ def test_a_run_without_the_flag_still_uses_the_corpus_default(tmp_path,
                                 "--label", "no-snapshot"])
     assert out["fact_snapshot"] is None
     assert out["arms"] == ["prefetch"]
+
+
+# ── #2778: every run discloses which <facts> ordering it scored ──────────────
+#
+# `prefetch` renders the CONFIDENCE order and is the only facts arm in the
+# default `--arms` set, while `config.yaml` ships `prefetch.facts.rank:
+# relevance` — so a default run scores a fact ordering no live turn renders, and
+# nothing in the artifact or on stdout used to say so. The contract is
+# disclosure, not re-defaulting (adding `prefetch_rel` to the defaults would
+# double every default run's scored prompts). The run-level tests fix the rank at
+# the `M.effective_facts_rank` seam so BOTH directions of the mismatch are pinned
+# without editing the shipped config; the first test drives the real config read
+# instead, and the last one checks the runner's own prose.
+
+_UNREADABLE = object()
+
+
+class _UnreadableConfig:
+    """A CONFIG whose every read raises — the "every failure" case
+    `app.prefetch._facts_rank_mode` documents, which has to land as `confidence`
+    because that is what the live renderer would then do."""
+
+    def get(self, *a, **k):
+        raise RuntimeError("config unavailable")
+
+
+def _facts_cfg(monkeypatch, rank) -> None:
+    """Point `prefetch.facts.rank` at `rank`; `None` drops the key and
+    `_UNREADABLE` swaps CONFIG for an object that raises.
+
+    The stub is a copy of `config.yaml` AS SHIPPED, not of the live `CONFIG`
+    object: a test that stubs the unreadable case and then wants the normal one
+    must not have the stub feed it, and `run` reads other config keys on its way
+    to the artifact, so a dict holding only this one would fail for a reason
+    unrelated to #2778. `_facts_rank_mode` imports CONFIG at call time, so
+    patching the module attribute is exactly what the live renderer would read."""
+    import app.config as cfg
+    if rank is _UNREADABLE:
+        monkeypatch.setattr(cfg, "CONFIG", _UnreadableConfig())
+        return
+    live = yaml.safe_load((ROOT / "config.yaml").read_text())
+    facts = dict((live.get("prefetch") or {}).get("facts") or {})
+    facts.pop("rank", None)
+    if rank is not None:
+        facts["rank"] = rank
+    monkeypatch.setattr(cfg, "CONFIG",
+                        {**live, "prefetch": {**(live.get("prefetch") or {}), "facts": facts}})
+
+
+def _ordered_facts_blocks(q):
+    """All three facts arms' blocks, each fed a line that names the ordering it is
+    supposed to be in, so an entry in the artifact's map is about a block visibly
+    different from the other arms'."""
+    lines = {"prefetch": ["- [C] confidence-ordered fact"],
+             "prefetch_rel": ["- [R] relevance-ordered fact"],
+             M.PREFETCH_RAWSPAN_ARM: ["- [R] relevance-ordered source span"]}
+    out = {arm: M.splice_facts(q.prompt, q.prompt, ln) for arm, ln in lines.items()}
+    out.update({"facts_conf": list(lines["prefetch"]),
+                "facts_rel": list(lines["prefetch_rel"]),
+                "facts_rawspan": list(lines[M.PREFETCH_RAWSPAN_ARM]),
+                "prefetch_ms": 1.0})
+    return out
+
+
+def _facts_run(tmp_path, *, arms, label, monkeypatch, rank=None, n_dev=2):
+    """One `run` over `n_dev` dev questions with the arm list and (optionally) the
+    configured rank fixed, returning the artifact it wrote plus the user turn of
+    every prompt that reached the model. `arms=None` leaves `--arms` out of argv
+    altogether, which is how the default set gets pinned. `n_dev` has to reach
+    `MIN_CATEGORY_N` for the arm-vs-arm CI to print at all, which is what the
+    summary test anchors the disclosure line's position on."""
+    root = make_set(tmp_path / f"set-{label}", {"knowledge_update": n_dev})
+    turns: list[str] = []
+
+    def answer_for(messages):
+        turns.append(messages[-1]["content"])
+        return "no idea"
+
+    argv = ["--set", str(root), "--judge", "rules", "--label", label,
+            "--out-dir", str(tmp_path / "runs")]
+    if arms is not None:
+        argv += ["--arms", arms]
+    if rank is not None:
+        monkeypatch.setattr(M, "effective_facts_rank", lambda: rank)
+    rep = M.run(argv, complete=_fake_complete(answer_for), primary=("http://x", "fake"),
+                blocks_fn=_ordered_facts_blocks)
+    return json.loads(Path(rep["_path"]).read_text()), turns
+
+
+def test_the_artifact_header_records_the_effective_facts_rank(tmp_path, monkeypatch):
+    """Clause 1, through the real config read. The fallback matters as much as
+    the value: a disclosure that answered `relevance` where production would have
+    fallen back to `confidence` would put a second, contradicting claim about the
+    shipped ordering into the same artifact."""
+    _facts_cfg(monkeypatch, "relevance")
+    assert M.effective_facts_rank() == "relevance"
+    _facts_cfg(monkeypatch, None)
+    assert M.effective_facts_rank() == "confidence", "an absent key must read confidence"
+    _facts_cfg(monkeypatch, _UNREADABLE)
+    assert M.effective_facts_rank() == "confidence", "an unreadable config must read confidence"
+
+    _facts_cfg(monkeypatch, "relevance")
+    art, _ = _facts_run(tmp_path, arms="prefetch", label="c1-rel", monkeypatch=monkeypatch)
+    assert art["facts_rank"]["configured"] == "relevance", art["facts_rank"]
+    assert art["facts_rank"]["config_key"] == "prefetch.facts.rank"
+
+    _facts_cfg(monkeypatch, None)
+    art, _ = _facts_run(tmp_path, arms="prefetch", label="c1-absent", monkeypatch=monkeypatch)
+    assert art["facts_rank"]["configured"] == "confidence", art["facts_rank"]
+
+
+def test_the_artifact_names_the_ordering_of_every_scored_facts_arm(tmp_path, monkeypatch):
+    """Clause 2. Three arms render `<facts>`; the other five render none, and the
+    map says so by leaving them out rather than listing them as no-ordering."""
+    art, turns = _facts_run(
+        tmp_path, arms=f"closed_book,history,prefetch,prefetch_rel,{M.PREFETCH_RAWSPAN_ARM}",
+        label="c2", monkeypatch=monkeypatch, rank="relevance")
+    ordering = art["facts_rank"]["arm_ordering"]
+    assert ordering == {"prefetch": "confidence", "prefetch_rel": "relevance",
+                        M.PREFETCH_RAWSPAN_ARM: "relevance"}, ordering
+    for arm in ("closed_book", "history"):
+        assert arm not in ordering, f"{arm} renders no <facts> block and must not be listed"
+    # The map describes blocks that really were fed, not a label: exactly the two
+    # dev questions' `prefetch` prompts carry the confidence-ordered line, and no
+    # prompt carries it alongside a relevance-ordered one.
+    conf_turns = [t for t in turns if "confidence-ordered fact" in t]
+    assert len(conf_turns) == 2, (len(turns), len(conf_turns))
+    assert all("relevance-ordered" not in t for t in conf_turns)
+
+
+def test_the_mismatch_record_fires_only_for_a_scored_arm_that_disagrees(tmp_path, monkeypatch):
+    """Clause 3, both directions. The empty list is the point as much as the
+    populated one: "checked and agrees" has to stay readable apart from "this run
+    predates the check", so the key is always present and the list is what
+    empties."""
+    art, _ = _facts_run(tmp_path, arms="closed_book,history,prefetch",
+                        label="c3-mismatch", monkeypatch=monkeypatch, rank="relevance")
+    assert art["facts_rank"]["mismatch"] == [
+        {"arm": "prefetch", "rendered": "confidence", "configured": "relevance"}], art["facts_rank"]
+
+    art, _ = _facts_run(tmp_path, arms="closed_book,history",
+                        label="c3-no-facts-arm", monkeypatch=monkeypatch, rank="relevance")
+    assert art["facts_rank"]["mismatch"] == [] and art["facts_rank"]["arm_ordering"] == {}
+
+    art, _ = _facts_run(tmp_path, arms="prefetch",
+                        label="c3-config-confidence", monkeypatch=monkeypatch, rank="confidence")
+    assert art["facts_rank"]["mismatch"] == [], art["facts_rank"]
+
+    # Under `confidence` the disagreement moves to the other arm rather than
+    # disappearing: the record is per scored arm, not a flag on the run.
+    art, _ = _facts_run(tmp_path, arms="prefetch,prefetch_rel",
+                        label="c3-flipped", monkeypatch=monkeypatch, rank="confidence")
+    assert art["facts_rank"]["mismatch"] == [
+        {"arm": "prefetch_rel", "rendered": "relevance", "configured": "confidence"}]
+
+
+def test_the_summary_names_each_mismatched_arm_beside_the_scores(tmp_path, monkeypatch, capsys):
+    """Clause 4. The disclosure has to be next to the numbers it qualifies — a
+    header key nobody scrolls to is how the 2026-09-25 baseline note came to
+    label the confidence arm `prefetch (today)`."""
+    _facts_run(tmp_path, arms="closed_book,history,prefetch", n_dev=22,
+               label="c4-mismatch", monkeypatch=monkeypatch, rank="relevance")
+    out = capsys.readouterr().out
+    lines = [l for l in out.splitlines() if l.startswith("facts rank:")]
+    assert len(lines) == 1, out
+    assert "[prefetch]" in lines[0] and "confidence order" in lines[0]
+    assert "prefetch.facts.rank=relevance" in lines[0], lines[0]
+    # Beside the scores: after `prefetch`'s own table, before the arm-vs-arm CIs.
+    assert out.index("[prefetch]") < out.index("facts rank:") < out.index("prefetch - closed_book")
+
+    capsys.readouterr()
+    _facts_run(tmp_path, arms="closed_book,history",
+               label="c4-clean-nofacts", monkeypatch=monkeypatch, rank="relevance")
+    assert "facts rank:" not in capsys.readouterr().out, "no facts arm scored, so nothing to say"
+
+    capsys.readouterr()
+    _facts_run(tmp_path, arms="prefetch",
+               label="c4-clean-matches", monkeypatch=monkeypatch, rank="confidence")
+    out = capsys.readouterr().out
+    assert "facts rank:" not in out, "a scored arm that matches the config prints no line"
+
+
+def test_the_disclosure_adds_no_arm_to_the_default_run(tmp_path, monkeypatch):
+    """Clause 5. The fix is disclosure precisely because re-defaulting `--arms`
+    would double the scored prompts of every default run and re-baseline every
+    artifact compared against them; if this goes red the round took that branch
+    while claiming it took this one."""
+    art, turns = _facts_run(tmp_path, arms=None, label="c5-default",
+                            monkeypatch=monkeypatch, rank="relevance")
+    assert art["arms"] == ["closed_book", "history", "prefetch"], art["arms"]
+    assert "prefetch_rel" not in art["arms"] and M.PREFETCH_RAWSPAN_ARM not in art["arms"]
+    assert len(turns) == 6, (len(turns), "2 dev questions × the same three arms, one prompt each")
+    # And the disclosure is what the default run actually carries: clause 1 and
+    # clause 3's populated direction, with `--arms` never written.
+    assert art["facts_rank"]["configured"] == "relevance"
+    assert [m["arm"] for m in art["facts_rank"]["mismatch"]] == ["prefetch"]
+
+
+def test_the_runner_no_longer_calls_the_confidence_order_the_shipped_one():
+    """Two sentences in this file were part of why the mismatch hid: the
+    `prefetch_blocks` docstring called the confidence order "today's shipped
+    behaviour", and the `DEV_COMPARISON_PAIRS` comment cited the config key as
+    `prefetch.rank`, a key that does not exist — so a reader who checked it found
+    nothing and concluded the run was honest."""
+    src = (ROOT / "eval" / "run_memory_eval.py").read_text()
+    assert "today's shipped behaviour" not in src
+    assert "prefetch.facts.rank" in src
+    assert "prefetch.rank" not in src.replace("prefetch.facts.rank", ""), (
+        "the runner cites a config key `prefetch.rank`, which does not exist")
