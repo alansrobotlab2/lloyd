@@ -92,10 +92,19 @@ supervisord program agent-qmd-daemon
 - **Collections** (14): the 11 the recall searches (`memory`, `knowledge`,
   `projects`, `personal`, `work`, `skills`, `architecture`, `lloyd`,
   `autonomy`, `backlog`, `people`) plus `autonomy-runs`, `sessions` and
-  `subliminal`. The recall never names those three: `subliminal` is the whole
-  vault as one collection, and a hit that arrives through it is folded back onto
-  its segment path by `agent_mcp/vault.py::_qmd_normalize_global`. They are still
-  embedded, so they count toward every re-embed. The vault's
+  `subliminal`. The recall never names those three. `subliminal` is the vault
+  root at `pattern: "*.md"` — root-level only, the loose notes that sit in no
+  segment directory and nothing else — because the 2026-10-07 ruling on #2180
+  narrowed it to that rather than retiring the eleven: under the old vault-wide
+  `**/*.md` glob every note a segment collection owns was indexed a second time
+  under this collection's name. That narrowing is in the tracked template
+  (`agent-services/conf/qmd-index.yml`) as of #2728; the daemon's own
+  `~/.config/qmd/index.yml` keeps the wide glob until the operator leg runs it,
+  and the nightly `config_drift` reports the gap as a `pattern` row — the
+  half-landed state, not a regression. A hit arriving through `subliminal` is
+  folded back onto its segment path by
+  `agent_mcp/vault.py::_qmd_normalize_global`. The three are still embedded, so
+  they count toward every re-embed. The vault's
   `architecture/` is an old OpenClaw-era set; the current docs in
   `~/lloyd/architecture/` are not a collection (measured, not adopted:
   `architecture/retrieval.md` §4).

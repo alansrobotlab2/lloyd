@@ -1021,3 +1021,82 @@ def test_the_readme_names_the_committed_copy_beside_the_runtime_citation():
         assert f"{pile[name]['bytes']:,} B" in bullet, (
             f"the bullet no longer states the {pile[name]['bytes']:,} B of {name}, so the "
             "figure is a claim about the report rather than a quote from it")
+
+
+# --- #2728: §2's `subliminal` sentence describes a root-level collection --------
+#
+# The sentence read "`subliminal` is the whole vault as one collection". It is now
+# false of the collection this repository ships: `agent-services/conf/qmd-index.yml`
+# carries `pattern: "*.md"` for it, root-level only, per the 2026-10-07 ruling on
+# #2180. It also happens to be the sentence a reader of #2180 arrived at and
+# widened the glob from, so an unworded doc is not a cosmetic problem here.
+#
+# Why this node cannot be a one-line `assert` on the raw text: the file BREAKS the
+# phrase across two lines — "`subliminal` is the whole" / "vault as one collection"
+# — so `grep -n "whole vault" architecture/qmd.md` answers 0 hits on the UN-edited
+# doc. A node written as `assert "the whole vault" not in _doc()` would have
+# passed green against the exact wording it exists to ban. `_flat` is what lets the
+# assertion be about a sentence rather than about where the file happened to break
+# it, and the control below runs that same `_flat` over the bytes the file really
+# broke at, so a fold that stopped folding is caught before the absence is trusted.
+
+#: The banned wording as §2 carried it, including the newline and the two-space
+#: continuation indent the file actually used. Deliberately not a one-line
+#: paraphrase: `"the whole vault as one collection"` written on one line would
+#: prove only that `_flat` is the identity function.
+OLD_SUBLIMINAL_CLAIM = ("`subliminal` is the whole\n"
+                        "  vault as one collection, and a hit that arrives through it")
+
+#: The phrase the replacement uses to name the pattern the collection now carries.
+#: Pinned inside the bullet rather than anywhere in the file: §2 states `*.md` in
+#: §2's 'What gets indexed' bullet too, so file-wide presence would pass on a doc
+#: that deleted the sentence and named nothing in its place.
+ROOT_LEVEL_CLAIM = 'root at `pattern: "*.md"`'
+
+
+def test_the_collections_bullet_describes_a_root_level_collection_not_the_whole_vault():
+    """#2728 clause 4: the whole-vault wording is gone, the root-level pattern is
+    named in its place, and the fold doing the work is proven on the real string.
+
+    The seam is prose to config — the template ships `pattern: "*.md"` for
+    `subliminal`, and until this commit §2 asserted the opposite to whoever next
+    reads a reported `pattern` drift and decides which side to move. Two ways to
+    pass this node falsely exist, and each has its own half of the node:
+
+    * **the ban matching nothing.** The control folds the same banned phrase
+      through the same `_flat` and requires a hit, so a `_flat` that lost its
+      whitespace join, or a constant whose line break drifted from the file's,
+      reddens here before the absence downstream is believed.
+    * **the replacement stating nothing.** A bullet that only deletes the sentence
+      clears the ban, so the pattern string, the ruling behind it and the
+      fold-back that makes a `subliminal/` hit land on its segment path are all
+      asserted inside that one bullet.
+    """
+    control = _flat(OLD_SUBLIMINAL_CLAIM)
+    assert "the whole vault as one collection" in control, (
+        "the control wording no longer folds to the banned phrase, so the absence "
+        "below is a match that silently never matches — which is the failure mode "
+        "this node exists to avoid, not a result it may report")
+
+    hits = [b for b in _section("## 2. The daemon").split("\n- ")
+            if "**Collections**" in b]
+    assert len(hits) == 1, (
+        f"§2 has {len(hits)} '**Collections**' bullets, so what this node calls 'the "
+        "bullet' is no longer one bullet")
+    bullet = _flat(hits[0])
+
+    assert "the whole vault as one collection" not in _flat(_doc()), (
+        "§2 still calls `subliminal` the whole vault. The 2026-10-07 ruling on #2180 "
+        'narrowed it to the vault root, and the tracked template\'s `pattern: "*.md"` '
+        "contradicts the sentence, so the doc is the stale half")
+    assert ROOT_LEVEL_CLAIM in bullet, (
+        f"the Collections bullet no longer names the pattern the collection carries "
+        f"({ROOT_LEVEL_CLAIM!r}); deleting the old sentence without saying what "
+        "replaced it leaves the reader who widens the glob with nothing to read")
+    assert "#2180" in bullet and "2026-10-07" in bullet, (
+        "the bullet lost the ruling the narrowing rests on, so the pattern it names "
+        "has no reason attached to it")
+    assert "`agent_mcp/vault.py::_qmd_normalize_global`" in bullet, (
+        "the fold-back is gone from the bullet. It is the mechanism that makes "
+        "narrowing cost retrieval nothing, and the reason the narrowing was allowed "
+        "at all")

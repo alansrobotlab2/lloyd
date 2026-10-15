@@ -422,3 +422,183 @@ def test_the_sessions_comment_names_the_background_split_it_does_not_show():
         f"the background split is documented with a document count "
         f"({stale.group()!r}); the split is the point, and the count is what this "
         f"file's own history says not to write")
+
+
+# --- #2728: `subliminal` is root-level only, and the reason is in the block -----
+#
+# #2180 measured what a vault-wide root costs: with `pattern: "**/*.md"` rooted at
+# `~/obsidian`, every note belonging to one of the eleven segment collections
+# nested under it was a `subliminal` row as well, so the same file stood in
+# `documents` and in `documents_fts` twice and arrived at the merge as two
+# candidates. The ruling of 2026-10-07 (carried by #2351) was to narrow this
+# collection to the vault root and keep the eleven, not to retire them. What lands
+# here is the tracked half of that ruling. The daemon's own file is a person's
+# edit and is still owed (#2728's operator leg), so from this commit the nightly
+# `config_drift` prints a `pattern` row for `subliminal` — a report entry and never
+# an exit code (`scripts/maintenance/qmd_index_maintenance.py:85-86`), and the
+# wrong way to silence it is to widen the glob back or to run the re-sync this
+# file's own header documents, which copies the un-narrowed live file over the
+# template.
+
+#: The vault root. `subliminal` is the only collection rooted here rather than
+#: inside one of its segments, which is the whole basis of the #2180 finding.
+VAULT_ROOT = "/home/alansrobotlab/obsidian"
+
+#: Every collection's `pattern` as this template stands. The clause #2728 has to
+#: hold is "nothing else moved", and only a snapshot says what the "else" was: an
+#: assertion aimed at `subliminal` alone would also pass on a file where `memory`
+#: had quietly gone root-level. A deliberate change to another collection edits
+#: this dict in the same commit — that friction is the pin working.
+EXPECTED_PATTERNS = {
+    "memory": "**/*.md",
+    "knowledge": "**/*.md",
+    "projects": "**/*.md",
+    "lloyd": "**/*.md",
+    "personal": "**/*.md",
+    "work": "**/*.md",
+    "skills": "**/*.md",
+    "people": "**/*.md",
+    "subliminal": "*.md",
+    "backlog": "**/*.md",
+    "autonomy": "*.md",
+    "autonomy-runs": "*/run_*.md",
+    "sessions": "**/*.md",
+    "architecture": "**/*.md",
+}
+
+#: What the `subliminal:` comment block has to carry for the clause to be worth
+#: anything: the ruling's item, the ruling's date, what it decided, the glob it
+#: replaced, and the instruction against undoing it. A comment saying only
+#: "narrowed" leaves a reader without the thing they need at the moment of the
+#: edit, which is what the reported drift will tempt them to undo.
+BLOCK_EVIDENCE = ("#2180", "2026-10-07", "Narrowed, not retired", "**/*.md",
+                  "DO NOT WIDEN IT BACK")
+
+
+def _subliminal_comment_block() -> str:
+    """The comment lines the template carries inside its own `subliminal:` block.
+
+    The reason `_sessions_comment_block` gives, and the reason it is written the
+    same way: `yaml.safe_load` discards comments, and the object under test is the
+    paragraph an operator reads before deciding to widen a glob. The block is the
+    run of `#` lines between `  subliminal:` and its `path:`, so another
+    collection's comment is not folded into it. The assert inside is the
+    denominator: an extractor returning `""` contains no `#2180` and no date, and
+    every claim about the block below would be a pass earned from nothing.
+    """
+    lines = TEMPLATE.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.rstrip() == "  subliminal:")
+    block = []
+    for ln in lines[start + 1:]:
+        if not ln.lstrip().startswith("#"):
+            break
+        block.append(ln.strip())
+    assert block, (
+        "the `subliminal:` collection carries no comment block, so the ruling this "
+        "file is supposed to hand a reader is not in the file at all")
+    return "\n".join(block)
+
+
+def test_the_subliminal_collection_is_root_level_only_and_nothing_else_moved():
+    """#2728 clause 1: one glob changed, and it is the glob #2180 ruled on.
+
+    Three assertions, one per thing a reader acts on: the glob, the root it is
+    relative to, and the ignores. `path` and `ignore` are not decoration beside the
+    pattern — the ruling narrows the pattern and nothing else, and a rewrite that
+    moved the root or dropped `agents/**` would change which documents the
+    collection serves while leaving `pattern: "*.md"` in place, which is the only
+    line a pattern-only test can see.
+    """
+    colls = yaml.safe_load(TEMPLATE.read_text())["collections"]
+    assert set(colls) == set(EXPECTED_PATTERNS), (
+        f"{sorted(set(colls) ^ set(EXPECTED_PATTERNS))} of the collections this file "
+        "documents is not the set the template defines, so the snapshot below has no "
+        "denominator")
+    for name, pattern in EXPECTED_PATTERNS.items():
+        assert colls[name]["pattern"] == pattern, (
+            f"{name}'s pattern is {colls[name]['pattern']!r}, not {pattern!r}: #2728 "
+            "narrowed `subliminal`, and nothing in the 2026-10-07 ruling said "
+            f"anything about {name}")
+    sub = colls["subliminal"]
+    assert sub["path"] == VAULT_ROOT, (
+        f"`subliminal` is rooted at {sub['path']!r}. Root-level `*.md` means the vault "
+        "root's own loose notes, so a moved root quietly changes the file set the "
+        "surviving glob matches")
+    assert sub["ignore"] == ["agents/**", "templates/**"], sub["ignore"]
+
+
+def test_the_subliminal_block_hands_a_reader_the_ruling_and_the_refusal():
+    """#2728 clause 2: the reason not to widen the glob is in the file, not only
+    in the backlog entry that recorded it.
+
+    The clause is not "a comment exists". It is that the next reader of a reported
+    `pattern` drift has the argument in front of them, in the file they are about
+    to edit — which is the exact moment the 2026-09-07 to 09-19 window went wrong
+    for `sessions`, when the reconcile that was run had nothing beside it saying
+    which side was true. Each item of `BLOCK_EVIDENCE` is therefore asserted by
+    name, and the control that these are assertable at all is the denominator
+    inside `_subliminal_comment_block`.
+    """
+    block = _subliminal_comment_block()
+    missing = [needle for needle in BLOCK_EVIDENCE if needle not in block]
+    assert not missing, (
+        f"the `subliminal:` block no longer carries {missing}; the narrowing without "
+        "its reason is how the vault-wide glob comes back as a drift 'fix'")
+
+
+def test_the_narrow_is_block_scoped_and_the_documented_resync_would_break_it():
+    """#2728 clause 3: this file was edited inside one block, not overwritten.
+
+    The alternative is not hypothetical — it is the command this file's own header
+    and `scripts/automod/spec.py:138` document, and the nightly drift report
+    prints: `cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml`. The
+    daemon's file is shorter than this one and carries no provenance and none of
+    these comment blocks, so running it now would delete exactly the three
+    structures pinned below: the header that names which file the daemon reads and
+    which direction a re-sync runs, the `autonomy-runs` block explaining why only
+    `run_*.md` is indexed, and the `sessions` block #2311 wrote to keep a stale
+    count out of the corpus. They share one node because a file that lost them is
+    not partly broken — it is a different file, and the last collection count or
+    path a reader could restore from would be gone with it.
+
+    The 14-collection assertion is the fourth corner: the `facts` collection went
+    out of the live file silently in 2026-09-19 and out of here only on 2026-09-28
+    (#1652), so the number of collections is the thing that catches a copy that
+    lost one rather than one that lost its comments.
+    """
+    text = TEMPLATE.read_text()
+
+    header = text.split("\ncollections:", 1)[0]
+    assert "TRACKED REFERENCE COPY" in header, (
+        "the header line that says what this file is is gone, which is the shape of "
+        "the daemon's file copied over it")
+    assert "~/.config/qmd/index.yml" in header, (
+        "the header no longer names the file the daemon actually reads, so a reader "
+        "has no way to know this one is not it")
+    assert "cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml" in header, (
+        "the header lost the re-sync command and its direction — the sentence that "
+        "makes a restore from this file safe")
+    assert "#1298" in header, (
+        "the header no longer cites the incident that made it say any of this, so it "
+        "reads as decoration and gets dropped by the next hand edit")
+
+    lines = text.splitlines()
+    at = next(i for i, ln in enumerate(lines) if ln.rstrip() == "  autonomy-runs:")
+    above = []
+    for ln in reversed(lines[:at]):
+        if not ln.lstrip().startswith("#"):
+            break
+        above.append(ln.strip())
+    assert above, (
+        "the `autonomy-runs:` key lost the comment block sitting above it — the "
+        "~19 MB of run records it exists to explain")
+    runs = "\n".join(reversed(above))
+    assert "architecture/autonomy-system.md" in runs and "run_*.md" in runs, (
+        f"the `autonomy-runs` block no longer says what it indexes and why ({runs!r})")
+
+    assert "No count is stated here" in _sessions_comment_block(), (
+        "the `sessions` block lost the sentence that keeps a live document count out "
+        "of it — #2311's rule, and the first thing the daemon's file does not have")
+
+    colls = yaml.safe_load(text)["collections"]
+    assert len(colls) == 14, sorted(colls)

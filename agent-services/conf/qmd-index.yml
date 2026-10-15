@@ -41,8 +41,20 @@ collections:
     path: /home/alansrobotlab/obsidian/people
     pattern: "**/*.md"
   subliminal:
+    # Narrowed, not retired — the 2026-10-07 ruling on #2180, carried by #2351:
+    # narrow this collection to the vault root and keep the eleven segment
+    # collections. The pattern used to be `**/*.md`, which made this root the
+    # whole vault, so every note one of those eleven owns was indexed a second
+    # time here — a second `documents` row and a second `documents_fts` row per
+    # file, and twice the candidates reaching the merge, for content the named
+    # collection already served. `*.md` matches root-level files only, so the
+    # duplication goes and the loose notes at the vault root stay, which is all
+    # this collection covers that no segment path does. DO NOT WIDEN IT BACK:
+    # `agent_mcp/vault.py::_qmd_normalize_global` already folds a
+    # `subliminal/`-prefixed hit onto its segment path, so the wide glob was
+    # never buying retrieval the narrow one loses — only rows.
     path: /home/alansrobotlab/obsidian
-    pattern: "**/*.md"
+    pattern: "*.md"
     ignore:
       - agents/**
       - templates/**
