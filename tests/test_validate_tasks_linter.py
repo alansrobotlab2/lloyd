@@ -14,6 +14,8 @@ and a `skill_name` with no SKILL.md behind it.
 """
 from __future__ import annotations
 
+import inspect
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -773,6 +775,70 @@ def test_the_alias_to_program_map_is_the_service_registrys():
         f"covers them: {sorted(registry_map)}")
 
 
+#: §#68 of `architecture/autonomy-jobs.md` states the fleet's `model:` census in prose.
+#: The real-board node below takes its expectation out of that sentence rather than from a
+#: number typed into an assertion, because the typed number is what broke: the fleet gained
+#: #98 `retag-untagged-facts` on 2026-10-14 and the node went red over a sentence in another
+#: file nobody was editing — a failure whose fix is not the assertion the reader is shown.
+#: Read from the doc, the same event names the parted sentence instead, and retyping the doc
+#: is then the entire repair. This is the same bargain the doc's own header states for every
+#: count it types: dated, and pinned to something re-derivable.
+DOC = ROOT / "architecture" / "autonomy-jobs.md"
+
+#: The census sentence, spelled the way the doc spells it. The grep command is part of the
+#: pattern on purpose: it is what fixes the number to the measurement it reports, so a stray
+#: "`primary` 12 times" elsewhere in the document cannot be mistaken for the census.
+DOC_CENSUS = re.compile(
+    r"`grep -h '\^model:' ~/obsidian/autonomy/\*\.md`\s+"
+    r"(?P<sentence>answers\s+`(?P<value>\w+)`\s+(?P<count>\d+)\s+times?)")
+
+#: How the doc spells the measurement the census reports, in backticks.
+CENSUS_CMD = "`grep -h '^model:' ~/obsidian/autonomy/*.md`"
+
+
+def census_prose(count: int, value: str = "primary") -> str:
+    """One census sentence in the doc's own spelling, for the parser's own tests."""
+    return f"{CENSUS_CMD} answers `{value}` {count} times"
+
+
+def doc_model_census(doc_text: str) -> tuple[int, str]:
+    """The `model:` census §#68 states, with the sentence that states it.
+
+    Raises rather than defaulting. A doc reworded past this shape has stopped being
+    pinned to the fleet, and the node that depends on the pin must say so — the silent
+    alternative is a node that quietly returns to green while measuring nothing against
+    the sentence, which is the blind spot this replaced. Two sentences quoting different
+    numbers raise for the same reason: the doc would be holding two censuses.
+    """
+    hits = list(DOC_CENSUS.finditer(doc_text))
+    if not hits:
+        raise AssertionError(
+            "architecture/autonomy-jobs.md no longer states its `model:` census in the "
+            "`answers `primary` N times` shape, so the doc and the fleet are no longer "
+            "joined — restate the sentence in that shape (with the date it was measured) "
+            "rather than dropping the join")
+    numbers = {int(h.group("count")) for h in hits}
+    if len(numbers) > 1:
+        raise AssertionError(
+            f"the doc states {len(hits)} `model:` censuses disagreeing with each other "
+            f"{sorted(numbers)}; the node cannot tell which one the fleet is meant to match")
+    return int(hits[0].group("count")), " ".join(hits[0].group("sentence").split())
+
+
+def census_parted_message(fleet_count: int, stated: int, sentence: str) -> str:
+    """What the node says when the fleet and §#68 have parted — pinned, because it is
+    the whole product of that failure: a reader with nothing but the assertion has to be
+    able to see the sentence, both numbers, and which file to edit.
+    """
+    return (
+        f"{fleet_count} task files declare a `model:`; §#68 of "
+        f"architecture/autonomy-jobs.md says {stated}, so the sentence and the fleet have "
+        f"parted — re-count and retype the doc. Its sentence reads: {sentence!r}. "
+        f"Re-count with `grep -h '^model:' ~/obsidian/autonomy/*.md | wc -l`, retype that "
+        f"sentence with the new number and the date it was measured; this assertion needs "
+        f"no edit, which is the point of reading the number out of the doc.")
+
+
 @live_vault
 def test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live(tmp_path):
     """Clause 3's real-directory leg: 0 warnings, exit 0, over `~/obsidian/autonomy`.
@@ -806,18 +872,118 @@ def test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live(tmp_pa
     assert "✅ all task files parse and pass structural checks" in out, out
     assert proc.returncode == 0, out
 
-    # §#68 of architecture/autonomy-jobs.md quotes this census in prose — "answers
-    # `primary` 39 times" — so it is read here rather than left to rot: the doc-claims
-    # suite cannot see the vault's front matter, and this is the only node that reads
-    # both the directory and the flags the sentence is about.
+    # §#68 of architecture/autonomy-jobs.md quotes this census in prose, so the expected
+    # number is read out of that sentence and never typed here: the doc-claims suite cannot
+    # see the vault's front matter, and this is the only node that reads both the directory
+    # and the flags the sentence is about. Typed here it went stale on 2026-10-14 when the
+    # fleet grew; read from the doc, a new task file fails by naming the sentence to retype.
     from scripts.autonomy import validate_tasks as vt
     declared = [ln.strip() for p in vt.DEFAULT_DIR.glob("*.md")
                 for ln in p.read_text(errors="replace").splitlines()
                 if ln.startswith("model:")]
-    assert len(declared) == 39, (
-        f"{len(declared)} task files declare a `model:`; §#68 of the doc says 39, so "
-        f"the sentence and the fleet have parted — re-count and retype the doc")
+    stated, sentence = doc_model_census(DOC.read_text(encoding="utf-8"))
+    assert len(declared) == stated, (
+        census_parted_message(len(declared), stated, sentence))
     assert set(declared) == {"model: primary"}, (
         f"a task file names an engine other than the primary: {sorted(set(declared))} "
         f"— §#68 states that every `model:` line reads `primary` as measured "
-        f"2026-10-13, the day #2632 landed the last one")
+        f"2026-10-15, the census having first been taken the day #2632 landed the check "
+        f"on 2026-10-13")
+
+
+# ── #2747: the doc's census is a joined claim, not a number two files agree on ──
+#
+# `architecture/autonomy-jobs.md` §#68 says `grep -h '^model:' ~/obsidian/autonomy/*.md`
+# answers `primary` N times. The live node above now reads N out of that sentence, and the
+# three nodes here are the gate-run half: they run in every checkout (`live_vault` is
+# deselected by `pytest.ini:14-15`, so the real-board node is exercised only by #83's nightly
+# Pre-Flight and by hand), and they pin the parser, the failure text, and the absence of a
+# hand-typed expectation.
+
+
+def test_the_census_expectation_is_parsed_out_of_the_doc_sentence():
+    """Clause 1 and 2's gate-run half: the expectation is a parse, and it is dated.
+
+    Two synthetic sentences quoting different numbers are parsed to those two numbers, so
+    the value demonstrably comes from the text and not from a constant the parser happens
+    to agree with. Then the real doc is read: it must hold exactly one census, it must
+    state `primary` (the value #2632 settled the fleet on), and an ISO date must sit inside
+    the 200 characters before the count — the doc's own header rule is that "every count
+    the doc does type carries the date it was true", and a census with no date is a claim
+    no later reader can tell stale from correct.
+    """
+    assert doc_model_census(census_prose(40)) == (40, "answers `primary` 40 times")
+    assert doc_model_census(f"…prose… {census_prose(41)} …prose…") == (
+        41, "answers `primary` 41 times")
+    assert doc_model_census(f"{CENSUS_CMD} answers `primary` 1 time\n") == (
+        1, "answers `primary` 1 time"), (
+        "the parser's plural allowance has to hold at one, or a fleet that shrank to a "
+        "single declaring task file would read as a broken doc")
+
+    text = DOC.read_text(encoding="utf-8")
+    stated, sentence = doc_model_census(text)
+    assert stated > 0, f"the census parsed to {stated}; a zero would read as an empty fleet"
+    assert sentence == "answers `primary` 40 times", (
+        f"§#68 must state the census as answers `primary` 40 times — every task file "
+        f"declaring a `model:` reads `primary` — and it reads {sentence!r}")
+    hit = DOC_CENSUS.search(text)
+    window = text[max(0, hit.start() - 200):hit.end()]
+    assert re.search(r"20\d\d-\d\d-\d\d", window), (
+        f"the census sentence carries no date within 200 characters of the count: "
+        f"…{window[-160:]!r} — an undated count is exactly the sentence that rotted here")
+
+
+def test_a_reworded_or_doubled_census_breaks_the_join_loudly():
+    """The parser may not degrade quietly, which is how the old pin went blind.
+
+    A doc reworded past the shape used to leave the node asserting a number nobody had
+    looked at; here it raises, and says which join broke. Two sentences quoting different
+    numbers raise too — a doc holding two censuses cannot tell the node which one the fleet
+    is meant to match, and picking one at random is the same silent wrong answer.
+    """
+    with pytest.raises(AssertionError) as gone:
+        doc_model_census("the fleet has forty model lines in it\n")
+    assert "no longer states" in str(gone.value), str(gone.value)
+
+    with pytest.raises(AssertionError) as doubled:
+        doc_model_census(
+            f"{census_prose(40)} … and elsewhere {census_prose(41)}\n")
+    assert "disagreeing" in str(doubled.value), str(doubled.value)
+
+    # A doc that repeats the *same* census is dull, not broken: no raise.
+    assert doc_model_census(
+        f"{census_prose(40)} … {census_prose(40)}\n") == (
+        40, "answers `primary` 40 times")
+
+    # A stray "`primary` 12 times" with no measurement in front of it is not the census:
+    # the command prefix is what joins the number to the thing it counts.
+    with pytest.raises(AssertionError):
+        doc_model_census("the model table lists `primary` 12 times in all\n")
+
+
+def test_the_real_board_node_holds_no_typed_census_and_names_the_sentence_when_it_parts():
+    """Clause 2's regression rail, run at the gate where the live node is not.
+
+    The first assertion is the one that keeps this fix from being undone by the next
+    convenient edit: if a typed number ever returns to the comparison, the node is back to
+    failing on a fleet that grew rather than on a sentence that parted. The rest pins the
+    failure text, which is the only thing a reader gets at 03:00 in a nightly log: both
+    counts, the sentence verbatim, the command that re-counts, and the file to retype.
+    """
+    src = inspect.getsource(
+        test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live)
+    assert "doc_model_census(DOC.read_text" in src, (
+        "the real-board node stopped deriving its expectation from the doc")
+    assert not re.search(r"len\(declared\)\s*==\s*\d", src), (
+        "a hand-typed census literal is back in the real-board node; that is the shape "
+        "that went stale on 2026-10-14 when the fleet grew past the number")
+
+    parted = census_parted_message(40, 39, "answers `primary` 39 times")
+    assert "40 task files declare a `model:`" in parted, parted
+    assert "says 39" in parted, parted
+    assert "'answers `primary` 39 times'" in parted, (
+        f"the message must quote the sentence the fleet parted with, got {parted!r}")
+    assert "grep -h '^model:' ~/obsidian/autonomy/*.md | wc -l" in parted, parted
+    assert "retype" in parted and "no edit" in parted, (
+        f"the reader must be told which file to retype and that this assertion is not it: "
+        f"{parted!r}")
