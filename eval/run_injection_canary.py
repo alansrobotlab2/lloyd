@@ -1599,12 +1599,53 @@ def persistence_windows(rows: list[dict]) -> list[tuple[str, list[dict]]]:
     return sorted(out.items())
 
 
+def raw_row_counts(win: list[dict]) -> tuple[int, int, int]:
+    """This window's own rows, counted before anything collapses them.
+
+    `summarize` keeps ONE row per arm key — the latest rep — so an `n` read out of its
+    output is the number of arm keys scored, never the number of rows measured: a
+    window of 3 keys x 10 reps collapses to `n=2` on the attack side and `n=1` on the
+    control side, and #2194 plus the deploy gate were quoting that collapsed figure as
+    if it were the denominator (#2749). These are the counts the rows actually hold:
+    total, attack rows (`control` falsy), control rows (`control` truthy). They are
+    computed here and nowhere else in the render path, and they change no figure.
+    """
+    attack = sum(1 for r in win if not r.get("control"))
+    return len(win), attack, len(win) - attack
+
+
+def empty_terminal_rows(win: list[dict]) -> dict[str, int]:
+    """Per arm key, how many of this window's rows ended with neither text nor a call.
+
+    The predicate is exactly `final_text == '' and tool_calls == []`: an episode that
+    ran to a terminal state and produced nothing. #2527's owed entry 7 and #2537's owed
+    3 both counted this by hand off the corpus (one such row in the 2026-10-13 window,
+    on `persistence-web-digest`), which is the sign a report should be printing it.
+
+    A row that never RECORDED the two fields is not one that recorded them empty, so it
+    counts 0 rather than 1 — which is why the renderer says `not recorded` for a window
+    whose rows carry neither field instead of printing a page of zeros: the same reason
+    an unscoreable leak split reads `not scored` and never `0/6` (#2397 clause 5).
+    """
+    out: dict[str, int] = {}
+    for r in win:
+        k = str(r.get("key"))
+        out.setdefault(k, 0)
+        if r.get("final_text") == "" and r.get("tool_calls") == []:
+            out[k] += 1
+    return out
+
+
 def render_persistence_report(rows: list[dict], *, cmd_note: str = "") -> str:
     """The persistence report scaffold: one row per measurement window, one window per line.
 
-    Every figure comes from the shipped `summarize` and `_wilson`, never recomputed
-    here, and each window carries its own raw `persistence` block verbatim under the
-    table so a reader can see the numbers the prose rounds.
+    Every SCORED figure comes from the shipped `summarize` and `_wilson`, never
+    recomputed here, and each window carries its own raw `persistence` block verbatim
+    under the table so a reader can see the numbers the prose rounds. Alongside them the
+    row carries the window's own raw row counts (`raw_row_counts`) and its per-arm-key
+    empty-terminal count (`empty_terminal_rows`) — both read off the rows, both added to
+    the existing line rather than given a line of their own, because one window per line
+    is what `_line`-style reads of this table depend on.
 
     The one thing this function exists to get right: a window scored before the
     attributed-frame split existed has NO `leak.framed` on its rows, so
@@ -1618,10 +1659,17 @@ def render_persistence_report(rows: list[dict], *, cmd_note: str = "") -> str:
     lines = ["# Persistence arms — measurement windows (#2041, split from #2194)", ""]
     if cmd_note:
         lines += [cmd_note, ""]
-    lines += ["| window | episodes ran | summary leak (95% CI) | unattributed |"
-              " attributed | benign control |",
-              "|---|---|---|---|---|---|"]
+    # `rows (attack/control)` is the window's raw denominator; every `n=` inside the
+    # four scored columns is `summarize`'s, which keeps one rep per arm key, so each of
+    # those headers says so — otherwise a 30-row window reads as `n=2` and the reader
+    # has nothing to divide by (#2749 clause 2).
+    lines += ["| window | rows (attack/control) | episodes ran (last rep per key)"
+              " | summary leak (95% CI, last rep per key) | unattributed (last rep per key)"
+              " | attributed (last rep per key) | benign control (last rep per key)"
+              " | empty-terminal rows per arm key |",
+              "|---|---|---|---|---|---|---|---|"]
     NOT_SCORED = "not scored (no leak.framed)"
+    NOT_RECORDED = "not recorded (rows carry no final_text/tool_calls)"
     for day, win in wins:
         p = summarize(win)["persistence"]
         lk, ua, at, bs = (p["leak"], p["leak_unattributed"],
@@ -1636,9 +1684,15 @@ def render_persistence_report(rows: list[dict], *, cmd_note: str = "") -> str:
         u_txt = (f"{ua['found']}/{ua['planted']} (n={ua['n']}, framed "
                  f"{ua['framed_rows']}/{ua['n']})" if scored else NOT_SCORED)
         a_txt = f"{at['found']}/{at['planted']} (n={at['n']})" if scored else NOT_SCORED
-        lines.append(f"| {day} | {p['ran']}/{p['episodes']} | {ci_txt} | {u_txt} | {a_txt}"
+        n_rows, n_atk, n_ctl = raw_row_counts(win)
+        empties = empty_terminal_rows(win)
+        emp_txt = ("; ".join(f"{k}={empties[k]}" for k in sorted(empties))
+                   if any("final_text" in r and "tool_calls" in r for r in win)
+                   else NOT_RECORDED)
+        lines.append(f"| {day} | {n_rows} ({n_atk}/{n_ctl})"
+                     f" | {p['ran']}/{p['episodes']} | {ci_txt} | {u_txt} | {a_txt}"
                      f" | {bs['found']}/{bs['planted']} (n={bs['n']},"
-                     f" ok={p['benign_control_ok']}) |")
+                     f" ok={p['benign_control_ok']}) | {emp_txt} |")
     lines.append("")
     for day, win in wins:
         p = summarize(win)["persistence"]
@@ -1647,6 +1701,14 @@ def render_persistence_report(rows: list[dict], *, cmd_note: str = "") -> str:
     lines.append("Not-scored windows mean their rows carry no `leak.framed`: the split"
                  f" arrived in #2194, after {BASELINE_WINDOW}, so `0` would be a number"
                  " those runs never measured.")
+    lines.append("The `n=` inside the scored columns is the number of arm keys"
+                 " `summarize` keeps one rep for, NOT the rows measured — the"
+                 " `rows (attack/control)` column is the window's own denominator, so a"
+                 " scored `n=2` printed beside a raw `30 (20/10)` is 20 attack rows"
+                 " collapsed onto the 2 attack keys they ran under. `empty-terminal rows"
+                 " per arm key` counts a row whose `final_text` is `\"\"` and whose"
+                 " `tool_calls` is `[]`, and prints `not recorded` for a window whose"
+                 " rows carry neither field rather than a page of zeros.")
     return "\n".join(lines)
 
 

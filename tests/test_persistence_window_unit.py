@@ -608,8 +608,17 @@ def test_the_arming_route_is_reachable_from_an_unattended_turn():
 
 REPORT_SCRIPT = "eval/run_injection_canary.py"      # named absolutely by the unit
 VENV_PY_SUFFIX = ".venvs/lloyd/bin/python"          # the repo's own interpreter
-REPORT_TABLE_HEADER = ("| window | episodes ran | summary leak (95% CI) |"
-                       " unattributed | attributed | benign control |")
+# #2749 added two columns to this line — the window's raw `rows (attack/control)`
+# denominator and its per-arm-key empty-terminal count — and relabelled the five scored
+# columns `last rep per key`, because every `n` in them is `summarize`'s key count and a
+# 30-row window was reading as `n=2`. The constant is the whole line, so the forked-CLI
+# stdout node and the write-behind node below both fail if the header and this copy drift.
+REPORT_TABLE_HEADER = ("| window | rows (attack/control) | episodes ran "
+                       "(last rep per key) | summary leak (95% CI, last rep "
+                       "per key) | unattributed (last rep per key) | "
+                       "attributed (last rep per key) | benign control "
+                       "(last rep per key) | empty-terminal rows per arm "
+                       "key |")
 WRITING_FLAGS = ("--write", "--force")              # dropped to make a run read-only
 
 
@@ -641,6 +650,34 @@ def _service_env() -> dict[str, str]:
         key, _, value = line.split("=", 1)[1].partition("=")
         env[key] = value.replace("%h", home)
     return env
+
+
+#: The script the unit's `ExecStartPost` names, resolved into THIS checkout.
+CANARY_SCRIPT = ROOT / "eval" / "run_injection_canary.py"
+
+
+def _fork_head(argv: list[str]) -> list[str]:
+    """The unit's interpreter, with its script token resolved into the tree under test.
+
+    The shipped line says `%h/lloyd/eval/run_injection_canary.py`, so forking `argv`
+    verbatim forks whatever checkout is INSTALLED — and a node that does that cannot pin
+    a change to the file it exists to test. #2749 is the case: the diff relabelled the
+    window table, the constant below carries the new header, and the fork still printed
+    the old one because the live tree had not moved. That is not the unit failing, it is
+    the fork pointing at the wrong tree — so the interpreter stays exactly as the unit
+    spells it (the sibling node pins that it is absolute, executable, and the repo venv
+    python, and that no `-m`/`--out` crept in) and only the script resolves into `ROOT`,
+    with `LLOYD_HOME` moved with it so the fork reads the corpus this tree tracks.
+    """
+    assert CANARY_SCRIPT.is_file(), (
+        f"{CANARY_SCRIPT} is not the shipped script path — a moved root silently turns "
+        "these forks into no-ops, which is how #2397 first broke")
+    return [argv[0], str(CANARY_SCRIPT)]
+
+
+def _fork_env() -> dict[str, str]:
+    """`_service_env()` with `LLOYD_HOME` pointed at the tree under test."""
+    return {**_service_env(), "LLOYD_HOME": str(ROOT)}
 
 
 def _utc_today() -> str:
@@ -710,7 +747,11 @@ def test_the_post_start_command_resolves_from_the_directory_systemd_starts_it_in
     The writing flags are dropped so the fork only renders — that is what the operator
     contract in `_report_cmd`'s docstring says a bare `report` does — and stdout is read
     as the report it is: the table header and the 2026-10-04 row, the window the item
-    says must stay on a line of its own."""
+    says must stay on a line of its own.
+
+    The interpreter token is the unit's own; the script token is resolved into this
+    checkout by `_fork_head`, because a fork of whatever tree happens to be installed
+    cannot pin a change to the renderer this node reads a header out of."""
     cp = _parse(SERVICE)
     wd = (cp.get("Service", "WorkingDirectory")
           if cp.has_option("Service", "WorkingDirectory") else None)
@@ -721,8 +762,9 @@ def test_the_post_start_command_resolves_from_the_directory_systemd_starts_it_in
         "the -m form cannot resolve unless the unit sets WorkingDirectory=%h/lloyd"
     assert "--out" not in argv, "an --out here would be a path the unit invented per run"
 
-    proc = subprocess.run([t for t in argv if t not in WRITING_FLAGS],
-                          capture_output=True, text=True, env=_service_env(),
+    proc = subprocess.run(_fork_head(argv)
+                          + [t for t in argv[2:] if t not in WRITING_FLAGS],
+                          capture_output=True, text=True, env=_fork_env(),
                           cwd="/", timeout=180)
     assert proc.returncode == 0, \
         f"the post-start argv failed from cwd=/ ({proc.returncode}): " \
@@ -742,7 +784,8 @@ def test_the_post_start_carries_force_because_a_same_day_rerun_would_otherwise_r
 
     The flag is not decoration. `_report_cmd` computes the target, sees it exists and
     returns 1 with `[refused] … already exists — pass --force to overwrite`
-    (`eval/run_injection_canary.py:1667-1676`), which on a unit whose window actually
+    (`eval/run_injection_canary.py:1735-1738`, the lines #2749's two new helpers pushed
+    the refuse down by), which on a unit whose window actually
     succeeded reads as `Failed with result 'exit-code'` — a second completed window on
     one UTC day would fail the very run that earned the report. So this writes twice to
     one throwaway target and once more with the flag, through the child process, because
@@ -779,12 +822,12 @@ def test_the_post_start_carries_force_because_a_same_day_rerun_would_otherwise_r
     # calendar.
     tracked_before = {p.name: p.read_bytes() for p in RC.OUT_DIR.iterdir()}
 
-    head, target2 = argv[:2], tmp_path / f"run-{today}{RC.REPORT_SUFFIX}"
+    head, target2 = _fork_head(argv), tmp_path / f"run-{today}{RC.REPORT_SUFFIX}"
     same_day = head + ["report", "--write", "--out", str(target2)]
     writes = [same_day,               # rep 10 finished, first window of the day
               same_day,               # a second one finished: this is the refusal
               same_day + ["--force"]]  # …which is the flag the unit carries
-    env, ran = _service_env(), []
+    env, ran = _fork_env(), []
     for i, cmd in enumerate(writes):
         proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
                               cwd="/", timeout=180)

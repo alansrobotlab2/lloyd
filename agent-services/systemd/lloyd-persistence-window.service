@@ -81,14 +81,18 @@ TimeoutStartSec=4h
 # the user's home, where `python -m eval.run_injection_canary` dies with
 # `ModuleNotFoundError: No module named 'eval'` (measured 2026-10-12, exit 1).
 #
-# Every figure in that file is summarize()'s and _wilson()'s output unchanged (:1164,
-# :1257, rendered by render_persistence_report at :1602), and persistence_windows
+# Every SCORED figure in that file is summarize()'s and _wilson()'s output unchanged
+# (:1164, :1257, rendered by render_persistence_report at :1639), and persistence_windows
 # (:1592) groups a window by the UTC day on its own rows -- so the 2026-10-04 figures
-# stay a row with their own denominator and a new window gets the line beside them,
-# never a share of theirs.
+# stay a row with their own denominator and a new window gets the line beside them, never
+# a share of theirs. summarize() collapses each arm key to its latest rep, so the n it
+# prints is a key count, not a row count; that is why the same line also carries the
+# window's raw row counts (rows/attack/control) and its per-arm-key count of rows that
+# ended with no final_text and no tool call (#2749). Those two columns are the only
+# figures render_persistence_report computes, and no scored number moved.
 #
 # --force is load-bearing, not tidy: _report_cmd sees an existing target and returns 1
-# with `[refused] ... already exists` (:1667-1676), so a second completed window on one
+# with `[refused] ... already exists` (:1735-1738), so a second completed window on one
 # UTC day would otherwise end as `Failed with result 'exit-code'` on a run whose window
 # actually succeeded.
 #
