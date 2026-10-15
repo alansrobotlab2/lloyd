@@ -7,9 +7,9 @@ Documentation=file:///home/alansrobotlab/lloyd/eval/run_persistence_arms.sh
 # the `claimed`/`running` depth off the pool status route
 # (eval/persistence_arms.py:190-207, IN_FLIGHT_STATES at :89), and that depth is
 # `SELECT source, state, COUNT(*) FROM queue GROUP BY source, state` with no
-# exclusion of the calling row (workers/queue.py:1103-1111). So a pool run burns the
-# default 900 s drain (a dispatched run gets no `--drain-wait`: that flag is an
-# ExecStart argument, not an environment default) and exits 2 every time it tries.
+# exclusion of the calling row (`depth_by_source()` in workers/queue.py). So a pool
+# run burns the default 900 s drain (a dispatched run gets no `--drain-wait`: that flag
+# is an ExecStart argument, not an environment default) and exits 2 every time it tries.
 # A pytest round cannot run it either:
 # tests/conftest.py refuses against the production tree, and the window needs the
 # live aggregator and the engine. systemd is the caller that is neither (#2428).

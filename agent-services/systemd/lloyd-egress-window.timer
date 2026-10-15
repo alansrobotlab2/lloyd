@@ -11,7 +11,9 @@ Description=Weekly (Monday) timer for the egress two-arm canary window (#2555; b
 # test_the_timer_hour_is_after_every_named_fire_and_clear_of_the_sibling_ceiling` re-reads
 # every `.timer` beside this one and re-derives the sibling's ceiling, so this paragraph
 # cannot rot into a lie the way `agent-services/systemd/lloyd-persistence-window.service`'s
-# stale `workers/queue.py:1103-1111` citation did.
+# bare line-number citation for the queue's pool-status query did: it pointed far above the
+# def it meant, shipped unnoticed, and #2772 replaced it with the symbol pointer that
+# tests/test_egress_window_unit.py now resolves for every unit in this directory.
 #
 # THE HOUR — after every scheduled thing this directory names, and clear of the OTHER
 # measurement window even at its own ceiling. The two calendars here that still fire every

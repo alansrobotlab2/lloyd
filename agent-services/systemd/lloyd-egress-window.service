@@ -8,7 +8,7 @@ Description=Egress two-arm canary window: one rep x the 18 scenarios x both egre
 # its sibling, and it is worth restating because this unit's `--drain-wait 3600` exists for
 # a reason the sibling's 900 s did not: `eval/egress_arms.py` will not start its episodes
 # while any queue row is in flight, and the queue's view of in-flight work comes from
-# `depth_by_source()` (workers/queue.py:1229 — `SELECT source, state, COUNT(*) as n FROM
+# `depth_by_source()` (workers/queue.py — `SELECT source, state, COUNT(*) as n FROM
 # queue GROUP BY source, state`, reached through `in_flight()` at eval/persistence_arms.py:190-206)
 # with no clause excluding the caller's own row. A window dispatched from the pool IS that
 # row: it burns its whole drain on itself and exits 2. The sibling unit is that failure on

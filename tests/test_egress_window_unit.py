@@ -6,7 +6,7 @@ them structural:
 
 * **A pool-dispatched window is impossible by construction.** The driver will not start its
   episodes while any queue row is in flight, and it learns that from `depth_by_source()`
-  (`workers/queue.py:1229` — `SELECT source, state, COUNT(*) as n FROM queue GROUP BY
+  (`workers/queue.py` — `SELECT source, state, COUNT(*) as n FROM queue GROUP BY
   source, state`) with no clause excluding its own row. A job dispatched to run the window
   IS the row it waits for, so it burns the whole drain and exits 2.
   `lloyd-persistence-window.service`'s first timer run is that failure on the record:
@@ -29,10 +29,13 @@ prose in SETUP.md and `architecture/infrastructure.md` — the move
 `tests/test_persistence_window_unit.py` makes at its timeout and timer nodes. This
 unit's numbers are its whole argument (a 5 h timeout, a 3,600 s drain, a 06:23 hour), and a
 setting whose comment no longer justifies it is exactly the drift that left the precedent
-unsupportable: `lloyd-persistence-window.service` still cites `workers/queue.py:1103-1111`,
-which is the boot-time interrupted-run recovery sweep now, while the query it means moved to
-:1229. Whether to spend a round repairing that sibling comment is owed-check's ruling
-(#2555 owed 5), not this round's.
+unsupportable. The precedent's own failure was a CITATION, not a setting:
+`lloyd-persistence-window.service` cited the pool-status query by line number long after
+those lines had become the boot-time interrupted-run recovery sweep, and nothing noticed
+because nothing re-read the file. #2772 retired both services' numbers in favour of naming
+`depth_by_source()`, and `_resolve_pool_query_pointer` here re-reads every window unit's
+pointer against `workers/queue.py` — including a surviving line number, which is allowed
+only while it resolves.
 
 What is NOT tested, and is owed instead (see the item): arming the timer and proving
 `ActiveState` beside `is-enabled`; the first real run and the >=36 arm-stamped rows it
@@ -48,6 +51,8 @@ import os
 import re
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 UNIT_DIR = REPO / "agent-services" / "systemd"
@@ -100,6 +105,75 @@ def _parse(text: str) -> dict[str, list[tuple[str, str]]]:
 def _comments(path: Path) -> str:
     return "\n".join(l.lstrip("#").strip() for l in path.read_text(encoding="utf-8").splitlines()
                      if l.lstrip().startswith("#"))
+
+
+# ── the pool-status pointer both window units lean on ──────────────────────────────────
+#
+# Every "why this cannot be a pool job" paragraph in `agent-services/systemd/` ends at the
+# same place: the queue's pool-status query. Citing it BY LINE NUMBER is what rotted — the
+# egress service shipped pointing at a live line and #2615's `pause_journal` DDL moved the
+# query below it without any test noticing, and the persistence service carried a dead
+# number green from then until #2772. A symbol next to the file cannot drift without
+# becoming a lie about a name, so that is the preferred form; a number is allowed only if
+# this resolver can re-read it and find the query there.
+
+POOL_QUERY_SQL = "GROUP BY source, state"        # the query's distinguishing text
+POOL_QUERY_DEF = "def depth_by_source"           # the function that builds it
+_QUEUE_ANCHOR = re.compile(r"workers/queue\.py")
+_QUEUE_NUMERIC = re.compile(r"workers/queue\.py:(\d+)")
+# `depth_by_source()` … workers/queue.py — the symbol bound to the file by the few
+# non-digit words a comment can put between them ("(", " in ", " at "). Non-DIGIT rather
+# than non-WORD: "`depth_by_source()` in workers/queue.py" has letters in the gap.
+_QUEUE_SYMBOL = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)\(\)`\D{0,10}?workers/queue\.py")
+
+
+def _resolve_pool_query_pointer(comment: str, qlines: list[str], *, src: str) -> list[str]:
+    """Resolve every pointer `comment` makes to `workers/queue.py` against that file.
+
+    Two forms resolve. A SYMBOL — `` `depth_by_source()` … workers/queue.py `` — needs
+    `def <name>` to exist in the file. A NUMBER — ``workers/queue.py:1103`` — needs the
+    cited line's own window (that line plus the three below it, so a `:1103-1111` range
+    counts) to hold the pool-status SQL, AND `def depth_by_source` to sit at or above it.
+
+    Everything else raises, and there is deliberately no third form: an anchor naming the
+    file with neither a line nor an adjacent symbol is unreadable, and — the part that
+    matters — a stale number is NOT excused by the comment saying it is stale. The node
+    this replaces forgave exactly that whenever the prose contained the word "rot", which
+    is how a wrong number passed. `qlines` is a parameter rather than a read here so the
+    failure modes below can be reached with a synthetic file instead of by damaging the
+    real one (#2772 clauses 3 and 4).
+    """
+    resolved: list[str] = []
+    covered: list[tuple[int, int]] = []
+
+    for m in _QUEUE_NUMERIC.finditer(comment):
+        n = int(m.group(1))
+        window = "\n".join(qlines[n - 1:n + 3])
+        assert POOL_QUERY_SQL in window, (
+            f"{src}: `{m.group(0)}` is cited as the pool-status query, but lines "
+            f"{n}–{n + 3} of workers/queue.py do not hold {POOL_QUERY_SQL!r}. The pointer "
+            "has rotted: re-aim it at the symbol `depth_by_source()`, which cannot rot.")
+        assert POOL_QUERY_DEF in "\n".join(qlines[:n]), (
+            f"{src}: `{m.group(0)}` sits above {POOL_QUERY_DEF}, so the cited line cannot "
+            "be inside the query the comment claims it is")
+        resolved.append(m.group(0))
+        covered.append(m.span())
+
+    for m in _QUEUE_SYMBOL.finditer(comment):
+        name = m.group(1)
+        assert re.search(rf"\bdef {re.escape(name)}\b", "\n".join(qlines)), (
+            f"{src}: `{m.group(0)}` names `{name}()` in workers/queue.py, which defines no "
+            f"`def {name}`. The pointer names a symbol that is not there.")
+        resolved.append(m.group(0))
+        covered.append(m.span())
+
+    uncovered = [comment[m.start():min(m.end() + 12, len(comment))]
+                 for m in _QUEUE_ANCHOR.finditer(comment)
+                 if not any(m.start() >= a and m.start() < b for a, b in covered)]
+    assert not uncovered, (
+        f"{src}: these mentions of workers/queue.py are neither a line number nor a "
+        f"`symbol()` bound to the file, so nothing can be checked about them: {uncovered}")
+    return resolved
 
 
 def _secs(value: str) -> int:
@@ -574,46 +648,114 @@ def test_no_surface_calls_this_window_a_daily_fire_anymore():
         f"the infrastructure row must read weekly: {row.strip()!r}"
 
 
-def test_the_timer_names_the_live_pool_query_and_refuses_to_claim_the_hour_avoids_rounds():
-    """#2555 clause 4(c): the citation points at the query that exists, and the false claim is absent.
+#: Every unit file in this directory that points at the queue's pool-status query.
+#: Enumerated rather than listed below, because a fourth unit that grows such a pointer
+#: has to be covered by the same rule and there is nothing to remember the name; the
+#: three #2772 names are then asserted PRESENT, so the guard cannot quietly cover zero.
+WINDOW_UNITS_WITH_POOL_POINTER = (SIBLING_SERVICE.name, SERVICE.name, TIMER.name)
 
-    The item, and the sibling unit's own header, both cite `workers/queue.py:1103-1111` for
-    the pool-status query. That is not the query any more — those lines are the boot-time
-    interrupted-run recovery sweep now — and `depth_by_source()` is at :1253 (:1229 until
-    #2615's `pause_journal` DDL went into `_SCHEMA` 27 lines above it, which is precisely the
-    way this pointer moves and why it is read from the file rather than remembered). So this unit
-    cites a line number and this node opens the real file at that number and requires the
-    `queue`/`GROUP BY source, state` text to be there, plus `def depth_by_source` above it:
-    a citation checked against nothing is how the sibling ended up carrying a dead pointer
-    into a unit that documents a mechanism by line (fixing that sibling is owed-check's
-    ruling #2555/5, not this round's).
 
-    And the comment must not justify the hour as a round-free window, because there is no
-    such hour. Measured 2026-10-11 from `workers.db` over 2026-10-04 → 10-11: 420 `autocode`
-    rounds, resident at 67.2% of 5-minute samples, starts in all 24 UTC hours (29 to 51 per
-    hour), p95 duration 54.5 min against a 900 s default drain. A comment crediting the
-    calendar would get this unit blamed for the next exit 2 instead of a too-short drain, so
-    both measured figures are required in the prose, with the lever that does work.
+def test_the_window_units_point_at_the_live_pool_query_and_refuse_to_claim_the_hour_avoids_rounds():
+    """#2555 clause 4(c), #2772 clauses 1-4: every window unit's pointer resolves, and the
+    false claim about the hour is absent.
+
+    This node used to open ONE file — the egress timer — and to assert against it a
+    literal line (`"workers/queue.py:1253" in c`), which is the pattern the item forbids:
+    the guard rotted with the number it quoted. It now walks every `.service`/`.timer` in
+    the directory whose comments name `workers/queue.py`, hands each comment to
+    `_resolve_pool_query_pointer`, and requires the three #2772 names to be in the set it
+    resolved. Both `.service` files point by symbol now; the timer still names a line, and
+    that line is re-read from `workers/queue.py` here rather than remembered.
+
+    Why the number is unsafe and the symbol is not: the mechanism is on the record in the
+    resolver's own header — a pointer aims at a line, `queue.py` grows above it, and
+    nothing notices. That is what a dead citation costs: the persistence service shipped
+    one, and the egress timer's comment had to spend a sentence explaining that its
+    sibling's citation was stale. Clause 4's red paths are proven below by handing the
+    resolver synthetic comments over a synthetic `queue.py`, so a wrong number in a real
+    unit cannot pass on the strength of prose — the excusing clause this rewrite deletes
+    forgave a dead number the moment the comment said the word "rot".
+
+    Kept from the old node, and still about the timer: the comment must not justify the
+    hour as a round-free window, because there is no such hour. Measured 2026-10-11 from
+    `workers.db` over 2026-10-04 → 10-11: 420 `autocode` rounds, resident at 67.2% of
+    5-minute samples, starts in all 24 UTC hours (29 to 51 per hour), p95 duration 54.5 min
+    against a 900 s default drain. A comment crediting the calendar would get this unit
+    blamed for the next exit 2 instead of a too-short drain, so both measured figures are
+    required in the prose, with the lever that does work.
     """
-    c = _comments(TIMER)
-    assert "workers/queue.py:1253" in c, c[:600]
     qlines = QUEUE.read_text(encoding="utf-8").splitlines()
-    cited = [int(n) for n in re.findall(r"workers/queue\.py:(\d+)", c)]
-    assert cited, "the comment names no line at all"
-    hits = [n for n in cited
-            if "GROUP BY source, state" in "\n".join(qlines[n - 1:n + 3])]
-    assert hits, (
-        f"no cited line {cited} holds the pool-status query; the pointer this unit leans on "
-        "has rotted and the comment needs re-aiming at the current def")
-    live = hits[0]
-    assert "def depth_by_source" in "\n".join(qlines[:live]), \
-        "the citation must point at or after depth_by_source()'s definition"
-    for n in cited:
-        if n not in hits:
-            assert re.search(r"rot|not the query|boot-time|recovery", c), (
-                f"workers/queue.py:{n} is cited but holds something else, and the comment "
-                "never says so — that is how the sibling unit shipped a dead pointer")
 
+    resolved: dict[str, list[str]] = {}
+    for unit in sorted(UNIT_DIR.iterdir()):
+        if unit.suffix not in (".service", ".timer"):
+            continue
+        c = _comments(unit)
+        if _QUEUE_ANCHOR.search(c):
+            resolved[unit.name] = _resolve_pool_query_pointer(c, qlines, src=unit.name)
+    for name in WINDOW_UNITS_WITH_POOL_POINTER:
+        assert name in resolved, (
+            f"{name} no longer points at workers/queue.py at all — the pointer is what "
+            "justifies this unit existing rather than being a pool job")
+    assert resolved, "not one unit file in the directory names the pool-status query"
+
+    # clause 1: the persistence service names the symbol, carries no line number, and the
+    # sentence around it still says WHY — the query has no exclusion of the calling row, so
+    # a pool-dispatched window waits on itself and burns its drain.
+    sib = _comments(SIBLING_SERVICE)
+    assert "`depth_by_source()`" in sib, \
+        "the sibling unit must name the symbol, not a line, for the pool-status query"
+    assert not _QUEUE_NUMERIC.search(sib), \
+        "the sibling unit is back to citing workers/queue.py by line number — the form that " \
+        "rotted once already (#2772)"
+    assert re.search(r"no[\s\S]{0,40}?exclusion of the calling row", sib), \
+        "the mechanism sentence went with the number: the query must be said to exclude nothing"
+    # `[\s\S]` rather than a space wherever the sentence can re-wrap: a comment line break
+    # is a reflow, not a change of meaning, and a guard that fails on one teaches people to
+    # delete it.
+    assert "drain" in sib and re.search(r"pool[\s\S]{0,4}run[\s\S]{0,20}?burns", sib), \
+        "the sentence must still draw the consequence for a pool-dispatched window"
+
+    # clause 2: same for this service, whose sentence ends in the exit code rather than a
+    # burned drain, because this unit's drain is the hour that was set to beat a round.
+    own = _comments(SERVICE)
+    assert "`depth_by_source()`" in own, \
+        "this unit must name the symbol, not a line, for the pool-status query"
+    assert not _QUEUE_NUMERIC.search(own), \
+        "this unit is back to citing workers/queue.py by line number (#2772)"
+    assert re.search(r"no clause excluding the caller[\u2019']s own row", own), \
+        "the mechanism sentence went with the number: the query must be said to exclude " \
+        "the caller nothing"
+    assert "exits 2" in own, "the consequence the dispatched window ends in must stay stated"
+
+    # clause 4: the resolver's red paths, each reachable from a synthetic comment. Line
+    # numbers are DERIVED from the synthetic bodies, never transcribed, so nothing here is
+    # an assertion about where the real query lives.
+    above_def = ["    rows = conn.execute(",
+                 '        "SELECT source, state, COUNT(*) as n FROM queue GROUP BY source, state"',
+                 "    return rows",
+                 "",
+                 f"    {POOL_QUERY_DEF}(self) -> int:  # defined BELOW the cited line"]
+    # Derived from the synthetic body, never transcribed: which line of it holds the SQL.
+    sql_line = next(i for i, ln in enumerate(above_def, 1) if POOL_QUERY_SQL in ln)
+    with pytest.raises(AssertionError, match="above"):
+        _resolve_pool_query_pointer(f"see workers/queue.py:{sql_line}", above_def,
+                                    src="synthetic")
+    no_sql = [f"    {POOL_QUERY_DEF}(self):", "        return {}"]
+    with pytest.raises(AssertionError, match="do not hold"):
+        _resolve_pool_query_pointer(f"see workers/queue.py:{sql_line}", no_sql,
+                                    src="synthetic")
+    with pytest.raises(AssertionError, match="defines no"):
+        _resolve_pool_query_pointer("(`not_the_real_thing()` in workers/queue.py)",
+                                    qlines, src="synthetic")
+    with pytest.raises(AssertionError, match="neither a line number"):
+        _resolve_pool_query_pointer("the queue file is workers/queue.py and that is all",
+                                    qlines, src="synthetic")
+    assert _resolve_pool_query_pointer("(`depth_by_source()` in workers/queue.py)",
+                                       qlines, src="synthetic"), \
+        "the symbol form the units now use must resolve against the real file"
+
+    c = _comments(TIMER)
     lower = c.lower()
     assert re.search(r"does not avoid|no calendar slot dodg|no fire time", lower), (
         "the comment must say outright that the fire time does not dodge automod rounds")
@@ -621,6 +763,38 @@ def test_the_timer_names_the_live_pool_query_and_refuses_to_claim_the_hour_avoid
         "the occupancy and p95 figures behind that refusal belong in the comment")
     assert "drain-wait" in c and str(DRAIN_S) in c, \
         "the comment must name the lever that actually prevents the refusal"
+    assert re.search(r"does not avoid|no calendar slot dodg|no fire time", lower), (
+        "the comment must say outright that the fire time does not dodge automod rounds")
+    assert "67.2" in c and "54.5" in c, (
+        "the occupancy and p95 figures behind that refusal belong in the comment")
+    assert "drain-wait" in c and str(DRAIN_S) in c, \
+        "the comment must name the lever that actually prevents the refusal"
+
+
+def test_systemd_itself_still_parses_every_window_unit_after_the_comment_edits():
+    """#2772 clause 5: the comment edits leave the units loadable by the real parser.
+
+    The only consumer of a systemd comment is systemd. Every other node here reads these
+    files through `_parse`, which is this suite's own INI view, and the arming nodes cross
+    the install route with a STUB `systemctl`; the one node that shells out to systemd
+    (`test_systemd_itself_reads_the_cadence_as_weekly_not_monthly`) hands it a calendar
+    expression, not the file. So a comment edit that broke the real grammar — an unbalanced
+    continuation, a stray directive character — would have gone green here and failed at the
+    next fire, which is the worst place to learn it. `systemd-analyze verify` is systemd's
+    own loader, takes a path, and needs no manager, no engine and no `systemctl`, so it is
+    the boundary a round is allowed to cross.
+
+    It is run over all four window units, not just the three this round touched: the claim
+    is that the shipped set loads, and a set pinned to "the files I edited" re-pins itself
+    out of existence the next time somebody touches a fourth.
+    """
+    units = sorted(UNIT_DIR.glob("lloyd-*-window.*"))
+    assert len(units) == 4, [u.name for u in units]
+    for unit in units:
+        proc = subprocess.run(["systemd-analyze", "verify", str(unit)],
+                              capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, \
+            f"systemd cannot load {unit.name} after the comment edits: {proc.stderr.strip()}"
 
 
 # ── clause 5: the arming route, and the rails a new unit trips ─────────────────────────
