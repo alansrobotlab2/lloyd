@@ -112,18 +112,34 @@ logger = logging.getLogger("lloyd.improvement")
 
 # Overridable module-level names: tests point these at a temp tree.
 FACTS_ROOT = VAULT_FACTS_ROOT
-# Two places a correction gets recorded, in two shapes. The compiled-in single
+# Three places a correction gets recorded, in three shapes. The compiled-in single
 # path could see only the first: `memory/corrections.md`, whose newest heading
 # was 2026-05-08 and whose file mtime was Aug 23, while the operator's live
 # corrections — `## corrections_log` bullets in `lloyd/USER.md`, dated
 # 09-07/08/09 — were invisible to the loop (no `.py` in the repo named
-# `corrections_log` at all). Both shapes now get a parser and both files get
-# read, because pointing the heading regex at a bullet list returns a silent
-# zero, which is the old blindness with a new filename in the record.
+# `corrections_log` at all). Every shape gets a parser and every file gets read,
+# because pointing the heading regex at a bullet list returns a silent
+# zero, which is the old blindness with a new filename in the record. The third
+# shape is the loaded-memory index (#2789), and it is the one the live channel
+# runs through today: the USER.md ruling of 2026-09-14 moved per-run corrections
+# out of that file, its `## corrections_log` is 2 standing bullets that can only
+# be fallback-dated, and a `[feedback]` bullet added to `lloyd/MEMORY.md` was read
+# by nobody — so the pass printed a dry channel while corrections were being
+# honoured in the file it never opened.
 CORRECTIONS_PATH = VAULT_ROOT / "memory" / "corrections.md"          # `## <date> — <text>`
 CORRECTIONS_BULLETS_PATH = VAULT_ROOT / "lloyd" / "USER.md"          # `- 2026-09-11: <text>`
+# The loaded-memory index, which is where a ruling that gets honoured actually
+# lands now: its dated `[feedback]` bullets are the shape corrections took after
+# `memory/corrections.md` stopped being written on 2026-05-08 and after
+# `lloyd/USER.md`'s `## corrections_log` was reduced to standing prose by the
+# 2026-09-14 ruling. Measured on the live vault: 87 tagged index bullets, 12 of
+# them `[feedback]` and dated 2026-09-08 → 2026-09-30, so four of those twelve sit
+# inside a 30-day window read from 2026-10-15 while the other two logs contribute
+# zero — which is why the pass reported `no_entries_in_window` for 160 days with
+# corrections in fact being recorded, and honoured, one file away.
+CORRECTIONS_MEMORY_INDEX_PATH = VAULT_ROOT / "lloyd" / "MEMORY.md"   # `- [feedback] (2026-09-11): <text>`
 CORRECTIONS_BULLETS_SECTION = "corrections_log"
-# Overridable for tests, like FACTS_ROOT. None means "the two constants above",
+# Overridable for tests, like FACTS_ROOT. None means "the three constants above",
 # read at CALL time rather than import time: a caller that repoints
 # `CORRECTIONS_PATH` — every test of this reader does — has to change what the
 # read sees, and a list assembled here at import would have frozen the real
@@ -135,8 +151,8 @@ def corrections_paths() -> list[Path]:
     """The correction logs this reader will consult, in order."""
     if CORRECTIONS_SOURCES is not None:
         return list(CORRECTIONS_SOURCES)
-    # Read the module globals, so repointing either constant repoints the read.
-    return [CORRECTIONS_PATH, CORRECTIONS_BULLETS_PATH]
+    # Read the module globals, so repointing any one constant repoints the read.
+    return [CORRECTIONS_PATH, CORRECTIONS_BULLETS_PATH, CORRECTIONS_MEMORY_INDEX_PATH]
 # A correction is evidence about a *recent* mistake. Undated, a March heading fed
 # the nightly loop forever and its two entities outranked every fresh drift write
 # in every run, permanently. Entries outside the window are counted in the record
@@ -329,6 +345,22 @@ _BULLET_DATE_RE = re.compile(
 _SECTION_HEAD_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.M)
 # The bullet marker, stripped from an UNDATED bullet to recover its prose (#2198).
 _BULLET_MARK_RE = re.compile(r"^\s*[-*]\s+")
+# The loaded-memory index shape (#2789): every line of the index is a bullet led by
+# one of three memory tags, and only `[feedback]` names a correction the operator
+# made. `[project]` and `[reference]` are index lines about state and about where
+# things live — counting them as corrections would credit the operator with 75
+# mistakes they never made, which is the same class of falsehood as counting a
+# heading's standing prose as an entry. Detection is by these tags appearing in the
+# text, never by the filename, for the reason `_corrections_entries` states: shape
+# picks the parser, so a test that repoints a path still parses what the file is.
+_INDEX_TAG_RE = re.compile(r"^\s*[-*]\s*\[(feedback|project|reference)\](?![A-Za-z])",
+                           re.I | re.M)
+_INDEX_FEEDBACK_LINE_RE = re.compile(r"^\s*[-*]\s*\[feedback\](?![A-Za-z])(.*)$", re.I)
+# The date a memory bullet carries: `(2026-09-11)`, inline after the tag rather
+# than leading the line, which is why `_entry_date`'s leading-date legs miss it and
+# this shape needs its own leg. A stamp is what the operator wrote; without it the
+# entry stays undated and takes the single documented fallback clock, never a guess.
+_INDEX_INLINE_DATE_RE = re.compile(r"\((\d{4}-\d{2}-\d{2})\)")
 # The log's own last-changed date, used to place an entry that carries none
 # (#2198). Read from the front matter by regex over the leading `---` block, in
 # the style of `_CREATED_AT_RE` above, and only in that block: the body of
@@ -462,19 +494,62 @@ def _file_fallback_date(path: Path) -> tuple[str | None, str | None]:
             .date().isoformat()), "mtime"
 
 
+def _index_feedback_entries(text: str) -> tuple[list[tuple[str | None, str]], str]:
+    """Parse a loaded-memory index into (dated entries, status) — corrections only.
+
+    An index of the `lloyd/MEMORY.md` kind carries one bullet per remembered thing,
+    each led by `[feedback]`, `[project]` or `[reference]`. Only a `[feedback]`
+    bullet is a correction: it is the tag the memory writer gives a ruling the
+    operator issued, while the other two index working state and file locations.
+    So an index whose every bullet is `[project]` yields NO entries and status
+    `empty` — nothing the operator corrected — and an index with 12 `[feedback]`
+    bullets among 87 tagged lines yields exactly 12 (#2789). A run that counted the
+    other 75 would be reporting corrections that were never made, and the number
+    would look like a busy fortnight.
+
+    A bullet is dated by its own inline `(YYYY-MM-DD)` stamp, which is the date the
+    operator's ruling was made. A bullet carrying none returns `(None, prose)` and
+    takes the caller's single documented fallback clock — the same leg
+    `_file_fallback_date` gives a standing bullet — and never a date invented here.
+    """
+    entries: list[tuple[str | None, str]] = []
+    for line in text.splitlines():
+        if not _INDEX_TAG_RE.match(line):
+            continue
+        m = _INDEX_FEEDBACK_LINE_RE.match(line)
+        if not m:
+            continue                       # `[project]` / `[reference]`: not a correction
+        d = _INDEX_INLINE_DATE_RE.search(line)
+        text_only = _INDEX_INLINE_DATE_RE.sub("", line, count=1)
+        text_only = _BULLET_MARK_RE.sub("", text_only.strip()).strip()
+        text_only = re.sub(r"^\[(?:feedback|project|reference)\]\s*", "", text_only,
+                           flags=re.I)
+        entries.append(((d.group(1) if d else None), text_only.strip()))
+    if not entries:
+        # Tagged lines exist and none of them is a correction. That is `empty`
+        # ("nothing to correct"), not `undated` and not `no_section`: the reader
+        # parsed the file fine, it just holds no operator ruling.
+        return [], "empty"
+    return entries, ("undated" if not any(d for d, _ in entries) else "entries")
+
+
 def _corrections_entries(path: Path) -> tuple[list[tuple[str | None, str]], str]:
     """Parse one corrections log into (dated entries, status).
 
-    Two shapes, because the two live logs use two shapes:
+    Three shapes, because the three live logs use three shapes:
       * `memory/corrections.md` — one heading per entry, `## 2026-05-08 14:37 PDT
         — Tool calls without ToolSearch schema loading`;
       * `lloyd/USER.md` `## corrections_log` — bullets, `- 2026-09-11: …`, with
-        standing prose between them that is not an entry.
+        standing prose between them that is not an entry;
+      * `lloyd/MEMORY.md` — a tagged index, `- [feedback] (2026-09-11) …`, where a
+        `[feedback]` bullet is an entry and a `[project]` or `[reference]` line is
+        not (#2789).
     A heading-only parser pointed at the second returns zero, and zero from an
     unparseable format is the exact failure this module is here to make visible.
 
     Shape, not path, picks the parser: a file that carries a `## corrections_log`
-    section is read as a bullet log, everything else as dated headings. Keying on
+    section is read as a bullet log, a file whose bullets are led by a memory tag
+    is read as an index, and everything else as dated headings. Keying on
     the filename is the mistake one reversion made — it parses whatever the file
     is called instead of what it contains.
 
@@ -494,6 +569,17 @@ def _corrections_entries(path: Path) -> tuple[list[tuple[str | None, str]], str]
     except OSError as exc:
         logger.debug("corrections log %s unreadable: %s", path, exc)
         return [], "unreadable"
+
+    # Checked FIRST, ahead of the `## corrections_log` section scan, and that
+    # ordering is the deliberate one: a tagged bullet is a correction only when the
+    # tag says `[feedback]`, and no enclosing heading can promote a `[project]`
+    # index line into something the operator corrected. The two logs that already
+    # worked are unaffected either way — `memory/corrections.md` carries no
+    # memory-tagged bullet at all, and `lloyd/USER.md`'s `corrections_log` bullets
+    # carry no tag either (measured: 0 tagged bullets in it), so neither reaches
+    # this leg and both keep the parser they always had.
+    if _INDEX_TAG_RE.search(text):
+        return _index_feedback_entries(text)
 
     start = None
     for m in _SECTION_HEAD_RE.finditer(text):
@@ -578,10 +664,15 @@ def read_correction_signals(limit: int = 25, window_days: int = CORRECTIONS_WIND
     and which leg of the waterfall supplied it.
 
     Reads every path in `corrections_paths()` — the compiled-in
-    `memory/corrections.md` *and* `lloyd/USER.md`'s `## corrections_log`, which
-    is where corrections have actually been written since the compiled-in file
-    stopped being. An entry is credited to an entity only when a token in it is
-    a registered entity name; dates and prose are stripped first, so
+    `memory/corrections.md`, `lloyd/USER.md`'s `## corrections_log`, and since
+    #2789 `lloyd/MEMORY.md`, whose dated `[feedback]` index bullets are where a
+    ruling the operator issued is recorded now. The earlier sentence here called
+    USER.md alone the live log; that stopped being true when the 2026-09-14 ruling
+    reduced its `## corrections_log` to standing prose (2 bullets, both dated only
+    by the file's own clock), and whether that file should be a corrections source
+    at all is the ruling #2789 leaves to its owed pass — this round keeps reading
+    it rather than deciding. An entry is credited to an entity only when a token in
+    it is a registered entity name; dates and prose are stripped first, so
     "TTS service status" yields `TTS` and nothing else does.
 
     The `[]` case is where the honesty lives — see `last_corrections_read()`.
@@ -2517,10 +2608,17 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         # how many of them?" — the owed ruling on whether standing corrections ever
         # resolve to a useful signal is made from these records, and a fallback that
         # reached the signals but not the record could not be ruled on at all.
+        # `newest_entry` goes per source as well as read-level (#2789) because the
+        # CLI now prints one line per source, and a line that says "stale since"
+        # has to name the date THAT log holds. Read-level `corrections_stale_since`
+        # is the max over stale logs, which with three logs of different vintages
+        # states one file's age for all three — the aggregate the item's clause 4
+        # is about.
         "corrections_sources": {p: {"status": i["status"], "entries": i["entries"],
                                     "in_window": i["in_window"],
                                     "outside_window": i["outside_window"],
                                     "undated": i["undated"], "signals": i["signals"],
+                                    "newest_entry": i["newest_entry"],
                                     "fallback_date": i["fallback_date"],
                                     "fallback_origin": i["fallback_origin"],
                                     "fallback_admitted": i["fallback_admitted"]}

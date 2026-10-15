@@ -125,10 +125,26 @@ def main() -> int:
         # a zero from a quiet fortnight printed identically. Same rule as the
         # store verdict above — the caveat goes on stdout, where the
         # counts-reader is, never only in the JSON nobody opens.
-        if rec.get("corrections_stale_since"):
-            print(f"[corrections] 0 signals in window: log stale since "
-                  f"{rec['corrections_stale_since']} (window "
-                  f"{rec.get('corrections_window_days')} days)")
+        # Per SOURCE, not one aggregate line (#2789). What this block used to print
+        # was a single age — the newest entry across every stale log, from
+        # `corrections_stale_since` — for the whole channel. With three logs of
+        # three different vintages (a heading log last written 2026-05-08, a
+        # standing-prose log whose bullets carry no date, a memory index with
+        # in-window `[feedback]` bullets) that printed one file's staleness as the
+        # channel's, so a run that had just read four fresh corrections still said
+        # "log stale since 2026-05-08" and a run that read none looked identical to
+        # it. Each line below carries its own log's entries / in-window / signals
+        # counts and, when that log is the dry one, its own newest entry — so the
+        # stdout states WHICH log is empty instead of pronouncing the channel dead.
+        _srcs = rec.get("corrections_sources") or {}
+        for _path, _info in sorted(_srcs.items()):
+            _line = (f"[corrections] {_path}: entries={_info.get('entries')} "
+                     f"in_window={_info.get('in_window')} "
+                     f"signals={_info.get('signals')} status={_info.get('status')}")
+            if _info.get("status") == "no_entries_in_window" and _info.get("newest_entry"):
+                _line += (f" — log stale since {_info['newest_entry']} "
+                          f"(window {rec.get('corrections_window_days')} days)")
+            print(_line)
         # The other silent half of the same channel (#2198): entries with no date on
         # the line. The stale line above covers a log that is simply old; it never
         # fired for `lloyd/USER.md`, whose bullets are standing prose with no date at

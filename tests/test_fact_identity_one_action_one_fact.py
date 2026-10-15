@@ -73,6 +73,13 @@ def tree(tmp_path, monkeypatch):
     monkeypatch.setattr(fi, "FACTS_ROOT", facts_root)
     monkeypatch.setattr(fi, "CORRECTIONS_PATH", vault_root / "memory" / "corrections.md")
     monkeypatch.setattr(fi, "CORRECTIONS_BULLETS_PATH", vault_root / "lloyd" / "USER.md")
+    # All THREE source constants must be repointed (#2789). The loaded-memory index
+    # resolves through `VAULT_ROOT`, which is the real vault, so patching only two
+    # left this file's corrections test reading the operator's live
+    # `lloyd/MEMORY.md` — 12 dated `[feedback]` bullets, 4 of them in window — and
+    # reporting `entries_no_entity` for a fixture whose own log is empty.
+    monkeypatch.setattr(fi, "CORRECTIONS_MEMORY_INDEX_PATH",
+                        vault_root / "lloyd" / "MEMORY.md")
     monkeypatch.setattr(fi, "CORRECTIONS_SOURCES", None)
     monkeypatch.setattr(fi, "RECORD_DIR", tmp_path / "records")
     shared._invalidate_entity_dirs_cache()
@@ -325,6 +332,11 @@ def test_zero_distinguishes_an_empty_log_from_an_unreadable_one(tree, monkeypatc
     head = vault_root / "memory" / "corrections.md"
     user = vault_root / "lloyd" / "USER.md"
     user.write_text("# nothing here\n", encoding="utf-8")
+    # Present and quiet, like the other two here. `_roll_up`'s rule is "else the
+    # worst file", and `missing` outranks `empty`, so an absent third log (#2789's
+    # source) would make every phase below report `missing` and this node would
+    # stop distinguishing the three zeros it exists to separate.
+    (vault_root / "lloyd" / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
     monkeypatch.setattr(fi, "_known_entities", lambda: {"tts": "TTS"})
 
     head.write_text("# Corrections Log\n", encoding="utf-8")
@@ -353,6 +365,10 @@ def test_a_heading_outside_the_window_contributes_no_entity(tree, monkeypatch):
         "## 2026-03-31 20:04 PDT — Skipped skill check before gateway restart\n"
         "## 2026-03-30 — Thorough autonomy audit\n", encoding="utf-8")
     (vault_root / "lloyd" / "USER.md").write_text("## corrections_log\n", encoding="utf-8")
+    # Present and holding no correction, so the read-level verdict below is the
+    # stale window being reported and not `missing` for a source that was never
+    # written (#2789 added this third log; `missing` outranks `no_entries_in_window`).
+    (vault_root / "lloyd" / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
     assert fi.read_correction_signals() == []
     read = fi.last_corrections_read()
     per = read["sources"][str(head)]

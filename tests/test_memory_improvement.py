@@ -67,10 +67,21 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(facts_mod, "FACTS_ROOT", facts_root)
     monkeypatch.setattr(fi, "FACTS_ROOT", facts_root)
     monkeypatch.setattr(fi, "CORRECTIONS_PATH", vault_root / "memory" / "corrections.md")
-    # The live log lives in `lloyd/USER.md`, and the reader consults both. Left
-    # as None, `corrections_paths()` resolves the two constants above at call
-    # time; pinning a list here would be a third path to keep in sync.
+    # The live logs live in `lloyd/USER.md` and `lloyd/MEMORY.md`, and the reader
+    # consults all three. Left as None, `corrections_paths()` resolves the three
+    # constants above at call time; pinning a list here would be a fourth path to
+    # keep in sync.
     monkeypatch.setattr(fi, "CORRECTIONS_BULLETS_PATH", vault_root / "lloyd" / "USER.md")
+    # Patched too, and it is not optional (#2789): the third source resolves
+    # through `VAULT_ROOT`, which is the REAL vault, so a fixture that repointed
+    # only the two older constants would have every corrections test in this file
+    # silently reading the operator's live `lloyd/MEMORY.md` — 12 dated
+    # `[feedback]` bullets, 4 of them inside a 30-day window — and reporting a
+    # verdict that mixed a temp vault with the running system. Two of three is not
+    # isolation; it is a test whose result depends on what the operator recorded
+    # this week.
+    monkeypatch.setattr(fi, "CORRECTIONS_MEMORY_INDEX_PATH",
+                        vault_root / "lloyd" / "MEMORY.md")
     monkeypatch.setattr(fi, "CORRECTIONS_SOURCES", None)
     monkeypatch.setattr(fi, "RECORD_DIR", tmp_path / "records")
     shared._invalidate_entity_dirs_cache()
@@ -647,6 +658,15 @@ def test_a_fully_stale_corrections_log_is_recorded_as_stale_not_as_zero(world):
     _corrections_log(vault_root / "memory" / "corrections.md", [(newest, "TTS")])
     (vault_root / "lloyd" / "USER.md").write_text(
         "# User\n\n## corrections_log\n\nStanding corrections only.\n", encoding="utf-8")
+    # The third log (#2789) is written here, present and holding no correction: an
+    # absent source is reported `missing`, and `_roll_up`'s documented rule is
+    # "signals beat everything, else the worst file" — so a file that simply is not
+    # there would outrank this test's subject and the aggregate would say `missing`
+    # instead of naming the stale log. Writing the quiet index is what keeps this
+    # node testing the verdict it was written for. The per-source block below is
+    # where an absent third log would have to be caught, and it is asserted there.
+    _memory_index(vault_root / "lloyd" / "MEMORY.md", [],
+                  [("project", "state note: the pass selects its own pool")])
 
     rec = fi.run_improvement(sources=("corrections",))
     assert rec["signals"] == 0, rec["signals"]
@@ -3908,3 +3928,213 @@ def test_the_fence_names_itself_permanent_and_points_at_the_trigger():
         f"has no stated end condition: {doc}")
     assert "and st." not in doc and "has to change" not in doc, (
         f"the fence docstring still tells the next round to edit it: {doc}")
+
+
+# ---------------------------------------------------------------------------
+# Section: the loaded-memory index as a corrections source (#2789).
+#
+# `memory/corrections.md` has held no entry since 2026-05-08 and the pass has
+# printed `[corrections] 0 signals in window: log stale since 2026-05-08` on
+# every night since, while rulings the operator issued and that WERE honoured sat
+# in `lloyd/MEMORY.md` as dated `[feedback]` bullets — 12 of them, 4 inside a
+# 30-day window measured on 2026-10-15. A dry channel and a live channel one file
+# away read identically, which is the blindness this section pins shut.
+# ---------------------------------------------------------------------------
+
+
+def _memory_index(path, feedback, others=(), *, front=""):
+    """Write a `lloyd/MEMORY.md`-shaped loaded-memory index.
+
+    `feedback` is a list of `(date_or_None, text)` and becomes `- [feedback]
+    (<date>): <text>` bullets — the date inline, exactly as the live index writes
+    it, because the inline stamp is the thing the reader has to find. `others` is
+    the list of `(tag, text)` `[project]`/`[reference]` index lines that are NOT
+    corrections. Neither list is touched: whether a bullet carries a date and which
+    tag it wears are the two variables under test.
+    """
+    body = ((front if front.startswith("---") else f"---\n{front}---\n")
+            if front else "")
+    body += "---\ntype: note\n---\n\n# Lloyd Long-Term Memory\n\n## Key Knowledge\n\n"
+    for date, text in feedback:
+        stamp = f" ({date})" if date else ""
+        body += f"- [feedback]{stamp}: {text}\n"
+    for tag, text in others:
+        body += f"- [{tag}]: {text}\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_the_memory_index_is_a_third_corrections_source_in_the_run_record(world):
+    """The channel is fed by the surface corrections actually land on.
+
+    `corrections_paths()` has to name `lloyd/MEMORY.md` beside the two logs it
+    already read, and a run's record has to list all three in
+    `corrections_paths_read` — because the record is what the nightly job and the
+    owed-check read back, and a source that is read but not named is a source that
+    cannot be audited.
+    """
+    facts_root, st, vault_root = world
+    _write_facts(facts_root, "TTS", "state",
+                 [{"fact": "TTS built-in voices return 500 errors.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+
+    names = [str(p) for p in fi.corrections_paths()]
+    assert names == [str(vault_root / "memory" / "corrections.md"),
+                     str(vault_root / "lloyd" / "USER.md"),
+                     str(vault_root / "lloyd" / "MEMORY.md")], names
+    assert len(names) == len(set(names)), f"a source is listed twice: {names}"
+
+    rec = fi.run_improvement(sources=("corrections",))
+    assert rec["corrections_paths_read"] == sorted(names), rec["corrections_paths_read"]
+    # The record's per-source block covers every path it claims to have read: a
+    # `paths_read` longer than `corrections_sources` would be a log named as
+    # consulted that nothing was ever measured in.
+    assert sorted(rec["corrections_sources"]) == sorted(names), sorted(rec["corrections_sources"])
+
+
+def test_only_a_feedback_bullet_in_a_memory_index_counts_as_a_correction(world):
+    """12 `[feedback]` bullets among 87 tagged index lines are 12 entries.
+
+    The live `lloyd/MEMORY.md` census on 2026-10-15 is 87 tagged bullets: 12
+    `[feedback]`, 73 `[project]`, 2 `[reference]`. Counting the other 75 would
+    report 75 corrections the operator never made — the same class of falsehood as
+    counting a heading's standing prose as an entry — and the number would look
+    like a busy fortnight rather than an index.
+    """
+    facts_root, st, vault_root = world
+    _write_facts(facts_root, "TTS", "state",
+                 [{"fact": "TTS built-in voices return 500 errors.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+    index = vault_root / "lloyd" / "MEMORY.md"
+
+    # 12 feedback + 73 project + 2 reference = 87 tagged lines, the live census.
+    _memory_index(index,
+                  [(_ago(2 + i), f"ruling {i} on the TTS surface") for i in range(12)],
+                  [("project", f"state note {i} mentions TTS") for i in range(73)]
+                  + [("reference", f"where note {i} lives") for i in range(2)])
+    rec = fi.run_improvement(sources=("corrections",))
+    src = rec["corrections_sources"][str(index)]
+    assert src["entries"] == 12, src
+    assert src["entries"] != 87, "the whole index was counted as corrections"
+    assert src["undated"] == 0, src
+    assert src["status"] == "entries", src          # in-window, and one names TTS
+    assert src["in_window"] == 12, src              # all 12 sit at 2..13 days back
+    assert rec["corrections_status"] == "signals", rec["corrections_status"]
+    # `seen` is shared across logs, so the twelve bullets naming TTS are one signal.
+    assert rec["signals"] == 1, rec["signals"]
+
+    # An index of ONLY `[project]`/`[reference]` lines names TTS in every bullet and
+    # still yields no entries, no signals, and the honest `empty` verdict: the file
+    # parsed fine, it just holds no operator ruling.
+    _memory_index(index, [], [("project", "TTS built-in voices return 500 errors.")
+                              for _ in range(73)]
+                         + [("reference", "TTS lives in agent-services") for _ in range(2)])
+    rec = fi.run_improvement(sources=("corrections",))
+    src = rec["corrections_sources"][str(index)]
+    assert (src["entries"], src["signals"]) == (0, 0), src
+    assert src["status"] == "empty", src
+
+
+def test_a_feedback_bullet_is_dated_from_its_inline_stamp_and_an_undated_one_falls_back(world):
+    """The inline `(YYYY-MM-DD)` is the clock; a missing one takes the one leg.
+
+    An inline stamp inside `window_days` admits the entry, and the same shape
+    stamped outside it does not — the date is the entry's own, so an index bullet
+    cannot be made current by editing the file. A bullet with NO stamp still goes
+    through the single documented fallback leg (`_file_fallback_date`) and is
+    reported in `corrections_undated_fallback`, never silently dropped and never
+    given a date invented at parse time.
+    """
+    facts_root, st, vault_root = world
+    _write_facts(facts_root, "TTS", "state",
+                 [{"fact": "TTS built-in voices return 500 errors.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+    index = vault_root / "lloyd" / "MEMORY.md"
+    outside = _ago(400)
+    _memory_index(index, [(_ago(2), "TTS status must be proven by a synthetic request"),
+                          (outside, "TTS used to fall back to built-in voices")])
+    rec = fi.run_improvement(sources=("corrections",))
+    src = rec["corrections_sources"][str(index)]
+    assert (src["entries"], src["in_window"], src["outside_window"]) == (2, 1, 1), src
+    assert src["newest_entry"] == _ago(2), (
+        f"newest_entry must be the inline stamp, not the file clock: {src}")
+    # `rec["signals"]` is a count; the list is the reader's own return, and the
+    # evidence line is where the entry's own date has to appear.
+    sig = fi.read_correction_signals()
+    assert [s["entity"] for s in sig] == ["TTS"], sig
+    assert sig[0]["corrections_path"] == str(index), sig[0]
+    assert sig[0]["entry_date_origin"] == "entry", sig[0]
+    assert sig[0]["evidence"].startswith(_ago(2)), sig[0]["evidence"]
+    assert outside not in json.dumps(sig), (
+        f"the out-of-window bullet's own stamp leaked into the evidence: {sig}")
+
+    # The undated leg, unchanged and still single: one bullet with no stamp, in a
+    # file whose only clock is its front matter, is admitted BY that clock and says
+    # so in `corrections_undated_fallback`.
+    _memory_index(index, [(_ago(2), "TTS status must be proven by a synthetic request"),
+                          (None, "TTS verdicts need a synthetic request")],
+                  front=f"timestamp: '{_ago(1)}T09:00:00'\n")
+    rec = fi.run_improvement(sources=("corrections",))
+    src = rec["corrections_sources"][str(index)]
+    assert (src["entries"], src["undated"], src["in_window"]) == (2, 1, 2), src
+    fb = rec["corrections_undated_fallback"]
+    assert fb["undated"] == 1 and fb["admitted"] == 1, fb
+    assert fb["date"] == _ago(1) and fb["origin"] == "front_matter:timestamp", fb
+
+
+def test_the_cli_prints_one_corrections_line_per_source_with_its_own_counts(
+        world, monkeypatch, capsys):
+    """Three logs, three lines, each with its own counts — never one channel verdict.
+
+    The block this replaces printed a single age for the whole channel, taken from
+    `corrections_stale_since`, which is the newest entry across every stale log.
+    With a heading log last written 400 days back, a standing-prose log, and an
+    index carrying in-window rulings, that line read `log stale since <400 days
+    ago>` while the run had in fact just read two fresh corrections — and the same
+    words appeared for a run that read nothing at all. Each line now carries the
+    entries / in-window / signals counts of the log it names.
+    """
+    facts_root, st, vault_root = world
+    _write_facts(facts_root, "TTS", "state",
+                 [{"fact": "TTS built-in voices return 500 errors.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+    stale = _ago(400)
+    _corrections_log(vault_root / "memory" / "corrections.md", [(stale, "TTS")])
+    _standing_log(vault_root / "lloyd" / "USER.md",
+                  ["**Standing**: a loaded-memory line names its source document"],
+                  front=f"timestamp: '{_ago(3)}T09:00:00'\n")
+    _memory_index(vault_root / "lloyd" / "MEMORY.md",
+                  [(_ago(2), "TTS status must be proven by a synthetic request"),
+                   (_ago(5), "TTS verdicts need a synthetic request")])
+
+    spec = importlib.util.spec_from_file_location("fact_improvement_cli_per_source",
+                                                  _SCRIPT_PATH)
+    cli = importlib.util.module_from_spec(spec)
+    sys.modules["fact_improvement_cli_per_source"] = cli
+    spec.loader.exec_module(cli)
+    monkeypatch.setattr(sys, "argv", ["fact-improvement.py", "--sources", "corrections"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+
+    per_source = [ln for ln in out.splitlines() if ": entries=" in ln
+                  and ln.startswith("[corrections] ")]
+    assert len(per_source) == 3, out
+    by_path = {ln.split("[corrections] ", 1)[1].split(": ", 1)[0]: ln for ln in per_source}
+    assert set(by_path) == {str(vault_root / "memory" / "corrections.md"),
+                            str(vault_root / "lloyd" / "USER.md"),
+                            str(vault_root / "lloyd" / "MEMORY.md")}, sorted(by_path)
+
+    # Each line's counts are ITS OWN: the stale log says so on its own line, and
+    # the index that carried two in-window rulings is never called stale.
+    stale_line = by_path[str(vault_root / "memory" / "corrections.md")]
+    assert "entries=1" in stale_line and "in_window=0" in stale_line, stale_line
+    assert f"log stale since {stale}" in stale_line, stale_line
+    index_line = by_path[str(vault_root / "lloyd" / "MEMORY.md")]
+    assert "entries=2" in index_line and "in_window=2" in index_line, index_line
+    assert "signals=1" in index_line, (
+        f"both rulings name TTS and TTS is registered, so one signal is the count: {index_line}")
+    assert "stale" not in index_line, index_line
+    # The channel as a whole is not stale, and no line may say it is.
+    assert "0 signals in window" not in out, out
+    assert out.count("log stale since") == 1, out
