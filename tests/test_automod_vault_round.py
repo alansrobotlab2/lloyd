@@ -5620,9 +5620,17 @@ SEEN_B = PINNED_NODE
 assert SEEN_B < SEEN_A, "the first-seen-order claim needs the fixture pair unsorted"
 
 
+class _QuietSlot:
+    """A won tests-lock, whose `release` the probe's `finally` may call (#2743)."""
+
+    def release(self) -> None:
+        pass
+
+
 def _budget_runs(monkeypatch, *, parallel: dict, re_ask: list[dict] | None = None,
                  base: list[dict] | None = None, real_clock: bool = False,
-                 record: dict | None = None):
+                 record: dict | None = None, queue_wait_s: float | None = None,
+                 queue: dict | None = None):
     """Stand in every run the probe launches, each with the cost and verdict named.
 
     `parallel`, `re_ask[i]` and `base[i]` carry `seconds` (what it cost — the clock
@@ -5640,6 +5648,15 @@ def _budget_runs(monkeypatch, *, parallel: dict, re_ask: list[dict] | None = Non
     COST; only the handed timeout says what it was ALLOWED to spend, which is the whole
     content of #2521 (a fake that dropped that argument could not tell a bounded launch
     from a wholesale one, and the node would pass on the old code).
+
+    `queue_wait_s` stands in the queue for the gate's tests lock too: the probe's wait
+    becomes a fake that moves the same clock by exactly that many seconds and reports
+    them back as `lock_wait_s`. #2743 needed that to be a number a test can name — the
+    clause is "a wait of W must not shrink an allowance by W", and a fake that took the
+    real lock would make W a fact about what else the box was running. The fake accepts
+    either call signature, so the same helper shows the old code shrinking the runs and
+    the new one not. `queue`, when given, is filled with `{asked: [...]}` — the ceiling
+    the probe handed the wait, which the new call site passes nothing for.
     """
     re_ask = re_ask if re_ask is not None else []
     base = base if base is not None else [{"seconds": 3.0}]
@@ -5682,8 +5699,22 @@ def _budget_runs(monkeypatch, *, parallel: dict, re_ask: list[dict] | None = Non
                 "files": len(files) if files else int(spec.get("files", 196)),
                 "workers": int(spec.get("workers", workers))}
 
+    def _slot(*args, **kw):
+        # Either signature: the call site passed the unspent budget before #2743 and
+        # passes nothing after it, and a fake keyed to one of the two would let the
+        # node silently stop measuring the thing it names.
+        asked = args[0] if args else kw.get("max_wait_s")
+        if queue is not None:
+            queue.setdefault("asked", []).append(
+                None if asked is None else float(asked))
+            queue.setdefault("waited", []).append(float(queue_wait_s))
+        clock.advance(float(queue_wait_s))
+        return _QuietSlot(), round(float(queue_wait_s), 1)
+
     monkeypatch.setattr(VG, "_run_selection", fake)
     monkeypatch.setattr(VG.time, "time", clock.time)
+    if queue_wait_s is not None:
+        monkeypatch.setattr(VG, "_wait_for_tests_slot", _slot)
     # `tests/conftest.py` sets the nesting env for the whole suite so ~25 `land()` calls
     # do not each spawn a ~70 s pytest child; a test of the probe has to clear it, which
     # is what the `probed` fixture does for the tests that go through `land()`.
@@ -5990,6 +6021,330 @@ def test_a_reserve_that_cannot_be_met_launches_no_pre_land_draw_and_never_refuse
         "say the opposite of what happened")
 
 
+def test_a_queued_probe_still_hands_the_candidate_its_full_working_budget(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """#2743 clause 1: a second spent queued is not a second taken off the run.
+
+    One deadline was fixed at `started + budget` and every run was handed what `left()`
+    still said, so the queue for the gate's tests lock was spent out of the runs. The 40
+    queued rows of `backlog/data/2026-10-15.2743-lloyd-automod-promotions.jsonl` each
+    show it; the plain instance is #2729 at 2026-10-15T02:27Z — `lock_wait_s` 352.0
+    against a `budget` of 503.9, the child launched with 150 s to finish a selection
+    whose measured cost is ~311 s, and the row ends `candidate.ran: 0` after 150.6 s.
+    Every one of the 25 rows that queued past half its budget ended `ran: 0`; the 8 rows
+    that ever got a candidate run out queued 12 to 122 s.
+
+    The clause is arithmetic about the allowance handed to the launch, so that is what is
+    pinned: a queue of exactly 200.0 s, the 300.0 s fallback budget, and the timeout the
+    candidate was given recorded AT the launch. On the old code that figure is 100.0 —
+    the budget minus the wait — and the assert below fails. On the new one it is the
+    whole 300.0 s working budget, while `lock_wait_s` still reports the 200.0 s the queue
+    took and `seconds` still counts it: the change moves where the wait is charged, it
+    never hides it.
+
+    The handed figure is also the number the child says out loud: `_run_selection`
+    renders `(the {budget:.0f}s it was given)` into its timeout note from this very
+    parameter, which is how #2729's row came to report a child given 150 s. The last
+    assert pins that the note is still built from the allowance rather than from a number
+    re-derived downstream, because a note that moved away from it would leave this node
+    pinning a figure no row carries.
+    """
+    import inspect
+
+    _disagreement_vault(vault)
+    real_run = VG._run_selection       # before `_budget_runs` stands in for it
+    record: dict = {}
+    queue: dict = {}
+    _budget_runs(monkeypatch, parallel={"seconds": 1.0},
+                 queue_wait_s=200.0, queue=queue, record=record)
+
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=tmp_path / "no-ledger-here.jsonl")
+
+    assert rep["budget"] == 300.0 and str(rep["budget_source"]).startswith("fallback"), rep
+    assert rep["lock_wait_s"] == 200.0, rep       # the queue's cost stays on the report
+    assert rep["seconds"] == 201.0, rep           # and inside the probe's wall clock
+    assert record["parallel"] == [300.0], (
+        f"a 200.0 s queue left the candidate {record['parallel'][0]}s of the 300.0 s "
+        f"budget: the wait was charged against the run, which is the #2729 shape")
+    assert queue["asked"] == [None], (
+        f"the call site handed the queue {queue['asked']} again — the unspent run budget "
+        f"is not the queue's bound")
+    assert "{budget:.0f}s it was" in inspect.getsource(real_run), (
+        "`_run_selection` no longer renders its own allowance into the timeout note, so "
+        "the figure pinned above is not the number a row reports")
+
+    assert rep["state"] == "checked" and rep["refuse"] is False, rep["reason"]
+
+
+def test_the_tests_lock_queue_is_bounded_by_its_own_named_ceiling(
+        tmp_path, monkeypatch, vault, guard_tree, probed):
+    """#2743 clause 2: the queue's bound is a named constant, not the run budget.
+
+    `PROBE_QUEUE_MAX_WAIT_S = 300.0` is sized off the witness extract, not picked: of the
+    40 queued rows, the 8 that ever reached a candidate run had waited 12 / 18 / 24 / 48
+    / 100 / 106 / 122 / 122 s, and the 32 that reached nothing had waited 66 to 476 s.
+    300.0 s therefore sits above every historical wait that bought a verdict, so real
+    contention still gets a slot with its full working budget, while the 476.2 s blind
+    wait of 2026-10-13T18:49Z — which launched a child "given 0s" — cannot recur.
+
+    The bound applied to the wait is `min(PROBE_QUEUE_MAX_WAIT_S, Gate.SERIAL_MAX_WAIT)`
+    = min(300.0, 2400.0), read through `_tests_lock` rather than restated, and it is
+    pinned where it can actually be observed: the number `acquire_wait` is asked to hold
+    out for. A shorter ask is honored, a longer one is not, and with the ceiling raised
+    past `SERIAL_MAX_WAIT` it is the gate's 2400.0 s that binds — because a land that
+    out-queues a gate rung is a synchronous request left hanging longer than any rung
+    that gates the code half.
+
+    And a lock still busy at the bound is the skip it already was, verbatim: `refuse`
+    false, `ok` true across the ledger seam (#2036's standing rule that a probe outage
+    never blocks a land and is never a pass either), and no `candidate` block, because no
+    run was ever launched.
+    """
+    import inspect
+
+    import scripts.automod.state as ST
+    from scripts.automod.gate import Gate
+
+    assert VG.PROBE_QUEUE_MAX_WAIT_S == 300.0, VG.PROBE_QUEUE_MAX_WAIT_S
+    assert VG.PROBE_QUEUE_MAX_WAIT_S <= Gate.SERIAL_MAX_WAIT, Gate.SERIAL_MAX_WAIT
+    # Its floor, stated because the number is re-derived by nothing: a queue shorter than
+    # the budget every probe falls back to cannot be filled by the slowest successful draw
+    # ever rowed (122.0 s) plus the working 300.0 s that draw needs. `PROBE_TIMEOUT_SECONDS`
+    # is the module's own name for that floor, so the claim is pinned to a symbol and not
+    # to a literal that could move out from under it.
+    assert VG.PROBE_QUEUE_MAX_WAIT_S >= VG.PROBE_TIMEOUT_SECONDS == 300.0, (
+        VG.PROBE_QUEUE_MAX_WAIT_S, VG.PROBE_TIMEOUT_SECONDS)
+    # Declared BESIDE the budget ceiling: the two constants bound the two halves of one
+    # probe — the runs and the queue — and whoever raises one has to be able to see the
+    # other. The `#:` comment block above it does not count as adjacency; the assignment
+    # line is what is measured.
+    src = inspect.getsource(VG).splitlines()
+    budget_at = next(i for i, ln in enumerate(src)
+                     if ln.startswith("PROBE_BUDGET_CEILING_S"))
+    queue_at = next(i for i, ln in enumerate(src)
+                    if ln.startswith("PROBE_QUEUE_MAX_WAIT_S"))
+    assert 0 < queue_at - budget_at <= 40, (
+        f"queue ceiling declared at line {queue_at}, budget ceiling at {budget_at} — the "
+        f"two bounds of one probe do not belong 40 lines apart")
+    sig = inspect.signature(VG._wait_for_tests_slot)
+    assert "remaining" not in sig.parameters, (
+        "the wait takes the unspent run budget again, which is the charge this item "
+        "exists to remove")
+
+    applied: list[float] = []
+    real_lock = ST.Lock
+
+    class _RecordingLock:
+        def __init__(self, path, owner=""):
+            self.path, self.owner = path, owner
+
+        def acquire_wait(self, max_wait, poll=None):
+            applied.append(float(max_wait))
+            raise ST.LockHeld("canned: tests lock held by gate-SM_TEST")
+
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(ST, "Lock", _RecordingLock)
+    pytest.raises(ST.LockHeld, lambda: VG._wait_for_tests_slot())
+    assert applied == [300.0], f"the queue was held to {applied}, not 300.0"
+    applied.clear()
+    # A caller may ask for a SHORTER queue and gets it; asking for a longer one is not a
+    # way past the ceiling, which is the whole point of the constant being a ceiling.
+    pytest.raises(ST.LockHeld, lambda: VG._wait_for_tests_slot(12.0))
+    assert applied == [12.0], applied
+    applied.clear()
+    pytest.raises(ST.LockHeld,
+                  lambda: VG._wait_for_tests_slot(5 * Gate.SERIAL_MAX_WAIT))
+    assert applied == [VG.PROBE_QUEUE_MAX_WAIT_S], applied
+    applied.clear()
+    # The bound is the MIN of the two constants, so raising the ceiling cannot put a
+    # probe in front of a gate rung: with the ceiling past `SERIAL_MAX_WAIT`, it is the
+    # rung's own 2400.0 s that holds the wait.
+    monkeypatch.setattr(VG, "PROBE_QUEUE_MAX_WAIT_S", 5 * Gate.SERIAL_MAX_WAIT)
+    pytest.raises(ST.LockHeld, lambda: VG._wait_for_tests_slot())
+    assert applied == [Gate.SERIAL_MAX_WAIT], applied
+    monkeypatch.setattr(VG, "PROBE_QUEUE_MAX_WAIT_S", 300.0)
+    monkeypatch.setattr(ST, "Lock", real_lock)     # `land` needs its own real lock
+
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+
+    def _busy(*args, **kw):
+        raise ST.LockHeld("canned: tests lock held by gate-SM_TEST")
+
+    monkeypatch.setattr(VG, "_wait_for_tests_slot", _busy)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n\n#2743 the queue gave up.\n")
+    out = V.land(["skills/foo/SKILL.md"], "#2743 the queue gave up", item_id=None)
+
+    assert out["ok"] is True, out
+    g = _events("vault_land")[-1]["guards"]
+    assert g["state"] == "skipped" and g["refuse"] is False, g
+    assert g["reason"] == ("the gate's tests lock stayed busy for the whole queue: "
+                           "canned: tests lock held by gate-SM_TEST"), g
+    assert "candidate" not in g and "unadjudicated" not in g, g
+    assert g["budget"] == 300.0, g
+
+
+def test_a_probe_that_queued_still_launches_every_serial_draw_its_reserve_permits(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """#2743 clause 3: `_draw_allowance` is a share of the WORKING budget, not of what
+    the queue left behind.
+
+    The same 300.0 s fallback budget, the same queue of 200.0 s, and a node that loses
+    every draw: the four serial draws get 149.5 / 298.0 s against the proposed vault and
+    148.5 / 296.0 s against the pre-land one, which is what `_draw_allowance` gives the
+    same shapes with no queue in front of them at all. On the old code the identical
+    probe hands out 49.5 / 98.0 and 48.5 / 96.0 — every share measured against a budget
+    the queue had already eaten — and the wider the wait, the more certain each draw was
+    of timing out. The #2521 reserve is untouched by this: it is the same rule, now
+    pointed at the budget it was always about.
+
+    The second half is that the reserve skip still FIRES, and fires only on a working
+    budget that is genuinely short: the same 200.0 s queue in front of a 294.0 s parallel
+    draw leaves 6.0 s of the working 300.0, and shared between the 2 draws still owed that
+    is 3.0 s each, under the 5.0 s a draw needs to be worth starting — so nothing launches
+    and the reason still reads `6.0s left`. That is the figure the same shape produces with
+    no queue in front of it, unchanged by the 200 s the queue took, where the old code's
+    reason read `-194.0s left` — which is the difference between a reserve that measures
+    the runs and one that measures the wait.
+    """
+    _disagreement_vault(vault)
+    record: dict = {}
+    re_asked = _budget_runs(
+        monkeypatch, parallel={"seconds": 1.0, "failed": [SEEN_A]},
+        re_ask=[{"seconds": 1.0, "failed": [SEEN_A]},
+                {"seconds": 1.0, "failed": [SEEN_A]}],
+        base=[{"seconds": 1.0, "failed": [SEEN_A]},
+              {"seconds": 1.0, "failed": [SEEN_A]}],
+        queue_wait_s=200.0, record=record)
+
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=tmp_path / "no-ledger-here.jsonl")
+
+    assert rep["lock_wait_s"] == 200.0 and rep["budget"] == 300.0, rep
+    assert len(re_asked) == 2, f"a re-ask draw never launched: {re_asked}"
+    assert record["re-ask"] == [149.5, 298.0], record
+    assert record["pre-land"] == [148.5, 296.0], record
+    assert rep["proposed_runs"] == 2 and rep["baseline_runs"] == 2, rep
+    # The node lost all four draws, so it is the box and not this land — a verdict, not
+    # the `answered nothing` non-answer the shrunken shares used to end in.
+    assert rep["state"] == "checked" and rep["refuse"] is False, rep["reason"]
+    assert rep["pre_existing"] == [SEEN_A], rep
+
+    # The reserve half: 294.0 s of the 300.0 s working budget spent by the parallel draw
+    # leaves 6.0 s, and 6.0 / 2 draws is under `MIN_RUN_SECONDS`, so nothing starts.
+    re_asked2 = _budget_runs(monkeypatch, parallel={"seconds": 294.0,
+                                                    "failed": [SEEN_A, SEEN_B]},
+                             queue_wait_s=200.0, record={})
+    rep2 = _probe_here(tmp_path, guard_tree, vault,
+                       budget_ledger=tmp_path / "no-ledger-here.jsonl")
+
+    assert re_asked2 == [], f"a draw started on a 3.0s share: {re_asked2}"
+    assert rep2["lock_wait_s"] == 200.0, rep2       # the queue is charged, and only that
+    assert rep2["proposed_runs"] == 0, rep2
+    assert rep2["state"] == "skipped" and rep2["refuse"] is False, rep2["reason"]
+    assert "could not start inside the 300s probe budget" in rep2["reason"], rep2["reason"]
+    assert "6.0s left" in rep2["reason"], (
+        f"the skip names what the queue left, not what the runs left: {rep2['reason']}")
+    assert rep2["unadjudicated"] == [SEEN_A, SEEN_B], rep2
+
+
+def test_a_probe_that_queued_reports_a_wall_clock_inside_the_stated_bound(
+        tmp_path, monkeypatch, vault, guard_tree, probed):
+    """#2743 clause 4: unbundling the queue leaves a STATED total, not an open one.
+
+    `land()` is called synchronously by `agent_mcp/automod.py:940` with no outer timeout
+    of its own, so moving the queue off the runs raises the worst-case call from one
+    budget to a budget plus a queue: the bound is therefore part of the change, and these
+    three legs pin it at the three levels it means something.
+
+    (a) A probe that waits the whole 300.0 s ceiling and then runs cleanly reports 301.0 s
+    against a bound of 300.0 budget + 300.0 ceiling + the 1.0 s `GROUP_TERM_GRACE_S` and
+    3.0 s `REAP_DRAIN_S` the module already bounds a killed run with.
+
+    (b) A queue can come back LATE: `state.Lock.acquire_wait` polls every 2.0 s, so the
+    wait it reports can overshoot its ceiling by up to one interval. A 302.0 s wait is
+    that case, and the 4.0 s of reap terms inside the bound is what absorbs it — the
+    candidate is still handed the whole 300.0 s, where the old code had `left()` at -2.0
+    and skipped the probe for want of a run. Past the reap terms the clamp is what holds
+    the line: a 310.0 s wait leaves 294.0 s of the 604.0 s bound, so that is the
+    allowance, and without the clamp the probe could reach 610 s against a stated 604.0.
+    310.0 s is beyond what today's 2.0 s poll can produce, and it is tested anyway
+    because the ceiling and the poll interval are two constants owned by two modules.
+
+    (c) Across the ledger seam, on a row: `guards.seconds` <= `guards.budget` +
+    `PROBE_QUEUE_MAX_WAIT_S` + the two reap terms, which is the shape the owed-check job
+    reads.
+    """
+    bound = VG.PROBE_QUEUE_MAX_WAIT_S + VG.GROUP_TERM_GRACE_S + VG.REAP_DRAIN_S
+    # The figure the clause states and the figure the module states are the same number;
+    # if `probe_wall_bound` ever adds a term of its own, the asserts below would go on
+    # proving a bound nobody wrote down.
+    assert VG.probe_wall_bound(300.0) == 300.0 + bound, VG.probe_wall_bound(300.0)
+
+    # (a) a full-ceiling wait, and a probe that still reaches a verdict.
+    _disagreement_vault(vault)
+    record: dict = {}
+    _budget_runs(monkeypatch, parallel={"seconds": 1.0},
+                 queue_wait_s=VG.PROBE_QUEUE_MAX_WAIT_S, record=record)
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=tmp_path / "no-ledger-here.jsonl")
+    assert rep["lock_wait_s"] == 300.0 and rep["seconds"] == 301.0, rep
+    assert rep["seconds"] <= rep["budget"] + bound, rep
+    assert record["parallel"] == [300.0], record
+
+    # (b) the wait comes back one poll interval past its ceiling — the overshoot the real
+    # 2.0 s poll produces — and the reap terms inside the bound absorb it, so the run is
+    # not what pays for the lock's lateness.
+    record2: dict = {}
+    _budget_runs(monkeypatch, parallel={"seconds": 1.0},
+                 queue_wait_s=VG.PROBE_QUEUE_MAX_WAIT_S + 2.0, record=record2)
+    rep2 = _probe_here(tmp_path, guard_tree, vault,
+                       budget_ledger=tmp_path / "no-ledger-here.jsonl")
+    assert rep2["lock_wait_s"] == 302.0, rep2
+    assert record2["parallel"] == [300.0], (
+        f"a 302.0 s wait left the candidate {record2['parallel'][0]}s: the overshoot ate "
+        f"the working budget again, which is the #2729 shape by 2 s instead of 352")
+    assert rep2["seconds"] <= rep2["budget"] + bound, rep2
+    assert rep2["state"] == "checked", rep2["reason"]
+
+    # ...and an overshoot past those reap terms is where the clamp holds the line: 310.0 s
+    # of the 604.0 s total is gone, so 294.0 s is what the run may have. Handed the whole
+    # 300.0 s instead, a run that used it would put the probe at 610.0 s against the bound
+    # asserted two lines up. 310.0 s is more than today's 2.0 s poll can produce; it is
+    # tested because the ceiling and the poll interval are constants in two modules.
+    record3: dict = {}
+    _budget_runs(monkeypatch, parallel={"seconds": 1.0},
+                 queue_wait_s=VG.PROBE_QUEUE_MAX_WAIT_S + 10.0, record=record3)
+    rep3 = _probe_here(tmp_path, guard_tree, vault,
+                       budget_ledger=tmp_path / "no-ledger-here.jsonl")
+    assert record3["parallel"] == [294.0], (
+        f"a 310.0 s wait handed the run {record3['parallel'][0]}s, so the probe's total is "
+        f"bounded by nothing but the run's own appetite")
+    assert rep3["lock_wait_s"] == 310.0 and rep3["seconds"] == 311.0, rep3
+    assert rep3["seconds"] <= rep3["budget"] + bound, rep3
+
+    # (c) the same bound on the row a later scan reads.
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+    _budget_runs(monkeypatch, parallel={"seconds": 1.0}, real_clock=True,
+                 queue_wait_s=200.0)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n\n#2743 the bound is on the row.\n")
+
+    out = V.land(["skills/foo/SKILL.md"], "#2743 a queued probe's wall clock",
+                 item_id=None)
+
+    assert out["ok"] is True, out
+    g = _events("vault_land")[-1]["guards"]
+    assert g["lock_wait_s"] == 200.0 and g["budget"] == 300.0, g
+    assert g["candidate"]["ran"] == 1, g
+    assert g["seconds"] <= g["budget"] + bound, (
+        f"a probe that queued {g['lock_wait_s']}s spent {g['seconds']}s of the stated "
+        f"{g['budget'] + bound:.1f}s ceiling")
+
+
 def test_the_row_of_every_2383_key_is_what_the_ledger_keeps():
     """Clauses 1 and 5 on the ledger surface: `_guards_row`, the one writer of the row.
 
@@ -6079,7 +6434,9 @@ def test_a_skip_that_reached_no_completed_run_keeps_candidate_and_reason_untouch
 
     _real_slot = VG._wait_for_tests_slot
 
-    def _busy(remaining):
+    def _busy(*args, **kw):
+        # Either call signature: #2743 takes the queue off the run budget, after which
+        # the call site passes nothing at all.
         raise ST.LockHeld("canned: tests lock held by gate-SM_TEST")
 
     monkeypatch.setattr(VG, "_wait_for_tests_slot", _busy)

@@ -122,8 +122,12 @@ NESTING_ENV = "LLOYD_VAULT_GUARD_PROBE"
 PYTEST_CHILD_ENV_DROP = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_WORKER_COUNT",
                          "PYTEST_XDIST_TESTRUNUID", "PYTEST_CURRENT_TEST")
 
-#: Whole probe: the queue for the gate's tests lock plus both pytest runs
-#: together, not either run on its own (`_deadline` below). Restated on
+#: The fallback WORKING budget: both pytest runs together, not either run on its
+#: own (`_deadline` below). It was the whole probe — queue for the gate's tests lock
+#: included — until #2743 moved the queue onto its own ceiling
+#: (`PROBE_QUEUE_MAX_WAIT_S`, which sits ON TOP of this figure and not inside it),
+#: because charging the wait to the runs is what turned 25 real probes into
+#: non-answers. Restated on
 #: 2026-10-02 because the figure it was calibrated on was wrong: the comment
 #: cited "453 nodes in 65 s", but the selection measured from a detached
 #: worktree at `405efe57` with the gate's own mark expr is **196 files, 7,065
@@ -320,22 +324,33 @@ def _failing_files(node_ids: list[str]) -> list[str]:
     return out
 
 
-def _wait_for_tests_slot(remaining: float) -> tuple:
+def _wait_for_tests_slot(max_wait_s: float | None = None) -> tuple:
     """Take the gate's tests-rung lock; `(lock, seconds waited)`.
 
-    The queue is capped twice over: by `remaining`, because seconds spent waiting
-    are seconds no run gets back and a run started on an empty budget reports
-    nothing, and by the gate's own `SERIAL_MAX_WAIT`, because a land that
-    out-queues a gate is a synchronous request left hanging longer than any rung
-    that gates the code half. `state.LockHeld` after that is the caller's signal to
-    report that it could not judge — never a reason to run anyway, which is the
-    contention #2042 names: three probes each spent their whole 300 s competing
-    with a gate `tests` rung that was holding this same lock.
+    The queue is capped by `min(PROBE_QUEUE_MAX_WAIT_S, Gate.SERIAL_MAX_WAIT)`, and by
+    nothing else. It used to be capped by the probe's unspent run budget as well — the
+    parameter was named `remaining` — and that one cap is what #2743 removes: charging the
+    wait to the runs made the wait itself the reason probes reached no verdict, since the
+    longer a probe queued the less each of its runs was allowed to take, until the child
+    that finally started was launched "given 0s". A long wait is now expensive to the
+    LAND (`probe_wall_bound`) and free to the RUNS. The second cap stays for its own
+    reason: a land that out-queues a gate is a synchronous request left hanging longer
+    than any rung that gates the code half.
+
+    `max_wait_s` exists for a caller that wants a shorter queue than the ceiling; it can
+    narrow the bound and cannot widen it. `state.LockHeld` after the bound is the
+    caller's signal that it could not judge — never a reason to run anyway, which is the
+    contention #2042 names: three probes each spent their whole 300 s competing with a
+    gate `tests` rung that was holding this same lock.
     """
     path, serial_max = _tests_lock()
+    asked = PROBE_QUEUE_MAX_WAIT_S if max_wait_s is None else float(max_wait_s)
+    # `PROBE_QUEUE_MAX_WAIT_S` appears in this min even though `asked` already defaults to
+    # it: an explicit ask may shorten the queue, and may not walk past the ceiling.
+    ceiling = min(asked, PROBE_QUEUE_MAX_WAIT_S, float(serial_max))
     lock = S.Lock(path, owner=f"vault-probe pid={os.getpid()}")
     started = time.time()
-    lock.acquire_wait(max(0.0, min(remaining, serial_max)), poll=2.0)
+    lock.acquire_wait(max(0.0, ceiling), poll=2.0)
     return lock, round(time.time() - started, 1)
 
 
@@ -758,6 +773,55 @@ BASELINE_DRAWS = 2
 #: inside the queue the rung already tolerates.
 PROBE_BUDGET_CEILING_S = 900.0
 
+#: The ceiling on the QUEUE for the gate's tests lock, charged SEPARATELY from the
+#: probe's working budget (#2743). Until this the two shared one deadline: `agreement`
+#: fixed `started + budget` before it queued and handed every child run what was left
+#: afterwards, so a queued second was literally a run's second. The witness extract
+#: `backlog/data/2026-10-15.2743-lloyd-automod-promotions.jsonl` is 40 queued
+#: `vault_land` rows, and all 25 that waited past half their budget ended
+#: `candidate.ran: 0` — #2729 (2026-10-15T02:27Z) queued 352.0 s of a 503.9 s budget and
+#: launched a child with 150 s to finish a ~311 s selection; the worst, 2026-10-13T18:49Z,
+#: waited 476.2 s against a 474.8 s budget and was "given 0s". 300.0 s is sized off the
+#: same 40 rows for the same reason the budget ceiling is a sized figure: the 8 queued
+#: rows that ever reached a candidate run had waited 12 / 18 / 24 / 48 / 100 / 106 / 122 /
+#: 122 s, so this sits above every historical wait that bought a verdict — real
+#: contention still gets a slot with its full working budget — while a blind multi-minute
+#: wait can no longer eat the runs. What is actually applied is
+#: `min(PROBE_QUEUE_MAX_WAIT_S, Gate.SERIAL_MAX_WAIT)`, and the total a probe may spend
+#: is `probe_wall_bound()`.
+PROBE_QUEUE_MAX_WAIT_S = 300.0
+
+
+def probe_wall_bound(budget: float, max_wait_s: float | None = None) -> float:
+    """Seconds the whole probe may take: its working budget PLUS the queue's ceiling.
+
+    Two additions to the working budget, both bounded, no third. The queue is
+    `min(PROBE_QUEUE_MAX_WAIT_S, Gate.SERIAL_MAX_WAIT)` (see `_wait_for_tests_slot`), and
+    a child run already handed an allowance may still take `GROUP_TERM_GRACE_S` before
+    `_reap_group` pulls the group down plus `REAP_DRAIN_S` to wait for it — the two
+    figures `_run_selection` bounds a killed run with, so the total is a sum of numbers
+    this module already commits to rather than a round guess.
+
+    Those reap terms are counted ONCE and not once per run, and the reason is the same
+    reserve that makes the draws shareable: a run that overruns its allowance spends
+    `left()` down to zero, `_draw_allowance` then hands out 0.0, and 0.0 is under
+    `MIN_RUN_SECONDS`, so nothing after it is launched. The working deadline can therefore
+    be passed by one run's reap terms and by no more — which is what turns this from a
+    description into the bound `run_budget` holds the next launch to.
+
+    `max_wait_s` is what the caller ASKED the queue for; a smaller ask narrows the bound
+    and a larger one never widens it past the ceiling. `agreement` clamps the run
+    allowance to this ceiling, so it is a bound and not a description:
+    `agent_mcp/automod.py:940` calls `land()` synchronously with no outer timeout, which
+    makes unbundling the queue a longer call, and that is only acceptable while the
+    longest it can be is a figure someone can read here.
+    """
+    _path, serial_max = _tests_lock()
+    asked = PROBE_QUEUE_MAX_WAIT_S if max_wait_s is None else float(max_wait_s)
+    ceiling = min(asked, PROBE_QUEUE_MAX_WAIT_S, float(serial_max))
+    return float(budget) + ceiling + GROUP_TERM_GRACE_S + REAP_DRAIN_S
+
+
 #: How many trailing bytes of the promotions ledger `probe_budget` reads, sized by
 #: measurement rather than by round number. A tail read is only worth paying for if it
 #: reaches the rows that carry a measured draw, and on the live 31 MB rolling ledger the
@@ -831,7 +895,7 @@ def _draw_seconds(row: dict) -> tuple[float | None, float | None]:
 
 def probe_budget(explicit: float | None = None,
                  ledger: Path | None = None) -> tuple[float, str]:
-    """The whole-probe budget, and the named input it was derived from.
+    """The probe's WORKING budget, and the named input it was derived from.
 
     The **named measured-cost input** is the promotions ledger's own `guards` rows:
     `guards.candidate.seconds` is what one full parallel draw of the vault-reading
@@ -941,16 +1005,19 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     unchanged: it still judges HEAD's code, it still builds the proposal by putting these paths
     back, and an unacknowledged disagreement still refuses.
 
-    `timeout` is the WHOLE probe: the queue for the gate's tests lock and every
-    pytest run together — the proposed-vault run, the serial draws of its failing
-    files against the proposed vault, and the draws against the pre-land vault —
-    handed out to each run as it goes. It was per run until #2042, which is the
-    arithmetic that made every real probe a non-answer — a probe could spend 300 s
-    queueing behind a gate `tests` rung and still be refused by its own next
-    300 s, and the row said only "timed out after 300s". Because drawing a side
-    `PROPOSED_DRAWS` or `BASELINE_DRAWS` times costs a run each, a budget too thin
-    for the second draw answers `skipped` with "could not be attributed" instead of
-    refusing: one draw cannot tell a flake from a disagreement.
+    `timeout` is the probe's WORKING budget: every pytest run together — the
+    proposed-vault run, the serial draws of its failing files against the proposed vault,
+    and the draws against the pre-land vault — handed out to each run as it goes. It was
+    per run until #2042, which is the arithmetic that made every real probe a non-answer —
+    a probe could spend 300 s queueing behind a gate `tests` rung and still be refused by
+    its own next 300 s, and the row said only "timed out after 300s". Since #2743 the
+    queue for the tests lock is no longer inside this figure either: it has its own
+    ceiling (`PROBE_QUEUE_MAX_WAIT_S`) and sits on top, so what a busy tests rung costs is
+    the land's wall clock and never a run's allowance. The whole probe may therefore take
+    `probe_wall_bound(budget)`, and `lock_wait_s` on the report is the part of it the queue
+    took. Because drawing a side `PROPOSED_DRAWS` or `BASELINE_DRAWS` times costs a run
+    each, a budget too thin for the second draw answers `skipped` with "could not be
+    attributed" instead of refusing: one draw cannot tell a flake from a disagreement.
 
     `timeout=None` — what the only production caller passes, since it passes nothing —
     takes the budget from `probe_budget`, which derives it from the last measured cost
@@ -998,7 +1065,16 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     # probe still runs with `PROBE_TIMEOUT_SECONDS`.
     budget, budget_source = probe_budget(timeout, ledger=budget_ledger)
     started = time.time()
+    # The WORKING budget — the seconds the runs get. The queue for the gate's tests lock
+    # is charged ON TOP of this, inside `probe_wall_bound`'s total, and not out of it
+    # (#2743): `deadline` is moved forward by exactly what the wait costs, once the wait
+    # is over, so every allowance below measures the runs against the budget they were
+    # always meant to have.
     deadline = started + max(float(budget), 0.0)
+    # The stated total: working budget + the queue's ceiling + the reap terms a killed run
+    # is already bounded by. Unbundling the queue makes a land a longer synchronous call;
+    # this is the figure that keeps that a stated number, and `run_budget` clamps to it.
+    wall_cap = started + probe_wall_bound(budget)
     # `candidate` and `baseline` are deliberately ABSENT rather than empty: a
     # run that was never launched has no numbers, and `_guards_row`
     # (`vault_round.py:654-666`) already writes them only `if cand:`/`if base:`,
@@ -1025,18 +1101,44 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         return report
 
     def left() -> float:
-        """Seconds of the probe's own budget still unspent."""
+        """Seconds of the probe's WORKING budget still unspent by a run."""
         return deadline - time.time()
 
+    def wall_left() -> float:
+        """Seconds left before the probe's stated total is spent (`probe_wall_bound`)."""
+        return wall_cap - time.time()
+
     def run_budget() -> float:
-        """The whole unspent budget: the CANDIDATE parallel draw's allowance, and no
+        """The whole working budget: the CANDIDATE parallel draw's allowance, and no
         other run's. It is the first run of the probe and the only one with no sibling
         still owed, so taking the remainder wholesale is right for it — #2521 moved the
         serial draws to `_draw_allowance`, which is what a side with a draw still owed
-        has to use. Whether the queue for the tests lock should be charged against this
-        remainder at all is the ruling #2521's owed-check entry carries.
+        has to use.
+
+        Since #2743 the remainder is the RUNS' remainder. Whether the queue for the tests
+        lock should be charged against it at all was the ruling #2521's owed-check entry
+        carried, and the ledger answered it: of the 40 queued rows in
+        `backlog/data/2026-10-15.2743-lloyd-automod-promotions.jsonl`, all 25 that waited
+        past half their budget ended `candidate.ran: 0`, because the wait had already
+        spent what the child needed to finish (#2729: 352.0 s queued of a 503.9 s budget,
+        the child launched with 150 s for a ~311 s selection). The queue is charged on top
+        now, and the only thing it costs the runs is the overshoot: `acquire_wait` polls
+        every 2.0 s, so a wait can come back up to one interval past its own ceiling, and
+        `min(left(), wall_left())` is what gives those seconds back to the wall bound
+        rather than to a run that would only time out.
         """
-        return max(left(), 0.0)
+        return max(min(left(), wall_left()), 0.0)
+
+    def share(draws_owed: int) -> float:
+        """A serial draw's allowance: `_draw_allowance` over the runs' remainder.
+
+        Named once so no draw site can drift back to measuring the queue. The wait for the
+        tests lock is paid for outside the working budget (#2743), so `left()` is exactly
+        what the draw and its #2521 reserve are about: a probe given a 503.9 s budget that
+        queued 352.0 s draws against the 503.9 s it was handed, not the 151.9 s the wait
+        left behind.
+        """
+        return _draw_allowance(left(), draws_owed)
 
     if os.environ.get(NESTING_ENV) == "1":
         return done(reason=(f"not run inside a test run or a probe child "
@@ -1113,11 +1215,18 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         # bytes of the same instant, and that promise is how a 222 s gap between
         # them went unnoticed through four refusals of a file no test reads.
         try:
-            slot, waited = _wait_for_tests_slot(left())
+            slot, waited = _wait_for_tests_slot()
         except S.LockHeld as exc:
             return done(reason=(f"the gate's tests lock stayed busy for the whole "
                                 f"queue: {exc}"))
         report["lock_wait_s"] = waited
+        # The wait is the LAND's cost, not the runs': the working deadline moves forward
+        # by exactly what the queue took, so every allowance below is measured against the
+        # budget the probe was handed and not against what a busy tests rung left of it
+        # (#2743). What the wait does cost is `probe_wall_bound`'s total, which
+        # `run_budget` clamps the next launch to — so a queued probe stays inside a stated
+        # number of seconds instead of inside a budget that stopped meaning what it said.
+        deadline += waited
 
         # The proposed run reads a MIRROR too, and that is the whole safety
         # argument for copying rather than linking: `land()` calls this with the
@@ -1231,7 +1340,7 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
                 f"cannot fit — so they are neither this land's nor the tree's"))
         draws: list[dict] = []
         while len(draws) < PROPOSED_DRAWS:
-            room = _draw_allowance(left(), PROPOSED_DRAWS - len(draws))
+            room = share(PROPOSED_DRAWS - len(draws))
             if room < MIN_RUN_SECONDS:
                 break
             draws.append(_run_selection(interp, tree, retry_files, proposed_vault,
@@ -1315,7 +1424,7 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
                                 f"lose every serial draw were dismissed "
                                 f"({', '.join(bits)}): " + ", ".join(dismissed[:5])))
         failing_files = _failing_files(confirmed)
-        if _draw_allowance(left(), BASELINE_DRAWS) < MIN_RUN_SECONDS:
+        if share(BASELINE_DRAWS) < MIN_RUN_SECONDS:
             # Asking for the pre-land run here would burn a run on a budget that
             # cannot report, which is the state the three #2042 rows are in.
             # Refusing on a red node alone is the wider rule the module docstring
@@ -1332,7 +1441,7 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
                                 f"this land's nor the tree's"))
         base_draws: list[dict] = []
         while len(base_draws) < BASELINE_DRAWS:
-            room = _draw_allowance(left(), BASELINE_DRAWS - len(base_draws))
+            room = share(BASELINE_DRAWS - len(base_draws))
             if room < MIN_RUN_SECONDS:
                 break
             base_draws.append(_run_selection(interp, tree, failing_files, base_vault,
