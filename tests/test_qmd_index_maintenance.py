@@ -674,6 +674,236 @@ def test_dry_run_prints_the_drift_and_writes_no_file(monkeypatch, tmp_path, caps
     assert "cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml" in printed
 
 
+# --- #2750: a row the template narrowed on purpose must not print its own undo --
+#
+# `subliminal`'s narrowing (#2180's ruling, carried by #2351) lands in two steps:
+# the daemon's file is hand-edited first, the tracked template is committed after
+# it. Between the two steps the files disagree on `pattern` and on nothing else,
+# and the TEMPLATE is the ahead side — c41d85a3 (#2728) is the template leg, and
+# the daemon's `~/.config/qmd/index.yml` still had the wide glob when it shipped.
+# The printer had one remedy for every nonzero drift, `RESYNC_COMMAND`, and for
+# this row that remedy runs the divergence backwards: the template is 102 lines
+# of which 52 are comment lines and the live file is 50 with none (measured with
+# `grep -c "^ *#"` on both, 2026-10-15), so copying the daemon's file onto the
+# template deletes the provenance header and the `autonomy-runs` and `sessions`
+# rationale comments AND widens the shipped glob back. What says which side is
+# ahead is not in YAML — `yaml.safe_load` discards comments — it is the ruling
+# comment inside the collection's own block, so that is what the direction is
+# read from, per collection, and never from a collection name.
+
+#: #2750's pair: the narrowed pattern committed to the template, the daemon's
+#: file not yet following. Exactly one collection differs, on `pattern` alone, so
+#: every case below has exactly one drift row in play.
+NARROW_RULED = """\
+collections:
+  subliminal:
+    # Narrowed, not retired — the 2026-10-07 ruling on #2180, carried by #2351:
+    # narrow this collection to the vault root and keep the eleven segment
+    # collections. The pattern used to be `**/*.md`, which made this root the
+    # whole vault. DO NOT WIDEN IT BACK.
+    path: /home/me/obsidian
+    pattern: "*.md"
+  memory:
+    path: /home/me/obsidian/memory
+    pattern: "**/*.md"
+"""
+
+#: The same file with its comment lines removed. Everything that is not the
+#: ruling is byte-identical, so whatever the two print differently is the
+#: comment doing it — that is the control for "derived from the comment".
+NARROW_UNRULED = re.sub(r"^ *#.*\n", "", NARROW_RULED, flags=re.MULTILINE)
+
+#: `subliminal` as the daemon still had it when the template commit landed.
+WIDE_LIVE = """\
+collections:
+  subliminal:
+    path: /home/me/obsidian
+    pattern: "**/*.md"
+  memory:
+    path: /home/me/obsidian/memory
+    pattern: "**/*.md"
+"""
+
+#: The identical marker carried by a collection called something else, for the
+#: clause-3 case: a rule keyed to the name `subliminal` would satisfy the first
+#: two cases here and hand the next ruling the wrong remedy.
+NARROW_RULED_OTHER = NARROW_RULED.replace("subliminal:", "attachments:")
+WIDE_LIVE_OTHER = WIDE_LIVE.replace("subliminal:", "attachments:")
+
+
+def _printed_main(monkeypatch, tmp_path, capsys, template: Path, live: Path) -> str:
+    """Run `main() --dry-run` over fixture configs and return what it printed.
+
+    The operator's screen is the surface #2750 is about, so these cases assert on
+    stdout rather than only on the dict. Same stubs as `_run_main` for the same
+    reasons: nothing here touches `~/.cache/qmd`, the daemon or the real configs,
+    and a drift row never changes the exit code.
+    """
+    monkeypatch.setattr(m, "TEMPLATE_CONFIG", template)
+    monkeypatch.setattr(m, "LIVE_CONFIG", live)
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    monkeypatch.setattr(m, "INDEX", tmp_path / "qmd" / "index.sqlite")
+    monkeypatch.setattr(m, "inspect_index", lambda: {"orphan_ratio": 0.0, "vectors_orphaned": 0})
+    monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
+    monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
+    monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py", "--dry-run"])
+    assert m.main() == 0, "a drift row must not change the job's exit code"
+    return capsys.readouterr().out
+
+
+def test_a_narrow_ruled_pattern_drift_prints_the_template_to_live_direction(
+        monkeypatch, tmp_path, capsys):
+    """Clause 1: the printed remedy points the way the ruling went.
+
+    It has to name the file to edit, say which direction, and cite the item it
+    came from, or the operator is left to guess whether this drift is a lapse or
+    a decision.
+    """
+    t, l = _pair(tmp_path, template=NARROW_RULED, live=WIDE_LIVE)
+    printed = _printed_main(monkeypatch, tmp_path, capsys, t, l)
+    assert "subliminal [pattern] template=*.md live=**/*.md" in printed, printed
+    assert "template -> live" in printed, printed
+    assert "#2180" in printed, printed
+    assert "apply the template's pattern" in printed, printed
+    assert m.NARROW_REMEDY_TARGET in printed, printed
+
+
+def test_a_narrow_ruled_pattern_drift_prints_no_live_to_template_cp(
+        monkeypatch, tmp_path, capsys):
+    """Clause 2: and prints none of the command that would undo the ruling.
+
+    The command is not merely redundant here — run against the live pair it is
+    the change that reverts #2180 and strips the template's comments, which is
+    why the whole block is suppressed rather than softened.
+    """
+    t, l = _pair(tmp_path, template=NARROW_RULED, live=WIDE_LIVE)
+    printed = _printed_main(monkeypatch, tmp_path, capsys, t, l)
+    assert "cp ~/.config/qmd/index.yml" not in printed, printed
+    assert m.RESYNC_COMMAND not in printed, printed
+
+
+def test_the_narrow_direction_follows_the_comment_not_the_collection_name(
+        monkeypatch, tmp_path, capsys):
+    """Clause 3: the same marker on another collection gives the same remedy.
+
+    Nothing here is allowed to know the word `subliminal`: the next narrowing
+    ruling will be filed under some other name, and a special case would print
+    it the revert with the authority of a fix.
+    """
+    t, l = _pair(tmp_path, template=NARROW_RULED_OTHER, live=WIDE_LIVE_OTHER)
+    printed = _printed_main(monkeypatch, tmp_path, capsys, t, l)
+    assert "attachments [pattern] template=*.md live=**/*.md" in printed, printed
+    assert "template -> live" in printed, printed
+    assert "#2180" in printed, printed
+    assert "cp ~/.config/qmd/index.yml" not in printed, printed
+    assert "subliminal" not in printed, printed
+
+
+def test_an_unruled_drift_still_prints_the_setup_documented_cp(
+        monkeypatch, tmp_path, capsys):
+    """Clause 4, first half: the other surface keeps the command it always had.
+
+    For a `path_differs` row, and for a collection the template says nothing
+    about, the daemon's file genuinely is the truth and SETUP.md's re-sync is the
+    remedy. The top-level keys keep their values, which is what the older nodes
+    of this file and `test_qmd_index_template.py` pin.
+    """
+    t, l = _pair(tmp_path)
+    printed = _printed_main(monkeypatch, tmp_path, capsys, t, l)
+    assert m.RESYNC_COMMAND in printed, printed
+    assert "live -> template" in printed, printed
+    out = m.config_drift(t, l)
+    assert out["resync_command"] == m.RESYNC_COMMAND
+    assert out["resync_direction"] == m.RESYNC_DIRECTION
+
+
+def test_the_same_narrowed_pattern_without_its_ruling_comment_prints_the_cp(
+        monkeypatch, tmp_path, capsys):
+    """Clause 4, second half, and the control for clause 3.
+
+    `NARROW_UNRULED` is `NARROW_RULED` with the comment deleted: same
+    collection, same narrowed pattern, same live file. Narrowing alone is not
+    evidence of a ruling — a half-landed pair (#2543's reason for comparing
+    `pattern` at all) looks exactly like this and wants the re-sync — so the
+    remedy has to fall back to the documented one.
+    """
+    t, l = _pair(tmp_path, template=NARROW_UNRULED, live=WIDE_LIVE)
+    printed = _printed_main(monkeypatch, tmp_path, capsys, t, l)
+    assert "subliminal [pattern] template=*.md live=**/*.md" in printed, printed
+    assert m.RESYNC_COMMAND in printed, printed
+    assert "live -> template" in printed, printed
+    assert "template -> live" not in printed, printed
+    row = m.config_drift(t, l)["drift"][0]
+    assert row["recommend"] == m.RECOMMEND_RESYNC, row
+    assert "ruling_item" not in row, row
+
+
+def test_the_narrow_recommendation_is_recorded_in_the_report_json(monkeypatch,
+                                                                  tmp_path):
+    """Clause 5: the dated report says which remedy it printed.
+
+    stdout is gone by the time anybody reads the report a week later, and the
+    row is what survives — so the recommendation lives on the row, with the item
+    it came from and the glob that was replaced, JSON-serialisable like the rest
+    of it.
+    """
+    t, l = _pair(tmp_path, template=NARROW_RULED, live=WIDE_LIVE)
+    report = _run_main(monkeypatch, tmp_path, t, l)
+    cd = report["config_drift"]
+    assert cd["drift_count"] == 1, cd["drift"]
+    row = json.loads(json.dumps(cd["drift"][0]))
+    assert row["kind"] == "pattern", row
+    assert row["recommend"] == m.RECOMMEND_NARROW == "template_to_live", row
+    assert row["ruling_item"] == "#2180", row
+    assert row["replaced_glob"] == "**/*.md", row
+
+
+def test_every_drift_row_names_the_remedy_it_recommends(monkeypatch, tmp_path):
+    """Clause 5, the other half: a row that recommends the re-sync says so too.
+
+    A reader of the report has to be able to tell "this one is a decision" from
+    "this one is unexplained", and the absence of a field answers that only if
+    every row that needs it carries it.
+    """
+    t, l = _pair(tmp_path)
+    report = _run_main(monkeypatch, tmp_path, t, l)
+    rows = report["config_drift"]["drift"]
+    assert len(rows) == 3, rows
+    assert [r["recommend"] for r in rows] == [m.RECOMMEND_RESYNC] * 3, rows
+    assert not any("ruling_item" in r for r in rows), rows
+
+
+def test_the_narrow_remedy_names_the_live_file_the_daemon_reads():
+    """The printed file is the real one, spelled the way the command spells it.
+
+    A remedy that names some other path is not actionable, and a hardcoded
+    tilde-path is exactly the kind of string that outlives the move it described.
+    """
+    assert m.NARROW_REMEDY_TARGET == "~/" + str(
+        m.LIVE_CONFIG.relative_to(Path.home())), m.NARROW_REMEDY_TARGET
+
+
+def test_the_shipped_template_s_ruling_block_reads_as_a_narrow_ruling():
+    """The marker is matched against the file this repository actually ships.
+
+    A fixture-only rule could pass while never firing on the real comment, whose
+    exact wording is what `c41d85a3` committed — and tonight's nightly is the
+    first that prints a remedy for that row, so the first chance to notice a
+    non-firing rule is the nightly itself. Reads the tracked template as text,
+    like the #2311 doc-preservation nodes this file's header allows, and never
+    the live config.
+    """
+    tmpl, note, bad = m._qmd_collections(m.TEMPLATE_CONFIG)
+    assert note is None and not bad, note
+    assert tmpl["subliminal"]["pattern"] == "*.md", tmpl["subliminal"]
+    ruling = m._narrow_rulings(m.TEMPLATE_CONFIG, tmpl)["subliminal"]
+    assert ruling["ruling_item"] == "#2180", ruling
+    assert ruling["replaced_glob"] == "**/*.md", ruling
+    # The template's other comment blocks cite item ids too — `autonomy-runs`
+    # names #67/#78/#80 — and none of them is a pattern ruling.
+    assert set(m._narrow_rulings(m.TEMPLATE_CONFIG, tmpl)) == {"subliminal"}
+
+
 # --- #1367: the unattended backfill refuses a corpus-wide re-embed -----------
 # Pending is counted *per configured model*: `getHashesNeedingEmbedding`
 # (qmd/src/store.ts:2561-2580) LEFT-JOINs on `model` + `embed_fingerprint`, not

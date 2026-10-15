@@ -224,6 +224,17 @@ LIVE_CONFIG = Path.home() / ".config/qmd/index.yml"
 # (SETUP.md:631-635). Run from the repo root.
 RESYNC_COMMAND = "cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml"
 RESYNC_DIRECTION = "live -> template (the file the daemon reads is the truth)"
+# #2750: the same live file, for the remedy that edits one field of it by hand
+# rather than overwriting the template with it. Spelled with a tilde because that
+# is how RESYNC_COMMAND spells it, and a path that resolves in the report but not
+# in the operator's shell is a lead they cannot follow.
+NARROW_REMEDY_TARGET = "~/.config/qmd/index.yml"
+#: The two remedies a drift row can recommend, in its `recommend` field.
+#: `live_to_template` is the documented re-sync above; `template_to_live` is for
+#: a difference the template itself records as a ruling (#2750), where the
+#: re-sync would be the revert.
+RECOMMEND_RESYNC = "live_to_template"
+RECOMMEND_NARROW = "template_to_live"
 
 # Prune when orphans exceed this share of all vectors. The threshold was set
 # when a cleanup cost a daemon stop; it no longer does, and the nightly
@@ -1799,6 +1810,148 @@ def _ignore_of(spec: dict) -> list[str] | None:
     return sorted(set(entries)) or None
 
 
+# ---- #2750: which side of a disagreement somebody chose -----------------------
+#
+# Four compared fields still do not say which side of a difference is the one a
+# person decided. A narrowing ruling is a hand edit to the daemon's file and a
+# later commit to the template (#2180's ruling, applied 2026-10-07, carried by
+# #2351, template leg committed as c41d85a3 / #2728), and while the two legs are
+# apart the pair is diverged ON PURPOSE with the TEMPLATE ahead. For that row
+# `RESYNC_COMMAND` is not the remedy but the revert: the live file is 50 lines
+# with no comment lines at all and the template is 102 with 52 (`grep -c "^ *#"`
+# on both, 2026-10-15), so the cp deletes the provenance header and the
+# `autonomy-runs` and `sessions` rationale comments and widens the shipped glob
+# back — while looking exactly like the hygiene step SETUP.md prescribes. The
+# direction therefore has to come from the only place the ruling is written
+# down, which is not YAML: `yaml.safe_load` discards comments, and a collection's
+# own `pattern` value cannot tell a decision from a lapse.
+
+#: `#2180` — the item a comment cites as having decided something.
+_RULING_ITEM_RE = re.compile(r"#(\d{2,})\b")
+#: A glob quoted in the comment. The one that is no longer the collection's own
+#: pattern is the glob the ruling replaced.
+_BACKTICKED_GLOB_RE = re.compile(r"`([^`\n]+)`")
+_NARROWING_RE = re.compile(r"narrow", re.IGNORECASE)
+_COLLECTIONS_KEY_RE = re.compile(r"^(?P<indent>[ \t]*)collections:\s*(?:#.*)?$")
+
+
+def _template_collection_comments(text: str) -> dict[str, str]:
+    """Each collection's own comment text, read from the template's raw bytes.
+
+    A ruling that exists only in comments is invisible to everything that parses
+    the file, so recovering it means reading it as text. A collection's block is
+    every comment line inside its body plus the comment lines that document it
+    from above; the tracked template writes rulings both ways — `subliminal`'s
+    sits inside the body under its key, `autonomy-runs`' rationale sits above its
+    key — so reading one place and not the other misses half the file.
+
+    A comment at the collections' own indent documents the key that FOLLOWS it
+    (that is how this template writes them), and a comment deeper in documents
+    the collection it is inside. Collections are the keys one indent below
+    `collections:`, whatever that indent turns out to be, and the block ends at
+    the first shallower line — which is how `models:` closes it. No
+    `collections:` block, or one with no key, is an empty answer, and an empty
+    answer leaves every drift row on the documented re-sync.
+    """
+    lines = text.splitlines()
+    start, parent = -1, ""
+    for i, line in enumerate(lines):
+        km = _COLLECTIONS_KEY_RE.match(line)
+        if km:
+            start, parent = i, km.group("indent")
+            break
+    if start < 0:
+        return {}
+    indent = ""
+    for line in lines[start + 1:]:
+        if line.strip() and not line.lstrip().startswith("#"):
+            indent = line[: len(line) - len(line.lstrip())]
+            break
+    if not indent or indent == parent:
+        return {}
+    # A key's first character is never whitespace, which is what stops a `path:`
+    # line four columns in from being read as a collection called `path`.
+    key_re = re.compile(
+        "^" + re.escape(indent) + r"(?P<name>[^#: \t][^:]*?):\s*(?:#.*)?$")
+    blocks: dict[str, list[str]] = {}
+    name: str | None = None
+    pending: list[str] = []
+    for line in lines[start + 1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        cur = line[: len(line) - len(line.lstrip())]
+        if stripped.startswith("#"):
+            if name is not None and len(cur) > len(indent):
+                blocks.setdefault(name, []).append(stripped)
+            else:
+                pending.append(stripped)
+            continue
+        if len(cur) < len(indent):
+            break
+        km = key_re.match(line)
+        if km:
+            name = km.group("name").strip().strip("\"'")
+            blocks.setdefault(name, [])
+            blocks[name].extend(pending)
+            pending = []
+    return {k: "\n".join(v) for k, v in blocks.items() if v}
+
+
+def _narrow_ruling(comments: str, template_pattern: str | None) -> dict | None:
+    """`{"ruling_item": "#2180", "replaced_glob": "**/*.md"}` for a narrowing the
+    comment records, else None.
+
+    Three things have to be in the collection's own comments, because each one
+    rules out a different false positive:
+
+    * the word "narrow" — `autonomy-runs`' comment cites #67, #78 and #80 and
+      quotes a glob, and decided nothing about either file, so a rule on "cites
+      an item" would hand its pattern drift the wrong remedy;
+    * a `#<digits>` item, because the remedy has to name who ruled: an operator
+      choosing between two files reads the ruling before they copy either way,
+      and a comment that only says "used to be wider" gives them nothing to read;
+    * a backticked glob (a quoted value containing `*`) that is NOT the
+      template's current pattern — that is the glob the ruling replaced. The
+      `subliminal` block quotes both `**/*.md` (replaced) and `*.md` (the
+      survivor), so taking any quoted glob would name the wrong value in the
+      remedy line.
+
+    The item cited is the first one, which is the ruling; #2351 is the carry that
+    follows #2180 in that block.
+    """
+    if not comments or not _NARROWING_RE.search(comments):
+        return None
+    item = _RULING_ITEM_RE.search(comments)
+    if not item:
+        return None
+    for cand in _BACKTICKED_GLOB_RE.findall(comments):
+        if "*" in cand and cand != template_pattern:
+            return {"ruling_item": "#" + item.group(1), "replaced_glob": cand}
+    return None
+
+
+def _narrow_rulings(path: Path, tmpl: dict[str, dict]) -> dict[str, dict]:
+    """Which collections the template records as deliberately narrowed, by name.
+
+    Reads the template a second time as text, because the parse that produced
+    `tmpl` has already thrown the ruling away. A file whose bytes cannot be read
+    has no rulings recorded, which is the safe direction to fall back to: every
+    row keeps the re-sync the code prints today.
+    """
+    try:
+        text = path.read_text()
+    except Exception:  # noqa: BLE001 — no recorded ruling is the safe answer
+        return {}
+    out: dict[str, dict] = {}
+    for name, comments in _template_collection_comments(text).items():
+        spec = tmpl.get(name) or {}
+        ruling = _narrow_ruling(comments, spec.get("pattern"))
+        if ruling:
+            out[name] = ruling
+    return out
+
+
 def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG) -> dict:
     """Compare the committed template with the config the daemon actually reads.
 
@@ -1857,6 +2010,10 @@ def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG) -> 
     out["comparable"] = True
     if tmpl_bad or live_bad:
         out["malformed"] = {"template": tmpl_bad, "live": live_bad}
+    # Which collections the template says it narrowed on purpose (#2750). Read
+    # once for the whole file, before the loop, so a ruling costs one re-read of
+    # the template and not one per collection.
+    narrow = _narrow_rulings(template, tmpl)
 
     for name in sorted(set(tmpl) | set(livec)):
         # Order matters. Which collections exist is answerable even when one
@@ -1896,17 +2053,32 @@ def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG) -> 
                      "live_path": livec[name].get("path")}
                 )
             if tmpl[name].get("pattern") != livec[name].get("pattern"):
-                out["drift"].append(
-                    {"collection": name, "kind": "pattern",
-                     "template_pattern": tmpl[name].get("pattern"),
-                     "live_pattern": livec[name].get("pattern")}
-                )
+                row = {"collection": name, "kind": "pattern",
+                       "template_pattern": tmpl[name].get("pattern"),
+                       "live_pattern": livec[name].get("pattern")}
+                # Only `pattern` can be a narrowing ruling: a path that moved or
+                # an `ignore` list that changed is not what a template comment
+                # rules on, so those rows keep the re-sync (#2750).
+                ruling = narrow.get(name)
+                if ruling:
+                    row["recommend"] = RECOMMEND_NARROW
+                    row["ruling_item"] = ruling["ruling_item"]
+                    row["replaced_glob"] = ruling["replaced_glob"]
+                out["drift"].append(row)
             t_ignore, l_ignore = _ignore_of(tmpl[name]), _ignore_of(livec[name])
             if t_ignore != l_ignore:
                 out["drift"].append(
                     {"collection": name, "kind": "ignore",
                      "template_ignore": t_ignore, "live_ignore": l_ignore}
                 )
+
+    # Every row says which way to reconcile it, including the rows whose answer
+    # is the documented re-sync (#2750 clause 5): the printed advice is gone by
+    # the time anybody reads the dated report, and the absence of a field must not
+    # be the only evidence that a row was unexplained. `setdefault`, so the one
+    # row that already carries `template_to_live` keeps it.
+    for row in out["drift"]:
+        row.setdefault("recommend", RECOMMEND_RESYNC)
 
     out["drift_count"] = len(out["drift"])
     out["in_sync"] = out["drift_count"] == 0
@@ -1934,6 +2106,27 @@ def _drift_pair(row: dict) -> tuple:
         if tk in row or lk in row:
             return row.get(tk), row.get(lk)
     return None, None
+
+
+def _narrow_remedy_lines(row: dict) -> list[str]:
+    """What to tell an operator about a pattern drift the template ruled (#2750).
+
+    No command is printed, deliberately. The form an operator already knows for
+    closing drift is `cp`, and in either direction it is wrong on this row:
+    live -> template reverts the ruling and deletes the template's comment lines
+    with it, and template -> live would overwrite the live file's whole content to
+    change one field. So the remedy is a hand edit of that field, and the lines
+    have to carry what a command would have carried by construction: the file to
+    edit, the value to put in it, the direction, and the item to read first.
+    """
+    item = row.get("ruling_item") or "an undated ruling"
+    tv, _lv = _drift_pair(row)
+    return [
+        f"    {row['collection']} [{row['kind']}]  narrow ruling {item}: "
+        f"template -> live, do NOT re-sync this row live -> template",
+        f"      apply the template's pattern {tv!r} to {NARROW_REMEDY_TARGET} "
+        f"(it replaced {row.get('replaced_glob')!r}); the re-sync would undo {item}",
+    ]
 
 
 # ---- #2180: one collection's root swallowing another collection's root -------
@@ -2901,6 +3094,8 @@ def _emit(r: dict, as_json: bool) -> None:
             print(f"  qmd config        not compared: {cd['note']}")
         elif cd.get("drift_count"):
             print(f"  qmd config drift  {cd['drift_count']} collection difference(s)")
+            resync_rows: list[dict] = []
+            narrow_rows: list[dict] = []
             for d in cd["drift"]:
                 # Read the row's own field: a `pattern` row carries
                 # template_pattern/live_pattern, and printing `template_path`
@@ -2909,8 +3104,20 @@ def _emit(r: dict, as_json: bool) -> None:
                 tv, lv = _drift_pair(d)
                 print(f"    · {d['collection']} [{d['kind']}] "
                       f"template={tv} live={lv}")
-            print(f"    re-sync ({cd.get('resync_direction')}):")
-            print(f"      {cd.get('resync_command')}")
+                (narrow_rows if d.get("recommend") == RECOMMEND_NARROW
+                 else resync_rows).append(d)
+            if resync_rows:
+                # The documented re-sync, under the rows whose truth really is the
+                # daemon's file. It used to print for ANY nonzero drift, which for
+                # a row the template narrowed on purpose printed the command that
+                # reverts the ruling (#2750) — so it now prints only when some row
+                # asks for it, and a run whose only drift is a ruled pattern shows
+                # no `cp` to run at all.
+                print(f"    re-sync ({cd.get('resync_direction')}):")
+                print(f"      {cd.get('resync_command')}")
+            for d in narrow_rows:
+                for line in _narrow_remedy_lines(d):
+                    print(line)
         else:
             print("  qmd config        template and live collections agree")
     # Printed on every run that measured it, agreement or no agreement (#2180): the
