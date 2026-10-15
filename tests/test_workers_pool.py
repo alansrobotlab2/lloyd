@@ -889,7 +889,12 @@ async def test_in_flight_state_is_reported_while_a_job_runs_and_cleared_after(q,
         await asyncio.wait_for(running.wait(), timeout=5)
         status = pool.status()
         assert status["in_flight_count"] == 1
+        # The bare queue-id key plus these three fields are the whole shape that
+        # `app/routers/dashboard.py` and `scripts/automod/promote.py` read today, so
+        # #2790 was only allowed to ADD to them (#2790 clause 3).
         assert status["in_flight"]["1"]["source"] == "s"
+        assert status["in_flight"]["1"]["kind"] == "k"
+        assert status["in_flight"]["1"]["started_at"]
         release.set()
         for _ in range(200):
             if pool.status()["in_flight_count"] == 0:
@@ -898,7 +903,67 @@ async def test_in_flight_state_is_reported_while_a_job_runs_and_cleared_after(q,
     finally:
         release.set()
         await pool.stop()
+    assert pool.status()["in_flight"] == {}
     assert pool.status()["in_flight_count"] == 0
+
+
+async def test_an_in_flight_entry_names_its_queue_id_and_the_worker_that_claimed_it(
+    q, monkeypatch, caplog,
+):
+    """#2790 clauses 1-2: a live slot has to say what its own key is.
+
+    `in_flight` is keyed by the `queue` rowid, but nothing in the payload said so, so
+    a reader who took the key for a process id and ran `ps -p <key>` got an empty
+    answer for every HEALTHY slot and called it a leak. That misread is what filed
+    #2788, and the round it sent the next reader to write spent its wall clock waiting
+    on a drain its own turn was blocking. The entry now re-states its key as
+    `queue_id` and names the `worker-N` loop that owns the turn — the pool already
+    stored that id; the projection used to drop it.
+    """
+    import logging
+    caplog.set_level(logging.INFO)
+    running = asyncio.Event()
+    release = asyncio.Event()
+
+    async def execute(item):
+        running.set()
+        await release.wait()
+        return {"summary": "ran"}
+
+    import workers.sources as sources
+    monkeypatch.setattr(sources, "SOURCE_REGISTRY",
+                        {"s": SimpleNamespace(NAME="s", execute=execute)}, raising=False)
+    monkeypatch.setattr(sources, "get_sources_config",
+                        lambda: {"s": {"max_duration_seconds": 30}}, raising=False)
+
+    q.enqueue("s", "k")
+    pool = WorkerPool(q, slots=1, poll_idle_seconds=0.01)
+    await pool.start()
+    try:
+        await asyncio.wait_for(running.wait(), timeout=5)
+        entries = pool.status()["in_flight"]
+        assert len(entries) == 1, entries
+        key, entry = next(iter(entries.items()))
+
+        # Clause 1: the key is named inside the value it keys, so `str(queue_id)`
+        # is the same string a reader is looking at in `in_flight`.
+        assert str(entry["queue_id"]) == key, (key, entry)
+        # Clause 2: the entry names the loop that claimed the row — proven against
+        # the row itself and against the `[worker-N] running …` line that id printed.
+        assert entry["worker"], f"the worker field came back empty: {entry}"
+        assert entry["worker"] in pool.worker_ids, (entry, pool.worker_ids)
+        row = q.get(int(key))
+        assert row is not None and row.claimed_by == entry["worker"], (row, entry)
+        assert any(r.getMessage().startswith(f"[{entry['worker']}] running ")
+                   for r in caplog.records), caplog.text
+        release.set()
+        for _ in range(200):
+            if pool.status()["in_flight_count"] == 0:
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        release.set()
+        await pool.stop()
 
 
 async def test_starting_recovers_everything_a_dead_pool_was_holding(q, monkeypatch):

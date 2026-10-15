@@ -1188,6 +1188,18 @@ class WorkerPool:
         return operator_pause_state(self.queue)["lease_age_s"]
 
     def status(self) -> dict:
+        """Pool state, as served by `GET /api/workers/status`.
+
+        `in_flight` is keyed by the `queue` rowid rendered as a string — it is NOT a
+        process id, which is the misread that got a healthy slot written up as a
+        leaked pid (#2788): `ps -p <key>` is empty for every live slot, because the
+        key is a database row. Each value therefore re-states its own key as
+        `queue_id` and names the `worker-N` loop that claimed the row, so the payload
+        answers "which loop owns this turn" on its own instead of making an operator
+        join `/api/workers/queue` and `ps` under incident pressure. The bare key and
+        the three original fields are unchanged: the dashboard's live panel and
+        `scripts/automod/promote.py` read them.
+        """
         return {
             "running": self._running,
             "paused": self._paused,
@@ -1198,9 +1210,11 @@ class WorkerPool:
             "slots": self.slots,
             "in_flight": {
                 str(k): {
+                    "queue_id": str(k),
                     "source": v.get("source"),
                     "kind": v.get("kind"),
                     "started_at": v.get("started_at"),
+                    "worker": v.get("worker"),
                 }
                 for k, v in self._in_flight.items()
             },
