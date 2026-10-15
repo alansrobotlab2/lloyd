@@ -39,10 +39,15 @@ v1 measures three links and names two. Stages in funnel order:
              acceptance: "names the missing stage rather than proxying it").
              `cannot_see.used_surrogate` holds the predicate v1 considered and
              the reason it is not evidence.
-  benefited  NOT MEASURED: `scripts/uptake_probe.py` refuses to write its table
-             below precision 0.70 and no uptake store exists on this box, so the
-             denominator is 0 and the stage prints a refusal with that 0 beside
-             its name rather than a rate.
+  benefited  NOT MEASURED: the store is read where `app/uptake.py` WRITES it
+             (`app.uptake.UPTAKE_ARTIFACT_DIR`, three tracked tables today), and
+             the newest one is named with its age and its citability keys — but
+             the leg still has no denominator, because joining its dispute
+             attribution into a per-artifact funnel needs the per-turn key the
+             `used` leg has no predicate for. The stage prints a refusal with
+             that 0 beside its name rather than a rate, and refuses by name
+             rather than citing a table older than `UPTAKE_TABLE_MAX_AGE_DAYS`
+             or one stamped `engine_rerouted` / `audit_only` / `measured: false`.
 
 Two further rulings v1 takes and states rather than settles: the cohort is
 SKILL.md only (a USER.md/MEMORY.md line sits in every prompt and therefore
@@ -471,33 +476,211 @@ def used_stage(reached: list[str] | None) -> dict:
             "mechanical measures reaching for an artifact, not applying it"))
 
 
-def benefited_stage(uptake_dir: Path | None = None) -> dict:
+#: The uptake table's filename pattern, spelled here rather than imported:
+#: `app/uptake.py` documents the shape (`uptake-YYYY-MM-DD.json`) but publishes no
+#: glob constant of its own, and `scripts/memory_revision_candidates.py` hard-codes
+#: the same pattern for the same reason.
+UPTAKE_TABLE_GLOB = "uptake-*.json"
+
+#: How old an uptake table may be before this stage refuses to speak from it.
+#: Deliberately NOT imported from `scripts/eval_instrument_index.py`, which also
+#: holds 30 for this store but publishes it only inside an `Instrument` literal
+#: for its own staleness column and owns nothing a reader may rely on; and
+#: deliberately not `SPILL_MAX_AGE_DAYS` from the retention sweep, which ages a
+#: completely different store. 30 is the window the probe itself runs over, so a
+#: table older than this describes a corpus the probe no longer reads. A table
+#: past it is named and refused, never cited as a benefited-leg denominator.
+UPTAKE_TABLE_MAX_AGE_DAYS = 30
+
+
+#: The three depths an uptake table's keys can live at, in the order the reader
+#: walks them. Not invented here: the instrument's own schema test spells the
+#: same walk (`tests/test_uptake.py::
+#: test_the_citability_rule_asks_about_the_keys_uptake_emits`, whose
+#: `instrument_writes` is the positive control), because the writer puts
+#: `audit_only` at table level (via `write_table`'s `extra`), `engine_rerouted`
+#: in the `classifier` block (`scripts/uptake_probe.py`'s `classifier_block`),
+#: and `measured` only inside that block's sub-blocks — never beside the others.
+#: A reader that looks only at the top level therefore reports two of the three
+#: keys absent on EVERY real table, which is the difference between "the file
+#: does not say" and "the file says it was scored by a rerouted engine".
+UPTAKE_TABLE_SUBBLOCKS: tuple[str, ...] = ("metrics", "holdout", "zero_shot")
+
+
+def _uptake_key_lookup(doc: dict, key: str) -> tuple[bool, Any]:
+    """Is this key stated in the table, and with what value? Depth-aware.
+
+    Returns `(stated, value)`; `stated` is False only when no level carries it.
+    """
+    if key in doc:
+        return True, doc[key]
+    block = doc.get("classifier")
+    if not isinstance(block, dict):
+        return False, None
+    if key in block:
+        return True, block[key]
+    for sub in UPTAKE_TABLE_SUBBLOCKS:
+        inner = block.get(sub)
+        if isinstance(inner, dict) and key in inner:
+            return True, inner[key]
+    return False, None
+
+
+def _uptake_citability_states(doc: dict) -> dict[str, str]:
+    """Each citability key's state in one table: `absent` / `true` / `false`.
+
+    `absent` is its OWN state and never `citable`: the three committed tables
+    carry none of the keys at all — they predate #1850, which introduced
+    `engine_rerouted` — while `app/uptake.py`'s own glossary reads
+    "`audit_only` ABSENT means this table cleared every floor and is citable".
+    That reading is sound for a table the current writer stamped and unsound for
+    one it never stamped at all, so this stage reports what the file does or does
+    not say and decides nothing about citability from an absent key. "Says
+    nothing" is decided only after all three depths are read, so an absent
+    `engine_rerouted` here means the FILE omits it, not that this reader missed
+    it.
+    """
+    from scripts.uptake_citability import CITABILITY_KEYS
+    out: dict[str, str] = {}
+    for key in CITABILITY_KEYS:
+        stated, value = _uptake_key_lookup(doc, key)
+        out[key] = "absent" if not stated else ("true" if value is True else "false")
+    return out
+
+
+def _uptake_table_read(path: Path) -> tuple[dict | None, str]:
+    """A table's bytes, and why they could not be read. Never raises."""
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if not isinstance(doc, dict):
+        return None, f"top-level JSON is a {type(doc).__name__}, not an object"
+    return doc, ""
+
+
+def _uptake_table_age_days(doc: dict, now: datetime) -> tuple[int | None, str]:
+    """The table's age in whole days, measured on its OWN `probe_timestamp`.
+
+    `probe_timestamp` is the only age field a table has: there is no top-level
+    `date`, and the files' mtimes are checkout mtimes — the retention sweep does
+    not `copystat` what it archives, so every table here reads the day it was
+    cloned. A missing or unparseable stamp is not age 0: the second element names
+    it, and the caller refuses rather than treating an undated table as fresh.
+    """
+    raw = doc.get("probe_timestamp")
+    if not isinstance(raw, str) or not raw.strip():
+        return None, "probe_timestamp is absent"
+    try:
+        stamp = datetime.fromisoformat(raw.strip())
+    except ValueError as exc:
+        return None, f"probe_timestamp {raw!r} is not ISO-8601 ({exc})"
+    if stamp.tzinfo is None:
+        # A naive stamp in a machine-facing payload is read as UTC by every later
+        # reader (the class rule of 2026-09-21), so it is read as UTC here too.
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return max(0, (now - stamp).days), ""
+
+
+def benefited_stage(uptake_dir: Path | None = None,
+                    *, now: datetime | None = None) -> dict:
     """`benefited` — NOT MEASURED, and its denominator is genuinely 0.
 
-    The uptake store is checked for, not assumed absent: #552's uptake table is
-    the only dispute-attribution instrument on this box,
-    `scripts/uptake_probe.py` exits 3 and deliberately writes no table below
-    precision 0.70, and whether to pay the secondary engine to attempt the leg at
-    all is an open ruling on #2507 — shipping this stage as a named gap is the
-    permitted outcome, not a failure. Either way there is no denominator.
+    The store is resolved through `app.uptake.UPTAKE_ARTIFACT_DIR`, the constant
+    the probe's own `write_table` outputs to — NOT through a re-spelled
+    `DATA_ROOT / "eval" / "uptake"`, which is the path this stage held until
+    #2733 and which nothing on this box has ever written. The attribute is read
+    off the module at CALL time (`uptake.UPTAKE_ARTIFACT_DIR`, not a value
+    imported once) for the same reason `scripts/memory_revision_candidates.py`
+    spells it that way: it is what a fixture repoints. #2597's rule is that an
+    instrument is read only where its own writer declares it, and this store is
+    the single eval instrument that lives inside the code tree
+    (`git ls-files eval/uptake`) rather than under the data root.
+
+    The newest table is named by filename, aged on its own `probe_timestamp` and
+    published with each citability key's state, so "the store is absent" can only
+    ever be said of a directory that really holds none.
+
+    Naming the store still cannot produce a rate: #552's table is the only
+    dispute-attribution instrument on this box, `scripts/uptake_probe.py` exits 3
+    and deliberately writes nothing below precision 0.70, joining its disputes
+    into a per-artifact denominator needs the per-turn key the `used` leg has no
+    predicate for, and whether to pay the secondary engine to attempt the leg at
+    all is an open ruling on #2507. Every branch of this function returns
+    `measured: false` with `denominator: 0`.
     """
-    from app import paths as _paths
-    uptake = Path(uptake_dir) if uptake_dir else (_paths.DATA_ROOT / "eval" / "uptake")
-    if uptake.is_dir():
+    from app import uptake as _uptake
+    uptake = Path(uptake_dir) if uptake_dir else Path(_uptake.UPTAKE_ARTIFACT_DIR)
+    now = now or datetime.now(timezone.utc)
+    detail: dict[str, Any] = {"uptake_store": str(uptake)}
+    if not uptake.is_dir():
         return _refused(
-            "benefited", "uptake_table_not_read_in_v1", 0,
-            f"`{uptake}` exists, but joining its dispute attribution into a "
-            f"per-artifact funnel needs the per-turn key the `used` leg has no "
-            f"predicate for, so the denominator stays 0 and the leg stays named "
-            f"rather than proxied",
-            unit="artifact", uptake_store=str(uptake))
+            "benefited", "no_uptake_table", 0,
+            f"`{uptake}` does not exist — it is the directory "
+            f"`app.uptake.UPTAKE_ARTIFACT_DIR` names, so the probe has written no "
+            f"table here (and exits 3 rather than write one below precision 0.70), "
+            f"which leaves no dispute signal to divide by. Attempting the leg "
+            f"means paying the secondary engine, an open ruling on #2507 and not a "
+            f"step here",
+            unit="artifact", **detail)
+    names = sorted(p.name for p in uptake.glob(UPTAKE_TABLE_GLOB))
+    if not names:
+        return _refused(
+            "benefited", "no_uptake_table", 0,
+            f"`{uptake}` exists but holds no `{UPTAKE_TABLE_GLOB}` table: "
+            f"`scripts/uptake_probe.py` refuses to write one below precision 0.70, "
+            f"so there is no dispute signal to divide by. Attempting the leg means "
+            f"paying the secondary engine, an open ruling on #2507 and not a step "
+            f"here",
+            unit="artifact", **detail)
+    newest = uptake / names[-1]
+    detail["uptake_table"] = newest.name
+    doc, read_err = _uptake_table_read(newest)
+    if doc is None:
+        return _refused(
+            "benefited", "uptake_table_unreadable", 0,
+            f"`{newest}` — the newest table in `{uptake}` by filename — could not "
+            f"be read as a table ({read_err}), so its age and citability are "
+            f"unknown and nothing may be spoken from it",
+            unit="artifact", **detail)
+    detail["uptake_citability"] = _uptake_citability_states(doc)
+    age_days, age_err = _uptake_table_age_days(doc, now)
+    detail["uptake_table_age_days"] = age_days
+    reasons: list[str] = []
+    if age_err:
+        reasons.append(f"its `probe_timestamp` is unreadable ({age_err})")
+    elif age_days > UPTAKE_TABLE_MAX_AGE_DAYS:
+        reasons.append(f"it is {age_days} days old, over the "
+                       f"{UPTAKE_TABLE_MAX_AGE_DAYS}-day ceiling this stage will "
+                       f"speak from")
+    states = detail["uptake_citability"]
+    if states["engine_rerouted"] == "true":
+        reasons.append("`engine_rerouted` is true")
+    if states["audit_only"] == "true":
+        reasons.append("`audit_only` is true, so every dispute count in it is an "
+                       "unvalidated classifier's guess")
+    if states["measured"] == "false":
+        reasons.append("`measured` is false")
+    if reasons:
+        return _refused(
+            "benefited", "uptake_table_uncitable", 0,
+            f"the newest uptake table `{newest.name}` in `{uptake}` is not a "
+            "table this census may speak from: " + "; ".join(reasons)
+            + ". Citability keys as the file states them: "
+            + ", ".join(f"{k}={v}" for k, v in states.items())
+            + " (an absent key is that file's own state, not a cleared floor). "
+            "Naming the store is as far as v1 goes; the leg stays named rather "
+            "than proxied",
+            unit="artifact", **detail)
     return _refused(
-        "benefited", "no_uptake_table", 0,
-        f"`{uptake}` does not exist: `scripts/uptake_probe.py` refuses to write "
-        f"its table below precision 0.70, so there is no dispute signal to "
-        f"divide by. Attempting the leg means paying the secondary engine, which "
-        f"is an open ruling on #2507 and not a step here",
-        unit="artifact", uptake_store=str(uptake))
+        "benefited", "uptake_table_not_read_in_v1", 0,
+        f"`{uptake}` holds its newest table `{newest.name}` "
+        f"({age_days} days old; citability keys as the file states them: "
+        + ", ".join(f"{k}={v}" for k, v in states.items()) + "), but joining its "
+        "dispute attribution into a per-artifact funnel needs the per-turn key "
+        "the `used` leg has no predicate for, so the denominator stays 0 and the "
+        "leg stays named rather than proxied",
+        unit="artifact", **detail)
 
 
 # ── the priced line ───────────────────────────────────────────────────────────
@@ -685,6 +868,7 @@ def cannot_see(used: dict) -> dict:
 def build_census(days: int = DEFAULT_DAYS, *, event_root: Path | None = None,
                  workers_db: Path | None = None,
                  skills_roots: list[Path] | None = None,
+                 uptake_dir: Path | None = None,
                  now: datetime | None = None) -> dict:
     """Assemble the whole census. Every argument exists for a test or a job."""
     from app import paths as _paths
@@ -700,7 +884,10 @@ def build_census(days: int = DEFAULT_DAYS, *, event_root: Path | None = None,
     cohort = _cohort_names(skills_roots) if produced.get("measured") else None
     offered, surfaced, detail = surface_stages(cohort, event_root, days)
     used = used_stage(detail.get("artifacts_reaching_surfaced"))
-    benefited = benefited_stage()
+    # `now` is passed on so the table's age is measured on the SAME clock as the
+    # window: a census assembled at a pinned instant must not age its uptake
+    # table against a later wall clock.
+    benefited = benefited_stage(uptake_dir=uptake_dir, now=now)
     stages = [s for s in (produced, offered, surfaced, used, benefited)]
     shares = loss_shares(stages)
     since = detail["telemetry"]["since"]
@@ -868,6 +1055,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skills-root", action="append", default=None,
                     metavar="DIR", help="skill root to census; repeatable "
                                         "(default agent_mcp.skills.SKILLS_DIRS)")
+    ap.add_argument("--uptake-dir", default=None, metavar="DIR",
+                    help="uptake table store for the `benefited` stage (default "
+                         "app.uptake.UPTAKE_ARTIFACT_DIR — the directory the "
+                         "probe's own write_table outputs to, which is inside the "
+                         "code tree, NOT under the data root)")
     args = ap.parse_args(argv)
 
     try:
@@ -879,7 +1071,9 @@ def main(argv: list[str] | None = None) -> int:
                           else None, workers_db=Path(args.workers_db)
                           if args.workers_db else None,
                           skills_roots=[Path(p) for p in args.skills_root]
-                          if args.skills_root else None)
+                          if args.skills_root else None,
+                          uptake_dir=Path(args.uptake_dir) if args.uptake_dir
+                          else None)
     path = write_artifact(census, out_dir)
     print(render_text(census))
     print(f"artifact: {path}")

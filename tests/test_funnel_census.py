@@ -105,6 +105,82 @@ def _empty_events(tmp_path: Path) -> Path:
     return d
 
 
+# ── the uptake store the `benefited` stage reads (#2733) ─────────────────────
+
+def _classifier_block(*, rerouted: bool = False,
+                      measured: bool = True) -> dict:
+    """A classifier block in the shape `scripts/uptake_probe.py` hands
+    `write_table`: engine keys at block level, `measured` only inside sub-blocks.
+
+    `stamp_engine` is the probe's own stamper, called with provenance supplied so
+    it never resolves an endpoint, and the block is built with the same keys the
+    probe builds — so a fixture stamped `engine_rerouted: true` here is rerouted
+    in exactly the way a real table is, including the cascade that sets every
+    sub-block's `measured` to false beside it.
+    """
+    import scripts.uptake_probe as probe
+    from app import uptake
+    block = {
+        "passed": not rerouted and measured,
+        "metrics": {"measured": measured, "precision": 0.82, "recall": 0.60},
+        "holdout": {"measured": measured, "precision": 0.79},
+        "zero_shot": {"measured": measured, "precision": 0.74},
+    }
+    return probe.stamp_engine(block, provenance={
+        "alias": "secondary", "endpoint": "http://127.0.0.1:9/v1/chat/completions",
+        "resolved_model": ("other-engine" if rerouted
+                           else uptake.EXPECTED_SCORING_ENGINE),
+        "expected_engine": uptake.EXPECTED_SCORING_ENGINE,
+        "expected_engine_reason": "fixture", "rerouted": rerouted})
+
+
+def _uptake_table(dir_: Path, name: str, *, days_ago: float = 1.0,
+                  classifier: dict | None = None,
+                  audit_only: bool = False,
+                  probe_timestamp: str | None = None) -> Path:
+    """One real uptake table, written by the instrument's OWN writer.
+
+    Hand-spelling the dict would grade the stage against a schema the probe never
+    emits: `app.uptake.write_table` puts `audit_only` at table level,
+    `engine_rerouted` inside `classifier` and `measured` only inside that block's
+    sub-blocks, so a flat fixture would pass a reader that misses two of the
+    three keys. `probe_timestamp` is set through `extra` to decouple the AGE from
+    the filename (`write_table` names the file off `date` and stamps the
+    timestamp itself), which is how a >30-day table is built at all; an explicit
+    stamp of `""` or junk is how the two unreadable-stamp cases are.
+    """
+    from app import uptake
+    extra: dict = {"probe_timestamp": (
+        probe_timestamp if probe_timestamp is not None else
+        (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat(
+            timespec="seconds"))}
+    if audit_only:
+        extra["audit_only"] = True
+        extra["audit_only_reason"] = "fixture: emitted under --ignore-precision-floor"
+    return uptake.write_table({"corpus": {"turns": 40, "disputes": 3},
+                               "coverage": {}, "entries": []},
+                              out_dir=dir_, date=name[len("uptake-"):-len(".json")],
+                              classifier=classifier, extra=extra)
+
+
+@pytest.fixture(autouse=True)
+def _uptake_store_repointed(tmp_path: Path, monkeypatch) -> Path:
+    """Every test in this file reads a fixture uptake store, never the real one.
+
+    The three committed tables under `eval/uptake/` are dated 2026-09-11/-17/-20,
+    so any test that read them would pin a number the calendar moves: the newest
+    crossed `UPTAKE_TABLE_MAX_AGE_DAYS` on 2026-10-20 and would have flipped this
+    file's expectations from a fresh table to a stale one all by itself. The
+    writer's constant is repointed for the whole module; the one test that exists
+    to prove THAT constant is the route repoints it again to its own fixture.
+    """
+    import app.uptake as uptake
+    d = tmp_path / "uptake_store"
+    _uptake_table(d, "uptake-2026-09-20.json", days_ago=1.0)
+    monkeypatch.setattr(uptake, "UPTAKE_ARTIFACT_DIR", d)
+    return d
+
+
 @pytest.fixture
 def corpus(tmp_path: Path) -> dict:
     """A skills root, an event log and a workers.db, sized so every stage bites.
@@ -424,3 +500,232 @@ def test_clause_5_an_empty_cost_denominator_refuses_rather_than_printing_zero(tm
     assert cost["gpu_hours_per_artifact_reaching_use"] is None
     assert "ratio_refusal" in cost
     assert "price: REFUSAL" in fc.render_text(census)
+
+
+# ── #2733: the benefited stage reads the store WHERE ITS WRITER DECLARES IT ───
+#
+# Until #2733 this stage defaulted to `app.paths.DATA_ROOT / "eval" / "uptake"`,
+# a path nothing ever wrote, while `app/uptake.py`'s own `write_table` outputs to
+# `UPTAKE_ARTIFACT_DIR` — inside the code tree. The false absence was the only
+# outcome reachable from `build_census`, which passed no directory at all. These
+# five clauses are the item's acceptance; the leg still never produces a rate,
+# because the join gap is a separate gap from the path.
+
+def test_2733_clause_1_the_store_resolves_through_the_writer_s_own_constant(
+        tmp_path, monkeypatch):
+    """Clause 1: repointing `app.uptake.UPTAKE_ARTIFACT_DIR` moves the stage, so
+    the store is resolved through the writer's constant and not a re-spelled
+    data-root path. `DATA_ROOT` is pinned to a directory that does not exist, so
+    the pre-#2733 default would have died on `no_uptake_table` naming it."""
+    import app.uptake as uptake
+    fixture = tmp_path / "writer_declared_store"
+    _uptake_table(fixture, "uptake-2026-10-10.json", days_ago=2.0)
+    monkeypatch.setattr(uptake, "UPTAKE_ARTIFACT_DIR", fixture)
+    monkeypatch.setattr(paths, "DATA_ROOT", tmp_path / "no_data_root_here")
+
+    out = fc.benefited_stage()
+
+    assert out["uptake_store"] == str(fixture)
+    assert out["refusal"] != "no_uptake_table", out["detail"]
+    assert str(tmp_path / "no_data_root_here") not in json.dumps(out)
+    assert out["uptake_table"] == "uptake-2026-10-10.json"
+
+
+def test_2733_clause_2_the_uptake_dir_flag_selects_the_store_end_to_end(
+        tmp_path, monkeypatch, corpus):
+    """Clause 2, the CLI leg: `--uptake-dir DIR` is what the stage reads once the
+    bytes are on disk, not just what `main` parsed — and no store path is
+    re-spelled from the data root on the way."""
+    chosen = tmp_path / "chosen_store"
+    _uptake_table(chosen, "uptake-2026-10-05.json", days_ago=1.0)
+    data_root = tmp_path / "data_root"
+    monkeypatch.setattr(paths, "DATA_ROOT", data_root)
+
+    assert fc.main(["--skills-root", str(corpus["skills"]),
+                    "--event-root", str(corpus["events"]),
+                    "--workers-db", str(corpus["db"]),
+                    "--uptake-dir", str(chosen)]) == 0
+    written = sorted((data_root / "eval" / "funnel").glob("funnel-*.json"))
+    assert len(written) == 1, f"one artifact expected, got {[str(p) for p in written]}"
+    stage = _stages(json.loads(written[0].read_text()))["benefited"]
+    assert stage["uptake_store"] == str(chosen)
+    assert stage["uptake_table"] == "uptake-2026-10-05.json"
+    assert stage["refusal"] == "uptake_table_not_read_in_v1"
+
+
+def test_2733_clause_2_the_default_is_the_writer_s_constant_and_the_flag_is_threaded(
+        tmp_path, monkeypatch, corpus):
+    """Clause 2, the two seams behind the flag: the CLI default resolves to
+    `app.uptake.UPTAKE_ARTIFACT_DIR` — proved by repointing that constant and
+    watching the stage follow it with no flag given — and `build_census` hands
+    `uptake_dir` down to the stage rather than dropping it."""
+    import app.uptake as uptake
+    chosen = tmp_path / "chosen_store"
+    _uptake_table(chosen, "uptake-2026-10-05.json", days_ago=1.0)
+    monkeypatch.setattr(uptake, "UPTAKE_ARTIFACT_DIR", chosen)
+    monkeypatch.setattr(paths, "DATA_ROOT", tmp_path / "no_data_root_here")
+
+    seen: list[dict] = []
+    real = fc.benefited_stage
+
+    def _spy(*args, **kwargs):
+        seen.append(dict(kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fc, "benefited_stage", _spy)
+    argv = ["--skills-root", str(corpus["skills"]),
+            "--event-root", str(corpus["events"]),
+            "--workers-db", str(corpus["db"])]
+    assert fc.main(argv) == 0
+    assert len(seen) == 1, f"the stage ran {len(seen)} times, expected exactly once"
+    assert seen[0]["uptake_dir"] is None, "the CLI default must not invent a path"
+
+    default = fc.benefited_stage(seen[0]["uptake_dir"])
+    assert default["uptake_store"] == str(uptake.UPTAKE_ARTIFACT_DIR)
+    assert default["uptake_store"] != str(paths.DATA_ROOT / "eval" / "uptake")
+
+    seen.clear()
+    fc.build_census(30, event_root=corpus["events"], workers_db=corpus["db"],
+                    skills_roots=[corpus["skills"]], uptake_dir=chosen)
+    assert len(seen) == 1, "build_census did not reach the benefited stage"
+    assert seen[0]["uptake_dir"] == chosen, "build_census dropped the store"
+
+
+def test_2733_clause_3_the_newest_table_is_named_with_its_age_and_key_states(
+        tmp_path):
+    """Clause 3: the store's newest table is named by FILENAME, aged on its own
+    `probe_timestamp`, and every citability key is reported in the state the FILE
+    states — where `absent` means the FILE omits it at EVERY depth it writes to,
+    proved by the same table shape carrying the keys one level down."""
+    store = tmp_path / "uptake"
+    _uptake_table(store, "uptake-2026-09-01.json", days_ago=1.0)
+    _uptake_table(store, "uptake-2026-10-10.json", days_ago=4.0)
+
+    out = fc.benefited_stage(store)
+
+    assert out["uptake_table"] == "uptake-2026-10-10.json"
+    assert out["uptake_table_age_days"] == 4, "aged on probe_timestamp, not mtime"
+    assert out["uptake_citability"] == {"engine_rerouted": "absent",
+                                        "measured": "absent",
+                                        "audit_only": "absent"}
+    assert "uptake-2026-10-10.json" in out["detail"]
+    assert "uptake-2026-09-01.json" not in json.dumps(out)
+    for key in ("engine_rerouted", "measured", "audit_only"):
+        assert f"{key}=absent" in out["detail"]
+    assert "citable" not in json.dumps(out["uptake_citability"])
+
+    # Positive control: the keys the writer puts BELOW the top level —
+    # `engine_rerouted` in `classifier`, `measured` in its sub-blocks — are read
+    # there, not missed. Without this leg, `absent` above is ambiguous between
+    # "the file omits the key" and "this reader never looks where it lives".
+    deep = tmp_path / "deep_store"
+    _uptake_table(deep, "uptake-2026-10-10.json", days_ago=1.0,
+                  classifier=_classifier_block(rerouted=True))
+    stated = fc.benefited_stage(deep)["uptake_citability"]
+    assert stated["engine_rerouted"] == "true", stated
+    assert stated["measured"] == "false", (
+        f"a rerouted stamp also sets every sub-block to measured=false; the "
+        f"reader must see that too, got {stated}")
+    assert stated["audit_only"] == "absent", stated
+
+
+def test_2733_clause_4_a_stale_or_uncitable_table_refuses_by_name(tmp_path):
+    """Clause 4: a table past `UPTAKE_TABLE_MAX_AGE_DAYS`, or stamped
+    `engine_rerouted: true` / `audit_only: true` / `measured: false`, or with no
+    readable `probe_timestamp`, is a NAMED refusal carrying its denominator and no
+    rate — never a 0.0 that would read as a measured zero. An absent key is not
+    the same thing as a cleared one, so an unstamped table is held for the join
+    gap rather than refused on citability, and an undated table is refused because
+    its age is unknowable, not because it is old."""
+    stale = tmp_path / "stale"
+    _uptake_table(stale, "uptake-2026-06-01.json",
+                  days_ago=fc.UPTAKE_TABLE_MAX_AGE_DAYS + 5)
+    out = fc.benefited_stage(stale)
+    assert out["refusal"] == "uptake_table_uncitable"
+    assert out["denominator"] == 0
+    assert "uptake-2026-06-01.json" in out["detail"]
+
+    rerouted = tmp_path / "rerouted"
+    _uptake_table(rerouted, "uptake-2026-10-10.json", days_ago=2.0,
+                  classifier=_classifier_block(rerouted=True))
+    assert fc.benefited_stage(rerouted)["refusal"] == "uptake_table_uncitable"
+
+    audit = tmp_path / "audit"
+    _uptake_table(audit, "uptake-2026-10-10.json", days_ago=2.0, audit_only=True,
+                  classifier=_classifier_block())
+    assert fc.benefited_stage(audit)["refusal"] == "uptake_table_uncitable"
+
+    measured_false = tmp_path / "unmeasured"
+    _uptake_table(measured_false, "uptake-2026-10-10.json", days_ago=2.0,
+                  classifier=_classifier_block(measured=False))
+    assert (fc.benefited_stage(measured_false)["refusal"]
+            == "uptake_table_uncitable")
+
+    # A table whose classifier ran but stamped no `engine_rerouted` at all — the
+    # pre-#1850 shape — must not be read as cleared, and must not refuse either:
+    # the stage's own reason for holding it is the join gap, named separately.
+    absent_keys = tmp_path / "absent_keys"
+    _uptake_table(absent_keys, "uptake-2026-09-20.json", days_ago=2.0,
+                  classifier={"passed": True,
+                              "metrics": {"precision": 0.8, "recall": 0.6}})
+    held = fc.benefited_stage(absent_keys)
+    assert held["refusal"] == "uptake_table_not_read_in_v1", "absent keys must not refuse"
+    assert held["uptake_citability"]["engine_rerouted"] == "absent", held
+
+    undated = tmp_path / "undated"
+    _uptake_table(undated, "uptake-2026-10-10.json", probe_timestamp="not-a-date")
+    assert fc.benefited_stage(undated)["refusal"] == "uptake_table_uncitable"
+
+    unstamped = tmp_path / "unstamped"
+    _uptake_table(unstamped, "uptake-2026-10-10.json")
+    (unstamped / "uptake-2026-10-10.json").write_text(
+        json.dumps({"entries": [], "corpus": {"turns": 40}}), encoding="utf-8")
+    assert fc.benefited_stage(unstamped)["refusal"] == "uptake_table_uncitable"
+
+    for case in (stale, rerouted, audit, measured_false, undated, unstamped):
+        stage = fc.benefited_stage(case)
+        assert stage["measured"] is False
+        assert stage["denominator"] == 0
+        for banned in ("k", "n", "rate", "ci95"):
+            assert banned not in stage, f"{banned} would read as a measured zero"
+
+
+def test_2733_clause_5_an_empty_store_still_refuses_by_name_and_no_branch_rates(
+        tmp_path):
+    """Clause 5: a store directory that exists but holds no table is still the
+    named `no_uptake_table` refusal naming THAT directory, and `measured: false`
+    with `denominator: 0` survives every one of the stage's five outcomes."""
+    empty = tmp_path / "empty_store"
+    empty.mkdir()
+    out = fc.benefited_stage(empty)
+    assert out["refusal"] == "no_uptake_table"
+    assert str(empty) in out["detail"]
+    assert out["uptake_store"] == str(empty)
+
+    missing = tmp_path / "never_created"
+    assert fc.benefited_stage(missing)["refusal"] == "no_uptake_table"
+
+    outcomes = [fc.benefited_stage(empty), fc.benefited_stage(missing)]
+    stale = tmp_path / "stale2"
+    _uptake_table(stale, "uptake-2026-01-01.json",
+                  days_ago=fc.UPTAKE_TABLE_MAX_AGE_DAYS + 1)
+    outcomes.append(fc.benefited_stage(stale))
+    unreadable_dir = tmp_path / "broken_store"
+    _ = _uptake_table(unreadable_dir, "uptake-2026-10-10.json", days_ago=1.0)
+    (unreadable_dir / "uptake-2026-10-10.json").write_text("{not json",
+                                                           encoding="utf-8")
+    outcomes.append(fc.benefited_stage(unreadable_dir))
+    fine = tmp_path / "fine_store"
+    _uptake_table(fine, "uptake-2026-10-10.json", days_ago=1.0)
+    outcomes.append(fc.benefited_stage(fine))
+
+    assert [o["refusal"] for o in outcomes] == [
+        "no_uptake_table", "no_uptake_table", "uptake_table_uncitable",
+        "uptake_table_unreadable", "uptake_table_not_read_in_v1"]
+    for stage in outcomes:
+        assert stage["measured"] is False
+        assert stage["denominator"] == 0
+        assert stage["stage"] == "benefited"
+        for banned in ("k", "n", "rate", "ci95"):
+            assert banned not in stage, f"{banned} would read as a measured zero"
+        assert stage["unit"] == "artifact"
