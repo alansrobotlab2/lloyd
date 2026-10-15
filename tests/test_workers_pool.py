@@ -696,26 +696,39 @@ def test_a_pause_row_with_no_holder_kind_at_all_is_a_persons_pause(q):
 
 
 async def test_a_boot_over_an_inherited_hold_names_the_hold_not_just_the_slots(q, caplog):
-    """#2498 clause 4: a boot while the fleet is halted has to be legible in the log.
+    """#2498 clause 4 for the log, and #2773 clauses 1, 2 and 4 for the fan-out.
 
     Inside the 20 h gap of 2026-10-09 the log carries bare
     `Worker pool started with 6 slots` lines (`server.err.4:8149,8357,8489`) and the
     halt is visible only as the absence of runs. One line per boot, naming the
-    kind, the instant, and what this boot decided about it.
+    kind, the instant, and what this boot decided about it — and one announcement per
+    boot carrying the same verdict, because a log line reaches whoever goes looking in
+    `server.err` and nothing else said a word: `poolwatch` rules a pause OUT of the
+    pool-silence alert by ruling (`agent-services/guardian/poolwatch.py`, the "Alert on a
+    pause" bullet), and
+    the trip that alerts, `vaultwatch`, fires only when a hold is TAKEN.
+
+    The seam is COUNTED, not inspected: an implementation that writes the log line and
+    returns without publishing satisfies every assertion above and fails the four
+    below.
     """
     import logging
     caplog.set_level(logging.INFO)
 
     cases = [
-        # (kind, lease age at this boot, what the boot must say about reconciling)
-        ("machine", 30.0, "no (lease still fresh"),
-        ("machine", 900.0, "yes (released at startup"),
-        ("person", None, "no (a person's hold is durable"),
+        # (kind, lease age at this boot, what the LOG must say about reconciling,
+        #  what the ANNOUNCEMENT must name on top of kind + since)
+        ("machine", 30.0, "no (lease still fresh", "not reconcile"),
+        ("machine", 900.0, "yes (released at startup", "lease"),
+        ("person", None, "no (a person's hold is durable", "not reconcile"),
     ]
-    for kind, lease_age_s, verdict in cases:
+    for kind, lease_age_s, verdict, announce_must in cases:
         since = _hold_pause(q, kind, held_for_hours=3.0, lease_age_s=lease_age_s)
+        _cleared_announce_floor(q)
+        calls: list[dict] = []
         caplog.clear()
-        pool = WorkerPool(q, slots=1, poll_idle_seconds=0.01)
+        pool = WorkerPool(q, slots=1, poll_idle_seconds=0.01,
+                          announce=_recording_announce(calls))
         await pool.start()
         try:
             lines = [r.getMessage() for r in caplog.records if "inherited a" in r.getMessage()]
@@ -724,8 +737,133 @@ async def test_a_boot_over_an_inherited_hold_names_the_hold_not_just_the_slots(q
             assert f"inherited a {kind} pause" in line, line
             assert f"since={since}" in line, line
             assert verdict in line, line
+
+            assert len(calls) == 1, ("expected one fan-out call for this boot",
+                                     kind, lease_age_s, calls)
+            published = calls[0]["title"] + "\n" + calls[0]["body"]
+            assert kind in published, (kind, calls)
+            assert str(since) in published, (since, calls)
+            assert announce_must in published, (announce_must, calls)
+            if lease_age_s is not None:
+                # Clause 2's figure: the release quotes the age it judged stale.
+                assert _names_the_lease_age(published, lease_age_s), (lease_age_s, calls)
+            if lease_age_s is not None and lease_age_s > 300:
+                # That figure has to be the release's OWN reading, not a fresh one.
+                # Releasing the hold rewrites the lease watermark, so an announcement
+                # that re-derived the age after the release would report 0 s for a hold
+                # it had just called stale — the two claims in one sentence. The
+                # watermark is zeroed under the announcement and it still says 900 s.
+                pool._inherited_pause["lease_age_s"] = 0.0
+                _cleared_announce_floor(q)
+                pool._announce_inherited_pause()
+                assert len(calls) == 2, calls
+                late = calls[1]
+                assert late["level"] == "info", late
+                assert _names_the_lease_age(late["body"], 900.0, tol_s=30), late["body"]
+                assert not re.search(r"lease_age=0 s", late["body"]), late["body"]
         finally:
             await pool.stop()
+
+
+async def test_the_announce_floor_survives_process_death_so_a_restart_storm_is_one_call(q):
+    """#2773 clause 3: the floor has to be durable, because a per-process one is a no-op.
+
+    `_announce_inherited_pause` already runs exactly once per process, so a backend
+    that crash-loops over a hold — the shape of 2026-10-09, which logged three bare
+    boots inside the halt — produces one fan-out call per restart if the throttle is
+    keyed on anything that dies with the process. Three boots here therefore run over
+    THREE `WorkQueue` objects on one database file, which is what a second process is
+    from the inside: the only thing they share is the row.
+
+    And the second half of the clause is what keeps the floor from being a mute: after
+    the window a boot announces again, and the hold is still engaged throughout,
+    because the floor throttles the BELL and never the halt.
+    """
+    import sqlite3
+    from datetime import timedelta
+
+    from workers.pool import (PAUSE_ANNOUNCE_FLOOR_SECONDS, PAUSE_ANNOUNCE_WM_KEY,
+                              PAUSE_WM_SOURCE)
+    _hold_pause(q, "person", held_for_hours=3.0)
+
+    calls: list[dict] = []
+    for _ in range(3):
+        pool = WorkerPool(WorkQueue(q.db_path), slots=1, poll_idle_seconds=0.01,
+                          announce=_recording_announce(calls))
+        await pool.start()
+        try:
+            assert pool.paused is True and pool.paused_by == ["operator"]
+        finally:
+            await pool.stop()
+    assert len(calls) == 1, ("a restart storm announced more than once", calls)
+
+    def _age_the_stamp(seconds: float) -> None:
+        now = datetime.now(timezone.utc)
+        with sqlite3.connect(str(q.db_path)) as conn:
+            conn.execute("UPDATE watermarks SET updated_at=? "
+                         "WHERE source=? AND key=?",
+                         ((now - timedelta(seconds=seconds)).isoformat(),
+                          PAUSE_WM_SOURCE, PAUSE_ANNOUNCE_WM_KEY))
+            conn.commit()
+
+    _age_the_stamp(PAUSE_ANNOUNCE_FLOOR_SECONDS + 60)
+    later = WorkerPool(WorkQueue(q.db_path), slots=1, poll_idle_seconds=0.01,
+                       announce=_recording_announce(calls))
+    await later.start()
+    try:
+        assert later.paused is True
+    finally:
+        await later.stop()
+    assert len(calls) == 2, ("a boot after the window stayed muted", calls)
+
+
+async def test_an_announcement_that_raises_cannot_break_boot_or_lift_the_hold(q, caplog):
+    """#2773 clause 5: the bell is not allowed to be the reason a boot fails.
+
+    The chain a boot's call goes down is `dispatch_watch.guardian_announce` →
+    `service_probe.guardian_announce` (imports `gstate`/`policy`/`notify`, then builds a
+    `Notifier`) → `Notifier.announce`, and three links in it can raise on a box whose
+    guardian tree is broken: the imports, the constructor, or the journal append at
+    `agent-services/guardian/notify.py:293`. Only the toast subprocess is already
+    swallowed — `notify._run` returns False instead of propagating — so the raise that
+    matters is the one that reaches `start()`, which would take the pool down with it:
+    a halt that stopped being audible would also stop the fleet starting at all, and a
+    half-started pool reports as a dead backend.
+    """
+    import logging
+    caplog.set_level(logging.INFO)
+
+    from workers.pool import PAUSE_WM_KEY, PAUSE_WM_SOURCE
+    _hold_pause(q, "machine", held_for_hours=3.0, lease_age_s=30.0)
+    _cleared_announce_floor(q)
+    calls: list[dict] = []
+
+    def exploding_announce(title: str, body: str, level: str) -> dict:
+        calls.append({"title": title, "body": body, "level": level})
+        raise RuntimeError("notify-send: connection refused")
+
+    pool = WorkerPool(q, slots=3, poll_idle_seconds=0.01, announce=exploding_announce)
+    await pool.start()
+    try:
+        assert len(pool.worker_ids) == 3 and len(pool._workers) == 3, (
+            "the raise reached start() and the pool came up short of its slots")
+        assert any("Worker pool started with 3 slots" in r.getMessage()
+                   for r in caplog.records), caplog.text
+        assert pool.paused is True and pool.paused_by == ["operator"], (
+            "a failed announcement lifted the halt it failed to announce")
+        assert q.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_KEY) == "1", (
+            "the durable hold row was rewritten by a boot that could not talk about it")
+        assert len(calls) == 1, calls
+        assert any("inherited a machine pause" in r.getMessage()
+                   for r in caplog.records), (
+            "the log line is the fallback channel and must be written anyway")
+        assert any("could not announce" in r.getMessage() for r in caplog.records), (
+            caplog.text)
+        assert not _announce_stamp(q), (
+            "the floor was stamped for a fan-out that raised, so the failure bought "
+            "the hold an hour of silence exactly while its alert path is broken")
+    finally:
+        await pool.stop()
 
 
 async def test_in_flight_state_is_reported_while_a_job_runs_and_cleared_after(q, monkeypatch):
@@ -1272,6 +1410,140 @@ def _forget_holder_kind(q) -> None:
         conn.execute("DELETE FROM watermarks WHERE source=? AND key=?",
                      (PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY))
         conn.commit()
+
+
+def _recording_announce(calls: list[dict]):
+    """A stand-in for the guardian fan-out that COUNTS, so a log-only change cannot
+    pass an announcement clause.
+
+    Called with the real route's shape — `workers.dispatch_watch.guardian_announce
+    (title, body, level)`, which is what `workers/pool.py` reaches for when a test has
+    not installed this — and returning the same empty receipt the real route returns
+    when its `Notifier` reports itself not `external`.
+    """
+    def _announce(title: str, body: str, level: str) -> dict:
+        calls.append({"title": title, "body": body, "level": level})
+        return {}
+    return _announce
+
+
+def _cleared_announce_floor(q) -> None:
+    """Forget that any boot has announced, so the next boot is judged as a first boot.
+
+    The floor is durable state (#2773 clause 3), which means the three cases of
+    `test_a_boot_over_an_inherited_hold_...` sharing one queue would announce once and
+    suppress twice without this between them. It deletes the ROW the way
+    `_forget_holder_kind` does, not a process attribute: a fixture that reset a field
+    would pass a floor that could not survive a restart, which is the whole clause.
+    """
+    import sqlite3
+
+    from workers.pool import PAUSE_ANNOUNCE_WM_KEY, PAUSE_WM_SOURCE
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("DELETE FROM watermarks WHERE source=? AND key=?",
+                     (PAUSE_WM_SOURCE, PAUSE_ANNOUNCE_WM_KEY))
+        conn.commit()
+
+
+def _code_only_source(module) -> str:
+    """`module`'s source with every docstring and comment removed.
+
+    A test that bans a name from a file is really banning it from the file's CODE:
+    prose is where a module explains what it declined to do, and `workers/pool.py`
+    names `harness.prefix_miss.announce_voice` in a docstring precisely to say it does
+    NOT read it. Banning the substring across the whole file would pass a real
+    `get_config()["harness"]["prefix_miss"]` line the moment somebody added an
+    explanation next to it — so the tree is parsed, each docstring dropped, and the
+    rest re-emitted (`ast.unparse` drops comments on its own).
+    """
+    import ast
+
+    tree = ast.parse(inspect.getsource(module))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) \
+                    and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                node.body = body[1:] or [ast.Pass()]
+    return ast.unparse(tree)
+
+
+def _announce_stamp(q) -> bool:
+    """Is there an announce-floor row at all? True means a boot has told somebody."""
+    from workers.pool import PAUSE_ANNOUNCE_WM_KEY, PAUSE_WM_SOURCE
+    return q.wm_updated_at(PAUSE_WM_SOURCE, PAUSE_ANNOUNCE_WM_KEY) is not None
+
+
+def _names_the_lease_age(text: str, age_s: float, tol_s: float = 5.0) -> bool:
+    """Whether `text` quotes the lease age a release judged stale.
+
+    The pool prints an age as `{:.0f} s`, and the seconds between winding a row back
+    and reading it are the boot's own, so this is a tolerance over the `N s` figures in
+    the text rather than a fixed string — `"900 s" in text` would fail on a slow box
+    and say nothing about the change.
+    """
+    return any(abs(float(found) - age_s) <= tol_s
+               for found in re.findall(r"(\d+) s", text))
+
+
+async def test_the_boot_announcement_takes_the_workers_route_and_adds_no_key(q, monkeypatch):
+    """#2773's routing, pinned: the fan-out is `workers`' own, and voice stays off.
+
+    The item proposed `app/prefix_miss.py:418`, but that `_announce` reads
+    prefix_miss's own `_cfg`, including `harness.prefix_miss.announce_voice`
+    (`config.yaml:648`) — reading a `harness.prefix_miss.*` key from `workers/pool.py`
+    would be the wrong coupling, and adding a pool-side voice switch is the new key the
+    item forbids. `workers` already has its route: `service_probe.guardian_announce`
+    builds its `Notifier` with `voice=False` (`workers/service_probe.py:254`), so voice
+    is off BY CONSTRUCTION and no key decides it — the same conclusion Alan's
+    2026-10-15 owed-check ruling reaches from the other direction (journal + toast, not
+    voice). `tests/test_service_probe.py:174` already pins that the pool wires exactly
+    that callable for the scheduler's probe; this pins the boot path does too.
+    """
+    from workers import service_probe
+
+    # 1. With no seam installed, the default resolves to the workers route — the same
+    #    callable the scheduler's service probe announces through.
+    pool = WorkerPool(q, slots=1)
+    assert pool._pause_announce_seam() is dispatch_watch.guardian_announce, (
+        "the boot announcement is not on the route the pool already uses")
+    # `dispatch_watch.guardian_announce` is a wrapper that imports
+    # `service_probe.guardian_announce` INSIDE its body (workers/dispatch_watch.py:368),
+    # so identity cannot be the test — delegation is. Patching the far end and calling
+    # the near end is what proves the boot's call lands on `workers`' route and its
+    # `voice=False` constructor, not on a second copy of a shim.
+    delegated: list[dict] = []
+    monkeypatch.setattr(service_probe, "guardian_announce",
+                        _recording_announce(delegated))
+    dispatch_watch.guardian_announce("t", "b", "warning")
+    assert len(delegated) == 1, delegated
+    # 3. The ban has to be on the CODE. `workers/pool.py` names
+    # `harness.prefix_miss.announce_voice` in a docstring to explain why it does not
+    # read that key, so a substring ban over the file bans the explanation and would
+    # pass the coupling: a later `get_config()["harness"]["prefix_miss"]` line is the
+    # thing to catch. Docstrings and comments are stripped, then the rest is searched.
+    code = _code_only_source(inspect.getmodule(WorkerPool))
+    assert "announce_voice" not in code, (
+        "workers/pool.py now reads prefix_miss's voice key")
+    assert "prefix_miss" not in code, (
+        "workers/pool.py now imports or reaches the app-layer fan-out")
+
+    # 2. And the boot path resolves the seam through the MODULE attribute on every
+    #    call, so this patch is the route being exercised and not a copy taken at
+    #    import time.
+    seen: list[dict] = []
+    monkeypatch.setattr(dispatch_watch, "guardian_announce",
+                        _recording_announce(seen))
+    _hold_pause(q, "person", held_for_hours=3.0)
+    _cleared_announce_floor(q)
+    booted = WorkerPool(q, slots=1, poll_idle_seconds=0.01)
+    await booted.start()
+    try:
+        assert len(seen) == 1, ("start() did not go through dispatch_watch's attribute",
+                                seen)
+    finally:
+        await booted.stop()
 
 
 async def _starving_alerts(q, monkeypatch, tmp_path):

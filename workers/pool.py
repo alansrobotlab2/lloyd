@@ -611,6 +611,22 @@ PAUSE_ACTOR_RECONCILE = "startup-reconcile"
 #: killed or OOM'd setter stops being believed within one scheduler gap.
 MACHINE_LEASE_STALE_SECONDS = 300
 
+#: Watermark (#2773) naming the last boot that ANNOUNCED an inherited hold, written
+#: on the same `_pool` source as the hold rows because it describes the same hold.
+#: It exists because the announcement has to survive the thing that makes it
+#: necessary: a backend that crash-loops over a halt boots N processes, and
+#: `_announce_inherited_pause` already runs exactly once per process — so a floor
+#: keyed on anything in this process's memory would be a no-op on precisely the
+#: restart storm it is meant to flatten.
+PAUSE_ANNOUNCE_WM_KEY = "operator_pause_announced"
+
+#: Minimum spacing between fan-out announcements of one standing hold (#2773).
+#: One hour: a crash loop turns on the corner of a minute (the 2026-10-09 gap
+#: logged three bare boots and would have logged three toasts), while a halt that
+#: stands for hours is not silence-able forever — the row ages, and the next boot
+#: past the window says it again.
+PAUSE_ANNOUNCE_FLOOR_SECONDS = 3600.0
+
 
 def _lease_age_seconds(updated_at: Optional[str]) -> Optional[float]:
     """Seconds between `updated_at` (the row's ISO stamp) and now, or None.
@@ -698,6 +714,7 @@ class WorkerPool:
         slots: int = 4,
         max_attempts: int = 3,
         poll_idle_seconds: float = 2.0,
+        announce: Optional[Any] = None,
     ):
         self.queue = queue
         self.slots = slots
@@ -726,6 +743,18 @@ class WorkerPool:
         # age, and whether this boot reconciled it — so `start()` can say so out
         # loud instead of reporting only a slot count over a halted fleet (#2498).
         self._inherited_pause: Optional[dict[str, Any]] = None
+        # The guardian fan-out this pool announces an inherited hold through (#2773),
+        # and the reason it is a constructor argument rather than a call: the boot path
+        # is the one path a test must be able to COUNT, and the callable that publishes
+        # a toast to Alan's desktop cannot be asserted on from a pytest process. Same
+        # shape as the pool's two other announce seams — `ServiceProbe.announce`
+        # (`workers/service_probe.py`), defaulted by `service_probe.shared()` and read
+        # by `_probe_services`, and the `DispatchWatch(announce=
+        # dispatch_watch.guardian_announce)` that `_watch_dispatch` builds — so no line
+        # number is quoted here to go stale under the next edit. `None` means that same
+        # real route, resolved per call so a caller that swaps
+        # `dispatch_watch.guardian_announce` is heard.
+        self._announce_override = announce
         self._paused_operator = self._load_operator_pause()
         self._paused_automod = False
         self._workers: list[asyncio.Task] = []
@@ -880,6 +909,13 @@ class WorkerPool:
                              inherited.get("since"), last_refresh)
             return
         inherited["reconciled"] = True
+        # The number this judgement was made on, kept under its own name. The
+        # announcement (#2773 clause 2) has to quote the age THE RELEASE judged stale,
+        # and `lease_age_s` in this dict is the reading `_load_operator_pause` took
+        # before the write below — the same figure, but naming it here is what keeps a
+        # later reader from wondering whether the announcement re-derived it after the
+        # row was already rewritten to `0`.
+        inherited["lease_age_judged_s"] = inherited.get("lease_age_s")
         self._journal_pause(value="0",
                             holder_kind=inherited.get("holder") or HOLDER_DEFAULT,
                             actor=PAUSE_ACTOR_RECONCILE)
@@ -888,14 +924,49 @@ class WorkerPool:
                        "dispatch resumes", inherited.get("holder"),
                        inherited.get("since"), last_refresh)
 
+    def _pause_announce_seam(self):
+        """The callable this boot publishes its inherited hold through.
+
+        Read as a module attribute on every call, exactly as `_watch_dispatch` reads
+        `dispatch_watch.guardian_announce` when it builds the dispatch watch, so the
+        route is swappable without reconstructing the pool. It is `workers`' own
+        fan-out — `workers/dispatch_watch.py:360`, which delegates to
+        `workers/service_probe.py:235`, which builds the guardian `Notifier` with
+        `voice=False` — and not `app/prefix_miss.py`'s `_announce`, whose voice channel
+        is decided by a `harness.prefix_miss.announce_voice` key that this package has
+        no business reading. Voice is therefore off by construction: no key added, and
+        none consulted (#2773).
+        """
+        if self._announce_override is not None:
+            return self._announce_override
+        from workers import dispatch_watch
+        return dispatch_watch.guardian_announce
+
     def _announce_inherited_pause(self) -> None:
-        """Say at boot what the previous process left holding the fleet.
+        """Say at boot what the previous process left holding the fleet — in the log
+        AND through the guardian's fan-out.
 
         A boot that re-engages a halt and logs nothing but `Worker pool started
         with 6 slots` is how 2026-10-09 stayed unread: inside the 20 h gap the log
         carries three bare "started with 6 slots" lines and the halt is visible
         only as the absence of runs (`server.err.4:8149,8357,8489`). One line per
         boot, naming the kind, the instant and whether this boot reconciled it.
+
+        #2773 adds the second channel, because a log line is read by whoever already
+        knows to open `server.err`. Nothing else in the system covered this seam:
+        `poolwatch` rules a pause OUT of the pool-silence alert by ruling
+        (`agent-services/guardian/poolwatch.py`, the "Alert on a pause" bullet), and `vaultwatch` fires only
+        when a hold is TAKEN — so a hold inherited across a restart, which is exactly
+        the 2026-10-09 shape, reached nobody. One fan-out call per boot, journal and
+        toast, carrying the SAME verdict string the log line carries so the two cannot
+        disagree.
+
+        Two rails, both because this is the boot path. It is throttled by durable state
+        (`PAUSE_ANNOUNCE_WM_KEY`), because the crash-loop that makes the announcement
+        worth having is a loop: once per process is once per restart. And the whole
+        block is wrapped, because the failure mode of an unguarded call here is worse
+        than silence — a raise out of `start()` takes the pool down with it, and a halt
+        that could not be announced would also have stopped the fleet from starting.
         """
         inherited = getattr(self, "_inherited_pause", None)
         if not inherited:
@@ -911,6 +982,53 @@ class WorkerPool:
                        "since=%s lease_age=%s reconciled=%s",
                        inherited.get("holder"), inherited.get("since"),
                        "n/a" if age is None else f"{age:.0f} s", verdict)
+
+        kind = inherited.get("holder") or HOLDER_DEFAULT
+        since = inherited.get("since")
+        # On the reconcile path the figure the announcement quotes is the one THIS
+        # release judged, read out of the field `_release_dead_machine_pause` wrote
+        # rather than the pre-release `lease_age_s` it happens to equal — a coincidence
+        # while the two live in one dict, and a lie as soon as anything re-reads the
+        # watermark between the release and the announcement, which by then says `0`.
+        judged = inherited.get("lease_age_judged_s") if inherited.get("reconciled") \
+            else age
+        lease = "n/a" if judged is None else f"{judged:.0f} s"
+        if inherited.get("reconciled"):
+            level = "info"
+            title = f"Worker pool released a stale {kind} pause at boot"
+            body = (
+                f"The {kind} hold taken at {since} was released by this boot: its "
+                f"lease was last refreshed {lease} before it started, past the "
+                f"{MACHINE_LEASE_STALE_SECONDS} s a machine's setter is believed alive "
+                f"for, so it cannot have survived the restart. "
+                f"reconciled={verdict}  lease_age={lease}  since={since}\n"
+                "Dispatch resumes; nobody resumed it.")
+        else:
+            level = "warning"
+            title = f"Worker pool is still halted by a {kind} pause"
+            body = (
+                f"This boot did not reconcile it ({verdict}). "
+                f"kind={kind}  since={since}  lease_age={lease}\n"
+                "Nothing is being dispatched until someone resumes it.")
+        try:
+            judged = _lease_age_seconds(self.queue.wm_updated_at(
+                PAUSE_WM_SOURCE, PAUSE_ANNOUNCE_WM_KEY))
+            if judged is not None and judged < PAUSE_ANNOUNCE_FLOOR_SECONDS:
+                logger.info("Worker pool: not announcing the inherited %s pause — one "
+                            "went out %.0f s ago and the floor is %d s (log line above "
+                            "is still the record)", kind, judged,
+                            int(PAUSE_ANNOUNCE_FLOOR_SECONDS))
+                return
+            self._pause_announce_seam()(title, body, level)
+            # Stamped only after the call returned. A fan-out that RAISED announced no
+            # one, and let it buy itself an hour of silence on the strength of having
+            # tried would hide the hold precisely while its alert path is broken; the
+            # next boot tries again, and the log line never stopped being written.
+            self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_ANNOUNCE_WM_KEY, "announced")
+        except Exception:
+            logger.warning("Worker pool: could not announce the inherited %s pause "
+                           "(since=%s) through the guardian fan-out; the log line above "
+                           "is the only record of this hold", kind, since, exc_info=True)
 
     def pause(self, paused: bool = True, owner: str = "operator",
               holder_kind: str = HOLDER_PERSON,
