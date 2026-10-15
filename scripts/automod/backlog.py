@@ -1295,10 +1295,34 @@ def _rederive_command(artifact: str, ext: str) -> str:
     figure the multi-line witnesses legitimately quote (`session_witness_*.json`
     uses its own line count as its figure) and adds the count that varies with the
     bytes, so disagreeing content can no longer agree on the answer.
+
+    For a STORE witness the same class of vacuity was left standing until #2751:
+    the branch printed `count(*) from sqlite_master`, which counts SCHEMA OBJECTS,
+    so every extract of one schema printed one figure however different their rows
+    were. The live `~/.cache/qmd/index.sqlite` prints `34` whatever it holds, and
+    triage's pair of extracts — 6,967 rows against 7,331 of the same table — both
+    printed `3` while their bytes were 106,496 and 114,688. So the figure is now the
+    total row count (one `INSERT` statement per row in the dump the connection
+    produces) beside the file's byte size: rows are what an item quotes, bytes are
+    what an extract of a subset cannot fake, and together they mean an extract
+    reproduces the quoted figure only by carrying the data.
+
+    The command is deliberately terse because it is not free-form: `_over_bound_extract_demand`
+    embeds it in an owed note that `clean_clauses` cuts from the END at
+    `CLAUSE_MAX_CHARS`, and the part that gets cut is the fallback sentence. The
+    budget is 233 characters of command when the artifact is the 65-character
+    `backlog/data/a-quite-long-live-store-name-that-keeps-going.sqlite` the tests
+    hand the builder (whose note was already 546 of the 600 on the retired
+    179-character command), and 189 when it is the 25-character
+    `backlog/data/index.sqlite` shape — which has to fit the ROOMY wording as well as
+    the compact one. Both bounds are pinned by
+    `tests/test_witness_artifact_clause.py::test_the_sqlite_command_stays_inside_the_owed_note_budget`;
+    a longer figure has to be paid for out of that budget, not out of the fallback.
     """
     if ext in _SQL_WITNESS_EXTS:
-        return (f"python3 -c \"import sqlite3;print(sqlite3.connect('{artifact}')"
-                f".execute('select count(*) from sqlite_master').fetchone()[0])\"")
+        return (f"python3 -c \"import sqlite3,os;a='{artifact}';c=sqlite3.connect(a);"
+                f"print(sum(1 for l in c.iterdump() if l.startswith('INSERT')),"
+                f"os.path.getsize(a))\"")
     return f"wc -l -c < {artifact}"
 
 

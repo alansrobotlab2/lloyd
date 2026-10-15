@@ -514,6 +514,199 @@ def test_the_rederive_command_varies_with_the_committed_bytes(tmp_path):
         f"the figure must be readable, not a hash: {out[0]!r}")
 
 
+def _sqlite_extract(path: Path, docs_rows: int, items_rows: int = 3,
+                    delete_from: "int | None" = None) -> Path:
+    """A store extract in the shape this convention actually archives.
+
+    Two tables and one index, `docs` carrying `docs_rows` rows and `items`
+    `items_rows`, so the schema is identical by construction between any two calls
+    and only the DATA moves — the pair the retired `count(*) from sqlite_master`
+    figure could not tell apart. `delete_from` drops the `docs` rows at and above
+    that id after the insert, and SQLite does not give the pages back without a
+    `VACUUM`: the same live row count, inside a bigger body of bytes.
+    """
+    import sqlite3
+    con = sqlite3.connect(path)
+    con.executescript("create table items(id primary key, title);"
+                      "create table docs(id primary key, body);"
+                      "create index ix_docs on docs(body);")
+    con.executemany("insert into items values(?,?)",
+                    [(i, f"t{i}") for i in range(items_rows)])
+    con.executemany("insert into docs values(?,?)",
+                    [(i, f"b{i}") for i in range(docs_rows)])
+    if delete_from is not None:
+        con.execute("delete from docs where id >= ?", (delete_from,))
+    con.commit()
+    con.close()
+    return path
+
+
+def _rederive_output(artifact, ext: str) -> list[str]:
+    """The emitted command's printed figures, run the way a witness is proved.
+
+    The command is the string a round or a person pastes into a shell to show a
+    committed extract reproduces an item's figure, so it is run as a shell command
+    here rather than reimplemented in Python: the emitted string is the seam, and a
+    quoting bug in it is exactly what this file must catch.
+    """
+    done = subprocess.run(B._rederive_command(str(artifact), ext), shell=True,
+                          capture_output=True, text=True)
+    assert done.returncode == 0, (done.stdout, done.stderr)
+    return done.stdout.split()
+
+
+def test_the_store_rederive_command_varies_with_rows_not_with_the_schema(tmp_path):
+    """#2751 clause 1: a store witness is proved by its data, not its schema.
+
+    `select count(*) from sqlite_master` counts SCHEMA OBJECTS, so every extract of
+    one schema printed one figure however different their rows were. Over the pair
+    below — `docs` holding 6,967 rows in one file and 7,331 in the other, `items`
+    and the index identical — the retired command printed `5` both times (two
+    tables, their two autoindexes, one explicit index) while the two files differed
+    in size, which is the assertion below rather than a byte count quoted here (the
+    figures depend on SQLite's page size). The clause this command is embedded in
+    ends "that output is the figure the item quotes", so on a store that sentence
+    pinned nothing: the same vacuity #2382 removed from the file branch (`wc -l`
+    printed 1 for all six `vllm_prefix_miss_*.json`), sitting in the half of the
+    branch that fix never reached.
+
+    The figure is now the total row count — one `INSERT` statement per row in the
+    dump the connection produces, so 6,967 + 3 = 6,970 — beside the file's byte
+    size, and the pair disagrees for every store extension the convention takes,
+    not only the `.sqlite` one triage cited.
+    """
+    pair = [_sqlite_extract(tmp_path / f"rows-{n}.sqlite", n)
+            for n in (6967, 7331)]
+    retired = ("python3 -c \"import sqlite3;print(sqlite3.connect('{p}')"
+               ".execute('select count(*) from sqlite_master').fetchone()[0])\"")
+    vacuous = [subprocess.run(retired.format(p=p), shell=True, capture_output=True,
+                              text=True).stdout.split() for p in pair]
+    assert vacuous[0] == vacuous[1] == ["5"], (
+        "positive control for the premise: the retired figure cannot separate two "
+        f"extracts whose rows differ — that is the vacuity being replaced: {vacuous}")
+    assert pair[0].stat().st_size != pair[1].stat().st_size, (
+        "and the two extracts are not the same bytes under different names")
+
+    for ext in sorted(B._SQL_WITNESS_EXTS):
+        one = _sqlite_extract(tmp_path / f"x-{ext}.sqlite", 6967)
+        two = _sqlite_extract(tmp_path / f"y-{ext}.sqlite", 7331)
+        out = [_rederive_output(one, ext), _rederive_output(two, ext)]
+        assert out[0] != out[1], (
+            f"a .{ext} extract agrees with itself across 6,967 and 7,331 rows, so "
+            f"its figure still reads the schema: {out}")
+        assert out[0] == ["6970", str(one.stat().st_size)], (
+            f"the figures are the total row count (6,967 + 3 items) beside the byte "
+            f"size, readable rather than a hash: .{ext} printed {out[0]}")
+        assert out[1][0] == "7334", f"a .{ext} row figure that is not 7,331 + 3: {out[1]}"
+
+
+def test_two_store_extracts_with_the_same_rows_still_disagree_on_their_bytes(tmp_path):
+    """#2751 clause 2: the byte size rides beside the row count, so rows are not the
+    only thing an extract has to get right.
+
+    An extract can carry exactly the row count an item quotes and still not be the
+    bytes the report was read off: 500 `docs` rows written straight in, and the same
+    500 left behind in a file that first held 5,500 of them and had 5,000 deleted
+    with no `VACUUM`, have one row figure (503 with `items`) and two file sizes. The
+    retired schema count was blind to both; the row count alone would still be blind
+    to the second. With the size in the output, an extract reproduces the figure
+    only by carrying bytes of its own.
+    """
+    tight = _sqlite_extract(tmp_path / "tight.sqlite", 500)
+    bloated = _sqlite_extract(tmp_path / "bloated.sqlite", 5500, delete_from=500)
+    out = [_rederive_output(p, "sqlite") for p in (tight, bloated)]
+    assert out[0][0] == out[1][0] == "503", (
+        f"the pair must agree on rows for this to be testing bytes: {out}")
+    assert int(out[1][1]) > int(out[0][1]), (
+        f"the byte size is absent, so a fatter extract could not be caught: {out}")
+    for got, path in zip(out, (tight, bloated)):
+        assert int(got[1]) == path.stat().st_size, (
+            f"the byte figure is not the committed file's size: {got} vs {path}")
+
+
+def test_the_store_figure_no_longer_reads_the_schema_and_the_file_branch_is_untouched():
+    """#2751 clause 3: the store branch changed, the file branch did not.
+
+    Two halves, because the class #2382 named has two branches and only one of them
+    was wrong. No `.db`/`.sqlite`/`.sqlite3` figure may come out of
+    `sqlite_master` again — the emitted string must not name it at all — and each
+    must compute both a row count (`iterdump`) and the file's size
+    (`os.path.getsize`). The file branch keeps `wc -l -c < artifact` byte for byte:
+    a store fix that also moved the form #2382 settled would silently re-open the
+    one-line-extract vacuity in the formats that were already fixed.
+    """
+    for ext in sorted(B._SQL_WITNESS_EXTS):
+        cmd = B._rederive_command(f"{B.WITNESS_ARTIFACT_DIR}/index.{ext}", ext)
+        assert "sqlite_master" not in cmd, (
+            f"a .{ext} witness reading its schema again: {cmd}")
+        assert "iterdump" in cmd and "os.path.getsize" in cmd, (
+            f"a .{ext} command with neither the row count nor the byte size: {cmd}")
+    for ext in sorted(set(B.WITNESS_EXTS) - set(B._SQL_WITNESS_EXTS)):
+        assert B._rederive_command(f"{B.WITNESS_ARTIFACT_DIR}/run.{ext}", ext) == \
+            f"wc -l -c < {B.WITNESS_ARTIFACT_DIR}/run.{ext}", (
+            f"the file branch #2382 fixed moved for .{ext}")
+
+
+def test_the_sqlite_command_stays_inside_the_owed_note_budget():
+    """#2751 clauses 4 and 5: the longer figure did not buy its room out of the
+    fallback sentence.
+
+    `_over_bound_extract_demand` embeds the command in a note that `clean_clauses`
+    cuts FROM THE END at `CLAUSE_MAX_CHARS`, so every character the store command
+    spends is taken off the closing fallback — the one instruction that stops a
+    round ordering a 982 MB store into the vault anyway. The measured budget is 233
+    characters of command for the 65-character artifact path the #2382 nodes already
+    hand the builder (52 of them basename) and 189 for the 25-character
+    `backlog/data/index.sqlite` shape, which is short enough to take the ROOMY
+    wording and therefore has to fit that one too.
+
+    What must still be there at the end: the ceiling by constant and by number
+    (`WITNESS_MAX_BYTES` = 1,048,576, untouched by this item), both wording forms —
+    the short path spelling out `committed to backlog/data/<name>`, the long path
+    the compact form — and the fallback last in each, with `clean_clauses` itself
+    leaving both notes whole.
+    """
+    long_artifact = ("backlog/data/"
+                     "a-quite-long-live-store-name-that-keeps-going.sqlite")
+    spent = len(B._rederive_command(long_artifact, "sqlite"))
+    assert 179 < spent <= 233, (
+        f"the bound is headroom rather than a bound unless the new figure actually "
+        f"spends some of it: the retired command measured 179 characters over this "
+        f"artifact path (note 546 of the 600) and this one is {spent}")
+    assert len(B._rederive_command("backlog/data/index.sqlite", "sqlite")) <= 189, (
+        "the shape that must fit the ROOMY wording outgrew its share")
+
+    assert B.WITNESS_MAX_BYTES == 1_048_576, "the ceiling is not this item's to move"
+    limit = f"{B.WITNESS_MAX_BYTES:,}"
+    deep_ndjson = ("~/.local/state/lloyd-request-manifests/manifests/"
+                   "2026-09-30-deeply-nested-request-manifest-export.ndjson")
+    long_store = ("~/lloyd-data/_pipeline/reflection/"
+                  "a-quite-long-live-store-name-that-keeps-going.sqlite")
+    for worst in (deep_ndjson, long_store):
+        note = B._over_bound_extract_demand(worst)
+        assert len(note) <= B.CLAUSE_MAX_CHARS, (
+            f"{len(note)} chars over {B.CLAUSE_MAX_CHARS} for {worst}: {note}")
+        assert note.rstrip(".").endswith("rather than ordering the store"), (
+            f"the longer command cut the fallback: {note}")
+        assert B.clean_clauses([note]) == [note], (
+            f"the truncator the note has to survive cut it: {note}")
+        assert worst in note and "WITNESS_MAX_BYTES" in note and limit in note, note
+        assert f"{B.WITNESS_ARTIFACT_DIR}/{Path(worst).name}" in note, note
+
+    roomy = B._over_bound_extract_demand("~/.cache/qmd/index.sqlite")
+    assert "committed to `backlog/data/index.sqlite`" in roomy, (
+        f"the short path lost the roomy wording: {roomy}")
+    assert B.clean_clauses([roomy]) == [roomy] and len(roomy) <= B.CLAUSE_MAX_CHARS, (
+        f"the roomy note with the store command in it no longer fits: {len(roomy)}")
+    assert roomy.rstrip(".").endswith("rather than ordering the store"), roomy
+
+    compact = B._over_bound_extract_demand(long_store)
+    assert "committed to" not in compact, (
+        f"the long path stopped taking the compact form, so something else gave: "
+        f"{compact}")
+    assert "extract" in compact.lower(), compact
+
+
 def test_no_format_the_convention_archives_is_handed_a_vacuous_proving(tmp_path):
     """#2267 clause 6 as amended for this round: no archived format gets a
     line-count-only demand.
@@ -535,8 +728,13 @@ def test_no_format_the_convention_archives_is_handed_a_vacuous_proving(tmp_path)
 
     So: every format in `WITNESS_EXTS` is asked through the real generator here. A
     file format's clause must carry `wc -l -c`, and must NOT carry the bare
-    `wc -l < artifact`; the three store formats keep the `sqlite_master` count,
-    which varies with the bytes by construction.
+    `wc -l < artifact`. The three store formats carry the command #2751 put in place
+    of the `sqlite_master` count — total rows beside byte size, the same
+    `_rederive_command` the generator itself calls — and NOT that retired count,
+    which was constant across any two extracts of one schema and so pinned as little
+    as the single-figure `wc -l` did. The old assertion here read `"sqlite_master" in
+    clause`, which is the sentence #2751 clause 3 makes false; rewriting it is part of
+    this change, not an accident of it.
     """
     d = tmp_path / "lloyd-data" / "_pipeline" / "reflection"
     d.mkdir(parents=True)
@@ -549,7 +747,12 @@ def test_no_format_the_convention_archives_is_handed_a_vacuous_proving(tmp_path)
         artifact = f"{B.WITNESS_ARTIFACT_DIR}/run.{ext}"
         clause = out[1]
         if ext in B._SQL_WITNESS_EXTS:
-            assert "sqlite_master" in clause, (ext, clause)
+            assert f"`{B._rederive_command(artifact, ext)}`" in clause, (
+                f"a .{ext} witness whose clause carries something other than the "
+                f"byte-varying store command: {clause}")
+            assert "sqlite_master" not in clause, (
+                f"a .{ext} clause back on the schema-count figure #2751 retired: "
+                f"{clause}")
         else:
             assert f"`wc -l -c < {artifact}`" in clause, (ext, clause)
             assert f"`wc -l < {artifact}`" not in clause, (
