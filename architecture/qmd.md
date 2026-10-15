@@ -286,12 +286,40 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   belongs to is, and never otherwise), while everything else keeps the `held_for_person`
   entry and reason it already had. Names decide nothing: `perfbench.sqlite` and the
   side-indexes `eval/` names are untouched, and a database no file in this tree mentions
-  changes bucket the moment something has it open. Neither bucket is deletable —
-  `apply_stray_retention` still refuses any name outside the backup series — so what
-  changed is which queue a person reads, and the morning line now counts the four
-  reasons a file survives apart: measured reader, keep-list, live handle, outside the
-  series. Whether `rebuild-20261004.sqlite` should be deleted at all is still #844's
-  ruling to make, and this change does not make it.
+  changes bucket the moment something has it open. Neither bucket was made deletable by
+  this — `apply_stray_retention` refused every name outside the backup series, as it had
+  since #2420 — so what changed was which queue a person reads, and the morning line now
+  counts the four reasons a file survives apart: measured reader, keep-list, live handle,
+  outside the series. Whether `rebuild-20261004.sqlite` should be deleted at all was left
+  as #844's ruling to make; #2680's owed entry made it on 2026-10-14, and the next bullet
+  is the channel that carries it.
+- **A delete somebody ruled is a data file too, and the nightly sweep is what performs it
+  (#2723).** The mirror of the keep-list above, because the ruling that #2481's owed entry
+  got — `Delete it`, owed-check `20261013_221241_owedcheck_4fc7`, routed into #2680 — had
+  nowhere to live. Ruling a delete in prose and naming an executor for it is how 506,781,794 B
+  of the 2026-10-14T05:00:34 report's `held_for_person` sat uncollected for nine days while
+  three items closed over it: #2686's fix shipped at `7006dc07` and never ran for the same
+  reason, and #2680 was closed with the work routed here rather than to a person. So
+  `RELEASED_STRAYS` in the module, merged with the optional
+  `$LLOYD_DATA/_pipeline/reflection/qmd-stray-release-list.json` beside the keep-list (entries
+  of `name` — a side copy's stem — each with a `reason` and a `source`), is what a delete
+  ruling now is. A released stem's paths are *derived*, never listed: `side_index_path`, that
+  database's `-wal`/`-shm`, and `side_marker_path` inside the index directory, plus
+  `side_config_path` in `~/.config/qmd`, each re-checked through `_check_side_name` and
+  required to be a regular non-symlink file where it is found. The live `index.sqlite` triple,
+  `~/.cache/qmd/models/`, `dist.prev-*`, a `.bak` the series rule does not already allow, and any stray the
+  stem does not name are unreachable by construction, and a released config goes only after
+  its database is gone. Rulings never outrank measurements: #2481's open-handle read and
+  #2119's sidecar-current-open test both hold a released name, and `release.blocked` says the
+  stem was ruled and why it stayed. A release is deliberately *not* gated on
+  `code_reference_hits`: this page's own prose and this module's own docstrings name
+  `rebuild-20261004.sqlite`, so that gate could never pass — and those sentences stay, because
+  they are the evidence that the file was read. Fail-closed the same way the keep-list is: an
+  entry with no `reason` or no `source`, from either channel, or a list that will not parse,
+  releases NOTHING and reports the error. The seed carries `rebuild-20261004` (all five paths,
+  `#2680`) and `rebuild-20261005` (its config only — the swap that shipped the fix renamed that
+  name's database into the live index, so it moves no stray byte and reports apart from the
+  byte total).
 - **An acting run resets the WAL it has been reporting (#2709).** The
   nightly report's `footprint` main + `-wal` + `-shm` (#844) sat at 99.5–100.6 %
   WAL-to-main on all fourteen reports 2026-10-01…10-14 — ~1.87 GB of real footprint

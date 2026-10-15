@@ -2788,6 +2788,15 @@ def _plan_pair(tmp_path: Path, keep_list_doc, with_prior_report: bool) -> dict:
     out = {"rep": rep}
     for tag, mod in (("base", _module_at(PRE_KEEP_LIST, "base", tmp_path)), ("now", m)):
         d = _witness_pile(tmp_path / tag)
+        # LIVE_CONFIG has to move with INDEX (#2723). This node passes `index` as an
+        # argument and used to leave the config path at the real `~/.config/qmd/index.yml`,
+        # which was harmless while the delete leg could only reach the index directory — and
+        # stopped being harmless the moment a released stem's `<stem>.yml` became deletable,
+        # because the plan then named a real file and `apply` unlinked it. `mod.LIVE_CONFIG`
+        # rather than `monkeypatch`, because the loop runs two module objects and the blob
+        # one is not the imported `m`.
+        mod.LIVE_CONFIG = tmp_path / f"{tag}-index.yml"
+        (tmp_path / f"{tag}-index.yml").write_text(LIVE)
         plan = mod.plan_stray_retention(index=d / "index.sqlite", repo_root=repo,
                                         report_dir=report_dir)
         out[f"{tag}_plan"] = plan
@@ -2825,13 +2834,19 @@ def test_with_nothing_written_the_plan_is_the_plan_the_rule_made_before_the_feat
     shared = ["bak_series", "kept", "planned", "deleted", "deleted_bytes", "held",
               "held_for_person", "errors"]
     #: Every key this module's plan carries that the pre-change module's does not:
-    #: #2420's `keep_list` block, and #2481's `live_side_indexes` — a non-series database
-    #: a live process holds open, counted apart from the abandoned copies beside it in
-    #: `held_for_person`. Neither can join `shared`: `base` has neither, and the equality
-    #: with the old rule only runs over keys the old rule produced. So the new key is
-    #: pinned two ways below — as one of exactly the keys `now` adds, and as the figure
-    #: it has to report on a pile where nothing is open.
-    added = ["keep_list", "live_side_indexes"]
+    #: #2420's `keep_list` block, #2481's `live_side_indexes` — a non-series database a live
+    #: process holds open, counted apart from the abandoned copies beside it in
+    #: `held_for_person` — and #2723's `release` block, the mirror that reports what a delete
+    #: ruling owns. None of the three can join `shared`: `base` has none of them, and the
+    #: equality with the old rule only runs over keys the old rule produced. So each new key
+    #: is pinned two ways below — as one of exactly the keys `now` adds, and as the figure it
+    #: has to report on a pile where nothing is open and nothing is ruled. `release` is the
+    #: first of the three whose emptiness is not a matter of nobody having written a file:
+    #: its seed ships in the code, so its inertness here rests on the 2026-10-03 pile holding
+    #: no `rebuild-20261004.*` and no `rebuild-20261005.*` — asserted two lines down, because
+    #: a seed that reached this pile would move `planned` and dissolve the comparison the
+    #: whole node is for.
+    added = ["keep_list", "live_side_indexes", "release"]
     assert len(base["bak_series"]) == 2, (
         f"the witness pile is no longer one kept copy and one candidate: {base['bak_series']}")
     assert {k: base[k] for k in shared} == {k: now[k] for k in shared}, (
@@ -2841,6 +2856,18 @@ def test_with_nothing_written_the_plan_is_the_plan_the_rule_made_before_the_feat
     assert now["live_side_indexes"] == [], (
         "the witness pile is a directory of files with no reader on them, so a run that "
         f"measured one here measured something that is not there: {now['live_side_indexes']}")
+    # The seed is the one part of the release channel that is never "unread": it ships in
+    # the module, so `now` cannot be inert merely because no JSON was found. Its inertness
+    # here is that the two ruled names are not files in this pile, which is what keeps the
+    # equality above a comparison with the old rule and not a comparison of two plans that
+    # both moved.
+    assert now["release"]["released"] == [] and now["release"]["blocked"] == [] \
+        and now["release"]["configs"] == [] and now["release"]["error"] is None, (
+        f"the shipped seed named a file in the 2026-10-03 witness pile, so the equality "
+        f"above is no longer a comparison with the old rule: {now['release']}")
+    assert now["release"]["entries"] == len(m.RELEASED_STRAYS), (
+        f"the release block over an unread list reports the constant, not zero: "
+        f"{now['release']['entries']} vs {len(m.RELEASED_STRAYS)}")
     assert "keep_list" not in base, "the baseline already had the block this change adds"
     assert now["keep_list"] == {"path": str(tmp_path / "reflection" / m.KEEP_LIST_NAME),
                                 "entries": 0, "held": [], "files": [], "error": None}, (
@@ -5048,3 +5075,744 @@ def test_a_main_file_that_is_not_a_database_is_refused_before_any_open(tmp_path)
     assert (index.parent / "index.sqlite-wal").exists(), (
         "the WAL was removed by a run that checkpointed nothing")
     assert wc["busy"] is None and wc["log"] is None, wc
+
+
+# --- #2723: a ruled delete runs in the acting sweep (the release channel) -----
+#
+# The keep-list (#2420) is how a human tells this job to KEEP a file. The mirror
+# question — "a person has already ruled this side copy a delete, so when does the sweep
+# actually unlink it?" — had no channel at all, which is how 506,781,794 B of
+# `rebuild-20261004*` sat in `held_for_person` quoting #844:141-142 for ten days after the
+# owed-check ruling of 2026-10-14T05:15:40 said `Delete it`.
+#
+# Every node below runs on a tmp tree; the real `~/.cache/qmd` is never touched, because a
+# round may not unlink a store the ruling is about (#2680) and the delete is the acting
+# sweep's own job. What a round can and must do is prove the mechanism, so the 05:00 run
+# executes a path that was tested rather than a path that was hoped for.
+
+
+@pytest.fixture(autouse=True)
+def _no_unattended_call_into_the_delete_leg_reaches_a_real_directory(monkeypatch,
+                                                                     tmp_path):
+    """Every unlink this file causes happens inside `tmp_path` — enforced, not inspected.
+
+    This suite has always guarded exactly one write surface: `INDEX` is pointed at a fixture
+    by `_retention_run`, `_plan_pair` and `_release_env`, because acting retention deletes
+    inside the index directory. #2723 gave `apply_stray_retention` a second surface,
+    `~/.config/qmd/<stem>.yml`, and a guard that reads only the path its author happened to
+    think of is not a guard — the 2026-09-22 class rule about a check living on one of two
+    write surfaces, in its own suite this time. The cost of getting it wrong is already on
+    this box: `_plan_pair` passed `index` as an argument, left `LIVE_CONFIG` at the real
+    path, planned the real `rebuild-20261005.yml` into `release.configs`, and unlinked it.
+    That file is gone (1,491 B, mtime 2026-10-05 07:22), and owed entry 3 of #2723 — `ls
+    ~/.config/qmd/rebuild-20261005.yml` after a sweep — has no witness left to measure.
+
+    So the check is not in any one helper: any call into the leg while `INDEX` or
+    `LIVE_CONFIG` sits outside this test's `tmp_path` raises before a byte goes. The blob
+    module `_module_at` loads is not patched here and is not covered — it is the pre-#2420
+    code, which has no release leg and therefore only ever wrote inside the index directory
+    it was handed.
+    """
+    real = m.apply_stray_retention
+
+    def guarded(plan, index=None):
+        for label, path in (("INDEX", m.INDEX if index is None else index),
+                            ("LIVE_CONFIG", m.LIVE_CONFIG)):
+            if tmp_path not in Path(path).resolve().parents:
+                raise AssertionError(
+                    f"{label}={path} is outside {tmp_path}, and this node is calling the "
+                    f"only function in the module that unlinks. Point it at a fixture: a "
+                    f"real file has already been lost that way once")
+        return real(plan, index=index)
+
+    monkeypatch.setattr(m, "apply_stray_retention", guarded)
+
+
+def _release_env(monkeypatch, tmp_path, specs):
+    """Point every module path at one fixture tree and hand back the index directory.
+
+    The same four globals `_retention_run` moves, without running `main()`: a node asking
+    what the plan says, or what `apply_stray_retention` unlinks, should not pay for a
+    retrieval probe it is not testing. The configs directory is `tmp_path` itself, because
+    `_pair` puts the live config there — so a released stem's config is
+    `tmp_path / "<stem>.yml"`, which is the only way a config-only release, the
+    `rebuild-20261005` half of the seed, is testable at all.
+    """
+    d = _qmd_dir(tmp_path, specs)
+    monkeypatch.setattr(m, "INDEX", d / "index.sqlite")
+    monkeypatch.setattr(m, "LIVE_CONFIG", tmp_path / "index.yml")
+    monkeypatch.setattr(m, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    (tmp_path / "reflection").mkdir(exist_ok=True)
+    return d
+
+
+def _ruled(*entries):
+    """`RELEASED_STRAYS`-shaped rulings, so a node states a ruling rather than a path."""
+    return tuple({"name": n, "reason": r, "source": s} for n, r, s in entries)
+
+
+def _reader_of(**holders):
+    """Stub the `/proc` read: these names have these pids, and nothing else does.
+
+    The holder is asserted to be measured, never inferred from a name — which is the whole
+    of #2481 — so the stub answers by name exactly as `open_handle_holders` does.
+    """
+    return lambda paths: {k: list(v) for k, v in holders.items()}
+
+
+GOOD = _ruled(("rebuild-fixture", "the rehearsal copy: nothing else reads it",
+               "#2723-fixture"))
+
+
+def test_a_ruled_release_moves_a_side_copy_from_held_for_person_into_planned(monkeypatch,
+                                                                            tmp_path):
+    """A ruling is what changes the bucket, and the moved entry carries its own words.
+
+    This is the whole of the bug: `held_for_person` means "not this job's to delete,
+    awaiting a person", and the ruling said otherwise, so the file was reported as waiting
+    for somebody who had already answered. The clause asks that a moved entry carry that
+    entry's OWN `reason` and `source`, asserted here per file rather than once: a report
+    that says only `planned` is the state that cost ten days, because a reader cannot tell
+    a ruled delete from a rule that fired by accident.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-fixture.sqlite", 4096, 20.0),
+        ("rebuild-fixture.sqlite.rebuild.json", 98, 20.0),
+        ("other-eval.sqlite", 4096, 20.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    out = m.plan_stray_retention()
+    assert out["errors"] == [] and out["release"]["error"] is None, out["errors"]
+    assert out["release"]["entries"] == 1, out["release"]
+    assert sorted(out["planned"]) == ["rebuild-fixture.sqlite",
+                                      "rebuild-fixture.sqlite.rebuild.json"], out["planned"]
+    held = [f["name"] for f in out["held_for_person"]]
+    assert held == ["other-eval.sqlite"], (
+        f"a name the ruling does not own stays held: {held}")
+    for rec in out["release"]["released"]:
+        assert rec["stem"] == "rebuild-fixture"
+        assert rec["reason"] == "the rehearsal copy: nothing else reads it", rec
+        assert rec["source"] == "#2723-fixture", rec
+    assert {r["name"] for r in out["release"]["released"]} == set(out["planned"]), (
+        "every planned released path has to appear in `release.released`, or the report "
+        "shows a delete with no ruling behind it")
+    assert (d / "rebuild-fixture.sqlite").is_file(), (
+        "planning is a read: nothing is freed until an acting run")
+
+
+def test_a_released_databases_sidecars_and_marker_are_planned_beside_it(monkeypatch,
+                                                                       tmp_path):
+    """A release rules a SIDE COPY, so every path of that name goes.
+
+    `rebuild-fixture.sqlite-wal` and `-shm` are not separate strays — they are the same
+    database, and that equivalence is exactly what #2481 was about. The marker travels for
+    the other reason: a leftover `.rebuild.json` is what lets `find_side_copies` offer a
+    name whose database something else made. `release_paths_for` is the one derivation both
+    the plan and the delete leg read, so it is asserted here rather than being two lists
+    kept in step by hand.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-fixture.sqlite", 4096, 20.0),
+        ("rebuild-fixture.sqlite-wal", 0, 20.0),
+        ("rebuild-fixture.sqlite-shm", 32768, 20.0),
+        ("rebuild-fixture.sqlite.rebuild.json", 98, 20.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    out = m.plan_stray_retention()
+    want = {"rebuild-fixture.sqlite", "rebuild-fixture.sqlite-wal",
+            "rebuild-fixture.sqlite-shm", "rebuild-fixture.sqlite.rebuild.json"}
+    assert set(out["planned"]) == want, out["planned"]
+    assert out["held_for_person"] == [], out["held_for_person"]
+    derived = m.release_paths_for("rebuild-fixture")
+    assert {p.name for p in derived["index_dir"]} == want, derived
+    assert [p.name for p in derived["config"]] == ["rebuild-fixture.yml"], derived
+    assert {r["name"] for r in out["release"]["released"]} == want
+    assert (d / "rebuild-fixture.sqlite").is_file(), "a plan frees nothing"
+
+
+def test_the_seeded_releases_are_exactly_the_two_rulings_and_name_their_decision():
+    """The constant is the only seed an unattended change can write, so it is read here.
+
+    `release_list_path` resolves into the reports directory, outside the repo and the vault
+    (#2723's own finding), so `RELEASED_STRAYS` is the whole of the ruling route this loop
+    can itself fill — which is exactly why its contents are a fact a test checks rather
+    than a comment: the file it sits in is that entry's only review surface.
+
+    The `code_reference_hits` measurement in this node is why those two entries are NOT
+    gated on #855's grep, and it is taken from the real tree: the grep is a substring walk
+    over our own `.py` files, and this module's prose names the 2026-10-04 side copy as the
+    example of the reader signature, so releasing that name would be blocked by a sentence
+    whose only job is to explain the guard. Deleting the prose to satisfy the gate would
+    destroy the reason `live_side_indexes` exists.
+    """
+    seeds = {e["name"]: e for e in m.RELEASED_STRAYS}
+    assert set(seeds) == {"rebuild-20261004", "rebuild-20261005"}, sorted(seeds)
+    assert seeds["rebuild-20261004"]["source"] == "#2680", seeds["rebuild-20261004"]
+    assert seeds["rebuild-20261005"]["source"] == "#2723", seeds["rebuild-20261005"]
+    assert "#2481" in seeds["rebuild-20261004"]["reason"] and \
+        "2026-10-14T05:15:40" in seeds["rebuild-20261004"]["reason"], (
+        "the ruling has to be quotable from the constant: this sentence is what replaces "
+        "'awaiting a person'")
+    assert "config" in seeds["rebuild-20261005"]["reason"], (
+        "that name's database was renamed to the live index by the 2026-10-05 swap, so its "
+        "entry has to say it is only the config left behind")
+    hits = m.code_reference_hits(["rebuild-20261004.sqlite"], m.REPO_ROOT)
+    assert hits["rebuild-20261004.sqlite"], (
+        "the exemption claimed here needs the grep to actually match: our own prose is the "
+        "reader it finds")
+
+
+def test_a_released_stem_is_released_although_its_own_module_names_it(monkeypatch,
+                                                                      tmp_path):
+    """The grep gate is present, matching, and deliberately not consulted. Clause 5.
+
+    #855's rule was "do not delete a database Lloyd's own code still names", and for the
+    backup series it still is: rule 2 of `plan_stray_retention` holds an older `.bak*`
+    whose name survives `code_reference_hits`. A release does not consult that gate, and
+    this node pins the exemption rather than merely asserting it — the premise on the
+    real tree, the release on a fixture whose repo root carries the matching witness.
+
+    The premise is this module itself: its prose names `rebuild-20261004.sqlite` as the
+    example of the reader signature #2481 exists to catch, so a substring grep over this
+    tree will match that name for as long as this file is honest about why the bucket
+    split exists. A release gated on the grep could therefore never fire for the one
+    ruling this channel was built for — and deleting those sentences to make the gate
+    pass would destroy the reason `live_side_indexes` exists. Wiring the gate into the
+    release leg, or deleting the prose, fails this node; releasing anyway, as here, is
+    the only state that keeps both.
+    """
+    premise = m.code_reference_hits(["rebuild-20261004.sqlite"], m.REPO_ROOT)
+    assert any("qmd_index_maintenance" in f for f in premise["rebuild-20261004.sqlite"]), (
+        f"the exemption needs the grep to actually hit our own prose: "
+        f"{premise['rebuild-20261004.sqlite']}")
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-20261004.sqlite", 4096, 20.0),
+        ("rebuild-20261004.sqlite-wal", 0, 20.0),
+        ("rebuild-20261004.sqlite-shm", 32768, 20.0),
+        ("rebuild-20261004.sqlite.rebuild.json", 98, 20.0)])
+    (tmp_path / "witness.py").write_text(
+        "# names the side copy as the example of the reader signature\n"
+        "NAMED = 'rebuild-20261004.sqlite'\n")
+    hits = m.code_reference_hits(["rebuild-20261004.sqlite"], tmp_path)
+    assert hits["rebuild-20261004.sqlite"], (
+        f"the fixture root must carry the hit too, or this releases despite no gate: {hits}")
+    out = m.plan_stray_retention()
+    assert out["release"]["error"] is None, out["release"]
+    assert set(out["planned"]) == {"rebuild-20261004.sqlite",
+                                   "rebuild-20261004.sqlite-wal",
+                                   "rebuild-20261004.sqlite-shm",
+                                   "rebuild-20261004.sqlite.rebuild.json"}, out["planned"]
+    assert out["held_for_person"] == [], (
+        "a held entry here would mean the grep gate outranked the ruling: "
+        f"{out['held_for_person']}")
+    assert (d / "rebuild-20261004.sqlite").is_file(), "planning frees nothing"
+
+
+def test_the_optional_release_list_sits_beside_the_keep_list_and_may_be_absent(monkeypatch,
+                                                                             tmp_path):
+    """The hand-written channel is a real route, and nothing about it is required.
+
+    `RELEASED_STRAYS` alone may not be the last word — #2680's ruling was made by a job that
+    cannot edit this file — so the JSON beside the keep-list is the second channel. It must
+    not be load-bearing: if a missing file were an error, the 05:00 run would hold
+    everything and the constant would stop working the day somebody moved that file.
+    """
+    _release_env(monkeypatch, tmp_path, LIVE_TRIO)
+    rel, keep = m.release_list_path(), m.keep_list_path()
+    assert rel.parent == keep.parent, (rel, keep)
+    assert rel.name == "qmd-stray-release-list.json", rel.name
+    assert not rel.exists()
+    assert m.read_release_list(rel) == {"path": str(rel), "entries": [], "error": None}
+    rl = m.release_rulings(rel)
+    assert rl["error"] is None and rl["shadowed"] == [], rl
+    assert {e["name"] for e in rl["entries"]} == {"rebuild-20261004", "rebuild-20261005"}
+    assert all(e["origin"] == "RELEASED_STRAYS" for e in rl["entries"]), rl
+
+
+def test_a_release_list_entry_replaces_the_constant_for_a_stem_and_says_so(monkeypatch,
+                                                                          tmp_path):
+    """Two channels can name one stem, and the fresher ruling must be the one in force.
+
+    Silent override is the failure: a reader checking `RELEASED_STRAYS` would read a reason
+    the run did not use. `shadowed` is how the report says the constant was overridden, and
+    it has to be non-empty exactly when that happened.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-fixture.sqlite", 4096, 20.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    m.release_list_path().write_text(json.dumps(
+        {"entries": [{"name": "rebuild-fixture", "reason": "superseded by a later ruling",
+                      "source": "#2723-list"}]}))
+    out = m.plan_stray_retention()
+    assert out["release"]["error"] is None, out["release"]
+    assert out["release"]["shadowed"] == ["rebuild-fixture"], out["release"]
+    assert out["release"]["entries"] == 1, out["release"]
+    rec = out["release"]["released"][0]
+    assert rec["reason"] == "superseded by a later ruling"
+    assert rec["source"] == "#2723-list", rec
+    assert (d / "rebuild-fixture.sqlite").is_file(), "planning frees nothing"
+
+
+def test_a_release_list_entry_for_a_stem_the_constant_does_not_name_releases_it(monkeypatch,
+                                                                              tmp_path):
+    """The JSON channel ADDS a ruling; it is not merely a way to re-word the constant's.
+
+    Clause 2's second half in full: an optional list "adds entries without being required
+    to exist". A file that could only override a stem `RELEASED_STRAYS` already carried
+    would make the constant the only real route — and the constant's authorship is rounds,
+    which is exactly the authorship #2680's owed-check ruling could not use: the delete was
+    decided by a job that cannot edit a repo file. A ruling made after this file shipped
+    must be able to name a stem for the first time, end to end: planned, reported, and
+    carrying the list's own `reason` and `source`, with `shadowed` empty because nothing
+    was overridden.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-listonly.sqlite", 4096, 20.0),
+        ("rebuild-listonly.sqlite.rebuild.json", 98, 20.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    m.release_list_path().write_text(json.dumps(
+        {"entries": [{"name": "rebuild-listonly",
+                      "reason": "ruled after this file shipped",
+                      "source": "#2723-list"}]}))
+    out = m.plan_stray_retention()
+    assert out["release"]["error"] is None, out["release"]
+    assert out["release"]["entries"] == 2, (
+        f"the constant's ruling and the list's ruling are both in force: {out['release']}")
+    assert out["release"]["shadowed"] == [], (
+        "no stem was overridden, so saying one was would be a false report")
+    assert set(out["planned"]) == {"rebuild-listonly.sqlite",
+                                   "rebuild-listonly.sqlite.rebuild.json"}, out["planned"]
+    rec = {r["name"]: r for r in out["release"]["released"]}
+    assert set(rec) == set(out["planned"]), rec
+    assert all(r["stem"] == "rebuild-listonly" and
+               r["reason"] == "ruled after this file shipped" and
+               r["source"] == "#2723-list" for r in rec.values()), rec
+    assert out["held_for_person"] == [], out["held_for_person"]
+    assert (d / "rebuild-listonly.sqlite").is_file(), "planning frees nothing"
+
+
+def test_a_release_list_that_will_not_parse_releases_nothing_and_says_so(monkeypatch,
+                                                                        tmp_path):
+    """Fail closed on the side of the mirror where the failure is an unlink.
+
+    For the keep-list, unparseable means "hold everything", which is the safe answer #2420
+    chose. Here the same rule is load-bearing in the other direction: a file that
+    half-parsed could name a database a process is reading, so NOTHING is released and the
+    error goes into `errors`, which is what the morning line prints. The unrecognised
+    top-level key case is the one that matters most, because `{"glob": "rebuild-*"}` is a
+    perfectly natural thing for a person to write, and on this side of the mirror a
+    wildcard is a request to delete whatever matches next.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-fixture.sqlite", 4096, 20.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    for body in ('{"entries": [', '{"entries": {"name": "rebuild-fixture"}}',
+                 '{"glob": "rebuild-*"}'):
+        m.release_list_path().write_text(body)
+        out = m.plan_stray_retention()
+        assert out["planned"] == [], f"{body!r} released {out['planned']}"
+        assert out["release"]["entries"] == 0, out["release"]
+        assert out["errors"] and str(m.release_list_path()) in out["errors"][0], out["errors"]
+        assert [f["name"] for f in out["held_for_person"]] == ["rebuild-fixture.sqlite"], out
+        assert (d / "rebuild-fixture.sqlite").is_file(), body
+    m.release_list_path().unlink()
+
+
+@pytest.mark.parametrize("bad", [
+    ("rebuild-fixture", "", "#2723-fixture"),
+    ("rebuild-fixture", "a reason, no source", ""),
+    ("index.sqlite", "names the live index itself", "#2723-fixture"),
+], ids=["no-reason", "no-source", "names-the-live-index"])
+def test_a_ruling_that_lost_a_field_releases_nothing(monkeypatch, tmp_path, bad):
+    """A half-written ruling counts as no ruling, whichever channel it came from.
+
+    `reason` and `source` are required for the reason #2420 requires them on the keep side:
+    the loss this channel replaces was a delete nobody could point a decision at. The third
+    case is the one that would be catastrophic rather than merely wrong — a release naming
+    the live index is a request to unlink the running database — and it fails on
+    `_check_side_name`, the same gate the rebuild route takes, not on a forbidden list that
+    has to be kept current.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-fixture.sqlite", 4096, 20.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", _ruled(bad))
+    out = m.plan_stray_retention()
+    assert out["planned"] == [] and out["release"]["entries"] == 0, out
+    assert out["release"]["error"] and "RELEASED_STRAYS" in out["release"]["error"], out
+    assert out["errors"], "a broken ruling has to reach the run's error line too"
+    assert "#844:141-142" in out["held_for_person"][0]["because"], out["held_for_person"]
+    assert (d / "rebuild-fixture.sqlite").is_file()
+
+
+def test_an_unreleased_stray_keeps_the_844_sentence_and_the_live_bucket_is_unchanged(
+        monkeypatch, tmp_path):
+    """The release channel changes nothing for a name it was not told about.
+
+    Two populations have to be untouched, and they are checked in one fixture because the
+    failure mode is the same: a release mechanism that reclassified strays generally would
+    move evalpin-class files out of `held_for_person`, or pull a measured-live database out
+    of `live_side_indexes`, and either way the queue figure and the safety story both change
+    with nobody deciding it. The `#844:141-142` text is asserted as a substring because that
+    citation is the sentence a person reads.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-fixture.sqlite", 4096, 20.0),
+        ("other-eval.sqlite", 4096, 1.0),
+        ("other-eval.sqlite-shm", 32768, 0.5),
+        (".qmd-embed.lock", 7, 1.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    monkeypatch.setattr(m, "open_handle_holders",
+                        _reader_of(**{"other-eval.sqlite": [4242]}))
+    out = m.plan_stray_retention()
+    assert {e["name"] for e in out["live_side_indexes"]} == {"other-eval.sqlite",
+                                                             "other-eval.sqlite-shm"}, \
+        out["live_side_indexes"]
+    assert [f["name"] for f in out["held_for_person"]] == [".qmd-embed.lock"], \
+        out["held_for_person"]
+    assert "#844:141-142" in out["held_for_person"][0]["because"], out["held_for_person"]
+    assert {r["name"] for r in out["release"]["released"]} == {"rebuild-fixture.sqlite"}
+    assert out["planned"] == ["rebuild-fixture.sqlite"]
+    assert (d / ".qmd-embed.lock").is_file()
+
+
+def test_a_descriptor_on_a_released_database_holds_every_path_of_that_name(monkeypatch,
+                                                                          tmp_path):
+    """#2481 outranks the list: a measured handle beats a sentence written earlier.
+
+    The ruling is a claim about the past; `open_handle_holders` is a measurement of now.
+    Seeded entry `rebuild-20261004` is not hypothetical — its `-shm` moved from
+    2026-10-07T05:06:45 to 2026-10-13 05:34:13, so something was still touching that
+    database six days before the ruling that says delete it.
+
+    The bucket split is the interesting part. The database and its two sqlite sidecars are
+    reported by #2481 where #2481 always reports them (`live_side_indexes`, with the pids),
+    because a release must not relocate live accounting; the marker and the config, which no
+    process can hold open, are recorded in `release.blocked` beside the ruling they belong
+    to. Nothing is planned, and every file is still on disk.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-fixture.sqlite", 4096, 20.0),
+        ("rebuild-fixture.sqlite-wal", 0, 20.0),
+        ("rebuild-fixture.sqlite-shm", 32768, 20.0),
+        ("rebuild-fixture.sqlite.rebuild.json", 98, 20.0)])
+    (tmp_path / "rebuild-fixture.yml").write_text("sources: []\n")
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    monkeypatch.setattr(m, "open_handle_holders",
+                        _reader_of(**{"rebuild-fixture.sqlite": [4242]}))
+    out = m.plan_stray_retention()
+    assert out["planned"] == [] and out["release"]["released"] == [], out
+    assert {e["name"] for e in out["live_side_indexes"]} == {"rebuild-fixture.sqlite",
+                                                             "rebuild-fixture.sqlite-wal",
+                                                             "rebuild-fixture.sqlite-shm"}, \
+        out["live_side_indexes"]
+    assert {r["name"] for r in out["release"]["blocked"]} == \
+        {"rebuild-fixture.sqlite.rebuild.json", "rebuild-fixture.yml"}, out["release"]
+    for rec in out["release"]["blocked"]:
+        assert rec["source"] == "#2723-fixture" and rec["reason"], rec
+        assert "open right now" in rec["because"][0], rec
+    held = {f["name"] for f in out["held_for_person"]}
+    assert held == {"rebuild-fixture.sqlite.rebuild.json"}, held
+    assert "released for deletion by #2723-fixture" in \
+        out["held_for_person"][0]["because"], out["held_for_person"]
+    assert all((d / n).is_file() for n in
+               ("rebuild-fixture.sqlite", "rebuild-fixture.sqlite-wal",
+                "rebuild-fixture.sqlite-shm", "rebuild-fixture.sqlite.rebuild.json"))
+    assert (tmp_path / "rebuild-fixture.yml").is_file(), (
+        "the config is held with the database it belongs to, not deleted beside it")
+
+
+def test_a_released_sidecar_still_reading_as_a_current_open_holds_the_whole_stem(
+        monkeypatch, tmp_path):
+    """The second half of #2481's guard, which is the half this file's own history needed.
+
+    A `-shm` stamped days after its database, later than the previous run, is a reader and
+    not a copy artifact (#2119) — precisely the signature `rebuild-20261004.sqlite`
+    presented on 2026-10-09. So the release path has to consult it, or the sweep would
+    unlink a database out from under a live connection on the strength of a list. Nothing is
+    measured in `/proc` here, so the block comes from the sidecar alone, and it holds the
+    marker too: a marker pointing at a database that is gone is worse for the next reader
+    than either whole state.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-fixture.sqlite", 4096, 12.0),
+        ("rebuild-fixture.sqlite-wal", 0, 12.0),
+        ("rebuild-fixture.sqlite-shm", 32768, 1.0),
+        ("rebuild-fixture.sqlite.rebuild.json", 98, 12.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    _prior_report(tmp_path / "reflection", datetime.fromtimestamp(time.time() - 2 * 86400))
+    out = m.plan_stray_retention()
+    assert out["planned"] == [] and out["release"]["released"] == [], out
+    assert out["live_side_indexes"] == [], (
+        "no descriptor was measured, so the live bucket must not be used as a hiding place")
+    assert {r["name"] for r in out["release"]["blocked"]} == {
+        "rebuild-fixture.sqlite", "rebuild-fixture.sqlite-wal",
+        "rebuild-fixture.sqlite-shm", "rebuild-fixture.sqlite.rebuild.json"}, out
+    assert any("sidecar" in r["because"][0] or "newer" in r["because"][0]
+               for r in out["release"]["blocked"]), out["release"]["blocked"]
+    assert len(out["held_for_person"]) == 4, out["held_for_person"]
+    assert all("but held this run" in f["because"] for f in out["held_for_person"]), \
+        out["held_for_person"]
+    assert all((d / f["name"]).exists() for f in out["held_for_person"]), (
+        "all four held names are still on disk: a plan writes nothing, and "
+        "`apply_stray_retention` re-checks each path at the moment of the unlink, so a "
+        "#2119 hold that `apply` failed to honour would surface here as a missing file "
+        "rather than as a mystery in the morning")
+
+
+def test_an_acting_run_unlinks_the_released_paths_and_reports_the_bytes_it_freed(
+        monkeypatch, tmp_path):
+    """The end of the item: an acting run deletes, and says so in the report it wrote.
+
+    Everything above is a plan. `apply_stray_retention` used to admit only a name starting
+    `index.sqlite.bak`, so a released name arriving in `planned` would have been recorded as
+    "not a deletable member of the series" and skipped — which is why the delete half of
+    this change is load-bearing and not a nicety. The assertions read the report the run
+    wrote rather than a function return, because the report is the artifact the next reader
+    trusts.
+
+    The released stem's config goes too, and its bytes are in neither figure — neither
+    `deleted_bytes` nor `stray_bytes` — because both walk the index directory and the config
+    lives in the config directory beside it. The fixture keeps them apart the way the box
+    does: `_qmd_dir` builds `tmp_path/qmd`, `_pair` writes configs to `tmp_path`. So the byte
+    delta below is the index directory alone, which is what #2723's 506,781,794 B is a
+    measurement of.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("index.sqlite.bak-z-keeper", 2048, 2.0),
+        ("index.sqlite.bak-a-freed", 2048, 30.0),
+        ("rebuild-fixture.sqlite", 4096, 20.0),
+        ("rebuild-fixture.sqlite-shm", 32768, 20.0),
+        ("rebuild-fixture.sqlite.rebuild.json", 98, 20.0),
+        ("other-eval.sqlite", 4096, 20.0)])
+    (tmp_path / "rebuild-fixture.yml").write_text("sources: []\n")
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    before = m.stray_files()["bytes"]
+    rep = _retention_run(monkeypatch, tmp_path, d, tmp_path, dry_run=False)
+    sr = rep["stray_retention"]
+    assert sr["errors"] == [], sr["errors"]
+    assert sr["release"]["deleted"] == ["rebuild-fixture.sqlite",
+                                        "rebuild-fixture.sqlite-shm",
+                                        "rebuild-fixture.sqlite.rebuild.json"], sr
+    assert sr["release"]["deleted_bytes"] == 4096 + 32768 + 98, sr["release"]
+    assert sr["release"]["configs_deleted"] == ["rebuild-fixture.yml"], sr["release"]
+    assert "index.sqlite.bak-a-freed" in sr["deleted"], sr["deleted"]
+    assert sr["kept"] == ["index.sqlite.bak-z-keeper"], (
+        f"the keeper is the newest surviving copy BY NAME: {sr['kept']}")
+    for gone in ("rebuild-fixture.sqlite", "rebuild-fixture.sqlite-shm",
+                 "rebuild-fixture.sqlite.rebuild.json"):
+        assert not (d / gone).exists(), gone
+    assert not (tmp_path / "rebuild-fixture.yml").exists()
+    assert (d / "other-eval.sqlite").is_file(), "an unreleased stray survived the run"
+    assert all((d / n).exists() for n in ("index.sqlite", "index.sqlite-wal",
+                                         "index.sqlite-shm")), "the live index is untouchable"
+    after = m.stray_files()["bytes"]
+    assert before - after == 4096 + 32768 + 98 + 2048, (
+        f"stray bytes fall by exactly the released index-directory files plus the freed "
+        f"series copy, with the config in neither figure: {before} -> {after}")
+
+
+def test_a_dry_run_prints_the_released_names_as_planned_and_deletes_nothing(
+        monkeypatch, tmp_path, capsys):
+    """`--dry-run` has to say the name, not only a count.
+
+    The dry run is what a person reads before deciding to run the thing for real. "3
+    planned" does not tell them one of the three is a 506 MB database a ruling named, so the
+    released names and the source of the ruling go on the same line as the byte total — and
+    the entry count with them, because "is the mechanism even wired up?" is the question
+    #2680 could not answer from ten days of reports.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-fixture.sqlite", 4096, 20.0),
+        ("rebuild-fixture.sqlite.rebuild.json", 98, 20.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    rep = _retention_run(monkeypatch, tmp_path, d, tmp_path, dry_run=True, capsys=capsys)
+    # `--dry-run --json` prints the report and nothing else, so the prose the operator
+    # reads has to be asked for by name: `_emit` is the same function `main()` hands the
+    # finished report to.
+    m._emit(rep, False)
+    out = capsys.readouterr().out
+    assert rep["stray_retention"]["dry_run"] is True
+    assert rep["stray_retention"]["deleted"] == []
+    assert "released rebuild-fixture.sqlite" in out, out
+    assert "#2723-fixture" in out, out
+    assert "1 rulings from" in out, out
+    assert (d / "rebuild-fixture.sqlite").is_file() and \
+        (d / "rebuild-fixture.sqlite.rebuild.json").is_file()
+
+
+def test_the_delete_leg_refuses_every_path_a_ruling_does_not_actually_own(monkeypatch,
+                                                                         tmp_path):
+    """`planned` is a report, not an authority: the leg re-derives what it may unlink.
+
+    Three attacks on the delete half, all refused, nothing freed:
+
+    * Names that are neither a released path nor a ruled series member — the live index's
+      own triple, two directories shaped like `models` and `dist.prev-1`, a `backup-`-shaped
+      file the series rule has never admitted, and `rebuild-fixture.evil`, which merely
+      resembles a released name. A release names a STEM and `release_paths_for` decides the
+      paths, so nothing outside that derivation is reachable at all. (A name like
+      `index.sqlite.bakz` is NOT in this list, because the series prefix rule admits it and
+      always did: #2323's guard is what keeps the planner from ever proposing one, and this
+      node is not about to widen a rule it did not come to change.)
+    * A released name that turns out to be a symlink: the shape of the target is checked as
+      well as the name, so the file the link points at is not freed either.
+    * A released entry whose stem is not a stem (`../index`). `_check_side_name` is asked
+      here rather than trusted from the plan.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-fixture.evil", 4096, 20.0),
+        ("rebuild-fixture2.sqlite", 4096, 20.0),
+        ("index.backup-20260907-100044.sqlite", 4096, 20.0)])
+    (d / "models").mkdir()
+    (d / "models" / "embed.onnx").write_bytes(b"\x00" * 64)
+    (d / "dist.prev-1").mkdir()
+    monkeypatch.setattr(m, "RELEASED_STRAYS", ())
+    live_names = ["index.sqlite", "index.sqlite-wal", "index.sqlite-shm"]
+    want = live_names + ["models", "dist.prev-1", "index.backup-20260907-100044.sqlite",
+                         "rebuild-fixture.evil", "rebuild-fixture2.sqlite"]
+    plan = {"planned": want, "errors": [], "release": {"released": [], "blocked": [],
+                                                       "configs": []}}
+    out = m.apply_stray_retention(plan)
+    assert out["deleted"] == [] and out["deleted_bytes"] == 0, out
+    assert len(out["errors"]) == len(want), out["errors"]
+    assert all("not a deletable member of the series" in e
+               or "not a path the released side copy" in e for e in out["errors"]), out
+    assert all((d / n).exists() for n in want if n not in ("models", "dist.prev-1")), out
+    assert (d / "models" / "embed.onnx").is_file() and (d / "dist.prev-1").is_dir()
+
+    victim = d / "victim.sqlite"
+    victim.write_bytes(b"\x00" * 512)
+    (d / "rebuild-fixture.sqlite").symlink_to(victim)
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    plan = {"planned": ["rebuild-fixture.sqlite"], "errors": [],
+            "release": {"released": [{"name": "rebuild-fixture.sqlite", "bytes": 512,
+                                      "stem": "rebuild-fixture"}], "blocked": [],
+                        "configs": []}}
+    out = m.apply_stray_retention(plan)
+    assert out["deleted"] == [] and victim.is_file() and victim.stat().st_size == 512, out
+    assert any("not a path the released side copy rebuild-fixture owns" in e
+               for e in out["errors"]), out["errors"]
+
+    plan = {"planned": ["rebuild-fixture.sqlite"], "errors": [],
+            "release": {"released": [{"name": "rebuild-fixture.sqlite", "bytes": 512,
+                                      "stem": "../index"}], "blocked": [], "configs": []}}
+    out = m.apply_stray_retention(plan)
+    assert out["deleted"] == [] and (d / "rebuild-fixture.sqlite").is_symlink(), out
+    assert any("released but refused" in e for e in out["errors"]), out["errors"]
+
+
+def test_a_released_config_stays_while_its_database_is_still_on_disk(monkeypatch,
+                                                                    tmp_path):
+    """Both edges of the config's one dependency, in one fixture.
+
+    `~/.config/qmd/<stem>.yml` is how `--index <stem>` finds a working side copy, so a
+    config unlinked while its database is still there leaves a reachable index with no
+    recorded config — worse than either endpoint. So the leg is ordered: database first,
+    config after. The first half asserts the refusal and its error line; the second re-runs
+    the same plan with the database gone and asserts the unlink, because a rule tested only
+    on its refusing edge is a rule that was never executed.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-fixture.sqlite", 4096, 20.0)])
+    cfg = tmp_path / "rebuild-fixture.yml"
+    cfg.write_text("sources: []\n")
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    plan = {"planned": [], "errors": [],
+            "release": {"released": [], "blocked": [],
+                        "configs": [{"name": "rebuild-fixture.yml", "path": str(cfg),
+                                     "stem": "rebuild-fixture", "bytes": 12,
+                                     "reason": "the rehearsal copy's config",
+                                     "source": "#2723-fixture"}]}}
+    out = m.apply_stray_retention(plan)
+    assert cfg.is_file(), "the config went while its database was still on disk"
+    assert out["release"]["configs_deleted"] == [], out["release"]
+    assert any("still present" in e for e in out["errors"]), out["errors"]
+
+    (d / "rebuild-fixture.sqlite").unlink()
+    out = m.apply_stray_retention(plan)
+    assert not cfg.exists(), "with the database gone, the config has nothing to serve"
+    assert out["release"]["configs_deleted"] == ["rebuild-fixture.yml"], out["release"]
+    assert out["deleted_bytes"] == 0, (
+        "a config is not a stray file, so its bytes never join the index-directory figure")
+
+
+def test_a_config_only_release_moves_no_stray_byte(monkeypatch, tmp_path):
+    """`rebuild-20261005` is released and the byte figure does not move — and that is right.
+
+    `stray_files` scans the index directory only, and that name's database was renamed to
+    the live index by the 2026-10-05 swap, so what is left of it is one 1,491 B config in
+    `~/.config/qmd`. A check that folded it into the byte total would read as a
+    contradiction of the release, and a release that appeared to move bytes it did not move
+    is the kind of claim that makes the next one doubted.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO, (".qmd-embed.lock", 7, 1.0)])
+    (tmp_path / "config-only.yml").write_text("sources: []\n")
+    monkeypatch.setattr(m, "RELEASED_STRAYS",
+                        _ruled(("config-only", "only its config survives", "#2723")))
+    before = m.stray_files()["bytes"]
+    rep = _retention_run(monkeypatch, tmp_path, d, tmp_path, dry_run=False)
+    sr = rep["stray_retention"]
+    assert sr["release"]["released"] == [] and sr["planned"] == [], sr
+    assert sr["release"]["configs_deleted"] == ["config-only.yml"], sr["release"]
+    assert sr["release"]["deleted"] == [] and sr["release"]["deleted_bytes"] == 0, sr
+    assert before == 7, before
+    assert m.stray_files()["bytes"] == before, (
+        "the cache directory holds the same 7 bytes after the run as before it: the only "
+        "thing this release removed was a config")
+    assert rep["stray_bytes"] == before, (
+        "the report's own byte figure did not move: `stray_files` walks the index directory "
+        "only, and this release removed a file from the config directory beside it — exactly "
+        "the shape of `rebuild-20261005.yml`, whose 1,491 B have never once appeared in a "
+        "`stray_bytes` reading")
+    assert not (tmp_path / "config-only.yml").exists()
+
+
+def test_a_failed_unlink_of_a_released_path_is_an_error_line_not_a_lost_report(
+        monkeypatch, tmp_path):
+    """A failed unlink costs an error line: never the artifact, never a byte total.
+
+    The run measures, plans, deletes, probes and writes. Raising partway would throw away
+    the report that is the only reason the next reader knows the pile exists — #2709's whole
+    point about a run that cannot write. So the OSError becomes an `errors` line, the
+    released name stays out of `release.deleted` AND out of `deleted`/`deleted_bytes`, and
+    the dated report is still on disk. The second half is not decoration: the report's byte
+    figure is the number the next sweep's post-condition is measured against, so a run that
+    freed nothing has to read as having freed nothing. A read-only directory stands in for
+    the chmod or immutable parent that reaches an unattended 05:00 run.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("rebuild-fixture.sqlite", 4096, 20.0),
+        ("rebuild-fixture.sqlite.rebuild.json", 98, 20.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
+    d.chmod(0o555)
+    try:
+        rep = _retention_run(monkeypatch, tmp_path, d, tmp_path, dry_run=False)
+    finally:
+        d.chmod(0o755)
+    sr = rep["stray_retention"]
+    assert sr["release"]["deleted"] == [], sr["release"]
+    assert sr["deleted"] == [] and sr["deleted_bytes"] == 0, (
+        "a run whose every released unlink failed must not report 4,194 B freed: the "
+        "headline figure is what the next sweep is measured against, and a name still "
+        f"on disk may not appear as bytes that left it: {sr['deleted']} "
+        f"{sr['deleted_bytes']}")
+    assert any("rebuild-fixture.sqlite" in e for e in sr["errors"]), sr["errors"]
+    assert (d / "rebuild-fixture.sqlite").is_file()
+    assert (tmp_path / "reflection"
+            / f"{m.REPORT_PREFIX}{datetime.now():%Y-%m-%d}.json").is_file(), (
+        "the report has to survive a run whose deletes all failed")

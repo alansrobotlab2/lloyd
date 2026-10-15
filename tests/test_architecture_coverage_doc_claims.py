@@ -675,6 +675,12 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
   '$LLOYD_DATA/_pipeline/reflection/qmd-stray-keep-list.json':
    ('generated: the keep-list the qmd stray sweep writes under the'
     'runtime root when it next runs'),
+  '$LLOYD_DATA/_pipeline/reflection/qmd-stray-release-list.json':
+   ('generated: the optional hand-written release list beside the'
+    'keep-list; `read_release_list` reads an absent file as no'
+    'additional entries by design, and the seed that is always in'
+    'force lives in the `RELEASED_STRAYS` constant, so the file'
+    'exists only once a person writes a ruling into it'),
   'dist/':
    ("other-tree: the qmd fork's build output, named as the"
     'directory the daemon serves; the fork sits at `~/lloyd/qmd`,'

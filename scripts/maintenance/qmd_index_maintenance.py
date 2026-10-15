@@ -102,16 +102,43 @@ SAFETY CONTRACT — this runs unattended:
     re-run code-reference grep over Lloyd's own tree still matches, or whose
     `-wal`/`-shm` is newer than its own main file. Everything outside that series
     (`perfbench.sqlite`, `index.backup-*.sqlite`, the eval side-indexes this
-    directory shares with `eval/contextual_titles.py`) is measured and left alone,
-    but not all in one bucket (#2481): one with an open handle held by a live
+    directory shares with `eval/contextual_titles.py`) is measured and left alone
+    unless a release ruling names its side-copy stem (the next bullet), but not all
+    in one bucket (#2481): one with an open handle held by a live
     process of this user — read off `/proc`, not inferred from its name — goes under
     `live_side_indexes` with its `-wal`/`-shm`, because calling running
     infrastructure somebody's abandoned backup is what made the queue's byte total
     track eval traffic instead of neglect; the rest go under `held_for_person`.
-    Neither is deletable: #844:141-142 ruled that deleting someone's backup database
-    is not a code round's call, and `/home` is mounted `noatime`, so atime is not
-    evidence of "unread" here and is not used as such. `--dry-run`
+    Neither is deletable *by the series rule*: #844:141-142 ruled that deleting someone's
+    backup database is not a code round's call, and `/home` is mounted `noatime`, so atime
+    is not evidence of "unread" here and is not used as such — which is exactly why the
+    only non-series file this job ever unlinks is one an explicit ruling named, with a
+    reason and an item behind it. `--dry-run`
     deletes nothing; the plan is reported with `dry_run: true` instead.
+  * A ruled *delete* runs in the acting sweep, through the mirror of the keep-list
+    (#2723). #2481's owed entry was ruled "Delete it" at 2026-10-14T05:15:40 (owed-check
+    `20261013_221241_owedcheck_4fc7`, routed to #2680), and 506,781,794 B of the 2026-10-04
+    rehearsal side copy has sat in `held_for_person` quoting a superseded #844 reason ever
+    since, because the executor that ruling named — an interactive session — executed
+    nothing across three items, while the only thing that ever deletes in this directory
+    is this nightly run. `KEEP_LIST_NAME` is the channel for *keeping*; `RELEASE_LIST_NAME`
+    beside it, plus `RELEASED_STRAYS` in this file, is the channel for releasing: an entry
+    names a side-copy STEM (`_check_side_name`'s rule, so never a path and never the live
+    index) with a `reason` and a `source`, and `plan_stray_retention` moves that stem's
+    `side_index_path` with its `-wal`/`-shm` and its `side_marker_path` out of
+    `held_for_person` and into `planned`, reporting each in `release.released` carrying the
+    entry's own reason and source; `apply_stray_retention` unlinks them, and
+    `side_config_path` only once its database is gone. Three rails hold. #2481 outranks
+    the list: a measured descriptor on the database, or a sidecar still reading as a
+    current open (#2119), leaves every path of that stem held and unplanned
+    (`release.blocked`). A release is deliberately NOT gated on `code_reference_hits`:
+    that scan matches this file's own prose, which has to keep naming the file it is
+    deciding (#2481's witness is a sentence at `main_database_of`), so the gate could
+    never pass. And it fails closed — an entry with no `reason` or no `source`, or a list
+    that will not parse, releases NOTHING and reports the error. That is `read_keep_list`'s
+    rule pointed the other way: a keep-list that failed open deleted a copy somebody was
+    reaching for, and a release-list that failed open would unlink a database somebody is
+    reading.
   * A person's "keep this copy" ruling lives in a data file, not in a sentence
     (#2420). #2323 banned naming a candidate in any `*.py`/`*.ts`/`*.sh`/`*.yml`,
     and prose was always outside the code-reference scan, so after that ban nothing
@@ -440,6 +467,47 @@ REPORT_PREFIX = "qmd-index-maintenance-"
 #: hold), and `_write_report`'s dated name can never land on it. It is written by a hand:
 #: nothing in this module creates, edits or deletes it.
 KEEP_LIST_NAME = "qmd-stray-keep-list.json"
+#: The mirror of `KEEP_LIST_NAME` (#2723): where a ruled *delete* lives, in the same
+#: directory, named so `previous_run_started`'s glob can never read it as a report and
+#: `_write_report`'s dated name can never land on it. Unlike the keep-list it is
+#: OPTIONAL and is not the only release route — see `RELEASED_STRAYS`, which is the
+#: seed a round can actually write, because this directory is outside the repo and no
+#: unattended change may create a file in it.
+RELEASE_LIST_NAME = "qmd-stray-release-list.json"
+#: The ruled deletes this job carries in code, where a review can read them (#2723).
+#: One entry per side-copy stem, each with a `reason` and a `source`; the paths it owns
+#: are derived (`release_paths_for`), never listed here. These two exist because a
+#: ruling that names an interactive session as its executor has no executor: #2481's
+#: owed entry was ruled "Delete it" on 2026-10-14 and nothing ran, so the 506,781,794 B
+#: of the 2026-10-04 rehearsal has been re-measured as `held_for_person` by ten nightly
+#: runs since, each quoting a #844 reason that ruling superseded.
+#:
+#: A release is NOT checked against `code_reference_hits`, and has to be read as
+#: exempt rather than as an oversight. That scan walks `REPO_ROOT` with a plain
+#: substring test, and this module's own prose is its most durable hit:
+#: `main_database_of` and the #2481 paragraph in `plan_stray_retention` both name
+#: `rebuild-20261004.sqlite` because they are the explanation of why the bucket split
+#: exists. A gate that refused to delete a file any `*.py` mentions could therefore
+#: never pass for as long as this file is honest about it — and deleting those two
+#: sentences to make it pass would remove the reason the `live_side_indexes` bucket was
+#: built. `test_a_released_stem_is_released_although_its_own_module_names_it` pins the
+#: exemption by measuring the hit and releasing anyway.
+RELEASED_STRAYS: tuple[dict, ...] = (
+    {"name": "rebuild-20261004",
+     "reason": ("the 2026-10-04 rehearsal side copy: the swap that shipped the fix was "
+                "the next day's rebuild-20261005, and the newest index.sqlite.bak* copy "
+                "this job already keeps is the fallback, so this is not anyone's only "
+                "copy of anything (#2481 owed entry 2, ruled 'Delete it' "
+                "2026-10-14T05:15:40)"),
+     "source": "#2680"},
+    {"name": "rebuild-20261005",
+     "reason": ("its database was renamed to index.sqlite by the 2026-10-05 swap and the "
+                "pre-swap live index it left behind is the retained newest `.bak*` copy, "
+                "so what is left of this name is only the config the rebuild route "
+                "copied beside it — a byte-identical duplicate of ~/.config/qmd/index.yml "
+                "(measured with cmp, 2026-10-14), which the live file already is"),
+     "source": "#2723"},
+)
 # What counts as "Lloyd's own code" when asking whether a file still has a reader.
 # Prose is deliberately absent: the four 2026-09-27 strays are named in
 # `architecture/qmd.md` and `qmd/WORKLOG.md` and opened by no program, and the
@@ -668,6 +736,207 @@ def keep_list_hold(name: str, entries: list[dict]) -> dict | None:
     return None
 
 
+def sidecar_open_reasons(main: Path, prev_run: float | None) -> list[str]:
+    """Why sqlite's own sidecars beside `main` say a reader is in there NOW (#2119).
+
+    Two bounds, both already the candidate rule's and unchanged here: a sidecar stamped
+    within `SIDECAR_COPY_TOLERANCE_S` of its main file was stamped by the copy, and one
+    last touched at or before the previous run's start stopped reading as a current open
+    before this job last looked. Extracted from the candidate loop so the release check
+    (#2723 clause 4) asks the same question of the same files with the same numbers
+    instead of writing a second answer to it — and a second answer is what drifts.
+
+    A missing `main` has no sidecars to read: `rebuild-20261005` is exactly that case, a
+    name whose database was renamed to `index.sqlite` by the swap, leaving its config
+    behind. Without the guard the stat below would raise on a ruling about a file that is
+    already gone, and an unattended run does not get to raise over a measurement.
+    """
+    if not main.is_file():
+        return []
+    reasons = []
+    for sfx in LIVE_SIDECARS:
+        side = main.with_name(main.name + sfx)
+        if not side.is_file():
+            continue
+        touched = side.stat().st_mtime
+        if touched - main.stat().st_mtime <= SIDECAR_COPY_TOLERANCE_S:
+            continue          # stamped by the copy, not by a reader (#2119)
+        if prev_run is not None and touched <= prev_run:
+            continue     # stale before the last run even looked (#2119)
+        reasons.append(f"its {sfx} sidecar is newer than the database itself, "
+                       f"so something has opened it read-write since")
+    return reasons
+
+
+def release_list_path(report_dir: Path | None = None) -> Path:
+    """Where a ruled release can be written: beside the keep-list and this job's reports."""
+    return (REPORT_DIR if report_dir is None else report_dir) / RELEASE_LIST_NAME
+
+
+def _release_entry_error(e, origin: str) -> str | None:
+    """Why this release entry may not be honoured, or None. Both channels, one rule.
+
+    `origin` is in the message because the two channels fail differently for a reader: a
+    bad entry in `RELEASED_STRAYS` is a bug in a file a review just read, while a bad
+    entry in the hand list is somebody's ruling they will have to rewrite.
+    """
+    if not isinstance(e, dict):
+        return f"({origin}) is a {type(e).__name__}, not an object"
+    name = e.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return (f"({origin}) has no non-empty 'name': a release names one side copy, by "
+                "its stem")
+    try:
+        _check_side_name(name.strip())
+    except SideCopyRefused as exc:
+        return (f"({origin}) names {name!r}, which the side-copy route itself would "
+                f"refuse: {exc}")
+    for field in ("reason", "source"):
+        if not isinstance(e.get(field), str) or not e[field].strip():
+            return (f"({origin}) names {name!r} with no non-empty '{field}': a delete has "
+                    "to say why it is a delete and which ruling made it one")
+    return None
+
+
+def read_release_list(path: Path | None = None) -> dict:
+    """Read the optional release-list: the ruled deletes written after this file was.
+
+    Shape, one entry per released side copy::
+
+        {"entries": [{"name": "<a side-copy stem>", "reason": "...", "source": "#2680"}]}
+
+    `name` is the STEM the rebuild route would have used (`_check_side_name`'s rule), not
+    a file name: the paths it owns are derived by `release_paths_for`, so a hand-written
+    list cannot name the live index, a `models/` directory, or a path at all. There is no
+    `glob` key here, unlike the keep-list — a wildcard is not a ruling about one copy some
+    one named, and on this side of the mirror a wildcard is a request to delete whatever
+    happens to match next. `reason` and `source` are required for the reason the keep-list
+    requires them: the loss this replaces was a delete nobody could point a decision at.
+
+    Absent, blank, `{}` or `{"entries": []}` is *no rulings* and no error. Anything else
+    that will not read as a list of rulings sets `error` and returns no entries, so the
+    caller releases NOTHING: fail closed, because the failure this channel can cause is
+    unlinking a database some process is reading.
+    """
+    p = release_list_path() if path is None else path
+    out: dict = {"path": str(p), "entries": [], "error": None}
+
+    def bad(why: str) -> dict:
+        out["error"] = f"{p}: {why}"
+        return out
+
+    if not p.exists():
+        return out
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return bad(f"could not be read ({e!r})")
+    if not raw.strip():
+        return out
+    try:
+        doc = json.loads(raw)
+    except ValueError as e:
+        return bad(f"is not JSON ({e})")
+    if not isinstance(doc, dict):
+        return bad(f"top level is a {type(doc).__name__}, not an object with 'entries'")
+    if set(doc) - {"entries"}:
+        return bad(f"unrecognised top-level key(s) {sorted(set(doc) - {'entries'})}; the "
+                   "only key this file reads is 'entries' (a side copy is named, never "
+                   "matched by pattern)")
+    entries = doc.get("entries")
+    if entries is None:
+        return out                       # `{}` or `"entries": null`: nothing asked for
+    if not isinstance(entries, list):
+        return bad(f"'entries' is a {type(entries).__name__}, not a list")
+    for i, e in enumerate(entries):
+        why = _release_entry_error(e, "release-list")
+        if why is not None:
+            return bad(f"entry {i} {why}")
+        out["entries"].append({"name": e["name"].strip(), "reason": e["reason"].strip(),
+                               "source": e["source"].strip(), "origin": "release-list"})
+    return out
+
+
+def release_rulings(path: Path | None = None) -> dict:
+    """Every release ruling in force: `RELEASED_STRAYS` plus the optional hand list.
+
+    The constant is the seed a review can read and a gate can run — `release_list_path`
+    resolves into the reports directory, which is outside the repo and the vault, so an
+    unattended change may not create the file there and the constant is the only ruling
+    route this loop can itself fill (#2723). The file is for a ruling made afterwards; it
+    is optional, and its absence is not an error.
+
+    A file entry naming a stem the constant already carries REPLACES it — the fresher
+    ruling is the one that was written later — and the fact is reported in `shadowed`, so
+    a later reader can see the constant was overridden rather than obeyed. Both channels
+    are validated by the same `_release_entry_error`, because a constant is code and code
+    rots: an entry that lost its `reason` in a rebase fails the whole release, exactly as
+    a malformed file does. One bad ruling releases NOTHING, in either direction.
+    """
+    j = read_release_list(path)
+    out: dict = {"path": j["path"], "entries": [], "error": j["error"], "shadowed": []}
+    rows = [(e.get("name"), e.get("reason"), e.get("source"), "RELEASED_STRAYS")
+            for e in RELEASED_STRAYS] + \
+           [(e["name"], e["reason"], e["source"], "release-list") for e in j["entries"]]
+    by_name: dict[str, dict] = {}
+    for name, reason, source, origin in rows:
+        why = _release_entry_error({"name": name, "reason": reason, "source": source},
+                                   origin)
+        if why is not None:
+            out["error"] = out["error"] or f"entry {why}"
+            continue
+        if name in by_name and origin == "release-list":
+            out["shadowed"].append(name)
+        by_name[name] = {"name": name, "reason": reason, "source": source,
+                         "origin": origin}
+    if out["error"]:
+        return out                       # entries stays []: nothing is released
+    out["entries"] = list(by_name.values())
+    return out
+
+
+def release_paths_for(stem: str) -> dict[str, list[Path]]:
+    """Every path a released side-copy stem owns, split by the directory it lives in.
+
+    Returns `{"index_dir": [...], "config": [...]}`. The index-directory half is exactly
+    `side_index_path(stem)` with its two sqlite sidecars and this route's own marker
+    (`side_marker_path`) — the marker travels with the database because a leftover marker
+    is what lets `find_side_copies` offer a name whose database something else made. The
+    config half is `side_config_path(stem)`, in `~/.config/qmd`, and it travels separately
+    for a reason: `stray_files` never scans that directory, so a config can never appear
+    in `planned` and its bytes are never in `stray_bytes` — which is why releasing
+    `rebuild-20261005` moves no byte of that figure at all.
+    """
+    main = side_index_path(stem)
+    return {"index_dir": [main,
+                          *(main.with_name(main.name + s) for s in LIVE_SIDECARS),
+                          side_marker_path(stem)],
+            "config": [side_config_path(stem)]}
+
+
+def release_is_blocked(stem: str, live_dbs: set[str], prev_run: float | None) -> list[str]:
+    """Why a released stem may NOT be unlinked this run; `[]` when it may (#2723 clause 4).
+
+    #2481 outranks any ruling, because the ruling is a sentence written earlier and these
+    two are measurements taken now: `open_handle_holders` finding a descriptor on the
+    database (which is how a name enters `live_dbs`), or a sqlite sidecar still reading as
+    a current open under #2119's two bounds. The case is not hypothetical for the seeded
+    entry: `rebuild-20261004.sqlite-shm` moved from 2026-10-07T05:06:45 to 2026-10-13
+    05:34:13, so whatever fooled #2481 into filing it as an abandoned backup is still
+    touching it.
+
+    Asked once per STEM, and the answer covers the marker and the config too: holding
+    three of a name's four paths and deleting the fourth would leave a marker pointing at
+    a database that is gone, which is worse for the next reader than either state.
+    """
+    main = side_index_path(stem)
+    reasons = []
+    if main.name in live_dbs:
+        reasons.append(f"a process of this user has {main.name} open right now")
+    reasons += sidecar_open_reasons(main, prev_run)
+    return reasons
+
+
 def main_database_of(name: str) -> str:
     """The database a file belongs to: `<db>-wal` and `<db>-shm` map to `<db>`.
 
@@ -749,7 +1018,8 @@ def open_handle_holders(paths) -> dict[str, list[int]]:
 def plan_stray_retention(index: Path | None = None,
                          repo_root: Path | None = None,
                          report_dir: Path | None = None,
-                         keep_list: Path | None = None) -> dict:
+                         keep_list: Path | None = None,
+                         release_list: Path | None = None) -> dict:
     """Decide what the retention rule would do to the index directory. Touches nothing.
 
     Before any of the rules below, every candidate is asked of the human keep-list
@@ -763,6 +1033,19 @@ def plan_stray_retention(index: Path | None = None,
     blank keep-list changes every figure below exactly as it stands; one that will not
     parse holds every candidate rather than deleting against an instruction it could not
     read.
+
+    Then the mirror, asked of the non-series files (#2723). `release_rulings` merges
+    `RELEASED_STRAYS` with the optional `release_list`, and a stem it releases has its
+    `side_index_path`, that database's `-wal`/`-shm`, and its `side_marker_path` moved out
+    of `held_for_person` and into `planned`, each reported in `release.released` carrying
+    that entry's own `reason` and `source`; `apply_stray_retention` is what unlinks them,
+    and `side_config_path` only after the database is gone. Ruling #2481 still outranks a
+    ruling from a list: a descriptor `open_handle_holders` measures on the database, or a
+    sidecar still reading as a current open under #2119, holds every path of that stem and
+    puts the reason in `release.blocked` instead. A release is not gated on
+    `code_reference_hits` — see `RELEASED_STRAYS` for why that gate could never pass — and
+    it fails closed: an entry with no `reason` or no `source`, from either channel, or a
+    list that will not parse, releases NOTHING and reports the error.
 
     Three rules, in the order the safety of each matters:
 
@@ -789,8 +1072,9 @@ def plan_stray_retention(index: Path | None = None,
        see whoever did it, because a grep cannot match a path assembled at runtime. So
        a sidecar that still reads as a current open is reported and held, not resolved;
        one that stopped reading as one is a delete candidate like any other.
-    3. Anything outside the series is never this job's to delete, but it is not all one
-       thing either. The directory is shared write home for live eval side-indexes
+    3. Anything outside the series is not this job's to delete on the strength of the
+       series rule, but it is not all one thing either. The directory is shared write home
+       for live eval side-indexes
        (`eval/contextual_titles.py:41,71` opens `sub06.sqlite`,
        `eval/embed_side_index.py:52` builds `subctx.sqlite`), and #844:141-142
        already ruled that deleting someone's backup database is not a code round's
@@ -809,14 +1093,17 @@ def plan_stray_retention(index: Path | None = None,
        minutes a paired A/B check was alive — 720,035,840 B appearing at 05:02 and
        gone by 05:16 — so its byte total tracked eval traffic, not neglect, and the
        first name on a list presented as abandoned backups was a database a running
-       process owned at that instant. Nothing became deletable by moving buckets: both
-       are report-only, and `apply_stray_retention` still refuses any name that is not
-       a member of the backup series.
+       process owned at that instant. Moving buckets never made anything deletable: both
+       are report-only, and `apply_stray_retention` still refuses a name that is neither a
+       member of the backup series nor a path a release ruling owns (#2723) — which is the
+       sense in which #2481 is still only a reporting fix, and the release ruling above is
+       the separate thing that carries a delete.
     """
     index = INDEX if index is None else index
     repo_root = REPO_ROOT if repo_root is None else repo_root
     report_dir = REPORT_DIR if report_dir is None else report_dir
     keep_list = keep_list_path(report_dir) if keep_list is None else keep_list
+    release_list = release_list_path(report_dir) if release_list is None else release_list
     out: dict = {"bak_series": [], "kept": [], "planned": [], "deleted": [],
                  "deleted_bytes": 0, "held": [], "held_for_person": [],
                  "live_side_indexes": [], "errors": []}
@@ -875,17 +1162,7 @@ def plan_stray_retention(index: Path | None = None,
         if ref:
             reasons.append("a code reference in Lloyd's own tree names it: "
                            + ", ".join(ref[:3]))
-        for sfx in LIVE_SIDECARS:
-            side = p.with_name(p.name + sfx)
-            if not side.is_file():
-                continue
-            touched = side.stat().st_mtime
-            if touched - p.stat().st_mtime <= SIDECAR_COPY_TOLERANCE_S:
-                continue          # stamped by the copy, not by a reader (#2119)
-            if prev_run is not None and touched <= prev_run:
-                continue     # stale before the last run even looked (#2119)
-            reasons.append(f"its {sfx} sidecar is newer than the database itself, "
-                           f"so something has opened it read-write since")
+        reasons += sidecar_open_reasons(p, prev_run)
         if reasons:
             out["held"].append({"name": p.name, "bytes": p.stat().st_size,
                                 "code_references": ref, "because": reasons})
@@ -907,6 +1184,22 @@ def plan_stray_retention(index: Path | None = None,
     for name, pids in readers.items():
         db_pids.setdefault(main_database_of(name), set()).update(pids)
     live_dbs = set(db_pids)
+    # The mirror of the keep-list (#2723): rulings that a delete was decided, read after
+    # the measurements above so a ruling never outranks one. `owned` is per file — every
+    # path of a released stem, derived rather than listed — and `blocked` is per stem, so
+    # one open descriptor holds a name's database, sidecars, marker and config together.
+    rl = release_rulings(release_list)
+    out["release"] = {"path": rl["path"], "entries": len(rl["entries"]),
+                      "released": [], "blocked": [], "configs": [],
+                      "shadowed": rl["shadowed"], "error": rl["error"]}
+    if rl["error"]:
+        out["errors"].append(rl["error"])
+    owned: dict[str, dict] = {}
+    blocked: dict[str, list[str]] = {}
+    for e in rl["entries"]:
+        for p in release_paths_for(e["name"])["index_dir"]:
+            owned[p.name] = e
+        blocked[e["name"]] = release_is_blocked(e["name"], live_dbs, prev_run)
     for f in outside:
         db = main_database_of(f["name"])
         if db in live_dbs:
@@ -924,29 +1217,124 @@ def plan_stray_retention(index: Path | None = None,
                                      "goes wherever the database it belongs to goes")
             out["live_side_indexes"].append(entry)
             continue
+        e = owned.get(f["name"])
+        if e is not None:
+            if blocked[e["name"]]:
+                # Ruled a delete, and #2481 still says something is in there. Held, with
+                # the block recorded beside the ruling rather than in its place: a later
+                # reader has to see both that the delete was decided and that this run
+                # could not carry it out, or the file looks forgotten instead of blocked.
+                out["release"]["blocked"].append(
+                    {"name": f["name"], "bytes": f["bytes"], "stem": e["name"],
+                     "reason": e["reason"], "source": e["source"],
+                     "because": blocked[e["name"]]})
+                out["held_for_person"].append(
+                    {"name": f["name"], "bytes": f["bytes"],
+                     "because": (f"released for deletion by {e['source']} "
+                                 f"({e['reason']}) but held this run: "
+                                 + "; ".join(blocked[e["name"]]))})
+                continue
+            out["planned"].append(f["name"])
+            out["release"]["released"].append(
+                {"name": f["name"], "bytes": f["bytes"], "stem": e["name"],
+                 "reason": e["reason"], "source": e["source"]})
+            continue
         out["held_for_person"].append(
             {"name": f["name"], "bytes": f["bytes"],
              "because": ("outside the index.sqlite.bak* series, so not this job's to "
                          "delete: this directory is shared with live eval side-indexes, "
                          "and #844:141-142 ruled that deleting someone's backup "
                          "database is not a code round's call")})
+    # The config half of a released stem never reaches the loop above: it lives in
+    # `~/.config/qmd`, which `stray_files` does not scan, so it is offered here, reported
+    # apart, and unlinked by `apply_stray_retention` only once its database is gone.
+    for e in rl["entries"]:
+        cfg = side_config_path(e["name"])
+        if not cfg.is_file() or cfg.is_symlink():
+            continue
+        if blocked[e["name"]]:
+            out["release"]["blocked"].append(
+                {"name": cfg.name, "bytes": cfg.stat().st_size, "stem": e["name"],
+                 "reason": e["reason"], "source": e["source"],
+                 "because": blocked[e["name"]]})
+            continue
+        out["release"]["configs"].append(
+            {"name": cfg.name, "path": str(cfg), "stem": e["name"],
+             "bytes": cfg.stat().st_size, "reason": e["reason"], "source": e["source"]})
     return out
 
 
 def apply_stray_retention(plan: dict, index: Path | None = None) -> dict:
-    """Delete the planned backups and their sidecars; record what actually went.
+    """Delete the planned backups, the released side copies, and record what went.
 
-    Nothing here reaches outside the index directory: a name must carry the backup
-    prefix, contain no path separator, and still be a plain file where it was found.
-    A failed unlink is recorded in `errors` and never raised — an unattended run has
-    to still measure, probe retrieval and write its report, and losing the artifact
-    is worse than leaving one 1.25 GB file for the next night.
+    Two classes of name are deletable, and each is re-derived here rather than trusted
+    from the plan, because the plan is a report that a caller could have edited:
+
+    * A member of the backup series: the name carries the backup prefix, and its
+      `-wal`/`-shm` go with it. Anything else in the series shape is refused as "not a
+      deletable member of the series" — the rail that held for every one of the
+      2026-10-04 strays before #2723, and the reason clause 4 of that item is
+      load-bearing rather than optional: a released name pushed into `planned` without
+      this half of the change would be errored, not deleted.
+    * A path a release ruling owns (#2723): the stem must survive `_check_side_name`,
+      which is the same refusal the rebuild route takes and structurally excludes the
+      live index's own name and any path separator, and the name must be one of the
+      paths `release_paths_for` derives for that stem — the database, its sqlite
+      sidecars, its marker. `models/`, `dist.prev-*/`, the live triple and every
+      unreleased stray are not derivable from a stem, so no release can reach them, and
+      a stray name that merely resembles a released file is refused:
+      "not a path the released side copy ... owns".
+
+    The released stem's config in `~/.config/qmd` is the one path outside the index
+    directory this function touches, and only once that stem's database is gone: a
+    config beside a live database is how `--index <name>` finds a working side copy, so
+    deleting it first would leave a reachable database with no recorded config. Its
+    bytes are reported in `release.configs_deleted` and kept out of `deleted_bytes`,
+    which counts index-directory files because `stray_bytes` does.
+
+    Every path is checked as a regular non-symlink file, and a failed unlink is recorded
+    in `errors` and never raised — an unattended run has to still measure, probe retrieval
+    and write its report, and losing the artifact is worse than leaving one 1.25 GB file
+    for the next night. Nothing here reaches outside the index directory and that one
+    config file.
     """
     index = INDEX if index is None else index
     d = index.parent
+    rel = plan.get("release") or {}
+    released = {r["name"]: r for r in rel.get("released", [])}
     deleted, freed = [], 0
+    rel_deleted, rel_freed = [], 0
     for name in list(plan.get("planned", [])):
         p = d / name
+        r = released.get(name)
+        if r is not None:
+            stem = r["stem"]
+            try:
+                _check_side_name(stem)
+                owned = {q.name for q in release_paths_for(stem)["index_dir"]}
+            except SideCopyRefused as exc:
+                plan["errors"].append(f"{name}: released but refused: {exc}")
+                continue
+            if "/" in name or name not in owned or not p.is_file() or p.is_symlink():
+                plan["errors"].append(f"{name}: not a path the released side copy "
+                                      f"{stem} owns")
+                continue
+            try:
+                size = p.stat().st_size
+                p.unlink()
+            except OSError as e:
+                # A failed unlink stays out of every headline number. The byte figure
+                # this run reports is the one the NEXT sweep is measured against
+                # (#2723's own post-condition: 1,496,985,698 B down to 990,203,904 B),
+                # so a name still on disk may not be counted as bytes that left it —
+                # the error line is the honest record of a failed delete.
+                plan["errors"].append(f"{name}: {e!r}")
+                continue
+            deleted.append(name)
+            rel_deleted.append(name)
+            freed += size
+            rel_freed += size
+            continue
         if "/" in name or not name.startswith(index.name + BACKUP_INFIX) \
                 or not p.is_file() or p.is_symlink():
             plan["errors"].append(f"{name}: not a deletable member of the series")
@@ -959,8 +1347,37 @@ def apply_stray_retention(plan: dict, index: Path | None = None) -> dict:
             except OSError as e:
                 plan["errors"].append(f"{target.name}: {e!r}")
         deleted.append(name)
+    configs_deleted = []
+    for c in rel.get("configs", []):
+        stem, want = c.get("stem"), c.get("name")
+        try:
+            _check_side_name(stem)
+        except SideCopyRefused as exc:
+            plan["errors"].append(f"{want}: released config refused: {exc}")
+            continue
+        cfg = side_config_path(stem)
+        if cfg.name != want or cfg.parent != LIVE_CONFIG.parent:
+            plan["errors"].append(f"{want}: not the config of side copy {stem}")
+            continue
+        if side_index_path(stem).exists():
+            plan["errors"].append(
+                f"{cfg.name}: {side_index_path(stem).name} is still present, so its "
+                "config stays beside it — a side copy reachable by name has to keep its "
+                "config")
+            continue
+        if not cfg.is_file() or cfg.is_symlink():
+            continue
+        try:
+            cfg.unlink()
+            configs_deleted.append(cfg.name)
+        except OSError as e:
+            plan["errors"].append(f"{cfg.name}: {e!r}")
     plan["deleted"] = deleted
     plan["deleted_bytes"] = freed
+    if rel:
+        rel["deleted"] = rel_deleted
+        rel["deleted_bytes"] = rel_freed
+        rel["configs_deleted"] = configs_deleted
     return plan
 
 
@@ -2149,7 +2566,16 @@ def main() -> int:
     retention["dry_run"] = bool(args.dry_run)
     # Acting, not dry-run: `--dry-run` shares the early-exit branch below precisely
     # because it changes nothing, and here that promise has teeth.
-    if not args.dry_run and retention["planned"]:
+    #
+    # The leg is entered for a released CONFIG as well as for a planned file (#2723). The
+    # gate used to be `retention["planned"]` alone, which is every path the sweep can reach
+    # in the index directory — and `rebuild-20261005`'s ruling covers only
+    # `~/.config/qmd/rebuild-20261005.yml`, because the swap renamed that name's database
+    # into the live index. Gated on `planned`, a release with nothing but a config left
+    # would have been reported in `release.configs` every night and executed by no run,
+    # which is the exact failure this item exists to end, re-created inside its own fix.
+    if not args.dry_run and (retention["planned"]
+                             or retention.get("release", {}).get("configs")):
         apply_stray_retention(retention)
     if stray["files"]:
         # Four different reasons a file survives, counted apart: a reader this run
@@ -2398,6 +2824,20 @@ def _emit(r: dict, as_json: bool) -> None:
     # did not run.
     sr = r.get("stray_retention") or {}
     if sr:
+        # The released names go out on this line, not only in the JSON (#2723): a
+        # `--dry-run` is read by the person who decides whether to run it for real, and
+        # "N planned" does not tell them that one of the N is a 506 MB database a ruling
+        # named. `blocked` is said too, because the state that needs a second look is a
+        # delete that was decided and could not be carried out.
+        rel = sr.get("release") or {}
+        said = ""
+        if rel.get("released"):
+            said += (f"; released {', '.join(x['name'] for x in rel['released'])} "
+                     f"(of {rel.get('entries', 0)} rulings from "
+                     + ", ".join(sorted({x["source"] for x in rel["released"]})) + ")")
+        if rel.get("blocked"):
+            said += (f"; {len(rel['blocked'])} of them held by #2481 ["
+                     + ", ".join(x["name"] for x in rel["blocked"]) + "]")
         print(f"  stray files       {len(r.get('stray', []))} file(s), "
               f"{mb(r.get('stray_bytes'))} beside the live index; "
               f"kept {', '.join(sr.get('kept', [])) or '—'}; deleted "
@@ -2406,6 +2846,7 @@ def _emit(r: dict, as_json: bool) -> None:
               + (f", {len(sr['keep_list'].get('held', []))} by keep-list"
                  f" of {sr['keep_list'].get('entries', 0)} entries"
                  if sr.get("keep_list") else "")
+              + said
               + (f"; {sr['skipped']}" if sr.get("skipped") else ""))
     v = b.get("vec0") or {}
     if v.get("occupancy") is not None:
