@@ -15,7 +15,7 @@ here by a rule rather than by a diff:
    `-m "not live_vault"`, so the checkout was red while every hard rung reported the
    file green (11 passed, 10 deselected). That is how it survived five days.
 2. `lloyd/bench/bench_007_skill_invocation.md` told the LLM judge to reward an answer
-   naming `groundskeeper-loop` — archived, unadvertised, unreadable via `skills_read`.
+   naming `groundskeeper-loop` — archived 2026-09-19 by #900, unreadable via `skills_read`.
    The autoresearch bench was scoring "recommends a procedure the tool refuses" as
    better `skill_awareness`.
 3. `architecture/morning-briefing.md` documented a live 7:00 AM `morning-briefing` job
@@ -65,9 +65,10 @@ VAULT = Path.home() / "obsidian"
 
 #: Skills whose *input prompt* still names a retired skill, and which are deliberately
 #: left alone. Re-pointing `bench_007_skill_invocation`'s prompt from
-#: `groundskeeper-loop` to `groundskeeper-survey` would break comparability with the
-#: round scores already recorded against that task, so the prompt stays and only the
-#: grading prose was corrected (backlog #1270). When the prompt is re-pointed, empty
+#: `groundskeeper-loop` (archived 2026-09-19, #900) to `groundskeeper-survey` would break
+#: comparability with the round scores already recorded against that task, so the prompt
+#: stays and only the grading prose was corrected (backlog #1270). When the prompt is
+#: re-pointed, empty
 #: this in the same change — `test_a_retired_name_survives_only_in_a_bench_prompt`
 #: fails on drift in either direction.
 KNOWN_RETIREDS_STILL_IN_A_PROMPT = {"bench_007_skill_invocation": "groundskeeper-loop"}
@@ -266,7 +267,8 @@ def test_no_bench_task_grades_a_retired_skill(bench_tasks, retired):
 
 def test_bench_007_grades_an_advertised_skill(bench_tasks, advertised):
     """Clause 2 as written: the grading prose names `groundskeeper-survey`, not
-    `groundskeeper-loop`, and the skill it names is in the advertised set.
+    `groundskeeper-loop` (which #900 archived on 2026-09-19), and the skill it names is
+    in the advertised set.
 
     The acceptance check reads lines 21-23 of the bench file, which is its grading
     prose; asserting off the parsed body instead means the clause cannot be satisfied

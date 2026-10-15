@@ -1491,13 +1491,34 @@ def test_the_exempt_dict_comment_block_names_only_recorded_entries():
 
 
 # --- The prose surfaces the block guard above cannot reach ------------------------
-#: The two files whose prose the rule below reads, labelled as they are cited in
-#: backlog items. The module half is resolved through the imported module, so the
-#: node reads the file the suite actually loaded rather than a same-named path.
-PROSE_SURFACE_FILES: tuple[tuple[str, Path], ...] = (
-    ("scripts/reflection_archive.py", Path(ra.__file__)),
-    ("tests/test_skill_reflection_archive.py", Path(__file__)),
-)
+#: What the rule below reads is EVERY tracked `.py` — `_tracked_python_files()`. This
+#: dict is what #2530 pinned (those two files, labelled as backlog items cite them) and
+#: it survives for two reasons only: each half resolves through the module the suite
+#: imported, so the scan reads the file it actually loaded rather than a same-named path
+#: elsewhere on the machine; and its two labels scope the two controls #2530 measured *in
+#: those files* (the vacuity floor of 3 sentences, and the live-skill control), which a
+#: tree-wide scan would satisfy with any file that happens to mention the name. It bounds
+#: the surface no more — #2752 widened the surface to the tree because the same rot was
+#: sitting unmarked in five other files (7 sentences over 1374 tracked `.py`).
+_IMPORT_RESOLVED_PROSE_FILES: dict[str, Path] = {
+    "scripts/reflection_archive.py": Path(ra.__file__),
+    "tests/test_skill_reflection_archive.py": Path(__file__),
+}
+
+#: A sentence that genuinely cannot carry a retirement mark — a quote of prose this repo
+#: does not own, whose wording the quoting round cannot change — goes here, as
+#: `(file label, where, sentence fragment): the reason, naming the backlog item`. The
+#: shape is `known_unmarked` in
+#: `test_a_retired_skill_is_named_with_its_retirement_where_an_active_skill_names_it`
+#: below: a recorded set, and fixing the prose has to empty the entry in the same change,
+#: because `_split_by_prose_exemptions` returns an entry that matches no measured
+#: violation and the node turns red on it. EMPTY AS LANDED (#2752, 2026-10-15): the 7
+#: unmarked sentences that existed at `ce545b09` were all clearable by rewording, so this
+#: list opened empty and nothing here has to be taken on trust. How many sentences one
+#: archival may exempt instead of marking is a ruling that belongs to that archival round
+#: and is owed on #2752; what this file pins is that an entry is recorded, attributed to
+#: an item, and dies with the sentence it excuses.
+UNMARKED_PROSE_EXEMPTIONS: dict[tuple[str, str, str], str] = {}
 
 #: A sentence says a skill is out of circulation. `archive` alone is NOT in this list
 #: on purpose: this file's own subject is dated `archive` copies of reports, so a
@@ -1629,10 +1650,89 @@ def _unmarked_retired_prose(
     return violations
 
 
+def _tracked_python_files() -> list[tuple[str, Path]]:
+    """`(label, path)` for every `.py` git tracks in this repo — the prose surface of the
+    rule below, which #2752 widened out of the two files #2530 pinned.
+
+    `git ls-files`, not a filesystem walk: the rule is about the corpus this repo ships,
+    and a scratch `.py` nobody has committed is not prose the next reader will trust. It
+    also means the surface is the same set of paths the suite's own collector answers for
+    and the same set `git grep` can be re-run against.
+
+    The two #2530 surfaces resolve through `_IMPORT_RESOLVED_PROSE_FILES` — the imported
+    module's own `__file__` — so this returns the file the suite loaded, not a same-named
+    path elsewhere.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-z", "--", "*.py"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, (
+        f"`git -C {ROOT} ls-files -- '*.py'` exited {proc.returncode}: "
+        f"{proc.stderr.strip()!r} — the prose surface could not be enumerated at all, "
+        "and a scan that enumerates nothing reports a clean tree"
+    )
+    rels = sorted(rel for rel in proc.stdout.split("\0") if rel)
+    return [(rel, _IMPORT_RESOLVED_PROSE_FILES.get(rel, ROOT / rel)) for rel in rels]
+
+
+def _surface_violations(
+    surfaces: dict[str, list[tuple[str, str]]], retired: set[str]
+) -> list[tuple[str, str, str]]:
+    """`(file, where, sentence)` for every unmarked retired-skill sentence of a surface
+    map, flat over the tree.
+
+    One function rather than the node's own comprehension, because the two negative
+    controls below mutate one file's prose and have to be answered by the SAME
+    aggregation the node asserts on: a control that re-implements it can pass while the
+    line that guards the tree stays broken.
+    """
+    return [
+        (label, where, sentence)
+        for label, paragraphs in surfaces.items()
+        for where, sentence in _unmarked_retired_prose(paragraphs, retired)
+    ]
+
+
+def _split_by_prose_exemptions(
+    violations: list[tuple[str, str, str]],
+    exemptions: dict[tuple[str, str, str], str],
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+    r"""`(still_red, stale_entries)` — violations no exemption covers, and exemptions that
+    cover no violation.
+
+    Three things are enforced here, in one place, because a rule enforced only in the
+    node that reads an EMPTY list is a rule no run has ever exercised: an entry has to
+    attribute itself to a backlog item (the `#\d{2,6}` in the reason), so the waiver has
+    an owner and a scheduler; it has to route out ITS sentence, matched by
+    `(file, where)` plus a fragment, so it cannot widen into a whole-file waiver; and a
+    list that only ever *removes* violations is a switch that turns the rule off one
+    sentence at a time, so an entry whose sentence has been marked or deleted comes back
+    here as `stale_entries` and reddens the node rather than quietly ageing out — the
+    same shrink-only discipline `known_unmarked` is held to above.
+    """
+    for (label, _where, _fragment), why in exemptions.items():
+        assert re.search(r"#\d{2,6}", why), (
+            f"the exemption for {label} records no backlog item ({why!r}), so nobody owns "
+            "the sentence it waives and nothing schedules it to be marked. The reason is "
+            "the record: name the item that took the exemption on."
+        )
+    still_red = [
+        v for v in violations
+        if not any(label == v[0] and where == v[1] and fragment in v[2]
+                   for (label, where, fragment) in exemptions)
+    ]
+    stale_entries = [
+        key for key in exemptions
+        if not any(key[0] == v[0] and key[1] == v[1] and key[2] in v[2] for v in violations)
+    ]
+    return still_red, stale_entries
+
+
 def test_no_prose_surface_states_a_retired_skill_as_live_spec():
-    """Clause 3 of #2530: the widened guard — a present-tense justification for a
-    skill nobody advertises any more is caught in the prose of BOTH files, not only
-    in the block contiguous to the exempt dict.
+    """Clause 3 of #2530, widened by #2752: a present-tense justification for a skill
+    nobody advertises any more is caught in the prose of EVERY tracked `.py`, not only in
+    the block contiguous to the exempt dict, and not only in the two files #2530 pinned.
 
     Unmarked, deliberately, so the gate's hard `-m "not live_vault"` rung runs it.
     The reason is the same one `test_the_exempt_dict_comment_block_names_only_recorded_entries`
@@ -1654,6 +1754,20 @@ def test_no_prose_surface_states_a_retired_skill_as_live_spec():
     `scripts/reflection_archive.py` inside `_heading_verb`'s docstring is neither a
     module docstring nor a comment, and a guard scoped to those two would still miss
     it.
+
+    #2752 is that same defect one level up, and the premise it closes is this node's own
+    wording: "every docstring and every comment run of these two files" was a scope claim
+    about where the rot lives, drawn from the two files that had just been burned in.
+    Re-running these helpers over all 1374 tracked `.py` at `ce545b09` found 25 sentences
+    naming one of the 9 quarantined skills, and 7 unmarked ones in 5 files this node could
+    not see: `scripts/skill_entity_overlap.py`, `tests/test_archived_skill_artifacts.py`
+    (3 sentences), `tests/test_skill_entity_overlap.py`, `tests/test_skill_timezone_literals.py`,
+    and `tests/test_extract_transcript_watermark.py`, which cited
+    `skills/periodic-memory-capture-lloyd/SKILL.md:84` as a live caller of the transcript
+    extractor although that skill had been archived in place by #2401 on 2026-10-08 (vault
+    commit `42144a4b`). So the surface is `_tracked_python_files()`. The fix was rewording
+    alone: `_RETIREMENT_WORD` and `_RETIREMENT_RECORD` are unchanged, because the rule was
+    never the part that was too narrow — its surface was.
 
     Keyed on the retired inventory, never on "a skill name this dict does not record".
     Measured over these two files before the change, 14 sentences name a LIVE skill
@@ -1680,16 +1794,56 @@ def test_no_prose_surface_states_a_retired_skill_as_live_spec():
     When a skill is archived later, the red this node raises belongs to the round that
     archived it, which is the round that owns the sentence — the house rule above the
     exempt dict is "an entry is dropped in the round that archives its skill, never
-    left behind", and the prose beside that dict is part of the entry.
+    left behind", and the prose beside that dict is part of the entry. Widening the
+    surface has one consequence worth stating here rather than discovering in a gate: an
+    archival now reddens this node in every file that cites the skill, not in two, so the
+    round that archives owns however many sentences the tree holds.
+    `UNMARKED_PROSE_EXEMPTIONS` is the recorded escape for a mention that genuinely cannot
+    carry a mark — empty as landed, because #2752 measured all 7 of them clearable by
+    rewording; shrink-only; and how many sentences one archival may take it up for is a
+    ruling that belongs to that archival round, owed on #2752.
     """
     retired = _retired_skill_names()
-    surfaces = {label: _prose_paragraphs(path) for label, path in PROSE_SURFACE_FILES}
-    for label, paragraphs in surfaces.items():
-        assert paragraphs, (
-            f"{label} yielded no docstring or comment paragraph, so the rule below "
-            "would pass on an empty read — a file with no prose to check is not the "
-            "same thing as a file with no violation in its prose"
+    surface_files = _tracked_python_files()
+    surface_paths = dict(surface_files)
+    # Clause 1 of #2752 says out loud how much tree this node read: 1376 tracked `.py`
+    # at landing, against a floor of 1000. The floor is what separates a clean tree from
+    # a scan that reached no tree at all — an empty worktree, a moved cwd, a `git` that
+    # answered with nothing — all three of which look spotless to a rule with no floor.
+    assert len(surface_files) >= 1000, (
+        f"only {len(surface_files)} tracked `.py` files were enumerated, so the prose "
+        "surface has collapsed to a fraction of the tree and everything outside it is "
+        "being reported clean without having been read"
+    )
+    missing = [label for label, path in surface_files if not path.is_file()]
+    assert not missing, (
+        f"{len(missing)} tracked `.py` file(s) are not on disk where the index says they "
+        f"are ({missing[:5]}), so this is reading a checkout that is not the repository — "
+        "a deleted-but-tracked file is a tree problem, not a retired-skill citation"
+    )
+    for label, resolved in _IMPORT_RESOLVED_PROSE_FILES.items():
+        assert surface_paths.get(label) == resolved, (
+            f"{label} is no longer in the tracked surface resolved through the imported "
+            "module, so the node is asserting about a same-named path rather than the "
+            "file the suite loaded — the reason #2530 wrote these two as paths"
         )
+
+    surfaces = {label: _prose_paragraphs(path) for label, path in surface_files}
+    # Clause 2 of #2752: a file with neither a docstring nor a comment run is SKIPPED,
+    # not failed. Nine tracked `__init__.py` (agent_mcp/, app/, app/harness/tests/,
+    # app/routers/, eval/djev/, eval/substrate_fuzz/, scripts/intel-pipeline/ ×2,
+    # scripts/meta_review/) have no prose at all, so #2530's per-surface `assert
+    # paragraphs` would have turned this node red on landing for a reason that has
+    # nothing to do with retired skills. What that assert existed for — an empty read
+    # must not pass — is now measured over the whole read, in the two floors below,
+    # instead of one file at a time.
+    skipped = sorted(label for label, paragraphs in surfaces.items() if not paragraphs)
+    assert len(surfaces) - len(skipped) >= 1000, (
+        f"only {len(surfaces) - len(skipped)} of {len(surfaces)} tracked `.py` yielded a "
+        f"docstring or comment paragraph ({len(skipped)} skipped, e.g. {skipped[:5]}): "
+        "the skip has eaten the corpus, and prose that was never read is not prose found "
+        "clean"
+    )
 
     named = [
         (label, where, sentence)
@@ -1698,12 +1852,28 @@ def test_no_prose_surface_states_a_retired_skill_as_live_spec():
         for sentence in _SENTENCE_END.split(text)
         if any(name in sentence for name in retired)
     ]
-    assert len(named) >= 3, (
-        f"only {len(named)} sentence(s) in these two files name a retired skill: "
-        "the rule below is vacuous until at least a few do, because a corpus with "
-        "nothing to mark proves only that it was never read. Either the prose was "
-        "deleted rather than marked, or the vault stopped quarantining anything — "
-        f"inventory: {sorted(retired)}"
+    # The second scaling floor (#2752 clause 2): 25 sentences name one of the 9
+    # quarantined skills across the tree today, so 20 leaves five sentences of room and
+    # still says the scan reached prose that CAN fail it. Marking a sentence never moves
+    # this count — a mark adds a date or sha and keeps the name — so the floor survives
+    # the very fix it is checked beside.
+    assert len(named) >= 20, (
+        f"only {len(named)} sentence(s) across {len(surfaces)} tracked `.py` name a "
+        "retired skill: the rule below is vacuous until a real number of them do, because "
+        "a corpus with nothing to mark proves only that it was never read. Either prose "
+        "was deleted rather than marked, the inventory shrank, or the scan stopped "
+        f"reaching the files that cite skills — inventory: {sorted(retired)}"
+    )
+    # And #2530's own vacuity floor, kept at the scope it was measured in: 15 sentences
+    # naming a retired skill sit in those two files today. Tree-wide, 20 could be met by
+    # a tree where the exempt-dict prose — the prose this file exists to police — had
+    # been deleted outright.
+    legacy_named = [v for v in named if v[0] in _IMPORT_RESOLVED_PROSE_FILES]
+    assert len(legacy_named) >= 3, (
+        f"only {len(legacy_named)} sentence(s) name a retired skill in the two files "
+        "#2530 pinned, so the citations that round fixed have left those files — the "
+        "Step 6.1 example and the exempt-dict comment are the prose this rule was built "
+        "on, and deleting them is not the same as marking them"
     )
     assert {"autonomy-reflection-pipeline", "nightly-day-end-synthesis"} & {
         name for _l, _w, s in named for name in retired if name in s
@@ -1714,18 +1884,29 @@ def test_no_prose_surface_states_a_retired_skill_as_live_spec():
         "marking them would leave this node green with nothing left to guard"
     )
 
-    violations = [
-        (label, where, sentence)
-        for label, paragraphs in surfaces.items()
-        for where, sentence in _unmarked_retired_prose(paragraphs, retired)
-    ]
-    assert not violations, (
+    violations = _surface_violations(surfaces, retired)
+    # Clause 4 of #2752: a mention that genuinely cannot carry a mark goes on
+    # `UNMARKED_PROSE_EXEMPTIONS`, which is EMPTY as landed — every one of the 7
+    # sentences #2752 measured was clearable by rewording. What keeps it from becoming a
+    # waiver drawer is enforced inside `_split_by_prose_exemptions` — an entry has to
+    # attribute itself to a backlog item, it can only excuse the sentence it names, and it
+    # comes back as a stale entry the moment that sentence is marked or deleted.
+    still_red, stale_entries = _split_by_prose_exemptions(violations,
+                                                          UNMARKED_PROSE_EXEMPTIONS)
+    assert not stale_entries, (
+        f"{len(stale_entries)} recorded exemption(s) match no measured violation "
+        f"({[list(k) for k in stale_entries]}) — the sentence was marked or deleted, so "
+        "empty the entry in this same change. A shrink-only list that keeps entries "
+        "after their sentence is gone is how an exemption becomes permanent prose."
+    )
+    assert not still_red, (
         "prose states a retired skill as if it still ran: "
-        f"{[(label, where, sentence[:120]) for label, where, sentence in violations]}. "
+        f"{[(label, where, sentence[:120]) for label, where, sentence in still_red]}. "
         "Say it was dropped, or name the retirement in the same sentence — the date, "
         "the vault commit, or the backlog item. A present-tense citation is what makes "
         "a quarantined skill look like a live prescription to the next reader, which "
-        "is the defect #2405 recorded and #2530 was filed to close."
+        "is the defect #2405 recorded, #2530 was filed to close in two files, and #2752 "
+        "closed across the tree."
     )
 
     # Clause 4: live-skill prose is not what this rule is for, and the four names that
@@ -1739,8 +1920,15 @@ def test_no_prose_surface_states_a_retired_skill_as_live_spec():
             "retirement marked in the same change that archived it — see the house "
             "rule above `EXPECTED_VAULT_WRITE_WRITERS`"
         )
-        assert any(live in text for paragraphs in surfaces.values() for _w, text in paragraphs), (
-            f"{live} no longer appears in either file's prose, so it is no longer a "
+        # Scoped to the two #2530 files, which is the only scope where this is a control:
+        # tree-wide, `obsidian` alone appears in 551 tracked files' prose, so "somewhere
+        # in the surface" would be true of any name at all and would stop testing that
+        # live-skill prose survives the scan untouched.
+        assert any(live in text
+                   for label, paragraphs in surfaces.items()
+                   if label in _IMPORT_RESOLVED_PROSE_FILES
+                   for _w, text in paragraphs), (
+            f"{live} no longer appears in either #2530 file's prose, so it is no longer a "
             "control for 'live prose stays untouched' — name a live skill that does, "
             "or the green below proves nothing about prose like it"
         )
@@ -1756,8 +1944,8 @@ def test_no_prose_surface_states_a_retired_skill_as_live_spec():
                    for v_label, v_where, v_sentence in violations)
     ]
     assert marked, (
-        "no sentence in either file carries a retirement marker, so there is nothing "
-        "here for the rule to check and the green above says nothing"
+        "no sentence in the tracked tree carries a retirement marker, so there is "
+        "nothing here for the rule to check and the green above says nothing"
     )
     for label, where, sentence in marked:
         stripped = _MARKER_EVIDENCE.sub("", sentence)
@@ -1788,6 +1976,127 @@ def test_no_prose_surface_states_a_retired_skill_as_live_spec():
         "the failure did not name where the sentence sits, so a red here would be "
         f"acted on blind: {reported_where}"
     )
+
+    # Clause 5 of #2752, the control the two-file version could not run at all: take a
+    # marker AWAY from a sentence that already carries one, in a file OUTSIDE the two
+    # #2530 pinned, and the aggregation that guards the tree has to go red naming that
+    # file and that sentence. Injecting a new sentence (above) only proves the finder
+    # sees the file it was already reading; this proves the widened scan reaches the
+    # rest of the tree AND that a marked sentence out there is passing because of its
+    # mark. Target: `scripts/skill_entity_overlap.py`'s `fixture_drift` docstring, whose
+    # sentence names `research-paper-writing` together with the archiving word and the
+    # vault commit `17e447d8` that archived it (#2409, 2026-10-08).
+    ctrl_label = "scripts/skill_entity_overlap.py"
+    assert ctrl_label not in _IMPORT_RESOLVED_PROSE_FILES, (
+        "the strip-a-marker control is now pointed at one of the two files #2530 pinned, "
+        "so it no longer proves the widened surface has teeth — it has to run outside "
+        "them, on a marked sentence naming a retired skill"
+    )
+    ctrl_paras: list[tuple[str, str]] = []
+    ctrl_hits = 0
+    for where, text in surfaces[ctrl_label]:
+        if "fixture_drift" not in where:
+            ctrl_paras.append((where, text))
+            continue
+        parts = _SENTENCE_END.split(text)
+        for i, part in enumerate(parts):
+            if "research-paper-writing" in part and "17e447d8" in part:
+                parts[i] = _MARKER_EVIDENCE.sub("", part)
+                ctrl_hits += 1
+        ctrl_paras.append((where, " ".join(parts)))
+    assert ctrl_hits == 1, (
+        f"the control found {ctrl_hits} sentence(s) in {ctrl_label}'s `fixture_drift` "
+        "docstring naming `research-paper-writing` with `17e447d8`; it needs exactly one, "
+        "or the sentence this clause names has been reworded away and the control is "
+        "stripping nothing"
+    )
+    newly_red = [v for v in _surface_violations({**surfaces, ctrl_label: ctrl_paras},
+                                                retired) if v not in violations]
+    assert [v[0] for v in newly_red] == [ctrl_label], (
+        f"stripping that marker did not turn the tree-wide rule red on that sentence "
+        f"alone — the new violations are "
+        f"{[(v[0], v[1], v[2][:120]) for v in newly_red]}, which means the scan does not "
+        f"reach {ctrl_label} the way this node claims it does"
+    )
+    assert "research-paper-writing" in newly_red[0][2] and "fixture_drift" in newly_red[0][1], (
+        f"the red did not name the sentence and where it sits ({newly_red[0][1]!r}), so a "
+        "round would be acting on it blind — a violation nobody can locate is not a report"
+    )
+
+
+def test_a_recorded_prose_exemption_routes_only_its_own_sentence_and_expires_with_it():
+    """Clause 4 of #2752, tested on the mechanism rather than on an empty list.
+
+    `UNMARKED_PROSE_EXEMPTIONS` is empty as landed — every one of the 7 sentences #2752
+    measured was clearable by rewording — so the guard above runs the exemption code with
+    nothing in it, which means the list's three honest properties are pinned here and not
+    there. All three are exercised against sentences injected into a list this node builds;
+    nothing here writes to disk, and neither sentence is any file's prose:
+
+      1. An entry routes the sentence it names out of the violation set, and only that one
+         — a waiver that reached a second sentence in the same paragraph of the same file
+         would be a whole-file opt-out wearing a sentence's clothing.
+      2. An entry whose sentence gets marked anyway comes back as a stale entry. A list
+         that only ever removed violations could grow without limit and nobody would notice
+         one ageing out quietly; this is the same shrink-only discipline `known_unmarked`
+         is held to two nodes below.
+      3. An entry has to attribute itself to a backlog item, or it raises — a waiver with
+         no item behind it has no owner and nothing that will ever remove it.
+    """
+    retired = _retired_skill_names()
+    label = "tests/test_skill_reflection_archive.py"
+    where = "exemption control (injected by this node)"
+    waived = ("`autonomy-reflection-pipeline` Step 6.1 is the read-list shape to follow, "
+              "seven items long.")
+    neighbour = "`groundskeeper-loop` sweeps the stale skill bodies on its own schedule."
+    surfaces = {
+        label: _prose_paragraphs(_IMPORT_RESOLVED_PROSE_FILES[label])
+        + [(where, waived), (where, neighbour)],
+    }
+    violations = _surface_violations(surfaces, retired)
+    assert [v[2] for v in violations if v[1] == where] == [waived, neighbour], (
+        "this node's own two injected sentences must both start out red, or the control "
+        "below is waiving something the rule never measured"
+    )
+
+    still_red, stale = _split_by_prose_exemptions(
+        violations, {(label, where, "read-list shape"): "#2752 the control in this node"})
+    assert not any(v[1] == where and v[2] == waived for v in still_red), (
+        "an exemption naming a file, a paragraph and a fragment of one sentence did not "
+        "route that sentence out of the violation set, so the list waives nothing and "
+        "every entry added to it would be pure liability"
+    )
+    assert [v[2] for v in still_red if v[1] == where] == [neighbour], (
+        "the exemption took a second sentence with it: the entry named one fragment and "
+        "the neighbour in the SAME paragraph stopped being red too, so the mechanism is a "
+        "per-paragraph waiver rather than a per-sentence one"
+    )
+    assert stale == [], (
+        f"a freshly recorded exemption against a live violation came back stale ({stale}), "
+        "so the guard would redden on its own bookkeeping"
+    )
+
+    # The sentence is fixed. The entry has to expire with it, in the same change.
+    fixed = ("`autonomy-reflection-pipeline` was archived 2026-09-19, vault commit "
+             "978aa34b; Step 6.1 is quoted below as history.")
+    surfaces_fixed = {
+        label: [(w, fixed if s == waived else s) for w, s in surfaces[label]]}
+    violations_fixed = _surface_violations(surfaces_fixed, retired)
+    assert not any(v[2] == waived for v in violations_fixed), (
+        "adding the retirement word and date to a sentence did not clear it, so the "
+        "stale-entry control below would be testing prose that was never fixed"
+    )
+    _still_red, stale_after = _split_by_prose_exemptions(
+        violations_fixed,
+        {(label, where, "read-list shape"): "#2752 the control in this node"})
+    assert [tuple(k) for k in stale_after] == [(label, where, "read-list shape")], (
+        "marking the sentence left the exemption in place without complaint, so the list "
+        "is append-only after all and can be filled until the rule guards nothing"
+    )
+
+    with pytest.raises(AssertionError, match="backlog item"):
+        _split_by_prose_exemptions(
+            violations, {(label, where, "read-list shape"): "it was awkward to reword"})
 
 
 @pytest.mark.live_vault

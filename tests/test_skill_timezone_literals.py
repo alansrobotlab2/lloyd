@@ -112,9 +112,11 @@ def _active_skills() -> dict[str, str]:
 # One entry per skill #1189's clause 2 governs (the three capture heredocs, the
 # Phase 5 header, and the three more `generated:` sightings its triage grep
 # surfaced: nightly-behavior-test ×3, nightly-morning-briefing ×1,
-# nightly-prompt-audit ×2). Value = (string #1189 measured at triage, string that
-# replaced it on 2026-09-17). Restoring the first in the real body must make the
-# rule fire; the second must be clean. That pairing is the rule proved against the
+# nightly-prompt-audit ×2 — all three archived on 2026-09-19 by #900, so those
+# entries pin a fix in bodies the loader has stopped advertising). Value = (string
+# #1189 measured at triage, string that replaced it on 2026-09-17). Restoring the
+# first in the real body must make the rule fire; the second must be clean.
+# That pairing is the rule proved against the
 # real text of the real fix, per file — the vault edit and this check cannot then
 # drift apart silently, because a nightly rewrite that changes a fix shape fails
 # this and points at the pair to update.

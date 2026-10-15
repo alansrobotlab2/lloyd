@@ -7,7 +7,10 @@ weak; the nightly screen #83 Stage 5 runs is prose in a runbook with no scorer a
 threshold committed, and it has produced three different readings of one corpus in two
 nights: the 2026-10-07 pass scored `ml-paper-writing` vs `research-paper-writing` at 0.03
 and called the pair a name look-alike, the 2026-10-08 pass scored the same pair 0.327-0.358
-and filed it as #2409, which is 2,607 lines of two skills for one procedure. #2409's own
+and filed it as #2409, which is 2,607 lines of two skills for one procedure — one of the
+two, `research-paper-writing`, archived in place as #2409's outcome on 2026-10-08 by vault
+commit `17e447d8`, so the corpus this module scores holds one live skill and one
+quarantined body on disk. #2409's own
 note says it plainly: "The two numbers are not comparable and one of the two readings is
 wrong." A score that moves when the wording moves is not an instrument.
 
@@ -601,7 +604,7 @@ def build_report(*, roots: Sequence[Path] | None, store, fixture_path: Path | No
                              "ranking_first_positives": int(ok), "verdict": note,
                              # A NEW key, deliberately: `ranking_first_positives` has always
                              # carried the pass bool (`int(ok)`) under a name that reads like
-                             # ranks, and tests/test_skill_entity_overlap.py:475 pins it to 0
+                             # ranks, and tests/test_skill_entity_overlap.py:477 pins it to 0
                              # over the FAIL fixture. The real ranks go beside it rather than
                              # replacing it, so the pinned key keeps meaning what it always
                              # meant and the new one is what #2549 added.

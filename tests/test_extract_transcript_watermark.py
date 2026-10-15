@@ -13,9 +13,10 @@ every run, and a transcript that is the tail of the corpus rather than the delta
 caller asked for.
 
 What this pins, across the boundary that matters — the script is a standalone
-`python3 extract-transcript.py` invoked by `skills/memory-capture/SKILL.md:30` and
-`skills/periodic-memory-capture-lloyd/SKILL.md:84`, so every node here runs it as a
-subprocess with `LLOYD_DATA` set to a scratch root and nothing else overridden. In
+`python3 extract-transcript.py` invoked by `skills/memory-capture/SKILL.md:30` (and by
+`skills/periodic-memory-capture-lloyd/SKILL.md:84` until #2401 archived that skill on
+2026-10-08, vault commit `42144a4b`), so every node here runs it as a subprocess with
+`LLOYD_DATA` set to a scratch root and nothing else overridden. In
 -process would let the suite's own already-imported `app.paths` decide the root for
 me; the child re-resolves it from the environment, which is the thing production
 does and the thing the old in-tree binding could not honour: two checkouts sharing

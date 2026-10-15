@@ -5,7 +5,9 @@ screen is described in a runbook with no scorer and no threshold committed to gi
 produced three readings of one corpus in two nights: the 2026-10-07 pass scored
 `ml-paper-writing` vs `research-paper-writing` at 0.03 and called the pair a name look-alike,
 the 2026-10-08 pass scored it 0.327-0.358 and filed it as #2409 — 2,607 lines of two SKILL.md
-files for one procedure, which a human found by reading one flagged pair. #2409 writes the
+files for one procedure (`research-paper-writing` among them, archived in place on
+2026-10-08 by vault commit `17e447d8` as that item's outcome), which a human found by
+reading one flagged pair. #2409 writes the
 defect out: "The two numbers are not comparable and one of the two readings is wrong."
 
 So every node here pins a property of a MEASUREMENT, not a verdict about any skill pair. The
