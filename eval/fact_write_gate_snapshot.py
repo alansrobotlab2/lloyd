@@ -81,6 +81,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -132,8 +133,57 @@ WRITE_SEQUENCE: tuple[tuple[str, str, str], ...] = (
 )
 
 
+#: One replay-list row: `(entity, category, fact)`, the same shape as
+#: `WRITE_SEQUENCE`. Read from a `--replay-from` JSONL file.
+REPLAY_ROW_KEYS: tuple[str, ...] = ("entity", "category", "fact")
+
+
 class SnapshotRefused(ValueError):
     """A snapshot root this builder will not write."""
+
+
+def load_replay_list(path: Path) -> list[tuple[str, str, str]]:
+    """The extra writes in a `--replay-from` file, in file order.
+
+    `WRITE_SEQUENCE` is a three-fact fixture about one synthetic entity, so a pair
+    built from it alone retires a prior no scored question renders — the #2768
+    measurement's null was that fixture's, not the gate's (#2768 Findings bullet
+    2). A replay list names writes against a REAL seeded corpus, which is the only
+    way the pair can differ on a fact the `<facts>` block actually renders.
+
+    Blank lines and a line whose FIRST character is `#` are skipped; an inline
+    `#` is content. The corpus contains an entity literally named
+    `GitHub issue #38606`, and a rule that stripped from any `#` would truncate
+    that row's `entity` to `GitHub issue ` and then refuse a path that was never
+    asked for — the shape of that bug is #2775's `--fact-snapshot` refusal for a
+    typo'd path, so the rule is leading-only and pinned.
+
+    A row missing any of `entity`/`category`/`fact`, or with an empty one, is a
+    `SnapshotRefused` naming the line number: a silently-dropped write is a pair
+    that quietly stops differing, which is the failure this whole builder is for.
+    """
+    rows: list[tuple[str, str, str]] = []
+    src = refuse_production_root(Path(path))
+    for n, raw in enumerate(src.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise SnapshotRefused(
+                f"{src}:{n} is not a JSON object ({exc})") from exc
+        if not isinstance(obj, dict):
+            raise SnapshotRefused(f"{src}:{n} is a {type(obj).__name__}, "
+                                  f"not an object with {list(REPLAY_ROW_KEYS)}")
+        missing = [k for k in REPLAY_ROW_KEYS if not str(obj.get(k) or "").strip()]
+        if missing:
+            raise SnapshotRefused(
+                f"{src}:{n} is missing or empty: {missing}; every row needs "
+                f"{list(REPLAY_ROW_KEYS)} so a dropped write cannot make the pair "
+                f"quietly stop differing")
+        rows.append((str(obj["entity"]), str(obj["category"]), str(obj["fact"])))
+    return rows
 
 
 def refuse_production_root(root: Path, what: str = "snapshot root") -> Path:
@@ -489,8 +539,9 @@ def isolated_tree(tree: Path, mode: str):
 
 
 def replay_tree(tree: Path, mode: str, *, now_iso: str | None = None,
-                seed: Path | None = None) -> dict:
-    """Replay `WRITE_SEQUENCE` into `tree` under gate mode `mode`; report it.
+                seed: Path | None = None,
+                replay: Sequence[tuple[str, str, str]] = ()) -> dict:
+    """Replay `WRITE_SEQUENCE` + `replay` into `tree` under gate mode `mode`; report it.
 
     Returns the per-write ledger: what the gate said, what the write TOOK, and
     the fact id the decision named — the reader of this artifact should not have
@@ -499,12 +550,19 @@ def replay_tree(tree: Path, mode: str, *, now_iso: str | None = None,
     `seed`, when given, is materialised into the leg FIRST, outside
     `isolated_tree`, so the leg's replay finds a real corpus to differ on and the
     read caches are cleared after the corpus is in place rather than before it.
+
+    `replay` are the `--replay-from` writes, executed after the fixture sequence
+    and through the same `gate_write` call, in the same environment. Both legs run
+    the identical list in the identical order: the pair differs by `LLOYD_FACT_WRITE_GATE`
+    and by nothing else, which is what makes a paired CI legal here at all.
     """
     now_iso = now_iso or datetime.datetime.now(datetime.timezone.utc).isoformat()
     writes: list[dict] = []
     seeded = seed_leg(Path(tree), seed) if seed is not None else None
     with isolated_tree(Path(tree), mode) as facts_root:
-        for entity, category, text in WRITE_SEQUENCE:
+        plan = ([("fixture", e, c, t) for e, c, t in WRITE_SEQUENCE]
+                + [("replay", e, c, t) for e, c, t in replay])
+        for origin, entity, category, text in plan:
             path = fact_file(facts_root, entity, category)
             entries = _read_list(path)
             before = {e.get("id"): bool(e.get("expired_at"))
@@ -520,6 +578,7 @@ def replay_tree(tree: Path, mode: str, *, now_iso: str | None = None,
             _write_list(path, entity, category, entries, now_iso)
             retrieval._fact_file_cache.clear()
             writes.append({
+                "origin": origin, "entity": entity,
                 "category": category, "fact": text, "verdict": decision.verdict
                 if decision else None, "took": took,
                 "target_fact_id": (decision.target or {}).get("fact_id")
@@ -566,7 +625,9 @@ def _differential(noop: dict, on: dict) -> dict:
 
 def build(out: Path, *, modes: tuple[str, ...] = MODE_PAIR,
           now_iso: str | None = None,
-          seed: Path | None = None) -> dict:
+          seed: Path | None = None,
+          replay: Sequence[tuple[str, str, str]] = (),
+          replay_from: Path | None = None) -> dict:
     """Build one snapshot dir per mode under `out` and report the differential.
 
     `seed` is a facts root (the `<corpus>/facts` layout) materialised into every
@@ -576,6 +637,13 @@ def build(out: Path, *, modes: tuple[str, ...] = MODE_PAIR,
     is created — both of those are #2775's rails, and both are the builder's, not
     the caller's, because the caller is a shell command line that cannot see
     inodes.
+
+    `replay` are the #2768 extra writes (`load_replay_list`'s rows), executed on
+    BOTH legs in the given order after `WRITE_SEQUENCE`; `replay_from` is the file
+    they came from, recorded so the manifest alone names the input the pair was
+    built from. The differential is what they bought: `writes_applied` counts the
+    UPDATEs each leg actually applied, which is where a reader tells a pair that
+    differs from a pair that merely ran.
     """
     out = refuse_production_root(Path(out))
     seed_root = None if seed is None else resolve_seed(Path(seed))
@@ -583,7 +651,8 @@ def build(out: Path, *, modes: tuple[str, ...] = MODE_PAIR,
     # has already spent the inodes it is complaining about.
     capacity = preflight_inodes(out, legs=len(modes), seed=seed_root)
     out.mkdir(parents=True, exist_ok=True)
-    reports = {mode: replay_tree(out / mode, mode, now_iso=now_iso, seed=seed_root)
+    reports = {mode: replay_tree(out / mode, mode, now_iso=now_iso, seed=seed_root,
+                                 replay=replay)
                for mode in modes}
     both = all(m in reports for m in MODE_PAIR)
     diff = _differential(reports["noop"], reports["on"]) if both \
@@ -593,6 +662,8 @@ def build(out: Path, *, modes: tuple[str, ...] = MODE_PAIR,
         "out": str(out), "modes": list(modes),
         "sequence": [{"entity": e, "category": c, "fact": t}
                      for e, c, t in WRITE_SEQUENCE],
+        "replay_from": None if replay_from is None else str(Path(replay_from).resolve()),
+        "replay": [{"entity": e, "category": c, "fact": t} for e, c, t in replay],
         "snapshots": {m: reports[m]["tree"] for m in reports},
         # The #2775 numbers, published rather than left in the caller's stdout:
         # what the seed was, what each leg paid for it, and what the filesystem
@@ -603,6 +674,13 @@ def build(out: Path, *, modes: tuple[str, ...] = MODE_PAIR,
         "inode_budget": capacity,
         "gate_logs": {m: str(out / m / SNAPSHOT_LOG_NAME) for m in reports},
         "writes": {m: reports[m]["writes"] for m in reports},
+        # Per leg: how many of the replayed writes that leg APPLIED as an UPDATE
+        # (a `noop` leg decides and refuses to apply, so this is the number the
+        # whole measurement turns on), and how many it saw at all.
+        "writes_applied": {
+            m: sum(1 for w in reports[m]["writes"] if w["took"] == "update")
+            for m in reports},
+        "writes_seen": {m: len(reports[m]["writes"]) for m in reports},
         "differential": diff,
         "shows_expiry_differential": bool(diff["expired_only_in_on"]),
         "warning": None if diff["expired_only_in_on"] else (
@@ -638,6 +716,14 @@ def cli_parser() -> argparse.ArgumentParser:
                          "Refused under production_data_root() — copy the tree out "
                          "first, or the nightly rebuild moves the corpus between "
                          "the legs")
+    ap.add_argument("--replay-from", default=None,
+                    help="a JSONL file of {\"entity\",\"category\",\"fact\"} writes to "
+                         "replay on BOTH legs after WRITE_SEQUENCE (#2768). The "
+                         "fixture sequence alone retires a prior no scored question "
+                         "renders, so a pair built without a list measures the "
+                         "fixture and not the gate. A blank line or a line starting "
+                         "with `#` is skipped; an inline `#` is content (the corpus "
+                         "has an entity named `GitHub issue #38606`)")
     return ap
 
 
@@ -649,13 +735,22 @@ def main(argv: list[str] | None = None) -> int:
     if bad:
         ap.error(f"unknown gate mode(s) {bad}; MODES is {list(gate.MODES)}")
     try:
+        replay = load_replay_list(Path(args.replay_from)) if args.replay_from else []
         manifest = build(Path(args.out), modes=modes,
-                         seed=Path(args.seed_from) if args.seed_from else None)
+                         seed=Path(args.seed_from) if args.seed_from else None,
+                         replay=replay,
+                         replay_from=Path(args.replay_from) if args.replay_from
+                         else None)
     except SnapshotRefused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
     print(json.dumps({"out": manifest["out"], "snapshots": manifest["snapshots"],
-                      "differential": manifest["differential"],
+                      "n_replay": len(manifest["replay"]),
+                      "writes_seen": manifest["writes_seen"],
+                      "writes_applied": manifest["writes_applied"],
+                      "differential": {
+                          k: (len(v) if isinstance(v, list) else v)
+                          for k, v in manifest["differential"].items()},
                       "shows_expiry_differential":
                           manifest["shows_expiry_differential"]}, indent=1))
     if manifest["warning"]:

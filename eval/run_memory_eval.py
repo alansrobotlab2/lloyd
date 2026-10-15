@@ -1494,8 +1494,40 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
                          "`<facts>` block from that tree instead of the live "
                          "store, overriding any inherited LLOYD_FACTS_ROOT. Run "
                          "it once per gate mode for a paired run.")
+    ap.add_argument("--categories", default=None,
+                    help=f"comma-separated subset of {list(CATEGORIES)} to score "
+                         "(#2768). One named bar otherwise costs the whole dev set "
+                         "— 1,275 prompts per leg on 2026-09-25 — and `--limit` "
+                         "keeps the first N OF EVERY CATEGORY, so it cannot buy one "
+                         "category cheaply. Applies to dev and holdout alike, before "
+                         "`--limit`. The selection is recorded in the artifact: a rate "
+                         "off a filtered leg is not the whole-set rate and must not be "
+                         "quoted as one.")
+    ap.add_argument("--dump-blocks", default=None, metavar="PATH",
+                    help="write one JSONL row per scored question with the rendered "
+                         "`<facts>` block lines under `facts_conf` (the `prefetch` "
+                         "arm) and `facts_rel` (the `prefetch_rel` arm) (#2768). "
+                         "Nothing else in the artifact can show what a leg rendered: "
+                         "`PREFETCH_META_KEYS` carries only the block's char count, so "
+                         "the claim 'this leg's block differs from that leg's' had "
+                         "neither witness nor counter-witness. Written after the run "
+                         "succeeds, and refused up front without a prefetch arm, "
+                         "because a file that names no block is the empty witness "
+                         "#2768's null was.")
     args = ap.parse_args(argv)
     arms = parse_arms(args.arms)
+    cats = None
+    if args.categories:
+        cats = [c.strip() for c in args.categories.split(",") if c.strip()]
+        bad = [c for c in cats if c not in CATEGORIES]
+        if bad:
+            ap.error(f"--categories: unknown categor(y|ies) {bad}; "
+                     f"the set's categories are {list(CATEGORIES)}")
+    if args.dump_blocks and not any(a.startswith("prefetch") for a in arms):
+        ap.error(f"--dump-blocks needs a prefetch arm in --arms (got {arms}): the "
+                 f"only blocks this command renders for a dump are the `<facts>` "
+                 f"ones, so with no prefetch arm it would write a file with no block "
+                 f"in it and that file would read as a leg that rendered nothing")
     ms = load_set(Path(args.set), view="all" if args.holdout else "tuning")
     judge_model = DJEV_JUDGE_MODEL if args.judge == "djev" else "rules"
     check_judge(ms.generator_model, judge_model)
@@ -1534,6 +1566,10 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
         sleep_store = os.environ[nsn.STORE_PATH_ENV]
 
     legs = [("dev", ms.dev)] + ([("holdout", ms.holdout)] if args.holdout else [])
+    if cats:
+        # Before `--limit`, so `--categories knowledge_update --limit 5` is the
+        # first 5 of that category and not the first 5 of everything that survive.
+        legs = [(n, [q for q in qs if q.category in cats]) for n, qs in legs]
     if args.limit:
         legs = [(n, [q for c in CATEGORIES for q in [x for x in qs if x.category == c][:args.limit]])
                 for n, qs in legs]
@@ -1547,12 +1583,23 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
     jobs: list[dict] = []
     prefetch_meta: dict[str, dict] = {}
     recall_meta: dict[str, dict] = {}
+    # #2768: the rendered lines themselves, kept per question so `--dump-blocks`
+    # can write them. `prefetch_meta` keeps only `PREFETCH_META_KEYS` — the block's
+    # CHAR COUNT — which is why a leg that rendered a different block was
+    # indistinguishable from one that rendered the same block, and the #2768 null
+    # could be reported without either witness or counter-witness.
+    block_rows: list[dict] = []
     for leg, qs in legs:
         for q in qs:
             blocks = None
             if want_facts:
                 blocks = blocks_fn(q)
                 prefetch_meta[q.id] = {k: blocks.get(k) for k in PREFETCH_META_KEYS}
+                if leg == "dev":
+                    block_rows.append({
+                        "id": q.id, "category": q.category,
+                        "facts_conf": list(blocks.get("facts_conf") or []),
+                        "facts_rel": list(blocks.get("facts_rel") or [])})
                 if SLEEP_NOTES_ARM in arms:
                     # Off the SAME retrieval, so the pair prices the channel and
                     # nothing else: the arm's only advantage would be that a note
@@ -1666,11 +1713,33 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
         }
     if use_recall:
         report["recall"] = {i: m for i, m in recall_meta.items() if qmap[i].leg == "dev"}
+    # #2768: what the leg was actually scored over. A filtered leg's rate is not the
+    # whole-set rate, and an artifact that recorded only `n_dev` (the set's size)
+    # beside a rate computed on one category invited exactly that misquote.
+    report["question_filter"] = {
+        "categories": cats, "limit": args.limit or None,
+        "n_scored_dev": len({r["id"] for r in report["rows"]}),
+        "n_dev_in_set": len(ms.dev)}
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"lloydmemeval-{args.label}.json"
     path.write_text(json.dumps(report, indent=1, default=str) + "\n")
     report["_path"] = str(path)
+    if args.dump_blocks:
+        # JSONL, not JSON: the committed evidence of a measurement must survive
+        # `.gitignore`'s blanket `*.json`, which is why every artifact a measurement
+        # note cites by path and expects to be tracked is a `.jsonl` (#2768 clause 1).
+        dump_path = Path(args.dump_blocks)
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        head = {"_header": "run_memory_eval blocks dump", "label": args.label,
+                "arms": arms, "fact_snapshot": report.get("fact_snapshot"),
+                "facts_rank": report.get("facts_rank"),
+                "set": report["set"], "question_filter": report["question_filter"]}
+        with open(dump_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(head) + "\n")
+            for row in block_rows:
+                fh.write(json.dumps(row) + "\n")
+        report["_blocks_path"] = str(dump_path)
     _print_summary(report)
     print(f"wrote {path}")
     return report
@@ -2005,6 +2074,214 @@ def recall_retrieval(argv: list[str] | None = None) -> dict:
     return out
 
 
+def read_artifact(path: str | Path) -> dict:
+    """One `run` artifact, with just enough checked to make `join` safe on it.
+
+    Refuses a file that is not a `run` artifact rather than reading it as one: an
+    artifact of another command has no `rows`, and a join that silently scored zero
+    shared questions off it would print a delta of +0.000 — which is precisely the
+    number #2768 was filed to explain.
+    """
+    p = Path(path)
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"join: {p} is not a readable run artifact ({exc})")
+    if not isinstance(doc, dict) or not isinstance(doc.get("rows"), list) \
+            or not doc["rows"]:
+        raise SystemExit(
+            f"join: {p} has no `rows` block — it is not an artifact of "
+            f"`run_memory_eval.py run` (that key holds the per-question dev rows). "
+            f"Name the two legs' run artifacts, not a retrieval artifact.")
+    return doc
+
+
+def _snapshot_root(value) -> str | None:
+    """The pointed-to snapshot root out of an artifact's `fact_snapshot` field.
+
+    `run` writes that field as the plain root path string, so reading it as a dict
+    raises `AttributeError` on the first real artifact and never on a fixture that
+    omits it — which is how this stayed hidden until the #2768 pair was joined.
+    """
+    if isinstance(value, dict):
+        return value.get("facts_root") or value.get("root")
+    return value
+
+
+def join_arms(legs: dict[str, dict], *, arm: str, metric: str,
+              category: str | None = None,
+              n_resamples: int | None = None, seed: int | None = None) -> dict:
+    """Paired arm-vs-arm delta ACROSS artifacts, keyed on the question id (#2768).
+
+    `run`'s own `dev_comparisons` are arm-vs-arm inside one process, and
+    `stats.paired_bootstrap_ci` takes two vectors over shared records and refuses
+    mismatched lengths — so two `--fact-snapshot` invocations, which is the only
+    way to score one arm against two fact trees, produced two artifacts and no way
+    to compute the interval the bar is stated in. This is that join.
+
+    Two rules, both because a joined interval is easy to make fake:
+
+    * **An id appearing twice within one leg is refused.** Pooling two arms of the
+      same question into one leg's vector duplicates observations, and a
+      bootstrapped interval over duplicated rows is NARROWER than 95% while looking
+      perfectly reasonable — the failure nobody would notice.
+    * **A missing or unmatched id is refused, not dropped.** `paired_bootstrap_ci`
+      would raise on a length mismatch, but silently intersecting first would let a
+      leg that scored 40 of 53 questions be reported as n=53.
+
+    `metric` is a row key the runner writes (`correct`, `correct_strict`,
+    `stale`, `abstain`): a float 0/1 per question, so the paired bootstrap is legal.
+    The seed and `n_resamples` are returned, and default to `eval.stats.SEED` /
+    `N_RESAMPLES` — the same defaults `run`'s own comparisons use, which is what
+    makes a joined interval comparable to an in-process one.
+    """
+    from stats import paired_bootstrap_ci, ci_excludes_zero, SEED, N_RESAMPLES
+    names = list(legs)
+    if len(names) != 2:
+        raise SystemExit(f"join: needs exactly two legs, got {names}")
+    a_name, b_name = names
+    by_id: dict[str, dict[str, dict]] = {}
+    for name, doc in legs.items():
+        seen: dict[str, dict] = {}
+        for row in doc["rows"]:
+            if row.get("arm") != arm:
+                continue
+            if category and row.get("category") != category:
+                continue
+            if metric not in row:
+                raise SystemExit(
+                    f"join: {name} has no {metric!r} on its rows "
+                    f"(metrics the runner writes: correct, correct_strict, stale, "
+                    f"abstain, mentioned, evidence_in_context)")
+            rid = row["id"]
+            if rid in seen:
+                raise SystemExit(
+                    f"join: {name} carries question {rid} twice for arm {arm!r}. A "
+                    f"paired bootstrap over duplicated questions reports an interval "
+                    f"narrower than the 95% it claims, so this is refused rather than "
+                    f"de-duplicated: check whether the two legs were pooled into one "
+                    f"artifact, or one artifact was passed twice.")
+            seen[rid] = row
+        if not seen:
+            raise SystemExit(
+                f"join: {name} has no {arm!r}"
+                + (f" rows in category {category!r}" if category else "")
+                + " — no scores were silently returned instead.")
+        by_id[name] = seen
+    only_a = sorted(set(by_id[a_name]) - set(by_id[b_name]))
+    only_b = sorted(set(by_id[b_name]) - set(by_id[a_name]))
+    if only_a or only_b:
+        raise SystemExit(
+            f"join: the legs scored different question sets "
+            f"(only in {a_name}: {only_a[:5]}{'...' if len(only_a) > 5 else ''}, "
+            f"only in {b_name}: {only_b[:5]}{'...' if len(only_b) > 5 else ''}). A "
+            f"paired interval over an intersected set would report n="
+            f"{len(set(by_id[a_name]) & set(by_id[b_name]))} for a comparison of a "
+            f"set nobody ran; run the legs over the same `--categories`/`--limit`.")
+    ids = sorted(by_id[a_name])
+    va = [float(bool(by_id[a_name][i].get(metric))) for i in ids]
+    vb = [float(bool(by_id[b_name][i].get(metric))) for i in ids]
+    # Passed explicitly rather than left to the callee's defaults, so the numbers
+    # reported below are the ones the resampling ran with even if `eval.stats`
+    # changes its defaults between the run and a re-read of this note.
+    seed = SEED if seed is None else seed
+    n_resamples = N_RESAMPLES if n_resamples is None else n_resamples
+    ci = paired_bootstrap_ci(va, vb, n_resamples=n_resamples, seed=seed)
+    flips_ab = sum(1 for x, y in zip(va, vb) if x < y)
+    flips_ba = sum(1 for x, y in zip(va, vb) if x > y)
+    return {
+        "a": a_name, "b": b_name, "arm": arm, "metric": metric,
+        "category": category, "n": len(ids),
+        "rate_a": round(sum(va) / len(va), 4), "rate_b": round(sum(vb) / len(vb), 4),
+        "diff": round(ci["diff"], 4), "ci": [round(ci["lo"], 4), round(ci["hi"], 4)],
+        "p": round(ci["p"], 4), "significant": ci["significant"],
+        "marginal": ci["marginal"],
+        "ci_excludes_zero": ci_excludes_zero(ci),
+        "flips_a_to_b": flips_ab, "flips_b_to_a": flips_ba,
+        "bootstrap": {"seed": seed, "n_resamples": n_resamples,
+                      "source": ("eval.stats defaults (SEED/N_RESAMPLES)"
+                                 if seed == SEED and n_resamples == N_RESAMPLES
+                                 else "overridden on the command line")},
+        "provenance": {name: {
+            "artifact": str(legs[name].get("_artifact_path")),
+            # `run` writes `fact_snapshot` as the pointed-to root path (a string) —
+            # not a dict — so reading it as one raises AttributeError on the first
+            # real artifact and never on a fixture that omits it. Handle both.
+            "fact_snapshot": _snapshot_root(legs[name].get("fact_snapshot")),
+            "facts_rank": legs[name].get("facts_rank"),
+            "set": legs[name].get("set"),
+            "question_filter": legs[name].get("question_filter")}
+            for name in names},
+        # Each row carries its own category, taken from the leg's row rather than
+        # from the `--category` filter: a committed per-question file has to say
+        # what each row is even when the join was not filtered, and a reader who
+        # sums rows by category must not have to trust the header to be told.
+        "per_question": [{"id": i, "category": by_id[a_name][i].get("category"),
+                          a_name: va[k], b_name: vb[k]}
+                         for k, i in enumerate(ids)],
+    }
+
+
+def join_cli(argv: list[str] | None = None) -> dict:
+    ap = argparse.ArgumentParser(prog="run_memory_eval.py join")
+    ap.add_argument("--leg", action="append", required=True, metavar="NAME=PATH",
+                    help="LEGNAME=/path/to/lloydmemeval-<label>.json, given twice: "
+                         "the two artifacts to join. NAME is what the delta is "
+                         "reported against (e.g. noop=.../noop.json on=.../on.json)")
+    ap.add_argument("--arm", required=True,
+                    help="the arm id both artifacts scored (e.g. prefetch_rel)")
+    ap.add_argument("--metric", default="correct",
+                    help="row key to pair on (default: correct)")
+    ap.add_argument("--category", default=None,
+                    help=f"restrict to one category, from {list(CATEGORIES)}")
+    ap.add_argument("--n-resamples", type=int, default=None)
+    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--out", default=None,
+                    help="write the full result here: `.json` for one indented "
+                         "object, or `.jsonl` — one header row carrying the result "
+                         "without the per-question rows, then one row per scored "
+                         "question (#2768). `run_memory_eval`'s own artifacts are "
+                         "`.json`, which `.gitignore` keeps untracked, and the "
+                         "evidence a measurement note cites has to be a tracked "
+                         "file, so the file the note names is the `.jsonl`.")
+    args = ap.parse_args(argv)
+    legs: dict[str, dict] = {}
+    for spec in args.leg:
+        if "=" not in spec:
+            ap.error(f"--leg wants NAME=PATH, got {spec!r}")
+        name, path = spec.split("=", 1)
+        name, path = name.strip(), path.strip()
+        if not name or not path:
+            ap.error(f"--leg wants a non-empty NAME and PATH, got {spec!r}")
+        if name in legs:
+            ap.error(f"--leg names {name!r} twice; the two legs need different names")
+        doc = read_artifact(path)
+        doc["_artifact_path"] = str(Path(path).resolve())
+        legs[name] = doc
+    res = join_arms(legs, arm=args.arm, metric=args.metric, category=args.category,
+                    n_resamples=args.n_resamples, seed=args.seed)
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if out.suffix == ".jsonl":
+            head = {k: v for k, v in res.items() if k != "per_question"}
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"_header": "run_memory_eval join", **head}) + "\n")
+                for r in res["per_question"]:
+                    fh.write(json.dumps(r, sort_keys=True) + "\n")
+        else:
+            out.write_text(json.dumps(res, indent=1) + "\n", encoding="utf-8")
+    print(f"{res['b']} - {res['a']} [{res['arm']}/{res['metric']}]"
+          + (f" category={res['category']}" if res["category"] else "")
+          + f": {res['diff']:+.3f} [{res['ci'][0]:+.3f},{res['ci'][1]:+.3f}] "
+            f"n={res['n']} (excludes zero: {res['ci_excludes_zero']}; "
+            f"flips {res['a']}→{res['b']} {res['flips_a_to_b']}, "
+            f"{res['b']}→{res['a']} {res['flips_b_to_a']}; "
+            f"seed={res['bootstrap']['seed']}, "
+            f"n_resamples={res['bootstrap']['n_resamples']})")
+    return res
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv.pop(0) if argv and not argv[0].startswith("-") else "run"
@@ -2021,6 +2298,9 @@ def main(argv: list[str] | None = None) -> int:
               f"holdout={len(ms.holdout or [])} generator={ms.generator_model}")
         _print_labels(label_quality(ms))
         return 0
+    if cmd == "join":
+        join_cli(argv)
+        return 0
     if cmd == "prefetch-retrieval":
         prefetch_retrieval(argv)
         return 0
@@ -2036,8 +2316,8 @@ def main(argv: list[str] | None = None) -> int:
         mapping = export_sessions(ms.dev, Path(a.out))
         print(f"exported {len(mapping)} dev sessions to {a.out}")
         return 0
-    raise SystemExit(f"unknown command {cmd!r} (run | verify | prefetch-retrieval | "
-                     "recall-retrieval | export-sessions)")
+    raise SystemExit(f"unknown command {cmd!r} (run | verify | join | "
+                     "prefetch-retrieval | recall-retrieval | export-sessions)")
 
 
 if __name__ == "__main__":

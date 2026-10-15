@@ -971,3 +971,284 @@ def test_the_note_rules_out_a_recurring_re_score_and_bundles_the_one_it_allows()
     assert sum(1 for lab in committed.values() if lab in "SD") == 0
     # Control for that zero: the same reader over one planted S row says one.
     assert sum(1 for lab in {**committed, 58: "S"}.values() if lab in "SD") == 1
+
+
+# ───────────────────────────────────────────────────────── #2768 measurement (b) ──
+# The paired `knowledge_update` gain bar (b) is stated in. The instrument existed
+# (`eval/fact_write_gate_snapshot.py`, `run --fact-snapshot`) and had never been
+# run, and two of its pieces had to be built before the bar could be measured:
+# a targeted replay list (pinned in `tests/test_fact_write_gate_snapshot.py`) and
+# a cross-artifact join, because the runner's only paired interval is arm-vs-arm
+# inside one process, while a gate-mode pair is one arm across two processes.
+MEAS_B = ROOT / "eval" / "measurements" / "fact-write-gate-b-2026-10-15.md"
+DIR_B = ROOT / "eval" / "measurements" / "fact-write-gate-b-2026-10-15"
+JOIN_B = DIR_B / "knowledge-update-join.jsonl"
+
+
+def _leg(ids: list[str], correct: list[int], arm: str = "prefetch_rel") -> dict:
+    return {"rows": [{"id": i, "arm": arm, "category": "knowledge_update",
+                      "correct": c} for i, c in zip(ids, correct)]}
+
+
+def test_the_join_pairs_two_artifacts_on_the_question_id():
+    """The delta bar (b) is stated in cannot be computed by the runner as shipped.
+
+    `run`'s `dev_comparisons` pair arms within one artifact and
+    `eval/stats.paired_bootstrap_ci` takes two vectors over shared records;
+    two `--fact-snapshot` legs are two artifacts, so the join lives here and names
+    its own seed and resample count, which is what the note has to be able to say.
+    """
+    from eval import run_memory_eval as rme
+    ids = [f"q{i}" for i in range(4)]
+    res = rme.join_arms({"noop": _leg(ids, [1, 1, 0, 0]),
+                         "on": _leg(ids, [1, 1, 1, 0])},
+                        arm="prefetch_rel", metric="correct")
+    assert res["n"] == 4
+    assert res["diff"] == pytest.approx(0.25)
+    assert res["flips_a_to_b"] == 1 and res["flips_b_to_a"] == 0
+    assert res["ci"][0] <= 0.0 <= res["ci"][1]
+    from eval import stats
+    assert res["bootstrap"] == {"seed": stats.SEED, "n_resamples": stats.N_RESAMPLES,
+                                "source": "eval.stats defaults (SEED/N_RESAMPLES)"}
+    assert [r["id"] for r in res["per_question"]] == ids
+
+
+def test_the_join_carries_a_string_shaped_fact_snapshot_through():
+    """`run` writes `fact_snapshot` as the root PATH, not a dict.
+
+    Reading it as one raises `AttributeError` on the first real artifact and never
+    on a fixture that omits the field, so the join would have died on the first
+    pair anyone ever tried to join.
+    """
+    from eval import run_memory_eval as rme
+    leg = _leg(["q1", "q2"], [1, 0])
+    leg["fact_snapshot"] = "/tmp/snapshots/noop"
+    leg["facts_rank"] = {"configured": "relevance", "mismatch": []}
+    res = rme.join_arms({"noop": leg, "on": _leg(["q1", "q2"], [1, 1])},
+                        arm="prefetch_rel", metric="correct")
+    assert res["provenance"]["noop"]["fact_snapshot"] == "/tmp/snapshots/noop"
+
+
+def test_the_join_refuses_a_question_that_appears_twice_in_one_leg():
+    """Pooling two arms of one question into a leg halves the variance for free.
+
+    The interval that comes out is narrower than the 95% it claims and looks
+    entirely reasonable, which is the worst way for a measurement to be wrong.
+    """
+    from eval import run_memory_eval as rme
+    doubled = _leg(["q1", "q2"], [1, 0])
+    doubled["rows"].append({"id": "q1", "arm": "prefetch_rel",
+                            "category": "knowledge_update", "correct": 1})
+    with pytest.raises(SystemExit) as exc:
+        rme.join_arms({"noop": doubled, "on": _leg(["q1", "q2"], [1, 1])},
+                      arm="prefetch_rel", metric="correct")
+    assert "narrower" in str(exc.value)
+
+
+def test_the_join_refuses_legs_that_scored_different_questions():
+    from eval import run_memory_eval as rme
+    with pytest.raises(SystemExit) as exc:
+        rme.join_arms({"noop": _leg(["q1", "q2"], [1, 0]),
+                       "on": _leg(["q1", "q3"], [1, 1])},
+                      arm="prefetch_rel", metric="correct")
+    assert "different question sets" in str(exc.value)
+
+
+def test_dump_blocks_is_refused_for_a_leg_that_rendered_no_facts_block(capsys):
+    """A dump written by a run with no prefetch arm would be an empty witness."""
+    from eval import run_memory_eval as rme
+    with pytest.raises(SystemExit) as exc:
+        rme.run(["--arms", "closed_book,history", "--dump-blocks", "/tmp/x.jsonl"])
+    assert exc.value.code == 2
+    assert "needs a prefetch arm" in capsys.readouterr().err
+
+
+def test_categories_is_validated_before_the_set_is_loaded(capsys):
+    """A typo'd category names the real ones instead of scoring zero questions."""
+    from eval import run_memory_eval as rme
+    with pytest.raises(SystemExit) as exc:
+        rme.run(["--arms", "prefetch_rel", "--categories", "not_a_category"])
+    assert exc.value.code == 2
+    assert "knowledge_update" in capsys.readouterr().err
+
+
+def test_join_writes_the_committed_jsonl_form_and_nothing_the_header_denies(tmp_path):
+    """`.jsonl` out: one header row with the result, then exactly n question rows.
+
+    Two reasons this is a real boundary and not a formatting preference. The
+    committed evidence of a measurement has to be a tracked file, and
+    `.gitignore:42` keeps every `*.json` untracked — so the note cites a `.jsonl`,
+    and the file it cites has to exist in that form. And the row count has to equal
+    the header's `n`: an artifact whose rows disagree with its own `n` is read as a
+    wider measurement than the one that was made.
+    """
+    from eval import run_memory_eval as rme
+
+    def artifact(path: Path, correct: list[int]) -> Path:
+        doc = {"eval": "lloydmemeval.run.v1", "arms": ["prefetch_rel"],
+               "fact_snapshot": str(path.parent / "snap"),
+               "rows": [{"id": f"q{i}", "arm": "prefetch_rel",
+                         "category": "knowledge_update", "correct": c}
+                        for i, c in enumerate(correct)]}
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return path
+
+    a = artifact(tmp_path / "noop.json", [1, 1, 0, 0])
+    b = artifact(tmp_path / "on.json", [1, 1, 1, 0])
+    out = tmp_path / "join" / "knowledge-update-join.jsonl"
+    rme.join_cli(["--leg", f"noop={a}", "--leg", f"on={b}",
+                  "--arm", "prefetch_rel", "--category", "knowledge_update",
+                  "--out", str(out)])
+    lines = out.read_text(encoding="utf-8").splitlines()
+    head = json.loads(lines[0])
+    assert head["_header"] == "run_memory_eval join" and head["n"] == 4
+    assert head["diff"] == pytest.approx(0.25) and "per_question" not in head
+    rows = [json.loads(l) for l in lines[1:]]
+    assert len(rows) == head["n"] == 4
+    assert {r["category"] for r in rows} == {"knowledge_update"}
+
+
+def test_join_refuses_a_leg_that_scored_no_rows_of_the_named_category(tmp_path):
+    """The other way a named bar can silently be a zero-question measurement."""
+    from eval import run_memory_eval as rme
+
+    def artifact(path: Path, cat: str) -> Path:
+        doc = {"eval": "lloydmemeval.run.v1", "arms": ["prefetch_rel"],
+               "rows": [{"id": "q1", "arm": "prefetch_rel", "category": cat,
+                         "correct": 1}]}
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return path
+
+    a = artifact(tmp_path / "noop.json", "temporal")
+    b = artifact(tmp_path / "on.json", "knowledge_update")
+    with pytest.raises(SystemExit) as exc:
+        rme.join_arms({"noop": rme.read_artifact(a), "on": rme.read_artifact(b)},
+                      arm="prefetch_rel", metric="correct",
+                      category="knowledge_update")
+    assert "no" in str(exc.value).lower()
+
+
+def _b_note() -> str:
+    assert MEAS_B.is_file(), f"{MEAS_B} is the record measurement (b) was taken"
+    return MEAS_B.read_text(encoding="utf-8")
+
+
+def test_the_b_note_records_the_paired_delta_with_its_interval_and_both_commands():
+    """Clause 1: the number, the interval, and the two command lines that made it."""
+    note = _b_note()
+    # The headline interval itself, not any bracketed number: the note carries
+    # several Wilson intervals, and a check that matched one of those would pass on
+    # a note that never stated the paired result.
+    assert "+0.000, 95% CI [-0.113, +0.094]" in note.replace("**", ""), (
+        "the paired delta and its 95% interval must be stated together")
+    assert "[+0.000, +0.094]" in note, "the correct_strict / evidence rows are part of the record"
+    assert re.search(r"n=53", note), "n is the 53 scored knowledge_update questions"
+    assert "seed" in note and "n_resamples" in note, (
+        "the interval is a bootstrap, so its seed and resample count are part of it")
+    assert JOIN_B.is_file(), (
+        f"{JOIN_B} is the join's own output; the interval in the note is readable "
+        f"there and cannot be a transcription of a terminal")
+    for snapshot in ("pair-2026-10-15/noop", "pair-2026-10-15/on"):
+        assert snapshot in note, f"the {snapshot} leg's command line is missing"
+    assert note.count("--arms prefetch_rel") >= 2, (
+        "both arms' command lines must name the scored arm: --fact-snapshot alone "
+        "does not say which <facts> ordering was scored")
+
+
+def test_every_artifact_the_b_note_cites_is_a_tracked_file_and_not_ignored():
+    """Clause 1's last half: the evidence a note cites has to survive `.gitignore`.
+
+    `.gitignore:42` is a blanket `*.json`, so every `run`/`join` artifact — including
+    the two artifacts this measurement was scored from — is invisible to git by
+    default. A note that cites one of those would be citing a file that does not
+    exist for anyone who checks it out, which is how a measurement becomes
+    unauditable after the machine that made it is gone. `git check-ignore` is the
+    only faithful reader of that rule, so the test asks git rather than re-implementing
+    the pattern.
+    """
+    import subprocess
+
+    note = _b_note()
+    cited = sorted({name for name in re.findall(r"`([\w.+-]+\.(?:jsonl|md))`", note)
+                    if (DIR_B / name).is_file()})
+    assert len(cited) >= 4, (
+        f"the note cites {cited}; it has to name the block dumps, the join and the "
+        f"build manifest beside it")
+    for name in cited:
+        path = DIR_B / name
+        probe = subprocess.run(
+            ["git", "-C", str(ROOT), "check-ignore", "-q", str(path.relative_to(ROOT))],
+            capture_output=True)
+        assert probe.returncode != 0, (
+            f"{name} is swallowed by .gitignore, so the evidence {name} is cited for "
+            f"is untracked and unreadable to anyone checking this repo out")
+        listed = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+             str(path.relative_to(ROOT))], capture_output=True)
+        assert listed.returncode == 0, f"{name} is not tracked"
+    assert not list(DIR_B.glob("*.json")), (
+        "a .json artifact in the measurement dir is gitignored by .gitignore's "
+        "blanket `*.json`; the committed form is the .jsonl `--out` writes")
+
+
+def test_the_b_note_legs_both_scored_the_ordering_production_ships():
+    """Clause 2 (#2778's rail, applied to the pair): no mismatch on the scored arm.
+
+    `config.yaml` ships `prefetch.facts.rank: relevance`; `--arms` defaults to
+    `closed_book,history,prefetch`, and the `prefetch` arm renders the confidence
+    order unconditionally. A gain measured on that arm is not a gain for the
+    ordering anyone runs, so the note's own command lines and both dumps have to
+    say `prefetch_rel` — and the dumps' headers carry the runner's disclosure.
+    """
+    note = _b_note()
+    assert "prefetch.facts.rank" in note
+    for path in (DIR_B / "knowledge-update-blocks-noop.jsonl",
+                 DIR_B / "knowledge-update-blocks-on.jsonl"):
+        head = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        assert head["facts_rank"]["mismatch"] == [], (
+            f"{path} scored an arm whose <facts> ordering is not the shipped one")
+
+
+def test_the_b_note_names_the_trees_and_keeps_every_path_out_of_the_live_root():
+    """Clause 4: the seed tree and snapshot root are named, and no path is the live one.
+
+    The live root is named by its canonical location rather than through
+    `production_data_root()`: a checkout of this repo in a worktree gets its own
+    `.lloyd-data`, so inside the round `production_data_root()` IS the tree the pair
+    was built in, and reading it here would make the assertion pass on `main` and
+    fail in exactly the tree that has to be checked.
+    """
+    note = _b_note()
+    assert "seed" in note and "snapshot root" in note
+    live = str(Path.home() / "lloyd-data")
+    checked = 0
+    for line in note.splitlines():
+        if not line.lstrip().startswith("$"):
+            continue
+        checked += 1
+        assert live not in line, f"an arm's command line reaches the live root: {line}"
+        assert "~/lloyd-data" not in line, (
+            f"an arm names the live root by its tilde form: {line}")
+    assert checked >= 2, "the note must carry both arms' command lines"
+
+
+def test_the_b_note_ends_on_the_bar_and_the_gate_is_still_noop():
+    """Clauses 5 and 4's config half: a verdict, Alan's decision, and no arming."""
+    import yaml
+    note = _b_note()
+    # The FINAL section, not the last N characters: "ends with" is about the note's
+    # closing section, and a fixed window would drift as the prose around the verdict
+    # is edited — silently moving the check off the verdict it exists to pin.
+    tail = note.rsplit("\n## ", 1)[-1]
+    assert tail.startswith("Verdict"), (
+        "the note's last section must be the verdict, not prose that follows it")
+    assert re.search(r"\bUNMET\b", tail), (
+        "the note must end with a met-or-unmet verdict on bar (b)")
+    assert "Alan" in tail, "the arming decision is Alan's, and the note has to say so"
+    assert "not-triggered" in note or "not triggered" in note
+    assert "5 E" in note and "55 P" in note, (
+        "the re-score is not-triggered because the 2026-10-08 labels are 5 E / 55 P "
+        "with 0 S/D rows, and the note cites that rather than asserting it")
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    assert cfg["knowledge_graph"]["write_gate"]["mode"] == "noop", (
+        "measurement (b) does not arm the gate: arming is Alan's ship action")

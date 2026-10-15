@@ -540,3 +540,219 @@ def test_no_documented_out_example_puts_a_snapshot_on_tmpfs_tmp():
     help_text = re.sub(r"\s+", "", snap.cli_parser().format_help())
     assert "/tmp" not in help_text, "the --out help still names tmpfs"
     assert DOCUMENTED_OUT in help_text, "the --out help names no on-disk location"
+
+
+# ─────────────────────────────────────────────────────────────── #2768 ──
+# Measurement (b) — the paired `knowledge_update` gain bar (b) is stated in.
+#
+# Two things about the instrument had to change before that bar could be measured
+# at all, and both are pinned here. The first is the null: `WRITE_SEQUENCE` is
+# three facts about one synthetic `Relay` entity, which no scored question
+# mentions, so the pair the builder used to produce retired a fact no `<facts>`
+# block ever rendered and the delta was 0.000 by construction (#2768 Findings
+# bullet 2). The fix is `--replay-from`: writes named against the seeded corpus,
+# executed on BOTH legs through the same `gate_write`, so the legs differ only by
+# what the gate's verdict buys. The second is the witness: the pair is only worth
+# scoring if a scored question's rendered block actually differs, and that claim
+# is now committed as JSONL beside the note rather than asserted in prose.
+REPLAY_DOC = (Path(__file__).resolve().parent.parent
+              / "eval" / "measurements" / "fact-write-gate-b-2026-10-15")
+BLOCKS_NOOP = REPLAY_DOC / "knowledge-update-blocks-noop.jsonl"
+BLOCKS_ON = REPLAY_DOC / "knowledge-update-blocks-on.jsonl"
+WITNESS = "lme-kn-013"
+
+
+def test_a_replay_list_is_read_in_order_and_skips_blanks_and_leading_comments(tmp_path):
+    src = tmp_path / "replay.jsonl"
+    src.write_text(
+        "# a comment line, which is not a write\n"
+        "\n"
+        '{"entity": "B", "category": "state", "fact": "second"}\n'
+        '   \n'
+        '{"entity": "A", "category": "state", "fact": "first"}\n',
+        encoding="utf-8")
+    assert snap.load_replay_list(src) == [
+        ("B", "state", "second"), ("A", "state", "first")]
+
+
+def test_a_replay_list_keeps_an_inline_hash_because_an_entity_is_named_one(tmp_path):
+    """`#` mid-line is content: the corpus has an entity named `GitHub issue #38606`.
+
+    A rule that stripped from any `#` would truncate that entity to `GitHub issue `
+    and then refuse the file it no longer asked for — a builder that silently
+    dropped a write is the thing that makes a pair quietly stop differing.
+    """
+    src = tmp_path / "replay.jsonl"
+    src.write_text('{"entity": "GitHub issue #38606", "category": "state",'
+                   ' "fact": "the entity name contains a hash"}\n', encoding="utf-8")
+    assert snap.load_replay_list(src) == [
+        ("GitHub issue #38606", "state", "the entity name contains a hash")]
+
+
+def test_a_replay_list_row_missing_a_key_names_the_line_that_is_wrong(tmp_path):
+    src = tmp_path / "replay.jsonl"
+    src.write_text('{"entity": "A", "category": "state", "fact": "ok"}\n'
+                   '{"entity": "A", "category": "state"}\n', encoding="utf-8")
+    with pytest.raises(snap.SnapshotRefused) as exc:
+        snap.load_replay_list(src)
+    assert ":2" in str(exc.value) and "fact" in str(exc.value)
+
+
+def _seed_entity(root: Path, entity: str, category: str, texts: list[str]) -> Path:
+    """One entity's category file in the `<corpus>/facts` layout, by the real writer."""
+    entries = [{"fact": t, "confidence": 0.9, "category": category, "id": None,
+                "created_at": NOW, "valid_at": None, "invalid_at": None,
+                "expired_at": None, "provenance": "STATED", "source_doc": None}
+               for t in texts]
+    snap.assign_ids(entries, category)
+    path = snap.fact_file(root, entity, category)
+    snap._write_list(path, entity, category, entries, NOW)
+    return root
+
+
+WITNESS_PRIOR = ("Hornet.dev presented on the effectiveness of BM25 for agentic "
+                "search.")
+WITNESS_WRITE = ("Hornet.dev presented on the effectiveness of BM25 for agentic "
+                 "search, per the 2026-10-14 sync that replaces the earlier "
+                 "reading on record")
+
+
+def test_a_targeted_replay_reaches_both_legs_and_only_the_on_leg_applies_it(
+        tmp_path, supersede):
+    """One replayed write, both legs see it, only `on` stamps the prior.
+
+    The `noop` leg is not a leg that skipped the write: it decided the same
+    verdict and was forbidden to apply it, which is what production `noop` means.
+    That is the whole content of the measurement — the pair differs by the
+    retirement and by nothing else — so both legs' fact sets are asserted to carry
+    the same texts before anything is allowed to differ, which a differential
+    alone would not catch: it would also be non-empty if the legs had run
+    different write sequences.
+    """
+    seed = _seed_entity(tmp_path / "seed" / "facts", "Hornet.dev", "event",
+                        [WITNESS_PRIOR])
+    out = tmp_path / "pair"
+    manifest = snap.build(out, seed=seed, now_iso=NOW,
+                          replay=[("Hornet.dev", "event", WITNESS_WRITE)])
+    assert manifest["writes_seen"]["noop"] == manifest["writes_seen"]["on"]
+    assert manifest["writes_applied"]["noop"] == 0, (
+        "the noop leg applied an UPDATE: it is no longer the arm production runs")
+    for mode in ("noop", "on"):
+        replayed = [w for w in manifest["writes"][mode] if w["origin"] == "replay"]
+        assert len(replayed) == 1, "the replayed write reached only one leg"
+        assert replayed[0]["verdict"] == "update", replayed[0]
+        assert replayed[0]["took"] == ("add" if mode == "noop" else "update")
+    hornet = {k for k in manifest["differential"]["expired_only_in_on"]
+              if k.startswith("Hornet.dev/")}
+    assert hornet == {"Hornet.dev/Hornet.dev-event.md::evnt-001"}
+    assert manifest["differential"]["expired_only_in_noop"] == []
+    noop_facts, on_facts = _facts_of(out / "noop"), _facts_of(out / "on")
+    assert {txt for txt, _ in noop_facts.values()} \
+        == {txt for txt, _ in on_facts.values()}, (
+        "the legs hold different fact texts, so the pair is not paired")
+    assert noop_facts["Hornet.dev/Hornet.dev-event.md::evnt-001"][1] is None
+    assert on_facts["Hornet.dev/Hornet.dev-event.md::evnt-001"][1] == NOW
+
+
+def test_the_b_pair_is_built_from_a_replay_list_the_builder_reads(tmp_path):
+    """The CLI's `--replay-from` is wired: the manifest names the file and its rows.
+
+    Without this the measurement note's pair could have been built by anything —
+    the manifest is what a reader re-checks the input against.
+    """
+    seed = _seed_entity(tmp_path / "seed" / "facts", "Relay", "state",
+                        ["Relay's cap is 40 units."])
+    src = tmp_path / "replay.jsonl"
+    src.write_text('{"entity": "Relay", "category": "state",'
+                   ' "fact": "Relay\'s cap is 40 units, per the 2026-10-14 sync."}\n',
+                   encoding="utf-8")
+    out = tmp_path / "pair"
+    assert snap.main(["--out", str(out), "--seed-from", str(seed),
+                      "--replay-from", str(src)]) == 0
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["replay_from"] == str(src.resolve())
+    assert manifest["replay"] == [
+        {"entity": "Relay", "category": "state",
+         "fact": "Relay's cap is 40 units, per the 2026-10-14 sync."}]
+
+
+def test_a_replay_list_under_the_live_root_is_refused_like_every_other_input(tmp_path):
+    src = production_data_root() / "replay-list.jsonl"
+    assert src.is_relative_to(production_data_root())
+    with pytest.raises(snap.SnapshotRefused) as exc:
+        snap.load_replay_list(src)
+    assert str(production_data_root()) in str(exc.value)
+
+
+def _dump_rows(path: Path) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        if "_header" in row:
+            continue
+        out[row["id"]] = row["facts_rel"]
+    return out
+
+
+def test_the_committed_block_dumps_differ_for_the_witness_question():
+    """The measurement's whole claim, checkable without re-running the model.
+
+    #2768 was filed because the previous pair's delta could not be read either
+    way: no artifact showed what each leg rendered, so a 0.000 was equally a
+    finding about the gate and a finding about the fixture. These two files are
+    the per-question `<facts>` block lines of the two legs, committed as JSONL
+    (a `.json` would be swallowed by `.gitignore`), and they differ on the
+    witness: the `noop` leg renders the prior the `on` leg has retired.
+    """
+    assert BLOCKS_NOOP.is_file() and BLOCKS_ON.is_file(), (
+        f"{BLOCKS_NOOP} and {BLOCKS_ON} are the committed renderings of each leg's "
+        f"`<facts>` block; without them the paired delta has no witness")
+    noop, on = _dump_rows(BLOCKS_NOOP), _dump_rows(BLOCKS_ON)
+    assert WITNESS in noop and WITNESS in on, (
+        f"{WITNESS} is the witness `knowledge_update` question (entity Hornet.dev)")
+    assert noop[WITNESS] != on[WITNESS], (
+        "the two legs render the same block for the witness, so the delta measures "
+        "the instrument and not the gate")
+    hornet = [ln for ln in noop[WITNESS] if "Hornet.dev" in ln]
+    assert hornet and hornet != [ln for ln in on[WITNESS] if "Hornet.dev" in ln], (
+        "the differing lines are not the witness entity's, so the block that "
+        "changed belongs to some other entity")
+
+
+def test_the_committed_block_dumps_name_the_arm_and_the_tree_each_came_from():
+    """Each dump's header says which leg it is, from which store, in which order.
+
+    The #2778 rail is the reason the arm matters: production ships
+    `prefetch.facts.rank: relevance`, and a witness read off the confidence arm
+    would not be a witness about the ordering anyone runs.
+    """
+    for path in (BLOCKS_NOOP, BLOCKS_ON):
+        head = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        assert head["arms"] == ["prefetch_rel"], head["arms"]
+        assert head["fact_snapshot"].endswith(("/noop", "/on")), head["fact_snapshot"]
+        assert head["facts_rank"]["configured"] == "relevance", head["facts_rank"]
+        assert head["facts_rank"]["arm_ordering"] == {"prefetch_rel": "relevance"}
+
+
+def test_the_committed_witness_rows_show_which_prior_the_gate_retired():
+    """The mechanism behind the block diff, per leg, without opening a snapshot tree.
+
+    `Hornet.dev/Hornet.dev-state.md::stat-002` is the prior whose line the witness
+    question renders: active in the `noop` leg, `expired_at`-stamped in the `on`
+    leg. The line in the clause that names this witness originally pointed at
+    `Hornet.dev-event.md::evnt-001`, and the measured ledger says that write was
+    NOT an UPDATE (`target_fact: null`, `took: "add"` in both legs), so the id is
+    pinned to what the ledger actually shows rather than to the triage note.
+    """
+    def facts(mode: str) -> dict[str, dict]:
+        path = REPLAY_DOC / f"witness-entity-facts-{mode}.jsonl"
+        return {f"{json.loads(l)['file']}::{json.loads(l)['id']}": json.loads(l)
+                for l in path.read_text(encoding="utf-8").splitlines()}
+    noop, on = facts("noop"), facts("on")
+    prior = "Hornet.dev/Hornet.dev-state.md::stat-002"
+    assert noop[prior]["expired_at"] is None, (
+        "the noop leg must keep the prior active: that is what production `noop` is")
+    assert on[prior]["expired_at"], "the on leg must stamp the prior expired"
+    assert noop[prior]["fact"] == on[prior]["fact"], (
+        "the legs hold different texts for the prior, so the pair is not paired")
+    assert any("evnt-001" in k for k in noop), "the event file's rows are committed too"
