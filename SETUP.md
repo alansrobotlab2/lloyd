@@ -1445,7 +1445,7 @@ missed by sleeping, which on a weekly timer can now be up to a week late.
 ### The egress-arms window
 
 ```bash
-systemctl --user enable --now lloyd-egress-window.timer   # 1 rep x 18 scenarios x 2 arms, daily 06:23
+systemctl --user enable --now lloyd-egress-window.timer   # 1 rep x 18 scenarios x 2 arms, Mondays 06:23
 ```
 
 `lloyd-egress-window.service` is tracked beside it and `install-services.sh` links it
@@ -1470,6 +1470,13 @@ claim its hour avoids an automod round — rounds are resident 67.2% of the time
 in all 24 hours — it waits that out with an explicit one-hour drain instead, and the hour
 only keeps its engine work out of the way of the 02:10 window and the 04:00-06:00
 scheduled jobs.
+
+#2770 put this timer on Mondays, the cadence #2754 had given the persistence window, so
+both windows now fire Monday morning: the unit's ceiling arithmetic — 02:10 + 4 h = 06:10
+latest engine hold, 06:23 starting 13 minutes past it — is what makes them consecutive
+rather than overlapping, and the other six days carry neither. The hour, the drain and the
+arms are unchanged; `Persistent=true` still catches a fire the box missed by sleeping,
+which on a weekly timer can now be up to a week late.
 
 ---
 

@@ -1,8 +1,9 @@
 [Unit]
-Description=Daily timer for the egress two-arm canary window
+Description=Weekly (Monday) timer for the egress two-arm canary window (#2555; bounded by #2770)
 # WHEN IT FIRES, AND WHAT IT DELIBERATELY DOES NOT AVOID.
 #
-# 06:23 local (13:23 UTC). Two numbers, both read off the other units in this directory —
+# Weekly, Mondays at 06:23 local (13:23 UTC). Two numbers, both read off the other units in
+# this directory —
 # which is the only time table this box has, because the autonomy jobs declare symbolic
 # frequencies (`frequency: daily` x28, `weekly` x8, `every-15min`, `6x-daily`, and 4 files
 # with none, across the 42 `~/obsidian/autonomy/*.md` measured 2026-10-11) and carry no cron
@@ -13,15 +14,16 @@ Description=Daily timer for the egress two-arm canary window
 # stale `workers/queue.py:1103-1111` citation did.
 #
 # THE HOUR — after every scheduled thing this directory names, and clear of the OTHER
-# measurement window even at its own ceiling. The daily calendars here fire at 02:10
-# (persistence), 04:17 (cert-renew) and 04:45 (qmd-cleanup), and SETUP.md puts the named
+# measurement window even at its own ceiling. The two calendars here that still fire every
+# day do so at 04:17 (cert-renew) and 04:45 (qmd-cleanup), and SETUP.md puts the named
 # autonomy jobs at 04:00 health report, 05:00 qmd index maintenance, 05:30 graph backup and
-# 06:00 retrieval eval; 06:23 sits behind all of them. `lloyd-persistence-window.timer` fires
-# at 02:10 and its service bounds the run with `TimeoutStartSec=4h`, so the latest that
-# window can still be holding the engine is 06:10: starting 13 minutes past that ceiling is
-# what keeps the two windows' engine work from overlapping, and that is arithmetic rather
-# than a guess. The remaining timers are hourly at :00 (data-snapshot), every 15 minutes
-# (vault-backup, and `lloyd-guardian-nag.timer` from boot), so none lands on :23 either.
+# 06:00 retrieval eval; 06:23 sits behind all of them. `lloyd-persistence-window.timer`
+# fires at 02:10 on Mondays (#2754) and its service bounds the run with `TimeoutStartSec=4h`,
+# so 02:10 + 4 h puts the latest that window can still be holding the engine at 06:10:
+# starting 13 minutes past that ceiling is what keeps the two windows' engine work from
+# overlapping, and that is arithmetic rather than a guess. The remaining timers are hourly
+# at :00 (data-snapshot), every 15 minutes (vault-backup, and `lloyd-guardian-nag.timer`
+# from boot), so none lands on :23 either.
 #
 # THE MINUTES — :23 is a minute no repo timer fires on, and `RandomizedDelaySec` below can
 # add at most 300 s to it, so the real start stays inside :23–:28, the same quarter-hour as
@@ -42,7 +44,20 @@ Description=Daily timer for the egress two-arm canary window
 # there is nothing excluding it).
 
 [Timer]
-OnCalendar=*-*-* 06:23:00
+# Weekly Mondays — the cadence #2754 gave `lloyd-persistence-window.timer`
+# (`Mon *-*-* 02:10:00`) and #2770 extends here: precedent, not a new measurement, and
+# cadence is all that moves. Both windows now fire on the same weekday, so the
+# 02:10 + 4 h = 06:10 latest-hold arithmetic above is what makes Monday's two windows
+# consecutive rather than concurrent: this one starts 13 minutes past the sibling's
+# ceiling, and the 300 s jitter below keeps the real start inside :23–:28. The other
+# six days carry neither window.
+# The `Mon` is the cadence and the date field stays deliberately wild: `*-*-1 06:23:00`
+# reads like a weekly spec but puts the `1` in the day-of-MONTH field, and systemd
+# normalizes it to `*-*-01` — firing on the 1st of each month, twelve times a year of a
+# window that means fifty-two. Asserted against systemd's own parser by
+# tests/test_egress_window_unit.py::
+# test_systemd_itself_reads_the_cadence_as_weekly_not_monthly.
+OnCalendar=Mon *-*-* 06:23:00
 # One rep x the 18 shipped scenarios x both arms is the sample the per-arm pair is published
 # from; more is hours of the primary held by a canary.
 Persistent=true

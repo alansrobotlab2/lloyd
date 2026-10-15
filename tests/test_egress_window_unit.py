@@ -24,8 +24,9 @@ root that keeps the ON arm's deny rows readable after the post-run leak check, t
 that keeps systemd from SIGTERMing it mid-drain, and the arming route that stops it
 shipping linked-but-unarmed the way its sibling did (#2537).
 
-Three nodes here assert against the unit files' own COMMENTS, not only their settings — the
-move `tests/test_persistence_window_unit.py` makes at its timeout and timer nodes. This
+Four nodes here assert against the unit files' own COMMENTS, and a fifth against the cadence
+prose in SETUP.md and `architecture/infrastructure.md` — the move
+`tests/test_persistence_window_unit.py` makes at its timeout and timer nodes. This
 unit's numbers are its whole argument (a 5 h timeout, a 3,600 s drain, a 06:23 hour), and a
 setting whose comment no longer justifies it is exactly the drift that left the precedent
 unsupportable: `lloyd-persistence-window.service` still cites `workers/queue.py:1103-1111`,
@@ -62,6 +63,7 @@ SCENARIOS = REPO / "eval" / "injection_canary" / "scenarios.yaml"
 QUEUE = REPO / "workers" / "queue.py"
 ARMS_PY = REPO / "eval" / "persistence_arms.py"
 CANARY = REPO / "eval" / "run_injection_canary.py"
+INFRA = REPO / "architecture" / "infrastructure.md"
 
 # The window's own numbers, restated here so a test fails when the unit and its prose
 # disagree — that disagreement is the drift this file exists to catch.
@@ -346,39 +348,101 @@ def test_the_timeout_outlives_the_drain_plus_the_engine_work_and_states_the_sum(
 
 # ── clause 4: the timer ───────────────────────────────────────────────────────────────
 
-def test_the_timer_fires_once_a_day_with_catchup_and_bounded_jitter():
-    """#2555 clause 4(a): `OnCalendar=`, `Persistent=true`, `RandomizedDelaySec=`.
+def test_the_timer_fires_once_a_week_on_monday_with_catchup_and_bounded_jitter():
+    """#2770 clause 1(a)/2, replacing the node that asserted
+    `re.fullmatch(r"\\*-\\*\\* \\d{2}:\\d{2}:00", cal)` and so refused a weekday prefix by
+    construction. That node did its job — it is the same shape #2754 had to replace on the
+    sibling (`test_the_timer_fires_once_a_week_on_monday_and_catches_up` is that rewrite) —
+    and the daily form it enforced is what #2770 bounds for this window.
 
-    Once a day: one rep x 18 scenarios x 2 arms is the sample the rate pair is published
-    from, and the primary is the scarce resource. `Persistent=true` catches a missed slot;
-    the jitter keeps 36 episodes off the same contention pattern every night, bounded so
-    the real start stays inside the same quarter-hour the comment reasons about.
+    The weekly spec goes in the day-of-week field: `Mon *-*-* 06:23:00`. The trap spelling
+    is `*-*-1 06:23:00` — the `1` sits in the day-of-MONTH field, systemd normalizes it to
+    `*-*-01`, and a window that means Mondays gets the 1st of each month.
+    `test_systemd_itself_reads_the_cadence_as_weekly_not_monthly` asks systemd to confirm
+    both readings; the fullmatch here is what stops a regression from re-introducing the
+    trap or the daily form.
+
+    What #2770 does NOT change — cadence only, clause 2: `Persistent=true` (it matters more
+    at one slot a week, not less: a suspend across Monday now costs the week's window
+    rather than the night's), `RandomizedDelaySec=300` (the jitter every latest-start
+    figure in this unit's comment is computed from), and `[Install] WantedBy=timers.target`
+    — the arming route the enabledness check reads.
     """
-    d = dict(_parse(TIMER.read_text(encoding="utf-8"))["Timer"])
+    text = TIMER.read_text(encoding="utf-8")
+    lines = [l.strip() for l in text.splitlines()
+             if l.strip().startswith("OnCalendar=")]
+    assert len(lines) == 1, f"this window gets exactly one slot: {lines}"
+    d = dict(_parse(text)["Timer"])
     cal = d["OnCalendar"]
-    assert re.fullmatch(r"\*-\*-\* \d{2}:\d{2}:00", cal), cal
+    assert re.fullmatch(r"Mon \*-\*-\* \d{2}:\d{2}:\d{2}", cal), \
+        f"weekly in the day-of-week field with the date field left wild: {cal!r}"
     assert d["Persistent"] == "true"
     assert _secs(d["RandomizedDelaySec"]) <= 300, d["RandomizedDelaySec"]
-    assert dict(_parse(TIMER.read_text(encoding="utf-8"))["Install"]).get("WantedBy") \
-        == "timers.target"
+    assert dict(_parse(text)["Install"]).get("WantedBy") == "timers.target"
+
+
+def test_systemd_itself_reads_the_cadence_as_weekly_not_monthly():
+    """#2770 clause 1(b): the grammar is systemd's, so the claim that separates the shipped
+    spec from the monthly trap is asked of systemd — the way the sibling's identically
+    named node asks it for 02:10.
+
+    `systemd-analyze calendar` is a pure parser: it normalizes an expression and prints
+    when it would next elapse, touching no manager and no unit state. Three readings, all
+    asserted:
+
+      * the unit's own value normalizes to itself, the `Mon` token intact;
+      * `*-*-1 06:23:00` normalizes to `*-*-01 06:23:00`, a day-of-MONTH spec — twelve
+        fires a year, on the 1st, of a window that means fifty-two Mondays;
+      * the `Next elapse:` line for the shipped spec names a Monday. Unlike the date or
+        the delta on that line — functions of the wall clock, which the sibling node
+        refuses for exactly that reason — the weekday is a deterministic property of a
+        weekday-scoped spec: the next Monday is always a Monday. That is clause 1's
+        7-day interval, read from systemd rather than asserted against my arithmetic.
+    """
+    def analyzed(expr: str) -> dict[str, str]:
+        proc = subprocess.run(["systemd-analyze", "calendar", expr],
+                              capture_output=True, text=True, timeout=30, check=True)
+        out: dict[str, str] = {}
+        for line in proc.stdout.splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                out[k.strip()] = v.strip()
+        return out
+
+    cal = dict(_parse(TIMER.read_text(encoding="utf-8"))["Timer"])["OnCalendar"]
+    got = analyzed(cal)
+    assert got["Normalized form"] == cal == "Mon *-*-* 06:23:00", \
+        f"systemd reads the shipped cadence as something other than a Monday: {cal!r}"
+    assert analyzed("*-*-1 06:23:00")["Normalized form"] == "*-*-01 06:23:00", \
+        "the day-of-month form is monthly, and if systemd ever stops saying so this " \
+        "node's reasoning needs re-deriving, not just its expected string"
+    assert got["Next elapse"].split()[0] == "Mon", \
+        f"a Monday-scoped spec must next elapse on a Monday: {got['Next elapse']!r}"
 
 
 def test_the_timer_hour_is_after_every_named_fire_and_clear_of_the_sibling_ceiling():
-    """#2555 clause 4(b): the hour justified against the other repo timers, read from their files.
+    """#2555 clause 4(b), #2770 clause 3: the hour justified against the other repo timers,
+    read from their files, and both calendars parsed position-independently.
 
-    `06:23` is later than every other daily calendar in `agent-services/systemd/` (02:10
-    persistence, 04:17 cert-renew, 04:45 qmd-cleanup) and clears the persistence window's
-    own stated ceiling: that unit bounds its run with `TimeoutStartSec=4h` from a 02:10
-    start, so 06:10 is the latest it can still hold the engine, and this window starts 13
-    minutes past that. The minute is one no repo timer fires on, and the jitter ceiling
-    (600 s) keeps it inside the same quarter-hour.
+    `06:23` is later than every other all-wildcard-date (daily) calendar in
+    `agent-services/systemd/` — since #2754 took the persistence window weekly and #2770
+    takes this one the same way, that set is cert-renew 04:17 and qmd-cleanup 04:45 — and
+    it clears the persistence window's own stated ceiling: the sibling's fire time and its
+    `TimeoutStartSec=4h` are re-read from the sibling's two files here, so 06:10 is the
+    latest that window can still hold the engine and this one starts 13 minutes past that.
+    Both windows are Monday-scoped now, so the comparison is a time-of-day statement, and
+    what the cadence change made true is that Monday's two windows are consecutive rather
+    than concurrent.
 
-    Derived from the unit files rather than transcribed, because a comment that reads a
-    sibling's fire time and ceiling out of the sibling is a comment that stays true when the
-    sibling moves — and this directory's fire times have moved before.
+    Position-independently (`[-1]`, not `[1]`): systemd's grammar puts the day-of-week
+    FIRST, so with a weekday prefix index 1 is the date field `*-*-*` and `int("*")` raises
+    ValueError. #2754 hit exactly that in this node's sibling read; #2770 would hit it in
+    the self read the moment this unit gained its prefix — an error naming neither field.
+    Nothing here transcribes an hour or a ceiling: the sibling's figures arrive by
+    re-reading the sibling, and this unit's arrive by re-reading this unit.
     """
     d = dict(_parse(TIMER.read_text(encoding="utf-8"))["Timer"])
-    hh, mm = [int(x) for x in d["OnCalendar"].split()[1].split(":")[:2]]
+    hh, mm = [int(x) for x in d["OnCalendar"].split()[-1].split(":")[:2]]
 
     others = {}
     for t in sorted(UNIT_DIR.glob("*.timer")):
@@ -420,6 +484,94 @@ def test_the_timer_hour_is_after_every_named_fire_and_clear_of_the_sibling_ceili
     jitter = _secs(d["RandomizedDelaySec"])
     assert hh * 60 + mm + jitter // 60 < hh * 60 + 30, \
         "the jitter must keep the real start inside the same quarter-hour the comment names"
+
+
+def test_the_timer_comment_states_the_weekly_cadence_the_precedent_and_the_margin():
+    """#2770 clause 4: the comment says what the timer now does, names the precedent, and
+    keeps the sibling arithmetic that justifies the hour.
+
+    The old paragraph listed the persistence window among "the daily calendars here" —
+    a sentence `dfeec1e6` (#2754) had already falsified for the sibling — and never named
+    a cadence for this unit at all. Three pins:
+
+      * the cadence in prose: weekly, on Mondays, not only in the `OnCalendar=` line;
+      * the precedent by number: #2754 is why Mondays, and the comment must say so;
+      * the margin as arithmetic: the sibling's fire time and ceiling are re-read from
+        the sibling's files here, and the comment must state the sum — the latest minute
+        the sibling's engine work can still run (06:10 from 02:10 + 4 h) — and how many
+        minutes past it this window starts. The figures are DERIVED here and matched
+        against the comment, so a comment that transcribes them will rot when the
+        sibling moves, which is clause 3's discipline applied to prose.
+    """
+    c = _comments(TIMER)
+    assert re.search(r"(?i)weekly", c), "the comment never names the cadence"
+    assert re.search(r"(?i)monday", c), "the comment never names the weekday it fires on"
+    assert "#2754" in c, "the comment must name the precedent that made the sibling weekly"
+
+    sh, sm = [int(x) for x in dict(_parse(SIBLING_TIMER.read_text(encoding="utf-8"))["Timer"])
+              ["OnCalendar"].split()[-1].split(":")[:2]]
+    sib_to = _secs(dict(_parse(SIBLING_SERVICE.read_text(encoding="utf-8"))["Service"])
+                   ["TimeoutStartSec"])
+    end = sh * 60 + sm + sib_to // 60
+    latest = f"{end // 60:02d}:{end % 60:02d}"
+    hh, mm = [int(x) for x in dict(_parse(TIMER.read_text(encoding="utf-8"))["Timer"])
+              ["OnCalendar"].split()[-1].split(":")[:2]]
+    past = hh * 60 + mm - end
+    assert re.search(re.escape(latest), c), \
+        f"the comment must state the latest minute the sibling's ceiling can run ({latest})"
+    assert f"{past} minutes" in c, \
+        f"the comment must state how far past that ceiling this window starts ({past} minutes)"
+    assert re.search(r":23\s*\u2013\s*:28|:23\s*-\s*:28", c), \
+        "the comment must bound the real start by the jitter it ships (:23–:28)"
+
+    sib_fire = f"{sh:02d}:{sm:02d}"
+    for line in c.splitlines():
+        if "daily" in line.lower():
+            assert ("persistence" not in line.lower() and sib_fire not in line), (
+                f"the comment lists the sibling's {sib_fire} among daily calendars again, "
+                f"the sentence #2754 had already falsified: {line.strip()!r}")
+
+
+def test_no_surface_calls_this_window_a_daily_fire_anymore():
+    """#2770 clause 5: every sentence that called this window a daily fire is updated, and
+    the enable route survives the rewrite verbatim.
+
+    Four surfaces describe this timer's cadence: the unit's `Description=`, the `[Timer]`
+    block itself (pinned by the nodes above), SETUP.md's enable route, and the
+    infrastructure unit table. The first two are graded from the unit file; the last two
+    are read from the tree here. `test_setup_md_carries_the_enable_route_verbatim` pins
+    the command string, so a rewrite that fixed the command's COMMENT to say "daily" while
+    the unit fired Mondays would still pass it — the exact gap the sibling's #2754 closed
+    by re-pinning its own enable route with its cadence comment, mirrored here.
+    """
+    desc = dict(_parse(TIMER.read_text(encoding="utf-8"))["Unit"])["Description"]
+    assert "daily" not in desc.lower(), f"the Description still names a cadence: {desc!r}"
+    assert re.search(r"(?i)weekly|monday", desc), \
+        f"the Description must name the cadence the timer now has: {desc!r}"
+
+    text = SETUP.read_text(encoding="utf-8")
+    m = re.search(r"systemctl --user enable --now lloyd-egress-window\.timer"
+                  r"[ \t]+#[ \t]*([^\n]*)", text)
+    assert m, "the enable route must stay in SETUP.md verbatim through the rewrite"
+    assert not re.search(r"(?i)\bdaily\b", m.group(1)), \
+        f"the enable route's comment still claims a daily cadence: {m.group(1)!r}"
+    assert re.search(r"(?i)monday|weekly", m.group(1)), \
+        f"the enable route's comment must carry the shipped cadence: {m.group(1)!r}"
+    body = text.split("### The egress-arms window", 1)[1]
+    body = body.split("\n### ")[0].split("\n## ")[0]
+    for line in body.splitlines():
+        assert "daily" not in line.lower(), \
+            f"SETUP.md claims a daily cadence for this window: {line.strip()!r}"
+    assert re.search(r"(?i)weekly|monday", body), \
+        "SETUP.md's egress section must say the cadence the unit now has"
+
+    row = next((l for l in INFRA.read_text(encoding="utf-8").splitlines()
+                if l.lstrip().startswith("|") and "lloyd-egress-window.timer" in l), None)
+    assert row is not None, "the infrastructure unit table lost this timer's row"
+    assert not re.search(r"(?i)\bdaily\b", row), \
+        f"the infrastructure row still claims a daily fire: {row.strip()!r}"
+    assert re.search(r"(?i)weekly|monday", row), \
+        f"the infrastructure row must read weekly: {row.strip()!r}"
 
 
 def test_the_timer_names_the_live_pool_query_and_refuses_to_claim_the_hour_avoids_rounds():
