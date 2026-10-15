@@ -77,10 +77,23 @@ class FakeEngine:
     `metrics` is mutable and read per request, so a node can move a counter between a
     level's before-snapshot and its after-snapshot, or hold `num_requests_running`
     above the level the sweep launched to stand in for traffic from somewhere else.
+
+    Two knobs the #2786 clauses drive:
+
+    * `prefix={"queries": q, "hits": h, "d_queries": dq, "d_hits": dh}` serves the two
+      `vllm:prefix_cache_*` counters at the given lifetimes and moves them by the given
+      amount on every completed chat request. It is OPT-IN: the default fixture is an
+      engine that publishes NEITHER counter, which is the state a level row has to
+      report as `null` rather than as zero reuse. `d_queries: 0` is the other case that
+      matters — a level with no queries to divide by must publish the pair and no ratio.
+    * `tokenize_count=N` answers `/tokenize` with `{"count": N}` (the route
+      `bench-admission-stall.py:107` posts to) and records the bodies in
+      `tokenize_calls`; `None` is an engine with no such route, which is a refusal.
     """
 
     def __init__(self, ids=SERVED, metrics=None, status=None, tokens=8,
-                 token_delay=0.002, preemption_step=1.0):
+                 token_delay=0.002, preemption_step=1.0, prefix=None,
+                 tokenize_count=4212):
         self.ids = list(ids)
         self.metrics = dict({
             "vllm:kv_cache_usage_perc": 0.42,
@@ -96,6 +109,12 @@ class FakeEngine:
         self.tokens = tokens
         self.token_delay = token_delay
         self.preemption_step = preemption_step
+        self.prefix = prefix
+        if prefix:
+            self.metrics.setdefault(bc.PREFIX_QUERIES, float(prefix["queries"]))
+            self.metrics.setdefault(bc.PREFIX_HITS, float(prefix["hits"]))
+        self.tokenize_count = tokenize_count
+        self.tokenize_calls: list[dict] = []
         self.chat_requests: list[dict] = []
         self.lock = threading.Lock()
 
@@ -145,6 +164,15 @@ class FakeEngine:
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", "0"))
                 body = json.loads(self.rfile.read(length) or b"{}")
+                if self.path == "/tokenize":
+                    with eng.lock:
+                        eng.tokenize_calls.append(body)
+                    if eng.tokenize_count is None:
+                        self._send(404, json.dumps({"error": self.path}))
+                    else:
+                        self._send(200, json.dumps({"count": eng.tokenize_count,
+                                                    "tokens": []}))
+                    return
                 if self.path != "/v1/chat/completions":
                     self._send(404, json.dumps({"error": self.path}))
                     return
@@ -157,6 +185,9 @@ class FakeEngine:
                     })
                     eng.metrics["vllm:num_preemptions_total"] = (
                         eng.metrics["vllm:num_preemptions_total"] + eng.preemption_step)
+                    if eng.prefix:
+                        eng.metrics[bc.PREFIX_QUERIES] += eng.prefix["d_queries"]
+                        eng.metrics[bc.PREFIX_HITS] += eng.prefix["d_hits"]
 
                 def send(chunk):
                     self.wfile.write(chunk.encode())
@@ -516,3 +547,247 @@ def test_the_spec_decode_pair_is_the_two_counters_the_doc_claims_are_running(tmp
     with fake_engine(tmp_path, metrics={bc.SPEC_DRAFTED: 0.0}) as eng:
         assert bc.spec_decode_counts(eng.base_url)["accepted_over_drafted"] is None, (
             "a zero denominator must not divide")
+
+
+# ── #2786 clause 1: prefix-cache reuse is measured per level, or reported as null ──
+
+def test_every_level_row_carries_the_prefix_cache_pair_delta_or_null(tmp_path):
+    """Clause 1: the row carries the delta of `vllm:prefix_cache_queries_total` and
+    `vllm:prefix_cache_hits_total` across that level, beside the four existing engine
+    counters — and `null`, never `0`, on an engine that serves neither.
+
+    Before this the file ASSERTED reuse was limited to a level's own repeats (docstring
+    `:68-77`) while never reading the two counters that would show it, so the claim was
+    unfalsifiable. The fixture moves each counter by a known amount per completed
+    request, so the delta is recomputed from the request log beside the row rather than
+    trusted. The unserved case is the load-bearing one: a level recorded as
+    "0 queries" reads as zero reuse, and what it means is that the engine gave no
+    evidence at all.
+    """
+    prefix = {"queries": 5000.0, "hits": 500.0, "d_queries": 130.0, "d_hits": 104.0}
+    with fake_engine(tmp_path, prefix=prefix) as eng:
+        doc = bc.sweep(eng.base_url, [2], 1, 16, "primary", "primary",
+                       bc.engine_config(eng.base_url, eng.proc_root), eng.status_url,
+                       "drained", monitor_interval=0.05, warmup=False)
+    lvl = doc["levels"][0]
+    n_requests = len(eng.chat_requests)
+    assert n_requests == 2, eng.chat_requests
+    pc = lvl["prefix_cache_during"]
+    assert pc["queries_delta"] == prefix["d_queries"] * n_requests, (pc, n_requests)
+    assert pc["hits_delta"] == prefix["d_hits"] * n_requests, (pc, n_requests)
+    assert lvl["engine_before"]["prefix_cache_queries_total"] == 5000.0, lvl
+    assert lvl["engine_after"]["prefix_cache_queries_total"] == 5000.0 + 260.0, lvl
+    assert lvl["engine_before"]["prefix_cache_hits_total"] == 500.0, lvl
+    # Beside the four, in the same row — not in a separate report a reader has to join.
+    for key in ("kv_cache_usage", "num_requests_running", "num_requests_waiting",
+                "preemptions_total"):
+        assert key in lvl["engine_after"], lvl["engine_after"]
+
+    with fake_engine(tmp_path) as eng:                 # default: neither counter served
+        doc = bc.sweep(eng.base_url, [1], 1, 16, "primary", "primary",
+                       bc.engine_config(eng.base_url, eng.proc_root), eng.status_url,
+                       "drained", monitor_interval=0.05, warmup=False)
+    pc = doc["levels"][0]["prefix_cache_during"]
+    assert pc["queries_delta"] is None, pc
+    assert pc["hits_delta"] is None, pc
+    assert "hit_rate" not in pc, "a ratio cannot be divided out of nothing"
+    assert doc["levels"][0]["engine_before"]["prefix_cache_queries_total"] is None
+    assert bc.prefix_delta({}, {}) == {"queries_delta": None,
+                                       "hits_delta": None}, bc.prefix_delta({}, {})
+
+
+# ── #2786 clause 2: one captured long prompt, one pass per level ─────────────────
+
+#: Something recognisably not one of the eight built-in prompts, so a row that sent the
+#: wrong thing cannot pass by accident.
+LONG_PROMPT = "REPLAYED LLOYD TURN >>> " + "summarise the vault and file the finding. " * 40
+
+
+def _prompt_file(tmp_path, text=LONG_PROMPT, name="captured-turn.txt") -> Path:
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_a_long_prompt_file_run_sends_that_prompt_once_per_level(tmp_path):
+    """Clause 2: `--long-prompt-file PATH` puts the file's bytes on every request and
+    runs each requested level EXACTLY ONCE whatever `--repeats` says, labelling every
+    row it produces `shape: long_prefill`; a run without the flag labels `shape: short`.
+
+    `--repeats 3` with `--levels 1,3` is therefore 4 chat requests, not 12: n=1 is the
+    whole reason the long rows are printed apart, and a warm-up pass would spend that
+    single pass on a warm prefill (reuse engages after one cold pass —
+    `bench-prefix-reuse.py` trap 2). The labels are what stop a long row being
+    downloaded into the short curve by whoever reads the artifact next.
+    """
+    with fake_engine(tmp_path) as eng:
+        pf = _prompt_file(tmp_path)
+        rc, out = _run_main(eng, tmp_path, "--long-prompt-file", str(pf),
+                            "--levels", "1,3", "--repeats", "3", tag="L1")
+        assert rc == 0, rc
+        doc = json.loads(_files(out)[0].read_text())
+    assert doc["shape"] == "long_prefill", doc["shape"]
+    assert doc["requested_levels"] == [1, 3], doc["requested_levels"]
+    assert doc["repeats"] == 3 and doc["repeats_per_level"] == 1, doc["repeats"]
+    assert [lvl["level"] for lvl in doc["levels"]] == [1, 3], doc["levels"]
+    for lvl in doc["levels"]:
+        assert lvl["shape"] == "long_prefill", lvl
+        assert lvl["repeats"] == 1, lvl
+    assert len(eng.chat_requests) == 4, [r["prompt"][:24] for r in eng.chat_requests]
+    assert {r["prompt"] for r in eng.chat_requests} == {LONG_PROMPT}, (
+        "the long shape must send the file verbatim on every slot of every level")
+
+    with fake_engine(tmp_path) as eng2:
+        rc2, out2 = _run_main(eng2, tmp_path, tag="L1b")
+        assert rc2 == 0, rc2
+        doc2 = json.loads(_files(out2)[0].read_text())
+    assert doc2["shape"] == "short", doc2["shape"]
+    assert all(lvl["shape"] == "short" for lvl in doc2["levels"]), doc2["levels"]
+
+
+def test_a_long_shape_artifact_names_the_prompt_file_and_its_engine_token_count(tmp_path):
+    """Clause 3: for a long-shape run `prompt_policy` names the prompt file path and
+    the prompt's token count from the engine's own tokenize route — the one
+    `bench-admission-stall.py:107` posts to (`/tokenize`: vLLM serves no
+    `/v1/tokenize`, and the sibling file is the route verified on this box) — while a
+    default run's `prompt_policy` stays the existing fixed string, character for
+    character.
+
+    `PROMPT_POLICY` is a constant, so it structurally cannot carry a path or a size;
+    the size has to be the engine's because there is no tokenizer helper anywhere in
+    this tree and chars/4 would be an invention recorded as a measurement. An engine
+    with no tokenize route is therefore a refusal that writes nothing, not a blank.
+    """
+    with fake_engine(tmp_path) as eng:
+        pf = _prompt_file(tmp_path, name="turn-42.md")
+        rc, out = _run_main(eng, tmp_path, "--long-prompt-file", str(pf), tag="L2")
+        assert rc == 0, rc
+        doc = json.loads(_files(out)[0].read_text())
+    assert str(pf) in doc["prompt_policy"], doc["prompt_policy"]
+    assert str(eng.tokenize_count) in doc["prompt_policy"], doc["prompt_policy"]
+    assert eng.tokenize_calls, "the token count was never asked of the engine"
+    assert eng.tokenize_calls[0]["prompt"] == LONG_PROMPT, eng.tokenize_calls[0]
+    assert eng.tokenize_calls[0]["model"] == SERVED[0], eng.tokenize_calls[0]
+
+    with fake_engine(tmp_path) as eng2:
+        rc2, out2 = _run_main(eng2, tmp_path, tag="L2b")
+        assert rc2 == 0, rc2
+        doc2 = json.loads(_files(out2)[0].read_text())
+    assert doc2["prompt_policy"] == bc.PROMPT_POLICY, doc2["prompt_policy"]
+    assert eng2.tokenize_calls == [], "a short run has no reason to call /tokenize"
+
+    with fake_engine(tmp_path, tokenize_count=None) as eng3:
+        pf3 = _prompt_file(tmp_path, name="turn-43.md")
+        rc3, out3 = _run_main(eng3, tmp_path, "--long-prompt-file", str(pf3), tag="L2c")
+        assert rc3 == 2, rc3
+        assert _files(out3) == [], out3
+        assert eng3.chat_requests == [], "the refusal must precede the load"
+
+    with fake_engine(tmp_path) as eng4:
+        rc4, out4 = _run_main(eng4, tmp_path, "--long-prompt-file",
+                              str(tmp_path / "no-such-turn.txt"), tag="L2d")
+        assert rc4 == 2, rc4
+        assert _files(out4) == [], out4
+        assert eng4.chat_requests == [], out4
+
+
+# ── #2786 clause 4: n=1 rows carry no spread and never sit in the knee table ──────
+
+#: The knee table's header, byte for byte as `main` has printed it since #2565. Written
+#: out here rather than imported from the script: clause 4 requires the default short
+#: table's columns to be UNCHANGED, so a edit that renames or reorders a column has to
+#: fail this node, not quietly move the expected value along with it.
+SHORT_TABLE_HEADER = (f"  {'lvl':>4}  {'agg tok/s':>10} {'spread':>7}  "
+                      f"{'ttft mean ms':>13} {'spread':>7}  {'ttft p95 ms':>12} "
+                      f"{'spread':>7}  {'preempt':>8} {'kv':>6}")
+
+
+def test_a_long_prefill_row_carries_no_spread_and_prints_in_its_own_n_equals_one_table(tmp_path,
+                                                                                       capsys):
+    """Clause 4: a long-shape row carries NO numeric `{key}_spread` value and prints in
+    a separate table that states `n=1`, while the default short table's columns and
+    rows are unchanged.
+
+    The hazard was live in code before this: `aggregate_level` wrote `{key}_spread` for
+    ANY non-empty run list, so a single run yielded `0.0` and the print loop emitted the
+    column unconditionally — a long row bolted onto the old path would have published
+    "variance zero" for a level whose variance was never measured. Absence of the key is
+    the fix, so the assertion is `not in`, and the long table's own header carries the
+    n=1 that explains why nothing is there. The short table is pinned by its exact
+    header line so "unchanged" is checkable rather than intended.
+    """
+    with fake_engine(tmp_path) as eng:
+        pf = _prompt_file(tmp_path, name="turn-44.txt")
+        rc, out = _run_main(eng, tmp_path, "--long-prompt-file", str(pf),
+                            "--levels", "1,2", "--repeats", "3", tag="L3")
+        assert rc == 0, rc
+        doc = json.loads(_files(out)[0].read_text())
+        long_out = capsys.readouterr().out
+    for lvl in doc["levels"]:
+        assert lvl["shape"] == "long_prefill", lvl
+        for key in ("aggregate_generation_tokens_per_s", "ttft_mean_ms", "ttft_p95_ms",
+                    "itl_mean_ms"):
+            assert f"{key}_spread" not in lvl, (key, lvl)
+            assert f"{key}_mean" in lvl, (key, lvl)
+    assert "LONG_PREFILL SHAPE" in long_out, long_out
+    assert "n=1 per level" in long_out, long_out
+    assert f"{'agg tok/s':>10} {'spread':>7}" not in long_out, (
+        "the knee table's spread columns must not print over a long row")
+    assert SHORT_TABLE_HEADER not in long_out, long_out
+
+    with fake_engine(tmp_path) as eng2:
+        rc2, out2 = _run_main(eng2, tmp_path, tag="L3b")
+        assert rc2 == 0, rc2
+        short_out = capsys.readouterr().out
+    assert SHORT_TABLE_HEADER in short_out, short_out
+    assert "LONG_PREFILL SHAPE" not in short_out, short_out
+    doc2 = json.loads(_files(out2)[0].read_text())
+    assert "aggregate_generation_tokens_per_s_spread" in doc2["levels"][0], doc2["levels"][0]
+
+
+# ── #2786 clause 5: a reuse ratio only where its condition can hold ───────────────
+
+def test_a_reuse_ratio_appears_only_on_a_nonzero_queries_delta_and_under_its_condition(tmp_path,
+                                                                                       capsys):
+    """Clause 5: a ratio beside the counter pair appears only when the queries delta is
+    non-zero, and only labelled with the condition `bench-prefix-reuse.py:11-25`
+    records — hits/queries is a token-level reuse rate ONLY while
+    `prefix_cache_queries_total == prompt_tokens_total`. Otherwise the raw pair is all
+    that appears.
+
+    The condition is not ceremony: on the 2026-09-06 MTP boot that note describes, the
+    queries counter summed across KV-cache groups, one 60,005-token prompt logged
+    673,179 queries (11.2x), and the ratio still read ~68% while real cross-request
+    reuse was zero. So the fixture's zero-queries engine has to yield the pair with no
+    ratio in the artifact AND no percentage or condition line in the printed table, and
+    the measuring engine's ratio has to travel with the parity named beside it.
+    """
+    zero = {"queries": 5000.0, "hits": 500.0, "d_queries": 0.0, "d_hits": 0.0}
+    with fake_engine(tmp_path, prefix=zero) as eng:
+        pf = _prompt_file(tmp_path, name="turn-45.txt")
+        rc, out = _run_main(eng, tmp_path, "--long-prompt-file", str(pf), tag="L4")
+        assert rc == 0, rc
+        doc = json.loads(_files(out)[0].read_text())
+        zero_out = capsys.readouterr().out
+    pc = doc["levels"][0]["prefix_cache_during"]
+    assert pc["queries_delta"] == 0.0, pc
+    assert pc["hits_delta"] == 0.0, pc
+    assert "hit_rate" not in pc, pc
+    assert "%*" not in zero_out, zero_out
+    assert "prompt_tokens_total" not in zero_out, (
+        "the parity condition must not be printed under a number that is not a rate")
+
+    live = {"queries": 5000.0, "hits": 500.0, "d_queries": 130.0, "d_hits": 104.0}
+    with fake_engine(tmp_path, prefix=live) as eng2:
+        pf2 = _prompt_file(tmp_path, name="turn-46.txt")
+        rc2, out2 = _run_main(eng2, tmp_path, "--long-prompt-file", str(pf2), tag="L5")
+        assert rc2 == 0, rc2
+        doc2 = json.loads(_files(out2)[0].read_text())
+        live_out = capsys.readouterr().out
+    pc2 = doc2["levels"][0]["prefix_cache_during"]
+    assert math.isclose(pc2["hit_rate"], 104.0 / 130.0, rel_tol=1e-9), pc2
+    cond = pc2["hit_rate_condition"]
+    assert "vllm:prefix_cache_queries_total" in cond, cond
+    assert "vllm:prompt_tokens_total" in cond, cond
+    assert "80.0%*" in live_out, live_out
+    assert "vllm:prompt_tokens_total" in live_out, live_out
