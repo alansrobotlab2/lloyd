@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import shutil
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -870,12 +871,17 @@ def test_the_count_follows_the_shipped_callable_and_never_its_own_phrases(
     the prose line, and `shapes` shows which residue shapes the callable reported on
     the DGX footer block.
 
-    The block's hashtag line is the one line this count cannot see, and the reason is
-    shared with the interest-profile sweep above rather than invented here:
-    `DIGEST_STRUCTURAL_PREFIXES` skips a leading `#` as a heading, and `#dgxspark`
-    starts with one. Telling those two apart would take a heading pattern of this
-    file's own — what #2011 forbids — so the blind spot is stated here and in the
-    sweep's docstring, and the writer stays the guard for a tag tail.
+    And what it skips is now the WRITER's skip set, not this file's (#2737 clause 4).
+    Until this round the count skipped a bare `"#"` as a heading prefix, and every tag a
+    digest carries begins that way, so the block's own `#dgxspark #nvidia #llm` was never
+    offered to the classifier and THIS node asserted the blindness: `lines_checked=3`,
+    `flagged=2`, shapes `{rule, footer-label}`. The discriminator moved to where the
+    phrases already live — `intel_pipeline.body.digest_structural_line` decides
+    heading-or-tag and `DIGEST_STRUCTURAL_SKIPS` names the exclusions the report prints —
+    so four lines are checked now, three are residue, and the shape that arrives is
+    `hashtag-run`: the one the count could not see while the writer could already drop
+    it, which is exactly the #2011 inversion (an instrument spelling its own rule and
+    disagreeing with the guard it reports on).
     """
     vault = _promo_vault(tmp_path, "A real paragraph about the box.\n\n"
                                    + FOOTER_BLOCK)
@@ -887,18 +893,30 @@ def test_the_count_follows_the_shipped_callable_and_never_its_own_phrases(
 
     rep = {"promo_residue": cs.promo_residue_sweep(vault, classify=spy)}
     per, flags, any_flagged = cs.promo_residue_lines(rep)
-    assert any_flagged and rep["promo_residue"]["total_flagged"] == 2, per
-    assert "lines_checked=3 flagged=2" in per[0], per[0]
+    assert any_flagged and rep["promo_residue"]["total_flagged"] == 3, per
+    assert "lines_checked=4 flagged=3" in per[0], per[0]
     assert "knowledge/ai-llms/youtube-digest.md" in per[0], per[0]
     assert "A real paragraph about the box." in cap, (
         "the callable was never asked about the prose line")
     shapes = {h["shape"] for h in rep["promo_residue"]["files"][0]["hits"]}
-    assert shapes == {"rule", "footer-label"}, shapes
+    assert shapes == {"rule", "footer-label", "hashtag-run"}, shapes
+    # The skip set the count ran on is the writer's, read off the shipped constant and
+    # not re-spelled here. A bare `"#"` in this file would satisfy the count above and
+    # re-open the blind spot in the same edit, so the assertions are on the NAME
+    # (`markdown heading`, a phrase only the writer's vocabulary contains) and on the
+    # predicate's own answer for the two lines this fixture holds.
+    assert rep["promo_residue"]["skips"] == list(
+        _body_mod().DIGEST_STRUCTURAL_SKIPS), rep["promo_residue"]["skips"]
+    assert "markdown heading" in _body_mod().DIGEST_STRUCTURAL_SKIPS
+    assert not any(s == "#" for s in _body_mod().DIGEST_STRUCTURAL_SKIPS), (
+        "a bare hash prefix is what made a tag run read as a heading")
+    assert _body_mod().digest_structural_line("#dgxspark") is False
+    assert _body_mod().digest_structural_line("### Heading") is True
 
     nothing = cs.promo_residue_sweep(vault, classify=lambda line: None)
     assert nothing["total_flagged"] == 0, nothing
     everything = cs.promo_residue_sweep(vault, classify=lambda line: "whatever")
-    assert everything["total_flagged"] == 3, everything
+    assert everything["total_flagged"] == 4, everything
     assert cs.promo_residue_lines({"promo_residue": nothing})[2] is False
     assert cs.promo_residue_lines({"promo_residue": everything})[2] is True
 
@@ -907,3 +925,98 @@ def test_the_count_follows_the_shipped_callable_and_never_its_own_phrases(
 # populated) are pinned in `tests/test_intel_pipeline_body.py`, alongside the
 # clause 3-5 nodes, because the contract maps the digest-side checks to that
 # file. The nodes for THIS file's clause 6 are immediately above.
+
+
+# ── #2737 clauses 3 and 4: a tag run in a digest counts ───────────────────────
+#
+# The instrument's blind spot was a bare `"#"` in a skip prefix tuple. A tag run
+# begins with one, so every digest body that opened on tags was skipped as a heading
+# and never offered to the classifier — `promo_residue_sweep` over the real vault
+# returned `total_flagged: 0` on 2026-10-15 while `knowledge/ai-llms/youtube-digest.md`
+# and `knowledge/robotics/youtube-digest.md` together held 8 lines the writer's own
+# predicate calls residue. The fix moved the skip decision to `intel_pipeline.body`,
+# which already owns every one of these shapes; these nodes pin what the count sees
+# now, and what it must still refuse to see.
+
+#: A body whose ONLY residue is a tag line — no rule, no footer label, no link. On
+#: the base commit this digest scored `total_flagged: 0`, because the tag line was
+#: skipped as a heading.
+TAG_RUN_ONLY = (
+    "## 2026-10-11\n\n"
+    "### New AI enzymes, 700+ math breakthroughs: AI NEWS\n\n"
+    "**Source:** youtube | **Relevance:** 4/10\n\n"
+    "#ai #aitools\n\n"
+    "00:00 AI news intro\n1:08 WorldPlay 2\n\n---\n")
+
+
+def test_a_digest_whose_only_residue_is_a_tag_run_counts_nonzero(tmp_path, capsys):
+    """#2737 clause 3: a body line reading `#ai #aitools` is flagged as
+    `hashtag-run`, and the command a person types exits 2 naming file:line.
+
+    Two surfaces, because the clause names both: the count (`promo_residue_sweep`)
+    and the exit (`main --quiet`). The flag line has to carry the shape in brackets
+    and the 1-based line, which is what makes the alert actionable — `flagged: 1`
+    on its own tells a reader nothing about which line to go and edit.
+    """
+    vault = _promo_vault(tmp_path, TAG_RUN_ONLY)
+    rep = cs.promo_residue_sweep(vault)
+
+    assert rep["total_flagged"] == 1, rep
+    hit = rep["files"][0]["hits"][0]
+    assert hit["shape"] == "hashtag-run", hit
+    assert hit["text"] == "#ai #aitools", hit
+    digest = vault / "knowledge" / "ai-llms" / "youtube-digest.md"
+    want = digest.read_text(encoding="utf-8").splitlines().index("#ai #aitools") + 1
+    assert hit["line"] == want, (hit, want)
+
+    rc = _run(vault, tmp_path / "pipe", tmp_path / "out", "--quiet")
+    assert rc == 2, rc
+    printed = capsys.readouterr().out
+    assert f"promo_residue: FLAGGED knowledge/ai-llms/youtube-digest.md:{hit['line']} " \
+           "[hashtag-run]" in printed, printed
+
+
+def test_a_real_heading_and_the_entry_rule_are_still_skipped(tmp_path):
+    """#2737 clause 4: closing the tag blind spot must not turn the instrument on the
+    lines an entry is BUILT from.
+
+    `### Heading` and the `---` rule are structure the writer emits around a body, so
+    counting them would put an alert on every entry in the vault and train the reader
+    to ignore it — the reason a skip set exists at all. The line between them is
+    CommonMark's, and it is one character wide: a heading is one to six `#` followed by
+    a space or nothing, a tag is a `#` followed by a word. So the SAME fixture text with
+    a space removed moves `# A heading inside the body` (skipped, 0 flagged) to
+    `#headingtag` (counted, as the writer's own `tag-mention-line`), and both files'
+    answer comes from one predicate rather than two spellings of the same rule.
+    """
+    body = ("## 2026-10-11\n\n"
+            "### An entry heading\n\n"
+            "**Source:** youtube | **Relevance:** 8/10\n\n"
+            "# A heading inside the body\n\n"
+            "---\n\n"
+            "Real prose, no residue here.\n\n---\n")
+    vault = _promo_vault(tmp_path, body)
+    rep = cs.promo_residue_sweep(vault)
+
+    assert rep["total_flagged"] == 0, rep["files"][0]
+    assert rep["skips"] == list(_body_mod().DIGEST_STRUCTURAL_SKIPS), rep["skips"]
+
+    one_char = _digest(vault, "ai-llms")
+    one_char.write_text(body.replace("# A heading inside the body", "#headingtag"),
+                        encoding="utf-8")
+    flipped = cs.promo_residue_sweep(vault)
+    assert flipped["total_flagged"] == 1, flipped["files"][0]
+    assert flipped["files"][0]["hits"][0]["shape"] == "tag-mention-line", flipped
+    assert flipped["files"][0]["hits"][0]["text"] == "#headingtag", flipped
+
+
+def _body_mod():
+    """`intel_pipeline.body`, through the same path insert `corpus_shape` uses.
+
+    Imported inside the nodes rather than at module scope: `corpus_shape.py` is
+    stdlib-only and reaches the package lazily, and a test file that imports it at
+    the top would pass while the shipped lazy path stayed broken.
+    """
+    sys.path.insert(0, str(ROOT / "scripts" / "intel-pipeline"))
+    import intel_pipeline.body as body
+    return body

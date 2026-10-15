@@ -231,6 +231,14 @@ DIGEST_GLOB = "knowledge/*/youtube-digest.md"
 #: these is what keeps the count about bodies — a `**Source:**` line or a heading
 #: carrying a rubric sentence is structure the writer does not choose, and counting
 #: it would train the reader to ignore the alert.
+#:
+#: Since #2737 this is `interest_profile_sweep`'s skip set ONLY: the promo sweep
+#: moved to the writer's shipped predicate, because a bare `"#"` is a prefix test
+#: for a heading that matches a tag run exactly, and that collision is what made
+#: the promo count return 0 over published residue. It is left alone here on
+#: purpose — #2039's denominator is pinned by three assertions in
+#: `tests/test_corpus_shape.py`, and whether that sweep should share the shipped
+#: predicate is a ruling on #2737's owed list, not a call for this round.
 DIGEST_STRUCTURAL_PREFIXES = ("#", "---", "**Source:**", "[Link]")
 
 #: `scripts/intel-pipeline`, the package that owns the guard. This script is
@@ -287,31 +295,73 @@ def _classify_promo_residue(text: str):
     return _footer_residue_shape(text)
 
 
+#: Cached the way `_classify_promo_residue` is, for the same reason — and this one
+#: is not a phrase list this file holds at all, it is the writer's own definition of
+#: what surrounds an entry body (#2737).
+_digest_structure = None
+
+
+def _load_digest_structure() -> tuple:
+    """`(predicate, skip names)` shipped by `intel_pipeline.body` (#2737).
+
+    `intel_pipeline.body.digest_structural_line` is the shipped answer, and shipping
+    it is the point. This file used to skip any line starting with `#`, which is a
+    prefix test for a heading and an exact collision with a tag: `#ai #ainews
+    #aitools` begins with `#` too, so the promo count read the residue the write
+    path published as the digest's own skeleton and returned 0 — a false green, on
+    the one shape this instrument was built to catch. Telling a heading from a tag
+    needs the space after the `#`, which is a pattern; #2011 forbids this file
+    holding a pattern of its own, so the pattern lives beside the writer and is
+    imported here.
+
+    The predicate and the skip set in words come back together, so a report names
+    its own denominator's exclusions from the same shipped source the sweep skipped
+    by and the two cannot drift apart.
+    """
+    global _digest_structure
+    if _digest_structure is None:
+        if str(_INTEL_PIPELINE_DIR) not in sys.path:
+            sys.path.insert(0, str(_INTEL_PIPELINE_DIR))
+        from intel_pipeline.body import (DIGEST_STRUCTURAL_SKIPS,
+                                         digest_structural_line)
+        _digest_structure = (digest_structural_line, list(DIGEST_STRUCTURAL_SKIPS))
+    return _digest_structure
+
+
+def _digest_structural_line(text: str) -> bool:
+    """The shipped predicate, behind a name this file's seam can hand to a test."""
+    return _load_digest_structure()[0](text)
+
+
 def promo_residue_sweep(vault: Path, classify=None) -> dict:
     """Per digest: how many body lines the residue predicate saw, and how many it flagged.
 
-    Two skips, each one a line that is not a body. `DIGEST_STRUCTURAL_PREFIXES` is
-    the set `corpus_shape.py` has always skipped — a heading, the `---` rule, the
-    `**Source:**` line, the `[Link]` — and the YAML front matter is the new one:
-    its `timestamp:` key is a metadata key, but `Subscribe`/`Timestamp` are also
-    the words a channel's footer label begins with, so counting front matter
-    would flag all ten digests on their own metadata and teach the reader to
-    ignore the alert. Bodies are what the writer chooses, so bodies are what this
-    measures — the same scope #2509's own acceptance is written against.
+    Two skips, each one a line that is not a body. The first is the structure
+    `write_item_to_vault` builds around an entry — a real markdown heading, the
+    `---` rule, the `**Source:**` line, the `[Link]` — and it is SHIPPED by
+    `intel_pipeline.body` (#2737), not spelled here; the second is the YAML front
+    matter, whose `timestamp:` key is metadata but whose `Subscribe`/`Timestamp`
+    words are also what a channel's footer label begins with, so counting it would
+    flag all ten digests on their own metadata and teach the reader to ignore the
+    alert. Bodies are what the writer chooses, so bodies are what this measures —
+    the same scope #2509's own acceptance is written against.
 
     `classify` is a seam for tests to show the count follows the callable they
     hand it and not some pattern of their own; production calls it with none.
 
-    One blind spot comes free with reusing the skip, and it is recorded rather
-    than papered over: a hashtag tail is a residue shape and a markdown heading
-    share the leading `#`, so a body line like `#ai #ainews #aitools` is skipped
-    here as structure, exactly as the interest-profile sweep above skips it.
-    Reading those two apart would need a heading pattern of this file's own,
-    which is the thing #2011 forbids. The write path has no such blind spot —
-    `strip_link_footer` sees a tag line on any line it walks — so this count is
-    the digest-side witness and the guard stays the writer's.
+    There used to be a third thing in the skip set: a bare `"#"`, which was also a
+    blind spot wearing a hat. A tag run and a markdown heading share the leading
+    `#`, so `#ai #ainews #aitools` was skipped as structure on every digest and the
+    total came back 0 while the vault held published tag tails — the false green
+    #2737 exists for. A heading is 1-6 `#` FOLLOWED BY A SPACE or nothing; a tag has
+    no space, so the two are separable, and the separation is the writer's shipped
+    `_MD_HEADING_RE`, so a shape the write path can drop can never again be counted
+    here as furniture. The interest-profile sweep still skips on this file's own
+    `DIGEST_STRUCTURAL_PREFIXES`: whether it should share this one is an open ruling
+    on #2737, and its denominator is pinned by tests that were written for it.
     """
     classify = classify or _classify_promo_residue
+    is_structure, skips = _load_digest_structure()
     files, total = [], 0
     for p in sorted(vault.glob(DIGEST_GLOB)):
         lines = p.read_text(errors="replace").splitlines()
@@ -323,7 +373,7 @@ def promo_residue_sweep(vault: Path, classify=None) -> dict:
                 if lineno > 1 and text == "---":
                     in_front_matter = False
                 continue
-            if not text or text.startswith(DIGEST_STRUCTURAL_PREFIXES):
+            if is_structure(line):
                 continue
             checked += 1
             shape = classify(text)
@@ -332,7 +382,7 @@ def promo_residue_sweep(vault: Path, classify=None) -> dict:
         total += len(hits)
         files.append({"file": str(p.relative_to(vault)), "lines_checked": checked,
                       "flagged": len(hits), "hits": hits})
-    return {"glob": DIGEST_GLOB, "skips": list(DIGEST_STRUCTURAL_PREFIXES),
+    return {"glob": DIGEST_GLOB, "skips": skips,
             "files": files, "files_count": len(files), "total_flagged": total}
 
 

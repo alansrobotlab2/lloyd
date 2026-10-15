@@ -275,6 +275,48 @@ _FOOTER_RESIDUE_WEAK = frozenset({"rule"})
 _FOOTER_RESIDUE_SELF_CONTAINED = frozenset(
     {"orphan-handle", "tag-mention-line", "hashtag-run"})
 
+# ── what is STRUCTURE around a digest body, shipped for the instrument ────────
+#  `corpus_shape.py`'s per-digest count has to skip the lines the writer itself
+#  puts around an entry, or it reports the entry's own skeleton as residue. It
+#  cannot be allowed to GUESS at that skeleton: a bare `"#"` in a skip list reads
+#  `#ai #ainews #aitools` as a markdown heading, which is how the promo count came
+#  back 0 over a vault that held tag runs (#2737, over a corpus whose false green
+#  is what `fcaed066` left behind). So the skip set is shipped here, beside the
+#  writer that emits those lines, and the heading test is a real one.
+
+#: An ATX markdown heading as CommonMark defines it: up to three spaces of
+#: indentation, 1-6 `#`, then a space or nothing. `# Heading` is a heading; `#ai`
+#: and `#shipit` are a TAG, because a tag has no space after its first `#`. That
+#: space is the whole difference, and a prefix test on `"#"` cannot express it —
+#: which is how `#ai #ainews #aitools` came to be skipped as a heading for as long
+#: as this instrument existed (#2737). Four spaces would be an indented code block,
+#: not a heading, so three is the ceiling.
+_MD_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t].*)?$")
+
+#: The lines `write_item_to_vault` builds AROUND an entry body: the source/relevance
+#: line, the item's link, and the `---` entry separator. Shipped, not re-spelled
+#: (#2011), so the instrument skips exactly what this module's writer emits.
+DIGEST_STRUCTURAL_PREFIXES: tuple[str, ...] = ("**Source:**", "[Link]", "---")
+
+#: What `digest_structural_line` accepts, in words, for a report that has to name
+#: its denominator's exclusions without importing a regular expression.
+DIGEST_STRUCTURAL_SKIPS: tuple[str, ...] = (
+    *DIGEST_STRUCTURAL_PREFIXES, "markdown heading")
+
+
+def digest_structural_line(line: str) -> bool:
+    """Is this digest line STRUCTURE the writer emits around a body (#2737)?
+
+    Blanks, the entry separator, the source/relevance line, the item's link, and a
+    real markdown heading. A tag or mention run is NOT structure — that is the
+    point of shipping this: `footer_residue_shape` calls such a line residue, and
+    until now the read side had a skip list wide enough to swallow it, so the
+    instrument certified as clean the exact shape the write path leaks.
+    """
+    text = line.strip()
+    return (not text or text.startswith(DIGEST_STRUCTURAL_PREFIXES)
+            or bool(_MD_HEADING_RE.match(text)))
+
 
 def footer_residue_shape(line: str) -> "str | None":
     """Which channel-footer residue this line is, or None (#2509).
@@ -349,6 +391,63 @@ def _drop_footer_residue(lines: list) -> list:
     if not any(ln.strip() for ln in kept):
         return lines
     return kept
+
+
+def _drop_leading_residue(lines: list) -> list:
+    """`lines` with a tag/mention run at the FRONT taken off, or `lines` ITSELF.
+
+    `_drop_footer_residue` is a backwards tail walk, so the identical shape at the
+    HEAD of a description survives it: the row this exists for
+    (`_pipeline/vault-derived/memory/feeds/raw/2026-10-11.jsonl`, video
+    `X0_GDOkLKzQ`) opens with `#ai #ainews #aitools #aivideo #agi #singularity`,
+    which `footer_residue_shape` itself reports as `hashtag-run`. The predicate
+    names the shape and only its POSITION saved it, and a line whose every token is
+    a tag cannot be prose whichever end it sits on. The counter-case is the
+    robotics row `e1mRQLsi47A` in `raw/2026-10-10.jsonl`, where the same shape ends
+    the description and the shipped tail walk does drop it.
+
+    Narrower than the tail walk in exactly one way, and that is the whole risk
+    control: only the shapes in `_FOOTER_RESIDUE_SELF_CONTAINED` (a hashtag run, a
+    tag/mention line, an orphan handle) are ever dropped from the front. A label, a
+    greeting or a thanks COULD open a channel's own prose — `Welcome back to the
+    channel, today we…` is the first line of a description, not a footer — and the
+    tail walk is allowed to drop those only because `_set_off` plus prose-below
+    proves they are a block; at the front there is no block to be a part of. A
+    `rule` is never dropped here either: #1561's abstention is that a rule alone is
+    section furniture.
+
+    A blank run AFTER a dropped line goes with it, the way the tail walk takes the
+    trailing blanks with a dropped tail, so the body that comes back opens on its
+    first real line rather than on the blank the run left behind — which is what
+    makes the stored row's new first line `00:00 AI news intro` and not an empty
+    line. A leading blank before anything is dropped is not itself a drop, and a
+    blank at the very end of the text is never a drop on its own: both are why the
+    function returns `lines` for text that carries no residue up front. Two
+    guarantees are inherited from the tail walk: the kept part must still carry a
+    non-blank line (#1900 — this must never empty a body into the scorer's `why`),
+    and a text with nothing to drop comes back as THE SAME LIST OBJECT, which is how
+    `unchanged` survives byte-for-byte on every abstention path (#2143 clause 3).
+    """
+    n = len(lines)
+    i = 0
+    while i < n and not lines[i].strip():
+        i += 1                                   # leading blanks are not a drop
+    start = i
+    while i < n:
+        if not lines[i].strip():
+            i += 1
+            continue
+        if footer_residue_shape(lines[i]) not in _FOOTER_RESIDUE_SELF_CONTAINED:
+            break
+        i += 1
+        while i < n and not lines[i].strip():     # the blank run goes with it
+            i += 1
+    if i <= start:
+        return lines
+    head = lines[i:]
+    if not any(ln.strip() for ln in head):
+        return lines                              # never empty the body (#1900)
+    return head
 
 #: The last labels this treats as a real top-level domain in a scheme-less host. Both
 #: halves of the constraint that keeps the host test from being a dotted-word test:
@@ -883,6 +982,14 @@ def _url_free_or(lines: list, unchanged: str) -> str:
     # at the end of the function, like the one #2143 replaced, would never
     # have looked at it.
     residue = _drop_footer_residue(kept)
+    # #2737: the same classifier, asked at the FRONT. The walk above is
+    # backwards, so a tag run opening a description was never offered to it —
+    # and this is the one place every `strip_link_footer` return path passes,
+    # which is what makes the leading rule a property rather than another
+    # anchor that has to be reached.
+    head = _drop_leading_residue(residue)
+    if head is not residue:
+        return "\n".join(head).rstrip()
     if residue is kept:
         return unchanged if not dropped else "\n".join(kept).rstrip()
     return "\n".join(residue).rstrip()

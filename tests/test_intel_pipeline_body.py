@@ -4063,3 +4063,274 @@ def test_the_digest_narration_dates_the_figures_it_reports():
         r"(?:holds|has|contains|carries)\s+(?:\d{3})\s*(?:entries|rules|`###`|headings)",
         src)
     assert not present_tense, f"an undated present-tense count is back: {present_tense}"
+
+
+# ── #2737 clause 1: a tag run OPENING a description is residue too ───────────
+#
+# #2509 gave the writer a residue classifier and a backwards tail walk over it, and
+# stopped there. `footer_residue_shape` reports `hashtag-run` for the first line of
+# the row below and the walk never asked about it, because that line is not at the
+# tail: `X0_GDOkLKzQ` (2026-10-11) went into
+# `knowledge/ai-llms/youtube-digest.md` opening on 48 characters of
+# `#ai #ainews #aitools #aivideo #agi #singularity`, and `strip_link_footer` at this
+# round's base commit returned the stored text BYTE-FOR-BYTE — 481 characters in, 481
+# out, no change reported. Position was doing predicate work. The counter-case is in
+# the same corpus: the robotics row `e1mRQLsi47A` carries the identical shape at the
+# TAIL of its description and the shipped code has always dropped it (#2509 clause 2,
+# vault commit `fcaed066`).
+#
+# The row's bytes are committed at `tests/fixtures/intel_tag_run_witness_2737.jsonl`,
+# so every assertion below runs on every gate round; the day file under the data root
+# is a cross-check when the box has it, never the thing a skip is keyed on (#2637).
+
+#: The fixture, its row id, and the 48-character tag line its `summary` opens on.
+X0_ROW_FIXTURE = "intel_tag_run_witness_2737.jsonl"
+X0_ROW_ID = "youtube:UCIgnGlGkVRhd4qNFcEwLL4A:X0_GDOkLKzQ"
+X0_ROW_TAGS = "#ai #ainews #aitools #aivideo #agi #singularity "
+
+#: The fixture's own shape: one line, 3,334 bytes, and the digest of those bytes,
+#: measured 2026-10-15 with `wc -l -c` and `sha256sum` over `tests/fixtures/`.
+X0_ROW_SHAPE = (1, 3334,
+                "66077853ee9628808c25833c9187e2a7fb8cd6c4a535a20dedc8f2e9ea9728ca")
+
+#: sha256 of `strip_link_footer(stored summary)` AFTER the fix: 431 characters, the
+#: 48-char tag line plus the blank that set it off taken off the front. Before the fix
+#: the same call returned the 481-character input, whose digest begins
+#: `ee5c7c6cfdbb7bb3` — that pair is the premise's measurement.
+X0_ROW_STRIPPED_SHA = \
+    "6ef9604426e1f276a89df79c0dc49e7f959e65f6c8a3a6eb4e55cc302950fc70"
+
+
+def test_the_stored_row_opens_on_a_tag_run_the_writer_itself_calls_residue():
+    """The premise, before any claim about the fix: the shipped classifier names the
+    line the shipped walk never asked about.
+
+    This is the node that turns the rest of this section into over-reach the moment
+    `footer_residue_shape` stops calling a leading tag run residue — a strip the
+    predicate never asked for is the bug #1924 is about, not a fix — so the predicate
+    is pinned here, beside the strip that consumes it.
+    """
+    assert body_mod.footer_residue_shape(X0_ROW_TAGS) == "hashtag-run"
+    assert "hashtag-run" in body_mod._FOOTER_RESIDUE_SELF_CONTAINED
+
+
+def test_the_stored_row_opening_on_a_tag_run_is_stripped_to_its_first_real_line():
+    """#2737 clause 1: over the stored row, `strip_link_footer` reports a change and
+    the body it returns opens on `00:00 AI news intro`, non-empty.
+
+    The fixture's stored length is asserted first, because the digests are only
+    evidence about the stored row while the bytes are the stored row. Then the two
+    facts the clause names, plus the never-empty one its parenthesis asks for:
+    `clip_body` is the next call in the scanner's chain
+    (`scanners/youtube_scanner.py:408`), so an empty return here is a scorer `why`
+    three frames later, and the guard #1900 put on the tail walk is what the leading
+    walk inherits from it.
+    """
+    import hashlib
+
+    row = _fixture_witness_row(X0_ROW_FIXTURE, X0_ROW_ID)
+    assert row is not None, f"{X0_ROW_FIXTURE} is unreadable"
+    raw = row["summary"]
+    assert raw.startswith(X0_ROW_TAGS), "the stored summary no longer opens on tags"
+    assert len(raw) == 481, len(raw)
+
+    stripped = body_mod.strip_link_footer(raw)
+
+    assert stripped != raw, "the leading tag run survived the strip (#2737 clause 1)"
+    assert stripped.splitlines()[0] == "00:00 AI news intro", stripped.splitlines()[0]
+    assert stripped.strip(), "a strip must never empty a body into the scorer's `why`"
+    assert hashlib.sha256(stripped.encode("utf-8")).hexdigest() == X0_ROW_STRIPPED_SHA
+    assert body_mod.clip_body(stripped).splitlines()[0] == "00:00 AI news intro"
+    # 50 characters: the 48-char tag line plus the blank that set it off.
+    assert len(raw) - len(stripped) == 50, (len(raw), len(stripped))
+
+
+def test_the_witness_fixture_is_still_its_bytes_and_the_strip_reaches_nothing_else():
+    """The committed fixture is still the exact line the day file holds, and the
+    leading rule reaches NOTHING else: each #2143/#2224 whitespace witness strips to
+    the digest its own bytes produced at this round's base commit.
+
+    Both halves are one property from two sides — a change that moves a stored witness
+    moved the write path further than the clause asked. The digests on the right were
+    measured by running `strip_link_footer` over each fixture's `summary` at `9356625c`,
+    the commit the round opened from; equality with a figure taken from the code BEFORE
+    the change is what #2143 clause 3 demands (a URL-free body comes back exactly as the
+    pre-#2143 function returned it), and the leading walk sits inside the same choke
+    point that rule was built to protect.
+    """
+    import hashlib
+
+    base_digests = {
+        ("intel_cta_witness_2143.jsonl",
+         "youtube:UC0C-17n9iuUQPylguM1d-lQ:lnB4Zckx_34"):
+            "8cbd9961542f0ddac5eede931b7af6e2d1378cfd82c98835d60331e6b29f70b7",
+        ("intel_sponsor_witness_2143.jsonl",
+         "youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:Sy1Fjf-H-Qg"):
+            "4c12b762330446674ae2a92632e1347020f5edbc8e7bc3163c804a7e7817eb51",
+        ("intel_bare_domain_witness_2224.jsonl",
+         "youtube:UC6QNjBn6KMq5-pe3OE11zZg:3cjnyL0_fMI"):
+            "fa1df12adfdf15a7884527f4b3da9a965c1b73524ecbd9d37749cec1a8513b57",
+        ("intel_bare_email_witness_2224.jsonl",
+         "youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:9CGsq3A590Q"):
+            "da530303555a6fb4f1755b14f59a2124c7b1af0d1788459f05556b7664d3561d",
+    }
+    for (name, want_id), sha in base_digests.items():
+        obj = _fixture_witness_row(name, want_id)
+        assert obj is not None, f"the committed witness {name} is unreadable"
+        out = body_mod.strip_link_footer(obj["summary"])
+        assert hashlib.sha256(out.encode("utf-8")).hexdigest() == sha, (
+            f"{name}: the leading drop moved a strip result, so it reached past a "
+            "self-contained shape into a witness body")
+
+    fixture_path = REPO_ROOT / "tests" / "fixtures" / X0_ROW_FIXTURE
+    raw_line = fixture_path.read_bytes()
+    assert (raw_line.count(b"\n"), len(raw_line),
+            hashlib.sha256(raw_line).hexdigest()) == X0_ROW_SHAPE, (
+        "the committed row is no longer the bytes the clause was measured over")
+    day = _RAW_FEEDS_DIR / "2026-10-11.jsonl"
+    if day.exists():
+        stored = next((l for l in day.read_text(encoding="utf-8").splitlines()
+                       if X0_ROW_ID in l), None)
+        assert stored is not None, (
+            f"`{X0_ROW_ID}` is gone from `feeds/raw/2026-10-11.jsonl`, so the "
+            "fixture is no longer verified by its source")
+        assert (stored + "\n").encode("utf-8") == raw_line, (
+            "the fixture and the day file disagree")
+
+
+def test_the_leading_drop_leaves_prose_and_mid_body_tag_runs_byte_identical():
+    """#2737 clause 2: a description whose first non-empty line is prose, and one whose
+    tag run sits mid-body, come back exactly as they went in.
+
+    The mid-body case is the counter-case to the whole fix. A tag run inside a body is
+    that body's own text — #2509 clause 3's `#nvidia` line moved to the middle — and the
+    instrument counts it too, which is the point of the pair: the writer drops what
+    OPENS a description, the instrument reports what is already published, and neither
+    one touches a tag in prose.
+    """
+    prose_first = ("A new paper shows up: agents that self-improve.\n\n"
+                   "It reports 30% better recall on the retrieval split.")
+    mid_body = ("A new paper shows up: agents that self-improve.\n\n"
+                + X0_ROW_TAGS + "\n\nThe result holds on three benchmarks.")
+    assert body_mod.strip_link_footer(prose_first) == prose_first
+    kept = body_mod.strip_link_footer(mid_body)
+    assert kept == mid_body, "a tag run MID-BODY is the paragraph's own text"
+    assert X0_ROW_TAGS in kept
+    assert body_mod.footer_residue_shape(X0_ROW_TAGS.strip()) == "hashtag-run"
+
+
+def test_the_leading_drop_fires_only_for_the_self_contained_shapes():
+    """#2737 clause 2, the half that keeps the fix small: only `hashtag-run`,
+    `tag-mention-line` and `orphan-handle` may open a description and go.
+
+    A weak shape — a rule, a footer label — is allowed to OPEN a body: that is #2509
+    clause 4's abstention for a tail, moved to the front. A single `#1 AI news intro` is
+    not a tag run either, because `_HASHTAG_RUN_RE` needs two tokens and every token a
+    tag, and a spaced `# Heading` cannot match it. And a body that is ONLY tags keeps
+    its tags: the never-empty guard makes the strip abstain rather than return "" to a
+    writer that would then route the item to the scorer as footer (#1900) — the same
+    reason the vault backfill leaves one published tag line where it is.
+    """
+    weak_rule = "______\n\n" + X0_ROW_TAGS + "\n\nProse body."
+    assert body_mod.strip_link_footer(weak_rule).splitlines()[0] == "______", (
+        "a leading rule is section furniture, not a residue drop")
+    numbered = "#1 AI news intro\n\nThe week in models, in twelve minutes."
+    assert body_mod.strip_link_footer(numbered) == numbered
+    heading = "# Heading line\n\nProse body."
+    assert body_mod.strip_link_footer(heading) == heading
+    prose_after_blanks = "\n\nReal prose after blanks."
+    assert body_mod.strip_link_footer(prose_after_blanks) == prose_after_blanks
+
+    tags_only = "#ai #ainews #aitools"
+    assert body_mod.strip_link_footer(tags_only) == tags_only, (
+        "tags-only text must keep its tags and let the writer abstain (#1900)")
+
+    handle_first = "@chennel\n\n" + X0_ROW_TAGS + "\n\nProse body."
+    assert body_mod.strip_link_footer(handle_first).splitlines()[0] == "Prose body."
+    tag_then_tags = "#airesearch\n\n" + X0_ROW_TAGS + "\n\nProse body."
+    assert body_mod.strip_link_footer(tag_then_tags).splitlines()[0] == "Prose body."
+    assert sorted(body_mod._FOOTER_RESIDUE_SELF_CONTAINED) == [
+        "hashtag-run", "orphan-handle", "tag-mention-line"]
+
+
+def test_the_leading_walk_returns_the_same_list_object_when_it_drops_nothing():
+    """#2737 clause 2, the seam the whitespace property rests on: with nothing to drop at
+    the front, `_drop_leading_residue` returns the SAME list object, which is how
+    `strip_link_footer` hands back the caller's own `unchanged` string instead of a
+    re-join (#2143 clause 3).
+
+    `is`, not `==`. A copy that compares equal satisfies every byte test above and still
+    takes the `unchanged` path away from an abstention, and the trailing newline a
+    `splitlines()` re-join loses is the artifact that made #2143 write this file's
+    whitespace witnesses at all.
+    """
+    lines = ["Real prose.", "", "More prose."]
+    assert body_mod._drop_leading_residue(lines) is lines
+    out = body_mod._drop_leading_residue(["", "", X0_ROW_TAGS, "", "Real prose."])
+    assert out is not lines
+    assert out == ["Real prose."]
+    assert body_mod._drop_leading_residue(["", ""]) == ["", ""]
+
+
+def test_no_shipped_digest_body_carries_a_tag_run_line():
+    """#2737 clause 5: the published residue is gone from both digests, read the way
+    the instrument reads it, and the repair moved no structural line.
+
+    The two files named in the item are the ones that published anyway: over the live
+    vault on 2026-10-15 the shipped sweep returned `total_flagged: 0` while
+    `knowledge/ai-llms/youtube-digest.md` held 7 lines and `knowledge/robotics/youtube-digest.md`
+    held 1 that `footer_residue_shape` calls residue and `digest_structural_line` does not
+    call structure — measured counts, 3333 and 1273 lines, on that date. The backfill deleted
+    exactly those 8 lines plus the blank that set each run off, so per file `^### ` and
+    `^---$` are unchanged, which is what the relation below asserts instead of a literal:
+    `rules == headings + 2` (the two front-matter fences) held before the repair and has to
+    hold after it, and #2566 clause 3 forbids re-pinning either file to a count.
+
+    It is asserted through the writer's predicate rather than a grep because the whole bug
+    was a grep-shaped skip: a node that spelled its own `^#[a-zA-Z]` pattern would pass on a
+    file the instrument still cannot see. The seeded half is what keeps this from being a
+    green that nothing could turn red.
+    """
+    import board_presence
+
+    vault = board_presence.vault_root()
+    digests = ["knowledge/ai-llms/youtube-digest.md",
+               "knowledge/robotics/youtube-digest.md"]
+
+    def residue_lines(lines):
+        """The instrument's own reading: front matter is not a body, a structural
+        line is not a body, and a body line the writer names residue is (#2509's
+        shape of the question, #2737's shape of the skip). The front-matter walk
+        mirrors `corpus_shape.promo_residue_sweep` line for line — a reading that
+        disagreed with the sweep about where a digest begins would make this node
+        green over a file the instrument still alerts on."""
+        out = []
+        in_front_matter = bool(lines) and lines[0].strip() == "---"
+        for i, ln in enumerate(lines, 1):
+            text = ln.strip()
+            if in_front_matter:
+                if i > 1 and text == "---":
+                    in_front_matter = False
+                continue
+            if not text or body_mod.digest_structural_line(text):
+                continue
+            shape = body_mod.footer_residue_shape(text)
+            if shape is not None:
+                out.append((i, text, shape))
+        return out
+
+    for rel in digests:
+        path = vault / rel
+        assert path.is_file(), path
+        lines = path.read_text(errors="replace").splitlines()
+        assert residue_lines(lines) == [], [
+            (n, t, s) for n, t, s in residue_lines(lines)]
+        headings = sum(1 for ln in lines if ln.startswith("### "))
+        rules = sum(1 for ln in lines if ln.strip() == "---")
+        assert rules == headings + 2, (rel, headings, rules)
+
+        seeded = list(lines)
+        at = next(i for i, ln in enumerate(seeded) if ln.startswith("### ")) + 4
+        seeded.insert(at, "#ai #aitools")
+        fired = residue_lines(seeded)
+        assert [s for _, _, s in fired] == ["hashtag-run"], fired
