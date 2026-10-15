@@ -98,9 +98,11 @@ CHAT_EMBED_ROUTES = ("prefetch", "prefetch_excerpt")
 
 #: Routes outside the v1 cohort, counted and named. Both splice a whole SKILL.md
 #: into a run prompt with no cap (`app/skill_embed.UNCAPPED_ROUTES`) and neither
-#: produces a transcript a per-turn `used` predicate could read, so including
+#: produces a transcript a per-run `used` predicate could read, so including
 #: them in the denominator would claim a funnel leg the census cannot finish.
-#: Whether they belong in v2 is an open ruling on #2507, not a decision here.
+#: #2507 ruled it: chat-only UNTIL such a per-run predicate exists, so folding them
+#: in needs that predicate first — not another ruling, which is why the share of
+#: them prints as a cohort boundary line and never as a stage.
 OUT_OF_COHORT_EMBED_ROUTES = ("autonomy_task", "worker_prompt", "dispatch")
 
 #: Sources whose job WRITES a durable artifact. `scheduled-task` is the one that
@@ -298,10 +300,14 @@ def _scan_embed_rows(root: Path, since: datetime, until: datetime) -> dict:
     `cannot_see` needs. The window is the one the telemetry reader returned
     rather than a fresh `now()`, so the two scans cannot disagree by seconds.
 
-    `landed=True, injected_body=False` is published, not bucketed: whether it is
-    a distinct stage or the first half of surfaced-not-used is an open ruling on
-    #2507, and a census that resolved it silently would decide a taxonomy the
-    item left open.
+    `landed=True, injected_body=False` is published, not bucketed, and it is not a
+    stage: #2507 ruled excerpt-only a RENDER MODE of `surfaced`, because
+    `app/prefetch.py:733-734` derives both flags from one `mode` (`landed` is
+    "a mode was chosen", `injected_body` is "that mode was `body`"). So the split
+    stays inside the surfaced count and prints beside it as a share; folding these
+    rows into `surfaced_not_used` would count one event twice, and giving them a
+    stage of their own would make the funnel's denominator depend on a renderer's
+    budget decision.
     """
     per_route: dict[str, int] = {}
     per_route_skills: dict[str, set[str]] = {}
@@ -345,9 +351,11 @@ def _scan_embed_rows(root: Path, since: datetime, until: datetime) -> dict:
                 else:
                     landed_no_body += 1
     return {"rows_by_route": per_route,
-            # Names are capped: the out-of-cohort set is what the pending cohort
-            # ruling on #2507 has to read, and 200 names is more than a ruling
-            # needs. The COUNTS above are uncapped and are what every rate here
+            # Names are capped: the out-of-cohort set is what a reader of the
+            # cohort boundary has to read, and 200 names is more than that needs.
+            # #2507 settled which routes are out of cohort; the names are here to
+            # show what sits behind the count, not to decide it. The COUNTS above
+            # are uncapped and are what every rate here
             # divides by — a cap on a published name list never touches a
             # denominator.
             "skills_by_route": {r: sorted(v)[:40] for r, v in per_route_skills.items()},
@@ -852,16 +860,23 @@ def cannot_see(used: dict) -> dict:
             "`offered` loss cannot tell those two apart, which is why nothing "
             "prunes on it"),
         "landed_without_injected_body": (
-            "`landed: true` with `injected_body: false` is counted as surfaced "
-            "and published in `surface_detail.landed_rows`; whether it is its "
-            "own stage is an open ruling on #2507 — resolving it here would "
-            "settle a taxonomy the item left open"),
+            "counted inside `surfaced` and published as a share of it "
+            "(`surfaced excerpt-only: k/n`), because #2507 ruled it a RENDER MODE "
+            "of surfaced and not a stage: `app/prefetch.py:733-734` sets both "
+            "flags from ONE `mode` (`landed` is `mode is not None`, `injected_body` "
+            "is `mode == \"body\"`), so a row with no body is an offer that landed "
+            "in the cheaper of two render modes, not an event between two stages. "
+            "The split lives in `surface_detail.embed_rows.landed_rows`"),
         "artifact_classes_not_censused": (
-            "USER.md / MEMORY.md lines, KG facts and knowledge notes. A "
-            "USER.md/MEMORY.md line sits in every prompt and so attributes every "
-            "outcome to everything in force, which is the dilution #552 hit; "
-            "facts and notes would need their own predicates, and whether v2 "
-            "gives them one is an open ruling on #2507"),
+            "USER.md / MEMORY.md lines, KG facts and knowledge notes: v1 is "
+            "SKILL.md-only, and the reason is settled rather than pending — no "
+            "per-turn predicate exists that could read a fact or a note the way a "
+            "hash check reads a skill body, and those classes are already measured "
+            "by the nightly retrieval baseline (`eval/run_eval.py`, which scores "
+            "entity and doc hits over `vault_recall`), so a funnel over them here "
+            "would duplicate an instrument rather than extend one. A "
+            "USER.md/MEMORY.md line also sits in every prompt and so attributes "
+            "every outcome to everything in force, which is the dilution #552 hit"),
     }
 
 
@@ -933,6 +948,14 @@ def render_text(census: dict) -> str:
     with its k/n — no runners-up beside it, because a line that lists candidates
     is the number the reader remembers and the candidates are what the reader
     would act on.
+
+    Two further lines print shares the census had already computed but never
+    showed (#2732): `surfaced excerpt-only: k/n`, the render-mode split inside the
+    surfaced count, and `out-of-cohort embed rows: k/n`, the cohort boundary. Both
+    are ratios BESIDE a stage. Neither may enter `stages[]` or `loss_shares`, and
+    neither can reach `dominant_loss_stage`, which is derived from
+    `loss_shares(stages)` — so a reader who wants the funnel's arithmetic unchanged
+    can check that in the same artifact rather than trust this sentence.
     """
     w = census["window"]
     lines = [
@@ -956,6 +979,45 @@ def render_text(census: dict) -> str:
         note = f"  <- {loss['label']}" if loss.get("label") else ""
         lines.append(f"loss share {stage}: {loss['k']}/{loss['n']} = "
                      f"{loss['share'] * 100:.1f}%{note}")
+    # ── Two shares the census already computed and never printed (#2732) ──────
+    # Both are ratios BESIDE a stage, never stages: `stages[]` is the five funnel
+    # legs and `dominant_loss_stage` is drawn from `loss_shares(stages)`, so a line
+    # appended here cannot move either, and a reader who wanted it to read as a leg
+    # can check that against `stages[]` in the same artifact.
+    #
+    # The first is the render-mode split inside `surfaced` that #2507 ruled NOT a
+    # stage: over the live 30-day window it measured 3,141 of 6,297 landed rows on
+    # 2026-10-15 — 49.9%, and 49.9% in every measurement since, though the counts
+    # drift by the minute. Half of everything that surfaced arrived as an excerpt,
+    # which the old report counted and then hid. The second is the cohort boundary:
+    # 734 of 7,042 embed rows in the same window arrived on an out-of-cohort route
+    # (10.4%), and printing it is what keeps the denominator question from being
+    # answered by anyone who forgets to ask it.
+    #
+    # Both k and n are read out of the published dict, never recomputed here: a
+    # number restated in two places is two numbers, and the JSON artifact is the
+    # one a later report parses.
+    embed = census["surface_detail"]["embed_rows"]
+    landed = embed.get("landed_rows") or {}
+    l_wo = int(landed.get("without_injected_body") or 0)
+    l_n = l_wo + int(landed.get("with_injected_body") or 0)
+    lines.append(
+        f"surfaced excerpt-only: {l_wo}/{l_n} of landed rows (a render mode of "
+        f"surfaced, not a stage)" if l_n else
+        "surfaced excerpt-only: REFUSAL - the embed-row scan published no "
+        "`landed_rows` (telemetry off, or no landed row in the window), so there "
+        "is no render-mode split to divide")
+    per_route = embed.get("rows_by_route") or {}
+    ex_n = sum(int(per_route.get(r) or 0) for r in OUT_OF_COHORT_EMBED_ROUTES)
+    emb_n = sum(int(v) for v in per_route.values())
+    lines.append(
+        f"out-of-cohort embed rows: {ex_n}/{emb_n} - the cohort boundary, not a "
+        f"funnel stage ({'/'.join(OUT_OF_COHORT_EMBED_ROUTES)} splice a body into "
+        f"a run prompt with no transcript a per-run `used` predicate could read)"
+        if emb_n else
+        "out-of-cohort embed rows: REFUSAL - the embed-row scan published no "
+        "`rows_by_route` (telemetry off, or no `skill.embedded` row in the "
+        "window), so the cohort boundary has no denominator")
     cost = census["cost"]
     if "gpu_hours" in cost:
         lines.append(f"cost: {cost['gpu_hours']} GPU-hours over {cost['runs']} runs "

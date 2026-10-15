@@ -729,3 +729,213 @@ def test_2733_clause_5_an_empty_store_still_refuses_by_name_and_no_branch_rates(
         for banned in ("k", "n", "rate", "ci95"):
             assert banned not in stage, f"{banned} would read as a measured zero"
         assert stage["unit"] == "artifact"
+
+
+# ── #2732: the two shares the census computed and never printed ───────────────
+#
+# Both numbers were already in the artifact and reachable from no report. Measured
+# over the census's own 30-day window (`build_census(30)` against the real event
+# store, 2026-10-15T04:17Z): the excerpt-only split inside `surfaced` is 3,141 of
+# 6,297 landed rows — 49.9% — and the out-of-cohort embed share is 734 of 7,042
+# embed rows — 10.4%. The counts drift by the minute and the shares do not: the
+# ruling that started this cites 3,131 of 6,277, the triage measured 3,138 of 6,291
+# two hours earlier, and all three are 49.9%.
+#
+# #2507 ruled both questions at 2026-10-15T02:47:52 (its #2 and #4 entries, the
+# latter naming this item as its follow-up) and the rulings were never written back
+# into the module, so every reader met a note saying the question was still
+# undecided, and the owed-check job went on re-asking it.
+#
+# What the five clauses below hold at once: the lines print, they print the numbers
+# the published dict holds, and neither one becomes a stage or a dominant-loss
+# candidate.
+
+def _lines(text: str, prefix: str) -> list[str]:
+    return [ln for ln in text.splitlines() if ln.startswith(prefix)]
+
+
+def test_the_excerpt_only_share_prints_from_the_published_dict(corpus):
+    """Clause 1: one `surfaced excerpt-only: k/n` line, taken from the census dict.
+
+    The fixture's two landed rows are one body render and one excerpt render, so
+    the honest share is 1/2 — and it must be read out of
+    `surface_detail.embed_rows.landed_rows`, not recomputed in the renderer: a k
+    written twice is two numbers, and the JSON artifact is the one a later report
+    parses.
+    """
+    census = _census(corpus)
+    landed = census["surface_detail"]["embed_rows"]["landed_rows"]
+    lines = _lines(fc.render_text(census), "surfaced excerpt-only: ")
+    assert len(lines) == 1, f"exactly one such line, got {lines}"
+
+    k, n = landed["without_injected_body"], (landed["with_injected_body"]
+                                             + landed["without_injected_body"])
+    assert f": {k}/{n} " in lines[0], f"{lines[0]!r} != {k}/{n} from {landed}"
+    # The line says what it is a share OF, since the denominator is not the
+    # funnel's and a bare k/n would read as if it were.
+    assert "landed rows" in lines[0], lines[0]
+
+
+def test_the_line_follows_the_dict_not_a_recount(tmp_path, monkeypatch):
+    """The same claim from the other side: mutate the dict, and the printed share
+    moves with it. A renderer that recounted the events would keep printing the
+    old split and the artifact and the report would disagree silently."""
+    census = fc.build_census(30, event_root=_empty_events(tmp_path),
+                             workers_db=_workers_db(tmp_path / "w.db", []),
+                             skills_roots=[tmp_path / "no_skills"])
+    landed = census["surface_detail"]["embed_rows"]["landed_rows"]
+    landed.update({"with_injected_body": 5, "without_injected_body": 7})
+    line = _lines(fc.render_text(census), "surfaced excerpt-only: ")[0]
+    assert ": 7/12 " in line, line
+    # And it never silently divides by zero: an empty split is a named refusal,
+    # which is clause 2's rule for the stages applied to a share.
+    landed.update({"with_injected_body": 0, "without_injected_body": 0})
+    line = _lines(fc.render_text(census), "surfaced excerpt-only: ")[0]
+    assert "REFUSAL" in line and "0/0" not in line, line
+
+
+def test_the_out_of_cohort_share_prints_as_the_cohort_boundary(corpus):
+    """Clause 2: the embed-route exclusion prints as k/n and says it is a cohort
+    boundary, not a funnel stage.
+
+    The fixture's two `skill.embedded` rows are one chat-route row (`alpha` on
+    `prefetch`) and one out-of-cohort row (`gamma` on `autonomy_task`), so the
+    share is 1/2 — small on purpose: what is under test is which side of the
+    boundary a row lands on, not the live magnitude, which is 734 of 7,036 rows
+    over the real 30-day window (measured 2026-10-15). Summing over
+    `OUT_OF_COHORT_EMBED_ROUTES` rather than subtracting the chat routes from the
+    total is the point: an unrecognised route is neither in nor out, and the line
+    must not be able to claim it silently.
+    """
+    census = _census(corpus)
+    per_route = census["surface_detail"]["embed_rows"]["rows_by_route"]
+    k = sum(per_route.get(r, 0) for r in fc.OUT_OF_COHORT_EMBED_ROUTES)
+    n = sum(per_route.values())
+    lines = _lines(fc.render_text(census), "out-of-cohort embed rows: ")
+    assert len(lines) == 1, f"exactly one such line, got {lines}"
+    assert f": {k}/{n} " in lines[0], f"{lines[0]!r} != {k}/{n} from {per_route}"
+    assert (k, n) == (1, 2), f"the fixture's cohort split moved: {per_route}"
+    assert "cohort boundary" in lines[0] and "not a funnel stage" in lines[0]
+    assert "stage " not in lines[0].split(" - ")[0], (
+        f"the label reads as a stage: {lines[0]!r}")
+
+
+def test_the_two_new_lines_add_no_stage_and_no_candidate(corpus):
+    """Clause 3: printing a share must not change a single number the report
+    already printed — the arithmetic of the funnel is the artifact's whole point.
+
+    Checked against the derivation, not a remembered string: `stages[]` is still
+    the five funnel legs, `loss_shares` still has the keys the measured stages
+    give it, and the one `dominant loss stage:` line still names what
+    `dominant_loss(loss_shares(stages))` returns with its own k/n. The two new
+    lines appear in none of those three.
+    """
+    census = _census(corpus)
+    stages = census["stages"]
+    assert [s["stage"] for s in stages] == list(fc.FUNNEL_ORDER), (
+        "a new stage entered the funnel: a printed share is not a leg")
+    assert len(census["loss_shares"]) == sum(
+        1 for s in stages if s.get("measured") and s.get("loss")), (
+        "the keys of loss_shares are no longer the measured stages' losses, so "
+        "`dominant_loss` is being fed a different set than the stages imply")
+
+    text = fc.render_text(census)
+    # Both counts read the artifact, never a remembered number: `FUNNEL_ORDER` is
+    # the order `stages[]` is built in and `loss_shares` is keyed by stage, so a
+    # printed line the census does not carry, or a census loss the report dropped,
+    # fails here — and neither count depends on how many lines the renderer happens
+    # to add.
+    assert [ln.split(" ")[1].rstrip(":") for ln in _lines(text, "stage ")] == \
+        [s["stage"] for s in stages] == list(fc.FUNNEL_ORDER), text
+    assert [ln.split(" ")[2].split(":")[0] for ln in _lines(text, "loss share ")] \
+        == list(census["loss_shares"]), text
+    for label in ("surfaced excerpt-only", "out-of-cohort embed rows"):
+        assert label not in census["loss_shares"], f"{label} became a loss-share key"
+        assert label not in census["stages"][0], f"{label} entered a stage dict"
+        assert not any(label in str(v) for v in census["loss_shares"].values())
+
+    dom = _lines(text, "dominant loss stage:")
+    assert len(dom) == 1, text
+    expected = fc.dominant_loss(fc.loss_shares(stages))
+    assert expected == census["dominant_loss_stage"], (
+        "the printed stage is no longer what the derivation returns")
+    assert expected["stage"] == "surfaced", expected
+    assert dom[0] == (f"dominant loss stage: {expected['stage']} "
+                      f"({expected['k']}/{expected['n']})"), dom[0]
+
+
+def test_no_cannot_see_value_still_calls_a_ruling_open(corpus):
+    """Clause 4: the ruled texts read as ruled.
+
+    `cannot_see` is the section a reader reaches for on a number they do not
+    trust, so an entry that ended "an open ruling on #2507" was the census asking
+    a question the owed-check job had settled at 2026-10-15T02:47:52 — and the next
+    reader, finding it unanswered, re-opens the whole taxonomy. Nothing in the
+    section may say that now: the two ruled entries name the decision and the
+    mechanism behind it.
+    """
+    see = _census(corpus)["cannot_see"]
+    assert isinstance(see, dict) and see, "cannot_see vanished"
+    assert not [k for k, v in see.items() if "open ruling" in json.dumps(v)], (
+        "a settled ruling is still advertised as open")
+
+    excerpt = see["landed_without_injected_body"]
+    assert "render mode" in excerpt and "not a stage" in excerpt, excerpt
+    assert "app/prefetch.py:733-734" in excerpt, (
+        "the ruling has to name the mechanism that settles it: both flags come "
+        "from one `mode`, not from two measurements")
+
+    classes = see["artifact_classes_not_censused"]
+    assert "SKILL.md-only" in classes, classes
+    assert "no per-turn predicate" in classes, classes
+    assert "eval/run_eval.py" in classes, (
+        "the reason has to name the instrument that already covers those classes")
+
+
+def test_the_cohort_text_reads_as_ruled_without_taking_2733_s_text():
+    """Clause 5: the three cohort notes are decided prose, and the only `open
+    ruling` strings left in the module are #2733's.
+
+    The grep this item was filed with — `open ruling on #2507` returning 0 hits —
+    is not the check, and it was never achievable by this item alone. At this
+    round's base the module carried the phrase on 7 lines while that literal grep
+    matched only 5 of them: one note sat mid-sentence across a line break in
+    `_scan_embed_rows`'s docstring, and an eighth note (`pending cohort ruling` in
+    the name-cap comment) used different wording entirely, so the old check could
+    pass with stale text still in the file. Three of the 7 belong to
+    `benefited_stage` — its docstring plus the two branches of its refusal — which
+    #2733 owns in a round that is in flight, so they are left exactly as they are.
+
+    The pin therefore is positional, not a line count: no `pending cohort` string
+    anywhere, no `open ruling` string outside `benefited_stage`'s own span, and
+    `benefited_stage`'s still present (which is what proves this round did not
+    reach into #2733's text to make a grep look clean).
+    """
+    src = (ROOT / "scripts" / "funnel_census.py").read_text(encoding="utf-8")
+    assert "pending cohort" not in src, "a ruled note still says pending"
+
+    # The one remaining `open ruling` phrasing must be #2733's and nowhere else:
+    # pinning it to the function's own source span rather than to a line count,
+    # because a line count silently entitles any future line to one.
+    start = src.index("def benefited_stage")
+    end = src.index("\ndef ", start)
+    body, outside = src[start:end], src[:start] + src[end:]
+    assert "open ruling" in body, "#2733's text was edited by this round"
+    assert "open ruling" not in outside, (
+        "a settled ruling is still advertised as open outside benefited_stage")
+
+    # The cohort constant's own comment states the boundary as a decision, with the
+    # condition that would reopen it — that condition is what makes it a ruling
+    # rather than a preference.
+    lines_ = src.splitlines()
+    at = next(i for i, ln in enumerate(lines_)
+              if ln.startswith("OUT_OF_COHORT_EMBED_ROUTES = ("))
+    top = at
+    while lines_[top - 1].lstrip().startswith("#:"):
+        top -= 1
+    block = "\n".join(lines_[top:at])
+    assert "chat-only UNTIL" in block and "per-run" in block, block
+    assert "Whether they belong" not in block, block
+    doc_start = src.index("def _scan_embed_rows")
+    doc = src[doc_start:src.index("\ndef ", doc_start)]
+    assert "RENDER MODE" in doc and "app/prefetch.py:733-734" in doc, doc
