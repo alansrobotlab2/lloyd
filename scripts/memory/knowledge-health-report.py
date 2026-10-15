@@ -112,6 +112,25 @@ EDGE_TYPE_MIN_USES = 5
 #: and 09-25 still FAIL (>0.8) and 09-26 and 09-27 PASS, so this is a looser bound
 #: with a sharper trigger, not a switch to always-green.
 EDGE_TYPE_MAX_SHARE = 0.8
+#: The rise over the matched-phase baseline the trend clause needs before it may FAIL,
+#: in share units — 0.005 is 0.5 percentage points (#2760). It exists because #74
+#: (`kg-mention-classifier`, daily in the EVENING UTC window, `depends_on: 48`) retires
+#: `mentions` edges every night while #60 measures at ~11:00Z on the refilled rising
+#: leg, so the share is a 24-hour sawtooth: measured intra-day spread 0.35-2.64 pp over
+#: 2026-10-08 to 10-15 (0.70/1.34/0.67/2.64/1.74/0.80/0.69/0.35), the same order as the
+#: rise the clause was calling a trend. Comparing this cycle's peak with the previous
+#: cycle's trough is what made the line FAIL six nights running
+#: (`grep -c 'conditions failing: dominant'` over
+#: `~/lloyd-data/_pipeline/reflection/knowledge-health-2026-10-*.md` printed 1 for each
+#: of 10-10 to 10-15) while the level it judged FELL from 34.2% to 31.8% — #1658's own
+#: failure mode, in the half of the clause #1658 left bare. Phase-alignment alone
+#: removes five of those six nights; the tolerance covers the residue, so a rise has to
+#: clear the cycle's own noise to be reported as one. At matched phase over the same
+#: window the clause still fires on 10-11 (+2.64 pp) and passes 10-12 to 10-15
+#: (33.08 → 31.93 → 31.85 → 31.69), so this is a quieter trigger, not an always-green
+#: one. Whether 0.5 pp is the right size, or should be derived from the spread, is owed
+#: to the owed-check job once post-landing nights exist.
+EDGE_TYPE_TREND_TOLERANCE = 0.005
 #: What the floor rules on since #1820: the store's own type vocabulary, imported from
 #: `app.kg_store` so the report and the writer cannot disagree about what a real
 #: relation is. An under-floor type is a defect when its name is not in here —
@@ -1513,36 +1532,60 @@ def _parse_edge_ts(value) -> datetime | None:
 
 def previous_dated_share(now: datetime | None = None,
                          metrics_dir: Path | None = None) -> dict | None:
-    """The last night's dominant-type share, DAY-aligned, or None if none exists.
+    """The last night's dominant-type share, DAY-aligned AND PHASE-aligned, or None.
 
     `{"date": "2026-09-27", "share": 0.698}` for the most recent snapshot whose
-    UTC date is strictly before `now`'s date, taking that date's LAST snapshot.
+    UTC date is strictly before `now`'s date, and within that date the snapshot whose
+    TIME OF DAY is nearest `now`'s — #2760. A tie in that distance takes the EARLIER
+    snapshot, so the pick never depends on which file the glob happened to yield last.
 
-    Day-aligned is not a detail. `kg_health` runs 3-5 times a day, and `mentions`
+    Phase-aligned is as much a detail as day-aligned was. #74
+    (`kg-mention-classifier`) retires `mentions` edges every night in the EVENING UTC
+    window while #60 measures at ~11:00Z on the refilled rising leg, so the share is a
+    24-hour sawtooth whose intra-day spread measured 0.35-2.64 pp over 2026-10-08 to
+    10-15. Taking the date's LAST snapshot — what this function did until #2760, via a
+    plain max on `(day, stamp)` — therefore always compared this cycle's peak with the
+    previous cycle's trough and reported "rising" every night whatever the store did:
+    six consecutive FAILs (2026-10-10 to 10-15) while the level fell 34.2% to 31.8%.
+    The two halves are not interchangeable. The tolerance ALONE would not have stopped
+    it — 2026-10-15's rise over the trough was +0.62 pp, above 0.5 — whereas
+    phase-alignment alone leaves one FAIL (10-11, +2.64 pp, a real rise) and passes
+    10-12 to 10-15 (33.08 → 31.93 → 31.85 → 31.69). The tolerance is the second line of
+    defence for the thin days, where nearest-neighbour is hours from the run instant and
+    a phase gap of the store's own could otherwise be read as a rise again.
+
+    Day-aligned is not a detail either. `kg_health` runs 3-5 times a day, and `mentions`
     grew between CONSECUTIVE snapshots in every hour measured on 2026-09-27 (+149,
     +152, +152, +84, +68): a snapshot-to-snapshot trend would report "rising" on
     every single nightly run and FAIL nightly for the same reason the old 50% limit
     did. Comparing only across a date boundary asks the question the ruling is about
-    — did the share come down overnight, against #74's ~2.5k-a-night retype.
+    — did the share come down overnight, against #74's ~2.5k-a-night retype. The most
+    recent PRIOR DAY still wins outright however well the phase of an older night
+    matches: "the previous night" is a night first and a phase second.
+
+    A thin day is possible — 2026-10-10 holds two snapshots (earliest 15:50Z) and
+    10-15 three (latest 08:40Z) — so nearest-neighbour is deliberately a fallback that
+    can land hours from the run instant rather than a window that returns nothing.
 
     Returns None when no snapshot in `EDGE_TYPE_SHARE_HISTORY_NIGHTS` carries a
     readable date and `edges.by_type`, and the caller says so on the line rather
     than defaulting the missing comparison to "not rising".
     """
-    moment = now or datetime.now(timezone.utc)
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     root = metrics_dir or EDGE_TYPE_METRICS_DIR
     if not root.exists():
         return None
-    today = moment.astimezone(timezone.utc).date()
+    today = moment.date()
     floor_date = today - timedelta(days=EDGE_TYPE_SHARE_HISTORY_NIGHTS)
-    best: tuple | None = None
+    run_minute = moment.hour * 60 + moment.minute
+    best: "tuple | None" = None
     for path in sorted(root.glob("kg-health-*.json")):
         try:
             snap = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         stamp = _parse_edge_ts(snap.get("captured_at")) or _parse_edge_ts(
-            path.stem.replace("kg-health-", "").replace("T", "T"))
+            path.stem.replace("kg-health-", ""))
         if stamp is None:
             continue
         stamp = stamp.astimezone(timezone.utc)
@@ -1554,7 +1597,15 @@ def previous_dated_share(now: datetime | None = None,
         if day >= today or day < floor_date:
             continue
         share = max(int(v) for v in by_type.values()) / total
-        key = (day, stamp)
+        gap = abs((stamp.hour * 60 + stamp.minute) - run_minute)
+        # Ranking keys, not printed spellings: the same instant arrives both as
+        # `+00:00` and as a `...Z` filename stem, so the stamp is ranked as an instant
+        # (`timestamp()` of the UTC-normalised datetime) exactly as #1658 clause 3
+        # settled. #2760's order on top of it: the NIGHT first (the most recent prior
+        # day wins outright), the phase gap second, and on an equal gap the EARLIER
+        # snapshot wins via the negated stamp, so the pick cannot depend on which file
+        # the glob yielded first.
+        key = (day, -gap, -stamp.timestamp())
         if best is None or key > best[0]:
             best = (key, {"date": day.isoformat(), "share": share})
     return best[1] if best else None
@@ -1592,10 +1643,16 @@ def edge_type_cardinality(type_dist: dict[str, int], *,
       legitimate first use — and every type under the floor, canonical or not, is
       named in the `types under {EDGE_TYPE_MIN_USES} uses:` column as ever.
     * The share condition is a TREND, not a level: FAIL when the leader exceeds
-      `EDGE_TYPE_MAX_SHARE` or when it is higher than the previous night's
-      day-aligned share. A constant FAIL teaches nothing; a level that is falling
-      while the line says FAIL nightly trains the reader to skip the section.
-      Neither #1820 nor #1931 changed this half.
+      `EDGE_TYPE_MAX_SHARE`, or when it exceeds the previous night's share by more than
+      `EDGE_TYPE_TREND_TOLERANCE` (0.5 pp, #2760). A constant FAIL teaches nothing; a
+      level that is falling while the line says FAIL nightly trains the reader to skip
+      the section. That is #1658's ruling, and #2760 had to apply it a second time in
+      the same clause: #1658 fixed WHICH direction counts (falling is not a failure)
+      but left any rise at all failing, and compared against a baseline that was the
+      prior day's LAST snapshot — always the post-#74 trough — so the line still FAILed
+      six nights running (2026-10-10 to 10-15) while the level fell 34.2% to 31.8%.
+      The baseline is now phase-aligned (see `previous_dated_share`) and the rise has to
+      clear the tolerance. Neither #1820 nor #1931 changed this half; #2760 did.
 
     Measured 2026-09-30 over the witness committed as vault
     `backlog/data/kg-health-2026-09-30T222931Z.json`: all 38,551 active edges
@@ -1604,10 +1661,10 @@ def edge_type_cardinality(type_dist: dict[str, int], *,
     `describes (1)` — the pure vocabulary test moves no live line. `tests/
     test_edge_type_vocabulary.py` asserts the DECLARED vocabularies agree with
     `EDGE_TYPES`, and this line is where the STORED rows are checked against it.
-    `EDGE_TYPE_MAX_SHARE` still catches a runaway catch-all at 0.8 on its own, a
-    rise still FAILs, and the measured dominant type, share and active-edge total
-    are printed on every PASS, so the bound quoted in the text is the one that can
-    fail the line.
+    `EDGE_TYPE_MAX_SHARE` still catches a runaway catch-all at 0.8 on its own, a rise of
+    more than 0.5 pp over the matched-phase baseline still FAILs, and the measured
+    dominant type, share and active-edge total are printed on every PASS, so the bound
+    quoted in the text is the one that can fail the line.
     """
     total = sum(type_dist.values())
     if not total:
@@ -1642,7 +1699,15 @@ def edge_type_cardinality(type_dist: dict[str, int], *,
     if share > EDGE_TYPE_MAX_SHARE:
         failing.append(f"dominant type share ({dominant} {share:.1%} > "
                        f"{EDGE_TYPE_MAX_SHARE:.0%})")
-    elif previous and share > previous["share"]:
+    elif (previous and
+          share - previous["share"] > EDGE_TYPE_TREND_TOLERANCE):
+        # More than the tolerance, not merely "higher", since #2760: the baseline
+        # `previous_dated_share` returns is now phase-aligned, and even so the cycle's
+        # own noise measured 0.35-2.64 pp, so ANY rise was the same permanent-FAIL
+        # trigger #1658 removed from the level. The segment keeps the exact wording it
+        # printed before — both operands, the date and the baseline share included —
+        # because which night was compared is what a reader checks this line against,
+        # and `test_both_conditions_are_attributed_together_…` pins that spelling.
         failing.append(f"dominant type share ({dominant} {share:.1%} > previous "
                        f"night {previous['date']} {previous['share']:.1%})")
 

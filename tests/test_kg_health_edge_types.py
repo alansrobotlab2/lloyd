@@ -419,18 +419,217 @@ def test_the_share_fails_on_the_ceiling_or_a_rise_and_passes_a_falling_share():
     """#1658 clause 2: the dominant-type condition is a trend with a level under it.
 
     70.0% fallen from 76.5% → PASS (this is 2026-09-26/27's actual movement, and the
-    old bound FAILed it nightly). 70.0% risen from 69.8% → FAIL naming the dominant
+    old bound FAILed it nightly). 70.0% risen from 69.0% → FAIL naming the dominant
     type share, which is the case the old bound could not express: a store drifting
     the wrong way while sitting below any fixed line.
+
+    Restated by #2760 in one place: the rise half used to assert that 70.0% over a
+    69.8% baseline (a 0.2 pp move) FAILed. That is the exact behaviour #2760 removes —
+    `EDGE_TYPE_TREND_TOLERANCE` is 0.5 pp because the share moves 0.35-2.64 pp inside
+    one day on #74's evening sweep alone — so leaving the sub-tolerance case asserting
+    FAIL would pin the false alarm this item exists to stop. The rise case therefore
+    moves to a 1.0 pp move (clears the tolerance), and the 0.2 pp move is asserted to
+    PASS here instead of being deleted, so the weakening is on the record.
     """
     fell = khr.edge_type_cardinality({"mentions": 70, "uses": 30},
                                      previous={"date": "2026-09-27", "share": 0.765})
     assert fell.startswith("Edge-type cardinality: PASS — "), fell
     rose = khr.edge_type_cardinality({"mentions": 70, "uses": 30},
-                                     previous={"date": "2026-09-27", "share": 0.698})
+                                     previous={"date": "2026-09-27", "share": 0.690})
     assert rose.startswith("Edge-type cardinality: FAIL — "), rose
     assert ("dominant type share (mentions 70.0% > previous night 2026-09-27 "
-            "69.8%)") in _failing_segment(rose), rose
+            "69.0%)") in _failing_segment(rose), rose
+    sub_tolerance = khr.edge_type_cardinality({"mentions": 70, "uses": 30},
+                                             previous={"date": "2026-09-27",
+                                                       "share": 0.698})
+    assert sub_tolerance.startswith("Edge-type cardinality: PASS — "), sub_tolerance
+    assert "conditions failing: none" in sub_tolerance, sub_tolerance
+
+
+def test_a_rise_has_to_clear_the_tolerance_before_the_trend_clause_fails():
+    """#2760 clause 2: the trend FAIL needs a rise of MORE than 0.5 pp, not any rise.
+
+    Baseline 31.5% is 2026-10-13's matched-phase reading and 32.1% is the item's own
+    example of a rise that must still fail (+0.6 pp). 31.9% is the same night's shape
+    with a +0.4 pp move, which is inside the measured intra-day spread (0.35-2.64 pp
+    over 2026-10-08 to 10-15) and must PASS: that is the whole point of the tolerance.
+
+    The bracket is 0.4 and 0.6 rather than 0.5 exactly because these shares are binary
+    fractions — a difference of exactly 0.005 is not representable, so an assertion on
+    the knife edge would be a test of rounding, not of the comparison. The fixture
+    totals keep every non-leader type under the leader and every count over the
+    5-use floor, so the share condition is the only thing this line can fail on.
+    """
+    assert khr.EDGE_TYPE_TREND_TOLERANCE == 0.005, (
+        "the clause is pinned to 0.5 pp by this item; deriving it from the measured "
+        "spread is owed to the owed-check job, not free here")
+
+    baseline = {"date": "2026-10-13", "share": 0.315}
+    inside = khr.edge_type_cardinality(_share_shape(3190), previous=baseline)
+    assert inside.startswith("Edge-type cardinality: PASS — "), inside
+    assert "conditions failing: none" in inside, inside
+
+    over = _share_shape(3210)
+    assert max(over.values()) == over["mentions"], (
+        f"the leader must be `mentions` for the segment wording: {over}")
+    rising = khr.edge_type_cardinality(over, previous=baseline)
+    assert rising.startswith("Edge-type cardinality: FAIL — "), rising
+    assert ("dominant type share (mentions 32.1% > previous night 2026-10-13 "
+            "31.5%)") in _failing_segment(rising), rising
+
+
+def _share_shape(pct: int) -> dict:
+    """A 10,000-edge type distribution whose leader is `mentions` at `pct` percent.
+
+    The three followers split the remainder and each stays under the leader, so
+    `max(by_type) / sum(by_type)` is exactly `pct` / 10,000 and the share condition is
+    the only thing a line built on this can fail on: every count is over the 5-use
+    floor and every name is in `EDGE_TYPES`.
+    """
+    rest = 10000 - pct
+    return {"mentions": pct, "uses": rest // 3, "related_to": rest // 3,
+            "co_accessed": rest - 2 * (rest // 3)}
+
+
+def _snap(dirn, iso_stamp: str, pct: int) -> None:
+    """One `kg_health` snapshot at `iso_stamp`, named and shaped the way the writer does.
+
+    Real names keep the dashes in the date and compact the time
+    (`kg-health-2026-10-14T111802Z.json`), which is the form the fallback in
+    `previous_dated_share` parses when a snapshot has no readable `captured_at`.
+    """
+    stamp = dt.datetime.fromisoformat(iso_stamp)
+    (dirn / f"kg-health-{stamp.strftime('%Y-%m-%dT%H%M%SZ')}.json").write_text(
+        json.dumps({"captured_at": iso_stamp,
+                    "edges": {"by_type": _share_shape(pct)}}), encoding="utf-8")
+
+
+def test_the_baseline_is_the_prior_day_snapshot_nearest_the_run_instant(tmp_path):
+    """#2760 clause 1: the baseline is PHASE-aligned, so it is not the trough.
+
+    #60 runs at ~11:00Z; #74 retires `mentions` edges in the evening. The rule used to
+    take the prior day's LAST snapshot (`key = (day, stamp)`, max), which is by
+    construction the post-#74 trough, and compare it with a reading taken on the
+    refilled rising leg — a peak-against-trough comparison that says "rising" every
+    night whatever the store does. The pick is now the prior day's snapshot whose
+    time-of-day is nearest the report's own instant.
+
+    The fixture is one prior UTC day with three snapshots spanning that cycle —
+    07:00Z at 31.69%, 11:18Z at 31.85%, 19:47Z at the 31.18% trough (the stamps of the
+    real `kg-health-2026-10-14T*.json` files) — plus a current-day snapshot at 08:40Z
+    the day-alignment rule must keep ignoring, and a run instant of 11:04Z. Nearest to
+    11:04 is 11:18 (14 minutes), NOT the 19:47 last snapshot 8.7 hours later. Still
+    asserted here because the change must not lose
+    them: the most recent prior day still wins over an older one however better its
+    phase; two snapshots equidistant around the instant take the earlier, so the choice
+    cannot depend on file iteration order; and None is returned when the window holds
+    no prior day (only today's snapshots, everything older than the 7-night window, or
+    files that do not parse) rather than a default that reads as "not rising".
+    """
+    d = tmp_path / "metrics"
+    d.mkdir()
+    now = dt.datetime(2026, 10, 15, 11, 4, tzinfo=dt.timezone.utc)
+
+    _snap(d, "2026-10-14T07:00:26.000+00:00", 3169)
+    _snap(d, "2026-10-14T11:18:02.000+00:00", 3185)
+    _snap(d, "2026-10-14T19:47:49.000+00:00", 3118)
+    _snap(d, "2026-10-15T08:40:00.000+00:00", 3134)
+
+    prev = khr.previous_dated_share(now, d)
+    assert prev and prev["date"] == "2026-10-14", prev
+    assert prev["share"] == pytest.approx(0.3185), (
+        f"the baseline is not the snapshot nearest 11:04Z (11:18Z at 31.85%): {prev}")
+    assert prev["share"] != pytest.approx(0.3118), (
+        "the baseline is still the prior day's LAST snapshot — the trough #74 leaves "
+        f"behind, which is the pick this item is about: {prev}")
+
+    # Day-alignment survives the phase rule: today's own 08:40Z snapshot is 2.4 hours
+    # from the run instant and the prior day's is 14 minutes, but a snapshot from the
+    # day being reported may never become its own baseline.
+    assert (d / "kg-health-2026-10-15T084000Z.json").exists(), (
+        "the fixture did not write a current-day snapshot to be tempted by")
+    assert prev["date"] != "2026-10-15", prev
+
+    # Most recent prior day first, THEN phase within it: 10-12 has a snapshot almost
+    # exactly on the instant, 10-13 only one 11 hours off, and the nearer-but-older day
+    # must not become the baseline — "the previous night" is a night, not a phase.
+    older = tmp_path / "older"
+    older.mkdir()
+    _snap(older, "2026-10-12T11:00:00.000+00:00", 2900)
+    _snap(older, "2026-10-13T22:00:00.000+00:00", 3118)
+    assert khr.previous_dated_share(now, older)["date"] == "2026-10-13", (
+        "phase alignment jumped past the more recent night")
+
+    # Equidistant around the instant: 09:04 and 13:04 are both 2 hours from 11:04, and
+    # the earlier snapshot wins so the answer never depends on glob order.
+    tie = tmp_path / "tie"
+    tie.mkdir()
+    _snap(tie, "2026-10-14T09:04:00.000+00:00", 4000)
+    _snap(tie, "2026-10-14T13:04:00.000+00:00", 4200)
+    assert khr.previous_dated_share(now, tie)["share"] == pytest.approx(0.4), (
+        "an equidistant pair resolved to the later snapshot, so the pick now depends "
+        "on which file the loop happened to read last")
+
+    # None, three ways, when the window holds no readable prior day.
+    only_today = tmp_path / "today"
+    only_today.mkdir()
+    _snap(only_today, "2026-10-15T11:04:00.000+00:00", 3180)
+    assert khr.previous_dated_share(now, only_today) is None, (
+        "a run with no previous night invented a baseline out of its own day")
+    too_old = tmp_path / "old"
+    too_old.mkdir()
+    _snap(too_old, "2026-10-07T11:00:00.000+00:00", 3180)
+    assert khr.previous_dated_share(now, too_old) is None, (
+        "a snapshot beyond EDGE_TYPE_SHARE_HISTORY_NIGHTS is not a previous night")
+    unreadable = tmp_path / "broken"
+    unreadable.mkdir()
+    (unreadable / "kg-health-2026-10-14T110000Z.json").write_text("{not json",
+                                                                  encoding="utf-8")
+    assert khr.previous_dated_share(now, unreadable) is None, (
+        "an unparseable snapshot counted as a readable one")
+
+
+def test_matched_phase_is_what_stopped_the_line_failing_while_the_level_fell(tmp_path):
+    """#2760's premise, reproduced in-tree rather than quoted from the item.
+
+    2026-10-15's report printed `dominant type mentions is 31.8% ... previous night
+    2026-10-14 31.2%` — FAIL — while the level had fallen from 34.2% on 10-11. Both
+    numbers are honest; the comparison between them was not: 31.2% is 10-14's 19:47Z
+    snapshot, taken after #74's evening sweep, and 31.8% is 10-15's 11:04Z reading on
+    the refilled leg. Rebuilt here from the same shapes — a prior day at 31.69 / 31.85
+    / 31.18% and a reading of 31.80% — the matched-phase baseline (11:18Z, 31.85%) makes
+    the line PASS, and the trough baseline makes it FAIL. That pair IS the bug and the
+    fix: same store, same reading, only the pick differs.
+
+    And the fix is not a mute: the same reading against a matched-phase baseline 0.6 pp
+    lower still FAILs, which is the 10-11 case (a real +2.64 pp rise at matched phase)
+    that has to keep failing or the clause would have been deleted instead.
+    """
+    d = tmp_path / "metrics"
+    d.mkdir()
+    _snap(d, "2026-10-14T07:00:26.000+00:00", 3169)
+    _snap(d, "2026-10-14T11:18:02.000+00:00", 3185)
+    _snap(d, "2026-10-14T19:47:49.000+00:00", 3118)
+    now = dt.datetime(2026, 10, 15, 11, 4, tzinfo=dt.timezone.utc)
+    reading = _share_shape(3180)
+    assert max(reading.values()) == 3180, "the reading is 31.8% on `mentions`"
+
+    prev = khr.previous_dated_share(now, d)
+    line = khr.edge_type_cardinality(reading, previous=prev)
+    assert line.startswith("Edge-type cardinality: PASS — "), line
+    assert "conditions failing: none" in line, line
+    assert "previous night 2026-10-14 31.9%" in line, (
+        f"the PASS line must still name the baseline it compared against: {line}")
+
+    against_trough = khr.edge_type_cardinality(reading, previous={"date": "2026-10-14",
+                                                                 "share": 0.3118})
+    assert against_trough.startswith("Edge-type cardinality: FAIL — "), against_trough
+    assert "dominant type share" in _failing_segment(against_trough), against_trough
+
+    still_rising = khr.edge_type_cardinality(_share_shape(3210),
+                                             previous={"date": "2026-10-14",
+                                                       "share": 0.3150})
+    assert still_rising.startswith("Edge-type cardinality: FAIL — "), still_rising
 
 
 def test_the_previous_night_is_day_aligned_and_no_history_only_lets_the_ceiling_fail(tmp_path):
