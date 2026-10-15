@@ -370,7 +370,12 @@ def _probe_verdict(proc, got: dict) -> tuple[bool, str]:
 def _safe_unit(extra: str = "") -> str:
     """A unit name unique to this call. systemd unit names are `[a-zA-Z0-9:.@_-]`; a
     collision with a live unit is a hard failure rather than a queue, so the suffix is a
-    random token — a pid alone would repeat across the many calls one process makes."""
+    random token — a pid alone would repeat across the many calls one process makes.
+
+    Neither part of the token identifies the call that made it: the leading number is a
+    wall-clock read (`int(time.time()) % 100000`), not a pid, so a scope name read out of
+    `journalctl -k` can be matched to a *time* but never to a spawner. #2725's planned
+    `ps`-at-kill-time diagnosis keyed on exactly that number and could not have worked."""
     suffix = f"{int(time.time()) % 100000}-{secrets.token_hex(4)}"
     return f"{UNIT_PREFIX}-{suffix}{('-' + extra) if extra else ''}"
 
@@ -592,12 +597,20 @@ def slice_cgroup_dir() -> str:
     race is the common case, not the rare one — the wrapper's shell dies in the same group
     kill as the payload, the unit stops, and systemd removes the directory whenever it
     gets to it. The slice's `memory.events` is cumulative and outlives every scope inside
-    it, so its `oom_kill` delta across one call attributes a memory kill to that call
-    without needing to catch anything in flight. Detection therefore never races; only the
-    optional per-call *peak* does, and its absence is reported as absence.
+    it, so reading it before and after a call detects that *a* memory kill happened without
+    needing to catch anything in flight.
 
-    Measured here: one planted allocator under `MemoryMax=256M` moved the slice's
-    `oom_kill` from 17 to 18, once, for that call.
+    What it cannot do is say whose. Every concurrent subtree in `lloyd.slice` shares this
+    counter, so a delta licenses exactly one claim — a kill happened somewhere in the slice
+    during the window — and `tripped_limit` words it that way; the sentence that this
+    call's subtree was killed comes only from the scope's own counters, which the sampler
+    does catch more often than the peaks. Detection never races; attribution is graded by
+    which witness arrived.
+
+    Measured here: five planted allocators under `MemoryMax=256M` each moved the slice's
+    `oom_kill` by one, and each also left `memory.events oom_kill=1` in its own report —
+    the three that allocated in 16 MiB strides never got a `memory.peak` into the report,
+    the two that paused between chunks did.
     """
     return f"{CGROUP_ROOT}{_user_manager_cgroup()}/{CEILING_SLICE}"
 
@@ -817,17 +830,35 @@ def tripped_limit(fields: dict[str, str]) -> dict | None:
                             + (f", memory.events max={ev.get('max')}" if ev else ""),
                 "detail": "the memory controller terminated the subtree; swap was "
                           "pinned to 0, so the box's zram could not absorb it"}
-    # Either the scope's own counter (read while it was alive) or the slice's cumulative
-    # one (read before and after, so it cannot be lost to collection) is enough: the first
-    # is the precise number, the second is the one that survives a group kill that takes
-    # the scope with it. A `None` delta is unknown, not zero, and contributes nothing.
-    if ev.get("oom_kill") or (delta or 0) > 0:
+    # The scope's own `memory.events` — captured by the sampler while the directory was
+    # alive, and merged into the report — is the ONLY witness that a kill happened inside
+    # THIS call's subtree, and it survives more often than the peaks do: measured over five
+    # planted 256 MiB allocators, `oom_kill=1` arrived in five of five while `memory.peak`
+    # arrived in none of the three fast ones. Claiming the kill is this call's on the
+    # strength of the slice's cumulative counter instead is a different statement and a
+    # false one: `lloyd.slice` counts every concurrent subtree in it, so a delta can only
+    # say a kill happened *somewhere* in the slice during the window. Until this split the
+    # two evidences shared one branch and the branch spoke the subtree sentence, which on
+    # this box blamed the gate's own ceiling suite (two real kills per automod round, at
+    # 256 MiB and 16 GiB) on whatever unrelated Bash call's window straddled them — 88
+    # occurrences across the Oct-13/14 session stores, one of which became incident #2725.
+    # A `None` delta is unknown, not zero, and contributes nothing either way.
+    if (ev.get("oom_kill") or 0) > 0:
         return {"limit": "MemoryMax", "value": MEMORY_MAX,
-                "observed": (f"memory.oom_kill rose by {delta} in {CEILING_SLICE} during "
-                             f"this call" if (delta or 0) > 0 else
-                             f"memory.events oom_kill={ev['oom_kill']}"),
+                "observed": f"memory.events oom_kill={ev['oom_kill']}"
+                            + (f" (memory.peak={peak_mem} against memory.max={cap})"
+                               if cap else ""),
                 "detail": "the memory controller killed a process in the subtree; swap "
                           "was pinned to 0, so the box's zram could not absorb it"}
+    if (delta or 0) > 0:
+        return {"limit": "MemoryMax", "value": MEMORY_MAX,
+                "observed": f"memory.oom_kill rose by {delta} in {CEILING_SLICE} during "
+                            f"this call's window",
+                "detail": f"{CEILING_SLICE} recorded {delta} memory "
+                          f"kill{'s' if delta != 1 else ''} while this call ran, "
+                          f"but this call's own counters record none, so no kill is "
+                          f"attributed to it; the scope that died is collected with its "
+                          f"counters, which is why only the slice saw it"}
     return None
 
 

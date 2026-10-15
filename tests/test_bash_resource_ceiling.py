@@ -18,8 +18,9 @@ RLIMIT_AS is per-process, and `RLIMIT_NPROC` counts the whole UID, which on a bo
 user owns the engines is a footgun aimed at the stack, not a bound on a child — would prove
 nothing.
 
-Which is also why the kill nodes set `MemoryMax` to 256M instead of using the shipped 32G:
-filling 32 GiB on a box with the engine daemons resident would put the agent stack down to
+Which is also why the kill nodes set `MemoryMax` to 256M instead of using the shipped 16G
+(`MEMORY_MAX` in `agent_mcp/_resource_ceiling.py`): filling 16 GiB on a box with the engine
+daemons resident would put the agent stack down to
 prove a bound exists. That is a substitute of *value*, not of *mechanism* — same unit, same
 cgroup files, same kernel controller — and the mechanism itself is proved again on the real
 constants: memory by the byte-exact `memory.max` read-back in the probe, tasks by the benign
@@ -34,6 +35,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -407,7 +409,8 @@ def test_the_full_suite_passes_under_the_shipped_ceiling():
     scope, under the values the module ships.
 
     The item's measured note is that a full run needs >8 GiB with the engine daemons
-    resident, which is why 32G is the order the constant sits at; a ceiling tuned to an
+    resident, which is why 16G is the order the constant sits at (`MEMORY_MAX` is 16G, so
+    the suite runs with under 8 GiB of headroom, not 24); a ceiling tuned to an
     ordinary command's p99 would stop this node, and stopping it is the self-inflicted
     failure the item warns about. It is also the distribution's own data point: the peak the
     sampler records for this run is what the owed p99 re-derivation is checked against, so it
@@ -565,7 +568,7 @@ def test_a_planted_allocator_is_killed_inside_the_byte_bound_and_named():
     """Clause 3: a planted single-process allocator dies under the memory limit, inside a
     stated byte bound, and the note names `MemoryMax` — with swap pinned to 0.
 
-    The cap this node plants is 256 MiB, not the shipped value: filling 32 GiB on a box with
+    The cap this node plants is 256 MiB, not the shipped value: filling 16 GiB on a box with
     the engine daemons resident is how the agent stack gets taken down to prove a bound
     exists, which is the failure #1337 exists to prevent. What is *not* substituted is the
     mechanism — the same unit, the same cgroup files, the same kernel memory controller —
@@ -618,6 +621,149 @@ def test_the_named_limit_reaches_the_tool_result_and_not_only_the_module():
     out = _run_bash(_ALLOCATOR_SHELL)
     assert "MemoryMax" in out, f"the tool result carries no named limit: {out[-400:]!r}"
     assert "exit code" in out, f"an OOM-killed command reported success: {out[-200:]!r}"
+    # #2727 clause 4: this kill happens inside its own scope, so the honest new wording
+    # (which reserves "somewhere in lloyd.slice" for a kill this call cannot evidence) must
+    # not have taken this one. The subtree claim is the marker that it did not.
+    assert "subtree" in out, \
+        f"a genuine 16 GiB kill was reported without claiming its own subtree: {out[-400:]!r}"
+
+
+# ── #2727 — whose kill: the slice's cumulative counter versus this call's own ───
+
+def test_a_slice_only_oom_delta_is_reported_as_the_slices_kill_and_not_as_this_calls():
+    """Clause 1: a call whose only kill evidence is the slice's cumulative counter gets a
+    note that names `lloyd.slice` and refuses to say this call's subtree was killed.
+
+    The shape is exactly what an unrelated call sees on this box while the gate's `tests`
+    rung runs the two allocator nodes above: this call's own counters are clean — no
+    `memory.events oom_kill`, a peak far under the cap — and the slice, which every
+    concurrent subtree in it shares, went up by 2. Before the split, one `if` admitted both
+    evidences and the branch's own words claimed the kill:
+    `memory.oom_kill rose by 2 in lloyd.slice during this call; the memory controller killed
+    a process in the subtree`, which is what 88 notes across the Oct-13/14 session stores
+    said, and what an autonomy session read as its own command dying and filed as incident
+    #2725 against a scanner that had not allocated anything.
+
+    The note must still appear: a kill happened in the ceiling's own slice during this
+    window, and silence would lose the detection the slice counter is the only witness of.
+    What changes is that the sentence is now about the slice, and says in words that no kill
+    is attributed to this call.
+    """
+    fields = {"mem_peak": "1048576", "mem_max": "17179869184",
+              "memory_events": "low=0;high=0;max=0;oom=0;oom_kill=0",
+              "oom_kill_delta": "2"}
+    note = RC.ceiling_note(fields)
+    assert note is not None, \
+        "a kill in the ceiling's slice went unreported, so the counter stopped being a witness"
+    assert RC.CEILING_SLICE in note, f"the note does not name where the kill was counted: {note}"
+    assert "rose by 2" in note, f"the delta the slice recorded is missing from the note: {note}"
+    assert "MemoryMax" in note, f"the note no longer names the limit kind: {note}"
+    for banned in ("in the subtree", "terminated the subtree", "killed a process"):
+        assert banned not in note, \
+            f"{banned!r} claims this call's subtree was killed on the slice's counter alone: {note}"
+    assert "no kill is attributed to it" in note, \
+        f"the note reports a slice-wide kill without disclaiming this call: {note}"
+
+
+def test_the_subtree_kill_wording_is_claimed_only_from_this_calls_own_counters():
+    """Clause 2: the subtree sentence is licensed by two witnesses and by nothing else —
+    the scope's own `memory.events oom_kill`, or a `memory.peak` that reached its cap.
+
+    One node, five shapes, because the defect was precisely a merged `if`: the two honest
+    witnesses and the slice-cumulative delta all reached the same branch, so the branch's
+    wording had to fit all three and fitted only the first two. `both` is the shape the box
+    actually produces for a planted kill (measured over five 256 MiB allocators: the scope's
+    own `oom_kill=1` arrived every time, and the slice had moved by one too) — the own
+    counter wins the wording there, which is the case that must not regress when the
+    slice-only case gains its own softer words. `unknown` pins the other half of the rule:
+    an unreadable slice file yields `None`, and `None` is not a zero that may be reported as
+    a clean run, nor a kill that may be reported at all.
+    """
+    cases = {
+        "own-events": ({"memory_events": "max=3;oom_kill=1", "mem_max": "268435456",
+                        "mem_peak": "0", "oom_kill_delta": "0"}, "subtree"),
+        "own-peak": ({"memory_events": "max=0;oom_kill=0", "mem_max": "268435456",
+                      "mem_peak": "268435456", "oom_kill_delta": "0"}, "subtree"),
+        "both": ({"memory_events": "max=1;oom_kill=1", "mem_max": "268435456",
+                  "mem_peak": "0", "oom_kill_delta": "1"}, "subtree"),
+        "slice-only": ({"memory_events": "max=0;oom_kill=0", "mem_max": "268435456",
+                        "mem_peak": "1048576", "oom_kill_delta": "1"}, "slice"),
+        "unknown": ({"memory_events": "max=0;oom_kill=0", "mem_max": "268435456",
+                     "mem_peak": "0", "oom_kill_delta": None}, None),
+    }
+    for name, (fields, expect) in cases.items():
+        note = RC.ceiling_note(fields)
+        if expect is None:
+            assert note is None, f"{name}: an unknown delta produced a verdict: {note}"
+            continue
+        assert note is not None, f"{name}: a recorded kill produced no note"
+        if expect == "subtree":
+            assert "subtree" in note, \
+                f"{name}: this call's own counters show the kill and the note hedges: {note}"
+        else:
+            assert "subtree" not in note, \
+                f"{name}: the slice's cumulative counter alone claimed a subtree kill: {note}"
+            assert RC.CEILING_SLICE in note, \
+                f"{name}: the note does not say where the kill it reports was counted: {note}"
+
+
+def test_a_clean_call_concurrent_with_a_sibling_scope_kill_is_not_blamed_for_it():
+    """Clause 3 across the real seam: a benign tool call that runs while a *sibling*
+    ceiling scope is OOM-killed reports its own exit code and is not told it killed itself.
+
+    Everything above this node is the module reading fields; this is the tool result. The
+    killed scope is a separate `apply()`/subprocess with its own 256 MiB cap, and the
+    innocent call is a real `B._bash` whose sleep spans the kill — the same geometry as a
+    session's Bash call straddling the gate's allocator pair, which is the traffic that made
+    88 misattributed notes. `_bash` runs in a worker thread only so the sibling can be
+    started *after* the innocent call's scope exists; that ordering is what guarantees the
+    kill lands inside the innocent window rather than before its baseline, and the innocent
+    call's own thread-safe `asyncio.run` needs no main-thread signal handlers.
+
+    The assertions then follow the counter rather than the clock: the node first proves the
+    slice's `oom_kill` actually rose across the innocent call's span, and only then demands
+    that the note appear, name the slice, and claim no subtree — so a scheduling hiccup that
+    killed the sibling outside the window fails the premise, never the wording.
+    Either way the exit code is the call's own — the innocent command is planted with
+    `exit 3` rather than a clean one, because `_bash` appends `[exit code: N]` only for a
+    non-zero rc, and a note that displaced that suffix would be invisible in a zero-exit
+    result. No note in this file may say "subtree" about a call that allocated nothing.
+    """
+    slow_allocator = (
+        "import time\n"
+        "time.sleep(0.2)\n"
+        "blocks = []\n"
+        "while True:\n"
+        "    blocks.append(bytearray(4 * 1024 * 1024))\n"
+        "    time.sleep(0.04)\n"
+    )
+    shipped = RC.MEMORY_MAX
+    argv, run = _wrap_python(slow_allocator, memory="256M", swap="0")
+    RC.MEMORY_MAX = shipped          # the innocent call runs production-shaped
+    before = RC._slice_events().get("oom_kill")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        innocent = pool.submit(_run_bash, "echo alive; sleep 8; exit 3")
+        time.sleep(1.0)              # the innocent scope exists before the kill can start
+        sibling = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, env=RC.launcher_env(None))
+        out = innocent.result(timeout=90)
+        rc = sibling.wait(timeout=90)
+    after = RC._slice_events().get("oom_kill")
+    RC.finish(run)                   # the sibling's own verdict, discarded here
+    assert rc in (-9, 137), f"the sibling scope was not OOM-killed (rc={rc}); the node's "\
+                             "premise did not fire"
+    assert before is not None and after is not None and after > before, \
+        f"the slice's oom_kill did not move ({before} -> {after}); nothing happened to "\
+        "attribute wrongly"
+    assert "[exit code: 3]" in out, \
+        f"the ceiling overwrote an innocent call's own exit code, or hid it: {out[-300:]!r}"
+    assert "[resource ceiling]" in out, \
+        f"the slice rose by {after - before} across this call's window and the note went "\
+        "silent — detection lost, which is the other half of the same defect"
+    assert RC.CEILING_SLICE in out, \
+        f"the note reported a kill without naming the slice it was counted in: {out[-300:]!r}"
+    assert "in the subtree" not in out and "terminated the subtree" not in out, \
+        f"a sibling scope's kill was blamed on a call that allocated nothing: {out[-300:]!r}"
 
 
 def test_the_shipped_values_are_the_ones_the_kernel_enforces():
