@@ -44,8 +44,35 @@ those depths as current; the live node asserts only that the five reach the pool
 which prints, per arm, the reranker the recall took, the pre-rank pool width and where
 each of the five landed. The footer also drives production's own arm, and on 2026-10-11
 that was a red by construction: `RECALL_RERANKER` is `"djev"` there, whose doc leg asks
-32 rows rather than 240, so four of the five never reach its pool at all — the gap
-recorded on #2571 and owed to the eval owner, not assumed away here.
+32 rows rather than 240, so four of the five never reach its pool at all. That gap was
+recorded on #2571 and has since been RULED — its owed entry 3, 2026-10-15: the
+five-file expectation is a pool-containment assertion, and on a 32-row canvas four of
+the five cannot reach the pool by construction, so a live node of that shape is red by
+design and NO second live node for the djev shape is owed. The eval's expectations are
+met on that arm as the scorer scores them — what the production entry point has to
+deliver, a gold document for this query, is asserted live at
+`test_the_eval_scorer_itself_reports_the_target_query_hitting`. The measurement behind
+the ruling: `doc_hit` true for `kg-maintenance-tasks` on 23 of 23 nightly
+production-config baselines from 2026-09-23 to 2026-10-15 (newest
+`nightly-20261015-20261015-060405.json`, `first_doc_rank` 3; across those 23 the rank
+ranged 2 to 14). That 23 is its window and no more — the store takes a new file on
+every nightly run and the retention sweep does not prune it — so it is a recording, and
+`test_the_header_states_the_djev_evidence_as_a_dated_recording_with_its_command` pins
+the recording rather than counting the store. The ceiling is the pool, not djev
+(`agent_mcp/vault.py`: "no ~32-row pool holds as many findable documents as
+collection-240 did, and djev cannot rank more than the 32 rows one 128-token canvas
+holds"). What the ruling leaves standing is a corpus-quality question that predates the
+arm switch and is not a djev regression: `doc_recall` on that arm is 0.4, two of the
+five gold documents reaching the answer. Re-derive the figure before repeating it, and
+mind the nesting — `doc_hit` sits at `scoring.doc_hit` on the record whose `id` is
+`kg-maintenance-tasks`, not on the record itself, so a flat read answers `None` for
+every night and reads as the opposite of the truth:
+
+    cd ~/lloyd && ~/lloyd/.venvs/lloyd/bin/python -c "import glob,json;files=sorted(glob.glob('/home/alansrobotlab/lloyd-data/eval/baselines/nightly-*.json'));sc=[next(r['scoring'] for r in json.load(open(f))['records'] if r['id']=='kg-maintenance-tasks') for f in files];print(len(files),sum(1 for s in sc if s['doc_hit']),files[-1].rsplit('/')[-1],sc[-1]['first_doc_rank'])"
+
+which printed `23 23 nightly-20261015-20261015-060405.json 3` on 2026-10-15 — nights
+counted, nights that hit, the newest night, its rank — and whose first two numbers
+diverge only when a night fails.
 
 The rows below are that recorded arm, in reply order, with the task files at their
 observed ranks. What is under test there is everything downstream of the daemon's
@@ -722,6 +749,106 @@ def test_the_module_header_dates_every_rank_it_states():
         window = flat[max(0, i - 200):i + 200]
         assert "2026-09-14" in window, (
             f"a stated quintuple with no measurement date near it: …{window}…")
+
+
+def test_the_header_records_the_djev_arm_ruling_not_an_open_owed_question():
+    """#2783: the production-arm gap is ANSWERED in the header, not owed to anyone.
+
+    The header used to end its djev paragraph with the gap "recorded on #2571 and owed
+    to the eval owner, not assumed away here". That owed-check has been ruled (#2571's
+    owed entry 3, 2026-10-15): the eval's expectations are met on the
+    `RECALL_RERANKER = "djev"` arm as the scorer scores them, and no second live node
+    for the djev shape is owed. A header line still phrased as an open question is the
+    worst kind of carried-forward claim — every later pass cites it and no pass
+    re-derives it — so the ruling is pinned here as text. Text is the right surface:
+    the decision was made once over the baseline store, and re-debating it on every
+    test run is not what retiring the sentence means.
+    """
+    flat = " ".join((__doc__ or "").split()).lower()
+
+    # Each open phrasing is written split, so this node's own source never becomes the
+    # hit a repo-wide `git grep` is meant to come back empty for.
+    for still_open in ("owed to the eval", "assumed away here", "not yet ruled",
+                       "whether the eval"):
+        assert still_open not in flat, (
+            f"the header leaves the production-arm gap open ({still_open!r}); the ruling "
+            f"is in #2571's owed entry 3 — record it, do not re-open it")
+
+    # The decision itself, in prose a reader can act on.
+    assert "expectations are met" in flat, (
+        "the header must say the expectations are met on that arm, not merely that "
+        "a node is red by construction")
+    assert "no second live node" in flat, (
+        "the header must close the second-node question the owed entry asked")
+    assert "#2571" in flat and "owed entry 3" in flat, (
+        "the ruling must name where it was made, or the next reader re-litigates it")
+
+
+def test_the_header_states_the_djev_evidence_as_a_dated_recording_with_its_command():
+    """The 23/23 figure is a dated recording plus its command — pinned as text, never as a count.
+
+    `~/lloyd-data/eval/baselines/` gains one `nightly-*.json` per nightly run and the
+    retention sweep does not prune that store, so a node that globbed it and asserted
+    the count would go red tomorrow with nothing broken: 23 is the window
+    2026-09-23 to 2026-10-15, not a property of the store. What a clean checkout CAN
+    check is that the header names the figure, bounds it by its own dates, names the
+    newest night, and gives a command whose output a reader can reproduce — including
+    the nested path, because `doc_hit` sits at `scoring.doc_hit` and a flat read of a
+    record answers `None` for every night, which reads as the opposite of the truth.
+    """
+    raw = __doc__ or ""
+    flat = " ".join(raw.split())
+
+    assert "23 of 23" in flat, "the evidence is not stated as a count of nights"
+    i = flat.find("23 of 23")
+    window = flat[i:i + 200]
+    assert "2026-09-23" in window and "2026-10-15" in window, (
+        f"the figure is not bounded by the dates it covers, so it reads as current: …{window}…")
+    assert "nightly-20261015-20261015-060405.json" in flat, "the newest night is not named"
+
+    # The re-derivation command: one indented block, and it names the nesting.
+    lines = raw.splitlines()
+    at = next((k for k, ln in enumerate(lines) if "nightly-*.json" in ln), None)
+    assert at is not None, "the header names no command that reads the nightly store"
+    start, end = at, at
+    while start > 0 and lines[start - 1].startswith("    "):
+        start -= 1
+    while end + 1 < len(lines) and lines[end + 1].startswith("    "):
+        end += 1
+    cmd = " ".join(ln.strip() for ln in lines[start:end + 1])
+    assert "kg-maintenance-tasks" in cmd, (
+        "the command must select the record by id: `kg-maintenance-tasks` is not the "
+        "first record of a baseline's 81")
+    assert "records" in cmd and "scoring" in cmd and "doc_hit" in cmd, (
+        "the command must descend records -> scoring -> doc_hit; any shallower read "
+        "prints None for every night")
+
+
+def test_the_header_keeps_the_32_row_scope_and_points_at_its_ceiling_source():
+    """Ruling the gap closes the question, not the mechanism — and the pointer resolves.
+
+    Under `RECALL_RERANKER = "djev"` the doc leg still asks 32 rows and four of the
+    five task files still never reach that pool. A reader who loses that sentence
+    re-opens the question the ruling just closed, so the scope statement survives the
+    owed clause it was attached to. The ceiling is owned by `agent_mcp/vault.py`, and
+    the citation is checked by PHRASE against that file's source rather than by line
+    number, because a `vault.py:247` citation moves the moment that comment block is
+    edited and then points at something else in silence.
+    """
+    from pathlib import Path
+
+    flat = " ".join((__doc__ or "").split())
+    assert "32 rows" in flat, "the doc leg's production ask is no longer stated"
+    assert "four of the five" in flat, "the scope of the gap is no longer stated"
+    assert "agent_mcp/vault.py" in flat, "the ceiling's source is not named"
+    assert "the ceiling is the pool, not djev" in flat.lower(), (
+        "the header must carry the ceiling statement, not just a file name")
+
+    src = (Path(__file__).resolve().parent.parent / "agent_mcp" / "vault.py").read_text(
+        encoding="utf-8").lower()
+    assert "the ceiling is the pool, not djev" in src, (
+        "the header points at a phrase agent_mcp/vault.py no longer carries — either "
+        "both move together or the pointer is dead")
 
 
 @pytest.mark.live_vault
