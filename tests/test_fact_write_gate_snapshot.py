@@ -12,6 +12,11 @@ changes that, and they pin it on the mechanism, not on a stub of it:
     `expired_at`-stamped in the `on` tree and still active in the `noop` tree.
   * clause 4 — no artifact of the build, and no path its readers are pointed at,
     resolves under `production_data_root()`.
+  * #2775 — a seeded leg must not cost one inode per corpus file: the seed's file
+    inodes are shared, a replayed write never reaches through a shared inode, a
+    seed that cannot be linked is copied rather than crashing the run, a `--out`
+    filesystem that cannot hold the run is refused before anything is created,
+    and no documented example points `--out` at tmpfs `/tmp`.
 
 What stays under the real code: `gate_write`'s decision, its in-place
 `expired_at` stamp, `app.fact_ids` numbering, the front-matter writer, the gate's
@@ -23,8 +28,10 @@ path an accidental arming could slip in by, so `LLOYD_FACT_WRITE_GATE` is the on
 way a mode reaches these calls, and one test below proves that by watching every
 `mode()` call the replay makes.
 """
+import errno
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -247,3 +254,289 @@ def test_isolated_tree_refuses_a_live_root_even_when_asked_nicely():
     with pytest.raises(snap.SnapshotRefused):
         with snap.isolated_tree(prod / "_pipeline" / "vault-derived", "noop"):
             pass
+
+
+# ── #2775: seeding a leg must not cost a corpus inode per corpus file ────────
+#
+# The failure this section pins is measured, not hypothetical: the #2768 round
+# filled `/tmp` (tmpfs, 1,048,576 inodes) to 81 % with ten full `copytree`
+# copies of a 62,806-file facts corpus — 816,670 inodes in `/tmp/fwg-b` — one
+# inode per corpus file per arm, with nothing anywhere on the path checking the
+# filesystem it was filling. The five rails #2775 asks for, in the order they are
+# pinned below: share the seed's inodes, never write through a shared one, survive
+# a seed that cannot be linked, price the run before paying for it, and do not
+# point the documented example at a filesystem with a million inodes on it. Each
+# of the first four was mutation-checked — removing the mechanism from the module
+# kills its node — and the fifth is a text assertion on the two surfaces the
+# clause names.
+
+#: The two seeded files a leg's replay rewrites: `Relay` is the entity
+#: `WRITE_SEQUENCE` writes, so its `state` and `history` files are the ones that
+#: must not still be the seed's inode by the end of a build.
+SEED_REPLAYED = ("Relay/Relay-state.md", "Relay/Relay-history.md")
+
+#: The file `isolated_tree` points `_shared.ALIASES_PATH` at, so it is the one
+#: seeded file a leg is allowed to write even though nothing in this builder
+#: writes it today. Copied per leg rather than linked for that reason.
+SEED_ALIAS_FILE = "entity-aliases.json"
+
+#: The documented `--out`, spelled once here so a docstring or help edit that
+#: moves it off on-disk scratch has to fail something.
+DOCUMENTED_OUT = ".lloyd-data/eval/fact-write-gate/pair"
+
+
+def _seed_facts(root: Path) -> Path:
+    """A facts root in the `<corpus>/facts` layout, written by the real writer.
+
+    Twelve fact files in six entity dirs plus the root's `entity-aliases.json`:
+    enough files that "one inode per corpus file per leg" and "one seed's
+    inodes" are plainly different numbers, small enough to read.
+    `Relay/Relay-state.md` is seeded with the prior `WRITE_SEQUENCE` rewrites, so
+    a seeded pair has a file to diverge on INSIDE the seeded tree — the only
+    place a shared inode is dangerous. The `Bearing*` entities are filler no
+    replay touches.
+    """
+    facts = root / snap.SNAPSHOT_FACTS_SUBDIR
+    files: dict[str, list[str]] = {
+        "Relay/state": [snap.WRITE_SEQUENCE[0][2]],
+        "Relay/history": ["Relay moved to the tailnet in 2026-08."],
+    }
+    for i in range(5):
+        files[f"Bearing{i}/state"] = [f"Bearing{i} is torqued to 12 N-m."]
+        files[f"Bearing{i}/history"] = [f"Bearing{i} was replaced in 2026-04."]
+    for rel, texts in files.items():
+        entity, category = rel.split("/")
+        entries = [{"fact": t, "confidence": 0.9, "category": category, "id": None,
+                    "created_at": NOW, "valid_at": None, "invalid_at": None,
+                    "expired_at": None, "provenance": "STATED", "source_doc": None}
+                   for t in texts]
+        snap.assign_ids(entries, category)
+        snap._write_list(snap.fact_file(facts, entity, category), entity, category,
+                         entries, NOW)
+    (facts / SEED_ALIAS_FILE).write_text('{"aliases": {}}', encoding="utf-8")
+    return facts
+
+
+def _seeded_files(seed: Path) -> list[Path]:
+    """Every file under a seed facts root, sorted, so a fixture can assert its own size."""
+    return [p for p in sorted(seed.rglob("*")) if p.is_file()]
+
+
+def _inode_set(*roots: Path) -> set[int]:
+    """The distinct file inodes the given trees address. This, not `len(walk())`,
+    is what a filesystem charges for: two links to one file cost one inode."""
+    out: set[int] = set()
+    for root in roots:
+        for p in sorted(root.rglob("*")):
+            if p.is_file() or p.is_symlink():
+                out.add(p.stat().st_ino)
+    return out
+
+
+def test_seeding_two_legs_shares_the_seed_s_inodes_instead_of_paying_a_corpus_per_leg(tmp_path,
+                                                                                    supersede):
+    """Clause 1: two legs seeded from one tree address one seed's file inodes, not
+    two seeds' — pinned by the same-relative-path file in each leg reporting an
+    identical `st_ino`, and by the seed file itself reporting three links.
+
+    The 12 untouched seeded files are the ones that must be shared. The two
+    `Relay` files a replay rewrites and the aliases file a leg may write are the
+    two exceptions, and they are counted as exceptions rather than ignored: a
+    build that copied everything would cost 26 file inodes here against the 16
+    this asserts.
+    """
+    seed = _seed_facts(tmp_path / "corpus")
+    seed_files = _seeded_files(seed)
+    assert len(seed_files) == 13, "12 fact files plus the root's aliases file"
+    untouched = [p for p in seed_files
+                 if p.relative_to(seed).as_posix() not in SEED_REPLAYED
+                 and p.name != SEED_ALIAS_FILE]
+    assert len(untouched) == 10
+
+    out = tmp_path / "pair"
+    manifest = snap.build(out, now_iso=NOW, seed=seed)
+    legs = [out / m / snap.SNAPSHOT_FACTS_SUBDIR for m in snap.MODE_PAIR]
+    assert manifest["seed"] == str(seed.resolve())
+
+    shared = seed / "Bearing0/Bearing0-state.md"
+    for leg in legs:
+        leg_file = leg / "Bearing0/Bearing0-state.md"
+        assert leg_file.stat().st_ino == shared.stat().st_ino, \
+            "the same file in the seed and in a leg is a different inode"
+        assert leg_file.read_bytes() == shared.read_bytes()
+    assert shared.stat().st_nlink == 3, "seed + both legs are one inode, three links"
+
+    # The filesystem's own bill: one seed's worth of inodes for the shared part,
+    # plus a fresh inode for each of the 2 replayed files in each of the 2 legs,
+    # plus a copied aliases file per leg. Two `copytree`s would bill 26.
+    assert len(_inode_set(*legs)) == len(untouched) + 2 * len(SEED_REPLAYED) + 2
+    assert len(_inode_set(*legs)) < 2 * len(seed_files)
+
+
+def test_a_replayed_seeded_pair_leaves_the_seed_tree_byte_identical(tmp_path, supersede):
+    """Clause 2: a leg's replay can never alter the seed, or the other leg, through
+    a shared inode.
+
+    `_write_list` used to `write_text` in place with no unlink. Against a hardlinked
+    seed that writes INTO the seed's inode: the frozen corpus stops being the thing
+    both legs were measured against, and the `noop` leg's reconstruction of a file
+    leaks through the same inode into the `on` leg — destroying the exact
+    differential the pair exists to measure. So the seed is hashed before and after,
+    and each leg's rewritten file has to be a DIFFERENT inode from the seed's and
+    from the other leg's while the bytes on the two legs diverge.
+    """
+    seed = _seed_facts(tmp_path / "corpus")
+    before = {p.relative_to(seed).as_posix(): (p.read_bytes(), p.stat().st_ino)
+              for p in _seeded_files(seed)}
+
+    out = tmp_path / "pair"
+    snap.build(out, now_iso=NOW, seed=seed)
+
+    after = {p.relative_to(seed).as_posix(): (p.read_bytes(), p.stat().st_ino)
+             for p in _seeded_files(seed)}
+    assert after == before, "a leg's replay wrote through a shared inode into the seed"
+    seeded = _facts_of(tmp_path / "corpus")
+    assert len(seeded) == 12, "the seed still holds exactly the facts it was seeded with"
+    assert seeded[STATE_KEY] == (snap.WRITE_SEQUENCE[0][2], None), \
+        "the seed's own prior picked up a leg's expired_at"
+
+    rel = Path("Relay/Relay-state.md")
+    seed_ino = (seed / rel).stat().st_ino
+    leg_paths = [out / m / snap.SNAPSHOT_FACTS_SUBDIR / rel for m in snap.MODE_PAIR]
+    leg_inos = [p.stat().st_ino for p in leg_paths]
+    assert all(i != seed_ino for i in leg_inos), \
+        "a rewritten leg file is still the seed's inode"
+    assert leg_inos[0] != leg_inos[1], "the noop leg and the on leg share one inode"
+    assert leg_paths[0].read_bytes() != leg_paths[1].read_bytes(), \
+        "the two legs wrote the same bytes through one link"
+
+    for leg in [out / m / snap.SNAPSHOT_FACTS_SUBDIR for m in snap.MODE_PAIR]:
+        assert (leg / SEED_ALIAS_FILE).stat().st_nlink == 1, \
+            "the aliases file `isolated_tree` points a leg at is a link into the seed"
+
+
+def test_a_seed_the_filesystem_cannot_link_falls_back_to_copying_instead_of_crashing(tmp_path,
+                                                                                    supersede,
+                                                                                    monkeypatch):
+    """Clause 3: seed and `--out` on different filesystems is the ordinary case
+    (a disk corpus, a scratch `--out`), and `os.link` answers it with `EXDEV`. A
+    builder that lets that escape crashes mid-seed; this one copies.
+
+    `os.link` is the only thing patched, so everything below it — the walk, the
+    copy fallback, the replay, the differential — is the real path.
+    """
+    seed = _seed_facts(tmp_path / "corpus")
+
+    def exdev(*args, **kwargs):
+        raise OSError(errno.EXDEV, "Invalid cross-device link", args[1] if len(args) > 1 else "")
+
+    monkeypatch.setattr(os, "link", exdev)
+    out = tmp_path / "pair"
+    manifest = snap.build(out, now_iso=NOW, seed=seed)
+    assert manifest["seed"] == str(seed.resolve())
+
+    for mode in snap.MODE_PAIR:
+        leg = out / mode / snap.SNAPSHOT_FACTS_SUBDIR
+        filler = leg / "Bearing0/Bearing0-state.md"
+        assert filler.is_file(), "the EXDEV fallback lost the seeded corpus"
+        assert filler.read_bytes() == (seed / "Bearing0/Bearing0-state.md").read_bytes()
+        assert filler.stat().st_nlink == 1, "a leg built by fallback still links the seed"
+    assert manifest["shows_expiry_differential"] is True, \
+        "the pair still measures something when it had to be copied"
+
+
+def test_a_filesystem_short_on_inodes_is_refused_before_the_out_dir_is_created(tmp_path,
+                                                                              supersede,
+                                                                              monkeypatch):
+    """Clause 4: the builder prices the run against the `--out` filesystem's free
+    inodes and refuses with both numbers, leaving the out dir uncreated.
+
+    Nothing on the eval path ever read `f_ffree`: `git grep -n "statvfs\\|f_ffree"
+    -- eval/` at #2775's triage returned one hit, and it was prose inside a stored
+    eval answer. The run that filled `/tmp` to the guardian's own 80 % alarm line
+    was one pair away from exhausting it, and the only thing between that and a
+    host where every `mktemp` fails (the 2026-09-29 class) was luck.
+
+    The build that fits is asserted FIRST, so the refusal below is the estimate
+    being tight and not the fixture being unable to write anything at all. Where
+    the host filesystem keeps an inode table that is checked through the real
+    `statvfs`; where it does not — btrfs under `/home`, which is both this round's
+    worktree and the gate's own pytest basetemp — `f_ffree` is 0 for that reason
+    alone, and the room has to be synthesised or the node is asserting on the
+    filesystem type of the machine that happens to run it. It did exactly that, and
+    the tests rung caught it, on the first gate of this round.
+    """
+    seed = _seed_facts(tmp_path / "corpus")
+    out = tmp_path / "pair"
+    needed = snap.planned_inode_need(legs=len(snap.MODE_PAIR), seed=seed)
+    assert needed > 0
+    total, free = snap.inode_capacity(out)
+    if total == 0:
+        # `statvfs_result` is positional: (bsize, frsize, blocks, bfree, bavail,
+        # FILES, FFREE, favail, fsid, flag, namemax). Room is f_ffree, the 7th field.
+        monkeypatch.setattr(os, "statvfs", lambda path: os.statvfs_result(
+            (4096, 4096, 0, 0, 0, needed + 1000, needed + 1000, 7, 0, 0, 255)))
+    else:
+        assert free >= needed
+    assert snap.build(out, now_iso=NOW, seed=seed)["out"] == str(out.resolve())
+
+    tight = tmp_path / "tight"
+    # A table that exists (f_files = needed + 1, so the check runs) with 7 inodes
+    # free in it — seven against the `needed` the run is about to ask for.
+    monkeypatch.setattr(os, "statvfs", lambda path: os.statvfs_result(
+        (4096, 4096, 0, 0, 0, needed + 1, 7, 7, 0, 0, 255)))
+    with pytest.raises(snap.SnapshotRefused) as exc:
+        snap.build(tight, now_iso=NOW, seed=seed)
+    msg = str(exc.value)
+    assert not tight.exists(), "the refusal created the out directory anyway"
+    assert "7 free inodes" in msg, msg
+    assert f"needs {needed}" in msg, msg
+    # Unseeded legs are priced too: three synthetic facts are a handful of inodes,
+    # but "this filesystem cannot hold what I am about to write" is not a property
+    # of the seed.
+    with pytest.raises(snap.SnapshotRefused):
+        snap.build(tight / "plain", now_iso=NOW)
+
+
+def test_a_filesystem_that_keeps_no_inode_table_is_not_read_as_being_full(tmp_path, supersede,
+                                                                         monkeypatch):
+    """`f_files == 0` means the filesystem has no inode table, which is not the same
+    fact as having no free inodes — and the first real run of the guard below
+    conflated them on this host's own btrfs and refused the build it was pricing.
+
+    Everything under `/home` is btrfs, INCLUDING the data root and every round's
+    worktree, and `statvfs` there reports `(f_files, f_ffree) == (0, 0)` because its
+    inodes are 64-bit numbers rather than slots in a table. Refusing on that reads
+    as a safety rail and is a rail that blocks every seeded eval on the machine.
+    """
+    seed = _seed_facts(tmp_path / "corpus")
+    monkeypatch.setattr(os, "statvfs", lambda path: os.statvfs_result(
+        (4096, 4096, 0, 0, 0, 0, 0, 0, 0, 0, 255)))
+    out = tmp_path / "pair"
+    manifest = snap.build(out, now_iso=NOW, seed=seed)
+    assert manifest["inode_budget"]["checked"] is False, manifest["inode_budget"]
+    assert manifest["shows_expiry_differential"] is True
+
+
+def test_no_documented_out_example_puts_a_snapshot_on_tmpfs_tmp():
+    """Clause 5: the invocation examples are the interface, and on both revisions
+    they put `--out` at `/tmp/fwg-…` — onto a tmpfs that holds 1,048,576 inodes in
+    total and was at 81 % of them when #2775 was filed.
+
+    The documented place is the tree's own gitignored data dir, `.lloyd-data`,
+    which is on disk, is under no VCS, and is not `production_data_root()` (which
+    `refuse_production_root` rules out, so the live data root is NOT the answer to
+    "where do eval artifacts go").
+    """
+    doc = snap.__doc__ or ""
+    assert "/tmp/" not in doc, "the module docstring still points an example at tmpfs"
+    assert DOCUMENTED_OUT in doc, "no example documents an on-disk out dir"
+
+    # `format_help()` hard-wraps at terminal width AND breaks a long token at a
+    # hyphen, so the example path can straddle two lines. It is compared with
+    # whitespace removed rather than wherever the wrap happened to fall; the `/tmp`
+    # ban is checked on the same text so a help edit cannot smuggle one past a line
+    # break either.
+    help_text = re.sub(r"\s+", "", snap.cli_parser().format_help())
+    assert "/tmp" not in help_text, "the --out help still names tmpfs"
+    assert DOCUMENTED_OUT in help_text, "the --out help names no on-disk location"
