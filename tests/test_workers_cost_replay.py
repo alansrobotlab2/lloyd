@@ -555,3 +555,210 @@ def test_a_run_with_no_rule_matched_still_names_a_candidate(tmp_path, monkeypatc
     v = CO.analyse(rows)
     assert v["candidate"]["rule"] == "spread", v["candidate"]
     assert "candidate is the task's size itself" in v["candidate"]["text"]
+
+
+# ---------------------------------------------------------------------------
+# The `compaction` column is one turn's JSON freeing record (#1078), not a count.
+#
+# Every site pinned below used to read the column with `int()`, so a real fire of
+# this diagnostic raised `ValueError: invalid literal for int() with base 10:
+# '{"mechanisms": [], "turn_start": …` — the identical string in the `error` column
+# of the quarantined `cost-investigate` queue row (workers.db id 8980, 3 attempts,
+# enqueued 2026-10-13T03:45:32Z) — and died upstream of its one write, which is why
+# `~/lloyd-data/_pipeline/cost-outliers/` had never existed (#2738). The seeds above
+# are all ints, which is how a green suite shipped that crash: no test here had
+# ever put a blob in the column.
+# ---------------------------------------------------------------------------
+
+def _turn_start_blob(turn_start_freed: int, relief_freed: int = 0) -> str:
+    """A `compaction` value in the shape the live column holds.
+
+    Copied field for field out of a real row of `~/lloyd-data/usage.db` read
+    2026-10-15 (row 11,553, which freed 11,343 tokens at turn start and 33,618
+    through the intra-turn relief ladder); only the two freed-token numbers are
+    parameterised, so a test can ask for exact arithmetic and still be handing the
+    reader the shape that raised. Written as JSON text because that is what the
+    column stores: TEXT holding an object, normalised by `usage_store`'s writer.
+    """
+    rec = {
+        "mechanisms": ["microcompact"],
+        "relief": [],
+        "relief_passes": 0,
+        "relief_tokens_freed": relief_freed,
+        "turn_start": {
+            "context_window": 262_144, "flushed_before_summary": False,
+            "mechanisms": ["microcompact"], "microcompact_reduced": 0,
+            "microcompact_sidecar": False, "microcompacted": 21, "ran": True,
+            "restored_files": 0, "summarize_attempted": False,
+            "summarize_outcome": "under_threshold", "summarized": False,
+            "summary_covered_rows": 0, "summary_folds": 0, "summary_reused": False,
+            "threshold": 210_144, "tokens_after": 28_261, "tokens_before": 39_604,
+            "tokens_freed": turn_start_freed, "truncated": False,
+        },
+    }
+    if relief_freed:
+        rec["mechanisms"].append("relief:intra_turn")
+        rec["relief_passes"] = 1
+        rec["relief"] = [{"freed_tokens": relief_freed, "passes": 2,
+                          "rearm": 151_303, "reason": "intra_turn",
+                          "rungs": ["tool_results:11", "reasoning:6"],
+                          "target": 109_274, "used_after": 108_211,
+                          "used_before": 151_313}]
+    return json.dumps(rec)
+
+
+def _relief_only_blob(relief_freed: int) -> str:
+    """The OTHER live shape: the relief ladder ran mid-turn, so the record has no
+    `turn_start` key at all. 60 of the 8,393 populated rows on this box are this
+    shape (measured 2026-10-15, `json_extract(compaction,'$.turn_start') IS NULL`),
+    and 506 of the 1,145 rows that freed anything freed only through it — so a
+    reader that indexes `record["turn_start"]` KeyError's on these, and one that
+    merely looks under it reports them as turns that freed nothing.
+    """
+    return json.dumps({
+        "mechanisms": ["relief:intra_turn"],
+        "relief": [{"freed_tokens": relief_freed, "passes": 2, "rearm": 151_303,
+                    "reason": "intra_turn",
+                    "rungs": ["tool_results:11", "reasoning:6", "reasoning:2"],
+                    "target": 109_274, "used_after": 108_211,
+                    "used_before": 151_313}],
+        "relief_passes": 1,
+        "relief_tokens_freed": relief_freed,
+    })
+
+
+def _usage_row(compaction=None, *, inp=10_000, outp=2_000, stop="end_turn", **over):
+    """One usage row as `usage_rows` hands it to `analyse`: every column present.
+
+    `cache_read` is large by default so `prefix_cache` stays unlit and a candidate
+    assertion says which rule fired rather than which one the fixture forgot to
+    switch off.
+    """
+    row = {"session_id": "s", "ts": "t", "model": "m", "input_tokens": inp,
+           "output_tokens": outp, "cache_create": 0, "cache_read": 10 ** 7,
+           "num_turns": 3, "reprefill_tokens": 0, "prefix_misses": 0,
+           "compaction": compaction, "stop_reason": stop, "tool_calls": 4,
+           "tool_errors": 0, "tool_errors_by_class": None, "skills": None}
+    row.update(over)
+    return row
+
+
+def test_a_live_compaction_blob_is_read_as_a_record_and_never_cast_to_a_number():
+    """Clause 1: the blob is the crash, so the blob is the seed.
+
+    Before #2738 both rows below raised on sight, and `analyse` is called before
+    the record's only write, so a fire produced no artifact at all. The relief-only
+    row is here because it is the second live shape, not a variation of the first:
+    it has no `turn_start` block to read.
+    """
+    rows = [_usage_row(_turn_start_blob(11_343, 33_618)),
+            _usage_row(_relief_only_blob(43_102)),
+            _usage_row()]                      # the NULL the store also holds
+    v = CO.analyse(rows)
+    assert isinstance(v, dict), "a blob turned the readout into an exception"
+    # Two rows freed something; the third recorded nothing.
+    assert v["figures"]["compact"] == 2, v["figures"]
+    assert v["candidate"]["rule"] == "compaction", v["candidate"]
+
+    # And no reader of this column may cast it again, in this module or later:
+    # `usage.compaction` is TEXT (`app/usage_store.py`'s own CREATE TABLE), so a
+    # line that casts it is a line that raises on 100% of the live rows.
+    src = (ROOT / "app" / "cost_outlier.py").read_text(encoding="utf-8")
+    cast = [ln.strip() for ln in src.splitlines()
+            if "int(" in ln and "compaction" in ln]
+    assert cast == [], f"the column holds a record, not a count: {cast}"
+
+
+def test_the_compaction_rule_needs_a_record_that_actually_freed_something():
+    """Clause 2: presence is not cost.
+
+    8,393 of the live usage rows carry a record and 1,145 of those freed anything
+    (measured 2026-10-15), so arming this rule on a record merely being present
+    would light it on 86% of runs — ahead of `prefix_cache`, whose <50%-cached
+    threshold is the one that actually discriminates, so the record would name the
+    wrong fix on most of the runs it wrote.
+
+    The quiet rows are not empty records: each says a pass RAN (`ran: true`, 21
+    things microcompacted) and freed 0, which is the case that reads as evidence
+    and is not.
+    """
+    quiet = CO.analyse([_usage_row(_turn_start_blob(0, 0)),
+                        _usage_row(_relief_only_blob(0))])
+    assert quiet["figures"]["compact"] == 0, quiet["figures"]
+    assert quiet["checks"]["compaction"] is False, quiet["checks"]
+    assert quiet["candidate"]["rule"] != "compaction", quiet["candidate"]
+
+    relief = CO.analyse([_usage_row(_relief_only_blob(43_102))])
+    assert relief["checks"]["compaction"] is True, relief["checks"]
+    assert relief["candidate"]["rule"] == "compaction", relief["candidate"]
+
+
+def test_compact_pct_is_freed_tokens_as_a_share_of_the_run():
+    """Clause 3: 10,000 tokens freed of a 100,000-token run is 10.0%.
+
+    Not a sum of the column: summing a JSON blob is arithmetically impossible, and
+    summing the mere presence of one would report 1 or 2 as a percentage. And the
+    number must not move when a row whose record freed nothing joins the run — the
+    zero-token row below is not invented, the live store has 10 rows with
+    `input_tokens+output_tokens = 0` and every one of them carries a compaction
+    record (measured 2026-10-15), which is exactly the row that would inflate a
+    presence-counting figure's row count without adding a token of spend.
+    """
+    run = [_usage_row(_turn_start_blob(6_000, 4_000), inp=90_000, outp=10_000)]
+    v = CO.analyse(run)
+    assert v["total_tokens"] == 100_000, v["total_tokens"]
+    assert v["figures"]["compact_pct"] == 10.0, v["figures"]
+
+    with_freebie = run + [_usage_row(_turn_start_blob(0, 0), inp=0, outp=0)]
+    v2 = CO.analyse(with_freebie)
+    assert v2["figures"]["compact_pct"] == 10.0, v2["figures"]
+    assert v2["figures"]["compact"] == 1, "the row that freed nothing is not compacted"
+
+
+def test_a_fired_run_with_a_live_blob_writes_its_one_record(tmp_path, monkeypatch):
+    """Clause 4: the deliverable, across the store seam that produced it.
+
+    Arming happens the way the pool arms (`_fired_payload`), the blob row is written
+    by the shipped writer into the fired run's own session, and `investigate` then
+    re-reads that store through `usage_rows` — so this test crosses the two
+    boundaries the crash sat between (sqlite TEXT -> dict -> figures -> markdown)
+    rather than calling `analyse` with a dict built in the test.
+    """
+    wdb, udb = _make_stores(tmp_path, monkeypatch)
+    queue = WorkQueue(wdb)
+    payload = _fired_payload(queue, wdb, udb)
+    usage_store.record_usage(session_id=payload["session_ids"][0], model="primary",
+                             input_tokens=1_000, output_tokens=500, num_turns=7,
+                             compaction=json.loads(_turn_start_blob(11_343, 33_618)))
+
+    out = tmp_path / "cost-outliers"
+    monkeypatch.setattr(CO, "record_path", lambda run_id: out / f"{run_id}.md")
+    res = CO.investigate(payload, usage_db=udb)
+
+    # Exactly one record, because the item is a file count over this directory.
+    files = sorted(p.name for p in out.iterdir())
+    assert len(files) == 1, f"expected one record for one fire, got {files}"
+    txt = (out / files[0]).read_text()
+    assert res["artifact_path"] == str(out / files[0])
+
+    cand = [ln for ln in txt.splitlines() if ln.startswith("**`")]
+    assert cand, "no candidate line"
+    assert cand[0].startswith("**`compaction`**"), cand[0]
+    assert "{" not in cand[0], f"an unsubstituted template reached the record: {cand}"
+    assert "44,961" in txt, "the compaction cell must show the tokens it freed"
+    assert '"mechanisms"' not in txt, "the raw blob does not belong in a record"
+
+
+def test_a_freeing_blob_beside_the_int_seeds_still_loses_to_the_turn_cap():
+    """Clause 5: the priority order is a judgement about causes, and a blob is now
+    in the same list of seeds the ints are in. A run that hit its turn cap AND
+    rewrote its history still gets the turn-cap sentence — finishing the job is the
+    cheaper fix — so reading `compaction` correctly must not have promoted it.
+    """
+    order = [k for k, _ in CO._CANDIDATE_RULES]
+    assert order.index("turn_cap") < order.index("compaction"), order
+    v = CO.analyse([_usage_row(_turn_start_blob(11_343, 33_618), stop="max_turns"),
+                    _usage_row(0),            # the int seed, still readable
+                    _usage_row(_relief_only_blob(43_102))])
+    assert v["checks"]["turn_cap"] and v["checks"]["compaction"], v["checks"]
+    assert v["candidate"]["rule"] == "turn_cap", v["candidate"]

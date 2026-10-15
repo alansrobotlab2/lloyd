@@ -51,6 +51,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+# `usage_store` owns the `compaction` column's shape (#1078) and already knows how
+# to read it; this module is a consumer. The dependency runs one way —
+# `usage_store` imports stdlib and `app.paths` only — so there is no cycle here,
+# and a second parser for the same column would be the thing that drifts.
+from app import usage_store
+
 # ── Tuning ───────────────────────────────────────────────────────────────────
 
 #: The source whose runs this trigger never scores. See the recursion note above.
@@ -176,8 +182,6 @@ def _token_totals(usage_db: Path, session_ids: Iterable[str]) -> dict[str, int]:
     ids = [s for s in session_ids if s]
     if not ids:
         return {}
-    from app import usage_store
-
     rows = usage_store.read_rows_readonly(
         Path(usage_db), ["session_id", "input_tokens", "output_tokens"],
         since_ts=_ALL_TS)
@@ -512,9 +516,10 @@ _CANDIDATE_RULES: tuple[tuple[str, str], ...] = (
                  "still working when it hit its turn cap, so the tokens went into "
                  "work that never finished — raise the cap only if the task is "
                  "really that long, otherwise split the job."),
-    ("compaction", "{compact} row(s) show compaction, which re-reads the history: "
-                   "the run spent {compact_pct}% of its tokens on re-reading its "
-                   "own context, so the fix is to hand it a narrower input."),
+    ("compaction", "{compact} row(s) rewrote the history and freed tokens, and "
+                   "every rewrite re-prefills everything after the break: "
+                   "{compact_pct}% of this run's tokens are what its context "
+                   "policy removed, so the fix is to hand it a narrower input."),
     ("prefix_cache", "cache_read is {cache_pct}% of prompt spend, so nearly every "
                      "turn re-reads an uncached prefix: the fix is a stable prompt "
                      "prefix (skills, tools and system text unchanged across turns) "
@@ -563,7 +568,14 @@ def analyse(rows: list[dict]) -> dict:
                  for r in rows)
     cache_read = sum(int(r.get("cache_read") or 0) for r in rows)
     refill = sum(int(r.get("reprefill_tokens") or 0) for r in rows)
-    compact = [r for r in rows if int(r.get("compaction") or 0)]
+    # `usage.compaction` is TEXT holding one run's freeing record (#1078), not a
+    # count, so `int()` on it raises on every populated row — which is how every
+    # real fire of this diagnostic died before reaching its write (#2738). A row
+    # counts toward the rule only when its record says something WAS freed:
+    # triage measured 8,384 populated rows against 1,145 that freed anything, so
+    # counting presence would arm this rule on 86% of runs, ahead of
+    # `prefix_cache`, whose threshold is the one that actually discriminates.
+    compact = [f for f in (_freed_tokens(r) for r in rows) if f > 0]
     capped = [r for r in rows if str(r.get("stop_reason") or "") == "max_turns"]
     tool_calls = sum(int(r.get("tool_calls") or 0) for r in rows)
     tool_errs = sum(int(r.get("tool_errors") or 0) for r in rows)
@@ -585,7 +597,12 @@ def analyse(rows: list[dict]) -> dict:
         "rows": len(rows),
         "capped": len(capped),
         "compact": len(compact),
-        "compact_pct": pct(sum(int(r.get("compaction") or 0) for r in compact), total),
+        # A share of WHAT THE POLICY REMOVED, not a sum of records: the two are the
+        # same number only if every record holds a count, which none does. Read as
+        # freed tokens over the run's own spend, because the cost a rewrite
+        # imposes is re-prefilling what it dropped, and a run that freed 10% of its
+        # tokens through compaction is paying that 10% again on the next turn.
+        "compact_pct": pct(sum(compact), total),
         "cache_pct": pct(cache_read, prompt + cache_read),
         "tool_errs": tool_errs,
         "tool_calls": tool_calls,
@@ -623,6 +640,29 @@ def analyse(rows: list[dict]) -> dict:
             "figures": figures, "checks": checks, "candidate": candidate}
 
 
+def _freed_tokens(row) -> int:
+    """Tokens one usage row's `compaction` record says its context policy freed.
+
+    The one way this module is allowed to read that column. `usage.compaction` is
+    TEXT holding a JSON record (#1078), not a count, so there is no cast that
+    reads it correctly — all three sites this helper replaced raised on every
+    populated row, which is why no fire of this diagnostic had ever written its
+    record (#2738). The parse lives in `usage_store`, which owns the column, and
+    it sums BOTH freeing paths: a reader that looks only under `turn_start` loses
+    the 506 relief-only rows out of the 1,145 that freed anything on this box, the
+    same mistake #2027's first draft made and which does not fail loudly — it
+    prints a plausible weaker number (`_freeing_evidence`'s docstring).
+
+    A row with no record, a record with no `turn_start` block, an unparseable
+    record, and an integer all read 0. An integer is not a live shape (measured
+    2026-10-15: 8,384 populated rows, all TEXT beginning `{`, none integer-shaped),
+    so reading one as 0 frees nothing to cost and invents nothing either.
+    """
+    if not row:
+        return 0
+    return usage_store.compaction_freed_tokens(row.get("compaction"))
+
+
 def _row_tokens(row) -> int:
     if not row:
         return 0
@@ -653,7 +693,8 @@ def render(payload: dict, rows: list[dict], verdict: dict) -> str:
              "",
              "## Where the tokens went",
              "",
-             "| session | ts | in | out | cache_read | refill | turns | compaction | stop | tools (err) |",
+             "| session | ts | in | out | cache_read | refill | turns | compaction "
+             "freed | stop | tools (err) |",
              "|---|---|---|---|---|---|---|---|---|---|",
              ]
     for r in rows[:40]:
@@ -663,7 +704,7 @@ def render(payload: dict, rows: list[dict], verdict: dict) -> str:
             f"{int(r.get('output_tokens') or 0):,} | "
             f"{int(r.get('cache_read') or 0):,} | "
             f"{int(r.get('reprefill_tokens') or 0):,} | "
-            f"{int(r.get('num_turns') or 0)} | {int(r.get('compaction') or 0)} | "
+            f"{int(r.get('num_turns') or 0)} | {_freed_tokens(r):,} | "
             f"{r.get('stop_reason') or ''} | {int(r.get('tool_calls') or 0)} "
             f"({int(r.get('tool_errors') or 0)}) |")
     if len(rows) > 40:

@@ -1521,3 +1521,38 @@ def count_inner_voice_observations_by_action(
         (session_id,),
     ).fetchall()
     return {r["action"]: int(r["n"]) for r in rows}
+
+
+# ── Public reader over one row's `compaction` record ─────────────────────────
+#
+# Deliberately at the bottom of this file rather than beside `_freeing_evidence`,
+# the private reader it wraps: this file's line numbers are cited in prose
+# elsewhere (a test docstring quotes the skill-breakdown comment twelve functions
+# up), and inserting code anywhere above the bottom silently moves every one of
+# those anchors while leaving the prose reading correct.
+#
+# The wrapper exists because `usage.compaction` is TEXT holding a JSON record
+# (#1078), not a count. A reader that treats the column as a number does not get
+# a wrong answer, it gets an exception on every populated row — which is what
+# `app/cost_outlier.py` did until #2738, and it died there only because that
+# module had no `except`. Every later reader of this column should come through
+# here rather than parse it again.
+
+def compaction_freed_tokens(compaction: Any) -> int:
+    """How many tokens one row's `compaction` record says were freed.
+
+    The sum of the record's two freeing paths — `turn_start.tokens_freed` for the
+    turn-start pass and top-level `relief_tokens_freed` for the intra-turn relief
+    ladder — because reading only the first loses 44% of the rows that freed
+    anything on this box (#2027's first draft did exactly that; see
+    `_freeing_evidence`'s docstring). A row with no record, a record with no
+    `turn_start` block, or a record that will not parse reads as 0: the same
+    reading `_freeing_evidence` gives it, and the same one `json_extract` gives it
+    in SQL. A value that is already an int also reads as 0 — this column has
+    stored no integer since the record existed (measured 2026-10-15: 8,384
+    populated rows, all TEXT beginning `{`, none integer-shaped), so an integer
+    there records nothing this file can name and reporting it as freed tokens
+    would be inventing a number.
+    """
+    ev = _freeing_evidence(compaction)
+    return ev["turn_start_freed"] + ev["relief_freed"]
