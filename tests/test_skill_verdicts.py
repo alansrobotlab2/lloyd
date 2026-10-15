@@ -5998,3 +5998,249 @@ def test_the_record_cli_refuses_an_absent_snapshot_and_writes_nothing(tmp_path):
     assert str(cands / ABSENT_SNAPSHOT) in out.stderr, out.stderr
     assert not store.exists(), (
         "the CLI refused on stdout and appended the row anyway")
+
+
+# ── #2746: a re-confirmation may not disarm the 60-day date reopen ───────────
+#
+# #736 made `record` carry `occurrences_at_decision` forward when `--occurrences` is
+# omitted, precisely so a routine append cannot disarm the >10x growth reopen. The date
+# leg had no such carry-forward: `reopen_reason` weighed it on the LATEST line's
+# `decided_at`, and `record` always stamps now, so every mandatory nightly re-confirmation
+# pushed the expiry out by another 60 days. For the seven fileless keys — no candidate
+# file, so no current count, and `reopen_reason` requires a baseline above 0 — the date leg
+# is the ONLY reopen available, and it was being pushed past reach every night they recurred.
+
+def _days_ago(days: int) -> str:
+    """A `decided_at` stamp `days` in the past, in the ledger's own format."""
+    return (datetime.now(tz=timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_the_date_leg_ages_on_first_decided_at_not_on_the_latest_append(store):
+    """Clause 1: the 60-day leg weighs on `first_decided_at`, falling back to `decided_at`.
+
+    The defect is #736's on the other leg. A key decided 75 days ago is past its expiry,
+    but the mandatory step-3.5 re-confirmation appends a line stamped today, and
+    `reopen_reason` read that stamp — so the row read as freshly decided and the expiry
+    that had already arrived was never reached. `seq-2-bash-other-bash-fs` has been
+    re-confirmed every night since 2026-09-14, which slid its evaluated expiry from
+    2026-11-13 to 2026-12-14: a key that recurs nightly can never expire by date.
+
+    The fallback half matters as much as the new leg: all 419 existing ledger lines lack
+    `first_decided_at`, and each must keep today's behaviour until its next append.
+    """
+    key = "Bash/fs"
+    first = _days_ago(75)
+    latest = _days_ago(10)
+    sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                      reason="installed skill owns this signature",
+                      evidence_cmd=PRINTING_CMD, occurrences=40, decided_at=first)
+    sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                      reason="re-confirmed against tonight's corpus",
+                      evidence_cmd=PRINTING_CMD, decided_at=latest)
+
+    row = sv.load_verdicts(store)[key]
+    assert row["decided_at"] == latest, "the latest line still records when it was written"
+    assert row["first_decided_at"] == first
+    assert sv.reopen_reason(row, occurrences=40) == f"expired after {sv.REOPEN_AFTER_DAYS}d", (
+        "a key first decided 75 days ago is past its expiry however recently it was "
+        "re-confirmed; before the fix this returned None because the leg read the "
+        "10-day-old stamp")
+    # And the lift is real where it is consumed, not just in the helper: a lifted verdict
+    # is the miner proposing again instead of suppressing.
+    assert sv.terminal_verdict(key, store=store, occurrences=40) is None
+
+    # The fallback for the pre-#2746 shape: no `first_decided_at`, so the leg weighs on
+    # `decided_at` exactly as it does today.
+    aged_legacy = {"pattern_key": "Bash/legacy", "verdict": "noise", "reason": "stored",
+                   "occurrences_at_decision": 1, "decided_at": _days_ago(61)}
+    assert sv.reopen_reason(aged_legacy, occurrences=1) == \
+        f"expired after {sv.REOPEN_AFTER_DAYS}d", \
+        "a row without the new field keeps today's behaviour until its next append"
+    fresh_legacy = dict(aged_legacy, decided_at=sv.now_iso())
+    assert sv.reopen_reason(fresh_legacy, occurrences=1) is None
+
+
+def test_record_stamps_first_decided_at_with_the_earliest_line_for_the_key(store):
+    """Clause 2: the carry-forward is the minimum over every line, not the prior row's stamp.
+
+    The subtlety an implementation that copies #736's shape naively gets wrong: taking the
+    superseded row's `decided_at` would, on the night this ships, hand a key that has been
+    re-confirmed nightly for a month a stamp from yesterday and leave its whole pre-fix
+    history disarmed. The append-only file preserves every earlier line, so the earliest is
+    read from all of them — out of file order on purpose below, because the second line
+    carries an OLDER date than the first and a prior-row implementation would pick the wrong
+    one either way.
+    """
+    key = "seq-2-bash-fs-bash-fs-err"
+    older, first_written = _days_ago(120), _days_ago(90)
+    sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                      reason="back-dated row written first", evidence_cmd=PRINTING_CMD,
+                      occurrences=241, decided_at=first_written)
+    sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                      reason="back-dated row that is nonetheless the earliest decision",
+                      evidence_cmd=PRINTING_CMD, decided_at=older)
+
+    appended = sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                                 reason="correction to the phrase above",
+                                 evidence_cmd=PRINTING_CMD)
+    assert appended["first_decided_at"] == older, (
+        "the carry-forward is the earliest decided_at over ALL lines for the key, not the "
+        f"prior row's stamp: got {appended['first_decided_at']}, want {older}")
+    assert appended["decided_at"] >= first_written, (
+        "the appended line's own decided_at still records when that line was written")
+    assert appended["occurrences_at_decision"] == 241, "#736's carry still works"
+
+    # A genuinely new key has no earlier line to carry, so its own stamp is the answer.
+    new_key = sv.record_verdict(store=store, pattern_key="Bash/network",
+                               verdict="reviewed_no_skill", reason="first decision tonight",
+                               evidence_cmd=PRINTING_CMD)
+    assert new_key["first_decided_at"] == new_key["decided_at"]
+
+
+def test_a_wiped_live_tree_still_yields_the_durable_copys_earliest_decision(store, mirror):
+    """Clause 2's other half: the earliest is read through `resolve_verdict_source`.
+
+    `carried_forward_occurrences` reads the fallback tree rather than the live file alone,
+    and the date leg needs the same reach: after a wipe the only surviving copy of the
+    original decision is the vault's, and a carry that read the empty live tree would mint
+    `first_decided_at = now` for a key decided months ago — disarming the leg with the
+    incident rather than the append.
+    """
+    key = "seq-2-read-edit"
+    first = _days_ago(90)
+    sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                      reason="decided before the wipe", evidence_cmd=PRINTING_CMD,
+                      occurrences=111, decided_at=first)
+    store.unlink()
+    assert not sv.load_verdicts(store), "the live tree is gone; only the copy has the row"
+    assert mirror.is_file(), "the durable copy still holds the original decision"
+
+    row = sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                            reason="re-minted after the wipe", evidence_cmd=PRINTING_CMD)
+    assert row["first_decided_at"] == first, (
+        "the earliest surviving decision comes from the durable copy, so a wipe cannot "
+        "reset a key's age")
+
+
+def test_the_cli_cannot_push_the_60_day_reopen_out(store, capsys):
+    """Clause 3: the same guard as #736's, across the surface the nightly actually uses.
+
+    The reproduction is the one triage ran: a terminal row first decided 75 days ago, then
+    one `record` append with no date flag and `--occurrences` omitted — the exact shape of
+    the mandatory step-3.5 write-back. Before the fix the growth leg survived that append
+    (`carried_forward_occurrences`) while the date leg went from `expired after 60d` to
+    None; the seven fileless keys have no growth leg to fall back on.
+    """
+    key = "seq-2-bash-other-bash-fs"
+    first = _days_ago(75)
+    sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                      reason="owned by the bash-fs skill", evidence_cmd=PRINTING_CMD,
+                      occurrences=12, decided_at=first)
+
+    assert sv.main(["record", "--pattern", key, "--verdict", "reviewed_no_skill",
+                    "--reason", "re-confirmed tonight: still owned, phrase corrected",
+                    "--evidence-cmd", declares("echo '12 occurrences over 5 sessions'"),
+                    "--store", str(store)]) == 0
+    capsys.readouterr()
+
+    row = sv.load_verdicts(store)[key]
+    assert row["decided_at"] >= first, "the append stamped itself today"
+    assert row["first_decided_at"] == first
+    assert sv.reopen_reason(row, occurrences=12) == f"expired after {sv.REOPEN_AFTER_DAYS}d", (
+        "a routine re-confirmation appended through the CLI with no date flag and no "
+        "--occurrences must not lift a verdict whose date leg has already come due")
+    assert sv.terminal_verdict(key, store=store, occurrences=12) is None, (
+        "the miner reads through terminal_verdict, so a None here is the suppression "
+        "sticking for another 60 days")
+
+
+def test_first_decided_at_is_a_declared_field_the_writers_carry(store, mirror, tmp_path):
+    """Clause 4: declaring it in `FIELDS` is what makes the field survive every writer.
+
+    `FIELDS` is the ledger's frontmatter key list, and the row dict is built in that order,
+    so pinning the two against each other is what stops the field being written by
+    `record` alone and dropped by the seed/sync/frontmatter routes. The sync assertion is
+    the cross-tree half: `sync` copies whole rows, so the field must arrive in the durable
+    copy rather than exist only in the live ledger.
+    """
+    assert "first_decided_at" in sv.FIELDS
+    assert sv.FIELDS.index("first_decided_at") == sv.FIELDS.index("decided_at") + 1, (
+        "declared beside the stamp it is the earlier version of")
+
+    first = _days_ago(70)
+    row = sv.record_verdict(store=store, pattern_key="Bash/timeout",
+                            verdict="reviewed_no_skill",
+                            reason="installed skill bash-timeout Pattern 3 owns this",
+                            evidence_cmd=PRINTING_CMD, occurrences=13, decided_at=first)
+    assert tuple(row) == sv.FIELDS, (
+        "the row a writer emits and the declared field list are the same keys in the same "
+        f"order: {tuple(row)}")
+    assert json.loads(store.read_text(encoding="utf-8").splitlines()[0])[
+        "first_decided_at"] == first, "the field is on disk, not only in the returned dict"
+
+    # `sync` carries it into the durable copy (it copies whole latest-per-key rows).
+    assert sv.main(["sync", "--store", str(store)]) == 0
+    durable_row = sv.load_verdicts(mirror)["Bash/timeout"]
+    assert durable_row["first_decided_at"] == first, (
+        "the durable copy must hold the same age anchor, or a post-wipe reader loses it")
+
+    # A seeded candidate mints its own anchor: it has no earlier line, so its own stamp.
+    cands = tmp_path / "seed-cands"
+    hand_candidate(cands, "candidate-Bash-logit-20261015.md", "Bash/logic", 9)
+    (cands / "candidate-Bash-logit-20261015.md").write_text(
+        "---\npattern: Bash/logic\nstatus: reviewed_no_skill\noccurrences: 9\n---\n\n"
+        "## Examples\n\n- one\n", encoding="utf-8")
+    assert sv.main(["seed", "--candidates", str(cands), "--store", str(store)]) in (0, 1)
+    seeded_row = sv.load_verdicts(store)["Bash/logic"]
+    assert seeded_row["first_decided_at"] == seeded_row["decided_at"], (
+        "a key with no earlier line is anchored at its own decision")
+
+
+def test_check_prints_the_expiry_the_row_is_actually_measured_on(store, tmp_path, capsys):
+    """Clause 5: a printed expiry is the date the row was judged against, never the append's.
+
+    Triage found the prose half of this already lying: a row whose own `reason` said
+    "self-reopens by DATE ~2026-11-09" was being evaluated against 2026-12-13, because the
+    stamp the reader is shown (`decided_at`) is not the stamp the leg is weighed on. The
+    fix prints the anchor the code actually uses, so a reader cannot be shown a date the
+    row is not measured on. Both judgement lines are pinned: `SKIP` (the verdict binds) and
+    `REOPEN` (the date leg fired).
+
+    The blocked case is built so the two candidate answers differ by 45 days — a node that
+    printed `decided_at + 60` could not pass it by accident.
+    """
+    expired_key, bound_key = "Bash/fs", "Write/permission"
+    exp_first, bnd_first = _days_ago(75), _days_ago(30)
+    bnd_latest = _days_ago(15)
+    cands = tmp_path / "candidates"
+    hand_candidate(cands, "candidate-Bash-fs-20261015.md", expired_key, 12)
+    hand_candidate(cands, "candidate-Write-permission-20261015.md", bound_key, 12)
+    for key, first in ((expired_key, exp_first), (bound_key, bnd_first)):
+        sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                          reason="owned elsewhere", evidence_cmd=PRINTING_CMD,
+                          occurrences=12, decided_at=first)
+    # The bound key gets a re-confirmation, which is what moves `decided_at` off the anchor.
+    sv.record_verdict(store=store, pattern_key=bound_key, verdict="reviewed_no_skill",
+                      reason="re-confirmed: still owned", evidence_cmd=PRINTING_CMD,
+                      decided_at=bnd_latest)
+
+    def _date(stamp: str) -> str:
+        return (datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+                + timedelta(days=sv.REOPEN_AFTER_DAYS)).strftime("%Y-%m-%d")
+
+    assert sv.main(["check", "--candidates", str(cands), "--store", str(store)]) == 0
+    out = capsys.readouterr().out
+
+    assert f"REOPEN {expired_key} :: expired after {sv.REOPEN_AFTER_DAYS}d" in out, out
+    assert _date(exp_first) in out, (
+        "the reopened line must state the expiry its date leg actually reached")
+    reopen_line = [ln for ln in out.splitlines() if ln.startswith(f"REOPEN {expired_key}")][0]
+    assert _date(bnd_latest) not in reopen_line
+
+    bound_line = [ln for ln in out.splitlines() if ln.startswith(f"SKIP {bound_key}")][0]
+    assert _date(bnd_first) in bound_line, (
+        f"a still-binding row prints the expiry of the anchor it is measured on; got {bound_line}")
+    assert _date(bnd_latest) not in bound_line, (
+        "printing decided_at + 60 would show a date 45 days later than the one the row "
+        f"is evaluated against: {bound_line}")

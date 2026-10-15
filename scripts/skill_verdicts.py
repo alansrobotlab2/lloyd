@@ -239,6 +239,12 @@ LEDGER_MINTED_STATUSES = frozenset({
 MINTED_BY_LEDGER = LEDGER_MINTED_STATUSES | {SUPERSEDED_STATUS}
 
 # Frontmatter keys, in order. `pattern_key` is the join key everywhere.
+#
+# `first_decided_at` sits beside `decided_at` because it is the earlier version of it, and
+# `record_verdict` builds the row dict in exactly this order (#2746 clause 4): the seed,
+# sync and frontmatter routes all copy whole rows, so a field declared here and written in
+# this order is carried by every one of them, and a field added to only one of the two
+# lists is dropped by the others.
 FIELDS = (
     "pattern_key",
     "verdict",
@@ -247,6 +253,7 @@ FIELDS = (
     "evidence_observed",
     "occurrences_at_decision",
     "decided_at",
+    "first_decided_at",
     "decided_by",
     "source_candidate",
 )
@@ -615,10 +622,50 @@ def is_terminal(row: dict | None) -> bool:
     return bool(row) and (row.get("verdict") or "").strip() in TERMINAL_VERDICTS
 
 
+def date_leg_anchor(row: dict) -> datetime | None:
+    """The stamp the 60-day leg is weighed on (#2746 clause 1).
+
+    `first_decided_at` when the row carries one, its own `decided_at` when it does not.
+    The fallback is not legacy decoration: all 419 ledger lines written before #2746 lack
+    the field, and each has to keep today's behaviour until its next append.
+
+    Weighing the leg on `decided_at` is the defect. `record` always stamps the line it
+    appends with now, and the nightly step-3.5 write-back re-confirms a recurring key every
+    night, so the anchor moved 60 days further out on each pass and a key that recurs could
+    never expire by date at all — `seq-2-bash-other-bash-fs` slid from a 2026-11-13 expiry
+    to 2026-12-14 in a month. The growth leg is immune to that because #736 made the append
+    carry `occurrences_at_decision` forward; this is the same carry-forward on the other
+    leg, and it is the only leg the seven fileless keys have.
+    """
+    first = _parse_ts(row.get("first_decided_at") or "")
+    return first if first is not None else _parse_ts(row.get("decided_at") or "")
+
+
+def reopen_expiry(row: dict) -> datetime | None:
+    """When the date leg comes due for this row, or None if its date cannot be read.
+
+    The anchor plus `REOPEN_AFTER_DAYS` — so a printed expiry is always the date the row
+    was actually evaluated against, never one a reader could only reach by guessing which
+    stamp the code used (#2746 clause 5).
+    """
+    anchor = date_leg_anchor(row)
+    return None if anchor is None else anchor + timedelta(days=REOPEN_AFTER_DAYS)
+
+
+def reopen_expiry_iso(row: dict) -> str:
+    """`reopen_expiry` as a date string, and '' when there is no date to print."""
+    expiry = reopen_expiry(row)
+    return "" if expiry is None else expiry.strftime("%Y-%m-%d")
+
+
 def reopen_reason(row: dict, occurrences: int = 0, now: datetime | None = None) -> str | None:
-    """Why a terminal verdict no longer binds, or None while it still does."""
+    """Why a terminal verdict no longer binds, or None while it still does.
+
+    The date leg ages on `date_leg_anchor` — the key's first decision, not the latest
+    append — so re-confirming a verdict cannot disarm it (#2746).
+    """
     now = now or datetime.now(tz=timezone.utc)
-    decided = _parse_ts(row.get("decided_at") or "")
+    decided = date_leg_anchor(row)
     if decided is None:
         return None
     if now - decided > timedelta(days=REOPEN_AFTER_DAYS):
@@ -658,6 +705,50 @@ def terminal_verdict(
     if reopen_reason(row, occurrences=occurrences, now=now) is not None:
         return None
     return row
+
+
+def carried_forward_first_decided_at(store: Path | str | None, pattern_key: str) -> str:
+    """The stamp this append must not disarm the date leg with (#2746 clause 2).
+
+    The EARLIEST decision this ledger holds for the key, read over **every** line rather
+    than taken from the row being superseded. The append-only file preserves all of them,
+    and the difference is what happens on the night this ships: a key re-confirmed nightly
+    for a month that is handed the prior row's stamp gets yesterday's date and stays
+    disarmed for another 60 days, while the earliest line puts its expiry back where it
+    belonged. A prior row's own `first_decided_at` is folded into the same minimum, so a
+    store whose earlier lines have been swept still keeps the date the leg was already
+    being weighed on.
+
+    Read through `resolve_verdict_source` for the reason `carried_forward_occurrences`
+    gives: after a wipe the surviving copy of the original decision is the durable one, and
+    an anchor of `now` minted from an empty live tree would let the incident do what the
+    append is refused for. No line for the key returns '', which is the one honest case for
+    `record_verdict` to stamp the key's own date — a genuinely new pattern has nothing to
+    disarm.
+    """
+    path = Path(resolve_verdict_source(store)[0])
+    key = pattern_key.strip()
+    if not path.is_file():
+        return ""
+    best: tuple[datetime, str] | None = None
+    # A quiet reader, unlike `load_verdicts`: it has already warned about any malformed
+    # line on this path, and this pass runs on every append.
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (row.get("pattern_key") or "").strip() != key:
+            continue
+        for stamp in (row.get("first_decided_at"), row.get("decided_at")):
+            stamp_text = (stamp or "").strip() if isinstance(stamp, str) else ""
+            ts = _parse_ts(stamp_text)
+            if ts is not None and (best is None or ts < best[0]):
+                best = (ts, stamp_text)
+    return best[1] if best else ""
 
 
 def carried_forward_occurrences(store: Path | str | None, pattern_key: str) -> int:
@@ -743,6 +834,16 @@ def record_verdict(
     so a correction appended without it cannot disarm the growth reopen (#736 clause 1).
     An explicit `0` is stored as given — `cmd_seed` passes one for a merged candidate
     whose units are not comparable with a one-bucket baseline.
+
+    `decided_at` records when *this line* was written and is never carried; the age the
+    60-day reopen is weighed on travels in `first_decided_at`, which
+    `carried_forward_first_decided_at` reads back as the earliest decision the ledger holds
+    for the key (#2746). Writing the stamp and weighing the leg on the same field is what
+    let the mandatory nightly re-confirmation push an expiry out by sixty days a night, and
+    it is #736's defect on the leg that carried nothing: the growth reopen had its
+    carry-forward from #736, the date reopen had none, and a fileless key — no candidate
+    file, therefore no current count, and `reopen_reason` requires a baseline above 0 — has
+    only the date leg to reopen on at all.
 
     The third refusal is the undeclared denominator (#2052): a command that ran, exited 0,
     and printed no `input_rows=<N>` is refused too, because 0 of the live ledger's 109
@@ -1000,6 +1101,11 @@ def record_verdict(
             "next run cannot re-check, and it is not the same defect as a missing field or a "
             "declared zero, both of which are refused above (#2103)"
         )
+    # Read before anything is written, from the same superseded state the occurrences carry
+    # reads from: the earliest decision this ledger holds for the key, or '' when there is
+    # none and this line is itself the first (#2746 clause 2).
+    first_decided = carried_forward_first_decided_at(store, pattern_key)
+    stamp = decided_at or now_iso()
     row = {
         "pattern_key": pattern_key,
         "verdict": verdict,
@@ -1007,7 +1113,10 @@ def record_verdict(
         "evidence_cmd": evidence_cmd,
         "evidence_observed": observed,
         "occurrences_at_decision": int(occurrences or 0),
-        "decided_at": decided_at or now_iso(),
+        "decided_at": stamp,
+        # Keys in `FIELDS` order, which the seed/sync/frontmatter writers copy whole rows
+        # by — a re-confirmation therefore cannot move the age the date leg weighs on.
+        "first_decided_at": first_decided or stamp,
         "decided_by": decided_by,
         "source_candidate": source_candidate,
     }
@@ -2758,6 +2867,10 @@ def scan_candidates(candidates_dir: Path, store: Path | str | None = None, *,
             "verdict": (row or {}).get("verdict", ""),
             "reason": (row or {}).get("reason", ""),
             "decided_at": (row or {}).get("decided_at", ""),
+            # The date the 60-day leg actually judges this row against, so the line
+            # `cmd_check` prints cannot show a reader an expiry the code did not use
+            # (#2746 clause 5). '' for a key with no verdict, which has no leg.
+            "reopen_expiry": reopen_expiry_iso(row) if row else "",
             "blocked": bool(terminal and lift is None),
             "reopened": lift or "",
         })
@@ -2842,13 +2955,20 @@ def cmd_check(args: argparse.Namespace) -> int:
         # about one pattern.
         merged = (f" [{row['signature_buckets']} mined patterns under this key]"
                   if row["signature_buckets"] > 1 else "")
+        # The expiry printed on both judgement lines is `first_decided_at` plus the window
+        # — the date `reopen_reason` really weighed — because the stamp beside it
+        # (`decided_at`) is the latest append, and a reader who adds 60 days to that gets a
+        # date the row is not measured on. That exact misreading is what #2746 found written
+        # into a row's own `reason`: "self-reopens by DATE ~2026-11-09" on a key whose leg
+        # was being evaluated against 2026-12-13.
+        expiry = f", date leg expires {row['reopen_expiry']}" if row["reopen_expiry"] else ""
         if row["blocked"]:
             print(
                 f"SKIP {row['pattern_key']} :: {row['verdict']} :: {row['reason']} "
-                f"(decided {row['decided_at']}, file {row['file']}){merged}"
+                f"(decided {row['decided_at']}{expiry}, file {row['file']}){merged}"
             )
         elif row["reopened"]:
-            print(f"REOPEN {row['pattern_key']} :: {row['reopened']}")
+            print(f"REOPEN {row['pattern_key']} :: {row['reopened']}{expiry}")
         else:
             print(f"PROCEED {row['pattern_key']}")
     # `LEDGER_ABSENT` first: it is the one finding that changes the exit status, and a
