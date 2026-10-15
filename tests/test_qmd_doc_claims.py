@@ -1100,3 +1100,182 @@ def test_the_collections_bullet_describes_a_root_level_collection_not_the_whole_
         "the fold-back is gone from the bullet. It is the mechanism that makes "
         "narrowing cost retrieval nothing, and the reason the narrowing was allowed "
         "at all")
+
+
+# ── The family-wide citation rule (#2755): a cited report resolves or the suite is red ──
+#
+# Every witness in this file was added by an item that had already shipped a dangling
+# citation: #2302, #2396 and #2539 each spent a round on one missing report. Three rounds
+# were needed because the citation-must-resolve check was single-family and single-bullet —
+# `qmd-side-copy-rebuild-2026[^` ]+` inside
+# `test_the_paragraph_reports_the_swap_and_cites_the_report_behind_it`, whose corpus is one
+# `**Task #81**` bullet — while the nightly family was guarded only by the names enumerated
+# in `CITED_REPORTS`. A list of what has been checked is not a rule over what may be cited:
+# 21 nightly reports sat under `$LLOYD_DATA/_pipeline/reflection/` on 2026-10-15, 17 of them
+# with no witness, so the next document to cite one needed an item rather than a diff.
+# #2539's owed-check ruled for widening the scan and measured the cost at zero, which is what
+# the node below re-measures on every run.
+
+#: The corpus, as routes: tracked markdown and nothing else. Code stays out because prose in
+#: a `.py` is a developer's note rather than a claim a reader of the architecture depends on,
+#: and three nightly names live in exactly that kind of prose with no witness anywhere —
+#: `tests/test_qmd_index_maintenance.py:1009` quotes `-2026-09-26.json`, and `:3251` and
+#: `:3433` quote `-2026-09-30.json`. A corpus that read `.py` would be red on landing for
+#: citations no document makes, which is how a rule ends up deleted instead of followed. The
+#: shape is re-proved after expansion, so widening these routes with a code glob fails here.
+MARKDOWN_ROUTES = ("architecture/*.md", "eval/**/README.md")
+
+#: The two dated families, and only those. `qmd-stray-keep-list.json` and
+#: `qmd-stray-release-list.json` are cited by the same doc through the same `$LLOYD_DATA`
+#: prefix and are outside this rule on purpose: the maintenance job rewrites those in place,
+#: so a committed copy would stop matching the live one by the next morning and the
+#: byte-comparison control would be false inside a day. A dated report is the opposite case
+#: — it names one finished invocation and never changes again — which is why it can be a
+#: witness and those two cannot.
+CITED_REPORT_RE = re.compile(
+    r"\$LLOYD_DATA/(_pipeline/reflection/qmd-(?:side-copy-rebuild|index-maintenance)"
+    r"-2026[0-9T:.Z_-]*\.json)")
+
+#: A nightly report that is on this box and has no witness, named by #2755's own positive
+#: control. Nothing here goes looking for it: no node in this section reads
+#: `_pipeline/reflection/`, which is what keeps the section green in a gate worktree whose
+#: `$HOME` is a `round_home` with no such directory at all (#2396 clause 5).
+UNCITED_NIGHTLY = "qmd-index-maintenance-2026-10-14.json"
+
+
+def _tracked_markdown() -> list[tuple[str, str]]:
+    """`(repo-relative path, text)` for every tracked file under `MARKDOWN_ROUTES`.
+
+    From the index rather than the working copy: a scratch `.md` sitting in a worktree is not
+    a citation anyone depends on, and an unstaged document is not a claim the suite owes a
+    check to. Both routes are markdown, and that is asserted rather than assumed.
+    """
+    listed = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--", *MARKDOWN_ROUTES],
+        capture_output=True, text=True)
+    assert listed.returncode == 0, listed.stderr
+    paths = sorted({ln for ln in listed.stdout.split("\n") if ln})
+    assert paths, f"`git ls-files -- {' '.join(MARKDOWN_ROUTES)}` listed no file at all"
+    code = [p for p in paths if not p.endswith(".md")]
+    assert not code, f"a MARKDOWN_ROUTES entry expanded to non-markdown: {code}"
+    return [(p, (ROOT / p).read_text(encoding="utf-8")) for p in paths]
+
+
+def _cited_reports(corpus: list[tuple[str, str]]) -> dict[str, set[str]]:
+    """`{report basename: the files citing it}` for one already-opened corpus."""
+    found: dict[str, set[str]] = {}
+    for rel, text in corpus:
+        for citation in CITED_REPORT_RE.findall(text):
+            found.setdefault(Path(citation).name, set()).add(rel)
+    return found
+
+
+def _assert_citations_resolve(corpus: list[tuple[str, str]]) -> dict[str, set[str]]:
+    """Fail naming the witness path for every citation with nothing committed behind it.
+
+    Resolution is the tree and its index alone — `_fixture()` and `git ls-files
+    --error-unmatch` — never `REFLECTION`, never the passwd anchor, never a vault path. That
+    is a deliberate narrowing: the byte-comparison against the live report is a different
+    question and is already asked of every name in `CITED_REPORTS` by
+    `test_the_three_new_cited_reports_are_exact_tracked_and_admissible`, and reaching the
+    machine from here would make the open-set rule ungradeable on a host that has no
+    `_pipeline/reflection/`. There is no skip in this function either, which
+    `test_no_witness_check_may_skip_a_report_it_could_not_read` holds over this file's source.
+    """
+    cited = _cited_reports(corpus)
+    gaps: list[str] = []
+    for name in sorted(cited):
+        witness = _fixture(name)
+        rel = witness.relative_to(ROOT).as_posix()
+        if not witness.is_file():
+            gaps.append(f"{', '.join(sorted(cited[name]))} cites {name}, which has no "
+                        f"committed witness at {rel}")
+            continue
+        tracked = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "--error-unmatch", rel], capture_output=True)
+        if tracked.returncode != 0:
+            gaps.append(f"{', '.join(sorted(cited[name]))} cites {name}; {rel} is on disk but "
+                        "not in the index, so a fresh clone has nothing to read")
+    assert not gaps, (
+        "a tracked document cites a dated qmd report whose bytes are in no repository, so "
+        "every figure that citation quotes is re-derivable only on the box that ran the job — "
+        "the green-that-means-nothing #2396 was cut to close. Commit the report in the same "
+        "diff as the document that cites it: " + "; ".join(gaps))
+    return cited
+
+
+def test_every_dated_qmd_report_a_doc_cites_has_a_committed_witness():
+    """The rule #2539's owed-check ruled for, over the open set rather than a list of names.
+
+    Green at HEAD because widening cost nothing today: the citations in the corpus are
+    exactly the five names `CITED_REPORTS` enumerates — three nightly reports and the two
+    rebuild reports — and all five witnesses are already in the index. The asserted direction
+    is the superset: a sixth citation whose witness is committed in the same diff passes with
+    no edit to this file, which is the difference between this node and the enumerated dict
+    that let #2302, #2396 and #2539 repeat one fix three times.
+    """
+    cited = _assert_citations_resolve(_tracked_markdown())
+
+    assert cited, (
+        "the scan found no dated qmd citation anywhere in the corpus, so it is an empty loop "
+        "rather than a rule — the citations live in architecture/qmd.md and "
+        "eval/episodic-arm/README.md")
+    dropped = sorted(set(CITED_REPORTS) - set(cited))
+    assert not dropped, (
+        f"a report `CITED_REPORTS` still enumerates is cited by no markdown under "
+        f"{MARKDOWN_ROUTES} ({dropped}), so the widened scan has silently stopped covering "
+        "it: either the citation moved to a file outside the corpus, which needs a new route, "
+        "or it was deleted, which means the dict loses the name too")
+    citing = {rel for rels in cited.values() for rel in rels}
+    for source in (DOC, EPISODIC_README):
+        rel = source.relative_to(ROOT).as_posix()
+        assert rel in citing, (
+            f"the scan read no citation in {rel} even though it is cited there; a corpus that "
+            "quietly lost the file holding a citation reports a clean sweep")
+
+
+def test_a_citation_with_no_witness_fails_the_family_scan_naming_the_missing_file():
+    """This section can fail, and what it asks for is admissible: the two halves, in one node.
+
+    The corpus is a copy — the tracked README's text plus one line citing `UNCITED_NIGHTLY` —
+    and nothing is written to the tree. What is pointed at that corpus is the same
+    `_assert_citations_resolve` the green node calls, so the failure demonstrated is the
+    node's own assertion rather than a hand-written analogue of it.
+    """
+    readme = EPISODIC_README.relative_to(ROOT).as_posix()
+    clean = EPISODIC_README.read_text(encoding="utf-8")
+    assert not _fixture(UNCITED_NIGHTLY).exists(), (
+        f"{UNCITED_NIGHTLY} now has a witness, so it is no longer a fixture-less name and "
+        "cannot demonstrate a missing one: point UNCITED_NIGHTLY at any nightly report in "
+        "the family that still has none. The rule above is unaffected — this node only proves "
+        "the rule can fail")
+    assert UNCITED_NIGHTLY not in _cited_reports([(readme, clean)]), (
+        f"the tracked README already cites {UNCITED_NIGHTLY}, so appending that citation below "
+        "would tamper with nothing; move the control to a report no document cites yet")
+
+    tampered = (clean + f"\nSee `$LLOYD_DATA/_pipeline/reflection/{UNCITED_NIGHTLY}` "
+                "for the run that lost nothing.\n")
+    assert UNCITED_NIGHTLY in _cited_reports([(readme, tampered)]), (
+        "the regex did not match the citation form this node writes, so the green node above "
+        f"is not looking for a name like {UNCITED_NIGHTLY} either")
+
+    with pytest.raises(AssertionError, match=re.escape(f"tests/fixtures/{UNCITED_NIGHTLY}")):
+        _assert_citations_resolve([(readme, tampered)])
+
+    rel = f"tests/fixtures/{UNCITED_NIGHTLY}"
+    rc, source, pattern = _ignore_rule(rel)
+    assert rc == 0 and pattern == "!qmd-index-maintenance-*.json", (
+        f"{rel} is resolved by {source!r} with pattern {pattern!r}; the family negation in "
+        "tests/fixtures/.gitignore is what admits a future witness past the root `*.json` "
+        "rule, and `.gitignore` is a denied path for a round — a fix that needed an edit "
+        "there would be a fix that cannot land")
+    assert subprocess.run(["git", "-C", str(ROOT), "check-ignore", "--no-index", rel],
+                          capture_output=True).returncode != 0, (
+        f"git check-ignore reports {rel} as ignored, so committing the witness the failure "
+        "above asks for would stage nothing and the suite would stay red forever")
+    assert subprocess.run(
+        ["git", "-C", str(ROOT), "check-ignore", "--no-index",
+         "tests/fixtures/some-random-witness.json"], capture_output=True).returncode == 0, (
+        "an ordinary .json under tests/fixtures is no longer ignored, so the line above is "
+        "proving nothing: it is the family negation, not a missing rule, that admits a "
+        "witness")
