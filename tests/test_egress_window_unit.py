@@ -802,10 +802,12 @@ def test_systemd_itself_still_parses_every_window_unit_after_the_comment_edits()
 def test_setup_md_carries_the_enable_route_verbatim():
     """#2555 clause 5(a): the exact command, in the tree the installer does NOT link.
 
-    `install-services.sh` links units; enabling is a decision it deliberately leaves out.
-    That half-step is what shipped `lloyd-persistence-window.timer` linked-but-unarmed
-    (#2537), and `scripts/maintenance/check-unit-enabledness.sh` reports FAIL for any repo
-    timer that is not `enabled`, so an undispatched new timer turns this landing into a
+    `install-services.sh` used to link units and leave enabling as a decision nobody took;
+    since #2774 it arms every `.timer` it links, so the route below is what the script now
+    runs rather than only what a human copies. The half-step is what shipped
+    `lloyd-persistence-window.timer` linked-but-unarmed (#2537), and
+    `scripts/maintenance/check-unit-enabledness.sh` reports FAIL for any repo timer that is
+    not `enabled`, so an undispatched new timer turns this landing into a
     fleet-health failure on its next whole-fleet run. The string is matched verbatim
     because it is meant to be copied out of the document.
     """

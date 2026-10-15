@@ -1,8 +1,8 @@
 """#2714: every tracked user unit file is graded for being the file it claims to be.
 
-`agent-services/setup/install-services.sh:55-75` symlinks every `.service` and `.timer`
-in `agent-services/systemd/` into `~/.config/systemd/user/`, and that symlink is the
-whole reason `architecture/infrastructure.md` may say "editing the repo copy is the
+The `ln -sf` loop in `agent-services/setup/install-services.sh` symlinks every `.service`
+and `.timer` in `agent-services/systemd/` into `~/.config/systemd/user/`, and that symlink
+is the whole reason `architecture/infrastructure.md` may say "editing the repo copy is the
 deploy". On this box five tracked units are not symlinks. They are plain `-rw-r--r--`
 copies placed by hand before the installer last ran: `lloyd-cert-renew.{service,timer}`,
 `lloyd-egress-window.{service,timer}`, `lloyd-persistence-window.{service,timer}`,
@@ -56,10 +56,10 @@ def _load_module():
 
 shc = _load_module()
 
-#: A stand-in installer carrying the exclusion line the real one carries at
-#: `install-services.sh:49`, in the same shape, so the parse is graded on the shape and
-#: not on the real file's length. `test_the_exclusion_list_is_the_installer_s` re-reads
-#: the real script beside it.
+#: A stand-in installer carrying the exclusion line the real one carries beside its
+#: `SYSTEMD_SRC`/`SYSTEMD_DST` declarations, in the same shape, so the parse is graded on
+#: the shape and not on the real file's length.
+#: `test_the_exclusion_list_is_the_installer_s` re-reads the real script beside it.
 INSTALLER_STUB = """#!/usr/bin/env bash
 SYSTEMD_SRC="$PROJECT_DIR/systemd"
 SYSTEMD_DST="$HOME/.config/systemd/user"
@@ -529,7 +529,7 @@ def test_a_checker_that_cannot_read_the_exclusion_list_grades_nothing_loudly(fle
 
 
 def test_the_exclusion_list_is_the_installer_s_and_not_a_name_written_here():
-    """The derivation, graded against the real `install-services.sh:49`.
+    """The derivation, graded against the real installer's `SYSTEM_SCOPE_UNITS` line.
 
     A green suite over temp installers would still say nothing if the default read a
     file that is not the installer, exactly as #1108's sibling node says about the byte

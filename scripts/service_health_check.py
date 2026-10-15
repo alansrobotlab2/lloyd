@@ -569,8 +569,11 @@ DEPLOYED_COPIES = (
 USER_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 SYSTEMD_UNIT_TREE = _TREE / "agent-services" / "systemd"
 INSTALL_SERVICES = _TREE / "agent-services" / "setup" / "install-services.sh"
-#: `SYSTEM_SCOPE_UNITS=(nvidia-power-limit.service)`, `install-services.sh:49`. Read from
-#: the installer instead of restated here, for `_switched_off`'s reason: the installer
+#: `SYSTEM_SCOPE_UNITS=(nvidia-power-limit.service)`, the declaration beside
+#: `SYSTEMD_SRC`/`SYSTEMD_DST` at the head of `install-services.sh` — anchored on its own
+#: text rather than a line number, because #2774 grew an arming block below it and a
+#: number here would have gone stale on the very commit that added arming. Read from the
+#: installer instead of restated here, for `_switched_off`'s reason: the installer
 #: owns that list, and a unit added to it must not need an edit to this file to stop
 #: being flagged for the gap the installer leaves on purpose.
 SYSTEM_SCOPE_RE = re.compile(r"^SYSTEM_SCOPE_UNITS=\(([^)]*)\)", re.MULTILINE)
@@ -1037,8 +1040,9 @@ def check_unit_file_links(tree_dir: Path = SYSTEMD_UNIT_TREE,
     """One graded row per tracked user-scope unit file: is the copy that runs the tree's
     own file, or a stand-in that will never follow it?
 
-    The installer's loop (`install-services.sh:55-75`) links every `*.service` and
-    `*.timer` in `tree_dir` into `deployed_dir`, so after it has run the deployed path is
+    The installer's link loop (the `ln -sf` in `install-services.sh`, over
+    `"$SYSTEMD_SRC"/*.service` and `*.timer`) links every unit in `tree_dir` into
+    `deployed_dir`, so after it has run the deployed path is
     a symlink to the tracked file and editing the repo copy IS the deploy. Anything else
     at that path means the running unit is a different object from the tracked one:
 

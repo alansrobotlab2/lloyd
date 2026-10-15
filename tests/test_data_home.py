@@ -1364,8 +1364,9 @@ def _unresolved(names: list[str]) -> list[str]:
 def test_the_cutover_timer_fleet_carries_the_cert_renewal_timer():
     """Clause 1: the renewal timer goes down and up with the rest of the fleet.
 
-    #1727 landed the renewal script and its units, but `install-services.sh:99-100`
-    are echo lines and `promote.py` only copies a unit and daemon-reloads, so
+    #1727 landed the renewal script and its units, but the installer then only ECHOED
+    its `systemctl --user enable` lines (#2774 is the round that made it run them) and
+    `promote.py` only copies a unit and daemon-reloads, so
     placement was never activation and no other list knew the timer existed. The
     fleet array is the repo's only say in the matter: enabling the timer on goliath
     is host state and stays with the operator (#1793's owed half).

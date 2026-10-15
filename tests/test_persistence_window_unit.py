@@ -617,10 +617,12 @@ def test_neither_new_unit_is_declared_system_scope():
 # ── the enable step, which is host state the loop cannot set ──
 
 def test_setup_md_carries_the_enable_route():
-    """A linked-but-never-enabled timer is the drift #1891 exists to catch:
-    `install-services.sh` echoes the `systemctl --user enable` lines instead of
-    running them, and `scripts/maintenance/check-unit-enabledness.sh` asserts every
-    repo timer answers `enabled`. The enable is host state, so this pins the one place
+    """A linked-but-never-enabled timer is the drift #1891 exists to catch, and the
+    shape that produced it was `install-services.sh` echoing the `systemctl --user
+    enable` lines instead of running them — since #2774 the script executes them
+    itself, which is what the route below now automates.
+    `scripts/maintenance/check-unit-enabledness.sh` asserts every repo timer answers
+    `enabled`. The enable is host state, so this pins the one place
     a human or a rebuild looks: the same page that carries the cert-renew line. It is
     not beyond an unattended turn's reach, and #2537 corrected the older claim here
     that it was — though since #2541 (2026-10-11) the reason is narrower than

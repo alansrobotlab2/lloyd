@@ -1,9 +1,11 @@
 """#1891 — scripts/maintenance/check-unit-enabledness.sh, the guard on a placed-but-disabled timer.
 
-A unit file that is installed but never enabled is invisible to every route this
-repo owns: `agent-services/setup/install-services.sh:99-100` *echoes* the
-`systemctl --user enable` lines instead of running them, `promote.py` only copies a
-unit and daemon-reloads, and `scripts/service_health_check.py` is supervisor-only —
+A unit file that is installed but never enabled was invisible to every route this
+repo owns when this guard was written: `install-services.sh` *echoed* the
+`systemctl --user enable` lines instead of running them (#2774 closed that — the
+script now executes the arming itself, and tests/test_install_services_arms_units.py
+holds it), `promote.py` only copies a unit and daemon-reloads, and
+`scripts/service_health_check.py` is supervisor-only —
 `git grep -n "is-enabled" -- scripts app tests` returned 0 hits before this script
 (positive control: 25 files match `systemctl` in the same scope). So
 `lloyd-cert-renew.timer` reads `disabled` on goliath with the other four repo timers
