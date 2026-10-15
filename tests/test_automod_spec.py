@@ -1289,9 +1289,16 @@ def test_the_tts_grant_moves_exactly_one_tracked_agent_services_verdict(monkeypa
     # the legality check called with the entry shipped. `pre` above strips only
     # TTS_PATCH, so the before/after diff this node computes is still exactly one
     # path: the voice entry is in both tuples.
+    # #2779 added the fifth name, `agent-services/setup/install-services.sh`, the
+    # same way again: one verbatim path, and this round's own node
+    # `test_the_installer_grant_admits_one_exact_path_and_nothing_else` is the
+    # legality check called with the entry shipped. `pre` still strips only
+    # TTS_PATCH, so the diff stays exactly one path: the installer entry is in both
+    # tuples.
     assert allowed_after == {TTS_PATCH, "agent-services/livekit_worker.py",
-                             QMD_TEMPLATE, VOICE_TIMELINE}, (
-        f"the named grants over tracked agent-services paths are exactly the four "
+                             QMD_TEMPLATE, VOICE_TIMELINE,
+                             "agent-services/setup/install-services.sh"}, (
+        f"the named grants over tracked agent-services paths are exactly the five "
         f"this node pins; found {sorted(allowed_after)}. A new verbatim grant is "
         f"a legitimate edit — add its path to this pin, and check it against "
         f"`agent_services_paths_admitted_without_being_named()`, which is the "
@@ -1829,3 +1836,221 @@ def test_the_timeline_diff_clears_scope_in_an_interpreter_that_imported_the_tupl
     parent = spec.check_scope(VOICE_TIMELINE_DIFF)
     assert lines[1].split(" ")[0] == str(parent[0]) == "True", (lines[1], parent)
     assert sorted(parent[2]["allowed"]) == sorted(VOICE_TIMELINE_DIFF), parent
+
+
+# ---------------------------------------------------------------------------
+# #2779: the user-unit installer grant — one path, so #2774 can clear rung 0
+# ---------------------------------------------------------------------------
+#
+# #2774 asks that the installer ARM the user units it links, and all five of its
+# clauses land inside `agent-services/setup/install-services.sh`. The round that
+# took it wrote the fix and never reached a test: its `gate.json` records one rung,
+# preflight, `ok: false`, `paths outside the writable set:
+# ['agent-services/setup/install-services.sh']`, and that rung's own buckets show
+# the diff's other eight paths already `allowed`. The blocker was never the work; it
+# was this tuple naming four verbatim `agent-services/` files and no setup path,
+# with `COMMENT_ONLY_GLOBS` = `("config.yaml",)` so even a comment-only edit there
+# classified `unlisted`. A round cannot widen its own scope, so this grant is its
+# own landed commit, exactly as #1449, #1883, #2136 and #2278 were before it.
+#
+# The shape is #1376's, unchanged: one file, named exactly, never a directory.
+# `agent-services/setup/` holds 33 tracked paths besides the granted one (`git
+# ls-files agent-services/setup/` -> 34 at this round's base), and
+# `agent-services/setup/probe.sh` — which exists only as a #1376 probe, never on
+# disk — is the case a directory grant would cover that no on-disk sample can.
+#
+# Clause map: 1 (the verdict, from a verbatim `*`-free entry) and 2 (one file,
+# nothing else in the directory) in
+# `test_the_installer_grant_admits_one_exact_path_and_nothing_else`; 3 (the exactness
+# rail still empty) called in that same node; 4 (the reason comment, read by this
+# file and not by the TTS rail, which is hard-coded to `TTS_PATCH` and will never
+# read a new line) in `test_the_installer_grant_carries_its_reason_beside_the_entry`;
+# and the payoff #2779 exists for — the refused nine-path diff clearing rung 0 in the
+# kind of process the gate is — in
+# `test_the_2774_diff_clears_rung_0_in_a_fresh_interpreter`.
+
+#: The granted path: #2774's five clauses are this file and nothing else.
+INSTALL_SERVICES = "agent-services/setup/install-services.sh"
+
+#: #1376's probe for a setup file nobody has written yet. A directory grant over
+#: `agent-services/setup/` would admit it; this entry must not.
+SETUP_PROBE = "agent-services/setup/probe.sh"
+
+#: The diff #2774's next round commits: the nine `changed_paths` copied out of the
+#: refused round's `gate.json`, verbatim, installer first. Rung 0 classifies a whole
+#: changed set, so what has to hold is the nine verdicts together — the same
+#: construction as `TTS_1878_DIFF` and `VOICE_TIMELINE_DIFF`, except that this one is
+#: a real refusal's input rather than a prediction of one.
+INSTALL_SERVICES_DIFF = [
+    INSTALL_SERVICES,
+    "architecture/infrastructure.md",
+    "scripts/service_health_check.py",
+    "tests/test_data_home.py",
+    "tests/test_egress_window_unit.py",
+    "tests/test_install_services_arms_units.py",
+    "tests/test_persistence_window_unit.py",
+    "tests/test_service_health_check_unit_links.py",
+    "tests/test_unit_enabledness_check.py",
+]
+
+
+def tracked_setup_siblings() -> list[str]:
+    """Every tracked `agent-services/setup/` file except the granted one.
+
+    Read from the index at call time, as the voice section's helper does: a setup
+    script added tomorrow is exactly what a directory grant would reach, so the
+    sibling set has to grow with the tree for the "nothing else moved" assertions
+    below to mean anything. 33 files at this round's base.
+    """
+    return sorted(p for p in tracked_agent_services_paths()
+                  if p.startswith("agent-services/setup/") and p != INSTALL_SERVICES)
+
+
+def test_the_installer_grant_admits_one_exact_path_and_nothing_else():
+    """#2779 clauses 1, 2 and 3: the verdict rung 0 wanted, from an entry that
+    reaches one file, with the exactness rail still clean.
+
+    `classify` is the verdict the refusal records and `check_scope` the call that
+    makes it, so the first two assertions are the pair of answers
+    `agent-services/setup/install-services.sh` was refused for. The `_match` half is
+    what makes this a test of the clause rather than of a literal written beside it:
+    an entry spelled `agent-services/setup/**` satisfies `classify` on the installer
+    AND admits its 33 tracked siblings plus `probe.sh`, because `fnmatch`'s `*`
+    crosses `/` and the matcher rung 0 uses is `spec._match`. Asking the tuple which
+    entries reach the path turns that red while leaving `classify` green. The rail is
+    called rather than restated — a restatement would keep passing if it were ever
+    refactored away — and the floors are denominator controls: 33 siblings is the
+    `setup/` directory minus this grant, and 70 is what the #1376 rail is sized on,
+    79 tracked `agent-services/` paths still classify `unlisted` with this grant
+    shipped against the 80 measured at the round's base.
+    """
+    assert INSTALL_SERVICES in spec.ALLOWED_GLOBS
+    assert spec.classify(INSTALL_SERVICES) == "allowed"
+    assert INSTALL_SERVICES in {g for g in spec.ALLOWED_GLOBS if "*" not in g}, (
+        "the entry admitting the installer is a wildcard spelling; #1376 clause 1 "
+        "refuses that however few files it happens to reach today")
+    reaching = [g for g in spec.ALLOWED_GLOBS if spec._match(INSTALL_SERVICES, (g,))]
+    assert reaching == [INSTALL_SERVICES], (
+        f"the installer is admitted by {reaching}: only a verbatim entry is legal "
+        f"under #1376 clause 1, and a wildcard here reaches its siblings too")
+    assert INSTALL_SERVICES in tracked_agent_services_paths(), (
+        f"{INSTALL_SERVICES} is not tracked, so admitting it grants nothing a round "
+        f"can actually change")
+    test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+    assert agent_services_paths_admitted_without_being_named() == []
+    siblings = tracked_setup_siblings()
+    assert len(siblings) >= 33, (
+        f"only {len(siblings)} tracked files share the setup directory with the "
+        f"grant, against the 33 at this round's base — the sibling assertions below "
+        f"would be guarding almost nothing")
+    assert [p for p in siblings if spec.classify(p) == "unlisted"] == siblings, (
+        "a setup file became writable as collateral of the #2779 grant: "
+        f"{[p for p in siblings if spec.classify(p) != 'unlisted']}")
+    assert SETUP_PROBE in AGENT_SERVICES_GLOB_PROBES
+    assert spec.classify(SETUP_PROBE) == "unlisted", (
+        "the seeded setup probe became writable, which is the exact harm a directory "
+        "grant does and this grant must not")
+    corpus = tracked_agent_services_paths() + list(AGENT_SERVICES_GLOB_PROBES)
+    setup_allowed = sorted(p for p in corpus
+                           if p.startswith("agent-services/setup/")
+                           and spec.classify(p) == "allowed")
+    assert setup_allowed == [INSTALL_SERVICES], (
+        f"the writable set inside the setup tree is {setup_allowed}, not the one "
+        f"file #2779 named")
+    unlisted = [p for p in tracked_agent_services_paths()
+                if spec.classify(p) == "unlisted"]
+    assert len(unlisted) >= 70, (
+        f"{len(unlisted)} tracked agent-services paths still unlisted, below the 70 "
+        f"the #1376 rail is sized on")
+
+
+def test_the_installer_grant_carries_its_reason_beside_the_entry():
+    """#2779 clause 4: the new grant's comment says why, read by this node.
+
+    The existing reason rail, `test_the_tts_grant_carries_its_reason_beside_the_entry`,
+    is hard-coded to `entry = f'    "{TTS_PATCH}",'` and asserts only TTS's own words,
+    so it never looks at a line added after it — without this node the discipline that
+    every `agent-services` grant carries its reason would be convention for the fifth
+    entry and a test for the first four. The walk is that rail's: up from the entry
+    over the contiguous comment lines. What it has to find is the two things a reader
+    needs to audit the line — the item it unblocks, #2774, and the rung-0 refusal in
+    the words rung 0 prints, which is what makes the grant's cost legible to someone
+    who has never heard of either item — and one thing it must not find: a commit sha
+    or branch name, which is the #2344 rule for reasons that outlive their round (the
+    branch outliving this change has its own name by the time anyone reads this, and a
+    reason that cites it stops being checkable the moment that branch is pruned).
+    """
+    import re
+
+    src = (REPO_ROOT / "scripts" / "automod" / "spec.py").read_text().splitlines()
+    entry = f'    "{INSTALL_SERVICES}",'
+    assert src.count(entry) == 1, (
+        f"expected the grant exactly once in spec.py's ALLOWED_GLOBS, found "
+        f"{src.count(entry)}")
+    block: list[str] = []
+    j = src.index(entry) - 1
+    while j >= 0 and (src[j].lstrip().startswith("#") or not src[j].strip()):
+        block.append(src[j])
+        j -= 1
+    comment = " ".join(reversed(block))
+    # The rail's join keeps each line's leading `#` and its indentation, so a phrase
+    # that wraps — as rung 0's own message does in this comment — is not a substring
+    # of the raw walk. Dropping only each line's leading marker keeps `#2774` intact
+    # (one `#` per line is the marker, the second is the issue ref) and makes the
+    # assertion about the prose rather than about where the author broke the line.
+    prose = " ".join(ln.strip().lstrip("#").strip() for ln in reversed(block))
+    prose = re.sub(r"\s+", " ", prose)
+    assert "#2774" in prose, (
+        f"the grant does not name the item it unblocks, so a reader cannot check "
+        f"whether the reason still holds: {comment!r}")
+    assert "#2779" in prose, comment
+    assert "outside the writable set" in prose and "unlisted" in prose, (
+        f"the grant does not quote the rung-0 refusal it exists to clear, which is "
+        f"the evidence that the cost of this line was ever paid: {comment!r}")
+    stray = re.search(r"\b(?:automod/|[0-9a-f]{7,40})\b", prose)
+    assert stray is None, (
+        f"the reason cites {stray.group(0)!r} — a sha or branch name goes stale the "
+        f"moment the ref is pruned, so the reason has to name an item and a refusal "
+        f"instead: {comment!r}")
+
+
+def test_the_2774_diff_clears_rung_0_in_a_fresh_interpreter():
+    """The payoff, asked of the process kind the gate actually is.
+
+    Everything else here is evaluated inside the pytest process, whose `spec` came
+    through this file's own import, so it would keep passing on an entry that reached
+    only an already-imported module. Rung 0 is a different process: the gate ladder is
+    spawned detached and its preflight calls `spec.check_scope(changed)` on a `spec`
+    that interpreter imported itself. So a fresh interpreter is handed the nine paths
+    the refused round actually presented, copied out of its `gate.json`, and the child's
+    answer is pinned both by equality with the parent (two readings of one wrong tuple
+    agree vacuously otherwise) and by the concrete verdict: `in scope`, no path in
+    `unlisted`, and — the reason the entry went into `ALLOWED_GLOBS` and not
+    `PROTECTED_GLOBS` — no drill, so a #2774 re-offer pays the tests rung and nothing
+    else. The claim stops short of the round it unblocks: this says the installer is
+    writable, not that #2774's arming is correct, and its nine paths' arming work is
+    asserted nowhere here.
+    """
+    probe = (
+        "from scripts.automod import spec; "
+        "import sys; "
+        "print(spec.classify(sys.argv[1])); "
+        "ok, why, buckets = spec.check_scope(sys.argv[1:]); "
+        "print(ok, why, sorted(buckets['allowed']), sorted(buckets['unlisted']), "
+        "sorted(buckets['protected'])); "
+        "print(spec.requires_drill(sys.argv[1:]))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe, *INSTALL_SERVICES_DIFF],
+                         cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.strip().splitlines()
+    assert lines[0] == spec.classify(INSTALL_SERVICES) == "allowed", out.stdout
+    assert lines[1] == (f"True in scope {sorted(INSTALL_SERVICES_DIFF)} [] []"), \
+        (lines[1], INSTALL_SERVICES_DIFF)
+    assert lines[2] == "False", out.stdout
+    ok, why, buckets = spec.check_scope(INSTALL_SERVICES_DIFF)
+    assert (ok, why) == (True, "in scope"), (ok, why, buckets)
+    assert not buckets["unlisted"] and not buckets["protected"], buckets
+    assert spec.requires_drill(INSTALL_SERVICES_DIFF) is False, (
+        "the grant landed in PROTECTED_GLOBS, so every #2774 re-offer would pay a "
+        f"guardian drill for an installer edit: {buckets}")

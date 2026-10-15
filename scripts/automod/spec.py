@@ -158,6 +158,25 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     # `agent-services/voice/probe.sh`), where this entry admits 0. Both halves are
     # pinned by tests/test_automod_spec.py's #2278 section.
     "agent-services/voice/timeline.py",
+    # #2779 / #2774 (2026-10-15): the user-unit installer, one verbatim file
+    # again. The round that needed it wrote #2774's arming fix into this script and
+    # its `gate.json` records the only rung that ran — preflight, `paths outside
+    # the writable set: ['agent-services/setup/install-services.sh']`, bucket
+    # `unlisted`. Admitted for the reason the four entries above do not share: this
+    # is the deploy half of the unit story. The unit files themselves are
+    # `PROTECTED_GLOBS` (`agent-services/systemd/**`, `supervisor/**`) — a round may
+    # edit one, but only by paying a guardian drill — while this script, which links
+    # those units into `~/.config/systemd/user/`, runs `systemctl --user
+    # daemon-reload`, and today merely PRINTS the `systemctl --user enable` a person
+    # has to run, sits in no tuple at all. So the one file where a round could
+    # change how a unit gets armed was unwritable while the units it arms are merely
+    # drill-gated, and #2774's five clauses all wait on this line. What is NOT
+    # admitted is the directory: `agent-services/setup/` holds 33 other tracked
+    # paths — `setup-all.sh`, the vendored `patches/*.patch`, the version pins — and
+    # every one of them stays `unlisted`; #1376 clause 1 prices a `setup/**` spelling
+    # at exactly that many unnamed admissions. tests/test_automod_spec.py's #2779
+    # section pins both halves, including the comment you are reading.
+    "agent-services/setup/install-services.sh",
     "web/src/**",
     "web/index.html",
     "web/public/**",

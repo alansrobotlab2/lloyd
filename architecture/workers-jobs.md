@@ -1182,7 +1182,7 @@ against named, dated open issues: owed-check's ruling, read on the daily note an
 delete-or-keep clock for the ledger starts at that first real run, not at this block's
 landing. What kept the loop from scheduling the source was never a fence around
 `config.yaml`: that claim was retired on 2026-10-05 by the `config_value_change` lane
-(`scripts/automod/spec.py:310`), whose denied set (`CONFIG_DENIED_KEYS`, `:231`)
+(`scripts/automod/spec.py:339`), whose denied set (`CONFIG_DENIED_KEYS`, `:253`)
 covers the lock-out, the rollback path, the engine's identity and the loop's own three
 worker sources, and no path under `workers.sources` belonging to anything else.
 
