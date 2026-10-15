@@ -235,6 +235,11 @@ def summarise(rows: list[dict]) -> dict:
     what produced the 2026-09-24 `all/bench_016` cell of `recall 0.0` from two trials
     that never got to answer (#2160 clause 2).
 
+    The spam block is held to the same exclusion for the same reason: a spam pair is
+    one reply scored twice, so `n`, `objective_drop`, `rubric_drop`, `composite_lower`
+    and `rubric_not_lower` are computed over the pairs whose `all` reply answered, and
+    a pair whose `all` row is `_cut` contributes to none of the five (#2741).
+
     `turns` is still averaged over every row in the cell: how long a run took is a
     fact about the trial that ran, truncated or not, and excluding a capped trial from
     it would flatter the arm's turn cost by hiding its most expensive trials. A cell
@@ -257,7 +262,12 @@ def summarise(rows: list[dict]) -> dict:
                        for m in ("precision", "recall", "f1", "objective",
                                  "rubric", "composite")},
                     "turns": _mean([r["turns"] for r in v["rows"]])}
-    pairs = [(r, s) for r in rows if r["arm"] == "all"
+    # A spam pair is one reply scored twice, so it exists only where that reply
+    # answered: pairing a cut `all` row with its padded copy would put a reply that
+    # never finished into the same mean as one that did (#2741). The padded copy is
+    # built from the same trace and inherits `all`'s cut flags, so filtering the `all`
+    # row removes both halves of such a pair.
+    pairs = [(r, s) for r in rows if r["arm"] == "all" and not _cut(r)
              for s in rows if s["arm"] == "spam"
              and (s["task_id"], s["trial"]) == (r["task_id"], r["trial"])]
     spam = {"n": len(pairs),

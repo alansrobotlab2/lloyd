@@ -53,6 +53,47 @@ def test_spam_is_paired_with_its_own_reply_and_disagreement_is_counted():
     assert s["cells"]["one/t1"]["recall"] == 0.1
 
 
+def test_spam_pairs_only_answered_all_rows():
+    """#2741: a spam pair exists only where the `all` reply it re-scores answered.
+
+    The spam arm is not a second trial — it is the `all` reply re-scored with wrong
+    extras appended — so the pair carries a measurement only if that reply is one.
+    `summarise` already keeps a cut row out of its cell means and out of the
+    judge-independence set, but `pairs` was built with no `_cut` filter, so all five
+    spam numbers were computed over pairs whose `all` reply the turn cap or the wall
+    clock stopped mid-enumeration.
+
+    Three pairs here, one answered. The answered pair alone gives `objective_drop`
+    0.3 (1.0 - 0.7), `rubric_drop` 0.4 (0.9 - 0.5), `composite_lower` 1 (0.60 < 0.95)
+    and `rubric_not_lower` 0 (0.5 < 0.9). Trial 1 is the turn-cap shape — 26 turns
+    against a 25-turn budget, `status='success'` — and its objective 0.0 is no
+    measurement, not a zero score; its padded copy also out-rubs its own truncated
+    original (0.9 >= 0.6), which is the wrongest of the four. Trial 2 is the other
+    cause, `status='timeout'`, excluded by the same predicate.
+
+    Unfixed, this same input reported n 3, objective_drop 0.1, rubric_drop -0.15,
+    composite_lower 3 and rubric_not_lower 2 — padding read as *raising* the rubric,
+    on two pairs that had no reply to pad.
+    """
+    rows = [
+        _row("all", 0, "t1", 1.0, 0.9, 0.95, 1.0, 1.0, status="success",
+             turns=8, turn_budget=25, turn_truncated=False),
+        _row("spam", 0, "t1", 0.7, 0.5, 0.60),
+        _row("all", 1, "t1", 0.0, 0.6, 0.20, 0.0, 0.0, status="success",
+             turns=26, turn_budget=25, turn_truncated=True),
+        _row("spam", 1, "t1", 0.0, 0.9, 0.05),
+        _row("all", 2, "t1", 0.0, 0.4, 0.10, 0.0, 0.0, status="timeout",
+             turns=0, turn_budget=25, turn_truncated=False),
+        _row("spam", 2, "t1", 0.0, 0.95, 0.02),
+    ]
+    spam = arms.summarise(rows)["spam"]
+    assert spam["n"] == 1, spam
+    assert spam["objective_drop"] == 0.3, spam
+    assert spam["rubric_drop"] == 0.4, spam
+    assert spam["composite_lower"] == 1, spam
+    assert spam["rubric_not_lower"] == 0, spam
+
+
 def test_a_cell_counts_both_truncation_causes_and_keeps_them_out_of_its_means():
     """Clause 2 (#2160): the two cut causes are counted beside `n` and excluded
     from the cell's score means.
@@ -348,6 +389,36 @@ def test_the_written_rows_produce_the_split_the_summary_reports(monkeypatch, tmp
     assert keyed[("all", _AT_CAP)]["turns"] == cap, keyed[("all", _AT_CAP)]
     assert (at_cap["n"], at_cap["n_truncated"], at_cap["n_scored"]) == (1, 1, 0), at_cap
 
+
+def test_the_rows_the_driver_writes_leave_the_cut_pairs_out_of_the_spam_delta(
+        monkeypatch, tmp_path):
+    """#2741 across the one boundary the summary tests cannot see: `trials.jsonl`.
+
+    The node above proves the arithmetic over rows this file hand-built. The half
+    that rots silently is the handoff to `--summarise`, which re-reads
+    `<out>/trials.jsonl` and pairs whatever it finds there — the same call the owed
+    run will make over its own artifact at zero engine cost. `_run_with_cuts` drives
+    the real `main_async` against a fake runner with every cut shape present, so of
+    its four `all` rows three are cut (bench_016 at the turn cap, bench_014 at the
+    wall clock, bench_015 at-cap) and only bench_017 answered. The pairing has to
+    report one pair; four means the summary is re-scoring three replies that never
+    finished, which is exactly the number the phrasing ruling would be quoted from.
+    """
+    _run_with_cuts(monkeypatch, tmp_path)
+    rows = [json.loads(line)
+            for line in (tmp_path / "cut" / "trials.jsonl").open()]
+    answered = [r for r in rows if r["arm"] == "all" and not arms._cut(r)]
+    assert [r["task_id"] for r in answered] == [_ANSWERED], answered
+
+    spam = arms.summarise(rows)["spam"]
+    assert spam["n"] == 1, spam
+    # The fake judge answers flat (objective 0.5, rubric 0.5, composite 0.5), so the
+    # one answered pair ties: no drop, composite not lower, and rubric_not_lower
+    # counts it because a tie is not lower. What separates the fix from the bug is
+    # n 1 against 4 and rubric_not_lower 1 against 4.
+    assert spam["objective_drop"] == 0.0, spam
+    assert spam["composite_lower"] == 0, spam
+    assert spam["rubric_not_lower"] == 1, spam
 
 
 def test_the_default_budget_is_the_runners_own(monkeypatch, tmp_path):
