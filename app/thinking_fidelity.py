@@ -241,35 +241,67 @@ def scan_file(path: Path) -> FileScan:
     return scan_messages(path, messages)
 
 
+def accumulate_file(scan: StoreScan, one: FileScan) -> None:
+    """Fold one file's contribution into a running `StoreScan`, in place.
+
+    The one arithmetic, and the reason a store and a slice of it cannot disagree:
+    every counter of every `StoreScan` this module produces moves through here,
+    including the two a `--record --per-day` run builds from ONE walk
+    (`scripts/thinking_fidelity_scan.scan_store_by_day`, #2819) — the whole store
+    and each day's slice, fed by the same `FileScan` object. A tally re-implemented
+    beside it can drift in any of the four counters, and the one it would drift in
+    is `exempt`, which is the e206f304 meta-session rule the per-day series exists
+    to measure.
+
+    Takes the `FileScan` and not the path: a caller that has already paid for the
+    read must not pay for it twice to change its mind about what to count.
+    """
+    scan.files += 1
+    if one.unreadable:
+        scan.unreadable += 1
+        return
+    scan.blocks += one.blocks
+    scan.flagged += one.flagged
+    scan.blocks_exempt_meta += one.exempt
+    if one.flagged:
+        scan.files_with_flags += 1
+        scan.flagged_files.append(one.path.name)
+    if one.exempt:
+        scan.files_exempt_meta += 1
+
+
+def iter_file_scans(paths: Iterable[Path]) -> Iterator[FileScan]:
+    """Read `paths` one at a time, yielding each file's `FileScan` in the order given.
+
+    The read as a stream, so a caller can fold one pass into several tallies at
+    once instead of walking the store once per tally (#2819: the day roll-up and
+    the whole-store row used to be two walks of the same ~10,000 files, and every
+    session file was JSON-parsed twice per nightly run). It is also the seam a
+    counting wrapper goes on to prove a run reads N files and not 2N —
+    `scan_files`, `scan_store` and the per-day walk all read through this name.
+
+    Unreadable files are yielded as `unreadable` `FileScan`s, never dropped: what
+    a missing file counts as is `accumulate_file`'s answer, not this generator's.
+    """
+    for path in paths:
+        yield scan_file(path)
+
+
 def scan_files(root: Path, paths: Iterable[Path]) -> StoreScan:
     """Scan exactly the session files `paths` names, attributing them to `root`.
 
     The slice seam. `scan_store` is this call over every ``*.json`` under a
     directory, and a caller that wants a *slice* of a store — one calendar day of
     it, which is what `scripts/thinking_fidelity_scan.py --per-day` groups by
-    (#1770) — has to get its numbers through here rather than walk the store a
-    second way beside it: a tally re-implemented next to this one can drift in
-    any of the four counters, and the one it would drift in is `exempt`, which is
-    the e206f304 meta-session rule the per-day series exists to measure.
+    (#1770) — has to get its numbers through here or through `accumulate_file`,
+    the same fold, rather than a tally of its own beside it.
 
     `root` is carried for the report, not for the walk: a day's scan says which
     store the day came from, and has no directory of its own.
     """
     scan = StoreScan(root=root)
-    for path in paths:
-        one = scan_file(path)
-        scan.files += 1
-        if one.unreadable:
-            scan.unreadable += 1
-            continue
-        scan.blocks += one.blocks
-        scan.flagged += one.flagged
-        scan.blocks_exempt_meta += one.exempt
-        if one.flagged:
-            scan.files_with_flags += 1
-            scan.flagged_files.append(path.name)
-        if one.exempt:
-            scan.files_exempt_meta += 1
+    for one in iter_file_scans(paths):
+        accumulate_file(scan, one)
     return scan
 
 

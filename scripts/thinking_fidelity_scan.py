@@ -67,11 +67,25 @@ Two properties a day series has to keep straight, and the fields that keep them:
     different things in the same series, and the rate read off the wrong row is
     the rate that lies.
 
-The day rows and the whole-store row are two reads of a live store — the day rows
-from one walk of the glob, the whole-store row from `scan_store`'s — so a session
-being written while the scan runs can appear in one and not the other. Every row
-carries its own `recorded_at` and its own `files`, so the disagreement is
-visible rather than silent; the day rows are the ones the ruling reads.
+`--per-day` reads the store ONCE (#2819). It used to read it twice — one
+`scan_store` for the whole-store row and a second glob-and-parse inside
+`roll_up_by_day` for the day rows — which on the live store of 2026-10-16 (10,082
+`*.json`, 217,825 blocks) meant every session file was JSON-parsed twice every
+night, about 50 s of the ~100 s the script took, on a job whose whole budget is
+300 s. `scan_store_by_day` walks the store once and folds each file into both
+tallies, so a session being written while the scan runs can no longer be in one
+row and not the other; every row still carries its own `recorded_at` and its own
+`files`, and the day rows are still the ones the ruling reads. Because the day
+rows are cut out of the walk, each one is appended the moment its day's slice is
+finished rather than after the walk is over, so a run that is killed or times out
+partway keeps the days it already covered instead of losing all of them; the
+whole-store row, which needs every file, is still last.
+
+The same walk is timed and reported as `scan_seconds` on the whole-store row.
+`workers.db`'s `duration_seconds` for task #91 is the whole agent turn and cannot
+say which part of it the scan was, which is why the 245.2 s peak of 2026-10-15
+against a 300 s budget could only be argued about; a row that carries its own
+walk cost makes the margin a measurement.
 
 `--record --per-day` together is what the daily autonomy task runs (its
 description is the command line, since the task body reaches no worker), so the
@@ -97,6 +111,7 @@ import argparse
 import json
 import re
 import sys
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -104,9 +119,10 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from app import thinking_fidelity  # noqa: E402
 from app.data_root import production_data_root  # noqa: E402
 from app.thinking_fidelity import (  # noqa: E402
-    StoreScan, scan_files, scan_store)
+    StoreScan, accumulate_file, scan_store)
 
 #: Where the prevalence series lives, relative to the production data root —
 #: beside the other measured series (`_pipeline/metrics/kg-health-*.json`).
@@ -201,14 +217,85 @@ class DayRollup:
         return "\n".join(lines)
 
 
+def scan_store_by_day(root: Path, since: str = "", on_day=None
+                      ) -> tuple[StoreScan, DayRollup]:
+    """Walk `root` ONCE and fold it into both the whole-store tally and the day tallies.
+
+    #2819. The two tallies used to be two walks — `scan_store` for the store and a
+    second glob-plus-parse inside `roll_up_by_day` for the days — so every session
+    file was JSON-parsed twice per nightly run: on the 10,082-file store of
+    2026-10-16 that second parse was the better part of 50 s of the script's
+    ~100 s, on a job whose budget is 300 s. One pass over the sorted glob now
+    reads each file exactly once and hands each `FileScan` to
+    `app.thinking_fidelity.accumulate_file` twice — once for the store, once for
+    its day — so the day rows and the whole-store row are the same arithmetic over
+    the same bytes rather than two arithmetic over two reads.
+
+    `on_day(day, scan)` is called the moment a day's slice is finished and BEFORE
+    the next day is opened, which is what lets `--record` put a day row on disk
+    while the walk is still running. The old order — both walks first, every write
+    after — meant an interruption at 95 % cost every day row, and the day rows are
+    the one thing job #91 exists to produce.
+
+    `since` bounds the DAY tallies; every file still counts toward the whole-store
+    tally, which is the point of doing one walk for both. Files whose names name no
+    date go to `DayRollup.undated` and to the whole-store tally only.
+    """
+    whole = StoreScan(root=root)
+    out = DayRollup()
+    open_day = ""                       # the day being folded, "" when none is open
+    open_scan: StoreScan | None = None  # None: that day is outside `since`
+
+    def close() -> None:
+        """Hand the open day to the roll-up and to `on_day`, then stop being open."""
+        nonlocal open_day, open_scan
+        if open_scan is not None:
+            out.days[open_day] = open_scan
+            if on_day is not None:
+                on_day(open_day, open_scan)
+        open_day, open_scan = "", None
+
+    for path in sorted(root.glob("*.json")):
+        day = day_of(path.name)
+        if not day:
+            # Undated: in the store tally, in no day tally, and it does not close
+            # the open day — its name sorts among the dated ones, not after them.
+            out.undated.append(path.name)
+            accumulate_file(whole, thinking_fidelity.scan_file(path))
+            continue
+        if day != open_day:
+            # Sorted names keep one day's files contiguous, so a new day means the
+            # previous day is finished: hand it over (and flush its row) BEFORE
+            # this day's first file is opened.
+            close()
+            if not since or day >= since:
+                open_day = day
+                open_scan = StoreScan(root=root)
+        # Resolved on the `app.thinking_fidelity` module namespace, which is where
+        # `iter_file_scans` resolves it too — so one wrapper there counts every
+        # file every walk in the process opens, which is the only way to show this
+        # run makes N reads and not the 2N the two-walk shape made.
+        one = thinking_fidelity.scan_file(path)
+        accumulate_file(whole, one)
+        if open_scan is not None:
+            accumulate_file(open_scan, one)
+    close()
+    return whole, out
+
+
 def roll_up_by_day(root: Path, since: str = "") -> DayRollup:
     """Group `root`'s session files by the day in their name, scan each group.
 
-    Each day's numbers come from `app.thinking_fidelity.scan_files` — the same
-    walk `scan_store` makes, one `scan_file` call per file — so the meta-session
-    exemption and the marker set are inherited, not re-implemented here (#1770
-    clause 1). `since` is a normalised ISO date or ""; it bounds the ROLL-UP, and
-    the whole-store row written beside it is unaffected by it.
+    Each day's numbers come from the one walk `scan_store_by_day` makes, folded
+    through `app.thinking_fidelity`'s own `scan_file` and `accumulate_file`, so the
+    meta-session exemption and the marker set are inherited, not re-implemented
+    here (#1770 clause 1). `since` is a normalised ISO date or ""; it bounds the
+    ROLL-UP, and the whole-store row written beside it is unaffected by it.
+
+    Since #2819 this is `scan_store_by_day` with the store tally set aside, which
+    means it reads the whole store even when `since` bounds it to one day: the
+    files outside the window are what the store tally it discards is made of. The
+    only caller that cares (`main`, with `--per-day`) wants that tally anyway.
 
     A day inside the window whose files hold no reasoning block still gets a scan
     (`blocks == 0`, which the row renders as a null rate, not a zero rate): the
@@ -216,17 +303,7 @@ def roll_up_by_day(root: Path, since: str = "") -> DayRollup:
     exists to remove. A day the store holds no files for is a different fact — no
     row is invented for it, and the printed window says what was scanned.
     """
-    by_day: dict[str, list[Path]] = {}
-    out = DayRollup()
-    for path in sorted(root.glob("*.json")):
-        day = day_of(path.name)
-        if not day:
-            out.undated.append(path.name)
-        elif not since or day >= since:
-            by_day.setdefault(day, []).append(path)
-    for day in sorted(by_day):
-        out.days[day] = scan_files(root, by_day[day])
-    return out
+    return scan_store_by_day(root, since)[1]
 
 
 def _measurements(scan: StoreScan) -> dict:
@@ -252,22 +329,34 @@ def _measurements(scan: StoreScan) -> dict:
     }
 
 
-def prevalence_row(scan: StoreScan,
-                   scope: str = SCOPE_WHOLE_STORE) -> dict:
+def prevalence_row(scan: StoreScan, scope: str = SCOPE_WHOLE_STORE,
+                   scan_seconds: float | None = None) -> dict:
     """The machine-readable row for a whole-store scan, denominator and all.
 
     `scope` is what the denominator covers, and it is a field rather than an
     implication because `--record --per-day` appends day rows into the same file
     as this one.
+
+    `scan_seconds` is the wall clock of the walk that produced `scan` (#2819). Job
+    #91's own margin against its 300 s budget could not be read off `workers.db`:
+    `duration_seconds` is the whole agent turn, and it peaked at 245.2 s on
+    2026-10-15 with no way to say how much of that was this scan. A row carrying its
+    own walk cost makes the margin measurable. It is absent, not zero, when the
+    caller timed nothing — a `0.0` here would read as a fast scan, which is the
+    same ambiguity `flagged_rate: null` exists to prevent. Day rows never carry it:
+    one walk is sliced into all of them, so its cost belongs to none of them.
     """
     now = datetime.now(timezone.utc)
-    return {
+    row = {
         "date": now.date().isoformat(),
         "scope": scope,
         "recorded_at": now.isoformat(timespec="seconds"),
         "root": str(scan.root),
         **_measurements(scan),
     }
+    if scan_seconds is not None:
+        row["scan_seconds"] = round(scan_seconds, 3)
+    return row
 
 
 def day_row(day: str, scan: StoreScan) -> dict:
@@ -289,11 +378,23 @@ def day_row(day: str, scan: StoreScan) -> dict:
 
 
 def record_prevalence(row: dict, series: Path) -> Path:
-    """Append the row as one JSON line and return the file it went into."""
+    """Append the row as one JSON line and return the file it went into.
+
+    Opens in append mode and writes one line at a time, which is what makes
+    #2819's incremental flush safe: `--record --per-day` calls this from inside the
+    walk, once per finished day, so the day rows are on disk before the
+    whole-store row's line is ever composed.
+    """
     series.parent.mkdir(parents=True, exist_ok=True)
     with series.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
     return series
+
+
+def _series_path(args) -> Path:
+    """Where this run's rows go: `--series`, or the default under the data root."""
+    return (Path(args.series).expanduser() if args.series
+            else production_data_root() / PREVALENCE_RELATIVE)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -329,14 +430,32 @@ def main(argv: list[str] | None = None) -> int:
               "was scanned, which is NOT a clean verdict", file=sys.stderr)
         return 2
 
-    scan = scan_store(root)
+    series = _series_path(args) if args.record else None
+    day_rows_written: list[str] = []
+
+    # One walk, whichever shape the run takes. With --per-day the same pass that
+    # builds the whole-store tally builds the day tallies, and `flush` puts each
+    # day row on disk as its day finishes — before the next day is opened, so a run
+    # cut short at 95 % of a 300 s budget still leaves the days it covered (the
+    # two-walk shape wrote nothing until both walks were done).
+    walk_started = time.monotonic()
+    if args.per_day:
+        def flush(day: str, day_scan: StoreScan) -> None:
+            record_prevalence(day_row(day, day_scan), series)
+            day_rows_written.append(day)
+
+        scan, rollup = scan_store_by_day(
+            root, args.since, flush if series is not None else None)
+    else:
+        scan, rollup = scan_store(root), None
+    walk_seconds = time.monotonic() - walk_started
+
     print(f"root: {root}")
     print(scan.report())
     if args.list:
         for name in scan.flagged_files:
             print(f"  flagged: {name}")
 
-    rollup = roll_up_by_day(root, args.since) if args.per_day else None
     if rollup is not None:
         report = rollup.report()
         if report:
@@ -348,17 +467,11 @@ def main(argv: list[str] | None = None) -> int:
                   "verdict", file=sys.stderr)
 
     if args.record:
-        series = (Path(args.series).expanduser() if args.series
-                  else production_data_root() / PREVALENCE_RELATIVE)
-        day_rows = ([day_row(day, s) for day, s in rollup.days.items()]
-                    if rollup is not None else [])
-        for one in day_rows:
-            record_prevalence(one, series)
-        row = prevalence_row(scan)
+        row = prevalence_row(scan, scan_seconds=walk_seconds)
         record_prevalence(row, series)
-        if day_rows:
-            print(f"recorded {len(day_rows)} day row(s) "
-                  f"({day_rows[0]['day']} .. {day_rows[-1]['day']}), oldest "
+        if day_rows_written:
+            print(f"recorded {len(day_rows_written)} day row(s) "
+                  f"({day_rows_written[0]} .. {day_rows_written[-1]}), oldest "
                   "first, then the whole-store row")
         print(f"recorded: {json.dumps(row, sort_keys=True)}")
         print(f"  appended to {series}")

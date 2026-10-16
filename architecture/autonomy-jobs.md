@@ -1157,7 +1157,7 @@ commit `5394a06e`, 01:35Z; its own `created:` is `2026-10-16T00:00:00Z`).
 
 | ID | Freq | Job | Reads | Writes | Must not |
 |----|------|-----|-------|--------|----------|
-| #91 | daily | Nightly thinking-fidelity prevalence series (`thinking-fidelity-prevalence-series`, #1770) | every session file under `~/lloyd-data/sessions`, walked twice by `scripts.thinking_fidelity_scan --record --per-day` | one row per calendar day plus a final `scope: whole_store` row, appended to `~/lloyd-data/_pipeline/metrics/thinking-fidelity-prevalence.jsonl` | `config.yaml` or `preserve_thinking_iterations`: switching the capture to `false` makes the marker rate fall without one fabricated trace going away, which is the failure #1510 closed |
+| #91 | daily | Nightly thinking-fidelity prevalence series (`thinking-fidelity-prevalence-series`, #1770) | every session file under `~/lloyd-data/sessions`, walked once by `scripts.thinking_fidelity_scan --record --per-day` (#2819: the day roll-up and the whole-store row were two walks over the 10,082 `*.json` of 2026-10-16, and the whole-store row now carries the walk's own `scan_seconds`) | one row per calendar day plus a final `scope: whole_store` row, appended to `~/lloyd-data/_pipeline/metrics/thinking-fidelity-prevalence.jsonl` | `config.yaml` or `preserve_thinking_iterations`: switching the capture to `false` makes the marker rate fall without one fabricated trace going away, which is the failure #1510 closed |
 | #92 | daily | vLLM prefix-miss daily (`vllm-prefix-miss-daily`, #2006) | `usage.db`, `event_logs/*.events.jsonl`, and the primary engine's status lines in `~/lloyd-data/logs/services/agent-llm-primary.log*`, through `scripts.vllm_prefix_miss_window` | `~/lloyd-data/vllm-prefix-miss/vllm_prefix_miss_<counted-day>.json`, plus a backlog item when a §10 trigger moved or a day is about to rotate out of the ~11-file log window uncounted | stage or commit anything: `workers/sources/arch_review.py` and an automod round are the two things that commit onto live main, and a nightly reader that staged its own fixture would be a third |
 | #93 | daily | Step conformance replay (`step-conformance-replay`, #2104) | the last 7 days of run traces under `~/lloyd-data/autonomy-runs`, replayed against each task's learned `expected_steps` ledger by `scripts/step_conformance.py replay --days 7 --support 1.0 --escalate-writes` | its printed lines verbatim into its own run record, and the one escalation: a backlog draft for a flagged run that wrote no artefact every other run of its task wrote | `learn --out` and `replay --json`; the ledger and the trajectory store stay closed for writing, and the job never adjudicates, promotes, closes or re-triages the draft it filed, never injects into a session, never opens a round |
 | #94 | daily | Referential integrity ledger (`referential-integrity-ledger`, #2151 from #882) | every backticked path and `path:N` cite in `lloyd/MEMORY.md`, `lloyd/USER.md` and `memory/mental-models.md`, resolved against the repo, vault, data root and the citing file's directory | `~/obsidian/autonomy/referential-integrity-latest.md` and a dated copy under `~/obsidian/autonomy/referential-integrity/` — the only two paths it may touch, both through Bash; exit 1 is the expected result every night, because baseline dangling cites exist | edit a cited memory file or any other file, fix a dangling cite, pass `--expect-dangling` to move a number, file an item, or read an unchanged count as a problem to escalate |
@@ -1206,6 +1206,22 @@ each one looks like an outage from the run record alone:
   45/10005 while the day was open and 45/10324 after, so a falling marker rate is
   only ever judged across closed days — and the lever that would legitimately move
   it is the prompt, not the capture setting.
+- **#91's day rows and its whole-store row are one walk now, and `scan_seconds` is
+  the only field on that row that is not a measurement of the store.** Until
+  #2819 the day rows came from one walk of the store and the whole-store row from a
+  second, so the two could disagree about a session that was still being written
+  (the two `files` values beside each other in the file were the tell), and a run
+  killed partway wrote nothing at all — losing every day row, which is the deliverable.
+  Now each file is read once and folded into both tallies, and a day's row is
+  appended the moment that day's slice finishes, so a killed run keeps the days it
+  covered and the whole-store row that never arrives is the only loss. Read the
+  consequence the other way too: a series with a whole-store row missing at the end
+  is a run that died mid-walk, and the day rows above it are complete for their own
+  days. `scan_seconds` is new from #2819 and absent on every earlier row — it is the
+  walk's wall clock (47.0 s over the 10,105 files of 2026-10-16, where the two-walk
+  script took 106.3 s), and its absence on an old row means nobody timed that run,
+  never that the run was fast. Task #91 declares no `acceptance.objective_checks`,
+  so that field is currently the only thing in the fleet watching its margin.
 - **#99 belongs to this group by its authority, not by its report.** Filed
   2026-10-16 and still `status: draft` with zero rows in `runs` — #2797 closed
   `done` on 2026-10-16 listing the one-line `status` flip as *still owed*, so the
