@@ -283,7 +283,7 @@ the reboot, not the pool wait.
 (`create_session`) and the one definition of "is a human reading this"
 (`is_user_session`;
 `NON_USER_PLATFORMS = {autonomy, worker}`). It is not quite the *only* writer:
-`POST /api/sessions/create` mints its stub JSON itself (`app/routers/sessions.py:667`)
+`POST /api/sessions/create` mints its stub JSON itself (`app/routers/sessions.py:868`)
 with a bare `write_text` and a field set missing `id`, `title` and `source`, so
 a pre-created Inner Voice session is the third session shape on disk — filed as
 #1275. Titles come from the secondary

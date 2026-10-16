@@ -22,11 +22,11 @@ are named by file, not by count: `tests/test_session_queue.py` and
 `tests/test_active_session_resolution.py` over the queue and the resolver,
 `tests/test_ambient_prefetch_retention.py` and `tests/test_session_doc_claims.py`
 over this page's own sentences, and the ambient cases in `tests/test_prefetch.py`.
-Re-measured 2026-10-12 by `--collect-only -q` on each file — collected nodes, not
+Re-measured 2026-10-16 by `--collect-only -q` on each file — collected nodes, not
 passing ones, so the figure ages rather than reassures:
 `tests/test_session_queue.py` 18, `tests/test_active_session_resolution.py` 5,
 `tests/test_ambient_prefetch_retention.py` 16,
-`tests/test_session_doc_claims.py` 10 (49 across those four), and
+`tests/test_session_doc_claims.py` 12 (51 across those four), and
 `tests/test_prefetch.py` 93. Those five are the mechanism's surface, and
 `tests/test_ambient_decision_turn_scope.py`, which came in with #2599, is a sixth
 that pins the decision store rather than the queue. Another file
@@ -70,7 +70,7 @@ meant to receive it (#2598).
 
 The cheap tier is still sold as costing nothing, but the exact phrase "zero SDK
 cost" is not in `agent_mcp/ambient.py` — it is the first line of the
-`/api/sessions/{id}/inject-prefetch` docstring (`app/routers/sessions.py:1233`).
+`/api/sessions/{id}/inject-prefetch` docstring (`app/routers/sessions.py:1366`).
 The tool description a producer actually reads says the signal is queued "at no
 cost" (`agent_mcp/ambient.py:65`) and the module docstring says "cheap prefetch
 drain (no SDK turn)" (`:11`); this page attributed the wording to the wrong file
@@ -143,14 +143,14 @@ reference them only if naturally relevant to what they're saying now.
 The stamp under each summary is the **server's** reading of the instant the entry
 was queued, never a date the producer wrote (#1197: an autotriage brief invented
 `2026-09-17` in its own header, queried the calendar for that day, and reported a
-birthday as "(no events)"). `ambient_clock_stamp` (`app/sessions_io.py:555`) is
+birthday as "(no events)"). `ambient_clock_stamp` (`app/sessions_io.py:558`) is
 the only formatter either ambient path uses, and it renders nothing for an unset
 instant — no measurement, no stamp, rather than a 1969 date offered as evidence.
 
 ### Key Properties
 
 - **Dedup by `dedup_key`** — same key re-firing replaces the previous unsent entry (newest wins). Default `dedup_key = source`.
-- **TTL** — entries carry `expires_at`, from `ttl_seconds` (default 3600, and the ambient tier only). Expiry is evaluated on **both** doors, so reclaiming a signal never depends on a turn arriving for the session it was queued against. `enqueue_ambient_prefetch` (`app/sessions_io.py:630`) purges that session's dead entries before it stores the new one, names each casualty's `source` in `dropped`, refuses a signal that was already expired at the moment it was written, and releases the session's key whenever the purge empties it; `drain_ambient_prefetch` (`app/sessions_io.py:701`) keeps its own filter as defence in depth, because an entry can pass its deadline while it waits rather than at write — and names each casualty in the log, since a path that drops a signal without a trace is how #910 stayed invisible. What `expires_at == 0.0` means is **no deadline**, not the epoch — every caller that omits `ttl_seconds` gets that value, so a purge that read it as "already expired" would silently delete nearly every ambient signal in the system and still report a clean queue. `tests/test_ambient_prefetch_retention.py` pins both halves of that boundary: expiry-on-write, key release through every door (a dead signal into an empty session, purge-to-empty, drain-to-empty, cap eviction), the drain's overflow re-insert and its logged drop of a signal that expired while it waited, that drain driven through its only production caller `prefetch._prefetch_prepare` rather than called directly, the `DELETE` and `/inject-prefetch` routes, and this page's own `app/sessions_io.py:<line>` citations (`test_the_pages_line_citations_point_at_the_functions_they_name`), since a stale pointer reads as a discovered defect. What the page said before, and what was wrong with it, is in the 2026-09-20 review-log entry below — and the three sentences that read as current but described the old tree are pinned absent by `test_the_architecture_page_describes_the_retention_that_shipped`, which is the machine-readable version of that entry.
+- **TTL** — entries carry `expires_at`, from `ttl_seconds` (default 3600, and the ambient tier only). Expiry is evaluated on **both** doors, so reclaiming a signal never depends on a turn arriving for the session it was queued against. `enqueue_ambient_prefetch` (`app/sessions_io.py:633`) purges that session's dead entries before it stores the new one, names each casualty's `source` in `dropped`, refuses a signal that was already expired at the moment it was written, and releases the session's key whenever the purge empties it; `drain_ambient_prefetch` (`app/sessions_io.py:704`) keeps its own filter as defence in depth, because an entry can pass its deadline while it waits rather than at write — and names each casualty in the log, since a path that drops a signal without a trace is how #910 stayed invisible. What `expires_at == 0.0` means is **no deadline**, not the epoch — every caller that omits `ttl_seconds` gets that value, so a purge that read it as "already expired" would silently delete nearly every ambient signal in the system and still report a clean queue. `tests/test_ambient_prefetch_retention.py` pins both halves of that boundary: expiry-on-write, key release through every door (a dead signal into an empty session, purge-to-empty, drain-to-empty, cap eviction), the drain's overflow re-insert and its logged drop of a signal that expired while it waited, that drain driven through its only production caller `prefetch._prefetch_prepare` rather than called directly, the `DELETE` and `/inject-prefetch` routes, and this page's own `app/sessions_io.py:<line>` citations (`test_the_pages_line_citations_point_at_the_functions_they_name`), since a stale pointer reads as a discovered defect. What the page said before, and what was wrong with it, is in the 2026-09-20 review-log entry below — and the three sentences that read as current but described the old tree are pinned absent by `test_the_architecture_page_describes_the_retention_that_shipped`, which is the machine-readable version of that entry.
 - **Two caps, and they answer different questions.** `AMBIENT_PREFETCH_CAP = 5`
   bounds what a session may *hold*: the oldest is evicted on enqueue.
   `AMBIENT_PREFETCH_DRAIN_MAX = 3` bounds what one turn may *see*: the drain
@@ -275,11 +275,11 @@ If the user sends a message while an ambient turn is running or queued:
   `AMBIENT_QUEUE_CAP` eviction.
 
 User turns always win, and `/cancel` never drops one: `drain_pending`'s
-`source=None` default means "ambient only" (`app/sessions_io.py:1106`), which
+`source=None` default means "ambient only" (`app/sessions_io.py:1109`), which
 is what `drain_pending=true` on that route relies on. Draining the user tier is
 the explicit `source="all"` sentinel — both tiers, ambient then user, summed
 count — and `DELETE /api/sessions/{id}` is its only caller
-(`app/routers/sessions.py:1003-1057`). That route wipes the session outright, so a
+(`app/routers/sessions.py:1141-1195`). That route wipes the session outright, so a
 queued **user** turn it left behind would still run and still write nothing:
 `_append_messages` goes through `mutate_session`, which no-ops once the session
 JSON is gone — a full model turn spent on a transcript nobody will read again.
@@ -521,9 +521,9 @@ mode has no reason to block it.
   the 800-char one; the #1149 date guard on all three doors; the memory-flush
   turn as a third occupant of the ambient tier; and `is_conversation_session` as
   the listing predicate that is deliberately *not* the delivery predicate.
-  Corrected: two drifted line pointers (`drain_pending` is
-  `app/sessions_io.py:1061`, not `1030-1074`; the `DELETE` route is
-  `app/routers/sessions.py:1003-1057`, not `811-840`), the "zero SDK cost"
+  Corrected: two drifted line pointers `drain_pending` is
+  `app/sessions_io.py:1109`, not `1030-1074`; the `DELETE` route is
+  `app/routers/sessions.py:1141-1195`, not `811-840`), the "zero SDK cost"
   attribution — that phrase is the `/inject-prefetch` docstring, not the tool
   description, which says "at no cost" — the override path, which is
   `$LLOYD_DATA/data/tool_overrides.yaml` rather than a file in the checkout, and

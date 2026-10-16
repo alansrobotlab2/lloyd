@@ -398,8 +398,8 @@ head in `sessions/`: no four-part id on live data carries a human platform at
 all, and **no writer records a member's departure** — the sweep gzips and never
 deletes, nothing rewrites the `platform` of an *existing* session
 (`_save_session_meta` stamps it only in its create branch,
-`app/sessions_io.py:1327-1345`), and `DELETE /api/sessions/{session_id}`
-(`app/routers/sessions.py:1003`, unlink at `:1035`) is the only in-tree route
+`app/sessions_io.py:1330-1348`), and `DELETE /api/sessions/{session_id}`
+(`app/routers/sessions.py:1141`, unlink at `:1173`) is the only in-tree route
 that removes a transcript — so this page records the emptiness and the missing
 witness and asserts no cause for the vanished twelve, one of which,
 `20260917_105134_autocode_029c`, exists under no suffix at all (#2651).
@@ -419,7 +419,7 @@ is the field the sweep reads. `_archive_age_for`
 `NON_USER_PLATFORMS = ("autonomy", "worker")`, `SESSION_ARCHIVE_AGE_DAYS` (90)
 for everything else — including an unreadable head, which keeps the longer
 window. This class is *defined* by a platform word outside that tuple:
-`names_a_machine_platform` (`app/sessions_io.py:241-259`) returns exactly that
+`names_a_machine_platform` (`app/sessions_io.py:244-262`) returns exactly that
 membership test, and its own docstring says the class is identified by failing
 it. The sweep's predicate and the endpoint's exemption are complements over one
 field, so the 30-day background age cannot reach a file the exemption exists for.

@@ -69,15 +69,43 @@ def _last_active_ts(path, data: dict) -> float:
             return 0.0
 
 
-@router.get("/api/sessions")
-async def list_sessions():
+def _collect_chat_sessions(dir_path, limit: int = 50) -> dict:
+    """Build the chat listing for `dir_path`: every session that is a conversation.
+
+    BLOCKING by design — it walks a directory of whole transcripts — and the
+    handler below is what keeps it off the event loop. It is the shape
+    `_collect_background_sessions` already has for the other half of the
+    bifurcation, and for the same reason: everything here is pure reads over a
+    snapshot list with no shared mutable state, so the WHOLE body can be handed
+    to a worker thread unchanged — the `*.json` walk, the four-part name skip,
+    the whole-file reads and the row build. Nothing in it is loop-local, and the
+    walk is a third of the hold (`SESSIONS_DIR.glob("*.json")` measured 21-35 ms
+    over two passes on 2026-10-16 through a ~10,170-entry directory, against the
+    read+parse 53 ms of the 86 chat-shaped files), so offloading only the reads
+    would leave that on the loop.
+
+    Every whole-file read goes through `_read_session_json`, the same seam the
+    background collector reads through, and through the MODULE-LEVEL name rather
+    than a local alias: that is what lets
+    `tests/test_session_platform_checks.py` slow the reads and prove the walk is
+    not holding the event loop. A local alias would be unpatchable, and the test
+    would silently measure an unslowed read.
+
+    `limit` slices the ROWS; `count` stays the total the walk settled. The
+    Session list page asks for no window, so the default is the one the handler
+    has always returned — but the two numbers are deliberately different, and a
+    collector that sliced before counting would report a 50-session directory
+    where 86 conversations were read (#2650 learned this from the other
+    endpoint's `count`).
+    """
     sessions = []
     loaded: list[tuple[float, dict, object]] = []
-    for sf in SESSIONS_DIR.glob("*.json"):
+    for sf in dir_path.glob("*.json"):
         # The filename fast path. A background run's id has four
-        # underscore-separated parts and a chat's has three, so most of this
-        # directory can be skipped without opening it — 479 of its 643 files
-        # were background on 2026-09-10, before autonomy was even recorded. A
+        # underscore-separated parts and a chat's has three, so nearly all of
+        # this directory can be skipped without opening it — 10,083 of its
+        # 10,169 files were four-part on 2026-10-16, a reading of a live
+        # directory that moves between readings rather than a floor. A
         # session JSON carries its whole transcript, so "skip it without
         # parsing" is the difference between a bounded listing and one that
         # grows with the fleet's throughput. For a four-part id the shape is
@@ -88,9 +116,11 @@ async def list_sessions():
         # path and the parsed path cannot disagree about a four-part id.
         if is_background_session_name(sf.name):
             continue
-        try:
-            data = json.loads(sf.read_text())
-        except Exception:
+        # None means unreadable or unparsable, and skips the file exactly as the
+        # `except Exception: continue` this replaced did — one wasted read, never
+        # a row built from a half-read transcript.
+        data = _read_session_json(sf)
+        if data is None:
             continue
         # Chat history is conversations, and "conversation" is one predicate
         # (`sessions_io.is_conversation_session`), not this endpoint's opinion.
@@ -142,14 +172,39 @@ async def list_sessions():
         except Exception:
             continue
 
-    return JSONResponse({"sessions": sessions[:50], "count": len(sessions)})
+    return {"sessions": sessions[:limit], "count": len(sessions)}
+
+
+@router.get("/api/sessions")
+async def list_sessions():
+    """The user's chat history: every session `is_conversation_session` accepts.
+
+    The listing is `_collect_chat_sessions`, and the only thing this handler adds
+    is that the walk runs on a worker thread. It used to run here, inline on the
+    event loop: `await list_sessions()` against the live directory measured
+    73-90 ms on 2026-10-16, and `server.py` boots uvicorn with no `workers=`, so
+    one loop serves everything — that hold was every other in-flight request's
+    latency, `/health` and the agent's own loopback HTTP included. It is a stall,
+    not a slow endpoint, and it is invisible in this endpoint's own latency
+    number. Pinning it is
+    `tests/test_session_platform_checks.py::test_the_chat_listing_gives_the_loop_back_while_it_reads`.
+
+    Offloading moves where the reads happen, never what they decide: the rows,
+    their fields, their order, the 50-row window and `count`'s meaning as the
+    UNSLICED total are `_collect_chat_sessions`' behaviour, unchanged, and pinned
+    by `tests/test_api_contracts.py::test_sessions_list_shape` and
+    `::test_the_two_listings_are_complements` with their assertions unedited.
+    """
+    return JSONResponse(
+        await asyncio.to_thread(_collect_chat_sessions, SESSIONS_DIR))
 
 
 #: How many *ambiguous* session files the background listing may open. A
 #: four-part name is decided by its shape and costs no read, so the only files
 #: worth opening are the chat-shaped ones — the half of the directory where a
-#: machine run can hide behind a human-looking id. That half is small (201 of
-#: 4,045 files on 2026-09-21) and grows with human conversation volume, not with
+#: machine run can hide behind a human-looking id. That half is small (86 of
+#: 10,169 files on 2026-10-16, a reading of a live directory rather than a
+#: bound) and grows with human conversation volume, not with
 #: machine throughput. The walk is mtime-ordered, so the budget spends itself on
 #: the newest of them.
 _BACKGROUND_PLATFORM_SCAN_CEILING = 600
@@ -195,11 +250,12 @@ def _collect_background_sessions(dir_path, limit: int,
     `is_conversation_session` refuses. That matters for two shapes the old
     four-part-name fast path could not see.
 
-    * A four-part id stamped with a human platform — 12 sessions on 2026-09-21,
-      newest `20260917_105134_autocode_029c` — minted by the chat path's lazy
-      create. The chat listings skip a four-part name unread, so when this
-      endpoint also dropped them as user-labelled they existed in no listing at
-      all.
+    * A four-part id stamped with a human platform — 0 of the 10,083 four-part
+      files on 2026-10-16, read from the head window — historically minted by
+      the chat path's lazy create. The chat listings skip a four-part name
+      unread, so when this endpoint also dropped them as user-labelled they
+      existed in no listing at all, which is why the class is exempt from the
+      row window below even on a day it is empty.
     * A three-part id stamped with a machine platform: the 3 `e2e-harness`
       automod smokes and the gate's `canary` turns. They used to sit in the
       user's chat history, which was wrong but visible; the allow-list takes
@@ -207,9 +263,12 @@ def _collect_background_sessions(dir_path, limit: int,
       instead.
 
     Dropping the name fast path costs almost nothing, because chats are rare
-    next to ~300 background runs a day: 6 of the newest 600 files were
-    chat-shaped on 2026-09-21, against the 600 this budget already spends. The
-    ceiling is what bounds this walk either way.
+    next to the background runs beside them: the newest 600 files by mtime held
+    6 chat-shaped ones on 2026-10-16, against the 600 this budget already
+    spends, and the directory held 370-469 four-part files per day over
+    2026-10-13 to 10-15 against 1-5 chat-shaped — files still on disk, which is
+    not the same count as files minted. The ceiling is what bounds this walk
+    either way.
 
     Rows carry `platform` and `source` because that is how the tab groups
     them: `autonomy-task:39` and `autocode` are different kinds of unattended
@@ -245,24 +304,26 @@ def _collect_background_sessions(dir_path, limit: int,
     #
     # Budgeting *reads* rather than *reach* is what makes the orphan half of #1064
     # true on live data instead of only in a test. The loop's previous shape opened
-    # the newest 600 files whatever they were, and all 12 four-part
-    # `mission-control` orphans sit past rank 600 in mtime order (newest at rank
-    # 1234, oldest at rank 3630), so that listing could not have returned one of
-    # them even with the membership rule fixed. A rule bounded by a scan window is
-    # a rule that silently stops applying to everything older than the window.
+    # the newest 600 files whatever they were, and the four-part
+    # `mission-control` orphans #1064 found all sat past rank 600 in mtime order,
+    # so that listing could not have returned one of them even with the membership
+    # rule fixed. A rule bounded by a scan window is a rule that silently stops
+    # applying to everything older than the window.
     #
     # A candidate settled for free must not then be dropped by the ROW budget,
     # which is the half this endpoint got wrong on its first pass: slicing the
     # candidate list to `limit * 2` before building rows reproduced the same
-    # blindness at a different number — the 12 orphans sit past index 1200 of
-    # 3,853 four-part candidates while the Background tab asks for 150 rows
+    # blindness at a different number — those orphans sat past index 1200 of the
+    # four-part candidates while the Background tab asks for 150 rows
     # (`web/src/components/pages/BackgroundPage.tsx:101`). So a four-part
-    # candidate is split here by `platform_from_head` — one 2 KB read, 55 ms over
-    # the whole four-part half on this box — into the ordinary machine runs, which
+    # candidate is split here by `platform_from_head` — one 2 KB read, 125 ms for
+    # all 10,083 of them on 2026-10-16 — into the ordinary machine runs, which
     # are what `limit` is for, and the mis-labelled or unclassifiable ones, which
     # are what this endpoint exists to show and are therefore exempt from the
     # window. A platform word outside the window reads as unknown and gets the
-    # file opened rather than a guess: 19 of 3,854 four-part files on 2026-09-21.
+    # file opened rather than a guess: 0 of the 10,083 four-part files read on
+    # 2026-10-16 needed that fallback, and the branch stays because a key order
+    # that pushed `platform` past 2 KB would.
     ordinary: list[tuple[float, dict | None, object]] = []  # machine-named runs
     special: list[tuple[float, dict | None, object]] = []   # mis-labelled, or unknown
     opened = 0
@@ -295,9 +356,11 @@ def _collect_background_sessions(dir_path, limit: int,
             (ordinary if names_a_machine_platform(data) else special).append(row)
 
     # Phase 2: pay for rows. The mis-labelled class is read first, in full, and
-    # never sliced: 12 rows against 3,853, the class no other surface shows, and
-    # clause 3 of #1064 is precisely the promise that it is not aged out. What is
-    # left of `limit` then goes to the ordinary runs.
+    # never sliced: it is the class no other surface shows, and clause 3 of #1064
+    # is precisely the promise that it is not aged out. On 2026-10-16 it held 0 of
+    # the 10,083 four-part files — what the exemption looks like on a quiet day,
+    # read then, not a bound that holds forward. What is left of `limit` then goes
+    # to the ordinary runs.
     def _read(row):
         ts, data, sf = row
         if data is not None:
@@ -322,8 +385,9 @@ def _collect_background_sessions(dir_path, limit: int,
 
     keep = max(0, limit - len(mislabelled))
     # mtime ordered the unread half, and for a machine run `last_active` sits
-    # within seconds of mtime (measured over 400 of them on 2026-09-21: median 0 s,
-    # max 4 s). The slack covers the case `_last_active_ts`'s own docstring names —
+    # within seconds of mtime (measured over 400 of them on 2026-10-16: median
+    # 0.0 s, max 0.2 s). The slack covers the case `_last_active_ts`'s own
+    # docstring names —
     # a backfill that re-touches mtimes and reorders the walk — and is why the
     # slice happens after that sort and not before it.
     window = sorted(ordinary, key=lambda row: row[0], reverse=True)

@@ -151,10 +151,11 @@ def known_platforms() -> frozenset:
 #: (`20260910_120001_autocode_9f2a`); a chat session's has three
 #: (`20260910_120001_9f2a1c`). That is a cheap discriminator, and it has to
 #: exist because the alternative is parsing every session JSON in the
-#: directory to answer "is this one a chat?" — at ~240 background sessions a
-#: day against ~14 chats (measured over the week to 2026-09-10), that is the
-#: difference between a bounded listing and one that grows with the fleet's
-#: throughput.
+#: directory to answer "is this one a chat?" — the directory held 370-469
+#: four-part files per day over 2026-10-13 to 10-15 against 1-5 chat-shaped
+#: ones (read 2026-10-16 from the filename dates of the files still on disk,
+#: which is not a count of what was minted), so that is the difference between a
+#: bounded listing and one that grows with the fleet's throughput.
 #:
 #: Where the file is opened, its `platform` is the authority. But the chat
 #: listings do not open a four-part file at all, so for that shape the NAME
@@ -186,11 +187,12 @@ def is_background_session_name(name: str) -> bool:
 #: Bytes read from the head of a session file by `platform_from_head`. Every
 #: writer of a session JSON in this tree puts `platform` in the first dozen
 #: keys (`_save_session_meta`, `create_session`, the worker recorder), so the
-#: word is found well inside this window on the live box: over all 3,853
-#: four-part session files on 2026-09-21 the key first appears at a median byte
-#: 105 and a maximum of 420, so 2,048 covers the shape with room for a long
-#: title. A file it does not cover is not a miss — it is reported as
-#: unclassifiable and the caller opens the whole file instead.
+#: word is found well inside this window on the live box: over all 10,083
+#: four-part session files read on 2026-10-16 the key first appears at a median
+#: byte 160 and a maximum of 215, so 2,048 covers the shape with room for a
+#: long title. That maximum is one day's reading, not a bound on the shape. A
+#: file it does not cover is not a miss — it is reported as unclassifiable and
+#: the caller opens the whole file instead.
 HEAD_PLATFORM_WINDOW = 2048
 
 _HEAD_PLATFORM = None  # compiled lazily; `re` is cheap but this module is imported everywhere
@@ -201,8 +203,9 @@ def platform_from_head(text: str) -> Optional[str]:
 
     Exists so a listing can *classify* a transcript it has no intention of
     opening. A session JSON holds the whole conversation, so parsing one to read
-    one scalar costs whatever the longest message is worth — 737 MB over the
-    four-part half of `sessions/` on 2026-09-21. Reading a window instead turns
+    one scalar costs whatever the longest message is worth — 1.78 GiB across the
+    10,083 four-part files of `sessions/` on 2026-10-16, read as file sizes that
+    day. Reading a window instead turns
     "which of these runs is the anomaly" from a full parse of every file into a
     bounded scan, which is what lets `/api/background/sessions` promise that a
     mis-classified run is reachable at the row budget the UI asks for.

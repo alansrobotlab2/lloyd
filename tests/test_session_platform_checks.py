@@ -1669,6 +1669,191 @@ async def test_the_background_listing_gives_the_loop_back_while_it_reads(
         "bounds, on the offloaded path")
 
 
+@pytest.mark.anyio
+async def test_the_chat_listing_gives_the_loop_back_while_it_reads(tmp_path, monkeypatch):
+    """/api/sessions must not hold the one event loop every route shares.
+
+    Differential of
+    `test_the_background_listing_gives_the_loop_back_while_it_reads`, for the
+    OTHER half of the bifurcation — the user's own chat history, whose exact-route
+    polls were counted at 3,426 in the live access log's covered window on
+    2026-10-16 (a figure carried from triage; the log is 10 MB and its extract is
+    owed on #2836, so nothing here asks a reader to re-count it). Against the live
+    directory `await list_sessions()` measured 73-90 ms that day, of which
+    `SESSIONS_DIR.glob("*.json")` alone was 21-35 ms through a ~10,170-entry
+    directory: `server.py` boots uvicorn with
+    no `workers=`, so while that
+    body ran inline every other in-flight request waited on it, `/health` and the
+    agent's own loopback HTTP calls included. It is a stall, not a slow endpoint.
+
+    The chat listing has exactly ONE blocking read seam — a four-part id is
+    skipped by name and never opened — so slowing `_read_session_json` by
+    PROBE_READ_SECONDS slows the whole body, the walk included, because the walk
+    is in the collector that was handed to `asyncio.to_thread`.
+      inline leg: the peer coroutine must NOT tick. That assertion has no peer
+        with nothing to compare — it is what the handler did before the move, and
+        it fails the moment the body stops being reachable inline.
+      endpoint leg: it must tick ~reads*PROBE_READ_SECONDS/PROBE_TICK_SECONDS.
+    """
+    import asyncio
+    from datetime import datetime, timedelta
+
+    import httpx
+
+    import server
+    from app.routers import sessions as sessions_router
+
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
+
+    def _write(sid, platform, mins_ago):
+        stamp = (datetime.now().astimezone() - timedelta(minutes=mins_ago)).isoformat()
+        (tmp_path / f"{sid}.json").write_text(json.dumps({
+            "session_id": sid, "session_key": sid, "platform": platform,
+            "created_at": stamp, "last_active": stamp, "message_count": 3,
+            "preview": sid}))
+
+    chats = [f"20261016_15{i:02d}00_{'abcdef'[i]}" for i in range(4)]
+    for i, sid in enumerate(chats):
+        _write(sid, "mission-control", 10 * (i + 1))
+    # A four-part id stamped with the user's own platform. The chat listings skip
+    # it by name, so the probe below cannot confuse the two halves' read counts,
+    # and it must still be absent from the response.
+    orphan = "20261016_152000_autocode_9f2a"
+    _write(orphan, "mission-control", 5)
+
+    reads = []
+    real_read = sessions_router._read_session_json
+
+    def slow_read(path):
+        reads.append(path.name)
+        time.sleep(PROBE_READ_SECONDS)     # blocking, exactly as read_text() is
+        return real_read(path)
+
+    monkeypatch.setattr(sessions_router, "_read_session_json", slow_read)
+
+    ticks = 0
+
+    async def peer():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(PROBE_TICK_SECONDS)
+            ticks += 1
+
+    task = asyncio.ensure_future(peer())
+    await asyncio.sleep(PROBE_TICK_SECONDS * 3)
+    before_t = ticks
+    assert before_t >= 1, "the probe coroutine never got scheduled, so the tick counts compare nothing"
+
+    ticks = 0
+    sessions_router._collect_chat_sessions(tmp_path)   # blocking, on the loop, as it used to be
+    leg1_reads = len(reads)
+    inline_ticks = ticks
+
+    ticks = 0
+    reads.clear()          # each leg counts its own reads, not the run's total
+    transport = httpx.ASGITransport(app=server.app, client=("127.0.0.1", 9999))
+    async with httpx.AsyncClient(transport=transport,
+                                base_url="http://lloyd-test") as client:
+        resp = await client.get("/api/sessions")
+    leg2_reads = len(reads)
+    ticks_during = ticks
+    task.cancel()
+
+    payload = resp.json()
+    assert leg1_reads == 4, (
+        f"the chat listing read {leg1_reads} files through `_read_session_json` "
+        "where 4 were expected: either the four-part half is being opened again, "
+        "or the collector no longer reads through the MODULE-LEVEL name — and a "
+        "local alias is unpatchable, which would make both legs below measure an "
+        "unslowed read")
+    assert inline_ticks == 0, (
+        f"a coroutine on the same loop advanced {inline_ticks} times while the chat "
+        "listing's body ran inline — the probe no longer blocks, so this test can no "
+        "longer show what the endpoint used to do to every other route")
+    assert leg2_reads == leg1_reads, (
+        f"GET /api/sessions paid for {leg2_reads} session reads where the body paid "
+        f"for {leg1_reads}: the two legs are no longer the same body, so the "
+        "comparison below compares nothing")
+    assert ticks_during >= int(leg2_reads * PROBE_READ_SECONDS
+                               / PROBE_TICK_SECONDS * 0.5), (
+        f"a coroutine on the same loop advanced only {ticks_during} times while "
+        f"{leg2_reads} slowed reads ran — the chat listing is still on the event "
+        "loop, which is the stall this clause is about")
+    assert [s["id"] for s in payload["sessions"]] == chats, (
+        f"offloading the walk changed which chats the listing returns, or their "
+        f"newest-first order: {payload['sessions']}")
+    assert payload["count"] == len(chats), (
+        "`count` no longer carries every conversation the listing settled "
+        "because of its page size")
+    assert orphan not in [s["id"] for s in payload["sessions"]], (
+        "the four-part half leaked into the user's chat history")
+
+
+def test_the_chat_listing_opens_only_the_chat_shaped_files(tmp_path, monkeypatch):
+    """The four-part half stays unread after the move into the collector.
+
+    #2650 offloaded the background listing and left this one inline; the property
+    that keeps either listing cheap is that 10,083 of the live directory's
+    10,169 files (read 2026-10-16) are decided by the filename and cost no read at
+    all. Moving the body into `_collect_chat_sessions` is where that could silently
+    regress — a collector that decided membership from the file's contents would
+    open the machine half too, and the response would look identical while the
+    cost went back to a whole-directory parse. So the counter, not the payload, is
+    the assertion here.
+
+    The counter also pins the seam itself: the collector must call
+    `_read_session_json` as a MODULE-LEVEL name, because a local alias would leave
+    this patch counting 0 reads and the loop-yield probe beside it measuring an
+    unslowed read.
+    """
+    from datetime import datetime, timedelta
+
+    from app.routers import sessions as sessions_router
+
+    def _write(sid, platform, mins_ago):
+        stamp = (datetime.now().astimezone() - timedelta(minutes=mins_ago)).isoformat()
+        (tmp_path / f"{sid}.json").write_text(json.dumps({
+            "session_id": sid, "session_key": sid, "platform": platform,
+            "created_at": stamp, "last_active": stamp, "message_count": 3,
+            "preview": sid}))
+
+    runs = [f"20261016_1200{i}0_autocode_9f2a" for i in range(3)]
+    _write(runs[0], "mission-control", 5)      # the #1064 orphan: still unread here
+    _write(runs[1], "autonomy", 15)
+    _write(runs[2], "bench", 25)
+    chats = ["20261016_130000_abcdef", "20261016_131000_123456", "20261016_132000_worker1"]
+    _write(chats[0], "mission-control", 35)
+    _write(chats[1], "mission-control", 45)
+    _write(chats[2], "worker", 55)             # chat-shaped: opened, then not listed
+
+    reads = []
+    real_read = sessions_router._read_session_json
+
+    def counting_read(path):
+        reads.append(path.name)
+        return real_read(path)
+
+    monkeypatch.setattr(sessions_router, "_read_session_json", counting_read)
+
+    full = sessions_router._collect_chat_sessions(tmp_path)
+    assert sorted(reads) == sorted(f"{c}.json" for c in chats), (
+        f"the chat listing opened {sorted(reads)}; only the 3 chat-shaped files may "
+        "be read — the four-part half, including the one stamped "
+        "`mission-control`, is decided by its name and costs no read")
+    assert [s["id"] for s in full["sessions"]] == chats[:2], (
+        f"the listing returned {full['sessions']}; a `worker` session is a machine "
+        "session and a four-part name is not a chat")
+    assert full["count"] == 2, full["count"]
+
+    # `count` is the UNSLICED total while `sessions` is the page: slicing inside
+    # the collector before counting would report a page size as a directory size.
+    page = sessions_router._collect_chat_sessions(tmp_path, limit=1)
+    assert [s["id"] for s in page["sessions"]] == [chats[0]], page["sessions"]
+    assert page["count"] == 2, (
+        "`count` became the page length inside the collector, so a caller can no "
+        "longer tell '2 conversations' from '2 of 2 shown'")
+
+
 # ── #1154 clause 2: a session body's own clock says which clock it is ────────
 
 def _has_offset(stamp: str) -> bool:

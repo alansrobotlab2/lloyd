@@ -417,3 +417,108 @@ def test_the_arch_page_lists_the_notes_read_door_beside_the_write_door():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+
+# ── #2836: the sessions census comments are dated readings, not growth floors ──
+
+#: The two files that describe this directory's shape to whoever tunes it next,
+#: resolved through the modules this file already imports rather than a path that
+#: could silently name some other checkout.
+_CENSUS_MODULES = {"sessions.py": sess_mod, "sessions_io.py": sessions_io}
+
+#: Figures triage found still quoted on 2026-10-16, each measured on 2026-09-10
+#: or 2026-09-21. They are not merely old: the quantity they state moved in BOTH
+#: directions afterwards (the four-part half of `sessions/` read 10,533 on
+#: 2026-09-21, 10,040 on 2026-10-16 morning, 10,083 hours later the same day),
+#: and nothing in this codebase explains either movement. A comment quoting one
+#: is therefore describing a trend it cannot justify.
+_STALE_CENSUS_FIGURES = ("479 of its 643", "3,853", "55 ms", "737 MB")
+
+#: A string that MUST be found in each file. Without it an absence verdict is
+#: unfalsifiable — a grep against a file that never resolved also returns nothing,
+#: which is this shape's own recorded failure mode (a 0-hit grep needs a control).
+_CENSUS_CONTROL = {"sessions.py": "_BACKGROUND_PLATFORM_SCAN_CEILING",
+                   "sessions_io.py": "HEAD_PLATFORM_WINDOW"}
+
+#: The readings #2836 published in their place, so the restatement is pinned as
+#: well as the deletion. Each token sits whole on one line on purpose: prose that
+#: wrapped is not an assertion.
+_RESTATED_READINGS = {
+    "sessions.py": ("10,169", "10,083", "125 ms", "2026-10-16: median"),
+    "sessions_io.py": ("10,083", "1.78 GiB", "byte 160 and a maximum of 215",
+                       "370-469"),
+}
+
+_STALE_DATE = re.compile(r"2026-09-(?:10|21)\b")
+_COMMA_COUNT = re.compile(r"\b\d{1,3},\d{3}\b")
+#: The exact mistake #2650's diff made: it wrote `at least 3,854 files and
+#: rising` for a directory that shrank ~490 files over the next three days. A
+#: count is a reading; the bound is the constant next to it.
+_COUNT_AS_FLOOR = re.compile(r"at least [\d,]+ (?:files|sessions)"
+                             r"|no fewer than|\band rising\b")
+
+
+def _census_source(name: str) -> list[str]:
+    """The whole file, lines, for one of the two census-carrying sources."""
+    path = Path(_CENSUS_MODULES[name].__file__).resolve()
+    assert path.name == name and path.is_file(), (
+        f"{name} resolved to {path}, which is not this checkout's source — every "
+        "absence assertion below would then be reading a file that is not the one "
+        "under review")
+    return path.read_text(encoding="utf-8").splitlines()
+
+
+def test_the_sessions_census_comments_quote_no_retired_reading():
+    """#2836: no 2026-09-10/09-21 census figure survives in either file, and no
+    count is presented as a growth floor.
+
+    `git grep -nE '3,853|55 ms|737 MB|479 of its 643'` over these two files is the
+    graded check, and this body is that command — `-E` is not decoration. Plain
+    `git grep` is BRE, where a pipe is a LITERAL pipe, so the same pattern without
+    it exits 1 on a file containing every string: the check as filed was vacuous,
+    and a vacuous check is the failure this file exists to prevent.
+    """
+    for name, lines in ((n, _census_source(n)) for n in _CENSUS_MODULES):
+        print(f"{name}: {len(lines)} lines scanned whole")
+        assert _CENSUS_CONTROL[name] in "\n".join(lines), (
+            f"{name} does not even contain {_CENSUS_CONTROL[name]!r}, so the "
+            "absence assertions below are reading the wrong file")
+
+        for figure in _STALE_CENSUS_FIGURES:
+            hits = [i + 1 for i, line in enumerate(lines) if figure in line]
+            assert not hits, (
+                f"{name}:{hits} still quotes the {figure!r} census figure — the "
+                "restatement belongs in this change (#2836 clause 5)")
+
+        stale = [i + 1 for i, line in enumerate(lines)
+                 if _COMMA_COUNT.search(line)
+                 and any(_STALE_DATE.search(near) for near in lines[max(0, i - 3):i + 4])]
+        assert not stale, (
+            f"{name}:{stale} put a thousands-scale count next to a 2026-09-10/09-21 "
+            "date. Those readings are retired in both directions; a census line "
+            "states the date it was read or it is not a census line")
+
+        floors = [i + 1 for i, line in enumerate(lines) if _COUNT_AS_FLOOR.search(line)]
+        assert not floors, (
+            f"{name}:{floors} presents a measured count as a floor — the shape "
+            "`at least 3,854 files and rising`, which the directory contradicted "
+            "within three days")
+
+
+def test_the_restated_sessions_census_readings_are_present_and_dated():
+    """The replacement has to exist, not only the deletion.
+
+    Clause 5 is half absence and half replacement: the figures now in these two
+    files are 2026-10-16 readings, and pinning them stops a later edit dropping
+    the replacement and leaving the comment claiming nothing at all.
+    """
+    for name, tokens in _RESTATED_READINGS.items():
+        text = "\n".join(_census_source(name))
+        dated = text.count("2026-10-16")
+        assert dated >= 2, (
+            f"{name} carries only {dated} `2026-10-16` readings; the census "
+            "restatement is supposed to have dated the lines it rewrote")
+        for token in tokens:
+            assert token in text, (
+                f"{name} no longer publishes the 2026-10-16 reading {token!r}")

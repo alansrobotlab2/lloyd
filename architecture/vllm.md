@@ -800,7 +800,7 @@ has still not been run as of 2026-09-11.
   `task:` or splits on `_` into four or more parts, whose third part is then the producer
   slug (`20260925_041134_autocode_bd3f` → `autocode`). The mint behind nearly every chat id
   is `create_session`, which appends the literal `iv` to every chat session it pre-creates
-  (`app/routers/sessions.py:853`, `suffix = "iv" + secrets.token_hex(2)`). That line runs
+  (`app/routers/sessions.py:917`, `suffix = "iv" + secrets.token_hex(2)`). That line runs
   ahead of anything the request body is asked, so the three-part `<ts>_iv<hex>` shape is
   what a pre-created chat id *is*, not a mark of anything the caller opted into. The
   `inner_voice` body flag is read later in that same handler and picks what a session does,
@@ -813,7 +813,7 @@ has still not been run as of 2026-09-11.
   therefore every turn that came from a chat-shaped id, and a turn whose
   id parses to another kind is invisible to (a) rather than counted in it. The mint that is
   *not* in the 23, though its shape looks like a chat id's, is `new_background_session_id`
-  (`app/sessions_io.py:279`): its four-part ids carry a producer slug as that third part, so
+  (`app/sessions_io.py:282`): its four-part ids carry a producer slug as that third part, so
   they are counted as whichever slug they name. #1719 was filed asking this bullet to cite
   that mint as the chat id's, which is how a chat population would end up naming background
   turns. **(a) is day-scoped — the mark names the day it is counted over — and its
