@@ -54,6 +54,18 @@ Definitions, because the window decides the answer
   not-measured one as though they were the same finding. So EVERY token figure on
   a row is over the rows of that class whose `reasoning_tokens` is non-null, and
   the coverage count is printed on the row itself, as the denominator it is.
+* **Displacement columns (#2798).** `mean_tool_calls` and `errors_per_tool_call`
+  are over that class's rows carrying BOTH `tool_calls` and `tool_errors` —
+  counted on the row as `tool_rows` — and `length_bound_turns` counts rows whose
+  `stop_reason` is exactly `length` over the rows carrying a stop reason at all,
+  counted as `stop_rows`. Both denominators travel with their figures for the same
+  reason `cover` does: 566 of the live store's 12,105 rows predate the telemetry
+  migration (`app/usage_store.py::_TELEMETRY_COLUMNS`: "NULL = unmeasured … never
+  zero"), so a mean over `turns` would price an unmeasured turn as a turn that
+  called no tools. This is the column that makes the crowding-out mechanism
+  *falsifiable* on this box instead of argued: the mechanism needs a budget the
+  turn actually hits, and a `length_bound_turns` of 0 across a week of real
+  traffic is the visible absence of that, not a claim that thinking is free.
 * **p90 reasoning tokens.** Nearest-rank over the covered values sorted
   ascending: the value at `ceil(0.9 * n)`, 1-based. Stated because two sane
   percentile definitions disagree on small n, and this table gets quoted.
@@ -102,6 +114,13 @@ UNATTRIBUTED = "unattributed"
 #: outcome rate to say anything about the class (#1266's exclusion discipline).
 THIN_DENOM = 30
 
+#: The one `usage.stop_reason` value that records a turn cut off by the budget
+#: rather than by the model deciding to stop (`stop`), the turn cap (`max_turns`)
+#: or a cancel. #2798's displacement claim is that thinking crowds out executed
+#: commands INSIDE a fixed budget, so this value, and only this value, is the
+#: budget being hit — counted per class as `length_bound_turns`.
+LENGTH_STOP_REASON = "length"
+
 
 @dataclass
 class ClassRow:
@@ -114,6 +133,58 @@ class ClassRow:
     output_covered: int = 0                              # sum, covered rows only
     prompt: list[int] = field(default_factory=list)      # EVERY row with a count
     status_counts: dict[str, int] = field(default_factory=dict)
+    # ── displacement (#2798) ────────────────────────────────────────────────
+    # Tool-call and error counts, appended IN PAIRS over the rows that carry a
+    # tool-call counter, so the two sums below are always over one row set.
+    tool_calls: list[int] = field(default_factory=list)
+    tool_errors: list[int] = field(default_factory=list)
+    stop_rows: int = 0        # rows of this class carrying a stop reason
+    length_bound: int = 0     # ... and that reason was 'length'
+
+    @property
+    def tool_rows(self) -> int:
+        """Rows of this class with a non-null `tool_calls` — the tool denominator."""
+        return len(self.tool_calls)
+
+    @property
+    def mean_tool_calls(self) -> float | None:
+        """Tool calls per measured turn, over the rows that carry the counter.
+
+        NULL is never averaged in as a zero, for the same reason `mean_reasoning`
+        is over the covered subset: a turn whose telemetry never landed is not a
+        turn that called no tools, and mixing the two would price a class the
+        engine reported nothing about as the cheapest class on the box.
+        """
+        return sum(self.tool_calls) / self.tool_rows if self.tool_rows else None
+
+    @property
+    def errors_per_tool_call(self) -> float | None:
+        """`sum(tool_errors) / sum(tool_calls)`, aggregate like `share`.
+
+        A mean of per-turn ratios would weight a turn that made one call the same
+        as one that made a hundred. Returns None when nothing was measured, and
+        also when the calls total is zero while errors are not — a ratio with a
+        zero denominator and a nonzero numerator has no value to print, and the
+        two sums on the row say so exactly.
+        """
+        if not self.tool_rows:
+            return None
+        calls, errors = sum(self.tool_calls), sum(self.tool_errors)
+        if not calls:
+            return None if errors else 0.0
+        return errors / calls
+
+    @property
+    def length_bound_turns(self) -> int | None:
+        """Turns that ended `stop_reason='length'`; None if none was measured.
+
+        This is the column the crowding-out mechanism is tested against: thinking
+        displacing executed commands only happens inside a budget the turn
+        actually hits, and `length` is that hit. A class whose rows carry no stop
+        reason at all reports None — printing 0 there would read as "measured and
+        never hit the ceiling", which is a finding, not a blank.
+        """
+        return self.length_bound if self.stop_rows else None
 
     @property
     def covered(self) -> int:
@@ -196,6 +267,19 @@ class ClassRow:
             # from its own sums. With them, the pinning test is exact.
             "reasoning_total": sum(self.reasoning) if self.covered else None,
             "output_total": self.output_covered if self.covered else None,
+            # ── displacement (#2798) ──────────────────────────────────────────
+            # Each ratio travels with the count of rows it was derived over, as
+            # `reasoning_coverage` and `input_rows` already do, and with its two
+            # sums at full precision so a witness can prove its own rounding.
+            "mean_tool_calls": (round(self.mean_tool_calls, 1)
+                                if self.mean_tool_calls is not None else None),
+            "errors_per_tool_call": (round(self.errors_per_tool_call, 4)
+                                     if self.errors_per_tool_call is not None else None),
+            "length_bound_turns": self.length_bound_turns,
+            "tool_rows": self.tool_rows,
+            "stop_rows": self.stop_rows,
+            "tool_calls_total": (sum(self.tool_calls) if self.tool_rows else None),
+            "tool_errors_total": (sum(self.tool_errors) if self.tool_rows else None),
             "outcome_rate": (round(o["rate"], 4) if o["rate"] is not None else None),
             "outcome_n": o["n"],
             "outcome_thin": o["thin"],
@@ -256,7 +340,12 @@ def build_table(*, workers_db: Path, usage_db: Path, since: str | None) -> dict[
 
     ucon = _read_only(usage_db)
     try:
-        cols = "session_id, reasoning_tokens, output_tokens, input_tokens"
+        # `stop_reason`, `tool_calls` and `tool_errors` are the #2798 displacement
+        # columns: NULL on every row written before the telemetry migration
+        # (`app/usage_store.py::_TELEMETRY_COLUMNS`), which is why each figure
+        # below carries its own denominator instead of dividing by `turns`.
+        cols = ("session_id, reasoning_tokens, output_tokens, input_tokens,"
+                " stop_reason, tool_calls, tool_errors")
         if since:
             rows = ucon.execute(
                 f"select {cols} from usage where ts >= ?", (since,)).fetchall()
@@ -271,7 +360,7 @@ def build_table(*, workers_db: Path, usage_db: Path, since: str | None) -> dict[
 
     unattributed = ClassRow(source=UNATTRIBUTED)
     null_sessions = 0
-    for sid, reasoning, output, prompt in rows:
+    for sid, reasoning, output, prompt, stop_reason, tool_calls, tool_errors in rows:
         target = classes.get(session_class[sid]) if sid in session_class else None
         if target is None:
             target = unattributed
@@ -280,6 +369,19 @@ def build_table(*, workers_db: Path, usage_db: Path, since: str | None) -> dict[
         target.turns += 1
         if prompt is not None:
             target.prompt.append(int(prompt))
+        if stop_reason is not None:
+            target.stop_rows += 1
+            if stop_reason == LENGTH_STOP_REASON:
+                target.length_bound += 1
+        if tool_calls is not None and tool_errors is not None:
+            # Paired, deliberately: an error count without its call count would put
+            # errors over a denominator that never counted them, and a call count
+            # without its error count would divide by a total missing its own
+            # numerator's rows. Both columns come from the same insert
+            # (`app/usage_store.py::_TELEMETRY_COLUMNS`); a row missing either one
+            # is out of both figures, and `tool_rows` is the count that says so.
+            target.tool_calls.append(int(tool_calls))
+            target.tool_errors.append(int(tool_errors))
         if reasoning is not None:
             # Both sums of the share grow together, or `mean_output` and `share`
             # would be over different row sets than the reasoning figures on the
@@ -289,7 +391,7 @@ def build_table(*, workers_db: Path, usage_db: Path, since: str | None) -> dict[
             target.output_covered += int(output or 0)
     # The row still carries a session count, because "3 turns in 1 session" and
     # "3 turns in 3 sessions" are different claims about the interactive residual.
-    unattributed.sessions = {sid for sid, _r, _o, _p in rows
+    unattributed.sessions = {sid for sid, *_rest in rows
                              if sid not in session_class}
 
     table = sorted(classes.values(), key=lambda r: r.source)
@@ -315,6 +417,64 @@ def build_table(*, workers_db: Path, usage_db: Path, since: str | None) -> dict[
     }
 
 
+#: The three #2798 fields a row must carry for the displacement columns to exist
+#: at all. Their ABSENCE is the signal: a row loaded from the committed 2026-10-11
+#: witness has no tool-call counter in it, so a table of those rows has no
+#: displacement column — a column of dashes over an unmeasured corpus would read
+#: as "measured, and the turns made no calls".
+DISPLACEMENT_KEYS = ("mean_tool_calls", "errors_per_tool_call",
+                     "length_bound_turns")
+
+#: Markdown header labels for the same three, in cell order.
+DISPLACEMENT_COLUMNS = ("meanT", "errPerCall", "lenBound")
+
+
+def displacement_cells(row: dict[str, Any], *, with_n: bool = True) -> list[str]:
+    """The three displacement cells for ONE row, read from that row's own fields.
+
+    Every figure carries the count it was derived over, as `outcome` carries its
+    `n`: a mean of 2.4 calls over 40 measured turns and one of 2.4 over 4,000 are
+    different findings, and a reader cannot tell them apart without the
+    denominator. `errPerCall` shares `meanT`'s denominator (both counters are
+    written by the same insert), which is why it does not repeat it.
+
+    The sentinel is the caller's: the aligned table prints a hyphen, the markdown
+    one the report's en dash, and a class whose rows carry no counter prints
+    whichever it is — never a 0, which would say the turns called nothing rather
+    than that nothing was counted. A class measured with no tool call and no
+    length-bound turn prints real zeros.
+    """
+    def cell(key: str, spec: str, denom: str | None) -> str:
+        value = row.get(key)
+        if value is None:
+            return ""            # the caller substitutes its own dash
+        text = format(value, spec)
+        n = row.get(denom) if denom else None
+        return f"{text} n={n:,}" if n is not None else text
+
+    tool_denom = None if not with_n else "tool_rows"
+    stop_denom = None if not with_n else "stop_rows"
+    return [cell("mean_tool_calls", ",.1f", tool_denom),
+            cell("errors_per_tool_call", ",.3f", None),
+            cell("length_bound_turns", ",d", stop_denom)]
+
+
+def aligned_displacement(row: dict[str, Any]) -> str:
+    """The three cells padded to the aligned table's widths, `-` for an absent one.
+
+    Column widths 9/10/7 with the `n=` dropped, for the same reason the aligned
+    `outcome` cell prints `96%` where the markdown one prints `96 % n=1133`: the
+    aligned page is a CLI table, and its denominators are the `--json` row's
+    `tool_rows` and `stop_rows`, which its legend points at.
+    """
+    mean_t, err, length_bound = displacement_cells(row, with_n=False)
+
+    def pad(text: str, width: int) -> str:
+        return "-".rjust(width) if not text else text.rjust(width)
+
+    return f"{pad(mean_t, 9)}{pad(err, 10)}{pad(length_bound, 7)}"
+
+
 def render(result: dict[str, Any]) -> str:
     """The human-readable table. Every column is a definition, not a guess."""
     out: list[str] = []
@@ -325,9 +485,16 @@ def render(result: dict[str, Any]) -> str:
     out.append(f"corpus: {c['describe_tree']}")
     out.append(f"stores: workers={c['workers_db']} usage={c['usage_db']}")
     out.append("")
+    # #2798: the displacement columns appear only when some row of THIS table
+    # carries them. A table built from the committed 2026-10-11 witness has no
+    # such keys at all, and printing three columns of dashes over it would claim
+    # the witness was measured and came out with no tool calls, which is the
+    # inversion every denominator on this page exists to prevent.
+    displacing = any(k in row for row in result["rows"] for k in DISPLACEMENT_KEYS)
     header = (f"{'class':<18}{'sess':>6}{'turns':>7}{'cover':>7}"
               f"{'meanR':>9}{'p90R':>9}{'meanOut':>9}{'meanIn':>9}{'share':>8}"
-              f"{'outcome':>10}{'s/f/s/i':>16}")
+              f"{'outcome':>10}{'s/f/s/i':>16}"
+              + (f"{'meanT':>9}{'err/call':>10}{'lenB':>7}" if displacing else ""))
     out.append(header)
     out.append("-" * len(header))
     for row in result["rows"]:
@@ -355,7 +522,8 @@ def render(result: dict[str, Any]) -> str:
             f"{cell(row['p90_reasoning_tokens'])}"
             f"{cell(row['mean_output_tokens'])}"
             f"{cell(row['mean_input_tokens'])}"
-            f"{share:>8}{pct:>10}{counts:>16}")
+            f"{share:>8}{pct:>10}{counts:>16}"
+            + (aligned_displacement(row) if displacing else ""))
     out.append("")
     out.append(f"outcome rate = success/(success+failed); skipped/interrupted excluded "
                f"from that denominator and printed beside it as s/f/s/i; "
@@ -367,6 +535,13 @@ def render(result: dict[str, Any]) -> str:
                "a count — not the covered subset — because it is the prefill a "
                "per-request thinking knob re-charges when its stamped system message "
                "leaves the prefix cache (app/harness/finalizer.py:24-37).")
+    if displacing:
+        out.append("meanT = mean tool calls per turn and err/call = tool errors per tool "
+                   "call, both over that class's rows carrying a tool-call counter; "
+                   "lenB = turns that ended stop_reason='length', over the rows carrying a "
+                   "stop reason. Their denominators are the --json row's `tool_rows` and "
+                   "`stop_rows`; a `-` means NO row of that class carries that counter, "
+                   "which is not the same finding as a turn that called nothing.")
     out.append(f"turns attributed {result['turns_attributed']} of {result['usage_rows']} "
                f"usage rows in the window; unattributed = the interactive residual, "
                f"no run names its session.")
@@ -389,8 +564,14 @@ MD_COLUMNS = ("class", "sess", "turns", "cover", "meanR", "p90R", "meanOut",
 NO_VALUE = "–"
 
 
-def _md_cell(row: dict[str, Any]) -> list[str]:
-    """One row's markdown cells, derived only from its witness fields."""
+def _md_cell(row: dict[str, Any], *, displacement: bool = False) -> list[str]:
+    """One row's markdown cells, derived only from its witness fields.
+
+    `displacement` appends the three #2798 cells. It is decided by the TABLE
+    (`markdown_rows`), never per row, because a table whose rows have different
+    cell counts is a ragged markdown table — and the report's own pin asserts
+    every row has the header's pipe count.
+    """
     def num(value: float | None) -> str:
         return NO_VALUE if value is None else f"{value:,.0f}"
 
@@ -402,13 +583,16 @@ def _md_cell(row: dict[str, Any]) -> list[str]:
         outcome = f"{o * 100:.0f} % n={row['outcome_n']}"
         if row["outcome_thin"]:
             outcome += " THIN"
-    return [row["class"], f"{row['sessions']:,}", f"{row['turns']:,}",
-            f"{row['reasoning_coverage']:,}", num(row["mean_reasoning_tokens"]),
-            num(row["p90_reasoning_tokens"]), num(row["mean_output_tokens"]),
-            num(row["mean_input_tokens"]),
-            (NO_VALUE if share is None else f"{share * 100:.1f} %"),
-            outcome,
-            f"{row['success']}/{row['failed']}/{row['skipped']}/{row['interrupted']}"]
+    cells = [row["class"], f"{row['sessions']:,}", f"{row['turns']:,}",
+             f"{row['reasoning_coverage']:,}", num(row["mean_reasoning_tokens"]),
+             num(row["p90_reasoning_tokens"]), num(row["mean_output_tokens"]),
+             num(row["mean_input_tokens"]),
+             (NO_VALUE if share is None else f"{share * 100:.1f} %"),
+             outcome,
+             f"{row['success']}/{row['failed']}/{row['skipped']}/{row['interrupted']}"]
+    if displacement:
+        cells += [c or NO_VALUE for c in displacement_cells(row)]
+    return cells
 
 
 def markdown_rows(result: dict[str, Any]) -> str:
@@ -425,10 +609,15 @@ def markdown_rows(result: dict[str, Any]) -> str:
         share = row["reasoning_share_of_output"]
         return (share is None, -(share or 0.0), row["class"])
 
-    lines = ["| " + " | ".join(MD_COLUMNS) + " |",
-             "|" + "|".join(["---"] * len(MD_COLUMNS)) + "|"]
+    # The displacement columns exist only for a table whose rows carry them, so
+    # the committed 2026-10-11 witness — whose rows have no such keys — renders
+    # byte-identically and the report's byte-for-byte pin of it stays green.
+    displacing = any(k in row for row in result["rows"] for k in DISPLACEMENT_KEYS)
+    columns = MD_COLUMNS + (DISPLACEMENT_COLUMNS if displacing else ())
+    lines = ["| " + " | ".join(columns) + " |",
+             "|" + "|".join(["---"] * len(columns)) + "|"]
     for row in sorted(result["rows"], key=sort_key):
-        lines.append("| " + " | ".join(_md_cell(row)) + " |")
+        lines.append("| " + " | ".join(_md_cell(row, displacement=displacing)) + " |")
     return "\n".join(lines)
 
 

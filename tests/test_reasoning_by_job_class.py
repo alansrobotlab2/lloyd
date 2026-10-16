@@ -1,7 +1,28 @@
-"""#2576 clauses 1-3: the per-job-class join, from two stores and out one table.
+"""#2576 clauses 1-3 and #2798's displacement columns: the per-job-class join.
 
 Clause → node map (the review rung grades per clause, so every clause names its
 nodes here rather than leaving them to be found by title):
+
+* **#2798 clause 1** — `--json` carries `mean_tool_calls`, `errors_per_tool_call`
+  and `length_bound_turns`, each over only the rows where that column is non-NULL,
+  with its measured-row count beside it, and null rather than 0 for a class nothing
+  measured:
+  `test_2798_clause_1_the_json_row_carries_the_three_ratios_with_their_denominators`,
+  `test_2798_clause_1_a_measured_zero_is_not_the_unmeasured_null`.
+* **#2798 clause 2** — both the plain `render` table and `markdown_rows` print the
+  three as cells taken from that row's own fields:
+  `test_2798_clause_2_every_displacement_cell_is_that_rows_own_in_both_tables`.
+* **#2798 clause 3** — mutating one row's tool-call and stop-reason fields moves that
+  row's cells and no other's, in the JSON and in both renderings:
+  `test_2798_clause_3_mutating_one_witness_row_moves_only_that_row`,
+  `test_2798_clause_3_mutating_one_usage_row_moves_only_its_class`,
+  `test_no_node_in_this_file_skips`.
+* **#2798 clause 4** — the committed 2026-10-11 witness still renders its pinned
+  11-column table byte-for-byte, because its rows carry none of the new keys:
+  `test_2798_clause_4_the_committed_witness_still_renders_eleven_columns`.
+* The report's own prose reading of these columns is pinned in
+  `tests/test_thinking_effort_report.py`, in the file that already pins its tables.
+* **Clause 1** — one row per job class with mapped-session count, turn count,
 
 * **Clause 1** — one row per job class with mapped-session count, turn count,
   non-null `reasoning_tokens` coverage, mean and p90 reasoning tokens, mean output
@@ -93,24 +114,43 @@ def _seed_workers(path: Path, rows: list[tuple[str, str, str, list[str]]]) -> No
         con.close()
 
 
-def _seed_usage(path: Path, rows: list[tuple[str | None, str, int | None, int]]) -> None:
-    """One row per turn. A `None` reasoning is the NULL the covered subset exists for.
+def _seed_usage(path: Path,
+                rows: list[tuple[str | None, str, int | None, int]
+                           | tuple[str | None, str, int | None, int,
+                                   str | None, int | None, int | None]]) -> None:
+    """One row per turn, in the table the live store actually has.
 
-    The column list is the whole `usage` table from `app/usage_store.py::_SCHEMA`
-    except the indexes: a fixture carrying only the three columns the query names
-    would stay green after a rename of the other eight, and those eight are what the
-    report's `mean output` and `share` columns silently depend on.
+    A 4-tuple is `(session_id, ts, reasoning_tokens, output_tokens)` with the
+    telemetry columns left NULL — the shape every row written before
+    `app/usage_store.py::_TELEMETRY_COLUMNS` landed has on the live store, which is
+    what `tool_rows`/`stop_rows` exist to count. A 7-tuple adds
+    `(stop_reason, tool_calls, tool_errors)` for the displacement cases.
+
+    The table comes from `app/usage_store._init_schema`, the same function that
+    creates the production store, and not from a column list typed in here. The
+    previous fixture typed eleven columns of its own invention — `source`, `kind`,
+    `job_id` and `cached_tokens`, four names the live table has never carried — while
+    missing `stop_reason`, `tool_calls` and `tool_errors`, so its docstring's claim to
+    be "the whole `usage` table" was false twice over and every query naming the
+    telemetry columns died with `no such column` on a fixture that purported to
+    exercise them. `_init_schema` creates the base table and then applies both
+    migration loops over `_TELEMETRY_COLUMNS` (app/usage_store.py:65 and the ALTER
+    block at :170-177), so a rename of a real column now breaks this fixture here
+    instead of breaking a live read.
     """
+    from app.usage_store import _init_schema
+
     con = sqlite3.connect(path)
     try:
-        con.execute("create table usage (ts text, source text, kind text,"
-                    " session_id text, job_id integer, model text, input_tokens integer,"
-                    " output_tokens integer, reasoning_tokens integer,"
-                    " cached_tokens integer, cost_usd real)")
-        con.executemany("insert into usage values (?,?,?,?,?,?,?,?,?,?,?)",
-                        [(t, "autocode", "turn", sid, None, "Qwen3.8-Flash-Next",
-                          100, out, reason, None, 0.0)
-                         for sid, t, reason, out in rows])
+        con.row_factory = sqlite3.Row          # _init_schema reads PRAGMA by name
+        _init_schema(con)
+        wide = [r + (None, None, None) if len(r) == 4 else r for r in rows]
+        con.executemany(
+            "insert into usage (ts, session_id, model, input_tokens, output_tokens,"
+            " reasoning_tokens, stop_reason, tool_calls, tool_errors)"
+            " values (?,?,?,?,?,?,?,?,?)",
+            [(t, sid, "Qwen3.8-Flash-Next", 100, out, reason, *telemetry)
+             for sid, t, reason, out, *telemetry in wide])
         con.commit()
     finally:
         con.close()
@@ -151,17 +191,32 @@ def stores(tmp_path):
           for i in range(30)],
     ])
     _seed_usage(usage, [
-        # autotriage: one covered, one NULL reasoning, one NULL output (guarded).
-        ("s-tri-a", "2026-10-05T10:00:05", 40, 100),
+        # autotriage: one NULL reasoning, one zero-output, all four of them below.
+        # The tail is (#2798) `(stop_reason, tool_calls, tool_errors)`: this class is
+        # the mixed case — 4 turns, only 3 of them measured, one of those 3 cut off at
+        # the budget, one measured with zero calls, and calls/errors whose class ratio
+        # is 3/12 = 0.25 while the mean of the per-turn ratios is (0.25 + 0.25 + 0)/3 =
+        # 0.1667. Same trap as `share`, one column over.
+        ("s-tri-a", "2026-10-05T10:00:05", 40, 100, "length", 4, 1),
         ("s-tri-b", "2026-10-06T10:00:05", None, 90),
-        ("s-tri-c", "2026-10-07T10:00:05", 60, None),
+        # Output 0, not None: the live DDL declares `output_tokens INTEGER NOT NULL`,
+        # so the NULL this row used to carry is a shape the store cannot hold and the
+        # old fixture was exercising `build_table`'s `output is not None` guard against
+        # a case production never sends. The class's covered-output sum is 100+0+50 and
+        # its share 120/150 either way, so no figure below moves.
+        ("s-tri-c", "2026-10-07T10:00:05", 60, 0, "stop", 8, 2),
         # autotriage's own turn, plus autocode's — both covered.
-        ("s-tri-d", "2026-10-08T10:00:05", 20, 50),
-        ("s-code-a", "2026-10-05T09:00:05", 10, 20),
+        ("s-tri-d", "2026-10-08T10:00:05", 20, 50, "max_turns", 0, 0),
+        ("s-code-a", "2026-10-05T09:00:05", 10, 20, "stop", 10, 0),
+        # autocode's second turn keeps NULL telemetry, so the class's tool mean is over
+        # ONE row while its `turns` is 2: a figure that divided by `turns` would print
+        # 5.0 and quietly price an unmeasured turn as a turn that called nothing.
         ("s-code-b", "2026-10-05T09:05:05", 10, 180),
         # Unattributed: no run names these. Including a NULL session_id, which is a
         # real shape in the store and must land in the residual, not crash the join.
-        ("s-orphan-1", "2026-10-05T12:00:00", 5, 20),
+        # s-orphan-1's two calls both errored, so the residual carries the 1.000
+        # error-per-call that no other class in this fixture has.
+        ("s-orphan-1", "2026-10-05T12:00:00", 5, 20, "length", 2, 2),
         ("s-orphan-2", "2026-10-06T12:00:00", None, 20),
         (None, "2026-10-07T12:00:00", 7, 21),
         # Outside the window entirely, and counted in the footer, not in a row.
@@ -587,6 +642,348 @@ def test_the_witness_flag_writes_the_bytes_the_report_reads(tmp_path, stores):
             "the wrapper stopped saying what is NOT in these bytes, which is the "
             "property that lets a census of every turn be committed at all")
     assert "turns_attributed" in text
+
+
+# ── #2798: the displacement columns ─────────────────────────────────────────
+
+
+def _md_cells_by_class(text: str) -> dict[str, list[str]]:
+    """A rendered markdown table as `{first cell: [cells]}`, header keyed `class`."""
+    out = {}
+    for line in text.splitlines():
+        if not line.startswith("| "):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        out[cells[0]] = cells
+    return out
+
+
+def _aligned_rows(text: str, classes: set[str]) -> dict[str, list[str]]:
+    """The aligned table's body lines as `{class: [whitespace fields]}`.
+
+    Selected by the class names rather than by a pattern over the page: the render's
+    legend lines are prose that opens with the columns' own names (`meanR = ...`,
+    `turns attributed ...`), so a prefix rule has to be as clever as the format to
+    keep them out, and a rule that is wrong here reads as a missing row.
+    """
+    return {fields[0]: fields for fields in
+            (line.split() for line in text.splitlines())
+            if fields and fields[0] in classes}
+
+
+def test_2798_clause_1_the_json_row_carries_the_three_ratios_with_their_denominators(stores):
+    """Clause 1: three displacement fields per `--json` row, each over its own subset.
+
+    `autotriage` is the discriminating class: 4 turns, only 3 of them carrying a
+    tool-call counter, of which one hit the budget, and calls/errors that aggregate to
+    3/12 = 0.25 while the mean of the three turns' own ratios is (0.25 + 0.25 + 0)/3 =
+    0.1667. 0.25 and 0.1667 are a 1.5x difference in a class's error rate, and it is
+    the same trap `share` pins two nodes above, one column over.
+    """
+    workers, usage = stores
+    result = build_table(workers_db=workers, usage_db=usage, since="2026-01-01T00:00:00")
+    rows = _rows(result)
+    for row in result["rows"]:
+        for key in ("mean_tool_calls", "errors_per_tool_call", "length_bound_turns",
+                    "tool_rows", "stop_rows", "tool_calls_total", "tool_errors_total"):
+            assert key in row, f"{row['class']}: the --json row lost {key}"
+        # Each printed figure re-derives from its own sums, as `share` does above: a
+        # tolerance would not see a ratio that drifted away from its denominator.
+        if row["tool_rows"]:
+            assert row["mean_tool_calls"] == round(
+                row["tool_calls_total"] / row["tool_rows"], 1)
+            assert row["errors_per_tool_call"] == round(
+                row["tool_errors_total"] / row["tool_calls_total"], 4)
+        else:
+            assert (row["tool_calls_total"], row["tool_errors_total"]) == (None, None)
+
+    tri = rows["autotriage"]
+    assert (tri["turns"], tri["tool_rows"], tri["stop_rows"]) == (4, 3, 3)
+    assert (tri["tool_calls_total"], tri["tool_errors_total"]) == (12, 3)
+    assert tri["mean_tool_calls"] == 4.0 and tri["errors_per_tool_call"] == 0.25
+    assert tri["length_bound_turns"] == 1
+    assert tri["errors_per_tool_call"] != pytest.approx((0.25 + 0.25 + 0.0) / 3), (
+        "errors per call drifted to the mean of per-turn ratios")
+
+    code = rows["autocode"]
+    # One of autocode's two turns has NULL telemetry, so its mean is over ONE row.
+    # Divided by `turns` the figure would be 5.0 — half its real value, because the
+    # unmeasured turn was priced as a turn that called nothing, which is the inversion
+    # `app/usage_store.py::_TELEMETRY_COLUMNS` warns about in its own comment.
+    assert (code["turns"], code["tool_rows"], code["stop_rows"]) == (2, 1, 1)
+    assert code["mean_tool_calls"] == 10.0 and code["errors_per_tool_call"] == 0.0
+    assert code["length_bound_turns"] == 0
+
+    residual = rows[UNATTRIBUTED]
+    assert (residual["mean_tool_calls"], residual["errors_per_tool_call"],
+            residual["length_bound_turns"]) == (2.0, 1.0, 1)
+
+    # A class with runs and no turns was never measured on either counter, so all
+    # three are null. A 0 here would say its turns were counted and never hit the
+    # budget — a finding about the mechanism, printed about a class that made none.
+    for cls in ("queue-maintenance", "board-steward"):
+        row = rows[cls]
+        assert (row["tool_rows"], row["stop_rows"]) == (0, 0)
+        assert row["mean_tool_calls"] is None, f"{cls} invented a tool mean from nothing"
+        assert row["errors_per_tool_call"] is None
+        assert row["length_bound_turns"] is None, f"{cls}: null is the finding, not 0"
+
+
+def test_2798_clause_1_a_measured_zero_is_not_the_unmeasured_null(tmp_path):
+    """`0` and NULL are different findings on all three, and each column decides alone.
+
+    Three classes, one per shape: `no-calls` measured a turn that called nothing (real
+    zeros, in every rendering); `no-telemetry` measured nothing at all (the sentinel);
+    and `stop-only` carries a stop reason with no tool counter, so its length figure is
+    a real 0 while its two ratios are null — the shape that tells the columns' two
+    denominators apart. Today's live store cannot produce that third shape, because
+    `stop_reason`, `tool_calls` and `tool_errors` all arrive from the same migration
+    (`stop_reason` is not in the original `create table usage`, and the 2026-10-16
+    check found 0 rows where one of the three is NULL and another is not), so the
+    distinction is seeded here rather than left unasserted.
+    """
+    workers, usage = tmp_path / "workers.db", tmp_path / "usage.db"
+    _seed_workers(workers, [
+        ("no-calls", "2026-10-05T09:00:00", "success", ["s-z"]),
+        ("no-telemetry", "2026-10-05T09:00:00", "success", ["s-n"]),
+        ("stop-only", "2026-10-05T09:00:00", "success", ["s-s"])])
+    _seed_usage(usage, [
+        ("s-z", "2026-10-05T09:10:00", 5, 20, "stop", 0, 0),
+        ("s-n", "2026-10-05T09:10:00", 5, 20),
+        ("s-s", "2026-10-05T09:10:00", 5, 20, "max_turns", None, None)])
+    result = build_table(workers_db=workers, usage_db=usage, since=None)
+    rows = _rows(result)
+
+    measured = rows["no-calls"]
+    assert (measured["tool_rows"], measured["stop_rows"]) == (1, 1)
+    assert (measured["mean_tool_calls"], measured["errors_per_tool_call"],
+            measured["length_bound_turns"]) == (0.0, 0.0, 0)
+    unmeasured = rows["no-telemetry"]
+    assert (unmeasured["tool_rows"], unmeasured["stop_rows"]) == (0, 0)
+    assert unmeasured["mean_tool_calls"] is None
+    assert unmeasured["errors_per_tool_call"] is None
+    assert unmeasured["length_bound_turns"] is None
+    mixed = rows["stop-only"]
+    assert (mixed["tool_rows"], mixed["stop_rows"]) == (0, 1)
+    assert (mixed["mean_tool_calls"], mixed["errors_per_tool_call"]) == (None, None)
+    assert mixed["length_bound_turns"] == 0, (
+        "the class's one turn ended max_turns, which is a measured turn that did NOT "
+        "hit the length budget — a null here would erase the negative result")
+
+    cells = _md_cells_by_class(markdown_rows(result))
+    assert cells["no-calls"][-3:] == ["0.0 n=1", "0.000", "0 n=1"]
+    assert cells["no-telemetry"][-3:] == [NO_VALUE] * 3
+    assert cells["stop-only"][-3:] == [NO_VALUE, NO_VALUE, "0 n=1"]
+    aligned = _aligned_rows(render(result), set(rows))
+    assert aligned["no-calls"][-3:] == ["0.0", "0.000", "0"]
+    assert aligned["no-telemetry"][-3:] == ["-", "-", "-"]
+    assert aligned["stop-only"][-3:] == ["-", "-", "0"]
+
+
+def test_2798_clause_2_every_displacement_cell_is_that_rows_own_in_both_tables(stores):
+    """Clause 2: every printed cell is formatted from ITS row's fields, in both tables.
+
+    #2576's third review round caught a renderer that printed one equal ratio on every
+    row, so "row-scoped" is asserted here by walking the rendered text and re-deriving
+    each cell from the `--json` row of the SAME class. A renderer that hoisted one
+    class's value into every row, or read the columns off the table instead of the row,
+    fails on the first class whose figure differs — and the spread assertion at the end
+    closes the case where every class would have printed the same thing anyway.
+    """
+    workers, usage = stores
+    result = build_table(workers_db=workers, usage_db=usage, since="2026-01-01T00:00:00")
+    rows = _rows(result)
+    md = markdown_rows(result)
+    header = md.splitlines()[0]
+    assert [c.strip() for c in header.strip("|").split("|")][-3:] == [
+        "meanT", "errPerCall", "lenBound"], header
+    cells, aligned = _md_cells_by_class(md), _aligned_rows(render(result), set(rows))
+    assert set(cells) - {"class"} == set(rows) == set(aligned)
+    for cls, row in rows.items():
+        want = ([NO_VALUE, NO_VALUE, NO_VALUE] if not row["tool_rows"] else
+                [f"{row['mean_tool_calls']:,.1f} n={row['tool_rows']:,}",
+                 f"{row['errors_per_tool_call']:,.3f}",
+                 (f"{row['length_bound_turns']:,} n={row['stop_rows']:,}"
+                  if row["length_bound_turns"] is not None else NO_VALUE)])
+        assert cells[cls][-3:] == want, (
+            f"{cls}: markdown printed {cells[cls][-3:]} where its own row says {want}")
+        # The aligned table's own sentinel is a hyphen, not the report's en dash: the
+        # two tables spell "nothing measured" differently and both are pinned here.
+        assert aligned[cls][-3:] == ["-" if w == NO_VALUE else w.split(" n=")[0]
+                                     for w in want], (
+            f"{cls}: the aligned table printed {aligned[cls][-3:]} for row {want}")
+    measured = [r for r in rows.values() if r["tool_rows"]]
+    assert len(measured) >= 3, "the fixture lost the classes the spread is read across"
+    assert len({(r["mean_tool_calls"], r["errors_per_tool_call"])
+                for r in measured}) >= 3, (
+        "every measured class printed the same two ratios, which is the shared-value "
+        "shape this node exists to catch")
+
+
+def test_2798_clause_3_mutating_one_witness_row_moves_only_that_row():
+    """Clause 3: the committed witness, mutated in one row, re-rendered both ways.
+
+    The 2026-10-11 witness is the artifact the report's table is pinned to, and its
+    rows carry none of the displacement keys — so it is the natural corpus to add them
+    to in order to prove the cells are row-scoped: two classes gain three cells with
+    stated values, every other class may gain ONLY the sentinel, and no class may
+    inherit a neighbour's numbers. Both renderings come off the same mutated dict, so
+    a renderer reading the table rather than the row shows up as a row that did not
+    move.
+    """
+    witness = _unwrap_witness(CLASS_WITNESS)
+    base_md, base_aligned = markdown_rows(witness), render(witness)
+    assert "meanT" not in base_md, (
+        "the pinned 2026-10-11 render grew columns on its own, so this node's "
+        "before-side is no longer the bytes the report pins")
+
+    mutated = json.loads(json.dumps(witness))
+    moved = {"autocode": (40.0, 0.25, 3), "owed-check": (1.5, 0.0, 0)}
+    for cls, (mean_t, err, length) in moved.items():
+        next(r for r in mutated["rows"] if r["class"] == cls).update(
+            mean_tool_calls=mean_t, errors_per_tool_call=err,
+            length_bound_turns=length, tool_rows=100, stop_rows=100,
+            tool_calls_total=100, tool_errors_total=100)
+
+    md, aligned = markdown_rows(mutated), render(mutated)
+    cells, base_cells = _md_cells_by_class(md), _md_cells_by_class(base_md)
+    assert set(cells) == set(base_cells), "a class appeared or vanished mid-render"
+    for cls, (mean_t, err, length) in moved.items():
+        assert cells[cls][-3:] == [f"{mean_t:,.1f} n=100", f"{err:,.3f}",
+                                   f"{length:,} n=100"], f"{cls}'s own cells"
+    for cls, row in cells.items():
+        if cls == "class":
+            continue
+        assert row[:11] == base_cells[cls][:11], (
+            f"{cls}: one of the eleven pinned columns moved when only two OTHER rows "
+            "were given displacement fields")
+        if cls not in moved:
+            assert row[-3:] == [NO_VALUE] * 3, (
+                f"{cls} printed {row[-3:]} without carrying the fields")
+    assert cells["autocode"][-3:] != cells["owed-check"][-3:], (
+        "the two mutated classes print the same triple, which is the shared-value bug")
+    header = md.splitlines()[0]
+    assert header.count("|") == base_md.splitlines()[0].count("|") + 3
+    ragged = {cls: len(row) for cls, row in cells.items() if len(row) != 14}
+    assert not ragged, f"markdown rows of differing width: {ragged}"
+
+    known = {c for c in cells if c != "class"}
+    after, before = _aligned_rows(aligned, known), _aligned_rows(base_aligned, known)
+    for cls, (mean_t, err, length) in moved.items():
+        assert after[cls][-3:] == [f"{mean_t:,.1f}", f"{err:,.3f}", f"{length:,d}"]
+    for cls, fields in after.items():
+        assert fields[:-3] == before[cls], (
+            f"{cls}: the aligned row changed before its three new cells")
+        if cls not in moved:
+            assert fields[-3:] == ["-"] * 3
+
+
+def test_2798_clause_3_mutating_one_usage_row_moves_only_its_class(stores):
+    """Clause 3 across the store boundary: one UPDATE on `usage` moves one class.
+
+    The witness node mutates a JSON document; this one mutates the fixture's SQLite
+    table, which `_seed_usage` builds with the production `_init_schema`, so the
+    statement is the one an operator would run against `usage.db` and a SELECT that
+    stopped naming `stop_reason`, `tool_calls` or `tool_errors` would leave every
+    figure here unchanged. Rows are compared as whole JSON documents, so a change that
+    leaked into a second class is named rather than averaged away.
+    """
+    workers, usage = stores
+    before = build_table(workers_db=workers, usage_db=usage, since="2026-01-01T00:00:00")
+    con = sqlite3.connect(usage)
+    try:
+        con.execute("update usage set stop_reason='length', tool_calls=99, tool_errors=7"
+                    " where session_id='s-code-b'")
+        con.commit()
+    finally:
+        con.close()
+    after = build_table(workers_db=workers, usage_db=usage, since="2026-01-01T00:00:00")
+
+    changed = {}
+    for row in after["rows"]:
+        old = next(r for r in before["rows"] if r["class"] == row["class"])
+        if json.dumps(row, sort_keys=True) != json.dumps(old, sort_keys=True):
+            changed[row["class"]] = (old, row)
+    assert set(changed) == {"autocode"}, (
+        f"one row's telemetry moved {sorted(changed)}; the columns are not scoped to "
+        "the class whose row changed")
+    old, new = changed["autocode"]
+    assert (old["tool_rows"], new["tool_rows"]) == (1, 2), "the row did not enter the denominator"
+    assert (old["mean_tool_calls"], new["mean_tool_calls"]) == (10.0, round(109 / 2, 1))
+    assert new["errors_per_tool_call"] == round(7 / 109, 4)
+    assert (old["length_bound_turns"], new["length_bound_turns"]) == (0, 1)
+    assert markdown_rows(after).count("54.5 n=2") == 1
+    assert "54.5 n=2" not in markdown_rows(before)
+    assert _aligned_rows(render(after), {"autocode"})["autocode"][-3:] == [
+        "54.5", "0.064", "1"]
+    assert _aligned_rows(render(before), {"autocode"})["autocode"][-3:] == [
+        "10.0", "0.000", "0"]
+
+
+def test_2798_clause_4_the_committed_witness_still_renders_eleven_columns():
+    """Clause 4: the 2026-10-11 witness is untouched, and still renders what it rendered.
+
+    Its rows carry none of the displacement keys, which is the only reason the new
+    columns are keyed off the rows: `tests/test_thinking_effort_report.py` byte-pins
+    this render inside the vault report and re-derives the report's prose figures from
+    it. The header is typed here rather than imported from `MD_COLUMNS` so the
+    assertion cannot be true by definition — the module constant and a test that reads
+    it agree whatever the renderer grows.
+    """
+    witness = _unwrap_witness(CLASS_WITNESS)
+    for row in witness["rows"]:
+        assert not ({"mean_tool_calls", "errors_per_tool_call",
+                     "length_bound_turns"} & set(row)), (
+            "the committed witness gained displacement keys, so it no longer proves "
+            "that an unmeasured corpus still renders the eleven pinned columns")
+    md = markdown_rows(witness)
+    assert md.splitlines()[0] == ("| class | sess | turns | cover | meanR | p90R "
+                                  "| meanOut | meanIn | share | outcome | s/f/s/i |")
+    ragged = {cls: len(row) for cls, row in _md_cells_by_class(md).items()
+              if len(row) != 11}
+    assert not ragged, f"the witness no longer renders 11 cells per row: {ragged}"
+    aligned = render(witness).splitlines()
+    header_line = next(l for l in aligned if l.startswith("class"))
+    assert "meanT" not in header_line, (
+        "the aligned table grew a displacement column for a corpus that has none")
+    classes = {row["class"] for row in witness["rows"]}
+    # Body rows are the header's width, or one wider: `THIN` is a trailing marker, and
+    # it is the only thing in this render that ever was.
+    too_wide = [l for l in aligned if l.split() and l.split()[0] in classes
+                and len(l.split()) > len(header_line.split()) + 1]
+    assert not too_wide, f"aligned rows wider than the header: {too_wide}"
+
+
+def test_no_node_in_this_file_skips():
+    """Clause 3's last requirement, as a node that runs with the suite rather than a grep.
+
+    Checked over the whole file including the helpers, because a skip inside a helper
+    hides a clause's nodes behind a green run — which is the failure mode `_measured()`
+    was written to avoid. Only the executable spellings are searched: the word "skip"
+    appears in prose below, and prose is not a node.
+    """
+    text = Path(__file__).read_text()
+    # Each needle is built at run time, because writing any of them as a literal in
+    # this file would make this node fail on its own source.
+    for needle in ("pytest" + "." + "skip", "@pytest.mark." + "skip", "skip" + "if"):
+        assert needle not in text, f"{needle} entered this file"
+
+
+def test_every_node_named_in_the_clause_map_exists():
+    """The clause map in this file's docstring is the review's index, so it cannot rot.
+
+    A node renamed or deleted leaves its clause pointing at nothing, and the review
+    rung reads that map as the clause-to-evidence table. Every backticked `test_*`
+    name in the module docstring has to be a function defined in this file.
+    """
+    import re
+
+    text = Path(__file__).read_text()
+    docstring = text.split('"""', 2)[1]
+    named = set(re.findall(r"`(test_[a-z0-9_]+)`", docstring))
+    assert named, "the clause map stopped naming any node, so it grades nothing"
+    missing = [name for name in sorted(named) if f"def {name}(" not in text]
+    assert not missing, f"the clause map names nodes this file does not define: {missing}"
 
 
 def test_a_missing_store_is_refused_rather_than_created(tmp_path):

@@ -40,6 +40,7 @@ NOTE = (board_presence.vault_root()
         / "knowledge" / "thinking-effort-per-job-class-2026-10-11.md")
 NOTE_REL = "knowledge/thinking-effort-per-job-class-2026-10-11.md"
 CLASS_WITNESS = REPO / "eval/measurements/2576-class-table-2026-10-11.md"
+DISPLACEMENT_WITNESS = REPO / "eval/measurements/2576-class-table-2026-10-16.md"
 PROBE_A = REPO / "eval/measurements/2576-probe-1500-2026-10-11.md"
 PROBE_B = REPO / "eval/measurements/2576-probe-1500-2026-10-11-run-b.md"
 N_ARMS = len(SPELLINGS)
@@ -109,6 +110,78 @@ def test_the_committed_witness_reproduces_the_derived_figures_the_note_prose_quo
     assert f"{code['mean_reasoning_tokens']:,.0f}" in note
 
 
+
+
+def test_the_displacement_paragraph_in_the_note_is_recomputed_from_its_witness():
+    """#2798 clause 5: the replaced paragraph's figures are its witness's, not typed in.
+
+    `**This table cannot see displacement.**` is gone, and in its place a reading of the
+    three columns #2798 added — taken over a LATER window than the table above it, which
+    is exactly the drift the module docstring says a hand-transcribed copy produced once.
+    So every figure in that paragraph is recomputed from
+    `eval/measurements/2576-class-table-2026-10-16.md` and required in the note's own
+    phrasing: the window stamps, the corpus counts, the two end classes of the
+    calls-per-turn range, `autocode`'s figure, and the count of turns that ended
+    `stop_reason=\'length\'`. The paragraph sits in the same section as the 2026-10-11
+    class table, so the two pins below also re-run here: the table must still be the OLD
+    witness's bytes, which is what keeps a later window from silently rewriting it.
+    """
+    note = NOTE.read_text()
+    assert "cannot see displacement" not in note, (
+        "the paragraph #2798 replaces is still standing, so the table still claims it "
+        "cannot see the budget when the script that produced it can")
+
+    witness = _unwrap(DISPLACEMENT_WITNESS)
+    body = note.split("## What this is not", 1)[1]
+    paragraph = next((p for p in body.split(". **It is not a priced arm.**")
+                      if "displacement" in p), None)
+    assert paragraph is not None, (
+        "the displacement reading is no longer the opening of 'What this is not', so a "
+        "reader looking for it at the old position finds the priced-arm refusal instead")
+
+    since, until = witness["window"]["since"], witness["window"]["until"]
+    assert f"`since={since}`" in paragraph and f"`until={until}`" in paragraph, (
+        "a reading of a later window than the table above it must carry that window, or a "
+        "later reader takes it for the 2026-10-11 corpus")
+    assert DISPLACEMENT_WITNESS.name in paragraph, (
+        "the paragraph must name the witness its figures come from")
+    for figure in (f"{witness['usage_rows']:,} usage rows",
+                   f"{witness['turns_attributed']:,} of them attributed"):
+        assert figure in paragraph, f"the paragraph no longer prints the corpus as {figure}"
+
+    rows = witness["rows"]
+    measured = [r for r in rows if r["tool_rows"]]
+    assert measured, "the displacement witness has no class with a tool-call counter"
+    assert all(r["tool_rows"] for r in rows if r["turns"]), (
+        "a class with turns carries no tool-call counter, so 'every class with turns "
+        "carries one' is no longer the witness's finding")
+    low = min(measured, key=lambda r: r["mean_tool_calls"])
+    high = max(measured, key=lambda r: r["mean_tool_calls"])
+    assert (f"**{low['mean_tool_calls']:.1f}** (`{low['class']}`, {low['tool_rows']:,} "
+            f"turns that called nothing at all)") in paragraph or (
+        f"**{low['mean_tool_calls']:.1f}** (`{low['class']}`" in paragraph), (
+        f"the low end of the calls-per-turn range is {low['class']} at "
+        f"{low['mean_tool_calls']:.1f} in the witness, and the paragraph says otherwise")
+    assert (f"**{high['mean_tool_calls']:.1f}** (`{high['class']}`, n="
+            f"{high['tool_rows']:,}") in paragraph, (
+        f"the high end of the range is {high['class']} at "
+        f"{high['mean_tool_calls']:.1f} over {high['tool_rows']:,} turns")
+    code = next(r for r in measured if r["class"] == "autocode")
+    assert (f"`autocode` at **{code['mean_tool_calls']:.1f}** over {code['tool_rows']:,} "
+            "turns") in paragraph, (
+        f"autocode's cell is {code['mean_tool_calls']:.1f} over {code['tool_rows']:,} "
+        "turns in the witness")
+    length_bound = sum(r["length_bound_turns"] or 0 for r in rows)
+    assert f"**{length_bound}** turn" in paragraph, (
+        f"the witness counts {length_bound} turns ending stop_reason='length' over its "
+        f"window, which is the number the paragraph exists to print")
+
+    # The 2026-10-11 corpus beside it is untouched: pinned as itself, and still
+    # rendering without the three columns because its rows carry none of the keys.
+    assert class_markdown(_unwrap(CLASS_WITNESS)) in note, (
+        "the class table is no longer the 2026-10-11 witness's render — the paragraph "
+        "above it was rewritten from a later window and the table moved with it")
+    assert "meanT" not in class_markdown(_unwrap(CLASS_WITNESS))
 
 def test_the_report_table_pin_fails_on_a_single_changed_digit():
     """The pin can fail, which is what distinguishes it from a print.
@@ -313,7 +386,9 @@ def test_the_report_names_what_the_measurement_cannot_see():
     A single-call bench trial penalises thinking under a completion-token ceiling by
     construction — the ceiling decides who finishes, not the reasoning — so no priced arm
     was run and the report may not imply one. And the video's mechanism is thinking
-    displacing *executed commands*, which a per-turn token census cannot see at all.
+    displacing *executed commands* — a per-turn token census cannot see the crowding,
+    and since #2798 it can see the one thing the crowding needs to happen at all: a
+    turn that ran out of budget. Both halves are still limits, so both stay in print.
     Asserted as exact substrings because these are the claims a later reader looks for
     before reusing the table.
     """
