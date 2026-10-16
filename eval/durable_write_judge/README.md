@@ -74,10 +74,16 @@ corpus rather than from the item's list. Classes that are **recorded but have no
 diff signature** — meaning-reversals, misattributed speakers — are absent from
 the corpus, and `report.md` says so rather than implying they are rare.
 
-Labels are rule-derived, one rater (Lloyd), and **unratified by Alan** — the
-silent-pass number is not trustworthy until that ratification exists. Every
-sample carries its `correction_evidence` so a rater can re-judge the label
-itself.
+Labels are rule-derived, one rater (Lloyd), no inter-rater check. The
+ratification that exists is **bounded and delegated**: the 20 `bad` labels are
+RATIFIED as gold by the #2639 owed-check 2026-10-16 on Alan's delegation — each
+re-derives from a repair diff plus the repairer's own defect word — while the 30
+`good` labels are refused as gold, because their warrant is only
+absence-of-repair. So recall-on-bad is quotable and the silent-pass rate is not:
+its denominator is every accepted sample, and every accepted `good` in it sits
+in the refused half, which is why `report.md` prints those figures as
+`UNRATIFIED-DENOMINATOR`. Every sample carries its `correction_evidence` so a
+rater can re-judge the label itself.
 
 ## Retriever choice, and the leak that had to be closed
 

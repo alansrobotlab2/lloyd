@@ -136,6 +136,7 @@ def render(samples: list[dict], raw_paths: dict[str, Path]) -> str:
     sq = selection_quality(samples)
     classes_present = sorted(class_counts(samples).items())
     n_bad = sum(1 for s in samples if s["label"] == "bad")
+    n_good = sum(1 for s in samples if s["label"] == "good")
 
     lines = [
         "# Durable-write judge calibration — backlog #580",
@@ -143,9 +144,12 @@ def render(samples: list[dict], raw_paths: dict[str, Path]) -> str:
         "**Status: offline experiment. Nothing in the live write path reads a judge "
         "score; `grep -n durable_write_judge workers/ app/ scripts/ autonomy/ skills/` "
         "returns nothing.** Labels are rule-derived from repair diffs and the "
-        "repairer's own recorded words; **one rater (Lloyd), no inter-rater check, "
-        "pending Alan's ratification** — the silent-pass number is not trusted until "
-        "that exists.",
+        "repairer's own recorded words, one rater (Lloyd), no inter-rater check; "
+        f"**the {n_bad} `bad` labels are RATIFIED as gold by the #2639 owed-check "
+        "2026-10-16 on Alan's delegation (each re-derives from a repair diff plus the "
+        f"repairer's own defect word), the {n_good} `good` labels are refused as gold "
+        "because their warrant is absence-of-repair — so recall-on-bad is quotable "
+        "and silent-pass is not.**",
         "",
         "## Corpus",
         "",
@@ -188,7 +192,7 @@ def render(samples: list[dict], raw_paths: dict[str, Path]) -> str:
         "",
         "## Results",
         "",
-        "| judge | judged bad/good | recall-on-bad % | false-positive-rate on good % | **silent-pass rate %** |",
+        "| judge | judged bad/good | recall-on-bad % | false-positive-rate on good % | **silent-pass rate %** (UNRATIFIED-DENOMINATOR) |",
         "|---|---|---|---|---|",
     ]
     for name in sorted(ms):
@@ -196,7 +200,8 @@ def render(samples: list[dict], raw_paths: dict[str, Path]) -> str:
         lines.append(
             f"| {JUDGE_NAMES[name]} | {m['judged_bad']}/{m['judged_good']} "
             f"(unjudged {m['unjudged']}) | **{m['recall_on_bad']}** | "
-            f"{m['false_positive_rate']} | **{m['silent_pass_rate']}** |"
+            f"{m['false_positive_rate']} | **{m['silent_pass_rate']}** "
+            "UNRATIFIED-DENOMINATOR |"
         )
     # #2465, on #2254's stop rule: the attribution confound these rates get read for was
     # measured, came back negative, and nothing in this repo said so. Placed directly
@@ -226,13 +231,17 @@ def render(samples: list[dict], raw_paths: dict[str, Path]) -> str:
         "200/200 rows judged — the 400-token judging budget the probe shipped with "
         "truncated 6 of 200 replies mid-JSON and the run correctly reported nothing).",
         "",
-        "silent-pass rate = accepted-and-labelled-bad / all accepted.",
+        "silent-pass rate = accepted-and-labelled-bad / all accepted. Every figure "
+        "marked **UNRATIFIED-DENOMINATOR** rests on that denominator, and every "
+        f"accepted `good` inside it is one of the {n_good} labels refused as gold, so "
+        "the rate is printed as untrusted rather than quoted.",
     ]
     for name in sorted(ms):
         m = ms[name]
         lines.append(
             f"- {JUDGE_NAMES[name]}: of {m['accepted']} accepted samples, "
-            f"{m['fn']} were labelled bad — **{m['silent_pass_rate']}%** silent pass; "
+            f"{m['fn']} were labelled bad — **{m['silent_pass_rate']}%** silent pass "
+            "(UNRATIFIED-DENOMINATOR); "
             f"recall {m['recall_on_bad']}% ({m['tp']} of {m['judged_bad']} bad flagged)."
         )
     lines += [
@@ -335,10 +344,15 @@ def render(samples: list[dict], raw_paths: dict[str, Path]) -> str:
         "",
         "## Caveats",
         "",
-        "- **One rater.** Every label derives from Lloyd's own recorded repair; Alan "
-        "is the domain expert who would have to ratify them, and inter-rater "
-        "reliability is unavailable. Correction evidence travels with each sample "
-        "(`correction_evidence`) so a rater can re-judge the label, not just the text.",
+        "- **One rater.** Every label derives from Lloyd's own recorded repair, and "
+        "inter-rater reliability is unavailable; the ratification that does exist is "
+        "bounded and delegated — the "
+        f"{n_bad} `bad` labels are RATIFIED as gold by the #2639 owed-check 2026-10-16 "
+        "on Alan's delegation, while the "
+        f"{n_good} `good` labels are refused as gold because their warrant is "
+        "absence-of-repair, so recall-on-bad is quotable and silent-pass is not. "
+        "Correction evidence travels with each sample (`correction_evidence`) so a "
+        "rater can re-judge the label, not just the text.",
         "- **Rule-derived labels are conservative and partial.** A class is assigned "
         "only when its signature is visible in the repair diff; a repair that "
         "reworded prose without removing a URL or adding a heading is unlabelled "
@@ -402,7 +416,8 @@ def main(argv: list[str] | None = None) -> int:
         m = metrics(samples, vs[name])
         print(f"{name}: recall_on_bad={m['recall_on_bad']}% "
               f"fp_rate={m['false_positive_rate']}% "
-              f"silent_pass={m['silent_pass_rate']}% unjudged={m['unjudged']}")
+              f"silent_pass={m['silent_pass_rate']}% (UNRATIFIED-DENOMINATOR) "
+              f"unjudged={m['unjudged']}")
     print(f"wrote {args.out}")
     return 0
 

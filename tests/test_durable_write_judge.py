@@ -448,8 +448,12 @@ def test_shipped_artifacts_exist_and_their_counts_are_the_ones_reported():
         recall = round(100.0 * tp / judged_bad, 1) if judged_bad else None
         fpr = round(100.0 * fp / judged_good, 1) if judged_good else None
         silent = round(100.0 * fn / accepted, 1) if accepted else None
+        # The row shape moves with #2823's clause 5, which demands the label on the
+        # table row itself: every recomputed number stays in its own cell, and the
+        # silent-pass cell additionally carries the UNRATIFIED-DENOMINATOR label.
         assert (f"| {sc.JUDGE_NAMES[judge]} | {judged_bad}/{judged_good} "
-                f"(unjudged {unjudged}) | **{recall}** | {fpr} | **{silent}** |") in report, (
+                f"(unjudged {unjudged}) | **{recall}** | {fpr} | **{silent}** "
+                "UNRATIFIED-DENOMINATOR |") in report, (
             f"report disagrees with judge_raw_{judge}.jsonl: "
             f"recall={recall} fpr={fpr} silent={silent}")
     assert counts and all(f"| `{c}` | {n}" in report for c, n in counts.items())
@@ -595,3 +599,212 @@ def test_the_readme_measured_section_agrees_with_the_shipped_artifacts():
     assert cited, "the README cites no tests, so the citation half is vacuous"
     assert not (cited - defined), (
         f"README cites tests that do not exist in this file: {sorted(cited - defined)}")
+
+
+# --- #2823: the bounded, delegated ratification of the labels --------------------
+#
+# #2639's owed-check ruled on these labels on 2026-10-16 and the ruling is dated and
+# scoped; what it did not do was reach the three places that describe them. Until the
+# nodes below, nothing in this file mentioned ratification at all (grep `ratif` here
+# returned 0 hits), which is why the sentence had been free to rot. These tests pin
+# the WORDING of a settled ruling, not a judgement: a future round that re-opens the
+# ruling changes the ruling's note first, and these assertions with it.
+
+#: The phrases the ruling itself uses. Each has to be legible in the emitted text.
+RATIF_MUST = ("RATIFIED as gold", "#2639 owed-check", "2026-10-16",
+              "on Alan's delegation", "refused as gold", "absence-of-repair")
+
+#: Every spelling under which the text could hand the ratification back to Alan, who
+#: explicitly did not ratify it: "the text must not claim otherwise".
+RATIF_MUST_NOT = ("pending Alan", "unratified by Alan", "would have to ratify",
+                  "Alan is the domain expert", "ratified by Alan", "until Alan",
+                  "until that ratification exists")
+
+
+def shipped_report_lines() -> list[str]:
+    """The committed artifact's lines, 1-based citation via ``lines[n - 1]``."""
+    return (HERE / "report.md").read_text().splitlines()
+
+
+def shipped_render() -> list[str]:
+    """What score.py renders from the shipped corpus and both raw verdict files."""
+    return sc.render(load_shipped_corpus(),
+                     {"a": HERE / "judge_raw_a.jsonl",
+                      "b": HERE / "judge_raw_b.jsonl"}).splitlines()
+
+
+def readme_ratif_paragraph() -> str:
+    readme = (HERE / "README.md").read_text()
+    start = readme.index("Labels are rule-derived")
+    return readme[start:readme.index("\n\n", start)]
+
+
+def test_the_status_sentence_states_which_label_half_is_gold_and_who_said_so():
+    """Clause 1 (#2823): the emitted status line carries the ruling, not the old ask.
+
+    The 20 `bad` labels are gold because each re-derives from a repair diff plus the
+    repairer's own defect word; the 30 `good` labels are not gold at all, because all
+    that warrants them is that no repair exists. Both halves and both counts are
+    asserted, and the counts are interpolated from the shipped corpus — a sentence that
+    names 20 and 30 by hand goes stale the first time `build_corpus.py` is re-run.
+    """
+    samples = load_shipped_corpus()
+    n_bad = sum(1 for s in samples if s["label"] == "bad")
+    n_good = sum(1 for s in samples if s["label"] == "good")
+    assert (n_bad, n_good) == (20, 30), "the ruling is scoped to these counts"
+    status = shipped_render()[2]
+    assert status.startswith("**Status: offline experiment."), (
+        "the ratification belongs in the status sentence the report opens with, not in "
+        "a paragraph added below it — an added paragraph moves the line citations")
+    for needle in RATIF_MUST:
+        assert needle in status, f"status line omits {needle!r}: {status}"
+    assert f"the {n_bad} `bad` labels are RATIFIED as gold" in status
+    assert f"the {n_good} `good` labels are refused as gold" in status
+    assert "recall-on-bad is quotable and silent-pass is not" in status
+    for banned in RATIF_MUST_NOT:
+        assert banned not in status, f"status line still says {banned!r}"
+
+
+def test_no_shipped_line_names_alan_as_the_ratifier_or_the_pending_one():
+    """Clause 2 (#2823): in this eval Alan holds one role only — the one who delegated.
+
+    The rule is mechanical because the misattribution is easy to write by accident: any
+    occurrence of the name must be followed by ``'s delegation``, so "pending Alan's
+    ratification", "unratified by Alan" and "Alan is the domain expert who would have to
+    ratify them" all fail here, while the delegation phrase passes. It is checked on all
+    three surfaces the ruling had to reach: the status line, the Caveats bullet, and the
+    README's provenance paragraph. The grep is then run as the item's own command over
+    the whole directory, because without ``--exclude-dir=__pycache__`` that command has
+    matched the stale compiled ``score.cpython-312.pyc`` and could never reach 0 hits.
+    """
+    report = shipped_report_lines()
+    targets = {"report.md line 3": report[2],
+               "report.md line 113": report[112],
+               "README.md provenance paragraph": readme_ratif_paragraph()}
+    for where, text in targets.items():
+        assert "on Alan's delegation" in text, f"{where} lost the delegation: {text}"
+        for tail in re.findall(r"Alan(.{0,15})", text):
+            assert tail.startswith("'s delegation"), (
+                f"{where} names Alan in another role: 'Alan{tail}'")
+        for banned in RATIF_MUST_NOT:
+            assert banned not in text, f"{where} credits Alan: {banned!r}"
+
+    grep = subprocess.run(
+        ["grep", "-rn", "--exclude-dir=__pycache__", "pending Alan", str(HERE)],
+        capture_output=True, text=True)
+    assert grep.returncode == 1 and not grep.stdout.strip(), (
+        "the item's own acceptance grep still returns hits:\n" + grep.stdout)
+
+
+def test_the_one_rater_caveat_carries_the_ruling_without_moving_two_cited_lines():
+    """Clause 3 (#2823): the second stale claim lived in Caveats, and both lines cited.
+
+    The self-preference probe's own ``report.py`` prints
+    ``eval/durable_write_judge/report.md:113`` twice as the source of the `good`-half
+    caveat, and ``report.md:32`` as the source of Judge A's published figure (pinned in
+    ``test_the_report_carries_the_self_preference_pointer_beside_the_published_rate``).
+    So each rewritten sentence must stay exactly ONE emitted ``lines`` element: a
+    rewrite that wrapped to a second paragraph would renumber both citations and leave
+    two true claims pointing at the wrong numbers, which no test outside this file
+    would notice.
+    """
+    lines = shipped_report_lines()
+    bullet = lines[112]
+    assert bullet.startswith("- **One rater.**"), bullet
+    for needle in RATIF_MUST:
+        assert needle in bullet, f"the caveat omits {needle!r}: {bullet}"
+    assert "Alan is the domain expert" not in bullet
+    assert "would have to ratify" not in bullet
+    assert "inter-rater reliability is unavailable" in bullet, (
+        "the honest half of the old sentence survives: no second rater was ever run, "
+        "and a Gemma-family second rater is inter-rater evidence, not ratification")
+    assert "(`correction_evidence`)" in bullet, "and the route to re-judge it survives"
+
+    rendered = shipped_render()
+    assert rendered[2] == lines[2] and rendered[112] == bullet, (
+        "both rewritten sentences are emitted, not hand-written beside the renderer")
+    a_row = next(i for i, ln in enumerate(lines)
+                 if "32.4" in ln and "Judge A" in ln and ln.startswith("|"))
+    assert a_row + 1 == 32, (
+        f"the Judge A row moved to line {a_row + 1}: the self-preference probe cites "
+        "`report.md:32` from its arms.py and report.py")
+    assert lines.index(bullet) + 1 == 113, (
+        "the `good`-half caveat must stay line 113 — report.py cites that number twice")
+
+
+def test_the_score_cli_regenerates_the_committed_report_byte_for_byte(tmp_path):
+    """Clause 4 (#2823), across the one process boundary this change crosses.
+
+    ``report.md`` is a product, so the ratification line is code: triage ran the CLI on
+    the shipped corpus and both raws and got the committed bytes back unchanged, which
+    is why a hand edit of the report alone would have been deleted by the next scoring
+    run. The check here is the CLI, not another in-process ``render`` call, because what
+    a reader trusts is the file ``python eval/durable_write_judge/score.py`` writes.
+    """
+    out = tmp_path / "report-regenerated.md"
+    proc = subprocess.run([sys.executable, str(HERE / "score.py"), "--out", str(out)],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, f"score.py exited {proc.returncode}: {proc.stderr[-400:]}"
+    committed = (HERE / "report.md").read_bytes()
+    assert out.read_bytes() == committed, (
+        "the committed report.md is not what score.py writes — the new provenance text "
+        "would be pasted prose that the next scoring run silently reverts")
+    text = committed.decode()
+    assert "on Alan's delegation" in text and "UNRATIFIED-DENOMINATOR" in text, (
+        "the regenerated bytes must be the ones carrying the ruling")
+    assert "(UNRATIFIED-DENOMINATOR)" in proc.stdout, (
+        "the CLI's own silent-pass echo is a printed figure too")
+
+
+def test_every_printed_silent_pass_figure_is_labelled_and_no_recall_figure_is(tmp_path,
+                                                                             mini_corpus):
+    """Clause 5 (#2823): the label sits on each figure, not in a paragraph below it.
+
+    Silent-pass's denominator is *all accepted*, so it rests entirely on the 30 `good`
+    labels the ruling refused as gold, while recall-on-bad reads only the 20 ratified
+    ones — the two columns of one table are therefore not equally quotable, and the
+    report has to say so on the row. Recall must NOT carry the label either: an
+    undifferentiated warning on every number would leave the quotable figure unreadable
+    and the unquotable one merely scary. Run on a fixture corpus as well as the shipped
+    one, because the label is a property of the renderer, not of these verdicts.
+    """
+    def check(lines: list[str], where: str) -> None:
+        rows = [ln for ln in lines if ln.startswith("| Judge ")]
+        assert len(rows) == 2, f"{where}: both result rows expected, got {rows}"
+        for row in rows:
+            cells = row.split("|")
+            assert "UNRATIFIED-DENOMINATOR" in cells[-2], (
+                f"{where}: the silent-pass cell is unlabelled: {row}")
+            assert "UNRATIFIED-DENOMINATOR" not in cells[3], (
+                f"{where}: recall-on-bad must not borrow the label: {row}")
+        header = next(ln for ln in lines if ln.startswith("| judge |"))
+        hcells = header.split("|")
+        assert "UNRATIFIED-DENOMINATOR" in hcells[-2], f"{where}: {header}"
+        assert "recall-on-bad" in hcells[3], (
+            f"{where}: the header changed columns: {header}")
+        bullets = [ln for ln in lines if ln.startswith("- Judge ") and "silent pass" in ln]
+        assert len(bullets) == 2, f"{where}: per-judge bullets missing: {bullets}"
+        for bullet in bullets:
+            assert "UNRATIFIED-DENOMINATOR" in bullet, (
+                f"{where}: bullet prints the rate unlabelled: {bullet}")
+            assert "UNRATIFIED-DENOMINATOR" not in bullet.split("recall ")[-1], (
+                f"{where}: the recall clause of the same bullet stays unlabelled: {bullet}")
+
+    check(sc.render(mini_corpus, _fixture_raws(tmp_path, mini_corpus, "accept")).splitlines(),
+          "fixture render")
+    check(shipped_report_lines(), "shipped report.md")
+
+
+def test_the_readme_states_the_delegated_ruling_and_keeps_its_measured_figures():
+    """Clause 5's README half (#2823): the hand-written provenance sentence agreed with
+    the stale one, so it had to be rewritten from the same ruling and not from the
+    report. ``test_the_readme_measured_section_agrees_with_the_shipped_artifacts`` keeps
+    the numbers themselves pinned; this node keeps only the provenance wording.
+    """
+    paragraph = readme_ratif_paragraph()
+    for needle in RATIF_MUST:
+        assert needle in paragraph, f"README omits {needle!r}: {paragraph}"
+    assert "UNRATIFIED-DENOMINATOR" in paragraph, (
+        "and names the label the report prints the silent-pass figures under")
+    for banned in RATIF_MUST_NOT:
+        assert banned not in paragraph, f"README still says {banned!r}"

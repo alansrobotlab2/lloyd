@@ -1,6 +1,6 @@
 # Durable-write judge calibration — backlog #580
 
-**Status: offline experiment. Nothing in the live write path reads a judge score; `grep -n durable_write_judge workers/ app/ scripts/ autonomy/ skills/` returns nothing.** Labels are rule-derived from repair diffs and the repairer's own recorded words; **one rater (Lloyd), no inter-rater check, pending Alan's ratification** — the silent-pass number is not trusted until that exists.
+**Status: offline experiment. Nothing in the live write path reads a judge score; `grep -n durable_write_judge workers/ app/ scripts/ autonomy/ skills/` returns nothing.** Labels are rule-derived from repair diffs and the repairer's own recorded words, one rater (Lloyd), no inter-rater check; **the 20 `bad` labels are RATIFIED as gold by the #2639 owed-check 2026-10-16 on Alan's delegation (each re-derives from a repair diff plus the repairer's own defect word), the 30 `good` labels are refused as gold because their warrant is absence-of-repair — so recall-on-bad is quotable and silent-pass is not.**
 
 ## Corpus
 
@@ -27,16 +27,16 @@ Retrieval is BM25 over the labelled corpus alone, not qmd: qmd indexes the vault
 
 ## Results
 
-| judge | judged bad/good | recall-on-bad % | false-positive-rate on good % | **silent-pass rate %** |
+| judge | judged bad/good | recall-on-bad % | false-positive-rate on good % | **silent-pass rate %** (UNRATIFIED-DENOMINATOR) |
 |---|---|---|---|---|
-| Judge A (static rubric, 5 random labelled examples) | 20/30 (unjudged 0) | **45.0** | 23.3 | **32.4** |
-| Judge B (static rubric, 5 nearest-retrieved examples, k=5) | 20/30 (unjudged 0) | **20.0** | 13.3 | **38.1** |
+| Judge A (static rubric, 5 random labelled examples) | 20/30 (unjudged 0) | **45.0** | 23.3 | **32.4** UNRATIFIED-DENOMINATOR |
+| Judge B (static rubric, 5 nearest-retrieved examples, k=5) | 20/30 (unjudged 0) | **20.0** | 13.3 | **38.1** UNRATIFIED-DENOMINATOR |
 
 > **Self-preference: probed 2026-10-09 on `primary`, negative — the bias this row is usually read for did NOT reproduce.** Same rubric and corpus, 50 samples x 4 attribution arms = 200 rows at temperature 0 (`asked_engine=secondary` -> `served_engine=primary`, which is the disabled-secondary rule and not a routing guarantee). The claim was that a note labelled as the judge's own output is passed more often; measured the other way — pass rate on `bad` was 65.0 % for the `self` arm against 75.0 % for the unattributed `none` arm, silent-pass 30.2 % against 34.1 %, i.e. -3.9 points, an attributed note was flagged MORE, not less. The floor it is read against is the arm that resends `none`'s prompt verbatim: +0.7 points silent-pass, 4.0 % flip. So the attribution block does move this judge's grade by a few points, but not in the self-favouring direction, and 32.4 % stands as a calibration figure rather than as a judge protecting itself. Report and per-arm figures: `~/lloyd-data/eval/owedcheck-2254/REPORT.md` (`arms-final.jsonl` beside it, 200/200 rows judged — the 400-token judging budget the probe shipped with truncated 6 of 200 replies mid-JSON and the run correctly reported nothing).
 
-silent-pass rate = accepted-and-labelled-bad / all accepted.
-- Judge A (static rubric, 5 random labelled examples): of 34 accepted samples, 11 were labelled bad — **32.4%** silent pass; recall 45.0% (9 of 20 bad flagged).
-- Judge B (static rubric, 5 nearest-retrieved examples, k=5): of 42 accepted samples, 16 were labelled bad — **38.1%** silent pass; recall 20.0% (4 of 20 bad flagged).
+silent-pass rate = accepted-and-labelled-bad / all accepted. Every figure marked **UNRATIFIED-DENOMINATOR** rests on that denominator, and every accepted `good` inside it is one of the 30 labels refused as gold, so the rate is printed as untrusted rather than quoted.
+- Judge A (static rubric, 5 random labelled examples): of 34 accepted samples, 11 were labelled bad — **32.4%** silent pass (UNRATIFIED-DENOMINATOR); recall 45.0% (9 of 20 bad flagged).
+- Judge B (static rubric, 5 nearest-retrieved examples, k=5): of 42 accepted samples, 16 were labelled bad — **38.1%** silent pass (UNRATIFIED-DENOMINATOR); recall 20.0% (4 of 20 bad flagged).
 
 Fox's reference point is one in five clean passes hiding a serious error.
 
@@ -110,7 +110,7 @@ Fox's open question is whether the retrieved-case leg picks the wrong shape of c
 
 ## Caveats
 
-- **One rater.** Every label derives from Lloyd's own recorded repair; Alan is the domain expert who would have to ratify them, and inter-rater reliability is unavailable. Correction evidence travels with each sample (`correction_evidence`) so a rater can re-judge the label, not just the text.
+- **One rater.** Every label derives from Lloyd's own recorded repair, and inter-rater reliability is unavailable; the ratification that does exist is bounded and delegated — the 20 `bad` labels are RATIFIED as gold by the #2639 owed-check 2026-10-16 on Alan's delegation, while the 30 `good` labels are refused as gold because their warrant is absence-of-repair, so recall-on-bad is quotable and silent-pass is not. Correction evidence travels with each sample (`correction_evidence`) so a rater can re-judge the label, not just the text.
 - **Rule-derived labels are conservative and partial.** A class is assigned only when its signature is visible in the repair diff; a repair that reworded prose without removing a URL or adding a heading is unlabelled here. Meaning-reversals and misattributed speakers — both recorded in `memory/2026-09-09.md` — are classes the detector has **no signature for**, so the corpus under-represents them; that is a limitation of the corpus, not evidence they are rare.
 - **`good` means no class signature fired**, not verified-clean. A judge flagging a `good` sample may be right, which inflates the measured false-positive rate and makes the reported silent-pass rate optimistic.
 - **Small n.** 20 bad across 5 classes, smallest class at n = 2. Percentages move by ~5 points per sample.
