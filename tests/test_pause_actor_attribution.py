@@ -19,6 +19,9 @@ to reach rather than assert around:
   * the harnesses — `eval/run_context_rot_eval.py` and `scripts/replay_run_state.py`
     hold the fleet over HTTP from their own processes, so the bytes under test are the
     ones their real code sends, captured off a recording transport and replayed here.
+  * the guardian — `agent-services/guardian/guardian.py` posts its pause with
+    `urllib.request` from its own systemd unit, so its bytes are captured off a faked
+    `urlopen` and replayed here the same way (#2846).
 
 `holder_kind` is deliberately not touched by this change: `person` is the safe default
 because it is never auto-released (the 20 h 52 m hold of 2026-10-09 is the reason), so
@@ -27,11 +30,20 @@ half this file cannot pin, because every caller in it names itself, is pinned in
 `tests/test_workers_router.py`.
 
 The scan in `test_no_pause_post_a_contracted_machine_caller_omits_the_actor` covers the
-three modules whose pause path this item names. It is not the whole corpus:
-`eval/persistence_arms.py::sync_resume` posts a bare `{"paused": false}` on purpose, as
-a last resort with no hold of its own to attribute, and
-`agent-services/guardian/guardian.py`'s vault trip posts `{"paused": true}` with no
-name either — that one is a scope ruling owed by the owed-check pass, not a clause.
+three modules whose pause path this item names. It is not the whole corpus, and it
+deliberately does not read the guardian: `eval/persistence_arms.py::sync_resume` posts a
+bare `{"paused": false}` on purpose, as a last resort with no hold of its own to
+attribute, and the guardian's two tripwires post a pause that takes the OPPOSITE half of
+this file's rule — a name and NO `holder_kind`, because a trip's hold must never be
+auto-released. That is #2846, and its nodes are below the divider rather than inside the
+scan, which would demand from the guardian a `holder_kind` that would resume dispatch
+mid-incident.
+
+#2846 is the last of the three: the guardian's shared `_pause_workers` helper posted
+`{"paused": true}` with no name and journalled `unattributed` for both trips. It now
+takes the actor as a required argument and each tripwire names its own trip, so
+`VAULT_TRIP_ACTOR` and `DATA_TRIP_ACTOR` are covered by the same rule the console and the
+harnesses are — with the one exception that they send no kind.
 """
 
 from __future__ import annotations
@@ -450,6 +462,316 @@ def test_no_pause_post_a_contracted_machine_caller_omits_the_actor():
     assert found >= 2, (
         f"only {found} pause POST(s) found across {scanned} — the harnesses moved, and "
         "this node must be re-read against where they went")
+
+
+# ── #2846: the guardian's two tripwires ──────────────────────────────────────
+#
+# The two pauses this file could not reach: `agent-services/guardian/guardian.py`
+# posts with `urllib.request` from its own systemd unit, so nothing here had ever
+# seen its bytes. It shared one helper between the vault tripwire and the data-root
+# tripwire and the helper named NEITHER, so a mass deletion and an eaten data root
+# both journalled `unattributed` — the one row a future incident would add.
+
+GUARDIAN_REL = "agent-services/guardian/guardian.py"
+GUARDIAN_DIR = ROOT / "agent-services" / "guardian"
+
+
+def _guardian_module():
+    """The guardian, imported the way the suite already imports it
+    (`tests/test_guardian_vaultwatch.py:26-31`).
+
+    Lazily and under its real name on purpose: `guardian.py` puts its own directory
+    on `sys.path` to reach `policy`, so loading a second copy under a synthetic name
+    would put a second `policy` in `sys.modules` and a node patching the guardian's
+    `policy.WORKERS_PAUSE_URL` would be patching a module the code never reads.
+    """
+    assert GUARDIAN_DIR.is_dir(), f"{GUARDIAN_DIR} is gone — the guardian moved"
+    if str(GUARDIAN_DIR) not in sys.path:
+        sys.path.insert(0, str(GUARDIAN_DIR))
+    import guardian
+    return guardian
+
+
+class _FakedHTTPResponse:
+    """The answer the backend gives a pause: `_pause_workers` reads `.status` off it."""
+
+    def __init__(self, status: int = 200):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _post_bytes(client, raw: bytes, content_type: str = "application/json"):
+    """A caller's serialised bytes, unopened and un-re-keyed, at the real route."""
+    return client.post(PAUSE_URL, content=raw, headers={"content-type": content_type})
+
+
+def _pause_the_guardian_posts(monkeypatch, actor: str) -> dict:
+    """Run the REAL `Guardian._pause_workers` and keep the `Request` it built.
+
+    The method is called on a `Guardian.__new__` object — the partial-construction
+    pattern the class documents for itself (`guardian.py`, the comment above
+    `__init__`, kept for `tests/test_guardian_rollback.py`). `_pause_workers` reads
+    no instance state and no argument but `actor` and `policy.WORKERS_PAUSE_URL`, so
+    this is the shipped method over the shipped serialiser with only the socket
+    faked — which is what makes the bytes below the bytes a trip puts on the wire.
+    """
+    G = _guardian_module()
+    calls: list[tuple[object, object]] = []
+
+    def fake_urlopen(request, timeout=None):
+        calls.append((request, timeout))
+        return _FakedHTTPResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    reported = G.Guardian._pause_workers(G.Guardian.__new__(G.Guardian), actor)
+
+    assert len(calls) == 1, (
+        f"_pause_workers made {len(calls)} attempts, not one — the capture is empty "
+        "or double-counted, and nothing below it can be believed")
+    request, timeout = calls[0]
+    assert request.get_method() == "POST", (
+        f"a trip that PAUSES by {request.get_method()}ting is not this route")
+    assert request.full_url.endswith(PAUSE_URL), (
+        f"the guardian's pause goes to {request.full_url}, not {PAUSE_URL} — this "
+        "node and the route under test have stopped describing the same call")
+    assert timeout == 5, (
+        f"the trip's pause now waits {timeout}s on the backend; the tick is on a "
+        "watchdog, and this node is where that budget is agreed")
+    raw = request.data
+    assert raw, "the pause POST carried no body at all"
+    return {"raw": raw, "body": json.loads(raw),
+            "content_type": request.get_header("Content-type"),
+            "reported": reported}
+
+
+def _guardian_trip_calls() -> dict[str, ast.Call]:
+    """Every `self._pause_workers(...)` in the guardian, keyed by its tripwire.
+
+    Read off the AST rather than grepped, because the claim being made is about
+    WHERE the name comes from: a call site that stopped passing one, or started
+    passing the other trip's, is the failure #2846 is about.
+    """
+    tree = ast.parse(_tracked(GUARDIAN_REL))
+    out: dict[str, ast.Call] = {}
+    for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "attr", None) == "_pause_workers"
+                    and getattr(node.func.value, "id", None) == "self"):
+                assert fn.name not in out, (
+                    f"{fn.name} pauses twice — re-read this node against a third action")
+                out[fn.name] = node
+    return out
+
+
+def _guardian_pause_helper() -> ast.FunctionDef:
+    tree = ast.parse(_tracked(GUARDIAN_REL))
+    fns = [n for n in ast.walk(tree)
+           if isinstance(n, ast.FunctionDef) and n.name == "_pause_workers"]
+    assert len(fns) == 1, (
+        f"the guardian has {len(fns)} `_pause_workers`; this node reads one")
+    return fns[0]
+
+
+def test_the_guardians_pause_helper_posts_a_body_that_names_a_holder(monkeypatch):
+    """Clause 1: the bytes the guardian's REAL helper puts on the wire parse to a
+    pause that names a holder, and the trips are named by the guardian itself.
+
+    Nothing restates the actor here: each string handed to the helper is read out of
+    the guardian module as the constant its tripwire passes, and the assertion runs on
+    what came back out of `request.data`.
+    """
+    G = _guardian_module()
+    for trip, const in (("vault", "VAULT_TRIP_ACTOR"), ("data", "DATA_TRIP_ACTOR")):
+        actor = getattr(G, const, None)
+        assert isinstance(actor, str) and actor, (
+            f"guardian.{const} is gone or empty — the {trip} trip stopped naming itself")
+        sent = _pause_the_guardian_posts(monkeypatch, actor)
+        body = sent["body"]
+        assert body.get("paused") is True, (
+            f"the {trip} trip does not pause the fleet: {body}")
+        named = _assert_names_a_holder(body.get("actor"), f"Guardian._pause_workers/{trip}")
+        assert named == actor, (
+            f"the {trip} trip asked to be journalled as {actor!r} and the wire says "
+            f"{named!r} — the helper is rewriting, or inventing, the name")
+        assert sent["reported"].startswith("paused (HTTP "), (
+            f"the trip reports its own pause as {sent['reported']!r}; the alert a "
+            "human reads quotes this string")
+
+
+def test_each_guardian_tripwire_names_its_own_trip_and_the_helper_names_none():
+    """Clause 2: the name comes from the CALL SITE, and the shared helper cannot
+    supply one — so a data-root halt can never be journalled under the vault's name.
+
+    Three things have to hold together for that, and each is read rather than
+    asserted as good intention: the helper takes `actor` with no default (a call site
+    cannot forget it), its body literal puts the PARAMETER on the wire (a constant
+    hardcoded in the shared code would satisfy every other node in this file), and the
+    two tripwires pass two different names that each say which trip it is.
+    """
+    G = _guardian_module()
+    helper = _guardian_pause_helper()
+    assert [a.arg for a in helper.args.args] == ["self", "actor"], (
+        "the guardian's pause helper no longer takes exactly one actor; re-read this "
+        "node against its signature")
+    assert not helper.args.defaults, (
+        "an actor DEFAULT would let a new tripwire journal a name it never chose — "
+        "the invented attribution #2615 exists to prevent")
+
+    built = [d for d in ast.walk(helper) if isinstance(d, ast.Dict)]
+    keyed = {tuple(k.value for k in d.keys if isinstance(k, ast.Constant)): d
+             for d in built}
+    with_actor = [k for k in keyed if "actor" in k]
+    assert with_actor, (
+        "the pause body carries no `actor` key at all — the trip is unattributed again")
+    for keys in with_actor:
+        d = keyed[keys]
+        value = next(v for k, v in zip(d.keys, d.values)
+                     if isinstance(k, ast.Constant) and k.value == "actor")
+        assert isinstance(value, ast.Name) and value.id == "actor", (
+            f"`actor` is sent as {ast.dump(value)}, not as the parameter: the shared "
+            "helper has started naming the trip, and both trips will journal one name")
+        assert "holder_kind" not in keys, (
+            f"the trip's pause body grew a `holder_kind` ({keys}) — see the next node")
+
+    calls = _guardian_trip_calls()
+    assert set(calls) == {"check_vault", "check_data"}, (
+        f"the pause is taken by {sorted(calls)}, not by the vault and data tripwires "
+        "this item names — a tripwire was added or renamed and its name is unpinned")
+    actors: dict[str, str] = {}
+    for trip, node in sorted(calls.items()):
+        assert len(node.args) == 1 and not node.keywords, (
+            f"{trip} calls `_pause_workers` with {len(node.args)} positional and "
+            f"{len(node.keywords)} keyword argument(s); one actor, by name, is the rule")
+        arg = node.args[0]
+        assert isinstance(arg, ast.Name), (
+            f"{trip} passes an inline actor instead of the module's own constant: two "
+            "trips can then agree on a string with nobody noticing")
+        actor = getattr(G, arg.id, None)
+        assert isinstance(actor, str) and actor, (
+            f"{trip} passes {arg.id}, which the guardian does not define as a name")
+        actors[trip] = _assert_names_a_holder(
+            actor, f"guardian.{arg.id} ({trip})")
+    assert actors["check_vault"] != actors["check_data"], (
+        f"both tripwires journal {actors['check_vault']!r}, which is the shared-helper "
+        "failure this clause exists to catch")
+    assert "vault" in actors["check_vault"] and "data" not in actors["check_vault"], (
+        f"the vault trip journals {actors['check_vault']!r}")
+    assert "data" in actors["check_data"] and "vault" not in actors["check_data"], (
+        f"the data trip journals {actors['check_data']!r}")
+
+
+def test_a_guardian_pause_names_no_kind_so_the_next_boot_cannot_write_it_off(
+        monkeypatch, tmp_path):
+    """Clause 3: no `holder_kind` in either trip's body, and the consequence that
+    makes its absence load-bearing — a trip's hold outlives the boot that would
+    reconcile a machine's away.
+
+    A `machine` hold's take write IS its lease, and a pool starting over a hold whose
+    lease passed `MACHINE_LEASE_STALE_SECONDS` releases it as a dead setter's
+    (`_release_dead_machine_pause`). Nothing beats a trip's lease once the take is
+    written: `vaultwatch.py` prints the resume curl for a human to run and
+    `datawatch.py` prints none, so a trip would never refresh a machine lease. Naming
+    a kind on a trip's pause would have the next backend restart resume dispatch during
+    the incident the halt was taken for, which is why the control below — the SAME
+    actor with a kind named — has to be the one that gets released.
+    """
+    import datetime as dt
+    import sqlite3
+
+    from workers.pool import (MACHINE_LEASE_STALE_SECONDS, PAUSE_WM_HOLDER_KEY,
+                              PAUSE_WM_SOURCE, WorkerPool)
+    from workers.queue import WorkQueue
+    G = _guardian_module()
+
+    trips = {}
+    for trip, const in (("vault", "VAULT_TRIP_ACTOR"), ("data", "DATA_TRIP_ACTOR")):
+        sent = _pause_the_guardian_posts(monkeypatch, getattr(G, const))
+        assert "holder_kind" not in sent["body"], (
+            f"the {trip} trip now sends holder_kind={sent['body']['holder_kind']!r}; "
+            f"a machine hold is auto-released {MACHINE_LEASE_STALE_SECONDS}s after its "
+            "last lease beat and dispatch would resume mid-incident")
+        trips[trip] = sent
+
+    def _aged_lease(db_path):
+        """Wind the holder row's stamp past the lease, as a dead setter's would be."""
+        stale = (dt.datetime.now(dt.timezone.utc)
+                 - dt.timedelta(seconds=MACHINE_LEASE_STALE_SECONDS + 60)).isoformat()
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("UPDATE watermarks SET updated_at=? WHERE source=? AND key=?",
+                         (stale, PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY))
+            conn.commit()
+
+    subject = trips["vault"]
+    client, pool = _route_client(monkeypatch, tmp_path, db="trip.db")
+    res = _post_bytes(client, subject["raw"], subject["content_type"])
+    assert res.status_code == 200, res.text
+    assert res.json()["holder_kind"] == "person", (
+        f"a trip that named no kind was not held to the route's person default: "
+        f"{res.json()}")
+    assert res.json()["machine_lease_age_s"] is None, (
+        "a person's hold must be judged by no lease age at all")
+    reborn = WorkerPool(WorkQueue(pool.queue.db_path), slots=1)   # the next boot
+    assert reborn.paused is True, (
+        "a boot wrote off a halt the guardian took — the hold is not person-durable")
+    assert reborn.holder_kind == "person" and reborn.machine_lease_age_s is None
+
+    # The control: the same actor and the same aged lease, with the one key the
+    # guardian does not send. If THIS hold survived, the assertion above would be
+    # proving nothing about the key's absence.
+    named = json.dumps({"paused": True, "actor": subject["body"]["actor"],
+                        "holder_kind": "machine"}, separators=(",", ":"))
+    client2, pool2 = _route_client(monkeypatch, tmp_path, db="named-kind.db")
+    res2 = _post_bytes(client2, named.encode(), subject["content_type"])
+    assert res2.status_code == 200 and res2.json()["holder_kind"] == "machine", res2.text
+    _aged_lease(pool2.queue.db_path)
+    assert WorkerPool(WorkQueue(pool2.queue.db_path), slots=1).paused is False, (
+        "a machine hold with an aged lease was NOT released, so the control proves "
+        "nothing and the clause above is resting on an unreleased-by-accident database")
+
+
+def test_the_two_guardian_trips_journal_their_own_trip_at_the_route(
+        monkeypatch, tmp_path):
+    """Clause 4: each trip's exact captured bytes, POSTed at the real route over a
+    real pool, append exactly one row carrying THAT trip's name and no other's.
+
+    One database per trip, because a hold already up appends no second row (a
+    re-take is a lease refresh, not a new hold) and a shared journal would read the
+    first trip's row as the second trip's. The control is the body the guardian
+    posted before #2846 — `{"paused": true}` and nothing else — which has to keep
+    journalling `unattributed`, or the two names above say nothing about the caller.
+    """
+    G = _guardian_module()
+    named = {}
+    for trip, const in (("vault", "VAULT_TRIP_ACTOR"), ("data", "DATA_TRIP_ACTOR")):
+        actor = getattr(G, const)
+        sent = _pause_the_guardian_posts(monkeypatch, actor)
+        client, pool = _route_client(monkeypatch, tmp_path, db=f"{trip}.db")
+        res = _post_bytes(client, sent["raw"], sent["content_type"])
+        assert res.status_code == 200, res.text
+        assert res.json()["paused"] is True, res.json()
+        rows = _journal(pool)
+        assert len(rows) == 1, (
+            f"the {trip} trip's pause appended {len(rows)} journal rows, not one")
+        assert rows == [("1", "person", actor)], (
+            f"the {trip} trip held the fleet as {rows[0]}, not as a person's hold "
+            f"named {actor!r}")
+        named[trip] = rows[0][2]
+    assert named["vault"] != named["data"], (
+        f"both trips journalled {named['vault']!r}: the journal cannot tell a vault "
+        "mass deletion from an eaten data root, which is the whole question #2615 asked")
+
+    control, control_pool = _route_client(monkeypatch, tmp_path, db="unnamed-trip.db")
+    res3 = _post_bytes(control, b'{"paused": true}')
+    assert res3.status_code == 200, res3.text
+    assert _journal(control_pool) == [("1", "person", PAUSE_ACTOR_DEFAULT)], (
+        "a pause that names nobody stopped being journalled as unnamed, so the two "
+        "names above are not evidence about who sent them")
 
 
 # ── the pytest-side sanity check on both defaults lives in

@@ -67,6 +67,19 @@ from supervisor import SupervisorClient, SupervisordUnreachable  # noqa: E402
 #: the same rule that took the path out of `policy.KG_DB` (#1525).
 KG_UNREADABLE_MARK = "knowledge graph UNREADABLE"
 
+#: The actor each tripwire puts on the pause it takes (#2846). `pause_journal`'s
+#: `actor` column answers "who held the fleet", and since `3b438c45`/`62404b6d` it
+#: answers it as `unattributed` for every guardian trip, because the one helper
+#: both trips share sent no name. Each trip names ITSELF and the helper takes the
+#: name as a required argument: a data-root halt journalled under a vault name
+#: would be an invented attribution, which is worse than the empty one. Neither
+#: name is paired with a `holder_kind` — see `_pause_workers`.
+VAULT_TRIP_ACTOR = "guardian-vault-trip"
+#: The data-root tripwire's own name, for the same reason and with the same
+#: no-`holder_kind` rule. The two strings must stay distinguishable to a reader of
+#: one journal row, which is why neither contains the other's subject.
+DATA_TRIP_ACTOR = "guardian-data-trip"
+
 
 def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [guardian] {msg}", flush=True)
@@ -1385,7 +1398,7 @@ class Guardian:
         except OSError as exc:
             log(f"could not write vault marker: {exc}")
         actions["sync"] = self._stop_sync()
-        actions["workers"] = self._pause_workers()
+        actions["workers"] = self._pause_workers(VAULT_TRIP_ACTOR)
         try:
             self.state.set_halted(f"vault tripwire: {why}")
             actions["promotions"] = "halted"
@@ -1627,7 +1640,7 @@ class Guardian:
             self.data.trip(why, snap, actions)
         except OSError as exc:
             log(f"could not write data marker: {exc}")
-        actions["workers"] = self._pause_workers()
+        actions["workers"] = self._pause_workers(DATA_TRIP_ACTOR)
         try:
             self.state.set_halted(f"data tripwire: {why}")
             actions["promotions"] = "halted"
@@ -1665,10 +1678,29 @@ class Guardian:
                               capture_output=True, timeout=10, check=False)
         return f"{outcome}; pkill rc={proc.returncode}"
 
-    def _pause_workers(self) -> str:
+    def _pause_workers(self, actor: str) -> str:
+        """Halt dispatch and leave `pause_journal` able to say WHO did it (#2846).
+
+        `actor` is required and comes from the trip, not from here: this helper
+        serves both tripwires, and a name hardcoded in the shared code would
+        journal a data-root halt under the vault's name.
+
+        The body carries NO `holder_kind`, and that omission is load-bearing. The
+        route defaults an unnamed kind to `person` (`workers/pool.py`'s
+        `HOLDER_DEFAULT`), which is the only kind nothing ever auto-releases; a
+        `machine` hold's take write IS
+        its lease, and a pool that starts over a hold whose lease passed
+        `MACHINE_LEASE_STALE_SECONDS` (300 s) releases it as a dead setter's
+        (`_release_dead_machine_pause`). Nothing beats a trip's lease once the take
+        is written: `vaultwatch.py` prints the resume curl for a human to run, and
+        `datawatch.py` prints none at all — each trip ends with a person restoring
+        the root and clearing the watch. Naming a kind here would therefore have the
+        next boot resume dispatch in the middle of the incident it is halted for.
+        """
         import urllib.request
+        body = json.dumps({"paused": True, "actor": actor}, separators=(",", ":"))
         req = urllib.request.Request(policy.WORKERS_PAUSE_URL, method="POST",
-                                     data=b'{"paused": true}',
+                                     data=body.encode(),
                                      headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=5) as resp:

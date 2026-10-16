@@ -292,10 +292,17 @@ def guardian(tmp_path, monkeypatch):
         programs="lloyd-mc:lloyd-backend", interval=5.0,
     )
     g = G.Guardian(args)
-    acted: dict = {"workers": 0, "alerts": []}
+    acted: dict = {"workers": 0, "alerts": [], "pause_actors": []}
     monkeypatch.setattr(g, "_stop_sync", lambda: "n/a")
-    monkeypatch.setattr(g, "_pause_workers",
-                        lambda: acted.__setitem__("workers", acted["workers"] + 1) or "paused")
+
+    def _pause(actor):
+        # #2846: a data-root halt must be journalled as the DATA trip and never as the
+        # vault's, because both tripwires share one pause helper.
+        acted["pause_actors"].append(actor)
+        acted["workers"] += 1
+        return "paused"
+
+    monkeypatch.setattr(g, "_pause_workers", _pause)
     monkeypatch.setattr(g, "alert", lambda level, title, body, **kw:
                         acted["alerts"].append((level, title, body)))
     monkeypatch.setattr(g, "_vault_evidence", lambda stamp: None)
@@ -310,6 +317,10 @@ def test_the_guardian_acts_on_a_data_wipe_once(guardian):
     shutil.rmtree(root / "sessions")
     g.check_data()
     assert acted["workers"] == 1 and g.state.is_halted()
+    assert acted["pause_actors"] == [G.DATA_TRIP_ACTOR], acted["pause_actors"]
+    assert "vault" not in G.DATA_TRIP_ACTOR, (
+        "a data-root halt now carries the vault trip's name, which is an attribution "
+        "nobody made (#2846)")
     [(level, title, body)] = acted["alerts"]
     assert level == "critical" and "restore-data.sh" in body
     g.check_data()

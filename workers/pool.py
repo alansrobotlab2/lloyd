@@ -585,7 +585,8 @@ PAUSE_WM_KEY = "operator_paused"
 PAUSE_WM_HOLDER_KEY = "operator_pause_holder"
 
 #: A human, through Mission Control or a curl, or anything that names no kind
-#: (the guardian's vault trip posts `{"paused": true}` and waits for a person).
+#: (a guardian trip names an ACTOR and no kind — `{"paused": true,
+#: "actor": "guardian-vault-trip"}` — and waits for a person; #2846).
 HOLDER_PERSON = "person"
 #: A process: an eval's measurement window, a replay harness's run.
 HOLDER_MACHINE = "machine"

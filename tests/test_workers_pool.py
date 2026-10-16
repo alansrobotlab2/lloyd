@@ -680,9 +680,10 @@ def test_a_pause_row_with_no_holder_kind_at_all_is_a_persons_pause(q):
     """The pre-#2498 database, and the guardian's vault trip, land on the safe side.
 
     `(_pool, operator_pause_holder)` did not exist until this change, so a hold
-    recorded by an older build — or by the guardian, which posts `{"paused": true}`
-    and by design waits for a human (`agent-services/guardian/vaultwatch.py` prints
-    the resume curl) — is one row and no kind. Reading that silence as `machine`
+    recorded by an older build — or by a guardian trip, which posts an actor but no
+    kind (#2846) and by design waits for a human
+    (`agent-services/guardian/vaultwatch.py` prints the resume curl) — is one row and no
+    kind. Reading that silence as `machine`
     would let the first boot after landing silently resume halts people took on
     purpose, which is the opposite of what this item is for.
     """

@@ -1352,11 +1352,13 @@ def test_a_collected_count_the_command_contradicts_is_what_the_node_flags():
 
 #: What the resolution node above asks of a `path:NNN` citation is that the FILE
 #: is there and the number is smaller than its line count. `len(splitlines())`
-#: is not an anchor: in a 2163-line file it points anywhere, so a citation whose
+#: is not an anchor: in a file of two thousand lines it points anywhere, so a citation whose
 #: number lands on `def main()` in a module whose decider is elsewhere passed,
 #: and passed in the two threat-model control cells that started #2583
 #: (`guardian.py:2147` for a crash-loop verdict that `evaluate_liveness`
-#: decides at `:689`). The node below asks the second question: is line N inside
+#: decided at `:689`; both are `def` HEADS, and #2846 has since moved them to
+#: 2179 and 702, which is why the node below pins the two definitions rather
+#: than #2583's literals). The node below asks the second question: is line N inside
 #: something the file *defines*.
 #:
 #: The tolerance is the span, and only the span. The rule reports an anchor that
@@ -1644,9 +1646,11 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     """The boundary of this rule, pinned rather than left to be rediscovered.
 
     #2583's two founding instances are NOT anchors this rule can catch, and a
-    green corpus must not be read as if it were: `guardian.py:2147` is the head
-    of `def main()` and `:689` is the head of `evaluate_liveness`, so both
-    numbers sit inside a definition and the span rule is silent on both. Same
+    green corpus must not be read as if it were: `guardian.py:2147` was the head
+    of `def main()` and `:689` the head of `evaluate_liveness`, so each number
+    sat inside a definition and the span rule was silent on it. #2846 then added
+    lines above both, which is exactly the drift the assertions below exist to
+    notice. Same
     for `app/desktop_lease.py:89` (`grant`, the human's side) against `:123`
     (`agent_may_act`, the decision a turn crosses). Telling one `def` from the
     one a threat row means is the name-proximity half of the item, which triage
@@ -1654,9 +1658,11 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     names a symbol, so that rule would refuse `architecture/threat-model.md`'s
     own corrected cells — and which the item carries as an owed ruling.
 
-    So this node asserts the silence. It is the same four numbers #2583 was
-    filed with, checked structurally rather than remembered, and it is what a
-    later reader needs to know before trusting "every anchor is graded".
+    So this node asserts the silence. It pins the same four DEFINITIONS #2583
+    was filed with, read out of the tree rather than remembered, and it is what
+    a later reader needs to know before trusting "every anchor is graded". The
+    guardian half carries a doc cite too: `architecture/threat-model.md`'s T-26
+    cell points at `evaluate_liveness`, so moving that head moves the row.
     """
     guardian, lease = ("agent-services/guardian/guardian.py", "app/desktop_lease.py")
     heads: dict[str, dict[str, int]] = {}
@@ -1664,16 +1670,24 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
         spans = definition_spans(ROOT / rel)
         assert spans is not None, f"{rel} stopped parsing; the boundary is ungradeable"
         heads[rel] = {name: lo for lo, _hi, name in spans}
-    assert heads[guardian]["main"] == 2147, (
-        f"`main` moved off :2147 ({heads[guardian]['main']}) — if it is gone "
+    assert heads[guardian]["main"] == 2179, (
+        f"`main` moved off :2179 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
-    assert heads[guardian]["evaluate_liveness"] == 689
+    assert heads[guardian]["evaluate_liveness"] == 702, (
+        f"`evaluate_liveness` moved off :702 "
+        f"({heads[guardian]['evaluate_liveness']}) — `architecture/threat-model.md`'s "
+        "T-26 cell cites this head, so that row moves with it")
     assert heads[lease]["grant"] == 89
     assert heads[lease]["agent_may_act"] == 123
 
     _g, bad = anchor_span_report(
-        f"| T-26 | ships a crash loop | `{guardian}:2147` |\n"
-        f"| T-35 | acted on with no lease | `{lease}:89` |\n")
+        # The measured heads, not #2583's literals: the point is that an anchor
+        # landing on a real `def` stays silent, and that is true of wherever this
+        # file's own assertions say these two definitions now are.
+        f"| T-26 | ships a crash loop | "
+        f"`{guardian}:{heads[guardian]['main']}` |\n"
+        f"| T-35 | acted on with no lease | "
+        f"`{lease}:{heads[lease]['grant']}` |\n")
     assert bad == [], (
         f"the span rule is now reporting anchors that land on a real `def` "
         f"({bad}) — either the rule grew a name window, which is the owed "

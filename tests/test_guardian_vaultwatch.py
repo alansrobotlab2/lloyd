@@ -94,10 +94,17 @@ def guardian(tmp_path, monkeypatch):
         programs="lloyd-mc:lloyd-backend", interval=5.0,
     )
     g = G.Guardian(args)
-    acted: dict = {"sync": 0, "workers": 0, "alerts": []}
+    acted: dict = {"sync": 0, "workers": 0, "alerts": [], "pause_actors": []}
     monkeypatch.setattr(g, "_stop_sync", lambda: acted.__setitem__("sync", acted["sync"] + 1) or "stopped")
-    monkeypatch.setattr(g, "_pause_workers",
-                        lambda: acted.__setitem__("workers", acted["workers"] + 1) or "paused")
+
+    def _pause(actor):
+        # #2846: the trip passes its own name, and what it passed is kept, because
+        # `pause_journal` answers "who held the fleet" with exactly this string.
+        acted["pause_actors"].append(actor)
+        acted["workers"] += 1
+        return "paused"
+
+    monkeypatch.setattr(g, "_pause_workers", _pause)
     monkeypatch.setattr(g, "alert", lambda level, title, body, **kw:
                         acted["alerts"].append((level, title, body)))
     monkeypatch.setattr(g, "ensure_chronic", lambda: None)
@@ -140,6 +147,72 @@ def test_evidence_is_captured(guardian):
     g, _, _ = guardian
     out = g._vault_evidence("20260914_000000")
     assert out and (Path(out) / "ps.txt").read_text().strip()
+
+
+def test_a_trip_still_halts_everything_and_now_arrives_named(guardian, monkeypatch):
+    """A vault trip keeps every action it ever took (#2846 clause 5), and this is the
+    only node that sees what the trip actually PUT on the wire.
+
+    The fixture stubs `_pause_workers`, as every node here needs, so the shipped
+    helper's bytes were invisible to this file. This node restores the real method over
+    a faked `urlopen` and leaves everything else exactly as the trip found it: the
+    attribution was the one thing allowed to move, so anything else changing here is a
+    regression, and the pause line the human reads is a real HTTP status only because
+    the real helper produced it.
+    """
+    import urllib.request
+
+    g, vault, acted = guardian
+    monkeypatch.setattr(g, "_pause_workers",
+                        types.MethodType(G.Guardian._pause_workers, g))
+    posts = []
+
+    class _Answer:
+        status = 200      # JSONResponse's default, which is what the pause route answers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _capture(request, timeout=None):
+        posts.append(request)
+        return _Answer()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _capture)
+
+    g.check_vault()                                   # arm the tripwire
+    for folder in ("backlog", "skills", "memory", "knowledge"):
+        shutil.rmtree(vault / folder)
+    g.check_vault()                                   # the mass deletion
+
+    # `acted["workers"]` counts the STUB this node replaced, so the request count is
+    # the evidence that exactly one hold was taken — and it is the better evidence,
+    # because the name in it came from the tripwire rather than from this file.
+    assert len(posts) == 1, f"a vault trip put {len(posts)} pause requests on the wire"
+    assert posts[0].get_method() == "POST" and posts[0].full_url.endswith(
+        "/api/workers/pause"), posts[0].full_url
+    sent = json.loads(posts[0].data)
+    assert sent == {"paused": True, "actor": G.VAULT_TRIP_ACTOR}, (
+        f"a vault trip pauses the fleet with {sent}: it must name the vault trip, and a "
+        "`holder_kind` key here would make the hold a machine lease that the next "
+        "backend restart writes off while the incident is still open")
+    assert acted["sync"] == 1, acted
+    assert g.state.is_halted(), "a wipe that stops sync no longer halts promotions"
+    marker = json.loads(g.vault.marker.read_text())
+    assert "disappeared" in marker["reason"]
+    assert marker["actions"]["sync"] == "stopped"
+    assert marker["actions"]["promotions"] == "halted"
+    assert marker["actions"]["workers"].startswith("paused (HTTP "), marker["actions"]
+    assert (Path(marker["actions"]["evidence"]) / "ps.txt").read_text().strip(), (
+        "the trip's process-table evidence came back empty")
+    [(level, title, body)] = acted["alerts"]
+    assert level == "critical" and "sync stopped" in title
+    assert "paused (HTTP 200)" in body, (
+        "the alert no longer quotes the pause it took, so whoever reads it cannot tell "
+        "a held fleet from a backend that refused the hold")
+    assert "restore-vault.sh" in body and "clear" in body
 
 
 # ── the sync gate ────────────────────────────────────────────────────────────

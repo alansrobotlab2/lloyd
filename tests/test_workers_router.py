@@ -936,11 +936,11 @@ def test_a_pause_that_names_no_kind_is_a_persons_hold_on_every_surface(
         monkeypatch, tmp_path):
     """The default is `person`, and it is the safe default rather than an accident.
 
-    The callers that name no kind are a Mission Control click, the guardian's
-    vault trip (`agent-services/guardian/guardian.py:_pause_workers` posts
-    `{"paused": true}` and `vaultwatch.py` prints the resume curl for a human to
-    run), and every build written before the field existed. Not one of them may be
-    auto-released at startup, so an unnamed kind has to be the kind that never is.
+    The callers that name no kind are a Mission Control click, the guardian's two
+    tripwires (`agent-services/guardian/guardian.py:_pause_workers` has posted an actor
+    and deliberately NO kind since #2846, and `vaultwatch.py` prints the resume curl for
+    a human to run), and every build written before the field existed. Not one of them
+    may be auto-released at startup, so an unnamed kind has to be the kind that never is.
     """
     client, pool, since = _pause_client(monkeypatch, tmp_path, held_for_hours=4.0)
 
