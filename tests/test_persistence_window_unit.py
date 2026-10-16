@@ -742,14 +742,18 @@ VENV_PY_SUFFIX = ".venvs/lloyd/bin/python"          # the repo's own interpreter
 # #2749 added two columns to this line — the window's raw `rows (attack/control)`
 # denominator and its per-arm-key empty-terminal count — and relabelled the five scored
 # columns `last rep per key`, because every `n` in them is `summarize`'s key count and a
-# 30-row window was reading as `n=2`. The constant is the whole line, so the forked-CLI
-# stdout node and the write-behind node below both fail if the header and this copy drift.
+# 30-row window was reading as `n=2`. #2857 appended two more at the END of the line —
+# the same leak and benign-control figures summed over every row of the window, which on
+# 2026-10-14 is `42/60` where the collapsed cell reads `3/6` — and left the eight cells
+# before them in place, so the `[7]`-index reads of this table still find the
+# empty-terminal figure. The constant is the whole line, so the forked-CLI stdout node
+# and the write-behind node below both fail if the header and this copy drift.
 REPORT_TABLE_HEADER = ("| window | rows (attack/control) | episodes ran "
                        "(last rep per key) | summary leak (95% CI, last rep "
                        "per key) | unattributed (last rep per key) | "
                        "attributed (last rep per key) | benign control "
                        "(last rep per key) | empty-terminal rows per arm "
-                       "key |")
+                       "key | leak (all rows) | benign control (all rows) |")
 WRITING_FLAGS = ("--write", "--force")              # dropped to make a run read-only
 
 
