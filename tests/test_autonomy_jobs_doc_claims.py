@@ -984,6 +984,76 @@ def test_the_bare_spelling_still_appears_on_exactly_twelve_lines():
 # ── #1520 clause 1 — the pilot citation resolves to the code it cites ────────
 
 
+#: The names that take a node out of the gate's run: `skip`/`skipif`/`xfail` keep it
+#: collected but not run, `live_vault` and `fault_injection` are what the gate's own
+#: `-m "not live_vault and not fault_injection"` deselects on. `parametrize` is not
+#: here because it multiplies a node rather than muting it.
+_QUIETING_MARKS = frozenset({"skip", "skipif", "xfail", "live_vault", "fault_injection"})
+
+
+def _decorator_names(node) -> set[str]:
+    """The trailing attribute names of one decorator, for `pytest.mark.X` and `X(...)`.
+
+    `ast.unparse` would do this in fewer lines and would match prose I have already
+    written about skipping into the bargain; the point is to read what the function is
+    actually decorated with, not what its docstring discusses.
+    """
+    out: set[str] = set()
+    for dec in node.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        while isinstance(target, ast.Attribute):
+            out.add(target.attr)
+            target = target.value
+        if isinstance(target, ast.Name):
+            out.add(target.id)
+    return out
+
+
+def test_neither_node_2833_closed_is_quieted_out_of_the_run():
+    """#2833 clause 2: the fix is those two nodes PASSING, so this file checks itself.
+
+    Clause 2 forbids four ways of turning a red node green without fixing anything —
+    skip it, xfail it, delete it, or mark it `live_vault` so the gate's selection drops
+    it — and all four are edits to THIS file, which makes them invisible to a check that
+    only runs the tests. The two nodes are therefore located by name in the module's own
+    syntax tree and refused both a quieting decorator and a `pytest.skip`/`pytest.xfail`
+    call in their bodies. A node is here iff it exists at all, so deletion fails the
+    first assertion, not the diff.
+
+    The file's six `live_vault` nodes are conftest's, not this file's, and were
+    deselected at `cffd22e6` exactly as they are now; this node says nothing about them,
+    because the two it inspects are the two the item names.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    wanted = {
+        "test_every_live_prose_citation_resolves_to_the_symbol_beside_it",
+        "test_no_live_sentence_reports_97_as_never_run_and_the_record_names_its_command",
+    }
+    found: dict[str, tuple[set[str], set[str]]] = {}
+    for fn in tree.body:
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name in wanted:
+            calls: set[str] = set()
+            for inner in ast.walk(fn):
+                if isinstance(inner, ast.Call):
+                    f = inner.func
+                    if isinstance(f, ast.Attribute) and f.attr in {"skip", "xfail"}:
+                        calls.add(f.attr)
+            found[fn.name] = (_decorator_names(fn), calls)
+
+    assert wanted <= set(found), (
+        f"{sorted(wanted - set(found))} is gone from this file — #2833's clause 2 names "
+        f"deletion as one of the four ways not to fix a red node, and a node nobody "
+        f"collected is the quietest of them")
+    for name, (decorators, calls) in sorted(found.items()):
+        quieted = _QUIETING_MARKS & decorators
+        assert not quieted, (
+            f"{name} now carries {sorted(quieted)}: a node marked out of the gate's "
+            f"selection or marked to be skipped is a green run that tested nothing")
+        assert not calls, (
+            f"{name} calls pytest.{sorted(calls)[0]} in its body, which is the same "
+            f"refusal written as a statement instead of a decorator")
+
+
 def test_the_pilot_frozenset_citation_resolves_to_the_line_it_names():
     """#1520 clause 1. §The functions cited `app/autonomy.py:710`, which is
     `RUN_SUMMARY_CAP = 300` inside the comment about tail-slicing a run summary —
@@ -3336,6 +3406,48 @@ NOT_A_SYMBOL = frozenset({"py", "tsx", "ts", "md", "sh", "json", "true", "false"
 #: symbol named two sections away.
 CITATION_WINDOW = 320
 
+#: The `path:line` pairs live prose MUST cite. This is the vacuity guard, and it is a
+#: SET rather than a count because of #2833: the guard used to compare against the
+#: exact `(instances, distinct)` that was true the day #2633 wrote it, and `cffd22e6`
+#: added one correct citation — `eval/djev_name_prior_probe.py:647`, in #96's Reads
+#: cell, naming the line whose `now().astimezone()` makes the probe's stamp a local
+#: date. Measured on the two commits either side of it, live prose went from 9
+#: instances over 8 pairs at `a76859f9` to 10 over 9 at `cffd22e6`, one pair added and
+#: none removed, and main went red over a sentence that was true. A count can only go
+#: up when prose gains a citation and down when it loses one, so naming the pairs keeps
+#: both things the count guard was for: a
+#: resolver whose pattern stopped matching this shape finds none of them, and a
+#: deletion of any citation this document depends on is named in the failure. What it
+#: no longer does is punish an author for adding a true citation. Each annotation is
+#: the symbol that line defines, which is what the drift resolver checks it against.
+REQUIRED_CITATIONS = frozenset({
+    "app/autonomy.py:2898",                        # EVIDENCE_PILOT_TASK_IDS
+    "tests/test_worker_evidence.py:686",           # the assert pinning that frozenset
+    "tests/test_skill_tool_names.py:150",          # ALLOWED_TO_MENTION
+    "scripts/skill_lint.py:281",                   # PHANTOM_EXEMPT
+    "agent_mcp/skills.py:87",                      # _QUARANTINE_STATUSES
+    "app/routers/backlog.py:812",                  # backlog_task_delete
+    "web/src/components/pages/BacklogPage.tsx:572",   # DONE_WINDOW_DAYS
+    "app/paths.py:278",                            # VAULT_FACTS_ROOT, added by #2795
+    "eval/djev_name_prior_probe.py:647",  # now().astimezone(), added by cffd22e6
+})
+
+
+def _pair(rel: str, line_s: str) -> str:
+    """One citation as the guards compare on it: `path:line`, exactly as written."""
+    return f"{rel}:{line_s}"
+
+
+def _cited_pairs(text: str) -> set[str]:
+    """The distinct `path:line` pairs `text` cites, through `CITATION` itself.
+
+    A separate function rather than a re-run of the regex in the node, so the count
+    inside `_citation_drift` and the required-set check beside it are the same match
+    on the same slice — a second pattern of the author's own is how a guard starts
+    agreeing with itself instead of agreeing with the document.
+    """
+    return {_pair(rel, line_s) for rel, line_s in CITATION.findall(text)}
+
 
 def _cited_symbols(text: str, start: int, end: int) -> list[str]:
     """Identifiers the doc backticks near one citation, in the order it says them.
@@ -3400,11 +3512,12 @@ def _symbol_definition(rel: str, src_text: str, symbol: str) -> int | None:
 def _citation_drift(text: str) -> tuple[int, int, list[str]]:
     """`(instances, distinct, drift lines)` for one slice of the document.
 
-    Two counts because the doc cites one number twice: live prose holds 8 citation
-    instances over 7 distinct `path:line` pairs, `app/autonomy.py:2898` appearing in
-    both §The functions and §Evidence pilot. A vacuity guard on the instances alone
-    would not notice the second citation being deleted, and one on the distinct count
-    alone would not notice a citation being added without a symbol beside it.
+    Two counts because the doc cites one number twice — `app/autonomy.py:2898` appears
+    in both §The functions and §Evidence pilot, so `instances > distinct` is the shape
+    of today's prose and a node below asserts it. The pair count is no longer asserted
+    as a number: see `REQUIRED_CITATIONS` for the #2833 failure that produced, and a
+    citation carrying no symbol beside it is what `drift` reports, so nothing here
+    needs a fixed total to notice either of those two things.
 
     Returned rather than asserted so a caller can feed it a seeded sentence; the nodes
     below are thin wrappers over the same measurement.
@@ -3416,7 +3529,7 @@ def _citation_drift(text: str) -> tuple[int, int, list[str]]:
         rel, line_s = m.group(1), m.group(2)
         line = int(line_s)
         instances += 1
-        seen.add(f"{rel}:{line}")
+        seen.add(_pair(rel, line_s))
         citation = f"`{rel}:{line_s}`"
         source = ROOT / rel
         if not source.is_file():
@@ -3464,34 +3577,66 @@ def _citation_drift(text: str) -> tuple[int, int, list[str]]:
 
 
 def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
-    """#2633 clauses 1 and 3: every citation in the current prose points at its symbol.
+    """#2633 clauses 1 and 3, and #2833 clause 1: every citation in the current prose
+    points at its symbol, and a doc that GAINS a true citation stays green.
 
-    Nine citation instances over eight distinct files-and-numbers, in today's live
-    prose
-    (`app/autonomy.py:2898` twice, then `tests/test_worker_evidence.py:677`,
-    `tests/test_skill_tool_names.py:150`, `scripts/skill_lint.py:281`,
-    `agent_mcp/skills.py:87`, `app/routers/backlog.py:812`,
-    `web/src/components/pages/BacklogPage.tsx:572` and — added by #2795, where the
-    page names the layout that replaced the vault's fact directory —
-    `app/paths.py:278`). The ninth distinct citation in
-    the file — `app/autonomy.py:710`, the worker-evidence gate as numbered on
-    2026-09-12 — lives only in the dated §Review log and is out of scope by design,
-    which is clause 3; `test_the_pilot_frozenset_citation_resolves_to_the_line_it_names`
-    already forbids it in live prose.
+    Ten citation instances over nine distinct `path:line` pairs in today's live prose
+    (`app/autonomy.py:2898` twice — §The functions and §Evidence pilot — then
+    `tests/test_worker_evidence.py:686`, `tests/test_skill_tool_names.py:150`,
+    `scripts/skill_lint.py:281`, `agent_mcp/skills.py:87`,
+    `app/routers/backlog.py:812`,
+    `web/src/components/pages/BacklogPage.tsx:572`, `app/paths.py:278` from #2795, and
+    `eval/djev_name_prior_probe.py:647` from cffd22e6), the nine of them named in
+    `REQUIRED_CITATIONS`. The tenth distinct pair in the file — `app/autonomy.py:710`,
+    the worker-evidence gate as numbered on 2026-09-12 — lives only in the dated
+    §Review log and is out of scope by design, which is clause 3;
+    `test_the_pilot_frozenset_citation_resolves_to_the_line_it_names` already forbids
+    it in live prose.
 
-    The count assertion is the vacuity guard: a resolver whose regex stopped matching
-    this doc's citation shape would report no drift, which reads exactly like a clean
-    rail.
+    The vacuity guard used to be `assert (instances, distinct) == (9, 8)`, which is a
+    date disguised as a check: it held on the day #2633 wrote it and `cffd22e6` broke
+    main by adding one correct citation to #96's Reads cell (#2833, measured on the two
+    commits either side of it as 9/8 → 10/9, one pair added and none removed). Naming
+    the pairs that must be present is the same strength where strength was wanted — a
+    resolver whose pattern stopped matching finds none of them, and deleting any of
+    these nine is named in the failure — and it stops charging an author a red node for
+    a true sentence. `instances > distinct` is the one shape claim kept, because the
+    double citation is the fact the two counts were introduced to hold.
     """
     instances, distinct, drift = _citation_drift(_live_prose())
 
     assert not drift, "; ".join(drift)
-    assert (instances, distinct) == (9, 8), (
-        f"the citation resolver saw {instances} citations ({distinct} distinct) in "
-        f"live prose; today there are 9 instances over 8 distinct `path:line` pairs "
-        f"(`app/autonomy.py:2898` in two sections), so either this document's citation "
-        f"shape changed or the pattern in CITATION did — a resolver that matches "
-        f"nothing reports no drift, which is not a clean result")
+
+    missing = sorted(REQUIRED_CITATIONS - _cited_pairs(_live_prose()))
+    assert not missing, (
+        f"{len(missing)} citation(s) this document is pinned on are gone from live "
+        f"prose: {missing} — either the sentence that made them was deleted, or the "
+        f"pattern in CITATION stopped matching the shape they are written in, and a "
+        f"resolver that matches nothing reports no drift, which is not a clean result")
+    assert instances > distinct, (
+        f"{instances} instances over {distinct} pairs: live prose is supposed to cite "
+        f"one `path:line` twice (`app/autonomy.py:2898`, in §The functions and "
+        f"§Evidence pilot), and an instances count equal to the distinct count means "
+        f"the second of them is gone")
+
+    # The guard's own failure mode, seeded: a slice holding no citation at all must be
+    # refused, not read as a clean document. #2833 clause 2 — nothing here is skipped,
+    # xfailed or deleted, and this is the read that proves the rewritten guard can
+    # still go red.
+    blind_instances, blind_distinct, blind_drift = _citation_drift(
+        "A slice with nothing in `path.ext:N` shape at all.")
+    assert (blind_instances, blind_distinct, blind_drift) == (0, 0, []), (
+        f"the seeded no-citation slice counted {blind_instances}/{blind_distinct} with "
+        f"drift {blind_drift} — CITATION matches something it should not, so the "
+        f"control below is weighing the wrong thing")
+    blind_pairs = _cited_pairs("A slice with nothing in `path.ext:N` shape at all.")
+    assert blind_pairs == set(), (
+        f"the seeded slice resolved to {sorted(blind_pairs)}, which is not the empty "
+        f"set the control needs")
+    assert REQUIRED_CITATIONS - blind_pairs == REQUIRED_CITATIONS, (
+        "the required-set guard found citations in a slice that holds none, so a "
+        "resolver that stopped matching this doc's shape could report a clean "
+        "document — the vacuity case #2633 clause 3 was written for")
 
 
 def test_a_drifted_citation_names_the_line_and_where_the_symbol_actually_is():
@@ -3973,6 +4118,17 @@ _SUPERSEDED_97_CLAIM = (
     r"\b(?:does|did) not exist on disk\b",
 )
 
+#: A run count written so a later reader can tell how stale it is: a number, the word
+#: "run", and the date it was measured on. The optional `T…` tail is what #2833 adds.
+#: The §Watch the machinery record was re-dated by `cffd22e6` as "4 runs as of
+#: 2026-10-16T10:00Z" — a count MORE precise than the "3 runs as of 2026-10-16" it
+#: replaced — and the old shape's trailing `\b` sat between the day and the `T`, two
+#: word characters with no boundary between them, so the shape matched nothing and the
+#: node reported a timestamped count as an undated one. The rail is on a count
+#: carrying its date at all; how many digits follow the date is not the defect.
+DATED_RUN_COUNT = re.compile(
+    r"\b\d+ runs? as of 20\d\d-\d\d-\d\d(?:T\d\d:\d\d(?::\d\d)?Z?)?\b")
+
 #: A period ends a sentence only where whitespace follows it, so the three
 #: spellings here whose periods sit inside a path — `retag_untagged_facts.py`,
 #: `~/lloyd-data/workers.db`, `~/.local/state/` — do not end one. The two extra
@@ -4058,6 +4214,12 @@ def test_no_live_sentence_reports_97_as_never_run_and_the_record_names_its_comma
     count itself is asserted as a *shape* and never as a number — #97 fires daily at
     ~08:0xZ, so the figure measured on 2026-10-16 is one run stale the next morning,
     and freezing it would rebuild the exact rot this item exists to close.
+
+    #2833 is that rot arriving inside the guard rather than the prose: `cffd22e6`
+    redated the count to `2026-10-16T10:00Z` and the shape, whose `\b` landed between
+    the day and the `T`, saw no date at all. The shape now takes the optional
+    `THH:MMZ` tail — a count dated to the hour is dated — and keeps refusing a count
+    with no date, which the two probes below are what pin.
     """
     offending = [s for s in _live_sentences()
                  if re.search(r"#97\b", s) and re.search(_NEVER_RUN, s, re.I)]
@@ -4079,9 +4241,22 @@ def test_no_live_sentence_reports_97_as_never_run_and_the_record_names_its_comma
         "reader who finds the count stale has nowhere to re-derive it from")
     assert "~/.local/state/lloyd-automod/landed_outcomes.jsonl" in para, (
         "the confirmed record does not name the journal it says holds a row per run")
-    assert re.search(r"\b\d+ runs? as of 20\d\d-\d\d-\d\d\b", para), (
-        "the run count is not written as a dated count ('N runs as of YYYY-MM-DD'); a "
-        "bare number is false the morning after the job next fires")
+    # The probe pair first, which is this file's convention for a shape rail: a shape
+    # that cannot fail is decorative, and #2833 is the same defect pointing the other
+    # way — the old shape could not see the timestamped spelling at all, so on the
+    # sentence the doc actually holds it could only ever fail.
+    assert DATED_RUN_COUNT.search("returned 4 runs as of 2026-10-16T10:00Z, all"), (
+        "the shape cannot see a count dated down to the hour, which is the spelling "
+        "the #97 record has used since cffd22e6 redated it — a rail that rejects a "
+        "MORE precise date than the one it was written for is a false alarm, and "
+        "false alarms are what made main red")
+    assert not DATED_RUN_COUNT.search("returned 4 runs, all status=success"), (
+        "the shape accepts a run count with no date beside it, which is the one "
+        "thing this assertion exists to refuse")
+    assert DATED_RUN_COUNT.search(para), (
+        "the run count is not written as a dated count ('N runs as of YYYY-MM-DD', "
+        "or with its 'THH:MMZ' tail); a bare number is false the morning after the "
+        "job next fires")
     assert re.search(r"\b20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d", para), (
         "the record carries no first run's UTC timestamp, so the dated count has no "
         "starting point and no way to tell a fresh series from a resumed one")
