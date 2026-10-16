@@ -7244,15 +7244,43 @@ def _two_path_asked(prompt: str) -> list[int]:
     return [i for i, t in enumerate(TWO_FILE_CLAUSES, 1) if f"{i}. {t}" in prompt]
 
 
+#: The marker line these nodes land in both runbooks: the figure clause 5 is about, in
+#: the shape the ledger cites. It is the only part of the body these nodes vary.
+TALLY_MARKER = ("candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 0\n")
+
+
+def _runbook_text(path: str) -> str:
+    """Plausible SKILL.md text for `path`: the live skill's own front matter, marker line.
+
+    Not cosmetic. Since #2812 the activation corpus covers
+    `skills/nightly-skills-management/SKILL.md`, so landing that path is an
+    activation-scored landing: `V.land` scores the candidate against the corpus and
+    refuses it under the skill's `recall_floor`. A body whose front matter says
+    `name: x` scores recall 0.0 and is refused for a reason that has nothing to do with
+    the clause ledger these two nodes grade — and a `0.0` score is the #79 shape the
+    corpus's own header says must never be the answer. The description is read from the
+    loader rather than copied here, because it is the discriminating half and copied it
+    would rot the day that runbook's front matter is rewritten.
+    """
+    from agent_mcp.skills import _iter_skills
+
+    slug = Path(path).parent.name
+    live = next((s for s in _iter_skills() if s["name"] == slug), None)
+    assert live is not None, (
+        f"{slug} is not loader-visible, so its front matter cannot be reproduced for a "
+        f"landing that the activation rail will score")
+    front = yaml.safe_dump({"name": slug, "description": live["description"]},
+                           sort_keys=False, allow_unicode=True)
+    return f"---\n{front}---\n{TALLY_MARKER}"
+
+
 def _run_a_two_path_land(vault, items, monkeypatch, item_id: int):
     """Land #2434's shape once: two paths, five clauses, clause 5 answered twice."""
     write_item(items, item_id, TWO_FILE_CLAUSES)
     monkeypatch.setattr(V, "GRADER", RV.grade_vault)
     for path in (CONSOLIDATION, MANAGEMENT):
         (vault / path).parent.mkdir(parents=True, exist_ok=True)
-        (vault / path).write_text("---\nname: x\n---\n"
-                                  "candidate_body_scoping: whole_file 0 dead_strip 0 "
-                                  "input_lost 0\n", encoding="utf-8")
+        (vault / path).write_text(_runbook_text(path), encoding="utf-8")
 
     def answer(**kw):
         return _twice_answered(_two_path_asked(kw["prompt"]))

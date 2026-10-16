@@ -14,6 +14,24 @@
 # `extra_records` are AUTHORED turns, not transcript turns, added only where the
 # real set covers a skill with fewer than five positives. They use the same
 # schema and join the corpus for every skill.
+#
+# The three skills #2812 added (youtube-digest, paper-digest,
+# nightly-skills-management) have ZERO labelled turns in the #557 set — `git grep`
+# for their slugs there returns nothing — because they are the protocols the
+# recurring worker jobs run, and a job's own dispatch never hands an interactive
+# turn to the matcher. So all fifteen of their positives are `extra_records`,
+# labelled here rather than inherited from a transcript, and each `source` says
+# whether the wording is quoted verbatim from a real session or modelled on one.
+# Their floors are the recall the first grown-corpus run measured on 2026-10-16,
+# recorded the same not-chosen way as the original five.
+#
+# What those floors do and do not guard, worth reading before rewriting one of
+# these three files: scoring runs the INTERACTIVE injection leg — what `prefetch`
+# would inject into a turn. A worker job never takes that path;
+# `workers/sources/youtube_digest.py` reads `~/obsidian/skills/<slug>/SKILL.md` by
+# path when it builds its prompt. That is this corpus's boundary, NOT a limit in
+# the runner — the runner scores all three skills, and a PASS on a rewritten
+# youtube-digest SKILL.md means only that its interactive activation held.
 
 skills:
   # recall at the 2026-09-24 baseline (positives in brackets)
@@ -22,6 +40,13 @@ skills:
   poisoned-worker-troubleshoot: {recall_floor: 1.0}  # 6/6
   system-health-check: {recall_floor: 1.0}           # 5/5
   voice-clone-sample: {recall_floor: 0.6}            # 3/5
+  # recall at the 2026-10-16 grown-corpus baseline, five authored positives each.
+  # Five positives is a coarse instrument: its recall moves in steps of 0.2, so a
+  # floor of 1.0 here means one missed positive is already under it and the landing
+  # is refused — the same shape #711 shipped for system-health-check (5/5, 1.0).
+  youtube-digest: {recall_floor: 1.0}                  # 5/5
+  paper-digest: {recall_floor: 1.0}                    # 5/5
+  nightly-skills-management: {recall_floor: 1.0}       # 5/5
 
 extra_records:
 - id: sac001
@@ -30,3 +55,134 @@ extra_records:
   expected_empty: false
   note: "authored 2026-09-24 for #711: the real set has four voice-clone-sample turns"
   source: "authored (#711), not a transcript turn"
+
+# ── #2812 positives: youtube-digest ──────────────────────────────────────────
+# The job's protocol is one video per run: a tracked-channel bundle already on
+# disk becomes a knowledge note plus at most one draft backlog item. An interactive
+# ask naming that shape is what these five are.
+- id: sac101
+  turn: "the guy in the video found a 4 gpu carrier board, digest it into a knowledge note"
+  expected_skills: [youtube-digest]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812; the subject is a real turn's, the digest instruction and the label are ours — the real turn only comments on the video, so no label could have come from it"
+  source: "authored (#2812); subject from sessions/20261013_125230_iv0606.json message_index=209"
+- id: sac102
+  turn: "run the youtube digest pass over the newest tracked-channel bundle and tell me what it filed"
+  expected_skills: [youtube-digest]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: the skill's own words for the job — tracked channel, bundle, at most one filed item"
+  source: "authored (#2812), not a transcript turn"
+- id: sac103
+  turn: "digest the tracked-channel video from this morning into a knowledge note and file a draft backlog item if it would improve lloyd"
+  expected_skills: [youtube-digest]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: names both artefacts the protocol produces, which is what separates it from a transcript request"
+  source: "authored (#2812), not a transcript turn"
+- id: sac104
+  turn: "the tracked-channel video bundle is already on disk, run the youtube digest protocol over it and write the knowledge note"
+  expected_skills: [youtube-digest]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: the bundle-is-on-disk precondition is this skill's, not any other youtube skill's"
+  source: "authored (#2812), not a transcript turn"
+- id: sac105
+  turn: "there is a bundle on disk with no knowledge note yet, digest it"
+  expected_skills: [youtube-digest]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: the short form of the same ask, deliberately well under the length of the others"
+  source: "authored (#2812), not a transcript turn"
+
+# ── #2812 positives: paper-digest ────────────────────────────────────────────
+# Three of these five are verbatim user turns: pulling a cited paper's full text
+# and putting a note in the vault IS this skill's procedure, so the wording is real
+# and only the label is ours.
+- id: sac106
+  turn: "can you pull the paper and take a closer look?"
+  expected_skills: [paper-digest]
+  expected_empty: false
+  note: "wording quoted verbatim from a real turn for #2812; labelled paper-digest here because reading a cited paper closely is that protocol, not because a transcript labelled it"
+  source: "authored (#2812); turn quoted verbatim from sessions/20260926_094011_ivb917.json message_index=20"
+- id: sac107
+  turn: "pull the paper, extract the main themes and add to the vault"
+  expected_skills: [paper-digest]
+  expected_empty: false
+  note: "wording quoted verbatim from a real turn for #2812: the read-and-note-in-the-vault shape, which is this skill's two moves"
+  source: "authored (#2812); turn quoted verbatim from sessions/20260930_190551_iv3164.json message_index=32"
+- id: sac108
+  turn: "the paper that video cited is still an abstract-only stub in knowledge/papers/, read the full text and replace it with a real note"
+  expected_skills: [paper-digest]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: the abstract-only placeholder under knowledge/papers/ is this skill's own starting state"
+  source: "authored (#2812), not a transcript turn"
+- id: sac109
+  turn: "spawn subagents to grab and summarize each of the 3 papers into the vault"
+  expected_skills: [paper-digest]
+  expected_empty: false
+  note: "wording quoted verbatim from a real turn for #2812; the fan-out is how those paper notes actually got written that day"
+  source: "authored (#2812); turn quoted verbatim from sessions/20261015_084402_ive376.json message_index=12"
+- id: sac110
+  turn: "grab the full text of the cited paper and write the note for it"
+  expected_skills: [paper-digest]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: 'cited' is the word tying the paper to a tracked-channel video, which is this skill's trigger"
+  source: "authored (#2812), not a transcript turn"
+
+# ── #2812 positives: nightly-skills-management ───────────────────────────────
+# The update half of the skills lifecycle: mine session logs, create and update,
+# dedupe the library, then drain the task-58 patch queue under
+# _pipeline/skills/proposed/.
+- id: sac111
+  turn: "run the nightly skills pass over the last week of session logs and tell me what it created"
+  expected_skills: [nightly-skills-management]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: session logs in, skills out — the pass, not the consolidation half"
+  source: "authored (#2812), not a transcript turn"
+- id: sac112
+  turn: "the skills library has near-duplicates again, dedupe it and drain the proposed patch queue"
+  expected_skills: [nightly-skills-management]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: dedupe plus the proposed-queue drain, the two steps no other skills skill owns"
+  source: "authored (#2812), not a transcript turn"
+- id: sac113
+  turn: "why is _pipeline/skills/proposed/ still filling up? drain the queue"
+  expected_skills: [nightly-skills-management]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: names the queue path the skill says it drains"
+  source: "authored (#2812), not a transcript turn"
+- id: sac114
+  turn: "go through the session logs and turn whatever repeated into a skill, then dedupe the library"
+  expected_skills: [nightly-skills-management]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: the lifecycle in one sentence, phrased the way a person would ask for it"
+  source: "authored (#2812), not a transcript turn"
+- id: sac115
+  turn: "check yesterday's sessions for skill-worthy patterns and update the skills that covered them"
+  expected_skills: [nightly-skills-management]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: 'skill-worthy' is the skill's own term for what the log pass looks for"
+  source: "authored (#2812), not a transcript turn"
+
+# ── #2812 near-miss negatives ────────────────────────────────────────────────
+# Every record that does not name a covered skill is already a negative for it, so
+# each new skill arrives with 89 of them and needs no filler; what these three add
+# is the shape most likely to be mistaken for the new skills — a youtube ask that
+# wants a transcript or an upload, a paper ask that wants only the arxiv source, a
+# skills ask that is one file's front matter. Each names the skill that should have
+# fired instead. On the 2026-10-16 run none of the three injected a new skill.
+- id: sac116
+  turn: "upload the rssc meeting recording to youtube with chapters and a description"
+  expected_skills: [rssc-youtube-upload]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: a youtube ask whose job is publishing, the sharpest near-miss for youtube-digest"
+  source: "authored (#2812), not a transcript turn"
+- id: sac117
+  turn: "grab the arxiv source for 2609.26758 and tell me what it actually claims"
+  expected_skills: [arxiv]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: a paper ask with no note to write, the near-miss for paper-digest"
+  source: "authored (#2812), not a transcript turn"
+- id: sac118
+  turn: "lint the skill I just wrote and fix its front matter"
+  expected_skills: [skill-lint]
+  expected_empty: false
+  note: "authored 2026-10-16 for #2812: a skills-library ask that is one file's front matter, not the nightly lifecycle"
+  source: "authored (#2812), not a transcript turn"
