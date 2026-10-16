@@ -61,6 +61,15 @@ GAP_STATUSES = ("refuted", "insufficient")
 # operate on one file.
 COUNT_MEASURES = ("files", "bytes", "lines", "matches")
 
+# Where run records live under the data root, and the one glob that counts a set
+# small enough to be gradeable: one task's directory, one pattern with no directory
+# separator in it. A `files` count bound at `RUN_RECORDS_DIR` with a glob that DOES
+# cross a boundary is refused at grading time by `_whole_run_record_corpus` (#2817)
+# — see the rule and its reasoning there, and the same instruction in
+# `CLAIMS_INSTRUCTION` so a run is told before it binds one.
+RUN_RECORDS_DIR = "autonomy-runs"
+RUN_RECORDS_CLOSED_GLOB = "run_*.md"
+
 # Fence tag the model is asked to close its final message with. Deliberately not
 # `json`: an untagged fence in a long markdown answer is ambiguous with the
 # answer's own examples, and we would parse the wrong thing.
@@ -185,6 +194,32 @@ def _check_file_exists(check: dict, root: Path) -> tuple[str, Any, str]:
             f"({target})")
 
 
+def _whole_run_record_corpus(target: Path, root: Path, pattern: str) -> bool:
+    """Is this `files` count the whole run-record corpus, and nothing smaller?
+
+    The graded run's own record is a member of that corpus and is written before its
+    claims are graded: `autonomy.run_task` lands `autonomy-runs/<id>/<run_id>.md` and
+    only then returns, and `workers/pool.py` verifies the bundle after the source
+    returns. So a claim about the whole corpus is wrong by at least one whatever the
+    run measured, and the corpus itself grows at roughly 37 records a day. That is a
+    failure mode of the check — `verify_claim` grades those `insufficient` and reserves
+    `refuted` for a check that ran and disagreed with the disk.
+
+    The discriminator is the directory separator in the glob, not the directory name:
+    `autonomy-runs/86` with `run_*.md` counts one task's records and stays gradeable
+    (both pilot runs of 2026-10-16 bind that form and verify), while `*/run_*.md` or
+    `**/run_*.md` bound at `autonomy-runs` spans every task's directory and so spans
+    the record the graded run wrote about itself.
+    """
+    if "/" not in pattern:
+        return False
+    try:
+        base = Path(root).resolve()
+    except OSError:                                    # unresolved symlink
+        return False
+    return target == base / RUN_RECORDS_DIR
+
+
 def _check_count_eq(check: dict, root: Path) -> tuple[str, Any, str]:
     target, err = _resolve(check.get("path"), root)
     if err:
@@ -203,6 +238,16 @@ def _check_count_eq(check: dict, root: Path) -> tuple[str, Any, str]:
             # unevaluable — it makes it wrong, with a count of zero.
             return ("refuted", 0, f"{target} is not a directory")
         pattern = str(check.get("glob") or "*")
+        if _whole_run_record_corpus(target, root, pattern):
+            # The repair leads: a gap line is truncated to MAX_GAP_CHARS with the
+            # claim in front of it, so a detail that explained itself first would
+            # lose the fix before the next run of the task ever read it.
+            return ("insufficient", None,
+                    f"bind the closed set instead — path '{RUN_RECORDS_DIR}/<task_id>' "
+                    f"with glob '{RUN_RECORDS_CLOSED_GLOB}' (no directory separator), "
+                    f"or a dated run id. A count over every run record ({pattern!r} "
+                    f"under {target}) cannot be settled by this check: this run's own "
+                    f"record is in that corpus before its claims are graded.")
         observed = sum(1 for p in target.glob(pattern) if p.is_file())
     else:
         if not target.is_file():
@@ -435,6 +480,13 @@ Rules:
   re-runs every check against the disk when this run's ledger row is written;
   anything that does not match is recorded as `refuted` and handed to the next
   run of this task by name.
+- A count of run records must be a closed set: bind `path: autonomy-runs/<task_id>`
+  with `glob: run_*.md` (no directory separator), or name a dated run id. Never the
+  whole corpus — `*/run_*.md` or `**/run_*.md` bound at `autonomy-runs/` counts every
+  task's records, and YOUR OWN RECORD is written into that corpus just before your
+  claims are graded, so the count you measured is short by at least one before the
+  verifier looks. Such a claim comes back `insufficient`, never `refuted`, because a
+  corpus that cannot hold still is the check's failure and not your error.
 - Do not bind a claim you cannot express as one of those four checks. Prose you
   did not bind is not evidence.
 """

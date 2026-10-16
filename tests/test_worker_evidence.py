@@ -17,6 +17,15 @@ version: claims arrive as `{claim, check}` pairs, a stdlib verifier re-runs each
 check when the ledger row is written, the verified/gap partition lands in the run
 record, the rate is per task with a claim-level denominator, and the gap list
 goes into the next run of that task's prompt.
+
+Since #2817 that re-run has one shape it refuses to grade: a `count_eq` over the whole
+run-record corpus (`*/run_*.md` or `**/run_*.md` bound at `autonomy-runs`) is
+`insufficient`, never `verified` and never `refuted`, because the graded run's own
+record is written into that corpus before its claims are graded and the corpus grows at
+roughly 37 records a day. What IS graded is the closed set — one task's directory with
+a glob that crosses no separator — verified and refuted exactly as before, `tolerance`
+included. The rule, its discriminator and its consequences are pinned in the `#2817`
+section at the end of this file.
 """
 
 from __future__ import annotations
@@ -1445,3 +1454,209 @@ def test_the_claims_instruction_works_the_json_shape_that_broke_and_states_why()
     for tid in (24, 38, 39, 40, 42, 53, 56):
         assert autonomy._evidence_prompt(tid, gaps=[]) == \
             evidence.CLAIMS_INSTRUCTION
+
+
+# ── #2817 — a count of the whole run-record corpus cannot hold still ────────
+
+def _seed_run_records(root: Path, per_task: dict[str, int]) -> int:
+    """Seed `autonomy-runs/<task>/run_<task>_<stamp>.md` the way `autonomy.py` does.
+
+    Returns the total written, so every caller states the on-disk number it is
+    claiming against instead of trusting a literal it did not create.
+    """
+    total = 0
+    for task_id, count in per_task.items():
+        d = root / evidence.RUN_RECORDS_DIR / task_id
+        d.mkdir(parents=True, exist_ok=True)
+        for i in range(count):
+            (d / f"run_{task_id}_2026101{i}_050000.md").write_text("x\n")
+        total += count
+    return total
+
+
+def test_a_whole_corpus_run_record_count_is_insufficient_not_refuted(tmp_path):
+    """#2817 clause 1: the corpus the graded run writes into is a check failure.
+
+    `autonomy.run_task` writes `autonomy-runs/<id>/<run_id>.md` and only then
+    returns, and `workers/pool.py` verifies the bundle after the source returns, so a
+    glob that crosses a directory boundary at `autonomy-runs` always counts the graded
+    run's own record. The live instance behind this item:
+    `run_scheduled-task_20261015_050046_db3930` (task 38) bound
+    `{path: autonomy-runs, glob: "*/run_*.md", measure: files, expected: 709}` and was
+    recorded `refuted — claimed files=709, disk says 710`, 9 ms after its own record
+    landed. The corpus also moves on its own: ~37 records a day.
+
+    Claimed one below the disk count, which is exactly the self-membership shape: the
+    number a run can measure while it runs is short of the number the same check sees
+    when it grades.
+    """
+    total = _seed_run_records(tmp_path, {"38": 3, "86": 3})
+    assert total == 6
+    for pattern in ("*/run_*.md", "**/run_*.md"):
+        v = verify_claim({"claim": f"the fleet has written {total - 1} run records",
+                          "check": {"kind": "count_eq", "path": "autonomy-runs",
+                                    "glob": pattern, "measure": "files",
+                                    "expected": total - 1}}, root=tmp_path)
+        assert v["status"] == "insufficient", (
+            f"{pattern!r} over the run-record root was graded {v['status']} at "
+            f"{total - 1} claimed against {total} on disk — the off-by-one a run cannot "
+            "avoid, because its own record is in the corpus it counts")
+        assert v["observed"] is None, (
+            "an unevaluable check reports no observation; reporting the moving count "
+            "would let a later reader weigh it against the claim as if it were settled")
+        assert f"{evidence.RUN_RECORDS_DIR}/<task_id>" in v["detail"], v["detail"]
+        assert evidence.RUN_RECORDS_CLOSED_GLOB in v["detail"], v["detail"]
+
+
+def test_a_fabricated_whole_corpus_count_reaches_the_gap_and_not_verified(tmp_path):
+    """#2817 clause 2: refusing to refute a whole-corpus count is not a free pass.
+
+    The rule keys on the claim's shape, before the number is read, so a run claiming
+    1 record against 40 on disk lands in `gap` — which is what the next run of that
+    task is handed — instead of joining `verified`, the set the next run must preserve.
+    """
+    total = _seed_run_records(tmp_path, {str(t): 5 for t in range(40, 48)})
+    assert total == 40
+    out = verify_bundle([{"claim": "the fleet has one run record", "check": {
+        "kind": "count_eq", "path": "autonomy-runs", "glob": "**/run_*.md",
+        "measure": "files", "expected": 1}}], root=tmp_path)
+    assert out["verified"] == [], (
+        "a whole-corpus count of 1 against 40 records was accepted as something the "
+        "next run must preserve")
+    assert len(out["gap"]) == 1, out["gap"]
+    assert out["gap"][0].startswith("[insufficient]"), out["gap"][0]
+    assert out["counts"]["refuted"] == 0 and out["counts"]["insufficient"] == 1
+    # The repair has to survive the gap cap, so it leads the detail: `gap` items are
+    # truncated at MAX_GAP_CHARS with the claim in front of them.
+    assert out["gap"][0].index(f"{evidence.RUN_RECORDS_DIR}/<task_id>") < 90, out["gap"][0]
+
+
+def test_a_per_task_run_record_count_is_still_graded_both_ways(tmp_path):
+    """#2817 clause 3: the closed-set form is the one that verifies, and it still does.
+
+    Both pilot runs of 2026-10-16 bind `path: autonomy-runs/86`, `glob: run_*.md` and
+    came back `verified` (`run_scheduled-task_20261016_050026_218f69`,
+    `run_scheduled-task_20261016_090013_93f62b`). One task's directory has no sibling
+    to sweep in, so the separator is the discriminator — and a recursive glob bound
+    INSIDE one task's directory is not the whole corpus either, which is why the rule
+    tests the bound path and not just the glob.
+    """
+    total = _seed_run_records(tmp_path, {"86": 22, "38": 4})
+    assert total == 26
+
+    ok = verify_claim({"claim": "task 86 has 22 run records", "check": {
+        "kind": "count_eq", "path": "autonomy-runs/86",
+        "glob": evidence.RUN_RECORDS_CLOSED_GLOB, "measure": "files",
+        "expected": 22}}, root=tmp_path)
+    assert ok["status"] == "verified" and ok["observed"] == 22, ok
+
+    bad = verify_claim({"claim": "task 86 has 96 run records", "check": {
+        "kind": "count_eq", "path": "autonomy-runs/86",
+        "glob": evidence.RUN_RECORDS_CLOSED_GLOB, "measure": "files",
+        "expected": 96}}, root=tmp_path)
+    assert bad["status"] == "refuted" and bad["observed"] == 22, bad
+    assert f"claimed files=96, disk says 22 ({tmp_path / 'autonomy-runs' / '86'})" \
+        in bad["detail"], bad["detail"]
+
+    recursive = verify_claim({"claim": "task 86 has 22 run records", "check": {
+        "kind": "count_eq", "path": "autonomy-runs/86", "glob": "**/run_*.md",
+        "measure": "files", "expected": 22}}, root=tmp_path)
+    assert recursive["status"] == "verified" and recursive["observed"] == 22, (
+        "the rule reached a glob that crosses no task boundary, and would have refused "
+        "the one count form that verifies today")
+
+
+def test_tolerance_still_bridges_a_count_the_new_rule_does_not_reach(tmp_path):
+    """#2817 clause 4: slack keeps working everywhere the rule does not apply.
+
+    `run_scheduled-task_20261013_050047_2ed1ce` found this workaround on its own
+    (637 claimed, tolerance 1, 638 observed, verified). What #2817 restricts is the
+    whole-corpus shape; a count over a directory that is not the run-record root — and
+    a closed set that is — keeps the semantics it has always had, including the
+    refutation when the slack is not there.
+
+    The one consequence the contract deliberately does not decide — whether a
+    whole-corpus claim carrying `tolerance: 1`, the workaround that real run used, stays
+    `verified` or becomes `insufficient` — is owed to owed-check as a RULING, so it is
+    pinned here as the shape the code has: the refusal reads the bound path and the
+    glob before the number, so slack does not buy back a claim about a corpus that
+    includes the claimant. If owed-check rules the other way, this assertion is the one
+    that has to change with it.
+    """
+    debug = tmp_path / "_pipeline/research/_debug"
+    debug.mkdir(parents=True)
+    for i in range(7):
+        (debug / f"hypothesis_fail_{i}.txt").write_text("x")
+    assert verify_claim({"claim": "~6 dumps", "check": {
+        "kind": "count_eq", "path": "_pipeline/research/_debug",
+        "glob": "hypothesis_fail_*.txt", "measure": "files",
+        "expected": 6, "tolerance": 1}}, root=tmp_path)["status"] == "verified"
+
+    nested = tmp_path / "_pipeline/runs"
+    (nested / "86").mkdir(parents=True)
+    for i in range(5):
+        (nested / "86" / f"run_86_{i}.md").write_text("x")
+    nested_claim = {"kind": "count_eq", "path": "_pipeline/runs",
+                    "glob": "*/run_*.md", "measure": "files", "expected": 3}
+    off_root = verify_claim({"claim": "3 nested records", "check": nested_claim},
+                            root=tmp_path)
+    assert off_root["status"] == "refuted" and off_root["observed"] == 5, off_root
+    assert "claimed files=3, disk says 5" in off_root["detail"], off_root["detail"]
+    # The same claim with slack verifies. Both halves matter: the first shows the rule
+    # never reached a crossing glob bound OUTSIDE the run-record root (it would have
+    # said `insufficient` with no observation at all), the second shows the slack that
+    # found it still doing its job.
+    assert verify_claim({"claim": "~4 nested records", "check": {
+        **nested_claim, "expected": 4, "tolerance": 1}},
+        root=tmp_path)["status"] == "verified", (
+        "the rule reached a corpus outside the run-record root; the separator alone is "
+        "not what refuses a claim")
+
+    _seed_run_records(tmp_path, {"86": 22})
+    assert verify_claim({"claim": "~21 records for task 86", "check": {
+        "kind": "count_eq", "path": "autonomy-runs/86",
+        "glob": evidence.RUN_RECORDS_CLOSED_GLOB, "measure": "files",
+        "expected": 21, "tolerance": 1}}, root=tmp_path)["status"] == "verified"
+    assert verify_claim({"claim": "21 records for task 86", "check": {
+        "kind": "count_eq", "path": "autonomy-runs/86",
+        "glob": evidence.RUN_RECORDS_CLOSED_GLOB, "measure": "files",
+        "expected": 21}}, root=tmp_path)["status"] == "refuted", (
+        "removing the slack did not change the verdict, so tolerance stopped meaning "
+        "anything on a closed set")
+
+    refused = verify_claim({"claim": "21 run records fleet-wide", "check": {
+        "kind": "count_eq", "path": "autonomy-runs", "glob": "*/run_*.md",
+        "measure": "files", "expected": 21, "tolerance": 1}}, root=tmp_path)
+    assert refused["status"] == "insufficient", (
+        "slack bought back a claim about a corpus that includes the claimant: the "
+        "refusal reads the bound path and glob before the number, so `tolerance` "
+        f"cannot rescue it — it came back {refused['status']}")
+    assert f"{evidence.RUN_RECORDS_DIR}/<task_id>" in refused["detail"], refused["detail"]
+
+
+def test_the_claims_instruction_tells_a_pilot_run_to_bind_a_closed_set():
+    """#2817 clause 5: the rule is in the prompt every pilot job is handed.
+
+    The closed-set discipline existed only as prose in the 2026-10-16 reflection
+    report, and skill prose binds only the jobs that read it — `skills/
+    nightly-reflection-config/SKILL.md` still prescribes the recursive form. This
+    block reaches every member of the pilot whether or not its skill says anything,
+    so it is asserted through the seam that ships it (`autonomy._evidence_prompt`),
+    not just against the constant.
+
+    Asserted as a rule about the shape plus the outcome the run is told to expect, and
+    that it stayed prose: a seventh worked example would change what a model imitates,
+    and this file pins the example block at six claims elsewhere.
+    """
+    text = evidence.CLAIMS_INSTRUCTION
+    assert f"{evidence.RUN_RECORDS_DIR}/<task_id>" in text
+    assert evidence.RUN_RECORDS_CLOSED_GLOB in text
+    assert "whole corpus" in text
+    assert "`insufficient`" in text
+    assert text.count(f"```{evidence.FENCE_TAG}") == 1, (
+        "the rule was added as a second worked example; the example block is what a "
+        "model copies verbatim and this file pins its shape elsewhere")
+    for tid in sorted(autonomy.EVIDENCE_PILOT_TASK_IDS):
+        block = autonomy._evidence_prompt(tid, gaps=[])
+        assert f"{evidence.RUN_RECORDS_DIR}/<task_id>" in block, (
+            f"pilot task {tid} is not being handed the closed-set rule")
