@@ -52,7 +52,7 @@ from pathlib import Path
 # definition shared by every writer and by the reporting tests (#1010). `body` is
 # imported so the index-line rule below measures the same lines the read-side
 # validator measures, from one function and not two copies of its regex.
-from app.prompt_surface import body, memory_ceiling, size_error
+from app.prompt_surface import ENTRY_TYPES, body, memory_ceiling, size_error
 
 # The directory `prompt_builder._load_memories` reads the two names from. The guard
 # fires on a path only when it resolves INTO this directory, which is what keeps a
@@ -342,7 +342,14 @@ def memory_write_error(path: str | os.PathLike[str], prospective: str) -> str | 
         # line, route its detail to a topic file) where the tight-limit refusal is
         # the general one, and a writer shown a byte count over a line it could
         # simply shorten is a writer that trims an unrelated entry instead.
+        #
+        # `index_no_room_error` sits between the two because it is the SAME tight-limit
+        # refusal re-texted for the case where that refusal's own advice is impossible
+        # (#2838), not a new condition: it answers non-None only where
+        # `index_tight_limit_error` already answers non-None, so the three-term chain
+        # refuses exactly what the two-term chain refused before, at the same priority.
         return (index_line_length_error(filename, prospective)
+                or index_no_room_error(path, filename, prospective)
                 or index_tight_limit_error(filename, prospective))
     return None
 
@@ -531,3 +538,176 @@ def _topic_size_message(name: str, size: int, ceiling: int) -> str:
         f"row in a second file is invisible to `status` and the audit silently stops "
         f"covering lines. Trim or retire rows against a loaded line that is gone."
     )
+
+
+# ── the index refusal whose own advice the same bound refuses (#2838) ──────────
+#
+# `index_file_refusal` sends a writer to write a topic file AND to "give the index ONE
+# typed line … ending `→ topics/<slug>`". That second half is only advice while the index
+# has room for a line, and the tight limit is exactly the bound that removes it: at the
+# size the index actually fails at — 20,463 B on disk against the 20,480 B limit, the
+# number #2649's own autotriage record quotes — adding the shortest legal typed line
+# (24 B) is refused, so the refusal ordered the one edit that could not be made. The
+# writer that obeyed anyway left a detail file the index never linked, which is #2613 and
+# #2649 (a link is a line, and a line is what was refused).
+#
+# This section answers that case instead. It is appended BELOW `memory_write_error` — the
+# space under line 262 — for the reason the citation block at :350-358 gives: the three
+# lines above it are cited by number in `lloyd/reviews/2026-09-14-user-md-audit.md`, and
+# `test_every_code_line_the_audit_cites_is_the_line_it_claims` reddens an edit that shifts
+# them.
+
+#: The shortest index line the add-a-line route can ever ask for: a typed bullet that
+#: ends in a topic pointer. Derived from the two grammars that define it — the shortest of
+#: `prompt_surface.ENTRY_TYPES`, a one-character hook, and `TOPIC_SLUG_RE`'s one-character
+#: minimum — and pinned against both regexes by
+#: `tests/test_memory_index_cap.py::test_the_line_floor_is_the_line_the_add_a_line_route_orders`,
+#: so a grammar change moves this number and the branch that compares it together instead
+#: of leaving the branch measuring against a stale figure.
+SHORTEST_TOPIC_LINE = f"- [{min(ENTRY_TYPES, key=len)}] x → {TOPIC_PREFIX}a\n"
+TOPIC_LINE_MIN_BYTES = len(SHORTEST_TOPIC_LINE.encode("utf-8"))
+
+#: Bytes a linked topic file must have free to be offered as the merge target. The
+#: judgeable quantity would be the length of the detail being written, and the guard cannot
+#: know it: the file it is checking and the file the detail belongs in may be two different
+#: files. So the floor is set from the other bound in reach — a finding is what
+#: `INDEX_LINE_MAX_BYTES` sizes an index line at (300 B), and a detail with considerably
+#: more to say than that is a knowledge note, which is `consolidation_hint`'s route. The
+#: number only ever decides between "this file can obviously take the merge" and "do not
+#: offer this file", and every live linked topic sits kilobytes clear of its ceiling.
+MIN_TOPIC_MERGE_BYTES = 512
+
+#: A `topics/<slug>` pointer in prose, with the slug bound spelled from its constant.
+TOPIC_LINK_RE = re.compile(rf"{TOPIC_PREFIX}[a-z0-9-]{{1,{TOPIC_SLUG_MAX_CHARS}}}")
+
+
+def linked_topic_files(text: str) -> list[str]:
+    """The topic files the top-level index lines of `text` link, in first-seen order.
+
+    Top-level bullets only, which is the grain `app.uptake` parses and the grain
+    `consolidate_memory_index.py` writes: an indented continuation quoting a topic path is
+    prose about a link, not a link the index carries. Duplicates collapse — the unit here
+    is the file, and the same file named by two index lines is one place a merge can go.
+
+    Names come back canonicalised to `topics/<slug>` through `topic_slug`, which is both
+    the string the index line itself carries and the form `memory_add(file=…)` takes; a
+    pointer that is not a legal slug is skipped rather than offered, since the refusal
+    spends the name it returns on an instruction to write to that exact file.
+    """
+    found: list[str] = []
+    for line in body(text).split("\n"):
+        if not line.startswith(("- ", "* ")):
+            continue
+        for match in TOPIC_LINK_RE.finditer(line):
+            slug = topic_slug(match.group(0))
+            name = f"{TOPIC_PREFIX}{slug}"
+            if slug is not None and name not in found:
+                found.append(name)
+    return found
+
+
+def _topic_room(name: str) -> tuple[int, int] | None:
+    """Bytes `name`'s file has free under its own ceiling, or None when it has none.
+
+    None covers the three ways a file cannot take a merge: it is absent (`memory_add`
+    refuses to create one and the writer would hand-create the orphan this whole branch
+    exists to stop), it is over its ceiling (`_topic_size_message` and its "Split it into
+    two topics" route are the word for that), and it has bytes left but not enough to hold
+    a finding. The last is judged against `MIN_TOPIC_MERGE_BYTES`, a floor of judgement
+    rather than a bound the guard can derive: nothing here knows how long the detail is,
+    because prospective content and the file the guard is checking may be different files
+    entirely.
+    """
+    # `topic_path(MEMORIES_DIR, slug)`, not a join: it is the resolver the rest of this
+    # tree uses, and the one that knows a topic lives under `TOPICS_SUBDIR` while the
+    # index that links it lives at the root beside that directory.
+    slug = name[len(TOPIC_PREFIX):] if name.startswith(TOPIC_PREFIX) else name
+    path = topic_path(MEMORIES_DIR, slug)
+    ceiling = topic_ceiling(name)
+    if not path.is_file() or ceiling is None:
+        return None
+    free = ceiling - path.stat().st_size
+    return (free, ceiling) if free >= MIN_TOPIC_MERGE_BYTES else None
+
+
+def merge_target(linked: list[str]) -> tuple[str, int, int] | None:
+    """The linked topic file with the most room, as `(name, free_bytes, ceiling)`.
+
+    Deliberately a byte count and not a judgement of fit: the guard cannot know which
+    linked topic the new detail belongs in, so it names the one that can certainly hold
+    it and the refusal says out loud that any other linked topic with room is as good a
+    target. Most-room also means the merge that costs the least attention: the file with
+    13 KB free is a safer destination than the one with 300 B, and the difference is all
+    this function is able to see.
+    """
+    best: tuple[str, int, int] | None = None
+    for name in linked:
+        room = _topic_room(name)
+        if room is None:
+            continue
+        if best is None or room[0] > best[1]:
+            best = (name, room[0], room[1])
+    return best
+
+
+def index_no_room_error(path, filename: str | None, prospective: str) -> str | None:
+    """The tight-limit refusal, re-texted for when its advice cannot be carried out.
+
+    Same condition as `index_tight_limit_error` — the prospective file over the tight
+    limit — so it can only ever answer where that function already refuses, and never
+    move a verdict. What it adds is the disk fact that turns the advice into a
+    contradiction: the tight limit MINUS the bytes already on disk is the room a new index
+    line has, and below `TOPIC_LINE_MIN_BYTES` no typed line fits at all, so "give the
+    index ONE typed line" is an instruction the same guard will refuse on the next call.
+    The room is read from disk and never handed in, because `_on_disk_bytes` measures it
+    there — "Measured here, never handed in by the caller", :248-259 — and a room the
+    caller could round down would be a way to pick which refusal this is.
+
+    A file still holding a line's worth of room gets None and keeps
+    `index_file_refusal`'s text unchanged: at 20,192 B on disk — the live index today —
+    288 B are free and a 105 B line is admissible, so the add-a-line route is still the
+    right advice there and rewriting it would only cost a writer the sentence it needs.
+    """
+    if index_tight_limit_error(filename, prospective) is None:
+        return None
+    limit = tight_limit(filename) or 0
+    ceiling = memory_ceiling(filename) or 0
+    room = limit - _on_disk_bytes(Path(path))
+    if room >= TOPIC_LINE_MIN_BYTES:
+        return None
+    size = len(prospective.encode("utf-8"))
+    owed = f"Record `{filename} at ceiling — consolidation owed` in the completion note."
+    head = (
+        f"{filename} would be {size:,} bytes, over the {limit:,}-byte tight limit "
+        f"({MEMORY_TIGHTNESS:.0%} of its {ceiling:,}-byte ceiling) that keeps the index "
+        f"consolidated, and only {room:,} of those bytes are free on disk — under the "
+        f"{TOPIC_LINE_MIN_BYTES}-byte floor of any typed index line. No new index line "
+        f"can be added while the file sits over that limit, so this refusal will not tell "
+        f"you to add one.")
+    target = merge_target(linked_topic_files(prospective))
+    if target is not None:
+        name, free, topic_ceiling_bytes = target
+        slug = name[len(TOPIC_PREFIX):]
+        return (
+            head + f" This is merge-into-a-linked-topic-file: append the detail to "
+            f"`{name}` ({free:,} bytes free of its {topic_ceiling_bytes:,}-byte topic "
+            f"ceiling), which `{filename}` already links — "
+            f"`memory_add(file=\"{name}.md\")`, or `Edit` on "
+            f"lloyd/{TOPICS_SUBDIR}/{slug}.md. Any other topic file the index links and "
+            f"that has room is as good a target; a new topic file is not, because the new "
+            f"line that would link it is the line that cannot be written (#2613/#2649 "
+            f"leave the reason). No line can point at the new detail until "
+            f"`dream-consolidation` (#47) reopens room under the tight limit, so the "
+            f"loaded index will not advertise it — that is the cost of writing here, and "
+            f"it is cheaper than the alternative: a detail file no index line links, "
+            f"which nothing loads and nothing prunes. Do not trim or shorten an unrelated "
+            f"entry to squeeze a line in — tightening `{filename}` is "
+            f"`dream-consolidation`'s decision, not a write-side one. " + owed)
+    return (
+        head + f" This is a consolidation, not a write: no topic file `{filename}` links "
+        f"has enough room under its own ceiling to take the merge, and a new topic file "
+        f"cannot be created, because the new line that would link it is the line that "
+        f"cannot be written (#2613/#2649 leave the reason). Do not trim or shorten an "
+        f"unrelated entry to squeeze a line in either — reopen room by merging linked "
+        f"topic files together in `dream-consolidation` (#47), which is also the run that "
+        f"reopens the tight limit. " + owed)
