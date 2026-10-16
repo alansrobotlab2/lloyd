@@ -3420,6 +3420,14 @@ CITATION_WINDOW = 320
 #: deletion of any citation this document depends on is named in the failure. What it
 #: no longer does is punish an author for adding a true citation. Each annotation is
 #: the symbol that line defines, which is what the drift resolver checks it against.
+#:
+#: Eight pairs, not nine: #2820 removes `eval/djev_name_prior_probe.py:647` from #96's
+#: row. That citation was true the day `cffd22e6` wrote it and became false by an edit
+#: to the function it pointed into — #2820 inserts a helper above that line, which is
+#: exactly the way a `path:line` citation goes stale while the prose around it stays
+#: right. The row now names `build_report` and `_now()` by symbol instead, and
+#: `test_the_name_prior_report_row_states_a_utc_date_key_and_keeps_its_four_tokens`
+#: forbids the numeric form coming back.
 REQUIRED_CITATIONS = frozenset({
     "app/autonomy.py:2898",                        # EVIDENCE_PILOT_TASK_IDS
     "tests/test_worker_evidence.py:686",           # the assert pinning that frozenset
@@ -3429,7 +3437,6 @@ REQUIRED_CITATIONS = frozenset({
     "app/routers/backlog.py:812",                  # backlog_task_delete
     "web/src/components/pages/BacklogPage.tsx:572",   # DONE_WINDOW_DAYS
     "app/paths.py:278",                            # VAULT_FACTS_ROOT, added by #2795
-    "eval/djev_name_prior_probe.py:647",  # now().astimezone(), added by cffd22e6
 })
 
 
@@ -4444,3 +4451,90 @@ def test_99_sits_in_the_tier_its_output_belongs_to():
     assert count is not None and int(count) == len(ids), (
         f"the writer tier counts {count} against {len(ids)} ids: its cell did not "
         f"move with #99, or #99 is listed twice")
+
+
+#: A clause of job 96's row that ties the report's calendar to the local zone: a
+#: word naming the key/stamp/filename, a copula or naming verb within 60 characters,
+#: and `local` within another 60, all inside one sentence-bounded clause. Matched
+#: with markdown emphasis stripped, so a regression cannot return by rewording or by
+#: hiding inside `*local*`, and a correct sentence cannot be missed because an author
+#: italicised a word in it. The review of SM_20261016_104300 sent back a ban written
+#: as three verbatim sentences, which bans typography rather than a claim — this is
+#: the shape those sentences were examples of.
+NAME_PRIOR_LOCAL_STAMP_CLAIM = re.compile(
+    r"\b(date key|date|stamp|filename|file)\b[^.;]{0,60}"
+    r"\b(is|are|was|were|keeps?|keys?|names?|derives?|taken|built)\b[^.;]{0,60}\blocal\b")
+
+#: … and the words that mark such a clause as HISTORY of the bug rather than a claim
+#: about the present — what lets the row keep explaining why the artefact on disk
+#: carries the wrong name after the code stopped producing it.
+NAME_PRIOR_LOCAL_STAMP_HISTORY = re.compile(
+    r"\bused to\b|\bprevious(?:ly)?\b|before #2820|until #2820")
+
+
+def test_the_name_prior_report_row_states_a_utc_date_key_and_keeps_its_four_tokens():
+    """#2820 clause 5: §Watch the machinery stops calling the date key local.
+
+    Two halves in one node, because the row is both the fleet's only prose about where
+    this job's artefact goes and the thing `WATCH_JOBS[96]` grades, and a rewrite could
+    plausibly satisfy either half while breaking the other.
+
+    Measured before this node existed, at the base it runs on: the row read "the stamp
+    is the probe's *local* date (…`when.date()`), so on this box the file is named one
+    UTC day behind its own run row and the weekly series does not join to `runs` on
+    date". After #2820 that is a description of a bug the code no longer has — and the
+    example is still on disk, because `name_prior_2026-10-11.json` stays mis-named (a
+    round must not mutate `~/lloyd-data`), so the row now states the UTC key and keeps
+    the superseded local key as history beside the filename that history produced.
+
+    The four tokens are what `WATCH_JOBS[96]` pins for every watch job and
+    `test_each_watch_entry_states_its_schedule_its_reads_its_writes_and_a_prohibition`
+    grades. Restating them here is deliberate: that grader is parametrised over all
+    eight watch jobs, so a rewrite of THIS row that quietly dropped a token would fail
+    there under a node named for no item, and this node is where a reader of #2820
+    would look.
+    """
+    row = _watch_row("#96")
+
+    # Half one, the ban: no clause of this row may claim the calendar is local…
+    for clause in re.split(r"[.;]", row):
+        if NAME_PRIOR_LOCAL_STAMP_CLAIM.search(clause.replace("*", "")):
+            assert NAME_PRIOR_LOCAL_STAMP_HISTORY.search(clause), (
+                "the #96 row says the report's date key is on the local calendar, the "
+                f"claim #2820 removed: {clause.strip()[:160]!r}")
+    # …and, positively, that the ban cannot be satisfied by a row that simply stopped
+    # talking about the calendar.
+    assert re.search(r"date key[^.;]{0,120}\bUTC\b", row), (
+        "the #96 row never says which calendar the date key — the report's filename "
+        "— is the run's day in; refusing the local claim is one half of clause 5, "
+        "naming the UTC one is the other")
+    assert "joins to `runs` on date" in row, (
+        "the row does not state the property the UTC key exists for. The pre-#2820 "
+        "wording was the negative ('does not join to'), which is exactly the claim "
+        "this node is here to fail on, so the positive is what has to be present")
+    assert "used to" in row, (
+        "the row dropped the superseded local key without keeping it as history, and "
+        "then `name_prior_2026-10-11.json` — mis-named, and staying so — is an "
+        "artefact the prose no longer explains")
+    assert "artefact can read as missing" in row, (
+        "the row lost the consequence that makes the off-by-one worth reading about: a "
+        "run whose report is named for the day before looks like a run that wrote "
+        "nothing, which is how the 2026-10-13 owed-check pass came to summarise a "
+        "directory of two runs as one report")
+    assert "eval/djev_name_prior_probe.py:" not in row, (
+        "the row cites the probe by `path:line` again. #2820 inserts a helper into the "
+        "file above the line `cffd22e6` cited, which is how that citation became a "
+        "false claim about the code while its sentence stayed true; name `build_report` "
+        "and `_now()` by symbol instead")
+
+    # Half two: the schedule cell and the three tokens, exactly as the shared grader
+    # reads them — the Freq cell equal, the rest substrings of the row.
+    freq, reads, writes, prohibition = WATCH_JOBS[96]
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    assert cells[1] == freq, (
+        f"the #96 row's Freq cell reads {cells[1]!r}, not {freq!r} — the rewrite that "
+        f"fixed the calendar claim also moved the schedule the task file declares")
+    for want in (reads, writes, prohibition):
+        assert want in row, (
+            f"the #96 row no longer contains {want!r}, one of the four tokens "
+            "`WATCH_JOBS[96]` pins and the per-job doc-claim grader requires")

@@ -419,6 +419,32 @@ class BadAnswer(Exception):
     pass
 
 
+def _now() -> dt.datetime:
+    """The run instant, in the box's local zone.
+
+    Local, and it stays local, because the timestamp in the report is meant to read the
+    same way the automod ledger beside it does. What must not be local is the DATE KEY
+    derived from it (#2820): the scheduled task runs this probe as its own process under
+    the box's zone while the `runs` row that records the run is stamped in UTC, so keying
+    the date off the zone used to name every report one UTC day behind its own run row.
+    On this box (-07:00), whose weekly slot completes just after 06:00Z, that left the
+    artefact on disk named `name_prior_2026-10-11.json` for a run whose row reads
+    2026-10-12T06:30Z — and it stays there, because a code round must not mutate
+    `~/lloyd-data`, so the owed-check pass reading the directory still sees that name
+    beside reports keyed correctly.
+
+    `build_report` takes its UTC date from this instant and keeps this object's offset
+    for the timestamp field. Three nodes pin that split from three directions, each in
+    the probe's test file: `test_the_date_key_is_the_utc_date_of_the_instant_not_the_local_one`
+    injects an instant whose local and UTC dates differ, so it holds on any box zone;
+    `test_the_stamp_follows_utc_in_a_real_process_under_a_fabricated_zone` reads a real
+    clock in a child process whose `TZ` is fabricated, which is the seam the scheduled
+    task actually crosses; and `test_generated_at_keeps_the_run_offset_when_the_date_key_moves_to_utc`
+    is what stops the fix succeeding by stamping UTC into the timestamp as well.
+    """
+    return dt.datetime.now().astimezone()
+
+
 def run(corpus: Sequence[Mapping], *, url: str, samples: int,
         timeout: float, log: Callable[[str], None] = print) -> list[dict]:
     """One row per prompt: argmax position per variant. Raises `Unreachable`
@@ -468,7 +494,13 @@ def build_report(rows: Sequence[Mapping], *, corpus_path: Path, corpus_kind: str
                      "build it with --build-corpus before citing these numbers.")
     return {
         "probe": PROBE, "schema_version": SCHEMA_VERSION,
-        "date": when.date().isoformat(),
+        # The calendar day is UTC and the timestamp below stays local, deliberately:
+        # the filename `report_path` builds from this field is how a report is joined
+        # to the `runs` row that records its run (#2820), and that row is UTC. So a
+        # report whose name and own timestamp disagree on the day are each right about
+        # what they mean — the name keys the UTC day, the timestamp reads the local
+        # one the way the automod ledger beside it does.
+        "date": when.astimezone(dt.timezone.utc).date().isoformat(),
         "generated_at": when.isoformat(timespec="seconds"),
         "engine": {"url": url, "samples": samples},
         "corpus": {"path": _rel(corpus_path), "kind": corpus_kind,
@@ -644,7 +676,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"engine answered out of shape: {exc} — no report written", file=sys.stderr)
         return 2
 
-    when = dt.datetime.now().astimezone()
+    # Through `_now`, not a direct `datetime.now()`: the CLI seam is the only way the
+    # unflagged path — the one the scheduled task runs with no `--date` — can be tested
+    # at a chosen instant, and a call written here directly is invisible to every
+    # monkeypatch of `_now` in the probe's test file, which is how a node pinning the
+    # UTC key ended up measuring this box's clock instead of the injected one.
+    when = _now()
     report = build_report(rows, corpus_path=corpus_path, corpus_kind=kind, url=url,
                           samples=args.samples, when=when)
     if args.date:

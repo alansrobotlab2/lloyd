@@ -9,6 +9,7 @@ to tell those apart, and it has to refuse to turn the last one into a number.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import shutil
@@ -553,3 +554,211 @@ def test_build_corpus_rebuilds_seam_states_from_shadow_meta(tmp_path):
     assert len(by["rank"]) == 2 and by["rank"][0]["state"].startswith("Query: how?")
     assert len(by["edges"]) == 1
     assert len({r["id"] for r in rows}) == len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Clause 1-4 (#2820) — the date KEY and the filename are the run's UTC date
+# ---------------------------------------------------------------------------
+
+#: An instant whose own-offset date and UTC date are different days, pinned to a fixed
+#: offset instead of read off the box. -07:00 is this box's offset (PDT), and 20:00
+#: there is 03:00Z the NEXT day: the local date is 2026-10-12, the UTC date 2026-10-13.
+#: Every node below injects this rather than calling `now().astimezone()`, because on a
+#: UTC-timezone box the real clock makes the old local-date key and the new UTC key
+#: agree, and a node built that way would pass without the fix.
+CROSSING = dt.datetime(2026, 10, 12, 20, 0, tzinfo=dt.timezone(dt.timedelta(hours=-7)))
+
+
+def _report_at(when: dt.datetime) -> dict:
+    """A report built from an injected instant: no engine, no write, no clock."""
+    return probe.build_report([], corpus_path=probe.PINNED_CORPUS,
+                              corpus_kind="pinned", url="http://127.0.0.1:1",
+                              samples=3, when=when)
+
+
+def test_the_date_key_is_the_utc_date_of_the_instant_not_the_local_one():
+    """#2820 clause 1. `build_report` stamped `date` with `when.date()`, which is the
+    date at the instant's OWN offset — 2026-10-11 for the run that completed
+    2026-10-12T06:31:09Z on this -07:00 box.
+
+    The key has to be the UTC date because it is what the file is named from (clause 2),
+    and the series of those filenames is what a person and the owed-check job join
+    against `runs.completed_at`, which is UTC.
+    """
+    assert CROSSING.date().isoformat() == "2026-10-12", (
+        "the instant stopped straddling the two calendars, so the nodes below would "
+        "pass on a fix that did nothing")
+    report = _report_at(CROSSING)
+    assert report["date"] == "2026-10-13", (
+        f"the date key is still the instant's own-offset date: report['date'] is "
+        f"{report['date']!r} for an instant that is 2026-10-12T20:00 at -07:00, i.e. "
+        f"2026-10-13T03:00Z")
+
+
+def test_an_unflagged_run_names_its_file_for_the_utc_day_of_its_own_run(monkeypatch,
+                                                                        tmp_path):
+    """#2820 clause 2, across the real write path: `main` → `build_report` →
+    `report_path` → a file on disk, with the clock injected at a day-straddling instant
+    and a scripted engine, so nothing here depends on the box's timezone or a live djev.
+
+    Before #2820 this wrote `name_prior_2026-10-12.json` for a run whose `runs` row
+    completes on the 13th — the off-by-one that made the artefact directory read as
+    "a run left no report" while two runs had written into one filename.
+    """
+    monkeypatch.setattr(probe, "_http", FakeEngine(follows_descriptions))
+    monkeypatch.setattr(probe, "_now", lambda: CROSSING)
+    out = tmp_path / "out"
+    code = probe.main(["--corpus", str(probe.FIXTURE_CORPUS), "--out-dir", str(out)])
+    assert code == 0, "the probe refused before writing anything"
+    assert [p.name for p in sorted(out.iterdir())] == ["name_prior_2026-10-13.json"], (
+        "the unflagged write path named its report for something other than the UTC "
+        f"day of the injected instant ({CROSSING.isoformat()} = 2026-10-13T03:00Z)")
+    written = out / "name_prior_2026-10-13.json"
+    report = json.loads(written.read_text())
+    assert report["date"] == "2026-10-13"
+    assert probe.report_path(out, report["date"]) == written, (
+        "the filename and the date key came apart, so reading the directory and "
+        "reading the report disagree about which day this run belongs to")
+    assert probe.validate_report(report) == []
+
+
+def test_generated_at_keeps_the_run_offset_when_the_date_key_moves_to_utc():
+    """#2820 clause 3: only the key moved. `generated_at` is the human-facing stamp and
+    serialises with the instant's own offset, so a -07:00 run still ends `-07:00` and no
+    committed report's meaning is invalidated by the fix.
+    """
+    report = _report_at(CROSSING)
+    assert report["generated_at"] == "2026-10-12T20:00:00-07:00", (
+        f"generated_at lost the run's own offset: {report['generated_at']!r}. "
+        f"Only `date` was allowed to change (#2820)")
+    assert dt.datetime.fromisoformat(report["generated_at"]) == CROSSING
+    assert report["date"] == "2026-10-13"
+
+
+def test_an_explicit_date_flag_still_overrides_the_derived_stamp(monkeypatch, tmp_path):
+    """#2820 clause 4: `--date` remains the last word over BOTH derivations.
+
+    The clock is the day-straddling instant, so a flag that lost its precedence would
+    produce the UTC filename here and the local one under the old code; either way the
+    flag's date has to win, which is what lets a back-dated run be written on purpose.
+    """
+    monkeypatch.setattr(probe, "_http", FakeEngine(follows_descriptions))
+    monkeypatch.setattr(probe, "_now", lambda: CROSSING)
+    out = tmp_path / "out"
+    code = probe.main(["--corpus", str(probe.FIXTURE_CORPUS), "--out-dir", str(out),
+                       "--date", "2026-09-24"])
+    assert code == 0, "the probe refused before writing anything"
+    assert [p.name for p in sorted(out.iterdir())] == ["name_prior_2026-09-24.json"]
+    assert json.loads((out / "name_prior_2026-09-24.json").read_text())["date"] == (
+        "2026-09-24")
+
+# ---------------------------------------------------------------------------
+# #2820 — the calendar the stamp is taken on, across the process boundary
+# ---------------------------------------------------------------------------
+
+#: `TZ` in the POSIX spelling, whose sign is INVERTED: `Etc/GMT-14` is UTC+14 and
+#: `Etc/GMT+12` is UTC-12. The pair is chosen so that whichever minute this suite runs
+#: at, one of the two zones is on a DIFFERENT calendar day from UTC: a +14 shift crosses
+#: local midnight when the UTC hour is 10 or later, a -12 shift when it is before 12, and
+#: those two windows tile the whole day. That is why the pair is a proof rather than a
+#: function of when CI happens to run. The zones are fabricated rather than this box's
+#: -07:00 on purpose — a node that trusted the box's zone passes vacuously on a box set
+#: to UTC, which is the trap #2820's triage named.
+UTC_AHEAD = "Etc/GMT-14"    # actually UTC+14
+UTC_BEHIND = "Etc/GMT+12"   # actually UTC-12
+
+#: What the child prints, in order: the instant `_now()` returns, that instant's own
+#: date, the report's `date` key, and the filename `report_path` builds from the key.
+_STAMP_UNDER_TZ = f"""
+import pathlib, sys
+sys.path.insert(0, {str(ROOT)!r})
+import eval.djev_name_prior_probe as p
+when = p._now()
+report = p.build_report([], corpus_path=p.PINNED_CORPUS, corpus_kind="pinned",
+                        url="http://127.0.0.1:1", samples=3, when=when)
+print(when.isoformat(timespec="seconds"))
+print(when.date().isoformat())
+print(report["date"])
+print(p.report_path(pathlib.Path(sys.argv[1]), report["date"]).name)
+"""
+
+
+@pytest.mark.parametrize("tz,offset", [(UTC_AHEAD, "+14:00"), (UTC_BEHIND, "-12:00")])
+def test_the_stamp_follows_utc_in_a_real_process_under_a_fabricated_zone(tmp_path,
+                                                                         tz, offset):
+    """#2820 clauses 1 and 2 where the bug lives: a separate process, the box's zone.
+
+    The review of SM_20261016_104300 named this seam — task #96 runs
+    `eval/djev_name_prior_probe.py` as its OWN process under the local zone, while the
+    `runs` row that records it is stamped in UTC — and an in-process monkeypatch of
+    `_now` cannot reach it: that tests this suite's handling of an injected object, not
+    libc reading `TZ` and `time.tzset` semantics in a fresh interpreter. So the child
+    imports the probe for real and reads a real clock.
+
+    Which of the two parametrised zones disagrees with UTC varies with the hour, and the
+    node says so out loud: the diverging branch additionally requires the key to be
+    NEITHER of the two candidate days the local zone could produce, so a reverted fix
+    fails on one branch at every hour of the day. `generated_at` keeping its offset is
+    clause 3's claim, asserted on the same instant so a "fix" that stamped UTC into the
+    timestamp as well cannot pass this node.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _STAMP_UNDER_TZ, str(tmp_path)],
+        env={**os.environ, "TZ": tz}, capture_output=True, text=True, timeout=120,
+        cwd=str(ROOT))
+    assert proc.returncode == 0, proc.stderr[-400:]
+    instant, own_offset_date, date_key, filename = proc.stdout.split()
+
+    assert instant.endswith(offset), (
+        f"under TZ={tz} the child reported {instant!r}, so the fabricated zone never "
+        f"reached its clock and this run measured the box's zone instead")
+    utc_date = dt.datetime.fromisoformat(instant).astimezone(
+        dt.timezone.utc).date().isoformat()
+    assert date_key == utc_date, (
+        f"under TZ={tz} a run at {instant} keyed its report {date_key} while its own "
+        f"instant is {utc_date} in UTC: the date key is the local calendar again, which "
+        f"is what named task #96's artefact one UTC day behind its own run row")
+    assert filename == f"name_prior_{utc_date}.json", (
+        f"{filename!r} does not follow the report's own UTC key {utc_date}")
+    assert instant[:19] == dt.datetime.fromisoformat(instant).replace(
+        tzinfo=None).isoformat(timespec="seconds"), (
+        f"the timestamp {instant!r} is not the local instant it claims")
+    if own_offset_date != utc_date:
+        assert date_key != own_offset_date, (
+            f"the key {date_key} equals the local date {own_offset_date}, so the "
+            f"agreement with UTC above is a coincidence of this hour")
+
+
+def test_the_file_the_cli_writes_names_the_utc_day_its_own_bytes_record(tmp_path,
+                                                                       monkeypatch):
+    """The end-to-end artefact: filename stem == `date` == UTC day of `generated_at`.
+
+    Not a comparison against a clock this test also reads — the three values are all
+    read back out of the one file the CLI wrote, which is the form the acceptance is
+    stated in ("a file in `~/lloyd-data/eval/djev/` is named for the same UTC day its
+    `runs` row completes on"). On a box whose local day currently equals UTC's this
+    passes on the pre-#2820 code too, so it is the shape check beside the deterministic
+    catch above, not a substitute for it; it would fail on the old code during the real
+    weekly slot, which is the hours where this box's date and UTC's differ.
+    """
+    monkeypatch.setattr(probe, "_http", FakeEngine(follows_descriptions))
+    out = tmp_path / "out"
+    code = probe.main(["--corpus", str(probe.FIXTURE_CORPUS), "--out-dir", str(out)])
+    assert code == 0, "the probe refused before writing anything"
+    written = sorted(out.glob("name_prior_*.json"))
+    assert len(written) == 1, f"an unflagged run wrote {len(written)} reports"
+    report = json.loads(written[0].read_text())
+    stem = written[0].name[len("name_prior_"):-len(".json")]
+    assert stem == report["date"], (
+        f"{written[0].name} carries date {report['date']!r}: the name and the field "
+        f"disagree about the day this report is keyed to")
+    generated = dt.datetime.fromisoformat(report["generated_at"])
+    assert generated.utcoffset() is not None, (
+        f"generated_at {report['generated_at']!r} is naive, so the artefact cannot be "
+        f"joined to a UTC `runs` row from its own bytes")
+    assert stem == generated.astimezone(dt.timezone.utc).date().isoformat(), (
+        f"{written[0].name} was generated at {report['generated_at']}, a UTC day of "
+        f"{generated.astimezone(dt.timezone.utc).date()} — the filename is not that day")
+    assert probe.validate_report(report) == [], (
+        "the UTC key broke the report against its own schema, which would make every "
+        "reader of the weekly series treat the run as malformed")
