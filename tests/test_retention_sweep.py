@@ -7015,6 +7015,9 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
     the table and nowhere else: the constant name, the 30-day window, and that age comes from
     the run tag. Exactly one row may carry the glob, and the description and body both say
     nineteen, which is the count the report now prints in both modes.
+
+    #2793 widened WHAT the one row has to state, not how many rows there are: the hold's NAME
+    SHAPE as the deliberate route, and the 90d hold-ruling count beside it.
     """
     # The same path the module's other skill nodes read, and the same skip they take when
     # it is unreachable — under the suite `rs.vault_root()` is the fixture's mirrored vault,
@@ -7036,6 +7039,18 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
     assert "FACTS_QUARANTINE_MAX_AGE_DAYS" in body, body[:200]
     assert "(30)" in body, body[:200]
     assert "run tag" in body.lower() and "held" in body.lower(), body[:400]
+    # #2793's half of the same row. The row already OBSERVED that a name whose tag cannot
+    # be parsed is held forever; what it did not state is the two things an operator can
+    # only infer from behaviour if the table is silent about them: what to NAME a directory
+    # in order to hold one (the prefix plus any text that is not a valid instant), and that
+    # a hold past 90 days is COUNTED as asking for a ruling. Each token is quoted exactly as
+    # the row must word it, and the count exactly as the report line prints it, so a looser
+    # paraphrase of the rule reddens this instead of quietly passing on the old row.
+    assert "facts-quarantine-manual-hold" in body, body[:400]
+    assert "not a valid utc instant" in body.lower(), body[:400]
+    assert "FACTS_QUARANTINE_HOLD_RULING_DAYS" in body, body[:400]
+    assert "N held past 90d (ruling due)" in body, body[:400]
+    assert "not a deletion horizon" in body.lower(), body[:400]
     # The row and the line have to agree, and only the shipped pair can prove it: the store
     # name the row leads with is the label the report line prints.
     _assert_table_rows_match_report(_skill_table_rows(text), _store_report,
@@ -7127,6 +7142,228 @@ def test_the_report_names_every_in_window_quarantine_with_the_date_it_dies(rs):
     assert f"{held.name} " in line and "(run tag is not a parseable instant)" in line, line
     assert gone.name not in {d["name"] for d in report["in_window_dirs"]}, report
     assert not report["removed"], "a dry run deleted something"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #2793: a facts-quarantine HOLD is a name, and a name carries no death date. Ruled
+# 2026-10-15 on #2585's owed entry 3 — the unparseable-run-tag hold STAYS as the
+# sanctioned hold for `facts-quarantine-*`, and what it was owed was age visibility:
+# `FACTS_QUARANTINE_HOLD_RULING_DAYS` (90) counted onto the report line as
+# `N held past 90d (ruling due)`, mirroring `due_ruling` beside
+# `BRANCH_UNREACHABLE_HOLD_DAYS` on the automod-branch store. Every node below is
+# therefore a claim about a number that is only ever reported: the seeds are HELD
+# directories (a name whose tag is not an instant), so a rung that deleted one would be
+# a new selection rule, and the threshold's own node moves the figure to prove the line
+# follows it and the delete does not.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fq_held_segment(line: str) -> str:
+    """The `held, never deleted:` segment of one quarantine line, and nothing else.
+
+    Folded and split the way the dry-run node above folds it (` — ` to `; `), so a node
+    that means to talk about the held NAMES cannot be quoting the in-window dates or the
+    ruling count by accident.
+    """
+    segs = [s for s in line.replace(" — ", "; ").split("; ")
+            if s.startswith("held, never deleted: ")]
+    assert len(segs) == 1, f"expected exactly one held segment in: {line}"
+    return segs[0]
+
+
+def test_one_held_directory_past_the_ruling_threshold_is_counted_and_the_younger_one_is_not(rs):
+    """Clauses 1 and 2 of #2793: the count appears for the over-90d hold, and reads exactly 1.
+
+    Seeded as the acceptance check names it — `facts-quarantine-manual-hold` at 200 days and
+    `facts-quarantine-fresh-hold` at 10, both unparseable tags, so both sit in `held` for the
+    same reason and differ in nothing but age. The count is asserted as the exact string the
+    check quotes, built beside the module's own constant so a threshold moved in the source
+    moves the assertion instead of reddening a line that still agrees with the code; the
+    NUMBER is pinned to 1, not merely present, which is what separates a count from a flag.
+    The held NAMES segment is asserted unchanged as well, because the clause that adds a
+    count is the same clause that must not touch the segment that already works.
+    """
+    old = _fq_seed(rs, "facts-quarantine-manual-hold",
+                   mtime_days_ago=rs.FACTS_QUARANTINE_HOLD_RULING_DAYS + 110)
+    young = _fq_seed(rs, "facts-quarantine-fresh-hold", mtime_days_ago=10)
+    assert rs.FACTS_QUARANTINE_HOLD_RULING_DAYS == 90, rs.FACTS_QUARANTINE_HOLD_RULING_DAYS
+
+    p = rs.sweep_facts_quarantine(False, rs.time.time())
+    line = rs._facts_quarantine_line(p)
+
+    want = f"1 held past {rs.FACTS_QUARANTINE_HOLD_RULING_DAYS}d (ruling due)"
+    assert want in line, line
+    assert line.count(f"held past {rs.FACTS_QUARANTINE_HOLD_RULING_DAYS}d (ruling due)") == 1, line
+    # The figure was computed from the ages the report already carried: 200.0 and 10.0, the
+    # same tenths `sweep_facts_quarantine` rounds into `held[i]["age_days"]`.
+    assert {h["name"]: h["age_days"] for h in p["held"]} == {
+        old.name: 200.0, young.name: 10.0}, p["held"]
+    seg = _fq_held_segment(line)
+    for d in (old, young):
+        assert (f"{d.name} {rs._bytes_under(d) / 1024:.0f} KiB "
+                f"(run tag is not a parseable instant)") in seg, (seg, d.name)
+    assert "held past" not in seg, f"the count belongs in its own segment: {seg}"
+    assert old.is_dir() and young.is_dir(), "a dry run deleted a held directory"
+
+
+def test_the_ruling_count_covers_every_held_directory_and_not_just_the_named_ones(rs):
+    """The count spans the whole held set while the NAMES stay capped by `FACTS_QUARANTINE_NAMES_SHOWN`.
+
+    Six holds past the threshold is deliberately more than the printed window: it is the one
+    state where the two numbers can disagree, because a count computed from the capped list
+    would read 5 against a store holding 6. This file already states the rule for the
+    candidate list — the names are bounded because they grow with the runs, the count beside
+    them never lies — and the new figure has to follow it, since a count taken from a
+    truncated list is the exact shape of every number on this report that has lied.
+    """
+    n = rs.FACTS_QUARANTINE_NAMES_SHOWN + 1
+    for i in range(n):
+        _fq_seed(rs, f"facts-quarantine-hold-{i + 1:02d}",
+                 mtime_days_ago=rs.FACTS_QUARANTINE_HOLD_RULING_DAYS + 5)
+
+    p = rs.sweep_facts_quarantine(False, rs.time.time())
+    line = rs._facts_quarantine_line(p)
+
+    assert len(p["held"]) == n, p["held"]
+    assert f"{n} held past {rs.FACTS_QUARANTINE_HOLD_RULING_DAYS}d (ruling due)" in line, line
+    assert f"+{n - rs.FACTS_QUARANTINE_NAMES_SHOWN} more" in _fq_held_segment(line), line
+
+
+def test_a_held_directory_with_no_readable_age_is_never_counted_toward_the_ruling(
+        rs, monkeypatch, tmp_path):
+    """Clause 3 of #2793: `no age readable` is not an age, so nothing can be overdue on it.
+
+    `age_days` is None on exactly one path — `stat()` raised — and for the name that path
+    belongs to, the bare `facts-quarantine-` prefix whose only age source is the mtime, the
+    report says `no age readable` beside it. No filesystem state a test can seed reproduces
+    the raise through the glob: `is_dir()` has to succeed first, and the parent's execute bit
+    that lets it is the same bit `stat()` needs. So the age source is WRAPPED, not replaced —
+    the real function answers for every directory but the named one, and for that one the fake
+    hands back the exact tuple the module's own `except OSError` branch returns for that name,
+    `(None, "mtime")`. Two things then have to hold apart: with a 200-day hold beside it the
+    count is still 1 and not 2, and holding nothing else the store prints its hold and says
+    nothing about a ruling — an unreadable age must not silently become a zero, which would
+    read as "nothing is overdue" about a directory nobody can date.
+    """
+    real = rs.facts_quarantine_age
+
+    def aged_once(path, now=None):
+        if path.name == rs.FACTS_QUARANTINE_PREFIX:
+            return None, "mtime"
+        return real(path, now)
+
+    monkeypatch.setattr(rs, "facts_quarantine_age", aged_once)
+    _fq_seed(rs, "facts-quarantine-manual-hold",
+             mtime_days_ago=rs.FACTS_QUARANTINE_HOLD_RULING_DAYS + 110)
+    ageless = _fq_seed(rs, rs.FACTS_QUARANTINE_PREFIX)
+
+    p = rs.sweep_facts_quarantine(False, rs.time.time())
+    line = rs._facts_quarantine_line(p)
+    no_age = [h for h in p["held"] if h["name"] == ageless.name]
+    assert len(no_age) == 1 and no_age[0]["age_days"] is None, p["held"]
+    assert no_age[0]["why"] == "no age readable", no_age
+    assert f"1 held past {rs.FACTS_QUARANTINE_HOLD_RULING_DAYS}d (ruling due)" in line, line
+    assert f"2 held past {rs.FACTS_QUARANTINE_HOLD_RULING_DAYS}d" not in line, line
+
+    alone = tmp_path / "only-an-ageless-hold"
+    alone.mkdir()
+    monkeypatch.setattr(rs, "FACTS_QUARANTINE_ROOT", alone)
+    _fq_seed(rs, rs.FACTS_QUARANTINE_PREFIX)
+    alone_line = rs._facts_quarantine_line(rs.sweep_facts_quarantine(False, rs.time.time()))
+    assert "held, never deleted: " in alone_line, alone_line
+    assert "no age readable" in alone_line, alone_line
+    assert "held past" not in alone_line, alone_line
+
+
+def test_an_apply_pass_deletes_neither_hold_whatever_their_age(rs):
+    """Clause 4 of #2793: two hundred days of hold is still zero deletes, and the line says so.
+
+    `--apply` over a tree holding one directory past the ruling threshold and one inside it:
+    `removed` stays 0, `freed` stays 0, the candidate set stays empty, and the file
+    fingerprint under the store root comes out identical to the one taken before the run —
+    the assertion that catches an `rmtree` aimed at the wrong list, which no count assertion
+    can see. The apply-mode line is asserted with it, because the run nobody watches is the
+    one whose stdout is all anyone ever reads: the count has to survive the verb moving from
+    `candidate` to `freed`, and the two lines must still differ in that verb alone.
+    """
+    old = _fq_seed(rs, "facts-quarantine-manual-hold",
+                   mtime_days_ago=rs.FACTS_QUARANTINE_HOLD_RULING_DAYS + 110)
+    young = _fq_seed(rs, "facts-quarantine-fresh-hold", mtime_days_ago=10)
+    before = _fq_fingerprint(rs.FACTS_QUARANTINE_ROOT)
+
+    dry_line = rs._facts_quarantine_line(rs.sweep_facts_quarantine(False, rs.time.time()))
+    p = rs.sweep_facts_quarantine(True, rs.time.time())
+    apply_line = rs._facts_quarantine_line(p)
+
+    assert p["removed"] == 0 and p["freed"] == 0 and p["candidates"] == [], p
+    assert old.is_dir() and young.is_dir(), "an --apply pass deleted a held directory"
+    assert _fq_fingerprint(rs.FACTS_QUARANTINE_ROOT) == before, "an --apply pass pruned the store"
+    count = f"1 held past {rs.FACTS_QUARANTINE_HOLD_RULING_DAYS}d (ruling due)"
+    assert count in dry_line and count in apply_line, (dry_line, apply_line)
+    assert apply_line == dry_line.replace(" KiB candidate", " KiB freed"), (dry_line, apply_line)
+
+
+def test_the_ruling_threshold_is_defined_by_the_report_and_read_by_nothing_that_deletes():
+    """Clause 1's second half: `FACTS_QUARANTINE_HOLD_RULING_DAYS` is a report figure, not a rule.
+
+    The risk the item names is the obvious drift — a number printed beside a hold becomes
+    the horizon for a hold — so this reads the SHIPPED file's syntax rather than the
+    redirected module. The constant is assigned once, at module level, to the literal 90;
+    the only function whose body LOADS the name is `_facts_quarantine_line`, which is the
+    formatter and calls no delete; and the horizon that does select a delete is untouched at
+    `FACTS_QUARANTINE_MAX_AGE_DAYS` = 30. A later edit wiring the 90 into the selection
+    comparison reddens this node and nothing else, which is the point: "report-only" is a
+    claim about who reads the constant, and that is a fact about the file.
+    """
+    import ast
+
+    name = "FACTS_QUARANTINE_HOLD_RULING_DAYS"
+    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+    values = [node.value for node in tree.body
+              if isinstance(node, ast.Assign)
+              and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)]
+    assert len(values) == 1, f"{name} is assigned {len(values)} times in {_SCRIPT}"
+    assert isinstance(values[0], ast.Constant) and values[0].value == 90, values[0]
+    readers = sorted({node.name for node in ast.walk(tree)
+                      if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      and any(isinstance(n, ast.Name) and n.id == name
+                              for n in ast.walk(node))})
+    assert readers == ["_facts_quarantine_line"], (f"{name} is read by {readers}", )
+
+    fresh_spec = importlib.util.spec_from_file_location("rs_report_only_probe", _SCRIPT)
+    fresh_mod = importlib.util.module_from_spec(fresh_spec)
+    fresh_spec.loader.exec_module(fresh_mod)
+    assert fresh_mod.FACTS_QUARANTINE_HOLD_RULING_DAYS == 90
+    assert fresh_mod.FACTS_QUARANTINE_MAX_AGE_DAYS == 30, "the deletion horizon moved"
+
+
+def test_moving_the_ruling_threshold_moves_the_count_and_cannot_move_the_delete(rs,
+                                                                               monkeypatch):
+    """The report-only claim tested where it matters: change the figure and watch the deleter not notice.
+
+    One seeded store holds BOTH ages at once — a hand-named directory 200 days old and a
+    tag-named directory 10 days past `FACTS_QUARANTINE_MAX_AGE_DAYS`, so both figures are
+    exceeded by both directories. The threshold is then set beyond every age (100000d: the
+    count must vanish) and at zero (the count must appear), each time through a real
+    `--apply`. `removed` is 1 in both cases and it is the TAGGED directory both times, and
+    the hold is still standing: that is the only way to prove a number reaches no delete,
+    because a grep only proves what the file says today.
+    """
+    horizon = rs.FACTS_QUARANTINE_MAX_AGE_DAYS
+    ruling = rs.FACTS_QUARANTINE_HOLD_RULING_DAYS
+    assert ruling == 90, ruling
+
+    for offset, threshold, expect_count in ((0, 100000, False), (3, 0, True)):
+        monkeypatch.setattr(rs, "FACTS_QUARANTINE_HOLD_RULING_DAYS", threshold)
+        tagged = _fq_seed(rs, f"facts-quarantine-{_fq_tag(rs, horizon + 10 + offset)}")
+        held = _fq_seed(rs, f"facts-quarantine-manual-hold-{offset}",
+                        mtime_days_ago=ruling + 110)
+
+        p = rs.sweep_facts_quarantine(True, rs.time.time())
+        line = rs._facts_quarantine_line(p)
+
+        assert p["removed"] == 1 and p["candidates"][0]["name"] == tagged.name, (threshold, p)
+        assert held.is_dir(), f"the threshold reached the delete at {threshold}"
+        assert ("held past" in line) is expect_count, (threshold, line)
 
 
 def test_the_unattended_run_prints_the_date_it_is_acting_on(tmp_path):

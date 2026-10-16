@@ -2832,6 +2832,22 @@ FACTS_QUARANTINE_ROOT = DATA_ROOT / "_pipeline" / "vault-derived"
 #: tree that had just gone past its horizon; the count printed beside it never lies.
 FACTS_QUARANTINE_NAMES_SHOWN = 5
 
+#: Past how many days a HELD quarantine directory is counted as overdue for a ruling.
+#: #2793, the third owed entry of #2585, which ruled on 2026-10-15 that the
+#: unparseable-run-tag hold stays as the sanctioned way to hold a `facts-quarantine-*`
+#: directory and that what it was owed was age visibility, not removal — a hold nobody
+#: can see the age of is a hold nobody is ever asked to end.
+#:
+#: A REPORTING THRESHOLD, not a deletion horizon, exactly like
+#: `BRANCH_UNREACHABLE_HOLD_DAYS` above: the only thing it does is append
+#: `N held past 90d (ruling due)` to the report line, and no delete path reads this
+#: number. Selection stays what it has been — the delete reaches a quarantine only on an
+#: age its own name states — so a directory named past this threshold at 900d is still
+#: standing, and still counted. An entry with no readable age is never counted toward it:
+#: `no age readable` is not a young directory, and a directory with no age has no age for
+#: anyone to rule on.
+FACTS_QUARANTINE_HOLD_RULING_DAYS = 90
+
 
 def facts_quarantine_age(path: Path, now: float | None = None) -> tuple[float | None, str]:
     """(age in days, where the age came from) for one quarantine directory.
@@ -2981,6 +2997,13 @@ def _facts_quarantine_line(p: dict) -> str:
     diff them word for word and see only the verb move. The names are the point: a
     count and a byte total bound a store, but it is the name that says WHICH quarantine
     run, and this is the one line whose delete takes a whole superseded fact tree.
+
+    #2793 adds one segment to the held case and changes no other token: `N held past 90d
+    (ruling due)`, printed only when some held directory's reported age is past
+    `FACTS_QUARANTINE_HOLD_RULING_DAYS`. It is absent, not zero, when nothing is overdue,
+    so a week's line differs from last week's only when a hold has actually aged past the
+    threshold — and the `held, never deleted` segment above it keeps printing its names,
+    bytes and reasons exactly as it did.
     """
     verb = "freed" if p["apply"] else "candidate"
     count = p["removed"] if p["apply"] else len(p["candidates"])
@@ -2998,6 +3021,22 @@ def _facts_quarantine_line(p: dict) -> str:
         if len(p["held"]) > FACTS_QUARANTINE_NAMES_SHOWN:
             held.append(f"+{len(p['held']) - FACTS_QUARANTINE_NAMES_SHOWN} more")
         notes.append("held, never deleted: " + ", ".join(held))
+        # #2793: the hold's AGE, which until now existed in the report dict
+        # (`held[i]["age_days"]`, computed for the line and thrown away by it) and nowhere
+        # a person read it. Counted over every held entry and not over the capped names
+        # above — `FACTS_QUARANTINE_NAMES_SHOWN` bounds the names because those grow with
+        # the runs, and the count beside them never lies, which is the same rule the
+        # candidate list follows. An entry whose age could not be read is excluded on
+        # purpose: `age_days` is None only where `stat()` raised — `no age readable` on the
+        # bare-prefix name that has no other age source — and a directory with no age has no
+        # age for a ruling to be due on. Counting it would put a figure on the line that the
+        # sweep cannot justify, which is the failure the whole store is written against.
+        # Nothing here selects or deletes: `held` is by construction the never-delete set.
+        due = sum(1 for h in p["held"]
+                  if h.get("age_days") is not None
+                  and h["age_days"] > FACTS_QUARANTINE_HOLD_RULING_DAYS)
+        if due:
+            notes.append(f"{due} held past {FACTS_QUARANTINE_HOLD_RULING_DAYS}d (ruling due)")
     quiet = []
     if p["in_window"]:
         # #2585: the directory names and their dates, not a bare count. `FACTS_QUARANTINE_NAMES_SHOWN`
