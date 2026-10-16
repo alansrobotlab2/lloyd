@@ -45,6 +45,20 @@ row that uses the bare spelling, in a doc whose sibling architecture files all
 spell the prefix the same bare way. The shorthand tests keep exactly one
 definition, place it above every bare use, and make it point at [[data-home]],
 which already owns the root-move rule (`architecture/data-home.md:33-34`).
+
+A third contract joined with #2805 (2026-10-16): a job that has run must not be
+described in live prose as one that never ran. §Watch the machinery stated that
+#97 had never run and that its journal did not exist, two days after its first
+nightly run had appended a row — a paragraph written from the skill and the
+module's docstring, which is what it said itself, instead of from the artefact the
+job had by then produced. The rule the four nodes at the foot of this file hold is
+therefore about *form*: an undated never-run claim is unfalsifiable until it rots,
+so every one in live prose has to carry the date it was measured and the command
+that re-derives it, and a superseded claim survives only inside a dated §Review log
+entry. No node here asserts a run count: #97 and #98 fire daily, so any number
+typed into a test is false the next morning — which is the same reason the doc
+dates its counts, and why the owed-check re-reads the count instead of a test
+freezing it.
 """
 
 from __future__ import annotations
@@ -3750,3 +3764,229 @@ def test_the_runner_definition_orders_snapshot_then_apply_then_the_scan():
         f"the task's own `description` orders the steps as {said}, and that field is "
         f"rendered into the prompt beside the skill, so the two definitions have to "
         f"agree on the order rather than merely both be present")
+
+
+# ── #2805 — a job that has run is not a job that never ran ────────────────────
+
+#: A never-run claim, in either tense this doc writes it in. The claim is not
+#: forbidden — #98's was true on 2026-10-16 — only the *undated* one is: both jobs
+#: fire daily, so the sentence is false the morning after it is written and nothing
+#: on the page says when it was worth reading. "never been bound to disk" (:158,
+#: :462) is deliberately outside this: it describes a count, not a job.
+_NEVER_RUN = r"\bhas never run\b|\bnever ran\b|\bnever runs\b|\bhas never been run\b"
+
+#: The two halves of the 2026-10-12 statement #2805 retires — the module's creation
+#: timestamp and its absence from disk — spelled to catch either tense, because the
+#: §Review log keeps it in the past and live prose may hold neither.
+_SUPERSEDED_97_CLAIM = (
+    r"created at 19:52Z",
+    r"\b(?:does|did) not exist on disk\b",
+)
+
+#: A period ends a sentence only where whitespace follows it, so the three
+#: spellings here whose periods sit inside a path — `retag_untagged_facts.py`,
+#: `~/lloyd-data/workers.db`, `~/.local/state/` — do not end one. The two extra
+#: lookbehinds are the doc's other habit: it bolds whole lead-in sentences, and
+#: `not this page's.** The defect` is a sentence boundary that a plain `[.!?]`
+#: split reads as one sentence, quietly lending a claim a date it does not carry.
+_SENT_SPLIT = re.compile(
+    r"(?:(?<=[.!?])|(?<=[.!?][*_`])|(?<=[.!?][*_`]{2}))\s+"
+)
+
+
+def _live_sentences() -> list[str]:
+    """Live prose as sentences. Table rows are dropped: a cell is not a sentence,
+    and both membership tables are pinned by their own nodes above."""
+    body = "\n".join(ln for ln in _live_prose().splitlines()
+                     if not ln.lstrip().startswith("|"))
+    return [s.strip() for s in _SENT_SPLIT.split(_flat(body)) if s.strip()]
+
+
+def _undated_never_run(sentence: str) -> bool:
+    """True for a sentence that says some `#N` never ran without saying when, or
+    how to re-check it.
+
+    The re-derivation half is `select count(*) from runs where task_id=N` naming one
+    of the ids in the sentence — the command the doc already uses for exactly this
+    at §Watch the machinery — because a date alone only marks the claim as rotting,
+    while the command is what lets the next pass settle it in one query.
+    """
+    ids = re.findall(r"#(\d+)", sentence)
+    if not ids or not re.search(_NEVER_RUN, sentence, re.I):
+        return False
+    dated = re.search(r"\b20\d\d-\d\d-\d\d\b", sentence)
+    commanded = any(f"select count(*) from runs where task_id={i}" in sentence
+                    for i in ids)
+    return not (dated and commanded)
+
+
+def _watch_section() -> str:
+    """§Watch the machinery, up to the next `##` heading, as written (not flat)."""
+    after = _text().split("## Watch the machinery", 1)
+    assert len(after) == 2, (
+        "architecture/autonomy-jobs.md has no §Watch the machinery section — clause 1 "
+        "names that section as where #97's record belongs")
+    return re.split(r"\n## ", after[1], 1)[0]
+
+
+def _watch_paragraph(marker: str) -> str:
+    """The §Watch the machinery paragraph carrying `marker`, prose flattened."""
+    for para in _watch_section().split("\n\n"):
+        if marker in _flat(para):
+            return _flat(para)
+    raise AssertionError(
+        f"no §Watch the machinery paragraph contains {marker!r}; the confirmed record "
+        "has to sit in the section whose table row it confirms")
+
+
+def _review_log_entries() -> list[tuple[str, str]]:
+    """§Review log as `(first line, flattened body)` per bullet.
+
+    The first line stays a line rather than joining the body because it is what
+    carries the entry's date, and clause 2 is about an entry whose *own line* begins
+    with that date — flattening it away is what let the 2026-10-12 count survive as
+    "the day this was written".
+    """
+    entries: list[str] = []
+    for line in _review_log().splitlines():
+        if re.match(r"^\s*[-*] ", line):
+            entries.append(line)
+        elif entries:
+            entries[-1] += "\n" + line
+    return [(e.splitlines()[0], _flat(e)) for e in entries]
+
+
+def test_no_live_sentence_reports_97_as_never_run_and_the_record_names_its_command():
+    """Clause 1. §Watch the machinery said #97 had never run and that its journal
+    did not exist on disk, and named the skill and the module's `record()` docstring
+    as the sources of its reads and writes — an admission, it turned out, that the
+    row had been written before the job had anything to be read against.
+
+    Both claims are now retired from live prose, and the replacement paragraph has to
+    be the thing that can be re-checked: the command, the store it runs over, the
+    journal, the first run's UTC timestamp, and a count written as a dated one. The
+    count itself is asserted as a *shape* and never as a number — #97 fires daily at
+    ~08:0xZ, so the figure measured on 2026-10-16 is one run stale the next morning,
+    and freezing it would rebuild the exact rot this item exists to close.
+    """
+    offending = [s for s in _live_sentences()
+                 if re.search(r"#97\b", s) and re.search(_NEVER_RUN, s, re.I)]
+    assert not offending, (
+        f"live prose reports #97 as never having run again: {offending} — its first run "
+        f"was 2026-10-13T08:06:10Z, so the claim is false today and the only place it "
+        f"may survive is a dated §Review log entry")
+
+    missing = [s for s in _live_sentences()
+               if "landed_outcomes.jsonl" in s
+               and re.search(r"\b(?:does|did) not exist\b|\bis absent\b", s, re.I)]
+    assert not missing, (
+        f"live prose still reports the landed-outcomes journal as absent from disk: "
+        f"{missing} — #97's `--record` run appends a row to it every night")
+
+    para = _watch_paragraph("select count(*) from runs where task_id=97")
+    assert "~/lloyd-data/workers.db" in para, (
+        "the confirmed record does not name the store its own command reads, so a "
+        "reader who finds the count stale has nowhere to re-derive it from")
+    assert "~/.local/state/lloyd-automod/landed_outcomes.jsonl" in para, (
+        "the confirmed record does not name the journal it says holds a row per run")
+    assert re.search(r"\b\d+ runs? as of 20\d\d-\d\d-\d\d\b", para), (
+        "the run count is not written as a dated count ('N runs as of YYYY-MM-DD'); a "
+        "bare number is false the morning after the job next fires")
+    assert re.search(r"\b20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d", para), (
+        "the record carries no first run's UTC timestamp, so the dated count has no "
+        "starting point and no way to tell a fresh series from a resumed one")
+
+
+def test_the_superseded_2026_10_12_97_claim_survives_only_in_a_dated_review_log_entry():
+    """Clause 2, both directions. The retired statement was a true measurement of
+    2026-10-12, so clause 2 moves it into §Review log rather than deleting it — and
+    the 2026-10-12 entry that carried the nearest thing to it said only "was 0 the
+    day this was written", a relative date, which is how a superseded claim comes to
+    read as a current one.
+
+    So the claim must be gone from live prose, present in the log, and held by an
+    entry that opens with its own absolute date.
+    """
+    live_hits = [m.group(0) for m in
+                 (re.search(p, _flat(_live_prose()), re.I) for p in _SUPERSEDED_97_CLAIM)
+                 if m]
+    assert not live_hits, (
+        f"live prose carries the retired 2026-10-12 statement again ({live_hits}); the "
+        "artefact contradicts it, and only a dated §Review log entry may hold it")
+
+    entries = _review_log_entries()
+    holding = [(first, body) for first, body in entries
+               if any(re.search(p, body, re.I) for p in _SUPERSEDED_97_CLAIM)]
+    assert holding, (
+        "the retired 2026-10-12 statement is nowhere in §Review log: clause 2 says it "
+        "moves there, not that it is deleted — the 2026-10-12 pass recorded a real "
+        "measurement, and a reader of that pass needs to see what held on its day")
+    for first, _body in holding:
+        assert re.match(r"^\s*[-*]\s*\*\*\s*20\d\d-\d\d-\d\d", first), (
+            f"an entry holding the retired claim does not open with its own date: "
+            f"{first!r} — 'the day this was written' is not a date, which is the "
+            f"convention this item is enforcing")
+
+
+def test_the_owed_sentence_kept_the_three_open_items_and_dropped_97():
+    """Clause 3. The §Review log's "What is still owed on this document" sentence
+    closed with #97's row "above that cannot be confirmed until its job has run".
+    The journal is the confirmation, so that half comes out — while #2631's
+    reconciler, #2632's stale `model:` and #2633's citation form all stay named,
+    because none of the three has landed and an owed sentence that loses an item on
+    the way to editing itself is how an open defect becomes invisible.
+    """
+    m = re.search(r"What is still owed on this document:(.*?)\.",
+                  _flat(_review_log()), re.S)
+    assert m, (
+        "§Review log no longer carries a 'What is still owed on this document' "
+        "sentence, so there is nothing left to check the owed list against")
+    owed = m.group(1)
+    assert "cannot be confirmed" not in owed, (
+        f"the owed sentence still holds the 'cannot be confirmed until its job has "
+        f"run' half: {owed.strip()!r}")
+    assert "#97" not in owed, (
+        f"the owed sentence still names #97: {owed.strip()!r} — its reads and writes "
+        f"are confirmed against the journal now, which is the whole of clause 3")
+    for still_open in ("#2631", "#2632", "#2633"):
+        assert still_open in owed, (
+            f"the owed sentence dropped {still_open}, which no round has landed — "
+            f"clause 3 keeps the three open items named: {owed.strip()!r}")
+
+
+def test_a_live_never_run_claim_about_a_job_id_carries_its_date_and_its_command():
+    """Clause 4, the general rail. §Canonicalize says of #98 that the repair script
+    "has been able to repair them since 2026-10-13 and has never run" — true, with
+    `count(*) where task_id=98` = 0 measured on 2026-10-16, and true-but-undated for
+    the never-run half: the 2026-10-13 date belongs to the capability, not to the
+    count, and no command was named to re-derive it.
+
+    That is the shape this node forbids everywhere in live prose, which is why
+    #98's sentence had to acquire both. #99 also has 0 runs and states no never-run
+    claim, so it is untouched — the rail is on the sentence form, not on any
+    particular job, and it is checked against a probe as well as against the doc so
+    that a predicate which stopped matching anything cannot pass as clean prose.
+    """
+    assert _undated_never_run("#42 has never run, because the box was rebuilt."), (
+        "the predicate no longer flags an undated never-run claim, so this node "
+        "cannot fail and the rail is decorative")
+    assert not _undated_never_run(
+        "#42 has never run as of 2026-10-16 "
+        "(`select count(*) from runs where task_id=42` over `~/lloyd-data/workers.db` "
+        "was 0 that day)."), (
+        "the predicate rejects a never-run claim that does carry its date and its "
+        "count command, which is the form clause 4 asks for")
+
+    sentences = _live_sentences()
+    assert any(re.search(_NEVER_RUN, s, re.I) for s in sentences), (
+        "no live sentence makes a never-run claim at all, so the scan below is "
+        "weighing an empty set — either §Canonicalize lost #98's sentence, in which "
+        "case re-read it, or §Watch the machinery has been emptied")
+
+    offenders = [s for s in sentences if _undated_never_run(s)]
+    assert not offenders, (
+        f"{len(offenders)} live sentence(s) say a job never ran without both a "
+        f"measurement date and the command that re-derives the count: {offenders}. "
+        f"Write it as '#N has never run as of YYYY-MM-DD (`select count(*) from runs "
+        f"where task_id=N` over `~/lloyd-data/workers.db` was 0 that day)' — these "
+        f"jobs fire daily, so an undated count is stale before the next reader.")

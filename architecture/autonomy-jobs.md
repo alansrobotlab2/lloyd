@@ -761,8 +761,10 @@ first automatic apply merged, and a revert then undid, are why the line sits at
 page's.** The defect it fixes is the one the measurement rail can count and no
 job repaired: fact records stored with an empty `entity`, which fall out of
 entity recall while the file still looks healthy. `scripts/memory/retag_untagged_facts.py`
-has been able to repair them since 2026-10-13 and has never run, because its
-contract named an operator for `~/lloyd-data`; the owed-check ruling that closed
+has been able to repair them since 2026-10-13, and #98 has never run as of
+2026-10-16 (`select count(*) from runs where task_id=98` over
+`~/lloyd-data/workers.db` was 0 that day), because its contract named an operator
+for `~/lloyd-data`; the owed-check ruling that closed
 #2686 on 2026-10-14 decided the remaining work was a scheduled run on this box
 rather than a human task, which is the same answer #990 gave #48. So the write
 joins the top tier, and it is bounded the way #48's is — **entity tags only**,
@@ -1191,13 +1193,22 @@ each one looks like an outage from the run record alone:
   reported as the absence it is, never as a pass; the detector has been read-only
   for most of its life and an empty window is how that keeps looking fine.
 
-**#97 has never run**: `select count(*) from runs where task_id=97` over
-`~/lloyd-data/workers.db` was 0 on 2026-10-12, the file was created at 19:52Z on
-2026-10-11, and `~/.local/state/lloyd-automod/landed_outcomes.jsonl` does not exist
-on disk yet. Its reads and writes above are therefore stated from
-`skills/landed-outcomes-daily-record/SKILL.md` and the module's own `record()`
-docstring, not from an artefact — the first run is what turns this row from a plan
-into a record, and #2630's owed-check pass is where it gets confirmed.
+**#97's row is a record now.** `select count(*) from runs where task_id=97` over
+`~/lloyd-data/workers.db` returned 3 runs as of 2026-10-16, all `status=success`,
+the first at 2026-10-13T08:06:10Z, and
+`~/.local/state/lloyd-automod/landed_outcomes.jsonl` holds one dated row per run,
+newest `generated_at` 2026-10-15T08:01:30Z; that run's own record reported
+`landed-outcomes: rows=3 latest=2026-10-15T08:01:30Z cost=ok latency=ok`. So the
+reads and writes in the row above are confirmed against an artefact and not stated
+from `skills/landed-outcomes-daily-record/SKILL.md` and the module's `record()`
+docstring — the state §Review log records as the one held on 2026-10-12. What even
+today's
+reading still understates: the newest row's `cost.join` share
+(`k=474 n=502 share=0.9442`) is a read-only query over that same `runs` table, so
+the job reads the store the fleet's run records live in as well as the automod
+ledger — said here rather than in the table cell, which is #2631's reconciler's to
+edit. And the count above is dated on purpose: #97 fires daily at ~08:0xZ, so a
+bare number is false by the next morning and only the re-derivable one stays true.
 
 Two of these seven are the reason the other five are trusted at all: #93 is the
 only thing that notices when a run stopped doing a step every other run of its task
@@ -1368,7 +1379,29 @@ decide what gets worked on next.
   is what the sentence asks a correcting pass to do. What is still owed on this
   document: #2631's reconciler against `~/obsidian/autonomy/` (both directions of
   this failure are still one `ls` away from being caught), #2632 (#68's stale
-  `model:`), #2633 (the citation form), and one row above that cannot be confirmed
-  until its job has run — #97's reads and writes are stated from its skill and its
-  module, and `select count(*) from runs where task_id=97` was 0 the day this was
-  written.
+  `model:`) and #2633 (the citation form).
+
+- **2026-10-16 — `current` for #97, and one owed item settles.** What §Watch the
+  machinery said until this morning, kept here because it was a true measurement of
+  its own day: #97 had never run — `select count(*) from runs where task_id=97`
+  over `~/lloyd-data/workers.db` was 0 on 2026-10-12, the module was created at
+  19:52Z on 2026-10-11, and `~/.local/state/lloyd-automod/landed_outcomes.jsonl`
+  did not exist on disk yet — so its reads and writes were stated from
+  `skills/landed-outcomes-daily-record/SKILL.md` and the module's `record()`
+  docstring, and the paragraph said so plainly rather than hiding it. Measured
+  2026-10-16 instead: 3 runs, all `status=success`, the first at
+  2026-10-13T08:06:10Z, one dated row per run in that journal (newest
+  `generated_at` 2026-10-15T08:01:30Z), and the run's own report line
+  `landed-outcomes: rows=3 latest=2026-10-15T08:01:30Z cost=ok latency=ok`. The live
+  paragraph is that count beside the command which re-derives it, and dated — the
+  job fires daily, so a bare number rots overnight, which is the same reason the
+  relative "the day this was written" the 2026-10-12 entry used for this count is
+  re-dated to 2026-10-12 here instead of being left to read as current. Three
+  consequences, in order: the fourth item that owed list carried ("one row above
+  that cannot be confirmed until its job has run") comes out of its sentence, the
+  journal being the confirmation it waited on; #98's parallel claim at §Canonicalize
+  keeps its words and gains what it lacked, since `count(*) where task_id=98` really
+  is 0 on 2026-10-16 and the sentence now carries that date and its command; and the
+  store #97 queries to produce its `cost.join` share is still missing from its Reads
+  cell, which is #2631's reconciliation to make and not a table edit from a doc
+  pass.
