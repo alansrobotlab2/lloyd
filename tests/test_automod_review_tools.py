@@ -140,6 +140,141 @@ def test_the_shipped_fixture_for_544_expects_the_human_review():
     assert {"544-first-cut", "544-stripped-tests"} <= names
 
 
+#: The four shipped cases and the range each one models, as data. Derived from
+#: nothing: these values are what the calibration was built on, and #2822 is what
+#: happens when they are re-read wrong — its ruling asked to narrow
+#: `447-small-met` to one path after a `git show` of a two-commit range.
+_544_PATHS = ["agent_mcp/_tool_effects.py", "agent_mcp/annotations.py", "agent_mcp/main.py",
+              "app/harness/loop.py", "app/harness/mcp_pool.py", "app/harness/policy.py",
+              "app/routers/dashboard.py", "tests/test_tool_effects.py", "workers/pool.py"]
+SHIPPED_RANGES = {
+    "392-small-met": ("ad64d312", "ce713bf3", ["tests/test_trajectory_extraction.py"]),
+    "447-small-met": ("fe40af38", "01219641", ["scripts/verify_cited_identifier.py",
+                                               "tests/test_cited_identifier_verification.py"]),
+    "544-first-cut": ("af1e8c1a", "0f019f90", _544_PATHS),
+    "544-stripped-tests": ("af1e8c1a", "0f019f90", _544_PATHS),
+}
+
+
+def _range_paths(repo, parent, commit):
+    r = git(repo, "diff", "--name-only", parent, commit)
+    assert r.returncode == 0, f"`git diff --name-only {parent} {commit}` failed: {r.stderr[:200]}"
+    return sorted(r.stdout.split())
+
+
+def test_every_shipped_case_declares_the_paths_of_the_range_the_grader_grades():
+    """#2822: a case's `changed_paths` must be the paths of `parent..commit`, because
+    that range is what the grader is handed.
+
+    `grade_commit` takes both ends, hands `parent` to the honesty prechecks and
+    `base=parent` to the grader, and `calibrate` feeds it `case["parent"]` — so the
+    graded surface is the range and never the tip commit alone. Nothing pinned that
+    before this: `git grep -n changed_paths -- tests/` found only stub-fixture uses,
+    and `test_the_shipped_fixture_for_544_expects_the_human_review` reads the
+    `expect` block. That gap is how a single-commit reading of a two-commit case
+    became an item asking to delete a path from the input to `pick_test_files`,
+    `paths` and `def_test_delta`.
+
+    This is also the check the ruling's own verdict turned on: it passes on all four
+    fixtures as they stand, which is the evidence that #2639's half about `447`'s
+    paths was wrong rather than the fixture being stale.
+    """
+    cases = RT.load_fixtures()
+    assert {c["name"] for c in cases} == set(SHIPPED_RANGES), (
+        "the shipped calibration set is no longer the four cases this test describes — a "
+        "case whose JSON stopped parsing, or whose `expect.kind` is unknown, is silently "
+        "skipped by load_fixtures, which would make the loop below grade nothing")
+    for case in cases:
+        got = _range_paths(RT.LIVE_ROOT, case["parent"], case["commit"])
+        assert sorted(case["changed_paths"]) == got, (
+            f"{case['name']} declares {sorted(case['changed_paths'])} but the range it "
+            f"grades, {case['parent'][:8]}..{case['commit'][:8]}, changes {got}. That list "
+            "is what the grader is told the diff touched, so a path outside the range is a "
+            "citation the grader cannot find and a test file it never picks.")
+
+
+def test_no_shipped_case_loses_a_path_to_a_single_commit_reading():
+    """#2822 clause 3: the ranges and their path lists are pinned as values, not
+    recomputed from the fixtures, so no later edit can quietly narrow one.
+
+    `447-small-met` is the case that catches the wrong read, and the last assertion is
+    the positive control for why: `git show --name-only 01219641` really does print one
+    path — it is the tip of a two-commit range (`bd033a19` + `01219641`, the round's two
+    cherry-picks onto base `fe40af38`) — so the claim was reproducible and still wrong. A
+    fixture narrowed to that one path would keep every other check green while being told
+    that `scripts/verify_cited_identifier.py` changed in a diff that does not contain it.
+    """
+    for name, (parent, commit, paths) in SHIPPED_RANGES.items():
+        case = json.loads((RT.FIXTURE_DIR / f"{name}.json").read_text())
+        assert case["parent"].startswith(parent) and case["commit"].startswith(commit), (
+            f"{name}'s range moved to {case['parent'][:8]}..{case['commit'][:8]}; the case "
+            "is now a different landing and its `expect` block is a claim about the old one")
+        assert sorted(case["changed_paths"]) == sorted(paths), (
+            f"{name}'s changed_paths no longer match what this calibration was built on")
+    tip = sorted(git(RT.LIVE_ROOT, "show", "--name-only", "--format=",
+                     "01219641584c35c2b0c2cfb7f117c76f851672d1").stdout.split())
+    assert tip == ["tests/test_cited_identifier_verification.py"], (
+        "the tip commit of 447's range no longer changes only the test file, so the "
+        "single-commit reading this case was nearly edited into is not even "
+        "self-consistent any more — re-derive the range before believing either number")
+
+
+def test_the_two_pass_cases_are_validated_on_a_named_ruling_not_on_a_flag():
+    """#2822 clause 1: the two `pass` cases carry no `provisional` key, and each note
+    says which ruling confirmed it and when, instead of disclaiming itself.
+
+    Dropping the key is behaviour-neutral by design — `calibrate` reads it with
+    `case.get("provisional", False)`, and the only other reader appends a
+    ` (provisional)` suffix to its line — so what has to be pinned is the
+    provenance: a case marked validated has to name the read that validated it, or the
+    four-case set is four assertions nobody checked. The ruling named here is #2639's
+    owed-check entry #3 of 2026-10-16T10:33:07Z, whose second half ("correcting 447's
+    changed_paths to the one path the commit contains") is refuted by the test above
+    and was not applied.
+    """
+    for name in ("392-small-met", "447-small-met"):
+        case = json.loads((RT.FIXTURE_DIR / f"{name}.json").read_text())
+        assert "provisional" not in case, (
+            f"{name} still carries the key; the expectation is confirmed, so the "
+            "disclaimer has to go from the case rather than be set to false")
+        assert case["expect"]["kind"] == "pass"
+        note = case["note"]
+        assert "a human has not yet confirmed" not in note, f"{name}'s note still disclaims itself"
+        assert "20261016_031621_owedcheck_e9d6" in note and "2026-10-16" in note, (
+            f"{name}'s note does not name the confirming ruling and its date")
+        assert "CONFIRM both expectations as pass and drop provisional:true" in note, (
+            f"{name}'s note does not quote the ruling it rests on")
+
+
+def test_the_calibration_readme_hedges_metric_2_and_still_documents_the_flag():
+    """#2822 clause 4: the two table rows read as validated, the file refuses to lend
+    four agreements to scorecard metric 2, and the field `fixture --provisional` writes
+    is still documented.
+
+    Metric 2 is the audit delta, computed in `scripts/automod/scorecard.py` over
+    `review` events from real landed rounds — never over these fixtures — so the caveat
+    is about what a reader may conclude, not about a bug. The last two assertions are
+    why the paragraph stays: the minting route still takes `--provisional`, so a
+    freshly-minted case can still arrive unconfirmed, and a reader has to know what the
+    field means when one does.
+    """
+    readme = (RT.FIXTURE_DIR / "README.md").read_text()
+    assert "until a human confirms" not in readme, (
+        "a shipped row still disclaims its expectation while the case file no longer does")
+    for name in ("392-small-met", "447-small-met"):
+        rows = [ln for ln in readme.splitlines() if ln.startswith(f"| `{name}`")]
+        assert len(rows) == 1 and "confirmed by a diff read on 2026-10-16" in rows[0], (
+            f"the `{name}` row is missing or no longer says what validated it")
+    assert "do not license scorecard metric" in readme and "audit delta" in readme, (
+        "the file no longer says that four agreements do not make a headline rate")
+    assert "`provisional: true` marks an expectation nobody has confirmed" in readme, (
+        "the field's documentation was dropped along with the two rows' disclaimers")
+    import inspect
+    assert '"--provisional"' in inspect.getsource(RT.main), (
+        "fixture --provisional no longer exists, so the paragraph this test protects and "
+        "the CLI have come apart")
+
+
 def test_a_harness_only_test_change_is_a_changed_test_to_the_backfill(world):
     """#1322's fourth site: the after-the-fact route built its changed-test set
     from root `tests/` too, so a landing whose test lives in app/harness/tests/

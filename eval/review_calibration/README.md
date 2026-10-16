@@ -22,10 +22,24 @@ here touches a round, a landing or `promotions.jsonl`.
 |---|---|---|
 | `544-first-cut` | `0f019f9`, the #544 landing that motivated the rung: acceptance clause (d) skipped, the loopback seam untested, `or True` in a test | `retry`; clause 4 not met; a test-honesty finding |
 | `544-stripped-tests` | the same commit with its test file removed (`strip_tests`) | `retry`; a test-honesty/no-test finding |
-| `392-small-met` | `ce713bf3`, a one-file landing whose author said `met` | `pass` — **provisional** until a human confirms |
-| `447-small-met` | `01219641`, a two-file landing whose author said `met` | `pass` — **provisional** until a human confirms |
+| `392-small-met` | `ce713bf3`, a one-file landing whose author said `met` | `pass` — confirmed by a diff read on 2026-10-16 |
+| `447-small-met` | `01219641`, a two-file landing whose author said `met` | `pass` — confirmed by a diff read on 2026-10-16 |
 
 `provisional: true` marks an expectation nobody has confirmed by reading the
 diff. Confirm or correct it, then drop the flag. A grader that agrees on all
 four — including disagreeing with #544's author about clause (d) — is one
 whose backfill numbers (`scorecard` metric 2, the audit delta) mean something.
+
+Four validated cases validate the grader; they do not license scorecard metric
+2 (the audit delta) as a headline rate. Metric 2 is computed over real landed
+rounds from `promotions.jsonl`, never over these fixtures, and agreement on
+four diffs — two of them the same #544 landing — says the grader can be run,
+not that its number is a rate.
+
+A case models a **range**, so a re-read of one is `git diff --name-only
+<parent> <commit>`, never `git show <commit>`: `grade_commit` grades
+`parent..commit` and hands the grader `base=parent`. `447-small-met` is the
+case that catches the wrong read — its range is the round's two cherry-picks
+(`bd033a19` + `01219641`) and prints both declared paths, while the tip commit
+alone prints one. `tests/test_automod_review_tools.py` pins every shipped case's
+`changed_paths` against that range for exactly this reason.

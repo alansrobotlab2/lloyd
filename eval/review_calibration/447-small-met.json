@@ -14,8 +14,7 @@
     "unmet_clauses": [],
     "honesty_finding": false
   },
-  "provisional": true,
-  "note": "A two-file landing whose author reported met; a human has not yet confirmed the expectation.",
+  "note": "Confirmed by a diff read on 2026-10-16: `git diff --name-only fe40af38 01219641` prints exactly the two paths this case declares — the range is the round's two cherry-picks (`bd033a19` + `01219641`) onto base `fe40af38`, which is what `grade_commit` grades, since it takes `parent..commit` and hands `base=parent` to the grader. Ruling: #2639's owed-check session 20261016_031621_owedcheck_e9d6 at 2026-10-16T10:33:07Z, entry #3, 'CONFIRM both expectations as pass and drop provisional:true'. The same entry's second half — 'correcting 447's changed_paths to the one path the commit contains' — is REFUTED and was not applied: it reads `git show --name-only 01219641`, one commit of a two-commit range, and narrowing this field would hand the grader a path absent from the diff it is grading.",
   "author_outcome": {
     "landed": true,
     "acceptance": "met",

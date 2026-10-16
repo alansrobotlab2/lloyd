@@ -13,8 +13,7 @@
     "unmet_clauses": [],
     "honesty_finding": false
   },
-  "provisional": true,
-  "note": "A one-file landing whose author reported met; a human has not yet confirmed the expectation.",
+  "note": "Confirmed by a diff read on 2026-10-16: the graded surface is parent..commit (`grade_commit` grades that range, not the tip), and `git diff --name-only ad64d312 ce713bf3` prints exactly the one path this case declares — a test-only landing the author called met, so `pass` is the expectation. Ruling: #2639's owed-check session 20261016_031621_owedcheck_e9d6 at 2026-10-16T10:33:07Z, entry #3, 'CONFIRM both expectations as pass and drop provisional:true'.",
   "author_outcome": {
     "landed": true,
     "acceptance": "met",
