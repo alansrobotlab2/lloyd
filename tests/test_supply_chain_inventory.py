@@ -615,3 +615,49 @@ def test_no_scanner_yields_a_coverage_gap_and_no_number(box):
         "the inventory is still enumerated when no scanner can run: the answer to "
         "'what is on this box' does not depend on the advisory feed")
     assert report["non_advisory_components"]
+
+
+def test_the_observed_scan_creates_the_directory_the_job_card_cites(box, tmp_path,
+                                                                   monkeypatch):
+    """#2831: the directory `architecture/autonomy-jobs.md`'s #99 row cites is the one the
+    scan writes, and a run is what takes it.
+
+    The row says #99's outputs are "the synthesised per-site requirements and the merged
+    scan input under `~/lloyd-data/supply-chain/observed/`". The corpus path check in
+    `tests/test_architecture_coverage_doc_claims.py` can only grade a citation that is on
+    disk, and this box holds no such directory because #99 had run 0 times when the row
+    was written (`cffd22e6`, 2026-10-16) — so the exemption entry filed there rests on two
+    claims, pinned here so neither is an assertion about a directory nobody checked:
+
+      * the location, read against a runtime root planted in `tmp_path`. A module that
+        moved the outputs into the checkout, or dropped a segment of the path the doc
+        spells, fails this — which is the rot the doc-citation check exists to catch;
+      * that the directory is created by the run itself, asked of an `out_dir` proven
+        absent before the call, so a `synthesize_lockfiles` that stopped taking the
+        `mkdir` fails rather than writing into a fixture's hand-built tree.
+    """
+    import app.paths as paths
+
+    runtime = tmp_path / "runtime-root"
+    monkeypatch.setattr(paths, "DATA_ROOT", str(runtime))
+    assert inv.observed_dir() == runtime / "supply-chain" / "observed", (
+        "the location the #99 row cites is no longer the one `observed_dir()` computes — "
+        "the sentence and the module have come apart, one of them is wrong")
+
+    fake_scanner(tmp_path / "osv-scanner")
+    with_path(box, tmp_path)
+    (tmp_path / "db").mkdir()
+    os.environ[sc.OSV_DB_ENV] = str(tmp_path / "db")
+    out = box["home"] / "lloyd-data" / "supply-chain" / "observed"
+    assert not out.exists(), (
+        "the fixture pre-created the cited directory, so the run below proves nothing")
+    report = inv.observed_scan(box["repo"], out_dir=out, scanner_name="osv-scanner",
+                               account_home=box["home"], roots=roots(box), now=NOW)
+    assert report["scan_status"] == "completed", report["reason"]
+    assert out.is_dir(), "a scan run does not create the directory the job card cites"
+    targets = [Path(s["lockfile"]) for s in report["sites"] if s.get("lockfile")]
+    assert targets, "the scan wrote no target at all, so nothing lands under that path"
+    assert all(out in t.parents for t in targets), (
+        f"a synthesised target sits outside the cited directory: {targets}")
+    assert (out / inv.MERGED_SITE / "requirements.txt").is_file(), (
+        "the merged scan input the row promises is not under the cited directory")

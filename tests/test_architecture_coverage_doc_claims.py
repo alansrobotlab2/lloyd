@@ -518,6 +518,18 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
     'was 0 on 2026-10-12, and the doc says in the same breath that '
     'the file does not exist yet. The one citation here whose '
     'absence is the fact being reported, not a pointer to a file'),
+  '~/lloyd-data/supply-chain/observed/': (
+      "generated: the scan makes this directory; nothing ships it. `observed_dir()` in "
+      "`app/harness/supply_chain_inventory.py` computes it under the runtime root, and the "
+      "`target_dir.mkdir(parents=True, exist_ok=True)` inside `synthesize_lockfiles` is what "
+      "takes it, so a box holds it only from the run that writes a scan target — and #99 had "
+      "run 0 times when `cffd22e6` wrote the row on 2026-10-16: `select count(*) from runs "
+      "where task_id='99'` over `~/lloyd-data/workers.db` was 0, against 4 for #97 in the "
+      "same query. The row therefore states where the job puts its outputs, which is what a "
+      "job card is for, not what the box happens to hold today. "
+      "`tests/test_supply_chain_inventory.py::test_the_observed_scan_creates_the_directory_"
+      "the_job_card_cites` pins both halves: the location, and that a run creates it"
+  ),
     '~/obsidian/memory/facts/': (
       "historical: the sentence exists to report that 15,299 queue rows name a vault prefix "
       "that is gone, and it names the layout that replaced it — "
