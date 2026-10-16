@@ -1453,10 +1453,12 @@ def test_report_grading_the_real_sequence_end_to_end_needs_no_engine(tmp_path):
 # the denominator at all, and `report` cannot even say the arm was run.
 #
 # The nodes below keep the raise's purpose (nothing unevidenced is ranked) and take
-# away its reach. Mechanism is NOT claimed by any of them: `_engine_turn` surfaces no
-# `stop_reason`, so a zero-claim theory may be truncation (#2624's class, budgets
-# still short) or an honest empty answer. The rows record only that a theory was
-# dispatched, cost tokens, and produced no citable claim.
+# away its reach. Since #2807 the mechanism IS claimed — the section after this one
+# carries `stop_reason`/`num_turns` onto the refusal row and gives a `max_turns` stop
+# a reason of its own — so these nodes hold the older shape on purpose: their fake
+# investigators name no stop at all, which is exactly the case that still earns a
+# `no-claims` row, and the rows they assert record only that a theory was dispatched,
+# cost tokens, and produced no citable claim.
 
 def _one_case(key: str) -> dict:
     """One fixture case under a key of the caller's choosing.
@@ -1469,7 +1471,7 @@ def _one_case(key: str) -> dict:
 
 
 def _arm_b(tmp_path, *, key="flaky-SM_20261001_034449", rows_name="rows.jsonl",
-           refuse=(), spend=None, rank_fn=None, ceiling=99_000):
+           refuse=(), spend=None, rank_fn=None, ceiling=99_000, stop=None):
     """Run arm B once over one case, with the theories in `refuse` answering in prose.
 
     Returns (case, slots, dispatched, rows, verdict). `dispatched` is the slot order
@@ -1477,6 +1479,11 @@ def _arm_b(tmp_path, *, key="flaky-SM_20261001_034449", rows_name="rows.jsonl",
     fan-out continued" from "the fan-out ended and something else wrote the rows".
     A refusal costs its own tokens by default (1,000 against the 10,000 an evidenced
     theory costs) so a row's spend can be attributed to the dispatch that earned it.
+
+    `stop` (#2807) gives a refusing slot its own harness stop as
+    `(stop_reason, num_turns)`, which is the pair `_engine_turn` now reads off the
+    `result` event; a slot absent from it reports no mechanism at all, which is the
+    shape every node written before #2807 drives.
     """
     from eval.diagnosis_fanout_replay import RowWriter, run_case_b
 
@@ -1493,7 +1500,10 @@ def _arm_b(tmp_path, *, key="flaky-SM_20261001_034449", rows_name="rows.jsonl",
         slot = slots[theories.index(theory)]
         dispatched.append(slot)
         if slot in refuse:
-            return {"tool": "Task", "claims": [], "tokens": cost[slot]}
+            row = {"tool": "Task", "claims": [], "tokens": cost[slot]}
+            if stop and slot in stop:
+                row["stop_reason"], row["num_turns"] = stop[slot]
+            return row
         return {"tool": "Task",
                 "claims": [{"claim": f"{slot}: the config drifted",
                             "citations": [{"path": "app/config.py", "line": 12}]}],
@@ -1673,6 +1683,224 @@ def test_a_refusal_is_not_reported_as_a_token_ceiling(tmp_path):
     assert [r["reason"] for r in tight_rows if r["kind"] == "ceiling"] == ["token-ceiling"]
     assert not [r for r in tight_rows if r["kind"] == "refusal"], (
         "an over-ceiling fan-out recorded a refusal beside its ceiling row")
+
+
+# ── #2807: a turn-cap stop is never read as an honest empty ───────────────────
+#
+# The section above records that a theory produced no citable claim and says
+# nothing about WHY, because the pair that would say it was dropped twice on its
+# way to the row: `_engine_turn` read `structured` and `usage` off the harness
+# `result` event and returned `{structured, tokens, model}`, then
+# `investigate_live` rebuilt that as `{tool, claims, tokens, model}`. The
+# 2026-10-13 arm-B pass is the witness — all 16 `kind: refusal` rows in
+# `~/lloyd-data/eval/2258/rows.jsonl` carry key set [arm, case_key, detail, kind,
+# reason, run_id, seq, slot, tokens, ts] and none carries the mechanism — which is
+# why naming the mechanism for `flaky-SM_20261001_034449` needed a bespoke probe of
+# ~1,000 engine-seconds instead of a read of data that already existed.
+#
+# The nodes below carry the pair from the result event to the row and give a
+# `max_turns` stop a reason that is neither `no-claims` nor `token-ceiling`, so a
+# budget that is still short and a model that declined to cite stop arriving at
+# the study as one row.
+
+
+def test_the_engine_turn_returns_the_stop_and_turn_count_its_result_event_carried(
+        monkeypatch):
+    """Clause 1, at the harness seam: `_engine_turn` keeps both fields of the event.
+
+    This is the one boundary no fake investigator can cross, so it is tested
+    against the producer's own factory: the stream below yields
+    `app.harness.events.result(...)`, the dict the real loop emits, so a renamed or
+    dropped field there is a red node here rather than a silently-absent column
+    three hops away in a row. Two calls with two different pairs are run because
+    the clause is that the values are READ off the event — one fixture and one
+    literal cannot tell those apart.
+
+    What the pair is for: a run that ends `max_turns` gets no `final_schema`
+    restatement (`FINALIZABLE_STOP_REASONS` is `{stop, end_turn}`,
+    `app/harness/finalizer.py:78`), so `structured` comes back empty and the claim
+    list under it is empty too. `investigate_live`'s budget was raised to 40 on
+    exactly that measurement, and the study still could not tell a truncation from
+    an honest empty, because `tokens` and `model` were the only two of the four
+    result-event fields read back out.
+    """
+    from app.harness import events as harness_events
+    from app.harness import loop as harness_loop
+    import app.prompt_builder as prompt_builder
+
+    scripted: list[dict] = []
+
+    def fake_run_query(messages, options):
+        assert str(options.session_id).startswith("bench_"), (
+            "the bench prefix is what sandboxes an investigation, and `_engine_turn` "
+            "refuses anything else before it ever reaches this stream")
+
+        async def stream():
+            yield {"type": "text", "text": "reading the ledger"}
+            yield scripted.pop(0)
+        return stream()
+
+    monkeypatch.setattr(harness_loop, "run_query", fake_run_query)
+    monkeypatch.setattr(prompt_builder, "build_system_prompt",
+                        lambda **kwargs: "bench prompt")
+
+    scripted.append(harness_events.result(
+        stop_reason="max_turns", num_turns=21, wrapped_up=True,
+        usage={"input_tokens": 179_000, "output_tokens": 186},
+        structured_error="no verdict to restate"))
+    truncated = asyncio.run(replay._engine_turn(
+        "investigate this one cause", schema=replay.CLAIMS_SCHEMA,
+        session_id="bench_2258_inv_truncated", max_turns=40))
+    assert truncated["stop_reason"] == "max_turns", truncated
+    assert truncated["num_turns"] == 21, truncated
+    assert truncated["tokens"] == 179_186, (
+        f"tokens read {truncated['tokens']}; the usage arithmetic is not what this "
+        "node is for and must not move with the two new keys")
+
+    scripted.append(harness_events.result(
+        stop_reason="stop", num_turns=27, structured={"claims": []},
+        usage={"input_tokens": 10, "output_tokens": 5}))
+    stopped = asyncio.run(replay._engine_turn(
+        "investigate this one cause", schema=replay.CLAIMS_SCHEMA,
+        session_id="bench_2258_inv_stopped", max_turns=40))
+    assert (stopped["stop_reason"], stopped["num_turns"]) == ("stop", 27), stopped
+
+
+def test_the_live_investigator_carries_the_stop_and_turn_count_through(monkeypatch):
+    """Clause 1's second hop: `investigate_live` does not drop what it was given.
+
+    Patching only `_engine_turn` would fix nothing observable. `investigate_live`
+    builds its own dict — `tool`, `claims`, `tokens`, `model` — and that rebuild
+    was the second place the mechanism was thrown away, so the pair has to be in
+    the return the arm actually reads. The fake below is the shape a capped run
+    really has: no structured answer, so an empty claim list, plus the pair naming
+    why (the numbers are the ones `investigate_live`'s docstring records for the
+    20-turn cap: 21 turns, 179,186 tokens).
+    """
+    case = _one_case("flaky-SM_20261001_034449")
+
+    async def fake_turn(prompt, *, schema, session_id, max_turns):
+        return {"structured": {}, "tokens": 179_186, "model": "primary",
+                "stop_reason": "max_turns", "num_turns": 40}
+
+    monkeypatch.setattr(replay, "_engine_turn", fake_turn)
+    out = asyncio.run(investigate_live(case, "the config drifted"))
+    assert out["claims"] == [], out
+    assert (out["stop_reason"], out["num_turns"]) == ("max_turns", 40), (
+        f"the investigator returned keys {sorted(out)} — the pair has to reach the "
+        "arm, or the row the arm writes cannot name its mechanism")
+
+
+def test_every_refusal_row_carries_the_pair_its_own_investigation_returned(tmp_path):
+    """Clause 2: both fields sit beside `tokens` on every refusal row, and they are
+    THAT dispatch's values.
+
+    Two refusing slots with two different stops, because "the values its own
+    investigation returned" is the clause and a shared or hard-coded pair would
+    pass a one-refusal fixture. A second run with a fake that names no stop at all
+    pins the remaining shape: the keys are still present and null, which says "this
+    investigator reported no mechanism" instead of inventing a `stop` at zero turns
+    — the invention this item exists to end.
+    """
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    stops = {slots[1]: ("max_turns", 40), slots[2]: ("stop", 9)}
+    spends = {slots[1]: 1_000, slots[2]: 2_000}
+    _, _, _, rows, _ = _arm_b(tmp_path, key=key, refuse=(slots[1], slots[2]),
+                              spend=spends, stop=stops, rows_name="paired.jsonl")
+    refusals = [r for r in rows if r["kind"] == "refusal"]
+    assert len(refusals) == 2, f"expected two refusal rows, got {len(refusals)}"
+    for row in refusals:
+        assert {"stop_reason", "num_turns"} <= set(row), (
+            f"the row carries {sorted(row)}; `tokens` alone cannot say which of the "
+            "two failures happened")
+        want = stops[row["slot"]]
+        assert (row["stop_reason"], row["num_turns"]) == want, (
+            f"slot {row['slot']} recorded {row['stop_reason']!r}/"
+            f"{row['num_turns']!r}; its own investigation returned "
+            f"{want[0]!r}/{want[1]}")
+        assert row["tokens"] == spends[row["slot"]], row
+
+    _, _, _, unreported_rows, _ = _arm_b(tmp_path, key=key, refuse=(slots[1],),
+                                        rows_name="unreported.jsonl")
+    unreported = next(r for r in unreported_rows if r["kind"] == "refusal")
+    assert unreported["stop_reason"] is None and unreported["num_turns"] is None, (
+        f"an investigator that named no mechanism left "
+        f"{unreported['stop_reason']!r}/{unreported['num_turns']!r} on the row")
+    assert unreported["reason"] == replay.REFUSAL_NO_CLAIMS, unreported
+
+
+def test_a_turn_capped_theory_gets_its_own_reason_and_not_the_no_claims_prose(
+        tmp_path):
+    """Clauses 3 and 4's wording half: three causes, three words, two details.
+
+    `turn-cap` is recorded for a `max_turns` stop and `no-claims` only for the
+    empty claim list that arrived on a run which DID stop. The detail is asserted
+    against the other wording rather than for a keyword: `no_claims_message` says
+    the model handed back prose, and putting that sentence on a truncated dispatch
+    is how a reader files a budget follow-up for a model that declined to cite, or
+    the other way round — the same misreading #2635 clause 4 was written against.
+    """
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    assert replay.REFUSAL_TURN_CAP == "turn-cap", replay.REFUSAL_TURN_CAP
+    assert len({replay.REFUSAL_TURN_CAP, replay.REFUSAL_NO_CLAIMS,
+                "token-ceiling"}) == 3, (
+        "the three refusal causes are no longer three words, so a row can say "
+        "`no-claims` and mean any of them")
+
+    _, _, _, rows, _ = _arm_b(tmp_path, key=key, refuse=(slots[1],),
+                              stop={slots[1]: ("max_turns", 40)},
+                              rows_name="capped.jsonl")
+    capped = next(r for r in rows if r["kind"] == "refusal")
+    assert capped["reason"] == replay.REFUSAL_TURN_CAP == "turn-cap", capped["reason"]
+    assert capped["stop_reason"] == "max_turns" and capped["num_turns"] == 40, capped
+    assert "ran out of turns" in capped["detail"], capped["detail"]
+    assert "40-turn budget" in capped["detail"], capped["detail"]
+    assert "handed back no claims" not in capped["detail"], (
+        f"the detail reads {capped['detail']!r} — that is the wording which means "
+        "the model answered and declined to cite")
+
+    _, _, _, honest_rows, _ = _arm_b(tmp_path, key=key, refuse=(slots[1],),
+                                     stop={slots[1]: ("stop", 12)},
+                                     rows_name="honest.jsonl")
+    honest = next(r for r in honest_rows if r["kind"] == "refusal")
+    assert honest["reason"] == replay.REFUSAL_NO_CLAIMS, honest
+    assert honest["stop_reason"] == "stop" and honest["num_turns"] == 12, honest
+    assert "handed back no claims" in honest["detail"], honest["detail"]
+    assert not [r for r in honest_rows
+                if r.get("reason") == replay.REFUSAL_TURN_CAP], (
+        "a run that stopped and still produced no claims was booked as a "
+        "truncation, which would send a budget follow-up at a model that declined")
+
+
+def test_a_turn_capped_refusal_and_a_ceiling_row_stay_two_different_rows(tmp_path):
+    """Clause 4's ceiling half: one case, both causes, two rows, two reasons.
+
+    The ceiling is 11,000 against a 10,000 evidenced theory plus a 1,000 refusal,
+    so theory 2 truncates on its OWN turn budget and theory 3 is never dispatched
+    because the fan-out's money ran out. The `kind: ceiling` row keeps
+    `reason: token-ceiling` — it is the fan-out's compute, not theory 2's turn
+    cap — and the turn-capped theory writes no ceiling row for itself.
+    """
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    _, _, dispatched, rows, _ = _arm_b(tmp_path, key=key, refuse=(slots[1],),
+                                       spend={slots[1]: 1_000},
+                                       stop={slots[1]: ("max_turns", 40)},
+                                       ceiling=11_000, rows_name="both.jsonl")
+    assert dispatched == slots[:2], (
+        f"the fan-out dispatched {dispatched}: 11,000 spent before the third theory "
+        "means the third dispatch never ran")
+    assert [r["reason"] for r in rows if r["kind"] == "refusal"] \
+        == [replay.REFUSAL_TURN_CAP], rows
+    assert [r["reason"] for r in rows if r["kind"] == "ceiling"] == ["token-ceiling"], (
+        "the ceiling row's reason moved: it records the fan-out running out of "
+        f"money, not theory {slots[1]}'s turn budget")
+    assert not [r for r in rows if r["kind"] == "refusal"
+                and r.get("reason") == "token-ceiling"], (
+        "a truncated theory was booked as an over-ceiling fan-out, which is the "
+        "wrong follow-up to file")
 
 
 # ── clause 5: the pass outlives one case's arm ────────────────────────────────

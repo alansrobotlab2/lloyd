@@ -152,6 +152,22 @@ DEFAULT_TOKEN_CEILING = 200_000
 #: let a study read "budget too small" from a run whose model simply refused to
 #: cite. `no-claims` is the raise's own complaint, kept as a recorded fact.
 REFUSAL_NO_CLAIMS = "no-claims"
+#: The harness's own word for a run its turn budget cut off: the `result` event's
+#: `stop_reason` (`app/harness/events.py:324`). The P6b wrap-up leaves it at
+#: `max_turns` rather than rewriting it, and the finalizer restates a
+#: `final_schema` only for `stop`/`end_turn`
+#: (`FINALIZABLE_STOP_REASONS`, `app/harness/finalizer.py:78`), so this is exactly
+#: the stop that comes back with no structured answer and therefore no claims.
+STOP_MAX_TURNS = "max_turns"
+#: A per-theory refusal the turn budget caused (#2807). A third word, and not
+#: either of the other two: `token-ceiling` says a theory was never dispatched
+#: because the fan-out's money ran out, `no-claims` says a theory ran to its stop
+#: and answered in prose, and this says the theory never got to answer at all.
+#: Folding this into `no-claims` is what made the truncation-vs-honest-empty
+#: question unanswerable from the 2026-10-13 pass's rows, and folding it into
+#: `token-ceiling` would book the wrong follow-up (a bigger fan-out budget for a
+#: single dispatch that was already over its own turn cap).
+REFUSAL_TURN_CAP = "turn-cap"
 
 
 class RecordError(Exception):
@@ -623,6 +639,22 @@ def no_claims_message(slot: Any) -> str:
             "a prose conclusion is not evidence to rank")
 
 
+def turn_cap_message(slot: Any, num_turns: Any = None) -> str:
+    """The complaint for a theory the turn budget stopped, in its own wording.
+
+    A separate wording is the point (#2807): `no_claims_message` says the model
+    answered in prose, and reusing it on a truncated dispatch would put that
+    sentence on a row whose model never got to answer. `num_turns` is the count
+    the harness reported, so the row also says how far it got.
+    """
+    reached = (f" at its {int(num_turns)}-turn budget"
+               if isinstance(num_turns, (int, float)) else " at its turn budget")
+    return (f"theory {slot!r} ran out of turns{reached} — stop_reason "
+            f"{STOP_MAX_TURNS!r}: the harness cut the run off before any structured "
+            "answer was restated, so this is truncation, not a theory that "
+            "declined to cite")
+
+
 def validate_investigation(row: dict) -> list[dict]:
     """A per-theory row must carry claims with citations, not a conclusion.
 
@@ -733,9 +765,12 @@ def rank_theories(case: dict, evidence: dict[str, list[dict]], *,
         # engine would ask it to choose among bare labels. Recorded rather than
         # raised (#2635): the case must still reach its verdict row so it enters
         # `report`'s denominator as the measured zero it is, not as an absence.
+        # Since #2807 the WHY is not named here: a case can arrive with a
+        # truncated theory and a prose-answering one, and only the per-slot
+        # refusal rows know which was which.
         return {"kind": "rank", "ok": False,
-                "reason": f"no-evidence: every dispatched theory refused "
-                          f"({REFUSAL_NO_CLAIMS!r}); nothing was ranked",
+                "reason": "no-evidence: every dispatched theory refused (see the "
+                          "refusal rows for each reason); nothing was ranked",
                 "order": [], "chosen_slot": None, "chosen_cause": None,
                 "refused": sorted(set(refused))}
     rows = rank_fn(query, candidates)
@@ -786,9 +821,12 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
 
     A theory that came back and handed over prose is cut short by a different
     cause, and since #2635 it is recorded the same way instead of raising: one
-    `kind: refusal` row with `reason: "no-claims"`, its own `tokens`, and the
-    theories that DID produce evidence going on to the ranking and the verdict
-    row. Before that the raise propagated out of `run` — `cmd_run` guarded
+    `kind: refusal` row, its own `tokens`, and the theories that DID produce
+    evidence going on to the ranking and the verdict row. Since #2807 the row also
+    carries the harness's `stop_reason` and `num_turns` beside those tokens, and
+    the reason is read from them: `turn-cap` for a run the turn budget stopped,
+    `no-claims` for a run that reached its stop and answered with nothing
+    citable. Before that the raise propagated out of `run` — `cmd_run` guarded
     nothing — so case 1 of a 21-key pass killed the remaining 20 and wrote no
     `verdict` row for itself, which made it invisible to `report`'s denominator
     rather than merely unscored.
@@ -827,12 +865,30 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
             # allowed to be a case's, and a case's is not allowed to be the pass's.
             # The tokens it did cost go on the row, so the spend the study reports
             # includes the dispatch that produced nothing.
+            #
+            # The pair the harness reported goes on the row too (#2807), and the
+            # reason is chosen from it. A run the turn budget stopped has no
+            # structured answer at all (`FINALIZABLE_STOP_REASONS`,
+            # `app/harness/finalizer.py:78`), so its claim list is empty for a
+            # reason with a completely different follow-up from a model that
+            # finished and answered in prose; recording both as `no-claims` is what
+            # made the truncation question unanswerable from the Oct 13 pass. An
+            # investigator that reports no stop leaves both cells null and keeps
+            # `no-claims` — absence is not evidence of a cap.
+            stop_reason = result.get("stop_reason") or None
+            reported_turns = result.get("num_turns")
+            num_turns = (int(reported_turns)
+                         if isinstance(reported_turns, (int, float)) else None)
+            turn_capped = stop_reason == STOP_MAX_TURNS
             refused.append(entry["slot"])
             writer.append({"seq": next_seq(), "run_id": run_id, "case_key": case_key,
                            "arm": ARM_B, "kind": "refusal", "ts": _now(),
                            "slot": entry["slot"], "tokens": tokens,
-                           "reason": REFUSAL_NO_CLAIMS,
-                           "detail": no_claims_message(entry["slot"])})
+                           "stop_reason": stop_reason, "num_turns": num_turns,
+                           "reason": REFUSAL_TURN_CAP if turn_capped
+                           else REFUSAL_NO_CLAIMS,
+                           "detail": turn_cap_message(entry["slot"], num_turns)
+                           if turn_capped else no_claims_message(entry["slot"])})
             continue
         # Everything the validator still refuses — a claim with no citation is a
         # broken instrument rather than a declined theory, and `validate_theories`
@@ -1001,16 +1057,27 @@ async def _engine_turn(prompt: str, *, schema: dict, session_id: str,
             "Restate the answer above as a JSON object matching the schema."),
         **_get_harness_kwargs())
     options.surface = "worker"
+    # `stop_reason` and `num_turns` come along because they are the only pair that
+    # says WHY an answer is empty (#2807). The harness emits both on the same
+    # `result` event as `structured` and `usage` (`app/harness/events.py:324,326`),
+    # so reading only two of the four fields turned a run the turn budget stopped
+    # into the same record as one that answered in prose.
     structured: dict = {}
     usage: dict = {}
+    stop_reason = ""
+    num_turns = 0
     async for evt in run_query([{"role": "user", "content": prompt}], options):
         if evt["type"] == "result":
             structured = evt.get("structured") or {}
             usage = evt.get("usage") or {}
+            stop_reason = str(evt.get("stop_reason") or "")
+            num_turns = int(evt.get("num_turns") or 0)
     return {"structured": structured,
             "tokens": int(usage.get("input_tokens") or 0)
             + int(usage.get("output_tokens") or 0),
-            "model": alias}
+            "model": alias,
+            "stop_reason": stop_reason,
+            "num_turns": num_turns}
 
 
 async def generate_theories_live(case: dict, *, max_turns: int = 6) -> list[str]:
@@ -1078,8 +1145,14 @@ async def investigate_live(case: dict, theory: str, *,
     out = await _engine_turn(prompt, schema=CLAIMS_SCHEMA,
                              session_id=_new_bench_session(case["key"], "inv"),
                              max_turns=max_turns)
+    # `stop_reason` and `num_turns` are re-emitted rather than dropped (#2807).
+    # This rebuild is the second hop that used to discard them, and patching only
+    # `_engine_turn` would have fixed nothing the arm could see: `run_case_b`
+    # writes its refusal row from THIS dict.
     return {"tool": "Task", "claims": out["structured"].get("claims") or [],
-            "tokens": out["tokens"], "model": out["model"]}
+            "tokens": out["tokens"], "model": out["model"],
+            "stop_reason": out.get("stop_reason") or "",
+            "num_turns": int(out.get("num_turns") or 0)}
 
 
 def rank_live(query: str, candidates: Sequence[str]):
