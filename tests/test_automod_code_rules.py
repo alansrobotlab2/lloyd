@@ -14,6 +14,7 @@ learned: a control that pins a count rots within days).
 from __future__ import annotations
 
 import ast
+import json
 import re
 import subprocess
 import sys
@@ -740,3 +741,413 @@ def test_the_whole_tree_control_is_still_zero_hits_over_exactly_five_allowed_sit
     for rid, n in sorted(res["counts"].items()):
         print(f"hits for {rid}: {n}")
     assert res["totals"]["parse_errors"] == 0, res["totals"]
+
+
+# ---------------------------------------------------------------------------
+# #2809 — the soak #2574 owed is recorded in the rule file, not in a closed item.
+#
+# Every clause here is a claim about prose in the comment block above `[meta]`, so
+# each node answers it with a DIFFERENT mechanism than the prose itself: `git` for
+# whether the landing commit the header cites really added this file and is an
+# ancestor of HEAD; `bash`+`jq` for whether the recompute block the header names
+# executes and can report a nonzero flag count; the `gate.py` source for whether the
+# flip bound in the header adds to the published one instead of competing with it; the
+# loader for whether the ids, matchers and cap the header describes are the ones the
+# file ships. Scope lines are pinned by #2810's three nodes in this file.
+#
+# What is deliberately NOT asserted anywhere below is the VALUE of a live soak figure.
+# "224 gate rows" and "120 landings" were true when written and are re-measured by the
+# owed-check pass, which is the only thing allowed to update them. A node that
+# re-read the ledger and demanded its flags still be 0 would enforce this instrument
+# through the test suite — and a rule that fails a round is precisely the flip #679
+# ruled has to be a human decision, so the suite must not make it.
+# ---------------------------------------------------------------------------
+
+#: The landing that put these rules on the gate, as the header cites it. Clause 1's
+#: acceptance check is `git grep -n 4592296e scripts/automod/code_rules.toml`, which
+#: is worth nothing unless the sha names the commit that actually added the file.
+RULES_LANDED_AT = "4592296e"
+
+#: The five ids and matchers as shipped when #2809 recorded the soak. A legitimate
+#: rule change updates this list on purpose, exactly like #2810's scope pins.
+RULE_IDS_AT_RECORDING = [
+    "guardian-import-hygiene",
+    "opens-kg-store-outside-kg-store",
+    "broad-except-swallow-same-line",
+    "naive-now-in-artifact-name",
+    "exports-lloyd-data-to-process-environ",
+]
+RULE_MATCHERS_AT_RECORDING = [
+    ("guardian-import-hygiene", "guardian_nonstdlib_import"),
+    ("opens-kg-store-outside-kg-store", "opens_kg_store"),
+    ("broad-except-swallow-same-line", "broad_except_swallow_same_line"),
+    ("naive-now-in-artifact-name", "naive_now_in_artifact_name"),
+    ("exports-lloyd-data-to-process-environ", "process_environ_lloyd_data"),
+]
+
+#: The two machine-readable figures in the header, parsed rather than counted by eye.
+RECORDED_FIGURE_RE = {
+    "SOAK_GATE_ROWS_AT_RECORDING": re.compile(
+        r"SOAK_GATE_ROWS_AT_RECORDING\s*=\s*(\d+)"),
+    "LANDED_PY_COMMITS_AT_RECORDING": re.compile(
+        r"LANDED_PY_COMMITS_AT_RECORDING\s*=\s*(\d+)"),
+}
+
+
+def _header_lines() -> list[str]:
+    """The comment block above the first `[table]` header, comment markers intact.
+
+    Everything above `[meta]` is prose: an edit confined to that region cannot change
+    a rule, a matcher, a scope or the cap, which is what #2809's comment-only clause
+    turns on.
+    """
+    lines = RULES_PATH.read_text(encoding="utf-8").splitlines()
+    head: list[str] = []
+    for ln in lines:
+        if ln.lstrip().startswith("["):
+            return head
+        head.append(ln)
+    raise AssertionError("the rule file has no [table] header, so it has no rule section")
+
+
+def _header_prose() -> str:
+    """That block as one whitespace-normalised string, `#NNNN` refs kept.
+
+    Joined, because a claim of record is one sentence and a prose assertion must not
+    hinge on where a rewrap happens to fall.
+    """
+    return " ".join(ln.lstrip("#").strip() for ln in _header_lines())
+
+
+def _recorded_figure(header: str, key: str) -> int:
+    m = RECORDED_FIGURE_RE[key].search(header)
+    assert m, f"the header carries no machine-readable {key}"
+    return int(m.group(1))
+
+
+def _fixture_row(created_at: str, counts: dict[str, int],
+                 covered: dict[str, int]) -> str:
+    """A `gate` ledger row shaped like the ones `rung_code_rules` writes."""
+    return json.dumps({
+        "event": "gate", "rung": "code_rules", "round_id": "SM_FIXTURE",
+        "created_at": created_at,
+        "code_rules": {
+            "status": "evaluated", "counts": counts, "labels": [],
+            "totals": {"files": 2,
+                       "coverage": {rid: {"covered": n, "of": 2}
+                                    for rid, n in covered.items()}}}})
+
+
+def _run_recompute_block(tmp_path: Path, ledger: Path) -> str:
+    """Extract the header's RECOMPUTE block and run it against `ledger`."""
+    lines = _header_lines()
+    starts = [i for i, ln in enumerate(lines) if ln.lstrip().startswith("# RECOMPUTE-BEGIN")]
+    ends = [i for i, ln in enumerate(lines) if ln.lstrip().startswith("# RECOMPUTE-END")]
+    assert starts and ends and ends[0] > starts[0], (
+        "the soak record names no RECOMPUTE-BEGIN/END block, so its figures cannot be "
+        "recomputed by a reader holding only this file")
+    body = "\n".join(ln[1:] if ln.startswith("#") else ln
+                     for ln in lines[starts[0] + 1:ends[0]])
+    script = tmp_path / "recompute.sh"
+    script.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body + "\n",
+                      encoding="utf-8")
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin",
+           "HOME": str(tmp_path),
+           "CODE_RULES_LEDGER": str(ledger),
+           "CODE_RULES_SOAK_SINCE": "2026-10-13T03:07:36Z"}
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                          env=env, cwd=str(tmp_path))
+    assert proc.returncode == 0, (
+        f"the recompute block the header names does not run (rc={proc.returncode}):\n"
+        f"{body}\n--- stderr ---\n{proc.stderr.strip()[:400]}")
+    return proc.stdout
+
+
+def test_the_header_names_the_soak_and_the_cited_landing_commit_is_the_one_that_added_the_file():
+    """Clause 1: 0 flags, a denominator, the command, the span, the flag count.
+
+    Three mechanisms, because the prose alone is not evidence: the acceptance grep has
+    to exit 0, the sha it finds has to be the commit that ADDED this file (a soak
+    "since <sha>" is a sentence about that sha), and the landing figure the header
+    claims is checked as a LOWER bound — landings accumulate, so a claim above the live
+    count was never measured, while one below it has merely aged.
+    """
+    header = _header_prose()
+    grep = subprocess.run(["git", "-C", str(ROOT), "grep", "-n", RULES_LANDED_AT,
+                           "scripts/automod/code_rules.toml"],
+                          capture_output=True, text=True)
+    assert grep.returncode == 0, (
+        "the acceptance check `git grep -n 4592296e scripts/automod/code_rules.toml` "
+        "found no landing commit: the header states a soak without naming what it is a "
+        "soak of")
+    assert f"{RULES_LANDED_AT} is the commit that put these rules on the gate" in header
+
+    added = _git(ROOT, "log", "--diff-filter=A", "--format=%H", "--",
+                 "scripts/automod/code_rules.toml").split()
+    assert len(added) == 1, f"expected one commit adding the rule file, got {added}"
+    assert added[0].startswith(RULES_LANDED_AT), (
+        f"the header cites {RULES_LANDED_AT} as the landing, but {added[0]} is the "
+        "commit that added this file — the soak's denominator would start at a commit "
+        "that has nothing to do with these rules")
+    anc = subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor",
+                          RULES_LANDED_AT, "HEAD"], capture_output=True, text=True)
+    assert anc.returncode == 0, (
+        f"{RULES_LANDED_AT} is not an ancestor of HEAD: {anc.stderr.strip()[:160]}")
+
+    assert "0 flags" in header, "the header states no flag count"
+    assert "promotions.jsonl" in header and "jq" in header, (
+        "the denominator names no command that recomputes it, so the figure is a "
+        "caption and not a measurement")
+    assert "git log --oneline 4592296e..HEAD" in header, (
+        "the landing-count denominator names no command either")
+    assert "`status: evaluated`" in header and "unevaluated" in header, (
+        "the denominator has to say what kind of row it counts and that none came back "
+        "unevaluated — otherwise a zero only means the instrument did not run")
+
+    rows = _recorded_figure(header, "SOAK_GATE_ROWS_AT_RECORDING")
+    assert rows >= 20, (
+        f"the header records a soak of {rows} gate rows, under the 20-landing bound a "
+        "flip waits on — the record is advertising a verdict it cannot support")
+    landed = _recorded_figure(header, "LANDED_PY_COMMITS_AT_RECORDING")
+    live = len(_git(ROOT, "log", "--oneline", f"{RULES_LANDED_AT}..HEAD", "--",
+                    "*.py").splitlines())
+    assert live >= landed, (
+        f"the header claims {landed} promoted .py landings since {RULES_LANDED_AT}; the "
+        f"command it names returns {live} now. Landings only accumulate, so the claim "
+        "was never measured — the owed-check pass may raise the figure, never invent it")
+    print(f"landings since {RULES_LANDED_AT}: recorded {landed}, measured now {live}")
+
+    span = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) \.\. "
+                     r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)", header)
+    assert span, "the header names no date span for the soak"
+    start, stop = span.group(1), span.group(2)
+    assert start < stop, span.groups()
+    assert start >= "2026-10-13", (
+        f"the soak's first row is stamped {start}, before the landing "
+        f"{RULES_LANDED_AT} (2026-10-13T03:07:36Z UTC) could have run a rule")
+
+
+def test_the_recompute_block_the_header_names_runs_and_reports_a_nonzero_flag_count(tmp_path):
+    """Clause 1's real half: the named command is a command, not a caption.
+
+    The figures in the header age, so nothing here asserts them. What is asserted is
+    the thing that does not age — that the block between `RECOMPUTE-BEGIN` and
+    `RECOMPUTE-END` executes, that it excludes rows before `SINCE`, that it can report
+    a flag when one exists (a program that could only ever print `flags 0` would keep
+    this record looking true forever), and that its coverage arm counts rows and files.
+    The ledger is a fixture in `tmp_path`, never the live one: reading live flags into
+    the suite would make an observe-only rule blocking by way of the test rung.
+    """
+    planted = [
+        _fixture_row("2026-10-12T00:00:00Z", {}, {"wide": 1}),   # before SINCE
+        json.dumps({"event": "promoted", "round_id": "SM_X",
+                    "created_at": "2026-10-14T00:00:00Z"}),      # not a gate row
+        _fixture_row("2026-10-14T00:00:00Z", {}, {"wide": 2, "narrow": 0}),
+        _fixture_row("2026-10-15T00:00:00Z", {"wide": 1}, {"wide": 1, "narrow": 0}),
+    ]
+    flagged = tmp_path / "flagged.jsonl"
+    flagged.write_text("\n".join(planted) + "\n", encoding="utf-8")
+    out = _run_recompute_block(tmp_path, flagged)
+    print(out)
+    head = out.splitlines()[0]
+    assert "rows 2" in head, (
+        f"the two in-window `gate` rows are not what the block counted: {head!r} — a "
+        "figure from this command is only trustworthy if the command scopes it")
+    assert "flags 1" in head, (
+        f"the block cannot report a nonzero flag count: {head!r}. A recompute that can "
+        "only ever print 0 is not a check, it is a caption for the answer already "
+        "recorded")
+    assert "2026-10-14T00:00:00Z .. 2026-10-15T00:00:00Z" in head, (
+        f"the span the block reports is not its own rows': {head!r}")
+    assert "wide: 2/2 rows saw >=1 file, 3 file-reads" in out, (
+        f"the coverage arm does not count rows-and-files as the header's table claims "
+        f"it does:\n{out}")
+    assert "narrow: 0/2 rows saw >=1 file, 0 file-reads" in out, (
+        f"a rule that covered nothing is reported as if it were indistinguishable from "
+        f"one that covered everything:\n{out}")
+
+    clean = tmp_path / "clean.jsonl"
+    clean.write_text("\n".join(planted[:3]) + "\n", encoding="utf-8")
+    out_clean = _run_recompute_block(tmp_path, clean)
+    assert "flags 0" in out_clean.splitlines()[0], (
+        f"with no flagged row planted the block still reports a flag: {out_clean!r}")
+
+
+def test_the_header_records_that_nothing_flipped_and_679_is_the_precedent_for_that():
+    """Clause 2: no rule flips, on #679's zero-finding-soak close.
+
+    Quoting the precedent is the point: #679 was ruled, delegated by a human, over a
+    far bigger zero (790 `vet` rows, 400 promoted landing events) and came out
+    observe-only. A header that said "nothing flips" without it would be a ruling with
+    no case behind it, and the next reader could not tell it from a default.
+    """
+    header = _header_prose()
+    low = header.lower()
+    assert "no rule has flipped to blocking" in low, (
+        "the header records a soak without recording the flip decision it supports")
+    assert "#679" in header, "the no-flip ruling names no precedent"
+    assert "flip nothing to blocking" in header, (
+        "the precedent's own ruling is not quoted, so the reader cannot compare the "
+        "two soaks — only the conclusion is in the file")
+    assert "not the defect class here" in header, (
+        "#679's zero-finding-soak close is not quoted: the phrase that settled a "
+        "comparable soak is the thing a future reader needs")
+    assert "790" in header and "400 promoted landing" in header, (
+        "the comparison's own denominators are missing, so this soak's 224 rows cannot "
+        "be read against the one that ruled first")
+    assert "nothing flips" in low, (
+        "the header quotes precedent but never states this file's own conclusion")
+
+
+def test_the_flip_bound_in_the_header_adds_to_the_one_gate_py_publishes():
+    """Clause 3: one published bound, two conditions, no competing number.
+
+    `rung_code_rules` already states the >=20-landings condition in the tree, and this
+    round touches only the `.toml`, so the header has to ADD to that bound rather than
+    restate it — two files carrying different flip thresholds is how a threshold stops
+    meaning anything. The check therefore runs both ways: gate.py must still say what
+    the header cites, and every digit-before-landings figure in the header must be 20.
+    """
+    gate = (ROOT / "scripts" / "automod" / "gate.py").read_text(encoding="utf-8")
+    assert "at least 20 landings" in gate, (
+        "rung_code_rules no longer publishes the >=20-landings bound the header cites, "
+        "so condition (a) points at a number that moved — move it in the same change, "
+        "not by editing the sentence here")
+    header = _header_prose()
+    assert "rung_code_rules" in header, (
+        "the header names no published bound to add itself to")
+    assert "at least 20 landings" in header, (
+        "condition (a) does not quote gate.py's bound, so a reader cannot tell which "
+        "number is the published one")
+    assert "at least 1 confirmed real catch" in header, (
+        "condition (b) is missing: >=20 landings with zero catches is #679's outcome, "
+        "not a licence to flip")
+    assert "in live diff" in header or "confirmed real catch in a live diff" in header, (
+        "condition (b) must be about a catch in a real diff, not in a fixture")
+    assert "allow list" in header and "SAME diff" in header, (
+        "a flip that ships without the allow list the rule will need refuses every "
+        "round until the exceptions land — including the round fixing them")
+    nums = set(re.findall(r"(\d+)\s?[- ]?\blandings\b", header))
+    assert nums == {"20"}, (
+        f"the header publishes flip bounds of its own: {sorted(nums)}, beside gate.py's "
+        "20 — a threshold in two places is a threshold nobody can satisfy")
+
+
+@pytest.mark.parametrize("rule_id", SHIPPED_RULE_IDS)
+def test_the_header_carries_a_coverage_figure_for_every_rule_the_file_ships(rule_id):
+    """Clause 4: the zero is priced per rule, and a new rule cannot dodge that.
+
+    Parametrized over the FILE's ids, so adding a rule without recording what it
+    covered is a red node here rather than a rule whose zero nobody can price — the
+    same shape as the fixture-coverage test above, on the other half of the record.
+    """
+    lines = [ln.lstrip("#").strip() for ln in _header_lines() if rule_id in ln]
+    assert lines, f"the header never names {rule_id}, so its zero is unattributed"
+    cov = [ln for ln in lines if re.search(r"\d+/\d+ rows", ln)]
+    assert cov, (
+        f"{rule_id} appears in the soak record with no `N/M rows` coverage figure: "
+        f"{lines}. A rule that covered two rows of two hundred has a zero that means "
+        "something else entirely, and the table is where that difference lives")
+    m = re.search(r"(\d+)/(\d+) rows", cov[0])
+    assert m, cov[0]
+    covered, total = int(m.group(1)), int(m.group(2))
+    assert total > 0 and 0 <= covered <= total, cov[0]
+    assert "file-reads" in cov[0], (
+        f"{rule_id}'s coverage line counts rows but not files, so a rule that saw one "
+        f"file in 200 rows and one that saw 200 files each look identical: {cov[0]}")
+    print(f"header coverage: {rule_id} {covered}/{total} rows")
+
+
+def test_the_header_prices_the_zero_and_the_rules_it_prices_are_the_rules_that_ship():
+    """Clause 4's other half: the coverage table's id set IS the shipped rule set.
+
+    A record that prices four of five rules reads exactly as complete as one that
+    prices five, which is the gap this node closes; and the sentence that makes the
+    table load-bearing has to be in the file, or the table is decoration beside a
+    headline number a reader will quote on its own.
+    """
+    header = _header_prose()
+    assert "a rule's zero is only as strong as its coverage" in header.lower(), (
+        "the header states a flag count without pricing it — the sentence the whole "
+        "coverage table exists to carry")
+    table_ids = set()
+    for ln in _header_lines():
+        m = re.match(r"^([a-z0-9][a-z0-9-]+)\s+\d+/\d+ rows", ln.lstrip("# ").strip())
+        if m:
+            table_ids.add(m.group(1))
+    assert table_ids == set(SHIPPED_RULE_IDS), (
+        f"the coverage table prices {sorted(table_ids)} but the file ships "
+        f"{sorted(SHIPPED_RULE_IDS)} — an unpriced rule's zero is the one that gets "
+        "quoted as if it were a soak")
+    narrow = [rid for rid in ("guardian-import-hygiene", "naive-now-in-artifact-name")
+              if any(rid in ln for ln in _header_lines()
+                     if re.search(r"\d+/\d+ rows", ln))]
+    assert narrow == ["guardian-import-hygiene", "naive-now-in-artifact-name"], (
+        "the two rules whose coverage is the weak point of this record are not the two "
+        "the record names")
+
+
+def test_the_header_rejects_669_stale_close_with_the_reason_that_rejects_it():
+    """Clause 5: #669's stale-close is refused, with its reason, so it is not reopened.
+
+    #669 is the other zero-finding soak in this area, and it ended `hand sweep
+    2026-09-24 (stale)` after two automod triages had CONFIRMED it — a sweep that
+    overrode a settled ruling and left no measurement behind it (the owed-check that
+    went looking for its artifact found `scripts/code_quality_metrics.py` absent,
+    because nothing had ever been measured). The reason is the deliverable: a bare
+    "not #669" would be re-litigated by the next person who saw the parallel.
+    """
+    header = _header_prose()
+    assert "#669" in header, "the header records no answer to the other closure route"
+    assert "hand sweep 2026-09-24 (stale)" in header, (
+        "the closure being refused is not named, so a reader cannot check the refusal")
+    assert "two automod triages had confirmed" in header, (
+        "the reason has to name what the sweep overrode — a stale close of an "
+        "unconfirmed item would be defensible, and this one is not")
+    assert "erases a settled ruling" in header, (
+        "the consequence is missing: the objection is a ruling erased, not a wording")
+    assert "code_quality_metrics.py" in header, (
+        "the refusal should cite the artifact that never existed, which is the proof "
+        "that this closure route measures nothing")
+    assert "stale-close is not a" in header, (
+        "the header never says what it is refusing to become")
+    assert "confirmed real catch" in header, (
+        "the record must also say what WOULD retire it, or it reads as permanent by "
+        "default rather than by ruling")
+
+
+def test_the_soak_record_is_a_comment_edit_and_the_rule_surface_it_describes_is_unchanged():
+    """Clause 6 of #2809's contract: a record about rules that changes none of them.
+
+    Three checks, none of them a count of how many lines the block has. (1) Everything
+    above `[meta]` is a comment, so the region this round edited cannot carry a rule.
+    (2) The ids and matchers still load as the five that shipped — scope lines are
+    pinned by #2810's three nodes, and the whole-tree control by the two above. (3) The
+    cap the header quotes is the loader's cap, so the prose and the code cannot drift
+    apart in a change that claims to be only prose.
+    """
+    lines = _header_lines()
+    non_comment = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
+    assert non_comment == [], (
+        f"non-comment lines above the first table header: {non_comment} — the soak "
+        "record is specified as a comment-only edit precisely so it cannot add, widen "
+        "or soften a rule while it reports on one")
+
+    rules = CR.load_rules(RULES_PATH)
+    assert [r.id for r in rules] == RULE_IDS_AT_RECORDING, (
+        f"the rule ids moved: {[r.id for r in rules]} vs "
+        f"{RULE_IDS_AT_RECORDING}. A round that records a soak ships no rule; if a "
+        "rule genuinely changed, that is a different item and this list moves with it")
+    assert [(r.id, r.matcher) for r in rules] == RULE_MATCHERS_AT_RECORDING, (
+        f"a matcher was swapped under cover of a comment edit: "
+        f"{[(r.id, r.matcher) for r in rules]}")
+    assert len(rules) <= CR.MAX_RULES, f"{len(rules)} rules, cap is {CR.MAX_RULES}"
+
+    header = _header_prose()
+    quoted_cap = re.search(r"`MAX_RULES` in code_rules\.py is (\d+)", header)
+    assert quoted_cap, (
+        "the header no longer states the cap in a form this node can read, so the "
+        "prose and the loader stopped being checkable against each other")
+    assert int(quoted_cap.group(1)) == CR.MAX_RULES, (
+        f"the header says the cap is {quoted_cap.group(1)} and the loader says "
+        f"{CR.MAX_RULES}")

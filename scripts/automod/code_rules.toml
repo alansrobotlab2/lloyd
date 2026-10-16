@@ -9,7 +9,105 @@
 # Loader and matcher implementations: `scripts/automod/code_rules.py`. The runner
 # is stdlib `ast` only and reports observe-only (#2574's own split, copied from
 # #679): nothing here can fail a round. Flipping a rule to blocking is a human
-# ruling after the soak, not a commit to this file.
+# ruling after the soak, not a commit to this file — and #2809 wrote that soak, its
+# denominator and its ruling into this block, so the zero is readable from the tree
+# instead of only from a closed item's activity log.
+#
+# ---------------------------------------------------------------------------
+# THE SOAK, AS MEASURED ON 2026-10-16 (#2809 — the record #2574 left owed).
+#
+#   0 flags. Zero hits, and zero sites rescued by an allow list, over 224 `gate`
+#   rows from 145 distinct rounds, every one of them `status: evaluated` — not a
+#   single row came back `unevaluated`, which is the state in which a zero would
+#   mean only that the instrument never ran.
+#   Date span 2026-10-13T03:41:47Z .. 2026-10-16T09:33:28Z.
+#
+# 4592296e is the commit that put these rules on the gate, and the rung
+# (`scripts/automod/gate.py`, `rung_code_rules`) writes its own result onto every
+# `gate` event in the automod ledger, so the soak replays from the ledger rather than
+# being remembered. SOAK_GATE_ROWS_AT_RECORDING = 224 is that denominator, and the
+# block below is the command that recomputes the rows, the flag count and the span —
+# and then the per-rule coverage — read-only from that ledger:
+#
+# RECOMPUTE-BEGIN
+# L="${CODE_RULES_LEDGER:-$HOME/.local/state/lloyd-automod/promotions.jsonl}"
+# SINCE="${CODE_RULES_SOAK_SINCE:-2026-10-13T03:07:36Z}"   # 4592296e's commit time, UTC
+# jq -s --arg s "$SINCE" '[.[] | select(.event=="gate" and .code_rules and .created_at>=$s)]
+#   | "rows \(length)  flags \([.[].code_rules | (.counts|add // 0)] | add // 0)  span \([.[].created_at]|min) .. \([.[].created_at]|max)"' "$L"
+# jq -s --arg s "$SINCE" '
+#   [.[] | select(.event=="gate" and .code_rules and .created_at>=$s)] as $rs
+#   | [$rs[] | .code_rules.totals.coverage | to_entries[] | [.key, .value.covered]]
+#   | group_by(.[0]) | .[]
+#   | "\(.[0][0]): \(.|map(select(.[1]>0))|length)/\($rs|length) rows saw >=1 file, \(.|map(.[1])|add) file-reads"' "$L"
+# RECOMPUTE-END
+#
+# WHY THE DENOMINATOR IS THE LEDGER'S ROW COUNT AND NOT THE LANDING COUNT. The item
+# was filed with "110 promoted landings with .py changes"; the same command read 120
+# the day this was written — LANDED_PY_COMMITS_AT_RECORDING = 120, recompute with
+# `git log --oneline 4592296e..HEAD -- '*.py' | wc -l` — so a bare count in prose is
+# false inside a week. `tests/test_automod_vet.py` learned exactly that ("a control
+# that pins a count rots within days") and `tests/test_automod_code_rules.py` restates
+# it: name the command beside the figure, and pin a figure as a lower bound, never as
+# an equality.
+#
+# COVERAGE, PER RULE, OVER THOSE SAME 224 ROWS — the figure that decides what the
+# zero is worth. `code_rules.run` carries `totals.coverage` for precisely this reason
+# (its own comment: "a rule that covered nothing for twenty landings has a zero nobody
+# should have believed"), and the second jq command above prints it per rule:
+#   opens-kg-store-outside-kg-store       224/224 rows saw >=1 file, 718 file-reads
+#   broad-except-swallow-same-line        224/224 rows saw >=1 file, 718 file-reads
+#   exports-lloyd-data-to-process-environ 224/224 rows saw >=1 file, 718 file-reads
+#   naive-now-in-artifact-name             84/224 rows saw >=1 file, 140 file-reads
+#   guardian-import-hygiene                 2/224 rows saw >=1 file,   2 file-reads
+# A RULE'S ZERO IS ONLY AS STRONG AS ITS COVERAGE, so "0 flags" is a statement about
+# the three `**/*.py` rules and close to nothing about the other two. A round that
+# touched only `tests/` and non-scope `scripts/` offered `naive-now-in-artifact-name`
+# nothing to read, which is 84 rows of the 224, and #2810's widening of that rule's
+# scope (1168247e) landed inside this window, so 4 rows out of 224 were gated against
+# the wider scope at all. `guardian-import-hygiene` saw a file twice, because two
+# rounds touched `agent-services/guardian/`. Any later reading of this zero has to
+# carry those fractions with it, and the weekly whole-tree census
+# (`scripts/maintenance/code_rules_census.py`) is what keeps them current.
+#
+# NO RULE HAS FLIPPED TO BLOCKING, and this soak does not license flipping one. #679
+# is the precedent on the same shape of finding: its owed-human sweep ruled "keep
+# observe-only (1 s, costs nothing), flip nothing to blocking", and its owed-check
+# then closed the observe-only half on the zero-finding soak as "not the defect class
+# here", measured over 790 `vet` rows carrying a record and 400 promoted landing
+# events. This soak is smaller — 224 rows over four days — and two of its five rules
+# barely ran, so the same call applies here with even less reason to reverse it.
+# Nothing flips.
+#
+# THE BOUND ON A FLIP, which no future round should read as "20 landings, go".
+# `scripts/automod/gate.py`, `rung_code_rules`, already publishes the first condition
+# — a human ruling after a soak of at least 20 landings — and that number stays
+# published THERE. This file adds a second condition to it rather than restating a
+# competing one:
+#   (a) the >=20 landings of soak `rung_code_rules` names, counted over evaluated rows
+#       and read beside a per-rule coverage table like the one above; AND
+#   (b) at least 1 confirmed real catch in a live diff — a hit that a human agreed was
+#       a genuine defect. A soak of 20 landings with zero catches is #679's outcome
+#       ("not the defect class here"), not a licence to flip; and
+#   (c) the round that flips a rule adds the allow list that rule will need in the
+#       SAME diff, because a blocking rule whose known exceptions land later refuses
+#       every round in between, including the round sent to fix them.
+# Flipping stays a human ruling in the way #679's was ("ruled (delegated by Alan)"),
+# never a self-mod round's editorial choice about a file it is already editing.
+#
+# WHY #669'S CLOSURE IS NOT THE ROUTE FOR THIS RECORD. #669 (measure structural code
+# quality per self-mod landing) is the other zero-finding soak in this area, and it
+# ended `up_next → done: hand sweep 2026-09-24 (stale)`. That route is REJECTED here,
+# on its face: two automod triages had confirmed #669 and a hand sweep closed it as
+# stale anyway, which erases a settled ruling instead of answering it — the owed-check
+# that later went looking for its artifact found `scripts/code_quality_metrics.py`
+# absent, because nothing had ever been measured. A soak that HAS been run fails the
+# other way under the same treatment: the number is real and re-measurable, and a
+# `done` item's activity log is the one place the next reader does not look. So the
+# ruling lives here, in the file the rules live in, and #669's stale-close is not a
+# reason to close this one. What retires this record is what #679 named: a confirmed
+# real catch, or a human ruling to flip or delete a rule.
+#
+# ---------------------------------------------------------------------------
 #
 # The three rules every candidate had to clear to get in here (item #2574 step 2):
 #   (a) its exception list is nameable in one line;
