@@ -25,7 +25,8 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB
+from app.paths import (PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB,
+                       VAULT_ROOT)
 from app.kg_store import (EDGE_TYPES, StoreUnavailable, canonical_edge_type,
                           store as _kg_store)
 from scripts.reflection_archive import (copy_gaps as _copy_gaps,
@@ -1047,6 +1048,168 @@ def _provenance_cell(pv: dict | None) -> str:
             f"(created_at {pv['created_at_pct']}%, source_doc {pv['source_doc_pct']}%)")
 
 
+#: #94's referential-integrity ledger: the one report of the only job that notices
+#: when loaded memory starts pointing at files that are not there.
+#:
+#: The resolver has written it nightly since it was armed, and nothing read it: the
+#: 2026-10-15 dated copy read `361 cites, 23 dangling, 8 exempt, 0 newly dangling`
+#: against the 2026-10-04 copy's `206 cites, 12 dangling, 5 exempt`, with no open
+#: backlog item on the population, and #2795 closed `done` on 2026-10-16 — two nights
+#: after the total reached 23 — with its exemption cleanup taken from 13 to 8 while the
+#: dangling count rose. Counts move nightly (the 2026-10-16 copy is 372/23/9), so every
+#: figure quoted here names the dated copy it came from. The resolver is forbidden to
+#: file an item or inject context, so "a person opens the file" was the entire alert
+#: surface, and it was not being opened (#2821).
+#:
+#: This path is the reader half of that. `git grep -n referential-integrity-latest`
+#: used to name only the generator, two OKF/segment exclusions and a step-conformance
+#: note; the numbers now also reach the one file in this area that both a downstream
+#: job and a person already read.
+REFERENTIAL_LEDGER = VAULT_ROOT / "autonomy/referential-integrity-latest.md"
+
+#: The three files the sweep weighs, in the resolver's own order. Spelled out rather
+#: than imported from `scripts/maintenance/referential_integrity.py` so this report
+#: does not gain a dependency on the job it reports about;
+#: `tests/test_knowledge_health_referential_integrity.py::test_the_corpus_the_section_names_is_the_resolver_s_own`
+#: reads the resolver's `CORPUS` literal out of its source and fails if the two drift.
+REFERENTIAL_CORPUS = ("lloyd/USER.md", "lloyd/MEMORY.md", "memory/mental-models.md")
+
+#: The four counts, matched on the exact lines `render_report` emits. Anchored to the
+#: start of a bullet because the front-matter `summary:` carries the same counts in
+#: prose ("361 cites, 23 dangling, 8 exempt, 0 newly dangling" on 2026-10-15), and a
+#: loose pattern would read that prose as a second measurement of its own.
+_LEDGER_COUNT_PATTERNS = {
+    "cites": re.compile(r"^- total cites: (\d+)$", re.M),
+    "dangling": re.compile(r"^- dangling: (\d+)$", re.M),
+    "exempt": re.compile(r"^- exempt: (\d+)$", re.M),
+    "newly": re.compile(r"^- newly dangling since the previous report: (\d+|n/a)", re.M),
+}
+
+
+def read_referential_ledger(path: Path | None = None) -> dict:
+    """Read #94's four counts out of its ledger. Never raises.
+
+    Returns `{"state": "measured", "cites": n, "dangling": n, "exempt": n,
+    "newly": n | None, "stamp": str | None, "path": Path}` — `newly` is None for the
+    resolver's `n/a (no previous report)` — or `{"state": "absent" | "unreadable",
+    "path": Path, "reason": str}`.
+
+    Three states because the difference is what a reader acts on. `absent` means the
+    nightly wrote nothing, which #94's run of 2026-10-13 did while recording
+    `status: success`; `unreadable` covers both an `OSError` on the path and a file
+    whose four count lines are not there, which is a truncated write, not a clean
+    sweep. Collapsing either into zeros would report health from what the parser
+    failed to find — the failure this section exists to avoid (#2821 clause 2).
+    """
+    ledger = REFERENTIAL_LEDGER if path is None else Path(path)
+    try:
+        text = ledger.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return {"state": "absent", "path": ledger,
+                "reason": "the file does not exist"}
+    except OSError as exc:
+        return {"state": "unreadable", "path": ledger,
+                "reason": f"{type(exc).__name__}: {exc}"}
+
+    found = {}
+    for key, pattern in _LEDGER_COUNT_PATTERNS.items():
+        m = pattern.search(text)
+        found[key] = m.group(1) if m else None
+    missing = sorted(k for k, v in found.items() if v is None)
+    if missing:
+        return {"state": "unreadable", "path": ledger,
+                "reason": "no parseable counts: no line matched for "
+                          + ", ".join(missing)}
+
+    stamp = re.search(r'^generated_at: "([^"]+)"', text, re.M)
+    return {
+        "state": "measured", "path": ledger,
+        "cites": int(found["cites"]), "dangling": int(found["dangling"]),
+        "exempt": int(found["exempt"]),
+        "newly": None if found["newly"] == "n/a" else int(found["newly"]),
+        "stamp": stamp.group(1) if stamp else None,
+    }
+
+
+def _referential_integrity_lines(ledger: dict) -> list[str]:
+    """The Loaded-memory referential integrity section for one ledger read.
+
+    The corpus and the resolver's edit authority are printed in every state,
+    including the two not-measured ones: they describe the instrument, not tonight's
+    measurement, and a reader who only ever sees `ledger absent` would otherwise
+    learn the scope of a check they cannot see (#2821 clause 4).
+    """
+    corpus = ", ".join(f"`{c}`" for c in REFERENTIAL_CORPUS)
+    corpus_plain = ", ".join(REFERENTIAL_CORPUS)
+    out = ["## Loaded-memory referential integrity", ""]
+    out.append(f"Weighed corpus: {corpus}. The resolver "
+               "(`scripts/maintenance/referential_integrity.py`, job #94) **edits "
+               "nothing** — report-only by its own contract — so every cite its ledger "
+               "names is still dangling after this section prints, and no line below is "
+               "a fix that has already happened.")
+    out.append("")
+
+    state = ledger.get("state")
+    if state == "absent":
+        out.append(
+            f"referential integrity: ledger absent — `{ledger['path']}` "
+            f"{ledger.get('reason', 'is not there')}. Nothing was measured tonight, so "
+            f"the four counts that normally cover {corpus_plain} are absent from this "
+            "night's report. An absent "
+            "ledger is not a clean sweep: #94's run of 2026-10-13 recorded "
+            "`status: success` and made neither this file nor its dated copy, and the "
+            "acceptance-grade regex that would have caught it graded 0.4 in a record "
+            "nobody reads. Absent means the measure did not happen.")
+        out.append("")
+        return out
+    if state != "measured":
+        out.append(
+            f"referential integrity: ledger unreadable — `{ledger['path']}`: "
+            f"{ledger.get('reason', 'unreadable')}. No counts are printed for the "
+            f"corpus named above ({corpus_plain}), because the alternative is reporting "
+            "whatever the parser failed to find as a measurement.")
+        out.append("")
+        return out
+
+    stamp = f", run {ledger['stamp']}" if ledger.get("stamp") else ""
+    out.append(f"Ledger: `{ledger['path']}` — read from disk while this report was "
+               f"generated{stamp}.")
+    out.append("")
+    newly_text = "n/a (no previous report)" if ledger["newly"] is None else str(ledger["newly"])
+    out.append(f"- total cites: {ledger['cites']}")
+    out.append(f"- dangling: {ledger['dangling']}")
+    out.append(f"- exempt: {ledger['exempt']}")
+    out.append(f"- newly dangling since the previous report: {newly_text}")
+    out.append("")
+
+    # The delta is the finding; the total is the standing population. Printed as a
+    # marker only for a real nonzero count, so that tonight's 23-cite baseline — the
+    # state the item was filed against — never arrives as news. Whether the delta
+    # should ever become an alarm, a filed item, or a blocked write is #882's
+    # `>=14 runs` revisit and is not this section's call (#2821's owed clause).
+    if ledger["newly"]:
+        out.append(f"NEWLY DANGLING: {ledger['newly']}")
+        out.append("")
+        out.append("These resolved in the previous report and do not resolve now: the "
+                   "part of the population that moved since the last sweep, and the "
+                   "only part of it that says anything about today.")
+    elif ledger["newly"] is None:
+        out.append("No previous report to compare against, so no delta was measured: "
+                   "the counts above are a baseline with no change attached, not a "
+                   "clean sweep.")
+    else:
+        out.append("Nothing newly dangling since the previous report, so this section "
+                   "carries no finding today.")
+    out.append("")
+    out.append("The `dangling` total above is a BASELINE, not a finding: cites go "
+               "stale when a file moves rather than when a memory breaks, and the "
+               "population has grown from 12 to 23 since 2026-10-04 with no single "
+               "night's damage in it. The reportable change is the `newly dangling` "
+               "delta.")
+    out.append("")
+    return out
+
+
 def generate_report(
     entity_stats: dict,
     rel_stats: dict,
@@ -1061,6 +1224,7 @@ def generate_report(
     trace_coverage: tuple[int, int] | None = None,
     stamp_cohort: dict | None = None,
     pattern_staleness: list | None = None,
+    referential_ledger: Path | None = None,
 ) -> str:
     """Generate the markdown health report.
 
@@ -1441,6 +1605,11 @@ def generate_report(
             lines.append(f"| … | *{len(pattern_staleness) - SECTION_ROW_CAP:,} more* |")
     lines.append("")
 
+    # #94's referential-integrity ledger, read here at generate time so the numbers in
+    # the dated file are the ones on disk this morning rather than a transcription that
+    # can age (#2821).
+    lines.extend(_referential_integrity_lines(read_referential_ledger(referential_ledger)))
+
     lines.append("## Suggested Research Questions")
     lines.append("")
 
@@ -1787,6 +1956,15 @@ def main():
         help=f"Facts directory (default: {FACTS_DIR})",
     )
     parser.add_argument(
+        "--referential-ledger",
+        type=Path,
+        default=REFERENTIAL_LEDGER,
+        help="Read #94's referential-integrity ledger from here (default: "
+             f"{REFERENTIAL_LEDGER}). Read, never written: this job does not "
+             "resolve cites, and a missing ledger prints `ledger absent` rather "
+             "than an exit code.",
+    )
+    parser.add_argument(
         "--no-alarm-exit", action="store_true",
         help="Always exit 0, even on an alarm condition (for ad-hoc runs)",
     )
@@ -1839,7 +2017,8 @@ def main():
                              duplicate_id_files=dup_id_files, copy_gaps=gaps,
                              trace_coverage=trace_coverage,
                              stamp_cohort=stamp_cohort,
-                             pattern_staleness=stale_patterns)
+                             pattern_staleness=stale_patterns,
+                             referential_ledger=args.referential_ledger)
 
     # Write output
     output_dir = args.output_dir
