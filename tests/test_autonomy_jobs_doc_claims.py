@@ -12,7 +12,8 @@ since 2026-09-15, and at base the doc did not contain the token `86` at all
 (`grep -cE '\\b86\\b|iv-metrics|iv_metrics' architecture/autonomy-jobs.md` → 0),
 while `:38` still bounded the fleet at "24 through 85". Nothing caught it:
 `workers/sources/arch_review.py` offers a group as a review unit by its *heading
-name* only (`autonomy-jobs:Measure`, `config.yaml:1641`), so it never asks who is
+name* only (one `autonomy-jobs:Measure` entry in
+`workers.sources.arch-review.groups` in `config.yaml`), so it never asks who is
 *inside* a group, and `scripts/autonomy/validate_tasks.py` checks task-file
 structure, not the doc.
 
@@ -59,6 +60,16 @@ entry. No node here asserts a run count: #97 and #98 fire daily, so any number
 typed into a test is false the next morning — which is the same reason the doc
 dates its counts, and why the owed-check re-reads the count instead of a test
 freezing it.
+
+A fourth contract joined with #2806 (2026-10-16): what `config.yaml` offers as a
+review unit has to be the doc's own list of groups, in both directions. The pair
+was read one way only — a configured name with no heading is reported, a heading
+with no configured entry is invisible — and §Watch the machinery went in as the
+doc's eighth group with no entry beside the seven, so its seven jobs were in no
+unit a reviewer could be sent to. The reconciliation reads the live config through
+`workers.sources.get_sources_config` and the live doc through `find_section`, so it
+binds the two files the cadence actually reads rather than two copies of them, and
+its failure is demonstrated on a seeded heading rather than described.
 """
 
 from __future__ import annotations
@@ -672,6 +683,150 @@ def test_every_configured_group_still_resolves_to_a_heading_in_the_doc():
         f"pass over that group can ever see it")
 
 
+#: A section the doc itself declares to be a functional group: a `## <Name>: <ids>`
+#: heading, and under it at least one `| #N |` job row. The shape is the whole
+#: discriminator — §The functions, §What the fleet actually costs, §Related and
+#: §Review log are `##` headings too (and §The functions is a per-job table of the
+#: groups), but none of them reads `## <Name>: <ids>`, so they are excluded by what
+#: they are rather than by a list of names that would stop excluding them the day a
+#: fifth prose section went in.
+_GROUP_HEADING = re.compile(r"^## (?!#)(?P<name>[^:]+):(?P<ids>[^\n]*#\d+[^\n]*)$")
+_GROUP_JOB_ROW = re.compile(r"(?m)^\| #\d+ \|")
+
+
+def _arch_review_groups() -> list[str]:
+    """The raw `workers.sources.arch-review.groups` list, through the reader production uses.
+
+    `get_sources_config` reads `app.config.CONFIG`, and `app.paths` resolves that from
+    the checkout the tests run in — so in a round's worktree or a throwaway checkout
+    this is that tree's list, which is the copy the change under test is in. A literal
+    copy of the list here would be a second source of the membership, which is the
+    thing #2806 is about.
+    """
+    from workers.sources import arch_review as A
+    from workers.sources import get_sources_config
+
+    return list((get_sources_config().get(A.NAME, {}) or {}).get("groups") or [])
+
+
+def _configured_group_names(groups: list[str]) -> list[str]:
+    """The `autonomy-jobs` names a raw `groups:` list holds, as `parse_groups` reads them."""
+    from workers.sources import arch_review as A
+
+    return [name for slug, name in A.parse_groups(groups) if slug == "autonomy-jobs"]
+
+
+def _job_group_names(text: str) -> list[str]:
+    """The groups `text` declares, in the order their headings appear.
+
+    The span comes from `find_section` — the matcher `workers/sources/arch_review.py`
+    uses to turn a configured name into the lines it hands a reviewer — so a name
+    counted here is a name that source could actually have reviewed.
+    """
+    from workers.sources import arch_review as A
+
+    lines = text.splitlines()
+    out: list[str] = []
+    for line in lines:
+        m = _GROUP_HEADING.match(line)
+        if not m:
+            continue
+        name = m.group("name").strip()
+        span = A.find_section(text, name)
+        if span is None:
+            continue                                    # not this shape after all
+        if _GROUP_JOB_ROW.search("\n".join(lines[span[0] - 1:span[1]])) and name not in out:
+            out.append(name)
+    return out
+
+
+def _group_headings_the_config_never_names(text: str, groups: list[str]) -> list[str]:
+    """Every group `text` declares that `groups` has no entry for.
+
+    Both arguments are inputs, not reads of the live tree, which is what lets the
+    failure be demonstrated rather than asserted: the same expression over the live
+    doc and the live `groups:` list is the green case, and over a doc carrying one
+    extra seeded group, or a list with one entry removed, it names what drifted.
+    Comparison goes through `heading_key` because that is how the source compares a
+    configured name to a heading — case-insensitively, and only up to the first `:`.
+    """
+    from workers.sources import arch_review as A
+
+    named = {A.heading_key(name) for slug, name in A.parse_groups(groups)
+             if slug == "autonomy-jobs"}
+    return [g for g in _job_group_names(text) if A.heading_key(g) not in named]
+
+
+def test_every_group_heading_in_the_doc_is_configured_as_a_review_unit():
+    """#2806. The other direction, which nothing walked before.
+
+    `test_every_configured_group_still_resolves_to_a_heading_in_the_doc` asks whether
+    every configured name has a heading, and a group added to the doc answers it by
+    not being in the list asked about. `workers/sources/arch_review.py` reports
+    `section_missing` on that same single direction, so the only teller of a group
+    with rows and no config entry was a model told to notice it, in a whole-doc unit
+    that rests `review_interval_days` at a time. §Watch the machinery went in at
+    `b221481c` (2026-10-12) as the doc's eighth group with no entry beside the seven,
+    and nothing downstream changed: the seven `| #91 |` rows simply had no unit, and
+    `~/.local/state/lloyd-automod/arch_review.json` carries a `group:autonomy-jobs:`
+    key for each of the seven and none for it.
+    """
+    doc, groups = _text(), _arch_review_groups()
+    declared, named = _job_group_names(doc), _configured_group_names(groups)
+    # Three statements of one membership, so an empty answer below is the pair
+    # agreeing and not a heading pattern that matched nothing.
+    assert declared and named, (
+        f"the doc declares {len(declared)} groups and config.yaml names {len(named)}; "
+        f"one of the two reads empty, which is a broken pattern, not a clean tree")
+    funcs = _table(FUNCTIONS_HEADER)
+    assert len(named) == len(declared) == len(funcs), (
+        f"config.yaml names {len(named)} autonomy-jobs groups ({sorted(named)}), the "
+        f"doc's headings with job rows are {len(declared)} ({sorted(declared)}) and "
+        f"§The functions lists {len(funcs)} — these are one membership in three "
+        f"places and they have come apart")
+
+    unconfigured = _group_headings_the_config_never_names(doc, groups)
+    assert not unconfigured, (
+        f"{unconfigured} hold `| #N |` job rows under a `## <Name>: <ids>` heading in "
+        f"architecture/autonomy-jobs.md, but config.yaml's "
+        f"`workers.sources.arch-review.groups` names no such unit, so no reviewer is "
+        f"ever offered them and no check notices — add the `autonomy-jobs:<Name>` "
+        f"entry beside the others")
+
+
+def test_a_dropped_or_seeded_group_fails_the_review_unit_check():
+    """The reverse check has to be able to fail, and the live pair is the control
+    that shows it is not failing for the wrong reason.
+
+    Both ways round: a heading the list never named (the §Watch the machinery case,
+    seeded so the check is shown catching it rather than describing it) and a list
+    that lost an entry its doc still has. Either way the drifted group is the thing
+    the result names, because a check that reported "N groups, M entries" without
+    saying which would be the same unreadable verdict #2630 was filed about.
+    """
+    groups = _arch_review_groups()
+    doc = _text()
+    assert _group_headings_the_config_never_names(doc, groups) == [], (
+        "the live doc and the live config already disagree, so nothing below can "
+        "show a seeded drift — fix #2806 first")
+
+    seeded, n = re.subn(
+        r"(?m)^## What the fleet actually costs$",
+        "## Seeded group: #999\n\n"
+        "| # | Job | What it does |\n"
+        "|---|---|---|\n"
+        "| #999 | seeded | a row that exists only to prove the check sees it |\n\n"
+        "## What the fleet actually costs", doc, count=1)
+    assert n == 1, "the seeded heading found no host section, so it proved nothing"
+    assert _group_headings_the_config_never_names(seeded, groups) == ["Seeded group"], (
+        "a group heading with a `| #999 |` row and no config entry came back clean, "
+        "which is exactly how §Watch the machinery read for four days")
+
+    dropped = [g for g in groups if g != "autonomy-jobs:Watch the machinery"]
+    assert len(dropped) == len(groups) - 1, "the copied list dropped nothing"
+    assert _group_headings_the_config_never_names(doc, dropped) == ["Watch the machinery"]
+
+
 def test_every_job_has_one_function_and_exactly_one_write_tier():
     """The two tables partition one fleet from two axes. Neither can be checked
     against the live fleet from inside a unit test, so each is checked against the
@@ -1153,7 +1308,7 @@ def test_the_newest_jobs_sit_in_the_group_and_tier_their_output_belongs_to():
 
 
 def test_every_groups_heading_row_link_and_id_list_agree():
-    """One rule over all seven groups, so a job can be added without the doc
+    """One rule over every group, so a job can be added without the doc
     quietly breaking around it. The Measure case is pinned for one group by
     `test_the_functions_table_row_and_every_anchor_follow_the_group_heading`;
     widening Ingest for #87–#89 and Bound entropy for #90 is the same edit in two

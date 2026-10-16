@@ -340,6 +340,55 @@ def test_a_group_names_a_doc_and_a_section(tree):
     assert not any("bad-entry" in i for i in ids)
 
 
+def test_the_live_group_list_offers_every_group_the_jobs_doc_declares():
+    """#2806. The picklist is built from `config.yaml`, and until this round nothing
+    asked whether `config.yaml` had everything in it.
+
+    `test_a_group_names_a_doc_and_a_section` covers `all_units` over a fixture list,
+    so it says what the function does with the names it is handed and nothing about
+    whether the real list names the real doc's sections. That gap is how
+    §Watch the machinery — `architecture/autonomy-jobs.md`'s eighth group, added at
+    `b221481c` with seven jobs behind it — sat for four days with no unit that could
+    be picked: `find_section` resolved it, so the one direction that gets reported
+    (`section_missing`, for a name with no heading) stayed green. Read through the
+    production lookup rather than a fixture tree, as
+    `test_autonomy_jobs_doc_claims.py::test_every_configured_group_still_resolves_to_a_heading_in_the_doc`
+    does, because the pair under test is this checkout's config and this checkout's
+    doc. No line numbers are asserted: the membership that matters is the seven rows
+    inside the section a reviewer would be handed.
+    """
+    from workers.sources import get_sources_config
+
+    root = Path(__file__).resolve().parent.parent
+    cfg = get_sources_config().get(A.NAME, {}) or {}
+    units = A.all_units(cfg, root)
+    by_id = {u["unit"]: u for u in units}
+    group_ids = [i for i in by_id if i.startswith("group:autonomy-jobs:")]
+    mine = [n for slug, n in A.parse_groups(cfg.get("groups")) if slug == "autonomy-jobs"]
+    assert len(group_ids) == len(mine), (
+        f"config.yaml names {len(mine)} autonomy-jobs groups and `all_units` offered "
+        f"{len(group_ids)} ({sorted(group_ids)}) — a configured group that reaches no "
+        f"picklist is a group nobody reviews")
+
+    want = "group:autonomy-jobs:Watch the machinery"
+    assert want in by_id, (
+        f"{want} is not on the picklist, so the seven jobs in §Watch the machinery "
+        f"have no unit that can ever be picked. Offered groups: {sorted(group_ids)}")
+    assert (by_id[want]["kind"], by_id[want]["doc"], by_id[want]["name"]) == (
+        "group", "autonomy-jobs", "Watch the machinery")
+
+    text = (root / "architecture" / "autonomy-jobs.md").read_text()
+    span = A.find_section(text, by_id[want]["name"])
+    assert span, (
+        "the unit is offered and its section cannot be found, so the turn would "
+        "record `section_missing` and file nothing")
+    section = "\n".join(text.splitlines()[span[0] - 1:span[1]])
+    absent = [f"#{n}" for n in range(91, 98) if f"| #{n} |" not in section]
+    assert not absent, (
+        f"the unit's own section is missing the job rows {absent} — the group would "
+        f"be reviewed with its members' rows outside the lines a reviewer is shown")
+
+
 @pytest.mark.parametrize("heading,want", [
     ("## Distil: #38 #42 #39", "distil"),
     ("## 6. Mining — Lloyd's own exhaust back out", "mining"),
@@ -1061,7 +1110,7 @@ async def test_a_front_matter_hunk_still_throws_the_group_edit_away(tree, monkey
     """#1686 resolved the contradiction by changing the prompt, not this rail. A
     group that touches the `date:` line anyway must still lose the entire doc
     edit: the front matter is shared text, and the bound that protects it is the
-    same one that stops seven groups sharing one file from re-opening each
+    same one that stops the groups sharing one file from re-opening each
     other's sections. The filings survive, as under every other bound."""
     doc = tree["arch"] / "workers-jobs.md"
     before = doc.read_text()

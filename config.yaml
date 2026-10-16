@@ -2262,6 +2262,10 @@ workers:
         - autonomy-jobs:Queue the work
         - autonomy-jobs:Bound entropy
         - autonomy-jobs:Measure
+        # #2806: the section went in as the doc's eighth group in b221481c with no
+        # entry here, so it was never offered to a reviewer. The two directions are
+        # pinned by tests/test_autonomy_jobs_doc_claims.py from both sides.
+        - autonomy-jobs:Watch the machinery
         - workers-jobs:Dispatch
         - workers-jobs:Self-modification
         - workers-jobs:Intake
