@@ -39,13 +39,16 @@ job is for, what it reads and writes, what it must not do, and what has already
 gone wrong with it.
 
 Jobs are numbered by their task id and that numbering is historical, not
-ordered: ids run 24 through 98 or beyond, with gaps where tasks were retired
-(2026-10-12). #98, the retag-untagged-facts runner, is the newest and was filed
-2026-10-14. Which ids are live is `GET /api/autonomy/tasks`'s business, not
-this document's. Typing a ceiling here has been wrong twice inside a week: the
-bound stopped at 85 while 86 was already running nightly, #1102 corrected it to
-86, and #87–#90 overtook that correction inside three days; #91–#97 overtook the
-correction this paragraph carries between 2026-09-29 and 2026-10-11. So the
+ordered: ids run 24 through 99 or beyond, with gaps where tasks were retired
+(2026-10-12). #99, the supply-chain observed-inventory regeneration job, is the
+newest and was filed 2026-10-16. Which ids are live is
+`GET /api/autonomy/tasks`'s business, not this document's. Typing a ceiling here
+has been wrong twice inside a week: the bound stopped at 85 while 86 was already
+running nightly, #1102 corrected it to 86, and #87–#90 overtook that correction
+inside three days; #91–#97 overtook the correction this paragraph carries between
+2026-09-29 and 2026-10-11, and #98 and #99 overtook the one before it inside two
+days — the second time the directory ran ahead of the sentence, and the second
+time a node was the thing that said so. So the
 range above is a floor, and the id it names carries the date it was the newest.
 
 **A filed task and an armed task are two different things, and the two kinds of
@@ -60,13 +63,17 @@ sending a filed task to `up_next` is a dispatch-affecting edit an unattended rou
 may not make, which is why that step is a person's. Which state an id is in is
 `GET /api/autonomy/tasks`'s business, as above.
 
-**Membership below is complete as of 2026-10-12, in both directions, and since
+**Membership below is complete as of 2026-10-16, in both directions, and since
 2026-10-13 that completeness is checked against the directory instead of
 promised.** The seven task files #91 nightly
 thinking-fidelity prevalence series, #92 vLLM prefix-miss daily, #93
 step-conformance replay, #94 referential-integrity ledger, #95 mitigation drill,
 #96 djev name-prior probe and #97 landed-outcomes daily record have their
-entries, in [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97).
+entries, in [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99).
+#99 supply-chain inventory regen has one in that same group — a watcher whose
+subject is the evidence the self-modification loop is judged on, and one that can
+file a backlog item, which is why it sits beside #92–#94 rather than with the four
+that only report.
 #98 retag untagged facts has its row, and the reason a repaired-the-record job
 belongs beside #48 rather than beside the watchers, under
 [Canonicalize](#canonicalize-48-67-84-98).
@@ -86,7 +93,8 @@ the task-file directory as the source of truth and fail on either direction, an
 id the tables name with no `NN-*.md` behind it (unless that id's own row says it
 is retired, which is how #36 stays listed with its file in `_archived/`) and a
 live task file the tables omit. #2630 owns the content of this paragraph, which
-is the same failure #1102 caught for #86, recurring for seven jobs and, in the
+is the same failure #1102 caught for #86, recurring for seven jobs, then for
+#99 on the day #99 landed, and, in the
 other direction, for three.
 
 ## The functions
@@ -100,7 +108,7 @@ other direction, for three.
 | [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
 | [Bound entropy](#bound-entropy-79-81-78-80-90) | #79 #81 #78 #80 · #90 | stop the stores rotting or growing without limit |
 | [Measure](#measure-60-82-70-36-76-86) | #60 #82 #70 #36 #76 #86 | say whether any of it is working |
-| [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97) | #91 #92 #93 #94 #95 #96 #97 | read the machinery the rest of the fleet runs on — session traces, the engine's log window, run records, loaded memory, the mitigations, the decision engine, the loop's own landings — and report what it looks like |
+| [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99) | #91 #92 #93 #94 #95 #96 #97 #99 | read the machinery the rest of the fleet runs on — session traces, the engine's log window, run records, loaded memory, the mitigations, the decision engine, the loop's own landings — and report what it looks like |
 
 ### Write authority is the fault line
 
@@ -114,7 +122,7 @@ the row answers the permission question, never the size question:
 
 | Tier | Jobs | |
 |---|---|---|
-| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #48 #98 · #92 #93 #94 | 25 |
+| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #48 #98 · #92 #93 #94 #99 | 26 |
 | Injects expiring context unattended | #68 | 1 |
 | Proposes; an operator applies | #67 #84 | 2 |
 | Reports only | #60 #82 #70 #78 #80 #36 #86 #90 · #91 #95 #96 #97 | 12 |
@@ -197,7 +205,8 @@ grouping those three jobs sat in one list and the alternation was invisible.
 29 of the 39 tasks (2026-10-12) declare no dependency at all: ten jobs name a
 parent, one each, and those ten are exactly the arrows drawn above. None of
 #91–#97 declares a parent, so the arrows are the same ten #1520 verified and the
-pair moved by seven together. #98 is the newest file and the only one that
+pair moved by seven together. #99 is the newest file; #98 was the newest when
+that sentence was written and is still the only one that
 declares a parent without being drawn: `depends_on: 24`, filed `status: draft`,
 so it is not in the fleet the diagram counts — arming it adds an eleventh arrow
 and takes one off the 29, which is the armed-state move the fleet-bound
@@ -1132,17 +1141,18 @@ name.
 
 ---
 
-## Watch the machinery: #91 #92 #93 #94 #95 #96 #97
+## Watch the machinery: #91 #92 #93 #94 #95 #96 #97 #99
 
-Measure asks whether the fleet is working. These seven ask a different question —
+Measure asks whether the fleet is working. These eight ask a different question —
 whether the *machinery the fleet runs on* still looks like what its own
 documentation says — and they read it from outside: the engine's reasoning traces,
 the serving process's cache and KV window, other jobs' run records, the memory
 surface a prompt is assembled from, the mitigations that stop a run, the decision
 engine on GPU 2, and the self-modification loop's own landings. None of them is
 about a job's output, which is why they are not scattered through the six groups
-above and why they arrived as a block: all seven were created between 2026-09-29
-and 2026-10-11, and none of them had an entry here until #2630.
+above and why they arrived as a block: seven of the eight were created between
+2026-09-29 and 2026-10-11 and none of those seven had an entry here until #2630;
+the eighth, #99, joined the directory on 2026-10-15 and this table on 2026-10-16.
 
 | ID | Freq | Job | Reads | Writes | Must not |
 |----|------|-----|-------|--------|----------|
@@ -1153,18 +1163,20 @@ and 2026-10-11, and none of them had an entry here until #2630.
 | #95 | daily | Mitigation drill, read (`mitigation-drill`, #2432 over #703/#2153) | `GET /api/workers/status`'s `.mitigation` block — one Bash call — which publishes what `~/lloyd-data/mitigation_drill.json` holds | nothing at all: `python -m scripts.mitigation_drill` from the pool's maintenance seat is the only writer of that state file, and a drill run of its own is refused while a self-modification round holds the pool | fire the drill, re-run the GET to refresh a stale reading or to confirm a `no-op`, edit the script, the state file or a threshold. A latest classification of `no-op` is a control regression to be named in one line; `{"state": "never-run"}` is a report, not a failure |
 | #96 | weekly | djev name-prior probe (`djev-name-prior-probe`, #2215 from #1452) | the pinned corpus `eval/djev/name_prior_corpus.jsonl` — 38 prompts on 2026-10-12, 10 dedupe / 10 entity / 10 edges / 8 rank, whose `sha256` every report records — one `choice` question per prompt against the decision engine | `~/lloyd-data/eval/djev/name_prior_<run date>.json`, the probe's default `--out-dir` since #2455, so a run leaves no file inside `~/lloyd` for anybody to `git add` | add a flag — `--samples`, `--url`, `--out-dir`, `--date` and `--corpus` are all absent from the command the skill gives — re-run the probe, or edit it; exit 3 means the engine was unreachable, no report was written and no flip rate was measured |
 | #97 | daily | automod landed-outcomes daily record (`landed-outcomes-daily-record`, #2572 from #2378) | `git log`/`git show` over `~/lloyd` plus the automod ledger, split by author and put through a Wilson interval by `scripts/automod/landed_outcomes.py`; it makes no model call | exactly one JSON row appended to `~/.local/state/lloyd-automod/landed_outcomes.jsonl` — `--record` is what makes it append, and without the flag the module prints, writes nothing and still exits 0 | add `--since`, which moves the window every rate in the row is measured on; edit, truncate, re-sort, compact or dedupe the journal; run it twice in one turn; hand-write a row |
+| #99 | weekly | supply-chain inventory regen (`supply-chain-inventory-regen`, #2796 from #2593): enumerate every distribution installed in the venv roots this box's launch scripts name, scan the set offline with `app/harness/supply_chain_inventory.py`, and compare the result with the committed reference at `eval/supply-chain/baseline.yaml` | the site-packages under `~/lloyd/.venvs` and `~/lloyd-data/venvs`, and that reference; the scan opens no network | one dated JSON report under `~/lloyd-data/supply-chain/`, and a backlog item when either headline count moves | calling `Write` or `Edit`; any `git` or `rm` command |
 
-Five of the seven carry an `acceptance.objective_checks` block naming `Write` and
+Six of the eight carry an `acceptance.objective_checks` block naming `Write` and
 `Edit` in its `tool_not_called` list, so their read-only bound is checked by the
 runner and not by the prose. #91 and #92 carry no such block: for those two the
 prohibition lives only in the `description` field a run is handed, which is why
 `preserve_thinking_iterations` and the staging rule are spelled out there in full.
 
-**Three of the seven are not report-only, whatever the report looks like.** The
+**Four of the eight are not report-only, whatever the report looks like.** The
 write-authority table asks one question — may it write while nobody is watching —
 and #92 files a backlog item, #93 files a backlog draft and #94 overwrites a
-latest-path ledger in the vault plus a dated copy beside it. Those are vault files
-that another job or a person will act on, so the three sit in the unattended-writer
+latest-path ledger in the vault plus a dated copy beside it, and #99 files a
+backlog item when either headline count moves. Those are vault files that another
+job or a person will act on, so the four sit in the unattended-writer
 tier beside #30 and #53. #91, #95, #96 and #97 are the report-only half: one dated
 artefact each under the data root or the automod state dir — #95 leaves not even
 that, since it reads a state file another process owns — and nothing in the vault
@@ -1189,6 +1201,17 @@ each one looks like an outage from the run record alone:
   45/10005 while the day was open and 45/10324 after, so a falling marker rate is
   only ever judged across closed days — and the lever that would legitimately move
   it is the prompt, not the capture setting.
+- **#99 belongs to this group by its authority, not by its report.** Filed
+  2026-10-15 and still `status: draft` — #2797 carries the one-line `status` flip,
+  the same standing human decision that holds #98 — it re-runs the observed
+  supply-chain inventory offline and can file a backlog item when a count moves,
+  which is #94's reason for being here, and the evidence it maintains is a file
+  nothing else in the fleet reads, so its going stale is invisible, which is #92's.
+  That makes it an unattended writer even though every run ends as a report, and its
+  own contract prohibits the two tools and the two commands that would let a run
+  write into the tree instead of beside it. It is also the recurrence: still absent
+  from both membership tables when the nightly Pre-Flight ran the membership node on
+  2026-10-16, and named here only because that node went red.
 - **#93 reporting an empty window is a finding.** Zero baselines and zero flags is
   reported as the absence it is, never as a pass; the detector has been read-only
   for most of its life and an empty window is how that keeps looking fine.
@@ -1210,7 +1233,7 @@ ledger — said here rather than in the table cell, which is #2631's reconciler'
 edit. And the count above is dated on purpose: #97 fires daily at ~08:0xZ, so a
 bare number is false by the next morning and only the re-derivable one stays true.
 
-Two of these seven are the reason the other five are trusted at all: #93 is the
+Two of these eight are the reason the other six are trusted at all: #93 is the
 only thing that notices when a run stopped doing a step every other run of its task
 did, and #94 is the only thing that notices when loaded memory starts pointing at
 files that are not there. Both are deliberately silent about what they find —
@@ -1362,7 +1385,8 @@ decide what gets worked on next.
 
 - **2026-10-12 — `current` for the fleet's membership; `stale` for one row.**
   #2630 wrote the seven entries and took out the three that had no task file.
-  #91–#97 are a group of their own, [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97),
+  #91–#97 are a group of their own, [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97)
+  (the slug as it stood that day; #2813's row moved it — see 2026-10-16),
   because what they read is the machinery the rest of the fleet runs on rather than
   the outside world (Ingest) or a job's own output (Measure). Their write authority
   split three/four against the triage's read that all seven were report-only: #92
@@ -1405,3 +1429,24 @@ decide what gets worked on next.
   store #97 queries to produce its `cost.join` share is still missing from its Reads
   cell, which is #2631's reconciliation to make and not a table edit from a doc
   pass.
+
+- **2026-10-16 — `current` again, one row late, and a node is what caught it.** #99
+  supply-chain inventory regen (#2796) arrived in `~/obsidian/autonomy/` with its
+  own `created: 2026-10-16T00:00:00Z` stamp and neither membership table named it: the same failure #2630 closed,
+  one id and one day after #98 did it. Read-only through the node's own helpers it
+  reported `live 41` and `([], ['#99'], [])` for both tables — no ghost, no
+  duplicate, exactly one unlisted id. It is named in both now, in §Watch the
+  machinery and in `Writes durable state unattended`, because it can file a backlog
+  item (#94's reason) over evidence nothing else in the fleet reads (#92's), and
+  because #98 — also `status: draft`, also in both tables — is the precedent that
+  arming is not what earns a row. The hand-typed floor moved to `24 through 99 or
+  beyond` and the group's own figures moved with its heading: seven members became
+  eight, the `objective_checks` count went five to six (measured across the eight
+  task files: #91 and #92 stay the only two with no block), and the unattended-writer
+  split three to four. Two figures were deliberately left alone — §The wiring's
+  no-dependency sentence and §Distil's opening count the fleet that actually runs,
+  and a `draft` job is not in it, so moving either would red the node that checks
+  those two against the arrows this document draws. What this entry cannot fix is why
+  the drift was ever possible: both membership nodes carry `@live_vault` and the gate
+  runs `-m "not live_vault"`, so nothing between a task file landing and the nightly
+  Pre-Flight reads the directory against these tables.

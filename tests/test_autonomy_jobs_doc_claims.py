@@ -142,6 +142,9 @@ WATCH_JOBS = {
          "scripts.mitigation_drill"),
     96: ("weekly", "name_prior_corpus.jsonl", "eval/djev/name_prior_", "--samples"),
     97: ("daily", "automod ledger", "landed_outcomes.jsonl", "--since"),
+    # #2813: the four probes read off ~/obsidian/autonomy/99-supply-chain-inventory-regen.md
+    99: ("weekly", "eval/supply-chain/baseline.yaml", "~/lloyd-data/supply-chain/",
+         "`Write` or `Edit`"),
 }
 
 #: The ten `depends_on` edges, as the wiring diagram's parent ─► child arrows.
@@ -178,6 +181,22 @@ def _ids(cell: str) -> list[str]:
     """The `#NN` job ids in a table cell or a stretch of prose, in the order written."""
     return [f"#{n}" for n in re.findall(r"#(\d+)", cell)]
 
+
+def _group_names() -> list[str]:
+    """The function groups' heading prefixes, read from §The functions' first column.
+
+    Derived rather than typed: a second hand-maintained list of the eight groups is
+    exactly the thing this file keeps having to correct, and the table's own link text
+    *is* the prefix of the heading the anchors must resolve to. So the node below
+    follows the table instead of policing a copy of it.
+    """
+    body = _text().split("## The functions", 1)[1].split("\n## ", 1)[0]
+    names = re.findall(r"^\| \[([^\]]+)\]\(#[^)]*\) \|", body, re.M)
+    assert len(names) == 8, (
+        f"§The functions' first column yields {len(names)} group links ({names}), not "
+        f"the eight the doc's prose claims — the anchor node cannot tell a stale slug "
+        f"from a table it cannot read")
+    return names
 
 def _measure_heading() -> str:
     m = re.search(r"^## (Measure: .+)$", _text(), re.M)
@@ -368,8 +387,15 @@ def test_no_second_fleet_bound_appears_anywhere_in_architecture():
     formatting — that is how a bound comes to look "not our problem" and stop being
     checked.
     """
-    found = {md.name: [ln.strip() for ln in md.read_text().splitlines()
+    # Live prose only, since #2813: the §Review log entry of that day quotes the
+    # bound it found ("the hand-typed floor moved to `24 through 99 or beyond`"),
+    # and that quotation is the dated record of what the note said before it moved.
+    # A scan of raw lines would read the quote as a second hand-maintained ceiling.
+    found = {md.name: [ln.strip() for ln in _live_prose().splitlines()
                        if re.search(r"\b\d+\s+through\s+\d+\b", ln)]
+             if md.name == "autonomy-jobs.md" else
+             [ln.strip() for ln in md.read_text().splitlines()
+              if re.search(r"\b\d+\s+through\s+\d+\b", ln)]
              for md in sorted(ARCH_DIR.glob("*.md"))}
     found = {k: v for k, v in found.items() if v}
     assert set(found) == {"autonomy-jobs.md"}, (
@@ -1075,6 +1101,12 @@ WATCH_TIER = {
     "#95": "Reports only",
     "#96": "Reports only",
     "#97": "Reports only",
+    # #2813, graded by the same question the tier table asks — may it write while
+    # nobody is watching. Yes: its task file's `acceptance.objective_checks` prohibits
+    # `Write`, `Edit`, `git` and `rm` precisely because its authority is one dated
+    # report under the data root plus a backlog item when a headline count moves. The
+    # report is what it prints; the filing is the write. Same reason #94 is here.
+    "#99": "Writes durable state unattended",
 }
 
 
@@ -2614,7 +2646,10 @@ def test_the_watch_group_table_holds_one_row_per_live_job_and_no_others():
     ids = [int(n) for n in re.findall(r"^\| #(\d+) \|", _watch_slice(), re.M)]
     assert sorted(ids) == sorted(WATCH_JOBS), (
         f"§Watch the machinery has per-job rows for {sorted(ids)}, not exactly the "
-        f"seven live task files {sorted(WATCH_JOBS)}")
+        f"{len(WATCH_JOBS)} live task files the entry-content node below is "
+        f"parametrised over — {sorted(WATCH_JOBS)}. One list for both, so a job "
+        f"admitted to the group moves the rows and the probes together (#2813 "
+        f"admitted #99 that way) instead of leaving one of them behind")
     assert len(ids) == len(set(ids)), f"a job has two entries: {sorted(ids)}"
 
 
@@ -3990,3 +4025,92 @@ def test_a_live_never_run_claim_about_a_job_id_carries_its_date_and_its_command(
         f"Write it as '#N has never run as of YYYY-MM-DD (`select count(*) from runs "
         f"where task_id=N` over `~/lloyd-data/workers.db` was 0 that day)' — these "
         f"jobs fire daily, so an undated count is stale before the next reader.")
+
+
+def test_every_live_link_into_a_job_group_points_at_that_groups_current_slug():
+    """#2813 clause 5: a group heading carries its id list, so admitting one job renames
+    every anchor that targets it — `watch-the-machinery-…-96-97` became
+    `…-96-97-99` — and only §Measure's own row was checked for that.
+
+    `test_the_functions_table_row_and_every_anchor_follow_the_group_heading` is the only
+    anchor rail the file had, and it searches `](#measure…)`: Measure's row, Measure's
+    bullet, Measure's slug. Every other group's anchors were unchecked, so admitting #99
+    to §Watch the machinery — which renames that heading's slug — could strand the
+    §Membership sentence pointing at the pre-#99 anchor with nothing on it. Two shapes
+    to fail on: a slug no heading has at all, which is exactly what a rename leaves
+    behind once the old slug is retired, and a link whose label names one group while
+    its anchor resolves to another group's heading — both headings exist there, so no
+    heading-by-heading comparison sees it either. Live prose only: §Review log keeps the
+    anchor as it stood
+    the day its entry was written, and rewriting the 2026-10-12 entry to a nine-day-
+    newer slug would make that entry claim the document said something it did not say
+    that day.
+    """
+    group_names = _group_names()
+    # Every heading level, because a live link can target a `###` section that is not a
+    # job group at all — §The wiring is one — and calling that a dead click would make
+    # the node red on a link that resolves fine.
+    headings = re.findall(r"^#{2,4}\s+(.+?)\s*$", _text(), re.M)
+    slug_of = {h: _slug(h) for h in headings}
+    by_slug = {slug_of[h]: h for h in headings
+               if any(h.startswith(g + ":") for g in group_names)}
+    assert len(by_slug) == len(group_names), (
+        f"{len(group_names)} groups in §The functions' table, {len(by_slug)} headings "
+        f"matching them — a group whose heading cannot be found would leave the checks "
+        f"below weighing an empty set")
+    group_slugs = set(by_slug)
+
+    live = "\n".join(ln for ln in _live_prose().splitlines()
+                      if not ln.lstrip().startswith("|"))
+    anchors = set(re.findall(r"\]\(#([a-z0-9][a-z0-9-]*)\)", live))
+
+    # The link's own text is read with its anchor, because that is the only way to state
+    # this drift at all: `by_slug` is keyed by `slug_of[h]` for exactly the headings it
+    # stores, so an anchor that resolves to a group heading is by construction that
+    # heading's current slug, and comparing the two could never fire. What can fire is a
+    # sentence naming one group and pointing at another's heading: both headings exist,
+    # so no heading-by-heading check can see it.
+    owner_of = {slug: next(g for g in group_names if h.startswith(g + ":"))
+                for slug, h in by_slug.items()}
+    mispointed = [{"label": label, "anchor": anchor, "resolves_to": owner_of[anchor]}
+                  for label, anchor in re.findall(
+                      r"\[([^\]]+)\]\(#([a-z0-9][a-z0-9-]*)\)", live)
+                  if label.strip() in group_names and anchor in owner_of
+                  and owner_of[anchor] != label.strip()]
+    assert not mispointed, (
+        f"live prose labels a link after one job group and points it at another group's "
+        f"heading: {mispointed}")
+
+    # The coupling clause 5 exists for shows up below, as an orphan: a group heading
+    # carries its id list in its slug, so admitting one job retires the old slug and a
+    # prose link still carrying it targets nothing.
+
+    orphans = sorted(a for a in anchors - group_slugs if a not in set(slug_of.values()))
+    assert not orphans, (
+        f"live prose targets anchors no heading in the document has: {orphans}. A group "
+        f"slug that outlives its own rename is a dead click, and it survives precisely "
+        f"because every heading-by-heading check finds its heading intact")
+
+
+def test_99_sits_in_the_tier_its_output_belongs_to():
+    """#2813 clause 4. #99 writes nothing into the vault and touches no lockfile: the
+    scan is documented `READ-ONLY / NO NETWORK`, runs offline, and its own task file
+    forbids it from calling `Write` or `Edit` at all. The case for the writer tier is
+    its second output — it files a backlog item when either headline count moves —
+    which is exactly the reason #92 and #93 sit there rather than with the reporters.
+
+    Measured, not asserted from the prose: the row it landed in, its count cell, and
+    the `WATCH_TIER` ruling this file carries all have to say the same thing.
+    """
+    writes = "Writes durable state unattended"
+    assert WATCH_TIER["#99"] == writes, (
+        "a job that files a backlog item is not in the writer tier, which is the one "
+        "question this table asks")
+    tiers = _table(TIERS_HEADER)
+    rows = [row for row, (ids, _c) in tiers.items() if "#99" in ids]
+    assert rows == [writes], (
+        f"#99's tier row is {rows}, not the single row `WATCH_TIER` rules for it")
+    ids, count = tiers[writes]
+    assert count is not None and int(count) == len(ids), (
+        f"the writer tier counts {count} against {len(ids)} ids: its cell did not "
+        f"move with #99, or #99 is listed twice")
