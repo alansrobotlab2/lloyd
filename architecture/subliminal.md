@@ -681,7 +681,7 @@ Tier-2 topic extraction (above).
 | `~/lloyd/app/compaction.py` + `app/routers/_messages_harness_adapter.py` | the two role filters that keep `subliminal` (and `thinking`) rows out of the prompt |
 | `~/lloyd/agent_mcp/skills.py` | `_iter_skills`, `_score_skill`, `_tokenize`, `_query_tokens` |
 | `~/lloyd/agent_mcp/session.py` | `_load_session_index`, `_score_session` |
-| `~/lloyd/agent_mcp/subliminal.py` | **Removed 2026-09-03.** Legacy `subliminal_recall` tool (keyword extraction + a full SOUL.md dump). Zero calls across the 40 sessions on disk, and SOUL.md is already in the system prompt. The `subliminal` QMD collection in `qmd-index.yml` is unrelated and stays. |
+| `~/lloyd/agent_mcp/subliminal.py` | **Removed 2026-09-03, in `f5789b71`.** Legacy `subliminal_recall` tool (keyword extraction + a full SOUL.md dump). Zero calls across the 40 sessions on disk, and SOUL.md is already in the system prompt. The `subliminal` QMD collection in `qmd-index.yml` is unrelated and stays. |
 | `~/lloyd/eval/run_prefetch_eval.py` | Prefetch-path retrieval eval: lex leg, hybrid straggler, and their merge, scored against `vault_recall_queries.yaml` expect_docs |
 | `~/lloyd/tests/test_prefetch.py` | Hermetic tests: capture helpers, focus tracking, task-ref precision, skill-score memo, budget drop + carry-over, leg ordering, session-index window, incremental backlog index |
 
@@ -802,7 +802,7 @@ with the genuinely correct answer, never an easier target.
   task-number unit/code exclusions; session-index cache keyed on window; focus
   keyword punctuation, locking, and topic-attempt accounting; single-newline
   nudge capture; `ide` badge; `tests/test_prefetch.py` added. Follow-ups the
-  same day: `agent_mcp/subliminal.py` deleted; observer subliminal cap made
+  same day: `agent_mcp/subliminal.py` deleted (`f5789b71`); observer subliminal cap made
   head+tail with `<skill>` blocks trimmed first; continuation regex no longer
   swallows "please X" / "let's X"; memory-nudge turn counter ignores ambient
   and background-task rows; `eval/run_prefetch_eval.py` added with a first

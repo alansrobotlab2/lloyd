@@ -42,8 +42,8 @@ topic.
 
 ## 1. What this replaced, and why the size was not the problem
 
-The two halves used to be joined by a markdown checklist,
-`~/obsidian/lloyd/research-queue.md`. By the time it was retired it held
+The two halves used to be joined by a markdown checklist, retired on 2026-09-04
+and archived in the vault by `d488e0a8`. By the time it was retired it held
 **2,839 checked items of which 314 were unique**: a producer that no longer
 exists had written the same 82 topics up to 390 times each, under fabricated
 2024 and 2025 dates. The generator's skill said to read it *in full* every

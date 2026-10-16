@@ -22,8 +22,8 @@ So what survives of each is the commit's parent — for those five,
 and its Retired section names every one of them. Nothing
 kept it honest from there. Three `tests/test_*_doc_claims.py` pinned numbers in
 three of them (23 such files now, over more than twice as many docs);
-`agent_mcp/memory_ops.py:12` cited a doc that no longer
-existed; the measured tables in [[autonomy-jobs]] and [[workers-jobs]] are
+`agent_mcp/memory_ops.py:12` (module retired in `ed78a3a9`) cited a doc that no
+longer existed; the measured tables in [[autonomy-jobs]] and [[workers-jobs]] are
 snapshots of one afternoon. A doc that has drifted is worse than no doc,
 because it is read as current.
 

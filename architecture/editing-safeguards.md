@@ -413,7 +413,8 @@ and `tests/test_automod_hardening.py::test_worker_turns_cannot_drive_the_loop`.
   dangerous direction: voice turns build a `RunOptions` with no `hooks=` and
   `_run_turn` never fills one, so `safety.py` is absent there too (#869);
   `builtin_bash.py`'s docstring still names the deleted
-  `app/inner_voice/heuristics.py` (#695); "~69 tolerated pyflakes findings" is
+  `app/inner_voice/heuristics.py` (#695; module retired in `4da219fa`); "~69
+  tolerated pyflakes findings" is
   `app/`-scoped-34 or whole-tree-~160 depending on scope, so the number now
   names its scope; the symbol-diff helper is `_touched_symbols`, not
   `diff_interfaces`; `config.yaml`'s "workers have no turn id and no reader"

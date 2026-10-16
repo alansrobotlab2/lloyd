@@ -19,8 +19,9 @@ Before: 19 memory-family tools at three abstraction levels — 10 `fact_*`
 (`agent_mcp/session.py`). Two prior consolidation efforts (#174 "17→7", #340
 the module split) moved the count **up**.
 
-Then (2026-09-09 to 2026-09-23): four verbs in `agent_mcp/memory_ops.py`,
-layered over the 19 as routers, each adding one guard its target lacked.
+Then (2026-09-09 to 2026-09-23; the module was retired in `ed78a3a9`): four verbs
+in `agent_mcp/memory_ops.py`, layered over the 19 as routers, each adding one
+guard its target lacked.
 
 | verb | delegated to | the one thing it added | where that guard lives now |
 |---|---|---|---|

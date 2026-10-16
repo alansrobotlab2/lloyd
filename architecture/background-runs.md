@@ -297,8 +297,9 @@ sessions this machine ran for itself were:
 
 The four that decide *listing, titling, embedding and recall* now call
 `is_conversation_session`; the ones that decide *delivery* —
-`workers/handlers/ambient.py`, the Chat/Background tab summaries, the active-
-session resolver — keep calling `is_user_session`, which is where the deny-list's
+`app/prefetch.py`'s next-session-note drain (`cdfee07f`, #2598), the Chat/
+Background tab summaries, the active-session resolver — keep calling
+`is_user_session`, which is where the deny-list's
 generosity belongs. `tests/test_session_platform_checks.py` greps `app/`,
 `agent_mcp/`, `workers/` and `scripts/` for the literal, because a seventh reader
 written next month is how this comes back — silently, since a background session

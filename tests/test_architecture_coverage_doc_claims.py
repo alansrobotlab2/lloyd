@@ -444,9 +444,11 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
     '`/architecture/.archive/` and the directory as it was; this is'
     'the subject of `test_index_md_sends_a_reader_to_history_rather'
     '_than_the_absent_archive`'),
-  'agent_mcp/memory_ops.py:12':
-   ('stale: the module was retired in ed78a3a9 with eleven other'
-    'tools, and the worked example still cites its old shape'),
+  'agent_mcp/memory_ops.py:12': (
+      "historical: the line is the review log's own list of what had drifted, and the module "
+      "it cites was retired in ed78a3a9 with eleven other tools — the drift is the record "
+      "here, not a pointer to the module"
+  ),
   'arch-review-conflicts/':
    ("generated: the gate's per-round conflict reports, written"
     'under the runtime root by a run and swept with the round'),
@@ -493,15 +495,19 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
   'references/prefs.yaml':
    ('other-tree: a path inside the skill directory the sentence'
     'names, which the extractor roots only at the four box roots'),
-  'scripts/groundskeeper/groundskeeper-survey.py':
-   ('stale: retired in 201901b4 with its queue writer and both'
-    'unwired consumers, which is #1012'),
-  'scripts/memory/batch-process-orphans.py':
-   ('stale: retired in the same 201901b4 sweep that took the survey'
-    'and its queue writer (#1012)'),
-  'scripts/memory/process-groundskeeper-queue.py':
-   ('stale: retired in the same 201901b4 sweep that took the survey'
-    'and its queue writer (#1012)'),
+  'scripts/groundskeeper/groundskeeper-survey.py': (
+      "historical: the section is the survey's own description, now written in the past and "
+      "naming 201901b4 (#1012, 2026-09-23) as the deletion; the page exists to explain why "
+      "the survey was retired, so the script is its subject"
+  ),
+  'scripts/memory/batch-process-orphans.py': (
+      "historical: both sentences that name it are dated 2026-09-19 narratives about the two "
+      "queue consumers, and both now say 201901b4 deleted them (#1012, 2026-09-23)"
+  ),
+  'scripts/memory/process-groundskeeper-queue.py': (
+      "historical: dated narrative, the same 201901b4 retirement as its sibling consumer and "
+      "named in both paragraphs that cite it — the queue-writer history is the claim"
+  ),
   'scripts/state.json':
    ('other-tree: a path inside the skill directory the sentence'
     "names; the job's own state lives under its runtime root"),
@@ -512,14 +518,12 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
     'was 0 on 2026-10-12, and the doc says in the same breath that '
     'the file does not exist yet. The one citation here whose '
     'absence is the fact being reported, not a pointer to a file'),
-  '~/obsidian/autonomy/85-secondary-routing-eval.md':
-   ('stale: a dated finding names the task file by a number the'
-    'task no longer carries; the skill of that name is at'
-    '`~/obsidian/skills/secondary-routing-eval`'),
-  '~/obsidian/memory/facts/':
-   ('stale: the fact-markdown directory the extraction used to'
-    'write; the store now lives in `kg.sqlite`, so the layout is'
-    'retired'),
+    '~/obsidian/memory/facts/': (
+      "historical: the sentence exists to report that 15,299 queue rows name a vault prefix "
+      "that is gone, and it names the layout that replaced it — "
+      "~/lloyd-data/_pipeline/vault-derived/facts/, VAULT_FACTS_ROOT at app/paths.py:278 — so "
+      "the dead prefix is quoted, not followed"
+  ),
  },
  'autonomy.md': {
   '_archived/':
@@ -535,11 +539,7 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
    ('generated: background-run transcripts under the runtime root,'
     'created by the first concurrent run and bounded by the'
     'retention sweep'),
-  'workers/handlers/ambient.py':
-   ("stale: the ambient handler's old module path; the tool is"
-    'dispatched from `agent_mcp/ambient.py`, which is what the row'
-    'should say'),
- },
+   },
  'backlog.md': {
   '~/.openclaw/':
    ('historical: the sentence states that neither `~/.openclaw/`'
@@ -581,10 +581,11 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
     'same row names, not of this checkout'),
  },
  'editing-safeguards.md': {
-  'app/inner_voice/heuristics.py':
-   ('stale: retired in 4da219fa with the ensemble and grading'
-    'machinery it belonged to; the sentence predates the thin-'
-    'observer rewrite'),
+  'app/inner_voice/heuristics.py': (
+      "historical: the 2026-09-13 review-log entry reports a docstring that still named the "
+      "deleted module and now names 4da219fa as the retirement; the finding's subject is the "
+      "stale docstring, not the file"
+  ),
  },
  'guard-coverage.md': {
   '.venvs/':
@@ -608,10 +609,13 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
     'directory is absent'),
  },
  'infrastructure.md': {
-  'agent-services/autonomy.service':
-   ('stale: the unit is at `agent-'
-    'services/systemd/autonomy.service`; the row drops the'
-    'directory and so names a path the tree has never had'),
+  'agent-services/autonomy.service': (
+      "historical: the sentence states the deletion itself — `511807a8` (#1110, 2026-09-24) — "
+      "so it is a record of a unit the tree no longer has. There is no other spelling to "
+      "correct it to: agent-services/systemd/ holds twenty tracked units and none of them is "
+      "this one, which is why #2795 re-kindled the entry instead of re-pointing it as the "
+      "item prescribed"
+  ),
   'agent-services/cert/':
    ('generated: TLS material `scripts/gen-cert.sh` writes into the'
     "production tree; a worktree has no copy of the machine's"
@@ -661,9 +665,11 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
     'figure'),
  },
  'memory.md': {
-  'agent_mcp/memory_ops.py':
-   ('stale: the module was retired in ed78a3a9 with eleven other'
-    'duplicate or subsumed tools'),
+  'agent_mcp/memory_ops.py': (
+      "historical: the paragraph is the dated `Then (2026-09-09 to 2026-09-23)` step of the "
+      "consolidation narrative and now names ed78a3a9 as the retirement, so the four verbs "
+      "are the subject of a history rather than a live surface"
+  ),
  },
  'mission-control.md': {
   'agent-services/cert/':
@@ -708,11 +714,7 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
   'pending-research/domain-research/':
    ('generated: the vault staging directory the research worker'
     'fills while a domain sweep is in flight, empty between runs'),
-  '~/obsidian/lloyd/research-queue.md':
-   ('stale: the queue lives at `~/obsidian/research-queue.md` (with'
-    '`lloyd/research-queue-archive.md` beside it), so the'
-    "sentence's directory segment is stale"),
- },
+   },
  'retrieval.md': {
   'architecture/recall-research-2026-09-24.md':
    ("historical: deleted in 4a6cdd54; index.md's Retired section"
@@ -744,9 +746,11 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
     'stale location'),
  },
  'subliminal.md': {
-  'agent_mcp/subliminal.py':
-   ('stale: the module was retired in f5789b71 by the'
-    'prefetch/subliminal rework that moved the machinery elsewhere'),
+  'agent_mcp/subliminal.py': (
+      "historical: the changelog line says itself that the module was deleted the same day "
+      "and now names f5789b71; a deleted file is the event being recorded, so no sentence "
+      "about it can resolve"
+  ),
   'architecture/recall-research-2026-09-24.md':
    ("historical: deleted in 4a6cdd54; index.md's Retired section"
     'reads it back with `git show`, which is what the citation'
@@ -763,9 +767,10 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
    ('generated: a directory of the nightly derived index under the'
     'vault, rebuilt by the consolidation job and absent before its'
     'first run'),
-  '~/lloyd/agent_mcp/subliminal.py':
-   ('stale: the same f5789b71 retirement, spelled from the account'
-    'home by the sentence that names the checkout'),
+  '~/lloyd/agent_mcp/subliminal.py': (
+      "historical: the same f5789b71 retirement as the bare spelling, in the table row that "
+      "opens **Removed 2026-09-03** — the row exists to say the module is gone"
+  ),
   '~/lloyd/skills/':
    ('historical: the pre-migration skills root; the library moved'
     'to `~/obsidian/skills/`, which is why the row lists it as a'
@@ -870,6 +875,46 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
     'lands'),
  },
 }
+
+#: Upper bound on the `stale:` population of PATH_CITATION_EXEMPTIONS — the rot kind: a
+#: sentence in an architecture page still pointing at a path this repo already retired.
+#:
+#: #2795, 2026-10-16. The widening that put this list on the corpus (`afb27381`) arrived
+#: with 105 entries, thirteen of them stale, and a week of nightly runs cleared NONE of
+#: them: nothing owned them. The scale rail in
+#: `test_every_path_citation_exemption_is_a_citation_the_doc_actually_makes` cannot own
+#: them — at 109 entries against 2,049 citations it engages only past 512, so an added
+#: entry has cost nothing since the week that rail was written, which is the rail's own
+#: warning coming true: the list said it existed to be cleared, and clearing was optional.
+#: This constant is the bound that engages.
+#:
+#: ZERO, because #2795 cleared all thirteen. Three sentences were corrected until the
+#: citation itself resolves and their entries went away with them: the delivery gate the
+#: page called `workers/handlers/ambient.py`, a spelling with no commit in this repo's
+#: history, is now `app/prefetch.py`, the file #2598 moved that decision into; the research
+#: checklist's dead path became the retirement itself (vault commit `d488e0a8`), leaving the
+#: archive the next sentence already cites; and the deleted task file
+#: `85-secondary-routing-eval.md` became the skill that outlived it, under the vault's
+#: skills directory. The other ten were dated narrative about something retired, and are
+#: re-kindled `historical:` — with the retirement named in the SENTENCE (`ed78a3a9`,
+#: `f5789b71`, `4da219fa`, `201901b4`, and `511807a8` for the systemd unit), not only in
+#: the reason, which is what turns `historical:` from a word an entry chose for itself into
+#: a claim a reader can check. `agent-services/autonomy.service` is one of those ten and
+#: NOT a correction: the item prescribed re-pointing it at the same name under
+#: `agent-services/systemd/`, which is absent too — twenty tracked units there, none of them
+#: this one, because `511807a8` (#1110) deleted the unit outright rather than moving it,
+#: autonomy having run under supervisord all along.
+#:
+#: LOWER IT IN THE SAME COMMIT as each further clear, so the ratchet records the shrink. It
+#: bounds the rot kind only, deliberately not the whole list: between `afb27381` and here
+#: the list grew by five entries and every one of them is `generated:` about a file that
+#: exists, so a bound on the whole list would have reddened honest reporting and taught the
+#: next reader to distrust it. At zero, one new rot exemption fails the suite by itself.
+#: Whether it stays at zero across a week of nightly runs, and whether `stale` should then
+#: leave the admitted kinds in the node above, is what the owed-check on #2582 rules on
+#: (#2795's owed entry 1).
+STALE_EXEMPTION_CEILING = 0  # 13 at `ef7ec109` (measured 2026-10-15) -> 0 on 2026-10-16, #2795
+
 
 
 def _resolved_or_none(path: Path) -> Path | None:
@@ -5480,3 +5525,222 @@ def test_the_autonomy_page_states_one_retry_default_rather_than_a_disagreement()
     assert re.search(r"no key is retired at\s+`_DEFAULT_MAX_RETRIES`", section), (
         "the page does not say a key-less file is retired AT the default it "
         "shows, which is the sentence the other four clauses exist to make true")
+
+
+#: What the thirteen `stale:` path-citation exemptions were at `ef7ec109` (the commit
+#: #2795's triage measured, 2026-10-15), what became of each, and what its sentence names
+#: now. `deleted` means the entry is GONE from `PATH_CITATION_EXEMPTIONS` and the page no
+#: longer makes that citation at all; `historical` means the entry survives under that kind
+#: because the span is quoted narrative about something retired, and the retirement is
+#: stated in the same paragraph as the span rather than only in the reason.
+#:
+#: The last column is what makes `historical:` checkable instead of self-declared: a reason
+#: re-worded to dodge a failing check carries no commit in the prose, and that is the case
+#: this table exists to refuse. `agent-services/autonomy.service` carries two markers
+#: because that deletion is stated twice — by sha in the unit paragraph, by backlog number
+#: in the misattribution list — and a reader can follow either to `511807a8`.
+STALE_CITATION_CLEARS = (
+    ("arch-review.md", "agent_mcp/memory_ops.py:12", "historical", ("ed78a3a9",)),
+    ("autonomy-jobs.md", "scripts/groundskeeper/groundskeeper-survey.py",
+     "historical", ("201901b4",)),
+    ("autonomy-jobs.md", "scripts/memory/batch-process-orphans.py",
+     "historical", ("201901b4",)),
+    ("autonomy-jobs.md", "scripts/memory/process-groundskeeper-queue.py",
+     "historical", ("201901b4",)),
+    ("autonomy-jobs.md", "~/obsidian/memory/facts/",
+     "historical", ("VAULT_FACTS_ROOT",)),
+    ("autonomy-jobs.md", "~/obsidian/autonomy/85-secondary-routing-eval.md",
+     "deleted", ("~/obsidian/skills/secondary-routing-eval/SKILL.md",)),
+    ("background-runs.md", "workers/handlers/ambient.py",
+     "deleted", ("app/prefetch.py",)),
+    ("editing-safeguards.md", "app/inner_voice/heuristics.py",
+     "historical", ("4da219fa",)),
+    ("infrastructure.md", "agent-services/autonomy.service",
+     "historical", ("511807a8", "#1110")),
+    ("memory.md", "agent_mcp/memory_ops.py", "historical", ("ed78a3a9",)),
+    ("research-pipeline.md", "~/obsidian/lloyd/research-queue.md",
+     "deleted", ("d488e0a8",)),
+    ("subliminal.md", "agent_mcp/subliminal.py", "historical", ("f5789b71",)),
+    ("subliminal.md", "~/lloyd/agent_mcp/subliminal.py", "historical", ("f5789b71",)),
+)
+
+
+def _paragraphs(text: str) -> list[str]:
+    """The page as blank-line-separated blocks — the unit a reader actually reads.
+
+    Wrapping is a layout accident: a sentence naming the retirement forty columns from the
+    path is checkable, and a sha parked three sections away is not.
+    """
+    return [b for b in text.split("\n\n") if b.strip()]
+
+
+def _cited_verdicts(slug: str) -> dict[str, object]:
+    """`{span: resolved_path_or_None}` for every citation one page makes.
+
+    Built from `cited_citations` and `resolve_citation`, so a corrected sentence is graded
+    by the extractor and the root-trying resolver the path node itself uses — not by a
+    substring search, which would accept a spelling nobody can open.
+    """
+    return {span: resolve_citation(path) for span, path, _line in cited_citations(_text(slug))}
+
+
+def test_the_thirteen_stale_path_citations_are_cleared_or_say_what_retired_them():
+    """#2795 clause 3: each of the thirteen `stale:` entries is gone, or is honest about
+    being a record.
+
+    A `deleted` row has to be absent from the list AND no longer cited: an entry moved to a
+    neighbouring spelling is the parking this list's own comment forbids, and the only proof
+    it did not happen is that the dead span is nowhere the extractor looks for citations. An
+    `historical` row has to carry that kind and to name its retirement in every paragraph
+    that cites the span — one of #2795's retirement commits (`ed78a3a9`, `f5789b71`,
+    `4da219fa`, `201901b4`, `511807a8`), or the anchor of the layout that replaced the path
+    where the retirement was a move rather than a deletion.
+    """
+    assert len(STALE_CITATION_CLEARS) == 13, (
+        f"#2795 cleared thirteen stale entries; this table names "
+        f"{len(STALE_CITATION_CLEARS)}, so it no longer describes the clear")
+    for slug, span, action, markers in STALE_CITATION_CLEARS:
+        assert slug in PATH_DOC_SLUGS, f"{slug} is not an architecture page"
+        text = _text(slug)
+        entries = PATH_CITATION_EXEMPTIONS.get(slug, {})
+        if action == "deleted":
+            assert span not in entries, (
+                f"{slug} still exempts {span}: the entry was kept, not cleared")
+            assert span not in _cited_verdicts(slug), (
+                f"{slug} still cites {span} with nothing to excuse it — the exemption "
+                "was deleted and the dead citation left behind")
+            assert any(m in text for m in markers), (
+                f"{slug} cleared {span} without naming what replaced it "
+                f"(looked for {markers})")
+            continue
+        assert span in entries, (
+            f"{slug} dropped its entry for {span} while still citing the dead path")
+        kind = entries[span].split(":", 1)[0].strip()
+        assert kind == "historical", (
+            f"{slug} cites {span} with kind `{kind}:`, not `historical:` — a rot entry "
+            "re-kindled to a kind it has not earned is the same parking with a new label")
+        hits = [p for p in _paragraphs(text) if f"`{span}`" in p]
+        assert hits, f"{slug} exempts {span} but no longer cites it — drop the entry"
+        for para in hits:
+            assert any(m in para for m in markers), (
+                f"{slug} cites {span} in a paragraph naming no retirement (looked for "
+                f"{markers} in:\n{para[:400]}\n) — `historical:` is honest only where "
+                "the prose itself says what retired the path")
+
+
+def test_the_cleared_citations_resolve_and_the_one_the_item_got_wrong_was_not_repointed():
+    """#2795 clauses 1 and 2: the corrected sentences pass the check's own resolver, and the
+    correction the item prescribed was skipped on purpose.
+
+    `agent-services/autonomy.service` is the exception the clauses name. The item told the
+    implementer to re-spell it as `agent-services/systemd/autonomy.service`; that path is
+    absent too — `511807a8` (#1110) deleted the unit outright rather than moving it,
+    autonomy has run under supervisord, and none of the twenty tracked units under
+    `agent-services/systemd/` is this one. So the sentence states the deletion and the entry
+    is `historical:`. Asserting here that the prescribed target still does NOT resolve is
+    what stops a later reader from "finishing" the correction the way the item asked, which
+    would put a resolving-looking path in front of a file that is not there.
+    """
+    jobs = _cited_verdicts("autonomy-jobs.md")
+    back = _cited_verdicts("background-runs.md")
+    research = _cited_verdicts("research-pipeline.md")
+    infra = _cited_verdicts("infrastructure.md")
+
+    for slug, span, verdicts, why in (
+            ("background-runs.md", "app/prefetch.py", back,
+             "the delivery gate #2598 moved"),
+            ("research-pipeline.md", "~/obsidian/lloyd/research-queue-archive.md", research,
+             "the archive the retired checklist became"),
+            ("autonomy-jobs.md", "~/lloyd-data/_pipeline/vault-derived/facts/", jobs,
+             "VAULT_FACTS_ROOT, the layout that replaced the vault fact tree"),
+            ("autonomy-jobs.md", "~/obsidian/skills/secondary-routing-eval/SKILL.md", jobs,
+             "the skill that outlived the deleted task file")):
+        assert span in verdicts, f"{slug} no longer cites {span} ({why})"
+        assert verdicts[span] is not None, (
+            f"{slug} cites {span} for {why} and the resolver cannot find it")
+
+    # The facts anchor is cited where it is true: line 278 of app/paths.py is the
+    # VAULT_FACTS_ROOT binding, and the sentence names the symbol and that line together.
+    assert "VAULT_FACTS_ROOT" in _text("autonomy-jobs.md")
+    assert jobs.get("app/paths.py:278") is not None, "app/paths.py:278 does not resolve"
+    line = (ROOT / "app" / "paths.py").read_text(encoding="utf-8").splitlines()[277]
+    assert "VAULT_FACTS_ROOT =" in line, f"app/paths.py:278 is {line!r}, not the binding"
+
+    # The exception, both halves: the item's target stays absent, and the entry says the
+    # sentence is a record of a deletion.
+    assert "agent-services/systemd/autonomy.service" not in infra, (
+        "infrastructure.md now cites the path #2795 refused to write, so the re-kind "
+        "this file documents has been replaced by a fiction")
+    assert resolve_citation(ROOT / "agent-services/systemd/autonomy.service") is None, (
+        "agent-services/systemd/autonomy.service has appeared on disk; the reason "
+        "infrastructure.md holds `historical:` for that span needs re-reading")
+    kind = PATH_CITATION_EXEMPTIONS["infrastructure.md"][
+        "agent-services/autonomy.service"].split(":", 1)[0].strip()
+    assert kind == "historical", f"the autonomy.service exemption is kind `{kind}:`"
+
+
+def test_the_stale_population_is_at_or_under_its_bound_and_names_every_offender():
+    """#2795 clause 4: `stale:` is the rot kind, so its size is bounded, and an offender is
+    reported by name.
+
+    Triage measured 109 exemptions with 13 stale, four weeks after the widening shipped 105
+    with the same 13 — the population had not moved, because nothing bounded it. The scale
+    rail in `test_every_path_citation_exemption_is_a_citation_the_doc_actually_makes` was
+    slack by 403 at that reading (109 against 2,049 citations, engaging only past 512), and
+    a bound on the whole list would have reddened the five honest `generated:` additions in
+    that same growth. This rail engages at `STALE_EXEMPTION_CEILING`, which is zero: one new
+    rot exemption and the suite says so, naming the slug, the span and the reason.
+    """
+    offenders = [
+        (slug, span, reason)
+        for slug, entries in PATH_CITATION_EXEMPTIONS.items()
+        for span, reason in entries.items()
+        if reason.split(":", 1)[0].strip() == "stale"
+    ]
+    assert len(offenders) <= STALE_EXEMPTION_CEILING, (
+        f"{len(offenders)} `stale:` path-citation exemptions against a bound of "
+        f"{STALE_EXEMPTION_CEILING}:\n"
+        + "\n".join(f"  {slug} cites {span} — {reason}" for slug, span, reason in offenders)
+        + "\n`stale:` is the rot kind: the path moved or was retired IN THIS REPO and the "
+        "sentence still points at the old spelling. Either correct the sentence until it "
+        "resolves and delete the entry, or, where the sentence is dated narrative about the "
+        "retirement, name the retiring commit in the sentence and re-kind the entry "
+        "`historical:`. If you cleared one, lower STALE_EXEMPTION_CEILING in the same "
+        "commit — that is what records the shrink."
+    )
+
+
+def test_the_rot_bound_is_shown_able_to_bite():
+    """#2795 clause 5: the ratchet is demonstrated, not asserted.
+
+    Same shape as `test_the_span_rule_is_shown_able_to_fail_on_anchors_the_corpus_wrote`:
+    inject one further `stale:` exemption into a real entry dict, require the rail to refuse
+    it by name, then remove it in a `finally` so the injected entry cannot reach a second
+    node. The green call on either side of the injection is what makes the refusal a
+    difference this node measured rather than an assert nobody can reach: an exemption list
+    that could not fail is a list of comments, which is how thirteen rot entries survived a
+    week of nightly runs nobody had to answer to.
+    """
+    slug, span = "autonomy-jobs.md", "app/inner_voice/_no_such_module_2795.py"
+    reason = ("stale: injected by the ratchet's own negative control — the module moved "
+              "and this sentence still points at the old spelling")
+    assert slug in PATH_CITATION_EXEMPTIONS, f"{slug} has no exemption entry to inject into"
+    assert span not in PATH_CITATION_EXEMPTIONS[slug], "the fixture is already in the list"
+
+    test_the_stale_population_is_at_or_under_its_bound_and_names_every_offender()
+
+    PATH_CITATION_EXEMPTIONS[slug][span] = reason
+    try:
+        with pytest.raises(AssertionError) as raised:
+            test_the_stale_population_is_at_or_under_its_bound_and_names_every_offender()
+    finally:
+        del PATH_CITATION_EXEMPTIONS[slug][span]
+
+    msg = str(raised.value)
+    assert ("1 `stale:` path-citation exemptions against a bound of "
+            f"{STALE_EXEMPTION_CEILING}") in msg, msg[:300]
+    assert slug in msg, msg[:300]
+    assert span in msg, msg[:300]
+    assert "the module moved" in msg, msg[:300]
+    assert "lower STALE_EXEMPTION_CEILING in the same commit" in msg, msg[-400:]
+    test_the_stale_population_is_at_or_under_its_bound_and_names_every_offender()

@@ -1006,10 +1006,11 @@ visible as a gap.
 The survey is the only vault-health number this machine produces, and it is
 **a measurement with no consumer**.
 
-`scripts/groundskeeper/groundskeeper-survey.py` walks the vault plus the
-~63,000-file fact tree across 11 categories and writes
-`_pipeline/groundskeeper-queue.json`. It runs at 02:30 under the
-`lloyd-groundskeeper-survey.timer` systemd user unit and takes about 40 minutes.
+`scripts/groundskeeper/groundskeeper-survey.py` (deleted by `201901b4`, #1012, on
+2026-09-23) walked the vault plus the
+~63,000-file fact tree across 11 categories and wrote
+`_pipeline/groundskeeper-queue.json`. It ran at 02:30 under the
+`lloyd-groundskeeper-survey.timer` systemd user unit and took about 40 minutes.
 Three roots, and the distinction matters for reading any item it emits:
 `VAULT_ROOT` is `~/obsidian`, `FACTS_DIR` is
 `~/lloyd-data/_pipeline/vault-derived/facts` — **outside the vault** — and `MEMORY_MD`
@@ -1050,7 +1051,8 @@ Four properties worth knowing before touching any of it:
   rename only when they match — on mismatch the temp goes, the live queue is
   left byte-identical, and `QueueWriteError` is raised. The survey,
   `scripts/memory/process-groundskeeper-queue.py` and
-  `scripts/memory/batch-process-orphans.py` all call it; the survey used to keep
+  `scripts/memory/batch-process-orphans.py` all called it until `201901b4`
+  (#1012, 2026-09-23) retired all three; the survey used to keep
   the check inline, which is exactly how the two consumers came to re-dump a
   9.3 MB queue nightly from outside it. Each write also appends one row to
   `_pipeline/groundskeeper-writes.jsonl` naming the writing script, its pid, the
@@ -1064,7 +1066,8 @@ Four properties worth knowing before touching any of it:
 - **79% of the queue names a path that does not exist.** `check_thin_profiles`
   writes `source_file: memory/facts/<entity>/`, vault-relative;
   `~/obsidian/memory/facts/` is gone and the fact tree moved to
-  `~/lloyd-data/_pipeline/vault-derived/facts/`. That is 15,299 `THIN_PROFILE` plus
+  `~/lloyd-data/_pipeline/vault-derived/facts/` (`VAULT_FACTS_ROOT`,
+  `app/paths.py:278`). That is 15,299 `THIN_PROFILE` plus
   9,559 `ENRICH_THIN_PROFILE` items each naming a directory nothing can open.
   `STALE_FACT` is wrong more loudly: `relpath` against `VAULT_ROOT` on a path
   outside it yields a `../lloyd/...` escape.
@@ -1093,9 +1096,11 @@ Two defects that are live and unowned:
   batch on every one of the 15 days 09-04→09-18, at run times drifting between
   10:21 and 14:23 UTC — not a timer, consistent with an agent turn. **What runs
   them is still unidentified** (no timer, no autonomy task, no worker source, no
-  skill names either script), and the scripts are deliberately left in place
-  because deleting an unattributed nightly job turns a silent write into a silent
-  failure. What changed on 2026-09-19 (#899) is that the next pass is nameable
+  skill names either script), and the scripts were deliberately left in place at
+  the time because deleting an unattributed nightly job turns a silent write into
+  a silent failure. That decision did not survive the week: `201901b4` (#1012,
+  2026-09-23) deleted both, with the survey and its queue writer. What changed on
+  2026-09-19 (#899) is that the next pass is nameable
   from disk: both consumers now stamp a log row per item they touch — so the
   second writer's reason finally appears in the log — and every queue write lands
   a row in `_pipeline/groundskeeper-writes.jsonl` naming its script and pid.
@@ -1311,9 +1316,10 @@ decide what gets worked on next.
   turn to it, so re-scoping the comparison onto it would measure nothing real. The
   sentence this replaces, "#85 is the fleet's only `draft` task", was false the day
   it was written: #68 has carried the same status throughout. What the retirement
-  is: `~/obsidian/autonomy/85-secondary-routing-eval.md` deleted, not moved to
-  `_archived/`, and `eval/secondary_routing_eval.py` and
-  `skills/secondary-routing-eval/SKILL.md` left on `main`, because a task file is
+  is: the numbered task file was deleted from `~/obsidian/autonomy/` rather than
+  moved to `_archived/`, and what survives is the skill it drove —
+  `~/obsidian/skills/secondary-routing-eval/SKILL.md` — beside
+  `eval/secondary_routing_eval.py`, both left on `main`, because a task file is
   cheap to re-add if a second chat engine ever returns. The blind spot that let the
   declaration sit for a week is closed the same day — `validate_tasks.py` now
   reports a `requires_slot:` whose enabled flag is false, answering from

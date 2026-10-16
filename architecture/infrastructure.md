@@ -399,9 +399,9 @@ in the default run) compares it and `/usr/local/sbin/set-gpu-power-limit.sh`
 byte for byte against the tracked pair: `drift` or `missing`, never `ok` for
 a copy it could not read (`tests/test_service_health_check_gpu_power_drift.py`).
 One tracked unit used to sit outside the directory —
-`agent-services/autonomy.service`, a dead Idler heartbeat whose
-`WorkingDirectory` and venv had both been deleted for a year; it was never
-installed by anything and was removed on 2026-09-24 (#1110).
+`agent-services/autonomy.service` (`511807a8`, #1110), a dead Idler heartbeat
+whose `WorkingDirectory` and venv had both been deleted for a year; it was never
+installed by anything and was removed on 2026-09-24.
 
 Placing a unit and enabling it are two acts, and the tree only performs the
 first. `scripts/maintenance/check-unit-enabledness.sh` (#1891) asserts every
