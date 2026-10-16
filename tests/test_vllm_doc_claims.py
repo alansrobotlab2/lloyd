@@ -1133,6 +1133,45 @@ def reopen(reopen_raw, cfg) -> dict:
     return W.derive(reopen_raw, gate=float(cfg["workers"]["kv_gate"]["max_kv_usage"]))
 
 
+#: The KV pool of a counted day whose own window holds no engine boot line, measured from
+#: the log rotation rather than assumed, keyed by the day. `extract` bounds a boot line to
+#: its own window (#2665), so a day the engine was never restarted for legitimately ships
+#: `pool_tokens: []` and `derive` reports the churn join as unmeasured — which is right for
+#: the aggregate and fatal for this file's per-event walk, because the free-pool half of §10's
+#: filing condition has no denominator at all without one.
+#:
+#: 2026-10-15 is that day, and the size below is that day's real one, not a stand-in:
+#: `agent-llm-primary.log.1`, which spans the whole 10-14 13:53 → 10-15 20:34 window, holds
+#: no `GPU KV cache size:` line, and the last boot before it is
+#: `INFO 10-12 16:21:06 … GPU KV cache size: 844,969 tokens` in `agent-llm-primary.log.3`.
+#: The engine that served 2026-10-15 therefore ran on the pool it booted with at 2026-10-12
+#: 16:21 PDT — the same 844,969 every §10 free-block figure on this page is computed on. An
+#: empty list for a day NOT in this map raises rather than falling back to a default: an
+#: unpinned denominator is a filing condition that was never computed, and §10's qualifying
+#: set may not rest on one.
+NO_BOOT_POOL = {"2026-10-15": 844969}
+
+
+def _with_pool(ex: dict) -> dict:
+    """A copy of an extract whose `pool_tokens` the free-pool arithmetic can divide by.
+
+    Returns the extract untouched whenever the window booted the engine and the script read
+    its size out of the window, which is every other counted day. Only a day named in
+    `NO_BOOT_POOL` is rewritten, so this cannot quietly hand some future no-boot day a
+    denominator nobody measured.
+    """
+    if ex["pool_tokens"]:
+        return ex
+    day = ex["window"][0]
+    if day not in NO_BOOT_POOL:
+        raise KeyError(
+            f"{ex['window'][0]}'s window holds no boot line and no measured pool; add the "
+            "size read from the rotation to NO_BOOT_POOL with its provenance, do not guess")
+    pinned = dict(ex)
+    pinned["pool_tokens"] = [NO_BOOT_POOL[day]]
+    return pinned
+
+
 def _gap_events(ex: dict, gate: float) -> list[dict]:
     """Each miss event that has a gap, with `derive`'s churn rule applied to it.
 
@@ -1148,8 +1187,12 @@ def _gap_events(ex: dict, gate: float) -> list[dict]:
     the one chat miss's gap is "a single engine status line", and a claim about a gap that
     thin is only worth checking if the line count comes from the same join.
     """
+    ex = _with_pool(ex)
     samples = ex["kv_samples"]
-    (pool,) = ex["pool_tokens"]
+    # `derive` takes the largest pool a window carries, which makes its churn count a
+    # lower bound on a window spanning a restart into a smaller cache. Same denominator here,
+    # so the assert at the bottom of this walk still compares like with like.
+    pool = max(ex["pool_tokens"])
     out = []
     for m in ex["misses"]:
         start = m[0] - m[1] / 1000
@@ -1169,10 +1212,17 @@ def _gap_events(ex: dict, gate: float) -> list[dict]:
                     "end": m[0], "iteration": m[2], "tokens": m[3], "cache_read": m[4],
                     "churn": computed >= (1 - peak) * pool})
     d = W.derive(ex, gate=gate)
-    assert len(out) == d["miss_events"] and \
+    # The walk yields the GAP-JOINED events, not every miss. On every day counted before
+    # 2026-10-15 those two counts coincided — each window's very first miss still had an
+    # earlier miss inside the window — so `miss_events` could stand in for the join. 2026-10-15
+    # is the first day where they differ (110 misses, 109 of them gap-joined), so the
+    # comparison is now against the set this walk actually covers, which is the same count
+    # `derive` reports as `misses_with_gap`.
+    assert len(out) == d["misses_with_gap"] and \
         sum(1 for e in out if e["churn"]) == d["misses_gap_churned_free_pool"], (
-        "this walk's churn rule no longer agrees with derive's aggregate, so "
-        "no per-event figure read off it is the split the doc cites")
+        "this walk no longer agrees with derive's aggregate — either it is dropping a "
+        "gap-joined miss or its churn rule is not the aggregate's — so no per-event figure "
+        "read off it is the split the doc cites")
     return out
 
 
@@ -2405,7 +2455,14 @@ def _sixth_bullet() -> str:
     """
     raw = DOC.read_text(encoding="utf-8")
     start = raw.index(_SIXTH_HEADING)
-    end = raw.index("- **The unannotated draft group.**", start)
+    # Bounded at the FIRST thing that follows this day's paragraph, not at a named bullet:
+    # #2852 appended a 2026-10-15 count bullet between this one and the draft group, and a
+    # span that ran to the draft group would let the newer day's attribution sentence answer
+    # this node's "exactly one sentence makes the iteration claim".
+    ends = [raw.index(m, start) for m in
+            ("- **The unannotated draft group.**", _SEVENTH_HEADING)
+            if raw.find(m, start) != -1]
+    end = min(ends) if ends else len(raw)
     return " ".join(raw[start:end].split()).replace("**", "")
 
 
@@ -2721,73 +2778,121 @@ def test_the_sixth_chat_miss_is_attributed_with_its_own_gap_line_count(sixth, si
 
 
 def test_the_third_counted_day_and_the_gap_shape_of_every_qualifying_event(
-        sixth_raw, replication_raw, filing_raw, cfg):
-    """#2248 clauses 4 and 5: three counted days now meet the condition, the gap of every
-    qualifying event is on the page, and it is separated from the days' own gap medians.
+        replication_raw, filing_raw, sixth_raw, seventh_raw, cfg):
+    """The filing condition's day count, the gap shape of every qualifying event, and the
+    gap p50 of the window it is quoted in — all derived, all four fixtures, in one node.
 
-    This is the node the item's own caveat could not have produced. The item asserted that
-    09-27's and 09-29's qualifying events "sat in gaps of minutes" and asked whether a 0.1 s
-    gap is therefore a different condition. Measured over the committed fixtures with the same
-    join, that premise is false — the qualifying gaps are 0.1/0.7/0.1/0.1 s on 09-27 and 0.2 s
-    on 09-29 — and the minutes-long figure is a DAY's gap p50. So nothing here is quoted: the
-    counts, the gap list, the widest event gap and the three day medians are all derived, and
-    the paragraph has to carry each rendering. The positive control is the day-side median
-    being minutes long; without it, a node that only asserted every event gap is small would
-    pass even on a page that never distinguished an event's gap from a day's.
+    Three numbers in §10 looked like prose and were measurements: the ordinal "third counted
+    day", the per-event gaps of the qualifying chat misses, and each window's OVERALL gap
+    p50 — the median over every miss event of a day. #2248 pinned the first two and #2268 the
+    third, and this node was `test_the_third_counted_day_…` while the derived set was three
+    days wide.
+
+    #2852 adds 2026-10-15 and the name's ordinal becomes historical: the day this node was
+    written for is the third, the set is now four, and the count comes out of `_qualifying_days`
+    again rather than out of a literal, which is the whole reason the ordinal was pinned by a
+    derived count in the first place. What that addition really costs is the SHAPE claim, so
+    the sub-second/single-status-line asserts are scoped to the events they cover and the odd
+    one out is asserted as the exception beside them. A node that quietly kept scanning three
+    fixtures would have let the page say "every qualifying gap is sub-second" while a fourth
+    qualifying gap was 126.5 s — false prose with a green rail on it, which is the failure
+    this file exists to make impossible.
+
+    The p50 leg guards a different trap: three days of a per-window figure are a trend, four
+    are a trend with a new extreme in it, and 2026-10-15's 100.2 s is that extreme. Quoting a
+    day's gap p50 beside a qualifying event's 0.1–0.7 s gap invites the reader to substitute
+    one for the other, so the node asserts BOTH the page's per-day list and which day is
+    largest in each of the two populations, because those two superlatives have to be allowed
+    to name different days — before #2852 they both named 2026-09-29.
     """
     gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
-    raws = [replication_raw, filing_raw, sixth_raw]
-    qualifying = [_qualifying(raw, gate) for raw in raws]
-    for raw, evs in zip(raws, qualifying):
-        assert evs, f"{raw['window'][0]} no longer carries a qualifying chat miss"
-    labelled = list(zip([raw["window"][0] for raw in raws], qualifying))
-    assert [len(evs) for evs in qualifying] == [4, 1, 1], [len(evs) for evs in qualifying]
+    days = _qualifying_days(gate)
+    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15"], days
+    raw_doc = DOC.read_text(encoding="utf-8")
+    assert f"the filing condition is met on a {_ordinal(len(days))} counted day" in raw_doc, (
+        f"§10's heading does not carry the derived count ({_ordinal(len(days))}); the node "
+        "that names the count and the node that derives it must move together")
+    assert "the filing condition is met on a third counted day" in _sixth_bullet(), (
+        "the paragraph that counted the third day no longer says so, so the history this "
+        "page's evidence set is built from has lost the day it was built on")
+    assert f"{_ordinal(len(days))} counted day on which the condition is met" in _sixth_bullet()
+
+    qualifying = [_qualifying(r, gate) for r in
+                  (replication_raw, filing_raw, sixth_raw, seventh_raw)]
+    assert [len(evs) for evs in qualifying] == [4, 1, 1, 1], (
+        f"a qualifying day's qualifying-event count moved: {[len(evs) for evs in qualifying]}")
     all_evs = [e for evs in qualifying for e in evs]
+    assert len(all_evs) == 7
+
+    # The event list §10 prints: one clause per day, each naming how many events that day
+    # contributes and what their gaps are. If a qualifying event ever moves out of the
+    # condition — or a fifth day appears — this assert and the paragraph fail together.
+    def _gap_list(evs):
+        vals = [f"{e['gap_s']:.1f}" for e in evs]
+        head = vals[0] if len(vals) == 1 else ", ".join(vals[:-1]) + " and " + vals[-1]
+        return head + " s"
+
+    items = [f"{day}'s {_word(len(evs))} at {_gap_list(evs)}"
+             for day, evs in zip(days, qualifying)]
+    said = ", ".join(items[:-1]) + " and " + items[-1]
     p = _sixth_bullet()
-
-    # Every qualifying event's gap, in one sentence, derived from the three fixtures.
+    p15 = _seventh_bullet()
     assert (f"The {_word(len(all_evs))} chat miss events now meeting the condition are "
-            f"{_gap_shape(labelled)}") in p, _gap_shape(labelled)
-    assert (f"none of the {_word(len(all_evs))} exceeds "
-            f"{max(e['gap_s'] for e in all_evs):.1f} s") in p
-    assert all(e["n_lines"] == 1 for e in all_evs), (
-        "a qualifying gap now spans more than one status line, so the paragraph's claim that "
-        "each is spanned by one is no longer what the join says")
-    assert "each one is spanned by a single engine status line" in p
+            f"{said}") in (p + " " + p15), (
+        "the paragraph's own list of qualifying events no longer matches the derived ones "
+        f"(derived: {said})")
 
-    # The separation, with the control that makes it a contrast rather than a tautology.
-    assert "Those are the qualifying events' gaps, not the days'" in p
-    derived = [W.derive(raw, gate=gate) for raw in raws]
-    p50s = [d["gap_s_p50"] for d in derived]
-    said = ", ".join(f"{v:.1f}" for v in p50s[:-1]) + f" and {p50s[-1]:.1f} s"
-    assert f"the same {_word(len(p50s))} windows' overall gap p50s are {said}" in p, said
-    widest = max(range(len(p50s)), key=lambda i: p50s[i])
-    assert p50s[widest] >= 60.0, (
-        f"no day's gap p50 is minutes long (max {p50s}), so the page's contrast between a "
-        "day's median and the qualifying events' gaps would be asserted against nothing")
-    assert (f"the largest of them, {p50s[widest]:.1f} s, is {labelled[widest][0]}'s, a day "
-            f"whose longest qualifying gap is "
-            f"{max(e['gap_s'] for e in labelled[widest][1]):.1f} s") in p
-    assert max(e["gap_s"] for e in all_evs) < 1.0, (
-        "a qualifying gap now runs to a second or more, so the paragraph's shape claim has to "
-        "be re-derived rather than left reading as three sub-second days")
+    # The shape, scoped to the events that have it, and the exception stated beside it. These
+    # two asserts are the mechanical half of clause 5: together they say six events are
+    # sub-second inside one status line and the seventh is not, so no reading of the page can
+    # take "sub-second, single status line" as a property of all seven.
+    first_three = [e for evs in qualifying[:3] for e in evs]
+    assert all(e["n_lines"] == 1 for e in first_three), (
+        "a qualifying gap from the first three days no longer fits inside a single status "
+        "line, so the page's sub-second claim needs re-scoping again")
+    assert max(round(e["gap_s"], 1) for e in first_three) < 1.0
+    late = qualifying[3]
+    assert all(e["n_lines"] > 1 and e["gap_s"] > 1.0 for e in late), (
+        "2026-10-15's qualifying gap stopped being the long multi-line one, and the page "
+        "still says it is")
+    assert f"{round(late[0]['gap_s'], 1)} s" in p and f"{late[0]['n_lines']} status lines" in p, (
+        "the 2026-10-01 paragraph's shape sentence must name the odd-one-out gap rather than "
+        "list the sub-second events and leave the reader to assume they all match")
 
-    # The third-day claim itself, derived over every fixture this file grades.
-    every = [json.loads(c.read_text(encoding="utf-8")) for c in
-             (EXTRACT, OLD_EXTRACT, REOPEN_EXTRACT, FILING_EXTRACT, REPLICATION_EXTRACT,
-              SIXTH_EXTRACT)]
-    qualifying_days = sorted(raw["window"][0] for raw in every if _qualifying(raw, gate))
-    assert qualifying_days == ["2026-09-27", "2026-09-29", "2026-10-01"], qualifying_days
-    assert _word(len(qualifying_days)) == "three", (
-        f"{len(qualifying_days)} counted days now qualify, so §10's 'third counted day' and "
-        "the three-window gap-p50 sentence both need re-cutting against the new count")
-    assert "third counted day on which the condition is met" in p
-    assert "the filing condition is met on a third counted day" in p
-    assert "it is not filed" in p, (
-        "the paragraph must keep the upstream report unfiled; the ruling's consequence is "
-        "unchanged by this day")
-    assert not re.search(r"github\.com/vllm-project/vllm/issues/\d+", _section(10)), (
-        "§10 names an upstream issue; the 'not filed' sentences must go when it does")
+    # Both superlatives, from the same derivations the list above came from: which day's
+    # OVERALL gap p50 is largest, and which day's longest QUALIFYING gap is largest.
+    windows = {r["window"][0]: W.derive(_with_pool(r), gate=gate)["gap_s_p50"]
+               for r in (replication_raw, filing_raw, sixth_raw, seventh_raw)}
+    worst_day = max(windows, key=windows.get)
+    worst = f"{windows[worst_day]:.1f}"
+    assert len(windows) == 4, f"a counted day carries no gap-joined miss: {windows}"
+    longest_qual = {day: max(round(e["gap_s"], 1) for e in evs)
+                    for day, evs in zip(days, qualifying)}
+    worst_q_day = max(longest_qual, key=longest_qual.get)
+    # The negative half, derived rather than pattern-matched: if the shape claim is ever
+    # re-widened to cover every qualifying event, the unscoped sentence comes back with the
+    # new count in it and this fails. Prose-matching a refutation is hopeless — the page now
+    # contains the words "every qualifying gap" inside a sentence saying that claim is false —
+    # so what is pinned is the claim's own derived form, which only a generalisation writes.
+    assert f"none of the {_word(len(all_evs))} exceeds" not in raw_doc, (
+        f"the page generalises the sub-second claim to all {len(all_evs)} qualifying events "
+        f"again, and one of them is {round(late[0]['gap_s'], 1)} s over "
+        f"{late[0]['n_lines']} status lines")
+    assert f"So the {_word(len(qualifying))} days agree on one shape" not in raw_doc, (
+        f"the page still claims the {_word(len(qualifying))} counted days agree on one gap "
+        f"shape while one qualifying gap is {round(late[0]['gap_s'], 1)} s and the other six "
+        "are under a second")
+    assert f"{_word(len(qualifying))} days do not agree on one shape" in p, (
+        "the shape sentence has to say the days no longer agree, not merely drop the claim")
+    assert (f"the largest of them, {worst} s, is {worst_day}'s, a day whose longest "
+            f"qualifying gap is {longest_qual[worst_day]:.1f} s") in p, (
+        f"the page's superlative is wrong for one of the two populations: largest overall "
+        f"gap p50 is {worst_day} at {worst} s, longest qualifying gap is {worst_q_day} at "
+        f"{longest_qual[worst_q_day]:.1f} s, and both names have to be the derived ones")
+    assert max(windows.values()) > 1.0, (
+        f"no counted day's OVERALL gap p50 is over a second any more ({windows}), so the "
+        "page's point that the per-day median and the qualifying-event gap are different "
+        "populations has nothing to point at")
 
 
 def test_the_sixth_paragraph_breaks_neither_the_one_mark_nor_the_one_query_rule(reading):
@@ -3007,7 +3112,7 @@ def test_the_ruled_stance_names_the_evidence_set_the_extract_set_derives(cfg):
     """
     gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
     days = _qualifying_days(gate)
-    assert days == ["2026-09-27", "2026-09-29", "2026-10-01"], days
+    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15"], days
     assert len(days) < len(_tracked_extracts()), (
         "every tracked extract now qualifies, so the join selected the whole directory and "
         "the count below is a restatement of `ls`")
@@ -3069,3 +3174,210 @@ def test_the_reword_keeps_every_graded_span_bounded_and_both_rails_intact(readin
     queries = _CHAT_QUERY.findall(reading)
     assert len(queries) == 1, (
         f"positive control: the counted reading carries {len(queries)} queries, not one")
+
+
+# ── #2852: 2026-10-15, the fourth counted day meeting the filing condition ──────────
+#
+# A seventh extract, and the first one whose window never booted the engine. That second
+# fact is the whole difficulty: §10's filing condition has two halves — no free-pool churn
+# in the gap, and a gap KV peak under the gate — and the first one divides by a KV pool the
+# window does not contain. #2665 bounded the boot line to its own window precisely so a day
+# would not inherit somebody else's cache size, so the honest read of `pool_tokens: []` is
+# `derive`'s `misses_gap_churned_free_pool: null`, and the dishonest one is a number. The
+# three nodes below therefore pin the size, and `NO_BOOT_POOL` above carries where it came
+# from: the rotation, not this file's imagination.
+
+SEVENTH_EXTRACT = ROOT / "tests" / "fixtures" / "vllm_prefix_miss_2026-10-15.json"
+DAILY_EXTRACT_DIR = Path.home() / "lloyd-data" / "vllm-prefix-miss"
+_SEVENTH_HEADING = "- **The 2026-10-15 count:"
+
+
+@pytest.fixture(scope="module")
+def seventh_raw() -> dict:
+    return json.loads(SEVENTH_EXTRACT.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def seventh(seventh_raw, cfg) -> dict:
+    """The day as `derive` reports it on the extract's own bytes — pool unpinning included.
+
+    Clause 2 grades the paragraph against THIS reading, not the pinned one, so every figure
+    it demands is one the committed file reproduces with no help from `NO_BOOT_POOL`. Only
+    the free-pool half is pinned, and it is graded by its own node.
+    """
+    return W.derive(seventh_raw, gate=float(cfg["workers"]["kv_gate"]["max_kv_usage"]))
+
+
+def _seventh_bullet() -> str:
+    """§10's 2026-10-15 paragraph, whole and collapsed, bounded at the next bullet or heading.
+
+    The same bound that keeps `_sixth_bullet` honest: a phrase demanded of this day must not
+    be answerable by whatever prose §10 grows underneath it.
+    """
+    raw = DOC.read_text(encoding="utf-8")
+    start = raw.index(_SEVENTH_HEADING)
+    nxt = re.search(r"^- |^## ", raw[start + len(_SEVENTH_HEADING):], re.M)
+    end = start + len(_SEVENTH_HEADING) + nxt.start() if nxt else len(raw)
+    return " ".join(raw[start:end].split()).replace("**", "")
+
+
+def test_the_seventh_extract_is_committed_and_matches_the_daily_job_byte_for_byte(seventh_raw):
+    """#2852 clause 1: the day is in the tree, tracked, one line, and identical to the copy
+    the standing daily job wrote — so the committed evidence is the reading, not a transcription.
+
+    The byte identity is asked of the daily job's file rather than of `--write-extract`
+    re-run here, because the thing worth pinning is that nobody re-cut the numbers between
+    the job that finds a day and the round that commits it. `#2248` pinned the same identity
+    for 2026-10-01 and the rotation had already begun dropping that day's lines by the time
+    the item closed; 2026-10-15's turn comes about as fast, and after it the fixture is the
+    only copy, which is why an untracked file is the day lost rather than a tidy tree.
+    """
+    assert seventh_raw["window"] == ["2026-10-15", "2026-10-16"]
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+         str(SEVENTH_EXTRACT.relative_to(ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{SEVENTH_EXTRACT.name} is on disk but not in git; its status lines leave the "
+        "rotation with the 10-15 logs, after which an untracked fixture is the day lost")
+    raw = SEVENTH_EXTRACT.read_text(encoding="utf-8")
+    assert raw.endswith("\n") and not raw.endswith("\n\n")
+    assert raw == json.dumps(seventh_raw, separators=(",", ":")) + "\n", (
+        f"{SEVENTH_EXTRACT.name} is not byte-for-byte what `--write-extract` writes")
+    assert len(raw.splitlines()) == 1
+    daily = DAILY_EXTRACT_DIR / SEVENTH_EXTRACT.name
+    if not daily.exists():
+        pytest.skip(f"the daily job has written no {daily}; its extract is the other half "
+                    "of this identity and only the job can produce it")
+    assert raw == daily.read_text(encoding="utf-8"), (
+        f"the committed fixture and the daily job's copy at {daily} differ; one of them is "
+        "not the reading, and §10 cites the figures as though they were the same file")
+    assert SEVENTH_EXTRACT in _tracked_extracts(), (
+        "the extract family no longer enumerates this day, so the derived evidence set "
+        "cannot see the counted day it is supposed to include")
+    seven = {EXTRACT, OLD_EXTRACT, REOPEN_EXTRACT, FILING_EXTRACT, REPLICATION_EXTRACT,
+             SIXTH_EXTRACT, SEVENTH_EXTRACT}
+    assert len(seven) == 7, "a re-pointed constant moves a day this file already grades"
+    windows = {c.name: json.loads(c.read_text(encoding="utf-8"))["window"][0] for c in seven}
+    assert windows[SEVENTH_EXTRACT.name] == "2026-10-15"
+    assert len(set(windows.values())) == 7, windows
+
+
+def test_the_seventh_day_figures_are_the_derivation(seventh_raw, seventh, cfg):
+    """#2852 clause 2: every figure in §10's 2026-10-15 paragraph is `derive`'s own, at the
+    gate `config.yaml` carries, recomputed from the committed bytes.
+
+    Nothing here is quoted from the item that filed it, and no figure is rounded into the
+    prose: the renderings below are the ones the page uses, so a `derive` that starts
+    returning 0.167 for the KV p50 fails this node rather than quietly re-cutting a counted
+    day's numbers underneath it.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert seventh["turns"] == 508 and seventh["measured"] == 508
+    assert seventh["turns_with_misses"] == 50
+    assert seventh["misses"] == 110 and seventh["reprefill_tokens"] == 12251791
+    assert seventh["worst_turn_tokens"] == 856098
+    assert seventh["chat_turns"] == 10 and seventh["chat_turns_with_misses"] == 1
+    assert seventh["by_kind"]["autocode"] == [106, 11780462]
+    # Rounded to the three decimals §10 prints: `derive` returns the p90 of a 6,893-sample
+    # list as a float, and 0.39299999999999996 is that sample's 0.393.
+    assert round(seventh["kv_p50"], 3) == 0.166 and round(seventh["kv_p90"], 3) == 0.393
+    assert round(seventh["kv_max"], 3) == 0.861 and seventh["running_p50"] == 1
+    assert seventh["misses_with_gap"] == 109
+    assert round(seventh["gap_s_p50"], 1) == 100.2
+    assert round(seventh["miss_kv_gap_p50"], 3) == 0.363
+    assert round(seventh["miss_kv_gap_p90"], 3) == 0.583
+    assert round(seventh["miss_kv_gap_max"], 3) == 0.749
+    assert seventh["misses_gap_over_gate"] == 10 and seventh["misses_gap_over_90"] == 0
+    assert round(seventh["two_request_tok_s_p50"], 1) == 2165.3
+    assert seventh["two_request_under_stall"] == 2
+    assert seventh["two_request_under_stall_not_cold"] == 0
+    assert seventh["pool_tokens"] is None, (
+        "the window now holds a boot line, so the pinned pool this day is graded on is no "
+        "longer needed and NO_BOOT_POOL is carrying a denominator nobody asks for")
+
+    # No assert here quotes markdown emphasis: `_seventh_bullet` collapses whitespace AND
+    # strips `**`, because §10 bolds its figures and this node grades the numbers, not the
+    # styling. An assert carrying `**` would fail on prose saying the figure exactly.
+    p = _seventh_bullet()
+    assert (f"{seventh['turns']} turns, {seventh['turns_with_misses']} of them carrying "
+            f"misses gives {seventh['misses']} misses / {seventh['reprefill_tokens']:,} "
+            "tokens") in p
+    assert f"{seventh['chat_turns_with_misses']} of the day's {seventh['chat_turns']} " \
+           "chat turns" in p
+    assert (f"KV p50 {seventh['kv_p50']:.2f} / p90 {seventh['kv_p90']:.2f} / max "
+            f"{seventh['kv_max']:.2f}") in p
+    assert f"gap p50 {seventh['gap_s_p50']:.1f} s" in p
+    assert (f"KV peak in the gap p50 {seventh['miss_kv_gap_p50']:.3f} / p90 "
+            f"{seventh['miss_kv_gap_p90']:.3f}, max {seventh['miss_kv_gap_max']:.3f}") in p
+    assert (f"{seventh['misses_gap_over_gate']} of {seventh['misses_with_gap']} at or "
+            f"over the {gate:.2f} gate and {seventh['misses_gap_over_90']} of them "
+            "over 0.90") in p
+    assert f"{seventh['by_kind']['autocode'][1]:,} of the {seventh['reprefill_tokens']:,}" in p
+    assert _SEVENTH_HEADING in DOC.read_text(encoding="utf-8")
+    assert SEVENTH_EXTRACT.name in p
+
+
+def test_the_seventh_day_chat_miss_qualifies_on_the_measured_pool(seventh_raw, cfg):
+    """#2852 clause 3: the day's one chat miss is attributed with arithmetic on the pool the
+    engine actually had, and the paragraph says where that size came from.
+
+    The node prints the provenance into the page rather than letting the paragraph assert a
+    free-block count off an unlabelled denominator, because the margin is thin and only the
+    provenance makes it checkable: 408,165 tokens against 413,190 free blocks is 98.8% of
+    what the walk LRU needs, and on the 484,612-token pool the engine ALSO ran on 2026-10-12
+    this same gap would read as churned. So the claim "not churned" is a claim about which
+    pool the day booted with, and the page has to carry that with it — a qualifying event
+    that survives only on one of two plausible denominators is the weakest one on the page.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    pinned = _with_pool(seventh_raw)
+    assert pinned["pool_tokens"] == [844969]
+    assert seventh_raw["pool_tokens"] == [], (
+        "the window now carries its own boot line, so this day no longer needs a pinned pool")
+    day = W.derive(pinned, gate=gate)
+    assert day["misses_gap_churned_free_pool"] == 44, day["misses_gap_churned_free_pool"]
+    assert day["misses_with_gap"] == 109
+
+    chat = [e for e in _chat_events(seventh_raw, gate)]
+    assert len(chat) == 1, f"the extract carries {len(chat)} gap-joined chat miss events"
+    e0 = chat[0]
+    assert e0["churn"] is False and e0["peak"] < gate, (
+        f"the day's only chat miss stopped meeting the filing condition: peak={e0['peak']} "
+        f"churn={e0['churn']}")
+    assert e0["n_lines"] == 14 and round(e0["gap_s"], 1) == 126.5
+    assert e0["iteration"] == 17 and e0["tokens"] == 112821 and e0["cache_read"] == 0
+    assert e0["computed"] == 408165 and e0["free_at_peak"] == 413190
+
+    turn = [t for t in seventh_raw["turns"] if t[1] == "chat" and (t[2] or 0) > 0]
+    assert len(turn) == 1
+    p = _seventh_bullet()
+    assert f"`{turn[0][0]}`" in p, "the paragraph must name the one turn it counted"
+    attrib = [s for s in p.split(". ") if "iteration" in s]
+    assert len(attrib) == 1 and turn[0][0] in attrib[0], (
+        "the sentence making the iteration claim does not name the turn the extract counted "
+        f"({turn[0][0]}), so the attribution is not pinned to an event")
+    for said in (f"iteration {e0['iteration']}", f"{e0['tokens']:,} tokens",
+                 f"cache_read {e0['cache_read']}", f"a gap of {e0['gap_s']:.1f} s",
+                 f"{e0['n_lines']} engine status lines", f"{e0['peak']:.3f}",
+                 f"under the {gate:.2f} gate",
+                 f"{e0['computed']:,} tokens computed in the gap",
+                 f"{e0['free_at_peak']:,} free blocks",
+                 f"{NO_BOOT_POOL['2026-10-15']:,}-token pool"):
+        assert said in attrib[0], (
+            f"{said!r} is not in the clause that attributes the event: {attrib[0]!r}")
+    assert "neither free-pool churn nor a gate-level KV explanation" in p
+    provenance = [s for s in p.split(". ") if "boot" in s and "844,969" in s]
+    assert provenance, (
+        "the paragraph states a free-block figure on a pool its own window never measured "
+        "and does not say where the size came from; the boot line and its timestamp belong "
+        "in the same sentence as the arithmetic they make possible")
+    assert "no boot line" in provenance[0] and "2026-10-12 16:21" in provenance[0]
+    churned = [s for s in p.split(". ") if "churn" in s and "109" in s]
+    assert churned and f"{day['misses_gap_churned_free_pool']} of {day['misses_with_gap']}" \
+        in churned[0], (
+        f"the day-level churn join is not the pinned reading ({day['misses_gap_churned_free_pool']} "
+        f"of {day['misses_with_gap']}), so the page is quoting the unmeasured null as a number")
+    assert "it is not filed" in p, (
+        "the ruled consequence carries to this day too: a fourth qualifying day adds "
+        "evidence, not stance, and the report stays unfiled")

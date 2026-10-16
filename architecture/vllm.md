@@ -1061,8 +1061,8 @@ has still not been run as of 2026-09-11.
   this page measures that the unannotated draft group below is the reason. The upstream
   report follows from that and is owed; it is not filed, and this page records the issue's
   URL when it is.
-- **The 2026-10-01 count: the filing condition is met on a third counted day, and every
-  qualifying gap on the record is sub-second.** **2026-10-01 00:00 → 2026-10-02
+- **The 2026-10-01 count: the filing condition is met on a third counted day, and the gap
+  shape of every qualifying event is on the page.** **2026-10-01 00:00 → 2026-10-02
   00:00 UTC** is counted the same way over the extract committed as
   `tests/fixtures/vllm_prefix_miss_2026-10-01.json`; every figure in this paragraph is
   recomputed from it at the `workers.kv_gate.max_kv_usage` gate by
@@ -1097,22 +1097,75 @@ has still not been run as of 2026-09-11.
   explanation**, one event on one day, and the **third counted day on which the condition
   is met** after 2026-09-29 and 2026-09-27. What a third day adds is the shape of the gap,
   because a gap is the one quantity on this page thin enough for a reader to mistake a
-  day's distribution for an event's. The six chat miss events now meeting the condition are
-  2026-09-27's four at 0.1, 0.7, 0.1 and 0.1 s, 2026-09-29's one at 0.2 s and
-  2026-10-01's one at 0.1 s: none of the six exceeds 0.7 s, and each one is spanned by a
-  single engine status line. Those are the qualifying events' gaps, not the days' — the
-  same three windows' overall gap p50s are 0.5, 100.1 and 24.8 s, medians over every miss
-  event of a day, and the largest of them, 100.1 s, is 2026-09-29's, a day whose longest
-  qualifying gap is 0.2 s. So the three days agree on one shape rather than on three
-  different ones: a prefix dropped between two consecutive requests, on a pool that neither
-  churned nor reached the gate. A third qualifying day adds evidence, not stance: owed-check
+  day's distribution for an event's. The seven chat miss events now meeting the condition are
+  2026-09-27's four at 0.1, 0.7, 0.1 and 0.1 s, 2026-09-29's one at 0.2 s,
+  2026-10-01's one at 0.1 s and 2026-10-15's one at 126.5 s: none of the six before
+  2026-10-15 exceeds 0.7 s, and each one is spanned by a single engine status line, while
+  2026-10-15's 126.5 s gap spans 14 status lines. Those are the qualifying events' gaps, not
+  the days' — the same four windows' overall gap p50s are 0.5, 100.1, 24.8 and 100.2 s,
+  medians over every miss event of a day, and the largest of them, 100.2 s, is
+  2026-10-15's, a day whose longest qualifying gap is 126.5 s. So the four days do not agree
+  on one shape: the three this paragraph counted are a prefix dropped between two
+  consecutive requests inside one status line, and 2026-10-15's is a prefix dropped across a
+  two-minute idle stretch, on a pool that neither churned nor reached the gate. A third
+  qualifying day adds evidence, not stance: owed-check
   ruled on 2026-10-06 (#2248's owed entry 3, recorded here by #2268) that the condition was
   already met on the second counted day and its consequence published, so the accepted-loss
   ruling and its consequence stand as written and the report is owed and **it is not filed**.
-  What the third day does change is the report's evidence set, now the three extracts
-  2026-09-27, 2026-09-29 and 2026-10-01; filing it remains Alan's alone, owned by #2250 Half
-  A. Each of the three days is committed as an extract because the engine lines behind it
-  expire the way every other day's do.
+  What the third day does change is the report's evidence set — and that set has since
+  grown, because 2026-10-15 below is the **fourth counted day on which the condition is
+  met**. What this paragraph's ruling now points at is therefore the four extracts
+  2026-09-27, 2026-09-29, 2026-10-01 and 2026-10-15; filing it remains Alan's alone, owned
+  by #2250 Half A. Each of the four days is committed as an extract because the engine lines
+  behind it expire the way every other day's do.
+- **The 2026-10-15 count: the filing condition is met on a fourth counted day, and its
+  qualifying gap is the first that is neither sub-second nor one status line.**
+  **2026-10-15 00:00 → 2026-10-16 00:00 UTC**, gate **0.60**, the seventh extract —
+  `tests/fixtures/vllm_prefix_miss_2026-10-15.json`, committed byte-for-byte as the daily job
+  wrote it (#2852). **508 turns, 50 of them carrying misses gives 110 misses / 12,251,791
+  tokens** (worst turn 856,098), and **1 of the day's 10 chat turns** carries one, so
+  this day cannot close criterion (a) either, and `chat_turns_with_misses` is the 1 that
+  §10's accepted-loss ruling is about.
+  Load mix is the reason the day looks quiet and is not: autocode's four rounds take
+  11,780,462 of the 12,251,791 tokens and 106 of the 110 misses, and chat takes 1 miss of
+  112,821 tokens. **KV p50 0.17 / p90 0.39 / max 0.86** with Running requests at **1** for
+  the median sample, so **(c) holds** with room to spare, and 109 misses join a status line
+  behind them at **gap p50 100.2 s** with **KV peak in the gap p50 0.363 / p90 0.583, max
+  0.749** — **10 of 109** at or over the **0.60** gate and **0** of them over 0.90, so the
+  misses are not admission pressure either. Criterion **(d) holds** on its own rule: 2,861
+  two-request windows, **2165.3 tok/s** at the median, slowest 8.6, and both of the two under
+  the 15 tok/s bar are cold admissions in flight rather than an idle engine.
+  `2026-10-15T15:54:11` is that one chat miss: **iteration 17** of a **112,821 tokens**
+  prompt admitted with **cache_read 0**, so a prefix was dropped rather than never built,
+  over **a gap of 126.5 s** spanning **14 engine status lines** whose peak is **0.511**,
+  **under the 0.60 gate**, while **408,165 tokens computed in the gap** against the
+  **413,190 free blocks** that peak implies on the **844,969-token pool** is 98.8% of what
+  the walk would have to evict, so neither free-pool churn nor a gate-level KV
+  explanation covers it — exactly §10's filing condition — and 2026-10-15 is therefore the
+  **fourth counted day on which the condition is met** and the report's evidence set is now **the four
+  extracts 2026-09-27, 2026-09-29, 2026-10-01 and 2026-10-15**.
+  That arithmetic sits on a pool this window never measured, and saying so is part of the
+  reading: this is the first counted day with **no boot line** inside it, because #2665
+  bounds a `GPU KV cache size:` line to its own window and a day the engine was not restart
+  for legitimately ships none — which is why the extract's own churn join is unmeasured
+  rather than zero. The **844,969** above is therefore the size read from the rotation: the
+  last boot before the window is `INFO 10-12 16:21:06 … GPU KV cache size: 844,969 tokens`,
+  and the file spanning the whole day holds no boot line at all, so the engine that served
+  2026-10-15 ran on the pool it booted with at **2026-10-12 16:21**. At that pool the day's
+  churn join is **44 of 109** gap-joined misses churning the free pool. The margin on THIS
+  event is thin and a reader should not take it as comfortably as 2026-10-01's, where 15,363
+  tokens went against 462,198 free blocks: not-churned survives here only above an
+  834,693-token pool, 1.2% under the one named, and on the 484,612-token pool the engine
+  ALSO booted on 2026-10-12 this same gap would read as churned. So the day qualifies on the
+  denominator that served it, and it is the weakest of the four.
+  One more thing this day moves, and it moves it against the page's own prose: the gap-shape
+  generalisation above, that every qualifying gap is sub-second and spanned by a single status
+  line, was true of the six events counted here and is false of this seventh at 126.5 s over
+  14 lines — the first qualifying drop across an idle stretch rather than between two
+  consecutive requests, which is a different mechanism and cannot be folded into that
+  sentence. A fourth qualifying day again adds evidence, not stance: the accepted-loss
+  ruling and its consequence stand as written and the report is owed and **it is not filed**.
+
 - **The unannotated draft group.** `_warn_if_unannotated_eagle_mamba` in
   vLLM's `v1/core/kv_cache_utils.py` — name the function, not the line: in
   the **production** venv at `dff1bde` the def is 2190 and its
@@ -1156,4 +1209,5 @@ has still not been run as of 2026-09-11.
 - 2026-09-27 — **§10's counted reading re-pointed (#1627).** Replaced by one full UTC day of real chat (2026-09-25), now naming chat turns as part of the shape and marking (a)-(d) pass/fail; criterion (d) became a derivation (`two_request_throughput`: a per-status-line combined tok/s reading, and a cold-admission exclusion that separates a re-admission in flight from a chunked prefill climbing across the line), so the page can be wrong about throughput without anyone deciding it was a stall. Corrected: the eviction bullet's shape (this day is gate-level KV in 26 of 46 gaps and free-pool churn in 3, not the reverse), (b)'s verdict against §6.1's per-day budget, the draft-group partial count, §6.3's cross-reference, and rotation's true horizon (about five days of engine status lines, not "two"). `tests/test_vllm_doc_claims.py` now derives every counted figure, both history paragraphs labelled, plus a round-trip against `usage.db`.
 - 2026-09-30 — **§10 counts 2026-09-29 (#1921).** The day the accepted-loss ruling's own filing condition was first met is now a derived reading of its own: `tests/fixtures/vllm_prefix_miss_2026-09-29.json` is committed as a THIRD extract (09-25 stays the counted reading, 09-28 the first re-open), and `tests/test_vllm_doc_claims.py` recomputes every figure in the new §10 paragraph from it at the `workers.kv_gate.max_kv_usage` gate — trigger figures, the (b) ratio against §6.1's budget, the load-mix caveat, (c)/(d), the churn split, and the one chat miss's attribution down to its gap's KV peak against the gate and its tokens against the free pool. The paragraph carries no pass/fail mark and no second population query, so `_verdict`'s one-mark rule and the one-query rule are pinned against it rather than merely left unbroken. Change 5 (whether 2026-09-27 replicates the condition, which decides if the upstream report follows) and Change 6 (a scheduled job, so a day stops needing a human `git add`) stay owed.
 - 2026-10-01 — **§10 counts 2026-09-27 (#2005).** The earlier day the 09-29 paragraph left uncounted is committed as `tests/fixtures/vllm_prefix_miss_2026-09-27.json`, a fifth extract, while its engine status lines were still in the rotation (7,039 of them in `.log.4`/`.log.5`). `tests/test_vllm_doc_claims.py` recomputes every figure in the new paragraph and walks the day's 17 chat miss events one by one: 6 churned, 7 sat at or over the gate, 4 had neither, 3 of them clear of the gate by a wide margin. The filing condition is therefore met on two independent counted days, and the accepted-loss paragraph and the 09-29 paragraph now say so and name both extracts. Owed: the upstream report itself, which is a write to a third-party repository and is Alan's to file.
-- 2026-10-05 — **§10 counts 2026-10-01 (#2248).** The day the standing daily job caught while its status lines were still in the rotation is committed as `tests/fixtures/vllm_prefix_miss_2026-10-01.json`, a sixth extract, re-derived from the rotation at the config gate and byte-identical to the daily job's copy at `~/lloyd-data/vllm-prefix-miss/` — which `test_the_sixth_day_round_trips_and_the_fixture_outlives_the_lines` compares the two files for, rather than leaving the identity as intent. `tests/test_vllm_doc_claims.py` recomputes every figure in the new §10 paragraph from it and attributes the day's one chat miss (iteration 20, 159,350 tokens cold, a 0.1 s gap, gap KV peak 0.453 against the 0.60 gate, 15,363 tokens computed against 462,198 free blocks), so the condition is met on a third counted day. What the third day settles is the gap shape, and the node now derives it across all three fixtures rather than asserting it: the six qualifying events are 4 + 1 + 1 at 0.1–0.7 s, every one spanned by a single status line, while a day's own gap p50 — 100.1 s on 2026-09-29 — is a median over all its miss events and is not the qualifying events' gap. The accepted-loss ruling and its consequence are unchanged: owed-check ruled on 2026-10-06 (#2248's owed entry 3, recorded here by #2268) that a third qualifying day adds evidence, not stance, so the report stays owed and unfiled with its evidence set now the three extracts 2026-09-27, 2026-09-29 and 2026-10-01, and the comment body itself, which is a write to a third-party repository, belongs to #2250 Half A (Alan).
+- 2026-10-05 — **§10 counts 2026-10-01 (#2248).** The day the standing daily job caught while its status lines were still in the rotation is committed as `tests/fixtures/vllm_prefix_miss_2026-10-01.json`, a sixth extract, re-derived from the rotation at the config gate and byte-identical to the daily job's copy at `~/lloyd-data/vllm-prefix-miss/` — which `test_the_sixth_day_round_trips_and_the_fixture_outlives_the_lines` compares the two files for, rather than leaving the identity as intent. `tests/test_vllm_doc_claims.py` recomputes every figure in the new §10 paragraph from it and attributes the day's one chat miss (iteration 20, 159,350 tokens cold, a 0.1 s gap, gap KV peak 0.453 against the 0.60 gate, 15,363 tokens computed against 462,198 free blocks), so the condition is met on a third counted day. What the third day settles is the gap shape, and the node now derives it across all three fixtures rather than asserting it: the six qualifying events then on the record are 4 + 1 + 1 at 0.1–0.7 s, every one of those six spanned by a single status line — the seventh, 2026-10-15's, added below by #2852, is not (126.5 s over 14 lines) — while a day's own gap p50 — 100.1 s on 2026-09-29 — is a median over all its miss events and is not the qualifying events' gap. The accepted-loss ruling and its consequence are unchanged: owed-check ruled on 2026-10-06 (#2248's owed entry 3, recorded here by #2268) that a third qualifying day adds evidence, not stance, so the report stays owed and unfiled with its evidence set then the three extracts 2026-09-27, 2026-09-29 and 2026-10-01, and the comment body itself, which is a write to a third-party repository, belongs to #2250 Half A (Alan). **2026-10-16: superseded on the evidence set by #2852** — 2026-10-15 is the **fourth counted day on which the condition is met**, so the set is now **the four extracts 2026-09-27, 2026-09-29, 2026-10-01 and 2026-10-15**, and the stance moves no further than it moved for the third: the report is owed and **it is not filed**.
+- 2026-10-16 — **§10 counts 2026-10-15 (#2852).** The fourth counted day on which the accepted-loss filing condition is met, committed as `tests/fixtures/vllm_prefix_miss_2026-10-15.json` byte-identical to the daily job's copy (`test_the_seventh_extract_is_committed_and_matches_the_daily_job_byte_for_byte` compares the two files, because the 10-15 status lines leave the rotation with the same turn the 10-01 ones did). `test_the_seventh_day_figures_are_the_derivation` recomputes every figure in the new §10 paragraph from the fixture at the config gate, and `test_the_seventh_day_chat_miss_qualifies_on_the_measured_pool` attributes its one chat miss (`2026-10-15T15:54:11`, iteration 17, 112,821 tokens cold, 126.5 s over 14 status lines, gap KV peak 0.511 against the 0.60 gate, 408,165 tokens computed against 413,190 free blocks). Two things this day cost the page, both paid here rather than carried. **One:** it is the first counted day whose window contains no engine boot, so #2665's windowing leaves `pool_tokens` empty and the churn join unmeasured; the free-block figure is computed on 844,969 tokens read from the rotation's last boot before the window (`INFO 10-12 16:21:06`), the paragraph says so, and `_with_pool` pins it so `_gap_events` can walk a day `derive` cannot — at that pool the day's churn split is 44 of 109. The margin is thin and the entry says so: not-churned holds only above an 834,693-token pool (98.8% of the walk's need), so this is the weakest of the four qualifying days. **Two:** the gap-shape generalisation the 2026-10-05 entry above records as settled — every qualifying gap sub-second and spanned by a single status line — is true of the six events then on the record and false of this seventh, and no rail would have caught it, because the two asserts that held it walked only the three older fixtures. They now scan all four, the sub-second claim is scoped to the six it covers, and the derived negative half fails any future re-widening. Stance unchanged: a fourth qualifying day adds evidence, not stance, the report stays owed, and it is not filed.
