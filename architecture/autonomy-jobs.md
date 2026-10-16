@@ -275,9 +275,9 @@ succeeds, which `tests/test_autonomy_slot_arm_guard.py` pins for id 68, and
 nothing ever asked the `model:` value about the flag. That blind spot is what
 #2632 closed: `scripts/autonomy/validate_tasks.py` now reports a `model:` naming
 a switched-off slot in the same one-line shape it uses for `requires_slot:`, and
-under `--strict` that warning fails the run. Measured 2026-10-15, no task file
+under `--strict` that warning fails the run. Measured 2026-10-16, no task file
 names the retired slot: `grep -h '^model:' ~/obsidian/autonomy/*.md` answers
-`primary` 40 times — exactly one `model:` line per task file that declares an
+`primary` 41 times — exactly one `model:` line per task file that declares an
 engine, and every one of them `primary`; the fleet was smaller when #2632 landed
 and the count grew as tasks joined it, #98 `retag-untagged-facts` being the most
 recent on 2026-10-14. The number is not left to rot on its own:

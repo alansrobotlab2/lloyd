@@ -14,6 +14,7 @@ and a `skill_name` with no SKILL.md behind it.
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import re
 import subprocess
@@ -911,6 +912,14 @@ def test_the_census_expectation_is_parsed_out_of_the_doc_sentence():
     the 200 characters before the count — the doc's own header rule is that "every count
     the doc does type carries the date it was true", and a census with no date is a claim
     no later reader can tell stale from correct.
+
+    The NUMBER is deliberately not pinned here, only its shape. A typed count in a node
+    that runs at the gate is the same #2747 defect one file over: the count is the fleet's,
+    the fleet grows, and `pytest.ini:14-15` deselects the one node that may lawfully
+    compare it to the directory. So this node proves the doc still reads as a census of
+    some positive size on the primary, and only `@live_vault`
+    `test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live` asks whether
+    that size is the fleet's.
     """
     assert doc_model_census(census_prose(40)) == (40, "answers `primary` 40 times")
     assert doc_model_census(f"…prose… {census_prose(41)} …prose…") == (
@@ -923,9 +932,10 @@ def test_the_census_expectation_is_parsed_out_of_the_doc_sentence():
     text = DOC.read_text(encoding="utf-8")
     stated, sentence = doc_model_census(text)
     assert stated > 0, f"the census parsed to {stated}; a zero would read as an empty fleet"
-    assert sentence == "answers `primary` 40 times", (
-        f"§#68 must state the census as answers `primary` 40 times — every task file "
-        f"declaring a `model:` reads `primary` — and it reads {sentence!r}")
+    assert re.fullmatch(r"answers `primary` \d+ times?", sentence), (
+        f"§#68 must state the census in the shape answers `primary` <digits> times — the "
+        f"value is `primary` because every task file declaring a `model:` reads `primary` — "
+        f"and it reads {sentence!r}")
     hit = DOC_CENSUS.search(text)
     window = text[max(0, hit.start() - 200):hit.end()]
     assert re.search(r"20\d\d-\d\d-\d\d", window), (
@@ -961,6 +971,47 @@ def test_a_reworded_or_doubled_census_breaks_the_join_loudly():
         doc_model_census("the model table lists `primary` 12 times in all\n")
 
 
+#: A census count typed into source, in the doc's own spelling.
+TYPED_CENSUS = re.compile(r"answers\s+`primary`\s+\d+\s+times?")
+
+
+def typed_census_on_doc_reads(node_src: str) -> list[str]:
+    """Lines of one test node that compare a TYPED census count against the real doc.
+
+    The distinction this rail has to get right, because both shapes are in the file:
+    `doc_model_census(census_prose(40)) == (40, "answers `primary` 40 times")` is the
+    parser measured against prose the node itself wrote, and is fine. What must never come
+    back is a typed count beside a value bound from `DOC.read_text` — that number is the
+    fleet's, and the fleet grows, which is precisely the assertion that went red on
+    2026-10-14 (#2747) and again on 2026-10-16 (#2814) over a file nobody was editing.
+    """
+    doc_names = set(re.findall(r"(\w+)\s*=\s*DOC\.read_text\b", node_src))
+    for m in re.finditer(
+            r"(\w+)(?:\s*,\s*(\w+))?\s*=\s*doc_model_census\(([^)]*)\)", node_src):
+        arg = m.group(3).strip()
+        if "DOC.read_text" in arg or arg in doc_names:
+            doc_names.update(n for n in m.groups()[:2] if n)
+    return [ln for ln in node_src.splitlines()
+            if TYPED_CENSUS.search(ln)
+            and any(re.search(rf"\b{re.escape(n)}\b", ln) for n in doc_names)]
+
+
+#: One node in the shape the rail exists to refuse, and one in the shape it must keep
+#: allowing. They sit at module level rather than inline in the rail node because the sweep
+#: reads test NODES, and a fixture written inside the node it is meant to prove would be
+#: read back as an offence by the very rule it demonstrates (it is: it was).
+OFFENDER_SRC = (
+    'def test_bench_typed_count():\n'
+    '    text = DOC.read_text(encoding="utf-8")\n'
+    '    stated, sentence = doc_model_census(text)\n'
+    '    assert sentence == "answers `primary` 40 times"\n')
+
+ALLOWED_SRC = (
+    'def test_bench_synthetic_prose():\n'
+    '    assert doc_model_census(census_prose(40)) == (40, '
+    '"answers `primary` 40 times")\n')
+
+
 def test_the_real_board_node_holds_no_typed_census_and_names_the_sentence_when_it_parts():
     """Clause 2's regression rail, run at the gate where the live node is not.
 
@@ -969,6 +1020,13 @@ def test_the_real_board_node_holds_no_typed_census_and_names_the_sentence_when_i
     failing on a fleet that grew rather than on a sentence that parted. The rest pins the
     failure text, which is the only thing a reader gets at 03:00 in a nightly log: both
     counts, the sentence verbatim, the command that re-counts, and the file to retype.
+
+    The last leg generalises the first across the whole file, because #2814 found the same
+    typed number living in a SECOND node — `test_the_census_expectation_is_parsed_out_of_the_doc_sentence`
+    — which carries no `live_vault` mark and so runs at every gate: retyping the doc for a
+    grown fleet turned that green node red. A typed census count compared against the doc
+    is now refused wherever it is not marked `live_vault`, so fleet growth can only ever
+    redden the node whose whole job is to measure the fleet.
     """
     src = inspect.getsource(
         test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live)
@@ -987,3 +1045,33 @@ def test_the_real_board_node_holds_no_typed_census_and_names_the_sentence_when_i
     assert "retype" in parted and "no edit" in parted, (
         f"the reader must be told which file to retype and that this assertion is not it: "
         f"{parted!r}")
+
+    # No node that the gate runs may compare a typed census count with the doc. The control
+    # first: the detector has to catch the shape, and must NOT catch the parser's own
+    # synthetic legs, or the rail would forbid the very tests that replaced the pin.
+    caught = typed_census_on_doc_reads(OFFENDER_SRC)
+    assert len(caught) == 1 and "40 times" in caught[0], (
+        f"the detector missed a typed census compared against the doc: {caught}")
+    assert typed_census_on_doc_reads(ALLOWED_SRC) == [], (
+        "the detector must still allow parsing prose the node wrote itself — the number "
+        "is only a stale claim when it is compared with the doc being read")
+
+    src = Path(__file__).read_text(encoding="utf-8")
+    offenders: dict[str, list[str]] = {}
+    for node in ast.parse(src).body:
+        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test_")):
+            continue
+        decs = " ".join(
+            ast.get_source_segment(src, d) or "" for d in node.decorator_list)
+        if "live_vault" in decs:
+            continue
+        body = ast.get_source_segment(src, node) or ""
+        if hits := typed_census_on_doc_reads(body):
+            offenders[node.name] = hits
+    assert not offenders, (
+        f"a typed census count is compared against the real doc in "
+        f"{sorted(offenders)} — nodes the gate runs, since none is marked `live_vault`. "
+        f"The count is the fleet's and the fleet grows: §#68's number went stale that way "
+        f"twice. Assert the census's SHAPE here and leave the count to "
+        f"`test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live`: "
+        f"{offenders}")
