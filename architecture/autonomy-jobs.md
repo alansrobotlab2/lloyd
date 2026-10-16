@@ -1152,7 +1152,8 @@ engine on GPU 2, and the self-modification loop's own landings. None of them is
 about a job's output, which is why they are not scattered through the six groups
 above and why they arrived as a block: seven of the eight were created between
 2026-09-29 and 2026-10-11 and none of those seven had an entry here until #2630;
-the eighth, #99, joined the directory on 2026-10-15 and this table on 2026-10-16.
+the eighth, #99, joined the directory and this table both on 2026-10-16 (vault
+commit `5394a06e`, 01:35Z; its own `created:` is `2026-10-16T00:00:00Z`).
 
 | ID | Freq | Job | Reads | Writes | Must not |
 |----|------|-----|-------|--------|----------|
@@ -1161,9 +1162,9 @@ the eighth, #99, joined the directory on 2026-10-15 and this table on 2026-10-16
 | #93 | daily | Step conformance replay (`step-conformance-replay`, #2104) | the last 7 days of run traces under `~/lloyd-data/autonomy-runs`, replayed against each task's learned `expected_steps` ledger by `scripts/step_conformance.py replay --days 7 --support 1.0 --escalate-writes` | its printed lines verbatim into its own run record, and the one escalation: a backlog draft for a flagged run that wrote no artefact every other run of its task wrote | `learn --out` and `replay --json`; the ledger and the trajectory store stay closed for writing, and the job never adjudicates, promotes, closes or re-triages the draft it filed, never injects into a session, never opens a round |
 | #94 | daily | Referential integrity ledger (`referential-integrity-ledger`, #2151 from #882) | every backticked path and `path:N` cite in `lloyd/MEMORY.md`, `lloyd/USER.md` and `memory/mental-models.md`, resolved against the repo, vault, data root and the citing file's directory | `~/obsidian/autonomy/referential-integrity-latest.md` and a dated copy under `~/obsidian/autonomy/referential-integrity/` — the only two paths it may touch, both through Bash; exit 1 is the expected result every night, because baseline dangling cites exist | edit a cited memory file or any other file, fix a dangling cite, pass `--expect-dangling` to move a number, file an item, or read an unchanged count as a problem to escalate |
 | #95 | daily | Mitigation drill, read (`mitigation-drill`, #2432 over #703/#2153) | `GET /api/workers/status`'s `.mitigation` block — one Bash call — which publishes what `~/lloyd-data/mitigation_drill.json` holds | nothing at all: `python -m scripts.mitigation_drill` from the pool's maintenance seat is the only writer of that state file, and a drill run of its own is refused while a self-modification round holds the pool | fire the drill, re-run the GET to refresh a stale reading or to confirm a `no-op`, edit the script, the state file or a threshold. A latest classification of `no-op` is a control regression to be named in one line; `{"state": "never-run"}` is a report, not a failure |
-| #96 | weekly | djev name-prior probe (`djev-name-prior-probe`, #2215 from #1452) | the pinned corpus `eval/djev/name_prior_corpus.jsonl` — 38 prompts on 2026-10-12, 10 dedupe / 10 entity / 10 edges / 8 rank, whose `sha256` every report records — one `choice` question per prompt against the decision engine | `~/lloyd-data/eval/djev/name_prior_<run date>.json`, the probe's default `--out-dir` since #2455, so a run leaves no file inside `~/lloyd` for anybody to `git add` | add a flag — `--samples`, `--url`, `--out-dir`, `--date` and `--corpus` are all absent from the command the skill gives — re-run the probe, or edit it; exit 3 means the engine was unreachable, no report was written and no flip rate was measured |
+| #96 | weekly | djev name-prior probe (`djev-name-prior-probe`, #2215 from #1452) | the pinned corpus `eval/djev/name_prior_corpus.jsonl` — 38 prompts on 2026-10-12, 10 dedupe / 10 entity / 10 edges / 8 rank, whose `sha256` every report records — one `choice` question per prompt against the decision engine | `~/lloyd-data/eval/djev/name_prior_<report date>.json`, the probe's default `--out-dir` since #2455, so a run leaves no file inside `~/lloyd` for anybody to `git add` — but the stamp is the probe's *local* date (`eval/djev_name_prior_probe.py:647` `now().astimezone()`, then `build_report`'s `when.date()`), so on this box the file is named one UTC day **behind** its own run row and the weekly series does not join to `runs` on date (#2820) | add a flag — `--samples`, `--url`, `--out-dir`, `--date` and `--corpus` are all absent from the command the skill gives — re-run the probe, or edit it; exit 3 means the engine was unreachable, no report was written and no flip rate was measured |
 | #97 | daily | automod landed-outcomes daily record (`landed-outcomes-daily-record`, #2572 from #2378) | `git log`/`git show` over `~/lloyd` plus the automod ledger, split by author and put through a Wilson interval by `scripts/automod/landed_outcomes.py`; it makes no model call | exactly one JSON row appended to `~/.local/state/lloyd-automod/landed_outcomes.jsonl` — `--record` is what makes it append, and without the flag the module prints, writes nothing and still exits 0 | add `--since`, which moves the window every rate in the row is measured on; edit, truncate, re-sort, compact or dedupe the journal; run it twice in one turn; hand-write a row |
-| #99 | weekly | supply-chain inventory regen (`supply-chain-inventory-regen`, #2796 from #2593): enumerate every distribution installed in the venv roots this box's launch scripts name, scan the set offline with `app/harness/supply_chain_inventory.py`, and compare the result with the committed reference at `eval/supply-chain/baseline.yaml` | the site-packages under `~/lloyd/.venvs` and `~/lloyd-data/venvs`, and that reference; the scan opens no network | one dated JSON report under `~/lloyd-data/supply-chain/`, and a backlog item when either headline count moves | calling `Write` or `Edit`; any `git` or `rm` command |
+| #99 | weekly | supply-chain inventory regen (`supply-chain-inventory-regen`, #2796 from #2593): enumerate every distribution installed in the venv roots this box's launch scripts name, scan the set offline with `app/harness/supply_chain_inventory.py`, and compare the two headline numbers with the previous dated report, falling back to the values quoted in its own `description` (the committed artifact's 698/150 of 2026-10-11, the 2026-10-16 reading of 906/150) | every `~/lloyd/.venvs/<name>/lib/python3*/site-packages` a launcher under `agent-services/` names, plus the account user-site `~/.local/lib/python3.*/site-packages` — the roots `site_roots()` walks; no `~/lloyd-data/venvs` exists and no run opens `eval/supply-chain/baseline.yaml`, and the scan opens no network | the synthesised per-site requirements and the merged scan input under `~/lloyd-data/supply-chain/observed/`, one dated JSON report beside that directory, and a backlog item only when the *missed-advisory* delta moves or the committed verdict's meaning changes | calling `Write` or `Edit`; any `git` or `rm` command |
 
 Six of the eight carry an `acceptance.objective_checks` block naming `Write` and
 `Edit` in its `tool_not_called` list, so their read-only bound is checked by the
@@ -1175,7 +1176,7 @@ prohibition lives only in the `description` field a run is handed, which is why
 write-authority table asks one question — may it write while nobody is watching —
 and #92 files a backlog item, #93 files a backlog draft and #94 overwrites a
 latest-path ledger in the vault plus a dated copy beside it, and #99 files a
-backlog item when either headline count moves. Those are vault files that another
+backlog item when the missed-advisory count moves. Those are vault files that another
 job or a person will act on, so the four sit in the unattended-writer
 tier beside #30 and #53. #91, #95, #96 and #97 are the report-only half: one dated
 artefact each under the data root or the automod state dir — #95 leaves not even
@@ -1191,9 +1192,13 @@ person. Four readings follow from that and are worth having written down, becaus
 each one looks like an outage from the run record alone:
 
 - **#94 exits 1 every night.** Twelve baseline dangling cites existed on 2026-10-04
-  (`200 cites, 12 dangling, 4 exempt`), so exit 1 is the ledger working. Exit ≥2 or
-  a traceback is the failure, and the `; echo "EXIT=$?"` on the command line is
-  there so the expected 1 is not recorded as a tool error.
+  (`200 cites, 12 dangling, 4 exempt`), so exit 1 is the ledger working — but 12 is
+  not a standing baseline to compare a night against: run 10 read `342 cites,
+  23 dangling, 8 exempt, 2 newly dangling` on 2026-10-14 and run 11 read `361 cites,
+  23 dangling, 8 exempt, 0 newly dangling` on 2026-10-15, and no open backlog item
+  names the 23 (#2821). Exit ≥2 or a traceback is the failure, and the
+  `; echo "EXIT=$?"` on the command line is there so the expected 1 is not recorded
+  as a tool error.
 - **#95 reporting `-` is not a gap in #95.** A `never-run` state or a stale newest
   `at` means the maintenance seat has not run the drill; the job's whole job is to
   say so in the shape of one line and stop.
@@ -1202,9 +1207,13 @@ each one looks like an outage from the run record alone:
   only ever judged across closed days — and the lever that would legitimately move
   it is the prompt, not the capture setting.
 - **#99 belongs to this group by its authority, not by its report.** Filed
-  2026-10-15 and still `status: draft` — #2797 carries the one-line `status` flip,
-  the same standing human decision that holds #98 — it re-runs the observed
-  supply-chain inventory offline and can file a backlog item when a count moves,
+  2026-10-16 and still `status: draft` with zero rows in `runs` — #2797 closed
+  `done` on 2026-10-16 listing the one-line `status` flip as *still owed*, so the
+  live owner of that flip is #2796's owed list and not a closed item; it is the same
+  standing human decision that holds #98 (`draft`, also zero runs) — it re-runs the
+  observed
+  supply-chain inventory offline and can file a backlog item when the
+  missed-advisory count moves,
   which is #94's reason for being here, and the evidence it maintains is a file
   nothing else in the fleet reads, so its going stale is invisible, which is #92's.
   That makes it an unattended writer even though every run ends as a report, and its
@@ -1217,17 +1226,19 @@ each one looks like an outage from the run record alone:
   for most of its life and an empty window is how that keeps looking fine.
 
 **#97's row is a record now.** `select count(*) from runs where task_id=97` over
-`~/lloyd-data/workers.db` returned 3 runs as of 2026-10-16, all `status=success`,
-the first at 2026-10-13T08:06:10Z, and
-`~/.local/state/lloyd-automod/landed_outcomes.jsonl` holds one dated row per run,
-newest `generated_at` 2026-10-15T08:01:30Z; that run's own record reported
-`landed-outcomes: rows=3 latest=2026-10-15T08:01:30Z cost=ok latency=ok`. So the
+`~/lloyd-data/workers.db` returned 4 runs as of 2026-10-16T10:00Z, all
+`status=success`, the first completed 2026-10-13T08:06:34Z and the newest
+2026-10-16T08:01:48Z, and
+`~/.local/state/lloyd-automod/landed_outcomes.jsonl` holds one dated row per run —
+4 rows, newest `generated_at` 2026-10-16T08:01:08Z; that run's own record reported
+`landed-outcomes: rows=4 latest=2026-10-16T08:01:08Z cost=ok latency=ok`. So the
 reads and writes in the row above are confirmed against an artefact and not stated
 from `skills/landed-outcomes-daily-record/SKILL.md` and the module's `record()`
 docstring — the state §Review log records as the one held on 2026-10-12. What even
 today's
 reading still understates: the newest row's `cost.join` share
-(`k=474 n=502 share=0.9442`) is a read-only query over that same `runs` table, so
+(`k=489 n=516 share=0.9477`, the 2026-10-16 row) is a read-only query over that same
+`runs` table, so
 the job reads the store the fleet's run records live in as well as the automod
 ledger — said here rather than in the table cell, which is #2631's reconciler's to
 edit. And the count above is dated on purpose: #97 fires daily at ~08:0xZ, so a
