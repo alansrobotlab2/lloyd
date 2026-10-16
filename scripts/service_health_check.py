@@ -803,16 +803,58 @@ def check_ca_trust(runner=subprocess.run) -> list:
 # so a placed-but-disabled timer was still found only by someone remembering to run
 # it (#1989). This entry is that caller, on the route a human actually runs.
 #
-# The .sh stays the single source of the assertion. Nothing here asks systemd
-# anything or decides which answer counts as a pass: a row is unhealthy only where
-# the script exited non-zero AND printed its own `FAIL <unit>` line for that timer,
-# and the denominator in every row is the script's own `checked N timers: ...` line,
-# copied, never recounted.
+# The .sh stays the single source of the ASSERTION. Nothing here asks systemd a
+# question or decides which answer counts as a pass: a row is unhealthy only where the
+# script exited non-zero AND printed its own `FAIL <unit>` line for that timer, and the
+# denominator in every row is the script's own `checked N timers: ...` line, copied,
+# never recounted.
+#
+# WHAT #2792 ADDED: the route now performs the act it used to only print. The guard's
+# FAIL line ends `— run: systemctl --user enable --now <unit>`, and nothing in this
+# repository ever ran it, so `lloyd-egress-window.timer` has sat disabled through four
+# triages that each re-printed the command (#2537, #2702, #2774 put an executed
+# `enable --now` into the installer, #2787, #2792). Three things make the act safe, and
+# tests/test_unit_enabledness_route.py pins each one:
+#
+#   * ONE argv. `arm_timer_argv` builds it from one token tuple and accepts only a bare
+#     `*.timer` name that the guard's own FAIL line named. No `disable`, `stop`,
+#     `restart` or `daemon-reload` is nameable anywhere in this file, and a `.service`
+#     name is refused. That rail is NOT inherited from the harness:
+#     `app/harness/service_control.py` does exempt `enable --now <timer>` for an
+#     unattended turn, but that hook classifies the Bash string an AGENT issues, and a
+#     systemctl this script spawns never crosses it.
+#   * An idle pool only. `agent-services/systemd/lloyd-egress-window.timer` carries
+#     `Persistent=true` with no stamp dir on this box, so `enable --now` fires the
+#     window at the arming instant, and its `.service` runs `--drain-wait 3600`: a
+#     health route run from inside a worker turn would otherwise arm the thing that
+#     drains the pool its own check is asking about. The reading is the two-part one
+#     `eval/persistence_arms.py::in_flight` takes, and an unreadable reading defers too.
+#   * The re-run is the verdict, never the act. A row says `enabled` only because the
+#     guard's RE-RUN put the timer in an enabled row; an `enable --now` that exits 0 on
+#     a timer the re-run still fails reads red, with that FAIL line in its status.
+#
+# So a whole-fleet or `--category units` run mutates host systemd state — which is the
+# item's whole point, and why `--no-arm` exists: the 04:00 diagnostic stays read-only
+# behind one flag. Under pytest the act is never real: systemctl goes to the same
+# injectable `runner` the guard goes to, and a `main()`-driven test puts a recording
+# stub `systemctl` first on PATH, exactly as tests/test_unit_enabledness_check.py does
+# when it drives the guard itself.
 UNITS_CATEGORY = "units"
 UNIT_ENABLEDNESS = _TREE / "scripts" / "maintenance" / "check-unit-enabledness.sh"
 _UNITS_DENOMINATOR_RE = re.compile(r"^checked \d+ timers?: .*$", re.M)
 _UNITS_ROW_RE = re.compile(r"^(\S+\.timer)\t(\S+)$", re.M)
 _UNITS_FAIL_RE = re.compile(r"^FAIL (\S+\.timer) ", re.M)
+
+#: The one systemd argv this route can build, tokenised rather than written as a
+#: sentence so the argv that runs and the argv a row prints cannot drift apart.
+_ARM_TOKENS = ("systemctl", "--user", "enable", "--now")
+_TIMER_SUFFIX = ".timer"
+_ARM_TIMEOUT_S = 30
+
+#: Queue states meaning a job is mid-flight — the same pair
+#: `eval/persistence_arms.py` calls `IN_FLIGHT_STATES`.
+_IN_FLIGHT_STATES = ("claimed", "running")
+_POOL_TIMEOUT_S = 5
 
 
 def _unit_enabledness_argv() -> list:
@@ -829,6 +871,170 @@ def _unit_enabledness_argv() -> list:
     return ["bash", script]
 
 
+def arm_timer_argv(unit) -> list:
+    """The one argv this route can build: `systemctl --user enable --now <unit>`.
+
+    Refuses anything that is not a bare timer unit name, which is the rail that makes
+    "only the arming act is reachable" a property of the code rather than of good
+    intentions. Names reach here out of `_UNITS_FAIL_RE`, whose `\\S+` will capture
+    `/tmp/x.timer` or `--wait.timer` just as happily out of a FAIL line printed by a
+    unit somebody named badly, and an argv list is only safe while its last element is
+    a name: a leading `-` is parsed by systemctl as a flag, and a `/` stops being a
+    unit name at all. A `.service` name cannot reach here (the regex yields `.timer`
+    only) and would be refused anyway — arming a schedule starts no unit, and starting
+    a unit is exactly what the harness reserves for a human.
+    """
+    if (not isinstance(unit, str) or not unit.endswith(_TIMER_SUFFIX)
+            or unit == _TIMER_SUFFIX or "/" in unit or unit.startswith("-")
+            or any(c.isspace() or c in "\\;&|$`'\"" for c in unit)):
+        raise ValueError(
+            f"refusing to build an arming argv for {unit!r}: only a bare *.timer unit "
+            f"name, taken from the guard's own FAIL line, is armable")
+    return [*_ARM_TOKENS, unit]
+
+
+def _workers_status_url() -> str:
+    """`/api/workers/status` on the backend this box runs.
+
+    Resolved per call, for the reason the fetcher in `check_path_sandbox` is resolved
+    at call time: an import-time constant freezes an environment someone may have
+    moved. `LLOYD_BACKEND_URL` is the same override `eval/persistence_arms.py` honours.
+    """
+    base = os.environ.get("LLOYD_BACKEND_URL", "http://127.0.0.1:8080").rstrip("/")
+    return f"{base}/api/workers/status"
+
+
+def _workers_status_payload() -> dict:
+    """One GET of `/api/workers/status`, parsed. stdlib: httpx is not importable here.
+
+    No credential, because the route carries none — it is what `scripts/mitigation_drill.py`
+    and the dashboard read unauthenticated, unlike `/state`, whose 401
+    `check_path_sandbox` goes out of its way to name.
+    """
+    with urllib.request.urlopen(_workers_status_url(), timeout=_POOL_TIMEOUT_S) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _pool_in_flight(fetch=None) -> Optional[dict]:
+    """What the worker pool says is mid-flight: `{}` idle, non-empty busy, `None` unreadable.
+
+    Two halves, because either one alone under-counts — the same reading
+    `eval/persistence_arms.py::in_flight` takes. `pool.in_flight_count` is a job running
+    inside a worker right now; a queue row in `claimed` or `running` is one the pool has
+    taken and may not have published an exit for yet.
+
+    `None` is a third answer and the caller must not collapse it into `{}`: an idle pool
+    is the green light to arm, an unreadable pool is not one. A backend that is down or
+    a body that is not JSON reads as "nothing is running" only if someone writes the
+    `or {}`, and that is the false comfort every other guard in this file refuses.
+
+    The same rule applies to a body that arrives whole. `app/routers/workers.py:131`
+    answers `{"initialized": false}` — over HTTP 200 — when it cannot even construct the
+    queue, and a reading built from that body with `.get(...) or {}` is an empty one: the
+    backend that knows nothing about the pool would green-light arming a Persistent timer.
+    So both halves have to be PRESENT to be believed — `initialized` true, a `pool` block
+    carrying the `in_flight_count` key, and a `depth` block. Anything else is `None`, and
+    `None` defers. The two type checks are the least load-bearing of the four: a block
+    that is not a mapping raises into the `except` below and reaches the same `None`, so
+    no input distinguishes them, and they stay because the answer being asserted is "this
+    body cannot be interpreted", not the mechanism that happens to produce it —
+    `test_a_status_body_that_says_nothing_about_the_pool_is_never_read_as_idle` pins that
+    answer for every shape, the malformed ones included.
+    """
+    get = fetch or _workers_status_payload
+    try:
+        status = get()
+        if not isinstance(status, dict):
+            return None
+        pool, depth = status.get("pool"), status.get("depth")
+        if (not status.get("initialized") or not isinstance(pool, dict)
+                or "in_flight_count" not in pool or not isinstance(depth, dict)):
+            return None
+        out: dict = {}
+        count = int(pool.get("in_flight_count") or 0)
+        if count:
+            out["in_flight"] = count
+        for source, states in depth.items():
+            for state, n in (states or {}).items():
+                if state in _IN_FLIGHT_STATES and int(n or 0) > 0:
+                    out[f"{source}:{state}"] = int(n)
+    except Exception:  # noqa: BLE001 — an unreadable reading is the answer, not a crash
+        return None
+    return out
+
+
+def _run_units_guard(runner):
+    """One guard invocation: `(exit code, its combined output)`. Raises what the runner raises."""
+    proc = runner(_unit_enabledness_argv(), capture_output=True, text=True, timeout=30)
+    return proc.returncode, ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+
+
+def _arm_timers(units, runner) -> dict:
+    """Run the guard's own remediation for each timer it named. Returns unit -> note.
+
+    The note is a sentence for the row and the exit code in it is systemctl's own.
+    Nothing here decides `healthy`: arming is an attempt, and only the guard's re-run
+    is a verdict. A refusal or a failed spawn is recorded and carried on with — the
+    re-run says what is true either way, which is the whole reason the re-run exists.
+    """
+    notes = {}
+    for unit in sorted(units):
+        try:
+            argv = arm_timer_argv(unit)
+        except ValueError as exc:
+            notes[unit] = str(exc)
+            continue
+        try:
+            proc = runner(argv, capture_output=True, text=True, timeout=_ARM_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001 — the re-run below is the arbiter
+            notes[unit] = (f"{' '.join(_ARM_TOKENS)} could not be attempted "
+                           f"({type(exc).__name__}: {str(exc)[:120]})")
+            continue
+        notes[unit] = f"{' '.join(argv)} exited {proc.returncode}"
+    return notes
+
+
+def _annotate_units(rows: list, units, note) -> list:
+    """Append one sentence, built per timer, to the rows for the timers it was about.
+
+    The guard's verdict word and its denominator stay first and untouched — the note
+    goes after them, so the row still leads with what systemd answered and the fault
+    count does not move.
+    """
+    for r in rows:
+        unit = (r["name"][len("timer:"):] if r["name"].startswith("timer:")
+                else r["name"])
+        if unit in units:
+            r["status"] = f"{r['status']} — {note(unit)}"
+    return rows
+
+
+def _units_rows(text: str, code: int) -> list:
+    """The rows the guard's text and exit code imply — the #1989 parsing, verbatim.
+
+    Kept whole so the first reading and the re-run after an arming are graded by one
+    piece of code, not by two copies that can disagree about what a FAIL line means.
+    """
+    denominator = _UNITS_DENOMINATOR_RE.search(text)
+    counted = denominator.group(0) if denominator else "the guard printed no denominator"
+    failed = set(_UNITS_FAIL_RE.findall(text)) if code != 0 else set()
+    rows = []
+    for unit, verdict in _UNITS_ROW_RE.findall(text):
+        rows.append(_units_row(f"timer:{unit}", unit not in failed,
+                               f"{verdict} — {counted}", code, text))
+    if code != 0 and not any(not r["healthy"] for r in rows):
+        head = next((ln for ln in text.splitlines() if ln.startswith("FAIL")),
+                    text.splitlines()[0] if text else "no output")
+        rows.append(_units_row("unit-enabledness", False,
+                               f"failed (exit {code}): {head[:200]} — {counted}",
+                               code, text))
+    elif not rows:
+        rows.append(_units_row("unit-enabledness", False,
+                               f"unknown: the guard exited 0 and named no timer — {counted}",
+                               code, text))
+    return rows
+
+
 def _units_row(name: str, healthy: bool, status: str, exit_code: int, output: str) -> dict:
     # No `advisory` key, on purpose: a timer that never fires is a job that never
     # runs, which is a live fault and is graded like the `deployed:` rows.
@@ -842,7 +1048,8 @@ def _units_row(name: str, healthy: bool, status: str, exit_code: int, output: st
     }
 
 
-def check_unit_enabledness(runner=subprocess.run) -> list:
+def check_unit_enabledness(runner=subprocess.run, pool_reader=None,
+                           arm: bool = True) -> list:
     """One graded row per repo timer, from the guard's own output and exit code.
 
     Exit 0 is the only pass. On a non-zero exit the rows the script itself named in
@@ -850,33 +1057,82 @@ def check_unit_enabledness(runner=subprocess.run) -> list:
     directory, no systemctl, zero timers) one `unit-enabledness` row carries its
     first FAIL line, because a guard that looked at nothing is never a pass. A guard
     that could not be run at all is likewise an unhealthy row, not a missing one.
+
+    On a red run that named at least one `*.timer`, the route then performs the
+    remediation that FAIL line prints (#2792) — `arm_timer_argv`'s single argv, per
+    named timer, and nothing else — and GRADES THE RE-RUN, not the act. Three exits
+    from before the act, each of them leaving the rows from the reading that found the
+    fault and naming in the row why no arming happened: `arm` is False (an operator
+    asked for a read-only run with `--no-arm`), the pool's in-flight reading could not
+    be read, or the pool has work in flight. An idle pool is the only green light.
+
+    `runner` is the guard's parameter doing double duty on purpose: one injectable
+    subprocess call means a test that can watch the guard can watch systemctl too, and
+    the argv set a test records is the argv set a live run would execute.
+    `pool_reader` is resolved at call time rather than bound as a default, for the
+    reason `check_path_sandbox` gives: a test hands this function a reading and pins the
+    deferred row with no live backend anywhere in the suite.
     """
-    argv = _unit_enabledness_argv()
+    read_pool = pool_reader or _pool_in_flight
     try:
-        proc = runner(argv, capture_output=True, text=True, timeout=30)
+        code, text = _run_units_guard(runner)
     except Exception as exc:
         return [_units_row("unit-enabledness", False,
                            f"unknown: the timer enabledness guard could not be run "
                            f"({str(exc)[:120]}) — nothing was checked", -1, str(exc))]
-    text = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
-    denominator = _UNITS_DENOMINATOR_RE.search(text)
-    counted = denominator.group(0) if denominator else "the guard printed no denominator"
-    failed = set(_UNITS_FAIL_RE.findall(text)) if proc.returncode != 0 else set()
-    rows = []
-    for unit, verdict in _UNITS_ROW_RE.findall(text):
-        rows.append(_units_row(f"timer:{unit}", unit not in failed,
-                               f"{verdict} — {counted}", proc.returncode, text))
-    if proc.returncode != 0 and not any(not r["healthy"] for r in rows):
-        head = next((ln for ln in text.splitlines() if ln.startswith("FAIL")),
-                    text.splitlines()[0] if text else "no output")
-        rows.append(_units_row("unit-enabledness", False,
-                               f"failed (exit {proc.returncode}): {head[:200]} — {counted}",
-                               proc.returncode, text))
-    elif not rows:
-        rows.append(_units_row("unit-enabledness", False,
-                               f"unknown: the guard exited 0 and named no timer — {counted}",
-                               proc.returncode, text))
-    return rows
+    miss = set(_UNITS_FAIL_RE.findall(text)) if code != 0 else set()
+    rows = _units_rows(text, code)
+    if not miss:
+        # Every timer the guard checked passed, or it failed without naming one — a
+        # fault no arming answers. systemd is asked nothing further and the pool is not
+        # read either: a run with nothing to fix has no business mutating anything.
+        return rows
+    if not arm:
+        return _annotate_units(rows, miss, lambda unit: (
+            "not armed: this run was asked to stay read-only (--no-arm)"))
+    busy = read_pool()
+    if busy is None:
+        return _annotate_units(rows, miss, lambda unit: (
+            "not armed: the worker pool's in-flight reading could not be read, and "
+            "arming a Persistent timer from a box that cannot say the pool is idle is "
+            "refused"))
+    if busy:
+        listed = ", ".join(f"{k}={v}" for k, v in sorted(busy.items()))
+        return _annotate_units(rows, miss, lambda unit: (
+            f"not armed: the worker pool has work in flight ({listed}), and this unit's "
+            f"window drains the pool when it fires"))
+
+    notes = _arm_timers(miss, runner)
+    try:
+        recheck_code, recheck_text = _run_units_guard(runner)
+    except Exception as exc:
+        # Arming may or may not have worked and nothing can now say so. The rows stay
+        # the red ones that found the fault; the unverified arming rides along in them.
+        # `why` is bound here rather than read inside the lambda: Python 3 unbinds the
+        # `as exc` name at the end of the block, so a late-bound closure over it is a
+        # warning waiting for the first reader who calls the lambda after the return.
+        why = f"the guard could not be re-run to check it ({str(exc)[:120]})"
+        return _annotate_units(rows, miss, lambda unit: (
+            f"arming: {notes.get(unit, 'not attempted')}, and {why} — still failing"))
+
+    still_failing = (set(_UNITS_FAIL_RE.findall(recheck_text))
+                     if recheck_code != 0 else set())
+    fail_lines = {}
+    verdicts = dict(_UNITS_ROW_RE.findall(recheck_text))
+    for line in recheck_text.splitlines():
+        hit = _UNITS_FAIL_RE.match(line)
+        if hit:
+            fail_lines[hit.group(1)] = line
+
+    def note(unit: str) -> str:
+        attempted = notes.get(unit, "not attempted")
+        if unit in still_failing:
+            return (f"arming {attempted}, and the re-run still fails: "
+                    f"{fail_lines.get(unit, 'the re-run named no FAIL line for it')[:300]}")
+        return (f"arming {attempted}, and the re-run says "
+                f"{verdicts.get(unit, 'nothing')}")
+
+    return _annotate_units(_units_rows(recheck_text, recheck_code), miss, note)
 
 
 CATEGORIES = {
@@ -1727,6 +1983,11 @@ def main():
     parser.add_argument("--services", nargs="+", help="Specific services to check")
     parser.add_argument("--category", choices=list(CATEGORIES.keys()), help="Check by category")
     parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    parser.add_argument("--no-arm", action="store_true",
+                        help="units category only: report a not-enabled timer without "
+                             "running the `enable --now` its FAIL line prints. Default is "
+                             "to arm it, but only when the worker pool reports nothing "
+                             "in flight (#2792).")
 
     args = parser.parse_args()
 
@@ -1767,9 +2028,12 @@ def main():
     if not args.services and args.category in (None, CA_TRUST_CATEGORY):
         results.extend(check_ca_trust())
     # The timer enabledness guard, on the same rule: whole-fleet run or its own
-    # category, never a `--services` ask.
+    # category, never a `--services` ask. Since #2792 it also arms what it finds
+    # disabled — the `enable --now <timer>` its FAIL line has always printed — so this
+    # is the one line of the health route that mutates host systemd state, and
+    # `--no-arm` is how a run stays the read-only diagnostic it was.
     if not args.services and args.category in (None, UNITS_CATEGORY):
-        results.extend(check_unit_enabledness())
+        results.extend(check_unit_enabledness(arm=not args.no_arm))
     # The GPU power guard, on the same rule again: whole-fleet run or its own
     # category, never a `--services` ask. It shells out to systemctl and nvidia-smi
     # with no root and no config, and on a box with neither it returns one advisory
