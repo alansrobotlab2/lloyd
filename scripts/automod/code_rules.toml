@@ -95,14 +95,33 @@ cite = """#548's findings for round SM_20260916_022959: a `--rerender` flag took
 minted a second committed table claiming a capture time it never captured. The \
 same class is the loaded-memory rule of 2026-09-21 ('a naive local timestamp \
 inside a machine-facing payload is read as UTC by every later reader')."""
-# Scope is the code the supervisor runs. The census measured 12 sites of this
-# shape at HEAD 2026-10-11; 9 are in `tests/` and `eval/` (a date in a filename a
-# human reads, not a payload a job parses) and 3 in one-off `scripts/` writers
-# (`benchmark.py`, `memory/kg_migrate_to_sqlite.py`, `memory/kg_rebuild.py`) — all
-# 12 are enumerated on #2574, and widening this scope is that census's owed ruling,
-# not a commit to this line.
+# Scope was "the code the supervisor runs" until #2810 took the widening #2574 left
+# owed. The evidence was harm on disk, not the shape: the rebuild snapshot
+# `~/lloyd-data/_pipeline/backups/rebuild-20260922T212107Z` names 21:21:07Z while
+# `TZ=UTC stat` gives its mtime as 2026-09-23 04:21:08 +0000 — a 7-hour skew this
+# file's own `kg_rebuild.py` wrote, and `:315` reads that name back out of saved
+# state, so a resume trusts it. Worse on the quarantine names:
+# `scripts/groundskeeper/retention-sweep.py:2806-2813` ages `facts-quarantine-*`
+# directories on the `%Y%m%dT%H%M%SZ` in the NAME as UTC, so a locally-stamped name
+# mis-ages a directory the sweep is allowed to delete. The 12 naive sites in the
+# three roots added below were converted to an explicit `timezone.utc` in the same
+# commit, so the widened scope has nothing to report on the tree it now reads.
+#
+# WHAT A ZERO OVER THESE ROOTS DOES NOT MEAN. The matcher fires only when the no-arg
+# `now()` sits inside the path expression itself, so a stamp built through a variable
+# — `ts = now()` on one line, `dir / f"x-{ts}.sqlite"` on the next — is invisible to
+# it. Five sites in this scope are that shape: `scripts/memory/revert-suffix-merges.py:367`,
+# `scripts/memory/seed_relationship_edges.py:332`,
+# `scripts/memory/next-gen-memory/fact_extractor.py:900`,
+# `scripts/memory/next-gen-memory/nightly_extraction.py:166` and
+# `scripts/maintenance/qmd_index_maintenance.py:2565`. All five were converted by
+# hand because of it, and all five would stay unreported if somebody put a naive
+# clock back at them. Teaching the matcher the variable hop is #2810's other owed
+# ruling; until that lands, 0 hits here means "no name built inline off a naive
+# clock", not "no naive name".
 scope = ["app/**", "agent_mcp/**", "workers/**", "server.py", "scripts/automod/**",
-         "agent-services/**/*.py"]
+         "agent-services/**/*.py", "scripts/memory/**", "scripts/benchmark.py",
+         "scripts/maintenance/**"]
 allow = []
 
 [[rule]]

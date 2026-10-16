@@ -112,7 +112,7 @@ PAUSED_TASKS = (24, 48, 74)
 
 def cmd_freeze(args) -> int:
     """Stop the writers, snapshot, and record what we are measured against."""
-    ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = RUN_ROOT / f"rebuild-{ts}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -312,7 +312,7 @@ CARRY_PROVENANCE = ("STATED", "INFERRED", "AMBIGUOUS")
 def cmd_export(args) -> int:
     """Collect what re-extraction cannot reproduce."""
     state = load_state()
-    run_dir = Path(state.get("run_dir") or (RUN_ROOT / f"rebuild-{dt.datetime.now():%Y%m%dT%H%M%SZ}"))
+    run_dir = Path(state.get("run_dir") or (RUN_ROOT / f"rebuild-{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}"))
     out = run_dir / "carryover"
     out.mkdir(parents=True, exist_ok=True)
 
@@ -907,7 +907,7 @@ def cmd_swap(args) -> int:
               file=sys.stderr)
         return 3
 
-    ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     quarantine = VAULT_DERIVED_ROOT / f"facts-quarantine-{ts}"
     old_db = VAULT_DERIVED_ROOT / f"kg-quarantine-{ts}.sqlite"
 
@@ -951,7 +951,7 @@ def cmd_rollback(args) -> int:
     if not quarantine.is_dir():
         print("no quarantined tree recorded", file=sys.stderr)
         return 2
-    ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     VAULT_FACTS_ROOT.rename(VAULT_DERIVED_ROOT / f"facts-rolledback-{ts}")
     quarantine.rename(VAULT_FACTS_ROOT)
     if old_db.exists():

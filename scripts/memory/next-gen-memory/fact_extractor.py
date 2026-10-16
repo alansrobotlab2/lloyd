@@ -897,7 +897,7 @@ class FactExtractor:
     @staticmethod
     def _quarantine(fact_file: Path, why: str) -> None:
         """Rename a corrupt fact file aside and return None."""
-        stamp = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         dest = fact_file.with_name(f"{fact_file.name}.corrupt-{stamp}")
         try:
             fact_file.rename(dest)

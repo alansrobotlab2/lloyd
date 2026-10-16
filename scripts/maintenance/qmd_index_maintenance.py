@@ -187,7 +187,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -2562,7 +2562,7 @@ def swap_side_copy(name: str, verification: dict | None) -> dict:
     side, marker = side_index_path(name), side_marker_path(name)
     if not marker.exists() or not side.exists():
         raise SideCopyRefused(f"swap refused: {side} is not a side copy this route built")
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     bak = INDEX.with_name(f"{INDEX.name}{BACKUP_INFIX}-{stamp}")
     out: dict = {"backup": str(bak), "actions": [], "swapped": False}
     try:

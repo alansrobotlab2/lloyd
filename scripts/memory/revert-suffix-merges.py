@@ -364,7 +364,7 @@ def main() -> int:
         st.close()
         return 0
 
-    ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_dir = args.out_dir / "store-backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
     store_bak = st.backup(backup_dir / f"kg-revert-{ts}.sqlite")

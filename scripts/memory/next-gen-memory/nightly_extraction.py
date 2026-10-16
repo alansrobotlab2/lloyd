@@ -12,7 +12,7 @@ import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Import resolution follows THIS file, never the live checkout (#755). The
@@ -163,7 +163,7 @@ class NightlyExtraction:
     def backup_graph_state(self):
         """Timestamped copy of the irreplaceable files before a destructive pass."""
         import shutil
-        stamp = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         dest = _STATE_PIPELINE / "backups" / f"pre-clean-{stamp}"
         saved = []
         for name in ("_relationships.json",):

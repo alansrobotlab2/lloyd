@@ -14,6 +14,7 @@ learned: a control that pins a count rots within days).
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -545,3 +546,197 @@ def test_the_live_tree_control_asks_what_it_actually_covered():
     assert res["totals"]["suppression_markers"] > 0, (
         "the live tree carries `# noqa` and `type: ignore` markers by the thousand; a "
         "control that counts none is not reading the files")
+
+
+# ---------------------------------------------------------------------------
+# #2810 — the naive-stamp rule earns the scripts tree, and the sites it names get
+# converted. Five nodes: the grep that filed the item now comes back empty; every
+# stamp left in those roots carries an explicit UTC zone; the rule's scope grew and
+# its cite did not; the widening is visible as a census figure and only for that
+# rule; and the whole-tree control is still zero hits over the five allowed sites.
+# ---------------------------------------------------------------------------
+
+#: The roots the widened scope reaches. `scripts/` at large is NOT one of them: the
+#: triage measured the naive sites living in these three, and a rule scoped to all
+#: of `scripts/` would have to be vouched for site by site across files nobody read.
+STAMP_ROOTS = ("scripts/memory", "scripts/benchmark.py", "scripts/maintenance")
+
+#: The grep the item was filed on, as re-worded by its own triage. The wording in
+#: the original clause — `now[()].*%Y%m%dT%H%M%SZ` — also spans an aware call, so a
+#: perfect conversion still returned 4 hits and the clause could not be satisfied;
+#: and it never matched `scripts/benchmark.py:287`, whose stamp has no `Z`.
+NAIVE_STAMP_GREP = r"(dt\.)?datetime\.now\(\).*%Y%m%d"
+
+#: A `now()` call naming the zone it is measured in. Both spellings the tree uses
+#: (`datetime.now(timezone.utc)` and `dt.datetime.now(dt.timezone.utc)`) match, and
+#: a bare `now()` does not.
+AWARE_NOW_RE = re.compile(
+    r"\bnow\(\s*(?:[A-Za-z_]\w*\.)?timezone\.(?:utc|UTC)\s*\)"
+    r"|\bnow\(\s*(?:[A-Za-z_]\w*\.)?UTC\s*\)")
+
+#: The rule's cite as shipped at dcf22067, whitespace collapsed the way `load_rules`
+#: collapses it. Clause 2 asks for it UNCHANGED, so it is pinned verbatim: widening
+#: the reach of a rule must not quietly rewrite the incident that justified it.
+CITE_NAIVE_NOW_AT_FILING = (
+    "#548's findings for round SM_20260916_022959: a `--rerender` flag took "
+    "`datetime.now()` for both the artifact filename and its `captured:` line and so "
+    "minted a second committed table claiming a capture time it never captured. The "
+    "same class is the loaded-memory rule of 2026-09-21 ('a naive local timestamp "
+    "inside a machine-facing payload is read as UTC by every later reader').")
+
+#: The four other rules' scopes as shipped at dcf22067. Three of them are `**/*.py`
+#: and so already covered every file this widening adds, which is why clause 3's
+#: "every other rule's denominator is unchanged" is not checkable as a number —
+#: those numbers cannot move. It is checkable as the one thing that would move them:
+#: a scope edit. Pinning the four scope lists is the falsifiable form of that claim.
+OTHER_RULE_SCOPES_AT_FILING = {
+    "guardian-import-hygiene": ("agent-services/guardian/*.py",),
+    "opens-kg-store-outside-kg-store": ("**/*.py",),
+    "broad-except-swallow-same-line": ("**/*.py",),
+    "exports-lloyd-data-to-process-environ": ("**/*.py",),
+}
+
+#: The naive rule's own scope before #2810. Rebuilt here as a `Rule` so the census
+#: delta is measured against the scope the rule actually shipped with, not against a
+#: number quoted from the item — 354 of 1377 was true at filing and the tree grows.
+NAIVE_NOW_SCOPE_AT_FILING = ("app/**", "agent_mcp/**", "workers/**", "server.py",
+                             "scripts/automod/**", "agent-services/**/*.py")
+
+
+def _stamp_grep(tree: Path) -> list[str]:
+    """The item's own acceptance grep, as lines of `path:line:source`."""
+    proc = subprocess.run(["git", "-C", str(tree), "grep", "-nE", NAIVE_STAMP_GREP,
+                           "--", *STAMP_ROOTS], capture_output=True, text=True)
+    # git grep exits 1 when nothing matches, which is the pass condition here, and
+    # 2 on a real failure (a bad pattern, an unreadable tree) — those must not read
+    # as "clean", the same trap `code_rules.run` refuses with `unevaluated`.
+    assert proc.returncode in (0, 1), (
+        f"the acceptance grep could not run: rc={proc.returncode} "
+        f"{proc.stderr.strip()[:200]}")
+    return [ln for ln in proc.stdout.splitlines() if ln.strip()]
+
+
+def test_the_naive_stamp_grep_that_filed_the_item_now_returns_nothing():
+    """Clause 1: the 12 sites are gone from the tree the grep reads."""
+    sites = _stamp_grep(ROOT)
+    assert sites == [], (
+        "these lines still build an artifact name from a no-arg `datetime.now()`, "
+        "which is local wall clock and gets read as UTC by every later reader:\n"
+        + "\n".join(sites))
+
+
+def test_every_name_stamp_in_the_widened_roots_names_its_zone():
+    """Clause 1's positive half: converted, not deleted, and no comment exemption.
+
+    The grep above goes green three ways — the sites converted, the sites deleted, or
+    the pattern broken — so this one reads the same roots line by line and asks the
+    other question: a line that builds a `%Y%m%d` stamp out of a `now()` call has to
+    say which zone that clock is in. It is the difference between "the defect is
+    absent" and "the code says what it does", and only the second one survives the
+    next person editing the line.
+    """
+    offenders: list[str] = []
+    for rel in _tracked_python(ROOT):
+        if not any(rel == r or rel.startswith(r.rstrip("/") + "/") for r in STAMP_ROOTS):
+            continue
+        if not rel.endswith(".py"):
+            continue
+        for i, line in enumerate((ROOT / rel).read_text(encoding="utf-8",
+                                                        errors="replace").splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#") or "%Y%m%d" not in line or "now(" not in line:
+                continue
+            if not AWARE_NOW_RE.search(line):
+                offenders.append(f"{rel}:{i}: {stripped}")
+    assert offenders == [], (
+        "a stamp-bearing `now()` call that does not name its zone: "
+        + "\n".join(offenders))
+
+
+def test_the_rule_gained_the_three_script_roots_and_its_cite_did_not_move():
+    """Clause 2: scope widened, still exactly 5 rules, cite byte-identical."""
+    rules = CR.load_rules(RULES_PATH)
+    assert len(rules) == 5, (
+        f"the rule file loads {len(rules)} rules; #2810 was to widen a scope, not add "
+        f"a rule: {[r.id for r in rules]}")
+    rule = {r.id: r for r in rules}["naive-now-in-artifact-name"]
+    assert rule.cite == CITE_NAIVE_NOW_AT_FILING, (
+        "the cite moved. The clause asks for the scope to widen with the incident that "
+        f"justified the rule left alone; got:\n{rule.cite}")
+    for root in ("scripts/memory/**", "scripts/benchmark.py", "scripts/maintenance/**"):
+        assert root in rule.scope, (
+            f"{root} is not in the rule's scope line; scope is {list(rule.scope)}")
+    for probe in ("scripts/memory/kg_rebuild.py", "scripts/benchmark.py",
+                  "scripts/maintenance/qmd_index_maintenance.py"):
+        assert rule.covers(probe), f"the widened scope still does not cover {probe}"
+
+
+def test_the_widening_shows_up_as_this_rules_census_and_nobody_elses():
+    """Clause 3: the coverage figure moves for one rule and its scope is the reason.
+
+    Printed, not just asserted, because the point of the census is that a reader of a
+    landing event months from now can see what a zero was measured over. The baseline
+    is the pre-widening scope rebuilt as a `Rule` and run through the same `covers()`,
+    so the delta is arithmetic over one mechanism rather than a comparison with a
+    number the item happened to record on the day it was filed.
+    """
+    tracked = _tracked_python(ROOT)
+    rule = {r.id: r for r in CR.load_rules(RULES_PATH)}["naive-now-in-artifact-name"]
+    before = CR.Rule(id="naive-now-in-artifact-name", matcher="naive_now_in_artifact_name",
+                     summary="", cite="#2810", scope=NAIVE_NOW_SCOPE_AT_FILING,
+                     exclude=())
+    now_cov = sorted(f for f in tracked if rule.covers(f))
+    was_cov = sorted(f for f in tracked if before.covers(f))
+    gained = sorted(set(now_cov) - set(was_cov))
+    print(f"coverage: naive-now-in-artifact-name covers {len(now_cov)} of {len(tracked)} "
+          f"tracked .py; at the scope shipped at filing it covered {len(was_cov)} "
+          f"— this widening added {len(gained)}")
+    assert len(now_cov) > len(was_cov), (
+        f"the rule covers {len(now_cov)} files, no more than the {len(was_cov)} the "
+        "pre-widening scope covered — the widening is not in the rule file")
+    assert gained, "the widening added no file at all"
+    for probe in ("scripts/memory/kg_rebuild.py", "scripts/benchmark.py",
+                  "scripts/maintenance/qmd_index_maintenance.py"):
+        assert probe in gained, (
+            f"{probe} was already covered before the widening, so the scope line did "
+            f"not gain the root that names it: gained={gained[:12]}")
+
+    others = {r.id: r.scope for r in CR.load_rules(RULES_PATH)
+              if r.id != "naive-now-in-artifact-name"}
+    assert others == OTHER_RULE_SCOPES_AT_FILING, (
+        "another rule's scope changed in the same breath as this one, so its census "
+        f"figure is no longer the one its own clause was graded against: {others}")
+
+    res = CR.run("HEAD", ROOT, rules_path=RULES_PATH, files=tracked, whole_tree=True)
+    assert res["status"] == CR.EVALUATED, res
+    recorded = res["totals"]["coverage"]["naive-now-in-artifact-name"]
+    assert recorded["covered"] == len(now_cov), (
+        f"the durable census says {recorded}, this node counted {len(now_cov)} — the "
+        "figure a landing event carries is not the scope the rule carries")
+
+
+def test_the_whole_tree_control_is_still_zero_hits_over_exactly_five_allowed_sites():
+    """Clause 4: with the scope widened, HEAD still has nothing to report.
+
+    The five sites are the whole allow population of the five rules at filing — two
+    `broad-except-swallow-same-line` drains in `app/sessions_io.py`, the test suite's
+    scratch-root exports, and the guardian's read-only store tripwire in
+    `tests/test_data_home.py`. The line numbers move whenever those files are edited,
+    so what is pinned is the count and the paths, which is the part that carries the
+    claim "no new violator slipped in behind the widening".
+    """
+    res = CR.run("HEAD", ROOT, rules_path=RULES_PATH,
+                 files=_tracked_python(ROOT), whole_tree=True)
+    assert res["status"] == CR.EVALUATED, res
+    assert res["hits"] == [], (
+        "new violators on the live tree under the widened scope: "
+        + "; ".join(f"{h['rule']} at {h['path']}:{h['line']}" for h in res["hits"]))
+    sites = sorted((h["rule"], h["path"]) for h in res["allowed"])
+    print("allowed sites: " + "; ".join(f"{r} @ {p}" for r, p in sites))
+    assert len(sites) == 5, f"the control reports {len(sites)} allowed sites, not 5: {sites}"
+    assert sorted(p for _, p in sites) == [
+        "app/sessions_io.py", "app/sessions_io.py", "tests/conftest.py",
+        "tests/test_data_home.py", "tests/test_youtube_artifact_phase.py"], sites
+    for rid, n in sorted(res["counts"].items()):
+        print(f"hits for {rid}: {n}")
+    assert res["totals"]["parse_errors"] == 0, res["totals"]

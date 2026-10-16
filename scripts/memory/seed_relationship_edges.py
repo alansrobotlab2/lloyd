@@ -329,7 +329,7 @@ def main() -> int:
         print(f"\nwrote proposals → {args.out}", file=sys.stderr)
 
     if args.apply:
-        ts = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         backup_dir = args.db.parent / "store-backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup = st.backup(backup_dir / f"kg-seed-{ts}.sqlite")

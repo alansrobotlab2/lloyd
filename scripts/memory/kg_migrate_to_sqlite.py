@@ -128,7 +128,7 @@ def main() -> int:
             checks["store_aliases_plus_entities"] = after["aliases"] + after["entities"]
             checks["legacy_non_self_aliases"] = sum(1 for k, v in legacy_al.items() if k != v)
             checks["store_aliases"] = after["aliases"]
-        exp_dir = args.db.parent / f"kg-export-check-{dt.datetime.now():%Y%m%dT%H%M%SZ}"
+        exp_dir = args.db.parent / f"kg-export-check-{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}"
         out = s.export_json(exp_dir)
         exported = json.loads(out["relationships"].read_text())["edges"]
         checks["exported_edges"] = len(exported)
@@ -153,7 +153,7 @@ def main() -> int:
         if not verified:
             print("  NOT retiring JSON: round trip did not verify", file=sys.stderr)
             return 2
-        ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+        ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         retired = []
         for p in (rel, al):
             if p.exists():

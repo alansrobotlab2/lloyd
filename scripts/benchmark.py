@@ -20,7 +20,7 @@ import statistics
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import requests
@@ -284,7 +284,7 @@ def main():
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from app.paths import LOGS_DIR
-    out_file = args.output_file or str(LOGS_DIR / "benchmarks" / f"bench_{args.tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    out_file = args.output_file or str(LOGS_DIR / "benchmarks" / f"bench_{args.tag}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json")
     with open(out_file, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"Saved → {out_file}")
