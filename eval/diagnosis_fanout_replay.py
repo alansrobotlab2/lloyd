@@ -485,8 +485,21 @@ def verify_citation(citation: dict, *, root: Path | None = None) -> dict:
     as `"some/file.py:123"`, which is the form a transcript actually contains.
     The verdict is per citation: `ok` plus a `reason` naming what was checked.
     A path that does not exist fails `no-such-path`; an existing file whose line
-    123 does not exist fails `line-out-of-range`. `root` relocates the whole
-    check, which is how a fixture tree proves both failures.
+    123 does not exist fails `line-out-of-range`; a string that cannot be stat'd
+    at all — prose in the `path` field, one component past NAME_MAX — fails
+    `not-a-path`. `root` relocates the whole check, which is how a fixture tree
+    proves both failures.
+
+    The `never raise` half is load-bearing and was a lie until #2799: `path` is
+    model output, and `Path.exists()` answers a name longer than NAME_MAX with
+    `OSError: [Errno 36] File name too long` rather than "no". 45 of the 2258
+    artifact's citations are prose excerpts of that shape (the longest, 281
+    characters), and every one of them aborted `cmd_report` before it printed a
+    line, because `cmd_report` prints what `format_report` collected only after
+    it returns. So the whole resolve-and-stat body is guarded — `exists()`,
+    `is_file()` and the line count's `open` alike — and an unstatable citation is
+    a FAILED citation, counted in the denominator exactly like a fabricated path,
+    never an exception and never skipped.
     """
     raw = str(citation.get("path") or citation.get("file") or "").strip()
     line = citation.get("line")
@@ -504,7 +517,17 @@ def verify_citation(citation: dict, *, root: Path | None = None) -> dict:
     if not str(base):
         out["reason"] = "no-path"
         return out
-    if not resolved.exists():
+    # Every filesystem call below is guarded, because `path` is model output and
+    # prose is not always statable: one component past NAME_MAX makes `exists()`
+    # RAISE `OSError: [Errno 36] File name too long` where a missing file merely
+    # answers "no" (#2799). An unstatable string fails the citation as
+    # `not-a-path` — a verdict in the denominator, never an exception.
+    try:
+        exists = resolved.exists()
+    except OSError:
+        out["reason"] = "not-a-path"
+        return out
+    if not exists:
         out["reason"] = "no-such-path"
         return out
     if line is None:
@@ -516,10 +539,20 @@ def verify_citation(citation: dict, *, root: Path | None = None) -> dict:
     except (TypeError, ValueError):
         out["reason"] = "line-not-a-number"
         return out
-    if not resolved.is_file():
+    # The other two filesystem operations, guarded as one: a path that survives
+    # `exists()` can still raise on `is_file()` or on the line count's `open`
+    # (the long-name case arrives here too when the citation carries a line),
+    # and a report that dies one line lower dies just as completely.
+    try:
+        is_file = resolved.is_file()
+        n_lines = _line_count(resolved) if is_file else 0
+    except OSError:
+        out["reason"] = "not-a-path"
+        return out
+    if not is_file:
         out["reason"] = "not-a-file"
         return out
-    if line_no < 1 or line_no > _line_count(resolved):
+    if line_no < 1 or line_no > n_lines:
         out["reason"] = "line-out-of-range"
         return out
     out["ok"] = True

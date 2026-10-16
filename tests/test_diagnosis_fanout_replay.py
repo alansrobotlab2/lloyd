@@ -30,7 +30,7 @@ from eval.diagnosis_fanout_replay import (  # noqa: E402
     THEORIES_PER_CASE, VAULT_WITNESS, WITNESS_CASES, WITNESS_ROWS, WITNESS_SHA,
     RowWriter, agrees, baseline_problem, build_cases, case_complete,
     citation_rows, excluded_note, format_report, investigate_live,
-    learnings_cases, load_cases, rank_theories, run_case_a, select_cases,
+    learnings_cases, load_cases, rank_theories, run_case_a, score, select_cases,
     slot_labels, verify_citation, verify_citations, witness_census,
     write_baseline, write_cases)
 
@@ -355,6 +355,220 @@ def test_the_citation_rate_counts_every_citation_of_a_rows_claims(tmp_path):
     assert scored["n"] == 3 and scored["passed"] == 2
     assert abs(scored["rate"] - 2 / 3) < 1e-9
     assert [v["ok"] for v in scored["verdicts"]] == [True, False, True]
+
+
+# ── #2799: an unstatable citation fails, it never aborts the report ─────────
+
+#: One citation `path` verbatim out of the 132 recorded rows of
+#: `~/lloyd-data/eval/2258/rows.jsonl` (the 2026-10-13 instrumented run). It is a
+#: prose excerpt, not a path: 281 characters in ONE component, past NAME_MAX 255,
+#: so `os.stat` answers `OSError: [Errno 36] File name too long` instead of
+#: "no such file". 45 of the artifact's citations are prose of this shape, and
+#: until #2799 the report could not re-grade a single one of its own rows: the
+#: exception escaped `verify_citation` and `cmd_report` prints its collected lines
+#: only after `format_report` returns, so stdout held the traceback and nothing else.
+PROSE_CITATION_281 = (
+    "instrumented pytest run, 2026-10-13 (this session), tree extracted from "
+    "dfb18646, single node, under 32 CPU spinners — failing run 12 captured "
+    "stdout; plugin wrapped Gate._take_review_prefetch and made "
+    "Gate._base_failures, gate._failures_at_base, state.read_red_set fatal-if-called")
+
+
+def _raise_on_one_path(monkeypatch, name: str, *ops: str) -> None:
+    """Make named `Path` operations raise for ONE path name and nothing else.
+
+    Every other path keeps its real behaviour, so the node proves the guard is
+    where the call is and not merely that some `except` exists somewhere. The
+    three operations the citation path reaches — the existence test, the
+    file/dir test and the line count's `open` — each get pinned this way.
+    """
+    for op in ops:
+        original = getattr(Path, op)
+
+        def wrapper(self, *args, _orig=original, _name=name, _op=op, **kwargs):
+            if self.name == _name:
+                raise OSError(36, "File name too long")
+            return _orig(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, op, wrapper)
+
+
+def test_a_citation_whose_path_is_prose_fails_as_not_a_path(tmp_path):
+    """Clause 1: the 281-char excerpt fails the citation; it does not raise.
+
+    `verify_citation`'s own docstring promises "never raise on a bad one", and
+    ENAMETOOLONG is exactly the bad case the docstring did not cover: `exists()`
+    swallows ENOENT (that is `no-such-path`) but re-raises errno 36, which is
+    what killed the study's ability to re-grade its own recorded rows.
+    """
+    assert len(PROSE_CITATION_281) == 281, (
+        "this fixture must stay the recorded excerpt: a shorter one fits in "
+        "NAME_MAX and then merely does not exist, which is the other branch")
+    verdict = verify_citation({"path": PROSE_CITATION_281}, root=tmp_path)
+    assert verdict["ok"] is False, verdict
+    assert verdict["reason"] == "not-a-path", verdict
+    # And it is NOT folded into `no-such-path`: a prose citation and a
+    # fabricated path are different findings, and the study's citation rate is
+    # read against both.
+    short = verify_citation({"path": "app/never_written.py", "line": 1}, root=tmp_path)
+    assert short["ok"] is False and short["reason"] == "no-such-path", short
+
+
+def test_the_oserror_guard_covers_every_filesystem_call_on_a_citation(tmp_path,
+                                                                     monkeypatch):
+    """Clause 2: an OSError at ANY stat of the resolved path yields `not-a-path`.
+
+    Catching only `exists()` would move the abort one line down: `is_file()` and
+    `_line_count`'s `open` reach the same errno on a path that is statable in
+    parts (a long name under a real directory, a file unreadable to this user).
+    Each operation is broken separately, on one file name only.
+    """
+    (tmp_path / "boom.py").write_text("a\nb\n", encoding="utf-8")
+    for op in ("exists", "is_file", "open"):
+        _raise_on_one_path(monkeypatch, "boom.py", op)
+        verdict = verify_citation({"path": "boom.py", "line": 1}, root=tmp_path)
+        assert verdict["ok"] is False, (op, verdict)
+        assert verdict["reason"] == "not-a-path", (op, verdict)
+        monkeypatch.undo()
+    # With nothing patched the same citation verifies, so the guard did not
+    # simply make every citation fail.
+    assert verify_citation({"path": "boom.py", "line": 1},
+                           root=tmp_path)["reason"] == "line-resolves"
+
+
+def test_a_prose_citation_counts_in_the_denominator_not_as_an_abort(tmp_path):
+    """Clause 3: prose citations enter the rate as failures; the report survives.
+
+    The item's bar is a citation RATE, so counting a prose citation is only
+    honest if it lands in the denominator — 45 of the 2258 artifact's citations
+    are prose, and dropping them would inflate the very number the study is
+    graded on. One prose row and one real row is 1/2.
+    """
+    (tmp_path / "real.py").write_text("a\nb\n", encoding="utf-8")
+    rows = [
+        {"arm": ARM_B, "kind": "tool", "case_key": "case-0", "seq": 1, "tokens": 10,
+         "claims": [{"claim": "the guard is missing",
+                     "citations": [{"path": PROSE_CITATION_281}]}]},
+        {"arm": ARM_B, "kind": "tool", "case_key": "case-0", "seq": 2, "tokens": 10,
+         "claims": [{"claim": "the file is two lines",
+                     "citations": [{"path": "real.py", "line": 1}]}]},
+    ]
+    scored = verify_citations(citation_rows(rows), root=tmp_path)
+    assert scored["n"] == 2 and scored["passed"] == 1, scored
+    assert abs(scored["rate"] - 0.5) < 1e-9, scored
+    assert [v["ok"] for v in scored["verdicts"]] == [False, True], scored
+    assert scored["verdicts"][0]["reason"] == "not-a-path", scored
+
+
+def test_the_reasons_the_verdict_already_wrote_are_all_unchanged(tmp_path):
+    """The guard adds ONE reason; the six the artifact already carries stand.
+
+    `no-such-path`, `path-exists`, `line-resolves`, `line-out-of-range`,
+    `not-a-file` and `line-not-a-number` are what the recorded citation rate is
+    built from, and the order between them and the new `not-a-path` is the whole
+    risk of the change: a guard wrapped around the wrong stretch would answer
+    `not-a-path` for an ordinary missing file and quietly rewrite the study's
+    denominator. (`no-path` is listed in the code but unreachable — `Path("")`
+    resolves to `.` and reports `path-exists`, which this node also pins so the
+    quirk is on the record rather than in prose.)
+    """
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "loop.py").write_text("one\ntwo\n", encoding="utf-8")
+    (tmp_path / "app" / "dir.py").mkdir()
+    cases = {
+        "line-resolves": ({"path": "app/loop.py", "line": 2}, True),
+        "path-exists": ({"path": "app/loop.py"}, True),
+        "no-such-path": ({"path": "app/never.py", "line": 1}, False),
+        "line-out-of-range": ({"path": "app/loop.py", "line": 99}, False),
+        "not-a-file": ({"path": "app/dir.py", "line": 1}, False),
+        "line-not-a-number": ({"path": "app/loop.py", "line": "two"}, False),
+    }
+    for reason, (citation, ok) in cases.items():
+        verdict = verify_citation(citation, root=tmp_path)
+        assert verdict["ok"] is ok, (reason, verdict)
+        assert verdict["reason"] == reason, (reason, verdict)
+    empty = verify_citation({"path": ""}, root=tmp_path)
+    assert empty["reason"] == "path-exists", empty
+
+
+def test_the_report_prints_a_headline_with_a_prose_citation_in_its_rows(tmp_path):
+    """Clause 4: `format_report` reaches its print path with prose in the rows.
+
+    The whole point of #2799 is the PRINT PATH: `cmd_report` collects every line
+    from `format_report` and prints them afterwards, so one escaping exception
+    loses every number the run recorded. The last line is the headline, and with
+    no cached retry baseline it must be the refused one rather than a traceback.
+    """
+    assert len(PROSE_CITATION_281) == 281
+    cases = _cases(1)
+    rows = [
+        {"arm": ARM_A, "kind": "verdict", "case_key": "case-0", "seq": 1,
+         "chosen_cause": "the diff caused it", "tokens": 5000},
+        {"arm": ARM_B, "kind": "verdict", "case_key": "case-0", "seq": 2,
+         "chosen_cause": "the diff caused it", "tokens": 9000},
+        {"arm": ARM_B, "kind": "tool", "case_key": "case-0", "seq": 3, "tokens": 9000,
+         "claims": [{"claim": "prose, not a path",
+                     "citations": [{"path": PROSE_CITATION_281}]}]},
+        {"arm": ARM_A, "kind": "tool", "case_key": "case-0", "seq": 4, "tokens": 5000,
+         "claims": [{"claim": "a real line",
+                     "citations": [{"path": "real.py", "line": 1}]}]},
+    ]
+    (tmp_path / "real.py").write_text("a\nb\n", encoding="utf-8")
+
+    scored = score(rows, cases, citation_root=tmp_path)
+    assert scored["arms"][ARM_B]["citations"] == {"n": 1, "passed": 0, "rate": 0.0,
+                                                 "verdicts": [
+        {"path": PROSE_CITATION_281, "line": None, "ok": False,
+         "reason": "not-a-path"}]}, scored["arms"][ARM_B]["citations"]
+    assert scored["arms"][ARM_A]["citations"]["passed"] == 1, scored
+
+    lines, evaluated = format_report(rows, cases, baseline=None, corpus="fp",
+                                     model="primary", token_ceiling=120_000,
+                                     citation_root=tmp_path)
+    text = "\n".join(lines)
+    assert evaluated is False and lines[-1].startswith("HEADLINE:"), text
+    assert "cannot evaluate" in lines[-1], text
+    assert re.search(rf"citations verified\s+{ARM_A}: 1/1\s+{ARM_B}: 0/1", text), text
+
+
+def test_the_report_command_exits_3_over_prose_citations_instead_of_dying(tmp_path):
+    """The acceptance check's own shape, across the CLI boundary.
+
+    `report` over the 2258 artifact used to exit 1 with stdout holding ONLY a
+    traceback, because `cmd_report` prints the lines `format_report` collected
+    after it returns — so an escaping `OSError` cost every number the study
+    recorded. Fixed, the same command prints its `cases:` line and a `HEADLINE:`
+    line and exits 3 (no cached retry baseline for the corpus): a refused
+    verdict, which is a result, not a crash.
+    """
+    cases_path = tmp_path / "cases.jsonl"
+    cases_path.write_text("".join(json.dumps(c) + "\n" for c in _cases(1)),
+                          encoding="utf-8")
+    rows_path = tmp_path / "rows.jsonl"
+    rows = [
+        {"arm": ARM_A, "kind": "verdict", "case_key": "case-0", "seq": 1,
+         "chosen_cause": "the diff caused it", "tokens": 5000},
+        {"arm": ARM_B, "kind": "verdict", "case_key": "case-0", "seq": 2,
+         "chosen_cause": "pre-existing at base 0: pre-existing", "tokens": 9000},
+        {"arm": ARM_B, "kind": "tool", "case_key": "case-0", "seq": 3, "tokens": 9000,
+         "claims": [{"claim": "prose, not a path",
+                     "citations": [{"path": PROSE_CITATION_281}]}]},
+    ]
+    rows_path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "eval" / "diagnosis_fanout_replay.py"), "report",
+         "--cases", str(cases_path), "--rows", str(rows_path),
+         "--baseline", str(tmp_path / "no-baseline.json"),
+         "--root", str(tmp_path), "--ceiling", "200000"],
+        capture_output=True, text=True, timeout=300, cwd=str(REPO))
+    assert proc.returncode == 3, proc.stdout + proc.stderr[-800:]
+    assert "Traceback" not in proc.stdout and "Traceback" not in proc.stderr, (
+        proc.stdout + proc.stderr[-800:])
+    assert "cases: 1" in proc.stdout, proc.stdout
+    assert "HEADLINE: cannot evaluate" in proc.stdout, proc.stdout
+    assert re.search(rf"citations verified\s+{ARM_A}: 0/0\s+{ARM_B}: 0/1", proc.stdout), (
+        proc.stdout)
 
 
 # ── clause 3: three theories before any evidence row ────────────────────────
