@@ -575,12 +575,14 @@ def test_a_customvoice_backend_still_synthesizes_a_built_in_on_both_routes(drive
     assert "generate_speech" in backend.attempts
 
     backend2 = FakeBackend("customvoice")
-    client2, _ = drive(backend2)
+    client2, log2 = drive(backend2)
     r2 = _speech(client2, "Ryan", stream=True, fmt="pcm")
     assert r2.status_code == 200, r2.text[:300]
     assert len(r2.content) > 0, "an accepted stream must actually carry bytes"
     assert "generate_speech_streaming" in backend2.attempts
-    assert log.warnings == [], "nothing here was a refusal"
+    assert log2.warnings == [], (
+        "the streaming leg was accepted, so its own recorder must be silent: "
+        f"{log2.warnings}")
 
 
 def test_the_clone_path_is_untouched_on_a_base_backend(drive):
