@@ -648,6 +648,77 @@ def test_the_lane_replies_for_a_subagent_only_when_its_parent_is_unattended():
     assert hook and hook[0].startswith("live-checkout git write"), hook
 
 
+#: A self-mod round's own linked worktree — the tree `scripts/automod/round.py`
+#: creates with `git worktree add`, spelled the way the fleet spells it. Derived from
+#: `_LIVE`'s parent so it stays a *sibling* of the live checkout on whichever tree
+#: runs the suite, which is the containment case `_is_live_root` is written for.
+_WORKTREE = str(__import__("pathlib", fromlist=["Path"]).Path(_LIVE).parent
+                / "lloyd-work" / "SM_20261016_000000" / "home" / "lloyd")
+
+#: #2801 clauses 1 and 2: one commit in that worktree, in the spellings the ledger
+#: shows a turn typing. Each holds the path in a variable assigned *in the same shell
+#: string* — the form the lane could not resolve, because `os.path.expandvars` reads
+#: the process environment and never the command's own `W=…`. Session
+#: `20261014_102752_autocode_3037` was refused three spellings of one commit at
+#: message indices 295/298/307 and recovered only at index 313 by passing `cwd` to the
+#: Bash tool explicitly: three iterations of a round's own landing path.
+#:
+#: Deliberately absent: ``git -C `$W` ``. That spelling already returned None before
+#: the fix, because `_tokens` treats a backtick as a command boundary so the `-C`
+#: argument never reaches the matcher — a green arm there would be a tokeniser
+#: accident, not evidence that a variable was resolved.
+_WORKTREE_IN_A_VARIABLE = [
+    f"W={_WORKTREE}; cd $W && git add f",
+    f"W={_WORKTREE}; cd $W && git add f && git commit -m x",
+    f"W={_WORKTREE}; git -C \"$W\" add f",
+    f"W={_WORKTREE}; git -C $W commit -m x",
+    # Both verbs carry their own `-C`. A bare `git commit` after a `git -C $W add`
+    # is *not* excused, and correctly so: `-C` relocates the one invocation that
+    # carries it, so the trailing bare commit really would run in the dispatch cwd —
+    # which here is the live checkout. Only a `cd` retargets the later segments.
+    f"W={_WORKTREE}; git -C $W add f && git -C $W commit -m x",
+    # The same shape with the tree named through `$HOME`, which is the third of the
+    # three spellings that refused in `20261014_102752_autocode_3037`. `$HOME` is true
+    # in the guard's process environment and in the shell's, so this arm is resolvable
+    # without the assignment map — and it is the arm a naive fix would break.
+    "W=$HOME/lloyd-work/SM_20261016_000000/home/lloyd; cd $W && git add f",
+]
+
+
+def test_a_worktree_path_held_in_a_variable_the_same_command_assigns_is_not_live():
+    """#2801 clauses 1 and 2: a round may commit in its own worktree by naming that
+    worktree once and referring to it afterwards — `cd $W` and `git -C "$W"` both.
+
+    Before the fix every arm below refused, and the refusal named the *live checkout*:
+    the raw `$W` was joined onto the dispatch cwd, which for a background turn is
+    `~/lloyd`, and `<live>/$W` is inside `<live>` by containment. So the lane was not
+    reporting "this is production", it was reporting "I could not read this path", and
+    nothing in the message let a reader tell the two apart.
+
+    Every arm runs with `cwd` at the live checkout on purpose — that is the worst case
+    the fix had to survive: the dispatch cwd points *at* production, and only the
+    command's own assignment says the write goes somewhere else.
+    """
+    from app.harness.live_git_writes import check_live_git_writes
+
+    # Positive control, in the same call sequence: the lane is answering, and an
+    # assignment naming the live tree is followed *to* the live tree rather than
+    # excused because it arrived as a variable. Clause 3 pins the refusal side
+    # properly in tests/test_protected_paths.py; this is the arm that stops the six
+    # below from passing with the lane deleted.
+    assert _lane(f"git -C {_LIVE} commit -m x") is not None, (
+        "the lane is not answering at all, so the arms below prove nothing")
+    assert check_live_git_writes(f"W={_LIVE}; cd $W && git add f", _BG,
+                                 cwd=_LIVE) is not None, (
+        "an assignment naming the live checkout stopped being followed at all")
+
+    for cmd in _WORKTREE_IN_A_VARIABLE:
+        assert _lane(cmd, _LIVE) is None, f"{cmd} was refused as a live write"
+        # The clause is worded against the lane's own entry point, with the dispatch
+        # cwd handed over the way the Bash tool hands it over: `cwd=LIVE`.
+        assert check_live_git_writes(cmd, _BG, cwd=_LIVE) is None, cmd
+
+
 TESTS = [
     test_seeding_a_broad_pattern_makes_the_benign_arm_strictly_worse,
     test_removing_a_pattern_makes_the_true_positive_arm_strictly_worse,
@@ -659,6 +730,7 @@ TESTS = [
     test_the_desktop_terminal_guard_carries_this_lane_for_text_a_person_types,
     test_a_command_that_arrives_with_no_session_id_is_not_this_lanes_to_refuse,
     test_the_lane_replies_for_a_subagent_only_when_its_parent_is_unattended,
+    test_a_worktree_path_held_in_a_variable_the_same_command_assigns_is_not_live,
 ]
 
 

@@ -29,7 +29,17 @@ What it refuses, precisely: one of the twelve subcommands in
 stash` form but `list`/`show`/`branch` — with its working directory being
 `app.paths.LIVE_CHECKOUT` or a directory inside it (git walks up to find the
 repository, so a nested `cd` is the same `HEAD`), arrived at either by `-C` or by a
-`cd` earlier in the same command, from a session that is not positively attended. It is a *scoped* rail by construction: the
+`cd` earlier in the same command, from a session that is not positively attended.
+The directory may also be named by a variable the same command assigned
+(`W=/home/alansrobotlab/lloyd-work/SM_…; cd $W && git add f`), which #2801 had to
+add because the lane could not see it: `os.path.expandvars` reads the *process*
+environment, so a path held in `W` resolved to nothing, fell back onto the dispatch
+cwd — the live checkout for every autocode round — and the round's own landing path
+was refused. Reading that assignment is what makes the refusal mean "the live tree"
+rather than "a path this matcher could not read"; `_assignments` states which
+assignments are believed and which are not.
+
+It is a *scoped* rail by construction: the
 self-modification loop lands by committing in linked worktrees of this very repo
 (`scripts/automod/round.py:111` — `git worktree add … /home/alansrobotlab/lloyd-
 work/SM_…`), the arch-review source commits to production **with** a commit, and
@@ -269,6 +279,102 @@ def _record_says_attended(sid: str) -> bool:
 # The matcher
 # ---------------------------------------------------------------------------
 
+#: A shell assignment that **persists**: one whose whole segment is assignments, at
+#: the start of the command or after a `;`, a `&&`/`||`/`|`, a newline or an open
+#: paren. The position is the whole rule, and it is the shell's own, read from both
+#: sides. In front, `(?:^|[;&|\n(])` rejects `env W=/x git -C $W`, whose `W` belongs to
+#: one command's environment. Behind, the lookahead rejects a value that is followed by
+#: a *command word*: `W=/x git add f` is a prefix assignment, and the shell expands
+#: that command's arguments before the environment holding `W` exists, so `$W` in them
+#: is empty — the value must be followed by a delimiter, a closing paren or the end of
+#: the string to count as a statement. Being conservative on the residue is the point:
+#: a run of two assignments (`W=/a W2=/b; cd $W`) and an assignment after `then`/`do`
+#: both persist in a real shell and neither is believed here, so such a `$W` stays
+#: unresolved and falls back to the dispatch cwd — which is the answer this lane gave
+#: before #2801, and the fail-closed one. What the lane will no longer do is fall back
+#: when the command plainly said where it was going.
+#:
+#: The value alternatives are a single-quoted run (literal, never expanded), a
+#: double-quoted run, or a bare run that stops at every character that means
+#: something else to a shell. `$` is *allowed* in the bare run, because
+#: `W=$HOME/lloyd-work/SM_…/home/lloyd` is a spelling the corpus really contains and
+#: the reference is left intact for `_norm`, whose `os.path.expandvars` reads the
+#: process environment — the same source the shell would read. What the run may not
+#: contain is a command substitution: `(` and `` ` `` are excluded, and the trailing
+#: lookahead is what keeps a value merely *cut* by one from being believed. In
+#: `W=/home/x/lloyd/$(echo sub)` the bare run can only end at `(`, which is not a
+#: delimiter, so the assignment is not recorded at all rather than recorded as the
+#: prefix `/home/x/lloyd/$` — a value that would resolve *outside* the tree the
+#: command actually cd's into. `W=$(mktemp -d)`, the fleet's scratch-clone recipe, is
+#: cut the same way and is not recorded either, which leaves it answering as it did
+#: before this lane read assignments at all: fall back to the dispatch cwd.
+_VAR_ASSIGN = re.compile(
+    r"(?:^|[;&|\n(])\s*(?:export\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)="
+    r"(?:'([^']*)'|\"([^\"]*)\"|([^\s;&|`<>()'\"\\*]*))"
+    r"(?=\s*(?:[;&|\n)]|$))"
+)
+
+
+def _var_ref(name: str) -> re.Pattern:
+    """`$NAME` / `${NAME}` for one known name, and nothing else.
+
+    The word boundary is load-bearing: with `W` and `WD` both assigned, a bare
+    `$WD` must not be rewritten through `W`. `$1`, `$?` and every name the command
+    never assigned are left alone for `_norm`'s `os.path.expandvars`, which reads the
+    *process* environment and is the correct reader for them.
+    """
+    return re.compile(r"\$\{" + re.escape(name) + r"\}|\$" + re.escape(name)
+                      + r"(?![A-Za-z0-9_])")
+
+
+def _assignments(text: str) -> dict[str, str]:
+    """`{NAME: value}` for the literal assignments this shell string makes.
+
+    #2801's whole fix. `_norm` resolves a `$W` through `os.path.expandvars`, which
+    reads `os.environ` and nothing else — so a path a turn assigned two segments
+    earlier was invisible, the raw `$W` was joined onto the dispatch cwd
+    (`check_live_git_writes`'s `cwd or os.getcwd()`, which for a Bash call carrying
+    no `cwd` is the aggregator's directory, `~/lloyd`), and the walk refused a write
+    aimed at its own round's worktree. Later assignments of one name win; a value
+    naming an earlier one is resolved against the map, so `X=/a; W=$X/b` lands on
+    `/a/b`. A value naming a variable the command never assigned keeps its `$`, and
+    `_norm` resolves it from the process environment exactly as the shell would
+    (`W=$HOME/lloyd` is a real spelling, and `$HOME` is true in both).
+    """
+    out: dict[str, str] = {}
+    for m in _VAR_ASSIGN.finditer(text):
+        single, double, bare = m.group(2), m.group(3), m.group(4)
+        if single is not None:
+            out[m.group(1)] = single      # a single-quoted value is literal
+            continue
+        value = double if double is not None else (bare or "")
+        for name, known in list(out.items()):
+            value = _var_ref(name).sub(lambda _m, v=known: v, value)
+        out[m.group(1)] = value
+    return out
+
+
+def _expand_vars(tokens: list[str], assigns: dict[str, str]) -> list[str]:
+    """Substitute this command's own assignments into one segment's tokens.
+
+    Every token, not just the path-looking ones: a shell expands the whole word and
+    this matcher cannot know which argument a path ended up inside. An empty map (no
+    assignment in the command) returns the segment untouched, so the thousands of
+    `git -C <literal> log` calls in the corpus pay nothing.
+    """
+    if not assigns:
+        return tokens
+    out: list[str] = []
+    for tok in tokens:
+        if "$" in tok:
+            for name, value in assigns.items():
+                if "$" + name in tok or "${" + name + "}" in tok:
+                    tok = _var_ref(name).sub(lambda _m, v=value: v, tok)
+        out.append(tok)
+    return out
+
+
 def _norm(target: str, base: str) -> str:
     if not target:
         return os.path.normpath(base)
@@ -357,9 +463,17 @@ def _walk(text: str, cwd: str, live: str, depth: int) -> str | None:
     path subsystem shares, whose own docstring warns that a guard with its own
     idea of a token boundary misses the invocations that matter most. It already
     treats `$(…)`, backticks and newlines as command boundaries.
+
+    The command's own assignments are resolved before any segment is read
+    (`_assignments`, #2801), because the tokeniser deliberately leaves `$W` as text
+    and `_norm`'s only reader for it is the process environment. That substitution
+    happens once per shell string, on the raw text rather than per token, so the
+    delimiter test that rejects a value cut by a command substitution has the raw
+    text to look at.
     """
     from app.harness.protected_paths import _segments, _tokens
 
+    assigns = _assignments(text)
     running = cwd
     try:
         segs = _segments(_tokens(text))
@@ -368,6 +482,7 @@ def _walk(text: str, cwd: str, live: str, depth: int) -> str | None:
     for seg in segs:
         if not seg:
             continue
+        seg = _expand_vars(seg, assigns)
         if seg[0] in ("cd", "pushd"):
             # A `cd` retargets every later segment: this is how `cd <live> && git
             # commit` becomes a write to production, and the same walk

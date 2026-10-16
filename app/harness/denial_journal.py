@@ -75,7 +75,18 @@ _HOOK_GUARDS: dict[str, str] = {
     "write_scope_denial": "trial_write_scope",
 }
 
-_SAFETY_LABEL = re.compile(r"harness safety: blocked '([^']*)'(?: on '(.*)')?")
+#: The label inside `harness safety: blocked <label>[ on <excerpt>]`, where each
+#: quoted run is a Python `repr()` of a string. `repr` picks the quote that is *not*
+#: in the value, so a label containing an apostrophe arrives double-quoted: the
+#: live-checkout git lane's own message says "a turn commits in its round's worktree"
+#: (#2604), and a pattern that read only `'…'` found nothing — which is why every one
+#: of the 50 live-lane hook rows in `~/lloyd-data/safety/denials.jsonl` for
+#: 2026-10-12..16 carries `label: ""` (#2801 clause 5). Both styles are therefore
+#: read, and neither class may contain its own opening quote — which is exactly what
+#: `repr` guarantees for the style it chose.
+_SAFETY_LABEL = re.compile(
+    r"""harness safety: blocked (?:"([^"]*)"|'([^']*)')(?: on (?:"[^"]*"|'[^']*'))?"""
+)
 
 _commit_cache: str | None = None
 
@@ -124,10 +135,53 @@ def guard_for_hook(callback: Any) -> str:
     return _HOOK_GUARDS.get(short, str(name))
 
 
+#: How much of a label the row keeps. The live-checkout git lane's refusal is a
+#: paragraph, and what a later pass groups on is the lane's name at its head, not its
+#: whole explanation — which is also why `reason` is kept beside it, uncapped by this.
+LABEL_CHARS = 120
+
+#: How much of the refused request the row keeps (#2801 clause 5). A command long
+#: enough to be cut here is still classifiable from its head, which is the shape of
+#: every false positive the ledger was filed to classify: `W=<worktree>; cd $W && git
+#: add …` names its tree in the first 60 characters.
+EXCERPT_CHARS = 200
+
+
 def label_of(reason: str) -> str:
-    """The pattern label inside a safety refusal, else ''."""
+    """The pattern label inside a safety refusal, else ''.
+
+    Read in whichever quote style `repr` chose (`_SAFETY_LABEL`), so a lane whose
+    message contains an apostrophe is not the one lane whose rows arrive anonymous.
+    """
     m = _SAFETY_LABEL.search(str(reason or ""))
-    return m.group(1) if m else ""
+    if not m:
+        return ""
+    return m.group(1) if m.group(1) is not None else (m.group(2) or "")
+
+
+def excerpt_of(tool: str, tool_input: Any) -> str:
+    """What was asked for, in the refused call's own words, on one line.
+
+    The hook side of the ledger had no excerpt at all before #2801: `record()` accepts
+    one and caps it at `EXCERPT_CHARS`, but `record_hook_deny` only ever saw the deny
+    *dict*, whose `permissionDecisionReason` is a paragraph capped at 400 characters
+    with the command already truncated out of it. Reading the request back off the
+    tool input is what makes a row classifiable without opening a transcript — for a
+    Bash refusal, the command; for a file tool, the path it named; for anything else,
+    the arguments as JSON. Newlines are folded because the row is one line of JSONL
+    and the classifier greps it.
+    """
+    if not isinstance(tool_input, dict):
+        return ""
+    for key in ("command", "file_path", "path", "url", "to", "pattern", "query",
+                "text", "prompt"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())
+    try:
+        return " ".join(json.dumps(tool_input, sort_keys=True).split())
+    except Exception:  # noqa: BLE001 — an excerpt is never worth a raise
+        return ""
 
 
 def _commit() -> str:
@@ -157,9 +211,9 @@ def record(*, guard: str, where: str, session_id: str | None, tool: str,
             "session": str(session_id) if session_id else None,
             "session_class": session_class(session_id, parent_of=parent_of),
             "tool": str(tool or ""),
-            "label": str(label or label_of(reason_text)),
+            "label": str(label or label_of(reason_text))[:LABEL_CHARS],
             "reason": reason_text[:400],
-            "excerpt": str(excerpt or "")[:200],
+            "excerpt": str(excerpt or "")[:EXCERPT_CHARS],
             "commit": _commit(),
         }
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -173,15 +227,30 @@ def record(*, guard: str, where: str, session_id: str | None, tool: str,
 
 
 def record_hook_deny(callback: Any, *, session_id: str | None, tool: str,
-                     deny: dict[str, Any]) -> bool:
-    """Journal a PreToolUse deny dict as the hook registry returns it."""
+                     deny: dict[str, Any],
+                     tool_input: Any = None) -> bool:
+    """Journal a PreToolUse deny dict as the hook registry returns it.
+
+    `tool_input` is the *refused* call's arguments, and it is the only place the
+    refused command still exists on this route. `app/harness/safety.py` builds an
+    80-character excerpt for the live-checkout git lane, but the hook contract hands
+    the registry a single `permissionDecisionReason` string, and that is capped at 400
+    characters here — so every hook-side row was written with `excerpt: ""` and, for a
+    lane whose label `repr` double-quotes, `label: ""` as well: 50 of them in
+    `~/lloyd-data/safety/denials.jsonl` for 2026-10-12..16, which is what made #2604's
+    owed ruling about the lane's false-positive share unanswerable from the durable
+    record (#2801 clause 5). Optional, so a caller that has no input still writes a
+    row — the refusal stands either way, and a journal that cannot name the command is
+    a worse journal, not a lost refusal.
+    """
     try:
         hso = (deny or {}).get("hookSpecificOutput") or {}
         reason = str(hso.get("permissionDecisionReason") or "")
     except Exception:  # noqa: BLE001
         reason = ""
     return record(guard=guard_for_hook(callback), where="hook", session_id=session_id,
-                  tool=tool, reason=reason)
+                  tool=tool, reason=reason,
+                  excerpt=excerpt_of(tool, tool_input))
 
 
 def rows(path: Path | None = None, *, since: float | None = None) -> list[dict[str, Any]]:

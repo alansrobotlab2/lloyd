@@ -100,6 +100,77 @@ def test_an_unlisted_gate_is_journaled_under_its_own_name(journal):
     assert _rows(journal)[0]["guard"].endswith("my_custom_gate")
 
 
+def test_a_hook_side_denial_row_names_the_command_it_refused(journal):
+    """#2801 clause 5, across the one boundary that used to lose the command.
+
+    The process boundary is the hook contract itself: `safety._safety_pretool_cb`
+    builds a `(label, excerpt)` pair — with an 80-character command excerpt for the
+    live-checkout git lane — and then flattens it into a single
+    `permissionDecisionReason` string, because that is all a PreToolUse deny may
+    carry. `hooks.fire_pre_tool_use` sees that string and nothing else, and
+    `record()` caps `reason` at 400 characters. So on this route the command was
+    structurally unrecoverable: all 50 live-checkout rows in
+    `~/lloyd-data/safety/denials.jsonl` for 2026-10-12..16 have `excerpt: ""`, which
+    is what made #2604's owed ruling ("did the lane fire only on its failure mode?")
+    unanswerable without opening transcripts. The fix carries the refused call's
+    `tool_input` alongside the deny, which is what this node crosses.
+
+    The label half is the other half of the same blindness: `_SAFETY_LABEL` read only
+    a single-quoted pattern, and this lane's message contains an apostrophe ("a turn
+    commits in its round's worktree"), so `repr` quotes it with double quotes and the
+    label came out empty too.
+    """
+    from app.harness import safety
+
+    live = str(__import__("app.paths", fromlist=["LIVE"]).LIVE_CHECKOUT)
+    cmd = f"git -C {live} commit -m x -- architecture/foo.md"
+    hooks = HookRegistry()
+    hooks.add_pre_tool_use(None, safety._safety_pretool_cb, fail_closed=True)
+    out = _run(hooks.fire_pre_tool_use(session_id="20261016_090000_autocode_2801",
+                                       tool_name="Bash",
+                                       tool_input={"command": cmd,
+                                                   "cwd": "/tmp/scratch"}))
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    rows = _rows(journal)
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["guard"] == "safety" and row["where"] == "hook", row
+    # The refused command, whole, and the lane that refused it — the two fields a
+    # later pass needs to classify a firing without a transcript.
+    assert row["excerpt"] == cmd, row
+    assert row["label"].startswith("live-checkout git write"), row["label"]
+    assert len(row["label"]) <= DJ.LABEL_CHARS, row["label"]
+
+
+def test_the_excerpt_and_label_helpers_read_what_the_rows_actually_carry():
+    """The two helpers behind clause 5, pinned at the unit level for the shapes the
+    fleet's rows contain rather than the one the end-to-end node happens to fire.
+
+    `excerpt_of` prefers the field that *is* the request — a Bash command, a file
+    path — over dumping the whole argument dict, because the dict of a `Write` carries
+    its content and the useful 200 characters would be the first 200 of a file. A
+    multi-line command is folded to one line because the row is one line of JSONL and
+    the classifier greps it; the 200-character cap is `record`'s, and the long arm
+    here is what shows the cap is a truncation and not a drop.
+    """
+    assert DJ.excerpt_of("Bash", {"command": "git status\ngit add -A\n",
+                                  "cwd": "/tmp"}) == "git status git add -A"
+    assert DJ.excerpt_of("Write", {"file_path": "/srv/prod/lloyd/app/x.py",
+                                   "content": "x" * 500}) \
+        == "/srv/prod/lloyd/app/x.py"
+    assert DJ.excerpt_of("Bash", {"command": "y" * 400})[:200] == "y" * 200
+    assert DJ.excerpt_of("Bash", "not a dict") == ""
+    assert DJ.excerpt_of("Bash", {}) != "", "an empty dict still gets the JSON form"
+
+    # Both quote styles `repr` may have chosen, and the absence of either.
+    assert DJ.label_of("harness safety: blocked 'rm -rf ~' on 'rm -rf ~'") \
+        == "rm -rf ~"
+    assert DJ.label_of('harness safety: blocked "live-checkout git write: `git add` '
+                       'in a round\'s worktree" on `git add f`') \
+        == "live-checkout git write: `git add` in a round's worktree"
+    assert DJ.label_of("grant: no grant for that") == ""
+
+
 def test_the_dispatch_refusal_helper_journals_under_the_named_guard(journal):
     from agent_mcp import main as M
     res = M._refused_call("Write", "read-only session: Write is not read-only",

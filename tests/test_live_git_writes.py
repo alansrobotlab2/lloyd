@@ -199,6 +199,91 @@ def test_a_write_verb_inside_a_non_shells_argument_is_data_not_a_command():
         assert check_live_git_writes(cmd, _BG, live=_LIVE) is None, cmd
 
 
+def test_a_variable_the_command_never_assigns_still_falls_back_to_the_dispatch_cwd():
+    """#2801 clause 4: the fail-closed direction survives the fix.
+
+    Substituting an assignment is only safe while *unresolved* stays what it was. A
+    name the command never assigns still reaches `_norm` with its `$` intact
+    (`os.path.expandvars` finds it in neither the process environment nor the
+    command), still gets joined onto the dispatch cwd, and so still refuses when that
+    cwd is inside the live tree — which is the answer a `cd $UNSET` gets from a shell
+    too, in the only sense that matters here: it does not quietly become nobody's
+    directory. The control arm below is what makes that a measurement and not an
+    assumption: the identical four commands, same unresolved names, dispatched from a
+    scratch directory, are not writes to production.
+    """
+    for name, cmd in (
+            ("cd an unset name", "cd $UNSET && git commit -m x"),
+            ("the -C spelling of an unset name", 'git -C "$UNSET" commit -m x'),
+            ("add and commit after an unset cd",
+             "cd $UNSET && git add f && git commit -m x"),
+            # An unrelated assignment earlier in the string must not become an
+            # excuse for the name that was never assigned.
+            ("an unset name beside an assigned one",
+             "W=/tmp/g; cd $UNSET && git commit -m x"),
+    ):
+        refused = check_live_git_writes(cmd, _BG, cwd=f"{_LIVE}/app/harness",
+                                        live=_LIVE)
+        assert refused, (name, cmd)
+        assert _LIVE in refused, (name, refused)
+        assert check_live_git_writes(cmd, _BG, cwd="/tmp/scratch",
+                                     live=_LIVE) is None, (name, cmd)
+
+
+def test_which_assignments_the_lane_believes_is_the_shells_own_rule():
+    """Where `_assignments` draws its line, and why each side of it is the shell's
+    line rather than the matcher's convenience.
+
+    Every arm is chosen so that the guard's answer agrees with the directory the
+    running shell would actually have put the `git` in:
+
+      * A **prefix** assignment (`W=… git add f`) is not believed, and the arm is
+        quieter than that: the lane never reads that `git` at all, because the matcher
+        is anchored on a program position and `_unwrap` strips assignments only behind a
+        wrapper it knows (`env FOO=bar git …`, pinned above). The shell puts a prefix
+        assignment in *one command's* environment and expands that command's arguments
+        first, so the `$W` in them is empty; believing it would resolve a variable that
+        never existed, which is #2801's bug wearing the opposite sign.
+      * A value **cut by a command substitution** (`W=/srv/prod/lloyd/$(echo sub)`)
+        is not believed either, because the only thing the tokeniser can see is the
+        prefix up to `(`, and a prefix is not the directory. `_assignments` drops the
+        whole assignment, so the lane falls back to the dispatch cwd exactly as it did
+        before the fix. `W=$(mktemp -d)`, the fleet's scratch-clone recipe, is in this
+        class — which is what keeps 2,000-odd real commands answering unchanged.
+      * `$WD` is not eaten by an assigned `W`: the reference needs a word boundary,
+        or the first assignment would resolve its neighbour's name.
+      * `${W}` and a value built from an earlier name (`X=…; W=$X`) are believed,
+        because a shell believes them.
+    """
+    scratch = "/tmp/scratch"
+
+    # Prefix assignments: not believed, so the dispatch cwd is the whole story.
+    assert check_live_git_writes(f"W={_LIVE} git add f", _BG, cwd=scratch,
+                                 live=_LIVE) is None
+    assert check_live_git_writes(f"W={_LIVE} cd $W && git add f", _BG, cwd=scratch,
+                                 live=_LIVE) is None
+    # …and the same tree reached through a *delimiter*, dispatched from inside the live
+    # checkout, does refuse. That is the control that keeps the two arms above from
+    # being vacuous: the assignment is what stopped being believed, not the segment
+    # being unread — the delimiter form is read, followed, and refused.
+    assert check_live_git_writes(f"W={_LIVE}; git add f", _BG, cwd=f"{_LIVE}/app",
+                                 live=_LIVE)
+
+    # Values cut by a substitution: dropped whole, so they fall back to the cwd.
+    assert check_live_git_writes(f"W={_LIVE}/$(echo sub); cd $W && git add f", _BG,
+                                 cwd=scratch, live=_LIVE) is None
+    assert check_live_git_writes(f"W=$({ _LIVE }); cd $W && git add f", _BG,
+                                 cwd=scratch, live=_LIVE) is None
+
+    # The word boundary, and the two spellings a shell follows.
+    assert check_live_git_writes(f"W=/tmp/g; WD={_LIVE}; cd $WD && git commit -m x",
+                                 _BG, cwd=scratch, live=_LIVE)
+    assert check_live_git_writes(f"W={_LIVE}; cd ${{W}} && git add f", _BG,
+                                 cwd=scratch, live=_LIVE)
+    assert check_live_git_writes(f"X={_LIVE}; W=$X; cd $W && git add f", _BG,
+                                 cwd=scratch, live=_LIVE)
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and callable(_fn):

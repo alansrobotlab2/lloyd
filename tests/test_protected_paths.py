@@ -873,3 +873,55 @@ def test_the_lane_leaves_every_other_checkout_alone(tmp_path):
     head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=worktree,
                           capture_output=True, text=True).stdout.strip()
     assert head, "the fixture worktree has no commit to check"
+
+
+def test_a_variable_holding_the_live_path_is_still_the_live_checkout(tmp_path):
+    """#2801 clause 3: reading an assignment has to land on the tree the literal
+    spelling names, in both directions.
+
+    The first four arms are the fail-closed half, and they are the reason this node
+    lives beside `_mk_repo` rather than in the discrimination file: `cwd` is the
+    *worktree*, so nothing about the dispatch directory points at production — the
+    only thing that makes these writes live is that the command's own `W=` says so.
+    Before #2801 all four refused as well, but for the wrong reason (the unresolved
+    `$W` was joined onto whatever `cwd` was), which is why a refusal alone was never
+    evidence the matcher had read the command.
+
+    The last two are the same two spellings aimed at the round's own worktree, with
+    `cwd` now pointing at the live tree, so the four refusals above cannot be
+    explained by the directory the call arrived in. The gate-level route
+    (`safety.check_bash_command`) is crossed in
+    `tests/test_safety_gate_discrimination.py`, which pins the same spellings against
+    the real `app.paths.LIVE_CHECKOUT`.
+    """
+    from app.harness.live_git_writes import check_live_git_writes
+
+    live = tmp_path / "lloyd"
+    _mk_repo(live)
+    (live / "architecture").mkdir(exist_ok=True)
+    worktree = tmp_path / "lloyd-work" / "SM_20261012_000000" / "home" / "lloyd"
+    _mk_repo(worktree)
+    bg = "20261011_233337_owedcheck_ac94"
+
+    for name, cmd in (
+            ("cd the assigned live tree", f"W={live}; cd $W && git add f.md"),
+            # One directory *inside* the checkout, still the same `HEAD` — the
+            # containment rule `test_the_lane_leaves_every_other_checkout_alone`
+            # pins for a literal, now pinned for a value that arrived by variable.
+            ("cd a directory inside it",
+             f"W={live / 'architecture'}; cd $W && git commit -m x"),
+            ("the -C spelling, quoted", f'W={live}; git -C "$W" commit -m x'),
+            ("the -C spelling, bare", f"W={live}; git -C $W add f.md"),
+    ):
+        refused = check_live_git_writes(cmd, bg, cwd=str(worktree), live=str(live))
+        assert refused, (name, cmd)
+        assert "live checkout" in refused and str(live) in refused, (name, refused)
+
+    for name, cmd in (
+            ("cd the round's worktree",
+             f"W={worktree}; cd $W && git add f.md && git commit -m x"),
+            ("the -C spelling at the worktree",
+             f'W={worktree}; git -C "$W" commit -m x'),
+    ):
+        assert check_live_git_writes(cmd, bg, cwd=str(live), live=str(live)) is None, \
+            (name, cmd)

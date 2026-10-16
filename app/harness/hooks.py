@@ -57,12 +57,20 @@ from typing import Any, Awaitable, Callable
 from app.harness import telemetry
 
 
-def _journal_deny(cb: Any, session_id: str, tool_name: str, deny: dict[str, Any]) -> None:
+def _journal_deny(cb: Any, session_id: str, tool_name: str, deny: dict[str, Any],
+                  tool_input: Any = None) -> None:
     """One durable row per PreToolUse deny (`denial_journal`). Never raises:
-    the deny is already decided and this is bookkeeping about it."""
+    the deny is already decided and this is bookkeeping about it.
+
+    `tool_input` is carried across because the deny dict cannot hold the refused
+    request: the hook contract is one reason string, capped at 400 characters in the
+    journal, so a row written from `deny` alone can never name the command that
+    produced it (#2801 clause 5).
+    """
     try:
         from app.harness import denial_journal
-        denial_journal.record_hook_deny(cb, session_id=session_id, tool=tool_name, deny=deny)
+        denial_journal.record_hook_deny(cb, session_id=session_id, tool=tool_name,
+                                        deny=deny, tool_input=tool_input)
     except Exception:  # noqa: BLE001
         pass
 
@@ -250,13 +258,13 @@ class HookRegistry:
                         ),
                     }
                 }
-                _journal_deny(cb, session_id, tool_name, denied)
+                _journal_deny(cb, session_id, tool_name, denied, tool_input)
                 return denied
             if not out:
                 continue
             hso = out.get("hookSpecificOutput") or {}
             if hso.get("permissionDecision") == "deny":
-                _journal_deny(cb, session_id, tool_name, out)
+                _journal_deny(cb, session_id, tool_name, out, tool_input)
                 return out
             if deliver is None and hso.get("skillDeliver"):
                 deliver = out
