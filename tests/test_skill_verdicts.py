@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -6244,3 +6245,224 @@ def test_check_prints_the_expiry_the_row_is_actually_measured_on(store, tmp_path
     assert _date(bnd_latest) not in bound_line, (
         "printing decided_at + 60 would show a date 45 days later than the one the row "
         f"is evaluated against: {bound_line}")
+
+
+# ── #2828: naming the fileless reopens ───────────────────────────────────────
+#
+# `ledger_only_keys` excludes a key its verdict's reopen has just released, and a released
+# fileless key emitted no `REOPEN` line either — that token is printed once per scanned
+# file, and there is no file — so the night a fileless verdict's 60-day leg came due, `check`
+# reported only the fileless count getting smaller. Everything below is a fixture ledger and a
+# fixture candidate directory; no test here reads or writes `_pipeline/skills/`. The three keys
+# are named after live ledger keys (#2644's seven and two of its 86) so the prose below names
+# the population the line exists for, not a synthetic one.
+
+EXPIRED_FILELESS_KEY = "seq-2-bash-other-bash-fs"
+YOUNG_FILELESS_KEY = "Bash/network"
+EXPIRED_BACKED_KEY = "Read/timeout"
+
+
+def ledger_reopened(out: str) -> list[str]:
+    return [ln for ln in out.splitlines() if ln.startswith(f"{sv.LEDGER_REOPENED_LABEL}: ")]
+
+
+def test_check_names_only_the_fileless_key_whose_date_leg_has_passed(tmp_path, capsys):
+    """Clause 1: two fileless terminal keys one day either side of nothing, and one name.
+
+    The fixture is the whole clause: one row anchored 61 days ago (past
+    `sv.REOPEN_AFTER_DAYS`, so `reopen_reason` releases it) and one at 30 days (still
+    binding), both with no candidate file, over a directory that holds only the file-backed
+    key. The 61-day key is named by the new line and absent from `ledger_only_keys`; the
+    30-day key is the reverse. That swap is the assertion — a line that named every fileless
+    key, or every expired ledger row regardless of files, passes nothing here, and 31 days
+    of daylight between the two fixtures means no rounding of the window can move either
+    one into the other's bucket.
+    """
+    cands = tmp_path / "candidates"
+    hand_candidate(cands, "candidate-bash-logic-20261012.md", BACKED_KEY, 1)
+    store = tmp_path / "verdicts.jsonl"
+    write_rows(store, [
+        ledger_row(BACKED_KEY, "rejected_false_positive"),
+        ledger_row(EXPIRED_FILELESS_KEY, "reviewed_no_skill",
+                   source_candidate="candidate-seq-2-bash-other-bash-fs-20260927.md",
+                   decided_at=_days_ago(61)),
+        ledger_row(YOUNG_FILELESS_KEY, "reviewed_no_skill", decided_at=_days_ago(30)),
+    ])
+
+    rc, out = read_back(store, cands, capsys)
+
+    assert ledger_reopened(out) == [f"{sv.LEDGER_REOPENED_LABEL}: 1 :: {EXPIRED_FILELESS_KEY}"], out
+    assert ledger_only(out) == [f"{sv.LEDGER_ONLY_LABEL}: 1 :: {YOUNG_FILELESS_KEY}"], out
+    assert EXPIRED_FILELESS_KEY not in ledger_only(out)[0], (
+        "the released key is still counted as a suppression the pipeline is applying; it "
+        "is not one — `terminal_verdict` hands the miner None for it tonight")
+    assert YOUNG_FILELESS_KEY not in ledger_reopened(out)[0], (
+        "a key inside its reopen window was named as reopened")
+    assert rc == 0, out
+
+
+def test_the_reopened_line_prints_its_zero_form_in_the_same_grammar(tmp_path, capsys):
+    """Clause 2: `0 :: none` on a quiet night, in `ledger_only_line`'s exact grammar.
+
+    Two things are pinned, and the second is the one a hand-rolled line gets wrong. The zero
+    case prints at all — a line that appears only when something reopened cannot tell a quiet
+    night from a `check` whose version never ran the comparison, which is the failure #2644
+    recorded for the line beside it. And the shape is the neighbour's: `label: <count> ::
+    <names or none>`, count then separator then payload, so one grep pattern and one reader
+    routine cover both. An `n=` or a dropped `::` here would print the right fact in a form
+    step 0 was never told to read.
+    """
+    cands = tmp_path / "candidates"
+    hand_candidate(cands, "candidate-bash-logic-20261012.md", BACKED_KEY, 1)
+    store = tmp_path / "verdicts.jsonl"
+    write_rows(store, [ledger_row(BACKED_KEY, "rejected_false_positive"),
+                       ledger_row(YOUNG_FILELESS_KEY, "reviewed_no_skill",
+                                  decided_at=_days_ago(30))])
+
+    rc, out = read_back(store, cands, capsys)
+
+    assert ledger_reopened(out) == [f"{sv.LEDGER_REOPENED_LABEL}: 0 :: none"], out
+    shape = re.compile(r"^\S+: \d+ :: .+$")
+    for line in ledger_reopened(out) + ledger_only(out):
+        assert shape.fullmatch(line), f"grammar drifted from the pair: {line!r}"
+    assert len(ledger_reopened(out)) == 1, out
+    assert rc == 0, out
+
+
+def test_the_reopened_line_sits_directly_above_the_totals_and_moves_no_count(tmp_path, capsys):
+    """Clause 3: position, totals text and exit code, all three, on one fixture set.
+
+    Position is asserted as *directly* above (`index(totals) - 1`), not merely above: the
+    nightly greps read the two counts off `splitlines()[-1]`, so the totals may not move and
+    the new number has exactly one row that is not among them. The totals' text is pinned by
+    differential — dropping the released row out of the ledger must leave a byte-identical
+    totals line, which is what proves the new key entered neither count (the totals are per
+    FILE, the new line per KEY, and a unit error here is the #2644 mistake all over again).
+
+    The exit code is pinned at both ends: 0 while the line names a key, because releasing a
+    verdict is not a failure `check` evaluates; and non-zero where it has always been
+    non-zero, an absent ledger beside adjudicated candidates, with the new line still printed
+    and the totals still last. `LEDGER_ABSENT` stays the only thing that moves the status.
+    """
+    cands = tmp_path / "candidates"
+    hand_candidate(cands, "candidate-bash-logic-20261012.md", BACKED_KEY, 1)
+    totals = "checked: 1  skipped_by_verdict: 1"
+    with_key = tmp_path / "with.jsonl"
+    without_key = tmp_path / "without.jsonl"
+    write_rows(with_key, [ledger_row(BACKED_KEY, "rejected_false_positive"),
+                          ledger_row(EXPIRED_FILELESS_KEY, "reviewed_no_skill",
+                                     decided_at=_days_ago(61))])
+    write_rows(without_key, [ledger_row(BACKED_KEY, "rejected_false_positive")])
+
+    rc_with, out_with = read_back(with_key, cands, capsys)
+    rc_without, out_without = read_back(without_key, cands, capsys)
+
+    lines = out_with.splitlines()
+    assert lines[-1] == totals, out_with
+    assert lines[-2] == f"{sv.LEDGER_REOPENED_LABEL}: 1 :: {EXPIRED_FILELESS_KEY}", out_with
+    assert lines[lines.index(totals) - 1] == lines[-2], (
+        "the new line must be the one row above the totals, not merely somewhere above them")
+    assert out_without.splitlines()[-1] == totals, (
+        "the totals moved when a released fileless key appeared in the ledger")
+    assert out_without.splitlines()[-2] == f"{sv.LEDGER_REOPENED_LABEL}: 0 :: none", out_without
+    assert rc_with == rc_without == 0, (out_with, rc_with, rc_without)
+
+    absent_cands = tmp_path / "absent-cands"
+    absent_cands.mkdir()
+    raw_candidate(absent_cands, "candidate-bash-timeout-20260922.md", "reviewed_no_skill")
+    rc_absent, out_absent = read_back(tmp_path / "gone" / "verdicts.jsonl", absent_cands, capsys)
+    assert rc_absent != 0, "the one alarm that has always moved the status stopped moving it"
+    assert any(ln.startswith("LEDGER_ABSENT") for ln in out_absent.splitlines()), out_absent
+    assert out_absent.splitlines()[-1] == "checked: 1  skipped_by_verdict: 0", out_absent
+    assert ledger_reopened(out_absent) == [f"{sv.LEDGER_REOPENED_LABEL}: 0 :: none"], out_absent
+
+
+def test_a_released_key_with_a_candidate_file_keeps_only_its_per_file_reopen_line(
+        tmp_path, capsys):
+    """Clause 4's exclusion: a released key WITH a file is already named, loudly, per file.
+
+    `cmd_check`'s loop over `scan_candidates` prints `REOPEN <key> :: <reason>` for it, so a
+    second name in the key-level line would report one reopen twice — and the two units would
+    then disagree about how many reopens tonight's run has to decide. The fileless key in the
+    same fixture proves the exclusion is about the file and not about the expiry: same 61-day
+    age, one has a file and one does not, and only the fileless one is named by the new line.
+    """
+    cands = tmp_path / "candidates"
+    hand_candidate(cands, "candidate-read-timeout-20261012.md", EXPIRED_BACKED_KEY, 12)
+    store = tmp_path / "verdicts.jsonl"
+    write_rows(store, [
+        ledger_row(EXPIRED_BACKED_KEY, "reviewed_no_skill", decided_at=_days_ago(61)),
+        ledger_row(EXPIRED_FILELESS_KEY, "reviewed_no_skill", decided_at=_days_ago(61)),
+    ])
+
+    rc, out = read_back(store, cands, capsys)
+
+    assert f"REOPEN {EXPIRED_BACKED_KEY} :: expired after {sv.REOPEN_AFTER_DAYS}d" in out, out
+    assert ledger_reopened(out) == [f"{sv.LEDGER_REOPENED_LABEL}: 1 :: {EXPIRED_FILELESS_KEY}"], out
+    assert EXPIRED_BACKED_KEY not in ledger_reopened(out)[0], (
+        "a key with a scanned candidate file was named twice for one reopen")
+    assert ledger_only(out) == [f"{sv.LEDGER_ONLY_LABEL}: 0 :: none"], out
+    assert out.splitlines()[-1] == "checked: 1  skipped_by_verdict: 0", out
+    assert rc == 0, out
+
+
+def test_the_reopened_names_are_reopen_reasons_and_not_a_second_sixty_day_count(
+        tmp_path, capsys):
+    """Clause 4's other half: the new path lifts on the anchor `reopen_reason` uses.
+
+    A hand-written leg would read `decided_at`, the stamp sitting beside the key. #2746 moved
+    the date leg to `first_decided_at` precisely because a nightly re-confirmation pushes
+    `decided_at` 60 days further out every night it runs, so this fixture is the two answers
+    that differ: anchored 90 days ago, re-confirmed 5 days ago. `reopen_reason` releases it and
+    the line must name it; arithmetic on `decided_at` would sit on this key for another month.
+    A second 60-day computation beside the shipped one is also the way the two lines drift
+    apart, which is why `cmd_check` feeds both of them from one `fileless_terminal_split` call
+    and the two wrapper functions below are asserted to agree with what was printed.
+    """
+    cands = tmp_path / "candidates"
+    hand_candidate(cands, "candidate-bash-logic-20261012.md", BACKED_KEY, 1)
+    store = tmp_path / "verdicts.jsonl"
+    anchored = ledger_row(EXPIRED_FILELESS_KEY, "reviewed_no_skill",
+                          decided_at=_days_ago(5))
+    anchored["first_decided_at"] = _days_ago(90)
+    write_rows(store, [ledger_row(BACKED_KEY, "rejected_false_positive"), anchored])
+
+    rc, out = read_back(store, cands, capsys)
+
+    row = sv.load_verdicts(store)[EXPIRED_FILELESS_KEY]
+    assert sv.reopen_reason(row, occurrences=0) == f"expired after {sv.REOPEN_AFTER_DAYS}d", (
+        "fixture: the row must be released by the shipped rule, and only by it")
+    assert ledger_reopened(out) == [f"{sv.LEDGER_REOPENED_LABEL}: 1 :: {EXPIRED_FILELESS_KEY}"], out
+    assert ledger_only(out) == [f"{sv.LEDGER_ONLY_LABEL}: 0 :: none"], out
+
+    table = sv.load_verdicts(store)
+    rows = sv.scan_candidates(cands, table=table)
+    assert sv.ledger_reopened_terminal_keys(table, rows) == [EXPIRED_FILELESS_KEY]
+    assert sv.ledger_only_terminal_keys(table, rows) == []
+    binding, released = sv.fileless_terminal_split(table, rows)
+    assert binding == [] and released == [EXPIRED_FILELESS_KEY], (
+        "the two printed lines are one partition of one scan: a key may be named by neither "
+        "half, or by both, only if the split itself has stopped being a partition")
+    assert rc == 0, out
+
+
+def test_the_runbook_step_zero_carries_the_reopened_names_too():
+    """Clause 5: the runbook, on the surface a nightly actually executes, in prose.
+
+    Read from the vault like the step-0 test above, and flattened for the same reason —
+    markdown wraps at 80 columns, and a test that pinned the wrapping would be a test of the
+    editor's line width. Both tokens are interpolated from their constants rather than typed,
+    so renaming either label turns the runbook red instead of teaching a nightly to look for a
+    string the code stopped printing. The assertions are the three things step 0 has to say:
+    that the line exists and sits beside `ledger_only_keys`, that its names go into the report,
+    and that a released key is a decision to make rather than a suppression to honour.
+    """
+    text = MINING_RUNBOOK.read_text(encoding="utf-8")
+    step0 = text[text.index("### 0."):text.index("### 1.")]
+    flat = " ".join(step0.split())
+
+    assert f"`{sv.LEDGER_REOPENED_LABEL}`" in flat, flat
+    assert f"`{sv.LEDGER_ONLY_LABEL}`" in flat, flat
+    assert "into the same result line" in flat, flat
+    assert "re-minted deliberately or left to be re-mined" in flat, flat
+    assert f"`{sv.LEDGER_REOPENED_LABEL}: 0 :: none` is the quiet night" in flat, flat

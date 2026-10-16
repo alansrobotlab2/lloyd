@@ -2885,6 +2885,69 @@ def scan_candidates(candidates_dir: Path, store: Path | str | None = None, *,
 #: `tests/test_mine_trajectories.py::test_the_runbook_reports_the_flag_instead_of_counting_buckets`.
 LEDGER_ONLY_LABEL = "ledger_only_keys"
 
+#: The label `check` prints for the fileless terminal keys whose verdict the reopen rules
+#: have just RELEASED (#2828). The complement of `ledger_only_keys`, and named as a constant
+#: beside it for the same reason: the runbook's step 0 quotes the token a run must read, and
+#: `tests/test_skill_verdicts.py` builds the quoted line from this value, so a rename turns
+#: the runbook red rather than teaching a nightly to hunt for a string the code stopped
+#: printing.
+LEDGER_REOPENED_LABEL = "ledger_reopened_keys"
+
+
+def fileless_terminal_split(table: dict[str, dict],
+                            rows: list[dict]) -> tuple[list[str], list[str]]:
+    """The two halves of one population, partitioned once by the lift rule.
+
+    Every latest-wins ledger key under a terminal verdict that **no scanned candidate file
+    names** lands in exactly one of the two lists: still binding (`[0]`, printed as
+    `ledger_only_keys`) or released by `reopen_reason` tonight (`[1]`, printed as
+    `ledger_reopened_keys`). One scan, one predicate, two buckets — which is the point: the
+    two lines are the same set split by the same call, so they cannot drift apart and no key
+    can be named by both or by neither. A second 60-day computation beside the first is
+    exactly how that drift starts, and #2746 had already moved the date leg onto
+    `date_leg_anchor`, so a re-derived expiry would disagree with the gate that decides
+    whether the verdict binds.
+
+    The lift is asked with `occurrences=0` for the reason spelled out in
+    `ledger_only_terminal_keys`: a key with no file has no snapshot, so nothing can measure
+    >10x growth against it and only the date leg can ever release it. That is the same
+    `occurrences` value `ledger_only_terminal_keys` has always passed, so the partition
+    reproduces #2644's line byte for byte.
+    """
+    named = {row["pattern_key"] for row in rows}
+    binding: list[str] = []
+    reopened: list[str] = []
+    for key, row in table.items():
+        if not is_terminal(row) or key in named:
+            continue
+        (reopened if reopen_reason(row, occurrences=0) is not None else binding).append(key)
+    # Sorted, so both lines are stable across runs and a grep can diff one night's names
+    # against the next.
+    return sorted(binding), sorted(reopened)
+
+
+def ledger_reopened_terminal_keys(table: dict[str, dict], rows: list[dict]) -> list[str]:
+    """Fileless terminal keys whose verdict `reopen_reason` releases tonight.
+
+    The half of the population that printed in no line at all until #2828. A lifted key with
+    no candidate file emits no `REOPEN` line either — `REOPEN` is printed once per *scanned
+    file* (`cmd_check`'s loop over `scan_candidates`), and there is no file to loop over — so
+    the night a fileless verdict's date leg came due, `check` reported only `ledger_only_keys`
+    getting smaller. A shrinking count there is true and says nothing usable: the verdict
+    stopped binding, which means the miner proposes that pattern again tonight and step 0's
+    reader has no name to carry into the report and no way to tell a re-mint worth doing from
+    one worth refusing. #2644's owed clause 2 was ruled LEFT STANDING on 2026-10-16 — no bulk
+    re-adjudication, no bulk tombstoning — so the per-key decision is exactly what this line
+    exists to make possible, and it names every key with no cap for the same reason
+    `ledger_only_keys` prints 86 names unabridged.
+
+    Live shape on 2026-10-16, read through this command: `ledger_only_keys: 86 :: …` against
+    `ledger_reopened_keys: 0 :: none` (129 latest-wins keys, 97 terminal, 86 of them fileless).
+    None of that cohort has reached its 60-day leg yet, so the first night this line names a
+    real key is a future run, not this one.
+    """
+    return fileless_terminal_split(table, rows)[1]
+
 
 def ledger_only_terminal_keys(table: dict[str, dict], rows: list[dict]) -> list[str]:
     """Latest-wins ledger keys under a terminal verdict that no scanned candidate names.
@@ -2912,18 +2975,17 @@ def ledger_only_terminal_keys(table: dict[str, dict], rows: list[dict]) -> list[
     `mine-trajectories.py` applies as it writes) refuses to suppress, and a line that
     named a lifted key would report a suppression the pipeline is not applying — and
     `skipped_by_verdict` already excludes a lifted key for the file-backed half
-    (`scan_candidates` sets `blocked` False). `occurrences=0` because there is no snapshot
-    to read a current count from, so only the 60-day expiry can lift one: a fileless key
-    has nothing to measure >10x growth against, which is owed clause 1 of #2644 and stays
-    that ruling's to settle. What that lift leaves unsaid is a known gap, recorded on the
-    item rather than papered over here: a lifted key with no file prints in no line at all
-    (`REOPENED` is emitted per scanned file), so the night its expiry falls due reports the
-    absence of a suppression without naming the reopen.
+    (`scan_candidates` sets `blocked` False). The split asks that lift with `occurrences=0`
+    because there is no snapshot to read a current count from, so only the 60-day expiry can
+    release one: a fileless key has nothing to measure >10x growth against, which is owed
+    clause 1 of #2644 and stays that ruling's to settle. What that lift used to leave unsaid
+    is said by the other half of the same scan: a released key with no file prints no `REOPEN`
+    line either (`REOPEN` is emitted per scanned file, and there is no file), so #2828 added
+    `ledger_reopened_terminal_keys` / `LEDGER_REOPENED_LABEL` to name it. Both lines now come
+    from `fileless_terminal_split`, so the exclusion here and that line are one predicate read
+    twice, not two rules that can disagree.
     """
-    named = {row["pattern_key"] for row in rows}
-    return sorted(key for key, row in table.items()
-                  if is_terminal(row) and key not in named
-                  and reopen_reason(row, occurrences=0) is None)
+    return fileless_terminal_split(table, rows)[0]
 
 
 def ledger_only_line(keys: list[str]) -> str:
@@ -2940,6 +3002,23 @@ def ledger_only_line(keys: list[str]) -> str:
     night with nothing fileless from a comparison nobody ran.
     """
     return (f"{LEDGER_ONLY_LABEL}: {len(keys)} :: "
+            + (", ".join(keys) if keys else "none"))
+
+
+def ledger_reopened_line(keys: list[str]) -> str:
+    """The one line for the released keys: `ledger_reopened_keys: 2 :: a, b`.
+
+    Same grammar and the same unit as `ledger_only_line` — keys, not files, and every name
+    printed with no cap — because a nightly's step 0 reads the two lines as one pair, and a
+    second grammar beside the first would be a second thing to remember at 3 a.m. It prints
+    `0 :: none` for the same reason `ledger_only_line` does: a line that appears only when
+    something reopened cannot tell a quiet night from a `check` whose version never compared
+    anything, which is the failure #2644 recorded for the line it sits beside.
+
+    Named by the two tests that read it: the count is the number of keys, and the names are
+    what a run carries into its report.
+    """
+    return (f"{LEDGER_REOPENED_LABEL}: {len(keys)} :: "
             + (", ".join(keys) if keys else "none"))
 
 
@@ -3039,7 +3118,14 @@ def cmd_check(args: argparse.Namespace) -> int:
     # counts off `splitlines()[-1]` (see the comment on the totals line below), and this is
     # a third number in a different unit — keys, not files — so displacing the totals to
     # publish it would break a reader that is not looking for it (#2644 clause 1).
-    print(ledger_only_line(ledger_only_terminal_keys(table, rows)))
+    #
+    # ONE split feeds both key lines, so the pair is a partition and not two queries: the
+    # keys `ledger_only_keys` drops are precisely the ones `ledger_reopened_keys` names
+    # (#2828). Nothing here changes `exit_code` — the release of a verdict is not a failure
+    # of `check`, and the one finding that has ever moved the status stays `LEDGER_ABSENT`.
+    binding_keys, released_keys = fileless_terminal_split(table, rows)
+    print(ledger_only_line(binding_keys))
+    print(ledger_reopened_line(released_keys))
     print(f"checked: {len(rows)}  skipped_by_verdict: {len(skipped)}")
     return exit_code
 
