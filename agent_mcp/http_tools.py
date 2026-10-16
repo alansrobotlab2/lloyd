@@ -32,34 +32,23 @@ WEB_USER_AGENT = (
 WEB_TIMEOUT_S = 15.0
 WEB_MAX_RESPONSE_BYTES = 2_000_000
 
-_PRIVATE_IP_PATTERNS = [
-    re.compile(r"^127\."),
-    re.compile(r"^10\."),
-    re.compile(r"^172\.(1[6-9]|2\d|3[01])\."),
-    re.compile(r"^192\.168\."),
-    re.compile(r"^0\."),
-    re.compile(r"^169\.254\."),
-    re.compile(r"^::1$"),
-    re.compile(r"^fc00:", re.IGNORECASE),
-    re.compile(r"^fd", re.IGNORECASE),
-    re.compile(r"^fe80:", re.IGNORECASE),
-]
-
-
-def _is_private_host(hostname: str) -> bool:
-    if hostname.lower() == "localhost":
-        return True
-    return any(p.match(hostname) for p in _PRIVATE_IP_PATTERNS)
-
-
 def _is_loopback_host(hostname: str) -> bool:
-    """The machine itself, by any of its names.
+    """The machine itself, by the three spellings the allowance recognises.
 
     `http_request` deliberately allows loopback so the agent can drive local
     services; `127.0.0.1` and `localhost` are the same host and must be
     treated identically. Previously only `127.` was allowed, so
     `http://localhost:8080/x` was blocked while `http://127.0.0.1:8080/x`
     went through.
+
+    This one stays a text match on purpose while `egress._is_private_host`
+    resolves (#2584). It is an exemption, so widening it is a decision rather than
+    a bug fix: a name resolving to loopback by some other spelling —
+    `localhost.localdomain`, this box's own hostname — is refused as private here,
+    where `browser.py`'s resolving `_is_loopback_host` would allow it. Whether the
+    allowance should reach "any name resolving to loopback" is a ruling on
+    #2584's list, not a change to smuggle in beside the fix; the narrowness is
+    pinned by `test_the_loopback_allowance_is_still_a_text_match`.
     """
     h = hostname.lower()
     return h == "localhost" or h.startswith("127.") or h == "::1"
@@ -312,6 +301,40 @@ def _final_url(response, requested: str) -> str:
     return str(getattr(response, "url", "") or requested)
 
 
+def _landed_hop_refusal(response, *, loopback_ok: bool = False) -> str:
+    """Why this response's hop chain may not be handed back, or "" when it may.
+
+    #2584. The pre-flight check asks once, about the hostname in the URL the
+    caller typed; `follow_redirects=True` then lets httpx hop wherever the server
+    points, and the body was returned keyed on `_final_url` with no second look.
+    A public page answering `302 → http://localhost.localdomain:8000/secret`
+    therefore handed a local service's response back as tool output with no DNS
+    trickery and no short TTL — the clean first hop was the only spelling the
+    pre-flight check ever saw.
+
+    Every hop is asked, each intermediate 3xx and the landed one, because the
+    landed one is where the bytes came from. The host comes from
+    `egress.host_of`, the same extraction the destination table uses, so the two
+    cannot disagree about what a host is; the answer comes from
+    `egress._is_private_host`, the same resolving predicate the pre-flight check
+    and the destination floor use.
+
+    `loopback_ok` is `http_request`'s sanctioned local-service allowance applied
+    per hop: one local service redirecting to another is still the box driving
+    itself, while a hop to a LAN address is refused with the allowance in force.
+    """
+    from agent_mcp import egress
+
+    for hop in [*(getattr(response, "history", None) or ()), response]:
+        host = egress.host_of(str(getattr(hop, "url", "") or ""))
+        if not host:
+            continue
+        if egress._is_private_host(host) and not (
+                loopback_ok and _is_loopback_host(host)):
+            return f'Blocked — private/internal hostname "{host}"'
+    return ""
+
+
 # A non-HTML error body is already the message, but it is also what an attacker
 # or a broken server controls: cap it, collapse it onto one line, and never
 # assume the declared content-type matches the bytes.
@@ -413,12 +436,15 @@ def _http_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 50000
     if not verdict.allowed:
         return json.dumps({"error": verdict.reason})
     hostname = parsed.hostname or ""
-    if _is_private_host(hostname):
+    if egress._is_private_host(hostname):
         return json.dumps({"error": f'Blocked — private/internal hostname "{hostname}"'})
     headers = {"User-Agent": WEB_USER_AGENT, "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
     try:
         with make_sync_http_client(timeout=WEB_TIMEOUT_S, follow_redirects=True, verify=True) as client:
             response = client.get(url, headers=headers)
+        refused = _landed_hop_refusal(response, loopback_ok=False)
+        if refused:
+            return json.dumps({"error": refused})
     except httpx.TimeoutException:
         return json.dumps({"error": f"Timed out after {WEB_TIMEOUT_S}s"})
     except Exception as exc:
@@ -523,7 +549,7 @@ def _http_request(method: str, url: str, headers: dict | None = None, body: str 
     verdict = egress.guard("http_request", url, loopback_ok=loopback)
     if not verdict.allowed:
         return json.dumps({"error": verdict.reason})
-    if _is_private_host(hostname) and not loopback:
+    if egress._is_private_host(hostname) and not loopback:
         return json.dumps({"error": f'Blocked — private/internal hostname "{hostname}"'})
     # TLS verification is on for everything except the machine's own loopback,
     # where local services legitimately serve self-signed certificates. It used
@@ -532,6 +558,9 @@ def _http_request(method: str, url: str, headers: dict | None = None, body: str 
     try:
         with make_sync_http_client(timeout=timeout_, verify=not loopback, follow_redirects=True) as client:
             resp = client.request(method_, url, headers=headers or {}, content=body.encode() if body else b"")
+            refused = _landed_hop_refusal(resp, loopback_ok=loopback)
+            if refused:
+                return json.dumps({"error": refused})
             return json.dumps({"status_code": resp.status_code, "headers": dict(resp.headers), "body": resp.text})
     except Exception as exc:
         return json.dumps({"error": f"Request failed: {exc}"})

@@ -14,22 +14,27 @@ production and taught the agent to distrust the tool:
     to fetch an index page and follow its links.
 
 Network is never touched: the HTTP client is stubbed and the extraction path
-is exercised directly.
+is exercised directly. Since #2584 the private-space predicate resolves, so an
+autouse fixture in this file stubs `agent_mcp.egress._resolve_addrs` as well —
+without it, every fetch test below that names a plausible host would put a live
+question to this box's resolver while still asserting nothing about it.
 """
 
 from __future__ import annotations
 
 import json
+import socket
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agent_mcp import http_tools
+from agent_mcp import _shared, egress, http_tools
 
 
 # A realistically-sized document. Trafilatura scores very short pages as
@@ -641,3 +646,284 @@ def test_corrupt_pdf_reports_an_error_not_a_crash(monkeypatch):
     monkeypatch.setattr(http_tools, "make_sync_http_client", lambda **kw: _FakeClient(resp))
     out = json.loads(http_tools._http_fetch("https://example.com/broken.pdf"))
     assert "error" in out and "PDF" in out["error"]
+
+
+# ── #2584: the destination's ADDRESS, not its spelling ───────────────────────
+#
+# `http_fetch` and `http_request` used to decide "private?" by matching the TEXT of
+# the hostname against ten prefixes, while the browser lane asked the resolver. The
+# HTTP lane is the one an injected URL reaches for free — no lease, no Playwright
+# session — so it was the weaker of the two: `localhost.localdomain`, which
+# resolves 127.0.0.1 and ::1 on this box, was fetched rather than refused. Both
+# lanes now call `egress._is_private_host`, which resolves, and every case below is
+# pinned against the real tool rather than against a predicate: a predicate agreeing
+# with itself is not what leaked.
+
+#: Text that matched none of the ten prefixes and resolves to loopback here.
+REBOUND_NAME = "localhost.localdomain"
+
+#: A name resolving into the LAN rather than to this machine: `http_request`'s
+#: loopback allowance must not swallow it, and does not.
+LAN_NAME = "lan-box.example.invalid"
+
+#: The public first hop of the redirect chain.
+PUBLIC_NAME = "public-box.example.invalid"
+
+_LOOPBACK_LANDING = "SECRET METADATA BODY"
+
+
+@pytest.fixture(autouse=True)
+def _offline_resolver(monkeypatch):
+    """Answer the resolver as "public" for every name, for every test in this file.
+
+    The predicate these tools now share resolves, so without this pin the fetch
+    tests above — which stub the client but name real-looking hosts — would each
+    put a live question to the box's resolver. That would quietly contradict this
+    module's "Network is never touched" claim rather than break an assertion, which
+    is the worst way for a suite to start depending on DNS. A test that wants a
+    private answer re-pins the seam with `_pin`, and
+    `test_the_http_lane_asks_the_resolver_exactly_once` fails if a lane ever grows a
+    second way to resolve.
+
+    The cache goes on both sides of the yield. `_is_private_host` is `lru_cached` by
+    host for the life of the process, so a node that pinned it to loopback would
+    otherwise hand the next node that answer, and a refusal assertion would hold on
+    some earlier node's pin instead of on this one's. `_pin` drops it again for the
+    same reason.
+    """
+    egress._is_private_host.cache_clear()
+    monkeypatch.setattr(egress, "_resolve_addrs", lambda host: ())
+    yield
+    egress._is_private_host.cache_clear()
+
+
+def _pin(monkeypatch, table: dict[str, tuple[str, ...]]):
+    """Resolve from `table`, every other name resolving to nothing, cache and all."""
+    monkeypatch.setattr(egress, "_resolve_addrs", lambda host: table.get(host, ()))
+    egress._is_private_host.cache_clear()
+
+
+def _error_of(raw: str) -> str:
+    return json.loads(raw).get("error", "")
+
+
+def test_http_fetch_refuses_a_name_that_resolves_to_loopback(monkeypatch):
+    """Clause 1. `http://localhost.localdomain/` on `http_fetch`: the refusal the
+    lane already worded, and no client built — the check sits above
+    `make_sync_http_client`, so the answer arrives before anything is connected to."""
+    _pin(monkeypatch, {REBOUND_NAME: ("127.0.0.1", "::1")})
+    built: list[str] = []
+    monkeypatch.setattr(http_tools, "make_sync_http_client",
+                        lambda *a, **k: built.append(str(k.get("url") or a)))
+
+    raw = http_tools._http_fetch(f"http://{REBOUND_NAME}/", max_chars=1000)
+
+    assert _error_of(raw) == f'Blocked — private/internal hostname "{REBOUND_NAME}"', raw
+    assert built == [], f"a client was constructed for a refused destination: {built}"
+
+
+def test_http_fetch_refuses_this_boxes_own_hostname(monkeypatch):
+    """Clause 1's second specimen: a name whose text says nothing, resolving to
+    this machine's LAN address. The pattern list could not see it and
+    `harness.egress_policy.enforce` being off is no excuse — the lane predicate is
+    the live answer in that posture, which is the whole reason #2584 was filed."""
+    own = socket.gethostname().split(".")[0]
+    _pin(monkeypatch, {own: ("192.168.50.108", "100.105.113.88")})
+    monkeypatch.setattr(http_tools, "make_sync_http_client",
+                        lambda *a, **k: pytest.fail("a client was built for a LAN host"))
+
+    raw = http_tools._http_fetch(f"http://{own}/", max_chars=1000)
+    assert _error_of(raw) == f'Blocked — private/internal hostname "{own}"', raw
+
+
+def test_the_numeric_spellings_the_prefix_list_matched_are_still_refused(monkeypatch):
+    """The half of the deleted pattern list that was working, kept working.
+
+    These are answered from `ipaddress` without any resolver answer — so they stay
+    refused on a box whose DNS is down, which is the property a purely resolving
+    check would have thrown away. `_offline_resolver` is in force here, returning
+    nothing for every name.
+    """
+    for host in ("127.0.0.1", "10.0.0.5", "192.168.1.20", "169.254.169.254",
+                 "172.16.0.9", "0.0.0.0"):
+        raw = http_tools._http_fetch(f"http://{host}/", max_chars=1000)
+        assert _error_of(raw) == f'Blocked — private/internal hostname "{host}"', (host, raw)
+
+    # The bracketed spelling, which is the one `urlparse().hostname` can read: the
+    # bare `http://::1/` has no hostname at all, and catching THAT is the floor's
+    # job under enforcement — `test_bracketed_ipv6_literal_is_refused` next door.
+    raw = http_tools._http_fetch("http://[::1]:8443/y", max_chars=1000)
+    assert _error_of(raw) == 'Blocked — private/internal hostname "::1"', raw
+
+
+def test_http_request_refuses_a_name_resolving_to_the_lan(monkeypatch):
+    """Clause 2. The same hole on the other verb, with an address that is private
+    but NOT loopback, so the sanctioned local-service allowance cannot be the
+    reason it gets through."""
+    _pin(monkeypatch, {LAN_NAME: ("192.168.50.108",)})
+    monkeypatch.setattr(http_tools, "make_sync_http_client",
+                        lambda *a, **k: pytest.fail("a client was built for a LAN host"))
+
+    raw = http_tools._http_request("GET", f"http://{LAN_NAME}/api")
+    assert _error_of(raw) == f'Blocked — private/internal hostname "{LAN_NAME}"', raw
+
+
+def test_the_loopback_allowance_is_still_a_text_match(monkeypatch):
+    """Clause 2's deliberate narrowness, pinned rather than discovered mid-round.
+
+    `http_request`'s allowance serves exactly `localhost`, `127.*` and `::1`. So
+    `localhost.localdomain`, which resolves to loopback, is refused here as private
+    while the browser lane's resolving `_is_loopback_host` allows it: the two lanes
+    disagree on that one name on purpose, because this is an exemption and widening
+    it to "any name resolving to loopback" is the ruling #2584 owes, not a change to
+    smuggle beside a fix. The three spellings it does serve are answered from text
+    with no resolver answer at all — the pin below resolves none of them, and they
+    still reach the socket, which is the pre-fix behaviour for all three.
+
+    The node pins its own premise rather than inheriting one: this file's autouse
+    fixture resolves nothing, so run alone the refusal below rested on the cached
+    answer an earlier node's pin had left behind, and in file order the two
+    assertions could not disagree. `_pin` says what makes the first one true.
+    """
+    _pin(monkeypatch, {REBOUND_NAME: ("127.0.0.1", "::1")})
+    monkeypatch.setattr(http_tools, "make_sync_http_client",
+                        lambda *a, **k: pytest.fail("a client was built outside the allowance"))
+    assert egress._is_private_host(REBOUND_NAME) is True, \
+        f"the pin did not make {REBOUND_NAME} resolve to loopback"
+    raw = http_tools._http_request("GET", f"http://{REBOUND_NAME}:8000/x")
+    assert _error_of(raw) == f'Blocked — private/internal hostname "{REBOUND_NAME}"', raw
+
+    reached: list[str] = []
+
+    class _Local:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def request(self, method, url, headers=None, content=None):
+            reached.append(url)
+            return httpx.Response(204, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(http_tools, "make_sync_http_client", lambda *a, **k: _Local())
+    for host in ("localhost", "127.0.0.1", "[::1]"):
+        out = json.loads(http_tools._http_request("GET", f"http://{host}:9000/state"))
+        assert "error" not in out, (host, out)
+    assert reached == [f"http://{h}:9000/state" for h in
+                       ("localhost", "127.0.0.1", "[::1]")], reached
+
+
+def _redirect_transport(handler, seen: list[dict], calls: list[str]):
+    """A `make_sync_http_client` that injects a faked transport and records the call.
+
+    Only httpx's network layer is replaced. The real `_shared.make_sync_http_client`
+    builds the client, so httpx's own redirect handling, `response.history` and
+    `resolves` stay live, and the resilience wrappers stay in the path. `seen`
+    records what the seam was asked for, which is how the tests below can say the
+    injection went through it rather than around it.
+    """
+    real = _shared.make_sync_http_client
+    transport = httpx.MockTransport(lambda request: (calls.append(str(request.url)),
+                                                     handler(request))[1])
+
+    def factory(*args, **kwargs):
+        seen.append(dict(kwargs))
+        kwargs["transport"] = transport
+        return real(*args, **kwargs)
+
+    return factory
+
+
+def _public_to(handler_public: str):
+    """Handler: public first hop, one 302 to `handler_public`, then the payload."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == PUBLIC_NAME:
+            return httpx.Response(302, headers={"Location": handler_public})
+        return httpx.Response(200, text=_LOOPBACK_LANDING)
+    return handler
+
+
+def test_a_redirect_landing_on_loopback_returns_no_body(monkeypatch):
+    """Clause 5. Real `follow_redirects=True`, only the transport faked: a public
+    page 302s to `http://localhost.localdomain/secret` and the landed body must not
+    come back. The pre-flight check saw only the first hop's spelling, which is
+    clean — no DNS trickery and no short TTL was ever needed to reach this."""
+    _pin(monkeypatch, {REBOUND_NAME: ("127.0.0.1", "::1"),
+                       PUBLIC_NAME: ("93.184.216.34",)})
+    seen: list[dict] = []
+    calls: list[str] = []
+    monkeypatch.setattr(http_tools, "make_sync_http_client",
+                        _redirect_transport(_public_to(f"http://{REBOUND_NAME}/secret"),
+                                            seen, calls))
+
+    raw = http_tools._http_fetch(f"http://{PUBLIC_NAME}/page", max_chars=5000)
+
+    assert seen, "make_sync_http_client was never reached, so this bypassed the seam"
+    assert all(s.get("follow_redirects") is True for s in seen), seen
+    assert calls == [f"http://{PUBLIC_NAME}/page", f"http://{REBOUND_NAME}/secret"], \
+        f"httpx did not follow the redirect: {calls}"
+    assert _LOOPBACK_LANDING not in raw, raw
+    assert _error_of(raw) == f'Blocked — private/internal hostname "{REBOUND_NAME}"', raw
+
+
+def test_a_redirect_landing_on_the_lan_returns_no_body_from_http_request(monkeypatch):
+    """Clause 5 on the verb that holds the allowance: the allowance covers
+    loopback, so a hop into the LAN is refused with it in force."""
+    _pin(monkeypatch, {LAN_NAME: ("192.168.50.108",),
+                       PUBLIC_NAME: ("93.184.216.34",)})
+    seen: list[dict] = []
+    calls: list[str] = []
+    monkeypatch.setattr(http_tools, "make_sync_http_client",
+                        _redirect_transport(_public_to(f"http://{LAN_NAME}/x"),
+                                            seen, calls))
+
+    raw = http_tools._http_request("GET", f"http://{PUBLIC_NAME}/page")
+
+    assert seen and all(s.get("follow_redirects") is True for s in seen), seen
+    assert _LOOPBACK_LANDING not in raw, raw
+    assert _error_of(raw) == f'Blocked — private/internal hostname "{LAN_NAME}"', raw
+
+
+def test_a_local_to_local_redirect_still_serves_under_the_allowance(monkeypatch):
+    """Clause 5's other side, without which the hop check would be an allowance
+    revocation wearing a fix: one local service redirecting to another is the box
+    driving itself, and the bytes come back."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/redirect":
+            return httpx.Response(302, headers={"Location": "http://localhost:9001/done"})
+        return httpx.Response(200, text="LANDING PAGE BODY")
+
+    seen: list[dict] = []
+    calls: list[str] = []
+    monkeypatch.setattr(http_tools, "make_sync_http_client",
+                        _redirect_transport(handler, seen, calls))
+
+    raw = http_tools._http_request("GET", "http://127.0.0.1:9000/redirect")
+
+    out = json.loads(raw)
+    assert "error" not in out, raw
+    assert out["body"] == "LANDING PAGE BODY", raw
+    assert calls == ["http://127.0.0.1:9000/redirect", "http://localhost:9001/done"], calls
+
+
+def test_the_http_lane_asks_the_resolver_exactly_once(monkeypatch):
+    """The seam itself, pinned through the tool rather than the predicate.
+
+    The HTTP lane's private-space answer comes from `egress._resolve_addrs`, once
+    per destination, and from nothing else. That single fact is what keeps the rest
+    of this file off the network, and it fails the day a lane grows its own
+    resolver call — which is how one question came to have two answers."""
+    asked: list[str] = []
+
+    def _resolve(host):
+        asked.append(host)
+        return ("10.1.2.3",)
+
+    monkeypatch.setattr(egress, "_resolve_addrs", _resolve)
+
+    raw = http_tools._http_fetch("http://one-answer.example.invalid/", max_chars=1000)
+
+    assert _error_of(raw) == ('Blocked — private/internal hostname '
+                              '"one-answer.example.invalid"'), raw
+    assert asked == ["one-answer.example.invalid"], asked

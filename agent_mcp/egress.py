@@ -78,10 +78,12 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import sqlite3
 import threading
 import time
@@ -318,20 +320,138 @@ def host_matches(entry: str, host: str) -> bool:
 
 # ── the private/loopback floor ──────────────────────────────────────────────
 
+#: The address classes no destination policy has ever allowed an unattended fetch
+#: to reach. `is_private` covers RFC1918, the CGNAT range 100.64.0.0/10 that
+#: Tailscale hands out on this box, and 0.0.0.0/8; `is_link_local` covers
+#: 169.254.0.0/16 — every cloud's metadata endpoint — and fe80::/10;
+#: `is_reserved` and `is_unspecified` catch the rest of what the deleted regex
+#: list in `http_tools.py` used to spell out as ten prefixes.
+_PRIVATE_ADDR_FLAGS = ("is_private", "is_loopback", "is_link_local",
+                       "is_reserved", "is_unspecified")
+
+
+@functools.lru_cache(maxsize=1024)
+def _resolve_addrs(hostname: str) -> tuple[str, ...]:
+    """Every address `hostname` resolves to, or `()` when it does not resolve.
+
+    Moved out of `agent_mcp/browser.py`, with the predicate that uses it
+    (#2584), and unchanged in behaviour. Cached for the life of the process: a
+    page pulls subresources from a handful of hosts, the browser's route
+    interceptor sees every one of them, and holding the first answer is part of
+    the DNS-rebinding defence — a name that answers public once and private on the
+    next hop gets one answer, the first one.
+
+    A resolver failure is `()` rather than an exception, because
+    `_is_private_host` answers "not private" for it: failing closed would refuse
+    every destination the resolver cannot name, which is the trade the pattern
+    match used to make for every public host, and a name nothing can resolve is
+    not a socket anyone can open either.
+
+    Module-level and reached by name, so a test substitutes the resolver by
+    rebinding this module's global — which is what keeps the offline fetch tests
+    off the network without patching `socket` under httpx.
+    """
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except Exception:  # noqa: BLE001 — an unresolvable name is not a refusal
+        return ()
+    return tuple(sorted({i[4][0] for i in infos}))
+
+
+def _address(text: str):
+    """`text` as an address object, or None when it is not an address literal.
+
+    Square brackets come off first: `urlparse().hostname` hands back `::1` for
+    `http://[::1]:8080/`, but a host string that still carries them is a spelling
+    the browser lane has always had to accept. `ipaddress` then refuses
+    `3232235777`, which is the *point* — an integer-form address is not a literal
+    this function answers, so the caller falls through to the resolver, which
+    normalises it the way Chromium does (`192.168.1.1`). None means "resolve it",
+    not "it is public".
+    """
+    t = str(text or "").strip().lower()
+    if t.startswith("[") and t.endswith("]"):
+        t = t[1:-1]
+    if not t:
+        return None
+    try:
+        return ipaddress.ip_address(t)
+    except ValueError:
+        return None
+
+
+@functools.lru_cache(maxsize=1024)
+def _is_private_host(hostname: str) -> bool:
+    """True when `hostname` is this machine, or somewhere on its network.
+
+    **The one definition in `agent_mcp/`** (#2584). There were two, and they
+    disagreed: `http_tools.py`'s copy matched the TEXT of the hostname against ten
+    prefixes and `browser.py`'s answered per resolved address, so
+    `localhost.localdomain` — which resolves `127.0.0.1` and `::1` on this box —
+    was refused by the browser lane and *fetched* by `http_fetch`. The text of a
+    hostname is chosen by whoever put the URL in front of the model; the address is
+    not.
+
+    Answers per resolved address, with two deliberate limits. An IP literal is
+    classified from `ipaddress` without consulting the resolver, so the numeric
+    spellings stay refused when DNS is down. A name that resolves nothing is not
+    private, for the reason in `_resolve_addrs`.
+
+    What it covers is the DECISION: the address the name answered when this process
+    asked, which is what the lanes' pre-flight checks and `floor_reason` below are
+    asked about. What it does not cover is the CONNECTION: httpx runs its own lookup
+    when the socket opens, so a name that answers public at the check and private a
+    moment later still reaches a socket — connect-time DNS rebinding. The cache in
+    `_resolve_addrs` keeps one answer per name for this decision inside a process;
+    it reaches no further than that decision, and closing the socket-side gap wants
+    a pinned-address transport, not a second call to this predicate. The redirect
+    spelling of the same reach, which needs no DNS timing at all, is closed by
+    `http_tools._landed_hop_refusal` asking again of every hop.
+
+    `http_tools._is_loopback_host` stays a text match on purpose: it is the
+    `http_request` local-service *allowance*, so widening it to "any name
+    resolving to loopback" is a ruling (owed on #2584), not a fix to smuggle
+    beside one.
+    """
+    host = str(hostname or "").strip().lower()
+    if not host:
+        # `about:blank` and `http:///x` are handled by the scheme check upstream;
+        # a destination with no host is not a destination. browser.py has refused
+        # an empty host this way since #424, and #2584's near-miss was an
+        # over-broad version of this exact rule blanking the browser's own page.
+        return True
+    if host == "localhost":
+        # The one name that must not depend on `/etc/hosts` being readable.
+        return True
+    literal = _address(host)
+    if literal is not None:
+        return any(getattr(literal, flag, False) for flag in _PRIVATE_ADDR_FLAGS)
+    for addr in _resolve_addrs(host):
+        parsed = _address(addr)
+        if parsed is None:
+            continue
+        if any(getattr(parsed, flag, False) for flag in _PRIVATE_ADDR_FLAGS):
+            return True
+    return False
+
+
 def floor_reason(host: str, *, loopback_ok: bool = False) -> str:
     """Why this host may never be fetched, or "" when it may.
 
-    Delegates to `agent_mcp.http_tools._is_private_host` rather than restating
-    the ranges: a second definition of the private space is how one of them
-    stops being true, and this one's whole job is to be closed.
+    Calls `_is_private_host` above, which since #2584 is the same resolving
+    predicate the two lanes call. It used to import `http_tools`'s pattern match,
+    which meant arming `harness.egress_policy.enforce` would have moved *which*
+    non-resolving predicate refused rather than closing the rebinding hole:
+    `floor_reason("localhost.localdomain")` returned `""` while the browser lane
+    refused the same name.
 
     `loopback_ok` is `http_request`'s sanctioned local-service allowance
-    (`http_tools.py:493`). It is passed in by the caller, never inferred, so the
+    (`http_tools.py:565`). It is passed in by the caller, never inferred, so the
     floor's answer cannot drift by call site.
     """
     if not host:
         return ""
-    from agent_mcp.http_tools import _is_loopback_host, _is_private_host
+    from agent_mcp.http_tools import _is_loopback_host
 
     if not _is_private_host(host):
         return ""
@@ -672,8 +792,13 @@ def guard(tool: str, url: str = "", *, host: str = "",
       behavior change wearing a security badge.
 
     The floor is part of the enforced policy. With `enforce` off the guard only
-    records, and each lane's own private-host check below it answers exactly as
-    it did before #628 — so the default-off flag changes no tool's behaviour.
+    records, and the private-host check each lane runs below it answers exactly
+    as it did before #628 — so the default-off flag changes no tool's behaviour.
+    Since #2584 that shared check is genuinely shared: `http_fetch`,
+    `http_request`, `floor_reason` below and `browser.py` all reach
+    `_is_private_host`, so "as it did before #628" is one answer instead of two,
+    and the HTTP lane resolves the way the browser lane always did with `enforce`
+    still off.
     With it on, the floor runs first and its message passes through verbatim.
     """
     if tool not in EGRESS_TOOLS:

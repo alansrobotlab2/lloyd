@@ -29,6 +29,7 @@ suite instead of proving anything.
 import asyncio
 import base64
 import importlib.util
+import inspect
 import json
 import re
 import sys
@@ -42,6 +43,8 @@ sys.path.insert(0, str(ROOT))
 import server  # noqa: E402
 from app.routers import browser as browser_router  # noqa: E402
 from agent_mcp import browser as browser_module  # noqa: E402
+from agent_mcp import egress  # noqa: E402  (#2584: the private-space owner lives there)
+from agent_mcp import http_tools  # noqa: E402  (#2584: the other loopback rule)
 
 WEB = ROOT / "web" / "src"
 
@@ -441,7 +444,16 @@ async def test_tool_schemas_still_expose_the_same_thirteen_tools():
 
 
 def test_the_predicate_still_classifies_hosts(monkeypatch):
-    p = browser_module._is_private_host
+    """The predicate this lane answers through is `egress._is_private_host` (#2584).
+
+    The seam is pinned on `egress` because that is where it lives, and `browser.py`
+    reaches both the predicate and its own `_is_loopback_host` as `egress.`
+    attributes — so one rebind covers the lane. `from x import y` would have bound
+    the object into `browser` and left `_is_loopback_host` reading a different
+    lookup path than the one a test pins. The cache is dropped with the pin because
+    the predicate is `lru_cached` by host for the life of the process.
+    """
+    p = egress._is_private_host
     assert p("localhost") is True
     assert p("127.0.0.1") is True
     assert p("10.1.2.3") is True
@@ -450,9 +462,47 @@ def test_the_predicate_still_classifies_hosts(monkeypatch):
     assert p("::1") is True
     assert p("") is True
     # Public: resolution stubbed so the suite never depends on DNS.
-    browser_module._resolve_addrs.cache_clear()
-    monkeypatch.setattr(browser_module, "_resolve_addrs", lambda h: ("93.184.216.34",))
-    assert browser_module._is_private_host("example.com") is False
+    monkeypatch.setattr(egress, "_resolve_addrs", lambda h: ("93.184.216.34",))
+    egress._is_private_host.cache_clear()
+    assert egress._is_private_host("example.com") is False
+    # The lane's own exemption reads the same seam, so it agrees that "example.com"
+    # is not this machine either.
+    assert browser_module._is_loopback_host("example.com") is False
+
+
+def test_the_lane_documents_the_loopback_asymmetry_it_actually_has(monkeypatch):
+    """Clause 4 of #2794, graded as prose.
+
+    `browser.py` used to document its `_is_loopback_host` as "Mirrors
+    `http_tools._is_loopback_host`", and the pair disproved that sentence on one
+    name: `localhost.localdomain` resolves `127.0.0.1` and `::1` on this box, so the
+    browser lane called it the machine (True) while `http_request`'s text-match
+    allowance called it not-the-machine (False) — both measured at ef7ec109 before
+    this change. The docstring now states the split, and the owner's docstring
+    states the separate limit the split is not: the owner answers at DECISION time,
+    while httpx resolves again when the socket opens.
+
+    Worth pinning because the next reader of these two functions decides from this
+    text whether widening one widens the other — and that is the ruling #2584 owes,
+    not a consequence of the fix. The measured disagreement is asserted beside the
+    prose, so the sentence cannot quietly rot back into "it mirrors that one" behind
+    a green suite.
+    """
+    src = inspect.getsource(browser_module._is_loopback_host)
+    assert "mirror" not in src.lower(), \
+        "the two rules do not mirror each other — see the measured pair below"
+    assert "http_tools._is_loopback_host" in src, \
+        "stating an asymmetry means naming the rule it is asymmetric to"
+    assert "resolv" in src.lower(), "and naming what makes them differ"
+
+    owner = (egress._is_private_host.__doc__ or "").lower()
+    assert "decision" in owner and "connect" in owner, \
+        "the owner has to name what it covers and the connect-time gap it leaves"
+    assert "httpx" in owner, "and what does the second lookup"
+
+    monkeypatch.setattr(egress, "_resolve_addrs", lambda h: ("127.0.0.1", "::1"))
+    assert browser_module._is_loopback_host("localhost.localdomain") is True
+    assert http_tools._is_loopback_host("localhost.localdomain") is False
 
 
 def test_the_guard_is_actually_wired_into_every_url_entry_point():
@@ -485,8 +535,9 @@ def test_the_guard_is_actually_wired_into_every_url_entry_point():
         "the MC frame must not carry a screenshot of a private host"
     # DNS is a blocking syscall and these run on the aggregator's loop, the
     # one that dispatches every MCP tool call.
-    assert "await asyncio.to_thread(_resolve_addrs" in src, \
-        "host resolution must not block the event loop"
+    assert "await asyncio.to_thread(egress._resolve_addrs" in src, \
+        "host resolution must not block the event loop, and must go through the " \
+        "owner's module attribute so one seam pin reaches this lane (#2584)"
     # `_frame_sections` is #424's addition and `frame_index` is a new way to name
     # a document: a frame has a host of its own, and a guard that lives on only
     # some of the surfaces that read a URL is not a guard.
@@ -539,7 +590,7 @@ async def test_an_encoded_lan_address_is_blocked_and_encoded_loopback_is_not():
     gets both right, because the platform resolver normalises exactly the way
     Chromium does.
     """
-    assert browser_module._is_private_host("3232235777") is True
+    assert egress._is_private_host("3232235777") is True
     assert browser_module._is_loopback_host("3232235777") is False
     assert browser_module._is_loopback_host("2130706433") is True
     assert browser_module._is_loopback_host("0x7f000001") is True

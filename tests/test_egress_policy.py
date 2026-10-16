@@ -32,8 +32,14 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import inspect
+import ipaddress
 import json
+import re
+import socket
 import sqlite3
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -830,3 +836,278 @@ def test_the_shipped_guard_allows_the_host_the_canary_bench_books_as_an_escape(d
     conn.close()
     assert [(r["tool"], r["decision"], r["reason"]) for r in row] == [
         ("http_search", egress.DECISION_ALLOW, "allow-listed")], row
+
+
+# ── #2584: one owner for the private space, and it resolves ──────────────────
+#
+# Two `_is_private_host` shipped with the same name and different methods:
+# `http_tools.py` matched the hostname TEXT against ten prefixes, `browser.py`
+# answered per RESOLVED address. With `harness.egress_policy.enforce` off — the
+# shipped posture — the lane predicates are the only live answer, so the lane that
+# needs no lease and no browser session was the weaker one: `localhost.localdomain`
+# resolves 127.0.0.1 and ::1 on this box and was fetched, as was this box's own
+# hostname. And `floor_reason` delegated to the pattern copy, so arming `enforce`
+# would only have moved which non-resolving predicate refused.
+#
+# `egress._is_private_host` is now the one owner. `egress` owns it rather than
+# either lane because this module's floor already had to answer the question, and
+# `floor_reason` importing `http_tools` was the direction that made the weak copy
+# load-bearing.
+
+#: Text matching none of the ten prefixes that used to be the whole check, which
+#: resolves to loopback on this box.
+REBOUND_NAME = "localhost.localdomain"
+
+
+def _resolve_to(monkeypatch, addrs: tuple[str, ...]) -> None:
+    """Pin the resolver seam for this test, and drop the cached answers with it.
+
+    `_is_private_host` is `lru_cached` by host across the process, so a node that
+    pins the seam without clearing the cache can be handed the answer some earlier
+    node's pin — or the box's real resolver — produced, and then pass for a reason it
+    did not test.
+    """
+    monkeypatch.setattr(egress, "_resolve_addrs", lambda host: addrs)
+    egress._is_private_host.cache_clear()
+
+
+def _definitions_of_the_predicate() -> list[str]:
+    """`git grep -n 'def _is_private_host' -- agent_mcp/`, run in this tree.
+
+    `git grep` and not a recursive `grep`: it is the command #2584's clause names,
+    and a plain walk over `agent_mcp/` would also read `__pycache__`.
+    """
+    out = subprocess.run(
+        ["git", "grep", "-n", "def _is_private_host", "--", "agent_mcp/"],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True, text=True)
+    assert out.returncode in (0, 1), out.stderr  # 1 = no match; the count below judges that
+    return [ln for ln in out.stdout.splitlines() if ln.strip()]
+
+
+def test_agent_mcp_ships_one_private_space_predicate_and_it_is_egress_s():
+    """Clause 3's observable: at most one definition, and it lives here.
+
+    The count is the observable the item names; the identity check is what stops a
+    round satisfying it by moving the copy to a third module and leaving
+    `floor_reason` delegating to a lane again.
+    """
+    found = _definitions_of_the_predicate()
+
+    assert len(found) <= 1, f"{len(found)} definitions of the private space: {found}"
+    assert found == [] or found[0].startswith("agent_mcp/egress.py:"), found
+    assert egress._is_private_host.__module__ == "agent_mcp.egress"
+
+
+def test_the_literal_branch_defers_to_the_resolver_for_a_text_ipaddress_refuses():
+    """Why the owner asks `ipaddress` first and the resolver second, and in that order.
+
+    `3232235777` is `192.168.1.1` written as an integer. `ipaddress` refuses that text,
+    so the owner treats it as a *name* and resolves it — which is how the browser
+    lane's long-standing rule that Chromium-style integer spellings get blocked keeps
+    answering after the move (`test_browser_panel.py` pins
+    `_is_private_host("3232235777") is True`). Answering it by prefix instead would
+    have been a fourth spelling-specific guess, and
+    `test_the_one_predicate_refuses_every_shape_the_pattern_list_matched_untouched`
+    covers the same case from the other side, with the seam pinned to a public address.
+    """
+    with pytest.raises(ValueError):
+        ipaddress.ip_address("3232235777")
+    assert egress._address("3232235777") is None, "an integer spelling is not a literal"
+    assert int("3232235777") == int(ipaddress.IPv4Address("192.168.1.1")), \
+        "the control assumed the integer and the dotted form name one address"
+
+    assert egress._address("192.168.1.1") == ipaddress.IPv4Address("192.168.1.1")
+    assert egress._address("[::1]") == ipaddress.IPv6Address("::1"), \
+        "a host string can still carry the brackets urlparse stripped elsewhere"
+    assert egress._address("") is None
+
+
+def test_the_one_predicate_refuses_names_whose_text_says_nothing():
+    """Clause 3's behaviour, on the two specimens #2584 was filed with.
+
+    This node deliberately resolves for real — the claim IS about real resolution,
+    and `socket.getaddrinfo` is the same question the predicate asks. Every other
+    node in this file pins the seam instead.
+    """
+    own_host = socket.gethostname().split(".")[0]
+
+    assert egress._is_private_host(REBOUND_NAME) is True, \
+        f"{REBOUND_NAME} resolves to {egress._resolve_addrs(REBOUND_NAME)}"
+    assert egress._is_private_host(own_host) is True, \
+        f"this box names itself {own_host} = {egress._resolve_addrs(own_host)}"
+
+
+def test_the_one_predicate_refuses_every_shape_the_pattern_list_matched_untouched(monkeypatch):
+    """The deleted list's useful half, and the control that this is not "resolve, or
+    else public".
+
+    With the resolver answering public for everything — the answer a rebinding
+    attacker can arrange — an address literal is still refused from `ipaddress`
+    alone. The pattern list was wrong because it looked ONLY at the text; it was not
+    worthless, and a fix that threw this out would be a downgrade in a fix's clothes.
+    """
+    _resolve_to(monkeypatch, ("93.184.216.34",))          # "every name is public"
+    try:
+        for literal in ("127.0.0.1", "10.0.0.5", "192.168.1.20", "172.16.0.9",
+                        "169.254.169.254", "0.0.0.0", "::1", "fe80::1"):
+            assert egress._is_private_host(literal) is True, literal
+    finally:
+        egress._is_private_host.cache_clear()
+
+
+def test_an_unresolvable_name_falls_back_public_as_the_browser_lane_always_did(monkeypatch):
+    """The behaviour that was `browser.py`'s, moved rather than reinvented.
+
+    A name resolving to nothing is not private: `_resolve_addrs` returns `()` and
+    the `if not addrs: return False` branch answers public. Flipping that would
+    refuse every typo and every offline name, which is a different product decision
+    than the one #2584 asks for.
+    """
+    _resolve_to(monkeypatch, ())                        # the name does not resolve
+    try:
+        assert egress._is_private_host("no-such-host.example.invalid") is False
+    finally:
+        egress._is_private_host.cache_clear()
+
+
+def test_the_resolver_seam_is_one_attribute_on_this_module(monkeypatch):
+    """Clause 3's substitutability, at the owner rather than through a tool.
+
+    Every resolution in the private-space answer goes through the module attribute
+    `_resolve_addrs`, so a test rebinds one name instead of `socket`, and no test has
+    to know which lane it is standing in. The counterfactual is built in: with the
+    seam pinned to loopback a name whose text is entirely public is refused, which is
+    exactly what the pattern-only copy could not do at any pin.
+    """
+    asked: list[str] = []
+    monkeypatch.setattr(egress, "_resolve_addrs",
+                        lambda host: (asked.append(host) or ("127.0.0.1",)))
+
+    assert egress._is_private_host("public-looking.example.invalid") is True
+    assert asked == ["public-looking.example.invalid"], asked
+
+    monkeypatch.setattr(egress, "_resolve_addrs", lambda host: ())
+    egress._is_private_host.cache_clear()
+    assert egress._is_private_host("public-looking.example.invalid") is False
+
+
+def test_floor_reason_refuses_a_name_that_only_the_resolver_can_see(monkeypatch):
+    """Clause 4: `floor_reason("localhost.localdomain")` returned `""`, which is the
+    destination floor saying "this destination is fine" about the machine itself.
+    With the floor delegating to the owner the same refusal the lane gives arrives
+    with `enforce` still off, so arming it would close the same case rather than a
+    different one."""
+    _resolve_to(monkeypatch, ("127.0.0.1", "::1"))
+
+    reason = egress.floor_reason(REBOUND_NAME)
+
+    assert reason == f'Blocked — private/internal host "{REBOUND_NAME}"', repr(reason)
+
+
+def test_floor_reason_still_answers_the_callers_it_served_before(monkeypatch):
+    """The floor's other answers, unchanged by the move: a public name is allowed,
+    the loopback allowance is granted only when the caller passes it, a LAN address
+    is refused even with the allowance, and the message wording is untouched — the
+    floor's text is what `guard` passes through verbatim and what the dashboard
+    renders as `network.policy`'s companion."""
+    _resolve_to(monkeypatch, ("93.184.216.34",))
+    assert egress.floor_reason("docs.example.org") == ""
+
+    _resolve_to(monkeypatch, ("127.0.0.1",))
+    assert egress.floor_reason("127.0.0.1") == 'Blocked — private/internal host "127.0.0.1"'
+    assert egress.floor_reason("127.0.0.1", loopback_ok=True) == ""
+    assert egress.floor_reason("") == ""
+
+    _resolve_to(monkeypatch, ("192.168.50.7",))
+    assert egress.floor_reason("lan-box.example.invalid", loopback_ok=True) == \
+        'Blocked — private/internal host "lan-box.example.invalid"'
+
+
+def test_the_floor_and_the_lane_agree_on_the_one_predicate(monkeypatch):
+    """Clause 4's edge: the floor's answer and the lane's answer for the same name
+    come from the same function, so fixing one cannot miss the other.
+
+    The counterfactual is the false claim itself. A text the ten prefixes waved
+    through is fed to the predicate the floor delegates to, and the refusal that
+    comes back is the reason the pattern copy is gone.
+    """
+    _resolve_to(monkeypatch, ("127.0.0.1", "::1"))
+
+    pattern_only = re.compile(r"^127\.|^10\.|^172\.(1[6-9]|2\d|3[01])\.|^192\.168\."
+                              r"|^0\.|^169\.254\.|^::1$|^fc00:|^fd|^fe80:")
+    assert pattern_only.match(REBOUND_NAME) is None, \
+        "the control assumed a text the ten prefixes miss; re-derive it"
+    assert egress._is_private_host(REBOUND_NAME) is True
+    assert egress.floor_reason(REBOUND_NAME) != ""
+    # The lane is pinned by how it calls, not by an identity that a `from x import y`
+    # would satisfy while leaving the module a second lookup path (#2584 review): the
+    # browser answers through `egress.`, so a test that rebinds the owner's seam
+    # reaches both this lane's exemption and the predicate that reads it.
+    lane_src = Path(inspect.getsourcefile(browser_module)).read_text(encoding="utf-8")
+    assert "if egress._is_private_host(hostname):" in lane_src, \
+        "browser.py no longer answers through the owner's module attribute"
+    assert "def _is_private_host" not in lane_src, "browser.py grew a predicate back"
+    assert http_tools._is_loopback_host is not egress._is_private_host
+
+
+def test_the_threat_model_no_longer_credits_two_predicates():
+    """The two rows that described the split have to describe the merged owner.
+
+    #2584's own finding was prose that read as closed: T-18 named `browser.py` as the
+    control while the lane an injected URL actually reaches carried the text match.
+    The fix makes that prose false in the other direction, and a page that credits a
+    split which no longer exists is the same defect wearing last week's clothes — so
+    the rows are pinned to the shipped shape, not left to the next reader's grep.
+    """
+    # Code side first, so a row crediting one lane as the control is contradicted by
+    # the tree rather than by another sentence: the owner is defined in `egress.py`,
+    # and neither lane module defines a predicate of its own any more.
+    owner = inspect.getmodule(egress._is_private_host)
+    assert owner is not None and owner.__name__ == "agent_mcp.egress", owner
+    for lane in (browser_module, http_tools):
+        lane_src = Path(inspect.getsourcefile(lane)).read_text(encoding="utf-8")
+        assert "def _is_private_host" not in lane_src, lane.__name__
+
+    page = (Path(__file__).resolve().parent.parent
+            / "architecture" / "threat-model.md").read_text(encoding="utf-8")
+    rows = {ln.split("|")[1].strip(): " ".join(ln.split())
+            for ln in page.splitlines()
+            if ln.startswith("| T-18 ") or ln.startswith("| B8 ")}
+    assert set(rows) == {"T-18", "B8"}, sorted(rows)
+
+    # Nothing in either row may still describe the retired split, and nothing may
+    # credit a file:line that no longer defines the predicate.
+    stale = ("two different functions", "does not resolve", "lane-specific",
+             "browser.py:147", "http_tools.py:49")
+    for label, flat in sorted(rows.items()):
+        offenders = [s for s in stale if s in flat]
+        assert offenders == [], f"{label} still reads: {offenders}"
+        assert "_is_private_host" in flat, f"{label} no longer names the owner: {flat[:120]}"
+
+    # Positive control: a row worded the way the pre-fix page worded them fails the
+    # assertions above rather than passing them vacuously.
+    pre_fix = ("| T-18 | B1 | E | x | `agent_mcp/browser.py:147` — the resolving "
+               "one. The `http_fetch`/`http_request` copy at `agent_mcp/http_tools.py:49` "
+               "matches the hostname's text and does not resolve, so this control is "
+               "lane-specific while `enforce` is off (#2584) |")
+    flat = " ".join(pre_fix.split())
+    assert any(s in flat for s in stale) and "_is_private_host" not in flat, \
+        "the control is no longer the pre-fix wording the assertions reject"
+
+
+def test_the_shipped_posture_stays_unarmed_and_this_fix_does_not_arm_it():
+    """The item states it, so it is pinned: the fix closes the hole in the posture
+    that ships.
+
+    A round that "fixed" the hole by setting `enforce: true` would pass every clause
+    above while overriding the decision `config.yaml` reserves to a human, so the
+    posture is asserted rather than assumed. `egress.enforce_on()` is what
+    `guard`'s floor branch reads, so the two together are the live posture.
+    """
+    from app.config import CONFIG
+
+    policy_cfg = (CONFIG.get("harness") or {}).get("egress_policy") or {}
+    assert policy_cfg.get("enforce") is False, policy_cfg
+    assert egress.enforce_on() is False, "the floor would run too, so this test's "\
+        "claim that the lane refusal is the live answer would be false"

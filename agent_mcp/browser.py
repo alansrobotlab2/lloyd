@@ -12,13 +12,11 @@ Tools (Phase 3): browser_select, browser_drag, browser_cookies
 
 import asyncio
 import base64
-import functools
 import ipaddress
 import json
 import logging
 import os
 import re
-import socket
 import time
 import urllib.parse
 from pathlib import Path
@@ -128,55 +126,42 @@ def _resolve_block_private() -> bool:
     return True
 
 
-@functools.lru_cache(maxsize=1024)
-def _resolve_addrs(hostname: str) -> tuple[str, ...]:
-    """Every address `hostname` resolves to, or () when it does not resolve.
-
-    Cached for the life of the process. That is deliberate on both counts: a
-    page pulls subresources from a handful of hosts and the route interceptor
-    below sees every one of them, and holding the first answer also blunts DNS
-    rebinding, where a name resolves public once and private immediately after.
-    """
-    try:
-        infos = socket.getaddrinfo(hostname, None)
-    except Exception:
-        return ()
-    return tuple(sorted({i[4][0] for i in infos}))
-
-
-def _is_private_host(hostname: str) -> bool:
-    """True when `hostname` is the machine itself or somewhere on its network.
-
-    Kept as the predicate the tests and `http_tools` both name, but it now
-    answers from resolution rather than from a prefix match.
-    """
-    if not hostname:
-        return True
-    if hostname.lower() == "localhost":
-        return True
-    for addr in _resolve_addrs(hostname):
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
-        if (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_unspecified):
-            return True
-    return False
+# Both names now come from `agent_mcp/egress.py`, which is where #2584 put the one
+# definition. Above this comment lived the resolving answer, while `http_tools.py`
+# carried a prefix match over the hostname TEXT under the same name — on the lane
+# that needs no browser lease and no Playwright session. So `localhost.localdomain`,
+# which resolves 127.0.0.1 and ::1 on this box, was refused by `browser_navigate`
+# and *fetched* by `http_fetch`.
+# The call sites below go through the module, not through imported names, so the
+# lane has exactly one lookup path: a test that pins the seam by rebinding
+# `egress._resolve_addrs` reaches `_is_loopback_host` here AND the predicate that
+# reads it, which imported names would not both do (`from x import y` binds the
+# object, so the local name keeps pointing at the old one). Behaviour for this lane
+# is unchanged, including the empty host — `_host_block_reason` asks the scheme
+# first, so `about:blank` stays snapshot-able.
+from agent_mcp import egress  # noqa: E402
 
 
 def _is_loopback_host(hostname: str) -> bool:
     """The machine itself, by any of its names.
 
-    Mirrors `http_tools._is_loopback_host`: `127.0.0.1` and `localhost` are the
-    same host and must be treated identically, or the guard's answer depends on
-    which spelling was typed.
+    NOT the same rule as `http_tools._is_loopback_host`, and #2584 is why this
+    sentence says so out loud: that one matches the TEXT of the hostname and
+    recognises exactly `localhost`, `127.*` and `::1`, while this one asks the
+    resolver and exempts a name only when EVERY address it answers with is
+    loopback. `localhost.localdomain` is therefore the machine here and is refused
+    as private there. Both are exemptions, and the split is deliberate: this lane
+    decides whether Chromium may open the box's own UI, whereas that one is
+    `http_request`'s local-service *allowance*, and widening it to every name that
+    resolves to loopback is a ruling owed on #2584 rather than something decided on
+    the way through a browser-lane fix. `127.0.0.1` and `localhost` stay the same
+    host under either reading — that half was never in dispute.
     """
     if not hostname:
         return False
     if hostname.lower() == "localhost":
         return True
-    addrs = _resolve_addrs(hostname)
+    addrs = egress._resolve_addrs(hostname)
     if not addrs:
         return False
     resolved = []
@@ -218,7 +203,7 @@ def _host_block_reason(url: str) -> str | None:
     hostname = parsed.hostname or ""
     if _is_loopback_host(hostname):
         return None
-    if _is_private_host(hostname):
+    if egress._is_private_host(hostname):
         return f'Blocked — private/internal host "{hostname}"'
     return None
 
@@ -251,7 +236,7 @@ async def _prewarm_host(url: str) -> None:
     aggregator's loop — the same loop that dispatches every MCP tool call.
     A literal IP costs microseconds because it never leaves the resolver, but
     a cold hostname is a network round trip, and the route interceptor sees
-    one per unique host on every page. `_resolve_addrs` is lru_cached, so
+    one per unique host on every page. `egress._resolve_addrs` is lru_cached, so
     warming it here makes the `_host_block_reason` call that follows free.
     """
     try:
@@ -260,7 +245,7 @@ async def _prewarm_host(url: str) -> None:
             return
         host = parsed.hostname or ""
         if host and host.lower() != "localhost":
-            await asyncio.to_thread(_resolve_addrs, host)
+            await asyncio.to_thread(egress._resolve_addrs, host)
     except Exception:
         # A failure here costs a blocking lookup in the check below, never
         # correctness — the sync path resolves for itself if the cache missed.
