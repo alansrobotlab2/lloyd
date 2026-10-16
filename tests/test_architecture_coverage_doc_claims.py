@@ -5744,3 +5744,137 @@ def test_the_rot_bound_is_shown_able_to_bite():
     assert "the module moved" in msg, msg[:300]
     assert "lower STALE_EXEMPTION_CEILING in the same commit" in msg, msg[-400:]
     test_the_stale_population_is_at_or_under_its_bound_and_names_every_offender()
+
+
+# ── #2804 — the Bash-lane ruling has to carry the body rule it leaves open ────
+
+#: The paragraph's opening words. `ACCEPTED-OPEN` appears once in the whole
+#: architecture corpus and it is in this paragraph, but the window is cut on the
+#: sentence rather than on the marker: a rewording that kept the marker and dropped
+#: the sentence would otherwise move the ruling out of view while leaving the thing
+#: a marker-based extractor was watching exactly where it was.
+_ACCEPTED_OPEN_PARA = "What stays open is a Bash child"
+
+#: Where the #2589 ruling starts, as against the #2362 dispatch-field argument the
+#: paragraph carried before #2804.
+_ACCEPTED_OPEN_RULING = "The body rule #2589 landed"
+
+
+def _accepted_open_paragraph(text: str) -> str:
+    """The Bash-lane ruling paragraph of §The dispatch-affecting fields, entire.
+
+    Cut at the blank line and not at a character window. The neighbour node
+    `test_the_dispatch_fields_page_names_every_surface_the_rail_holds` cannot see this
+    paragraph in its first read (`text[heading:heading + 1600]`, and the paragraph
+    opens 6547 characters past the heading), and its one read that does reach — the
+    slice from `**What the rail does not reach` to end of file — asks only for strings
+    that predate #2589. So a page can hold an accepted-open ruling, be sliced by a node
+    that covers it, and still record nothing of the body rule; that is how the ruling
+    came to live only in `64b501c3`'s commit message.
+    """
+    assert _ACCEPTED_OPEN_PARA in text, (
+        "the Bash-lane paragraph is off the page, so the ruling that accepts the lane "
+        "has nowhere to live and there is nothing here to grade")
+    start = text.index(_ACCEPTED_OPEN_PARA)
+    end = text.find("\n\n", start)
+    assert end != -1, "the paragraph never closes, so the cut would run to end of file"
+    para = text[start:end]
+    assert "ACCEPTED-OPEN" in para, (
+        f"the window cut on {_ACCEPTED_OPEN_PARA!r} holds no ACCEPTED-OPEN marker, so it "
+        f"is prose near the ruling rather than the ruling: {para[:120]!r}")
+    assert "PROTECTED_WRITE_ROOTS" in para, (
+        "the paragraph no longer carries the bind-mount argument, so a ruling saying it "
+        "is open 'for that same reason' would point at nothing and be graded as if it did")
+    return para
+
+
+def _body_ruling_gaps(para: str) -> list[str]:
+    """Each way this paragraph can fail to record the #2589 ruling, named.
+
+    Shared by the claim node and its control: the control seeds text and asks this
+    same function what is missing from it, so a green claim node is never an
+    extractor that quietly found nothing to compare.
+    """
+    if _ACCEPTED_OPEN_RULING not in para:
+        return ["it never mentions the #2589 body rule"]
+    ruling = para[para.index(_ACCEPTED_OPEN_RULING):]
+    return [why for needle, why in (
+        ("64b501c3", "it does not name the commit that landed the body rule"),
+        ("bind-mount", "it does not tie itself to the same bind-mount reason the "
+                       "paragraph already gives"),
+        ("land-time", "it does not name the land-time probe as the enforcement point "
+                      "for a shell-authored body"),
+        ("scripts/automod/vault_guards.py:555",
+         "it does not cite the line that hands the probe its vault"),
+        ("LLOYD_VAULT_ROOT", "it does not name the knob that line sets"),
+        ("tests/test_research_doc_claims.py::_task_files",
+         "it does not name the corpus that probe grades"),
+        ('guard="autonomy_body_rail"',
+         "it states no reopen trigger an offender could be checked against"),
+        ("Reopen", "it states no condition for un-accepting the lane"),
+    ) if needle not in ruling]
+
+
+def test_the_accepted_open_bash_lane_records_the_body_rule_ruling():
+    """source: architecture/autonomy.md § The dispatch-affecting fields, the
+           **ACCEPTED-OPEN** paragraph.
+    claim: the paragraph that accepts the Bash lane names #2589's body rule
+           (`64b501c3`) as open on this lane for the same bind-mount reason, names
+           the land-time probe as what enforces it for a shell-authored body —
+           `scripts/automod/vault_guards.py:555` setting `LLOYD_VAULT_ROOT`, grading
+           the corpus of `tests/test_research_doc_claims.py::_task_files` — and
+           states its reopen trigger as an observable a reader can go and measure.
+    verdict: #2589 put the rail on both writer lanes and ruled the Bash lane "not
+             taken" in the prose of its own commit message, which is the only place
+             that ruling existed. A scope ruling a reader cannot cite is a ruling that
+             gets re-asked, and #2589's owed entry is what asked it again.
+
+    The page's FIRST mention of the body rule, so the node pins the whole ruling and
+    not an insertion point: before this the page carried no `undelivered`,
+    no `instruction_region` and no `#2265` anywhere (`git grep -nE` over
+    `architecture/autonomy.md` returned nothing at filing).
+    """
+    gaps = _body_ruling_gaps(_accepted_open_paragraph(_text("autonomy.md")))
+    assert not gaps, (
+        f"the Bash-lane ACCEPTED-OPEN paragraph {', '.join(gaps)} — #2589's body rule was "
+        "ruled open on this lane in commit 64b501c3 and written down nowhere else, which "
+        "is exactly the state that made the question come back")
+
+
+def test_the_body_ruling_check_fails_on_a_paragraph_that_lost_the_ruling():
+    """Delete-to-fail for the node above: it fails on the ruling's absence, and on
+    each of its parts, not on a rewording it could not see.
+
+    Seeded text only. The live page is asserted clean first, because otherwise a
+    fixture that "passes" for having nothing to find is indistinguishable from one
+    that passes because the ruling really is there — the failure shape every other
+    extractor proof in this file exists to rule out.
+    """
+    para = _accepted_open_paragraph(_text("autonomy.md"))
+    assert _body_ruling_gaps(para) == [], (
+        "the live page already fails the claim node, so a fixture failing below for some "
+        "other reason would prove nothing about the fixture")
+
+    deleted = para[:para.index(_ACCEPTED_OPEN_RULING)]
+    assert deleted != para and _ACCEPTED_OPEN_RULING not in deleted, (
+        "the fixture did not remove the ruling, so nothing below was tested")
+    assert _body_ruling_gaps(deleted) == ["it never mentions the #2589 body rule"], (
+        "the paragraph as it stood before #2804 did not fail the check, or failed it for "
+        "some reason other than the missing ruling")
+    assert "ACCEPTED-OPEN" in deleted and "PROTECTED_WRITE_ROOTS" in deleted, (
+        "the fixture dropped the lane's own argument with the ruling, so the failure "
+        "above came from an emptied paragraph and not from a missing ruling")
+
+    for needle in ("64b501c3",
+                   "scripts/automod/vault_guards.py:555",
+                   "LLOYD_VAULT_ROOT",
+                   "tests/test_research_doc_claims.py::_task_files",
+                   'guard="autonomy_body_rail"'):
+        missing = para.replace(needle, "the probe", 1)
+        assert missing != para, f"the seeded text held no {needle} to drop"
+        assert _body_ruling_gaps(missing), (
+            f"a ruling that lost {needle} still read as complete, so the claim node "
+            "would pass on a paragraph that stopped being checkable")
+        assert "#2589" in missing, (
+            f"dropping {needle} took the ruling's subject with it, so the fixture "
+            "tested the whole-ruling case a second time")

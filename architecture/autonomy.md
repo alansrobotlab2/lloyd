@@ -782,7 +782,19 @@ nightly ledger the directory exists to keep, which is what recording the half-op
 lane means; it stands beside #2190's deletion asymmetry as the second deliberate
 asymmetry rather than an oversight. The asymmetry above still stands with both of
 them: a task file that leaves the live set is retired, not refused, and none of these
-surfaces can delete one.
+surfaces can delete one. The body rule #2589 landed (`64b501c3`) — refuse a task body
+that orders a tool the built prompt never delivers — is open on this lane for that same
+bind-mount reason and not for a second one: a Bash child authors a body with `cat >` and
+`sed -i`, so there is no write-time rail for it to reach. What enforces it here instead
+is the land-time probe: `scripts/automod/vault_guards.py:555` hands that probe its
+`LLOYD_VAULT_ROOT`, and the corpus the probe grades is
+`tests/test_research_doc_claims.py::_task_files`, which is why a shell-authored body
+naming an undelivered tool reddens the next round's base probe rather than the turn that
+wrote it. Reopen this ruling on one observable: that sweep yields an offender with no
+`guard="autonomy_body_rail"` denial row beside it — `agent_mcp/builtin_fs.py:461` and
+`agent_mcp/vault.py:1795` write such a row on each closed lane — because an offender that
+reached the corpus unrefused means the lane is producing bodies nobody refused, which is
+not what accepting it claimed.
 
 ### The parser can never drop a task
 
