@@ -1103,12 +1103,62 @@ def strip_link_footer(text: str) -> str:
 #: rubric and nothing about the video. The patterns key on the sentence NAMING the
 #: reader or the profile; a `why` that merely rates (`Scores 8/10: robotics`) or
 #: describes is not matched and is still published as #1155 ruled.
+#:
+#: `intersect` joined the rating verbs on 2026-10-17 because the rubric says it: the
+#: harvested sentence `Directly addresses AI applications in manufacturing and CAD,
+#: which intersects with hardware and robotics interests.` — the entry the harvest
+#: comment in `tests/test_intel_pipeline_body.py` marks 866 — names the profile with
+#: that verb and no other. It is the one of the 27 in that file's
+#: `PUBLISHED_PROFILE_SENTENCES` that dropping `intersect` loses at the shipped window,
+#: and without the verb it needs a window of 87 (from `addresses`) where with it it
+#: needs 28 — so it was being caught only by the bare-word pattern this change
+#: removes. All 25 sentences this pattern catches are caught at a window of 40, so the
+#: 80 below was never the binding constraint and widening it would have fixed nothing
+#: while leaving the false positive armed. Every figure in this paragraph is recomputed
+#: by
+#: `tests/test_intel_pipeline_body.py::test_the_window_was_never_the_binding_constraint_naming_the_verb_was`.
+#: (The digest itself is cited here by dated section and entry heading, never by
+#: line number: `tests/test_automod_doc_claims.py::test_no_source_cites_the_youtube_digest_by_line_number`
+#: exists because the vault's bytes are versioned in another repository, so a line
+#: number written against a digest is a claim with an expiry no check here can see.)
+#:
+#: RETIRED: the fifth shipped pattern, `re.compile(r"\binterests\b")` — a match on
+#: the bare English word, with nothing requiring a rating verb, a named reader or a
+#: profile beside it, which is the one shape that contradicted this table's own rule
+#: above. It was written for a scorer's `why`, a one-sentence string where any
+#: mention of interests was near-certainly the rubric speaking; but
+#: `scripts/maintenance/corpus_shape.py:interest_profile_sweep` asks the SAME
+#: callable about every line of every published digest, and a digest's body is the
+#: channel's own description — open-set prose about the world, in which
+#: "interests" is a word people use. It duly fired on
+#: `But is Europe ready for Elon Musk's autonomous transport revolution, or will
+#: regulation and industrial interests hold it back?` — published 2026-10-17 into
+#: `knowledge/robotics/youtube-digest.md`, inside its `## 2026-10-17` section as the
+#: closing question of the entry `🚨 TESLA'S EUROPE TAKEOVER: FSD, CYBERCAB &
+#: ROBOTRUCKS`, which is the channel's own description of its video and not a
+#: scorer's `why` — and
+#: because three test nodes re-count the live corpus with this guard
+#: (`test_intel_pipeline_body.py`'s two #2039 corpus nodes and
+#: `test_corpus_shape.py::test_the_run_finds_the_vault_and_the_data_root_from_the_environment`,
+#: which copies that digest as its CLEAN corpus), one ordinary sentence turned the
+#: whole suite red. No edit to the corpus could have kept that property: the check
+#: would go red again the first time a channel described anything with interests in
+#: it, which is what makes a bare-word pattern unsatisfiable over an open-set corpus
+#: rather than merely strict. What the guard must still catch is unaffected: all 27
+#: harvested rubric sentences stay flagged, pinned by
+#: `test_every_published_interest_profile_sentence_is_classified_as_one` and, against
+#: a future re-widening, by
+#: `tests/test_intel_pipeline_body.py::test_no_interest_profile_pattern_fires_on_the_bare_word`.
+#: retire_when: a real scorer `why` reaches a digest naming interests with no rating
+#: verb, named reader or profile beside it — i.e. a false negative observed in the
+#: published corpus, not a shape imagined. Then the fix is to name its verb, the way
+#: `intersect` was named above, never the word.
 _INTEREST_PROFILE_RES = (
     re.compile(r"\bthe user\b", re.IGNORECASE),
     re.compile(r"\binterest profile\b", re.IGNORECASE),
     re.compile(r"\b(?:align(?:s|ed|ing)?|match(?:es|ed|ing)?|relevan(?:t|ce)|related|"
-               r"core|central|addresses)\b[^.!?]{0,80}\binterests?\b", re.IGNORECASE),
-    re.compile(r"\binterests\b", re.IGNORECASE),      # `robotics and AI interests`
+               r"core|central|addresses|intersect(?:s|ing|ion)?)\b"
+               r"[^.!?]{0,80}\binterests?\b", re.IGNORECASE),
     re.compile(r"\btangential(?:ly)?\b", re.IGNORECASE),
     re.compile(r"\blacks?\b[^.!?]{0,40}\b(?:relevance|focus)\b", re.IGNORECASE),
 )

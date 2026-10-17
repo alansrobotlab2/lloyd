@@ -1723,16 +1723,98 @@ def test_every_published_interest_profile_sentence_is_classified_as_one(sentence
     assert body_mod.is_interest_profile_prose(sentence) is True, sentence
 
 
+#: The sentence that turned the suite red on 2026-10-17. Published verbatim into
+#: `knowledge/robotics/youtube-digest.md`, in its `## 2026-10-17` section as the
+#: closing question of the entry "🚨 TESLA'S EUROPE TAKEOVER: FSD, CYBERCAB &
+#: ROBOTRUCKS" — the channel's own
+#: episode question, from the video's description, not a scorer's `why` — and
+#: flagged by the guard's then-fifth pattern, `re.compile(r"\binterests\b")`, which
+#: matched the word and required nothing beside it. Three nodes re-count the live
+#: corpus with this guard, so one ordinary English word in one channel's prose made
+#: all three fail: this two corpus nodes of #2039 and
+#: `tests/test_corpus_shape.py::test_the_run_finds_the_vault_and_the_data_root_from_the_environment`,
+#: which copies that very digest as its clean corpus.
+PUBLISHED_BODY_QUESTION = (
+    "But is Europe ready for Elon Musk's autonomous transport revolution, or will "
+    "regulation and industrial interests hold it back?")
+
+#: #866's harvested rubric sentence, spelled out here rather than indexed so the
+#: differential below keeps its meaning if the harvested list grows. It names the
+#: profile with `intersects`, the verb the guard did not know until 2026-10-17.
+INTERSECTS_RUBRIC_SENTENCE = (
+    "Directly addresses AI applications in manufacturing and CAD, which intersects "
+    "with hardware and robotics interests.")
+
+
 @pytest.mark.parametrize("why", [
     "Scores 8/10: covers the agent-safety keyword set",
     "Scores 8/10: robotics",
     DESCRIPTIVE_WHY,
     "Isaac Lab adds a camera preset per task; the note walks through the config.",
     "An interesting comparison of two KV cache layouts under load.",
+    PUBLISHED_BODY_QUESTION,
     "",
 ])
 def test_a_why_that_describes_or_merely_scores_is_not_interest_profile_prose(why):
     assert body_mod.is_interest_profile_prose(why) is False, why
+
+
+def test_no_interest_profile_pattern_fires_on_the_bare_word():
+    """The guard's own rule, held as an invariant over the pattern table.
+
+    `body.py`'s comment on `_INTEREST_PROFILE_RES` says the patterns key on the
+    sentence NAMING the reader or the profile. Until 2026-10-17 one of them did not:
+    `\\binterests\\b` alone, which is satisfied by any text containing the word. The
+    guard is asked about a scorer's one-sentence `why` on the write path
+    (`vault_writer._entry_body`) AND about every line of every published digest
+    (`corpus_shape.interest_profile_sweep`), and on the second surface the text is
+    a channel's description of its own video — open-set prose, where "interests" is
+    a word people use about the world. So the bare word is not a strict rule the
+    corpus occasionally trips; it is a rule the corpus cannot satisfy, and any edit
+    that puts a pattern like it back re-arms the red tree for the next digest.
+
+    Asserted per pattern, not over the disjunction: a text the whole table rejects
+    is also rejected by a table with one pattern missing, which is why the
+    parametrised false-case above alone would not catch a re-widening.
+    """
+    assert body_mod.is_interest_profile_prose(PUBLISHED_BODY_QUESTION) is False
+    for i, pattern in enumerate(body_mod._INTEREST_PROFILE_RES):
+        assert pattern.search("interests") is None, (
+            f"pattern {i} ({pattern.pattern!r}) matches the bare word with nothing "
+            "beside it, so it flags any published prose that contains it")
+        assert pattern.search("industrial interests hold it back") is None, (
+            f"pattern {i} ({pattern.pattern!r}) fires on the 2026-10-17 digest line "
+            "that turned the suite red")
+
+
+def test_the_intersects_rubric_sentence_is_caught_by_the_verb_it_names():
+    """The false positive was fixed by naming a verb, not by deleting a catch.
+
+    `INTERSECTS_RUBRIC_SENTENCE` is one of the 27 published rubric sentences, and
+    until 2026-10-17 the only thing flagging it was the bare-word pattern: `intersects`
+    was absent from the rating-verb list, so the nearest verb the table knew was
+    `addresses`, 87 characters away — outside the 80-character window. With the verb
+    named the sentence is caught on its own grammar.
+
+    The second assertion is the differential that makes that a claim rather than a
+    coincidence: the same sentence with BOTH of its rating verbs replaced by ordinary
+    ones and nothing else changed — same shape, same `interests`, same topic words —
+    is not flagged. If the guard were flagging it on the word, the plural, or the
+    topic, both halves would agree.
+    """
+    assert INTERSECTS_RUBRIC_SENTENCE in PUBLISHED_PROFILE_SENTENCES, (
+        "the sentence this node differential-tests is no longer one of the harvested "
+        "published rubric sentences, so the pin has drifted from the corpus")
+    assert body_mod.is_interest_profile_prose(INTERSECTS_RUBRIC_SENTENCE) is True
+    verbless = (INTERSECTS_RUBRIC_SENTENCE
+                .replace("Directly addresses", "Directly presents")
+                .replace("which intersects with", "which shares"))
+    for verb in ("address", "intersect", "align", "match", "relevan", "related",
+                 "core", "central", "user"):
+        assert verb not in verbless, verbless
+    assert body_mod.is_interest_profile_prose(verbless) is False, (
+        "the sentence is caught by something other than its rating verbs, so removing "
+        "the bare-word pattern did not move the catch onto the grammar")
 
 
 def test_an_interest_profile_why_is_never_the_body_by_either_route():
@@ -1957,6 +2039,58 @@ def _load_corpus_shape():
     return mod
 
 
+def _verb_pattern_source():
+    """The shipped rating-verb pattern's own source, so this node's variants differ
+    from it in exactly the one thing each varies and never re-spell the verb list."""
+    return body_mod._INTEREST_PROFILE_RES[2].pattern
+
+
+def _verb_variant(window: int | None = None, without_intersect: bool = False):
+    src = _verb_pattern_source()
+    if without_intersect:
+        stripped = src.replace("|intersect(?:s|ing|ion)?", "")
+        assert stripped != src, (
+            "the rating-verb pattern no longer spells `intersect` the way this node's "
+            "differential assumes, so the 87-to-28 figure below is stale")
+        src = stripped
+    if window is not None:
+        src = re.sub(r"\{0,\d+\}", "{0,%d}" % window, src, count=1)
+    return re.compile(src, re.IGNORECASE)
+
+
+def test_the_window_was_never_the_binding_constraint_naming_the_verb_was():
+    """The arithmetic behind leaving the pattern's `[^.!?]{0,80}` window at 80 instead
+    of widening it (#2916) — all four figures recomputed from the shipped pattern and
+    the harvested corpus, none of them a number a reader has to take on trust:
+
+    - 25 of the 27 harvested sentences are caught by the rating-verb pattern;
+    - dropping `intersect` from it at the shipped window loses EXACTLY ONE of them;
+    - that one needs a window of 87 without `intersect`, which is why the bare word was
+      doing its job by accident — and 28 with it, so naming the verb is what closed it;
+    - every one of the 25 is still caught at a window of 40, so 80 is not what was
+      binding and widening it would have fixed nothing while leaving the false positive
+      armed.
+
+    Each variant is the shipped pattern with the one edit named in its own clause, so a
+    claim about the corpus here is recomputed by the machine that reads it.
+    """
+    caught = [s for s in PUBLISHED_PROFILE_SENTENCES
+              if body_mod._INTEREST_PROFILE_RES[2].search(s)]
+    assert len(caught) == 25 and len(PUBLISHED_PROFILE_SENTENCES) == 27, len(caught)
+    lost = [s for s in caught if not _verb_variant(without_intersect=True).search(s)]
+    assert [s[:24] for s in lost] == [INTERSECTS_RUBRIC_SENTENCE[:24]], lost
+
+    def min_window(sentence, **kw):
+        for w in range(1, 200):
+            if _verb_variant(window=w, **kw).search(sentence):
+                return w
+        raise AssertionError(f"no window under 200 catches {sentence!r}")
+
+    assert min_window(INTERSECTS_RUBRIC_SENTENCE, without_intersect=True) == 87
+    assert min_window(INTERSECTS_RUBRIC_SENTENCE) == 28
+    assert max(min_window(s) for s in caught) == 40
+
+
 def test_the_shipped_guard_reports_no_interest_profile_prose_in_any_published_digest():
     """Clause 2 of #2039, over the REAL vault: zero flagged lines, ten files.
 
@@ -1968,6 +2102,13 @@ def test_the_shipped_guard_reports_no_interest_profile_prose_in_any_published_di
     category digests on this box with an explicit number rather than `>=`, because a
     sweep that quietly found one file fewer would also quietly find fewer defects —
     add a category digest and this goes red until the count moves with it.
+
+    It went red on 2026-10-17 for the other reason, and correctly: the guard carried a
+    pattern that matched the bare word `interests`, so one channel's own episode
+    question — `PUBLISHED_BODY_QUESTION` below, published into
+    `knowledge/robotics/youtube-digest.md` under its `## 2026-10-17` section — counted
+    as a defect. The pattern is gone (#2916); this node is the surface a future
+    re-widening trips on, because the corpus it counts is the machine's real one.
     """
     import board_presence
     cs = _load_corpus_shape()
