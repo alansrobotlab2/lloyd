@@ -136,13 +136,17 @@ NEW_JOBS = ("#90", "#91", "#92", "#93", "#94", "#95", "#96", "#97")
 #: control in `test_the_departed_paper_digests_hold_no_membership_row`.
 DEPARTED = ("#87", "#88", "#89")
 
-#: The seven watch-the-machinery jobs, each with the schedule its own task file's
+#: The jobs §Watch the machinery holds, each with the schedule its own task file's
 #: `frequency:` declares and three phrases its entry has to contain: what it reads,
 #: the artefact it writes, and one thing it must not do. Read off
-#: `~/obsidian/autonomy/9[1-7]-*.md` on 2026-10-12 and typed here rather than
-#: parsed from the vault on purpose: a check that opened the task directory is a
+#: `~/obsidian/autonomy/9[1-7]-*.md` on 2026-10-12, off `99-*.md` on 2026-10-16
+#: (#2813) and off `100-*.md`/`101-*.md` on 2026-10-17 (#2881), and typed here rather
+#: than parsed from the vault on purpose: a check that opened the task directory is a
 #: `live_vault` read, which the gate deselects (`pytest.ini:10-13`), and every
 #: clause #2630 was accepted on has to be gradable by the rung that really runs.
+#: The two 2026-10-16 arrivals are `status: draft`, which is no bar: #98 and #99 are
+#: draft too and both are listed, because the table records what a filed task file
+#: names, not what the scheduler has armed.
 WATCH_JOBS = {
     91: ("daily", "~/lloyd-data/sessions", "thinking-fidelity-prevalence.jsonl",
          "preserve_thinking_iterations"),
@@ -156,6 +160,16 @@ WATCH_JOBS = {
     # #2813: the four probes read off ~/obsidian/autonomy/99-supply-chain-inventory-regen.md
     99: ("weekly", "eval/supply-chain/baseline.yaml", "~/lloyd-data/supply-chain/",
          "`Write` or `Edit`"),
+    # #2881: the four probes read off ~/obsidian/autonomy/100-eval-instrument-index-daily.md
+    # and 101-gate-to-land-lag-daily-record.md on 2026-10-17. Both declare
+    # `frequency: daily`, both write exactly one dated row to one JSONL outside this
+    # repo, and neither may re-sort or compact the history it just appended. #100's
+    # read is spelled `wc -l` — the count step its own task file names — rather than
+    # the publisher's module name, because that module's name appearing in any module
+    # is what `test_no_gate_promotion_or_rollback_path_reads_the_index` counts as a
+    # reader of the published index outside the publisher itself.
+    100: ("daily", "wc -l", "instrument-index.jsonl", "re-sort"),
+    101: ("daily", "gate_to_land_lag.py", "gate_to_land_lag.jsonl", "re-sort"),
 }
 
 #: The ten `depends_on` edges, as the wiring diagram's parent ─► child arrows.
@@ -1332,6 +1346,16 @@ WATCH_TIER = {
     # report under the data root plus a backlog item when a headline count moves. The
     # report is what it prints; the filing is the write. Same reason #94 is here.
     "#99": "Writes durable state unattended",
+    # #2881, the same question asked of the two 2026-10-16 arrivals. Neither may file
+    # anything: each task file's `acceptance.objective_checks` names `Write` and `Edit`
+    # in its `tool_not_called` list and its prohibition sentence forbids filing a
+    # backlog item or opening a round, so the only durable thing either leaves is one
+    # dated row in its own journal — `~/lloyd-data/eval/instrument-index/` for #100,
+    # `~/.local/state/lloyd-automod/` for #101, both outside the repo, the vault and
+    # the queue. That is #97's position exactly, which is why #2881's contract places
+    # them here rather than beside #92–#94.
+    "#100": "Reports only",
+    "#101": "Reports only",
 }
 
 
@@ -1371,7 +1395,8 @@ def test_the_newest_jobs_sit_in_the_group_and_tier_their_output_belongs_to():
     for job, tier in WATCH_TIER.items():
         assert job in watch[0], (
             f"{job} is not in the Watch the machinery row, which lists {watch[0]} — "
-            f"every one of the seven reads the machinery another job runs on")
+            f"every job in `WATCH_TIER` reads the machinery another job runs on, "
+            f"which is what makes it one group rather than Measure's")
         assert tier_of(job) == [tier], (
             f"{job} is in {tier_of(job) or 'no tier'}, not {tier!r} as #2630 ruled: "
             f"the tier answers what the run may write with nobody watching")
@@ -2840,8 +2865,9 @@ def _watch_slice() -> str:
     """
     text = _text()
     assert WATCH_HEADING in text, (
-        "architecture/autonomy-jobs.md has no §Watch the machinery to hold #91–#97, "
-        "so the seven live task files are back to having no entry — the #2630 defect")
+        "architecture/autonomy-jobs.md has no §Watch the machinery to hold the "
+        "watchers, so their live task files are back to having no entry — the "
+        "#2630 defect, #2813's and #2881's all at once")
     return text.split(WATCH_HEADING, 1)[1].split("\n## ", 1)[0]
 
 
@@ -2860,8 +2886,8 @@ def _watch_row(job: str) -> str:
 
 
 def test_the_watch_group_table_holds_one_row_per_live_job_and_no_others():
-    """#2630 clause 3's membership half: the seven have entries, and the group holds
-    nothing that is not one of them.
+    """#2630 clause 3's membership half, over the group as it now stands: every job
+    in `WATCH_JOBS` has a row, and the group holds nothing that is not one of them.
 
     `test_each_watch_entry_states_its_schedule_its_reads_its_writes_and_a_prohibition`
     checks the rows' contents; this checks the row *set*, because a doc that gained
@@ -2988,10 +3014,11 @@ def test_the_seven_add_no_dependency_edge_and_the_fleet_arithmetic_moves_once():
         f"the wiring diagram reads {sorted(edges)}, not the ten verified edges "
         f"{sorted(TEN_EDGES)} — none of #91–#97 declares a parent, so none of them "
         f"belongs in this picture")
-    seven = {f"#{job}" for job in WATCH_JOBS}
-    assert not (seven & {e for pair in edges for e in pair}), (
-        f"the diagram drew an edge for one of {sorted(seven)}; the item's own "
-        f"`depends_on` check reads 0 for all seven files")
+    grouped = {f"#{job}" for job in WATCH_JOBS}
+    assert not (grouped & {e for pair in edges for e in pair}), (
+        f"the diagram drew an edge for one of {sorted(grouped)}; every file in "
+        f"`WATCH_JOBS` reads `depends_on` 0 — #100 and #101 verified on 2026-10-17 — "
+        f"so none of them belongs in this picture")
     funcs = _functions_section()
     m = re.search(r"\b(\w+) of the (\w+) tasks\b", _flat(funcs))
     assert m, "§The wiring no longer counts the jobs that declare no dependency"
@@ -3002,8 +3029,83 @@ def test_the_seven_add_no_dependency_edge_and_the_fleet_arithmetic_moves_once():
         f"#1520 clause 3 pinned two sections together over")
     assert fleet - without == len(edges), (
         f"{fleet} − {without} = {fleet - without} but the diagram draws {len(edges)} "
-        f"edges; adding the seven adds no parent, so both numbers move by seven "
-        f"together or the sentence and the picture part company")
+        f"edges; a job joining §Watch the machinery adds no parent, so the two "
+        f"numbers move together or the sentence and the picture part company")
+
+
+#: A claim that some id is the fleet's newest, as the doc writes it in §The
+#: functions' numbering note and in §The wiring's parenthetical. `is` and not `was`:
+#: the §Review log and the wiring note both keep superseded newest-ids in the past
+#: tense on purpose, and those are records rather than current claims.
+_NEWEST_CLAIM = re.compile(r"#(\d+)[^.]*\bis the newest\b")
+
+
+def test_the_2881_pair_is_listed_once_in_each_table_and_the_watch_row_agrees():
+    """#2881 clause 1, gradable without the vault.
+
+    `test_every_live_task_file_is_named_once_in_each_membership_table` is the real
+    reconciler and carries `@live_vault`, so the gate never runs it
+    (`pytest.ini:10-13`) and #100/#101 were invisible to every node here: symmetric
+    omission passes `test_every_job_has_one_function_and_exactly_one_write_tier`,
+    which is how #2630, #2813 and #2881 all happened. This pins the two ids the same
+    file can check — exactly one row apiece in each table, and the §Watch the
+    machinery row agreeing with `WATCH_JOBS`, so the group's membership, the two
+    tables and the entry rows cannot drift apart silently. #36 is asserted present
+    rather than absent: the repair adds rows, and a repair that deleted a row to make
+    a count agree would fail here as loudly as one that duplicated the pair.
+    """
+    funcs = _table(FUNCTIONS_HEADER)
+    # The same two parses `test_every_live_task_file_is_named_once_in_each_membership_table`
+    # feeds its reconciler, so this node's id sets are the ones the vault-side check
+    # compares against the directory and not a second reading of the tables.
+    grouped, tiered = (ids for _, ids in _membership_tables())   # functions, tiers
+    assert sorted(grouped) == sorted(tiered), (
+        "the two membership tables name different id sets; symmetric omission is the "
+        "one drift `test_every_job_has_one_function_and_exactly_one_write_tier` "
+        "cannot see, and it is how all three of #2630, #2813 and #2881 arrived")
+    for job in ("#100", "#101"):
+        assert grouped.count(job) == 1, (
+            f"{job} appears {grouped.count(job)} times in the function table; #2881 "
+            f"is one row per live task file in each table, counting #98's and #99's "
+            f"`status: draft` as membership and not as arming")
+        assert tiered.count(job) == 1, (
+            f"{job} appears {tiered.count(job)} times in the write-authority table, "
+            f"which is the doc's answer to what that job may do unattended")
+    assert "#36" in grouped and "#36" in tiered, (
+        "#36 lost its row: the ghost exemption in the reconciler is the reason it "
+        "keeps one row in each table, so a repair that dropped it to fix a count "
+        "would not also be a repair that kept the tables symmetric")
+    watch = next(v for k, v in funcs.items() if k.startswith("[Watch the machinery]"))
+    assert sorted(watch[0]) == sorted(f"#{j}" for j in WATCH_JOBS), (
+        f"§Watch the machinery's row lists {sorted(watch[0])} while `WATCH_JOBS` "
+        f"holds rows for {sorted(f'#{j}' for j in WATCH_JOBS)} — the heading node "
+        f"checks the row against the heading, and only this one ties the group to "
+        f"the entries and tiers typed above")
+
+
+def test_no_live_sentence_calls_a_superseded_id_the_newest():
+    """#2881 clause 4's prose half. The numbering note said "#99 … is the newest",
+    in the present tense, while the directory already held #100 and #101 — the
+    second time this file has had to retire a sentence of that shape (the wiring
+    note's "#99 is the newest file" is its first), and the second time the floor
+    beside it was the thing that outlived the id it named.
+
+    The expectation is derived, not typed: the highest id either membership table
+    names is what a present-tense newest-claim has to name. Past tense stays legal —
+    §The wiring and §Review log keep the id each was written under, and rewriting
+    dated prose would destroy the record #2813's entry is for.
+    """
+    listed = max(int(i[1:]) for ids, _ in _table(FUNCTIONS_HEADER).values() for i in ids)
+    claims = [(int(m.group(1)), s) for s in _sentences(_live_prose())
+              if (m := _NEWEST_CLAIM.search(s))]
+    assert claims, (
+        "no live sentence names the newest job, so the bound below would prove "
+        "nothing — positive control failed")
+    for named, sentence in claims:
+        assert named == listed, (
+            f"{sentence!r} calls #{named} the newest while the membership tables list "
+            f"#{listed}; the numbering note's own rule is that the id carries the "
+            f"date it was the newest, which is a past-tense sentence")
 
 
 # ── #2631 — the two membership tables reconcile against the task-file directory ─
