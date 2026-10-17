@@ -3149,6 +3149,167 @@ def _tool_quality_line(p: dict) -> str:
     return f"{label}: {p['files']} files, oldest {oldest}, {p['bytes']} B" + tail
 
 
+# Store 18: the injection-canary corpus (#2862) — the 20th line the report prints, the
+# second store this sweep REPORTS and does not bound, and the only one of the twenty that
+# lives inside the tracked tree.
+# ---------------------------------------------------------------------------
+
+#: Anchored on `_TREE`, the way the three automod stores reach the checkout — which is
+#: why this line prints from a round's worktree too, where the automod stores refuse: a
+#: worktree holds its own copy of `eval/measurements/`. The corpus is git-tracked data
+#: (`git ls-files eval/measurements/` counts 83 files, and `rows.jsonl` is committed by
+#: the round that runs the canary), so a delete here would be a delete in the repository.
+INJECTION_CANARY_DIR = _TREE / "eval" / "measurements" / "injection-canary"
+#: Labelled by its tree-relative path, NOT by the resolved one. `tool-quality`'s label
+#: carries `DATA_ROOT` and moves under `$LLOYD_DATA`; this path is inside the tree, so a
+#: label containing the resolved root could never equal the report's label — and the
+#: count-consistency guards match the report's label before taking its fields (#2472).
+INJECTION_CANARY_STORE_LABEL = "eval/measurements/injection-canary/"
+
+#: The one file the canary appends to, and the reports that document each window.
+CANARY_ROWS_NAME = "rows.jsonl"
+CANARY_REPORT_PREFIX = "run-"
+CANARY_REPORT_SUFFIX = "-persistence.md"
+
+#: Reporting thresholds, NOT deletion horizons — the shape
+#: `FACTS_QUARANTINE_HOLD_RULING_DAYS` uses. Half a year of the cadence the timer keeps
+#: (`lloyd-persistence-window.timer`, `OnCalendar=Mon *-*-* 02:10:00`) at the ~30 rows and
+#: ~190 KB a window measured, and 5 MB is where a file the round commits on every run
+#: starts costing the clone rather than the disk. Unlike every other store here, and
+#: unlike tool-quality, this one has NO second owner to defer to: `eval/run_injection_canary.py`
+#: opens `rows.jsonl` in append mode and holds no prune, no trim and no deletion of its
+#: nothing anywhere bounds it and the threshold is the only notice an operator gets.
+CANARY_ESCALATE_WINDOWS = 26
+CANARY_ESCALATE_BYTES = 5 * 1024 * 1024
+
+
+def _canary_row_tally(rows_file: Path) -> tuple[int, set]:
+    """`(rows, distinct ts[:10])` read out of one corpus file, read-only.
+
+    A row is a non-blank line whether or not it parses — that is the corpus's true size,
+    and a JSON line the writer mangled is still bytes on disk and still a row in the
+    count. It contributes no WINDOW, and skipping it there is the same asymmetry
+    `_tool_quality_files` calls `other` for: an unreadable row's age is unknowable, so it
+    moves the size and not the threshold that reads windows.
+    """
+    rows = 0
+    days: set = set()
+    with open(rows_file, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            rows += 1
+            try:
+                day = str(json.loads(line).get("ts") or "")[:10]
+            except ValueError:
+                continue
+            if len(day) == 10 and day[4] == "-" and day[7] == "-":
+                days.add(day)
+    return rows, days
+
+
+def sweep_injection_canary(apply: bool, *, path: Path | None = None) -> dict:
+    """Count the injection-canary corpus. `apply` is accepted and ignored, on purpose.
+
+    This is the second store that reports without bounding (tool-quality is the first), and
+    the reason is stronger here than there: the corpus is git-tracked, so deleting it is a
+    repository write, and deleting an anti-injection measurement would remove the evidence
+    the canary exists to produce. The `apply` parameter is kept for the symmetry that
+    matters — the node that proves `apply=True` deletes nothing is the same node that
+    proves a dry run does, and neither gets to pass by accident.
+
+    Returns `present`/`files`/`bytes`/`rows`/`windows`/`oldest`. An absent or unreadable
+    directory returns all-zero rather than raising, and is never created: a sweep that
+    mkdirs what it only counts makes "empty" and "never written" the same report, and here
+    it would add a path to the repository.
+    """
+    store = Path(path) if path is not None else INJECTION_CANARY_DIR
+    out = {"apply": bool(apply), "present": False, "files": 0, "bytes": 0, "rows": 0,
+           "windows": 0, "oldest": None, "other": 0}
+    try:
+        entries = sorted(store.iterdir())
+    except OSError:
+        # Absent, unreadable, or not a directory — `iterdir` raises for all three, and
+        # every one means "this checkout has no corpus yet".
+        return out
+    out["present"] = True
+    days: set = set()
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                out["other"] += 1
+                continue
+            size = entry.stat().st_size
+        except OSError:
+            out["other"] += 1
+            continue
+        out["bytes"] += size
+        if entry.name == CANARY_ROWS_NAME:
+            try:
+                file_rows, file_days = _canary_row_tally(entry)
+            except OSError:
+                # Counted in size, absent from the tally: the bytes are real, the dates
+                # are not readable, and `other` says so in the same word the line uses.
+                out["other"] += 1
+                continue
+            out["rows"] += file_rows
+            days |= file_days
+        elif (entry.name.startswith(CANARY_REPORT_PREFIX)
+              and entry.name.endswith(CANARY_REPORT_SUFFIX)):
+            # `files` is the persistence reports specifically — the clause's own
+            # definition — so the line can say how many windows were documented without
+            # counting the `run-*.log` files as if they were.
+            out["files"] += 1
+            day = entry.name[len(CANARY_REPORT_PREFIX):-len(CANARY_REPORT_SUFFIX)]
+            if len(day) == 10 and day[4] == "-" and day[7] == "-":
+                days.add(day)
+        else:
+            # The `run-*.log` files the canary also leaves here. Real bytes, unknown
+            # window: they move the size and not the threshold.
+            out["other"] += 1
+    out["windows"] = len(days)
+    out["oldest"] = min(days) if days else None
+    return out
+
+
+def _injection_canary_line(p: dict) -> str:
+    """Rows, windows, bytes, reports — and the verdict the two thresholds decide.
+
+    Shaped on `_tool_quality_line`, whose tail says `REPORT ONLY … this sweep deletes
+    nothing here`, with one addition this store earns because nothing else bounds it: an
+    `ESCALATE`/`OK` word. It is a reporting verdict, and the tail keeps saying so beside
+    it, because the reading this line has to make impossible is "past 26 windows the sweep
+    starts pruning the repo's own measurements". `OK` is printed as explicitly as
+    `ESCALATE`: a silent line under a threshold is indistinguishable from a store nobody
+    added, which is the exact state #2862 is ending.
+    """
+    label = f"  injection-canary corpus ({INJECTION_CANARY_STORE_LABEL})"
+    over = []
+    if p["windows"] > CANARY_ESCALATE_WINDOWS:
+        over.append(f"{p['windows']} windows > {CANARY_ESCALATE_WINDOWS}")
+    if p["bytes"] > CANARY_ESCALATE_BYTES:
+        over.append(f"{p['bytes']:,} B over the {CANARY_ESCALATE_BYTES // (1024 * 1024)} MB "
+                    f"reporting bound")
+    verdict = "ESCALATE" if over else "OK"
+    bound = (f"past its reporting threshold ({', '.join(over)})" if over else
+             f"within its reporting threshold ({CANARY_ESCALATE_WINDOWS} windows / "
+             f"{CANARY_ESCALATE_BYTES // (1024 * 1024)} MB)")
+    tail = (f" — {verdict} {bound}; REPORT ONLY: this sweep deletes nothing here in either "
+            f"mode, since a delete in the tracked tree is a repo write and the bound is a "
+            f"ruling (#2862)")
+    if not p["rows"] and not p["files"]:
+        line = f"{label}: 0 rows, 0 windows, 0 B, 0 report(s), no dated row" + tail
+    else:
+        oldest = p["oldest"] or "no dated row"
+        line = (f"{label}: {p['rows']:,} rows / {p['windows']} weekly windows / "
+                f"{p['bytes']:,} B / {p['files']:,} persistence report(s), "
+                f"oldest {oldest}" + tail)
+    if p["other"]:
+        line += f" ({p['other']} entr{'y' if p['other'] == 1 else 'ies'} counted in size " \
+                f"with no readable window)"
+    return line
+
+
 
 
 def main() -> int:
@@ -3207,6 +3368,11 @@ def main() -> int:
     # the argument is accepted and never read, so an applied run reaches this store with
     # the same code path a dry run does (#2472 clause 2).
     tool_q = sweep_tool_quality(args.apply)
+    # Counted in both modes and printed in both: the number an operator approves `--apply`
+    # against is the same number that decides whether the corpus is past its reporting
+    # bound, and a store that only spoke in a dry run would be unreadable in the run that
+    # actually deletes. Read-only either way — `apply` is accepted and ignored.
+    canary = sweep_injection_canary(args.apply)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -3301,6 +3467,14 @@ def main() -> int:
         # sandbox declines it too and still prints eleven store lines plus one refusal
         # line.
         print(_ledger_line(ledger_rows))
+    # Printed LAST, and outside the refusal guard: this store lives in `_TREE`, so a run
+    # from a round's worktree or a sandbox counts it just as a production run does — the
+    # corpus is a tracked directory, present in every checkout, and refusing the deletions
+    # elsewhere says nothing about it. Printing it after the automod lines keeps the two
+    # lines that can name a production ref where an operator has always read them, and it
+    # means a store appended later does not renumber the positional pins in
+    # tests/test_retention_sweep.py that read the task-79 items in order.
+    print(_injection_canary_line(canary))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0

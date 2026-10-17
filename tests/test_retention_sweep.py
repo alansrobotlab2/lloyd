@@ -160,6 +160,15 @@ def rs(tmp_path, monkeypatch):
         # node that needs it. Created here because an absent root is a state every node has
         # to be able to distinguish from an empty one — the sweep's own `present` flag.
         ("FACTS_QUARANTINE_ROOT", "vault-derived", True),
+        # Store 18, the injection-canary corpus (#2862). The one store in this file that
+        # lives in the CHECKED-OUT TREE, so unlike every entry above it there IS a real
+        # directory at `eval/measurements/injection-canary/` in the very repo these tests
+        # run against — 112 rows / 433 KB as filed, growing ~30 rows every Monday. Left
+        # alone, every `main()` report here would carry whatever the corpus holds that day
+        # and the count guards would read a different number per machine. NOT created: an
+        # absent store is the state the fixture wants, and it is also the `0 rows` case
+        # clause 3 pins. The clause nodes write their own fixture into it.
+        ("INJECTION_CANARY_DIR", "eval/measurements/injection-canary", False),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -981,9 +990,23 @@ def test_the_one_resolution_owns_every_directory_the_sweep_touches(tmp_path, mon
                           # a writable one. Exempting it because it is reported-only would
                           # leave the one class of bug this node catches uncaught for the one
                           # store that is new.
-                          "TOOL_QUALITY_DIR"}, \
+                          # #2862's store joins the set for the same reason #2472's did: the
+                          # hazard this guard exists for is a store whose path the sweep
+                          # resolved WRONG, and a reported-only store resolves through a
+                          # root like any writable one. Its root is the CHECKED-OUT TREE
+                          # rather than the data root, which is what the assertion below
+                          # pins rather than `is_relative_to(root)`.
+                          "TOOL_QUALITY_DIR", "INJECTION_CANARY_DIR"}, \
         f"the sweep gained or lost a store dir; update this set deliberately: {sorted(swept)}"
     for name, value in sorted(swept.items()):
+        if name == "INJECTION_CANARY_DIR":
+            # The one store here that is NOT under the data root, and it must stay that way
+            # (#2862): the corpus is git-tracked, so anchoring it to `$LLOYD_DATA` would
+            # report `0 rows` over a directory that is still growing, in the one direction
+            # of drift that reads as a clean result.
+            assert value == _SWEEP_TREE / "eval" / "measurements" / "injection-canary", (
+                f"{name} = {value} moved off the tree it is tracked in")
+            continue
         assert value.is_relative_to(root), f"{name} = {value} is outside the root {root}"
     assert swept["AUTONOMY_TASKS_DIR"] == root / "vault" / "autonomy"
     # The two files, not just the directories: the pair is deleted by name, so a
@@ -1812,9 +1835,9 @@ def _assert_table_rows_match_report(rows: dict[str, str], report: list[str],
             f"{sorted(rows)}")
 
 
-def test_the_skill_says_nineteen_stores_and_its_table_has_a_row_per_report_line(
+def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
         rs, _store_report):
-    """Clause 4 of #2418, carried by #2472 and widened by #2615: the skill says nineteen,
+    """Clause 4 of #2418, carried by #2472, widened by #2615 and #2862: the skill says twenty,
     and its table's
     rows are the report's lines.
 
@@ -1827,7 +1850,7 @@ def test_the_skill_says_nineteen_stores_and_its_table_has_a_row_per_report_line(
     It went stale anyway, in the direction this node was blind to: #1644 added two
     stores and the prose stayed at ten for nine commits, because the count of report
     lines came from the suffix selector that could not see them (`#1835`). The report
-    side of the comparison is now the `_store_report` fixture — the nineteen lines
+    side of the comparison is now the `_store_report` fixture — the twenty lines
     `main()` prints with all three automod rungs in play — so this node reads one
     measurement, not two.
     """
@@ -1840,11 +1863,11 @@ def test_the_skill_says_nineteen_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 19, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 20, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "nineteen unbounded-growth stores" in text, (
-        "the skill's description states a store count other than nineteen")
-    assert "nineteen in all" in text, "the skill's body states a store count other than nineteen"
+    assert "twenty unbounded-growth stores" in text, (
+        "the skill's description states a store count other than twenty")
+    assert "twenty in all" in text, "the skill's body states a store count other than twenty"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -1933,8 +1956,8 @@ def test_the_skill_says_nineteen_stores_and_its_table_has_a_row_per_report_line(
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "sixteen store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports sixteen stores by design")
+    assert "seventeen store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports seventeen stores by design")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -2041,7 +2064,15 @@ _STORE_ORDER_ANCHOR = "in this order:"
 _STORE_ORDER_TAIL = "Report all"
 _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                       "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
-                      "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "1": 1, "2": 2, "3": 3, "4": 4,
+                      "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+                      "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+                      # #2862 added the twentieth store. `twenty` is six letters, so the
+                      # name guard's `[a-z]{9,}` scan never asks for it and this entry is
+                      # read only by the prose side (`_store_count_claimed`): a vault file
+                      # that says "twenty stores are bounded" would otherwise raise
+                      # `unrecognised store-count numeral` at the guard instead of being
+                      # graded against the twenty the sweep prints.
+                      "twenty": 20, "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
 
@@ -2085,8 +2116,8 @@ def _store_report_lines(out: str) -> list[str]:
 
 def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
         rs, _store_report):
-    """#1835 clause 1, carried by #2472 and widened by #2615: the nineteen lines `main()`
-    prints are nineteen stores, and the three the loop leaves outside the data root are among them.
+    """#1835 clause 1, carried by #2472, widened by #2615 and #2862: the twenty lines
+    `main()` prints are twenty stores, and the three the loop leaves outside the data root are among them.
 
     This is the acceptance check itself, run against the real `main()`: the count a
     full sweep reports, taken through the selector every count comparison in this file
@@ -2095,9 +2126,9 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 19, (
-        f"the sweep prints {len(_store_report)} store lines, not the nineteen its report "
-        f"has had since #2472 added the tool-quality store: {_store_report}")
+    assert len(_store_report) == 20, (
+        f"the sweep prints {len(_store_report)} store lines, not the twenty its report "
+        f"has had since #2862 added the injection-canary corpus: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -2133,6 +2164,12 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     # because the label carries the directory's own name and this file does not decide it.
     tq_line = rs._tool_quality_line(rs.sweep_tool_quality(False))
     assert tq_line.split(":")[0].strip() in printed, f"the tool-quality store is not in the report: {printed}"
+    # Store 18 (#2862) joins the invisible set on the same evidence: its renderer has no
+    # delete verb either, so the selector cannot see it, and a count taken through that
+    # selector silently under-reports by one from the day it was added.
+    _canary_line = rs._injection_canary_line(rs.sweep_injection_canary(False))
+    assert _canary_line.split(":")[0].strip() in printed, (
+        f"the injection-canary store is not in the report: {printed}")
     invisible = [ln for ln in _store_report
                  if not ln.endswith(("freed", "candidate", "removed (keep last 200)"))]
     assert sorted(ln.split(":")[0] for ln in invisible) == sorted([dirs_line,
@@ -2141,7 +2178,12 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
                                                                   prov_line,
                                                                   turn_line,
                                                                   pytest_line,
-                                                                  tq_line.split(":")[0].strip()]), (
+                                                                  tq_line.split(":")[0].strip(),
+                                                                  # #2862's store is invisible
+                                                                  # to the same rule for the
+                                                                  # same reason: no delete verb
+                                                                  # in either mode.
+                                                                  _canary_line.split(":")[0].strip()]), (
         "these store lines are invisible to an endswith(('freed','candidate',"
         "'removed (keep last 200)')) rule, which is how #1835's drift happened: "
         f"{[ln.split(':')[0] for ln in invisible]}")
@@ -2184,16 +2226,16 @@ def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
         f"the rule counted a line that is not a store: {report}")
 
 
-def test_a_run_outside_the_production_checkout_reports_sixteen_stores_and_one_refusal_line(
+def test_a_run_outside_the_production_checkout_reports_seventeen_stores_and_one_refusal_line(
         rs, monkeypatch, capsys):
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
-    `  automod stores: REFUSED: …`, so a reader holding that output sees fourteen store
-    lines while the skill says nineteen — and SKILL.md now says so in those words. This
+    `  automod stores: REFUSED: …`, so a reader holding that output sees seventeen store
+    lines while the skill says twenty — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
-    (just "nineteen", which makes every sandbox run look like it lost three stores) or the
+    (just "twenty", which makes every sandbox run look like it lost three stores) or the
     alarming half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
     owns the predicate itself and the `NOT_PRODUCTION_EXIT` half; what is new here is the
     COUNT, which is the number a report is written from.
@@ -2202,20 +2244,25 @@ def test_a_run_outside_the_production_checkout_reports_sixteen_stores_and_one_re
     the predicate's original reason (a worktree shares the live repo's refs) does not
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
-    the rule. A refused run therefore still prints fourteen lines plus one refusal line,
-    not sixteen — neither the pytest basetemp root #2418 added nor the tool-quality store
-    #2472 added is one of the three guarded stores, so both print here whatever the tree
-    is, and the second of those is asserted below rather than left to the count: a store
-    this sweep never deletes has no reason to sit behind the production-checkout guard at
-    all, and if somebody moved it there the count alone would not say which store went.
+    the rule. A refused run therefore still prints seventeen store lines plus one refusal
+    line: neither the pytest basetemp root #2418 added, the tool-quality store #2472 added,
+    nor the injection-canary corpus #2862 added is one of the three guarded stores, so all
+    three print here whatever the tree is, and the last two of those are asserted below
+    rather than left to the count — a store this sweep never deletes has no reason to sit
+    behind the production-checkout guard at all, and if somebody moved one there the count
+    alone would not say which store went.
     """
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 16, f"a refusal run should report sixteen stores: {report}"
+    assert len(report) == 17, f"a refusal run should report seventeen stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
+    assert any("injection-canary corpus" in ln for ln in report), (
+        f"the tracked-tree store vanished from a refused run: it is a directory inside "
+        f"`_TREE`, present in every checkout, and a run that may delete nothing has no "
+        f"reason to stop counting it: {report}")
     refusal = [ln.strip() for ln in out.splitlines()
                if ln.strip().startswith("automod stores:")]
     assert len(refusal) == 1, f"expected one automod refusal line, got: {refusal}"
@@ -2344,7 +2391,7 @@ def _dry_run_report(rs, monkeypatch, capsys, *, refused: bool = False) -> str:
     all three automod rungs because a round's worktree shares the live repository's refs.
     The plain `rs` fixture already answers that question *yes* — deliberately, over
     redirected constants, so a node about `sessions/*.json` does not end on exit 2 for a
-    branch delete it never asked about — which is what lets the sixteen lines below be
+    branch delete it never asked about — which is what lets the seventeen lines below be
     produced from `tmp_path` alone: `AUTOMOD_WORK_ROOT` is an empty directory,
     `AUTOMOD_REPO` an empty repository, and the ledger trio absent files, so all three
     rungs are reading a machine that has never run the loop, and the ledger rung has no
@@ -2420,7 +2467,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 19, (
+    assert len(items) == len(_store_report) == 20, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -7014,7 +7061,7 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
     is that the row states the rule. So this node pins the three things an operator reads off
     the table and nowhere else: the constant name, the 30-day window, and that age comes from
     the run tag. Exactly one row may carry the glob, and the description and body both say
-    nineteen, which is the count the report now prints in both modes.
+    twenty, which is the count the report now prints in both modes.
 
     #2793 widened WHAT the one row has to state, not how many rows there are: the hold's NAME
     SHAPE as the deliberate route, and the 90d hold-ruling count beside it.
@@ -7028,8 +7075,8 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
         pytest.skip(f"the vault skill is not reachable from here: {skill}")
     text = skill.read_text(encoding="utf-8")
     front = text.split("---", 2)[1]
-    assert "nineteen unbounded-growth stores" in front, front[:200]
-    assert "nineteen in all" in text, "the skill's body states a count other than eighteen"
+    assert "twenty unbounded-growth stores" in front, front[:200]
+    assert "twenty in all" in text, "the skill's body states a count other than twenty"
     rows = _skill_table_rows(text)
     hits = [(label, body) for label, body in rows.items()
             if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
@@ -7879,3 +7926,255 @@ def test_the_two_source_readers_agree_on_names_and_differ_on_read_budgets(rs, tm
         "a head probe with no caller would let someone pin two windows against each other "
         "and call the agreement a cross-check"
     )
+
+
+
+
+# ---------------------------------------------------------------------------
+# Store 18: the injection-canary corpus — reported, never bounded (#2862).
+# The one store on this fleet that grows by itself INSIDE the tracked tree:
+# `lloyd-persistence-window.timer` fires `Mon 02:10`, and
+# `eval/run_injection_canary.py` opens rows.jsonl in append mode with no
+# retention of its own. 636 KB / 112 rows / 6 windows as filed, ~170-190 KB and
+# ~30 rows per window. Every node below writes its own fixture into the store the
+# `rs` fixture redirects (pointed at the tmp root, NOT created), so no node here
+# reads the live corpus or mutates it.
+# ---------------------------------------------------------------------------
+
+
+def _canary_store(root: Path, windows: int, rows_per_window: int = 30,
+                  row_bytes: int = 0, reports: int | None = None) -> Path:
+    """Write a corpus of `windows` weekly windows and return the store path.
+
+    `windows` windows means that many distinct `ts[:10]` values AND that many
+    `run-<day>-persistence.md` reports unless `reports` says otherwise, because
+    that is what one timer fire leaves behind. `row_bytes` pads each row, which
+    is how the byte branch of the threshold is reached without writing 5 MB of
+    dates by hand.
+    """
+    store = root / "eval" / "measurements" / "injection-canary"
+    store.mkdir(parents=True, exist_ok=True)
+    pad = "x" * max(0, row_bytes - 40)
+    with open(store / "rows.jsonl", "w", encoding="utf-8") as fh:
+        for w in range(windows):
+            day = f"2026-{(w // 28) + 1:02d}-{(w % 28) + 1:02d}"
+            for _ in range(rows_per_window):
+                fh.write('{"ts": "%sT02:11:04+00:00", "payload": "%s"}\n' % (day, pad))
+    for w in range(reports if reports is not None else windows):
+        day = f"2026-{(w // 28) + 1:02d}-{(w % 28) + 1:02d}"
+        (store / f"run-{day}-persistence.md").write_text(f"# {day}\n", encoding="utf-8")
+    return store
+
+
+def _canary_lines(out: str) -> list[str]:
+    """The store lines of one captured run — the same extractor the count guards use."""
+    return _store_report_lines(out)
+
+
+def _canary_run(rs, monkeypatch, capsys, apply: bool) -> str:
+    """Run the shipped `main()` in one mode against whatever `rs` points at, and return
+    stdout. Both modes go through the real entry point because the claim is about the
+    report an operator and task #79 read, not about a helper's return value."""
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"] + (["--apply"] if apply else []))
+    assert rs.main() == 0, f"the sweep must exit 0 in {'APPLY' if apply else 'DRY RUN'} mode"
+    return capsys.readouterr().out
+
+
+def test_the_injection_canary_store_counts_rows_windows_reports_and_oldest(rs, monkeypatch,
+                                                                          capsys):
+    """Clause 1: the counter returns the six figures the line is built from, and
+    `main()` prints the labelled line in BOTH modes.
+
+    `rows`, `windows` and `files` are three different quantities on purpose — 4 windows
+    holding 120 rows and leaving 4 reports prints all three — because a line that
+    conflated them could not say which of the two growth curves (rows per week, or weeks
+    themselves) the corpus is on. The oldest window is a date, so a reader learns how
+    long the growth has been running without opening the file.
+
+    The `main()` half is the process boundary this store crosses: autonomy task #79 runs
+    this script as a subprocess and reads only its stdout, so a figure the function
+    returns and the report never prints is a figure nobody acts on. The label is asserted
+    byte-exact, `injection-canary corpus (eval/measurements/injection-canary/)`, because
+    the clause names it and because the store's directory is the thing a reader has to
+    find afterwards.
+    """
+    store = _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=4,
+                          rows_per_window=30)
+    p = rs.sweep_injection_canary(False, path=store)
+    assert p["present"] is True, p
+    assert p["rows"] == 120, f"4 windows x 30 rows each: {p}"
+    assert p["windows"] == 4, f"the window figure is distinct ts[:10] values: {p}"
+    assert p["files"] == 4, f"`files` counts the run-*-persistence.md reports: {p}"
+    assert p["oldest"] == "2026-01-01", p
+    assert p["bytes"] == sum(f.stat().st_size for f in store.iterdir()), p
+
+    for apply in (False, True):
+        out = _canary_run(rs, monkeypatch, capsys, apply)
+        assert out.splitlines()[0].endswith("DRY RUN" if not apply else "APPLY"), out
+        lines = [ln for ln in out.splitlines() if "injection-canary corpus" in ln]
+        assert len(lines) == 1, f"exactly one line in {'APPLY' if apply else 'DRY RUN'}: {lines}"
+        assert lines[0].strip().startswith(
+            "injection-canary corpus (eval/measurements/injection-canary/):"), lines[0]
+        assert "120 rows" in lines[0] and "4 weekly windows" in lines[0], lines[0]
+        assert "oldest 2026-01-01" in lines[0], lines[0]
+
+
+def test_the_injection_canary_line_says_ESCALATE_over_the_bound_and_OK_under_it(
+        rs, tmp_path):
+    """Clause 2: the verdict flips on `windows > 26` OR `bytes > 5 MB`, and both branches
+    are pinned from a fixture the sweep writes into nothing but tmp_path.
+
+    Two separate escalations, not one test with two asserts, because they are two
+    different failure modes of the same store: 27 windows is a corpus that has been
+    appended to for half a year at a normal size, and 5 MB at 2 windows is a run that
+    wrote something enormous. The `OK` side is pinned as explicitly as the `ESCALATE`
+    side: a silent line under a threshold is indistinguishable from a store nobody added,
+    which is the exact state #2862 is ending.
+
+    At-or-below is `OK` and strictly-above escalates, so the boundary itself (26 windows,
+    exactly 5 MB) is on the OK side — the numbers the line quotes are the store's own
+    constants, never a copy.
+    """
+    ok = _canary_store(tmp_path / "ok", windows=26, rows_per_window=2)
+    p_ok = rs.sweep_injection_canary(False, path=ok)
+    line_ok = rs._injection_canary_line(p_ok)
+    assert f"({rs.INJECTION_CANARY_STORE_LABEL})" in line_ok, line_ok
+    assert " OK " in f" {line_ok} ", f"at or below the bound the line must say OK: {line_ok}"
+    assert "ESCALATE" not in line_ok, line_ok
+
+    over_windows = _canary_store(tmp_path / "wide", windows=27, rows_per_window=1)
+    line_w = rs._injection_canary_line(rs.sweep_injection_canary(False, path=over_windows))
+    assert "ESCALATE" in line_w and "27 windows > 26" in line_w, line_w
+    assert "OK" not in line_w.split("ESCALATE")[1], line_w
+
+    big = _canary_store(tmp_path / "big", windows=2, rows_per_window=1,
+                        row_bytes=5 * 1024 * 1024 // 2)
+    p_big = rs.sweep_injection_canary(False, path=big)
+    assert p_big["bytes"] > rs.CANARY_ESCALATE_BYTES, p_big
+    line_b = rs._injection_canary_line(p_big)
+    assert "ESCALATE" in line_b and "MB reporting bound" in line_b, line_b
+    assert rs.CANARY_ESCALATE_WINDOWS == 26 and rs.CANARY_ESCALATE_BYTES == 5 * 1024 * 1024
+
+
+def test_an_absent_or_unreadable_canary_store_reports_zero_rows_and_is_never_created(rs):
+    """Clause 3, first half: an absent store prints `0 rows` and nothing on this path
+    creates it.
+
+    The corpus is absent on a box where the timer has never fired, and `0 rows` is also
+    what a broken registration prints — so the line has to say which, and the sweep must
+    not "help" by making the directory. That mkdir is the real hazard here: the store is
+    git-tracked, so a sweep that created the path would leave an untracked directory in
+    the live checkout that `git status` then blames on whatever round ran.
+
+    `unreadable` is the same claim one level down: `iterdir()` raising `PermissionError`
+    is the state a `chmod 000` reproduces, and a store that cannot be read is a store the
+    report describes as empty-and-that-is-known, never an exception that kills the sweep
+    before the other nineteen lines print.
+    """
+    absent = Path(rs.INJECTION_CANARY_DIR) / "…".replace("…", "no-such-store")
+    p = rs.sweep_injection_canary(False, path=absent)
+    assert p["present"] is False and p["rows"] == 0 and p["windows"] == 0, p
+    assert "0 rows" in rs._injection_canary_line(p), rs._injection_canary_line(p)
+    assert not absent.exists(), "the sweep created a store it only reports on"
+
+    locked = _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
+    before = sorted(q.name for q in locked.iterdir())
+    locked.chmod(0o000)
+    try:
+        p2 = rs.sweep_injection_canary(True, path=locked)
+        line2 = rs._injection_canary_line(p2)
+        assert "0 rows" in line2, f"an unreadable store must not raise: {line2}"
+    finally:
+        locked.chmod(0o755)
+    assert sorted(q.name for q in locked.iterdir()) == before, "the count changed the store"
+    assert not (Path(rs.INJECTION_CANARY_DIR).parents[2] / "eval" / "measurements"
+                / "injection-canary" / "no-such-store").exists()
+
+
+def test_an_applied_canary_sweep_removes_nothing_and_rewrites_no_byte(rs):
+    """Clause 3, second half: `apply=True` is accepted and ignored, and every fixture
+    file comes back byte-identical with its mtime and inode intact.
+
+    The store's own writer (`eval/run_injection_canary.py`) appends with no retention, so
+    there is no second deleter to coordinate with and nothing that says which rows are
+    safe: the whole corpus is one week's evidence for the #2754 persistence ruling. The
+    stronger reason is the tree — a delete inside a tracked path is a repo write, `git
+    checkout` re-creates the file, and a sweep that appeared to free 5 MB would have
+    freed none of it while leaving the round's diff dirty.
+
+    mtime and inode are checked beside the bytes because a rewrite that preserved content
+    would still break the store's own readers: the report files are dated by filename and
+    the persistence windows are keyed on them, so a re-stamped file is a window moved.
+    """
+    store = _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=3,
+                          rows_per_window=5)
+    before = {q.name: (q.read_bytes(), q.stat().st_mtime_ns, q.stat().st_ino)
+              for q in sorted(store.iterdir())}
+    assert rs.sweep_injection_canary(True, path=store)["rows"] == 15
+    after = {q.name: (q.read_bytes(), q.stat().st_mtime_ns, q.stat().st_ino)
+             for q in sorted(store.iterdir())}
+    assert set(after) == set(before), f"the applied run moved the store: {set(before) ^ set(after)}"
+    for name, (payload, stamp, ino) in before.items():
+        assert after[name][0] == payload, f"{name} was rewritten"
+        assert after[name][1] == stamp, f"{name} had its mtime moved"
+        assert after[name][2] == ino, f"{name} was replaced rather than left alone"
+
+
+def test_the_injection_canary_count_path_has_no_way_to_change_the_store(rs):
+    """The same claim one level down: the counting function contains no INSTRUMENT that
+    could remove, rewrite or create anything, whatever its tests say.
+
+    Same shape as `test_the_tool_quality_count_path_has_no_way_to_change_the_store` for
+    the same reason — a behavioural node holds only until somebody adds an `unlink` two
+    lines away, and this store is the one the next person is most likely to want to
+    prune, because it is the only one sitting in the repo where they can see it. Reads
+    the function's code object, so the names the body can reach are what is checked,
+    including the module-level import that makes a `send2trash` reachable by bare name.
+
+    `mkdir` and `open` are in the ban list because the hazard here is not only deletion:
+    a "helpful" normalisation that created the missing directory would leave an untracked
+    dir in the live checkout, which is what clause 3's other node pins behaviourally.
+    """
+    fn = rs.sweep_injection_canary
+    banned = {"unlink", "rmtree", "remove", "touch", "mkdir", "open", "write_text",
+              "write_bytes", "rename", "replace", "send2trash"}
+    reached = set(fn.__code__.co_names) | {
+        c.co_name for c in fn.__code__.co_consts if hasattr(c, "co_names")
+        for n in [None] if False} | {
+        n for c in fn.__code__.co_consts if hasattr(c, "co_names") for n in c.co_names}
+    assert not (reached & banned), (
+        f"the count path can reach {sorted(reached & banned)}, so it is not a read-only "
+        f"store: {sorted(reached)}")
+    assert "open" not in fn.__code__.co_names, (
+        "rows.jsonl is read through the shared tally helper, not by an open() this "
+        "function holds — a mode string here is where a read becomes a write")
+
+
+def test_the_injection_canary_store_prints_last_and_the_refused_run_prints_seventeen(
+        rs, monkeypatch, capsys):
+    """Clause 4: a refused run prints seventeen store lines and a production run prints
+    twenty, with the new store LAST in both.
+
+    Last is not cosmetic. `test_the_task_description_names_every_store_the_sweep_prints`
+    matches task 79's enumeration to the printed lines POSITIONALLY, so appending the
+    store keeps items 1-19 where they are and every existing positional pin survives; a
+    store inserted in the middle would silently re-point every item at its neighbour's
+    rule, which is the class of drift this file has been built to catch.
+
+    The refused run is the other half: this store answers to `_TREE`, not to the
+    production check, so a run from a worktree or sandbox counts it anyway — the corpus
+    is a tracked directory present in every checkout, and refusing the deletions elsewhere
+    says nothing about it. That is why the count is 17 (19 minus the three automod
+    rungs that collapse into one refusal line) and not 16, and why the line still appears
+    after the refusal.
+    """
+    _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
+    lines = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
+    assert len(lines) == 20, f"a production run prints twenty store lines: {lines}"
+    assert lines[-1].split(":")[0].strip().startswith("injection-canary corpus"), lines[-1]
+
+    monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
+    refused = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
+    assert len(refused) == 17, (
+        f"a refused run prints seventeen store lines plus the refusal: {refused}")
+    assert refused[-1].split(":")[0].strip().startswith("injection-canary corpus"), refused[-1]

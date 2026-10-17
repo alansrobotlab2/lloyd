@@ -1217,7 +1217,13 @@ RETENTION_NODES = (
     # number without changing this node's second name.
     # #2615's hold journal is the eighth move: `…eighteen_stores…` → `…nineteen_stores…`, for
     # the same reason as the seven before it, and the second name once more needed no edit.
-    "test_the_skill_says_nineteen_stores_and_its_table_has_a_row_per_report_line",
+    # #2862's injection-canary corpus is the ninth move: `…nineteen_stores…` →
+    # `…twenty_stores…`, for the same reason as the eight before it, and the second name
+    # once more needed no edit. #2873 is the round carrying this citation across that
+    # rename: #2862's store half was committed on its own branch while this list stayed
+    # behind, and a citation left holding the old spelling is the failure the rule above
+    # exists to catch — it reads as the guard having vanished, not as it having moved.
+    "test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line",
     "test_the_task_description_names_every_store_the_sweep_prints",
 )
 
