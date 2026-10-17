@@ -7,7 +7,7 @@ supervisord streak reaches `SUPERVISORD_DOWN_STREAK` (3) at
 `agent-services/guardian/guardian.py:1233-1236`, `_stop_sync` issues a real
 `pkill -f "sync --path …"` at `guardian.py:1054`, and the promoter reaches
 `systemctl --user daemon-reload` and `systemctl --user restart lloyd-guardian` at
-`scripts/automod/promote.py:586` and `:595` — the second through the thin `_run`
+`scripts/automod/promote.py:601` and `:610` — the second through the thin `_run`
 wrapper at `promote.py:542`, which calls the module-global `subprocess.run`. Before this fixture the only protection
 was each node remembering its own stub, so a new module re-inherited the trap.
 

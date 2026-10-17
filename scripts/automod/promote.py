@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -550,8 +550,8 @@ def _apply_service_changes(changed: list[str]) -> list[str]:
     `spec.py` calls the supervisor confs, the systemd units and the guardian
     "protected" — allowed to change, provided the drill passes. But nothing
     ever *applied* such a change: supervisord includes conf.d straight out of
-    the repo and needs `reread`/`update` to notice, systemd units are copies
-    under ~/.config and the repo edit reached nothing at all, and the guardian
+    the repo and needs `reread`/`update` to notice, systemd reads its units out
+    of ~/.config so the repo edit reached nothing at all, and the guardian
     runs from a pinned snapshot that is only re-staged on a unit restart. So a
     round could pass a full drill, land, be marked healthy, and leave the
     running system on the old definition indefinitely — the change looked
@@ -576,9 +576,24 @@ def _apply_service_changes(changed: list[str]) -> list[str]:
         src = LIVE_ROOT / rel
         if not src.is_file():
             continue
+        dst = SYSTEMD_USER_DIR / src.name
         try:
             SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, SYSTEMD_USER_DIR / src.name)
+            if dst.is_symlink() and os.path.realpath(dst) == os.path.realpath(src):
+                # The link already names this file. Re-creating it would bump the
+                # link's mtime for nothing, and anything SHORTER than this check —
+                # "does the path exist?" — would let the next branch write through a
+                # link that points somewhere else entirely.
+                notes.append(f"already linked {src.name}")
+                continue
+            if dst.is_symlink() or dst.exists():
+                # A plain file (an old deploy) or a link to SOME OTHER file. The old
+                # copy path followed that link and rewrote the foreign target while
+                # leaving the link in place, so the unit stayed wrong and an
+                # unrelated file silently gained the repo's bytes. Drop the entry,
+                # then link — never write through it.
+                dst.unlink()
+            os.symlink(src, dst)
             notes.append(f"installed {src.name}")
         except OSError as exc:
             notes.append(f"FAILED to install {src.name}: {exc}")

@@ -462,7 +462,7 @@ def _landing_seen(round_id: str | None, events: list[dict]) -> bool:
 
     Reading the ledger *after* the marker is safe because of the landing's own
     ordering: `round.land` appends `promoted` inside `P.promote`
-    (`scripts/automod/promote.py:1335`) and clears the marker in its `finally`
+    (`scripts/automod/promote.py:1350`) and clears the marker in its `finally`
     (`scripts/automod/round.py:382`), so the row exists by the time the marker is
     gone — the two sources cannot both be empty on a completed landing.
     """

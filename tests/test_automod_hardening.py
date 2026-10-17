@@ -1120,6 +1120,216 @@ def test_a_code_only_change_touches_no_service_machinery(monkeypatch, tmp_path):
     assert calls == [] and notes == []
 
 
+# ── #2898: promoting a unit must LINK it, not write one ───────────────────────
+#
+# `_apply_service_changes` deployed a changed unit by writing a copy of the repo
+# file into ~/.config/systemd/user. Ten units on this box are already links into
+# the repo — put there by the canonical installer, `ln -sf` at
+# `agent-services/setup/install-services.sh:95`, and two of the shapes it makes
+# (`lloyd-guardian.service`, `lloyd-vault-backup.timer`) are `active` — so the
+# copy path met its own output: a write onto a link that points at the source
+# raises `shutil.SameFileError`, which is an `OSError` subclass and so was
+# swallowed into a `FAILED to install` note that said the install failed when
+# nothing was wrong; and a write onto a link that points ELSEWHERE followed the
+# link and rewrote that foreign file, leaving the unit still linked to it. Both
+# modes were reproduced with a /tmp sandbox on the shipped line before it was
+# changed. These nodes pin the replacement.
+
+#: A real unit in the repo, so `src = LIVE_ROOT / rel` finds a file. Deliberately
+#: not `lloyd-guardian.service`: that name also fires the guardian restart, and these
+#: nodes count what systemd is asked to do for the unit itself.
+_DEPLOY_UNIT = "agent-services/systemd/lloyd-graph-backup.service"
+
+
+def _stub_the_deploy_seam(P, monkeypatch, systemd_dir, calls):
+    """Route the subprocess and filesystem seams of one `_apply_service_changes` call.
+
+    `_run` must be stubbed for the suite's own guard
+    (`tests/test_conftest_subprocess_guard.py:243`): an unstubbed `_run` here would
+    `daemon-reload` the real session manager mid-test.
+    """
+    monkeypatch.setattr(P, "_run", lambda argv, timeout=60.0: calls.append(
+        [str(a) for a in argv]) or type("R", (), {"returncode": 0, "stdout": "",
+                                                  "stderr": ""})())
+    monkeypatch.setattr(P, "SYSTEMD_USER_DIR", systemd_dir)
+
+
+@pytest.mark.parametrize("deployed_before", ["absent", "an old plain file"])
+def test_a_landed_unit_is_deployed_as_a_link_into_the_repo(monkeypatch, tmp_path,
+                                                           deployed_before):
+    """Clause 1: after a landing the deployed unit is a symlink to the tracked file.
+
+    The two starting states are the ones a landing can meet on a box where the unit
+    was never linked: absent (a new unit), or a plain file left by an earlier
+    landing's copy. Both end as a link, because a copy is stale the moment the repo
+    moves again while a link cannot disagree with the tracked bytes.
+    """
+    from scripts.automod import promote as P
+    calls = []
+    systemd = tmp_path / "systemd"
+    _stub_the_deploy_seam(P, monkeypatch, systemd, calls)
+    dst = systemd / "lloyd-graph-backup.service"
+    tracked = P.LIVE_ROOT / _DEPLOY_UNIT
+    if deployed_before == "an old plain file":
+        dst.parent.mkdir(parents=True)
+        dst.write_text("[Unit]\nDescription=the stale copy this replaces\n")
+
+    notes = P._apply_service_changes([_DEPLOY_UNIT])
+
+    assert dst.is_symlink(), (
+        f"{deployed_before}: the deployed unit is not a symlink — a copy is a second "
+        f"source of truth that goes stale on the next edit")
+    assert dst.resolve() == tracked.resolve(), (
+        f"the link points at {os.readlink(dst)}, not at the tracked unit")
+    assert f"installed {dst.name}" in notes, (
+        f"a fresh deploy must still say it installed the unit; notes were {notes}")
+    assert not any("FAILED" in n for n in notes), notes
+    assert any("daemon-reload" in " ".join(c) for c in calls), calls
+
+
+def test_relanding_an_already_linked_unit_writes_nothing(monkeypatch, tmp_path):
+    """Clause 2: the second landing is a no-op, and says so instead of failing.
+
+    This is the state the old line could not survive: writing a copy onto a link
+    that resolves to the source raises `shutil.SameFileError`, an `OSError`, which
+    the `except OSError` turned into `FAILED to install` — a false alarm on every
+    landing after the first, with nothing wrong and nothing delivered. The fix is
+    idempotent by checking what the link RESOLVES to: a weaker test ("does the path
+    exist?") would fall through to the replacing branch and write through a link
+    that names a different file, which is the next node.
+    """
+    from scripts.automod import promote as P
+    calls = []
+    systemd = tmp_path / "systemd"
+    _stub_the_deploy_seam(P, monkeypatch, systemd, calls)
+    dst = systemd / "lloyd-graph-backup.service"
+    assert "installed lloyd-graph-backup.service" in P._apply_service_changes(
+        [_DEPLOY_UNIT]), "the first landing must create the link"
+    target_before, link_mtime = os.readlink(dst), dst.lstat().st_mtime_ns
+    unit_mtime = dst.stat().st_mtime_ns          # through the link: the repo's file
+
+    notes = P._apply_service_changes([_DEPLOY_UNIT])
+
+    assert os.readlink(dst) == target_before, "the link was re-created, not kept"
+    assert dst.lstat().st_mtime_ns == link_mtime, (
+        "the link itself was rewritten: an already-correct deploy must touch nothing")
+    assert dst.stat().st_mtime_ns == unit_mtime, "bytes were written through the link"
+    assert any("already linked" in n for n in notes), (
+        f"the note must say the unit is already linked; notes were {notes}")
+    assert not any("installed" in n or "FAILED" in n for n in notes), (
+        f"a no-op must not claim to have installed anything, and must not repeat the "
+        f"SameFileError alarm the copy path raised here; notes were {notes}")
+
+
+def test_a_link_to_a_foreign_file_is_replaced_not_written_through(monkeypatch, tmp_path):
+    """Clause 3: a deployed link naming some other file is swapped, and that file is
+    left alone.
+
+    The old copy path silently SUCCEEDED in this state: it followed the link, put
+    the repo's bytes into the foreign file, and left the unit pointing at it — the
+    `wrongtarget:` shape `scripts/service_health_check.py:1364` exists to report,
+    made worse by an unrelated file having been overwritten by a promotion.
+    """
+    from scripts.automod import promote as P
+    calls = []
+    systemd = tmp_path / "systemd"
+    _stub_the_deploy_seam(P, monkeypatch, systemd, calls)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    foreign = elsewhere / "lloyd-graph-backup.service"
+    foreign.write_text("[Unit]\nDescription=a unit that lives somewhere else\n")
+    bytes_before, mtime_before = foreign.read_bytes(), foreign.stat().st_mtime_ns
+    systemd.mkdir()
+    os.symlink(foreign, systemd / "lloyd-graph-backup.service")
+    dst = systemd / "lloyd-graph-backup.service"
+
+    notes = P._apply_service_changes([_DEPLOY_UNIT])
+
+    assert dst.is_symlink() and os.path.realpath(dst) == os.path.realpath(
+        P.LIVE_ROOT / _DEPLOY_UNIT), (
+        f"the wrong-target link survived; it now names {os.readlink(dst)}")
+    assert foreign.read_bytes() == bytes_before, (
+        "the foreign file was written through the link — the promotion overwrote a "
+        "file it was never asked to touch")
+    assert foreign.stat().st_mtime_ns == mtime_before, (
+        "the foreign file was opened for writing even though its bytes match")
+    assert f"installed {dst.name}" in notes, notes
+    assert not any("FAILED" in n for n in notes), notes
+
+
+def test_a_link_that_cannot_be_made_notes_the_failure_and_still_reloads_once(
+        monkeypatch, tmp_path):
+    """Clause 4: an `OSError` from linking is a note, never an exception, and the
+    one `daemon-reload` a touched-unit run owes systemd still happens — exactly once,
+    whether one unit failed or two did.
+
+    The reload is what makes the OTHER units' changes take effect, so a failure on
+    one unit must not skip it; and it must not run per unit either, which is why
+    two units are touched here and the count is asserted.
+    """
+    from scripts.automod import promote as P
+    calls = []
+    systemd = tmp_path / "systemd"
+    _stub_the_deploy_seam(P, monkeypatch, systemd, calls)
+
+    def _no_space(target, link_path, *args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(P.os, "symlink", _no_space)
+    units = ["agent-services/systemd/lloyd-graph-backup.service",
+             "agent-services/systemd/lloyd-graph-backup.timer"]
+
+    notes = P._apply_service_changes(units)      # must not raise
+
+    reloads = [c for c in calls if "daemon-reload" in " ".join(c)]
+    assert len(reloads) == 1, (
+        f"a touched-unit run owes systemd exactly one daemon-reload, got {reloads}")
+    for rel in units:
+        name = rel.rsplit("/", 1)[-1]
+        assert any(n.startswith(f"FAILED to install {name}") for n in notes), (
+            f"{name} failed to link and nothing says so; notes were {notes}")
+    assert any("No space left on device" in n for n in notes), (
+        f"the note must carry the exception, not just the unit name; notes were {notes}")
+
+
+def test_the_unit_deployer_holds_no_copy_path_and_no_dead_import():
+    """Clause 5: the copy is gone from the module, and removing it left no import
+    behind.
+
+    Asserted over the module text rather than by behaviour because the hazard is
+    the residue: `shutil.copy2` on a unit path is exactly the line that produced
+    `unitlink:… — copy:` health rows, and `import shutil` with its one use gone is
+    an F401 the gate's pyflakes delta rung would catch but no test here would. The
+    sweep below is that rung's check, run on the file the behaviour tests cannot
+    see inside.
+    """
+    import ast
+    src = (ROOT / "scripts/automod/promote.py").read_text(encoding="utf-8")
+    assert "copy2" not in src, (
+        "a copy of a unit onto a link is what raised SameFileError into a false "
+        "'FAILED to install', or wrote through a link into a foreign file")
+    assert "shutil" not in src, (
+        "`shutil` survived only for the unit copy; an unused import is F401")
+    tree = ast.parse(src)
+    imported: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported[alias.asname or alias.name.split(".")[0]] = node.lineno
+        elif isinstance(node, ast.ImportFrom) and node.col_offset == 0:
+            for alias in node.names:
+                if alias.name != "*":
+                    imported[alias.asname or alias.name] = node.lineno
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    # A module bound only inside a function's `import os`-style local is still
+    # "used"; the sweep only reports a name no part of the file binds.
+    dead = {name: line for name, line in imported.items()
+            if name not in used and name != "annotations"}
+    assert not dead, (
+        f"module-level imports nothing binds: {dead} — pyflakes calls this F401 and "
+        f"the gate's delta rung flags findings new to the diff")
+
+
 def test_an_aggregator_verdict_is_confirmed_across_ticks(tmp_path):
     """`mcp_degraded_is_fatal` fires on a body reporting zero tools.
 
