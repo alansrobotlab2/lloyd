@@ -1220,6 +1220,54 @@ def test_an_autonomy_task_scope_with_a_live_row_compiles_the_exception_in(
     assert live_grant_names(sched_turn["grants"], "autonomy-task:99") == ()
 
 
+def test_a_live_vault_land_licence_widens_the_ban_by_that_one_name_only(
+        sched_turn):
+    """#2927: the licence is a crack for ONE tool, not an exemption from the ban.
+
+    Licensing the nightly vault-landing jobs is what brings `automod_vault_land` under
+    the flip gate's 5% bar, and the failure that would make enforcement unsafe for the
+    whole fleet is the same read widening the loop surface along with it:
+    `WORKER_AUTOMOD_BAN` carries NINE names and the licence is for ONE of them. A scope
+    that got `automod_start`, `automod_land` or `automod_rollback` back with it would put
+    an unattended turn in a position to open a self-modification round, gate it, promote
+    it and roll the guardian back — the reach the ban exists to keep out of scheduled
+    turns. So this asserts the SIZE of the widening as well as its contents: one name in,
+    the other eight out, plus the separately-banned mint tool still out.
+
+    The route is the live one — a real row in a real sqlite file read back by
+    `live_grant_names`, then handed to the same `envelope_for` call `run_task` makes —
+    because a hand-written widening tuple would be testing this file's arithmetic rather
+    than the pool's.
+    """
+    from app.harness.capabilities import live_grant_names
+    from app.tool_bans import WORKER_AUTOMOD_BAN, WORKER_GRANT_MINT_BAN
+
+    scope = f"autonomy-task:{SCHED_TASK_ID}"
+    sched_turn["grants"].mint(
+        scope=scope, tool_pattern="automod_vault_land", issued_by="Alan",
+        expires_at=_FAR_FUTURE, note="fixture")
+    widening = live_grant_names(sched_turn["grants"], scope)
+    base = caps.envelope_for(SCHED_SOURCE)
+    env = caps.envelope_for(SCHED_SOURCE, grant_widening=widening, scope=scope)
+
+    assert len(WORKER_AUTOMOD_BAN) == 9, (
+        "the ban's size is this node's arithmetic — 'the other eight' is only a true "
+        "statement against nine names")
+    assert "automod_vault_land" in WORKER_AUTOMOD_BAN
+    assert widening == ("automod_vault_land",)
+    assert len(env) == len(base) + 1, (
+        f"a licence for one name widened the envelope by {len(env) - len(base)}")
+    others = tuple(n for n in WORKER_AUTOMOD_BAN if n != "automod_vault_land")
+    assert len(others) == 8
+    assert not [n for n in others if n in env], (
+        f"the licence let {sorted(set(others) & set(env))} into a scheduled envelope")
+    # The mint tool is a SEPARATE ban enforced on the same turn, and a vault licence says
+    # nothing about it: a turn that can write a grant can widen itself again, which is
+    # the reason #534 enforces it twice.
+    assert not [n for n in WORKER_GRANT_MINT_BAN if n in env], (
+        "a granted job could mint itself further authority")
+
+
 def test_no_worker_source_envelope_names_the_vault_land_exception():
     """Clause 4's other half: the exception is a per-job crack, not a hole.
 
