@@ -447,6 +447,71 @@ def test_no_second_fleet_bound_appears_anywhere_in_architecture():
         f"another form and rots the same way — say 'every task file'")
 
 
+# ── #2892 — §#68's `model:` census is a dated typed MINIMUM, not a count ──────
+
+
+def test_the_model_census_states_a_dated_minimum_and_says_so_in_words():
+    """#2892 clause 4, and the record of which branch this doc took.
+
+    The item offered two ways to stop §#68's `model:` census lagging the fleet (it was
+    retyped three days running: #2747 39→40, #2814 40→41, #2882 41→43). The first was
+    to read the floor off the §functions membership tables, the way
+    `test_the_fleet_bound_floors_the_range_at_the_newest_task` reads `newest`. That
+    branch is unsatisfiable as worded, and this node is where the reason is recorded
+    where the next reader will meet it rather than in a round's report: both tables
+    parse to 44 ids and one of them, #36, is retired with no task file
+    (`_retired_named_ids(_text())` → `['#36']`), while the model-declaring fleet is 43
+    files — `grep -h '^model:' ~/obsidian/autonomy/*.md | wc -l` → 43. A floor read
+    off the tables would state 44 and the real-board node would fail its own `>=` the
+    day it landed. Subtracting retired ids is #2895's writer-side check, not a
+    sentence in this doc.
+
+    So the number stays hand-typed, and what is pinned here is the shape that lets a
+    typed number survive a fleet that grows: floor wording, the word "minimum" beside
+    the figure so nobody retypes it as a count, and the measurement date in front of
+    it. `tests/test_validate_tasks_linter.py` owns the parser and the join to the
+    directory; this file owns what the sentence claims.
+    """
+    section = _parked_job_section()
+    m = re.search(
+        r"`grep -h '\^model:' ~/obsidian/autonomy/\*\.md` answers `(?P<value>\w+)` "
+        r"at least (?P<count>\d+) times? or beyond", section)
+    assert m, (
+        "§#68 no longer states its `model:` census as a floor in the shape `answers "
+        "`primary` at least N times or beyond`, immediately after the command that "
+        "measures it — that spelling is what let the count be retyped on 2026-10-15, "
+        "2026-10-16 and 2026-10-17 instead of simply being reached")
+    assert m.group("value") == "primary", (
+        f"the floor is stated for {m.group('value')!r}, but every task file declaring "
+        f"a `model:` reads `primary`")
+    assert re.search(r"20\d\d-\d\d-\d\d", section[max(0, m.start() - 200):m.end()]), (
+        "the floor carries no ISO measurement date within 200 characters before the "
+        f"number: …{section[max(0, m.start() - 200):m.end()][-160:]!r} — a minimum "
+        "without its date is a claim no later reader can date-stamp as stale")
+    tail = section[m.end():m.end() + 160]
+    assert "minimum" in tail, (
+        f"the sentence does not say in words that {m.group('count')} is a minimum "
+        f"(nothing within 160 characters after the floor says so: {tail!r}) — a bare "
+        "'at least N' reads as a count to the next editor, and the count is what got "
+        "retyped three times")
+    assert "ceiling" in tail, (
+        f"the sentence no longer says what the floor is NOT ({tail!r}); #1520's defect "
+        "was a typed ceiling on a fleet that grows, and the reader has to be told that "
+        "is the thing this sentence refuses to be")
+    # Flattened: the doc wraps near 88 columns, and a wrap inside the sentence is not a
+    # second census — see `test_no_second_fleet_bound_appears_anywhere_in_architecture`.
+    live = _flat(_live_prose())
+    floors = re.findall(r"answers `\w+` at least \d+ times? or beyond", live)
+    assert len(floors) == 1, (
+        f"live prose now holds {len(floors)} `model:` census floors {floors}: one is "
+        f"§#68's, a second is a second sentence for whoever notices it rotting")
+    # Requires digits immediately after the value, so §#68's own floor cannot match it.
+    exact = re.findall(r"answers `\w+` \d+ times?", live)
+    assert not exact, (
+        f"an exact `model:` census count is back in live prose ({exact}); the exact "
+        f"shape is retired — a floor or nothing")
+
+
 # ── clause 3 — every statement that counts the Measure group ─────────────────
 
 

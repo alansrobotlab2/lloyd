@@ -298,13 +298,13 @@ nothing ever asked the `model:` value about the flag. That blind spot is what
 a switched-off slot in the same one-line shape it uses for `requires_slot:`, and
 under `--strict` that warning fails the run. Measured 2026-10-17, no task file
 names the retired slot: `grep -h '^model:' ~/obsidian/autonomy/*.md` answers
-`primary` 43 times — exactly one `model:` line per task file that declares an
-engine, and every one of them `primary`; the fleet was smaller when #2632 landed
-and the count grew as tasks joined it, #101 `gate-to-land-lag-daily-record` being
-the most recent on 2026-10-16. The number is not left to rot on its own:
-`tests/test_validate_tasks_linter.py` parses it out of this sentence and
-re-measures the fleet beside it, so the sentence and the directory can only
-disagree by failing that node. Everything below describes the mechanism as
+`primary` at least 43 times or beyond — a typed **minimum**, measured the same day
+and not a ceiling: exactly one `model:` line per task file that declares an engine,
+all of them `primary`, and the fleet only grows (#101 `gate-to-land-lag-daily-record`
+joined 2026-10-16), so a floor cannot lag it the way the exact count did three days
+running. It stays pinned: `tests/test_validate_tasks_linter.py` parses the minimum out
+and re-measures the fleet, going red only if the fleet drops below the floor. All of
+this describes the mechanism as
 designed and as it behaved while live. The other — the 6 am "read the
 overnight reports and announce a synthesis" job — no longer runs at all and no
 autonomy task binds it. Its skill is archived; an unbound copy survives as

@@ -786,24 +786,34 @@ def test_the_alias_to_program_map_is_the_service_registrys():
 #: count it types: dated, and pinned to something re-derivable.
 DOC = ROOT / "architecture" / "autonomy-jobs.md"
 
-#: The census sentence, spelled the way the doc spells it. The grep command is part of the
-#: pattern on purpose: it is what fixes the number to the measurement it reports, so a stray
-#: "`primary` 12 times" elsewhere in the document cannot be mistaken for the census.
+#: The census sentence, spelled the way the doc spells it since #2892: a FLOOR. The grep
+#: command is part of the pattern on purpose: it is what fixes the number to the measurement
+#: it reports, so a stray "`primary` 12 times" elsewhere in the document cannot be mistaken
+#: for the census. The exact spelling — `answers `primary` 43 times`, no floor words — is
+#: deliberately NOT matched any more: retyping that number was the whole repair three days
+#: running (#2747 on 2026-10-15, #2814 on 2026-10-16, #2882 on 2026-10-17), so a doc that
+#: has drifted back to an exact count is the defect and must raise, not parse.
 DOC_CENSUS = re.compile(
     r"`grep -h '\^model:' ~/obsidian/autonomy/\*\.md`\s+"
-    r"(?P<sentence>answers\s+`(?P<value>\w+)`\s+(?P<count>\d+)\s+times?)")
+    r"(?P<sentence>answers\s+`(?P<value>\w+)`\s+at\s+least\s+(?P<count>\d+)\s+times?"
+    r"\s+or\s+beyond)")
 
 #: How the doc spells the measurement the census reports, in backticks.
 CENSUS_CMD = "`grep -h '^model:' ~/obsidian/autonomy/*.md`"
 
 
 def census_prose(count: int, value: str = "primary") -> str:
-    """One census sentence in the doc's own spelling, for the parser's own tests."""
-    return f"{CENSUS_CMD} answers `{value}` {count} times"
+    """One census sentence in the doc's own floor spelling, for the parser's own tests."""
+    return f"{CENSUS_CMD} answers `{value}` at least {count} times or beyond"
 
 
 def doc_model_census(doc_text: str) -> tuple[int, str]:
-    """The `model:` census §#68 states, with the sentence that states it.
+    """The FLOOR §#68 puts on the fleet's `model:` census, with the sentence that states it.
+
+    The int is a MINIMUM, not the fleet's size: since #2892 the sentence reads "at least N …
+    or beyond", so a fleet that grows past N satisfies it and only a fleet that drops under
+    N contradicts the doc. That is the whole point of the floor — under the exact spelling
+    this replaced, every task anyone filed parted the sentence and the repair was a retype.
 
     Raises rather than defaulting. A doc reworded past this shape has stopped being
     pinned to the fleet, and the node that depends on the pin must say so — the silent
@@ -815,9 +825,11 @@ def doc_model_census(doc_text: str) -> tuple[int, str]:
     if not hits:
         raise AssertionError(
             "architecture/autonomy-jobs.md no longer states its `model:` census in the "
-            "`answers `primary` N times` shape, so the doc and the fleet are no longer "
-            "joined — restate the sentence in that shape (with the date it was measured) "
-            "rather than dropping the join")
+            "floor shape `answers `primary` at least N times or beyond`, so the doc and "
+            "the fleet are no longer joined — restate the sentence in that shape, with the "
+            "date it was measured, rather than dropping the join. An exact `answers "
+            "`primary` N times` is NOT the shape: retyping that number was the entire "
+            "repair on 2026-10-15 (#2747), 2026-10-16 (#2814) and 2026-10-17 (#2882)")
     numbers = {int(h.group("count")) for h in hits}
     if len(numbers) > 1:
         raise AssertionError(
@@ -826,18 +838,36 @@ def doc_model_census(doc_text: str) -> tuple[int, str]:
     return int(hits[0].group("count")), " ".join(hits[0].group("sentence").split())
 
 
-def census_parted_message(fleet_count: int, stated: int, sentence: str) -> str:
-    """What the node says when the fleet and §#68 have parted — pinned, because it is
-    the whole product of that failure: a reader with nothing but the assertion has to be
-    able to see the sentence, both numbers, and which file to edit.
+def census_below_floor_message(fleet_count: int, floor: int, sentence: str) -> str:
+    """What the real-board node says when the fleet drops UNDER §#68's floor — pinned,
+    because it is the whole product of that failure: a reader with nothing but the
+    assertion has to see the sentence, both numbers, which file to edit, and the fact that
+    a floor moves only when tasks are RETIRED, never when they arrive.
     """
     return (
         f"{fleet_count} task files declare a `model:`; §#68 of "
-        f"architecture/autonomy-jobs.md says {stated}, so the sentence and the fleet have "
-        f"parted — re-count and retype the doc. Its sentence reads: {sentence!r}. "
-        f"Re-count with `grep -h '^model:' ~/obsidian/autonomy/*.md | wc -l`, retype that "
-        f"sentence with the new number and the date it was measured; this assertion needs "
-        f"no edit, which is the point of reading the number out of the doc.")
+        f"architecture/autonomy-jobs.md floors the census at {floor}, so the fleet has "
+        f"fallen under the minimum the doc states — that happens only if task files were "
+        f"retired, so confirm the retirement was intended before lowering the number. Its "
+        f"sentence reads: {sentence!r}. Re-count with `grep -h '^model:' "
+        f"~/obsidian/autonomy/*.md | wc -l`, retype that sentence with the new minimum and "
+        f"the date it was measured; this assertion needs no edit, which is the point of "
+        f"reading the number out of the doc.")
+
+
+def fleet_reaches_census_floor(declared: list[str], floor: int, sentence: str) -> None:
+    """The join between §#68's stated floor and a measured fleet: the fleet must REACH the
+    minimum, never equal it.
+
+    A function rather than an ``assert len(declared) >= stated`` inline in the real-board
+    node, because that node carries ``@live_vault`` and the gate deselects it
+    (``pytest.ini:14-15``): an inline comparison could only be pinned by reading the node's
+    source, which cannot tell ``>=`` from ``==`` in any way a failing run demonstrates. Here
+    both directions run at every gate —
+    ``test_the_floor_join_lets_a_grown_fleet_pass_and_a_shrunken_one_fail``.
+    """
+    assert len(declared) >= floor, census_below_floor_message(
+        len(declared), floor, sentence)
 
 
 @live_vault
@@ -873,97 +903,147 @@ def test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live(tmp_pa
     assert "✅ all task files parse and pass structural checks" in out, out
     assert proc.returncode == 0, out
 
-    # §#68 of architecture/autonomy-jobs.md quotes this census in prose, so the expected
-    # number is read out of that sentence and never typed here: the doc-claims suite cannot
+    # §#68 of architecture/autonomy-jobs.md FLOORS this census in prose, so the expected
+    # minimum is read out of that sentence and never typed here: the doc-claims suite cannot
     # see the vault's front matter, and this is the only node that reads both the directory
-    # and the flags the sentence is about. Typed here it went stale on 2026-10-14 when the
-    # fleet grew; read from the doc, a new task file fails by naming the sentence to retype.
+    # and the flags the sentence is about. Typed as an equality it went stale on 2026-10-14,
+    # then again on 2026-10-16 and 2026-10-17; read as a floor, filing a task can never
+    # redden this node — only retiring one can, and then the message says so.
     from scripts.autonomy import validate_tasks as vt
     declared = [ln.strip() for p in vt.DEFAULT_DIR.glob("*.md")
                 for ln in p.read_text(errors="replace").splitlines()
                 if ln.startswith("model:")]
-    stated, sentence = doc_model_census(DOC.read_text(encoding="utf-8"))
-    assert len(declared) == stated, (
-        census_parted_message(len(declared), stated, sentence))
+    floor, sentence = doc_model_census(DOC.read_text(encoding="utf-8"))
+    fleet_reaches_census_floor(declared, floor, sentence)
     assert set(declared) == {"model: primary"}, (
         f"a task file names an engine other than the primary: {sorted(set(declared))} "
-        f"— §#68 states that every `model:` line reads `primary` as measured "
-        f"2026-10-15, the census having first been taken the day #2632 landed the check "
-        f"on 2026-10-13")
+        f"— §#68 states that every `model:` line in the declaring fleet reads `primary`, "
+        f"the census having first been taken the day #2632 landed the check on 2026-10-13")
 
 
 # ── #2747: the doc's census is a joined claim, not a number two files agree on ──
 #
 # `architecture/autonomy-jobs.md` §#68 says `grep -h '^model:' ~/obsidian/autonomy/*.md`
-# answers `primary` N times. The live node above now reads N out of that sentence, and the
-# three nodes here are the gate-run half: they run in every checkout (`live_vault` is
-# deselected by `pytest.ini:14-15`, so the real-board node is exercised only by #83's nightly
-# Pre-Flight and by hand), and they pin the parser, the failure text, and the absence of a
-# hand-typed expectation.
+# answers `primary` at least N times or beyond. The live node above reads that FLOOR out of
+# the sentence, and the nodes here are the gate-run half: they run in every checkout
+# (`live_vault` is deselected by `pytest.ini:14-15`, so the real-board node is exercised only
+# by #83's nightly Pre-Flight and by hand), and they pin the parser, the floor shape, the
+# join's two directions, the failure text, and the absence of a hand-typed expectation.
+# #2892 moved the sentence from an exact count to a floor after the same number had been
+# retyped on three consecutive days — #2747 39→40, #2814 40→41, #2882 41→43 — which is the
+# event that proves a typed ceiling on a growing fleet is unenforceable where no gate runs.
 
 
 def test_the_census_expectation_is_parsed_out_of_the_doc_sentence():
-    """Clause 1 and 2's gate-run half: the expectation is a parse, and it is dated.
+    """Clauses 1 and 2's gate-run half: the expectation is a parse of a FLOOR, and it is dated.
 
-    Two synthetic sentences quoting different numbers are parsed to those two numbers, so
-    the value demonstrably comes from the text and not from a constant the parser happens
-    to agree with. Then the real doc is read: it must hold exactly one census, it must
-    state `primary` (the value #2632 settled the fleet on), and an ISO date must sit inside
-    the 200 characters before the count — the doc's own header rule is that "every count
-    the doc does type carries the date it was true", and a census with no date is a claim
-    no later reader can tell stale from correct.
+    Two synthetic sentences quoting different minima are parsed to those two numbers, so the
+    value demonstrably comes from the text and not from a constant the parser happens to
+    agree with. Then the real doc is read: it must hold exactly one census, it must state
+    `primary` (the value #2632 settled the fleet on), it must be FLOOR-spelled — "at least",
+    a number, "or beyond", and the word "minimum" beside it, so a reader is not left to infer
+    that the count is not a count — the measurement command must still sit immediately in
+    front of it, and an ISO date must sit inside the 200 characters before the number (the
+    doc's own header rule is that "every count the doc does type carries the date it was
+    true", and an undated floor is a claim no later reader can tell stale from correct).
 
-    The NUMBER is deliberately not pinned here, only its shape. A typed count in a node
-    that runs at the gate is the same #2747 defect one file over: the count is the fleet's,
-    the fleet grows, and `pytest.ini:14-15` deselects the one node that may lawfully
-    compare it to the directory. So this node proves the doc still reads as a census of
-    some positive size on the primary, and only `@live_vault`
-    `test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live` asks whether
-    that size is the fleet's.
+    The NUMBER is deliberately not pinned here, only its shape. A typed count in a node that
+    runs at the gate is the same #2747 defect one file over: the count is the fleet's, the
+    fleet grows, and `pytest.ini:14-15` deselects the one node that may lawfully compare it
+    to the directory. So this node proves the doc still floors the census at some positive
+    size on the primary, and only `@live_vault`
+    `test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live` asks whether the
+    fleet reaches that size.
     """
-    assert doc_model_census(census_prose(40)) == (40, "answers `primary` 40 times")
+    assert doc_model_census(census_prose(40)) == (
+        40, "answers `primary` at least 40 times or beyond")
     assert doc_model_census(f"…prose… {census_prose(41)} …prose…") == (
-        41, "answers `primary` 41 times")
-    assert doc_model_census(f"{CENSUS_CMD} answers `primary` 1 time\n") == (
-        1, "answers `primary` 1 time"), (
+        41, "answers `primary` at least 41 times or beyond")
+    assert doc_model_census(
+        f"{CENSUS_CMD} answers `primary` at least 1 time or beyond\n") == (
+        1, "answers `primary` at least 1 time or beyond"), (
         "the parser's plural allowance has to hold at one, or a fleet that shrank to a "
         "single declaring task file would read as a broken doc")
 
     text = DOC.read_text(encoding="utf-8")
     stated, sentence = doc_model_census(text)
-    assert stated > 0, f"the census parsed to {stated}; a zero would read as an empty fleet"
-    assert re.fullmatch(r"answers `primary` \d+ times?", sentence), (
-        f"§#68 must state the census in the shape answers `primary` <digits> times — the "
-        f"value is `primary` because every task file declaring a `model:` reads `primary` — "
-        f"and it reads {sentence!r}")
+    assert stated > 0, (
+        f"the census floor parsed to {stated}; a zero would state no floor at all")
+    assert re.fullmatch(r"answers `primary` at least \d+ times? or beyond", sentence), (
+        f"§#68 must state the census as a floor in the shape answers `primary` at least "
+        f"<digits> times or beyond — the value is `primary` because every task file "
+        f"declaring a `model:` reads `primary` — and it reads {sentence!r}")
     hit = DOC_CENSUS.search(text)
     window = text[max(0, hit.start() - 200):hit.end()]
     assert re.search(r"20\d\d-\d\d-\d\d", window), (
-        f"the census sentence carries no date within 200 characters of the count: "
+        f"the census sentence carries no date within 200 characters before the count: "
         f"…{window[-160:]!r} — an undated count is exactly the sentence that rotted here")
+    assert text[hit.start() + len(CENSUS_CMD):hit.start("sentence")].strip() == "", (
+        f"the measurement command no longer immediately precedes the census number: "
+        f"{text[hit.start():hit.start('sentence')]!r} — the command is what fixes the "
+        f"number to the measurement it reports")
+    tail = text[hit.end():hit.end() + 160]
+    assert "minimum" in tail, (
+        f"the floor is not labelled in words: nothing within 160 characters after "
+        f"{sentence!r} says the number is a minimum — {tail!r}. A bare 'at least N' reads "
+        f"as a count to the next editor, which is how it got retyped instead of left alone")
+
+
+def test_the_floor_join_lets_a_grown_fleet_pass_and_a_shrunken_one_fail():
+    """Clause 3's gate-run leg: the join is ``>=``, demonstrated in both directions.
+
+    The real-board node that runs this against `~/obsidian/autonomy` is deselected at the
+    gate, so without this node the difference between ``>=`` and ``==`` would rest on a
+    source-text regex in the rail below. Here a fleet of 41 against a floor of 40 passes —
+    the exact event that reddened the old equality three times — and a fleet of 39 against
+    the same floor fails naming the floor, the count, the sentence and the file.
+    """
+    sentence = "answers `primary` at least 40 times or beyond"
+    fleet_reaches_census_floor(["model: primary"] * 41, 40, sentence)
+    fleet_reaches_census_floor(["model: primary"] * 40, 40, sentence)
+    with pytest.raises(AssertionError) as shrunk:
+        fleet_reaches_census_floor(["model: primary"] * 39, 40, sentence)
+    msg = str(shrunk.value)
+    assert "39 task files declare a `model:`" in msg, msg
+    assert "floors the census at 40" in msg, msg
+    assert sentence in msg, msg
 
 
 def test_a_reworded_or_doubled_census_breaks_the_join_loudly():
     """The parser may not degrade quietly, which is how the old pin went blind.
 
-    A doc reworded past the shape used to leave the node asserting a number nobody had
+    A doc reworded past the floor shape used to leave the node asserting a number nobody had
     looked at; here it raises, and says which join broke. Two sentences quoting different
-    numbers raise too — a doc holding two censuses cannot tell the node which one the fleet
-    is meant to match, and picking one at random is the same silent wrong answer.
+    numbers raise too — a doc holding two censuses cannot tell the node which minimum the
+    fleet is meant to reach, and picking one at random is the same silent wrong answer.
+
+    The two spellings #2892 retired raise as well. An exact `answers `primary` 43 times` is
+    no longer the shape: parsing it would let the doc drift back to the sentence that had to
+    be retyped on 2026-10-15, 2026-10-16 and 2026-10-17 and call that green. A floor with no
+    "or beyond" is #1520's ceiling defect in floor clothing — true today, false the day the
+    next task is filed — so it is refused for the same reason the numbering note refuses one.
     """
     with pytest.raises(AssertionError) as gone:
         doc_model_census("the fleet has forty model lines in it\n")
     assert "no longer states" in str(gone.value), str(gone.value)
+
+    with pytest.raises(AssertionError) as exact:
+        doc_model_census(f"{CENSUS_CMD} answers `primary` 43 times\n")
+    assert "no longer states" in str(exact.value), str(exact.value)
+
+    with pytest.raises(AssertionError) as capped:
+        doc_model_census(f"{CENSUS_CMD} answers `primary` at least 43 times\n")
+    assert "no longer states" in str(capped.value), str(capped.value)
 
     with pytest.raises(AssertionError) as doubled:
         doc_model_census(
             f"{census_prose(40)} … and elsewhere {census_prose(41)}\n")
     assert "disagreeing" in str(doubled.value), str(doubled.value)
 
-    # A doc that repeats the *same* census is dull, not broken: no raise.
+    # A doc that repeats the *same* floor is dull, not broken: no raise.
     assert doc_model_census(
         f"{census_prose(40)} … {census_prose(40)}\n") == (
-        40, "answers `primary` 40 times")
+        40, "answers `primary` at least 40 times or beyond")
 
     # A stray "`primary` 12 times" with no measurement in front of it is not the census:
     # the command prefix is what joins the number to the thing it counts.
@@ -971,19 +1051,52 @@ def test_a_reworded_or_doubled_census_breaks_the_join_loudly():
         doc_model_census("the model table lists `primary` 12 times in all\n")
 
 
-#: A census count typed into source, in the doc's own spelling.
-TYPED_CENSUS = re.compile(r"answers\s+`primary`\s+\d+\s+times?")
+def test_the_census_floor_is_the_only_one_in_architecture():
+    """Clause 1's "stays the only census" leg, widened past §#68's own file.
+
+    #1520 found its range bound duplicated in `index.md`, where "each of the 32 scheduled
+    jobs" rotted inside three days while the note being repaired stayed green. A second
+    census anywhere under `architecture/` is the same defect in another file, so this walks
+    the directory: any sentence in either the retired exact spelling or the floor spelling
+    must be the one §#68 sentence the parser already found.
+    """
+    doc_text = DOC.read_text(encoding="utf-8")
+    stated, sentence = doc_model_census(doc_text)
+    census_files = sorted(p.relative_to(ROOT).as_posix()
+                          for p in (ROOT / "architecture").rglob("*.md")
+                          if DOC_CENSUS.search(p.read_text(encoding="utf-8")))
+    assert census_files == ["architecture/autonomy-jobs.md"], (
+        f"a `model:` census in the floor spelling turned up in {census_files}; §#68 is the "
+        f"only place the fleet's `model:` census belongs — a copy in another file is "
+        f"re-typed by whoever notices it rotting, which is the #2747 loop again")
+    # Wraps are formatting, not meaning: the doc breaks near 88 columns, so this leg reads
+    # the flattened prose, exactly as `test_autonomy_jobs_doc_claims._flat` does for the
+    # numbering note. An exact-string match against raw lines would fail on a rewrap.
+    flat = re.sub(r"\s+", " ", doc_text)
+    exact = re.findall(r"answers `primary` (?:at least )?\d+ times?", flat)
+    assert len(exact) == 1 and exact[0] == f"answers `primary` at least {stated} times", (
+        f"architecture/autonomy-jobs.md carries {len(exact)} census-shaped counts "
+        f"{exact}, of which the parser found one floor of {stated}: {sentence!r}")
+
+
+#: A census number typed into source, in EITHER spelling: the exact count the doc used until
+#: #2892 and the floor it uses now. The floor form has to match too — a rail that matches
+#: only the retired spelling reads an empty set the moment the doc stops typing an exact
+#: count, and the ban below then passes over nothing while looking green.
+TYPED_CENSUS = re.compile(
+    r"answers\s+`primary`\s+(?:at\s+least\s+)?\d+\s+times?")
 
 
 def typed_census_on_doc_reads(node_src: str) -> list[str]:
-    """Lines of one test node that compare a TYPED census count against the real doc.
+    """Lines of one test node that compare a TYPED census number against the real doc.
 
-    The distinction this rail has to get right, because both shapes are in the file:
-    `doc_model_census(census_prose(40)) == (40, "answers `primary` 40 times")` is the
-    parser measured against prose the node itself wrote, and is fine. What must never come
-    back is a typed count beside a value bound from `DOC.read_text` — that number is the
-    fleet's, and the fleet grows, which is precisely the assertion that went red on
-    2026-10-14 (#2747) and again on 2026-10-16 (#2814) over a file nobody was editing.
+    The distinction this rail has to get right, because both spellings are in the file:
+    `doc_model_census(census_prose(40)) == (40, "answers `primary` at least 40 times or
+    beyond")` is the parser measured against prose the node itself wrote, and is fine. What
+    must never come back is a typed number beside a value bound from `DOC.read_text` — that
+    number is the fleet's, and the fleet grows, which is precisely the assertion that went
+    red on 2026-10-14 (#2747), 2026-10-16 (#2814) and 2026-10-17 (#2882) over a file nobody
+    was editing.
     """
     doc_names = set(re.findall(r"(\w+)\s*=\s*DOC\.read_text\b", node_src))
     for m in re.finditer(
@@ -1000,58 +1113,92 @@ def typed_census_on_doc_reads(node_src: str) -> list[str]:
 #: allowing. They sit at module level rather than inline in the rail node because the sweep
 #: reads test NODES, and a fixture written inside the node it is meant to prove would be
 #: read back as an offence by the very rule it demonstrates (it is: it was).
+#: One node in the shape the rail exists to refuse, and one in the shape it must keep
+#: allowing. They sit at module level rather than inline in the rail node because the sweep
+#: reads test NODES, and a fixture written inside the node it is meant to prove would be
+#: read back as an offence by the very rule it demonstrates (it is: it was). Both are written
+#: in the doc's CURRENT floor spelling: a fixture left in the retired exact spelling would
+#: still pass the detector check while proving nothing about the sentence the doc now holds.
 OFFENDER_SRC = (
+    'def test_bench_typed_count():\n'
+    '    text = DOC.read_text(encoding="utf-8")\n'
+    '    stated, sentence = doc_model_census(text)\n'
+    '    assert sentence == "answers `primary` at least 40 times or beyond"\n')
+
+ALLOWED_SRC = (
+    'def test_bench_synthetic_prose():\n'
+    '    assert doc_model_census(census_prose(40)) == (40, '
+    '"answers `primary` at least 40 times or beyond")\n')
+
+#: The same pair in the spelling #2892 retired, so the rail's reach across BOTH is shown:
+#: widening TYPED_CENSUS for the floor must not have dropped the exact count, which is the
+#: shape a rewording can slide back into.
+OFFENDER_SRC_EXACT = (
     'def test_bench_typed_count():\n'
     '    text = DOC.read_text(encoding="utf-8")\n'
     '    stated, sentence = doc_model_census(text)\n'
     '    assert sentence == "answers `primary` 40 times"\n')
 
-ALLOWED_SRC = (
-    'def test_bench_synthetic_prose():\n'
-    '    assert doc_model_census(census_prose(40)) == (40, '
-    '"answers `primary` 40 times")\n')
 
+def test_the_real_board_node_holds_no_typed_census_and_names_the_floor_when_the_fleet_drops():
+    """Clauses 3 and 4's regression rail, run at the gate where the live node is not.
 
-def test_the_real_board_node_holds_no_typed_census_and_names_the_sentence_when_it_parts():
-    """Clause 2's regression rail, run at the gate where the live node is not.
+    The first assertions are the ones that keep this fix from being undone by the next
+    convenient edit: the real-board node must derive its expectation from the doc, must hand
+    it to `fleet_reaches_census_floor` rather than comparing inline, must not compare the
+    census with `==` at all, and must still assert the exact engine property. A typed number
+    back in that node means it is failing on a fleet that grew rather than on a sentence the
+    doc owns.
 
-    The first assertion is the one that keeps this fix from being undone by the next
-    convenient edit: if a typed number ever returns to the comparison, the node is back to
-    failing on a fleet that grew rather than on a sentence that parted. The rest pins the
-    failure text, which is the only thing a reader gets at 03:00 in a nightly log: both
-    counts, the sentence verbatim, the command that re-counts, and the file to retype.
+    Then the failure text, which is the only thing a reader gets at 03:00 in a nightly log:
+    both numbers, the sentence verbatim, the command that re-counts, and the file to retype.
 
     The last leg generalises the first across the whole file, because #2814 found the same
     typed number living in a SECOND node — `test_the_census_expectation_is_parsed_out_of_the_doc_sentence`
     — which carries no `live_vault` mark and so runs at every gate: retyping the doc for a
-    grown fleet turned that green node red. A typed census count compared against the doc
-    is now refused wherever it is not marked `live_vault`, so fleet growth can only ever
-    redden the node whose whole job is to measure the fleet.
+    grown fleet turned that green node red. A typed census number compared against the doc is
+    refused wherever the node is not marked `live_vault`, so only the node whose whole job is
+    to measure the fleet can ever be reddened by the fleet. Since #2892 that ban reads BOTH
+    spellings, because the doc's sentence no longer types an exact count and a rail matched
+    to the retired spelling alone would sweep an empty set and report it as clean.
     """
     src = inspect.getsource(
         test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live)
     assert "doc_model_census(DOC.read_text" in src, (
         "the real-board node stopped deriving its expectation from the doc")
-    assert not re.search(r"len\(declared\)\s*==\s*\d", src), (
-        "a hand-typed census literal is back in the real-board node; that is the shape "
-        "that went stale on 2026-10-14 when the fleet grew past the number")
+    assert "fleet_reaches_census_floor(declared, floor, sentence)" in src, (
+        "the real-board node no longer runs the census through the floor join, so the "
+        "comparison is back inline where only a deselected node can see it")
+    assert not re.search(r"len\(declared\)\s*==", src), (
+        "an equality against the census count is back in the real-board node; equality is "
+        "the shape that went stale on 2026-10-14, 2026-10-16 and 2026-10-17 when the fleet "
+        "grew past the number the doc typed")
+    assert re.search(r"set\(declared\)\s*==\s*\{\"model: primary\"\}", src), (
+        "the exact-property leg left the real-board node: the floor says how many task "
+        "files declare an engine, only this assertion says they all name the primary")
 
-    parted = census_parted_message(40, 39, "answers `primary` 39 times")
-    assert "40 task files declare a `model:`" in parted, parted
-    assert "says 39" in parted, parted
-    assert "'answers `primary` 39 times'" in parted, (
-        f"the message must quote the sentence the fleet parted with, got {parted!r}")
+    parted = census_below_floor_message(
+        39, 40, "answers `primary` at least 40 times or beyond")
+    assert "39 task files declare a `model:`" in parted, parted
+    assert "floors the census at 40" in parted, parted
+    assert "'answers `primary` at least 40 times or beyond'" in parted, (
+        f"the message must quote the sentence the fleet fell under, got {parted!r}")
     assert "grep -h '^model:' ~/obsidian/autonomy/*.md | wc -l" in parted, parted
     assert "retype" in parted and "no edit" in parted, (
         f"the reader must be told which file to retype and that this assertion is not it: "
         f"{parted!r}")
 
-    # No node that the gate runs may compare a typed census count with the doc. The control
-    # first: the detector has to catch the shape, and must NOT catch the parser's own
-    # synthetic legs, or the rail would forbid the very tests that replaced the pin.
+    # No node that the gate runs may compare a typed census number with the doc. The controls
+    # first: the detector has to catch the shape in both spellings, and must NOT catch the
+    # parser's own synthetic legs, or the rail would forbid the very tests that replaced the
+    # pin — and a rail that only caught the retired exact spelling would be green on vacuity.
     caught = typed_census_on_doc_reads(OFFENDER_SRC)
-    assert len(caught) == 1 and "40 times" in caught[0], (
-        f"the detector missed a typed census compared against the doc: {caught}")
+    assert len(caught) == 1 and "at least 40 times" in caught[0], (
+        f"the detector missed a typed floor compared against the doc: {caught}")
+    caught_exact = typed_census_on_doc_reads(OFFENDER_SRC_EXACT)
+    assert len(caught_exact) == 1 and "40 times" in caught_exact[0], (
+        f"the detector lost the retired exact spelling when it widened to the floor: "
+        f"{caught_exact}")
     assert typed_census_on_doc_reads(ALLOWED_SRC) == [], (
         "the detector must still allow parsing prose the node wrote itself — the number "
         "is only a stale claim when it is compared with the doc being read")
