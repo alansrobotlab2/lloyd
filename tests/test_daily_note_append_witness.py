@@ -1127,3 +1127,111 @@ def test_the_worker_pool_throughput_census_line_lands_on_the_note_with_its_talli
         "the census posted the day without recording it in its own in-process key, so "
         "the dedupe this node exists to prove is not the one being run: "
         + repr(fw._state.get(fw._THROUGHPUT_WM_KEY)))
+
+
+# ── #2899 clause 5: the ABSOLUTE-floor leg's line reaches this note too ──────
+def test_a_floor_triggered_census_line_lands_on_the_note_naming_its_own_rule(
+        witness, tmp_path, monkeypatch):
+    """Clause 5: a census fired by the floor alone travels the real route, witnessed.
+
+    The same route as the ratio leg's node above — `fleet_watchdog._alert` →
+    `app.discord_notify.discord_alert` → its no-channel branch →
+    `app.autonomy.append_daily_alert_line` → this ledger — with the one same pin:
+    `CONFIG`'s Discord block, because this box has no home channel and a test must
+    not decide that by loading the real config. What differs is the seeding: 40
+    `failed` runs on the newest complete UTC day against 20 on its predecessor is
+    2.0x, a fifth of the 10x rule, so the ONLY thing that can post here is the
+    absolute leg. That is the shape of 2026-10-07 (75 against 12 = 6.25x), the
+    silent day #2899 exists to recover, and the note line is the whole deliverable.
+
+    Which is why the naming assertion sits in this file and not only beside the
+    formatter: the seam that matters is between this process and the note a human
+    reads a day later, and a floor day and a ratio day have to be tellable apart
+    from the line alone.
+    """
+    import asyncio
+    import sqlite3
+
+    import workers.fleet_watchdog as fw
+    import app.discord_notify as dn
+    from workers.queue import WorkQueue
+
+    monkeypatch.setattr(dn, "CONFIG", {"discord": {}}, raising=False)
+    # Same reason as the node above: `_throughput_reported_day` takes the later of
+    # `fw._state` and the watermark row, and this file has no fixture guarding that
+    # module-global, so a day left there by any earlier node suppresses this
+    # node's census outright. Pinning the one key this alarm owns restores it on
+    # teardown and leaves nothing set for whoever is collected next.
+    monkeypatch.setitem(fw._state, fw._THROUGHPUT_WM_KEY, None)
+
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+    twodays = (datetime.now(timezone.utc) - timedelta(days=2)).date().isoformat()
+    q = WorkQueue(tmp_path / "floor.db")
+    # 26 + 10 + 4 = 40 failures on the counted day (the pinned floor exactly), over
+    # two real classes so the note says what KIND of bad day it was, and 20 on the
+    # predecessor so the pair is 2.0x and the ratio leg provably cannot fire.
+    rows = ([("no structured answer: finalizer failed", "03:07")] * 26
+            + [("ConnectError: All connection attempts failed", "19:41")] * 10
+            + [("unclassified thing happened", "21:02")] * 4)
+    conn = sqlite3.connect(str(q.db_path))
+    for n, (summary, hhmm) in enumerate(rows):
+        stamp = f"{yesterday}T{hhmm}:{(n % 60):02d}+00:00"
+        conn.execute(
+            "INSERT INTO runs (run_id, source, status, started_at, completed_at,"
+            " summary) VALUES (?,?,?,?,?,?)",
+            (f"f{n}", "owed-check", "failed", stamp, stamp, summary))
+    for n in range(20):                       # the predecessor: 20, so 2.0x
+        stamp = f"{twodays}T06:{n:02d}:00+00:00"
+        conn.execute(
+            "INSERT INTO runs (run_id, source, status, started_at, completed_at,"
+            " summary) VALUES (?,?,?,?,?,?)",
+            (f"p{n}", "autotriage", "failed", stamp, stamp, "one-off failure"))
+    conn.commit()
+    conn.close()
+
+    async def _one_census():
+        return await fw._census_failure_throughput(asyncio.get_running_loop(), q)
+
+    asyncio.run(_one_census())
+
+    led = _rows(witness["ledger"])
+    assert len(led) == 1, (
+        "a floor-triggered census posted an alert this witness did not record — the "
+        f"line either never reached the note or reached it unwitnessed: {led}")
+    note = Path(led[0]["note_path"])
+    assert note.exists(), f"the row names a note that is not on disk: {led[0]}"
+    line = [ln for ln in note.read_text(encoding="utf-8").splitlines()
+            if hashlib.sha256(ln.encode("utf-8")).hexdigest()
+            == led[0]["line_sha256"]][0]
+
+    assert yesterday in line and twodays in line, (
+        "the line does not name both days it counted: " + line)
+    assert "40 failed runs" in line and "against 20" in line, (
+        "the line does not name the two counts the floor leg weighed: " + line)
+    # The LITERAL 40, not `fw._THROUGHPUT_FLOOR`: the 40 rows seeded above are a
+    # literal as well, and an assertion that reads the threshold off the module would
+    # follow the constant wherever a re-pricing moved it instead of pinning the number
+    # this note line is supposed to carry. The module's own value is pinned at 40 by
+    # `test_the_floor_leg_posts_on_a_40_versus_20_day_the_ratio_leg_is_blind_to`.
+    assert "floor rule: >= 40" in line, (
+        "the note cannot tell a floor day from a ratio day, so a reader re-pricing "
+        "the floor from the notes has nothing to work from: " + line)
+    assert "10x rule" not in line, (
+        "the line blames the ratio rule for a 2.0x day: " + line)
+    classes = line.split("classes:", 1)[1].split(";")[0]
+    nonzero = [part.strip() for part in classes.split(",")
+               if part.strip() and not part.strip().endswith(" 0")]
+    assert len(nonzero) >= 2, (
+        f"the line names {len(nonzero)} failure class(es); the clause requires at "
+        f"least two so the note says what kind of bad day it was: {line}")
+    assert "no structured answer 26" in line and "connect error 10" in line, (
+        "the two biggest classes are not the ones the seeded rows had: " + line)
+    assert f"failures span {yesterday}T" in line and "Z to " in line, (
+        "the line names no window bounds for the failures it counts: " + line)
+    assert "UTC" in line and "America/Los_Angeles" in line, (
+        "the line names a UTC day on a note keyed to another zone without saying so: "
+        + line)
+    assert fw._state[fw._THROUGHPUT_WM_KEY] == yesterday, (
+        "the floor leg posted a day it did not record in the ONE key both legs share, "
+        "so a restart would post it again: "
+        + repr(fw._state.get(fw._THROUGHPUT_WM_KEY)))

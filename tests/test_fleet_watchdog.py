@@ -2485,3 +2485,239 @@ async def test_the_census_is_silent_and_raises_nothing_on_a_store_it_cannot_comp
     assert alerts == [], f"an unreadable store produced an alert: {alerts}"
     assert fw._throughput_census(broken) is None, (
         "an unreadable store raised or guessed instead of reporting nothing")
+
+
+# ── #2899: an absolute-floor leg on the SAME census ──────────────────────────
+# The ratio leg compares a day with its neighbour, and a comparison is blind on
+# exactly the days #2890's owed entry named: `2026-09-29` (187 failed against 27,
+# 6.93x) and `2026-10-07` (75 against 12, 6.25x) are the two worst days in the
+# live `workers.db` and neither reached a note, because the day before each was
+# already bad. The floor leg asks the other question of the SAME reading — is this
+# day itself bad, whatever its predecessor looked like — so it inherits the
+# newest-complete-UTC-day-with-adjacent-predecessor shape, including the rule that
+# an absent predecessor is not a zero (the node above stays green at any count).
+# 40 is pinned, not derived: over the 25 complete UTC days that store held on
+# 2026-10-17 the sorted per-day `failed` counts are
+# [1,5,6,6,7,7,8,8,9,9,10,10,10,12,13,14,15,20,27,27,32,57,75,137,187], and the
+# only gap wide enough to sit between an ordinary bad day and the four days worth
+# a line is 32→57, so ANY floor inside it fires on exactly {09-24:57, 09-29:187,
+# 10-07:75, 10-16:137}. Whether 40 is the right number inside that gap is #2899's
+# owed measurement after a week of real traffic, not something this fixture can
+# decide.
+
+async def test_the_floor_leg_posts_on_a_40_versus_20_day_the_ratio_leg_is_blind_to(
+        board, monkeypatch, tmp_path):
+    """Clause 1: the absolute leg fires on a 2x day, and the constant fires it.
+
+    40 failed against 20 is 2.0x — one fifth of `_THROUGHPUT_RATIO` — so nothing
+    about this pair can satisfy the ratio rule; it is 2026-10-07's shape (75 v 12,
+    6.25x, silent) shrunk to fixture size. The line names both counts and both days
+    because a floor reading that said only "40 failed" could not be checked against
+    the store it came from. The board and the queue are empty, so the only alert
+    this tick can produce is the census's.
+    """
+    _unsuppressed_census(monkeypatch)
+    assert fw._THROUGHPUT_FLOOR == 40, (
+        "the floor is a constant pinned on the live distribution, not a baseline — "
+        "the 40 and 20 seeded below are that number and its half")
+    q = _throughput_queue(tmp_path / "floor.db",
+                          _throughput_rows(_THROUGHPUT_DAY, 40)
+                          + _throughput_rows(_THROUGHPUT_PREV, 20))
+    alerts = _watch_alerts(monkeypatch)
+    await fw.tick(q)
+    assert len(alerts) == 1, f"expected the one floor-leg alert: {alerts}"
+    msg = alerts[0]
+    assert "40 failed runs on UTC" in msg, msg
+    assert f"against 20 on UTC {_THROUGHPUT_PREV}" in msg, msg
+    assert _THROUGHPUT_DAY in msg, msg
+
+
+async def test_the_floor_is_a_constant_so_39_failed_against_20_posts_nothing(
+        board, monkeypatch, tmp_path):
+    """Clause 2: one failure under the floor is silence, and the SILENCE IS THE RULE'S.
+
+    39 against 20 is 1.95x and one short of `_THROUGHPUT_FLOOR`. The detector-level
+    assertion is the point of this node rather than decoration: a sliding baseline —
+    a mean of recent days, which would land near 20 here — posts this line, and that
+    is the failure the clause exists to keep out. Returning None says the number
+    never reached `_alert` at all, so the emptiness above cannot be a watermark's
+    doing.
+    """
+    _unsuppressed_census(monkeypatch)
+    q = _throughput_queue(tmp_path / "just-under.db",
+                          _throughput_rows(_THROUGHPUT_DAY, 39)
+                          + _throughput_rows(_THROUGHPUT_PREV, 20))
+    alerts = _watch_alerts(monkeypatch)
+    await fw.tick(q)
+    assert alerts == [], (
+        f"39 failed is one below the pinned floor of {fw._THROUGHPUT_FLOOR}, so this "
+        f"is a normal day and the census posted it: {alerts}")
+    assert fw._throughput_census(q) is None, (
+        "the detector returned a verdict for a day under the floor and under the "
+        "ratio, so the silence above belongs to the watermark and not to the rule")
+
+
+async def test_a_day_tripping_both_legs_posts_one_line_on_the_one_day_watermark(
+        board, monkeypatch, tmp_path):
+    """Clause 3: two legs fire, one line goes out, one row is written.
+
+    137 against 7 is the pair that shipped the ratio leg — 19.6x AND over the floor,
+    so both rules trigger on the same reading. The second tick is the dedupe's test:
+    the day must be recorded exactly once, under the ONE key `throughput_day`, and a
+    second key for the second leg would be two alarms spending one another's
+    silence, which is precisely what #1704/#1735 removed for the stall alarms'
+    persisted instants. The stall row is seeded first so "no new key" has a baseline
+    to be compared against.
+    """
+    _unsuppressed_census(monkeypatch)
+    q = _throughput_queue(tmp_path / "both-legs.db",
+                          _throughput_rows(_THROUGHPUT_DAY, 137)
+                          + _throughput_rows(_THROUGHPUT_PREV, 7))
+    # Both neighbours' rows are SEEDED so the "no new key" comparison below has a
+    # baseline of the rows a live store actually holds: with only one of them
+    # present, a row some other alarm legitimately writes during the two ticks would
+    # read as the floor leg bringing its own key.
+    q.wm_set(fw.NAME, fw._STALL_WM_KEY, "2026-10-16T00:00:00+00:00")
+    q.wm_set(fw.NAME, fw._NEXTRUN_WM_KEY, "2026-10-16T00:00:01+00:00")
+    before = _watermarks(q)
+    assert fw._NEXTRUN_WM_KEY in before and fw._STALL_WM_KEY in before, (
+        f"the baseline rows were not written, so the key-set comparison below would "
+        f"be comparing against an empty store: {sorted(before)}")
+
+    alerts = _watch_alerts(monkeypatch)
+    await fw.tick(q)
+    await fw.tick(q)
+    assert len(alerts) == 1, (
+        f"two ticks over a pair that trips both legs posted {len(alerts)} lines; the "
+        f"legs share the one day watermark, so both together still write one line "
+        f"per counted day: {alerts}")
+    assert "10x rule" in alerts[0] and "floor rule" in alerts[0], (
+        f"a day that trips both rules names only the one that was here first: "
+        f"{alerts[0]}")
+
+    after = _watermarks(q)
+    assert after.get(fw._THROUGHPUT_WM_KEY, (None, None))[0] == _THROUGHPUT_DAY, (
+        "the census posted a day it did not record, so the next process would post "
+        f"the same day again: {after}")
+    extra = sorted(set(after) - set(before) - {fw._THROUGHPUT_WM_KEY})
+    assert extra == [], (
+        f"the floor leg brought its own watermark key {extra} into the store; both "
+        f"legs dedupe on `{fw._THROUGHPUT_WM_KEY}` alone")
+    for key in (fw._STALL_WM_KEY, fw._NEXTRUN_WM_KEY):
+        assert after[key] == before[key], (
+            f"the floor leg moved the persisted instant of `{key}` — "
+            f"{before[key]} became {after[key]} — which is one alarm spending another's "
+            "silence, the failure #1704/#1735 removed")
+
+
+async def test_the_floor_leg_line_names_its_own_rule_and_keeps_the_tallies_and_window(
+        board, monkeypatch, tmp_path):
+    """Clause 4: the line says WHICH rule fired, and loses nothing the ratio line had.
+
+    `_throughput_alert_message` hardcoded the `(10x rule: N.Nx)` parenthetical, so a
+    floor-triggered 40-vs-20 day would have printed "10x rule: 2.0x" — a line that
+    misstates its own trigger and sends a reader to audit a ratio that was never the
+    reason for it. The class tallies and the dated `failures span …Z to …Z` bounds
+    are what made the ratio line triageable (#2890's incident was one availability
+    event across three windows), so this node pins them on the floor line too, plus
+    the clock sentence, because the census counts UTC days while the note is keyed
+    to America/Los_Angeles.
+    """
+    _unsuppressed_census(monkeypatch)
+    pairs = ([(_THROUGHPUT_DAY, "run failed: no structured answer", "03:07")] * 26
+             + [(_THROUGHPUT_DAY, "ConnectError: all connection attempts failed",
+                 "19:41")] * 10
+             + [(_THROUGHPUT_DAY, "unclassified thing happened", "21:02")] * 4
+             + [(_THROUGHPUT_PREV, "one-off failure", "06:00")] * 20)
+    q = _throughput_queue(tmp_path / "naming.db", pairs)
+    alerts = _watch_alerts(monkeypatch)
+    await fw.tick(q)
+    assert len(alerts) == 1, f"expected the one floor-leg alert: {alerts}"
+    line = alerts[0]
+
+    assert "floor rule" in line, (
+        f"a day that fired only the absolute leg names no rule, or names the wrong "
+        f"one: {line}")
+    assert "floor rule: >= 40" in line, (
+        f"the line names the floor rule but not the value it was pinned at — the "
+        f"literal here is deliberate, since the 40 rows seeded above are a literal "
+        f"too: {line}")
+    assert "10x rule" not in line, (
+        f"a 40-vs-20 day is 2.0x, so the ratio rule did not fire and must not be "
+        f"printed as the trigger: {line}")
+    assert "classes:" in line, f"the floor line carries no class tally: {line}"
+    assert "no structured answer 26" in line, line
+    assert "connect error 10" in line, line
+    assert "other 4" in line, (
+        f"the 4 seeded rows that match no needle must show up as `other`, not vanish: "
+        f"{line}")
+    assert f"failures span {_THROUGHPUT_DAY}T" in line and "Z to " in line, (
+        f"the floor line names no window bounds for the failures it counts: {line}")
+    assert "UTC" in line and "America/Los_Angeles" in line, (
+        f"the floor line names a UTC day on a note keyed to another zone without "
+        f"saying so: {line}")
+
+
+async def test_the_floor_leg_reaches_a_person_from_the_watch_seat_on_a_ratio_blind_day(
+        board, tmp_path, monkeypatch):
+    """The new leg across the seat's own seam: a STARTED pool, 40 v 20, one line.
+
+    The pool-seat node above seeds a 137-vs-7 pair, which now trips BOTH legs, so
+    before this node no floor-only day had ever been read by the caller that actually
+    reads the store in production — `WorkerPool._watch_fleet` → `fw.tick` →
+    `_census_failure_throughput`'s `run_in_executor` thread opening `workers.db`. The
+    other floor nodes call `fw.tick` directly: same function, different caller, and
+    the executor hand-off is where a leg that only exists on one call path would show
+    up. The source block says `enabled: False` and dispatch is stubbed, so the one
+    line this pool can produce is the census's (#1682's disarmament, re-asked of the
+    leg that ships in this diff), and the pair is 2.0x — a day the ratio leg, left
+    alone, would have passed over in silence exactly as it passed over 2026-10-07.
+    """
+    _unsuppressed_census(monkeypatch)
+    q = _throughput_queue(tmp_path / "floor-seat.db",
+                          _throughput_rows(_THROUGHPUT_DAY, 40)
+                          + _throughput_rows(_THROUGHPUT_PREV, 20))
+    monkeypatch.setattr(sources, "SOURCE_REGISTRY", {"scheduled-task": st},
+                        raising=False)
+    monkeypatch.setattr(sources, "get_sources_config", lambda: {
+        "scheduled-task": {"enabled": False, "interval_seconds": 0,
+                           "max_duration_seconds": 1800}}, raising=False)
+    alerts = _watch_alerts(monkeypatch)
+
+    async def _noop(*_a, **_k):
+        return None
+
+    pool = WorkerPool(q, slots=0, poll_idle_seconds=0.01)
+    monkeypatch.setattr(pool, "_maybe_sweep_poisoned", _noop)
+    monkeypatch.setattr(pool, "_probe_services", _noop)
+    monkeypatch.setattr(pool, "_watch_dispatch", _noop)
+    seen = {"watch": 0}
+    real_watch = pool._watch_fleet
+
+    async def _watch_spy():
+        await real_watch()
+        seen["watch"] += 1
+
+    monkeypatch.setattr(pool, "_watch_fleet", _watch_spy)
+    await pool.start()
+    try:
+        for _ in range(300):
+            if alerts or seen["watch"] >= 3:
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        await pool.stop()
+
+    assert seen["watch"] >= 1, (
+        "a started pool ran `_watch_fleet` zero times, so the seat never had a chance "
+        "to read the runs store")
+    assert any("40 failed runs on UTC" in a for a in alerts), (
+        f"the watch seat ran {seen['watch']} pass(es) over a 40-vs-20 day and said "
+        f"nothing — the day-shape the ratio leg cannot see; the day it would have to "
+        f"suppress is {fw._throughput_reported_day(q)!r} of " + repr(alerts))
+    assert any("floor rule" in a and "10x rule" not in a for a in alerts), (
+        f"the line the seat posted does not name the floor rule as its trigger: "
+        f"{alerts}")
+    assert not q.list_items(source="scheduled-task", limit=50), (
+        "a source disabled in config enqueued work, so the line above could have come "
+        "from dispatch rather than from the watchdog seat")

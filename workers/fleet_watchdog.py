@@ -146,13 +146,36 @@ _UNPARSEABLE_SCAN_SECONDS = 30 * 60
 #: instrumenting a channel whose flapper was already fixed: that one measured a
 #: producer known to be quiet, this one writes for a population no writer covered.
 _THROUGHPUT_RATIO = 10
+#: The absolute floor, #2899's second leg on the SAME reading. A ratio is a
+#: comparison, and a comparison is blind on exactly the days #2890's owed entry
+#: named: `2026-09-29` (187 `failed` runs against 27 = 6.93x) and `2026-10-07` (75
+#: against 12 = 6.25x) are the two worst days the live store holds and neither
+#: reached a note, because the day before each was ALREADY bad. This leg asks the
+#: other question of the same newest-complete-day pair — is this day itself bad,
+#: whatever its predecessor looked like — so it inherits the adjacency gate and the
+#: rule that an absent predecessor is not a zero, rather than counting a day the
+#: pool never ran. Pinned rather than derived, because a baseline computed from
+#: recent days is the very blindness being repaired: over the 25 complete UTC days
+#: `workers.db` held on 2026-10-17 the sorted per-day `failed` counts are
+#: [1,5,6,6,7,7,8,8,9,9,10,10,10,12,13,14,15,20,27,27,32,57,75,137,187], and the
+#: only gap wide enough to separate an ordinary bad day from the four worth a line
+#: is 32→57, so ANY floor inside it fires on exactly {09-24:57, 09-29:187,
+#: 10-07:75, 10-16:137} — three lines in 25 days beyond the one the ratio already
+#: caught. Where inside that gap to put it, and whether 40 is still the right place
+#: after a week of real traffic, is #2899's owed measurement, not a call this
+#: constant can make for a future store.
+_THROUGHPUT_FLOOR = 40
 #: This alarm's own "we already told someone" row, holding the UTC DAY it last
 #: reported — a day string, not an instant. The dedupe unit is a day, so a
 #: cooldown in seconds would let the first tick after the pair rolls over post the
 #: SAME day again, and a promise about a day cannot be kept with a stopwatch. Keyed
 #: beside `_STALL_WM_KEY` and `_NEXTRUN_WM_KEY` under this module's own name, so no
 #: alarm can spend another's silence and no alarm's persisted instant moves when
-#: this one fires.
+#: this one fires. It is also the ONLY throughput row: the ratio leg and the floor
+#: leg (#2899) are two rules over one reading of one day, so they share this
+#: watermark rather than each carrying a key of its own — a per-leg key would let a
+#: day that trips both reach a person twice, which is one alarm spending its own
+#: silence.
 _THROUGHPUT_WM_KEY = "throughput_day"
 #: Failure classes, read off `runs.summary` as substrings. These are the strings
 #: the 2026-10-16 census actually found (99 / 24 / 3 / 6 / 3 / 1 of its 137), not a
@@ -1222,13 +1245,24 @@ def _throughput_census(queue: WorkQueue) -> dict | None:
     #2890 used, hazards and all, including that a row stamped in a local zone would
     be grouped by its own date digits.
 
+    TWO rules read that one pair (#2890 shipped the first, #2899 the second), and
+    either one alone is enough to post: the day-over-day RATIO, `newer >=
+    _THROUGHPUT_RATIO * older`, which catches a day that is loud RELATIVE to its
+    neighbour; and the absolute FLOOR, `newer >= _THROUGHPUT_FLOOR`, which catches a
+    day that is loud on its own terms whatever the neighbour looked like — the case
+    the ratio structurally cannot see, because two bad days in a row make the second
+    one look ordinary. Both read the same pair, so the floor leg inherits every shape
+    above rather than loosening any of them: a single-day store with 137 rows is
+    still not a comparison and still says nothing. The point of the second leg is a
+    different threshold, not a different query.
+
     Returns None — nothing to say, and no line — for each of the shapes the store can
     hand back that is not a comparison: no complete day at all, a newest complete day
     whose predecessor has no rows (an absent predecessor is NOT read as a zero,
-    because a day the pool did not run is not a day the pool survived), a count under
-    the ratio, or a store it cannot open. It never raises: this runs on the pool's
-    scheduler tick, beside two stall alarms, and #1682's whole point is that a fault
-    in one reader here may not be the thing that stops the others.
+    because a day the pool did not run is not a day the pool survived), a count that
+    trips NEITHER leg, or a store it cannot open. It never raises: this runs on the
+    pool's scheduler tick, beside two stall alarms, and #1682's whole point is that a
+    fault in one reader here may not be the thing that stops the others.
 
     The connection is closed explicitly rather than left to `with`, unlike the
     precedent read at `app/failure_ledger.py:615`: that one runs once per ledger
@@ -1252,7 +1286,13 @@ def _throughput_census(queue: WorkQueue) -> dict | None:
             "SELECT substr(started_at, 1, 10), count(*) FROM runs "
             "WHERE status = 'failed' GROUP BY 1"))
         newer, older = counts.get(day, 0), counts.get(prev, 0)
-        if newer < _THROUGHPUT_RATIO * max(older, 1):
+        # Two independent rules over one reading, and WHICH one fired travels with
+        # the result: `_throughput_alert_message` has to say so, because a line that
+        # printed the ratio on a floor-triggered 2.0x day would send a reader to
+        # audit a rule that was never the reason it exists.
+        by_ratio = newer >= _THROUGHPUT_RATIO * max(older, 1)
+        by_floor = newer >= _THROUGHPUT_FLOOR
+        if not (by_ratio or by_floor):
             return None
         rows = conn.execute(
             "SELECT summary, started_at FROM runs WHERE status = 'failed' "
@@ -1288,6 +1328,10 @@ def _throughput_census(queue: WorkQueue) -> dict | None:
     return {
         "day": day, "prev": prev, "newer": newer, "older": older,
         "ratio": newer / max(older, 1),
+        # Which of the two rules fired. At least one of these is True by the time a
+        # dict exists: the only way out of the census with a verdict is a triggered
+        # day, and a day that trips both says so twice rather than picking a winner.
+        "by_ratio": by_ratio, "by_floor": by_floor,
         "classes": [(label, tallies[label]) for label, _ in _THROUGHPUT_CLASSES],
         "other": max(newer - matched, 0),
         "first": min(stamps) if stamps else None,
@@ -1305,9 +1349,21 @@ def _throughput_alert_message(census: dict) -> str:
     PREVIOUS note. A line that said only "yesterday" would be read against the wrong
     day by the one person it is written for, so it says which clock it counts and
     that this note is keyed to another.
+
+    The parenthetical names EVERY rule that fired, because it used to be hardcoded
+    to the ratio (#2899): a floor-triggered 40-vs-20 day would have printed "10x
+    rule: 2.0x", a line that misstates its own trigger and points a reader at a
+    comparison nobody made. A day that trips both legs says so twice, which is also
+    what makes the two rules distinguishable from the notes alone — the owed
+    re-pricing of the floor is a count of these lines.
     """
     parts = [f"{label} {n}" for label, n in census["classes"] if n]
     parts.append(f"other {census['other']}")
+    rules = []
+    if census["by_ratio"]:
+        rules.append(f"{_THROUGHPUT_RATIO}x rule: {census['ratio']:.1f}x")
+    if census["by_floor"]:
+        rules.append(f"floor rule: >= {_THROUGHPUT_FLOOR}")
     bounds = ""
     if census["first"] and census["last"]:
         bounds = (f"; failures span {census['day']}T{census['first'][11:16]}Z to "
@@ -1315,7 +1371,7 @@ def _throughput_alert_message(census: dict) -> str:
     return (
         f"worker pool failure throughput: {census['newer']} failed runs on UTC "
         f"{census['day']} against {census['older']} on UTC {census['prev']} "
-        f"({_THROUGHPUT_RATIO}x rule: {census['ratio']:.1f}x); classes: "
+        f"({'; '.join(rules)}); classes: "
         f"{', '.join(parts)}{bounds}. Times and days are UTC; this note is keyed to "
         f"America/Los_Angeles, so the day named is not necessarily this note's day.")
 
