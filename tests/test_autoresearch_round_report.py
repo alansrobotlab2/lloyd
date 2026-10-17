@@ -14,6 +14,14 @@ proposer replaced, and the real `judge_trace` / `aggregate_variant` grading the
 traces. `tests/test_autoresearch_auto_restore.py::drive_round` cannot stand in
 for it — it replaces `judge_trace` with a preset score, so the exclusion this
 item is about never runs there.
+
+#2919 clause 5 lives here too, because the surface it governs is this section: the
+coverage table prints a `pass^N` column beside `pass@N` for every row with a
+`draws excluded` count, and the same section states the expected pessimism (pass^N ≈
+pass@1^N, so a 0.0 is the expected reading below ~90% single-draw reliability).
+`test_the_coverage_table_prints_pass_n_beside_pass_at_n_with_its_own_caveats` and
+`test_a_report_of_an_artifact_written_before_pass_n_existed_prints_it_absent` are
+those two, both rendered from an artifact the leg's own writer put on disk.
 """
 from __future__ import annotations
 
@@ -302,10 +310,163 @@ def test_a_round_prints_the_coverage_counts_before_its_per_task_table(round_env)
     assert "- graded failures today: 1" in report
     assert "reachable (today's failure, pass@8 passes): 1" in report
     assert "unreachable (today's failure, pass@8 never passes): 0" in report
-    assert "| bench_a3 | 0.125 | 1.000 | reachable |" in report, (
-        "the disagreeing task, with both numbers named")
-    assert "| bench_a2 | 1.000 | 1.000 | reliable |" in report
+    assert "| bench_a3 | 0.125 | 1.000 | 0.000 | reachable |" in report, (
+        "the disagreeing task, with both numbers named — and its pass^8 is 0.000 while "
+        "its pass@8 is 1.000, which is the divergence this column exists to show")
+    assert "| bench_a2 | 1.000 | 1.000 | 1.000 | reliable |" in report
     assert "LEG CUT" not in report, "two classes are present, so the leg separates things"
+
+
+def test_the_coverage_table_prints_pass_n_beside_pass_at_n_with_its_own_caveats(tmp_path):
+    """#2919 clause 5: the pass^N column, the draws it excluded, and the scale beside it.
+
+    An arm built by the leg's own builders over four tasks chosen to cover every shape
+    the new column can take, then rendered by `report_lines` — the same call
+    `run_round._coverage_section` makes:
+
+      `bench_n_all`        8/8, `safety_critical` → pass@8 1.000, pass^8 1.000, `reliable`
+      `bench_n_disagree`   5/8, not flagged       → pass@8 1.000, pass^8 0.000, `reachable`
+      `bench_n_safety`     7/8, `safety_critical` → pass@8 1.000, pass^8 0.000, `reachable`
+      `bench_n_short`      4/8 scored, flagged    → pass@8 absent, pass^8 1.000 over 4, `indeterminate`
+
+    The first three rows carry the table's headline: pass@8 is 1.000 on all three and
+    pass^8 is 1.000 on one, so "eventually" and "every time" are visibly different
+    columns rather than an argument. The fourth is the excluded-draw case — four draws
+    the engine never answered — where pass@8 cannot be computed at all and pass^8 prints
+    as `1.000 (over 4)`: the figure has to say how many draws it actually weighed, and
+    the `draws excluded` column has to say 4 beside it, because an excluded draw that is
+    invisible is one a reader will silently read as a failure.
+
+    The pessimism statement is asserted in the same section as the table it explains.
+    With pass@1 = p, pass^N ≈ p^N, so at N=8 the expected value at p=0.90 is already
+    0.430 and at p=0.80 it is 0.168: a column of 0.000s is what arithmetic predicts for
+    a corpus whose tasks are not 90%-reliable per draw, and without that sentence printed
+    beside it the column reads as a regression report.
+    """
+    from scripts.autoresearch import coverage_leg as cov
+
+    def draws_for(tid, scores):
+        return [cov.draw_record(task_id=tid, draw_index=i, objective_score=s,
+                                status="success" if s is not None else "error",
+                                trace={} if s is None else {"total_tokens": 120})
+                for i, s in enumerate(scores)]
+
+    tasks = [{"id": tid} for tid in ("bench_n_all", "bench_n_disagree",
+                                     "bench_n_safety", "bench_n_short")]
+    context = cov.measurement_context(
+        model_alias="primary", served_model="lloyd-nova2-9b", quantization=None,
+        corpus_tasks=tasks, n=8, route=cov.ROUTE_DIRECT,
+        sampling={"temperature": 0.3, "max_tokens": 1500})
+    arm = cov.build_coverage(
+        {"bench_n_all": draws_for("bench_n_all", [1.0] * 8),
+         "bench_n_disagree": draws_for("bench_n_disagree", [1.0] * 5 + [0.0] * 3),
+         "bench_n_safety": draws_for("bench_n_safety", [1.0] * 7 + [0.0]),
+         "bench_n_short": draws_for("bench_n_short", [1.0] * 4 + [None] * 4)},
+        n_requested=8, context=context,
+        safety_critical_ids={"bench_n_all", "bench_n_safety", "bench_n_short"})
+    # Through the writer and the loader, not a dict handed to the renderer: a report
+    # built from bytes on disk is the only version a human ever reads, and #2186
+    # clause 4's provenance lives in those bytes.
+    cfg = make_cfg(tmp_path)
+    cov.write_coverage(cfg, arm)
+    loaded = cov.load_coverage(cfg, model_alias="primary", route=cov.ROUTE_DIRECT, n=8)
+    assert loaded == arm, "the artifact round-trips the new fields, or the report below " \
+                          "is printing something no later reader can re-derive"
+    lines = cov.report_lines(cfg, baseline_summary={"per_task": []},
+                             model_alias="primary", route=cov.ROUTE_DIRECT, n=8)
+    table_head = "### Per-task coverage (N=8)"
+    section = "\n".join(lines[lines.index(table_head):])
+    header = next(line for line in section.splitlines() if line.startswith("| task |"))
+
+    assert header.split("|")[4].strip() == f"pass^{arm['n_draws']}", \
+        "the column is named with the arm's own N, so it cannot claim to be pass@8's twin"
+    assert "| draws excluded |" in header, "the count is a column, not a footnote"
+
+    rows = {line.split("|")[1].strip(): line.split("|")
+            for line in section.splitlines() if line.startswith("| bench_n")}
+    assert sorted(rows) == ["bench_n_all", "bench_n_disagree", "bench_n_safety",
+                            "bench_n_short"], "every row in the table carries the column"
+    for cells in rows.values():
+        assert len(cells) == len(header.split("|")), \
+            "one cell per header column — a row missing its pass^N cell is a row reading " \
+            "the verdict column as a number"
+
+    all_pass, disagree, safety, short = (rows["bench_n_all"], rows["bench_n_disagree"],
+                                        rows["bench_n_safety"], rows["bench_n_short"])
+    assert all_pass[4].strip() == "1.000" and all_pass[5].strip() == "reliable"
+    assert disagree[3].strip() == "1.000" and disagree[4].strip() == "0.000", \
+        "the unflagged task keeps `reachable` while its pass^8 sits visibly at 0.000"
+    assert disagree[5].strip() == "reachable" and disagree[7].strip() == "0"
+    assert safety[4].strip() == "0.000" and safety[5].strip() == "reachable"
+    assert disagree[3].strip() == safety[3].strip() == "1.000", \
+        "pass@8 is the same number on both rows, and pass^8 is what separates them"
+    assert disagree[2].strip() == "0.625" and safety[2].strip() == "0.875", \
+        "pass@1 stays in the row beside both, because a pass^N of 1.000 bought by a " \
+        "constant answer has to be visible as such"
+
+    assert short[4].strip() == "1.000 (over 4)", \
+        "four draws were answered, so the figure names four — a bare 1.000 would read as " \
+        "a clean pass^8 the arm never measured"
+    assert short[3].strip() == "-", \
+        "pass@8 needs eight draws to sample from and is printed absent, never as 0.000"
+    assert short[5].strip() == "indeterminate" and short[7].strip() == "4", \
+        "the excluded count is printed with the figure it could otherwise have corrupted"
+
+    scale = "\n".join(lines[lines.index(table_head):lines.index(header)])
+    assert "pass^8 ≈ p^8" in scale, "the expected-pessimism statement is in this section"
+    assert "0.430 at p=0.90" in scale and "0.168 at p=0.80" in scale, \
+        "the two anchors are computed from the arm's N=8, so a reader can check them"
+    assert "below ~90% single-draw reliability a 0.0" in scale, scale
+    assert "not a score to raise" in scale, \
+        "the column classifies which verdict a task deserves; this is what stops a " \
+        "column of 0.000s being read as a regression"
+    assert "answer diversity" in scale, \
+        "the degeneracy warning: a constant answer scores 1.0 on pass^N without being right"
+
+
+def test_a_report_of_an_artifact_written_before_pass_n_existed_prints_it_absent(tmp_path):
+    """The old bytes on this box are still fresh, so the new renderer must read them honestly.
+
+    None of `comparable`'s freshness keys changed with #2919 — route, N, model id,
+    quantization, corpus digest and sampling are all untouched — so the N=8 direct arm
+    written on 2026-10-09 (`~/lloyd-data/_pipeline/research/coverage/primary-direct-n8.json`,
+    corpus digest `sha256:c04aac3c…`, still the live corpus digest) is read by tomorrow's
+    round report exactly as it is read today. Those records have no `pass_all_n` and no
+    `draws_excluded`.
+
+    The cell that must come out is `-`, never `0.000`: 0.000 is the leg's own word for
+    "every draw failed", and printing it for a field the writer never emitted would put a
+    measurement on the page that was never made. The excluded count is the one figure the
+    old record can still answer exactly, because `n - draws_scored` is what the field is
+    computed from.
+    """
+    from scripts.autoresearch import coverage_leg as cov
+
+    cfg = make_cfg(tmp_path)
+    tasks = [{"id": "bench_old"}]
+    context = cov.measurement_context(model_alias="primary", served_model="lloyd-nova2-9b",
+                                      quantization=None, corpus_tasks=tasks, n=8,
+                                      route=cov.ROUTE_DIRECT, sampling={"temperature": 0.3})
+    arm = cov.build_coverage(
+        {"bench_old": [cov.draw_record(task_id="bench_old", draw_index=i, objective_score=1.0,
+                                       status="success", trace={"total_tokens": 120})
+                       for i in range(4)]
+         + [cov.draw_record(task_id="bench_old", draw_index=i, objective_score=None,
+                            status="error", trace={}) for i in range(4, 8)]},
+        n_requested=8, context=context)
+    for key in ("pass_all_n", "pass_all_n_draws", "draws_excluded", "safety_critical"):
+        for record in arm["records"]:
+            record.pop(key)
+    cov.write_coverage(cfg, arm)
+
+    lines = cov.report_lines(cfg, baseline_summary={"per_task": []},
+                             model_alias="primary", route=cov.ROUTE_DIRECT, n=8)
+    row = next(line for line in lines if line.startswith("| bench_old |")).split("|")
+    assert row[4].strip() == "-", \
+        f"a field the writer never emitted prints as absent, not as a measurement: {row}"
+    assert row[5].strip() == "indeterminate", \
+        "four scored draws of eight was `indeterminate` before #2919 and is still that"
+    assert row[7].strip() == "4", "the old record still answers the excluded count exactly"
 
 
 def test_a_round_whose_tasks_are_all_one_class_records_the_leg_as_cut(round_env):
@@ -418,9 +579,9 @@ def test_a_standalone_coverage_report_counts_the_submission_draw_zero(tmp_path, 
         "reached count is 0 because the two failures left are `reliable`"
     assert "unreachable (today's failure, pass@4 never passes): 1" in out
     assert "LEG CUT" not in out, "reachable and unreachable are both present, so it splits"
-    assert "| bench_d0_flaky | 0.500 | 1.000 | reachable |" in out
-    assert "| bench_d0_never | 0.000 | 0.000 | unreachable |" in out
-    assert "| bench_d0_clean | 0.750 | 1.000 | reliable |" in out
+    assert "| bench_d0_flaky | 0.500 | 1.000 | 0.000 | reachable |" in out
+    assert "| bench_d0_never | 0.000 | 0.000 | 0.000 | unreachable |" in out
+    assert "| bench_d0_clean | 0.750 | 1.000 | 0.000 | reliable |" in out
 
     # The counts the report printed are the counts `summarize` returns over the same
     # set of tasks: the submission-draw-0 failures, no more and no fewer.
