@@ -630,7 +630,13 @@ def test_a_dominant_created_at_cohort_is_undated_rather_than_stale(tmp_path):
     stamp = (NOW - timedelta(days=COHORT_AGE)).date()
     assert cohort == {"date": stamp.isoformat(), "date_records": COHORT + 1,
                       "active_total": COHORT + 2, "cohort": COHORT,
-                      "flip_date": (stamp + timedelta(days=THRESH)).isoformat()}
+                      "flip_date": (stamp + timedelta(days=THRESH)).isoformat(),
+                      # #2930: nothing in this corpus is stamped AFTER the dominant
+                      # date — every `created_at` here is the cohort day — so there is
+                      # no tail to name. Pinned by equality so a tail key that invented
+                      # a date, or defaulted to None instead of an empty list, fails
+                      # here rather than in the renderer seven files down.
+                      "tail_dates": []}
 
 
 def test_an_event_date_still_ages_a_fact_recorded_on_the_stamp_day(tmp_path):
@@ -1557,6 +1563,13 @@ def test_the_rot_line_names_the_stamp_date_and_says_the_residual_is_the_decay_si
     will either be told or not be told. The date has to be the cohort's own
     (`cohort['date']`, the date `flip_date` is derived from), and the sentence has to
     say both halves: the sub-count is rebuild provenance, the residual is decay.
+
+    The residual is a NUMBER here as of #2930, not the phrase #2674 shipped ('the
+    residual is the decay signal'), which is satisfied by a line that attributes nothing
+    at all — and this corpus's residual is 1, the `GenuinelyAged` row. The parenthesis
+    the clause opens is asserted closed, which is #2674's own unresolved review advisory
+    (SM_20261014_014419): every assertion in this node was satisfiable by the shipped
+    line, whose parenthesis never closed.
     """
     rows = _tagged_stale()
     cohort = khr.stale_stamp_cohort(_stamp_corpus())
@@ -1564,7 +1577,8 @@ def test_the_rot_line_names_the_stamp_date_and_says_the_residual_is_the_decay_si
     assert f"2 where {khr.STALE_RECORD_AGE_LABEL} itself passes {THRESH} days" in line, line
     assert f"of which 1 share the {STAMP_DAY} re-derivation stamp" in line, line
     assert "rebuild provenance, not decay" in line, line
-    assert "residual is the decay signal" in line, line
+    assert "the residual 1 is the decay signal" in line, line
+    assert _balanced(line), f"an unclosed parenthesis is the #2674 defect: {line}"
     assert f"2 where {khr.STALE_RECORD_AGE_LABEL} itself passes {THRESH} days —" in line, (
         "the clause must sit inside the rotted figure, not after the sentence")
 
@@ -1576,9 +1590,12 @@ def test_the_clause_prints_on_a_partial_attribution_and_is_silent_with_no_cohort
     genuinely spread — prints the rot figure with no clause and does not raise: the
     line is byte-identical to what it printed before this sub-count existed. The
     third case below is the one that matters from 2026-11-23: a cohort, and rotted
-    rows it cannot name (the 09-24…09-30 rebuild tail, ~5,972 rows, all under the
-    share gate). Silence there would present a stamp cohort and its residual as one
-    undifferentiated rise, so the clause prints and states the residual.
+    rows it cannot name. #2674 shipped this case with the residual named as a phrase,
+    because at the time the rows it could not name were the 2026-09-24…09-30 rebuild
+    tail (20,104 of them as-of 2026-11-29, measured 2026-10-17), every one of them
+    under the share gate; #2930 names that tail, so what the residual states now is
+    what is genuinely left over. Either way silence would present a stamp cohort and its
+    residue as one undifferentiated rise, so the clause prints and counts the remainder.
     """
     rows = _tagged_stale(with_cohort=False)
     line = khr._stale_age_split_line(rows)
@@ -1593,11 +1610,11 @@ def test_the_clause_prints_on_a_partial_attribution_and_is_silent_with_no_cohort
         "a cohort with no stamped rows changed the line, which is the no-cohort case's "
         "contract as much as the cohort case's")
 
-    # Partial: one stamped, one genuinely rotted, both inside a real cohort corpus.
+    # Partial: one stamped, two genuinely rotted, all inside a real cohort corpus.
     mixed = _tagged_stale() + [{khr.STALE_STAMP_TAG_KEY: False,
                                 "age_days": 500, "record_age": 500}]
     partial = khr._stale_age_split_line(mixed, cohort)
-    assert "of which 1 share" in partial and "residual is the decay signal" in partial, partial
+    assert "of which 1 share" in partial and "the residual 2 is the decay signal" in partial, partial
 
 
 def test_the_section_prints_the_sub_count_with_the_date_its_own_cohort_line_prints():
@@ -1641,3 +1658,451 @@ def test_the_skill_names_the_stamp_sub_count_of_the_rot_figure():
     assert "2026-11-22" in bullet, (
         "the bullet has to name the day the rot number stops being zero, or a reader "
         "meeting the rise has no way to expect it")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# #2930 — the rebuild TAIL inside the rot count, before 2026-11-22
+#
+# #2674 named the rows carrying the 2026-09-23 stamp date and handed everything else
+# in the rotted bucket to decay. The run that wrote that stamp did not stop at one
+# midnight: measured 2026-10-17 as-of 2026-11-29, `find_stale_facts` returns 49,454
+# rows and `stale_age_split` gives {arrived_stale 12,657, record_aged 36,797,
+# record_age_unseen 0, record_aged_on_stamp_date 16,693} — and all 20,104 rotted rows
+# the sub-count does not claim carry `created_at` on 2026-09-24…09-30 (6,981 / 3,517 /
+# 2,979 / 2,651 / 2,011 / 1,317 / 648). Those same dates hold between 1,317 and 6,981
+# ACTIVE rows each, which is 0.82% to 4.37% of the store's 159,914 active rows — every
+# one under `STALE_DOMINANT_DATE_SHARE` 0.25 — so no day of that spill can be a cohort
+# of its own, and as shipped the section calls 20,104 rebuild rows decay, with a
+# parenthesis that never closes.
+#
+# These nodes pin the tail as an ANNOTATION, exactly as #2674 pinned the stamp date:
+# `tail_dates` decides nothing about cohort membership, `record_aged_on_stamp_tail`
+# sits beside the other sub-count and outside `STALE_AGE_KEYS`, and the line names
+# both before naming a residual. The fixture's +7 date has to carry
+# `STALE_DOMINANT_DATE_FLOOR` (1,000) active rows to be tail-attributed at all, which
+# is why the corpus reuses `COHORT`.
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: The day the re-derivation was still writing, and the day it had genuinely stopped:
+#: one inside `STALE_STAMP_TAIL_DAYS`, one outside it. Both rows are past 60 days old
+#: either way, so the crossing itself is not what a node has to simulate.
+TAIL_DAY = (datetime.fromisoformat(STAMP_DAY)
+            + timedelta(days=khr.STALE_STAMP_TAIL_DAYS)).date().isoformat()
+PAST_TAIL_DAY = (datetime.fromisoformat(STAMP_DAY)
+                 + timedelta(days=khr.STALE_STAMP_TAIL_DAYS + 1)).date().isoformat()
+
+
+def _tail_corpus(tail_rows: int = COHORT, past_rows: int = 1,
+                 with_cohort: bool = True, cohort_rows: int = COHORT,
+                 fresh_rows: int = 0) -> dict:
+    """A store stamped on the cohort date, on cohort date +7, and on +8.
+
+    The three dates are the whole argument. `Rebuilt` is the cohort itself
+    (`cohort_rows` undated rows, so the gate arms and `date_records` is a real number);
+    `TailRebuilt` is the spill — `tail_rows` rows on cohort date +7, which is
+    `STALE_STAMP_TAIL_DAYS` days later and must be named as the same rebuild;
+    `LateDay` is `past_rows` rows on +8, one day past the window, which is the
+    residual the line has to keep calling decay. `Stamped` carries its own
+    `event_date`, so it survives as a stale row and is the one `created_on_stamp_date`
+    row.
+
+    `fresh_rows` pads the store with recent, dated, non-stale records — half on
+    `NOW-30`, half on `NOW-31`, so neither of those dates can out-carry the stamp and
+    become the dominant one. They sit in `active_total` and nowhere else, which is how a
+    node holds the tail's own SHARE below `STALE_DOMINANT_DATE_SHARE` while the dominant
+    date still clears it — the live shape, where the cohort is 62% of the store and no
+    tail day reaches 5%.
+
+    `tail_rows=0` is a corpus whose rebuild finished on the stamp day;
+    `with_cohort=False` drops the dominant thousand rows so no date clears
+    `STALE_DOMINANT_DATE_FLOOR`, which is the hand-written case with no cohort to
+    attribute anything to.
+    """
+    fresh_days = [(NOW - timedelta(days=30)).date().isoformat(),
+                  (NOW - timedelta(days=31)).date().isoformat()]
+    entities = {
+        "Stamped": [{"category": "state", "facts": [
+            {"fact": "the run wrote 41 documents",
+             "created_at": f"{STAMP_DAY}T04:24:54+00:00",
+             "event_date": _STAMP_EVENT_DAY, "status": "active"}]}],
+        "TailRebuilt": [{"category": "state", "facts": [
+            {"fact": f"tail row {n}", "created_at": f"{TAIL_DAY}T00:00:0{n % 10}+00:00",
+             "status": "active"} for n in range(tail_rows)]}],
+        "LateDay": [{"category": "state", "facts": [
+            {"fact": f"genuinely aged late row {n}",
+             "created_at": f"{PAST_TAIL_DAY}T00:00:0{n % 10}+00:00",
+             "status": "active"} for n in range(past_rows)]}],
+    }
+    if fresh_rows:
+        entities["Fresh"] = [{"category": "state", "facts": [
+            {"fact": f"fresh dated record {n}",
+             "created_at": f"{fresh_days[n % 2]}T10:00:00+00:00",
+             "event_date": fresh_days[n % 2], "status": "active"}
+            for n in range(fresh_rows)]}]
+    if with_cohort:
+        entities["Rebuilt"] = [{
+            "category": "state",
+            "facts": [{"fact": f"re-derived row {n}",
+                       "created_at": f"{STAMP_DAY}T00:00:0{n % 10}+00:00",
+                       "status": "active"} for n in range(cohort_rows)]}]
+    return entities
+
+
+def _balanced(line: str) -> bool:
+    """Does every parenthesis this line opens, it also close?
+
+    #2674's own review (SM_20261014_014419, unresolved advisory) caught the shipped
+    clause at substring level only, which is satisfied by a line whose parenthesis is
+    never closed — and the shipped line's is not. Any node that pins this clause's
+    PROSE has to check the balance too, or the same defect re-lands green.
+    """
+    return line.count("(") == line.count(")")
+
+
+def test_a_rebuild_that_finished_on_the_stamp_day_has_no_tail():
+    """Clause 1: a corpus stamped on ONE date gives `tail_dates == []`, not None and not
+    an absent key, and every other key of the cohort dict is untouched.
+
+    This is the regression rail on #2674's corpus: the nodes there hand
+    `_stale_age_split_line` cohorts from `_stamp_corpus()`, whose only `created_at`
+    dates are the stamp day and one row 100 days BEFORE it. A tail that invented a
+    date from those would print a range over a rebuild that never happened.
+    """
+    cohort = khr.stale_stamp_cohort(_stamp_corpus())
+
+    assert cohort is not None, "the fixture must arm the cohort gate first"
+    assert cohort["tail_dates"] == [], cohort
+    # The five shipped keys, byte for byte, still say what they said (#2674's pins).
+    assert cohort["date"] == STAMP_DAY
+    assert cohort["date_records"] == COHORT + 1
+    assert cohort["cohort"] == COHORT
+    assert cohort["active_total"] == COHORT + 2
+    assert cohort["flip_date"] == (datetime.fromisoformat(STAMP_DAY)
+                                   + timedelta(days=THRESH)).date().isoformat()
+
+
+def test_the_tail_is_the_stamp_days_spill_and_stops_at_the_named_window():
+    """Clause 1: cohort date +7 is `tail_dates`, +8 is not, and the window is a named
+    constant rather than a number in the gate.
+
+    +7 is the last day the item is willing to call the same run; +8 is where the
+    store is back inside its ordinary ingest, so including it would start relabelling
+    real decay as provenance — the error in the other direction, and the one that is
+    harder to notice because it makes the rot figure look even cleaner.
+    """
+    assert khr.STALE_STAMP_TAIL_DAYS == 7, (
+        "the window is the item's stated number: widening it relabels ingest as rebuild")
+
+    cohort = khr.stale_stamp_cohort(_tail_corpus())
+
+    assert cohort["date"] == STAMP_DAY
+    assert cohort["tail_dates"] == [TAIL_DAY], (
+        f"+7 in, +8 out, sorted: {cohort['tail_dates']}")
+    assert cohort["flip_date"] == (datetime.fromisoformat(STAMP_DAY)
+                                   + timedelta(days=THRESH)).date().isoformat()
+    # The tail changed nothing about the cohort itself: membership is decided by
+    # `date` alone, so the stale headline and the 2026-11-22 crossing are untouched.
+    assert cohort["date_records"] == COHORT + 1
+    assert cohort["cohort"] == COHORT
+    assert cohort["active_total"] == 2 * COHORT + 2
+
+
+def test_the_tail_is_gated_by_the_floor_alone_never_by_the_share():
+    """Clause 1: the tail's gate is `STALE_DOMINANT_DATE_FLOOR`, NOT the share gate.
+
+    The whole reason the tail exists is that no day of the live spill clears
+    `STALE_DOMINANT_DATE_SHARE` — the largest, 2026-09-24, is 4.37% of active rows
+    against a 25% gate. So a tail date must be admissible at a share a quarter of that
+    gate, while a day under the floor is ordinary ingest and stays in the residual.
+    The gate reads the same `day_counts` histogram the dominant date is decided on, so
+    the floor means one number on both sides.
+    """
+    ent = _tail_corpus(cohort_rows=4 * COHORT, fresh_rows=8_000)
+    small = (datetime.fromisoformat(STAMP_DAY)
+             + timedelta(days=khr.STALE_STAMP_TAIL_DAYS - 1)).date().isoformat()
+    # A same-window day holding four rows: inside the window, under the floor.
+    ent["SmallDay"] = [{"category": "state", "facts": [
+        {"fact": f"a day's ordinary writing {n}", "created_at": f"{small}T09:00:00+00:00",
+         "status": "active"} for n in range(4)]}]
+
+    cohort = khr.stale_stamp_cohort(ent)
+
+    assert cohort is not None, "the dominant date must still arm the cohort"
+    assert cohort["tail_dates"] == [TAIL_DAY], (
+        f"the four-row day is under the floor and must not be named: {cohort['tail_dates']}")
+    # The admissible tail sits far under the SHARE gate — that is the point, and it is
+    # the live store's shape: 2026-09-24 carries 4.37% of active rows against a 25% gate.
+    tail_share = COHORT / cohort["active_total"]
+    assert tail_share < khr.STALE_DOMINANT_DATE_SHARE, (
+        f"a corpus whose tail clears the share gate tests nothing: share={tail_share:.4f}")
+
+
+def test_every_stale_row_is_tagged_with_whether_it_lands_on_the_rebuild_tail():
+    """Clause 2: `find_stale_facts` carries `created_on_stamp_tail` on EVERY row it
+    returns, true only for a row whose own `created_at` is one of the cohort's tail days.
+
+    The +8 row is the one that matters: it is stale, it is rotted, it is three days
+    from the tail, and it must be False. Naming it would be the item inventing the
+    very misreading it exists to close.
+    """
+    rows = khr.find_stale_facts(_tail_corpus(), NOW, THRESH)
+    by_fact = {r["preview"]: r for r in rows}
+
+    assert all(khr.STALE_STAMP_TAIL_TAG_KEY in r for r in rows), \
+        "every returned row carries the tag, True or False"
+    assert by_fact["tail row 0"][khr.STALE_STAMP_TAIL_TAG_KEY] is True
+    assert by_fact["genuinely aged late row 0"][khr.STALE_STAMP_TAIL_TAG_KEY] is False
+    assert by_fact["the run wrote 41 documents"][khr.STALE_STAMP_TAIL_TAG_KEY] is False
+    # The two tags are disjoint by construction: `date` and `tail_dates` never share a
+    # day, so no row can be double-attributed and push the printed residual negative.
+    assert not any(r[khr.STALE_STAMP_TAG_KEY] and r[khr.STALE_STAMP_TAIL_TAG_KEY]
+                   for r in rows), [r["entity"] for r in rows
+                                    if r[khr.STALE_STAMP_TAG_KEY]
+                                    and r[khr.STALE_STAMP_TAIL_TAG_KEY]][:3]
+
+
+def test_the_tail_tag_is_false_with_no_cohort_or_no_created_at():
+    """Clause 2: no cohort, or a row whose `created_at` cannot be read, and the answer is
+    False — and NOT a claim that the row is decay.
+
+    Same refusal as the stamp tag, for the same reason: a corpus with no cohort has no
+    tail to be on, and a row with no parseable `created_at` has no date to match, so it
+    stays unattributed in `record_age_unseen` rather than falling in by default. The
+    second case sits in a corpus that DOES have a tail, so the only reason those rows are
+    False is that they have no date to match, not that nothing was ever named.
+    """
+    no_cohort = _tail_corpus(with_cohort=False, tail_rows=0)
+    rows = khr.find_stale_facts(no_cohort, NOW, THRESH)
+    assert rows, "the fixture has to return rows for the absence to mean anything"
+    assert khr.stale_stamp_cohort(no_cohort) is None
+    assert not any(r[khr.STALE_STAMP_TAIL_TAG_KEY] for r in rows)
+
+    ent = _tail_corpus()
+    ent["Undated"] = [{"category": "state", "facts": [
+        {"fact": "a row with no created_at at all", "event_date": _STAMP_EVENT_DAY,
+         "status": "active"},
+        {"fact": "a row whose created_at cannot be parsed",
+         "created_at": "sometime in the autumn", "event_date": _STAMP_EVENT_DAY,
+         "status": "active"}]}]
+    by_fact = {r["preview"]: r for r in khr.find_stale_facts(ent, NOW, THRESH)}
+
+    assert by_fact["tail row 0"][khr.STALE_STAMP_TAIL_TAG_KEY] is True, \
+        "the corpus must have a tail, or the two rows below are False for the wrong reason"
+    assert by_fact["a row with no created_at at all"][
+        khr.STALE_STAMP_TAIL_TAG_KEY] is False
+    assert by_fact["a row whose created_at cannot be parsed"][
+        khr.STALE_STAMP_TAIL_TAG_KEY] is False
+
+
+def test_the_split_adds_a_rebuild_tail_sub_count_that_moves_no_row():
+    """Clause 3: `record_aged_on_stamp_tail` counts inside the rotted branch only, sits
+    outside `STALE_AGE_KEYS`, and the partition sum still equals the row count.
+
+    The invariant is the one the section header claims — `sum(split[k] for k in
+    STALE_AGE_KEYS) == len(stale_facts)` — and the reason the sub-count has to stay out
+    of the tuple. A tagged row that changed STATE would break it, which is the failure
+    the rotted-branch-only placement exists to prevent.
+    """
+    rows = khr.find_stale_facts(_tail_corpus(), NOW, THRESH)
+
+    split = khr.stale_age_split(rows)
+
+    # COHORT tail rows + the stamped row + the one +8 row; the cohort's own thousand
+    # undated rows never reach this function, which is what `cohort` means.
+    assert split == {khr.STALE_ARRIVED_KEY: 0, khr.STALE_ROTTED_KEY: COHORT + 2,
+                     khr.STALE_RECORD_UNSEEN_KEY: 0,
+                     khr.STALE_ROTTED_STAMP_KEY: 1,
+                     khr.STALE_ROTTED_TAIL_KEY: COHORT}, split
+    assert khr.STALE_ROTTED_TAIL_KEY not in khr.STALE_AGE_KEYS, (
+        "the tail is a breakdown of `record_aged`, not a fourth state")
+    assert sum(split[k] for k in khr.STALE_AGE_KEYS) == len(rows)
+
+    # Placement, not only value: arrived and unseen rows cannot be claimed by it even
+    # when hand-tagged, because the increment lives inside the rotted branch.
+    tagged = [{khr.STALE_STAMP_TAIL_TAG_KEY: True, "age_days": 400, "record_age": 1},
+              {khr.STALE_STAMP_TAIL_TAG_KEY: True, "age_days": 400},
+              {khr.STALE_STAMP_TAIL_TAG_KEY: True, "age_days": 400, "record_age": THRESH}]
+    s2 = khr.stale_age_split(tagged)
+
+    assert s2[khr.STALE_ROTTED_TAIL_KEY] == 1
+    assert s2[khr.STALE_ARRIVED_KEY] == 1 and s2[khr.STALE_RECORD_UNSEEN_KEY] == 1
+    assert sum(s2[k] for k in khr.STALE_AGE_KEYS) == 3
+
+    # An untagged corpus carries the key at zero, so the section reads "no tail named"
+    # and never "the tail measurement failed".
+    empty = khr.stale_age_split([])
+    assert empty[khr.STALE_ROTTED_TAIL_KEY] == 0
+    assert empty[khr.STALE_ROTTED_STAMP_KEY] == 0
+    assert sum(empty[k] for k in khr.STALE_AGE_KEYS) == 0
+
+
+def test_a_rebuild_tail_row_is_attributed_and_the_late_day_stays_the_residual():
+    """Clause 5: on a corpus stamped on the cohort date, +7 and +8, the +7 row is
+    tail-attributed and the +8 row is the residual — residual 1.
+
+    The live case measured 2026-10-17 as-of 2026-11-29 is this shape with different
+    sizes: 36,797 rotted, 16,693 stamped, 20,104 in the tail, and the residual
+    reaching zero only once the tail is named. Here the sizes are the fixture's, so the
+    arithmetic closes exactly: 1 stamped + 1,000 tail + 1 late = 1,002 rotted, residual
+    1. An off-by-one in the window or in the subtraction moves that number, which is
+    what this node is for.
+    """
+    ent = _tail_corpus()
+    cohort = khr.stale_stamp_cohort(ent)
+    rows = khr.find_stale_facts(ent, NOW, THRESH)
+
+    split = khr.stale_age_split(rows)
+    line = khr._stale_age_split_line(rows, cohort)
+
+    assert split[khr.STALE_ROTTED_TAIL_KEY] == COHORT
+    residual = (split[khr.STALE_ROTTED_KEY] - split[khr.STALE_ROTTED_STAMP_KEY]
+                - split[khr.STALE_ROTTED_TAIL_KEY])
+    assert residual == 1, f"the +8 row is the only decay left: {split}"
+    assert "the residual 1 is the decay signal)" in line, line
+
+
+def test_the_line_names_both_sub_counts_and_closes_its_parenthesis():
+    """Clause 4: the clause prints both sub-counts, takes its range from `tail_dates`,
+    and calls only the leftover the decay signal — with every parenthesis it opens
+    closed.
+
+    The balance assertion is the point, not a formality: #2674's review caught the
+    shipped clause by substring and the shipped line's parenthesis was never closed, so
+    a substring-only node passes on the defect that is already in production. The
+    residual is a NUMBER here: a phrase like 'the residual is the decay signal' is
+    satisfied by a line that attributes nothing at all.
+    """
+    ent = _tail_corpus()
+    cohort = khr.stale_stamp_cohort(ent)
+    line = khr._stale_age_split_line(khr.find_stale_facts(ent, NOW, THRESH), cohort)
+
+    assert (f"of which 1 share the {STAMP_DAY} re-derivation stamp and {COHORT:,} "
+            f"the {TAIL_DAY} rebuild tail (rebuild provenance, not decay; "
+            "the residual 1 is the decay signal)") in line, line
+    assert _balanced(line), f"an unclosed parenthesis is the #2674 defect: {line}"
+    assert "rebuild tail" in line and "rebuild provenance" in line, line
+
+
+def test_the_line_names_a_whole_tail_as_a_range_and_prints_no_stamp_half():
+    """Clause 4: the range is the tail's first and last date, and the stamp half of the
+    clause does not have to be populated for the tail half to print.
+
+    On the live store from 2026-11-23 the two halves arrive together, but a run that
+    stamped its tail only — or a cohort whose dominant rows are all cohort members and
+    never stale rows — still has to attribute what it can. The K=0 form of the shipped
+    clause is 'of which 0 share …', so this keeps that shape and adds the tail to it.
+    """
+    rows = [{khr.STALE_STAMP_TAIL_TAG_KEY: True, "age_days": 400, "record_age": 400},
+            {khr.STALE_STAMP_TAIL_TAG_KEY: True, "age_days": 400, "record_age": 400},
+            {"age_days": 400, "record_age": 400}]
+    cohort = {"date": "2026-09-23", "date_records": 99_433, "cohort": 82_705,
+              "active_total": 159_914, "flip_date": "2026-11-22",
+              "tail_dates": ["2026-09-30", "2026-09-24", "2026-09-25"]}
+
+    line = khr._stale_age_split_line(rows, cohort)
+
+    assert ("of which 0 share the 2026-09-23 re-derivation stamp and 2 the "
+            "2026-09-24…2026-09-30 rebuild tail (rebuild provenance, not decay; "
+            "the residual 1 is the decay signal)") in line, line
+    assert _balanced(line), line
+    # Out-of-order input is sorted before the span is taken: a range printed as the
+    # store's insertion order would read as "2026-09-30…2026-09-24", backwards.
+    assert "2026-09-30…" not in line, line
+
+
+def test_a_tagged_tail_with_no_tail_dates_prints_no_empty_range():
+    """The one shape `find_stale_facts` cannot produce, so the renderer has to survive it:
+    a cohort that names no tail dates while a row still carries the tail tag.
+
+    Reached only by hand — the tag is derived FROM `tail_dates`, so a real call cannot
+    disagree with its own cohort — and it is the case where a naive `f"the {span}"`
+    prints 'the  rebuild tail' over an empty sequence, or throws. The line says nothing
+    about a range it does not have, still balances its parentheses, and still reports a
+    residual, which is the honest half: the row is attributed, the dates are simply
+    unknown.
+    """
+    rows = [{khr.STALE_STAMP_TAIL_TAG_KEY: True, "age_days": 400, "record_age": 400},
+            {"age_days": 400, "record_age": 400}]
+    cohort = {"date": "2026-09-23", "date_records": 99_433, "cohort": 82_705,
+              "active_total": 159_914, "flip_date": "2026-11-22", "tail_dates": []}
+
+    line = khr._stale_age_split_line(rows, cohort)
+
+    assert "rebuild tail" not in line, line
+    assert "the  " not in line, f"a blank where a range should be: {line}"
+    assert _balanced(line), line
+    assert "the residual 1 is the decay signal)" in line, line
+
+
+def test_the_line_is_silent_without_a_cohort_or_without_a_tagged_row():
+    """Clause 4: two absences, and the split line is byte-identical to the pre-#2674 line
+    in each — no clause, no dangling parenthesis, no zero-value clause.
+
+    Silence is what keeps a hand-written corpus reading the same as it did last week:
+    the line's other three numbers and the `(the rot signal)` label are the shipped
+    text, so a node that only checked "no tail phrase" would pass on a line that had
+    lost the rest of the sentence too.
+    """
+    ent = _tail_corpus()
+    rows = khr.find_stale_facts(ent, NOW, THRESH)
+    cohort = khr.stale_stamp_cohort(ent)
+    baseline = ("of which", "rebuild tail", "re-derivation stamp", "decay signal")
+
+    untagged = [{"age_days": 400, "record_age": THRESH},
+                {"age_days": 400, "record_age": THRESH}]
+
+    cases = {
+        "no cohort at all": khr._stale_age_split_line(rows),
+        "a cohort and nothing tagged": khr._stale_age_split_line(untagged, cohort),
+    }
+
+    for name, line in cases.items():
+        for phrase in baseline:
+            assert phrase not in line, f"{name}: {line}"
+        assert _balanced(line), f"{name}: {line}"
+        assert "(the rot signal)," in line, \
+            f"{name}: the shipped sentence itself must survive: {line}"
+
+    # And the silent line is not merely short: the rot count it does print is the same
+    # 1,002 rows, so nothing was dropped on the way to saying nothing about provenance.
+    assert f"{COHORT + 2:,} where" in cases["no cohort at all"], cases["no cohort at all"]
+
+
+def test_the_skill_names_the_rebuild_tail_instead_of_calling_it_decay():
+    """Clause 6: the skill the knowledge-health agent runs names the tail sub-count, and
+    stops telling that agent to report the RESIDUAL as the decay signal — the half of the
+    misread that lives in prose rather than in the script.
+
+    Read through `vault_root()` like the #2475 skill node above, because the file lives in
+    the vault tree and the semantics live here: nothing in the code fails when the prose
+    drifts, so only a node that reads the shipped file can catch the sentence that
+    re-creates the misread. The node asserts against the SHIPPED names (`record_aged_on_
+    stamp_tail`, `STALE_AGE_SPLIT`) and forbids the shipped instruction plus any row count
+    it would have to hard-code — the bullet that quoted '~12,737 rows' for 2026-11-22 was
+    stale on 2026-10-13, when the figure it forecast was already 16,693.
+    """
+    import app.data_root as _dr
+
+    skill = _dr.vault_root() / "skills" / "knowledge-health-report" / "SKILL.md"
+    if not skill.is_file():
+        pytest.skip(f"the vault skill is not reachable from here: {skill}")
+    lines = skill.read_text(encoding="utf-8").splitlines()
+
+    start = next(i for i, ln in enumerate(lines)
+                 if ln.strip().startswith("- **Stale facts**"))
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith(("- ", "#", "\n"))), len(lines))
+    bflat = " ".join(" ".join(lines[start:end]).split())
+
+    assert "Report the RESIDUAL as the decay signal" not in bflat, (
+        f"the instruction that hands the rebuild tail to decay is back: {bflat[:240]}")
+    assert "tail" in bflat.lower(), bflat[:240]
+    # The name the agent will actually see in the line, not one invented for the test.
+    script_src = (ROOT / "scripts/memory/knowledge-health-report.py").read_text(encoding="utf-8")
+    assert khr.STALE_ROTTED_TAIL_KEY in script_src, (
+        f"the code no longer carries {khr.STALE_ROTTED_TAIL_KEY!r}")
+    assert "rebuild tail" in script_src and "rebuild tail" in bflat.lower(), (
+        "the skill and the line must name the same thing")
+    # A row count in this bullet is a number the skill cannot keep current. The dated
+    # 2026-10-09 measurement above it stays — that one is a measurement, not a forecast.
+    assert "12,737" not in bflat and "16,693" not in bflat and "20,104" not in bflat, bflat[:300]
