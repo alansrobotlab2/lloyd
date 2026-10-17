@@ -825,19 +825,31 @@ def round_landing_rows(events, *, round_id: str | None = None,
                        session_id: str | None = None) -> list[dict]:
     """The landing rows that belong to this round, from the ledger.
 
-    `promoted` and `item_landed` carry `round_id`; `vault_land` does not, so a
-    vault landing is matched on `item_id` — and on the calling turn's
-    `session_id`, because `item_id` is OPTIONAL at the tool boundary
-    (`automod_vault_land` takes it as an optional integer, and 56 of the 172
-    `vault_land` rows in `promotions.jsonl` on 2026-09-21 carry none). A reader
-    that assumed the argument was always supplied would demote a vault-surface
-    turn that really did land, which is the false-positive direction this
-    reconciliation must not have. The session id is not the model's say-so
-    either: the harness stamps it into every MCP request's `_meta`
-    (`agent_mcp/main.py:META_SESSION_ID`) and the tool handler, not the caller,
-    writes it onto the row (`agent_mcp/automod.py`, `scripts/automod/vault_round.py`).
-    Only a successful row counts — an `ok: false` one is a validation failure
-    that reverted its own paths.
+    `promoted` and `item_landed` carry `round_id`; `vault_land` is matched on the
+    `item_id` the ROW itself carries, and the round's `round_id` / the calling
+    turn's `session_id` are consulted only for a row that carries none. That
+    fallback is there because `item_id` is OPTIONAL at the tool boundary
+    (`automod_vault_land` takes it as an optional integer: 189 of the 863
+    `vault_land` rows in `promotions.jsonl` and its two monthly archives on
+    2026-10-17 carry no `item_id`, 133 of those a session). A reader that assumed
+    the argument was always supplied would demote a vault-surface turn that really
+    did land, which is the false-positive direction this reconciliation must not
+    have. The session id is not the model's say-so either: the harness stamps it
+    into every MCP request's `_meta` (`agent_mcp/main.py:META_SESSION_ID`) and the
+    tool handler, not the caller, writes it onto the row
+    (`agent_mcp/automod.py`, `scripts/automod/vault_round.py`). Only a successful
+    row counts — an `ok: false` one is a validation failure that reverted its own
+    paths.
+
+    A row that DOES name an item is that item's landing and no other's. The
+    session says which turn wrote the row, not which items landed: #2888 was closed
+    at `landed: true` / `acceptance: met` with an empty mismatch on two rows naming
+    #2885 and #2887 that shared its session while it opened no round and no row
+    named it. Reused sessions are the ordinary case, not the exception — 674 of
+    those 863 rows carry an `item_id` across 341 distinct sessions, about two items
+    to a session — so the old unconditional `or session_id` arm was a standing
+    false positive, not a corner. A row naming a different item is likewise not
+    resurrected by a matching `round_id`.
 
     `surface` decides what counts. For a `vault` item the vault row *is* the
     landing. For `code` and `mixed` it is not enough: the code half reaches
@@ -847,11 +859,23 @@ def round_landing_rows(events, *, round_id: str | None = None,
     """
     rid = str(round_id or "")
     sid = str(session_id or "")
-    vault_ok = [ev for ev in (events or ())
-                if ev.get("event") == VAULT_LANDING_EVENT and ev.get("ok")
-                and ((item_id is not None and ev.get("item_id") == item_id)
-                     or (rid and str(ev.get("round_id") or "") == rid)
-                     or (sid and str(ev.get("session_id") or "") == sid))]
+    vault_ok = []
+    for ev in (events or ()):
+        if ev.get("event") != VAULT_LANDING_EVENT or not ev.get("ok"):
+            continue
+        row_item = ev.get("item_id")
+        if row_item is None:
+            # The row names no item, so the round and the harness-stamped session
+            # are the only attribution it can carry. Both keep the claim: that is
+            # the direction this reconciliation must never get wrong.
+            if ((rid and str(ev.get("round_id") or "") == rid)
+                    or (sid and str(ev.get("session_id") or "") == sid)):
+                vault_ok.append(ev)
+        elif item_id is not None and row_item == item_id:
+            # The row names an item, so it vouches for that item alone. Neither the
+            # round nor the session is consulted: a turn that landed #2885 and
+            # #2887 proves those two landed, and nothing about a third item.
+            vault_ok.append(ev)
     code_ok = [ev for ev in (events or ())
                if ev.get("event") in CODE_LANDING_EVENTS and rid
                and str(ev.get("round_id") or "") == rid]
@@ -894,9 +918,11 @@ def reconcile_outcome_landing(outcome: dict | None, *, round_id: str | None = No
 
     `session_id` is the implement turn's own session, and it is what makes a
     vault landing attributable when the turn did not pass `item_id` to
-    `automod_vault_land` — see `round_landing_rows`. It attributes a row, it does
-    not manufacture one: a turn that landed nothing has no row carrying its
-    session either, and still gets demoted.
+    `automod_vault_land` — see `round_landing_rows`, which consults it only for a
+    row that names no item. It attributes a row, it does not manufacture one: a
+    turn that landed nothing has no row carrying its session, and a turn whose
+    session landed two OTHER items has no row carrying its own — #2888 claimed
+    `landed: true` on exactly that shape and is demoted like any other.
     """
     if not outcome or not outcome.get("landed"):
         return outcome, ""

@@ -3465,13 +3465,23 @@ def _vault_row(item_id=415, *, ok=True):
 
 
 def _reconcile(events, *, surface="mixed", round_id=UNLANDED_ROUND, item_id=415,
-               landing_seen=False):
+               landing_seen=False, session_id=None):
     """The self-report as the finalizer hands it over, reconciled once."""
     outcome = B.parse_outcome(LANDING_CLAIM)
     outcome, _ = B.settle_item_verdict(outcome, landing_seen=landing_seen)
     return B.reconcile_outcome_landing(outcome, round_id=round_id, item_id=item_id,
                                        events=list(events), landing_seen=landing_seen,
-                                       surface=surface)
+                                       surface=surface, session_id=session_id)
+
+
+def _session_vault_row(item_id, *, session="s415", round_id=None, ok=True):
+    """One `vault_land` row as the tool handler writes it: `item_id` a scalar, the
+    `session_id` stamped on by the handler rather than supplied by the model."""
+    row = {"event": "vault_land", "ok": ok, "item_id": item_id,
+           "session_id": session, "commit": "c" * 40}
+    if round_id is not None:
+        row["round_id"] = round_id
+    return row
 
 
 def test_a_mixed_round_with_only_a_vault_landing_is_recorded_as_not_landed():
@@ -3725,6 +3735,131 @@ def test_the_vault_writer_still_demotes_a_turn_that_landed_nothing(isolated, mon
     ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM, surface="vault")
     assert ev["outcome"]["landed"] is False, ev["outcome"]
     assert "vault_land" in ev["outcome_landing_mismatch"], ev["outcome_landing_mismatch"]
+
+
+# ── #2888: a reused session's landing for ANOTHER item is not this item's ────
+#
+# The session arm above exists because `item_id` is optional at the tool boundary.
+# It was consulted unconditionally, so on 2026-10-17 a turn with no round and no
+# row naming its item was kept at `landed: true` / `acceptance: met` with an empty
+# mismatch, and the item closed, because the same session had landed two other
+# items. Reused sessions are the ordinary case, not the exception: of the 863
+# `vault_land` rows across `promotions.jsonl` and the two monthly archives on
+# 2026-10-17, 674 carry an `item_id` spread over 341 distinct sessions — about two
+# items to a session.
+
+def _two_foreign_landings():
+    """The #2888 ledger: two successful `vault_land` rows on one session, each
+    naming an item other than the one being reconciled."""
+    return [_session_vault_row(2885), _session_vault_row(2887)]
+
+
+def test_a_vault_landing_row_naming_other_items_is_not_this_items_landing():
+    """The #2888 row, replayed through `reconcile_outcome_landing` directly.
+
+    Item 2888, no round opened, `surface='vault'`, and the only rows that session
+    wrote name #2885 and #2887. The demotion has to name the absence of a round,
+    which is what the closed item's own record never did.
+    """
+    events = _two_foreign_landings()
+    assert B.round_landing_rows(events, round_id=None, item_id=2888, surface="vault",
+                                session_id="s415") == [], (
+        "a session match vouched for landings that belong to two other items")
+    outcome, mismatch = _reconcile(events, surface="vault", round_id=None,
+                                   item_id=2888, session_id="s415")
+    assert outcome["landed"] is False, outcome
+    assert mismatch and "(none opened)" in mismatch, mismatch
+    assert outcome["landed_mismatch"] == mismatch
+
+
+def test_the_writer_demotes_a_vault_landing_that_belonged_to_other_items(isolated,
+                                                                        monkeypatch):
+    """The same shape across the seam that produced it: rows written into the live
+    ledger mid-turn by the tool handler, and the persisted `finished` row, not just
+    a function's return value.
+
+    This is #2888 as it happened — the rows were already there, stamped with the
+    implement turn's own session — so the row the writer persists is the thing that
+    has to stop saying `landed: true`.
+    """
+    def two_foreign_lands():
+        for row in _two_foreign_landings():
+            S.append_event(row, path=S.LEDGER_PATH)
+
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM,
+                                  mid_turn=two_foreign_lands, surface="vault")
+    assert ev["outcome"]["landed"] is False, ev["outcome"]
+    assert "vault_land" in ev["outcome_landing_mismatch"], ev["outcome_landing_mismatch"]
+
+
+@pytest.mark.parametrize("row_item,kept", [(2888, True), (2885, False), (None, True)])
+def test_an_item_carrying_vault_landing_counts_only_for_the_item_it_names(row_item,
+                                                                         kept):
+    """The attribution rule as a rule, not as one case.
+
+    A row that names an item vouches for that item and nothing else — not even a
+    matching `round_id` and a matching harness-stamped session resurrect it for a
+    different item, which is the #2888 failure wearing a round number. A row that
+    names no item falls back to the round, then the session: 189 of the 863 rows on
+    2026-10-17 carry no `item_id`, 133 of those a session.
+    """
+    row = _session_vault_row(row_item, round_id="SM_2888")
+    rows = B.round_landing_rows([row], round_id="SM_2888", item_id=2888,
+                                surface="vault", session_id="s415")
+    assert bool(rows) is kept, (row_item, rows)
+    outcome, mismatch = _reconcile([row], surface="vault", round_id="SM_2888",
+                                   item_id=2888, session_id="s415")
+    assert outcome["landed"] is kept, (row_item, outcome)
+    assert (mismatch == "") is kept, (row_item, mismatch)
+
+
+@pytest.mark.parametrize("fallback", ["round", "session"])
+def test_a_vault_landing_row_naming_no_item_is_attributed_by_either_fallback(fallback):
+    """The false-positive direction the docstring protects, pinned at the function
+    the fix narrows: with no `item_id` on the row, the round and the session each
+    still keep the claim on their own. Demoting either would flag every vault round
+    that omitted the optional argument.
+    """
+    row = _session_vault_row(None, round_id=("SM_2888" if fallback == "round" else "SM_OTHER"),
+                             session=("s415" if fallback == "session" else "sOTHER"))
+    assert B.round_landing_rows([row], round_id="SM_2888", item_id=2888,
+                                surface="vault", session_id="s415"), row
+    outcome, mismatch = _reconcile([row], surface="vault", round_id="SM_2888",
+                                   item_id=2888, session_id="s415")
+    assert outcome["landed"] is True, (fallback, outcome)
+    assert mismatch == "", (fallback, mismatch)
+
+
+def test_the_early_returns_and_the_surface_rule_survive_the_narrowed_landing_arm():
+    """The fix narrows one arm of one matcher. These four must not move.
+
+    A falsy `landed` is not reconciled at all; `landing_seen` keeps the claim while a
+    landing is in flight; a `promoted` row naming the round is the code landing it
+    always was; and a `vault_land` row that names THIS item — the strongest
+    attribution a vault row can carry — still proves nothing about a `code` or
+    `mixed` round, which is the #415 rule.
+    """
+    quiet, mismatch = B.reconcile_outcome_landing({"acceptance": "met", "landed": False},
+                                                  round_id="SM_X", item_id=2888,
+                                                  events=[], surface="vault")
+    assert quiet["landed"] is False and mismatch == "", (quiet, mismatch)
+
+    in_flight, mismatch = _reconcile(_two_foreign_landings(), surface="vault",
+                                     round_id=None, item_id=2888, session_id="s415",
+                                     landing_seen=True)
+    assert in_flight["landed"] is True and mismatch == "", (in_flight, mismatch)
+
+    promoted, mismatch = _reconcile([{"event": "promoted", "round_id": "SM_2888",
+                                      "item_id": 2888, "commit": "a" * 40}],
+                                    surface="code", round_id="SM_2888", item_id=2888,
+                                    session_id="s415")
+    assert promoted["landed"] is True and mismatch == "", (promoted, mismatch)
+
+    for surface in ("code", "mixed"):
+        claim, mismatch = _reconcile([_session_vault_row(2888)], surface=surface,
+                                     round_id="SM_2888", item_id=2888,
+                                     session_id="s415")
+        assert claim["landed"] is False and mismatch, (surface, claim, mismatch)
 
 
 def test_a_commit_the_vault_holds_is_not_an_unresolved_citation(repo, tmp_path, monkeypatch):
