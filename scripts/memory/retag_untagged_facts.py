@@ -636,9 +636,20 @@ def plan_tree(root: Path) -> Report:
 def default_reindexer():
     """`app.kg_store`'s own reindex, resolved lazily so importing this module never
     opens the KG store. A test injects its own into `apply_tree`; production gets
-    this, which is the only writer of `facts_idx` there is."""
+    this one — the only route by which THIS script writes `facts_idx`.
+
+    The accessor is `.facts_idx.reindex`, never `.reindex`: `reindex` and
+    `last_reindex` are methods of `_FactsIdx` (`app/kg_store.py:1261` and `:1527`),
+    which the store exposes as the attribute `self.facts_idx` (`app/kg_store.py:218`)
+    and does not delegate. `store().reindex` raised `AttributeError: 'KGStore' object
+    has no attribute 'reindex'` on the first real `--apply` (2026-10-17T14:33Z) —
+    AFTER the files had been rewritten, which is why the hook is also built inside
+    `apply_tree`'s guard and not before it. The fleet's 11 other call sites use the
+    delegated form (`agent_mcp/facts.py:168`, `kg_rebuild.py:580`,
+    `repair_fact_duplicates.py:1007`).
+    """
     from app.kg_store import store
-    return store().reindex
+    return store().facts_idx.reindex
 
 
 def apply_tree(root: Path, *, reindexer=None) -> Report:
@@ -680,10 +691,24 @@ def apply_tree(root: Path, *, reindexer=None) -> Report:
         rep.verify_bad, rep.verify_lost = bad, lost
 
     if changed:
-        if reindexer is None:
-            reindexer = default_reindexer()
         try:
-            rep.reindex = dict(reindexer(paths=changed))
+            # Resolving the hook is INSIDE the guard because resolving it is itself a
+            # failure mode: the default reaches into `app.kg_store` at call time, and
+            # on 2026-10-17 a wrong attribute there raised `AttributeError` from OUT
+            # SIDE this handler — 14 bare traceback lines on stderr, no `retagged`
+            # line, no `REINDEX FAILED:` line, and `main`'s exit-code expression never
+            # evaluated, on a run that had already rewritten 831 files. A factory that
+            # cannot resolve must cost the same as a reindex that fails.
+            hook = default_reindexer() if reindexer is None else reindexer
+            # `root=root` because `_FactsIdx.reindex` defaults it to
+            # `VAULT_FACTS_ROOT` (`app/kg_store.py:1267`) while rows are matched on the
+            # tree-relative spelling they were indexed against (`:1350-1353`). Without
+            # it a `--facts-root` run would index the LIVE tree rather than the tree it
+            # just wrote — and worse than merely the wrong tree: `_rows_for_file`'s
+            # `path.relative_to(root)` raises `ValueError` on a foreign root and falls
+            # back to `rel = str(path)` (`:1229-1232`), so the delete-by-rel and the
+            # insert would not even agree on the spelling of a row's `file_path`.
+            rep.reindex = dict(hook(paths=changed, root=root))
         except Exception as exc:                     # noqa: BLE001
             # The files are already rewritten, so an index still serving the old
             # blank tag is the #2092 shape, and this is the one outcome the exit code

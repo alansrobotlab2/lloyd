@@ -624,6 +624,180 @@ def test_a_written_tree_that_cannot_be_reindexed_exits_one(facts_root, capsys):
     assert rc == 1, capsys.readouterr().out
 
 
+def test_the_default_reindexer_returns_the_call_that_actually_writes_the_index(
+        facts_root, tmp_path):
+    """Clause 1 of #2909 — the seam every other node here fakes, crossed for real.
+
+    Calling `default_reindexer()` and invoking what it returns with `paths=` over a temp
+    facts root must index those files (`files >= 1`) with the rows readable back out of
+    the store — and must not raise `AttributeError`, which is what it did on 2026-10-17.
+
+    `git grep -n default_reindexer -- tests/` before #2909 returned exactly one line,
+    `assert R.default_reindexer.__name__ == "default_reindexer"` inside
+    `test_importing_the_module_does_not_open_the_kg_store`: a NAME check, in a node
+    about import hygiene. Nothing ever called the hook, so the whole production path
+    was untested while every apply above passed on an injected lambda. Called for real
+    on 2026-10-17T14:33Z it raised `AttributeError: 'KGStore' object has no attribute
+    'reindex'` — `reindex` lives on `_FactsIdx` (`app/kg_store.py:1261`), which the
+    store exposes as `self.facts_idx` (`:218`) and does not delegate — after the run
+    had already rewritten 831 fact files.
+
+    So: a temp `kg.sqlite`, the hook production actually gets, and the rows read back
+    out of the store. The `file_path` spelling is asserted too, because
+    `reindex(paths=…, root=…)` matches rows on the tree-relative path it stored, and a
+    hook that wrote absolute `file_path` rows would look like a clean reindex while
+    every reader missed them.
+    """
+    from app import kg_store
+    import yaml
+
+    st = kg_store.configure(tmp_path / "kg.sqlite")
+    try:
+        target = facts_root / "Acme Widget" / "Acme Widget-state.md"
+        # What that file says, read off its own front matter with yaml — not through
+        # this script's parser and not through the store, so the expectations below are
+        # independent of both.
+        recs = yaml.safe_load(
+            target.read_text(encoding="utf-8").split("---")[1])["facts"]
+        hook = R.default_reindexer()
+        assert hook == st.facts_idx.reindex, (
+            "default_reindexer() is not the store's own facts-index reindex: "
+            + repr(hook))
+        stats = dict(hook(paths=[target], root=facts_root))
+        # Clause 1's `files >= 1`. Every count here is derived from the fixture, never
+        # a literal that would go stale if `_doc`/`_rec` grew: one path went in, so one
+        # file must come out, and `facts` must be the records that file holds.
+        assert stats["files"] >= 1, f"nothing was indexed: {stats}"
+        assert stats["files"] == 1, f"one path in, {stats['files']} files reported"
+        assert stats["facts"] == len(recs), f"{len(recs)} records in that file: {stats}"
+
+        rows = st.facts_idx.for_entity("Acme Widget")
+        assert {r["file_path"] for r in rows} == {
+            "Acme Widget/Acme Widget-state.md"}, [r["file_path"] for r in rows]
+        # The `file_path` is the tree-RELATIVE spelling, which is the thing `root=`
+        # decides: `reindex` deletes by `file_path=?` and inserts what
+        # `_rows_for_file` computed from the same root, so a wrong root would leave
+        # the old rows standing under one spelling and add new ones under another.
+        #
+        # The expected entity per record is spelled the way `_rows_for_file` resolves
+        # it — `f.get("entity") or entity` (`app/kg_store.py:1242`) — so `''` and an
+        # absent key fall back to the file's top-level entity AT INDEX TIME (which is
+        # why #2909's owed reindex is a content no-op on the live tree), while the
+        # truthy `entity: '   '` record became its own key and only a retag plus this
+        # call moves it.
+        blank = st.facts_idx.for_entity("   ")
+        assert sorted(r["entity"] for r in rows + blank) == sorted(
+            rec.get("entity") or "Acme Widget" for rec in recs), \
+            [(r["entity"], r["fact"]) for r in rows + blank]
+        assert len(rows) + len(blank) == len(recs), (
+            f"{len(rows) + len(blank)} of {len(recs)} records indexed")
+        assert [r["fact"] for r in rows].count("Acme's retry budget is three.") == 0
+    finally:
+        kg_store.reset()
+
+
+def test_a_default_reindexer_that_cannot_resolve_reports_failure_and_exits_one(
+        facts_root, monkeypatch, capsys):
+    """Clause 2 of #2909 — where the hook is BUILT is a clause, not a detail.
+
+    `apply_tree` wrote the files, then resolved its default reindexer OUTSIDE the
+    `try` whose `except` sets `rep.reindex_error` — so the 2026-10-17 crash escaped as
+    14 bare traceback lines on stderr: no `retagged …` line, no `REINDEX FAILED:` line,
+    and `main`'s exit-code expression never evaluated. A tool that has already written
+    831 files and exits by traceback is a tool whose operator cannot tell what half
+    happened. Constructing the hook is now inside that guard, so an unresolvable
+    factory costs exactly what a failed reindex costs.
+    """
+    def cannot_resolve():
+        raise AttributeError("'KGStore' object has no attribute 'reindex'")
+
+    monkeypatch.setattr(R, "default_reindexer", cannot_resolve)
+    fresh = facts_root.parent / "fresh"
+    shutil.copytree(facts_root, fresh)
+    # How many files the run is going to write, read off the plan rather than
+    # hardcoded: this node is about what happens AFTER that many files are written.
+    planned = len([p for p in R.plan_tree(facts_root).plans if p["edits"]])
+    assert planned >= 1, "the fixture has nothing to write, so this node proves nothing"
+
+    rep = R.apply_tree(facts_root)          # no injected reindexer: the production route
+    assert rep.written == planned, rep.written      # the writes did happen
+    assert f"{planned} file(s) written but reindex failed" in rep.reindex_error, \
+        rep.reindex_error
+    assert "AttributeError" in rep.reindex_error, rep.reindex_error
+    assert "REINDEX FAILED" in rep.render(apply=True, root=facts_root)
+
+    capsys.readouterr()
+    rc = R.main(["--facts-root", str(fresh), "--apply"])
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "REINDEX FAILED:" in out, out
+
+
+def test_the_reindex_is_asked_for_the_tree_that_was_written(facts_root, tmp_path):
+    """Clause 3 of #2909 — `apply_tree` must ask for the tree it wrote, not the default.
+
+    `--facts-root` exists, and `reindex`'s own `root` defaults to the LIVE tree.
+    `_FactsIdx.reindex` resolves `root = Path(root or VAULT_FACTS_ROOT)`
+    (`app/kg_store.py:1267`), and its note at `:1350-1353` is explicit that rows are
+    matched on the tree-relative spelling they were indexed against, so `root` must be
+    the tree they came from. `apply_tree` held that root in hand and never passed it —
+    so a `--facts-root` repair would have indexed `VAULT_FACTS_ROOT` instead of the
+    tree it wrote, and `_rows_for_file`'s `relative_to` fallback (`:1229-1232`) would
+    have made the delete and the insert disagree on the spelling of `file_path`.
+    """
+    calls: list[dict] = []
+
+    def spy(*, paths, root=None, **kw):
+        paths = list(paths)
+        calls.append({"paths": [Path(p) for p in paths], "root": root})
+        # Exactly the three keys `_FactsIdx.reindex` returns
+        # (`app/kg_store.py:1268`), so this fake is as tight as the seam it stands in
+        # for: a call that passed some other keyword, or read back a key the real
+        # reindex does not emit, fails here and not only against a real store.
+        return {"files": len(paths), "facts": 0, "entities_registered": 0}
+
+    other = tmp_path / "other-facts"        # a second tree exists; neither is the default
+    shutil.copytree(facts_root, other)
+    rc = R.main(["--facts-root", str(facts_root), "--apply"], reindexer=spy)
+    assert rc == 0, rc
+    assert len(calls) == 1, f"reindex called {len(calls)} times: {calls}"
+    assert calls[0]["root"] == facts_root, (
+        "reindex was asked for a tree other than the one it wrote: "
+        + str(calls[0]["root"]))
+    assert all(p.is_relative_to(facts_root) for p in calls[0]["paths"]), calls[0]["paths"]
+    assert not any(p.is_relative_to(other) for p in calls[0]["paths"]), calls[0]["paths"]
+
+
+def test_an_apply_over_a_fully_tagged_tree_prints_the_pair_and_needs_no_index(
+        facts_root, capsys, monkeypatch):
+    """Clause 4 of #2909 — a tree with nothing to write keeps today's behaviour.
+
+    This is also the state the live tree is in now, and the reason the
+    2026-10-17 crash is latent rather than recurring — `apply_tree` only reaches
+    `default_reindexer()` inside `if changed:`, so a `--apply` over a tagged tree never
+    touches the store. Both halves are pinned in one run: the report says what it said
+    before this change, and the DEFAULT hook is rigged to raise, so if a future edit
+    ever builds the hook on a tree with nothing to write, this node goes red instead of
+    the nightly going red.
+    """
+    def never_wanted():
+        raise AssertionError("default_reindexer() must not be resolved when nothing "
+                             "was written — it would open kg.sqlite for nothing")
+
+    n_files = 4                                 # files in this fixture holding a record
+    monkeypatch.setattr(R, "default_reindexer", never_wanted)
+    R.apply_tree(facts_root, reindexer=lambda **kw: {
+        "files": 0, "facts": 0, "entities_registered": 0})
+    capsys.readouterr()
+    rc = R.main(["--facts-root", str(facts_root), "--apply"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "nothing to apply: no record in this tree is missing an entity:" in out, out
+    assert "unchanged: every record already carries its file's entity" in out, out
+    assert f"nothing to do in {n_files} file(s):" in out, out
+    assert "REINDEX FAILED" not in out, out
+
+
 def test_nothing_to_repair_is_a_clean_exit_not_an_alarm(facts_root, capsys):
     """A tree with no untagged record is the goal state.
 
