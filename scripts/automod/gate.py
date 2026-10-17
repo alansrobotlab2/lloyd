@@ -662,6 +662,268 @@ def _failed_node_ids(text: str) -> list[str]:
     return out
 
 
+# ── what a red node's own output looks like, and how much of it is kept ──────
+#
+# Why this exists (#2876): the `tests` rung persisted node ids and a 15-line
+# pytest tail. The tail is the tail of the LAST file's output — under `-q` the
+# traceback section sits ABOVE it and was never reached — and on the
+# PASS-because-pre-existing branch, the branch an inherited red takes, no
+# output text reached disk at all. So round SM_20261017_015755 had five node
+# ids for `tests/test_vault_sync_refusals.py` and nothing else; its author
+# concluded they were red because they read the live vault, filed #2875 on that,
+# and the real error — `FileNotFoundError: [Errno 2] No such file or directory:
+# 'bash'`, from an unrestored `os.environ["PATH"]` write two files away in
+# `tests/test_supply_chain_inventory.py` — surfaced only when the review rung's
+# model re-ran the pair by hand. A node id names a test; it never says why it
+# is red.
+#
+# Kept per node: the `FAILED`/`ERROR` header line the short summary printed for
+# that node, then its own `E `-prefixed assertion/error lines. Per node a
+# couple of KB covers the header, the `E ` lines and the crash; in total this is
+# the most a `gate.json` may grow by, so the file stays parseable with a
+# hundred failing nodes. `detail` is NOT one of these places — the runner caps
+# it at `DETAIL_MAX_CHARS` (`_clip_detail`), which is how #2726's verdict lost
+# its own tail.
+FAILURE_EXCERPT_MAX_CHARS = 2000
+FAILURE_EXCERPTS_MAX_CHARS = 16000
+
+#: The file the base probe writes ITS excerpts to (#2876), under
+#: `base_probe_excerpts_path` — the round's ARTIFACT directory, the one holding
+#: `gate.json`. The probe's worktree and its fresh data root are `shutil.rmtree`d
+#: in the probe's own `finally`, so a body written under either of them dies with
+#: the attribution it was supposed to support, and the only witness to "this
+#: failure predates your diff" is a count again. Hence a caller-supplied path
+#: outside `scratch`, which is how the parameter is spelled.
+#:
+#: `round_dir` is the word to be careful of here: `worktree.round_dir` is
+#: `~/lloyd-work/<id>` — the round's WORKING tree, deleted by `worktree.remove()`
+#: and reclaimed by the retention sweep — while `state.ROUNDS_DIR/<id>` is where
+#: its report lives and what `land` reads. They share a name and only one of them
+#: outlives the round, which the first cut of this got wrong: the bodies it wrote
+#: under `~/lloyd-work` were swept with the worktree, i.e. the same defect one
+#: directory level up.
+BASE_PROBE_EXCERPTS_FILE = "base-probe-failures.json"
+
+
+def base_probe_excerpts_path(round_id: str) -> Path | None:
+    """The round-directory file the base probe writes its failure bodies to, or
+    None when there is no round directory to write it into.
+
+    `state.ROUNDS_DIR`, not `worktree.round_dir`: see the comment on
+    `BASE_PROBE_EXCERPTS_FILE`. Spelled as a function, like
+    `state.gate_marker_path` and `state.land_marker_path` spell their own, so the
+    tests can move the store by moving `ROUNDS_DIR` and the rung has no idea it
+    was moved.
+
+    The `is_dir()` test is not decoration. A round's artifact directory exists
+    before its ladder starts — `run_spec.yaml` is written at round start and the
+    `gate.running` marker before the gate — so by the time the `tests` rung runs a
+    suite it is there in every real path; and a store that answers None when it is
+    absent is a store that never `mkdir`s round state for its own convenience. A
+    test that stood a Gate but no round therefore writes nothing anywhere, which
+    matters because every Gate test in the suite reuses half a dozen round ids.
+    """
+    d = S.ROUNDS_DIR / round_id
+    return d / BASE_PROBE_EXCERPTS_FILE if d.is_dir() else None
+
+#: What an over-budget body says about itself. A cut that leaves no trace is a
+#: body that reads as complete, and the whole point of the store is a body a
+#: reader can trust.
+_EXCERPT_CUT_NOTE = " …[excerpt clipped at {limit} chars]"
+
+#: One per-test section rule inside pytest's traceback region. Normally padded
+#: on both sides (`__________ test_x __________`), but pytest shrinks the padding
+#: to a single underscore per side when the title is longer than the terminal, so
+#: the underscore count cannot be a floor — pinned against real output by
+#: tests/test_automod_gate.py::test_a_long_node_name_whose_section_rule_lost_its_padding.
+#: The whitespace required after the underscores is what keeps a bare rule line
+#: (a section separator with no title) from being read as a boundary.
+_PYTEST_SECTION_RULE_RE = re.compile(r"^_+\s+(\S(?:.*\S)?)\s*_+$", re.M)
+#: pytest's traceback region: `ERRORS` and `FAILURES`, in that order, closed by
+#: the short-summary banner. Everything the rules above split lives inside it, so
+#: a test that prints a rule-looking line in its own captured output OUTSIDE this
+#: region cannot cut a block.
+_PYTEST_TROUBLE_BANNER_RE = re.compile(r"^=+ (?:FAILURES|ERRORS) =+$", re.M)
+_PYTEST_SUMMARY_BANNER_RE = re.compile(r"^=+ short test summary info =+$", re.M)
+#: An assertion/error line: `E` alone, or `E` plus whitespace — `E       assert
+#: False`, `E   ModuleNotFoundError: …`. Not `ERROR …`, which is a summary header,
+#: and not an indented source line.
+_PYTEST_E_LINE_RE = re.compile(r"^E(?:\s.*)?$")
+
+
+def _failure_blocks(text: str) -> list[tuple[str, str]]:
+    """`(section title, body)` per failing node in pytest's traceback output.
+
+    Empty when the run printed no traceback region at all — `--tb=no`, a worker
+    that died before reporting, a pytest that never started. Callers then fall
+    back to the header line, which still names the node and carries the crash
+    message the summary printed.
+    """
+    opened = _PYTEST_TROUBLE_BANNER_RE.search(text)
+    if not opened:
+        return []
+    region = text[opened.end():]
+    closed = _PYTEST_SUMMARY_BANNER_RE.search(region)
+    if closed:
+        region = region[:closed.start()]
+    parts = _PYTEST_SECTION_RULE_RE.split(region)
+    out: list[tuple[str, str]] = []
+    # `split` with one capture group yields [pre, title, body, title, body, …].
+    for i in range(1, len(parts) - 1, 2):
+        title, body = parts[i].strip(), parts[i + 1]
+        if title:
+            out.append((title, body))
+    return out
+
+
+def _node_names(node_id: str) -> tuple[str, str, str]:
+    """`(file, leaf, dotted)` for a node id: the path it lives in, its last `::`
+    component, and the class-qualified name (`TestGroup::test_x` →
+    `TestGroup.test_x`) as pytest spells it in a section title. A bare-file id
+    (`ERROR tests/x.py`, a collection failure) has no leaf."""
+    f, _, rest = node_id.partition("::")
+    parts = [p for p in rest.split("::") if p]
+    leaf = parts[-1] if parts else ""
+    dotted = ".".join(parts[1:]) if len(parts) > 1 else leaf
+    return f, leaf, dotted
+
+
+def _failure_excerpts(text: str, node_ids: list[str], *,
+                      per_node: int | None = None,
+                      total: int | None = None) -> dict[str, str]:
+    """Per-node failure bodies from one pytest run's output, keyed by node id.
+
+    Attribution is by section title, in three tightening passes, because the
+    title is the only thing in a traceback block that names the test: first the
+    exact name (`test_x`, `TestGroup.test_x`, `test_x[1]`), so a parametrised
+    node cannot steal its own non-parametrised sibling's block; then a title that
+    CONTAINS the name alongside the node's own file (`ERROR at setup of test_x`);
+    then a block whose body carries both the name and the file, which is what a
+    rule truncated by the terminal width still gives. A node nothing claimed
+    still gets its header line, so the store never answers "not red" for a node
+    the summary named. If exactly one block and one node are unclaimed, they are
+    paired: that is the single-failure run, and with nothing else left there is
+    nothing to confuse it with.
+
+    Both budgets announce themselves instead of cutting silently: a body over
+    `per_node` ends in `_EXCERPT_CUT_NOTE`, and a node the total could not hold
+    is left OUT of the dict for the caller to name as unstored (`write_failure_
+    excerpts`' `unstored`, the rung's `failure_excerpts_unstored`) — because a
+    red node silently absent reads as a node that passed, and because a
+    placeholder body would break the one promise the total makes: that it bounds
+    what this dict costs. An id list is the shape `data` already carries
+    unbounded (`failed_node_ids`, `parallel_only_failures`); a body is what needs
+    a ceiling. The budgets are read from the module here rather than bound as
+    defaults, so a test can stand more red nodes above a smaller one.
+    """
+    per_node = FAILURE_EXCERPT_MAX_CHARS if per_node is None else per_node
+    total = FAILURE_EXCERPTS_MAX_CHARS if total is None else total
+    headers: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        m = re.match(r"^(?:FAILED|ERROR)\s+(\S+)", line)
+        if m and ".py" in m.group(1):
+            headers.setdefault(m.group(1), line)
+    blocks = _failure_blocks(text)
+    owner: dict[int, str] = {}
+
+    def claim(i: int, nid: str) -> None:
+        owner[i] = nid
+
+    def free(i: int) -> bool:
+        return i not in owner
+
+    for nid in node_ids:
+        _f, leaf, dotted = _node_names(nid)
+        for i, (title, _body) in enumerate(blocks):
+            if free(i) and (title == leaf or (dotted and title == dotted)):
+                claim(i, nid)
+                break
+    for nid in node_ids:
+        f, leaf, _d = _node_names(nid)
+        for i, (title, body) in enumerate(blocks):
+            if not free(i):
+                continue
+            if leaf and leaf in title and (f in title or f in body):
+                claim(i, nid)
+                break
+            if not leaf and (f in title or f in body):
+                claim(i, nid)
+                break
+    for nid in node_ids:
+        f, leaf, _d = _node_names(nid)
+        if not leaf:
+            continue
+        for i, (_title, body) in enumerate(blocks):
+            if free(i) and leaf in body and f in body:
+                claim(i, nid)
+                break
+    left_blocks = [i for i in range(len(blocks)) if free(i)]
+    left_nodes = [n for n in node_ids if n not in owner.values()]
+    if len(left_blocks) == 1 and len(left_nodes) == 1:
+        claim(left_blocks[0], left_nodes[0])
+
+    by_node = {nid: blocks[i][1] for i, nid in owner.items()}
+    out: dict[str, str] = {}
+    used = 0
+    for nid in node_ids:
+        lines = [headers.get(nid) or f"FAILED {nid}"]
+        body = by_node.get(nid)
+        if body:
+            lines += [ln.rstrip() for ln in body.splitlines()
+                      if _PYTEST_E_LINE_RE.match(ln)]
+        excerpt = "\n".join(lines)
+        if len(excerpt) > per_node:
+            note = _EXCERPT_CUT_NOTE.format(limit=per_node)
+            excerpt = excerpt[:max(0, per_node - len(note))].rstrip() + note
+        if used + len(excerpt) > total:
+            continue                      # named as unstored by the caller
+        used += len(excerpt)
+        out[nid] = excerpt
+    return out
+
+
+def unstored_failure_nodes(node_ids: list[str], stored: dict[str, str]) -> list[str]:
+    """The red nodes the total budget could not hold, in the order the summary
+    named them (#2876). Every red node is therefore either a body or a name here,
+    and never simply missing: a node missing from BOTH is a node that passed."""
+    return [n for n in node_ids if n not in stored]
+
+
+def write_failure_excerpts(path: Path | str, text: str, node_ids: list[str], *,
+                           source: str,
+                           per_node: int | None = None,
+                           total: int | None = None) -> dict[str, str]:
+    """Extract `text`'s per-node bodies and persist them to PATH; return what
+    was stored ({} when there was nothing to store, or the write failed).
+
+    The file names what it could not hold alongside what it does (`unstored`), so
+    a reader of a bounded store is never left to infer which red nodes are absent
+    and why. It is written for a red run whose total held nothing at all, because
+    "these nodes were red and no body fit" is a fact worth keeping and not a
+    missing file.
+
+    Diagnostics only, so a write that cannot happen is a warning and never a
+    verdict: an unwritable path must not turn a probe that answered into one
+    that did not, and must not cost a round its exemption.
+    """
+    excerpts = _failure_excerpts(text, node_ids, per_node=per_node, total=total)
+    if not excerpts and not node_ids:
+        return {}
+    payload = {"schema": 1, "source": source,
+               "excerpts": excerpts,
+               "unstored": unstored_failure_nodes(node_ids, excerpts)}
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — a body store is never the gate's verdict
+        print(f"[warn] could not store failure excerpts in {path}: "
+              f"{type(exc).__name__}: {exc}")
+        return {}
+    return excerpts
+
+
 def _classify_test_failure(node_ids: list[str],
                            base_failed: set[str]) -> tuple[bool, list[str]]:
     """`(external, new)` — a delta, for the same reason the pyflakes rung is one.
@@ -813,7 +1075,8 @@ def _reconfirm_candidate_failures(python: Path, root: Path,
 def _failures_at_base(python: Path, live_root: Path, base: str,
                       node_ids: list[str], scratch: Path,
                       env: dict | None = None, *, by_node: bool = False,
-                      timeout: float | None = None) -> tuple[set[str], str]:
+                      timeout: float | None = None,
+                      excerpt_path: Path | None = None) -> tuple[set[str], str]:
     """Which of `node_ids` already fail at `base`, in a throwaway worktree.
 
     Module-level and fully parameterised so it can be exercised against a real
@@ -923,6 +1186,18 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
             tail = " | ".join(text.strip().splitlines()[-3:])[:200]
             return set(), (f"head probe INCONCLUSIVE at base {base[:8]} — nothing "
                            f"passed and nothing failed (rc={r.returncode}): {tail}")
+        # The bodies of what this run reproduced, written OUTSIDE `scratch`:
+        # `wt` and `probe_data` are both deleted in the `finally` below, so a body
+        # written under them dies with the attribution it was meant to support and
+        # the only witness to "this failure predates your diff" is a count again
+        # (item 2876). Keyed on the ids this run itself named, not on `failed`:
+        # `by_node` adds nodes whose file is gone, which this run never executed,
+        # and a body for a test pytest did not run is a body nobody wrote. On the
+        # answering path only — an INCONCLUSIVE run returned above, reproducing
+        # nothing, and an empty body store beside "pytest never ran" is a phantom.
+        if excerpt_path is not None:
+            write_failure_excerpts(excerpt_path, text, _failed_node_ids(text),
+                                   source=f"base probe at {base[:8]}")
         where = " in a fresh data root" if "LLOYD_DATA" in probe_env else ""
         lost = (f" (+{len(vanished)} whose file is gone)" if by_node and vanished else "")
         return failed, (f"probed {len(files)} {'node' if by_node else 'file'}(s) "
@@ -2639,9 +2914,13 @@ class Gate:
                     f"red set cached for base {self.base[:8]} (recorded by {entry.get('by') or '?'}, "
                     f"{int(time.time() - entry['ts'])}s ago): all {len(probe_ids)} already failing; "
                     f"probe skipped", True, True)
+        # Beside `gate.json`, for the reason in `_failures_at_base`. The pickup
+        # probe in `red_tree_state_at_head` passes nothing and keeps the behaviour
+        # it has always had.
         base_failed, note = _failures_at_base(
             self.python, self.live, self.base, probe_ids,
-            W.round_dir(self.round_id), self._child_env(isolate_home=True))
+            W.round_dir(self.round_id), self._child_env(isolate_home=True),
+            excerpt_path=base_probe_excerpts_path(self.round_id))
         conclusive = _probe_conclusive(note)
         if conclusive:
             try:
@@ -2778,6 +3057,37 @@ class Gate:
             data["retried_node_ids"] = list(to_reconfirm)
             data["flaky_node_ids"] = list(flaky)
             new = [n for n in new if n not in flaky]
+        # Every node still red when the retry finishes gets its own body stored
+        # (item 2876): a node id names a test, it never says why the test is red,
+        # and the 15-line pytest tail is the tail of the LAST file's output.
+        # `data` is stored unclipped — `_clip_detail` runs on `detail` alone, at
+        # one call site in `RungResult` — so the two budgets in
+        # `_failure_excerpts` are the whole bound on this. Flaky nodes are
+        # excluded: they passed the repeat run, and an error body beside a node
+        # the rung calls a flicker is a body for a failure that is not red.
+        red_nodes = [n for n in node_ids if n not in set(flaky)]
+        excerpts = _failure_excerpts(text, red_nodes)
+        if excerpts or red_nodes:
+            unstored = unstored_failure_nodes(red_nodes, excerpts)
+            data["failure_excerpts"] = excerpts
+            data["failure_excerpts_chars"] = sum(len(v) for v in excerpts.values())
+            if unstored:
+                data["failure_excerpts_unstored"] = unstored
+            said = (f"{len(excerpts)} of {len(red_nodes)} red node(s) kept their own "
+                    f"failure excerpt ({data['failure_excerpts_chars']} chars, at most "
+                    f"{FAILURE_EXCERPT_MAX_CHARS} each, {FAILURE_EXCERPTS_MAX_CHARS} in "
+                    f"total) in the round's `failure_excerpts`")
+            if unstored:
+                # `_name_ids`, not a join: an id list in the verdict prose can
+                # overflow the trail budget and cut the sentence a reader needs
+                # (the #2726 rail, and #2726's own misdiagnosis, both began that
+                # way). The full list is in `failure_excerpts_unstored`.
+                said += (f"; the total left no room for {len(unstored)}: "
+                         f"{_name_ids(unstored)}")
+            probe_bodies = base_probe_excerpts_path(self.round_id)
+            if probe_bodies is not None and probe_bodies.exists():
+                said += f"; the base probe's own bodies are in `{probe_bodies.name}`"
+            data["failure_excerpt_note"] = said
         red_item = self._file_red_tree(pre_existing) if (pre_existing and conclusive) else None
         if red_item:
             data["red_tree_item"] = red_item
@@ -2798,6 +3108,10 @@ class Gate:
                 parts.append(f"{len(flaky)} FLAKY (passed a repeat run): {_name_ids(flaky)}")
             lead = ("tests pass on this diff — " + "; ".join(parts) + f". {probe_note}"
                     + (f". {flaky_note}" if flaky_note else "") + ". ")
+            # Only the count keys are dropped: they are already in `counts`. So
+            # `failure_excerpts` rides onto the pass too, which is the point —
+            # this is the branch an inherited red takes, and before item 2876 it
+            # was the one branch where no pytest output reached disk at all.
             return self._tests_pass(counts, only, {**{k: v for k, v in data.items()
                                                       if k not in counts},
                                                    "_lead": lead})

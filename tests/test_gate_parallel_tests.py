@@ -104,7 +104,12 @@ def test_a_failure_that_survives_the_serial_re_run_is_judged_as_it_always_was(tm
     script.append((1, f"FAILED {real} - assert False\n1 failed, 60 passed in 3s\n"))
     probed: list = []
 
-    def at_base(python, live, base, node_ids, scratch, env):
+    # `**_kw` because the rung now also passes `excerpt_path`, the round-dir file
+    # the probe's own bodies go to; this stub answers the attribution and nothing
+    # else, so it takes the new keyword and ignores it.
+    # `excerpt_path` named, not `**_kw`: the rung passes it now, and a stub
+    # that swallows unknown keywords swallows a mistyped one.
+    def at_base(python, live, base, node_ids, scratch, env, *, excerpt_path=None):
         probed.append(list(node_ids))
         return set(), "probed 1 file(s) at base: none failing"
     monkeypatch.setattr(G, "_failures_at_base", at_base)

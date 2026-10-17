@@ -51,7 +51,11 @@ def _gate(tmp_path, monkeypatch, base, *, failing, probe=None):
                         lambda *a, **k: ([], "failed every repeat"))
     probed: list[list[str]] = []
 
-    def at_base(python, live, b, node_ids, scratch, env=None):
+    # `**_kw` for the same reason as tests/test_gate_parallel_tests.py: the rung
+    # passes `excerpt_path` now, and this stub's whole job is the attribution.
+    # `excerpt_path` named, not `**_kw`: the rung passes it now, and a stub
+    # that swallows unknown keywords swallows a mistyped one.
+    def at_base(python, live, b, node_ids, scratch, env=None, *, excerpt_path=None):
         probed.append(list(node_ids))
         if probe is not None:
             return probe(node_ids)

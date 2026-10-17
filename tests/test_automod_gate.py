@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -1110,6 +1111,11 @@ def test_rung_tests_reports_pre_existing_breakage_as_an_external_blocker(tmp_pat
 def _round_over_red_tree(tmp_path, monkeypatch, name, *, edit=("unrelated.py", "X = 1\n")):
     repo, base = _repo_with_failing_test(tmp_path)
     monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
+    # The artifact directory the probe's bodies are written into, redirected
+    # exactly as WORK_ROOT is one line above: a Gate test that let the rung
+    # resolve the real `state.ROUNDS_DIR` would file its diagnostics beside real
+    # rounds'.
+    monkeypatch.setattr(G.S, "ROUNDS_DIR", tmp_path / "rounds")
     wt = tmp_path / "work" / name / "home" / "lloyd"
     wt.parent.mkdir(parents=True)
     git(repo, "worktree", "add", "-q", "-b", f"automod/{name}", str(wt), base)
@@ -1129,6 +1135,10 @@ def test_rung_tests_passes_over_pre_existing_breakage_and_records_it(tmp_path, m
     question, because the round is not stopped."""
     _small_floors(monkeypatch)
     g, repo, wt, base = _round_over_red_tree(tmp_path, monkeypatch, "SM_T")
+    # The round's artifact directory, which in production exists before the ladder
+    # runs (`run_spec.yaml` at round start): with it present the probe files its
+    # bodies there, and the note below can name that file to a reader.
+    (G.S.ROUNDS_DIR / g.round_id).mkdir(parents=True)
     try:
         ok, detail, data = g.rung_tests()
     finally:
@@ -1140,6 +1150,24 @@ def test_rung_tests_passes_over_pre_existing_breakage_and_records_it(tmp_path, m
     assert "PRE-EXISTING" in detail and base[:8] in detail
     assert data["base_probe"].startswith("probed "), data["base_probe"]
     assert data["red_set_cached"] is False
+    # #2876: this is the branch a round INHERITS a red through - every failure
+    # attributed to the base, so the rung passes and nothing downstream ever
+    # looks at the output again. It used to keep node ids alone, which is how the
+    # author of round SM_20261017_015755 concluded "these five read the live
+    # vault" about a failure whose real error was `FileNotFoundError: ... 'bash'`,
+    # from an unrestored `PATH` write two files away. The body is built from the
+    # candidate run's own text, so it exists on this branch too - and on the
+    # cached-red-set path, where no pytest ever runs at base.
+    body = data["failure_excerpts"]["tests/test_pre.py::test_already_broken"]
+    assert body.startswith("FAILED tests/test_pre.py::test_already_broken"), body
+    assert "assert False" in body, body
+    assert data["failure_excerpts_chars"] == len(body)
+    assert data["failure_excerpt_note"].startswith("1 of 1 red node(s) kept"), \
+        data["failure_excerpt_note"]
+    # The sentence points at the probe's file by name, on the path that found it:
+    # a reader of gate.json should not have to know the constant to find the file.
+    assert G.BASE_PROBE_EXCERPTS_FILE in data["failure_excerpt_note"], \
+        data["failure_excerpt_note"]
     assert data["failed"] == 1, "the failure is counted, not excised"
     # A throwaway repo is not the production tree: no board write.
     assert "red_tree_item" not in data
@@ -3659,3 +3687,281 @@ def test_a_crash_inside_the_rule_runner_costs_the_round_nothing(tmp_path, monkey
     assert "UNEVALUATED" in row[0].detail, row[0].detail
     assert "no verdict" in row[0].detail, row[0].detail
     assert "clean" not in row[0].detail, row[0].detail
+
+
+# ── #2876: a red a round inherits must be diagnosable from what the gate
+#    stored, not from a re-run of the suite. The `tests` rung kept node ids and a
+#    15-line pytest tail — the tail of the LAST file's output — so the assertion
+#    text of an inherited failure reached no disk at all. ────────────────────
+
+def _gate_json(g):
+    """Persist `g.report` through `state.write_gate_report` — the writer `run_gate`
+    and `promote` share, and the only writer of the shape `land` reads — and hand
+    back the parsed `gate.json`. So every assertion below is about the artifact a
+    later process actually gets, not about a dict this test alone held or a private
+    re-implementation of the write. `RungResult` clips `detail` on construction
+    (`_clip_detail`), so what comes back is the capped artifact: the store under
+    test has to survive independently of it."""
+    p = G.S.write_gate_report(g.round_id, g.report.to_dict())
+    parsed = json.loads(p.read_text(encoding="utf-8"))
+    return p, [r for r in parsed["rungs"] if r["name"] == "tests"][0]
+
+
+def _repo_at(tmp_path, name, files):
+    """A committed throwaway repo of `files`, in the shape `_failures_at_base`
+    expects: a git tree at a head, with the red it is asked about already there."""
+    r = tmp_path / name
+    (r / "tests").mkdir(parents=True)
+    git(tmp_path, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@e.com")
+    git(r, "config", "user.name", "t")
+    for rel, src in files.items():
+        f = r / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(src, encoding="utf-8")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "base")
+    return r, git(r, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_a_red_round_stores_each_failing_nodes_own_assertion_beside_its_id(tmp_path, monkeypatch):
+    """clause 1: for a node still red when the `tests` rung finishes, the round
+    directory holds that node's assertion text, retrievable BY NODE ID, from a
+    place the 2000-char clip on `detail` cannot reach. End to end: a real red
+    tree, a real pytest, its real traceback, `gate.json` written and re-read."""
+    _small_floors(monkeypatch)
+    src = ("def test_already_broken():\n    assert False\n\n"
+           "def test_fine():\n    assert True\n\n"
+           "def test_added_by_this_round():\n    assert 1 == 43, 'wanted forty-three'\n")
+    g, repo, wt, _base = _round_over_red_tree(tmp_path, monkeypatch, "SM_BODY1",
+                                              edit=("tests/test_pre.py", src))
+    try:
+        assert g._rung("tests", g.rung_tests) is False, "the round added a failure itself"
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    path, rung = _gate_json(g)
+    store = rung["data"]["failure_excerpts"]
+    assert {"tests/test_pre.py::test_already_broken",
+            "tests/test_pre.py::test_added_by_this_round"} <= set(store), sorted(store)
+    broken = store["tests/test_pre.py::test_already_broken"]
+    assert "assert False" in broken, broken
+    assert "tests/test_pre.py::test_already_broken" in broken, broken
+    assert broken.startswith("FAILED "), broken
+    # Each node's body is its OWN: the line that names one failure belongs to the
+    # node it names, not to whichever block the parser was reading.
+    added = store["tests/test_pre.py::test_added_by_this_round"]
+    assert "wanted forty-three" in added, added
+    assert "assert False" not in added, added
+    assert broken != added
+    # Named, not assumed: the report read back is the file
+    # `state.write_gate_report` put in the round's ARTIFACT directory — the one
+    # `land` reads, and NOT `worktree.round_dir`, which is the round's working
+    # tree and gets deleted out from under the round.
+    assert path == G.S.ROUNDS_DIR / g.round_id / "gate.json", path
+
+
+def test_every_shape_of_failing_node_gets_its_own_body(tmp_path):
+    """pytest spells a failing node four ways in its traceback — a plain
+    assertion, a method under a class, a parametrised case, and a file that
+    cannot be collected at all, whose section header is `ERROR collecting` and
+    whose node id carries no `::`. The store has to key each of them by the id the
+    short summary printed, because that id is what the rung blames; a parser that
+    handles only the first shape leaves a collection failure undiagnosable, which
+    is the exact class of red #2875 got wrong.
+
+    Driven through the base probe over a real repo, so the bytes parsed are
+    pytest's own and not a fixture of expected output.
+    """
+    repo, base = _repo_at(tmp_path, "shapes", {
+        "tests/test_shapes.py": (
+            "import pytest\n"
+            "\n"
+            "\n"
+            "class TestGroup:\n"
+            "    def test_a_method_fails(self):\n"
+            '        raise RuntimeError("named for the shape")\n'
+            "\n"
+            "\n"
+            '@pytest.mark.parametrize("n", [1, 2])\n'
+            "def test_parametrized_fails(n):\n"
+            "    assert n == 43\n"
+            "\n"
+            "\n"
+            "def test_plain():\n"
+            "    assert False\n"),
+        "tests/test_uncollectable.py": "import definitely_not_a_real_module_xyz\n",
+    })
+    out = tmp_path / "round" / G.BASE_PROBE_EXCERPTS_FILE
+    failed, note = G._failures_at_base(
+        Path(sys.executable), repo, base,
+        ["tests/test_shapes.py", "tests/test_uncollectable.py"],
+        tmp_path / "scratch", excerpt_path=out)
+    assert len(failed) == 5, note          # four failures, one collection error
+    store = json.loads(out.read_text())["excerpts"]
+    method = store["tests/test_shapes.py::TestGroup::test_a_method_fails"]
+    assert method.startswith("FAILED tests/test_shapes.py::TestGroup::test_a_method_fails"), method
+    assert "named for the shape" in method, method
+    assert "assert 1 == 43" in store["tests/test_shapes.py::test_parametrized_fails[1]"]
+    assert "assert 2 == 43" in store["tests/test_shapes.py::test_parametrized_fails[2]"]
+    collection = store["tests/test_uncollectable.py"]
+    assert collection.startswith("ERROR tests/test_uncollectable.py"), collection
+    assert "definitely_not_a_real_module_xyz" in collection, collection
+    for nid, body in store.items():
+        assert nid in body, f"{nid} is stored under a body that does not name it"
+        assert body.splitlines()[0].startswith(("FAILED ", "ERROR ")), body
+
+
+def test_the_excerpt_budget_names_every_node_it_cannot_store(tmp_path, monkeypatch):
+    """clause 3: twenty real red nodes against a budget too small to hold them.
+    Every node must still be a key of the store — a red node that is quietly
+    absent reads as a node that passed — the ones the budget spent must say so in
+    the store itself, and `gate.json` must still parse, because a rung whose data
+    cannot be read back is a rung that stopped reporting at all."""
+    _small_floors(monkeypatch)
+    src = "".join(f"def test_broken_{i}():\n    assert {i} == 'not a number'\n\n"
+                  for i in range(20))
+    g, repo, wt, _base = _round_over_red_tree(tmp_path, monkeypatch, "SM_BUDGET",
+                                              edit=("tests/test_pre.py", src))
+    monkeypatch.setattr(G, "FAILURE_EXCERPTS_MAX_CHARS", 100)
+    try:
+        assert g._rung("tests", g.rung_tests) is False
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    path, rung = _gate_json(g)
+    data = rung["data"]
+    assert len(data["failed_node_ids"]) == 20, data["failed_node_ids"]
+    stored, missing = data["failure_excerpts"], data["failure_excerpts_unstored"]
+    # Every red node is accounted for: a body, or a name. A node absent from BOTH
+    # is a node that passed, and that is the one misreading the store may permit
+    # no version of.
+    assert set(stored) | set(missing) == set(data["failed_node_ids"]), (
+        sorted(stored), sorted(missing))
+    assert set(stored) & set(missing) == set()
+    assert missing, "the budget never ran out, so this node pinned nothing"
+    # And the total budget is the bound it claims, which is only true because an
+    # omitted node costs zero bytes: no placeholder bodies sitting behind it.
+    assert data["failure_excerpts_chars"] <= 100, data["failure_excerpts_chars"]
+    assert all(len(v) <= G.FAILURE_EXCERPT_MAX_CHARS for v in stored.values())
+    assert "20 red node(s)" in data["failure_excerpt_note"], data["failure_excerpt_note"]
+    assert f"the total left no room for {len(missing)}" in data["failure_excerpt_note"], \
+        data["failure_excerpt_note"]
+    assert json.loads(path.read_text(encoding="utf-8")) is not None
+
+
+def test_an_overlong_body_is_cut_at_its_own_limit_and_says_so():
+    """The per-node half of clause 3, on one body long enough to need it: a real
+    pytest assertion diff over a long string runs to thousands of characters, and
+    a cut that leaves no trace is the failure mode to avoid."""
+    text = ("==== FAILURES ====\n"
+            "_______________ test_a_very_long_failure _______________\n"
+            "E       AssertionError: " + ("x" * 5000) + "\n"
+            "\n"
+            "tests/long.py:3: AssertionError\n"
+            "==== short test summary info ====\n"
+            "FAILED tests/long.py::test_a_very_long_failure - AssertionError\n"
+            "1 failed in 0.01s\n")
+    got = G._failure_excerpts(text, ["tests/long.py::test_a_very_long_failure"])
+    body = got["tests/long.py::test_a_very_long_failure"]
+    assert len(body) <= G.FAILURE_EXCERPT_MAX_CHARS, len(body)
+    assert body.endswith(f"[excerpt clipped at {G.FAILURE_EXCERPT_MAX_CHARS} chars]"), body[-60:]
+
+
+def test_the_base_probes_bodies_outlive_its_own_scratch_cleanup(tmp_path):
+    """clause 4: the probe deletes its worktree and its data root in its own
+    `finally`, so the file it writes must live outside both. Also pins that the
+    keyword is optional and inert: the existing callers, and every existing test
+    of this function, call it positionally and get exactly what they got before.
+
+    Fail-closed behaviour is re-pinned here too, because the body store rides on
+    the same code path that used to report `0 already failing` for a python that
+    could not import pytest — an inconclusive probe reproduced nothing, and must
+    leave no phantom bodies behind."""
+    repo, base = _repo_with_failing_test(tmp_path)
+    scratch = tmp_path / "scratch"
+    out = tmp_path / "round" / G.BASE_PROBE_EXCERPTS_FILE
+    failed, note = G._failures_at_base(
+        Path(sys.executable), repo, base, ["tests/test_pre.py::test_already_broken"],
+        scratch, excerpt_path=out)
+    assert failed == {"tests/test_pre.py::test_already_broken"}, note
+    assert not (scratch / "baseline").exists(), "the probe left its worktree behind"
+    assert not (scratch / "baseline-data").exists(), "the probe left its data root behind"
+    store = json.loads(out.read_text())
+    assert store["source"].startswith("base probe at "), store["source"]
+    body = store["excerpts"]["tests/test_pre.py::test_already_broken"]
+    assert "assert False" in body, body
+    assert body.startswith("FAILED tests/test_pre.py::test_already_broken"), body
+
+    # The same call without the keyword — the shape every existing caller uses.
+    failed2, note2 = G._failures_at_base(
+        Path(sys.executable), repo, base, ["tests/test_pre.py::test_already_broken"],
+        tmp_path / "scratch2")
+    assert failed2 == failed, note2
+    assert len(list((tmp_path / "round").iterdir())) == 1, "the keywordless call wrote a file"
+
+    # A probe that reproduced nothing writes nothing.
+    clean, clean_base = _repo_at(tmp_path, "clean",
+                                 {"tests/test_ok.py": "def test_fine():\n    assert True\n"})
+    nothing = tmp_path / "round2" / G.BASE_PROBE_EXCERPTS_FILE
+    failed3, note3 = G._failures_at_base(Path(sys.executable), clean, clean_base,
+                                         ["tests/test_ok.py"], tmp_path / "scratch3",
+                                         excerpt_path=nothing)
+    assert failed3 == set(), note3
+    assert not nothing.exists()
+
+    # And a probe that could not run at all stays INCONCLUSIVE, unexplained, empty.
+    stub = tmp_path / "python-without-pytest"
+    stub.write_text("#!/bin/sh\necho 'No module named pytest' >&2\nexit 1\n",
+                    encoding="utf-8")
+    stub.chmod(0o755)
+    broke = tmp_path / "round3" / G.BASE_PROBE_EXCERPTS_FILE
+    failed4, note4 = G._failures_at_base(stub, repo, base,
+                                         ["tests/test_pre.py::test_already_broken"],
+                                         tmp_path / "scratch4", excerpt_path=broke)
+    assert failed4 == set() and "INCONCLUSIVE" in note4, note4
+    assert not broke.exists(), "an inconclusive probe stored bodies for nothing"
+
+
+def test_the_probes_bodies_lay_where_gate_json_lays_not_in_the_worktree(tmp_path, monkeypatch):
+    """The first cut of this feature wrote the probe's bodies under
+    `worktree.round_dir` and commented that they sat "beside `gate.json`". They did
+    not: that path is `~/lloyd-work/<id>`, the round's WORKING tree, which
+    `worktree.remove()` `shutil.rmtree`s and the retention sweep reclaims after
+    `WORKTREE_DIR_MAX_AGE_DAYS` — the same defect one directory level up, wearing
+    the right file name. Two directories share the word `round_dir`, so this names
+    which one the store resolves to, then deletes the other to prove it.
+
+    The edit is in an unrelated file on purpose: the probe exists to answer
+    "does this red predate the diff?" about files the round did NOT touch, and
+    skips failures inside its own (`no failures outside the round's own files to
+    probe`), so an edit to the red file itself would never run the probe at all.
+    """
+    _small_floors(monkeypatch)
+    # Named so `worktree.round_dir(g.round_id)` IS the tree this round stands on:
+    # the deletion below then removes something real.
+    g, repo, wt, _base = _round_over_red_tree(tmp_path, monkeypatch, "SM_T")
+    # In production the artifact directory exists before the ladder runs:
+    # `run_spec.yaml` is written at round start, `gate.running` before the gate.
+    # Where it is absent `base_probe_excerpts_path` answers None, and a rung with
+    # no round directory writes nothing rather than inventing one.
+    (G.S.ROUNDS_DIR / g.round_id).mkdir(parents=True)
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    assert ok is True, f"{detail}\n{data.get('base_probe')}"
+
+    p = G.S.ROUNDS_DIR / g.round_id / G.BASE_PROBE_EXCERPTS_FILE
+    assert p == G.base_probe_excerpts_path(g.round_id), G.base_probe_excerpts_path(g.round_id)
+    assert p.is_file(), "the probe wrote no bodies into the round's artifact directory"
+    body = json.loads(p.read_text(encoding="utf-8"))["excerpts"]
+    assert "assert False" in body["tests/test_pre.py::test_already_broken"], body
+
+    # The two directories are different trees, and this is the call that removes
+    # one of them — `worktree.remove()`'s own `shutil.rmtree`, and the retention
+    # sweep's, both reach `~/lloyd-work/<id>`.
+    worktree_root = G.W.round_dir(g.round_id)
+    assert worktree_root != p.parent and worktree_root not in p.parents, (worktree_root, p)
+    shutil.rmtree(worktree_root, ignore_errors=True)
+    assert not worktree_root.exists()
+    assert "assert False" in json.loads(p.read_text(encoding="utf-8"))[
+        "excerpts"]["tests/test_pre.py::test_already_broken"], "the bodies died with the worktree"
