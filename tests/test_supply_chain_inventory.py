@@ -27,10 +27,12 @@ real osv-scanner-shaped JSON and a real count line, because what clause 3 forbid
 is a synthesised target the *parser* silently rejects — a monkeypatched
 `subprocess.run` could not express that, only confirm the code path ran.
 """
+import contextlib
 import datetime as dt
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -42,6 +44,122 @@ from app.harness import supply_chain as sc          # noqa: E402
 from app.harness import supply_chain_inventory as inv  # noqa: E402
 
 NOW = dt.datetime(2026, 10, 11, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+#: There is deliberately no list of environment names here. The first shape of the
+#: guard below restored a three-name tuple — `PATH`, the OSV URL override, the OSV
+#: DB path — and that covered the file only for as long as no node wrote a fourth,
+#: which is the defect #2872's review rung named: an allowlist holds by luck and by
+#: maintenance. So the fixture snapshots the whole environment instead, and a name
+#: nobody has thought of yet is bounded the same as `PATH`. What the nodes here
+#: write today is one `git grep -n 'os.environ\['` away: `PATH` and the OSV URL
+#: override at the two scanner sites (`with_path`, and
+#: `test_no_scanner_yields_a_coverage_gap_and_no_number`), `sc.OSV_DB_ENV` in the
+#: nodes that point the OSV database at their own `tmp_path`, and the probe names
+#: the guard's own tests plant.
+
+
+def snapshot_process_env():
+    """The live process environment, name to value, at this instant."""
+    return dict(os.environ)
+
+
+def restore_process_env(snapshot):
+    """Put `snapshot` back, deleting a name that was absent when it was taken.
+
+    `None` means "was not there", which is not the same thing as an empty string:
+    `supply_chain` reads `LLOYD_OSV_API_URL` with `.get(...).strip()` and then
+    `isdigit()`s it, so restoring `LLOYD_OSV_API_URL=""` over an absent name turns
+    "no override" into "override with no digits" — a different error, at a
+    different line, than the one a node was testing. Pinned by
+    `test_the_snapshot_deletes_a_name_that_was_absent_rather_than_blanking_it`.
+
+    This half only puts back names the snapshot HAS. Undoing a name a node
+    invented is `prune_process_env_extras`, and the two are separate functions on
+    purpose: a caller holding a hand-built partial snapshot must never be able to
+    ask this one to delete the rest of the process.
+    """
+    for name, value in snapshot.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+def prune_process_env_extras(snapshot):
+    """Delete every live name that `snapshot` does not contain.
+
+    This is the half no allowlist can be. A node that writes a name already in the
+    snapshot is undone by `restore_process_env`; a node that invents one is invisible
+    to a restore that only iterates the names it knows, which is exactly how
+    #2872's review refused the first version of this guard. Deleting whatever the
+    snapshot lacks covers both, including a name nobody in this file has written
+    yet. Pinned by `test_the_prune_deletes_an_invented_name_and_keeps_the_rest` and
+    by the planter/receiver pair run in
+    `test_an_unlisted_name_written_by_one_node_does_not_reach_the_next`.
+
+    Only ever call this with a snapshot of the WHOLE environment
+    (`snapshot_process_env()`); a partial one would empty the process.
+    """
+    for name in [n for n in os.environ if n not in snapshot]:
+        del os.environ[name]
+
+
+@contextlib.contextmanager
+def isolated_process_env():
+    """Run a block whose writes to the process environment cannot outlive the block.
+
+    Both halves run on the way out, and in this order: restore the names the
+    snapshot has, then delete the names it does not. One snapshot of the whole
+    environment drives both, so a block that invents a variable is as bounded as
+    one that overwrites `PATH`.
+    """
+    snapshot = snapshot_process_env()
+    try:
+        yield
+    finally:
+        restore_process_env(snapshot)
+        prune_process_env_extras(snapshot)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_environment():
+    """Every node in this file hands back the process environment it was given.
+
+    Nodes here have to control the real `PATH` rather than stub `subprocess.run` —
+    the module docstring's own reason: "a monkeypatched `subprocess.run` could not
+    express" a target the parser rejects, "only confirm the code path ran" — so
+    eight of them prepend a planted scanner to `PATH` through `with_path`, and
+    `test_no_scanner_yields_a_coverage_gap_and_no_number` points it at a directory
+    that does not exist. An assignment like that outlives the node that made it,
+    because `os.environ` is the pytest process and not the test. That is how #2872
+    was filed: that last node put `PATH` at a nonexistent directory and never put
+    it back, so the nodes scheduled after it in the same process woke up unable to
+    find `git`
+    (`test_workers_router.py::test_the_override_file_stays_untracked`,
+    `FileNotFoundError: 'git'`) or `jq`
+    (`test_workers_router.py::test_the_published_filter_names_a_starving_source_and_says_nothing_otherwise`,
+    "this box has none" — it does), and the one node in THIS file that runs a real
+    subprocess, `test_the_observed_scan_creates_the_directory_the_job_card_cites`,
+    saw its three planted scanner sites come back unscanned and reported a
+    coverage gap instead of an advisory count. Seven failures across three files,
+    one leaked assignment, none of them caused by the round whose gate found them.
+
+    Restoring rather than forbidding: converting the two writer sites to
+    `monkeypatch.setenv` would stop today's leak and leave the next writer free to
+    repeat it, and `with_path` cannot take `monkeypatch` without its eight call
+    sites taking it as an argument. This guard holds for whoever writes the
+    environment here next.
+
+    Scope: the whole environment, not a list of names. The first version of this
+    fixture snapshotted a three-name tuple, and the review rung refused it — a node
+    inventing a name outside that tuple would still have leaked, which is the same
+    class of bug the fixture exists to stop. `dict(os.environ)` plus
+    `prune_process_env_extras`, which deletes every name the snapshot lacks, needs
+    no list kept in step with the file, so the promise above holds for a name
+    nobody has written yet.
+    """
+    with isolated_process_env():
+        yield
 
 
 def write_dist(root: Path, name: str, version: str) -> Path:
@@ -595,8 +713,19 @@ def test_the_report_names_its_scope_so_a_reader_can_tell_which_box_it_describes(
 def test_no_scanner_yields_a_coverage_gap_and_no_number(box):
     """The #688 rule, at the inventory's own seam.
 
-    conftest strips `PATH`, so a test run never has the scanner and this is the
-    every-night state of a task run with a minimal PATH. Null, never zero — the
+    This node removes the scanner from its own reach, and the removal is its own:
+    `tests/conftest.py` assigns no `PATH` anywhere (checked at `d07746d0`, and the
+    assertion worth trusting is about the harness, not about a value), so the
+    fixture hands this node whatever `PATH` the invoking shell had — on this box
+    `/usr/local/bin:/usr/bin`, which is where `git`, `jq` and `python3` live, and
+    which is why one un-restored write here broke nodes two files away. Pointing
+    that PATH at a directory that does not exist is what makes the instrument
+    missing here — not the harness, and not an empty PATH to begin with. (An
+    earlier version of this docstring credited conftest with stripping `PATH`. It
+    is a false claim about a mechanism, it is the reason the assignment below was
+    left unrestored, and that unrestored assignment is #2872: seven failures in
+    three files, from a node that could not find `git` two files away. The fixture
+    now puts `PATH` back whatever this node does with it.) Null, never zero — the
     bug #688 was filed about was a zero that meant "instrument missing", and this
     is the same instrument with a second place to fail.
     """
@@ -661,3 +790,154 @@ def test_the_observed_scan_creates_the_directory_the_job_card_cites(box, tmp_pat
         f"a synthesised target sits outside the cited directory: {targets}")
     assert (out / inv.MERGED_SITE / "requirements.txt").is_file(), (
         "the merged scan input the row promises is not under the cited directory")
+
+
+def test_the_snapshot_deletes_a_name_that_was_absent_rather_than_blanking_it():
+    """The restore half of `_isolate_process_environment`, on its own terms.
+
+    A snapshot that saved `None` for an absent name must put back *absence*. A
+    blank string is not absence here: `supply_chain` reads
+    `LLOYD_OSV_API_URL` with `.get(...).strip()` and then `isdigit()`s it, so an
+    empty value turns the "no override" path into "override with no digits" —
+    a different error, at a different line, than the one a node was testing.
+    """
+    absent = "LLOYD_TEST_NAME_ABSENT_ON_PURPOSE"
+    assert absent not in os.environ, "a node earlier in this file leaked the name"
+    sentinel_before = os.environ.get(sc.OSV_API_URL_ENV)
+    snapshot = {absent: None, sc.OSV_API_URL_ENV: sentinel_before}
+    os.environ[absent] = "written by a node that must not keep it"
+    os.environ[sc.OSV_API_URL_ENV] = "http://127.0.0.1:1/an-offline-override"
+    try:
+        restore_process_env(snapshot)
+        assert absent not in os.environ, \
+            "an absent name came back as an empty string instead of staying absent"
+        assert os.environ.get(sc.OSV_API_URL_ENV) == sentinel_before, \
+            "a name that had a value was deleted instead of restored"
+    finally:
+        os.environ.pop(absent, None)
+
+
+def run_nodes_in_one_process(nodes, expected_summary):
+    """Run these node ids, in this order, in one fresh pytest process; pin the summary.
+
+    Both #2872 pins need the same shape, and every part of the shape is load-bearing.
+    One subprocess, because `os.environ` is one process and the leak is a hand-off
+    from one node to the next — nothing inside a single test can see it. Explicit node
+    ids in a chosen order, because the order is the cause and a pin must be able to
+    force it. The gate's own marker selection, so the pin measures what the gate
+    measures. And a summary line, not just an exit code: exit 0 is also what a run
+    that never RAN a node gives you — a node given a `live_vault` or
+    `fault_injection` marker is deselected, the count comes back short, and the pin
+    goes on passing while covering nothing. Clause 4 of #2872 is precisely a ban on
+    reaching green that way, so the expected count is asserted and no `skipped`,
+    `xfailed` or `deselected` may appear in the child's output.
+    """
+    root = Path(__file__).resolve().parents[1]
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "--no-header", "-rs",
+                        "-p", "no:cacheprovider", "-m",
+                        "not live_vault and not fault_injection", *nodes],
+                       cwd=root, capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, (
+        "a node in tests/test_supply_chain_inventory.py leaked the process "
+        f"environment again — {expected_summary} expected, got:\n{r.stdout[-3000:]}")
+    assert expected_summary in r.stdout, (
+        f"the selection did not run all {len(nodes)} nodes — expected "
+        f"'{expected_summary}', got:\n{r.stdout[-3000:]}")
+    for word in ("deselected", "skipped", "xfailed"):
+        assert word not in r.stdout, (
+            f"the {len(nodes)}-node selection reported {word!r}, so it is no longer "
+            f"covering the leak it was written for:\n{r.stdout[-3000:]}")
+
+
+def test_the_clobbering_nodes_leave_the_process_environment_to_the_next_file():
+    """#2872, end to end: the four nodes in the order that gate ran them.
+
+    The leak only shows as a failure in another file, so the pin has to cross that
+    boundary too — inside one process, because `os.environ` is one process. Node ids
+    are passed explicitly and in definition order, with no `-n`, so xdist stays out of
+    it and every node here shares one interpreter, and the selection is the gate's
+    own. Before the guard the run exited non-zero on all four: the scanner-less node
+    took `PATH` with it, so the node beside it in this file found its three planted
+    scanner sites unscanned and reported a coverage gap, and two files away
+    `test_workers_router.py` could not find `git` or `jq`.
+    """
+    run_nodes_in_one_process([
+        "tests/test_supply_chain_inventory.py::test_no_scanner_yields_a_coverage_gap_and_no_number",
+        "tests/test_supply_chain_inventory.py::test_the_observed_scan_creates_the_directory_the_job_card_cites",
+        "tests/test_workers_router.py::test_the_override_file_stays_untracked",
+        "tests/test_workers_router.py::test_the_published_filter_names_a_starving_source_and_says_nothing_otherwise",
+    ], "4 passed")
+
+
+#: A name that no list, comment or fixture in this file could have been written to
+#: expect. That absence is the whole point: the guard either deletes it because it
+#: snapshots everything, or leaves it behind because it does not.
+UNLISTED_ENV_PROBE = "LLOYD_2872_ENV_PROBE_NOT_NAMED_IN_ANY_LIST"
+PROBE_VALUE = "written and not restored, on purpose"
+
+
+def test_the_prune_deletes_an_invented_name_and_keeps_the_rest():
+    """`prune_process_env_extras` on its own terms: the extra goes, the rest stays.
+
+    The direct pin of the half #2872's review said was missing. A snapshot taken
+    before the plant, pruned after it, must end with the environment byte for byte as
+    it was — which is also the assertion that stops the prune from being "clear
+    anything that looks temporary" and making the node below it run without `PATH`.
+    """
+    snapshot = snapshot_process_env()
+    os.environ[UNLISTED_ENV_PROBE] = PROBE_VALUE
+    assert os.environ[UNLISTED_ENV_PROBE] == PROBE_VALUE, "the plant did not take"
+    prune_process_env_extras(snapshot)
+    assert UNLISTED_ENV_PROBE not in os.environ, (
+        "an invented environment name survived the prune, so the fixture's "
+        "snapshot is not the whole environment and a fourth name still leaks")
+    assert dict(os.environ) == snapshot, (
+        "the prune deleted names the snapshot had, not just the ones it lacked")
+
+
+def test_an_unlisted_environment_name_is_written_here_and_not_cleaned_up():
+    """Half one of the hand-off: write a name, walk away, as the #2872 node did.
+
+    Deliberately no pop, no `finally`, no `monkeypatch`: the node has to behave the
+    way `test_no_scanner_yields_a_coverage_gap_and_no_number` behaved before this
+    fixture existed, because that behaviour — not a write to a name someone thought
+    to list — is what the guard has to survive. Its own assertion only proves the
+    write took effect; the coverage is the next node's.
+    """
+    os.environ[UNLISTED_ENV_PROBE] = PROBE_VALUE
+    assert os.environ[UNLISTED_ENV_PROBE] == PROBE_VALUE, "the plant did not take"
+
+
+def test_the_unlisted_name_the_node_above_wrote_is_not_in_the_environment():
+    """Half two: the name did not reach this node.
+
+    Alone, this passes vacuously, because nothing planted it — it only bites after
+    its planter. Definition order gives a file-level run that pairing, and the gate's
+    own distribution preserves it (`rung_tests` adds `--dist loadfile`, one file's
+    nodes on one worker in order), and
+    `test_an_unlisted_name_written_by_one_node_does_not_reach_the_next` forces the
+    pair in a process of its own so neither of those has to be trusted.
+    """
+    assert UNLISTED_ENV_PROBE not in os.environ, (
+        "a node in this file handed the rest of the suite an environment name it "
+        "invented — the autouse fixture's snapshot did not delete it")
+
+
+def test_an_unlisted_name_written_by_one_node_does_not_reach_the_next():
+    """The allowlist's own failure mode, end to end: planter then receiver, one process.
+
+    The three-name tuple let this through: the planter's name was not one of the
+    three, so the restore never touched it and the node after it found it set. That
+    is not hypothetical here. With `prune_process_env_extras` taken out of the
+    fixture's teardown — the behaviour the tuple had for a name it did not list —
+    this node's own child run reports `1 failed, 1 passed`, and the four guard nodes
+    in this file report `2 failed, 2 passed`: the receiver and this pin, with the
+    planter and the direct prune test passing beside them. Restoring the whole
+    environment is what makes it pass, and running the pair in a child process is
+    what stops the pairing from depending on file order or on a distribution
+    strategy staying as it is today.
+    """
+    run_nodes_in_one_process([
+        "tests/test_supply_chain_inventory.py::test_an_unlisted_environment_name_is_written_here_and_not_cleaned_up",
+        "tests/test_supply_chain_inventory.py::test_the_unlisted_name_the_node_above_wrote_is_not_in_the_environment",
+    ], "2 passed")
