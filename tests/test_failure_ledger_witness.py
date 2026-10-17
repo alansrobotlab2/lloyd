@@ -25,7 +25,7 @@ runs in the default `pytest tests/` the gate's `tests` rung executes. A node beh
 a module-level skip would be a claim with no witness — which is the exact thing
 clause 6 is about.
 
-It ships ten nodes: nine over the vault bytes —
+It ships thirteen nodes: twelve over the vault bytes —
 `test_the_witness_is_a_dated_file_not_the_retired_mirror_path`,
 `test_the_witness_holds_the_two_live_rows_the_clause_quotes`,
 `test_every_witness_row_is_an_error_alert_of_the_quoted_family`,
@@ -34,7 +34,10 @@ It ships ten nodes: nine over the vault bytes —
 `test_the_2228_gate_witness_is_a_dated_sibling_and_the_mirror_is_untouched`,
 `test_the_2383_extract_is_a_dated_file_reproducing_the_unadjudicated_baseline`,
 `test_the_2383_gate_witness_is_a_dated_sibling_because_gate_json_was_taken`,
-`test_the_2523_red_tree_extract_reproduces_the_two_roundless_items` — plus
+`test_the_2523_red_tree_extract_reproduces_the_two_roundless_items`,
+`test_the_2444_promotions_extract_reproduces_the_at_the_max_ratio`,
+`test_every_dated_promotions_extract_is_committed_and_parses` and
+`test_the_2759_promotions_extract_reproduces_its_published_lag_percentiles` — plus
 `test_the_docstring_names_every_node_this_file_ships`, the rail that re-checks this
 paragraph against the module's own bytes on every run.
 
@@ -626,8 +629,8 @@ def test_the_docstring_names_every_node_this_file_ships():
         f"the module docstring advertises {sorted(advertised - shipped)} that this "
         f"file does not ship; this file ships {sorted(shipped - advertised)} the "
         "docstring never names")
-    assert len(shipped) == 11, (
-        "ten witness nodes over the vault bytes plus this rail. The count is spelled "
+    assert len(shipped) == 13, (
+        "twelve witness nodes over the vault bytes plus this rail. The count is spelled "
         "out so that adding a node has to come back here and re-read the "
         "paragraph, instead of leaving it a sentence behind")
 
@@ -714,3 +717,311 @@ def test_the_2444_promotions_extract_reproduces_the_at_the_max_ratio():
                    f"arch_review_rows {arch}"):
         assert quoted in md, (
             f"the note quotes figures this extract does not print: {quoted!r}")
+
+
+def _percentile(sorted_values: list[float], q: float) -> float:
+    """Linear interpolation at `i = (n - 1) * q` — the method the extract was built with.
+
+    Not `statistics.quantiles`, and not nearest-rank: the header publishes values only
+    THIS method reproduces, and the whole value of re-deriving a published figure is
+    that a mismatch means the bytes changed rather than that the test picked a different
+    convention. Checked against the committed extract: all three percentiles match to
+    the last digit.
+    """
+    i = (len(sorted_values) - 1) * q
+    lo = int(i)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (i - lo)
+
+
+
+# ── #2878: every dated promotions extract, not just the one already pinned ─────
+#
+#: A FLOOR, not an equality. Extracts are only ever added to this directory (each
+#: owed entry cuts a dated sibling and nothing in the loop deletes a witness), so a
+#: floor cannot rot the way `== 7` would, and it is still the assertion that turns
+#: the suite red the first time one goes missing — which is what the six unpinned
+#: ones never did. 7 is the count of committed dated promotions extracts as at the
+#: commit this node was written.
+_MIN_PROMOTION_EXTRACTS = 7
+
+#: The dated-sibling form `_witness_artifact` emits for a source whose basename is
+#: retired. Group 1 is the item id, which is what the one-per-item check below
+#: counts — and it is counted out of this pattern, never out of a list of ids, so a
+#: node that named its subjects would stop being a property of the directory.
+_PROMOTION_EXTRACT_NAME = re.compile(
+    r"^\d{4}-\d{2}-\d{2}\.(\d{4})-[\w.\-+]+-promotions\.jsonl$")
+
+
+def _own_source_of(node_name: str) -> str:
+    """The bytes of one node in this file, docstring included, cut from `def` to `def`.
+
+    Needed because the property node below has to prove it does not name the items it
+    enumerates, and the file as a whole necessarily does name some: this module's
+    other nodes are each about one item and say so, in their globs and their
+    docstrings. The claim that survives that is the one about the node that claims to
+    enumerate, so that is the span the scan reads.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    start = src.index(f"def {node_name}(")
+    rest = src[start + 1:]
+    end = rest.index("\ndef ") if "\ndef " in rest else len(rest)
+    return src[start:start + 1 + end]
+
+
+def test_every_dated_promotions_extract_is_committed_and_parses():
+    """Every dated promotions extract in the witness directory is tracked, sized and parseable.
+
+    #2878's premise, measured the day it was filed: seven dated promotions extracts
+    are committed under `backlog/data/`, and exactly ONE was pinned — the node above,
+    which globs for its own item alone. The other six could have been deleted from the
+    vault tomorrow and this file would have stayed green, which is the same failure the
+    module docstring rails against one level up: a figure with no check under it is a
+    figure that quietly stops being true. This node is a property of the directory, so
+    the eighth extract is covered the day it lands and nothing here has to be edited
+    again to keep the guard whole.
+
+    What is asserted per hit, and what is deliberately NOT:
+
+    - The name is the dated-sibling form `_witness_artifact` emits, and AT MOST ONE
+      file exists per item id — two extracts for one item is two candidate witnesses
+      for one figure, which is the drift this directory's naming scheme exists to avoid.
+    - The file is TRACKED (`git ls-files --error-unmatch`), not merely present. Same
+      reason #2523's node goes one subprocess further than `is_file()`: an uncommitted
+      extract is a scratch file, and history is the only thing that outlives the fold
+      of the live store the extract was cut from.
+    - It fits under `WITNESS_MAX_BYTES` — the ceiling an owed entry may ask for. The
+      largest extract today is 870,849 bytes of it; the smallest is 1,509.
+    - Every non-empty line parses as JSON.
+
+    Two assertions the item asked for that this node does NOT make, because they are
+    false on today's bytes and a guard that is red on arrival guards nothing: only one
+    of the seven begins with a header row carrying `measured_at`/`built_at` (the other
+    six begin with a raw ledger row), and two of the seven have no `.md` sibling. So
+    the parseable-line property is the one that holds for all seven, stated as the
+    item's own fallback: "assert instead that every non-empty line parses as JSON".
+
+    The item ids are discovered by the glob and by nothing else. This node's own bytes
+    are scanned for them below, and no per-id allowlist appears: a node that listed its
+    subjects would pass today and go silently stale the day a witness is added, which
+    is precisely how the six unpinned extracts stayed unpinned.
+    """
+    from scripts.automod import backlog as B
+
+    data = paths.VAULT_ROOT / "backlog" / "data"
+    hits = sorted(data.glob("*.????-*promotions.jsonl"))
+    assert len(hits) >= _MIN_PROMOTION_EXTRACTS, (
+        f"{len(hits)} dated promotions extracts are on disk, fewer than the "
+        f"{_MIN_PROMOTION_EXTRACTS} committed as at this node's writing: a witness "
+        "someone owes has left the tree, and only one of the six unpinned ones was "
+        "ever checked for being there")
+    # The store this file may never read is a sibling of the vault, and this is the
+    # node that walks a directory named after promotions. Say which root it is in.
+    assert data.resolve().is_relative_to(paths.VAULT_ROOT.resolve()), (
+        f"{data} is not inside the vault, so the `git ls-files` below is grading some "
+        "other tree")
+
+    ids: dict[str, list[str]] = {}
+    for p in hits:
+        m = _PROMOTION_EXTRACT_NAME.match(p.name)
+        assert m, (
+            f"{p.name} matches the promotions-extract glob but not the dated-sibling "
+            "form `_witness_artifact` emits, so it is either misnamed or a scratch "
+            "file wearing a promotions suffix")
+        ids.setdefault(m.group(1), []).append(p.name)
+    dupes = {k: v for k, v in sorted(ids.items()) if len(v) > 1}
+    assert not dupes, (
+        f"{dupes} — an item with more than one dated promotions extract leaves a later "
+        "reader to choose between two witnesses of the same figure")
+
+    # The enumeration is a property, not a roster. Every id discovered above must be
+    # ABSENT from this node's own bytes; the day someone writes one in, the node stops
+    # enumerating the directory and starts asserting a list of it.
+    own = _own_source_of("test_every_dated_promotions_extract_is_committed_and_parses")
+    spelled = sorted(i for i in ids if i in own)
+    assert not spelled, (
+        f"this node now spells {spelled}, so it is checking a list of items rather "
+        "than a property of the directory — which is how the six unpinned extracts "
+        "stayed unpinned: the one node that looked named only its own subject")
+
+    for p in hits:
+        rel = str(p.relative_to(paths.VAULT_ROOT))
+        tracked = subprocess.run(
+            ["git", "-C", str(paths.VAULT_ROOT), "ls-files", "--error-unmatch", rel],
+            capture_output=True, text=True)
+        assert tracked.returncode == 0, (
+            f"{p.name} is on disk but not tracked: `git ls-files --error-unmatch` said "
+            f"{tracked.stderr.strip() or 'nothing'}, and an uncommitted extract is a "
+            "scratch file rather than bytes with history")
+        raw = p.read_bytes()
+        assert len(raw) == p.stat().st_size < B.WITNESS_MAX_BYTES, (
+            f"{p.name} is {len(raw):,} bytes against the "
+            f"{B.WITNESS_MAX_BYTES:,}-byte ceiling an owed entry may ask a witness to "
+            "fit under")
+        bad = [(i + 1, ln) for i, ln in enumerate(raw.decode("utf-8").splitlines())
+               if ln.strip() and not _parses_as_json(ln)]
+        assert not bad, (
+            f"{p.name} line {bad[0][0]} is not JSON: {bad[0][1][:120]!r} — a truncated "
+            "row is the failure mode of a hand-copied extract, and the only one nobody "
+            "sees by eye in 1,742 lines")
+
+
+def _parses_as_json(line: str) -> bool:
+    try:
+        json.loads(line)
+    except ValueError:
+        return False
+    return True
+
+
+def test_the_2759_promotions_extract_reproduces_its_published_lag_percentiles():
+    """#2759 owed 2: its published gate→promote lag figures, recomputed from the extract's bytes.
+
+    The extract's first line is a header that PUBLISHES a `published` block — n, the
+    percentiles, the buckets, the ceiling — and until this node nothing in the repo had
+    re-derived one of them. Those figures therefore had the status of the one this
+    module exists to rail against (#2079 clause 6, #2385's red-tree count): quoted from
+    the note, never measured against the bytes the note was cut from. A reader who
+    wanted to check the p99 had to do the arithmetic by hand.
+
+    Everything comes out of this file's own committed bytes, including both
+    thresholds, so no literal appears that could disagree with the artifact:
+
+    - population: the `kind: "round"` rows carrying both `gate_ts` and `promoted_ts`;
+      lag = `promoted_ts - gate_ts`, the interval the item is named for. 1176 of the
+      1676 round rows pair, the header's own `n_joined` says 1176, and one assertion
+      ties the three together so a re-cut cannot move one of them alone.
+    - percentiles by linear interpolation at `i = (n - 1) * q`. Stated because the
+      method is load-bearing: nearest-rank returns different numbers for p90 and p99 on
+      this population and would go red against a header that is correct.
+    - `over_bucket` and `over_ceiling` count lags STRICTLY over `published.bucket_s`
+      (600 s) and `published.ceiling_s` (4500 s), both read from the header. The
+      ceiling is cross-checked against the header's `idle_hard_max_wait_s` too, because
+      a second field carrying the same number is the only thing in these bytes that says
+      the ceiling came from the wait policy rather than from whoever typed the row.
+    - the WHOLE published block is re-derived and its key set pinned, so a figure a
+      future re-cut adds cannot join the block without something re-computing it.
+    - the file's shape: 1742 non-empty lines = 1676 round rows + 65 moved rows + 1
+      header, and exactly 65 lines contain `live HEAD moved`, matching
+      `moved_row_count`. That is the extract's own internal arithmetic; if it is ever
+      re-cut and the header updated without the rows, this is the assertion that says so.
+
+    271,722 bytes, read once for the header and once for the rows — the price of the
+    figures coming from disk rather than from this paragraph. The exact float values are
+    re-derived and deliberately NOT restated here, so this prose cannot rot; the rounded
+    figures, for orientation only, are p50 19.3 s, p90 163.3 s, p99 2040.5 s, max
+    3194.2 s, min −2.5 s (yes, negative: one promotion was stamped a moment before its
+    own gate finished, and `negative: 1` is published for it and re-derived here).
+
+    What this node does NOT do is read what the header points at. The header names a
+    `snapshot_dir` holding the store's state at cut time, under the runtime data root:
+    outside the commit, removable by a cleaner, and a node that asserted it exists would
+    be a guard reading its own missing input — the same reason the #2523 node refuses
+    this file to name the live store at all, a scan that re-reads this file's bytes on
+    every run and so covers the two nodes added here as well. The path the header names
+    is checked for the one property checkable from here: that this file never spells it.
+    """
+    from scripts.automod import backlog as B
+
+    data = paths.VAULT_ROOT / "backlog" / "data"
+    lines_of = {p: [l for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+                for p in sorted(data.glob("*.????-*promotions.jsonl"))}
+    assert len(lines_of) >= _MIN_PROMOTION_EXTRACTS, (
+        f"{len(lines_of)} dated promotions extracts, fewer than "
+        f"{_MIN_PROMOTION_EXTRACTS}: the sibling node names the failure")
+
+    # Which of these is the #2759 one? Discovered, not spelled: it is the one whose
+    # first line is a header carrying a published block, and today exactly one of them
+    # is — the other six begin with a raw ledger row. So the item's number never enters
+    # the selection, and a second extract cut the same way is a real failure here
+    # rather than an arbitrary pick between two.
+    def _published_header(lines: list[str]) -> dict:
+        try:
+            first = json.loads(lines[0])
+        except ValueError:
+            return {}
+        if isinstance(first, dict) and isinstance(first.get("published"), dict):
+            return first
+        return {}
+
+    with_published = [p for p, ls in lines_of.items() if _published_header(ls)]
+    assert len(with_published) == 1, (
+        f"{len(with_published)} of these extracts carry a published block, not one: "
+        f"{[p.name for p in with_published]} — the figures below belong to a single "
+        "artifact and this node can no longer say which")
+    witness = with_published[0]
+    assert witness.resolve().is_relative_to(paths.VAULT_ROOT.resolve()), (
+        f"{witness} is not inside the vault, so its figures are not committed bytes")
+
+    lines = lines_of[witness]
+    rows = [json.loads(l) for l in lines]
+    header = _published_header(lines)
+    pub = header["published"]
+
+    # Thresholds from the artifact, never a literal: both are inputs to the two counts.
+    bucket, ceiling = pub["bucket_s"], pub["ceiling_s"]
+    assert bucket > 0 and ceiling > bucket, (
+        f"the published thresholds are bucket_s={bucket} ceiling_s={ceiling}; both "
+        "counts below are 'strictly over', which needs them positive and ordered")
+    assert ceiling == header["idle_hard_max_wait_s"], (
+        f"published.ceiling_s {ceiling} is not this extract's own idle_hard_max_wait_s "
+        f"{header['idle_hard_max_wait_s']}, so the ceiling the lags were bucketed "
+        "against is no longer the ceiling the wait policy had")
+
+    lag = sorted(r["promoted_ts"] - r["gate_ts"] for r in rows
+                 if r.get("kind") == "round"
+                 and r.get("promoted_ts") is not None
+                 and r.get("gate_ts") is not None)
+    assert len(lag) == pub["n"] == header["n_joined"], (
+        f"{len(lag)} round rows pair here against published.n {pub['n']} and the "
+        f"header's n_joined {header['n_joined']} — the population these percentiles are "
+        "over is not the one the header says it published them over")
+    assert pub["n"] > 0, "a published percentile over an empty population"
+
+    derived = {
+        "n": len(lag),
+        "p50": _percentile(lag, 0.50),
+        "p90": _percentile(lag, 0.90),
+        "p99": _percentile(lag, 0.99),
+        "max": lag[-1],
+        "min": lag[0],
+        "over_bucket": sum(1 for x in lag if x > bucket),
+        "over_ceiling": sum(1 for x in lag if x > ceiling),
+        "negative": sum(1 for x in lag if x < 0),
+    }
+    unaccounted = sorted(set(pub) - set(derived) - {"bucket_s", "ceiling_s"})
+    assert not unaccounted, (
+        f"the header publishes {unaccounted}, which nothing here recomputes — a figure "
+        "inside the artifact that no test derives is a figure a re-cut can change "
+        "without anything going red")
+    mismatched = {k: f"published {pub[k]!r}, derived {v!r}"
+                  for k, v in derived.items() if v != pub[k]}
+    assert not mismatched, (
+        "the header publishes figures these bytes do not produce: " + "; ".join(
+            f"{k}: {m}" for k, m in sorted(mismatched.items())))
+
+    assert len(lines) == header["distinct_round_ids"] + header["moved_row_count"] + 1, (
+        f"{len(lines)} non-empty lines, but the header describes "
+        f"{header['distinct_round_ids']} round rows + {header['moved_row_count']} moved "
+        "rows + 1 header — the extract's own arithmetic no longer adds up, which is what "
+        "a re-cut that updated one field and not the other looks like")
+    moved = sum(1 for l in lines if "live HEAD moved" in l)
+    assert moved == header["moved_row_count"], (
+        f"{moved} lines say 'live HEAD moved' against a header counting "
+        f"{header['moved_row_count']}: the rows carried over verbatim and the number "
+        "published for them disagree")
+
+    assert len(witness.read_bytes()) < B.WITNESS_MAX_BYTES, (
+        f"{witness.name} is over the ceiling a witness may be cut to, and this node "
+        "parses it twice")
+
+    snap = str(header.get("snapshot_dir") or "")
+    assert snap, (
+        "the header no longer names the snapshot it was cut from, so the check below "
+        "has nothing to keep away from and a reader cannot tell that these bytes came "
+        "from somewhere else")
+    assert snap not in Path(__file__).read_text(encoding="utf-8"), (
+        f"this file now spells the path the extract names as its source ({snap!r}). "
+        "That is runtime data outside the commit: a cleaner can remove it, and a node "
+        "that reads it — or asserts it exists — is a guard reading its own missing "
+        "input")
