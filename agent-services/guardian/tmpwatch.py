@@ -35,6 +35,9 @@ CLEAR_FRACTION = 0.70
 #: `du --inodes` of /tmp is a million stats, which is not a guardian tick.
 SCAN_LIMIT = 300_000
 TOP_N = 8
+#: Field 1 of this file is seconds since boot. A plain read keeps the module
+#: stdlib-only — `uptime -s` would cost a guardian tick a subprocess.
+UPTIME_PATH = "/proc/uptime"
 
 ALERT_TITLE = "/tmp is running out of inodes"
 
@@ -67,6 +70,35 @@ def measure(path: str = PATH, statvfs=os.statvfs) -> Reading:
                    inodes_used=int(st.f_files - st.f_ffree),
                    bytes_total=int(st.f_blocks * st.f_frsize),
                    bytes_used=int((st.f_blocks - st.f_bfree) * st.f_frsize))
+
+
+def read_boot_elapsed(path: str = UPTIME_PATH) -> float | None:
+    """Seconds since boot, or None when they cannot be read.
+
+    Never raises. This number exists to bound the reading the alert reports —
+    `/tmp`'s inode budget is a tmpfs budget, so the boot it counts from is the
+    same event that zeroes that counter — and losing the bound is better than
+    losing the alarm, which is the failure an exception here would cause."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return float(fh.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def format_elapsed(seconds: float) -> str:
+    """`30300` -> `8h25m`. Under a minute reads in seconds, a day and up in
+    days and hours, so a figure on the alert line never runs past it."""
+    secs = int(seconds)
+    days, rem = divmod(secs, 86400)
+    hours, minutes = divmod(rem // 60, 60)
+    if days:
+        return f"{days}d{hours:02d}h"
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if secs < 60:
+        return f"{secs}s"
+    return f"{minutes}m"
 
 
 def level_for(fraction: float) -> str | None:
@@ -129,8 +161,26 @@ class TmpWatch:
     quiet until the reading falls below `CLEAR_FRACTION`."""
     path: str = PATH
     statvfs: object = os.statvfs
+    #: Where the elapsed-since-boot that bounds the reading comes from. A
+    #: caller (a test, or a future probe) may hand any callable returning a
+    #: float of seconds; the default reads this box's `/proc/uptime`.
+    boot_elapsed: object = read_boot_elapsed
     open_level: str | None = None
     last: Reading | None = field(default=None, repr=False)
+
+    def boot_elapsed_label(self) -> str | None:
+        """The elapsed-since-boot as `8h25m`, or None if no number is to be had.
+
+        Swallows whatever the source can do — `/proc/uptime` absent, a field
+        that will not parse, a callable that raises — because this figure only
+        annotates the alert. `Guardian.check_tmp` does catch an exception out of
+        `tick()`, but only logs it and returns, so a raise here would read as a
+        silently missing alarm."""
+        try:
+            elapsed = self.boot_elapsed()
+            return None if elapsed is None else format_elapsed(float(elapsed))
+        except Exception:  # noqa: BLE001 — the alarm outranks its annotation
+            return None
 
     def tick(self) -> tuple[str, str | None, str]:
         """`(action, level, body)`; action is `alert`, `resolve` or `none`."""
@@ -148,11 +198,23 @@ class TmpWatch:
         return "none", level, ""
 
     def describe(self, r: Reading) -> str:
+        """The whole alert body. This is the only surface a reader sees:
+        `guardian.check_tmp` posts this string verbatim to `Notify.alert`, so
+        the bound on the number belongs here and nowhere else."""
         top, truncated = top_consumers(self.path)
+        since = self.boot_elapsed_label()
         lines = [
             f"{r.path}: {r.inodes_used:,} of {r.inodes_total:,} inodes used "
             f"({r.inode_fraction:.0%}); {r.bytes_used / 2**30:.1f} of "
-            f"{r.bytes_total / 2**30:.0f} GiB ({r.byte_fraction:.0%}).",
+            f"{r.bytes_total / 2**30:.0f} GiB ({r.byte_fraction:.0%})."
+            + (f" {since} since this boot." if since else ""),
+            # The one sentence that keeps the next reader from projecting this
+            # counter forward: it is uptime-bounded, and the 2026-10-16 note
+            # asserted "exhaustion in days, >= ~3,290 inodes/hour" off its bare
+            # percentage while that day's four firings moved +781 in >= 8 h.
+            f"{PATH} is a tmpfs, so that inode counter is bounded by uptime: a "
+            "reboot clears it to zero, which makes this percentage what has "
+            "accumulated since the last boot rather than a rate.",
             "At 100% every mkdir under /tmp fails with ENOSPC while `df -h` looks "
             "healthy — the state both tree deletions (09-22, 09-29) happened in.",
             "",
