@@ -107,6 +107,7 @@ import shutil
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger("lloyd-builtin-resource-ceiling")
@@ -172,9 +173,69 @@ CGROUP_ROOT = "/sys/fs/cgroup"
 
 #: Where a call's counters are mirrored to. Under `~/lloyd-data`, never the checkout: a
 #: round must not create runtime files in the tree that ships code.
-REPORT_DIR = Path(os.environ.get("LLOYD_DATA",
-                                 str(Path.home() / "lloyd-data"))) / \
-    "_pipeline" / "ceiling"
+_DATA_ROOT = Path(os.environ.get("LLOYD_DATA", str(Path.home() / "lloyd-data")))
+REPORT_DIR = _DATA_ROOT / "_pipeline" / "ceiling"
+
+#: How long a row is kept. ONE number, read by both owners of the bound: this module's
+#: :func:`_prune_samples` applies it from inside the append, and
+#: `scripts/groundskeeper/retention-sweep.py` imports it as
+#: `CEILING_SAMPLES_MAX_AGE_DAYS` for its own prune of the same file. The second owner
+#: exists because the first only runs when a Bash call happens: a box whose MCP service is
+#: down, or one that simply stops running Bash, keeps whatever the file had reached and
+#: says nothing about it anywhere — a bound that tightens only under load is a side effect
+#: of load, not a bound. The two owners share this constant rather than each holding a
+#: number, because a row store pruned on two horizons is a distribution whose window
+#: depends on which of them last ran, and the window is the only thing the p99 means.
+#:
+#: 90 days rather than the sweep's uniform 30, because the horizon must sit outside the
+#: window the rows exist for: #2578 owes a p99 over >=7 days of Bash children that includes
+#: one full `pytest tests/` run, and a horizon that empties the evidence before it can be
+#: read is not bounding a store, it is deleting it.
+SAMPLE_MAX_AGE_DAYS = 90
+
+
+def samples_path(data_root: "str | os.PathLike[str] | None" = None) -> Path:
+    """Where the durable per-call rows live, for a caller that knows a different data root.
+
+    The sweep needs the path rather than the constant below because it resolves its own
+    `DATA_ROOT` by three rules (an env override, then the tree, then home) and then redirects
+    it under a test; a sweep that pruned whatever root this module happened to import into
+    would be pruning a tree its own report does not name — the mistake
+    `tests/test_retention_sweep.py`'s unredirected-paths guard exists to catch. Same layout as
+    `REPORT_DIR`, one file instead of a directory, and the sweep reaches the store through
+    this function rather than restating the layout.
+    """
+    root = _DATA_ROOT if data_root is None else Path(data_root)
+    return root / "_pipeline" / "ceiling-samples.jsonl"
+
+
+#: The durable per-call sample store: **one JSON row per completed Bash call**, carrying
+#: `ts, rc, mem_peak, mem_max, pids_peak, pids_max, mem_frac, oom_kill_delta, source, unit`.
+#: This is the record, not a mirror of it. `finish()`'s `logger.info` line is a convenience,
+#: and the reason that used to be given for deleting the report — that "the same line in the
+#: already-rotated MCP log carries the identical numbers" — was false on this box: `grep -c
+#: "resource ceiling sample"` returns 0 across `logs/mcp.log`, its ten rotations and
+#: `logs/lloyd-agent-worker.log`, because this logger reaches no file at all (that file is
+#: uvicorn access lines). So the only thing a call left behind was the `.report` of a spawn
+#: that never reached `finish` — 100 unread files across 2026-10-12→17, against 429 Bash calls
+#: counted in the 25 newest session stores — and the peak distribution #2578's owed entry asks
+#: a p99 of did not exist.
+#:
+#: `source` is what keeps a row honest about how it was measured: `"scope"` or
+#: `"scope+report"` means the scope's own cgroup files answered `settle`'s final read;
+#: `"report"` means systemd had already collected the scope and the sampler's mirrored
+#: snapshot is all there is; `"none"` means neither arrived, so the row is a timestamp and an
+#: rc about a call whose consumption is unknown — a p99 taken over a store that contains those
+#: is a number about nothing unless the reader filters on this field, which is why `status()`
+#: reports `sample_unmeasured` beside `sample_rows`. `unit` lets a reader prove one row per
+#: call instead of one row per some multiple of calls.
+#:
+#: Bounded twice, on one horizon: :func:`_prune_samples` from inside the append, and the
+#: daily `scripts/groundskeeper/retention-sweep.py` run, whose store this is now — its
+#: `CEILING_SAMPLES_MAX_AGE_DAYS` IS the `SAMPLE_MAX_AGE_DAYS` above, imported rather than
+#: copied, and it reaches this file through :func:`samples_path` rather than by restating
+#: the layout. That pair is what licenses one row per call.
+SAMPLE_STORE = samples_path()
 
 #: A wall-clock budget on the ceiling's own nodes, so "completed" can never be reported
 #: without "and it was not held". Loose against each node's real cost on purpose: what
@@ -697,6 +758,14 @@ class CeilingRun:
         earlier one, and merging takes the larger of each rather than letting either win.
         If the directory is already collected, the report is all there is and the caller
         falls back to the exit status, which is why `finish` reads rc.
+
+        Which of those two witnesses answered is returned as `source`, because #2924 turns
+        this dict into a durable row and a peak is only as good as the read that produced
+        it: `"scope"` means the directory was still there and this function read it,
+        `"scope+report"` means both answered and `_higher_of` merged them, `"report"` means
+        systemd had already collected the scope and every number came from the sampler's
+        mirrored snapshot, and no key at all means neither arrived (a run that never armed
+        reports `{}`, and `finish` records that as `"none"` rather than dropping the row).
         """
         self._stop.set()
         if self._thread is not None:
@@ -704,12 +773,13 @@ class CeilingRun:
         report = _read_report_file(self.report)
         live = _read_counters(self.cgdir) or {}
         if not live:
-            return report
+            return {**report, "source": "report"} if report else {}
         if not report:
-            return live
+            return {**live, "source": "scope"}
         merged = dict(report)
         for key, value in live.items():
             merged[key] = _higher_of(key, report.get(key), value)
+        merged["source"] = "scope+report"
         return merged
 
 
@@ -875,8 +945,153 @@ def ceiling_note(fields: dict[str, str]) -> str | None:
             f"{trip['detail']}")
 
 
-def finish(run: "CeilingRun | None") -> str | None:
-    """Read the verdict for a finished call, record the peaks, and return the line, if any.
+def _int_or_none(value: object) -> "int | None":
+    """A counter as an int, or None when it is absent or `max`.
+
+    Not `_int`: a sample row must distinguish "this peak was never read" from "this peak
+    was zero", and `_int` returns 0 for both, which would let a store full of unmeasured
+    calls pull a p99 toward zero. `max` is unbounded and is not a number either.
+    """
+    try:
+        text = str(value).strip()
+        if not text or text == "max":
+            return None
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mem_frac(mem_peak: "int | None", mem_max: "int | None") -> "float | None":
+    """Peak over cap, the number the p99 re-derivation actually reads. `round`ed to four
+    places so a row is 200 bytes and not a float spew; None when either side is unknown."""
+    if not mem_peak or not mem_max:
+        return None
+    return round(mem_peak / mem_max, 4)
+
+
+def _append_sample(fields: dict[str, str], rc: "int | None", unit: str) -> None:
+    """Append one row to `SAMPLE_STORE`. Never raises.
+
+    Never raises for the reason that governs everything in this module: this sits on the
+    path that reports a command's own exit code, and a store that cannot be written (a full
+    disk, a directory the retention sweep is mid-rewrite on) must cost a sample, not a Bash
+    call. The failure is logged at debug because a store that has been failing for a week is
+    exactly the thing `status()`'s `sample_rows` will show as a flat line, and the debug line
+    is then the only place the reason exists.
+    """
+    mem_peak = _int_or_none(fields.get("mem_peak"))
+    mem_max = _int_or_none(fields.get("mem_max"))
+    row = {
+        # UTC with the offset spelled out, never a naive local stamp: the retention sweep
+        # compares this against a UTC cutoff, and a stamp that only *looks* local is read as
+        # UTC by every later reader — an hour of drift on every row, in whichever direction
+        # this box happens to sit.
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+        "rc": rc,
+        "mem_peak": mem_peak,
+        "mem_max": mem_max,
+        "pids_peak": _int_or_none(fields.get("pids_peak")),
+        "pids_max": _int_or_none(fields.get("pids_max")),
+        "mem_frac": _mem_frac(mem_peak, mem_max),
+        "oom_kill_delta": int(fields.get("oom_kill_delta") or 0),
+        # Which witness measured the peak. "none" is the no-witness case: settle() returns
+        # no key at all when both the scope directory and the mirrored report came back
+        # empty, and a row with `source: "none"` is a call whose consumption is UNKNOWN —
+        # not a call that used zero. A p99 that does not filter on this is a lie.
+        "source": fields.get("source") or "none",
+        "unit": unit,
+    }
+    try:
+        SAMPLE_STORE.parent.mkdir(parents=True, exist_ok=True)
+        _prune_samples()
+        with open(SAMPLE_STORE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError:
+        logger.debug("ceiling sample row could not be written", exc_info=True)
+
+
+def _prune_samples(now: "float | None" = None) -> int:
+    """Drop rows past `SAMPLE_MAX_AGE_DAYS`, at most once a day. Returns how many went.
+
+    This bound is what licenses one row per Bash call at ~250 bytes each: the store prunes itself
+    from its own writer, so it cannot silently become the twentieth unbounded file under
+    `~/lloyd-data` if nothing else ever reaches it. Rate-limited by the file's own mtime rather
+    than run per call — 429 Bash calls across the 25 newest session stores would otherwise mean
+    a full read-modify-rewrite of the store hundreds of times a day to retire rows that age out
+    once a day.
+
+    Age is each row's own `ts`, never the file's mtime, which is always now on a store that is
+    appended forever: a prune keyed on mtime deletes nothing while reporting a clean sweep, the
+    failure `scripts/groundskeeper/retention-sweep.py` names for its turn-row store. Two kinds of
+    row are always kept — one whose `ts` will not parse (#2357: unreadable is not the same thing
+    as old), and the newest row in the file, so a box idle for a quarter still holds a witness of
+    its last call rather than an empty store that reads as "never measured". Rewrite is
+    rename-atomic, because `_sample_rows` and the owed p99 pass read this file while a Bash call
+    is appending to it.
+    """
+    try:
+        stamp = SAMPLE_STORE.stat().st_mtime
+    except OSError:
+        return 0
+    moment = time.time() if now is None else now
+    if moment - stamp <= 86400:
+        return 0
+    rows = _sample_rows()
+    if len(rows) < 2:
+        return 0
+    horizon = moment - SAMPLE_MAX_AGE_DAYS * 86400
+    newest = max((str(r.get("ts", "")) for r in rows), default="")
+    kept: list[dict] = []
+    for r in rows:
+        raw = r.get("ts")
+        when = None
+        if isinstance(raw, str) and raw:
+            try:
+                when = datetime.strptime(raw[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                    tzinfo=timezone.utc).timestamp()
+            except ValueError:
+                when = None
+        if when is None or when > horizon or str(raw) == newest:
+            kept.append(r)
+    dropped = len(rows) - len(kept)
+    if dropped <= 0:
+        os.utime(SAMPLE_STORE, (moment, moment))   # nothing to retire; do not re-check today
+        return 0
+    body = "".join(json.dumps(r, sort_keys=True) + "\n" for r in kept)
+    tmp = SAMPLE_STORE.with_suffix(SAMPLE_STORE.suffix + ".pruning")
+    tmp.write_text(body, encoding="utf-8")
+    os.replace(tmp, SAMPLE_STORE)
+    return dropped
+
+
+def _sample_rows(path: "Path | None" = None) -> list[dict]:
+    """Every parsable row in `SAMPLE_STORE`, oldest first; unreadable tail line skipped.
+
+    The sweep rewrites this file in place, so a read that lands mid-rewrite can see a
+    truncated last line. Skipping it is right here and reporting it is the sweep's job:
+    `status()` uses this to answer "how deep is the sample store", and a half line is not a
+    sample.
+    """
+    target = SAMPLE_STORE if path is None else Path(path)
+    rows: list[dict] = []
+    try:
+        raw = target.read_bytes()
+    except OSError:
+        return rows
+    for line in raw.split(b"\n"):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            rows.append(rec)
+    return rows
+
+
+def finish(run: "CeilingRun | None", rc: "int | None" = None) -> str | None:
+    """Read the verdict for a finished call, append its durable row, return the line, if any.
 
     Called by `_bash` where it already appends `[exit code: N]`, so rc=137 and rc=-9
     arrive with a meaning attached: without this line, 137 is a number, and a future
@@ -884,19 +1099,34 @@ def finish(run: "CeilingRun | None") -> str | None:
     matters — a ceiling that cannot explain itself must not stop a command reporting its
     own exit code.
 
-    Two things happen here beyond the note, both about what this leaves behind. The peak
-    and the cap are logged on **every** call, tripped or not, because the number the item
-    owes after landing is a pair — commands the ceiling killed, and benign commands that
-    came within a fraction of it — and a record kept only of kills can answer only half.
-    And the report file is then unlinked: one file per Bash call, forever, would be a
-    twentieth unbounded store in `~/lloyd-data` for a job whose retention sweep exists to
-    bound nineteen, when the same line in the already-rotated MCP log carries the
-    identical numbers.
+    Two things happen here beyond the note, both about what this leaves behind.
+
+    **One row per call lands in `SAMPLE_STORE`, whatever else happened** — tripped or not,
+    counters or none. The number #2578 owes after landing is a pair (commands the ceiling
+    killed, and benign commands that came within a fraction of the cap), so a record kept
+    only of kills answers only half of it, and a call that yielded no counters still gets a
+    row with `source: "none"` rather than being skipped, because a store that silently drops
+    its own failures cannot be asked how deep it is. `rc` is what lets a peak be read as a
+    fact at all: 4 GiB that exited 0 and 4 GiB that exited 137 are different measurements.
+    A backgrounded spawn passes `rc=None` — its process is still running at this point and
+    its exit code belongs to the task registry — which is honest as "no exit code existed",
+    and `unit` is what joins the row to that task's own log.
+
+    **Then the per-unit report is unlinked**, so `REPORT_DIR` stays a handover between the
+    sampler and this function instead of becoming a second per-call store. The reason this
+    used to give for the unlink — that "the same line in the already-rotated MCP log carries
+    the identical numbers" — was false on this box: `grep -c "resource ceiling sample"` is 0
+    in `logs/mcp.log`, in its ten rotations and in `logs/lloyd-agent-worker.log`, because
+    this logger reaches no file at all (the file is uvicorn access lines). What survived a
+    call was therefore only the `.report` of a spawn that never got here — 100 unread files
+    across 2026-10-12→17 — which is why the JSONL row, not the log line, is the record now.
+    The line below stays for whoever is tailing.
     """
     fields = run.settle() if run is not None else {}
     if run is not None:
         fields = dict(fields)
         fields["oom_kill_delta"] = _oom_kill_delta(run.baseline, _slice_events())
+    _append_sample(fields, rc, run.unit if run is not None else "")
     if fields:
         peak_mem, cap = _int(fields.get("mem_peak")), _int(fields.get("mem_max"))
         logger.info(
@@ -936,6 +1166,21 @@ def status() -> dict:
     A box the ceiling cannot arm reports `fallback: true` with the reason. It does not
     report a bound that is not there.
     """
+    rows = _sample_rows()
+    stamps = sorted({str(r.get("ts", ""))[:10] for r in rows if r.get("ts")})
+    # Whole days the store covers, inclusive of both ends, and None when there is nothing to
+    # span. #2578's owed entry asks "do we have >=7 days of real traffic yet", and the point
+    # of putting the answer here is that the pass which has to rule on it can read /state
+    # instead of opening the file: `sample_days` < 7 is that question, and `sample_rows`
+    # tells whether the window is thin or merely short.
+    days = None
+    if len(stamps) >= 2:
+        try:
+            first = time.strptime(stamps[0], "%Y-%m-%d")
+            last = time.strptime(stamps[-1], "%Y-%m-%d")
+            days = (int(time.mktime(last)) - int(time.mktime(first))) // 86400 + 1
+        except ValueError:
+            days = None
     ok, err = available()
     return {
         "enforcing": ok,
@@ -951,6 +1196,16 @@ def status() -> dict:
         "measured_peak_pids": MEASURED_PEAK_PIDS,
         "headroom_factor": HEADROOM_FACTOR,
         "report_dir": str(REPORT_DIR),
+        # #2924: how deep the durable sample store is. `measured_peak_*` above is the single
+        # 2026-10-12 observation the constants were derived from; these are how many real
+        # calls now stand behind that kind of number, and `sample_days` is the >=7-days
+        # question #2578 owes. `sample_unmeasured` is the rows carrying `source: "none"` —
+        # rows a p99 must not silently average in.
+        "sample_store": str(SAMPLE_STORE),
+        "sample_rows": len(rows),
+        "sample_days": days,
+        "sample_dates": stamps,
+        "sample_unmeasured": sum(1 for r in rows if r.get("source") == "none"),
     }
 
 

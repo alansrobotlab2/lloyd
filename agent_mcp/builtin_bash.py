@@ -366,7 +366,11 @@ async def _bash(args: dict[str, Any]) -> str:
     #
     # Nothing is appended when no limit tripped, so a benign command's output is
     # byte-identical to what it was before the ceiling existed.
-    ceiling_note = (_resource_ceiling.finish(ceiling_report)
+    # `rc` rides in beside the counters (#2924): the durable sample row is a peak AND an
+    # exit status, and a 4 GiB command that exited 0 is not the same measurement as a 4 GiB
+    # command the ceiling killed with 137. This is the same value the `[exit code: N]`
+    # suffix below carries, computed one line up.
+    ceiling_note = (_resource_ceiling.finish(ceiling_report, rc)
                     if ceiling_report is not None else None)
 
     if rc != 0:

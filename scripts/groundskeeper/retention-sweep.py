@@ -400,6 +400,23 @@ try:
     from app import tool_quality as _TOOL_QUALITY_MODULE
 except ModuleNotFoundError:  # pragma: no cover - same fallback as above
     import tool_quality as _TOOL_QUALITY_MODULE  # type: ignore
+try:
+    # Store 19's path AND its horizon, both read off the writer — store 15's reason
+    # (`app.voice_turns` owns where the turn rows live, so the file this rung prunes is
+    # the file the writer writes) and store 17's reason (`RETENTION_DAYS` is quoted at
+    # print time) applied to the file `agent_mcp/_resource_ceiling.py` appends one row
+    # per Bash call to. The sharing matters here more than in either precedent: this
+    # store has TWO pruning owners — the writer's own `_prune_samples` at append time,
+    # and this rung — and two owners of one horizon is exactly how a bounded store
+    # starts disagreeing with its own report line. `samples_path()` is the writer's own
+    # resolver, imported rather than restated for store 15's reason: restating the
+    # layout here is how the bound comes to apply to a file nothing opens while the line
+    # still prints a count. The module drags nothing in: `agent_mcp/__init__.py` is
+    # empty and `_resource_ceiling`'s only imports are the standard library, which is
+    # what makes this safe from cron and from task #79's shell, where `app.paths` is not.
+    from agent_mcp import _resource_ceiling as _CEILING_MODULE
+except ModuleNotFoundError:  # pragma: no cover - same fallback as above
+    import _resource_ceiling as _CEILING_MODULE  # type: ignore
 
 # The runtime data root — `app.paths.DATA_ROOT`'s three rules, read from the one
 # copy of them (#1415). It used to be restated here as
@@ -3312,6 +3329,174 @@ def _injection_canary_line(p: dict) -> str:
 
 
 
+# Store 19: the ceiling's per-Bash-call sample rows (#2924) — the 21st line the report
+# prints, after the injection-canary corpus (#2862) at the 20th, and the second store this
+# sweep bounds on a horizon it does not own. (The numbered list in the module docstring stops at
+# nineteen because #2862 never added its own store there either; the section comment is
+# where each of these two stores' rationale lives, and `#1835`'s count guards read the
+# printed lines, not that list.)
+# ---------------------------------------------------------------------------
+#
+# `<data root>/_pipeline/ceiling/ceiling-samples.jsonl` is the store #2924 created so the
+# owed p99 re-derivation has a population: `agent_mcp/_resource_ceiling.py::finish` appends
+# exactly one row per completed Bash call — `ts`, `rc`, the peak RSS and peak task count of
+# that call's cgroup, the cap it ran under, and which of the two counters measured them —
+# and `status()` reports the file's depth so the "is there a week of data yet" question is
+# answerable from `/state` without a shell. Before #2924 the same numbers went to a logger
+# whose output reaches no file on this box (`grep -c "resource ceiling sample"` over
+# `mcp.log` and its ten rotations: 0 in all eleven), which is the premise that item was
+# written against.
+#
+# The volume, from the writer's own estimate: ~300-500 Bash calls a day at ~300 bytes a
+# row, so ~100-150 KB a day and ~9-13 MB at the horizon below. That is why this store needs
+# a prune at all, and why the horizon is the writer's rather than a number chosen here.
+#
+# Why a second owner, when the writer already prunes at append time: `_prune_samples` runs
+# from inside the append, so it only ever runs when a Bash call happens. A box whose MCP
+# service is down, or one that simply stops running Bash for a month, keeps whatever the
+# file had reached and prints nothing about it anywhere — a bound that only tightens under
+# load is not a bound, it is a side effect of load. The daily sweep is what makes it a
+# schedule. The two owners read ONE constant, `_CEILING_MODULE.SAMPLE_MAX_AGE_DAYS`, so the
+# distribution the owed pass computes is a p99 of a stated window whichever of them last
+# ran; that sharing is the reason the horizon is imported and not written here.
+CEILING_SAMPLES_FILE = Path(_CEILING_MODULE.samples_path(DATA_ROOT))
+
+#: The window, read off the writer — NOT a horizon this file chose. Its docstring carries
+#: why 90 and not the 30 this sweep uses for its file stores: the row store exists to hold
+#: a p99, and a window shorter than the traffic needed to fill one would bound the file by
+#: emptying the evidence. `tests/test_retention_sweep.py` asserts this name resolves at
+#: all and equals the writer's, which is what makes the name unphantomable: the previous
+#: round shipped a comment here citing a constant that existed nowhere in the repository.
+CEILING_SAMPLES_MAX_AGE_DAYS = _CEILING_MODULE.SAMPLE_MAX_AGE_DAYS
+
+
+def _ceiling_row_seconds(line: bytes) -> float | None:
+    """The instant a sample row carries, or None if it carries no readable one.
+
+    None is not a failed parse to be discarded: it is the state #2357 exists for, a row
+    written by a build whose date field this reader can no longer interpret. Those rows are
+    kept (see `sweep_ceiling_samples`), so this has to distinguish "absent or
+    non-`isoformat`-able" from "zero", exactly as the ledger's `_iso_seconds` does.
+    """
+    try:
+        doc = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    return _iso_seconds(doc.get("ts"))
+
+
+def sweep_ceiling_samples(apply: bool, now: float, *, path: Path | None = None,
+                          max_age_days: int | None = None) -> dict:
+    """Prune ceiling sample rows older than the writer's own horizon. Store 19.
+
+    Rows are aged on their own `ts` — never the file's mtime, which is one append old for
+    the whole store however old its contents are (#2225's reason, and #2273's for a row
+    store of exactly this shape). Two rules are not this store's and come from rulings that
+    already exist:
+
+    * A row with no readable `ts` is KEPT and counted in `undated` (#2357). Retiring a
+      format is a migration, not an excuse to delete; losing the old rows would guarantee
+      any future re-verification of the change starts at zero.
+    * The newest row is kept whatever its age, because that is the writer's own
+      `_prune_samples` rule and this rung must not empty a store whose owner promised never
+      to: `status()` reads this file, and an idle box that reads `0 rows` after a sweep
+      looks like a box that has never measured anything.
+
+    The rewrite goes through `_rewrite_live_ledger` — the same routine stores 13 and 14
+    (#1975, #2225) use — because the writer's hazard is identical: `_append_sample` opens
+    the file in append mode under no lock while this rewrite is in flight, so a rename of a
+    stale snapshot renames rows that landed mid-sweep out of existence. That helper grafts
+    the appended tail back and refuses rather than lose bytes.
+
+    `apply=False` decides every byte from the same read and writes nothing (#2005/#2006/
+    #2008). Absent store is reported and NEVER created (#2354: the writer creates it).
+    """
+    out = {"apply": apply, "present": False, "before": 0, "after": 0, "bytes": 0,
+           "kept": 0, "dropped": 0, "undated": 0, "refused": None,
+           "horizon_days": CEILING_SAMPLES_MAX_AGE_DAYS if max_age_days is None
+           else int(max_age_days)}
+    store = Path(path) if path is not None else CEILING_SAMPLES_FILE
+    if not store.is_file():
+        # The state a box that has never finished a Bash call under this build is in:
+        # reported, and never created — `_append_sample` mkdirs and creates it on the
+        # first row (#2354's rule for a writer-owned store).
+        return out
+    try:
+        raw = store.read_bytes()
+    except OSError as exc:
+        # Present but unreadable is a different report from absent, and store 14's
+        # REFUSED branch is where the difference belongs.
+        out["refused"] = f"{store} unreadable ({exc.strerror or exc})"
+        return out
+
+    out["present"] = True
+    out["before"] = out["after"] = len(raw)
+    horizon = out["horizon_days"]
+    cutoff = now - horizon * 86400
+
+    lines = raw.splitlines(keepends=True)
+    stamps = [_ceiling_row_seconds(ln) for ln in lines]
+    newest = max((s for s in stamps if s is not None), default=None)
+
+    keep: list[bytes] = []
+    for ln, stamp in zip(lines, stamps):
+        if not ln.strip():
+            keep.append(ln)          # a blank or the trailing newline: bytes stay, they
+            continue                 # are not rows and ageing them would rewrite for none
+        if stamp is None:
+            out["undated"] += 1
+            keep.append(ln)
+        elif stamp >= cutoff or stamp == newest:
+            keep.append(ln)
+        else:
+            out["dropped"] += 1
+    out["kept"] = len(keep)
+    body = b"".join(keep)
+    out["bytes"] = len(raw) - len(body)
+    if not out["dropped"] or not apply:
+        return out
+
+    settled, refusal = _rewrite_live_ledger(store, body, len(raw), noun="sample file")
+    out["refused"] = refusal
+    if settled:
+        try:
+            out["after"] = store.stat().st_size
+        except OSError:
+            out["after"] = len(body)
+    else:
+        out["dropped"] = 0
+        out["bytes"] = 0
+    return out
+
+
+def _ceiling_samples_line(p: dict) -> str:
+    """The report line for store 19 — the `provenance journal` renderer's shape (#2225).
+
+    The three forms an operator reads are the three that matter for a row store with two
+    owners: nothing yet, nothing due, and something pruned with the byte figures either
+    side. `undated` rides on every form, including the absent-store one, because a
+    non-empty count beside `no sample store yet` is the contradiction that says the path
+    this rung read is not the path the writer writes.
+    """
+    label = f"  ceiling sample rows >{p['horizon_days']}d"
+    tail = ("" if not p["undated"] else
+            f" — {p['undated']} undated row(s) kept (no parseable `ts`)")
+    if not p["present"]:
+        return f"{label}: no sample store yet — nothing to bound" + tail
+    if p["refused"]:
+        return f"{label}: REFUSED ({p['refused']}) — live sample file intact" + tail
+    verb = "would prune" if not p["apply"] else "pruned"
+    if not p["dropped"]:
+        return (f"{label}: 0 {verb} ({p['kept']} rows, {p['before']} bytes live)" + tail)
+    if not p["apply"]:
+        return (f"{label}: {p['dropped']} {verb} ({p['kept']} kept, "
+                f"{p['bytes']} B of it)" + tail)
+    return (f"{label}: {p['dropped']} {verb} ({p['before']} → {p['after']} bytes live, "
+            f"{p['bytes']} B out)" + tail)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -3373,6 +3558,11 @@ def main() -> int:
     # bound, and a store that only spoke in a dry run would be unreadable in the run that
     # actually deletes. Read-only either way — `apply` is accepted and ignored.
     canary = sweep_injection_canary(args.apply)
+    # The ceiling's sample rows (#2924), on the writer's own horizon. Run in both modes
+    # and decided from the same read in both, like every store here; the rewrite it may
+    # do goes through the ledger's graft-and-refuse helper, because the row writer appends
+    # under no lock while this is in flight.
+    ceiling = sweep_ceiling_samples(args.apply, now)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -3475,6 +3665,11 @@ def main() -> int:
     # means a store appended later does not renumber the positional pins in
     # tests/test_retention_sweep.py that read the task-79 items in order.
     print(_injection_canary_line(canary))
+    # Printed after the canary, and outside the refusal guard like it: this store is a
+    # data-root file, so a run that declines the loop's three refs still bounds it. It is
+    # the last line because appending a store here keeps items 1-20 of task 79's
+    # enumeration where the positional guard reads them (#2862's reason, inherited).
+    print(_ceiling_samples_line(ceiling))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0

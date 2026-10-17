@@ -43,8 +43,10 @@ import os
 import re
 import subprocess
 import sys
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -406,7 +408,29 @@ def test_the_slice_is_lloyd_slice_at_every_spawn_site_and_never_app_slice():
             assert not any("app.slice" in path for path in paths), \
                 f"the {site} site's child is under app.slice — the monitored cgroup: {paths}"
         fields = run.settle()
+        before = len(RC._sample_rows())
         RC.finish(run)          # after settle: finish unlinks the report it reads from
+        # #2924 clause 3, at all three spawn sites. The unlink must not take the record with
+        # it: the `.report` is the handover between the sampler and `finish`, and the JSONL
+        # row is what survives. One row, and no per-call artefact left but that row.
+        assert not run.report.exists(), \
+            f"{site}: the per-call report outlived finish(), so `~/lloyd-data/_pipeline/" \
+            "ceiling/` is still growing a file per Bash call — 100 of those had already " \
+            "accumulated unread when this clause was written"
+        after = RC._sample_rows()
+        assert len(after) == before + 1, \
+            f"{site}: finish() appended {len(after) - before} rows for one completed call; " \
+            "the store is one row per call, and a p99 over a store that counts a call twice " \
+            "(or drops the benign calls, which is how this file read it before #2924) is a " \
+            "p99 of whatever is left, not of the traffic"
+        mine = [r for r in after if r.get("unit") == run.unit]
+        assert len(mine) == 1, \
+            f"{site}: the row that was appended is not this call's — {len(mine)} rows carry " \
+            f"unit={run.unit!r}, so rows are being attributed to the wrong call"
+        assert mine[0].get("source") in ("scope", "scope+report", "report"), \
+            f"{site}: the row says source={mine[0].get('source')!r}, which names neither the " \
+            "live cgroup read nor the mirrored report. 'none' here would mean a real spawn " \
+            "produced no witness at all and the row was written anyway"
         assert fields.get("scope") == run.cgdir, \
             f"the {site} site's counters came from {fields.get('scope')!r}, not the scope " \
             f"{run.cgdir} that `apply` named in the argv — the sampler is watching a " \
@@ -1075,3 +1099,394 @@ _ALLOCATOR_SHELL = (_MEMCAP_READ_BACK_SHELL +
                     'while True:\n'
                     '    blocks.append(bytearray(8 * 1024 * 1024))\n'
                     '    print(len(blocks) * 8 * 1024 * 1024, flush=True)"')
+
+
+# ── #2924: the durable per-call sample store ──────────────────────────────────
+#
+# Before this section existed, nothing about a finished Bash call outlived the process that
+# ran it. `finish` logged one line to the `lloyd-builtin-resource-ceiling` logger and unlinked
+# the report; the logger reaches no file on this box (`grep -c "resource ceiling sample"
+# ~/lloyd-data/logs/mcp.log ~/lloyd-data/logs/mcp.log.{1..10}
+# ~/lloyd-data/logs/lloyd-agent-worker.log` → 0 in all eleven, and `mcp.log` is uvicorn access
+# lines), so the numbers were gone, and the only artefacts that did survive were the `.report`
+# files of spawns that never reached `finish` — 100 of them, unread, across 2026-10-12→17. That
+# is why #2578's owed p99 re-derivation could not be answered: there was no distribution of
+# peak RSS and peak task count per Bash child subtree to take a percentile of. These nodes pin
+# the row, and the retention sweep's store 20 pins the store's depth.
+
+#: The fields a row must carry. `mem_peak`/`pids_peak` are what the p99 is taken of;
+#: `mem_max`/`pids_max` are the caps that were in force for that call, so a future reader can
+#: tell a peak that was 5% of its ceiling from one that was 95% without knowing what the
+#: constants were today; `rc` separates a peak that completed from a peak that was killed at
+#: it; `oom_kill_delta` is the kill witness that has no ceiling to trip; `source` says which
+#: witness produced the peaks; `unit` identifies the call.
+NOW = datetime.now(timezone.utc)
+
+SAMPLE_FIELDS = frozenset({
+    "ts", "rc", "mem_peak", "mem_max", "pids_peak", "pids_max",
+    "mem_frac", "oom_kill_delta", "source", "unit",
+})
+
+
+@pytest.fixture(autouse=True)
+def _samples_to_tmp(tmp_path, monkeypatch):
+    """Every row this file's 46 nodes produce lands in a per-test file, never the live store.
+
+    Not tidiness: contamination. These nodes run real Bash calls, and if they appended to
+    `~/lloyd-data/_pipeline/ceiling-samples.jsonl` they would be writing peaks of 8 MiB sleeps
+    and planted 4 GiB allocators into the same file the owed-check pass is going to take a p99
+    from — the fixture would be corrupting the very measurement #2578 owes. With the store
+    redirected, a node can also count rows exactly, which no assertion could do against a file
+    the rest of the fleet is appending to.
+    """
+    store = tmp_path / "_pipeline" / "ceiling-samples.jsonl"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(RC, "SAMPLE_STORE", store)
+    return store
+
+
+def _rows():
+    """The store's rows, parsed the way a reader will parse them."""
+    return RC._sample_rows()
+
+
+def test_the_finish_seam_records_the_rc_it_is_given_and_null_for_a_background_call():
+    """Clause 1's seam, with no spawn in the way: the row carries the code it was handed.
+
+    Clause 1 asks for a test that calls the finish seam with a KNOWN rc and reads the row
+    back. `finish(None, rc=3)` is the only way to have both halves of that sentence at once:
+    the rc is known because the test wrote it, and the call is still a real one on a real
+    path — `run=None` is exactly the shape a call reaches `finish` with when
+    `systemd-run --scope` refused to create the unit, so the arm being exercised is a live
+    failure mode of this box and not a fixture invention.
+
+    The background arm is asserted beside it because it is the other thing the `rc`
+    parameter has to get right. `_bash`'s backgrounded spawn calls `finish` while its
+    process is still running, so it passes nothing, and the row must say `null` rather than
+    `0`: a zero here is a claim that a command succeeded, which is the one thing a store
+    feeding a p99 must never invent.
+    """
+    assert RC.finish(None, rc=3) is None, \
+        "a call with no counters tripped a limit — the note would have gone to the model"
+    rows = _rows()
+    assert len(rows) == 1, f"one finished call must leave exactly one row, got {len(rows)}"
+    row = rows[0]
+    assert set(row) == SAMPLE_FIELDS, \
+        f"the row's fields are {sorted(set(row) ^ SAMPLE_FIELDS)} off the required set " \
+        f"{sorted(SAMPLE_FIELDS)}"
+    assert row["rc"] == 3, f"rc={row['rc']!r}, not the 3 handed to `finish`"
+    assert row["source"] == "none", \
+        f"source={row['source']!r} names a witness for a call that had no scope at all"
+    assert row["mem_peak"] is None and row["mem_frac"] is None, \
+        "a call with no counters must not report a peak, least of all a zero one"
+    assert row["unit"] == "", f"unit={row['unit']!r} for a call that never had one"
+
+    assert RC.finish(None) is None
+    bg = _rows()[-1]
+    assert "rc" in bg, f"the row dropped the key entirely: {sorted(bg)}"
+    assert bg["rc"] is None, \
+        f"a backgrounded call's row carries rc={bg['rc']!r}; a zero there claims a command " \
+        "succeeded when no exit code existed yet"
+
+
+def test_a_benign_finished_call_appends_one_row_with_every_field_and_its_rc():
+    """Clause 1, over a real spawn: the row is written, and its rc IS the call's rc.
+
+    `exit 3` is the call, chosen because a benign call is the case the pre-#2924 code
+    skipped entirely (`finish` returned None, so nothing was kept) and the case the p99 needs
+    most: the owed question is "how close does ordinary work come to the cap", which is a
+    question about calls that never tripped anything.
+
+    What is asserted about the code is equality with `done.returncode` rather than equality
+    with 3, and the difference matters. `systemd-run --scope` answers 1 when the user manager
+    will not create the unit — what 8 parallel workers and the resident engine daemons do to
+    a transient scope occasionally, the same load that makes the allocator node in this file
+    flaky — and on that run the call's real exit code IS 1, so a row that said 3 would be the
+    test making the store assert its own expectation. A skip used to sit here for that case;
+    it is gone because a skip hides the whole node, including the field-by-field shape check
+    below, whenever the box is loaded, which is exactly when this store matters. The equality
+    is falsifiable in both directions: a `finish` that hardcoded 0, that dropped the key, or
+    that recorded the wrapper's success instead of the child's, reddens it. And the command's
+    own code arriving in a row is pinned without an environment in the way by
+    `test_the_finish_seam_records_the_rc_it_is_given_and_null_for_a_background_call`, which
+    hands `finish` a 3 and reads it back.
+    """
+    argv, run = RC.apply(["/bin/sh", "-c", "exit 3"])
+    assert run is not None, "the ceiling is unavailable, so this node cannot reach `finish`"
+    done = subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if done.returncode == 1:
+        # One retry, so the common case is the one the rest of this node grades; a second
+        # refusal is not retried further and is not skipped over either — see the docstring.
+        done = subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    assert RC.finish(run, done.returncode) is None, \
+        "a 6-byte shell that exited 3 tripped a limit — the note would have gone to the model"
+    rows = _rows()
+    assert len(rows) == 1, f"expected exactly one row for one call, got {len(rows)}"
+    row = rows[0]
+    assert set(row) == SAMPLE_FIELDS, \
+        f"the row's fields are {sorted(set(row) ^ SAMPLE_FIELDS)} off the required set " \
+        f"{sorted(SAMPLE_FIELDS)}"
+    assert row["rc"] == done.returncode, \
+        f"rc={row['rc']!r} is not the {done.returncode} this call actually exited with"
+    assert row["unit"] == run.unit, \
+        f"unit={row['unit']!r} is not the call's own unit {run.unit!r}, so a reader cannot " \
+        "join the row to the task it describes"
+    assert row["oom_kill_delta"] == 0, \
+        "a call that allocated 6 bytes recorded an OOM kill"
+    assert datetime.strptime(row["ts"], "%Y-%m-%dT%H:%M:%S%z").utcoffset() \
+        == timedelta(hours=0), \
+        f"ts={row['ts']!r} carries no UTC offset; the retention sweep compares this against " \
+        "a UTC cutoff, and a naive stamp is read as UTC by every later reader"
+
+    # The arm split is on a fact this node measured, not on an expectation: only the command
+    # can answer 3 (`systemd-run` forwards its child's status), so a 3 here proves the unit
+    # was really created and its counters are this call's. On the refusal arm (1) there was
+    # no subtree to measure, and the row's honesty is then that it claims NOTHING — a peak of
+    # 0 would be the false record, and `source: "none"` is the field that says so. Clause 2's
+    # node owns the live-read-versus-mirrored-report split; this one only pins that a call
+    # which ran names the witness that measured it.
+    if done.returncode == 3:
+        assert row["source"] in ("scope", "scope+report", "report"), \
+            f"source={row['source']!r} does not name the witness that measured this call"
+        assert row["mem_max"] == RC.memory_bytes(), \
+            (f"mem_max={row['mem_max']!r} is not the cap that was in force "
+             f"({RC.memory_bytes()})")
+        assert row["pids_max"] == int(RC.TASKS_MAX), \
+            (f"pids_max={row['pids_max']!r} is not the shipped TASKS_MAX "
+             f"({RC.TASKS_MAX!r})")
+    else:
+        assert done.returncode == 1, \
+            (f"the wrapper answered {done.returncode}, which is neither the command's 3 nor "
+              "the manager's refusal — this node has no arm for it and should say so")
+        assert row["source"] == "none", \
+            f"source={row['source']!r} names a witness for a call whose unit was refused"
+        assert row["mem_peak"] is None, \
+            f"a refused scope reported mem_peak={row['mem_peak']!r}"
+
+
+def test_the_row_names_which_witness_measured_it_and_is_written_even_when_the_scope_is_gone(
+        tmp_path):
+    """Clause 2: a collected scope still yields a row, and its `source` differs from a live read.
+
+    The two arms are the same call observed through the only two witnesses there are. A real
+    transient scope is collected ~20 ms after its last process exits, so `settle`'s live read
+    often finds nothing and the sampler's mirrored report is all that remains — which is a real
+    number, but a different kind of one: it is what systemd happened to record, not what was
+    read off the subtree. A reader taking a p99 has to be able to tell those apart, and the
+    field that says so is worthless unless a test proves the two arms actually produce
+    different values. The synthetic cgroup directory is the standard trick in this file:
+    `_read_counters` opens the names it opens, so pointing `run.cgdir` at a directory holding
+    them exercises the live branch without needing a scope that outlives its processes.
+    """
+    # What this kernel actually writes, read off a live report on 2026-10-17: `mem_peak=
+    # 1310720`, `pids_peak=2` — decimal, not hex, and `memory.max` holds bytes rather than the
+    # "16G" the constant says. A hex-shaped fake would let an int(x,16)-vs-int(x) mistake pass
+    # this node and then null out mem_peak on every live row of the real store.
+    peak = 240 * 1024 * 1024
+    caps = {"memory.max": str(RC.memory_bytes()), "memory.swap.max": "0",
+            "pids.max": str(RC.TASKS_MAX)}
+
+    def armed_run(cgdir):
+        argv, run = RC.apply(["/bin/sh", "-c", "true"])
+        assert run is not None, "the ceiling is unavailable, so this node cannot reach settle"
+        counters = {"memory.peak": f"{peak}\n", "memory.current": "1048576\n",
+                    "pids.peak": "12\n", "pids.current": "2\n",
+                    "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n",
+                    "pids.events": "max 0\n", **caps}
+        for name, value in counters.items():
+            (cgdir / name).write_text(value, encoding="utf-8")
+        run.cgdir = str(cgdir)
+        return argv, run
+
+    # Arm 1 — the scope is still readable when settle runs: the live read answers. The
+    # command has to actually run, because the sampler only mirrors a scope it catches while
+    # the unit exists; the directory the run is pointed at afterwards is what makes the live
+    # branch deterministic instead of racing systemd's ~20 ms collection.
+    live_root = tmp_path / "cg-live"
+    live_root.mkdir()
+    argv, run = armed_run(live_root)
+    subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    RC.finish(run, 0)
+    live_row = _rows()[-1]
+    assert live_row["source"].startswith("scope"), \
+        f"a live read that answered produced source={live_row['source']!r}"
+    assert live_row["mem_peak"] == peak, \
+        f"mem_peak={live_row['mem_peak']!r}, not the {peak} this scope's memory.peak holds"
+
+    # Arm 2 — the same call with the scope collected: systemd has taken the directory, and
+    # the sampler's mirrored report is all that remains. The report is written through the
+    # module's own `_write_report` (the rename-atomic writer the sampler uses) over the
+    # counters the fake directory yields, so this is the real artefact in shape and content;
+    # inventing a key=value blob here would be testing this node's own guess.
+    gone_root = tmp_path / "cg-gone"
+    gone_root.mkdir()
+    argv, run = armed_run(gone_root)
+    mirrored = RC._read_counters(str(gone_root))
+    assert mirrored is not None and mirrored.get("mem_peak"), \
+        "the fake scope directory did not answer a live read, so arm 2 proves nothing"
+    RC._write_report(run.report, mirrored)
+    shutil.rmtree(gone_root)                # what systemd does ~20 ms after the unit stops
+    RC.finish(run, 0)
+    gone_rows = [r for r in _rows() if r.get("unit") == run.unit]
+    assert len(gone_rows) == 1, \
+        f"a call whose cgroup directory was already gone produced {len(gone_rows)} rows; " \
+        "the row is the record, and losing it here is how the store ends up holding only " \
+        "the traffic that happened to be watched"
+    gone_row = gone_rows[0]
+    assert gone_row["source"] == "report", \
+        f"source={gone_row['source']!r} with the directory removed — the field claims a " \
+        "live read that could not have happened"
+    assert gone_row["mem_peak"] == int(mirrored["mem_peak"]), \
+        f"the row carries mem_peak={gone_row['mem_peak']!r}, not the mirrored report's " \
+        f"{mirrored['mem_peak']!r}"
+    assert gone_row["mem_max"] == RC.memory_bytes(), \
+        "the caps the call ran under are missing from a report-sourced row"
+
+    assert live_row["source"] != gone_row["source"], \
+        f"both arms say source={live_row['source']!r}, so the field cannot tell a live read " \
+        "from a mirrored snapshot and a reader cannot filter the store by witness"
+
+
+def test_status_reports_the_store_its_depth_and_the_rows_that_measured_nothing():
+    """Clause 4: the >=7-days question is answerable from `/state`, not from a shell.
+
+    The store is seeded with three dates, one row of them unmeasured. `sample_days` is what
+    #2578's owed entry asks ("is there a week of real traffic yet") and `sample_unmeasured` is
+    the caveat that has to travel with it: rows carrying `source: "none"` are timestamps about
+    calls nobody measured, and a store reported as "9 rows over 9 days" while 8 of them are
+    unmeasured would send the owed-check pass off to compute a p99 of nothing.
+    """
+    def seeded(ts, source):
+        return json.dumps({"ts": ts, "rc": 0, "mem_peak": 1, "mem_max": 2, "pids_peak": 3,
+                           "pids_max": 4, "mem_frac": 0.5, "oom_kill_delta": 0,
+                           "source": source, "unit": "seed.unit"}) + "\n"
+
+    RC.SAMPLE_STORE.write_text(
+        seeded("2026-10-11T02:00:00+00:00", "scope")
+        + seeded("2026-10-13T02:00:00+00:00", "report")
+        + seeded("2026-10-17T02:00:00+00:00", "none"),
+        encoding="utf-8")
+    st = RC.status()
+    assert st["sample_store"] == str(RC.SAMPLE_STORE), \
+        "status() does not name the store it counted, so a reader cannot verify the number"
+    assert st["sample_rows"] == 3, f"sample_rows={st['sample_rows']} for 3 seeded rows"
+    assert st["sample_days"] == 7, \
+        f"rows dated 2026-10-11 and 2026-10-17 span 7 whole days inclusive; sample_days=" \
+        f"{st['sample_days']} — the owed bar is stated in days, so an off-by-one here moves " \
+        "the re-derivation date"
+    assert st["sample_dates"] == ["2026-10-11", "2026-10-13", "2026-10-17"], \
+        f"sample_dates={st['sample_dates']}"
+    assert st["sample_unmeasured"] == 1, \
+        f"sample_unmeasured={st['sample_unmeasured']}; the row with source='none' has to be " \
+        "visible or the depth of the store overstates the depth of the measurement"
+    assert st["measured_peak_ram_bytes"] == RC.MEASURED_PEAK_RAM_BYTES, \
+        "the single-sample constant and the store depth are reported apart from each other " \
+        "only if both are present; the first is the old evidence, the second is the new"
+
+    RC.SAMPLE_STORE.unlink()
+    empty = RC.status()
+    assert empty["sample_rows"] == 0 and empty["sample_days"] is None, \
+        f"an absent store reports {empty['sample_rows']} rows over {empty['sample_days']} " \
+        "days; zero days would read as a store that has been running a day at a time, and " \
+        "'not yet measured' is a different answer from 'measured, thin'"
+
+
+def test_the_sample_store_bounds_itself_at_the_stated_horizon():
+    """Clause 5's substance: the store cannot grow without bound, and the horizon is stated.
+
+    The store exists so that a p99 can be taken later; an unbounded one is the failure this item's
+    own premise is about (100 unread `.report` files that nothing ever swept), so the bound is part
+    of what makes the row worth writing. Three rows are seeded at 200, 3 and unparseable days, with
+    the file's mtime pushed two days back so the once-a-day rate limit is open.
+
+    What is asserted is which rows SURVIVE, not just that some did: the 200-day row goes, the
+    3-day row stays, and the row whose `ts` will not parse stays too — pruning an unreadable row as
+    though it were old is #2357's error, and here it would also be quietly deleting the truncated
+    tail line a crashed append leaves behind, which is the only witness that call ever had. The
+    second half of the node is the rate limit: with a fresh mtime the same old row must still be
+    there, because rewriting the whole store on every one of ~430 Bash calls a day to retire rows
+    that age out yearly is not a bound, it is a load.
+    """
+    def seeded(days_ago, ts="ok"):
+        age = (NOW - timedelta(days=days_ago))
+        stamp = "not-a-timestamp" if ts == "bad" else age.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        return json.dumps({"ts": stamp, "rc": 0, "mem_peak": 1, "mem_max": 2, "pids_peak": 3,
+                           "pids_max": 4, "mem_frac": 0.5, "oom_kill_delta": 0,
+                           "source": "scope", "unit": f"seed-{days_ago}.unit"}) + "\n"
+
+    assert RC.SAMPLE_MAX_AGE_DAYS == 90, \
+        "the horizon moved; header store 20's rationale in retention-sweep.py and #2578's " \
+        ">=7-day p99 window are both written against 90"
+    RC.SAMPLE_STORE.write_text(seeded(200) + seeded(3) + seeded(1, ts="bad"), encoding="utf-8")
+    old_mtime = NOW.timestamp() - 2 * 86400
+    os.utime(RC.SAMPLE_STORE, (old_mtime, old_mtime))
+
+    assert RC._prune_samples(NOW.timestamp()) == 1, \
+        "one row of three is 200 days old against a 90-day horizon; the prune that did not " \
+        "happen is how this store becomes the thing the item was filed to stop"
+    survivors = [r["unit"] for r in RC._sample_rows()]
+    assert "seed-3.unit" in survivors, f"the 3-day row was pruned: {survivors}"
+    assert "seed-1.unit" in survivors, \
+        f"the row with an unparseable ts was pruned ({survivors}) — unreadable is not old, and " \
+        "a truncated tail line is that call's only surviving witness"
+    assert "seed-200.unit" not in survivors, f"the 200-day row survived: {survivors}"
+
+    # Rate limit: same store, fresh mtime, and the old row is left alone until tomorrow.
+    RC.SAMPLE_STORE.write_text(seeded(200) + seeded(3), encoding="utf-8")
+    before = RC._sample_rows()
+    assert RC._prune_samples(NOW.timestamp()) == 0, \
+        "the prune ran inside its own 24h window; at ~430 Bash calls a day that is a full " \
+        "rewrite of the store hundreds of times daily"
+    assert [r["unit"] for r in RC._sample_rows()] == [r["unit"] for r in before]
+
+    # Appending is what triggers it in production: the row that arrives must not be the only
+    # thing the rewrite keeps.
+    RC.SAMPLE_STORE.write_text(seeded(200) + seeded(3), encoding="utf-8")
+    os.utime(RC.SAMPLE_STORE, (old_mtime, old_mtime))
+    RC._append_sample({"source": "scope"}, 0, "appended.unit")
+    units = [r["unit"] for r in RC._sample_rows()]
+    assert units == ["seed-3.unit", "appended.unit"], units
+
+
+def test_the_store_path_is_one_derivation_of_the_data_root_and_names_the_layout():
+    """Clause 4's constant, on this side of the seam: one derivation, one layout.
+
+    The store path has exactly one owner — this module's `samples_path` — because the sweep
+    now prunes the file this writer appends, and two spellings of one layout is how a bound
+    comes to apply to a file nothing opens while the report line still prints a count. So
+    this node pins the two things only this file can: that the layout is
+    `_pipeline/ceiling-samples.jsonl` for any root handed to the function, and that both
+    `REPORT_DIR` and `SAMPLE_STORE` are module-level constants beside each other with
+    `SAMPLE_STORE` derived through the function rather than rebuilt at call time (clause 4
+    asks for a constant, not a call).
+
+    The other half of the seam — that the sweep reaches THIS file, and prunes it on THIS
+    module's horizon — is pinned from the sweep's side by
+    `tests/test_retention_sweep.py::test_the_sample_store_is_the_writers_own_path_and_horizon`,
+    which imports both modules and compares the constants. It is asserted there and not here
+    because that is where the sweep module is loaded and its store paths redirected; an
+    assertion about the sweep written here would be an import of a script with no fixture
+    behind it, which is what the previous round of this item left as
+    `assert callable(RC.samples_path)` — a check that cannot fail, since the same node calls
+    the function five lines above.
+    """
+    other = RC.samples_path(Path("/tmp/other-root"))
+    assert other == Path("/tmp/other-root/_pipeline/ceiling-samples.jsonl"), \
+        f"samples_path('/tmp/other-root') = {other}"
+    # The constant itself is pinned by the source-text check below, not by comparing
+    # `RC.SAMPLE_STORE` with `RC.samples_path()`: this file's autouse fixture rebinds the
+    # constant to a per-test path, so that comparison would be measuring the fixture.
+    src = RC_SRC                       # already the module's text, read at import
+    report_at = re.search(r"^REPORT_DIR = ", src, re.M)
+    store_at = re.search(r"^SAMPLE_STORE = samples_path\(\)$", src, re.M)
+    assert report_at and store_at, \
+        "REPORT_DIR and SAMPLE_STORE must both be module constants with SAMPLE_STORE derived " \
+        "through samples_path(); the item asks for the path beside REPORT_DIR"
+    # And the horizon the sweep imports: a number the sweep copied rather than imported
+    # would be a second bound on one file, so the module's own definition is pinned to the
+    # name, not to a value the sweep could re-declare.
+    horizon_at = re.search(r"^SAMPLE_MAX_AGE_DAYS = (\d+)$", src, re.M)
+    assert horizon_at, "SAMPLE_MAX_AGE_DAYS must be a module constant on one line"
+    assert int(horizon_at.group(1)) == RC.SAMPLE_MAX_AGE_DAYS, (
+        f"the module defines {horizon_at.group(1)}d but the live value is "
+        f"{RC.SAMPLE_MAX_AGE_DAYS}")

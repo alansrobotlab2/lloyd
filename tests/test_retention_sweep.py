@@ -169,6 +169,15 @@ def rs(tmp_path, monkeypatch):
         # absent store is the state the fixture wants, and it is also the `0 rows` case
         # clause 3 pins. The clause nodes write their own fixture into it.
         ("INJECTION_CANARY_DIR", "eval/measurements/injection-canary", False),
+        # Store 19 (the 21st printed line), the ceiling's per-Bash-call sample rows
+        # (#2924). A FILE, deliberately
+        # NOT created: an absent store is the state of a box whose MCP service has never
+        # finished a Bash call under this build, and two of the facts this store is pinned
+        # by are that the sweep creates nothing where it prunes (#2354 — `_append_sample`
+        # owns the mkdir) and that the absent case reports without raising. The one path
+        # redirects the whole store; `_rewrite_live_ledger` writes its temp file beside it,
+        # so the graft lands in tmp too.
+        ("CEILING_SAMPLES_FILE", "ceiling/ceiling-samples.jsonl", False),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -996,7 +1005,15 @@ def test_the_one_resolution_owns_every_directory_the_sweep_touches(tmp_path, mon
                           # root like any writable one. Its root is the CHECKED-OUT TREE
                           # rather than the data root, which is what the assertion below
                           # pins rather than `is_relative_to(root)`.
-                          "TOOL_QUALITY_DIR", "INJECTION_CANARY_DIR"}, \
+                          "TOOL_QUALITY_DIR", "INJECTION_CANARY_DIR",
+                          # #2924's sample store joins through the same DATA_ROOT as every
+                          # writable store here, and unlike #2472's and #2862's it IS
+                          # writable: this rung rewrites a file the MCP service appends to
+                          # under no lock, so a wrongly-resolved path here deletes rows of
+                          # the live distribution rather than counting the wrong directory.
+                          # A `_FILE` and not a `_DIR` because the writer's resolver names
+                          # the one file it appends to, exactly like store 15's turns file.
+                          "CEILING_SAMPLES_FILE"}, \
         f"the sweep gained or lost a store dir; update this set deliberately: {sorted(swept)}"
     for name, value in sorted(swept.items()):
         if name == "INJECTION_CANARY_DIR":
@@ -1837,7 +1854,7 @@ def _assert_table_rows_match_report(rows: dict[str, str], report: list[str],
 
 def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
         rs, _store_report):
-    """Clause 4 of #2418, carried by #2472, widened by #2615 and #2862: the skill says twenty,
+    """Clause 4 of #2418, carried by #2472, widened by #2615, #2862 and #2924: the skill says 21,
     and its table's
     rows are the report's lines.
 
@@ -1850,7 +1867,7 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     It went stale anyway, in the direction this node was blind to: #1644 added two
     stores and the prose stayed at ten for nine commits, because the count of report
     lines came from the suffix selector that could not see them (`#1835`). The report
-    side of the comparison is now the `_store_report` fixture — the twenty lines
+    side of the comparison is now the `_store_report` fixture — the 21 lines
     `main()` prints with all three automod rungs in play — so this node reads one
     measurement, not two.
     """
@@ -1863,11 +1880,11 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 20, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 21, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "twenty unbounded-growth stores" in text, (
-        "the skill's description states a store count other than twenty")
-    assert "twenty in all" in text, "the skill's body states a store count other than twenty"
+    assert "21 unbounded-growth stores" in text, (
+        "the skill's description states a store count other than 21")
+    assert "21 in all" in text, "the skill's body states a store count other than 21"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -1956,8 +1973,8 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "seventeen store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports seventeen stores by design")
+    assert "eighteen store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports eighteen stores by design")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -2072,7 +2089,7 @@ _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six
                       # that says "twenty stores are bounded" would otherwise raise
                       # `unrecognised store-count numeral` at the guard instead of being
                       # graded against the twenty the sweep prints.
-                      "twenty": 20, "1": 1, "2": 2, "3": 3, "4": 4,
+                      "twenty": 20, "21": 21, "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
 
@@ -2116,8 +2133,8 @@ def _store_report_lines(out: str) -> list[str]:
 
 def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
         rs, _store_report):
-    """#1835 clause 1, carried by #2472, widened by #2615 and #2862: the twenty lines
-    `main()` prints are twenty stores, and the three the loop leaves outside the data root are among them.
+    """#1835 clause 1, carried by #2472, widened by #2615, #2862 and #2924: the 21 lines
+    `main()` prints are 21 stores, and the three the loop leaves outside the data root are among them.
 
     This is the acceptance check itself, run against the real `main()`: the count a
     full sweep reports, taken through the selector every count comparison in this file
@@ -2126,8 +2143,8 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 20, (
-        f"the sweep prints {len(_store_report)} store lines, not the twenty its report "
+    assert len(_store_report) == 21, (
+        f"the sweep prints {len(_store_report)} store lines, not the 21 its report "
         f"has had since #2862 added the injection-canary corpus: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
@@ -2183,7 +2200,19 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
                                                                   # to the same rule for the
                                                                   # same reason: no delete verb
                                                                   # in either mode.
-                                                                  _canary_line.split(":")[0].strip()]), (
+                                                                  _canary_line.split(":")[0].strip(),
+                                                                  # #2924's store is invisible
+                                                                  # for a third reason again:
+                                                                  # it DOES carry a delete
+                                                                  # verb, but its line ends in
+                                                                  # the undated-row tail, which
+                                                                  # matches none of the three
+                                                                  # suffixes — so a count taken
+                                                                  # through that selector is
+                                                                  # one short in EITHER mode.
+                                                                  rs._ceiling_samples_line(
+                                                                      rs.sweep_ceiling_samples(False, time.time())
+                                                                  ).split(":")[0].strip()]), (
         "these store lines are invisible to an endswith(('freed','candidate',"
         "'removed (keep last 200)')) rule, which is how #1835's drift happened: "
         f"{[ln.split(':')[0] for ln in invisible]}")
@@ -2233,9 +2262,9 @@ def test_a_run_outside_the_production_checkout_reports_seventeen_stores_and_one_
 
     Outside the production checkout all three automod rungs collapse into
     `  automod stores: REFUSED: …`, so a reader holding that output sees seventeen store
-    lines while the skill says twenty — and SKILL.md now says so in those words. This
+    lines while the skill says 21 — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
-    (just "twenty", which makes every sandbox run look like it lost three stores) or the
+    (just "21", which makes every sandbox run look like it lost three stores) or the
     alarming half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
     owns the predicate itself and the `NOT_PRODUCTION_EXIT` half; what is new here is the
     COUNT, which is the number a report is written from.
@@ -2255,7 +2284,7 @@ def test_a_run_outside_the_production_checkout_reports_seventeen_stores_and_one_
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 17, f"a refusal run should report seventeen stores: {report}"
+    assert len(report) == 18, f"a refusal run should report eighteen stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2467,7 +2496,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 20, (
+    assert len(items) == len(_store_report) == 21, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -2496,6 +2525,11 @@ def test_the_task_description_names_every_store_the_sweep_prints(
     assert "~/lloyd-work" in items[16][1] and "dirs" in items[16][1], items[16]
     assert "automod/*" in items[17][1] and "branches" in items[17][1], items[17]
     assert items[16][0] == 17 and items[17][0] == 18 and items[18][0] == 19, items[16:]
+    # #2924 adds the ceiling sample store as item 21, printed LAST after #2862's canary
+    # at 20. Appending rather than inserting is what keeps every positional pin above
+    # pointing at the store it always named.
+    assert "ceiling" in items[20][1] and "rows" in items[20][1], items[20]
+    assert items[20][0] == 21, items[20]
     # Clause 2, on the tenth store's own terms: the groundskeeper pair sits where the
     # sweep prints it, between the session spill dirs and `workers.db runs`, and names
     # both files plus the constant that decides its window, so the description says
@@ -2531,8 +2565,13 @@ def test_the_store_count_guard_refuses_a_description_that_disagrees_with_the_rep
     # number is hand-copied goes stale in exactly the way it exists to detect (#1835's
     # twelve-line drift reached the fixture too, when the report went from twelve stores to
     # thirteen with #1975's ledger).
-    count_word = next(word for word, n in _STORE_COUNT_WORDS.items()
-                      if n == len(labels) and not word.isdigit())
+    # A spelled count word where one exists, the digit spelling otherwise: 21 has no
+    # compound this scanner can read (`_number_words` splits "twenty-one" into TWO counts
+    # and returns None), so a fixture that insisted on a word would either raise or plant a
+    # number the guard cannot parse. Task 79's real description uses the same digit spelling
+    # this line falls back to, which is what keeps the control a control.
+    count_word = next((word for word, n in _STORE_COUNT_WORDS.items()
+                       if n == len(labels) and not word.isdigit()), str(len(labels)))
     good = (f"The script is the only actor. {count_word} stores are bounded, and the "
             "report names them in this order: "
             + "; ".join(f"{i + 1} {lab}, bounded at the window in the line"
@@ -7075,8 +7114,8 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
         pytest.skip(f"the vault skill is not reachable from here: {skill}")
     text = skill.read_text(encoding="utf-8")
     front = text.split("---", 2)[1]
-    assert "twenty unbounded-growth stores" in front, front[:200]
-    assert "twenty in all" in text, "the skill's body states a count other than twenty"
+    assert "21 unbounded-growth stores" in front, front[:200]
+    assert "21 in all" in text, "the skill's body states a count other than 21"
     rows = _skill_table_rows(text)
     hits = [(label, body) for label, body in rows.items()
             if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
@@ -8150,31 +8189,268 @@ def test_the_injection_canary_count_path_has_no_way_to_change_the_store(rs):
         "function holds — a mode string here is where a read becomes a write")
 
 
-def test_the_injection_canary_store_prints_last_and_the_refused_run_prints_seventeen(
+def test_the_injection_canary_store_prints_second_last_and_the_refused_run_prints_eighteen(
         rs, monkeypatch, capsys):
-    """Clause 4: a refused run prints seventeen store lines and a production run prints
-    twenty, with the new store LAST in both.
+    """#2862 clause 4, re-pointed by #2924: a refused run prints eighteen lines and a
+    production run prints 21, with the canary line SECOND-LAST in both.
 
-    Last is not cosmetic. `test_the_task_description_names_every_store_the_sweep_prints`
-    matches task 79's enumeration to the printed lines POSITIONALLY, so appending the
-    store keeps items 1-19 where they are and every existing positional pin survives; a
-    store inserted in the middle would silently re-point every item at its neighbour's
-    rule, which is the class of drift this file has been built to catch.
+    Second-last is not a demotion, it is the pin that the append order is intact.
+    `test_the_task_description_names_every_store_the_sweep_prints` matches task 79's
+    enumeration to the printed lines POSITIONALLY, so a store is added at the END and
+    items 1-20 keep the rule they always had; #2924's ceiling sample store took the last
+    slot, which moved the canary from -1 to -2 here and nowhere else. A store inserted in
+    the middle would silently re-point every item at its neighbour's rule, which is the
+    class of drift this file exists to catch — and the positional assert below is what
+    would name it.
 
     The refused run is the other half: this store answers to `_TREE`, not to the
     production check, so a run from a worktree or sandbox counts it anyway — the corpus
     is a tracked directory present in every checkout, and refusing the deletions elsewhere
-    says nothing about it. That is why the count is 17 (19 minus the three automod
-    rungs that collapse into one refusal line) and not 16, and why the line still appears
-    after the refusal.
+    says nothing about it. That is why the count is 18 (21 minus the three automod
+    rungs that collapse into one refusal line) and not 17, and why the line still appears
+    after the refusal. The ceiling store answers to `DATA_ROOT` and survives the same
+    guard for the same reason; `test_the_ceiling_sample_store_prints_last_and_survives_the_refusal`
+    pins that line's own position.
     """
     _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
     lines = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(lines) == 20, f"a production run prints twenty store lines: {lines}"
-    assert lines[-1].split(":")[0].strip().startswith("injection-canary corpus"), lines[-1]
+    assert len(lines) == 21, f"a production run prints 21 store lines: {lines}"
+    assert lines[-2].split(":")[0].strip().startswith("injection-canary corpus"), lines[-2]
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(refused) == 17, (
+    assert len(refused) == 18, (
         f"a refused run prints seventeen store lines plus the refusal: {refused}")
-    assert refused[-1].split(":")[0].strip().startswith("injection-canary corpus"), refused[-1]
+    assert refused[-2].split(":")[0].strip().startswith("injection-canary corpus"), refused[-2]
+
+
+# ── #2924 store 19 (the 21st printed line): the ceiling's sample rows ──────────
+#
+# `agent_mcp/_resource_ceiling.py` appends one row per completed Bash call — the peak RSS
+# and peak task count of that call's cgroup against the caps it ran under — into
+# `<data root>/_pipeline/ceiling/ceiling-samples.jsonl`. That store is the population
+# #2578's owed p99 re-derivation is waiting on, and it exists because the same numbers used
+# to go only to a logger that reaches no file: `grep -c "resource ceiling sample"` over
+# `~/lloyd-data/logs/mcp.log`, its ten rotations and `logs/lloyd-agent-worker.log` is 0 in
+# all eleven. One row per call is only survivable if something bounds the file, and the
+# writer's own prune runs solely from inside an append — so on a box that stops running
+# Bash calls, the bound stops running too. These nodes pin the scheduled owner.
+
+from datetime import datetime, timezone                        # noqa: E402
+
+import agent_mcp._resource_ceiling as RC                       # noqa: E402
+
+
+def _ceiling_seed(rs, rows, *, store=None):
+    """Write `rows` (dicts or raw lines) to the redirected sample store and return it."""
+    store = Path(store if store is not None else rs.CEILING_SAMPLES_FILE)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    # A raw-string row arrives without its newline, and joining it verbatim merges it into
+    # the NEXT row — three lines where the test seeded four, which reads as a mis-counted
+    # prune rather than a broken helper.
+    body = "".join((r if r.endswith("\n") else r + "\n") if isinstance(r, str)
+                   else json.dumps(r, sort_keys=True) + "\n" for r in rows)
+    store.write_text(body, encoding="utf-8")
+    return store
+
+
+def _ceiling_row(days_ago: float, *, unit: str = "unit.test", rc: int = 0,
+                 mem_peak: int = 5_242_880, pids_peak: int = 4) -> dict:
+    """One sample row in the writer's own shape, stamped `days_ago` in UTC."""
+    ts = datetime.fromtimestamp(NOW_EPOCH - days_ago * 86400, timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S+00:00")
+    return {"ts": ts, "rc": rc, "mem_peak": mem_peak, "mem_max": 17_179_869_184,
+            "pids_peak": pids_peak, "pids_max": 1024,
+            "mem_frac": round(mem_peak / 17_179_869_184, 4), "oom_kill_delta": 0,
+            "source": "scope", "unit": unit}
+
+
+NOW_EPOCH = time.time()
+
+
+def test_the_sample_store_is_the_writers_own_path_and_horizon(rs):
+    """Clause 5's mechanism, at the seam: the sweep prunes the file the WRITER writes, on
+    the horizon the WRITER holds — both imported, neither restated.
+
+    This is the node the previous round of #2924 lacked. It shipped a comment claiming the
+    store was bounded by a constant named `CEILING_SAMPLES_MAX_AGE_DAYS` in
+    `scripts/groundskeeper/retention-sweep.py`, and `git grep` over that repository found
+    the name in no file at all. So this pins the two objects rather than the prose: the
+    function `rs._CEILING_MODULE.samples_path` has to BE the writer's function (identity,
+    not an equal-looking copy), and `rs.CEILING_SAMPLES_MAX_AGE_DAYS` has to BE
+    `agent_mcp._resource_ceiling.SAMPLE_MAX_AGE_DAYS`.
+
+    The identity is the whole point. Two owners of one horizon is what lets the
+    distribution the owed pass computes mean anything: the writer prunes at append time,
+    this rung prunes on schedule, and if either held its own number, the window would
+    depend on which of them last ran. And the layout is reached through the writer's own
+    resolver for store 15's reason (`app.voice_turns.turns_path()`), because a restated
+    `_pipeline/ceiling-samples.jsonl` here would keep printing a confident count while
+    pruning a file nothing opens — the store would silently become the unbounded one,
+    which is the failure this item exists to close.
+    """
+    assert rs._CEILING_MODULE.samples_path is RC.samples_path, (
+        "the sweep holds its own copy of the path resolver instead of the writer's")
+    assert rs.CEILING_SAMPLES_FILE.name == "ceiling-samples.jsonl", rs.CEILING_SAMPLES_FILE
+    # The fixture redirects the store under tmp_path, so the leaf it lands on is the
+    # writer's own `ceiling/` directory; the `_pipeline` leg of the layout is the writer's
+    # resolver's answer for an unredirected root, pinned by the assertion after this one.
+    assert rs.CEILING_SAMPLES_FILE.parent.name == "ceiling", rs.CEILING_SAMPLES_FILE
+    # The resolver answers for any root, which is what lets the sweep hand it its own
+    # `DATA_ROOT` (env, then tree, then home) and still land on the writer's layout.
+    assert RC.samples_path(Path("/some/root")) == \
+        Path("/some/root/_pipeline/ceiling-samples.jsonl")
+    assert rs.CEILING_SAMPLES_MAX_AGE_DAYS == RC.SAMPLE_MAX_AGE_DAYS == 90, (
+        f"the sweep's horizon is {rs.CEILING_SAMPLES_MAX_AGE_DAYS} and the writer's is "
+        f"{RC.SAMPLE_MAX_AGE_DAYS}; two windows over one row store is the drift this pins out")
+    # And the rung reaches the store through the module constant rather than a path built
+    # per call, which is what `tests/test_bash_resource_ceiling.py` pins from the side that
+    # owns the constant.
+    body = inspect.getsource(rs.sweep_ceiling_samples)
+    assert "CEILING_SAMPLES_FILE" in body, (
+        "the rung builds its own path instead of reading the module constant")
+    assert "_pipeline" not in body and "ceiling-samples" not in body, (
+        "the rung restates the layout it is supposed to import")
+    assert not rs.CEILING_SAMPLES_FILE.exists(), (
+        "importing the sweep created the writer's store — #2354: absent means never "
+        "measured, and `_append_sample` owns the mkdir")
+
+
+def test_the_sweep_prunes_ceiling_rows_past_the_horizon_and_keeps_every_other_kind(rs):
+    """Clause 5's rule, row by row: 200d goes, 3d stays, an unparseable `ts` stays and is
+    counted, and the dry run and the applied run decide from the same read.
+
+    The four rows are the four states a real store holds. The 200-day row is past the 90-day
+    horizon the writer publishes. The 3-day row is what ordinary traffic looks like. The
+    `not-a-timestamp` row is #2357's rule: a row written by a build this reader can no longer
+    interpret is KEPT and counted apart, because retiring a format is a migration and the
+    alternative is a sweep that quietly deletes the history of a store that exists to be
+    read years later. And the newest row is kept whatever its age — `_prune_samples` promises
+    it, `status()` reads this file, and an emptied store reads as "never measured".
+
+    Age is each row's own `ts`, never the file's mtime: on a file that is appended forever the
+    mtime is the newest call, so an mtime window would keep every row and still print a clean
+    sweep — the failure mode #2225 names for the provenance journal and #2273 for the turn
+    rows.
+    """
+    store = _ceiling_seed(rs, [
+        _ceiling_row(200.0, unit="old.unit"),
+        _ceiling_row(3.0, unit="recent.unit"),
+        '{"ts": "not-a-timestamp", "rc": 0, "mem_peak": 1, "unit": "undated.unit"}',
+        _ceiling_row(1.0, unit="newest.unit"),
+    ])
+    before = store.read_bytes()
+
+    dry = rs.sweep_ceiling_samples(False, NOW_EPOCH)
+    assert dry["dropped"] == 1, f"a 200-day row must be the only candidate: {dry}"
+    assert dry["kept"] == 3 and dry["undated"] == 1, dry
+    assert dry["after"] == dry["before"], "a dry run rewrote the store"
+    assert store.read_bytes() == before, "a dry run changed the store's bytes"
+    line = rs._ceiling_samples_line(dry)
+    assert "would prune" in line and "1 undated" in line, line
+    assert str(dry["horizon_days"]) in line, (
+        f"the line names no horizon a reader can check the prune against: {line}")
+
+    applied = rs.sweep_ceiling_samples(True, NOW_EPOCH)
+    assert applied["dropped"] == 1, applied
+    assert applied["after"] < applied["before"], applied
+    survivors = [json.loads(l) for l in store.read_text().splitlines() if l.strip()]
+    units = [r["unit"] for r in survivors]
+    assert units == ["recent.unit", "undated.unit", "newest.unit"], units
+    assert not [p for p in store.parent.iterdir() if p != store], (
+        "the rewrite left a temp file beside the store")
+    done = rs._ceiling_samples_line(applied)
+    assert "pruned" in done and "would" not in done, done
+    assert f"{applied['before']} \u2192 {applied['after']} bytes live" in done, done
+
+
+def test_an_absent_ceiling_store_is_reported_never_created_and_a_lone_row_survives(rs):
+    """The two states that must not read as a broken sweep, and the keep-newest rule.
+
+    An absent store is a box whose MCP service has never finished a Bash call under this
+    build: reported as `no sample store yet`, never as a 0 that looks like a prune that ran,
+    and above all never CREATED — #2354's rule for a store with its own writer, and the
+    reason `_append_sample` owns the `mkdir`. A store holding one ancient row is the other
+    state: the row is past every horizon in the file, and it is still kept, because the
+    writer's prune promises a newest row always exists and a sweep that empties the file
+    would leave `status()` reporting an empty sample store on a box that measured something
+    months ago.
+    """
+    assert not rs.CEILING_SAMPLES_FILE.exists()
+    absent = rs.sweep_ceiling_samples(True, NOW_EPOCH)
+    assert absent["present"] is False and absent["dropped"] == 0, absent
+    assert not rs.CEILING_SAMPLES_FILE.exists(), (
+        "the sweep created the writer's store out of an absent one")
+    assert "no sample store yet" in rs._ceiling_samples_line(absent)
+
+    lone = _ceiling_seed(rs, [_ceiling_row(4000.0, unit="lone.unit")])
+    kept = rs.sweep_ceiling_samples(True, NOW_EPOCH)
+    assert kept["dropped"] == 0, f"the only row in the store was pruned: {kept}"
+    assert len(lone.read_text().splitlines()) == 1, lone.read_text()
+    assert "lone.unit" in lone.read_text()
+
+    aged = _ceiling_seed(rs, [_ceiling_row(400.0, unit="a.unit"),
+                              _ceiling_row(401.0, unit="b.unit")])
+    out = rs.sweep_ceiling_samples(True, NOW_EPOCH)
+    assert out["dropped"] == 1, out
+    assert "a.unit" in aged.read_text() and "b.unit" not in aged.read_text(), aged.read_text()
+
+
+def test_a_ceiling_row_appended_while_the_sweep_read_survives_the_rewrite(rs, monkeypatch):
+    """The concurrency hazard, tested rather than asserted in prose.
+
+    `_append_sample` opens the store in append mode with no lock, while this rung is reading
+    it and rewriting it. A rename of a stale snapshot renames away whatever landed in between
+    — the identical hazard #1975 found on the promotion ledger, which is why this store reuses
+    that ledger's rewrite helper. The helper re-checks the live size against the bytes it was
+    told it read and grafts the tail it did not see; if this rung passed the wrong byte count,
+    the graft would either duplicate the new row or lose it.
+
+    The append is injected at the helper boundary, which is the real moment between the read
+    and the rename: a thread racing a millisecond-long rewrite in a suite that runs eight
+    workers in parallel would be a flake with a claim attached to it.
+    """
+    store = _ceiling_seed(rs, [_ceiling_row(300.0, unit="oldest.unit"),
+                               _ceiling_row(200.0, unit="older.unit"),
+                               _ceiling_row(150.0, unit="newest.unit")])
+    read_bytes = store.stat().st_size
+    late = _ceiling_row(0.0, unit="late.unit")
+    real = rs._rewrite_live_ledger
+
+    def racing(path, body, seen, **kw):
+        assert seen == read_bytes, (
+            f"the rung reported reading {seen} bytes of a {read_bytes}-byte store, so the "
+            "graft boundary it hands the helper is wrong")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(late, sort_keys=True) + "\n")
+        return real(path, body, seen, **kw)
+
+    monkeypatch.setattr(rs, "_rewrite_live_ledger", racing)
+    out = rs.sweep_ceiling_samples(True, NOW_EPOCH)
+    assert out["dropped"] == 2, out
+    survivors = [json.loads(l) for l in store.read_text().splitlines() if l.strip()]
+    assert [r["unit"] for r in survivors] == ["newest.unit", "late.unit"], survivors
+    assert survivors[0]["mem_peak"] == late["mem_peak"], survivors[0]
+
+
+def test_the_ceiling_sample_store_prints_last_and_survives_the_refusal(rs, monkeypatch,
+                                                                       capsys):
+    """Where the line prints, in both kinds of run.
+
+    Last, because task 79's enumeration is matched to the printed lines POSITIONALLY —
+    appending keeps items 1-20 on their own rules, which is #2862's reason and now #2924's.
+    And printed outside the production-checkout refusal, because the store is a data-root
+    file: a run from a round's worktree declines the loop's three refs and still bounds this
+    one, so a box that only ever runs the sweep from a gate cannot let the store grow past
+    the horizon while its report says nothing about it. That is the same argument that put
+    the canary line after the refusal, and it is why the refused run has 18 lines rather than
+    17.
+    """
+    _ceiling_seed(rs, [_ceiling_row(3.0, unit="live.unit")])
+    report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
+    assert len(report) == 21, f"a production run prints 21 store lines: {report}"
+    assert report[-1].split(":")[0].strip().startswith("ceiling sample rows"), report[-1]
+
+    refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
+    assert len(refused) == 18, f"a refused run prints eighteen store lines: {refused}"
+    assert refused[-1].split(":")[0].strip().startswith("ceiling sample rows"), refused[-1]
