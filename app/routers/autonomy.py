@@ -291,7 +291,39 @@ def _autonomy_write_file(task_dict: dict) -> Path:
     body = with_body_contract(task_dict.get("body", ""))
     content = f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True)}---\n\n{body}"
     path.write_text(content, encoding="utf-8")
+    if not existing:
+        # A CREATE, decided by `_autonomy_find_file` above rather than by the caller's
+        # `task_id`, because that is the same test that chose the filename: an id with no
+        # file yet is a new fleet member whatever the client meant. The report travels with
+        # the path instead of being logged, so whoever made the file is told the doc does not
+        # name it (#2895) — the route has produced no drift itself, but a guard on one writer
+        # is not a guard, and this is the writer the Mission Control page uses.
+        return _membership_at_filing(task_id, path)
     return path
+
+
+def _membership_at_filing(task_id, path: Path) -> Path:
+    """`path`, carrying what `architecture/autonomy-jobs.md`'s two membership tables say
+    about the task file that was just created (`jobs_membership.TaskFilePath.report`).
+
+    Delegates the whole question to `scripts/autonomy/jobs_membership.py`, which the MCP
+    writer and `validate_tasks.py` consult too, so the two tables have one parser in the
+    tree. Imported inside the function on the precedent of `app/routers/automod.py:177`:
+    `scripts/` is a namespace package reached through the repo root's entry on `sys.path`,
+    and a route module must not fail to import because of where it was started from.
+
+    It never raises and never refuses. The write has already happened by the time this runs,
+    and an unreadable doc comes back as `unchecked` — a value that is not a pass, but is
+    nowhere near a reason to withhold a task file.
+    """
+    try:
+        from scripts.autonomy import jobs_membership as jm
+
+        return jm.reported(path, jm.report_at_filing(task_id, task_dir=_AUTONOMY_DIR,
+                                                     file_name=path.name))
+    except Exception as exc:  # noqa: BLE001 — the file is written; reporting cannot undo it
+        logger.warning("task-write: membership report failed for #%s: %s", task_id, exc)
+        return path
 
 
 @router.get("/api/autonomy/tasks")
@@ -389,8 +421,19 @@ async def autonomy_task_write(request: Request):
             "updated": now,
             "body": "",
         }
-        _autonomy_write_file(task_dict)
-        return JSONResponse({"task": {"id": new_id}})
+        path = _autonomy_write_file(task_dict)
+        # The id was the whole response until now. `membership` is what the two tables of
+        # `architecture/autonomy-jobs.md` say about the file that was just written — on the
+        # response, because the create path has no other channel: nothing reads a log line
+        # from here, and the page that posted it has no way to open the doc (#2895).
+        # `{"unchecked": …}` rather than a missing key when the report could not be made: an
+        # absent field would read as "checked, and clean" to a client rendering this.
+        return JSONResponse({"task": {
+            "id": new_id,
+            "membership": getattr(path, "report", None)
+            or {"task_id": new_id, "tables_missing": [],
+                "unchecked": "the writer returned no membership report"},
+        }})
     else:
         path = _autonomy_find_file(task_id)
         if not path:

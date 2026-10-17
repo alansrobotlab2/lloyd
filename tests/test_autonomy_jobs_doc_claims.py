@@ -90,8 +90,17 @@ ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "architecture" / "autonomy-jobs.md"
 ARCH_DIR = ROOT / "architecture"
 
-FUNCTIONS_HEADER = "| Function | Jobs | What it is for |"
-TIERS_HEADER = "| Tier | Jobs | |"
+#: The membership tables' single parser, now that the writers need one too (#2895).
+#: Imported from the repo root the way `app/routers/automod.py:177` reaches
+#: `scripts.automod.state`, and deliberately a module-level import here: a doc-claims file
+#: that cannot load its own parser should fail at collection, not on whichever node reads a
+#: table. The drift arithmetic below delegates to it; `_table` stays where it is because
+#: twenty-odd other nodes in this file group those tables by tier or function, which is a
+#: different question from who is a member.
+from scripts.autonomy import jobs_membership as jm  # noqa: E402
+
+FUNCTIONS_HEADER = jm.FUNCTIONS_HEADER
+TIERS_HEADER = jm.TIERS_HEADER
 
 #: The Measure-group jobs whose report has no scheduled consumer. Three
 #: sentences in the doc count against this set — the "no consumer" heading, that
@@ -3208,13 +3217,13 @@ def test_no_live_sentence_calls_a_superseded_id_the_newest():
 # rule itself is proved: a check that can only be exercised against the live vault
 # is a check no rung can see fail.
 
-TASK_FILE_NAME = re.compile(r"(\d+)-.*\.md$")
-
-#: A membership row that discharges its own id: `| #36 | … Retired 2026-09-23 …`.
-#: Case-sensitive on purpose — the words *retired* and *archived* recur in prose
-#: narrating other jobs' histories, and a row that merely mentions a retirement is
-#: not that row's own retirement. Only #36's row matches in today's doc.
-RETIRED_MEMBERSHIP_ROW = re.compile(r"^\| #(\d+) \|.*\b(?:Retired|Archived)\b", re.M)
+#: Both patterns now live in `scripts/autonomy/jobs_membership.py` (#2895), where the two
+#: task-file writers, `validate_tasks.py` and this file read the same bytes. They are bound
+#: here rather than deleted because a node's prose names them, and a name in prose that
+#: points at a re-declared copy is the second copy this item exists to remove: edit the test
+#: copy and the fleet's membership would be computed one way here and another way at filing.
+TASK_FILE_NAME = jm.TASK_FILE_NAME
+RETIRED_MEMBERSHIP_ROW = jm.RETIRED_MEMBERSHIP_ROW
 
 
 def _task_dir() -> Path:
@@ -3241,9 +3250,7 @@ def _task_file_ids(tasks_dir: Path) -> set[str]:
     input that makes every id the doc names an offence *and* every real omission
     invisible, in the same run.
     """
-    ids = {f"#{m.group(1)}"
-           for m in (TASK_FILE_NAME.match(p.name) for p in tasks_dir.glob("*.md"))
-           if m}
+    ids = jm.task_file_ids(tasks_dir)
     assert ids, (
         f"no `NN-*.md` task file in {tasks_dir}, so there is nothing to reconcile "
         f"against — a fleet of zero tasks is not a fleet")
@@ -3253,9 +3260,12 @@ def _task_file_ids(tasks_dir: Path) -> set[str]:
 def _retired_named_ids(doc_text: str) -> set[str]:
     """Ids the doc discharges by its own row: `{#36}` in today's document.
 
-    Read off the row, never typed, for the reason given on `RETIRED_MEMBERSHIP_ROW`.
+    Read off the row, never typed, for the reason given on `RETIRED_MEMBERSHIP_ROW`. Since
+    #2895 the pattern lives in `scripts/autonomy/jobs_membership.py`, because the two
+    task-file writers and `validate_tasks.py` ask the same question and a second copy of the
+    answer is how this class of drift survived four rounds.
     """
-    return {f"#{n}" for n in RETIRED_MEMBERSHIP_ROW.findall(doc_text)}
+    return jm.retired_named_ids(doc_text)
 
 
 def _job_num(job: str) -> int:
@@ -3274,12 +3284,15 @@ def _membership_drift(named: list[str], live: set[str],
     - **unlisted** — a live task file whose id the table never names. (#91–#97.)
     - **duplicate** — the id appears twice in the table, so the roster claims the
       job holds the group twice.
+
+    Delegates to `jm.table_drift`, the same function the two task-file writers reach
+    through `jm.membership_drift(doc_text, task_dir)` (#2895). It used to be computed
+    here, which is the shape that made this section a nightly-only witness: the writers
+    could not import a test, so the first thing in a day to read both sides was a red
+    suite. Every node below still asserts against this signature — moving the arithmetic
+    out is what lets `validate_tasks.py` and a filing agent ask it at 02:00 instead.
     """
-    named_set = set(named)
-    ghosts = sorted(named_set - live - retired, key=_job_num)
-    unlisted = sorted(live - named_set, key=_job_num)
-    duplicated = sorted({j for j in named if named.count(j) > 1}, key=_job_num)
-    return ghosts, unlisted, duplicated
+    return jm.table_drift(named, live, retired)
 
 
 def _assert_no_ghosts(table: str, named: list[str], live: set[str],

@@ -13,6 +13,7 @@ Tools: autonomy_tasks, autonomy_write_task, autonomy_get_task,
 import asyncio
 import datetime
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -40,6 +41,13 @@ from app.routers.autonomy import _TASK_NAME_RE
 # consults to ask why a task is still running (#2640). Imported for the same
 # reason as `_TASK_NAME_RE` above: one value, one place it is written.
 from app.autonomy import max_retries_budget
+
+#: Same convention as every other module in `agent_mcp/` (`skills.py:28`, `browser.py`,
+#: `automod.py`). `autonomy.py` itself had no logger until #2895 — the note at
+#: `_description_guard_fires` records that the whole file was `git grep`-clean of logging in
+#: the #2534 era, when the guard's only channel was its own ledger. A report that rides on a
+#: return value needs a channel for the case where there is no return value to ride on.
+logger = logging.getLogger(__name__)
 
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 
@@ -371,7 +379,38 @@ def _write_task_file(task_dict: dict) -> Path:
     body = with_body_contract(task_dict.get("body", ""))
     content = f"---\n{yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)}---\n\n{body}"
     path.write_text(content, encoding="utf-8")
+    if not existing:
+        # A new fleet member, decided by `_find_task_file` — the same test that chose the
+        # filename. `path` normally comes straight out of that branch as a plain `Path`, so
+        # this is where a creation is distinguishable from an update, and the report rides ON
+        # the path (`jobs_membership.TaskFilePath`) rather than replacing it: the callers here
+        # and in tests/test_autonomy_failure_alert.py use the return as a Path. (#2895.)
+        return _membership_at_filing(task_id, path)
     return path
+
+
+def _membership_at_filing(task_id: int, path: Path) -> Path:
+    """`path`, carrying what `architecture/autonomy-jobs.md`'s two membership tables say about
+    the task file that was just created (`report` names the tables that omit the id).
+
+    Same delegate as the HTTP writer's (`app/routers/autonomy.py`), because a guard on one of
+    two writers is not a guard — and this is the writer with recorded traffic: 41
+    `autonomy_write_task` calls against zero recorded creates on the route. The parse, the
+    journal row and its schema all live in `scripts/autonomy/jobs_membership.py`, so the two
+    tables have one reader in the tree.
+
+    Never refuses and never raises: the file is on disk before this runs and dispatch will see
+    it, so the only failure mode left is failing to SAY so. An unreadable doc is reported as
+    `unchecked`, which is deliberately not a clean value.
+    """
+    try:
+        from scripts.autonomy import jobs_membership as jm
+
+        return jm.reported(path, jm.report_at_filing(task_id, task_dir=AUTONOMY_DIR,
+                                                     file_name=path.name))
+    except Exception as exc:  # noqa: BLE001 — a report that cannot be made is not a write error
+        logger.warning("autonomy_write_task: membership report failed for #%s: %s", task_id, exc)
+        return path
 
 
 def _find_task_file(task_id: int) -> Path | None:
@@ -745,8 +784,18 @@ def _handle_write(params: dict) -> str:
             "updated_at": now,
             "body": "",
         }
-        _write_task_file(task_dict)
-        return json.dumps({"task": task_dict})
+        written = _write_task_file(task_dict)
+        result = {"task": task_dict}
+        # `membership` is new (#2895), and it is here because the writer's return value was
+        # discarded at this line: the report `_write_task_file` now attaches on a create had
+        # no channel at all, and whoever called this tool is the only party in the loop who can
+        # still add the two doc rows while the task is fresh. A key a client does not read is
+        # harmless, so nothing existing breaks; `unchecked` on a failure rather than an absent
+        # key, because an absent key reads as "checked, and clean".
+        result["membership"] = getattr(written, "report", None) or {
+            "task_id": new_id, "tables_missing": [],
+            "unchecked": "the writer returned no membership report"}
+        return json.dumps(result)
     else:
         existing_path = _find_task_file(task_id)
         if not existing_path:

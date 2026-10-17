@@ -79,6 +79,15 @@ try:
     from app import llm_slots  # noqa: E402
 except Exception:  # noqa: BLE001
     llm_slots = None
+# The membership tables' parser (#2895), which lives beside this file rather than in
+# `tests/` precisely so the linter, the two task-file writers and the nightly reconciler
+# share ONE reading of the two tables. A second copy of the rule is how the class of drift
+# this file now reports survived four rounds of tests.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import jobs_membership as jm  # noqa: E402
+except Exception:  # noqa: BLE001
+    jm = None
 # Which supervisord program each `models:` alias tracks (#2632). `requires_slot:`
 # names a program, so #1577's check could ask `llm_slots` directly; `model:` names an
 # ALIAS, and the one place the tree says which row an alias belongs to is
@@ -309,6 +318,47 @@ def skill_resolves(value: str, skills_dirs: list[Path]) -> bool:
     return False
 
 
+def doc_membership_warnings(d: Path, jobs_doc: Path,
+                            parser=None) -> list[str]:
+    """DOC_MEMBERSHIP warnings for the fleet in `d` against `jobs_doc`'s two tables.
+
+    Separate from `main()` so `tests/test_validate_tasks_linter.py` can assert on the
+    messages over a fixture pair without running the scheduler's whole field validation over
+    a synthetic file, and so the rule lives in one place with the parser it uses.
+
+    The ids come from the DIRECTORY and the tables come from the DOC, both parsed by
+    `scripts/autonomy/jobs_membership.py` — never from a list of expected ids in this file.
+    A roster here would be the fifth hand-typed membership table in the tree, which is the
+    thing that keeps drifting.
+    """
+    jm = parser if parser is not None else globals().get("jm")
+    if jm is None:
+        return [f"DOC_MEMBERSHIP: unchecked — jobs_membership.py is not importable from "
+                f"{Path(__file__).parent}"]
+    try:
+        text = Path(jobs_doc).read_text(encoding="utf-8")
+        live = jm.task_file_ids(Path(d))
+        retired = jm.retired_named_ids(text)
+        parsed = [(name, jm.named_ids(text, header)) for name, header in jm.TABLES]
+    except (OSError, jm.UnreadableDoc) as exc:
+        # A doc whose tables cannot be located is not a doc in sync. Reported, never
+        # silently passed: `table_rows` raises rather than parsing nothing, because an empty
+        # parse and a clean doc would otherwise look identical from here. Both tables are read
+        # inside this `try` — the header is looked up per table, so a loop that parsed outside
+        # it raised straight out of the linter on a doc with its headings reworded, which is
+        # exactly the shape the exception exists for.
+        return [f"DOC_MEMBERSHIP: unchecked — {jobs_doc}: {exc}"]
+    out: list[str] = []
+    for name, named in parsed:
+        ghosts, unlisted, dupes = jm.table_drift(named, live, retired)
+        out += [f"{i}: DOC_MEMBERSHIP: {name} names no row for a live task file — add its "
+                f"row or retire it in {Path(jobs_doc).name}" for i in unlisted]
+        out += [f"{i}: DOC_MEMBERSHIP: {name} names a job with no task file under {d} and "
+                f"no Retired row" for i in ghosts]
+        out += [f"{i}: DOC_MEMBERSHIP: listed more than once in {name}" for i in dupes]
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--autonomy-dir", default=str(DEFAULT_DIR))
@@ -322,6 +372,12 @@ def main() -> int:
                          "accepted model: values, and whose slot enabled flags "
                          "(`secondary_enabled`, `djev.enabled`) decide which "
                          "requires_slot: programs are switched off")
+    ap.add_argument("--jobs-doc", default=None, metavar="FILE",
+                    help="architecture/autonomy-jobs.md whose two membership tables are "
+                         "checked against the directory (DOC_MEMBERSHIP). Default: that "
+                         "doc in the tree this script runs from, but only when "
+                         "--autonomy-dir is the default fleet directory; pass it "
+                         "explicitly to check a fixture or a redirected fleet.")
     ap.add_argument("--strict", action="store_true",
                     help="treat structural warnings as failures (exit 2)")
     args = ap.parse_args()
@@ -496,6 +552,28 @@ def main() -> int:
                         f"{p.name}: depends_on {dep_id} but #{dep_id} is "
                         f"status={dep_status or 'unset'}"
                     )
+
+    # DOC_MEMBERSHIP (#2895) — is every live task file named by BOTH membership tables of
+    # `architecture/autonomy-jobs.md`? Ids come from the directory and both tables are
+    # parsed, so there is no allowlist to age and no file to register: the file on disk IS
+    # the fleet, which is the rule the four rounds on this class (#1102, #2630/#2631, #2813,
+    # #2881) kept rediscovering from the wrong end, after a suite went red.
+    #
+    # Only this class joins `warnings`, never the exit rules below: the doc is prose, and
+    # prose lagging the fleet by a day has never been a reason to fail a scheduler's
+    # validation. `--strict` still turns it into exit 2, because that flag's whole meaning is
+    # "treat structural warnings as failures".
+    #
+    # It runs when the doc was asked for (`--jobs-doc`) or when the directory is the default
+    # one, and is skipped otherwise. A test passing `--autonomy-dir tmp` is asking about one
+    # file's fields and has no opinion about the shared doc, and `jm.JOBS_DOC` resolves to
+    # whichever tree is running, so grading a real fleet against a checkout that is behind it
+    # would be a measurement of the worktree.
+    jobs_doc = Path(args.jobs_doc).expanduser() if args.jobs_doc else None
+    if jobs_doc is None and d.resolve() == DEFAULT_DIR.resolve():
+        jobs_doc = jm.JOBS_DOC if jm else None
+    if jobs_doc is not None:
+        warnings.extend(doc_membership_warnings(d, jobs_doc, jm))
 
     print(f"Scanned {len(files)} task files in {d}")
     print(f"  parseable:   {len(by_file)}")

@@ -1222,3 +1222,278 @@ def test_the_real_board_node_holds_no_typed_census_and_names_the_floor_when_the_
         f"twice. Assert the census's SHAPE here and leave the count to "
         f"`test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live`: "
         f"{offenders}")
+
+
+# ── #2895: DOC_MEMBERSHIP — the linter reads the doc's two membership tables ────
+#
+# The fleet's own membership was never one of this linter's classes, so a task file could
+# land that the doc names nowhere and every check above would pass on it. Four rounds were
+# spent on that gap from the wrong end (#1102, #2630/#2631, #2813, #2881): the only node that
+# reconciled the two tables against the directory carries `@live_vault`, which the automod gate
+# deselects (`scripts/automod/gate.py:641`), so the first thing in a day to read both sides was
+# allowed to be a red suite.
+#
+# These nodes stay with the file's own convention — the linter is a CLI and nothing imports it,
+# so every fact here comes out of a subprocess and an exit code. The parser is
+# `scripts/autonomy/jobs_membership.py`, the same one both task-file writers reach on a create
+# (`tests/test_autonomy_task_membership_at_filing.py`), which is the point of extracting it: the
+# linter cannot hold a laxer rule than filing does.
+#
+# `--jobs-doc` is passed explicitly in every seeded node. Without it the check is SKIPPED for a
+# non-default `--autonomy-dir`, by design — see
+# `test_without_the_flag_a_fixture_directory_is_not_graded_against_the_shared_doc`.
+
+
+def _membership_doc(tmp_path: Path, *, functions=(), tiers=()) -> Path:
+    """A two-table membership doc in the live doc's shape.
+
+    Which cell the ids sit in is the detail that decides whether this fixture means anything:
+    the live rows are `| [Ingest](#ingest-68-30-53) | #68 #30 #53 | … |` and `| Writes durable
+    state unattended | #30 #53 … |`, so the ids are in the SECOND cell of both tables and
+    `jobs_membership.table_rows` reads `cells[1]`. A fixture that spelled them into cell 1
+    parses as a table naming nobody — and "names nobody" is indistinguishable from "in sync" for
+    any node that checks only one direction, which is the exact blind spot this class grew in.
+    """
+    headers = ("| Function | Jobs | What it is for |", "| Tier | Jobs | |")
+    parts = []
+    for hdr, ids in zip(headers, (functions, tiers)):
+        rows = "".join(f"| Group {i} | #{i} | note |\n" for i in ids)
+        parts.append(f"{hdr}\n|---|---|---|\n{rows}")
+    d = tmp_path / "autonomy-jobs.md"
+    d.write_text("\n\n".join(parts) + "\n", encoding="utf-8")
+    return d
+
+
+def _membership_run(tmp_path, lint_args: "Linter", doc: Path, *extra: str):
+    return lint_args.run("--jobs-doc", str(doc), *extra)
+
+
+def test_doc_membership_names_a_task_file_neither_table_lists(tmp_path):
+    """The #2881 shape, from the linter's side: `41-….md` on disk, #41 named nowhere.
+
+    Both table names appear in the line because the fix is one row in EACH, and a warning that
+    names one sends a reader to add that one and leave the other wrong — #2881's third instance
+    was precisely a job in the functions table and absent from the tier table. Naming the id is
+    the other half of the value: "membership drift" without `#41` sends a person to diff the
+    whole fleet by hand.
+    """
+    lint = Linter(tmp_path)
+    lint.add("40-x.md", id=40, name="x", status="draft", frequency="daily",
+             skill_name="heartbeat")
+    lint.add("41-y.md", id=41, name="y", status="draft", frequency="daily",
+             skill_name="heartbeat")
+    doc = _membership_doc(tmp_path, functions=(40,), tiers=(40,))
+
+    rc, out = _membership_run(tmp_path, lint, doc)
+    hits = [ln for ln in out.splitlines() if "DOC_MEMBERSHIP" in ln]
+    assert len(hits) == 2, out
+    assert all("#41" in ln for ln in hits), hits
+    assert any("functions table" in ln for ln in hits) and any(
+        "write-authority" in ln for ln in hits), hits
+    assert rc == 0, f"a doc that lags the fleet must cost a run nothing, got exit {rc}"
+
+
+def test_doc_membership_names_a_row_with_no_task_file_behind_it(tmp_path):
+    """The opposite direction, which is the one a filing check cannot catch by definition: the
+    doc claims a job the fleet does not have (#87 #88 #89, and the three paper digests of #2630).
+
+    The ghost rule discharges an id whose OWN row says Retired, read off the row rather than
+    from a typed list — the case that forced the exemption is #36, whose membership row at
+    `architecture/autonomy-jobs.md:933` says **Retired 2026-09-23** while its file sits in
+    `_archived/`. The negative control below is the half that keeps the exemption honest: prose
+    about somebody else's retirement must not discharge anything, or the exemption is an
+    allowlist with extra steps.
+    """
+    lint = Linter(tmp_path)
+    lint.add("40-x.md", id=40, name="x", status="draft", frequency="daily",
+             skill_name="heartbeat")
+    doc = _membership_doc(tmp_path, functions=(40, 41), tiers=(40,))
+
+    rc, out = _membership_run(tmp_path, lint, doc)
+    hits = [ln for ln in out.splitlines() if "DOC_MEMBERSHIP" in ln and "#41" in ln]
+    assert len(hits) == 1, out
+    assert "no task file" in hits[0] and "no Retired row" in hits[0], hits[0]
+
+    # The discharging row's shape is #36's, at `architecture/autonomy-jobs.md:933`:
+    # `| #36 | daily | the vault | **Retired 2026-09-23 (#1012)** — … |`. It starts with the ID,
+    # which is what `RETIRED_MEMBERSHIP_ROW`'s `^\| #(\d+) \|` anchors on, and it sits outside
+    # both membership tables — a row in a table this check reads would also NAME the id, and the
+    # test would then be grading a doc that lists #41 rather than one that discharges it.
+    discharged = tmp_path / "discharged.md"
+    discharged.write_text(
+        doc.read_text(encoding="utf-8")
+        + "\n| #41 | daily | the vault | **Retired 2026-10-17** — merged into #40 |\n",
+        encoding="utf-8")
+    assert not [ln for ln in _membership_run(tmp_path, lint, discharged)[1].splitlines()
+                if "DOC_MEMBERSHIP" in ln and "#41" in ln], (
+        "a row that discharges its own id was still reported as a phantom")
+
+    # The same words, and the same id, in a line that is not #41's own row: not a discharge.
+    # Without this the exemption is an allowlist you can buy with any sentence in the doc.
+    prose = tmp_path / "prose.md"
+    prose.write_text(
+        doc.read_text(encoding="utf-8")
+        + "\nGroup 41, whose predecessor Retired in 2026, absorbs it.\n",
+        encoding="utf-8")
+    assert [ln for ln in _membership_run(tmp_path, lint, prose)[1].splitlines()
+            if "DOC_MEMBERSHIP" in ln and "#41" in ln], (
+        "prose mentioning a retirement discharged an id whose row does not say retired")
+
+
+def test_doc_membership_is_the_directory_not_a_registration(tmp_path):
+    """No allowlist, and no way to file a task quietly.
+
+    This class turned on a hand-typed roster that nobody updated, so the property that decides
+    whether the fix holds is this one: a file that appears in the directory is asked about on
+    the NEXT run with no edit to any list, in any file, anywhere. Anything that needs
+    registering is the same roster under a better name.
+    """
+    lint = Linter(tmp_path)
+    lint.add("40-x.md", id=40, name="x", status="draft", frequency="daily",
+             skill_name="heartbeat")
+    doc = _membership_doc(tmp_path, functions=(40,), tiers=(40,))
+    assert not [ln for ln in _membership_run(tmp_path, lint, doc)[1].splitlines()
+                if "DOC_MEMBERSHIP" in ln], "a clean pair reported drift"
+
+    lint.add("41-y.md", id=41, name="y", status="draft", frequency="daily",
+             skill_name="heartbeat")
+    hits = [ln for ln in _membership_run(tmp_path, lint, doc)[1].splitlines()
+            if "DOC_MEMBERSHIP" in ln]
+    assert len(hits) == 2 and all("#41" in ln for ln in hits), hits
+
+    # A name that is not `NN-*.md` is not a fleet member, so the fleet's own `_config.md` and
+    # any note dropped into the directory cannot manufacture a violation — and, symmetrically,
+    # cannot hide one: `_config.md` beside a real unlisted id leaves exactly the two hits.
+    (lint.autonomy_dir / "_config.md").write_text("---\ntype: note\n---\n\nx\n",
+                                                  encoding="utf-8")
+    (lint.autonomy_dir / "scratch.md").write_text("# scratch\n", encoding="utf-8")
+    hits = [ln for ln in _membership_run(tmp_path, lint, doc)[1].splitlines()
+            if "DOC_MEMBERSHIP" in ln]
+    assert len(hits) == 2 and all("#41" in ln for ln in hits), hits
+
+
+def test_doc_membership_reports_an_unreadable_doc_instead_of_passing(tmp_path):
+    """An empty parse and a clean doc must be tellable apart from the output alone.
+
+    `jobs_membership.table_rows` raises rather than returning no rows for exactly this reason,
+    and the class surfaces both failure shapes as one reported line: a doc that is not on disk,
+    and a doc whose two table headers have been reworded so the tables cannot be located. Both
+    say `unchecked`, which no reader can mistake for a pass, and both are warnings, so
+    `--strict` fails on them.
+    """
+    lint = Linter(tmp_path)
+    lint.add("40-x.md", id=40, name="x", status="draft", frequency="daily",
+             skill_name="heartbeat")
+
+    rc, out = _membership_run(tmp_path, lint, tmp_path / "not-here.md")
+    hits = [ln for ln in out.splitlines() if "DOC_MEMBERSHIP" in ln]
+    assert len(hits) == 1 and "unchecked" in hits[0], out
+    assert rc == 0
+    assert _membership_run(tmp_path, lint, tmp_path / "not-here.md", "--strict")[0] == 2, (
+        "an unchecked membership check is outside --strict, so it can pass silently")
+
+    headerless = tmp_path / "reworded.md"
+    headerless.write_text("# A doc whose tables were reworded\n\nnothing here\n",
+                          encoding="utf-8")
+    rc, out = _membership_run(tmp_path, lint, headerless)
+    hits = [ln for ln in out.splitlines() if "DOC_MEMBERSHIP" in ln]
+    assert len(hits) == 1 and "unchecked" in hits[0], out
+
+
+def test_without_the_flag_a_fixture_directory_is_not_graded_against_the_shared_doc(tmp_path):
+    """The scoping rule, pinned because it is the one thing here that could lie.
+
+    With no `--jobs-doc` the class runs only when `--autonomy-dir` is the default fleet
+    directory. Two reasons, and the second is the one a round can be burned by: `jobs_membership`
+    resolves the doc relative to the tree that is RUNNING, so grading the real fleet against a
+    checkout that is a day behind would report every job filed since that checkout as unlisted —
+    a measurement of the worktree, not of the fleet. A test passing `--autonomy-dir tmp` is
+    asking about one file's fields and has no opinion about a shared doc it did not name.
+    """
+    lint = Linter(tmp_path)
+    lint.add("40-x.md", id=40, name="x", status="draft", frequency="daily",
+             skill_name="heartbeat")
+
+    rc, out = lint.run()
+    assert "DOC_MEMBERSHIP" not in out, (
+        "a redirected fixture directory was graded against a doc the caller never named")
+    assert rc == 0
+    # And it is not simply dead code: naming the doc turns the same directory into a report.
+    doc = _membership_doc(tmp_path, functions=(), tiers=())
+    assert any("DOC_MEMBERSHIP" in ln for ln in lint.run("--jobs-doc", str(doc))[1].splitlines())
+
+
+def test_doc_membership_leaves_every_other_class_and_every_exit_code_alone(tmp_path):
+    """The bound the item states outright, measured as exit codes.
+
+    Four facts from this linter's own contract, each re-checked on a directory that ALSO carries
+    membership drift, which is the only way to show the new class did not disturb the others: an
+    unparseable file is exit 1, `--strict` turns structural warnings into exit 2, a bad
+    `depends_on` is still named by file and upstream, and a clean run is exit 0. The one
+    intentional difference is that DOC_MEMBERSHIP joins `warnings`, so it is exit 0 by itself and
+    exit 2 under `--strict` — the doc is prose, and prose lagging the scheduler has never been a
+    reason to fail the thing that dispatches jobs.
+    """
+    lint = Linter(tmp_path)
+    lint.add("40-x.md", id=40, name="x", status="draft", frequency="daily",
+             skill_name="heartbeat")
+    doc = _membership_doc(tmp_path, functions=(40,), tiers=(40,))
+
+    assert _membership_run(tmp_path, lint, doc)[0] == 0, "a clean case stopped being clean"
+
+    lint.add("41-y.md", id=41, name="y", status="draft", frequency="daily",
+             skill_name="heartbeat")
+    assert _membership_run(tmp_path, lint, doc)[0] == 0
+    assert _membership_run(tmp_path, lint, doc, "--strict")[0] == 2
+
+    # A real structural violation keeps its own class, its own wording and its own code with
+    # membership drift present beside it: #815's frequency vocabulary, unchanged.
+    lint.add("42-z.md", id=42, name="z", status="up_next", frequency="hourly-on-the-hour",
+             skill_name="heartbeat")
+    rc, out = _membership_run(tmp_path, lint, doc)
+    assert "hourly-on-the-hour" in out and rc == 0, out
+
+    (lint.autonomy_dir / "43-broken.md").write_text(
+        "---\ntype: autonomy\nid: [unclosed\n---\n\nx\n", encoding="utf-8")
+    rc, out = _membership_run(tmp_path, lint, doc)
+    assert rc == 1, f"DOC_MEMBERSHIP changed the unparseable exit code: {rc}\n{out}"
+    assert "UNPARSEABLE" in out or "unparseable" in out, out
+
+
+@pytest.mark.live_vault
+def test_the_live_fleet_and_the_live_doc_reconcile_through_the_new_class():
+    """What this round can honestly say about the real tree: the class is silent on today's
+    fleet, and it is silent because #2881 hand-fixed both tables on 2026-10-17, not because the
+    check skipped.
+
+    Marked `@live_vault` for the reason the same file's own reconciling nodes are
+    (`tests/test_autonomy_jobs_doc_claims.py:3349`, `:3377`): it reads `~/obsidian/autonomy`,
+    which no round under test controls, so the gate deselects it and it runs under a bare
+    `pytest tests/` and in the nightly. The seeded nodes above are what the gate sees — which is
+    the shape this item exists to install.
+
+    The fleet size is READ off the run and compared against the directory the run names, not
+    typed into this file. The first draft asserted `"Scanned 43 task files" in out`, and 43 was
+    simply how many files the fleet held on the morning #2881 hand-fixed the two tables
+    (`f1cd276e`): the next task filed — WITH its two doc rows just as much as without — reddened
+    this node, so it was a maintenance tripwire dressed as a check and could not tell "the fleet
+    grew" apart from "the linter stopped counting". Counting the directory behind the scanner is
+    the claim that survives a filing: it says the scanner saw the whole fleet, and it stays true
+    whatever the fleet is. The `DOC_MEMBERSHIP` silence below is the part about the doc.
+    """
+    proc = subprocess.run([sys.executable, str(SCRIPT)], capture_output=True, text=True,
+                          timeout=180, cwd=str(ROOT))
+    out = proc.stdout + proc.stderr
+    scanned = re.search(r"^Scanned (\d+) task files in (.*)$", out, re.MULTILINE)
+    assert scanned, f"the run printed no scan line this node can count:\n{out[:600]}"
+    printed, scanned_dir = int(scanned.group(1)), Path(scanned.group(2).strip())
+    # The same glob the scanner uses (`validate_tasks.py`: `*.md` whose name starts with
+    # digits-and-a-dash), so this compares two readings of one rule and not a guess at it.
+    on_disk = [p for p in scanned_dir.glob("*.md") if re.match(r"\d+-", p.name)]
+    assert printed > 0, f"the directory the linter scanned came back empty: {scanned_dir}"
+    assert printed == len(on_disk), (
+        f"the linter counted {printed} task files while {len(on_disk)} numbered files sit in "
+        f"{scanned_dir}: the count on the report is not the fleet, so the silence below proves "
+        f"nothing about a fleet the scanner did not see\n{out[:400]}")
+    hits = [ln for ln in out.splitlines() if "DOC_MEMBERSHIP" in ln]
+    assert hits == [], "the live fleet and the live doc disagree:\n" + "\n".join(hits)
