@@ -60,6 +60,49 @@ BEFORE_TOTAL = 40
 BEFORE_MACHINE = 21
 
 
+# ── four sites ruled NON-CONVERTIBLE, and the reserve that is not one of them ───
+#
+# The standing skip count sits under the ceiling (`PYTEST_MAX_SKIPPED` in
+# `scripts/automod/gate.py`, enforced at its tests rung), so a round that needs a
+# conversion goes looking for one. These four are not available. Each was examined
+# against the three ways #1377 gives of removing an absence skip — report the real
+# failure, build a synthetic and label it, or keep it a skip with an id — and each was
+# ruled PERMANENTLY non-convertible: not an owed conversion, and a round may never
+# count any of them as skip headroom or convert one by asserting an absence as a pass.
+# The ruling otherwise lived only in the owed entry of a closed item, which is where a
+# ruling goes to become invisible; it is here so the next round reads it instead of
+# re-filing it for a person. Anchored by the text of each skip call rather than a line
+# number, because every line citation in this file has drifted at least once.
+#
+# 1. `tests/test_qmd_fork_landing.py` — skip reason `is not on disk here`. The node's
+#    own docstring rules that "an absent fork is reported as *skipped*, not as a
+#    pass", and the qmd fork is a never-touch tree: a synthetic fork would turn every
+#    assertion in the file into a test of a copy, which is the misattribution the fork
+#    check exists to avoid.
+# 2. `tests/test_trajectory_extraction.py`, the guard inside `_live_buckets` — skip
+#    reason `no trajectories dir on this machine`. This skips on machine state and
+#    nothing else: the regenerated-error corpus is not in the repo. Two nodes consume
+#    the guard (`test_no_regenerated_bucket_promotes_the_keyword_sweep`,
+#    `test_the_regenerated_window_flags_only_persisted_flag_failures`), and neither may
+#    be turned into a pass on a machine holding no corpus.
+# 3. `tests/_live_data.py` — skip reason `absent at`, which already names the path and
+#    the owner it wants. This is #1377's step-3 branch, and the file carries the record
+#    of what the other branches would have hidden: `SM_20260923_034250` promoted with
+#    `kg.sqlite` missing and 39 named skips. A loss is not a stub, and no round may
+#    collapse that fork to make a node report something.
+# 4. `tests/test_retrieval_seed_anchoring.py` — skip reason `no entity-vector index`.
+#    A measurement node: that probe is followed by a Qwen3 weights probe, and the node
+#    may not assert a ranking without both. A ranking over an absent index is a number
+#    about nothing, and the file's own
+#    `test_a_zero_row_live_store_is_not_skipped_by_this_gate` already rules that an
+#    empty-but-present store is a failure rather than a skip.
+# The only convertible reserve is the two `recording mode only` skips —
+# `tests/test_turn_options.py` and `tests/test_worker_capability_allowlist.py`, found by
+# their marker reasons `recording mode only (LLOYD_RECORD_TURN_OPTIONS=1)` and
+# `recording mode only (LLOYD_RECORD_CAPABILITY_BASELINE=1)` rather than by line numbers
+# that have already drifted twice. They stay untaken until a round with zero failures is
+# actually refused by the 40 rail; standing readings sit at 35-36 of 40 with no such
+# refusal on record, so a round short of the rail has no business touching them either.
 def _git(root: Path, *args: str) -> str:
     import subprocess
     r = subprocess.run(["git", "-C", str(root), *args],
@@ -159,8 +202,10 @@ CONVERTED: tuple[tuple[str, str], ...] = (
 #: `recording mode`: `recording mode only (LLOYD_RECORD_*=1)` names an env flag an
 #: operator sets, not a fact about this box's hardware, and counting it as a machine
 #: fact would exempt two skips a later round could genuinely convert. It is NOT the
-#: case that they were converted and no longer skip — `tests/test_turn_options.py:331`
-#: and `tests/test_worker_capability_allowlist.py:163` both still carry the marker and
+#: case that they were converted and no longer skip — `tests/test_turn_options.py`,
+#: reason `recording mode only (LLOYD_RECORD_TURN_OPTIONS=1)`, and
+#: `tests/test_worker_capability_allowlist.py`, reason
+#: `recording mode only (LLOYD_RECORD_CAPABILITY_BASELINE=1)`, both still carry it and
 #: both still skip in gate shape, which is exactly why their two rows are in the
 #: committed before-inventory. An earlier draft of this comment claimed they were gone;
 #: the classification stands, for the reason above and not that one.
@@ -283,9 +328,15 @@ def skip_sites(src: str) -> list[str]:
     Deliberate exclusions and one admitted hole:
 
       * `pytest.raises(pytest.skip.Exception)` is an ASSERTION about a skip, not a
-        skip, and must not be flagged: ~12 nodes in `tests/test_trajectory_extraction.py`
-        assert that the `_live_buckets` guard raises it, and clause 4 REQUIRES that
-        guard to stay. `pytest.raises` is a call named `raises`, and
+        skip, and must not be flagged: 8 sites in `tests/test_trajectory_extraction.py`
+        assert that a live-data guard raises it — the guards `tests/_live_data.py`
+        exports and that file calls, `require_live_data` and `require_live_volume` — and
+        clause 4 REQUIRES those guards to stay. That 8 is NOT a count of anything to do
+        with `_live_buckets`, which no `pytest.raises` site asserts: that guard has two
+        consumers, named in the non-convertible block above. An earlier draft of this
+        sentence attributed the 8 to `_live_buckets`, which is how a wrong count and a
+        wrong guard travelled together for a week.
+        `pytest.raises` is a call named `raises`, and
         `pytest.skip.Exception` is an attribute, so neither rule fires on it. That
         asymmetry is what `test_the_skip_needle_sees_a_marker_and_leaves_an_assertion_alone`
         pins in both directions.

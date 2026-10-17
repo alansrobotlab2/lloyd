@@ -13,6 +13,7 @@ reasons. The artifacts, not a transcription, are what the assertions read.
 """
 import ast
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -767,3 +768,373 @@ def test_clause_2_green_cannot_have_come_from_a_skip_or_a_deleted_node():
             in nodes), (
         "the node clause 1 names is gone from this file, so clause 1 has been "
         "answered by removing the question")
+
+
+# ── #2920 — the non-convertible ruling has to live in the code, not in a closed item ──
+#
+# Four skip sites were ruled permanently non-convertible, and the ruling existed only in
+# the owed entry of a `done` item, which is where a ruling goes to become invisible: the
+# next round reads a closed item's tail as history and re-files the question for a person.
+# The nodes below keep the comment honest against the tree, in the direction that matters
+# — a comment that claims a skip call, a count or a citation the code does not carry goes
+# red. The process boundary is the one every prose claim in this file crosses: a comment in
+# `skip_inventory.py` and a `pytest.skip` several files away are read by different people at
+# different times, and nothing but these nodes connects them.
+
+RULED = {
+    "tests/test_qmd_fork_landing.py": "is not on disk here",
+    "tests/test_trajectory_extraction.py": "no trajectories dir on this machine",
+    "tests/_live_data.py": "absent at",
+    "tests/test_retrieval_seed_anchoring.py": "no entity-vector index",
+}
+
+
+def _module_comment_text() -> str:
+    """Every comment and docstring line in `skip_inventory.py`, joined.
+
+    Read as text rather than as `__doc__` because the ruling is a `#` block, and a test that
+    only read docstrings would pass on a module that lost it.
+    """
+    src = (ROOT / "tests" / "skip_inventory.py").read_text(encoding="utf-8")
+    keep = [ln for ln in src.splitlines() if ln.lstrip().startswith("#")]
+    return "\n".join(keep) + "\n" + _docstring_text(src)
+
+
+def _docstring_text(src: str) -> str:
+    """All docstrings in the module, concatenated — the second half of where a claim lives."""
+    out = []
+    for n in ast.walk(ast.parse(src)):
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            d = ast.get_docstring(n)
+            if d:
+                out.append(d)
+    return "\n".join(out)
+
+
+def _skip_call_literals(rel_path: str) -> list[str]:
+    """Every string literal passed to a `pytest.skip(...)` call in a file.
+
+    Literals of the CALL, found on the AST — so an anchor matching one of these is matched
+    against the text of a skip call and not against the same words appearing in a docstring,
+    a comment or an assert message elsewhere in the file.
+    """
+    src = (ROOT / rel_path).read_text(encoding="utf-8")
+    found: list[str] = []
+    for n in ast.walk(ast.parse(src)):
+        if not isinstance(n, ast.Call):
+            continue
+        name = ast.unparse(n.func)
+        if name.rsplit(".", 1)[-1] != "skip":
+            continue
+        for part in ast.walk(n):
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                found.append(part.value)
+    return found
+
+
+def test_the_ruling_block_names_the_four_sites_and_withholds_them_as_headroom():
+    """Clause 1: the word and the four filenames sit together, and headroom is refused.
+
+    Checked as one block rather than four independent greps, because the failure this guards
+    is the partial one — a later edit keeps the word `non-convertible` somewhere and drops a
+    file, or lists the four as ordinary commentary where a round reads them as fair game.
+    """
+    text = _module_comment_text()
+    assert "non-convertible" in text.lower(), \
+        "the module carries no ruling: #2920's four sites are back to being visible only in " \
+        "a closed item's owed entry"
+    window = text.lower().index("non-convertible")
+    nearby = text[max(0, window - 1200): window + 3000]
+    for rel in RULED:
+        assert rel in nearby, f"{rel} is not named inside the non-convertible block"
+    assert "headroom" in nearby.lower(), \
+        "the block does not say a round may not count these as skip headroom, which is the " \
+        "half of the ruling a round actually acts on"
+    assert "never" in nearby.lower(), \
+        "the block does not state the withholding as permanent"
+
+
+def test_each_ruled_site_is_anchored_by_the_text_of_its_skip_call():
+    """Clause 2: each anchor is a live skip-call argument in the file it names.
+
+    Matched against the literals of `pytest.skip(...)` calls found on the AST, not against the
+    file's text — so an anchor cannot satisfy the block by sharing words with a docstring, a
+    comment, or an assert message, and a reworded skip goes red here instead of leaving the
+    block pointing at a call that no longer says what it was quoted as saying.
+    """
+    text = _module_comment_text()
+    for rel, anchor in RULED.items():
+        assert anchor in text, \
+            f"the block does not carry the anchor `{anchor}` for {rel}"
+        literals = _skip_call_literals(rel)
+        assert literals, f"{rel} exposes no pytest.skip(...) string literal at all"
+        assert any(anchor in lit for lit in literals), (
+            f"`{anchor}` is not an argument of any pytest.skip call in {rel}; the block "
+            f"anchors it to text its skip no longer carries — anchors are skip-call text "
+            f"precisely so a drifted line number cannot be the whole citation")
+
+
+def test_each_ruled_site_carries_the_reason_the_ruling_rests_on():
+    """Clause 3: four reasons, each with the specific thing that makes it unconvertible.
+
+    The substrings are the load-bearing nouns of each reason, not whole sentences: a block
+    that named the four files and skipped the *why* would leave a round able to re-litigate
+    each one, which is what the item is asking this file to stop.
+    """
+    text = _module_comment_text()
+    want = [
+        ("skipped", "qmd's docstring ruling that an absent fork is reported skipped"),
+        ("never", "…and never as a pass"),
+        ("never-touch", "the qmd fork is a tree no round may touch"),
+        ("machine state", "_live_buckets skips because of what this box holds"),
+        ("1377", "_live_data.py is #1377's step-3 branch"),
+        ("step-3", "…named as step 3, the branch that stays a skip"),
+        ("SM_20260923_034250", "the round that promoted with kg.sqlite missing"),
+        ("entity-vector", "the seed-anchoring node needs the vector index"),
+        ("Qwen3", "…and the Qwen3 weights"),
+        ("ranking", "…because the assertion it guards is a ranking"),
+    ]
+    missing = [why for needle, why in want if needle not in text]
+    assert not missing, (
+        f"the block states the four files but not: {missing} — a ruling without its reasons "
+        f"gets re-argued by the next round that wants a conversion")
+
+
+def test_the_ruling_counts_agree_with_the_tree_and_the_stale_ones_are_gone():
+    """Clause 4: the numbers in the comment are the numbers on disk, and two old ones died.
+
+    Re-measured here rather than quoted, because the figure already sitting in the module was
+    wrong in its attribution, and the number was right for the wrong reason: there are 8
+    `pytest.raises(pytest.skip.Exception)` sites, and not one of them asserts `_live_buckets`
+    — they assert the live-data guards `tests/_live_data.py` exports (`require_live_data`,
+    `require_live_volume`). So the block gives that guard no count at all and names its 2
+    consumers instead, which is a claim that cannot drift, and the stale `:331`/`:163` reserve
+    citations became their marker-reason texts.
+    """
+    text = _module_comment_text()
+    traj = (ROOT / "tests" / "test_trajectory_extraction.py").read_text(encoding="utf-8")
+    assert traj.count("pytest.raises(pytest.skip.Exception)") == 8, (
+        "the count this node pins as the truth has moved; re-read the file and update both "
+        "this figure and the block's sentence about what those sites guard")
+    assert len(_live_bucket_consumers()) == 2, \
+        "`_live_buckets` gained or lost a consumer; the block names them, so update both"
+    # The attribution, checked rather than trusted. Each raise-site reaches a guard of
+    # `tests/_live_data.py` — the parametrized ones through an `ABSENCE_EDGES` row naming a
+    # module guard, the rest by calling one directly — so the chain is followed through module
+    # functions instead of looking for a call the test body does not contain.
+    holders = _raises_skip_functions()
+    assert holders, "no site asserts a live-data guard's skip any more; the exclusion this " \
+                    "comment documents has nothing left to exclude"
+    unreachable = [f for f in holders if not _reaches_live_data_guard(f)]
+    assert not unreachable, (
+        f"these holders of a `pytest.raises(pytest.skip.Exception)` site reach no guard that "
+        f"`tests/_live_data.py` exports: {unreachable} — the block attributes the 8 to those "
+        f"guards, and that attribution is the thing this node exists to keep true")
+    bucket = [f for f in holders if "_live_buckets" in _calls_in(f)]
+    assert not bucket, (
+        f"{bucket} now asserts `_live_buckets`'s skip, so the block's disclaimer that the 8 "
+        f"are not that guard's count is false and both files need the same edit")
+    for guard in ("require_live_data", "require_live_volume"):
+        assert guard in text, \
+            f"the block stopped naming the guard `{guard}` that the 8 sites assert"
+
+    assert "~12 nodes" not in text, \
+        "the stale '~12 nodes' claim is back — it attributed 8 assertion sites to a guard " \
+        "that has 2 consumers and whose guard no `pytest.raises` site covers"
+    assert "test_turn_options.py:331" not in text and \
+        "test_worker_capability_allowlist.py:163" not in text, \
+        "the drifted reserve line citations are back; the reserve is cited by marker reason"
+    for reason in ("recording mode only (LLOYD_RECORD_TURN_OPTIONS=1)",
+                   "recording mode only (LLOYD_RECORD_CAPABILITY_BASELINE=1)"):
+        assert reason in text, f"the reserve lost its reason text `{reason}`"
+        assert (ROOT / "tests" / ("test_turn_options.py"
+                                  if "TURN_OPTIONS" in reason
+                                  else "test_worker_capability_allowlist.py")
+                ).read_text(encoding="utf-8").count(reason) == 1, \
+            f"`{reason}` is no longer a single live marker reason in the file it cites"
+
+
+def _live_bucket_consumers() -> list[str]:
+    """Test functions that call `_live_buckets(...)`, by name, not by line.
+
+    Named because the block names them: a line number for these two drifted once already
+    between triage and this commit, which is exactly the failure clause 4 is about.
+    """
+    src = (ROOT / "tests" / "test_trajectory_extraction.py").read_text(encoding="utf-8")
+    out = []
+    for f in [n for n in ast.walk(ast.parse(src))
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        if any(isinstance(c, ast.Call)
+               and getattr(c.func, "id", getattr(c.func, "attr", "")) == "_live_buckets"
+               for c in ast.walk(f)):
+            out.append(f.name)
+    return sorted(out)
+
+
+def test_the_ruling_is_a_comment_and_the_module_surface_is_untouched():
+    """Clause 5: recording a ruling must not become a behaviour change.
+
+    The module's public surface is pinned by name and value, and the shipped ceiling is read
+    out of `gate.py`'s bytes rather than the imported object, so a bump that left
+    `BEFORE_TOTAL` alone would be red here. Also asserts every changed line of the diff (when
+    one is available) is a comment — the boundary this clause exists to guard is the one
+    between a note a round reads and a rule the leg enforces.
+    """
+    assert S.BEFORE_TOTAL == 40 and S.BEFORE_MACHINE == 21
+    for fn in ("is_machine_fact", "read_inventory", "skip_sites", "machine_rows",
+               "live_rows", "total", "changed_paths", "git_touches", "round_base"):
+        assert callable(getattr(S, fn)), f"{fn} disappeared from the module's surface"
+    for name in ("FIXTURES", "BEFORE", "CONVERTED"):
+        assert getattr(S, name) is not None, f"{name} is gone"
+
+    gate = (ROOT / "scripts" / "automod" / "gate.py").read_text(encoding="utf-8")
+    assert re.findall(r"^PYTEST_MAX_SKIPPED = (\d+)$", gate, re.M) == ["40"], \
+        "the ceiling moved while this ruling was being written; the block's bound and " \
+        "test_the_pinned_before_total_is_the_ceiling_the_rung_uses both need the same number"
+
+    same, why = _executable_ast_matches_round_base()
+    assert same, (
+        f"#2920 is meant to be a comment-only change and it is not: {why}")
+
+
+def _strip_docstrings(tree: ast.AST) -> ast.AST:
+    """Drop every docstring node, so a reworded docstring cannot read as a behaviour change.
+
+    Comments are already invisible to the parser; docstrings are not, and one of this item's
+    corrections sits inside `skip_sites`' docstring.
+    """
+    for n in ast.walk(tree):
+        body = getattr(n, "body", None)
+        if not isinstance(body, list) or not body:
+            continue
+        first = body[0]
+        if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            body.pop(0)
+    return tree
+
+
+def _executable_ast_matches_round_base() -> tuple[bool, str]:
+    """(True, "") when `tests/skip_inventory.py` parses identically to the round base.
+
+    Compared on the AST with docstrings stripped, not on lines: a line-level "is it a comment"
+    test passes on a change that edited a string literal's innards and fails on one that
+    reflowed prose, and the question clause 5 actually asks is whether anything executable
+    moved. Uses `S.round_base`, the same base resolution the rails themselves use, so the node
+    compares against the tree the round was opened from whether or not the work is committed.
+    """
+    rel = "tests/skip_inventory.py"
+    base = S.round_base(ROOT)
+    try:
+        before = subprocess.run(["git", "-C", str(ROOT), "show", f"{base}:{rel}"],
+                                capture_output=True, text=True, check=False)
+    except OSError as exc:
+        return False, f"could not read the base copy of {rel}: {exc}"
+    if before.returncode != 0:
+        return False, f"`git show {base}:{rel}` exited {before.returncode}: {before.stderr[:120]}"
+    after = (ROOT / rel).read_text(encoding="utf-8")
+    try:
+        old = ast.dump(_strip_docstrings(ast.parse(before.stdout)))
+        new = ast.dump(_strip_docstrings(ast.parse(after)))
+    except SyntaxError as exc:
+        return False, f"{rel} no longer parses: {exc}"
+    if old == new:
+        return True, ""
+    return False, ("the AST differs from the round base, so an executable statement changed "
+                   "alongside the ruling")
+
+
+def _raises_skip_functions() -> list[str]:
+    """Test functions holding a `pytest.raises(pytest.skip.Exception)` site, by name.
+
+    The attribution check needs the enclosing function, not a line count: 8 is the number of
+    sites and every one of them is a `require_live_data` guard, which is only visible per
+    function.
+    """
+    src = (ROOT / "tests" / "test_trajectory_extraction.py").read_text(encoding="utf-8")
+    out = []
+    for f in [n for n in ast.walk(ast.parse(src))
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        for c in ast.walk(f):
+            if (isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                    and c.func.attr == "raises" and c.args
+                    and "skip" in ast.unparse(c.args[0])):
+                out.append(f.name)
+                break
+    return sorted(out)
+
+
+def _live_data_guard_names() -> set[str]:
+    """The guard names `tests/_live_data.py` exports — the population the 8 sites draw from."""
+    ld = (ROOT / "tests" / "_live_data.py").read_text(encoding="utf-8")
+    return set(re.findall(r"^def (require[a-z_]*)\(", ld, re.M))
+
+
+def _calls_in(func_name: str) -> list[str]:
+    """Every callee name inside one test function of `test_trajectory_extraction.py`."""
+    return _TRAJ_CALLS.get(func_name, [])
+
+
+def _module_calls() -> dict[str, list[str]]:
+    """`{function name: names it reaches}` for every function in the trajectory test module.
+
+    A name reached through a `@pytest.mark.parametrize` argument counts, because that is how a
+    parametrized guard reaches its subject: `ABSENCE_EDGES` passes a guard as a *value*
+    (`pytest.param(test_the_live_corpus_emits_one_file_per_sequence_pattern, "corpus")`), so the
+    function under test is an input to the node and appears nowhere in its body as a call.
+    """
+    src = (ROOT / "tests" / "test_trajectory_extraction.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    consts = _module_constants(tree)
+    out: dict[str, list[str]] = {}
+    for f in [n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        reached = [getattr(c.func, "id", getattr(c.func, "attr", ""))
+                   for c in ast.walk(f) if isinstance(c, ast.Call)]
+        for d in f.decorator_list:
+            for n in ast.walk(d):
+                if isinstance(n, ast.Name):
+                    reached.append(n.id)
+                    reached += sorted(consts.get(n.id, ()))
+        out[f.name] = reached
+    return out
+
+
+def _module_constants(tree: ast.AST) -> dict[str, set[str]]:
+    """`{constant name: names its literal mentions}` for module-level list/tuple bindings.
+
+    `ABSENCE_EDGES` is a table of `pytest.param(<guard function>, <root>)`, so the guards a
+    parametrized node can be handed live in that binding and in nowhere else; without this the
+    reachability walk stops at the table's name and reports a real attribution as false.
+    """
+    out: dict[str, set[str]] = {}
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            out[n.targets[0].id] = {x.id for x in ast.walk(n.value) if isinstance(x, ast.Name)}
+    return out
+
+
+_TRAJ_CALLS = _module_calls()
+
+
+def _reaches_live_data_guard(func_name: str) -> bool:
+    """True when a function reaches a guard `tests/_live_data.py` exports, through module fns.
+
+    The reachability matters: the parametrized raise-sites do not call `require_live_data`
+    themselves — an `ABSENCE_EDGES` row names a module guard, and that guard is what calls
+    one — so a direct-call check reports a true attribution as false. That is the difference
+    between this node and a grep.
+    """
+    exported = _live_data_guard_names()
+    seen: set[str] = {func_name}
+    frontier = [func_name]
+    while frontier:
+        name = frontier.pop()
+        callees = set(_TRAJ_CALLS.get(name, ()))
+        if callees & exported:
+            return True
+        for nxt in callees - seen:
+            if nxt in _TRAJ_CALLS:
+                seen.add(nxt)
+                frontier.append(nxt)
+    return False
