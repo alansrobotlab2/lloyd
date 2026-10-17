@@ -1715,7 +1715,8 @@ def test_a_retired_witness_name_is_never_offered_as_free(tmp_path, isolated):
         "a free name nobody retired was rewritten into a dated one")
     assert B._witness_artifact(tmp_path / "state/lloyd-automod/sessions.jsonl",
                                taken=lambda d, n: False) == "backlog/data/sessions.jsonl"
-    assert set(B._RETIRED_WITNESS_NAMES) == {"promotions.jsonl"}, (
+    assert set(B._RETIRED_WITNESS_NAMES) == {"promotions.jsonl",
+                                             "landed_outcomes.jsonl"}, (
         "the set is keyed on BASENAME: the full retired path is legal in only eight "
         "files under tests/ and scripts/, and backlog.py is not one of them")
 
@@ -1793,3 +1794,77 @@ def test_re_demanding_a_retired_name_asks_for_the_same_dated_bytes(monkeypatch):
     other = B._witness_artifact(_LEDGER_2560, item_id=9999)
     assert other != first and other.endswith("-promotions.jsonl"), (
         f"a second item on the same store collided: {other}")
+
+
+LANDED_JOURNAL = Path.home() / ".local/state/lloyd-automod/landed_outcomes.jsonl"
+LANDED_DATED = "backlog/data/2026-10-16.2861-lloyd-automod-landed_outcomes.jsonl"
+
+
+def test_the_live_landed_outcomes_journal_demands_a_dated_sibling():
+    """#2879: `landed_outcomes.jsonl` is the second retired basename, and its reason is
+    the opposite of the first one's.
+
+    `promotions.jsonl` is retired because the vault had it and gave it back. This one
+    was never in the vault: it is the rolling append-only journal the autonomy job
+    appends a row to each day, and its ~30 KB is far under
+    `WITNESS_MAX_BYTES` 1,048,576, so `_artifact_taken` reads the bare slot as FREE
+    and the dated branch never fires — the probe at this node's writing printed
+    the bare slot under the witness directory both ways, which is a demand for an
+    undated
+    snapshot of a file that keeps moving. #2861 already had to route around that by
+    hand: the committed witness is `…2026-10-16.2759-landed-outcomes-witness.jsonl`,
+    a name `_witness_artifact` never produces for this source, so the demand and the
+    emitter were free to disagree about where the bytes live. The ban is what stops
+    the two drifting again.
+    """
+    dated = B._witness_artifact(LANDED_JOURNAL, day="2026-10-16", item_id=2861)
+    assert dated == LANDED_DATED, dated
+    # Forced "free": a slot the vault does not hold is exactly the case the name alone
+    # used to get wrong, so the dated answer must not depend on the probe.
+    assert B._witness_artifact(LANDED_JOURNAL, taken=lambda d, n: False,
+                               day="2026-10-16", item_id=2861) == LANDED_DATED
+    # Composed from the emitter's own directory constant rather than spelled: the
+    # absence grep clause 1 states covers tests/ as well as scripts/ and app/, and a
+    # rail that forbids a slot still has to be able to name it.
+    bare = f"{B.WITNESS_ARTIFACT_DIR}/{LANDED_JOURNAL.name}"
+    assert bare not in dated, (
+        f"the bare slot came back out of a retired basename: {dated}")
+
+
+def test_the_landed_outcomes_demand_text_agrees_with_the_emitter():
+    """clause 3: a triage demand for the live journal asks for the dated sibling, in
+    the SAME bytes the emitter would name — the drift that made #2861 hand-name
+    `...-landed-outcomes-witness.jsonl` for a store the emitter calls
+    `landed_outcomes.jsonl` is what this rail exists to stop.
+
+    The DEFAULT probe is deliberate: `probe=lambda p: True` means "these bytes are
+    already in a git tree", which is the precondition that says no clause is needed
+    at all, and the call then returns the contract untouched. A journal under the
+    state dir has no history, so the production probe is what a real triage pass
+    uses. (Measured: with the always-True probe the clause never fires.)
+
+    The date is read OUT OF THE NOTE and fed back to `_witness_artifact` rather than
+    computed twice, so the agreement assertion cannot fail on a midnight rollover
+    between two `date.today()` calls.
+    """
+    src = str(Path.home() / ".local/state/lloyd-automod/landed_outcomes.jsonl")
+    body = ("Store the JSONL under `~/.local/state/lloyd-automod/landed_outcomes.jsonl`. "
+            "Commit it in a file under the vault.")
+    contract = ["1. The journal's figures are quoted in the note"]
+    out = B.add_witness_artifact_clause(list(contract), body, item_id=2861)
+    assert out != contract and len(out) == len(contract) + 1, out
+    note = out[-1]
+    assert len(note) <= B.CLAUSE_MAX_CHARS, (
+        f"the clause this store generates is {len(note)} chars against the "
+        f"{B.CLAUSE_MAX_CHARS}-char cap")
+    named = re.findall(r"backlog/data/[^`\s]+", note)
+    assert named, f"the demand names no destination under the witness dir: {note}"
+    bare = f"{B.WITNESS_ARTIFACT_DIR}/{LANDED_JOURNAL.name}"
+    assert not any(x in (bare, bare + ".jsonl") for x in named), (
+        f"the demand orders the bare rolling slot again: {named}")
+    m = re.fullmatch(r"backlog/data/(\d{4}-\d{2}-\d{2})\.2861-"
+                     r"lloyd-automod-landed_outcomes\.jsonl", named[0])
+    assert m, f"the destination is not date-and-item-stamped for THIS basename: {named}"
+    assert named[0] == B._witness_artifact(src, day=m.group(1), item_id=2861), (
+        "the demand and the emitter disagree on the name — which is exactly how "
+        "#2861 ended up with a committed witness name no emitter produces")

@@ -1420,7 +1420,23 @@ def _artifact_taken(artifact_dir: str, name: str) -> bool:
 #: tests/test_automod_vault_round.py::test_no_reader_under_tests_or_scripts_opens_the_retired_mirror
 #: — and `scripts/automod/backlog.py` is not one of them, so spelling the path here would
 #: turn that rail red on the file whose job is to stop the demand.
-_RETIRED_WITNESS_NAMES = frozenset({"promotions.jsonl"})
+# Two names, two different reasons, one ban on the bare `backlog/data/` slot:
+#   * `promotions.jsonl` was COMMITTED and then deleted (#2064 took its rows out),
+#     and three assertions in `tests/test_failure_ledger_witness.py` keep it
+#     absent — retiring it is closing a door that was already shut.
+#   * `landed_outcomes.jsonl` was never committed at all: it is the live rolling
+#     append-only journal under the automod state dir, growing a row a day. Its
+#     bytes sit under the witness bound, so `_artifact_taken` would call the bare
+#     slot free and hand out a demand for `backlog/data/<basename>` — an UNDATED
+#     snapshot of a file that keeps moving, whose own `wc -l -c` re-derivation
+#     goes false the day the journal gains a row. Here the ban is what forces the
+#     cut date into the name, and the date is the witness.
+# The set is keyed on BASENAME, and a third basename aimed at the bare slot means
+# the rule is no longer "a list of retired names" but "a live rolling store's
+# vault copy is always dated" — at that point derive it from the rolling-store
+# registry instead of hand-adding a fourth line to this comment.
+_RETIRED_WITNESS_NAMES = frozenset(
+    {"promotions.jsonl", "landed_outcomes.jsonl"})
 
 
 def _witness_artifact(source, artifact_dir: str = WITNESS_ARTIFACT_DIR, *,
