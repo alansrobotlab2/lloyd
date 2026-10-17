@@ -3674,8 +3674,9 @@ def test_a_landing_that_finished_after_the_snapshot_is_still_a_landing(tmp_path,
 def test_a_vault_landing_with_no_item_id_is_attributed_to_the_turn_that_made_it(
         isolated, monkeypatch, tmp_path):
     """The second seam the review rung named: `item_id` is OPTIONAL on
-    `automod_vault_land`, and 56 of the 172 `vault_land` rows in the ledger on
-    2026-09-21 carry none, so matching a vault landing on `item_id` alone demotes a
+    `automod_vault_land`, and 189 of the 870 `vault_land` rows in
+    `promotions.jsonl` and its two monthly archives on 2026-10-17 carry none (133
+    of those a session), so matching a vault landing on `item_id` alone demotes a
     vault-surface turn that really landed.
 
     End to end across the process boundary the row actually crosses: the row is
@@ -3743,10 +3744,12 @@ def test_the_vault_writer_still_demotes_a_turn_that_landed_nothing(isolated, mon
 # It was consulted unconditionally, so on 2026-10-17 a turn with no round and no
 # row naming its item was kept at `landed: true` / `acceptance: met` with an empty
 # mismatch, and the item closed, because the same session had landed two other
-# items. Reused sessions are the ordinary case, not the exception: of the 863
+# items. Reused sessions are the ordinary case, not the exception: of the 870
 # `vault_land` rows across `promotions.jsonl` and the two monthly archives on
-# 2026-10-17, 674 carry an `item_id` spread over 341 distinct sessions — about two
-# items to a session.
+# 2026-10-17, 681 carry an `item_id` spread over 344 distinct sessions — about two
+# items to a session. The same loose arm on the finish side closed #2039 on
+# #2027's vault sha; `workers/sources/autocode.py:_vault_commits_since` is narrowed
+# the same way by #2913.
 
 def _two_foreign_landings():
     """The #2888 ledger: two successful `vault_land` rows on one session, each
@@ -3800,7 +3803,7 @@ def test_an_item_carrying_vault_landing_counts_only_for_the_item_it_names(row_it
     A row that names an item vouches for that item and nothing else — not even a
     matching `round_id` and a matching harness-stamped session resurrect it for a
     different item, which is the #2888 failure wearing a round number. A row that
-    names no item falls back to the round, then the session: 189 of the 863 rows on
+    names no item falls back to the round, then the session: 189 of the 870 rows on
     2026-10-17 carry no `item_id`, 133 of those a session.
     """
     row = _session_vault_row(row_item, round_id="SM_2888")

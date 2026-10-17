@@ -12,6 +12,12 @@ paragraph does: on 2026-09-04 the web-lookup investigation found that the
 model shells out to curl because Bash has an affordance paragraph and
 http_* did not. Naming a tool is not enough; *where* it is named is part of
 whether it gets used.
+
+The last section checks the other kind of claim a docstring makes about the
+system: a MEASUREMENT quoted as prose. A tool name that stopped existing fails
+the call; a ledger cohort that stopped being true fails nothing, it just
+misleads the next reader who trusts it and does not re-run the join. Both are
+prose that has to be held against the code it describes, so both live here.
 """
 
 from __future__ import annotations
@@ -283,3 +289,101 @@ def test_the_eval_set_exists_and_has_controls():
         assert all(t.startswith("graph_") for t in q["expect_tools"]), q["id"]
     for q in controls:
         assert not any(t.startswith("graph_") for t in q["expect_tools"]), q["id"]
+
+
+# ── prose that quotes a ledger cohort quotes the CURRENT measurement ──────────
+#
+# The same kind of failure in the other direction: a claim about code that has
+# quietly stopped being true. The attribution rule for a `vault_land` row — a row
+# vouches for the item IT names, and the harness-stamped session decides only a
+# row that names none — is justified in prose by how many rows carry no
+# `item_id`. That number moved twice in four weeks and the docstrings kept the
+# old one each time, so the rule stood explained by a corpus nobody could go back
+# and check: the cohort measured 2026-09-21 survived in four places and the one
+# measured 2026-10-14 in another (the strings are the ban-list below, quoted
+# nowhere else in the tree), and the arm each of them justified — an unconditional
+# `or session_id` — was still closing items on OTHER items' landings when #2913
+# narrowed it (`workers/sources/autocode.py:_vault_commits_since`, #2039 closed on
+# #2027's vault sha).
+
+#: The cohort as measured on 2026-10-17 over `promotions.jsonl` and its two
+#: monthly archives: 870 `vault_land` rows, 681 of them carrying an `item_id`
+#: across 344 distinct sessions, 189 carrying none, 133 of those a session.
+ATTRIBUTION_COHORT_DATE = "2026-10-17"
+RETIRED_ATTRIBUTION_FIGURES = ("56 of the 172", "86 of the 403", "of the 863",
+                               "674 of those", "341 distinct sessions")
+#: The rule's own surfaces: the two readers, the tool boundary that stamps the
+#: session, and the two suites that pin both sides of the rule.
+ATTRIBUTION_SOURCES = ("workers/sources/autocode.py", "scripts/automod/backlog.py",
+                       "agent_mcp/automod.py")
+ATTRIBUTION_TESTS = ("tests/test_automod_review.py", "tests/test_vault_surface_churn.py")
+
+_QUOTED_COHORT = re.compile(r"(?:\d+ )?of the [\d,]{3,}\b")
+
+
+def _prose_blocks(rel: str) -> list[str]:
+    """Every docstring and every run of whole-line comments in one source file.
+
+    Docstrings only would miss `agent_mcp/automod.py`, where the attribution
+    comment that rotted is a comment run inside the tool handler."""
+    import ast
+    src = (ROOT / rel).read_text(encoding="utf-8")
+    blocks = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            doc = ast.get_docstring(node)
+            if doc:
+                blocks.append(doc)
+    run: list[str] = []
+    for line in src.splitlines():
+        if line.lstrip().startswith("#"):
+            run.append(line)
+        elif run:
+            blocks.append("\n".join(run))
+            run = []
+    if run:
+        blocks.append("\n".join(run))
+    return blocks
+
+
+def test_no_attribution_prose_cites_a_retired_vault_land_cohort():
+    """The retired cohorts stay retired. Each string in the ban-list is one that
+    sat in the tree and read as a live measurement, because the prose quoting it
+    carried no date a later reader could contradict.
+
+    This file is the one place allowed to name them — and it names each exactly
+    once, in the constant, which is what keeps the list checkable rather than
+    padded and stops the ban-list itself becoming a citation nobody re-runs."""
+    here = Path(__file__).resolve()
+    for path in [*(ROOT / rel for rel in ATTRIBUTION_SOURCES),
+                 *(ROOT / rel for rel in ATTRIBUTION_TESTS),
+                 *sorted((ROOT / "tests").glob("test_*.py"))]:
+        text = path.read_text(encoding="utf-8")
+        for retired in RETIRED_ATTRIBUTION_FIGURES:
+            if path.resolve() == here:
+                assert text.count(retired) == 1, (
+                    f"the ban-list names the retired cohort {retired!r} "
+                    f"{text.count(retired)} times; it belongs in the constant only")
+                continue
+            assert retired not in text, (
+                f"{path.relative_to(ROOT)} still cites the retired vault_land "
+                f"cohort {retired!r}; re-measure it against the promotions ledger")
+
+
+def test_vault_land_attribution_prose_cites_the_measured_cohort_with_its_date():
+    """Every block that quotes a fraction of the `vault_land` rows quotes the
+    measurement WITH the date it was taken, so the next reader re-runs the join
+    instead of trusting a number that has since moved."""
+    checked = 0
+    for rel in (*ATTRIBUTION_SOURCES, *ATTRIBUTION_TESTS):
+        for block in _prose_blocks(rel):
+            if "`vault_land`" not in block or not _QUOTED_COHORT.search(block):
+                continue
+            checked += 1
+            assert ATTRIBUTION_COHORT_DATE in block, (
+                f"{rel}: a `vault_land` cohort quoted without {ATTRIBUTION_COHORT_DATE} "
+                f"is an undated measurement — {block[:120]!r}")
+    assert checked >= 6, (
+        f"only {checked} attribution blocks were checked: the scan matched almost "
+        "nothing, which is how a prose check passes by testing nothing")

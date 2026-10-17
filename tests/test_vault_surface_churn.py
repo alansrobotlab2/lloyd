@@ -906,11 +906,12 @@ def test_a_self_healed_round_is_left_to_the_normal_closer(isolated):
 
 def test_another_items_refusal_is_never_borrowed(isolated):
     """`item_id` is optional on the `automod_vault_land` tool, so a continued
-    session carries rows that name no item at all (86 of the 403 `vault_land` rows
-    in the live ledger, measured 2026-10-14) beside rows that name one. A row
-    naming SOMEONE ELSE's item must not be matched by session — that would buy a
-    close for content this item never wrote — while a row naming no item is still
-    matched by session, as `_vault_commits_since` has always done."""
+    session carries rows that name no item at all (189 of the 870 `vault_land`
+    rows in `promotions.jsonl` and its two monthly archives on 2026-10-17, 133 of
+    those with a session) beside rows that name one. A row naming SOMEONE ELSE's
+    item must not be matched by session — that would buy a close for content this
+    item never wrote — while a row naming no item is still matched by session, as
+    `_vault_commits_since` has always done."""
     write_item(isolated, 2693, clauses=["a"])
     _ev(event="backlog_triage", item_id=2693, verdict="confirmed", surface="vault",
         check="ls", evidence="e", acceptance="a", acceptance_clauses=["a"])
@@ -947,3 +948,135 @@ def test_the_short_sha_held_by_carries_is_recorded_as_it_stands(isolated):
     B.reconcile_statuses(S.LEDGER_PATH)
     assert _fm(p)["status"] == "done", "a short sha is still a landing to the reconcile"
     assert [m for m in _events("status_moved") if m.get("to") == "draft"] == []
+
+
+# ── #2913: the finish-side reader must not borrow another item's vault landing ─
+#
+# `ed5ace11` (#2903) narrowed `round_landing_rows`, the reader behind the
+# `landed` field. The finish-side reader it never touched —
+# `workers.sources.autocode._vault_commits_since` — decides two other things
+# from the same rows: the `vault_commits` list persisted on the
+# `backlog_implement` finished row, which `settled_landings` (backlog.py:3745)
+# turns into an `item_landed` row for the item it is reading, and
+# `_vault_landed_since`, the turn-end sweep's gate on running that close at all.
+# So one turn was checked narrowly for `landed` and loosely for the close.
+#
+# The loose arm has already fired. Joining every `backlog_implement` finished
+# row's `vault_commits` to the `vault_land` rows in `promotions.jsonl` and its
+# two monthly archives (measured 2026-10-17): of the 528 finished rows carrying
+# `vault_commits`, 503 include a row naming their own item and 24 name no item
+# at all — the protected direction — while exactly ONE, item #2039 on session
+# `20261001_154803_*`, has landing rows naming ONLY another item (#2027).
+# Reusing a session is the ordinary case, not the exception: of the 870
+# `vault_land` rows in those files on 2026-10-17, 681 carry an `item_id` spread
+# over 344 distinct sessions — about two items to a session — and 189 carry
+# none, 133 of those a session.
+
+#: #2039's own session, truncated to the prefix the ledger actually holds.
+SESSION_2039 = "20261001_154803"
+
+
+def _land_row(item_id, *, commit, session=SESSION_2039, ok=True):
+    """A successful `vault_land` row in the shape the MCP tool handler writes it:
+    `item_id` from the call arguments (optional there), `session_id` stamped by
+    the handler from the harness's `_meta` (`agent_mcp/automod.py`), never by the
+    caller. `item_id=None` is the 189-row shape that has no attribution but its
+    session."""
+    return {"event": "vault_land", "ok": ok, "item_id": item_id, "commit": commit,
+            "session_id": session, "ts": 1.0, "paths": [f"knowledge/{commit}.md"]}
+
+
+def test_a_vault_landing_row_naming_other_items_is_not_this_items_vault_commit():
+    """Clause 1, at the function the close reads.
+
+    Two successful rows on one session, each naming an item other than the one
+    being finalised — #2039's ledger exactly. The turn's own session id is what
+    the loose arm vouched on, so it is what the call passes.
+    """
+    rows = [_land_row(2027, commit="a1a1a1a1"), _land_row(2036, commit="b2b2b2b2")]
+    assert I._vault_commits_since(rows, 2039, 0.0, session_id=SESSION_2039) == [], (
+        "a session match vouched for two landings that belong to other items")
+    # Control: the same call with a row naming THIS item is a landing. The empty
+    # answer above is attribution, not a blanket refusal to see a vault landing.
+    mine = _land_row(2039, commit="c3c3c3c3")
+    assert I._vault_commits_since(rows + [mine], 2039, 0.0,
+                                  session_id=SESSION_2039) == ["c3c3c3c3"]
+
+
+def test_a_vault_landing_row_with_no_item_id_is_still_attributed_by_session():
+    """Clause 2: the false-positive direction this must never acquire.
+
+    #982's turn called `automod_vault_land` without the optional `item_id`, so
+    its row carries no item at all and the harness-stamped session is the only
+    attribution it has. Demoting that row would read a vault-surface turn that
+    really landed as having landed nothing — 189 of the 870 rows on 2026-10-17
+    are in that shape, 133 of them with a session to go on.
+    """
+    assert I._vault_commits_since([_land_row(None, commit="d4d4d4d4")],
+                                  2039, 0.0, session_id=SESSION_2039) == ["d4d4d4d4"]
+    # Controls: a matching session is still required, and a row is never
+    # attributed to a turn that has no session of its own to match with.
+    assert I._vault_commits_since([_land_row(None, commit="e5e5e5e5",
+                                             session="20261001_999999")],
+                                  2039, 0.0, session_id=SESSION_2039) == []
+    assert I._vault_commits_since([_land_row(None, commit="d4d4d4d4")], 2039, 0.0) == []
+
+
+def _foreign_landing_turn(item_id: int):
+    """#2039's turn as the worker records it: a `vault` item that opened no
+    round, a session that landed two OTHER items, and the `vault_commits` the
+    finisher actually persists — produced by the same call `_run_and_record`
+    makes at autocode.py:2149, not a hand-typed list."""
+    _ev(event="backlog_triage", item_id=item_id, verdict="confirmed", surface="vault",
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=["a"])
+    _ev(event="vault_land", **{k: v for k, v in _land_row(2027, commit="a1a1a1a1").items()
+                               if k != "event"})
+    _ev(event="vault_land", **{k: v for k, v in _land_row(2036, commit="b2b2b2b2").items()
+                               if k != "event"})
+    vault_commits = I._vault_commits_since(S.read_events(path=S.LEDGER_PATH), item_id,
+                                           0.0, session_id=SESSION_2039)
+    _ev(event="backlog_implement", phase="finished", item_id=item_id, round_id="",
+        surface="vault", session_id=SESSION_2039, vault_commits=vault_commits,
+        outcome={"landed": True, "acceptance": "met", "clause_outcomes": [],
+                 "deferred_to": [], "spawned": [], "summary": "landed on the vault"})
+    return vault_commits
+
+
+def test_an_item_whose_session_landed_only_other_items_is_never_closed_on_their_shas(
+        isolated):
+    """Clause 3: the whole finish side, on the #2039 shape.
+
+    What the loose arm costs is not a wrong `landed` field —
+    `reconcile_outcome_landing` already answers that one narrowly — it is the
+    close: `settled_landings` turns this row's `vault_commits` into an
+    `item_landed` row carrying the item's OWN id and the foreign sha
+    (backlog.py:3837-3841), so #2039 went to `done` on #2027's commit.
+    """
+    p = write_item(isolated, 2039, clauses=["a"])
+    vault_commits = _foreign_landing_turn(2039)
+    assert vault_commits == [], (
+        "the finisher persisted another item's vault shas as this item's landing")
+    assert I._vault_landed_since(2039, 0.0, session_id=SESSION_2039) is False, (
+        "the turn-end sweep would run the close on landings this item never made")
+    assert {d["item_id"] for d in B.settled_landings(S.LEDGER_PATH)} == set(), (
+        "settled_landings emitted a landing row for an item whose rows name others")
+    assert B.close_settled_items(S.LEDGER_PATH) == []
+    fm = _fm(p)
+    assert fm["status"] == "up_next" and "automod_landed" not in fm, fm
+
+    # Control, same session and same rows but a landing that names ITS OWN item:
+    # the machinery still settles and closes it. What stopped #2039 above is the
+    # attribution, not a blanket refusal to close a vault item.
+    _ev(event="backlog_triage", item_id=2040, verdict="confirmed", surface="vault",
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=["a"])
+    own_row = _land_row(2040, commit="f6f6f6f6")
+    own_row.pop("event")
+    own_row["ts"] = (_events("vault_land")[-1]["ts"] or 0) + 1
+    _ev(event="vault_land", **own_row)
+    _ev(event="backlog_implement", phase="finished", item_id=2040, round_id="",
+        surface="vault", session_id=SESSION_2039, vault_commits=["f6f6f6f6"],
+        outcome={"landed": True, "acceptance": "met", "clause_outcomes": [],
+                 "deferred_to": [], "spawned": [], "summary": "its own landing"})
+    landed = {d["item_id"]: d for d in B.settled_landings(S.LEDGER_PATH)}
+    assert landed[2040]["commit"] == "f6f6f6f6" and landed[2040]["vault"] is True, landed
+    assert I._vault_landed_since(2040, 0.0, session_id=SESSION_2039) is True

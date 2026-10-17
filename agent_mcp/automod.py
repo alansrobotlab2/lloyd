@@ -931,10 +931,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             ack = [str(a) for a in (arguments.get("ack") or []) if str(a).strip()]
             # The turn's own session id, from the `_meta` the harness stamps — not
             # from `arguments`, which the caller controls. It is the attribution
-            # that survives an omitted optional `item_id`, and 56 of the 172
-            # `vault_land` rows in the ledger on 2026-09-21 carry no item, so a
-            # vault round that landed would otherwise be recorded as not landed
-            # (`scripts/automod/backlog.py:round_landing_rows`).
+            # that survives an omitted optional `item_id`, and 189 of the 870
+            # `vault_land` rows in `promotions.jsonl` and its two monthly archives
+            # on 2026-10-17 carry no item (133 of those a session), so a vault
+            # round that landed would otherwise be recorded as not landed
+            # (`scripts/automod/backlog.py:round_landing_rows`). It is the ONLY
+            # attribution such a row has, which is why no reader may use it to
+            # claim a row that DOES name an item: 681 of those 870 rows carry an
+            # `item_id` across 344 distinct sessions, so a session is shared by
+            # about two items and matching one of them loosely settles the other
+            # (#2888 on the `landed` field, #2039 on the close).
             from agent_mcp import _task_registry
             try:
                 out = VR.land(paths, str(arguments.get("message") or ""),

@@ -829,7 +829,7 @@ def round_landing_rows(events, *, round_id: str | None = None,
     `item_id` the ROW itself carries, and the round's `round_id` / the calling
     turn's `session_id` are consulted only for a row that carries none. That
     fallback is there because `item_id` is OPTIONAL at the tool boundary
-    (`automod_vault_land` takes it as an optional integer: 189 of the 863
+    (`automod_vault_land` takes it as an optional integer: 189 of the 870
     `vault_land` rows in `promotions.jsonl` and its two monthly archives on
     2026-10-17 carry no `item_id`, 133 of those a session). A reader that assumed
     the argument was always supplied would demote a vault-surface turn that really
@@ -845,11 +845,13 @@ def round_landing_rows(events, *, round_id: str | None = None,
     session says which turn wrote the row, not which items landed: #2888 was closed
     at `landed: true` / `acceptance: met` with an empty mismatch on two rows naming
     #2885 and #2887 that shared its session while it opened no round and no row
-    named it. Reused sessions are the ordinary case, not the exception — 674 of
-    those 863 rows carry an `item_id` across 341 distinct sessions, about two items
+    named it. Reused sessions are the ordinary case, not the exception — 681 of
+    those 870 rows carry an `item_id` across 344 distinct sessions, about two items
     to a session — so the old unconditional `or session_id` arm was a standing
     false positive, not a corner. A row naming a different item is likewise not
-    resurrected by a matching `round_id`.
+    resurrected by a matching `round_id`. The same rule decides the finish-side
+    close: `workers/sources/autocode.py:_vault_commits_since` applies it since
+    #2913, after item #2039 was closed on #2027's vault sha through the loose arm.
 
     `surface` decides what counts. For a `vault` item the vault row *is* the
     landing. For `code` and `mixed` it is not enough: the code half reaches
@@ -4004,9 +4006,11 @@ def held_by_head_landing(rows, item_id: int, *, session_id: str | None = None) -
     this refuses: not all-met, still spent, still moved to `draft`.
 
     Rows are attributed by `item_id`, or by `session_id` when a row carries no
-    item id at all — 56 of the 172 `vault_land` rows on 2026-09-21 carry none.
+    item id at all — 189 of the 870 `vault_land` rows in `promotions.jsonl` and
+    its two monthly archives on 2026-10-17 carry none, 133 of those a session.
     A row that DOES name an item is never matched by session: a continued
-    session carries several items, and borrowing another item's refusal to close
+    session carries several items (681 of those 870 rows carry an `item_id`
+    across 344 distinct sessions), and borrowing another item's refusal to close
     this one is the false close this route must not make.
 
     `commit` is the taking sha. Every named path taken by one snapshot shares

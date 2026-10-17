@@ -1767,20 +1767,51 @@ def _vault_commits_since(events: list[dict], item_id: int, since_ts: float,
                          session_id: str | None = None) -> list[str]:
     """Shas of this item's successful `vault_land`s at or after `since_ts`.
 
-    Matched on `item_id` OR on the turn's `session_id`, because `item_id` is
-    optional on the `automod_vault_land` tool and 56 of the 172 `vault_land`
-    rows in the ledger on 2026-09-21 carry none — a vault-only turn that passed
-    no item, or that opened no round, would otherwise have its real landing
-    read as no landing. The session id on the row is written by the tool handler
-    from the harness's `_meta`, never by the caller's arguments
-    (`agent_mcp/automod.py`, `scripts/automod/vault_round.py:land`).
+    A row vouches for an item only through the `item_id` the ROW itself carries;
+    the turn's `session_id` is consulted only for a row that carries none. That
+    fallback is there because `item_id` is OPTIONAL at the tool boundary
+    (`automod_vault_land` takes it as an optional integer: 189 of the 870
+    `vault_land` rows in `promotions.jsonl` and its two monthly archives on
+    2026-10-17 carry no `item_id`, 133 of those a session), and a vault-only turn
+    that passed no item, or that opened no round, would otherwise have its real
+    landing read as no landing — #982's turn committed to the vault, was graded 4
+    of 4 met, and read as "nothing landed". The session id on the row is written
+    by the tool handler from the harness's `_meta`, never by the caller's
+    arguments (`agent_mcp/automod.py`, `scripts/automod/vault_round.py:land`).
+
+    A row that DOES name an item is that item's landing and no other's, which is
+    what the old unconditional `or session_id` arm got wrong: the session says
+    which turn wrote the row, not which items landed. Reused sessions are the
+    ordinary case, not the exception — 681 of those 870 rows carry an `item_id`
+    across 344 distinct sessions, about two items to a session — and the arm
+    already cost one wrong close. Item #2039's finished row carried `vault_commits`
+    naming only #2027, because both turns ran on session `20261001_154803_*`, and
+    `scripts.automod.backlog.settled_landings` turned those shas into an
+    `item_landed` row for #2039 (backlog.py:3837-3841). This is the same rule
+    `round_landing_rows` (backlog.py:823) has applied since #2903 narrowed it for
+    the `landed` field: before this change the same turn was checked narrowly for
+    that field and loosely for the close.
     """
     sid = str(session_id or "")
-    return [e.get("commit") for e in events
-            if e.get("event") == "vault_land" and e.get("ok")
-            and float(e.get("ts") or 0) >= since_ts
-            and (e.get("item_id") == item_id
-                 or (sid and str(e.get("session_id") or "") == sid))]
+    commits = []
+    for e in events:
+        if e.get("event") != "vault_land" or not e.get("ok"):
+            continue
+        if float(e.get("ts") or 0) < since_ts:
+            continue
+        row_item = e.get("item_id")
+        if row_item is None:
+            # The row names no item, so the harness-stamped session is the only
+            # attribution it can carry, and it keeps the claim. Demoting it would
+            # read a vault-surface turn that really landed as one that landed
+            # nothing — the direction this must never get wrong (#982).
+            if sid and str(e.get("session_id") or "") == sid:
+                commits.append(e.get("commit"))
+        elif row_item == item_id:
+            # The row names an item, so it vouches for that item alone: neither
+            # this turn's session nor its round resurrects it for a third item.
+            commits.append(e.get("commit"))
+    return commits
 
 
 def _vault_landed_since(item_id: int, since_ts: float,
