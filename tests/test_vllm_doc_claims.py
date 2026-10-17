@@ -3381,3 +3381,180 @@ def test_the_seventh_day_chat_miss_qualifies_on_the_measured_pool(seventh_raw, c
     assert "it is not filed" in p, (
         "the ruled consequence carries to this day too: a fourth qualifying day adds "
         "evidence, not stance, and the report stays unfiled")
+
+
+# ── #2912: 2026-10-12, the eighth extract — a pinned reading §10 does not count ────────────
+#
+# Every other file in this family corresponds to a day §10 counts and cites by name. This one
+# does not, and on the current ruling it never will: 2026-10-12 carries 0 chat misses meeting
+# the filing condition, so it earns no §10 paragraph. What it earns is durability. The reading
+# #2665/#2666 closed on — 844,969 pool tokens, 192 misses, 23,596,385 re-issued tokens, 65
+# gaps churned against a free pool — rested on 193,549 bytes the standing daily job wrote under
+# `~/lloyd-data/vllm-prefix-miss/`, and nothing on this machine bounds those bytes: #2248's own
+# advisory already expected that directory to be pruned day by day, and #2252 (done) retired
+# the `backlog/data/vllm_prefix_miss_*.json` vault-witness demand that used to ask for a copy,
+# so `scripts/automod/backlog.py` now skips a witness token whose basename an in-tree path
+# already carries. A git-tracked fixture pinned by the four nodes below is the only home left
+# with history, and `tests/fixtures/.gitignore` negates the family so that it costs one
+# `git add` rather than a force-add nobody can see.
+#
+# The standing owed-check ruling of 2026-10-16, recorded in #2666, is that this day's reading is
+# permanent as recorded. These nodes pin the bytes and their derivation; they do NOT file the
+# day as counted, and the last node checks exactly that, so the next §10 editor reads the extra
+# fixture as a pinned reading rather than as an uncited counted day.
+
+EIGHTH_EXTRACT = ROOT / "tests" / "fixtures" / "vllm_prefix_miss_2026-10-12.json"
+# The size #2665/#2666 quote off these bytes: `wc -l -c` over them prints `1 193549`.
+_EIGHTH_BYTES = 193_549
+
+
+@pytest.fixture(scope="module")
+def eighth_raw() -> dict:
+    return json.loads(EIGHTH_EXTRACT.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def eighth(eighth_raw, cfg) -> dict:
+    """2026-10-12 as `derive` reports it on the committed bytes, at the gate `config.yaml` carries."""
+    return W.derive(eighth_raw, gate=float(cfg["workers"]["kv_gate"]["max_kv_usage"]))
+
+
+def test_the_eighth_extract_is_committed_and_matches_the_daily_job_byte_for_byte(eighth_raw):
+    """#2912 clause 1: the day is in the tree, tracked, canonical, and identical to the copy the
+    standing daily job wrote — so the committed evidence IS the reading, not a transcription.
+
+    Byte identity is asked of the daily job's file rather than of `--write-extract` re-run here,
+    for #2852's reason: the thing worth pinning is that nobody re-cut the numbers between the job
+    that finds a day and the round that commits it. The existence guard is #2852's too, and it is
+    what keeps this node honest rather than vacuous — once the job prunes that directory the
+    fixture is the only copy, and the skip says so in the report instead of pretending to compare.
+    """
+    assert eighth_raw["window"] == ["2026-10-12", "2026-10-13"], (
+        "the pinned reading is a 00:00→00:00 UTC window like every other reading; a fixture from "
+        "another window is a different day wearing this day's file name")
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+         str(EIGHTH_EXTRACT.relative_to(ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{EIGHTH_EXTRACT.name} is on disk but not in git: the daily job's copy of it sits in a "
+        "directory nothing bounds, so an untracked fixture is this day lost rather than a tidy "
+        "tree")
+    raw = EIGHTH_EXTRACT.read_text(encoding="utf-8")
+    assert raw == json.dumps(eighth_raw, separators=(",", ":")) + "\n", (
+        f"{EIGHTH_EXTRACT.name} is not byte-for-byte what `vllm_prefix_miss_window "
+        "--write-extract` writes for the rows it holds, so the committed reading has been edited "
+        "by hand and no longer answers a re-derive")
+    daily = DAILY_EXTRACT_DIR / EIGHTH_EXTRACT.name
+    if not daily.exists():
+        pytest.skip(f"the daily job has written no {daily}; its extract is the other half of this "
+                    "identity and only the job can produce it")
+    assert raw == daily.read_text(encoding="utf-8"), (
+        f"the committed fixture and the daily job's copy at {daily} differ; one of them is not "
+        "the reading #2665/#2666 closed on, and both are cited as though they were one file")
+    assert EIGHTH_EXTRACT in _tracked_extracts(), (
+        "the extract family no longer enumerates this day, so the derived evidence set cannot see "
+        "the file it has to exclude — membership is by name family, not by anybody's list")
+
+
+def test_the_eighth_fixture_carries_the_quoted_size_off_its_own_bytes(eighth_raw):
+    """#2912 clause 2: the figure the closed items quote is a property of the committed bytes.
+
+    `wc -l -c < tests/fixtures/vllm_prefix_miss_2026-10-12.json` prints `1 193549`, and both
+    numbers are asserted off `read_bytes()` here rather than off prose: the byte count is the
+    quoted figure, and the line count is 1 because a canonical `--write-extract` file is ONE line
+    by construction, which is also why the old demand to prove a report with `wc -l` could never
+    be answered (the #2248 clause the review rung amended said exactly that). The row counts are
+    the third half of the same guard: a fixture trimmed to the fields somebody quoted would keep
+    its byte count only by losing rows, and 356 turn rows and 194 miss rows is what the day
+    produced — `derive` reads 356 turns and 194 miss events out of them, and reports 192 misses.
+    """
+    raw = EIGHTH_EXTRACT.read_bytes()
+    assert len(raw) == _EIGHTH_BYTES, (
+        f"the committed bytes are {len(raw)} B, not the {_EIGHTH_BYTES} B #2665/#2666 quote — the "
+        "quoted figure is a measurement of this file, so a fixture that grew or was trimmed makes "
+        "the closed items' sentence false rather than merely stale")
+    assert raw.count(b"\n") == 1 and raw.endswith(b"\n") and not raw.endswith(b"\n\n"), (
+        "the extract is one newline-terminated compact line; the line count is half of the quoted "
+        "figure, so a re-flowed fixture makes `wc -l -c` answer something other than `1 193549`")
+    assert len(eighth_raw["turns"]) == 356 and len(eighth_raw["misses"]) == 194, (
+        f"the committed line carries {len(eighth_raw['turns'])} turn rows and "
+        f"{len(eighth_raw['misses'])} miss rows, not the 356 and 194 the day wrote")
+
+
+def test_the_eighth_day_figures_are_derived_from_the_committed_bytes(eighth_raw, eighth, cfg):
+    """#2912 clause 3: every figure #2665/#2666 closed on is `derive`'s own, recomputed from the
+    committed bytes at the gate `config.yaml` carries — nothing here is quoted from the item that
+    filed it.
+
+    The pool figure is the one worth reading carefully: the extract's raw `pool_tokens` is
+    `[484612, 844969]` because the window holds two engine boot lines, and #2665's landed
+    behaviour is to report the largest, which is the denominator the day's churn join was
+    measured on. `derive` returns it as a bare int, so this assert is the difference between
+    pinning 844,969 and accidentally pinning a list. The two counts beside it are the control that
+    keeps the reading honest: `misses_gap_over_gate` is 42 of `misses_with_gap` 194, and the churn
+    join is 65 — a `derive` that started reading the smaller pool would move the last two, not
+    this one, which is why all four are asserted together.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    day = W.derive(eighth_raw, gate=gate)
+    assert day == eighth, "the module fixture and this node derived the day differently"
+    assert eighth_raw["window"] == ["2026-10-12", "2026-10-13"]
+    assert day["pool_tokens"] == 844969, (
+        f"derive reports pool_tokens {day['pool_tokens']}, not 844969; the raw extract carries "
+        f"{eighth_raw['pool_tokens']} and the closed reading is the largest boot pool")
+    assert day["misses"] == 192
+    assert day["reprefill_tokens"] == 23596385
+    assert day["misses_gap_churned_free_pool"] == 65
+    assert day["turns"] == 356 and day["turns_with_misses"] == 58
+    assert day["miss_events"] == 194 and day["misses_with_gap"] == 194
+    assert day["misses_gap_over_gate"] == 42, (
+        f"{day['misses_gap_over_gate']} of {day['misses_with_gap']} gaps are at or over the "
+        f"{gate:.2f} gate `config.yaml` carries, not 42; the day's figures are a reading AT that "
+        "gate, so a moved gate has to move this node and the closed items' sentence together")
+
+
+def test_the_eighth_extract_joins_the_family_without_moving_a_graded_reading(eighth_raw, eighth,
+                                                                            cfg):
+    """#2912 clause 4: 2026-10-12 enters the tracked family by name glob and moves nothing §10
+    grades — and the page still does not count it.
+
+    Family membership needed no node edited: `_tracked_extracts()` enumerates by name family, which
+    is how #1921, #2005, #2248 and #2852 each arrived. What has to be asserted is the other half —
+    that membership is not counting. The day carries 0 chat misses meeting the filing condition, so
+    `_qualifying` returns the empty list over its bytes and the derived evidence set stays exactly
+    the four days §10's composed prose names; the strict `<` beside it is what stops the count
+    reading as a restatement of `ls` now that the family holds eight files and the evidence set
+    holds four. The two page checks are the convention note: every other fixture in this family is
+    cited by name from its own §10 bullet, and this one is neither cited nor given a bullet, so a
+    future §10 editor who sees the file and looks for its paragraph finds this node saying why
+    there is none.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    days = _qualifying_days(gate)
+    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15"], (
+        "the derived §10 evidence set moved under a commit that promised to touch no graded "
+        "reading, so either the criteria changed or this day's bytes did")
+    assert "2026-10-12" not in days
+    assert EIGHTH_EXTRACT in _tracked_extracts()
+    assert len(days) < len(_tracked_extracts()), (
+        "every tracked extract now qualifies, so the pinned-but-not-counted distinction this day "
+        "exists to hold has gone")
+    assert eighth["chat_turns_with_misses"] == 0, (
+        "the day now carries a chat miss, and whether it becomes a counted §10 day is owed-check's "
+        "ruling, not this fixture's")
+    assert _qualifying(eighth_raw, gate) == [], (
+        "a 2026-10-12 chat miss now meets the filing condition, so the standing ruling that this "
+        "reading is permanent-but-uncounted has to be re-ruled before §10 moves")
+    windows = {c.name: json.loads(c.read_text(encoding="utf-8"))["window"][0]
+               for c in _tracked_extracts()}
+    assert windows[EIGHTH_EXTRACT.name] == "2026-10-12"
+    assert len(set(windows.values())) == len(windows), (
+        f"two extracts now carry one day: {windows}")
+    raw_doc = DOC.read_text(encoding="utf-8")
+    assert "- **The 2026-10-12 count" not in raw_doc, (
+        "§10 has grown a bullet for this day while its own paragraph-level count still derives "
+        "four days; a counted day and a pinned reading may not be the same file by accident")
+    assert EIGHTH_EXTRACT.name not in raw_doc, (
+        "§10 now cites a fixture it does not count, so the page points a reader at an extract no "
+        "criterion grades")
