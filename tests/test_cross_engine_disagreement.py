@@ -820,17 +820,85 @@ def test_arm1_gold_is_shipped_120_seeded_rows_with_warrants():
 
 
 def test_the_change_that_added_arm_1_touched_only_eval_and_tests():
-    """The scope rule for THIS commit, not the one for the previous arm's commit:
-    a third surface must not need an app/ change to exist."""
+    """Arm 1's commit carried no CODE outside `eval/` and `tests/`: a third surface must
+    not need an `app/` change to exist. Two defects, both found by the node going red at
+    `caafecd6` while the rule it states was satisfied.
+
+    **Which commit it asks.** It used to read "the commit that most recently touched
+    `eval/cross_engine_disagreement.py`", which is not arm 1's commit — that file is the
+    shared runner, so the answer moves every time anyone edits it, and the day #2824
+    landed, the answer became #2824's commit for the wrong reason. Its own docstring said
+    THIS commit, and the node above
+    (`test_the_change_that_added_this_measurement_touched_only_eval_and_tests`) already
+    states the rule this one violated: only the commit that ADDED a path is immutable, so
+    only that one makes a claim that cannot rot. Arm 1 added its own surface under
+    `eval/cross_engine_disagreement_arm1/`, so that is what is resolved now, and the
+    membership check below proves the resolution landed on the commit that adds arm 1's
+    surface AND arm 1's suite, each path by exact name. `--diff-filter=A` over two paths
+    returns the newest
+    commit adding EITHER one, so membership of both is what excludes a later commit that
+    re-adds only one of them, as well as the previous arm's commit and any later edit to
+    the shared runner.
+
+    **What it forbids.** It used to reject every path outside `eval/` and `tests/`, which
+    is a stricter rule than the one filed and was unsatisfiable on the facts: shipping an
+    `eval/<arm>/` directory compels a row in the arms inventory, because
+    `tests/test_architecture_coverage_doc_claims.py::test_measurement_doc_names_exactly_the_eval_arms_that_exist`
+    fails the doc the moment an arm directory is unlisted. No arm-1 commit could exist
+    that kept both nodes green — one demanded a documentation edit outside `eval/` and
+    `tests/`, the other refused it. So the name now means what the clause means: no CODE
+    outside `eval/` and `tests/`. Documentation is admitted on one narrow, checked ground
+    — the arms row the other guard compels — and a byte of Python, YAML, service or
+    frontend code anywhere else still reddens this node.
+    """
     import subprocess
-    out = subprocess.run(["git", "log", "-1", "--format=%H", "--",
-                          "eval/cross_engine_disagreement.py"],
-                         cwd=str(_REPO), capture_output=True, text=True)
-    assert out.stdout.strip(), "no history for the runner"
-    head = out.stdout.split()[0]
-    files = subprocess.run(["git", "show", "--pretty=format:", "--name-only", head],
-                           cwd=str(_REPO), capture_output=True, text=True
-                           ).stdout.splitlines()
-    bad = [f for f in files if f.strip()
-           and not (f.startswith("eval/") or f.startswith("tests/"))]
-    assert not bad, f"arm 1's commit touched non-eval/test paths: {bad}"
+
+    def _git(*args: str) -> str:
+        run = subprocess.run(["git", *args], cwd=str(_REPO),
+                             capture_output=True, text=True)
+        assert run.returncode == 0, f"git {' '.join(args)} failed: {run.stderr[:300]}"
+        return run.stdout
+
+    #: Arm 1's own added paths — the surface its commit created, not the shared runner it
+    #: wired into. `--diff-filter=A` keeps the answer fixed for the life of the repo, but
+    #: over several paths it returns the newest commit adding EITHER one, so a later
+    #: commit that deleted and re-added one path would re-anchor the node. The membership
+    #: check below closes that: the resolved commit has to add BOTH, each by exact name.
+    ARM1_ADDED_PATHS = ("eval/cross_engine_disagreement_arm1/rubric.py",
+                        "tests/test_cross_engine_arm1_gold.py")
+    found = _git("log", "--format=%H", "--diff-filter=A", "-1", "--",
+                 *ARM1_ADDED_PATHS).strip()
+    assert found, f"no commit adds {ARM1_ADDED_PATHS[0]} — arm 1 has no history"
+    sha = found.splitlines()[0]
+    files = [f for f in _git("show", "--pretty=format:", "--name-only", sha).splitlines()
+             if f.strip()]
+    assert files, f"no file list for {sha[:8]}"
+    for added in ARM1_ADDED_PATHS:
+        assert added in files, (
+            f"{sha[:8]} does not add {added}, so it is not the commit that added both of "
+            "the paths this node resolves on: it is the previous arm's commit, a later "
+            "commit that re-added only one of them, or an edit to the shared runner")
+
+    stray = [f for f in files
+             if not (f.startswith("eval/") or f.startswith("tests/")
+                     or f.endswith(".md"))]
+    assert stray == [], (
+        f"{sha[:8]} added arm 1 alongside code outside eval/ and tests/: {stray}; the "
+        "third surface is a corpus and a sampler, so it wires nothing and no app/, "
+        "agent_mcp/, script, service or web file belongs in that commit")
+
+    # The one permission the widened rule grants, granted exactly: the docs it admits are
+    # the arms inventory, and its hunk has to be the row naming this arm — which is the
+    # row `test_measurement_doc_names_exactly_the_eval_arms_that_exist` compels. Any
+    # other documentation in that commit is not compelled by anything and so is stray.
+    docs = [f for f in files
+            if f.endswith(".md")
+            and not (f.startswith("eval/") or f.startswith("tests/"))]
+    assert docs == ["architecture/measurement.md"], (
+        f"arm 1's commit carries documentation outside eval/ and tests/ beyond the arms "
+        f"inventory the doc-claim guard compels: {docs}")
+    hunk = _git("show", "--pretty=format:", sha, "--", "architecture/measurement.md")
+    added = [ln for ln in hunk.splitlines() if ln.startswith("+")]
+    assert any("cross_engine_disagreement_arm1" in ln for ln in added), (
+        "arm 1 touched architecture/measurement.md without adding its arms row, so the "
+        "doc edit is not the one the doc-claim guard required")
