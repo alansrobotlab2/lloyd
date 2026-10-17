@@ -398,11 +398,25 @@ head in `sessions/`: no four-part id on live data carries a human platform at
 all, and **no writer records a member's departure** — the sweep gzips and never
 deletes, nothing rewrites the `platform` of an *existing* session
 (`_save_session_meta` stamps it only in its create branch,
-`app/sessions_io.py:1330-1348`), and `DELETE /api/sessions/{session_id}`
-(`app/routers/sessions.py:1141`, unlink at `:1173`) is the only in-tree route
-that removes a transcript — so this page records the emptiness and the missing
-witness and asserts no cause for the vanished twelve, one of which,
-`20260917_105134_autocode_029c`, exists under no suffix at all (#2651).
+`app/sessions_io.py:1330-1348`). Two in-tree routes remove a transcript, and
+what separates them is everything around the unlink: `DELETE
+/api/sessions/{session_id}` (`app/routers/sessions.py:1141`) cancels the current
+turn, drains the queued turns in **both** tiers, discards the session's ambient
+prefetch and `rmtree`s the `<id>.tool-results` spill dir beside the transcript,
+while `POST /api/sessions/clear` (`app/routers/sessions.py:1669`) is a
+bare `meta_path.unlink()` of the one id its body names — no cancel, no drain, no
+spill dir, no `logger` call at all. Neither leaves a per-session record a later
+reader could find, so this page records the emptiness and the missing witness and
+asserts no cause for the vanished twelve, one of which,
+`20260917_105134_autocode_029c`, exists under no suffix at all (#2651). That
+witness is thinner than it looks: measured 2026-10-18 on the *name* date of every
+entry in `~/lloyd-data/sessions/` — not its mtime, which here is the archive time
+— no entry of any suffix is named `2026-09-13` through `2026-09-21`, while the
+`2026-09-09`/`2026-09-12` archives and every day from `2026-09-22` on are
+present, and the four post-`2026-09-09` ids this census counted on 2026-09-17
+(#1064) carry name-dates inside it — one `2026-09-16`, three `2026-09-17` — so
+the gap is store-wide rather than class-shaped and the missing witness is not
+evidence about this class; this sentence states no cause for the gap.
 
 The eight `20260909_1538xx_autonomy_*` ids named above were never members of this
 class. They were sorted by their *filename* — the `_autonomy_` in the name is
