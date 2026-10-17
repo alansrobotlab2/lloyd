@@ -18,13 +18,22 @@ RLIMIT_AS is per-process, and `RLIMIT_NPROC` counts the whole UID, which on a bo
 user owns the engines is a footgun aimed at the stack, not a bound on a child — would prove
 nothing.
 
-Which is also why the kill nodes set `MemoryMax` to 256M instead of using the shipped 16G
-(`MEMORY_MAX` in `agent_mcp/_resource_ceiling.py`): filling 16 GiB on a box with the engine
-daemons resident would put the agent stack down to
-prove a bound exists. That is a substitute of *value*, not of *mechanism* — same unit, same
-cgroup files, same kernel controller — and the mechanism itself is proved again on the real
-constants: memory by the byte-exact `memory.max` read-back in the probe, tasks by the benign
-16-way fan-out that `TasksMax=1024` must let through untouched.
+Which is also why no node in this file allocates the shipped 16G (`MEMORY_MAX` in
+`agent_mcp/_resource_ceiling.py`): filling 16 GiB on a box with the engine daemons resident
+would put the agent stack down to prove a bound exists. The cap every planted memory bomb
+runs at is `PLANTED_MEMORY_MAX` = 256M — the byte-bound allocator, the slow sibling in the
+misattribution node, and the allocator whose kill has to surface in a *tool result*
+(`test_the_named_limit_reaches_the_tool_result_and_not_only_the_module`, which ran against
+the shipped 16G until #2925: 242 launches of it since 2026-10-13, with scope teardown peaks
+up to 15.7G and ~100 s of wall clock each) — and the planted fan-out runs at
+`RC.TASKS_MAX = "48"`. Each allocator node then proves its own cap from inside the scope it
+was planted in (its `planted cap-path=… cap=…` line, read from that scope's `memory.max`),
+so an edit that drops a
+patch fails a node instead of quietly arming 16G again. That is a substitute of *value*, not
+of *mechanism* — same unit, same cgroup files, same kernel controller — and the mechanism
+itself is proved again on the real constants, which no node patches: memory by the byte-exact
+`memory.max` read-back in the probe, tasks by the benign 16-way fan-out that `TasksMax=1024`
+must let through untouched.
 """
 
 import asyncio
@@ -117,19 +126,91 @@ _FAN_OUT = (
     "        pass\n"
     "print('loop-ended', flush=True)\n"
 )
+# The cap every planted memory bomb in this file runs at, and the most a planted cap is
+# allowed to be. #2925 found the tool-result node allocating against the shipped 16G — so
+# one suite run grew a real ~15 GiB buffer per launch inside `lloyd.slice` and spent ~100 s
+# of wall clock racing the Bash tool's own 120 s timeout to get its kill in first. 256M is
+# what the byte-bound allocator already cost: the same silent SIGKILL in a second.
+PLANTED_MEMORY_MAX = "256M"
+PLANTED_MEMORY_MAX_BYTES = 256 * 1024 * 1024
+# 512 MiB, from the item. The nodes below assert their scope reads back at or under this, so
+# the invariant is `<= 512 MiB` and not `== 256M`: raising `PLANTED_MEMORY_MAX` past the
+# bound, or dropping a patch so the scope arms at the shipped 16G, fails a node.
+PLANTED_CAP_LIMIT_BYTES = 512 * 1024 * 1024
+# Bytes the allocator is expected to die inside: the test's own 256M cap plus one 8 MiB
+# block plus the interpreter's own footprint. Stated because the item's acceptance is a
+# *byte* bound, and because 8 GiB of churn before a kill would be a different failure.
+_ALLOCATOR_BYTE_BOUND = PLANTED_MEMORY_MAX_BYTES + 64 * 1024 * 1024
+
+#: The first line of both allocator payloads: the cap, and the path it was read from, taken
+#: from the scope the payload is already running in — `/proc/self/cgroup` names the
+#: `lloyd-bash-ceiling-*.scope` (measured through `B._bash` on this box, where the child's own
+#: view does name it) and that scope's `memory.max` is the value `apply` asked the manager
+#: for. Both figures are printed, not just the number, because the proof has to be the planted
+#: command's own and nothing else's: `planted` is a marker no harness line prints, and the
+#: path is what distinguishes a read of the per-call scope from a read of
+#: `/sys/fs/cgroup/memory.max`, which also exists and is an entirely different cgroup. Printed
+#: *before* allocating because the process that read it is SIGKILLed with no exit status of its
+#: own and a fast scope's `memory.peak` is collected with its directory — a witness that lives
+#: only in the note goes blind exactly when the bomb grows largest. And the payloads exit 42
+#: rather than allocate past `PLANTED_CAP_LIMIT_BYTES`: an assertion that reads the run's output
+#: can only fire after the kill, so the guard against a dropped patch has to live in the payload,
+#: which is what `test_a_planted_allocator_refuses_to_grow_against_an_oversized_scope` proves.
+_MEMCAP_READ_BACK_PY = (
+    "import pathlib, sys\n"
+    "rel = pathlib.Path('/proc/self/cgroup').read_text().split(':', 2)[2].strip()\n"
+    "p = '/sys/fs/cgroup' + rel + '/memory.max'\n"
+    "cap = int(pathlib.Path(p).read_text().strip())\n"
+    "print('planted cap-path=' + p + ' cap=' + str(cap), flush=True)\n"
+    f"sys.exit(42) if cap > {PLANTED_CAP_LIMIT_BYTES} else None\n"
+)
+_MEMCAP_READ_BACK_SHELL = (
+    "cap=$(cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max); "
+    "echo planted cap-path=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max cap=$cap; "
+    f'[ "$cap" -le {PLANTED_CAP_LIMIT_BYTES} ] || exit 42; ')
+
 # `-u` is load-bearing for the byte bound below: stdout is a pipe here, so without
 # unbuffered output the progress lines die in the child's own 8 KiB buffer when it is
 # SIGKILLed and the bound becomes unmeasurable.
 _ALLOCATOR = (
+    _MEMCAP_READ_BACK_PY +
     "blocks = []\n"
     "while True:\n"
     "    blocks.append(bytearray(8 * 1024 * 1024))\n"
     "    print(f'bytes={len(blocks) * 8 * 1024 * 1024}', flush=True)\n"
 )
-# Bytes the allocator is expected to die inside: the test's own 256M cap plus one 8 MiB
-# block plus the interpreter's own footprint. Stated because the item's acceptance is a
-# *byte* bound, and because 8 GiB of churn before a kill would be a different failure.
-_ALLOCATOR_BYTE_BOUND = 256 * 1024 * 1024 + 64 * 1024 * 1024
+
+
+def _planted_cap_bytes(shown: str) -> int:
+    """The cap a planted allocator read back from its own scope, bounded (#2925).
+
+    `shown` is whatever the node has in hand — the child's stdout, or the whole tool result.
+    Four assertions, in the order the failure modes arrive. `planted` is printed by the two
+    allocator payloads and by nothing else in the run, so requiring exactly one such line is
+    what makes the figure the planted command's own rather than a number the harness happened
+    to emit: zero means the read-back is gone, two means something else started printing it.
+    The path has to name a per-call ceiling scope, because `/sys/fs/cgroup/memory.max` also
+    reads cleanly and belongs to no call at all. Then the bound — the shipped `MEMORY_MAX` of
+    16G is 17179869184 bytes, which is what the third bites on — and finally the planted value,
+    so a patch and a payload that disagree about which run this is cannot pass either.
+    """
+    found = re.findall(r"planted cap-path=(\S+) cap=(\d+)", shown)
+    assert len(found) == 1, \
+        f"expected exactly one `planted cap-path=… cap=…` line, got {len(found)}: the marker is " \
+        f"printed by the planted allocator alone, so none means the in-scope read-back was " \
+        f"dropped and more than one means the figure is no longer attributable to it"
+    path, raw = found[0]
+    value = int(raw)
+    assert "lloyd-bash-ceiling-" in path, \
+        f"the payload read its cap from {path}, which is not a per-call ceiling scope — the cap " \
+        f"that bites a planted command is its own scope's, named in /proc/self/cgroup"
+    assert value <= PLANTED_CAP_LIMIT_BYTES, \
+        f"the planted payload ran in a scope whose memory.max was {value} bytes, over " \
+        f"the {PLANTED_CAP_LIMIT_BYTES}-byte bound this suite is allowed to plant under"
+    assert value == PLANTED_MEMORY_MAX_BYTES, \
+        f"the scope the payload ran in carried {value} bytes, not the " \
+        f"{PLANTED_MEMORY_MAX_BYTES} ({PLANTED_MEMORY_MAX}) the node planted"
+    return value
 
 
 @pytest.fixture(autouse=True)
@@ -148,8 +229,11 @@ def _fresh_probe():
 
 @pytest.fixture(autouse=True)
 def _restore_constants():
-    """Nodes shrink the cap so a planted command dies in a second instead of at 32 GiB; the
-    shipped values are restored after each one, because they are the ceiling."""
+    """Nodes shrink the cap so a planted command dies in a second instead of at the shipped
+    `MEMORY_MAX` of 16G; the shipped values are restored after each one, because they are the
+    ceiling. The restore is what makes `RC.MEMORY_MAX = PLANTED_MEMORY_MAX` safe to write in a
+    node body at all — and until #2925 one node never patched the constant in the first place,
+    which no restore could notice: that is the gap the payload's in-scope cap read-back is for."""
     before = (RC.MEMORY_MAX, RC.MEMORY_SWAP_MAX, RC.TASKS_MAX)
     yield
     RC.MEMORY_MAX, RC.MEMORY_SWAP_MAX, RC.TASKS_MAX = before
@@ -568,12 +652,13 @@ def test_a_planted_allocator_is_killed_inside_the_byte_bound_and_named():
     """Clause 3: a planted single-process allocator dies under the memory limit, inside a
     stated byte bound, and the note names `MemoryMax` — with swap pinned to 0.
 
-    The cap this node plants is 256 MiB, not the shipped value: filling 16 GiB on a box with
-    the engine daemons resident is how the agent stack gets taken down to prove a bound
-    exists, which is the failure #1337 exists to prevent. What is *not* substituted is the
-    mechanism — the same unit, the same cgroup files, the same kernel memory controller —
-    and the shipped values are proved separately, without allocating them, by the byte-exact
-    read-back in the node below.
+    The cap this node plants is `PLANTED_MEMORY_MAX` (256 MiB), not the shipped value:
+    filling 16 GiB on a box with the engine daemons resident is how the agent stack gets
+    taken down to prove a bound exists, which is the failure #1337 exists to prevent. What is
+    *not* substituted is the mechanism — the same unit, the same cgroup files, the same
+    kernel memory controller — and the shipped values are proved separately, without
+    allocating them, by the byte-exact read-back in `test_the_shipped_values_are_the_ones_the
+    _kernel_enforces`.
 
     The bound is 256 MiB + 64 MiB of headroom read out of the allocator's own progress
     lines: an allocator that churned 8 GiB before dying would be a different failure mode
@@ -586,7 +671,7 @@ def test_a_planted_allocator_is_killed_inside_the_byte_bound_and_named():
     through a shell) with no message anywhere, which is the bare exit code the item refuses
     to leave the reader with.
     """
-    argv, run = _wrap_python(_ALLOCATOR, memory="256M", swap="0")
+    argv, run = _wrap_python(_ALLOCATOR, memory=PLANTED_MEMORY_MAX, swap="0")
     proc = subprocess.run(argv, capture_output=True, text=True, timeout=CEIL_BUDGET_S,
                             env=RC.launcher_env(None))
     note = RC.finish(run)
@@ -594,9 +679,21 @@ def test_a_planted_allocator_is_killed_inside_the_byte_bound_and_named():
     assert proc.returncode in (-9, 137), \
         f"expected the memory controller's silent SIGKILL (rc=-9, or 137 through a shell), " \
         f"got {proc.returncode}: {(proc.stdout + proc.stderr)[-300:]}"
-    assert "ceiling" not in (proc.stdout + proc.stderr), \
-        "the child reported a ceiling itself, so this node would be testing the payload " \
-        "rather than the wrapper's translation of a silent kill"
+    # #2925 clause 3, first of the file's two `bytearray(8 * 1024 * 1024)` payload sites: the
+    # allocator printed the cap its own scope carried before it allocated anything, so the
+    # bound is evidenced by the run itself and not only by the `memory=` on the line above.
+    _planted_cap_bytes(proc.stdout)
+    # The child must not pronounce the verdict: no note marker, no named limit, no kill
+    # counter. That is what would make this node grade the payload instead of the wrapper's
+    # translation of a silent kill. It is stated as the verdict's own wording rather than as
+    # "no occurrence of 'ceiling'", because the payload's cap line necessarily contains that
+    # substring — the scope it is running in is named `lloyd-bash-ceiling-*.scope`, and naming
+    # that scope is the proof that the figure came from the ceiling's cgroup and not from the
+    # slice root (#2925).
+    child = proc.stdout + proc.stderr
+    assert not any(token in child for token in ("[resource ceiling]", "MemoryMax=", "oom_kill")), \
+        f"the child reported a ceiling verdict itself, so this node would be grading the " \
+        f"payload rather than the wrapper's translation of a silent kill: {child[-300:]!r}"
     assert note and "MemoryMax" in note, \
         f"rc={proc.returncode} with no named limit: the item's whole complaint about a " \
         "bare exit code"
@@ -617,15 +714,70 @@ def test_the_named_limit_reaches_the_tool_result_and_not_only_the_module():
     about the *tool result*, which is what a turn sees when its command dies. So the same
     allocator is run through the foreground spawn site and the note is asserted in that
     output, next to the `[exit code: …]` suffix the handler appends.
+
+    #2925 is why this node now patches the cap. It used to run `_ALLOCATOR_SHELL` against the
+    shipped `MEMORY_MAX` of 16G, so every gate run grew a real ~15 GiB buffer inside
+    `lloyd.slice` — 242 launches of that payload between 2026-10-13 and 2026-10-17, teardown
+    peaks up to 15.7G, ~100 s of wall clock each, which left the node racing the Bash tool's
+    own 120 s timeout to get its kill in before a timeout note replaced the ceiling note. The
+    claim under test is that a *named* limit reaches the tool result, and a named 256M is the
+    same claim about the same code path; the shipped value is proved at the kernel, byte for
+    byte and without allocating it, by `test_the_shipped_values_are_the_ones_the_kernel_enforces`.
     """
+    RC.MEMORY_MAX = PLANTED_MEMORY_MAX
     out = _run_bash(_ALLOCATOR_SHELL)
     assert "MemoryMax" in out, f"the tool result carries no named limit: {out[-400:]!r}"
+    # Clause 2: graded against the cap this node actually armed, the way the byte-bound node
+    # asserts its own `256M`. Asserting only that *a* limit was named would still pass on a
+    # note saying 16G, which is the exact sentence that stopped being true of this node.
+    assert PLANTED_MEMORY_MAX in out, \
+        f"the tool result named a limit, but not the {PLANTED_MEMORY_MAX} cap this node " \
+        f"planted: {out[-400:]!r}"
     assert "exit code" in out, f"an OOM-killed command reported success: {out[-200:]!r}"
     # #2727 clause 4: this kill happens inside its own scope, so the honest new wording
     # (which reserves "somewhere in lloyd.slice" for a kill this call cannot evidence) must
-    # not have taken this one. The subtree claim is the marker that it did not.
+    # not have taken this one. The subtree claim is the marker that it did not — and it is
+    # still the claim, now that the kill underneath it happens at 256M instead of 16 GiB.
     assert "subtree" in out, \
-        f"a genuine 16 GiB kill was reported without claiming its own subtree: {out[-400:]!r}"
+        f"a kill at the planted {PLANTED_MEMORY_MAX} cap was reported without claiming its " \
+        f"own subtree: {out[-400:]!r}"
+    # Clause 3, second of the file's two `bytearray(8 * 1024 * 1024)` payload sites. The
+    # figure comes back in this tool result because the payload read its own `memory.max`
+    # before allocating: the process that read it was SIGKILLed and left no exit status of
+    # its own, so an assertion on anything the harness reads out afterwards could go blind
+    # exactly when the bomb grew largest.
+    _planted_cap_bytes(out)
+
+
+def test_a_planted_allocator_refuses_to_grow_against_an_oversized_scope():
+    """The payload's own bound, enforced by the payload — so a dropped patch costs no RAM.
+
+    `_planted_cap_bytes` is what fails when a node forgets to narrow the cap, but it reads the
+    run's output, and output only exists once the allocator has been killed: at the shipped 16G
+    that is ~100 s of wall clock and 15 GiB of a real scope, which is the thing this item exists
+    to stop. So the bound is baked into both payloads, which print their cap and then exit 42
+    rather than allocate past it. This node arms a scope one notch over the bound and proves the
+    refusal from the three things that have to be true together: the run ends with 42, it names
+    the oversized cap, and it printed no allocation progress at all.
+
+    It also pins that the bound is in the payload and not merely in the harness: the comparison
+    the child made was against a number compiled into the command string.
+    """
+    argv, run = _wrap_python(_ALLOCATOR, memory="1G", swap="0")
+    started = time.monotonic()
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=CEIL_BUDGET_S,
+                            env=RC.launcher_env(None))
+    RC.finish(run)
+    assert proc.returncode == 42, \
+        f"an allocator planted in a 1G scope should refuse rather than fill it, got " \
+        f"rc={proc.returncode}: {(proc.stdout + proc.stderr)[-200:]!r}"
+    assert "cap=1073741824" in proc.stdout, \
+        f"the refusal did not name the oversized cap it read: {proc.stdout[-200:]!r}"
+    assert "bytes=" not in proc.stdout, \
+        "the payload allocated before refusing, so a dropped patch still grows the bomb — the " \
+        "cap has to be checked before the first bytearray"
+    assert time.monotonic() - started < 10.0, \
+        "a refusal that takes minutes is not a guard; it is the old 16G node with a new name"
 
 
 # ── #2727 — whose kill: the slice's cumulative counter versus this call's own ───
@@ -738,7 +890,7 @@ def test_a_clean_call_concurrent_with_a_sibling_scope_kill_is_not_blamed_for_it(
         "    time.sleep(0.04)\n"
     )
     shipped = RC.MEMORY_MAX
-    argv, run = _wrap_python(slow_allocator, memory="256M", swap="0")
+    argv, run = _wrap_python(slow_allocator, memory=PLANTED_MEMORY_MAX, swap="0")
     RC.MEMORY_MAX = shipped          # the innocent call runs production-shaped
     before = RC._slice_events().get("oom_kill")
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -769,13 +921,23 @@ def test_a_clean_call_concurrent_with_a_sibling_scope_kill_is_not_blamed_for_it(
 def test_the_shipped_values_are_the_ones_the_kernel_enforces():
     """The shipped constants, read back from inside a live scope — proved without allocating them.
 
-    The kill nodes run at 256 MiB and 48 tasks so the agent stack is never at risk; that
-    substitution has to be paid for somewhere, and it is paid here. The same `apply`/
-    `scope_argv` path is asked for the shipped constants and `memory.max`,
-    `memory.swap.max` and `pids.max` are read back and compared to `RC.memory_bytes()` and
-    `RC.TASKS_MAX`. A ceiling whose constant and whose enforced value disagree is a ceiling
-    that does not exist, and only this comparison would notice.
+    The kill nodes run at `PLANTED_MEMORY_MAX` (256 MiB) and `RC.TASKS_MAX = "48"` so the
+    agent stack is never at risk; that substitution has to be paid for somewhere, and it is
+    paid here. The same `apply`/`scope_argv` path is asked for the shipped constants and
+    `memory.max`, `memory.swap.max` and `pids.max` are read back and compared to
+    `RC.memory_bytes()` and `RC.TASKS_MAX`. A ceiling whose constant and whose enforced value
+    disagree is a ceiling that does not exist, and only this comparison would notice.
+
+    #2925 clause 5 is the other half of that comparison, and it is why this node patches
+    nothing: an equality against `RC.memory_bytes()` is satisfied by *whatever* the constant
+    says, so on its own it would happily certify a shipped cap someone had quietly shrunk to
+    the test's own value. The literal below is the shipped value, and the read-back under it
+    still proves the kernel got exactly that.
     """
+    assert RC.MEMORY_MAX == "16G", \
+        f"the shipped cap this node exists to prove at the kernel is {RC.MEMORY_MAX!r}, not " \
+        f"'16G' — and this node patches nothing, so a test-local cap leaking into the " \
+        f"shipped constant is exactly what this line is for"
     probe = ("CG=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); "
              "printf 'mem=%s swap=%s pids=%s\\n' \"$(cat $CG/memory.max)\" "
              "\"$(cat $CG/memory.swap.max)\" \"$(cat $CG/pids.max)\"")
@@ -908,7 +1070,8 @@ _FAN_OUT_NO_REAP = (
 #: asserted inside the tool result and not only in the module's return value. Plain `print`,
 #: no f-string: the payload sits inside shell double quotes, and nested quoting is how a
 #: planted command stops being the thing under test.
-_ALLOCATOR_SHELL = ('python3 -u -c "blocks = []\n'
+_ALLOCATOR_SHELL = (_MEMCAP_READ_BACK_SHELL +
+                    'python3 -u -c "blocks = []\n'
                     'while True:\n'
                     '    blocks.append(bytearray(8 * 1024 * 1024))\n'
                     '    print(len(blocks) * 8 * 1024 * 1024, flush=True)"')
