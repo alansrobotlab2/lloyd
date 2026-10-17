@@ -368,18 +368,27 @@ def test_trap_two_sends_the_reader_to_no_idle_boot_run():
     retired = [s for s in _sentences(bullet) if "retired" in s.lower()]
     assert retired, (
         "the idle-boot pointer left nothing behind: no dated removal, no reason")
-    assert any("2026-09-29" in s and "_restart_primary" in s
-               and "scripts/automod/promote.py:1880" in s and "warranted" in s
-               for s in retired), (
+    cited = [(s, re.search(r"scripts/automod/promote\.py:(\d+)", s)) for s in retired]
+    assert any("2026-09-29" in s and "_restart_primary" in s and m and "warranted" in s
+               for s, m in cited), (
         "the drop is not dated with its reason: the window closes minutes after a "
         "boot only Alan gates (_restart_primary, "
-        "scripts/automod/promote.py:1880), so no dedicated restart is warranted")
+        "scripts/automod/promote.py:<the line that defines it>), so no dedicated "
+        "restart is warranted")
     # The gate the reason cites has to be where the sentence says it is, or the
-    # sentence is a citation to nothing and re-opens the argument it settles.
+    # sentence is a citation to nothing and re-opens the argument it settles. The
+    # number is read out of the sentence rather than repeated here: any edit to
+    # promote.py ABOVE the definition moves every citation below it, and a literal
+    # in this file then fails for a doc that was correctly re-pointed as loudly as
+    # for a stale one -- which is how #2859 met it, three lines of ledger row
+    # shifting a citation about 700 lines away. Same check, one source of truth.
     promote = (ROOT / "scripts" / "automod" / "promote.py").read_text().splitlines()
-    assert "_restart_primary" in promote[1879], (
-        "scripts/automod/promote.py:1880 does not name _restart_primary, so trap "
-        "#2's reason cites a line that has moved")
+    nums = [int(m.group(1)) for s, m in cited if m and "warranted" in s]
+    assert nums, "trap #2's reason cites no promote.py line, so nothing to check"
+    assert all("_restart_primary" in promote[n - 1] for n in nums), (
+        f"scripts/automod/promote.py:{nums} does not name _restart_primary, so trap "
+        f"#2's reason cites a line that has moved -- re-point it to "
+        f"{[i + 1 for i, ln in enumerate(promote) if 'def _restart_primary' in ln]}")
     assert "#1635" in bullet, (
         "positive control: the retirement names no item, so a later reader has "
         "nothing to check the ruling against and will re-file the run")

@@ -1058,9 +1058,11 @@ def _regate_after_move(round_id: str, worktree: Path, live: Path, base: str,
     on top of what landed — which is the only build that was ever going to be
     live, and the one nothing had tested until now.
 
-    Returns `(base, head, gate_report)`. Persists both records the next reader
-    depends on: `gate.json`, which `land` reads its head from, and the run
-    spec's base, which the next `run_gate` reads its diff from.
+    Returns `(base, head, gate_report)`. Persists the three records the next reader
+    depends on: `gate.json`, which `land` reads its head from, the run spec's base,
+    which the next `run_gate` reads its diff from, and — on the passing path only —
+    one `land_rebased` ledger row, which is what separates this from a re-gate that
+    never had a moved tree to recover from.
     """
     from scripts.automod import gate as G   # lazy: gate → canary → ports; not needed elsewhere here
     # The item, so the chase's gate can run its review rung. Without it the
@@ -1089,6 +1091,21 @@ def _regate_after_move(round_id: str, worktree: Path, live: Path, base: str,
                      f"retested, and the `{failed.get('name')}` rung failed: "
                      f"{failed.get('detail', '')[:300]}",
                      external=True, rung=failed.get("name"), moved_to=live_head)
+    # The failure path above has always left a row; the SUCCESS below left none, so
+    # a caught-and-recovered move was indistinguishable from a routine re-gate —
+    # the ordinary `gate` rows are the same either way. One row on the passing path
+    # only, after the refusal has raised, so a refused chase stays the single
+    # `land_failed` it is today and this is never a second event for one landing.
+    # Shape mirrors `land_wait_settle` above (round_id / ok / detail). Written on a
+    # dry run as well: this function runs before `promote`'s dry-run return, which
+    # is what its tests exercise.
+    S.append_event({
+        "event": "land_rebased", "round_id": round_id, "ok": True,
+        "from_base": base, "to_base": report.base, "head": report.head,
+        "moved_to": live_head,
+        "detail": (f"main moved to {live_head[:8]} after the gate passed; rebased "
+                   f"{base[:8]}->{str(report.base)[:8]} and every rung passed on top "
+                   f"of it, head {str(report.head)[:8]}")})
     return report.base, report.head, rep
 
 
@@ -1173,9 +1190,27 @@ def promote(round_id: str, worktree: Path, base: str, *,
     # passed it.
     gate_head = (gate_report or {}).get("head")
     if gate_head and gate_head != head:
-        raise PromoteError(
+        # The raise alone used to be the whole record, so the count of times this
+        # check caught the tree moving was unknowable. The gate's own preflight
+        # catch is countable by contrast: as of 2026-10-16 the live ledger and its
+        # two archives hold 35 `gate` rows at `rung: preflight` with `ok: false`
+        # carrying `live HEAD moved` (65 rows contain the phrase, the other 30 only
+        # quote it), against 0 rows for this check. `detail` keeps the identical
+        # message; the two full shas and `identity_refuse` are the machine-readable
+        # form, so a reader never greps prose. NOT external: a commit sneaking into
+        # this round's own worktree after its gate is the round's own doing, and
+        # `external_blocker` is what spares an item's attempt count
+        # (`scripts/automod/backlog.py`, `_external_budget_left`), so flipping the
+        # flag here would launder a real refusal. Written on a dry run too,
+        # deliberately: this check sits before the dry-run return below, and
+        # `_land_failed` already fires on dry runs for the denylist and the
+        # overlapping-live-edits refusals.
+        _land_failed(
+            round_id,
             f"worktree HEAD moved since the gate ran ({head[:8]} != gated "
-            f"{gate_head[:8]}) — re-gate before landing")
+            f"{gate_head[:8]}) — re-gate before landing",
+            external=False, identity_refuse=True,
+            worktree_head=head, gate_head=gate_head)
 
     # The land train (`automod.landing.defer_restart`, and only while the
     # STAGED guardian can judge a batch): a landing that need not restart

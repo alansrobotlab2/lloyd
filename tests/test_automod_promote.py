@@ -445,7 +445,10 @@ def test_a_moved_main_is_rebased_and_retested_before_landing(shared_tree, monkey
     """`main` moved after the gate passed. The promoter used to refuse; now it
     runs the gate again with the old base — whose preflight rebases — and
     lands the retested result. Both records the next reader depends on are
-    rewritten: gate.json (land's head) and the run spec (the next gate's base)."""
+    rewritten: gate.json (land's head) and the run spec (the next gate's base).
+    Since #2859 a third record is written: one `land_rebased` row, which is what
+    tells a caught-and-recovered move apart from a routine re-gate — before it the
+    only trace was the ordinary `gate` rows, identical either way."""
     import scripts.automod.gate as G
     _StubGate.verdict, _StubGate.seen = True, []
     monkeypatch.setattr(G, "Gate", _StubGate)
@@ -463,11 +466,22 @@ def test_a_moved_main_is_rebased_and_retested_before_landing(shared_tree, monkey
     assert gate_json["base"] == t["moved"] and gate_json["head"] == new_head
     assert f"base_commit: {t['moved']}" in (S.ROUNDS_DIR / "SM_MV" / "run_spec.yaml").read_text()
 
+    rows = _events("land_rebased")
+    assert len(rows) == 1, f"one recovered move, exactly one row: {rows}"
+    ev = rows[0]
+    assert ev["round_id"] == "SM_MV" and ev["ok"] is True
+    assert ev["from_base"] == t["base"], "the base the round started from"
+    assert ev["to_base"] == t["moved"] and ev["moved_to"] == t["moved"], "where main had got to"
+    assert ev["head"] == new_head, "the head it rebased onto, which is what lands"
+    assert _events("land_failed") == [], "a recovery is not a failure; no land_failed on this path"
+
 
 def test_a_retest_that_fails_is_a_land_failed_that_keeps_the_item(shared_tree, monkeypatch):
     """The round's change no longer passes on top of what landed. That is a
     refusal after every rung had passed — invisible to the backlog before
-    `land_failed` existed, and it spent the item."""
+    `land_failed` existed, and it spent the item. #2859 added the success row on
+    the other path, so this path must still be ONE event: a refused chase that
+    also wrote a recovery row would count the same landing twice."""
     import scripts.automod.gate as G
     _StubGate.verdict, _StubGate.seen = False, []
     monkeypatch.setattr(G, "Gate", _StubGate)
@@ -475,23 +489,118 @@ def test_a_retest_that_fails_is_a_land_failed_that_keeps_the_item(shared_tree, m
 
     with pytest.raises(P.PromoteError, match="rebased and retested.*`tests` rung failed"):
         P.promote("SM_MV", t["wt"], t["base"], gate_report={"head": t["gated"]}, dry_run=True)
-    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "land_failed"][-1]
+    rows = _events("land_failed")
+    assert len(rows) == 1, f"one refused chase, one event, not two: {rows}"
+    ev = rows[-1]
     assert ev["external_blocker"] is True and ev["rung"] == "tests" and ev["moved_to"] == t["moved"]
     assert json.loads((S.ROUNDS_DIR / "SM_MV" / "gate.json").read_text())["ok"] is False
+    assert _events("land_rebased") == [], (
+        "the ladder failed on top of the moved main; nothing was recovered, so no recovery row")
+
+
+def _events(event: str) -> list:
+    """Ledger rows of one event, read back through the same reader the reports,
+    the MCP server and the guardian use — the promoter writes this file from a
+    different process from every one of them."""
+    return [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == event]
+
+
+def _refuse_an_ungated_commit(t):
+    """Commit into the round's own worktree after its gate ran and let `promote`
+    refuse it. Returns `(stray_head, the single land_failed row the refusal left)`.
+    """
+    (t["wt"] / "app" / "m.py").write_text("V = 3\n", encoding="utf-8")
+    _git(t["wt"], "add", "-A"); _git(t["wt"], "commit", "-q", "-m", "ungated")
+    stray = _git(t["wt"], "rev-parse", "HEAD").stdout.strip()
+    with pytest.raises(P.PromoteError, match="re-gate before landing"):
+        P.promote("SM_MV", t["wt"], t["base"], gate_report={"head": t["gated"]}, dry_run=True)
+    rows = _events("land_failed")
+    assert len(rows) == 1, f"one refusal must leave exactly one row, got {rows}"
+    return stray, rows[-1]
 
 
 def test_a_commit_snuck_in_after_the_gate_is_still_refused_before_any_rebase(shared_tree, monkeypatch):
     """The ungated-commit guard runs first. A rebase legitimately moves the
-    head; a stray commit is not a rebase, and must not be laundered by one."""
+    head; a stray commit is not a rebase, and must not be laundered by one. Since
+    #2859 the refusal also leaves exactly one `land_failed` row before the raise —
+    on a dry run too, because the check sits ahead of the dry-run return and
+    `_land_failed` already writes on dry runs for the denylist refusal."""
     import scripts.automod.gate as G
     _StubGate.verdict, _StubGate.seen = True, []
     monkeypatch.setattr(G, "Gate", _StubGate)
     t = shared_tree
-    (t["wt"] / "app" / "m.py").write_text("V = 3\n", encoding="utf-8")
-    _git(t["wt"], "add", "-A"); _git(t["wt"], "commit", "-q", "-m", "ungated")
-    with pytest.raises(P.PromoteError, match="re-gate before landing"):
-        P.promote("SM_MV", t["wt"], t["base"], gate_report={"head": t["gated"]}, dry_run=True)
+
+    stray, ev = _refuse_an_ungated_commit(t)
+
     assert _StubGate.seen == [], "refused before the rebase, not after"
+    assert ev["event"] == "land_failed" and ev["ok"] is False
+    assert ev["round_id"] == "SM_MV", "the row names the round it refused"
+
+
+def test_the_identity_refuse_row_is_findable_without_reading_prose(shared_tree, monkeypatch):
+    """#2859: the refuse used to exist only as an exception message, so the number
+    of times it fired was unanswerable — the gate preflight's catch had 35
+    `gate`/`preflight` rows to its name as of 2026-10-16 and this had none. The row
+    is now keyed, not narrated: `identity_refuse: true`, `external_blocker: false`
+    (a commit into the round's own worktree is the round's own, and that flag is
+    what spares an item's attempt count), and the prose is still there for the
+    human, naming both shas and asking for a re-gate."""
+    import scripts.automod.gate as G
+    _StubGate.verdict, _StubGate.seen = True, []
+    monkeypatch.setattr(G, "Gate", _StubGate)
+    t = shared_tree
+
+    stray, ev = _refuse_an_ungated_commit(t)
+
+    assert ev["identity_refuse"] is True and ev["external_blocker"] is False
+    assert ev["worktree_head"] == stray and ev["gate_head"] == t["gated"]
+    assert stray[:8] in ev["detail"] and t["gated"][:8] in ev["detail"]
+    assert "re-gate before landing" in ev["detail"]
+    # The key, not the prose, is the countable form: this is what a later reader
+    # greps, and the bare words already appear in ledger rows that only quote them.
+    assert '"identity_refuse": true' in S.LEDGER_PATH.read_text(encoding="utf-8")
+
+
+def test_a_clean_landing_records_neither_of_the_two_new_rows(shared_tree, monkeypatch):
+    """Nothing moved: the gate judged the worktree's current head and live `main`
+    is still the base this diff is cut against. Neither the identity refusal nor
+    the recovery row may appear, so a normal promotion's ledger is byte-for-byte
+    what it was before #2859."""
+    import scripts.automod.gate as G
+    _StubGate.verdict, _StubGate.seen = True, []
+    monkeypatch.setattr(G, "Gate", _StubGate)
+    t = shared_tree
+    head = _git(t["wt"], "rev-parse", "HEAD").stdout.strip()
+
+    # base == live `main` and gate_report head == the worktree's own head: the
+    # ordinary case, where the round is landed exactly as it was gated.
+    out = P.promote("SM_MV", t["wt"], t["moved"], gate_report={"head": head}, dry_run=True)
+
+    assert out["would_promote"] is True and out["parent"] == t["moved"]
+    assert _StubGate.seen == [], "nothing moved, so nothing was re-gated"
+    assert _events("land_rebased") == [], "a landing that never chased a move writes no recovery row"
+    assert _events("land_failed") == [], "and nothing was refused"
+
+
+def test_the_recovery_row_comes_from_the_function_and_not_from_one_call_site(shared_tree, monkeypatch):
+    """`_regate_after_move` has three callers inside the promoter (the landing
+    path, the post-restart re-check, and the batch/flush path), so the row belongs
+    to the function: a fourth caller must not land a recovered move silently.
+    Called directly here — through `promote` the event could equally be one call
+    site's bookkeeping."""
+    import scripts.automod.gate as G
+    _StubGate.verdict, _StubGate.seen = True, []
+    monkeypatch.setattr(G, "Gate", _StubGate)
+    t = shared_tree
+
+    base, head, rep = P._regate_after_move("SM_MV", t["wt"], t["live"], t["base"], t["moved"])
+
+    rows = _events("land_rebased")
+    assert len(rows) == 1, f"one recovered move, one row: {rows}"
+    assert rep["ok"] is True and base == t["moved"] and head != t["moved"], \
+        "rebased onto live main, so the new base is main and the head is the round's commit on top"
+    assert rows[0]["from_base"] == t["base"] and rows[0]["to_base"] == base
+    assert rows[0]["head"] == head and _events("land_failed") == []
 
 
 def test_a_failure_before_the_merge_never_rolls_back(monkeypatch, tmp_path):

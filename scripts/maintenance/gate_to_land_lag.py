@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Gate-pass→promote lag, and the moved-tree catch the ledger cannot count (#2759).
+"""Gate-pass→promote lag, and the moved-tree catches the ledger only started
+counting in #2859 (#2759).
 
 Two numbers decide whether a staleness stamp is worth building for the
 verdict→action lane of #2758: how long a gate's verdict stays actionable before the
@@ -18,24 +19,27 @@ measured 2026-10-15, 26,798 of the 47,767 ledger rows are archived, so a reader 
 took only the live file described under 60 % of the corpus and reported the shorter
 lag.
 
-Read the three absences in the output as loudly as the numbers:
+Read the absences in the output as loudly as the numbers:
 
-  * **The promote-time identity refuse leaves no ledger row.** Its raise
-    (`promote.py`: "worktree HEAD moved since the gate ran … re-gate before
-    landing") sits *before* the `try:` that appends an event, so it escapes
-    `promote()` with no `append_event`: 0 of 47,767 rows contain that message and no
-    file under the state dir does. Its catch count is therefore **unknown**, and this
-    report never prints a `0` for it. The countable half is the gate preflight's
-    catch, whose `live HEAD moved` detail `gate.py` does write.
-  * **A caught-and-recovered move is invisible too.** `_regate_after_move` re-runs
-    the ladder, and the ordinary `gate` rows are its only trace, so a recovery cannot
-    be separated from a routine re-gate.
+  * **This reader counts one of the two moved-tree catches.** The gate preflight's
+    catch is countable because `gate.py` writes a `live HEAD moved` detail into the
+    ledger. The promote-time identity refuse used to be uncountable for the opposite
+    reason: its raise (`promote.py`: "worktree HEAD moved since the gate ran …
+    re-gate before landing") sat *before* the `try:` that appends an event, so it
+    escaped `promote()` with no `append_event` and no file under the state dir
+    carried it. That absence was published here as `unknown`, never as a `0`.
+    **#2859 ended it** — the refuse now appends a `land_failed` row carrying
+    `identity_refuse: true`, and `_regate_after_move` appends a `land_rebased` row
+    when the chase's ladder passes on top of the moved `main`. This report still
+    joins only `gate`/`promoted` rows, so it prints neither count: the ledger keys
+    are the route (`grep -c '"identity_refuse": true' promotions.jsonl`, and
+    `'"event": "land_rebased"'`), not a figure owned here.
   * **The other two #2758 lanes are not computable from any store.** measure→publish
     and read→claim have no "state at next read" row anywhere, so their lag needs a
     writer, not a reader. Said here rather than printed as an empty table.
 
-Giving those three a row of their own is new instrumentation, outside this read-only
-item, and owed to a ruling once the published absence is on the record.
+Two of those three now have a row of their own (#2859, code); measure→publish and
+read→claim still need a writer, and are owed to a ruling rather than to this reader.
 
     python scripts/maintenance/gate_to_land_lag.py [--state-dir PATH] [--record] [--json]
 
@@ -340,9 +344,11 @@ def render(row: dict) -> str:
 
     out.append(f"  ledger rows containing {MOVED_TREE_TEXT!r}: "
                f"{row['live_head_moved_rows']} — the gate-preflight catch, which "
-               f"gate.py does write; the promote-time identity refuse appends no "
-               f"ledger row, so its catch count is unknown, not zero, and a "
-               f"caught-and-recovered move is indistinguishable from a routine re-gate")
+               f"gate.py does write; since #2859 the promote-time identity refuse "
+               f"writes its own land_failed row (identity_refuse: true) and a "
+               f"recovered move writes land_rebased, and this reader joins only "
+               f"gate/promoted rows, so both counts stay unknown here, not zero — "
+               f"read them off those ledger keys, never off a 0 printed here")
     out.append("  not computable from any store (owed #2758): measure→publish and "
                "read→claim have no state-at-next-read row, so their lag needs a "
                "writer, not this reader")
