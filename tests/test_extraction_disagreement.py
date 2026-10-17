@@ -25,6 +25,7 @@ its own template and chunker.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -894,6 +895,492 @@ def test_dry_run_writes_the_sample_but_sends_no_request(tmp_path, vault, both_pa
     assert summary["dry_run"] is True
     assert summary["documents_measured"] == 6
     assert all(d["disagreement_rate"] is None for d in summary["documents"])
+
+
+# ── #2918: per-difference records, a two-sided judge, and the greedy control ──
+#
+# The artifact published 1,007 settlements on 2026-10-17 with
+# `both_supported == 0`, and the label was unreachable by construction:
+# `difference_pairs` emitted `{"a": f, "b": None}` for every one-sided fact, so
+# `settle` always rendered the other reading as "(none)" and the prompt's own
+# definition of `both_supported` could never honestly apply. The settled
+# differences were counters only (`settled: dict[str, int]`), so a reported
+# defect could not be cited without grepping the fact tree. The nodes below pin
+# what has to be true for the number to mean what its name says.
+
+#: A wording-only split of ONE claim: `canonical_text` matches, the raw sentence
+#: does not. This is the only class in this instrument whose pair has a real
+#: reading on BOTH sides, which is why it is the class that goes to the judge
+#: two-sided.
+REWORD_A = "The queue runs nightly over the vault."
+REWORD_B = "Currently, the queue runs nightly over the vault."
+#: A different claim in the same (entity, category): a real difference, so this
+#: document owes the judge one two-sided rewording pair and two one-sided pairs.
+OTHER_CLAIM = "The queue was rebuilt on Tuesday."
+#: A stretch that is verbatim in `_split_doc`'s body, so a span the judge quotes
+#: here can be located rather than reported as invention.
+DOC_SPAN = "runs nightly over the vault"
+
+
+def _split_doc(tmp_path: Path, name: str = "split.md") -> tuple[Path, Path]:
+    """A one-chunk document under a one-directory vault, at the same place
+    `config_with` points its `sources.paths`."""
+    vault = tmp_path / "obsidian"
+    d = vault / "knowledge"
+    d.mkdir(parents=True, exist_ok=True)
+    doc = d / name
+    doc.write_text("# Split\n\nThe queue " + DOC_SPAN + ". Nothing else here.\n"
+                   + "filler word " * 60 + "\n", encoding="utf-8")
+    return vault, doc
+
+
+def _arm_sender(facts_by_arm: dict[str, list[dict]], calls: list | None = None):
+    """A transport that answers each arm with the facts it was told to.
+
+    The arm is decided by the prompt and the temperature, never by a call counter:
+    a document's chunks are one call each, and a counter would hand pass A the
+    second element from its second chunk onward. First sight of a prompt is pass A,
+    the repeat is pass B; any temperature other than the production one is the
+    greedy arm, which answers identically in both of its passes because greedy
+    decoding of identical bytes is deterministic.
+    """
+    seen: list[str] = []
+
+    def send(prompt, port, temperature=None):
+        temp = X.DEFAULT_TEMPERATURE if temperature is None else temperature
+        if temp != X.DEFAULT_TEMPERATURE:
+            arm = "greedy"
+        else:
+            arm = "B" if prompt in seen else "A"
+        seen.append(prompt)
+        if calls is not None:
+            calls.append((arm, temp, prompt))
+        facts = facts_by_arm.get(arm, [])
+        return (json.dumps({"facts": facts}, sort_keys=True),
+                {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50,
+                 "seconds": 0.25,
+                 "sent_sha256": hashlib.sha256(prompt.encode()).hexdigest()},
+                0.25)
+    return send
+
+
+def _label_judge(label: str):
+    """A judge that lands `label` and quotes `DOC_SPAN` — the stretch
+    `_split_doc` actually contains — except for `neither_supported`, which is the
+    one label that settles on the document's silence."""
+    def judge(document, fact_a, fact_b, port):
+        return {"label": label, "span": None if label == "neither_supported" else DOC_SPAN}
+    return judge
+
+
+def _two_reading_judge(seen: list):
+    """A judge that can only answer `both_supported` when it is given TWO readings.
+
+    The shape is the test: under a single-sided pairing there is an empty second
+    reading in front of it, so it lands `neither_supported` — a defect — and every
+    node asserting a both-supported settlement reddens. A green `both_supported`
+    here is therefore evidence the pair was two-sided, not evidence the judge was
+    told to say so.
+    """
+    def judge(document, fact_a, fact_b, port):
+        seen.append((fact_a, fact_b))
+        if not fact_a or not fact_b or "(none)" in (fact_a, fact_b):
+            return {"label": "neither_supported", "span": None}
+        return {"label": "both_supported", "span": DOC_SPAN}
+    return judge
+
+
+# (1) one record per settled difference, enough to cite a defect without a grep
+
+def test_every_settled_difference_is_recorded_with_the_identity_a_citation_needs(tmp_path):
+    """Clause 1. A settled difference used to be a counter, so the artifact could
+    say "4 defects in this document" and nothing about which four: chasing one meant
+    grepping the derived fact tree for its text. Each settlement now travels as its
+    own record carrying the key it was matched on, both readings, the located span
+    and the fact file the extractor would file it under — and the records sum to the
+    counters, so a published count is a count of rows a reader can open."""
+    vault, doc = _split_doc(tmp_path)
+    mod = _load_module()
+    mod._ALIAS_MAP = {}
+    row = mod.audit_document(FakeFE(), doc, vault, port=9,
+                             sender=_arm_sender({"A": [{"entity": "Lloyd", "category": "state",
+                                                        "fact": REWORD_A},
+                                                       {"entity": "Lloyd", "category": "state",
+                                                        "fact": OTHER_CLAIM}],
+                                                 "B": [{"entity": "Lloyd", "category": "state",
+                                                        "fact": REWORD_B}]}),
+                             judge=_label_judge("pass_a_supported"), facts_dir="/facts")
+    # One key both passes hold in different words (a rewording) and one key only
+    # pass A holds (a difference): the smallest corpus that owes the judge a
+    # two-reading pair AND a one-reading pair.
+    assert row["rewordings"] == 1 and row["differences"] == 1, row
+    st = row["settled"]
+    assert row["settled_total"] == sum(st.values()) == 2, row
+    assert len(row["settlements"]) == row["settled_total"], "one record per settlement"
+    for label in X.LABELS:
+        assert sum(1 for r in row["settlements"] if r["label"] == label) == st[label], label
+    assert row["settled_by_kind"] == {
+        "difference": {"pass_a_supported": 1, "pass_b_supported": 0,
+                       "both_supported": 0, "neither_supported": 0},
+        "rewording": {"pass_a_supported": 1, "pass_b_supported": 0,
+                      "both_supported": 0, "neither_supported": 0}}, row["settled_by_kind"]
+    text = doc.read_text(encoding="utf-8")
+    for r in row["settlements"]:
+        assert r["label"] in X.LABELS and r["entity"] and r["category"], r
+        assert r["entity"] == "Lloyd" and r["category"] == "state", r
+        # The record's identity IS the diff key it was matched on, so citing the
+        # defect needs no second lookup and no re-canonicalisation.
+        assert tuple(X.fact_key(r["entity"], r["category"], r["canonical_text"])) \
+            == (r["entity"], r["category"], r["canonical_text"]), r
+        assert (r["fact_a"] or r["fact_b"]), f"a record with neither reading: {r}"
+        assert r["fact_file"] == "/facts/Lloyd/Lloyd-state.md", r
+        assert r["span"] is None or text[r["span"]["start"]:r["span"]["end"]] == DOC_SPAN, r
+    assert row["supporting_spans"] == [r["span"] for r in row["settlements"] if r["span"]], \
+        "the spans the artifact lists are not the spans the records carry"
+
+
+def test_a_record_names_the_fact_file_the_extractor_writes_by():
+    """Clause 1's derived path, asserted against the writer's own pattern rather
+    than a string copied from this module: `self.facts_dir / entity /
+    f"{entity}-{category}.md"` (`fact_extractor.py:479`), rooted at
+    `app.paths.VAULT_FACTS_ROOT` (`fact_extractor.py:56,245`). A citation pointing
+    at a file the writer never uses sends a reader to the wrong note.
+
+    The root is read from `app.paths` rather than written down, and the name is shaped
+    here rather than run through the extractor's `_sanitize_entity`: that gate judges a
+    name against the entity registry and returns `""` for one it calls junk or
+    candidate (`fact_extractor.py:543-545`), so a citation sent through it would
+    silently lose its path whenever the registry disagreed with the model. Shaping is
+    all a locator needs; judging is what the writer does to what it writes."""
+    # `_gate_entity` keeps case, so the citation keeps it: the writer files `Lloyd`
+    # under `Lloyd/`, and a helper that folded the case would name a directory that
+    # note is not in.
+    assert X.fact_file_path("Lloyd", "state", "/facts") \
+        == str(Path("/facts/Lloyd/Lloyd-state.md"))
+    root = X.facts_dir()
+    assert root.name == "facts" and root.parent.name == "vault-derived", root
+    # An entity name is model output, and the writer sanitises it for exactly this
+    # reason. A citation must not be able to escape the facts tree because a fact
+    # named a directory.
+    escaped = X.fact_file_path("../../etc/passwd", "state", "/facts")
+    assert Path(escaped).resolve().is_relative_to(Path("/facts").resolve()), escaped
+    assert X.fact_file_path("Lloyd", "STATE", "/facts") == X.fact_file_path("Lloyd", "state", "/facts")
+
+
+# (2) one class of difference reaches the judge with BOTH readings
+
+def test_a_rewording_goes_to_the_judge_with_two_readings_and_a_difference_with_one(tmp_path):
+    """Clause 2. The degeneracy was arithmetic, not calibration: the pairing gave
+    the judge one reading and an explicit "(none)", so `both_supported` — defined in
+    the prompt as the document backing BOTH — could not be the honest answer for any
+    of the 1,007 settlements, while the run's 11 rewordings, the only pairs with two
+    real readings, were never put to it at all."""
+    vault, doc = _split_doc(tmp_path)
+    mod = _load_module()
+    mod._ALIAS_MAP = {}
+    seen: list[tuple] = []
+    row = mod.audit_document(FakeFE(), doc, vault, port=9,
+                             sender=_arm_sender({"A": [{"entity": "Lloyd", "category": "state",
+                                                        "fact": REWORD_A},
+                                                       {"entity": "Lloyd", "category": "state",
+                                                        "fact": OTHER_CLAIM}],
+                                                 "B": [{"entity": "Lloyd", "category": "state",
+                                                        "fact": REWORD_B}]}),
+                             judge=_two_reading_judge(seen), facts_dir="/facts")
+    assert row["rewordings"] == 1 and row["differences"] == 1, row
+    assert len(seen) == 2, f"one read per pair, one difference and one rewording: {seen}"
+    two_sided = [(a, b) for a, b in seen if a and b]
+    assert two_sided, f"the judge was handed no two-reading pair: {seen}"
+    assert all(x not in ("", "(none)") for pair in two_sided for x in pair), two_sided
+    # The two readings it received are the two sentences the passes actually
+    # produced, not a canonicalised stand-in neither pass wrote.
+    assert {tuple(sorted(p)) for p in two_sided} == {tuple(sorted((REWORD_A, REWORD_B)))}
+    one_sided = [(a, b) for a, b in seen if not a or not b]
+    assert len(one_sided) == 1, f"the only-A difference stays one-reading: {seen}"
+    assert {r["kind"] for r in row["settlements"]} == {"difference", "rewording"}, \
+        row["settlements"]
+    assert [r["two_sided"] for r in row["settlements"] if r["kind"] == "rewording"] == [True]
+    assert not any(r["two_sided"] for r in row["settlements"] if r["kind"] == "difference")
+
+
+# (3) audit-level fixtures that force each agreement-shaped label
+
+def test_an_audit_whose_document_backs_both_wordings_lands_both_supported(tmp_path):
+    """Clause 3, and the node that reddens if settlement goes single-sided again. The
+    judge answers `both_supported` only with two readings in front of it, so under
+    the old pairing this same document landed `neither_supported`,
+    `settled.both_supported` was 0 and `defects` was 1.
+
+    Splitting one supported fact two ways is not an invention by either pass, so it
+    is not a defect — which is the clause-4 statement the count has to honour."""
+    vault, doc = _split_doc(tmp_path, "both.md")
+    mod = _load_module()
+    mod._ALIAS_MAP = {}
+    seen: list[tuple] = []
+    row = mod.audit_document(FakeFE(), doc, vault, port=9,
+                             sender=_arm_sender({"A": [{"entity": "Lloyd", "category": "state",
+                                                        "fact": REWORD_A}],
+                                                 "B": [{"entity": "Lloyd", "category": "state",
+                                                        "fact": REWORD_B}]}),
+                             judge=_two_reading_judge(seen), facts_dir="/facts")
+    assert row["differences"] == 0 and row["rewordings"] == 1, row
+    assert row["settled"]["both_supported"] == 1, (row["settled"], seen)
+    assert row["settled_total"] == 1 and row["settled_by_kind"]["rewording"]["both_supported"] == 1
+    assert row["defects"] == 0 and row["defect_yield"] == 0.0, row
+    rec = row["settlements"][0]
+    assert rec["label"] == "both_supported" and rec["two_sided"] is True, rec
+    assert rec["fact_a"] == REWORD_A and rec["fact_b"] == REWORD_B, rec
+    assert rec["fact_file"] == str(Path("/facts/Lloyd/Lloyd-state.md")), rec
+    assert rec["span"] and rec["span"]["text"] == DOC_SPAN, rec
+
+
+def test_an_audit_whose_document_backs_neither_reading_lands_neither_supported(tmp_path):
+    """Clause 3's other fixture, at the same level and through the same function:
+    `neither_supported` is the label that means at least one pass wrote something the
+    document did not say, and the only one that may settle with no span. Pinning it
+    through `audit_document` rather than a stubbed `settle` is what makes it a
+    fixture and not a restatement of the label tuple."""
+    vault, doc = _split_doc(tmp_path, "neither.md")
+    mod = _load_module()
+    mod._ALIAS_MAP = {}
+    row = mod.audit_document(FakeFE(), doc, vault, port=9,
+                             sender=_arm_sender({"A": [{"entity": "Lloyd", "category": "state",
+                                                        "fact": OTHER_CLAIM}], "B": []}),
+                             judge=_label_judge("neither_supported"), facts_dir="/facts")
+    assert row["differences"] == 1 and row["rewordings"] == 0, row
+    assert row["settled"]["neither_supported"] == 1 and row["settled_total"] == 1, row
+    assert row["defects"] == 1 and row["defect_yield"] == 1.0, row
+    rec = row["settlements"][0]
+    assert rec["label"] == "neither_supported" and rec["span"] is None, rec
+    assert rec["two_sided"] is False and rec["kind"] == "difference", rec
+    assert rec["fact_a"] == OTHER_CLAIM and rec["fact_b"] is None, rec
+
+
+# (4) the published definition and the count must be one list of labels
+
+def test_the_published_defect_yield_definition_names_exactly_the_labels_the_count_adds(
+        tmp_path):
+    """Clause 4. Settling rewordings moves the yield's denominator, and the artifact
+    publishes its own definition so a later reader cannot silently redefine the
+    ratio — which makes a definition that drifted from the counter a published false
+    statement rather than a stale comment. Checked both ways: the numerator of the
+    string is exactly the label tuple the counter reads, and `defects` is recomputed
+    from the emitted per-difference records, over a whole run through `main`."""
+    vault, doc = _split_doc(tmp_path, "yield.md")
+    out = tmp_path / "out"
+    mod = _load_module()
+    mod._ALIAS_MAP = {}
+    mod._load_extractor = lambda: FakeFE()
+    mod._endpoint_up = lambda port: True
+
+    def judge_fn(document, fact_a, fact_b, port):
+        if fact_a and fact_b:
+            return {"label": "both_supported", "span": DOC_SPAN}
+        return {"label": "pass_a_supported" if fact_a else "pass_b_supported",
+                "span": DOC_SPAN}
+
+    seen: list[str] = []
+
+    def transport(prompt, port, temperature=None):
+        arm = "B" if prompt in seen else "A"
+        seen.append(prompt)
+        facts = ([{"entity": "Lloyd", "category": "state", "fact": REWORD_A},
+                  {"entity": "Lloyd", "category": "state", "fact": OTHER_CLAIM}]
+                 if arm == "A" else
+                 [{"entity": "Lloyd", "category": "state", "fact": REWORD_B}])
+        return (json.dumps({"facts": facts}),
+                {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50,
+                 "seconds": 0.25,
+                 "sent_sha256": hashlib.sha256(prompt.encode()).hexdigest()}, 0.25)
+
+    real_audit = mod.audit_document
+
+    # `main` calls `audit_document` with no judge and no sender, so the wiring has to
+    # happen here — and it must not be done through a parameter of this wrapper named
+    # `judge`, which would then shadow the judge being wired in and quietly hand the
+    # run the module's real transport.
+    def with_wired_in(fe, path, root, port, settle_port=None, **kw):
+        return real_audit(fe, path, root, port, settle_port, sender=transport,
+                          judge=judge_fn, facts_dir="/facts",
+                          temperature_0=bool(kw.get("temperature_0")))
+    mod.audit_document = with_wired_in
+    cfg = config_with(["knowledge"], tmp_path)
+    assert mod.main(["--out", str(out), "--vault-root", str(vault), "--config", str(cfg),
+                     "--sample-size", "1", "--seed", "yield-seed"]) == 0
+    summary = json.loads(next((out / p.name / "extraction-disagreement.json")
+                              for p in out.iterdir()).read_text(encoding="utf-8"))
+    definition = summary["defect_yield_definition"]
+    named = tuple(lb for lb in X.LABELS if lb in definition.split("/")[0])
+    assert named == X.DEFECT_LABELS, (named, X.DEFECT_LABELS, definition)
+    records = [r for d in summary["documents"] for r in d["settlements"]]
+    assert sum(1 for r in records) == summary["totals"]["settled_total"], records
+    recomputed = sum(1 for r in records if r["label"] in X.DEFECT_LABELS)
+    assert recomputed == summary["totals"]["defects"] == sum(d["defects"]
+                                                             for d in summary["documents"])
+    assert summary["defect_yield_overall"] == round(
+        recomputed / summary["totals"]["settled_total"], 4)
+    # The agreement label the definition excludes is excluded from the count too,
+    # and it is non-zero here — the whole point of the change.
+    both = sum(1 for r in records if r["label"] == "both_supported")
+    assert both == summary["totals"]["settled"]["both_supported"] == 1, records
+    # Of the two settlements this fixture produces, the rewording's `both_supported`
+    # adds nothing to the defect count and the single-sided difference adds one.
+    assert recomputed == summary["totals"]["defects"] == 1, records
+
+
+# (5) the headline rate separated from decoding variance
+
+def _payload_literal() -> dict:
+    """The extractor's own request payload, read out of `_call_llm`'s source with
+    `ast` — the way `_self_written_memory_notes` reads the job's exclusion list. A
+    literal restated here would keep passing the day production moved."""
+    tree = ast.parse(X.EXTRACTOR_PATH.read_text(encoding="utf-8"))
+    found: dict = {}
+
+    class _PromptOut(ast.NodeTransformer):
+        def visit_Name(self, node):        # noqa: N802 — ast's own spelling
+            return ast.Constant(value="PROMPT") if node.id == "prompt" else node
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef) and node.name == "_call_llm"):
+            continue
+        for sub in node.body:
+            if (isinstance(sub, ast.Assign)
+                    and getattr(sub.targets[0], "id", "") == "payload"):
+                found = ast.literal_eval(_PromptOut().visit(sub.value))
+    assert found, "no `payload = {...}` literal found in the extractor's _call_llm"
+    return found
+
+
+def test_the_production_payload_is_the_extractors_own_and_the_greedy_arm_moves_one_field():
+    """Clause 5's precondition. Both production passes must keep sending the
+    extractor's own payload byte for byte — same system line, same 0.3, same 6,000
+    max_tokens, same priority 2 — because a pass that sampled differently is not
+    measuring production, and `pair_guard`'s wire digest is the witness that they
+    agree. A temperature-0 arm may therefore move exactly one field and nothing
+    else, and only for the arm that asked for it."""
+    production = _payload_literal()
+    base = X.build_payload("PROMPT")
+    assert base["temperature"] == 0.3 == X.DEFAULT_TEMPERATURE == production["temperature"]
+    for key, value in production.items():
+        if key != "messages":
+            assert base[key] == value, \
+                f"{key}: the audit sends {base[key]!r}, production sends {value!r}"
+    assert base["messages"][0] == production["messages"][0], "the system line moved"
+    greedy = X.build_payload("PROMPT", temperature=0.0)
+    assert greedy["temperature"] == 0.0
+    assert set(greedy) == set(base)
+    assert [k for k in greedy if greedy[k] != base[k]] == ["temperature"], \
+        "the two arms differ in more than the knob"
+    # The bytes actually posted: the digests `pair_guard` compares are of the
+    # serialised payload, so a moved knob has to move them and only them.
+    assert json.dumps(greedy, sort_keys=True) != json.dumps(base, sort_keys=True)
+
+
+def _md_cell(markdown: str, path_part: str, column: str) -> str | None:
+    """One cell of the artifact's per-document table, addressed by header name.
+
+    The table is what a human opens, so the clause naming the markdown as well as
+    the JSON is not decoration: a rate that exists only in the JSON is a rate nobody
+    reads. Returns None when the cell holds the em-dash placeholder — an arm that did
+    not run must never render as a 0.0."""
+    lines = [l for l in markdown.splitlines() if l.startswith("|")]
+    header = [c.strip().strip("*") for c in lines[0].strip().strip("|").split("|")]
+    assert column in header, f"{column} is not a column of the table: {header}"
+    idx = header.index(column)
+    for line in lines[1:]:
+        if path_part in line:
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            assert len(cells) == len(header), f"ragged table row: {line!r}"
+            value = cells[idx]
+            return None if value in ("—", "-") else value
+    raise AssertionError(f"no table row for {path_part}")
+
+
+def test_per_document_disagreement_is_reported_at_the_production_temperature_and_at_zero(
+        tmp_path):
+    """Clause 5, end to end through the artifact. The headline rate on 2026-10-17 was
+    0.8784 with nothing to separate the model disagreeing about the text from the
+    model sampling at 0.3. Two greedy passes of the same bytes is that control.
+
+    The arm is opt-in and its absence is reported as absent: a run that did not ask
+    for it says `None`, never a 0.0 that would read as a clean bill of health. And
+    the control is a second PAIR, so it goes through `pair_guard` too — the
+    production pair's digests still matching each other is what "the 0.0 arm leaves
+    the production payload byte-identical" means, and a measured row at all is the
+    witness, because the guard raises rather than reporting."""
+    vault, doc = _split_doc(tmp_path, "arms.md")
+    # One `--out` per invocation: a run directory is named by the UTC second, so two
+    # runs a second apart can land in the same folder and the control's artifact would
+    # overwrite the base one.
+    out, out_t0 = tmp_path / "out-base", tmp_path / "out-t0"
+    mod = _load_module()
+    mod._ALIAS_MAP = {}
+    mod._load_extractor = lambda: FakeFE()
+    mod._endpoint_up = lambda port: True
+    calls: list[tuple] = []
+    arm_facts = {"A": [{"entity": "Lloyd", "category": "state", "fact": REWORD_A}],
+                 "B": [{"entity": "Lloyd", "category": "state", "fact": OTHER_CLAIM}],
+                 "greedy": [{"entity": "Lloyd", "category": "state", "fact": REWORD_A}]}
+
+    # `send`'s own argument order is (port, prompt); an injected sender's is
+    # (prompt, port), so the run goes through an adapter rather than a swapped pair of
+    # arguments that would read a port number as prose. Rebuilt per run because
+    # `_arm_sender` decides which pass a call is from the prompts it has already
+    # seen: one instance across two runs would answer pass A with pass B's facts.
+    def wire():
+        arm = _arm_sender(arm_facts, calls=calls)
+
+        def transport(port, prompt, temperature=None):
+            return arm(prompt, port, temperature=temperature)
+        mod.send = transport
+    wire()
+    cfg = config_with(["knowledge"], tmp_path)
+    argv = ["--vault-root", str(vault), "--config", str(cfg),
+            "--sample-size", "1", "--seed", "arms"]
+
+    assert mod.main(argv + ["--out", str(out)]) == 0, "the base run did not complete"
+    base_dir = next(out.iterdir())
+    base = json.loads((base_dir / "extraction-disagreement.json").read_text())
+    base_row = base["documents"][0]
+    assert base_row["disagreement_rate"] == 1.0, base_row
+    assert base_row["disagreement_rate_t0"] is None, base_row
+    assert base["disagreement_rate_overall_t0"] is None
+    assert base["temperature_0_arm"] is False
+    assert _md_cell((base_dir / "extraction-disagreement.md").read_text(),
+                    "arms.md", "rate@0.0") is None, "an arm that did not run reported a number"
+    assert all(t == X.DEFAULT_TEMPERATURE for _, t, _ in calls), \
+        "a run without the flag sent a non-production temperature"
+
+    calls.clear()
+    wire()
+    assert mod.main(argv + ["--out", str(out_t0), "--temperature-0"]) == 0
+    run_dir = next(out_t0.iterdir())
+    summary = json.loads((run_dir / "extraction-disagreement.json").read_text())
+    row = summary["documents"][0]
+    assert row["disagreement_rate"] == 1.0, "the production arm moved with the flag on"
+    assert row["differences"] == 2 and row["compared"] == 2, row
+    assert row["disagreement_rate_t0"] == 0.0, row
+    assert row["differences_t0"] == 0 and row["compared_t0"] == 1, row
+    assert summary["disagreement_rate_overall_t0"] == 0.0
+    assert summary["temperature_0_arm"] is True
+    assert summary["temperature_arms"] == {"production": 0.3, "control": 0.0,
+                                          "control_requested": True}
+    assert summary["documents_measured"] == 1 and row["pass_errors"] == []
+    # The greedy arm is two more passes of the same prompts, and they are billed:
+    # one meter per arm, so the document's cost is the sum of four.
+    n_chunk = len(row["chunk_offsets"])
+    assert (row["cost"]["a"]["calls"], row["cost"]["b"]["calls"],
+            row["cost"]["t0"]["calls"]) == (n_chunk, n_chunk, 2 * n_chunk), row["cost"]
+    assert row["cost"]["calls"] == (row["cost"]["a"]["calls"] + row["cost"]["b"]["calls"]
+                                   + row["cost"]["settlement"]["calls"]
+                                   + row["cost"]["t0"]["calls"]), row["cost"]
+    greedy_temps = [t for _, t, _ in calls if t == 0.0]
+    assert len(greedy_temps) == 2 * n_chunk, \
+        f"the greedy arm sent {len(greedy_temps)} calls for {n_chunk} chunks"
+    md = (run_dir / "extraction-disagreement.md").read_text()
+    assert _md_cell(md, "arms.md", "rate@0.3") == "1.0", md
+    assert _md_cell(md, "arms.md", "rate@0.0") == "0.0", md
 
 
 def test_the_change_that_added_this_measurement_touched_only_eval_and_tests():

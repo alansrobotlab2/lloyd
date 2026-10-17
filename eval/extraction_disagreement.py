@@ -104,6 +104,26 @@ MIN_DOC_CHARS = 200
 #: what a difference that cannot be placed becomes, and it is never counted as
 #: agreement.
 LABELS = ("pass_a_supported", "pass_b_supported", "both_supported", "neither_supported")
+#: The labels `defects` adds, and the ONLY thing that ratio sums: the three labels
+#: in which at least one pass wrote something the document does not back.
+#: `both_supported` is excluded because it is the settlement saying neither pass
+#: invented anything. This tuple is the single source for both the counter in
+#: `audit_document` and the `defect_yield_definition` the artifact publishes, so
+#: the definition a later reader weighs the number against cannot drift from the
+#: arithmetic that produced it — which is what it would have done when settling
+#: rewordings two-sided (#2918) put `both_supported` answers into a run that had
+#: never counted one.
+DEFECT_LABELS = ("pass_a_supported", "pass_b_supported", "neither_supported")
+
+#: The two kinds of pair `difference_pairs` produces, and the axis the settlement
+#: counts are split by: a `difference` is a key one pass holds alone (one reading),
+#: a `rewording` is one key both passes hold in different words (two readings). The
+#: split exists because the labels the two kinds can honestly reach differ —
+#: `both_supported` is only ever a rewording's answer — and a run that reported them
+#: as one four-way count could not tell a judge that started working from a pairing
+#: that finally asked the question.
+PAIR_KINDS = ("difference", "rewording")
+
 UNSETTLED = "unsettled"
 
 SETTLE_PROMPT = """Two independent extraction passes read this document and disagreed about one fact. \
@@ -490,6 +510,85 @@ def reload_alias_map() -> None:
     _ALIAS_MAP = None
 
 
+def facts_dir() -> Path:
+    """The derived fact tree the extraction writes into, read through `app.paths`
+    like the writers do (`fact_extractor.py:56, 245`).
+
+    A defect citation has to name a file the writer actually uses, so the root is
+    the pipeline's own rather than a path guessed from this module's location. With
+    `app.paths` unimportable the fallback is the production shape, because a
+    citation that is merely unresolvable is better than a citation with no root at
+    all — and `fact_file_path` still says which root it used by returning it.
+    """
+    try:
+        from app.paths import VAULT_FACTS_ROOT
+        return Path(VAULT_FACTS_ROOT)
+    except Exception:  # noqa: BLE001 — the citation degrades to the default shape
+        return Path.home() / "lloyd-data" / "_pipeline" / "vault-derived" / "facts"
+
+
+def _path_safe(name: str) -> str:
+    """A filesystem name out of a model's phrase, in the extractor's shape.
+
+    `_sanitize_entity` (`fact_extractor.py:533`) delegates to `_gate_entity`
+    (`fact_extractor.py:494`), and its shaping is three operations at
+    `fact_extractor.py:507-511`: keep the last path segment, delete the characters
+    `<>:"|?*`, collapse runs of whitespace. Case is PRESERVED there, so it is
+    preserved here — the live store's entity directories are lower-case because the
+    prompt's canonical entity list is, not because the gate folded them, and a
+    citation that lower-cased on its own would name a directory the writer never
+    made for an entity spelled with a capital.
+
+    The same three operations, in the same direction: DELETED rather than
+    substituted, so a citation and the note the writer files agree character for
+    character wherever the gate is defined. A trailing dot is dropped too, which is
+    what makes `..` collapse to nothing instead of to a hop out of the facts tree.
+
+    The gate is NOT called, and not for the reason a comment used to give (it no
+    longer registers anything — `fact_extractor.py:499-501` records that the junk
+    predicate was moved AHEAD of the alias table precisely so a refused name never
+    enters it). The reason is that it is a gate and not a formatter: it judges the
+    name against the entity registry and returns `""` for one it calls junk or
+    candidate (`fact_extractor.py:543-545`), so a citation routed through it would
+    silently lose its path whenever the registry disagreed with the model — and it
+    wants the source document and declared type, which an audit over a corpus has no
+    business guessing. Shaping is all a locator needs.
+    """
+    s = str(name or "").strip().split("/")[-1].split("\\")[-1]
+    s = re.sub(r"[<>:\"|?*]", "", s)
+    s = re.sub(r"\s+", " ", s).strip().rstrip(".")
+    return s or "unknown"
+
+
+def fact_file_path(entity, category, facts_root=None) -> str:
+    """The note this fact is filed under: `self.facts_dir / entity /
+    f"{entity}-{category}.md"`, the writer's own pattern
+    (`fact_extractor.py:479`).
+
+    The point is that citing a settled difference stops being a grep. A record that
+    named only the fact's text could be chased to its note only by searching the
+    fact tree for that text — and a text the two passes worded differently has two
+    plausible greps, which is how a defect report turns into a hunt.
+
+    Two caveats a reader needs, both stated rather than discovered: the ENTITY is
+    shaped here rather than judged (see `_path_safe`), so an entity that aliases to
+    another is filed under the canonical name this module cannot resolve without the
+    alias store; and the CATEGORY segment is lower-cased with non-word characters
+    replaced, which is this module's shaping, whereas the writer maps the category
+    onto a fixed 287-spelling-vocabulary-first `normalize_category`
+    (`fact_extractor.py:127`, used at `:476` and `:689`). For a category already in
+    that vocabulary the two agree — both lower-case it and neither leaves a slash in
+    it — and for one outside it they do not, because that one lands on whatever
+    token-overlap winner `normalize_category` picks, or on `general`. Which is why
+    the record carries the raw `category` field beside the path: the path is a
+    locator to open, not a claim that a row exists at it.
+    """
+    root = Path(facts_root) if facts_root else facts_dir()
+    safe = _path_safe(entity)
+    cat = re.sub(r"[^\w\-]", "_", str(category or "").strip().lower()) or "general"
+    return str(root / safe / f"{safe}-{cat}.md")
+
+
 def diff_passes(facts_a: list[dict], facts_b: list[dict], resolve=None) -> dict:
     """Match pass A against pass B on the clause-3 key, three buckets deep.
 
@@ -566,26 +665,50 @@ def prompt_digest(prompts: list[dict]) -> str:
     return hashlib.sha256("\x1f".join(p["text"] for p in prompts).encode("utf-8")).hexdigest()
 
 
-def send(port: int, prompt: str, timeout: float = 240.0) -> tuple[str, dict, float]:
-    """One chat call, and the only reason this module talks HTTP itself.
+#: The temperature the production extraction samples at
+#: (`fact_extractor.py:444`). Both production arms of this audit send it, and a
+#: pass that sampled at any other value is not measuring production — which is
+#: why the greedy control arm (#2918) is a separate, opt-in pair of passes
+#: (`--temperature-0`) rather than a changed constant here.
+DEFAULT_TEMPERATURE = 0.3
 
-    The payload is the extractor's own, field for field — same system line, same
-    `temperature` 0.3, same `max_tokens` 6000, same `priority` 2 — because a
-    pass that sampled differently than production is not measuring production.
-    It differs in exactly one way: it keeps the `usage` field the extractor
-    drops, which is where this audit's cost line comes from.
+#: The control arm's temperature: greedy, so two passes of identical prompt bytes
+#: differ only where the model cannot place its answer, not where it sampled.
+GREEDY_TEMPERATURE = 0.0
+
+
+def build_payload(prompt: str, temperature: float | None = None) -> dict:
+    """The extractor's request payload, field for field, with one knob.
+
+    Same system line, same `max_tokens` 6000, same `chat_template_kwargs`, same
+    `priority` 2 as `_call_llm`'s literal (`fact_extractor.py:438-450`), which is
+    what makes a pass here a pass of production. `temperature` defaults to
+    `DEFAULT_TEMPERATURE`, production's own; naming it exists only so the greedy
+    control arm can differ from production in that one field and nothing else.
     """
-    payload = {
+    return {
         "model": "primary",
         "messages": [
             {"role": "system", "content": "You are a fact extraction engine."},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.3,
+        "temperature": DEFAULT_TEMPERATURE if temperature is None else temperature,
         "max_tokens": 6000,
         "chat_template_kwargs": {"enable_thinking": False},
         "priority": 2,
     }
+
+
+def send(port: int, prompt: str, timeout: float = 240.0,
+         temperature: float | None = None) -> tuple[str, dict, float]:
+    """One chat call, and the only reason this module talks HTTP itself.
+
+    The payload is `build_payload`'s — the extractor's own, and identical for both
+    production arms, which is what the wire digest in `pair_guard` certifies. It
+    differs in exactly one way: it keeps the `usage` field the extractor
+    drops, which is where this audit's cost line comes from.
+    """
+    payload = build_payload(prompt, temperature=temperature)
     body = json.dumps(payload, sort_keys=True).encode("utf-8")
     req = urllib.request.Request(
         f"http://localhost:{port}/v1/chat/completions",
@@ -676,7 +799,7 @@ def _as_answer(raw):
 
 
 def run_pass(fe, prompts: list[dict], port: int, pass_id: str, sender=None,
-             cost: dict | None = None) -> dict:
+             cost: dict | None = None, temperature: float | None = None) -> dict:
     """Send the pre-built prompts and parse the answers. Given nothing from the
     other pass — no shared facts, no prior list, no feedback. That is what makes
     the two of them a pair at all.
@@ -684,15 +807,23 @@ def run_pass(fe, prompts: list[dict], port: int, pass_id: str, sender=None,
     `cost` is this arm's meter. One prompt sends one call, which books one entry in
     it. A call whose transport raised books no call (nothing came back to meter) and
     lands in `errors`, so `calls` below — prompts attempted — can exceed the metered
-    calls by exactly the number of errors."""
-    sender = sender or (lambda p, pt: send(pt, p))
+    calls by exactly the number of errors.
+
+    `temperature` is left at production's own value unless an arm asks for another
+    (the greedy control), and it is passed only when named: a two-argument transport —
+    every offline fake in the suite — keeps working, and a production-mirror arm keeps
+    sending `build_payload`'s unchanged bytes."""
+    sender = sender or (lambda p, pt, temperature=None: send(pt, p, temperature=temperature))
     cost = new_cost() if cost is None else cost
     facts: list[dict] = []
     errors: list[str] = []
     sent_hashes: list[str] = []
     for p in prompts:
         try:
-            text, u, s = sender(p["text"], port)
+            if temperature is None:
+                text, u, s = sender(p["text"], port)
+            else:
+                text, u, s = sender(p["text"], port, temperature=temperature)
         except SystemExit:
             raise
         except Exception as exc:  # noqa: BLE001 — a lost call is an error row, not a crash
@@ -876,61 +1007,171 @@ def settle(diff: dict, source: str, judge=None, port: int = 8096,
 
 
 def difference_pairs(diff: dict) -> list[dict]:
-    """The differences to settle: one entry per unmatched fact. An only-A fact
-    and an only-B fact are settled separately — pairing them by position would
-    invent a comparison the passes never made."""
-    pairs = [{"a": f, "b": None, "side": "a"} for f in diff["only_a"]]
-    pairs += [{"a": None, "b": f, "side": "b"} for f in diff["only_b"]]
+    """The pairs to put to the source, each labelled with what it can honestly show.
+
+    An only-A fact and an only-B fact are settled separately — pairing them by
+    position would invent a comparison the passes never made — and each is ONE
+    reading: the judge is given the claim and an explicit `(none)` for the other
+    pass, so `both_supported` cannot be its answer, and `side` records which pass is
+    claiming it alone.
+
+    A rewording is TWO readings of one claim — the same canonical text in two
+    accents — and it is the only class this instrument produces that can honestly be
+    answered `both_supported`. It used to be dropped on the floor here: this function
+    read only `only_a`/`only_b`, so the 2026-10-17 run put 1,007 settlements to the
+    judge and none of its 11 rewordings, and every pair it did put came back
+    single-sided by construction. That is why the label sat at 0, and why the fix is
+    the pairing rather than the prompt: "does the document back BOTH of these?" is
+    the question that separates a paraphrase of one real fact from two passes that
+    each invented a different one.
+    """
+    pairs = [{"a": f, "b": None, "side": "a", "kind": "difference", "two_sided": False}
+             for f in diff["only_a"]]
+    pairs += [{"a": None, "b": f, "side": "b", "kind": "difference", "two_sided": False}
+              for f in diff["only_b"]]
+    pairs += [{"a": {"fact": r["a"], "entity": r["entity"], "category": r["category"]},
+               "b": {"fact": r["b"], "entity": r["entity"], "category": r["category"]},
+               "side": "either", "kind": "rewording", "two_sided": True,
+               "entity": r["entity"], "category": r["category"],
+               "canonical_text": r["canonical_text"]}
+              for r in diff.get("rewordings", [])]
     return pairs
+
+
+def settlement_record(pair: dict, verdict: dict, facts_root=None) -> dict:
+    """One settled difference, as a row a reader can go and check.
+
+    This is what the artifact never had: `settled` was a `dict[str, int]`, so a run
+    could publish "329 defects" and say nothing about which ones, and the one piece
+    of information that makes a defect actionable — which note of the derived fact
+    tree holds it — appeared nowhere in the module. A record therefore carries the
+    key the difference was matched on (entity, category, canonical text), both
+    readings as the passes wrote them, the span that settled it, and the fact file
+    the extractor writes by. `label` and `kind` are the two axes the counters split
+    on, and every counter in the artifact is a count of these rows.
+    """
+    a, b = pair.get("a") or {}, pair.get("b") or {}
+    entity = pair.get("entity") or a.get("entity") or b.get("entity") or ""
+    category = pair.get("category") or a.get("category") or b.get("category") or ""
+    canonical = pair.get("canonical_text") or canonical_text(
+        a.get("fact") or b.get("fact") or "")
+    span = verdict.get("span")
+    return {"kind": pair.get("kind", "difference"),
+            "label": verdict["label"],
+            "side": pair.get("side"),
+            "two_sided": bool(pair.get("two_sided", False)),
+            "entity": _resolve_entity(entity) if entity else "",
+            "category": str(category or "").strip().lower(),
+            "canonical_text": canonical,
+            "fact_a": a.get("fact"),
+            "fact_b": b.get("fact"),
+            "span": span,
+            "span_form": (span or {}).get("form"),
+            "fact_file": fact_file_path(entity, category, facts_root),
+            "reason": verdict.get("reason")}
 
 
 # ── the audit ───────────────────────────────────────────────────────────────
 
 def audit_document(fe, path: Path, vault_root: Path, port: int, settle_port: int | None = None,
-                   sender=None, judge=None) -> dict:
+                   sender=None, judge=None, facts_dir=None, temperature_0: bool = False) -> dict:
+    """Audit one document: two (optionally four) passes, then settle what differs.
+
+    `temperature_0` adds a THIRD and FOURTH pass of the same prompt bytes, decoded
+    greedily, and reports their disagreement beside the production pair's. It is
+    opt-in because the two production passes have to keep sending the extractor's own
+    payload byte for byte — the wire digest `pair_guard` compares is the witness that
+    they do — and a control arm that came along by default would double the run's
+    cost on every audit that only wanted the headline rate.
+
+    `facts_dir` is the derived fact tree settlement records cite. It defaults to the
+    pipeline's own (`facts_dir()`), and a test passes its own so the citation is
+    asserted as a path rather than as a string copied out of this file.
+    """
     rel = str(path.relative_to(vault_root))
     source = path.read_text(encoding="utf-8", errors="replace")
     prompts = build_prompts(fe, source)
     digest = prompt_digest(prompts)
     offsets = [[p["offset"], p["chunk_chars"]] for p in prompts]
     # One meter per arm. A call belongs to exactly one arm, so the run's cost is
-    # their disjoint sum: pass A's prompts, pass B's prompts, and every read the
-    # reconciler made to settle a difference.
-    cost_a, cost_b, cost_settle = new_cost(), new_cost(), new_cost()
+    # their disjoint sum: pass A's prompts, pass B's prompts, every read the
+    # reconciler made to settle a difference, and (opt-in) the greedy control pair.
+    cost_a, cost_b, cost_settle, cost_greedy = new_cost(), new_cost(), new_cost(), new_cost()
     a = run_pass(fe, prompts, port, "A", sender, cost=cost_a)
     b = run_pass(fe, prompts, port, "B", sender, cost=cost_b)
     pair_guard(prompts, a, b)          # raises rather than reporting a bad pair
     diff = diff_passes(a["facts"], b["facts"])
     settled: dict[str, int] = {label: 0 for label in LABELS}
+    settled_by_kind: dict[str, dict[str, int]] = {
+        kind: {label: 0 for label in LABELS} for kind in PAIR_KINDS}
+    settlements: list[dict] = []
     unsettled: list[dict] = []
     spans: list[dict] = []
     for pair in difference_pairs(diff):
         verdict = settle(pair, source, judge, settle_port or port, meter=cost_settle)
         if verdict["label"] == UNSETTLED:
             unsettled.append({"a": (pair["a"] or {}).get("fact"),
-                              "b": (pair["b"] or {}).get("fact"), "reason": verdict["reason"]})
-        else:
-            settled[verdict["label"]] += 1
-            if verdict.get("span"):
-                spans.append(verdict["span"])
+                              "b": (pair["b"] or {}).get("fact"),
+                              "kind": pair.get("kind", "difference"),
+                              "reason": verdict["reason"]})
+            continue
+        record = settlement_record(pair, verdict, facts_dir)
+        settlements.append(record)
+        settled[verdict["label"]] += 1
+        settled_by_kind[record["kind"]][verdict["label"]] += 1
+        if verdict.get("span"):
+            spans.append(verdict["span"])
     # The denominator is every fact BOTH passes held: identical matches, rewordings
     # (same canonical text, different words) and the one-sided keys, which are the
     # disagreements inside it. Rewordings are counted, because a rewording IS a fact
     # both passes produced.
     compared = diff["identical"] + len(diff["rewordings"]) + diff["differences"]
     n_settled = sum(settled.values())
-    # A single-sided settlement means one pass holds a reading the document
-    # supports and the other does not, and `neither_supported` means the document
-    # supports neither — both are defects in at least one pass. `both_supported`
-    # is the passes splitting two real facts, which is an omission each but not
-    # an invention. The definition travels with the artifact so a later reader
-    # cannot silently redefine it.
-    defects = (settled["pass_a_supported"] + settled["pass_b_supported"]
-               + settled["neither_supported"])
-    # Derived from the three disjoint arms rather than accumulated alongside them:
-    # the total of a run is a function of meters that each counted their own calls,
-    # so there is no second place a call could be added.
-    cost_total = merge_costs(cost_a, cost_b, cost_settle)
+    # `DEFECT_LABELS` is the whole of the defect count, and the same tuple builds
+    # the definition the artifact publishes, so the two cannot disagree. What the
+    # labels mean: a single-sided settlement is one pass holding a reading the
+    # document supports and the other not, and `neither_supported` is the document
+    # backing neither — a defect in at least one pass either way. `both_supported`
+    # is excluded because it is the settlement finding nothing invented: the passes
+    # split ONE supported fact into two wordings, which is an instrument artefact of
+    # keying on canonical text, not an error either pass made.
+    defects = sum(settled[label] for label in DEFECT_LABELS)
+
+    t0_row: dict = {"differences_t0": None, "identical_t0": None, "rewordings_t0": None,
+                    "compared_t0": None, "disagreement_rate_t0": None}
+    if temperature_0:
+        # Two greedy passes of the SAME prompts, then the same diff. Greedy decoding
+        # of identical bytes is what the production pair's rate would be with the
+        # sampling removed, so the gap between it and `disagreement_rate` is the part
+        # of the headline number that is the decoder and not the corpus. The guard
+        # runs here too: the control is only a control if its two passes were asked
+        # the same question, and a `PairNotComparable` from a control arm must not
+        # take the production measurement down with it.
+        try:
+            c = run_pass(fe, prompts, port, "greedy-A", sender, cost=cost_greedy,
+                         temperature=GREEDY_TEMPERATURE)
+            d = run_pass(fe, prompts, port, "greedy-B", sender, cost=cost_greedy,
+                         temperature=GREEDY_TEMPERATURE)
+            pair_guard(prompts, c, d)
+            t0 = diff_passes(c["facts"], d["facts"])
+            t0_compared = t0["identical"] + len(t0["rewordings"]) + t0["differences"]
+            t0_row = {
+                "differences_t0": t0["differences"],
+                "identical_t0": t0["identical"],
+                "rewordings_t0": len(t0["rewordings"]),
+                "compared_t0": t0_compared,
+                "disagreement_rate_t0": (round(t0["differences"] / t0_compared, 4)
+                                        if t0_compared else None),
+            }
+        except PairNotComparable as exc:
+            t0_row = {**t0_row, "t0_error": str(exc)}
+    # Derived from the disjoint arms rather than accumulated alongside them: the
+    # total of a run is a function of meters that each counted their own calls, so
+    # there is no second place a call could be added. It is built AFTER every arm has
+    # run — the control's two greedy passes included — because a total derived before
+    # the last arm filled its meter would under-bill the run by exactly that arm, and
+    # the artifact bills itself against Gallon's 7.5M with this number.
+    cost_total = merge_costs(cost_a, cost_b, cost_settle, cost_greedy)
     return {
         "path": rel,
         # The root this document was read from, as given to the run: a reader
@@ -949,19 +1190,30 @@ def audit_document(fe, path: Path, vault_root: Path, port: int, settle_port: int
         "differences": diff["differences"],
         "compared": compared,
         "disagreement_rate": round(diff["differences"] / compared, 4) if compared else None,
+        # ── the greedy control arm (`--temperature-0`), None when it did not run ──
+        # Absent is reported as absent, never as 0.0: a control that did not run and
+        # rendered as a perfect score would be the most convincing wrong number in
+        # the file.
+        **t0_row,
         "settled": settled,
         "settled_total": n_settled,
+        "settled_by_kind": settled_by_kind,
+        # One row per settlement, and the counters above are counts of these rows:
+        # `defects` is recomputable from here without re-reading a single document.
+        "settlements": settlements,
         "unsettled": unsettled,
         "defects": defects,
         "defect_yield": round(defects / n_settled, 4) if n_settled else None,
         "supporting_spans": spans,
-        # The three arms are disjoint, so the document's cost is their sum and a
-        # call cannot be in two of them: the reconciler's reads are in `settlement`
-        # and nowhere else. `total_tokens`/`seconds` are the figure the artifact
-        # bills itself against, and they now include the reconciler — which is what
-        # makes the comparison to Gallon's 7.5M an apples-to-apples one, since his
-        # figure is the cost of the whole reconciliation and not of the two passes.
-        "cost": {**cost_total, "a": cost_a, "b": cost_b, "settlement": cost_settle},
+        # The arms are disjoint, so the document's cost is their sum and a call
+        # cannot be in two of them: the reconciler's reads are in `settlement` and
+        # nowhere else, the greedy control's in `t0`. `total_tokens`/`seconds` are the
+        # figure the artifact bills itself against, and they now include the
+        # reconciler — which is what makes the comparison to Gallon's 7.5M an
+        # apples-to-apples one, since his figure is the cost of the whole
+        # reconciliation and not of the two passes.
+        "cost": {**cost_total, "a": cost_a, "b": cost_b, "settlement": cost_settle,
+                 "t0": cost_greedy},
         "pass_errors": a["errors"] + b["errors"],
     }
 
@@ -1005,17 +1257,42 @@ def summarize(sample: dict, docs: list[dict], errors: list[dict], started: float
             "differences": differences,
             "settled": settled,
             "settled_total": settled_total,
+            "settled_by_kind": {kind: {label: sum(d["settled_by_kind"][kind][label] for d in docs)
+                                       for label in LABELS} for kind in PAIR_KINDS},
+            "settlements": sum(len(d["settlements"]) for d in docs),
             "unsettled": unsettled,
             "defects": defects,
         },
         "disagreement_rate_overall": (round(differences / sum(d["compared"] for d in docs), 4)
                                       if sum(d["compared"] for d in docs) else None),
+        # The greedy control, aggregated the same way. `None` when the arm did not run
+        # (`temperature_0_arm` below says which of the two kinds of None this is), and
+        # a real number when it did: `disagreement_rate_overall` minus this is the part
+        # of the headline rate that decoding at 0.3 contributed rather than the corpus.
+        "disagreement_rate_overall_t0": (
+            round(sum(d["differences_t0"] or 0 for d in docs)
+                  / sum(d["compared_t0"] or 0 for d in docs), 4)
+            if any(d["compared_t0"] for d in docs) else None),
+        "temperature_0_arm": any(d["compared_t0"] is not None for d in docs),
+        "temperature_arms": {"production": DEFAULT_TEMPERATURE,
+                             "control": GREEDY_TEMPERATURE,
+                             "control_requested": any(d["compared_t0"] is not None
+                                                      for d in docs)},
         "defect_yield_overall": round(defects / settled_total, 4) if settled_total else None,
+        # The numerator is `DEFECT_LABELS`, rendered — not restated — so the string a
+        # later reader weighs the number against and the sum that produced it are the
+        # same list by construction. This matters most where the labels moved: settling
+        # rewordings two-sided (#2918) is the first time a run could produce a
+        # `both_supported` settlement at all, and a definition still describing a world
+        # in which that label never happened would be a published false statement.
         "defect_yield_definition": (
-            "(pass_a_supported + pass_b_supported + neither_supported) / settled: a "
-            "single-sided settlement is a reading the document supports that the other pass "
-            "did not produce, `neither_supported` is a reading neither is supported by; "
-            "`both_supported` (the passes split two real facts) is not counted as a defect. "
+            "(" + " + ".join(DEFECT_LABELS) + ") / settled, where `settled` counts every "
+            "label settled from either kind of pair (a one-reading `difference` or a "
+            "two-reading `rewording`): a single-sided settlement is a reading the document "
+            "supports that the other pass did not produce, `neither_supported` is a reading "
+            "neither is supported by. `both_supported` — the document backing BOTH wordings "
+            "of one claim, which only a two-reading rewording pair can answer — is not "
+            "counted as a defect, because it is the settlement finding nothing invented. "
             "`unsettled` is never folded into either side of the ratio."),
         "disagreement_rate_is_a_lower_bound": (
             "Both passes are the same weights, so this understates the true rate; the "
@@ -1032,6 +1309,11 @@ def summarize(sample: dict, docs: list[dict], errors: list[dict], started: float
             "total_calls": sum(d["cost"]["calls"] for d in docs),
             "settlement_tokens": sum(d["cost"]["settlement"]["total_tokens"] for d in docs),
             "settlement_seconds": round(sum(d["cost"]["settlement"]["seconds"] for d in docs), 3),
+            # The control arm's own price, kept separate because it is the line that
+            # moves when `--temperature-0` is passed and the line a widening decision
+            # has to weigh before opting in to it.
+            "temperature_0_calls": sum(d["cost"]["t0"]["calls"] for d in docs),
+            "temperature_0_tokens": sum(d["cost"]["t0"]["total_tokens"] for d in docs),
             "wall_clock_seconds": round(time.monotonic() - started, 3),
             "source": ("taken off each model response's `usage` by this module and timed here: "
                        "the extractor's `_call_llm` drops the field, and the usage store is "
@@ -1058,8 +1340,13 @@ def render_markdown(summary: dict) -> str:
         f"- settled {summary['totals']['settled_total']}: "
         + ", ".join(f"{k} {v}" for k, v in summary["totals"]["settled"].items()),
         f"- unsettled: {summary['totals']['unsettled']} (never counted as agreement)",
+        "- settled by kind: " + "; ".join(
+            f"{kind}: " + "/".join(str(summary['totals']['settled_by_kind'][kind][lb])
+                                   for lb in LABELS)
+            for kind in PAIR_KINDS)
+        + " (a/b/both/neither — only a rewording pair can answer both_supported)",
         f"- rewordings: {summary['totals']['rewordings']} "
-        f"(canonical text matched, wording differed — not differences)",
+        f"(canonical text matched, wording differed — settled two-sided since #2918)",
         f"- cost per document: mean {summary['cost']['per_document_mean_tokens']} tokens / "
         f"{summary['cost']['per_document_mean_seconds']} s, over "
         f"{summary['cost']['total_calls']} calls; run total "
@@ -1068,21 +1355,27 @@ def render_markdown(summary: dict) -> str:
         f"{summary['cost']['settlement_seconds']} s; "
         f"{summary['cost']['source']}",
         "",
-        "| document | dir | facts A/B | identical | reword | diffs | rate | settled (a/b/both/neither) "
-        "| unsettled | defects | tokens | s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        # `rate@0.3` is the production pair and `rate@0.0` the greedy control, named by
+        # the temperature rather than by a word, so the two columns cannot be read as
+        # two samples of the same arm. An arm that did not run is an em dash, never a
+        # 0.0 that would read as the document agreeing with itself perfectly.
+        "| document | dir | facts A/B | identical | reword | diffs | rate@0.3 | rate@0.0 "
+        "| settled (a/b/both/neither) | unsettled | defects | tokens | s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for d in summary["documents"]:
         st = d["settled"]
+        rate_t0 = d.get("disagreement_rate_t0")
         lines.append(
             f"| `{d['path'][:60]}` | {d['category']} | {d['facts_a']}/{d['facts_b']} "
-            f"| {d['identical']} | {d['rewordings']} | {d['differences']} | {d['disagreement_rate']} "
+            f"| {d['identical']} | {d['rewordings']} | {d['differences']} "
+            f"| {d['disagreement_rate']} | {'—' if rate_t0 is None else rate_t0} "
             f"| {d['settled_total']} ({st['pass_a_supported']}/{st['pass_b_supported']}/"
             f"{st['both_supported']}/{st['neither_supported']}) | {len(d['unsettled'])} "
             f"| {d['defects']} | {d['cost']['total_tokens']} | {d['cost']['seconds']} |")
     for e in summary["errors"]:
         lines.append("| **" + e["path"] + "** | " + e.get("category", "")
-                     + " | errored: " + e["error"] + " |" + " |" * 9)
+                     + " | errored: " + e["error"] + " |" + " |" * 10)
     return "\n".join(lines) + "\n"
 
 
@@ -1123,6 +1416,13 @@ def main(argv: list[str] | None = None) -> int:
                          "pair this box can run (eval/cross_engine_disagreement.py:9-19).")
     ap.add_argument("--dry-run", action="store_true",
                     help="draw the sample and write the artifact without sending a request")
+    ap.add_argument("--temperature-0", action="store_true",
+                    help=f"add a THIRD AND FOURTH pass of the same prompts at "
+                         f"{GREEDY_TEMPERATURE} and report each document's disagreement rate "
+                         f"at both temperatures, so the headline rate at "
+                         f"{DEFAULT_TEMPERATURE} can be separated from decoding variance. "
+                         f"Opt-in because it doubles the extraction cost of the run; the "
+                         f"two production passes keep sending production's payload either way.")
     args = ap.parse_args(argv)
 
     out = Path(args.out)
@@ -1156,18 +1456,25 @@ def main(argv: list[str] | None = None) -> int:
                          "chars_covered": 0, "prompt_sha256": None, "chunk_offsets": [],
                          "facts_a": 0, "facts_b": 0, "identical": 0, "rewordings": 0,
                          "differences": 0, "compared": 0, "disagreement_rate": None,
+                         "differences_t0": None, "identical_t0": None,
+                         "rewordings_t0": None, "compared_t0": None,
+                         "disagreement_rate_t0": None,
                          "settled": {label: 0 for label in LABELS}, "settled_total": 0,
+                         "settled_by_kind": {kind: {label: 0 for label in LABELS}
+                                             for kind in PAIR_KINDS},
+                         "settlements": [],
                          "unsettled": [], "defects": 0, "defect_yield": None,
                          "supporting_spans": [],
                          # Shaped like a measured row, zero-filled: a dry run sent
                          # no call, so every arm's meter reads zero rather than the
                          # row lacking the keys a reader (or `summarize`) indexes.
                          "cost": {**new_cost(), "a": new_cost(), "b": new_cost(),
-                                  "settlement": new_cost()},
+                                  "settlement": new_cost(), "t0": new_cost()},
                          "pass_errors": [], "dry_run": True})
             continue
         try:
-            docs.append(audit_document(fe, path, vault, args.port, args.settle_port))
+            docs.append(audit_document(fe, path, vault, args.port, args.settle_port,
+                                       temperature_0=bool(args.temperature_0)))
         except PairNotComparable as exc:
             errors.append({"path": str(path.relative_to(vault)), "error": f"pair not comparable: {exc}",
                            "category": path.relative_to(vault).parts[0]})
