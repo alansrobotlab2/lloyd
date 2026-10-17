@@ -13,8 +13,10 @@ test that only counts today's 44 tasks asserts a fact about a snapshot.
 
 from __future__ import annotations
 
+import errno
 import json
 import re
+import subprocess
 
 import pytest
 
@@ -327,3 +329,124 @@ def test_expected_digests_are_recomputable_from_the_fixtures_they_name():
                 f"{t.id}: expected digest is not the fixture's digest")
             n += 1
     assert n >= 6, f"only {n} digest-checked fixture tasks; the round-trip domain is thin"
+
+
+# ── #2929 clause 3: an error needle has to be one the row's own shape can print ──
+#
+# A `shown_contains` needle is normally text the corpus authors itself. One class is not: the
+# string an operating-system error prints is decided by the errno behind it, and an errno
+# appears only when the condition behind it exists. Two shipped rows got that wrong —
+# `rf-readonly-dir-error-text` demanded EROFS's text (`Read-only file system`, the message for
+# a read-only MOUNT) from a mode-500 DIRECTORY (EACCES), and `rf-write-into-proc-error-text`
+# demanded EACCES's text from `/proc/substrate-fuzz-nope`, a path that does not exist so the
+# kernel answers ENOENT first. Both sat red in the first arm-A run as host defects no substrate
+# can cause. These rows are RED at that commit: the loader had no such check.
+
+
+def test_the_os_error_needle_map_is_populated_before_it_is_trusted():
+    """Every refusal above depends on a lookup table derived from `errno.errorcode`, and a
+    guard whose derived input came out empty reports a clean corpus: the first version of
+    `_os_error_needles` iterated the dictionary's VALUES (its names) instead of its KEYS (its
+    numbers), `os.strerror` raised on each name, the broad `except` swallowed it, and the map
+    was empty — every needle then looked fine and all three refusals silently stopped firing.
+    So the map's own population is measured here, and the three needles this item is about are
+    named individually because an entry that is absent is a bug nobody would notice.
+    """
+    assert len(C.OS_ERROR_NEEDLES) > 40, len(C.OS_ERROR_NEEDLES)
+    assert C.OS_ERROR_NEEDLES["permission denied"] == errno.EACCES
+    assert C.OS_ERROR_NEEDLES["read-only file system"] == errno.EROFS
+    assert C.OS_ERROR_NEEDLES["no such file or directory"] == errno.ENOENT
+
+
+def test_the_loader_refuses_an_errno_needle_the_rows_setup_cannot_stage():
+    """The shipped row's own shape, with its old needle restored, and the loader says no."""
+    row = sf_task(tid="synthetic-EROFS", domain="refusal_shapes",
+                  setup=[{"path": "rodir", "dir": True, "mode": "500"}],
+                  steps=[{"tool": "Bash",
+                          "args": {"command": "printf x > rodir/inside.txt", "cwd": "{root}"}}],
+                  post={"kind": "shown_contains", "expected": "Read-only file system"})
+    with pytest.raises(C.CorpusError) as exc:
+        parse_task_row(row)
+    msg = str(exc.value)
+    assert "synthetic-EROFS" in msg, msg
+    assert "EROFS" in msg, msg
+    assert "mode_without_write" in msg, msg
+    # And the needle the setup DOES cause is accepted, so the refusal is about the mismatch
+    # and not about error needles in general.
+    row["postcondition"] = {"kind": "shown_contains", "expected": "Permission denied"}
+    assert parse_task_row(row).post.expected == "Permission denied"
+
+
+def test_the_loader_refuses_a_needle_whose_errno_no_row_shape_can_stage():
+    """A needle naming an errno that nothing in this corpus stages — `No space left on device`
+    is EROS's neighbour in the same way: nothing fills a filesystem — is refused on every row,
+    because a needle that can never fire reports a defect no substrate can cause."""
+    row = sf_task(tid="synthetic-ENOSPC", domain="filesystem",
+                  post={"kind": "shown_contains", "expected": "No space left on device"})
+    with pytest.raises(C.CorpusError) as exc:
+        parse_task_row(row)
+    assert "ENOSPC" in str(exc.value)
+
+
+def test_a_permission_needle_is_refused_when_the_write_target_cannot_refuse_a_write():
+    """The second shipped defect's shape. A permission refusal needs a target that EXISTS and
+    is not writable, and the loader measures both rather than trusting the row's title:
+    `/proc/substrate-fuzz-nope` is absent, so the kernel would answer ENOENT and the needle
+    would sit red forever. A step writing into `/proc/version` — present, mode 444, owned by
+    `nobody` — is accepted, because that write really is refused."""
+    def row(target: str) -> dict:
+        return sf_task(tid="synthetic-proc", domain="refusal_shapes",
+                       steps=[{"tool": "Bash",
+                               "args": {"command": f"printf x > {target}", "cwd": "{root}"}}],
+                       post={"kind": "shown_contains", "expected": "Permission denied"})
+
+    with pytest.raises(C.CorpusError) as exc:
+        parse_task_row(row("/proc/substrate-fuzz-nope"))
+    assert "does not exist" in str(exc.value), str(exc.value)
+    assert parse_task_row(row("/proc/version")).post.expected == "Permission denied"
+
+
+def test_an_enoent_needle_needs_no_staging_because_naming_a_missing_path_is_the_shape():
+    """`ctl-rf-notfound-refusal-text`'s needle is `not found`, and ENOENT is the errno a step
+    raises by naming a path nothing creates. Refusing it would leave no way to assert the
+    missing-binary shape at all, which is the positive control on the two refusals above."""
+    row = sf_task(tid="synthetic-ENOENT", domain="refusal_shapes",
+                  steps=[{"tool": "Bash",
+                          "args": {"command": "cat ./never-written.txt", "cwd": "{root}"}}],
+                  post={"kind": "shown_contains", "expected": "No such file or directory"})
+    assert parse_task_row(row).post.expected == "No such file or directory"
+
+
+def test_no_shipped_row_keeps_an_error_needle_its_own_setup_cannot_produce():
+    """The scan over the corpus as shipped: every row's needle is checked by the same function
+    the loader calls, so the file cannot pass by the loader being somewhere else. The needle set
+    is derived from `os.strerror`, so a row that starts asserting a new errno's message is
+    caught by this node without anyone editing a list (#2929)."""
+    refused = [(t.id, C.errno_needle_reason(t.post, t.setup, t.steps)) for t in CORPUS]
+    assert [r for r in refused if r[1] is None] != [], "the check matches no shipped row at all"
+    bad = {tid: why for tid, why in refused if why}
+    assert not bad, json.dumps(bad, indent=1)
+    for t in REAL:
+        if t.post.kind == "shown_contains":
+            assert t.post.expected.lower() != "read-only file system", (
+                f"{t.id} still demands EROFS's message")
+
+
+def test_the_combining_row_expects_the_bytes_its_own_step_emits():
+    """`uni-combining-marks-in-stdout` declared `sha256("cafe\\u0301 combining\\n")` =
+    `84720c67cfd0cccd…` while its own step is `printf 'cafe\\xcc\\x81\\n'`, which emits the 7
+    bytes `b'cafe\\xcc\\x81\\n'` = `dcc492420fc77018…`. The substrate answered with those 7 bytes
+    and the run reported it as a normalisation finding; nothing normalised — the row was authored
+    against a payload its step never emits, and the word `combining` in the expected string was
+    never printed by anything. The digest is now the step's own output (#2929).
+
+    The row still detects what it was written to detect: a boundary that precomposed the
+    sequence answers `caf\\xc3\\xa9\\n`, 6 bytes, and fails this digest."""
+    command = BY_ID["uni-combining-marks-in-stdout"].steps[0]["args"]["command"]
+    assert command == "printf 'cafe\\xcc\\x81\\n'", command
+    emitted = subprocess.run(["/bin/sh", "-c", command], capture_output=True).stdout
+    assert emitted == b"cafe\xcc\x81\n" and len(emitted) == 7, repr(emitted)
+    assert BY_ID["uni-combining-marks-in-stdout"].post.expected == sha(emitted)
+    assert sha(b"caf\xc3\xa9\n") != BY_ID["uni-combining-marks-in-stdout"].post.expected, (
+        "the precomposed answer would pass, so the row no longer detects a normalising "
+        "boundary")

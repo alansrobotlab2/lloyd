@@ -1123,7 +1123,7 @@
       "domain": "unicode_text",
       "id": "uni-combining-marks-in-stdout",
       "postcondition": {
-        "expected": "84720c67cfd0cccd15fee5faa7be4a6b0e30763c88de6f8c68b0878b249918e5",
+        "expected": "dcc492420fc77018ce8b7eb59458568e7901e9751194f4dbe7a1044ca16ccd2e",
         "kind": "stdout_sha256"
       },
       "reason": "a normalising boundary turns e + combining acute into \u00e9: identical on screen, different bytes, and the digest is the only witness.",
@@ -1387,11 +1387,11 @@
         "expected": "Permission denied",
         "kind": "shown_contains"
       },
-      "reason": "the error text is the only thing that lets a caller attribute the refusal to the kernel instead of to itself.",
+      "reason": "the error text is the only thing that lets a caller attribute the refusal to the kernel instead of to itself, so the target has to be a file that exists and refuses \u2014 a missing path yields ENOENT and tests nothing about permission.",
       "steps": [
         {
           "args": {
-            "command": "printf x > /proc/substrate-fuzz-nope",
+            "command": "printf x > /proc/version",
             "cwd": "{root}"
           },
           "tool": "Bash"
@@ -1406,10 +1406,10 @@
       ],
       "id": "rf-readonly-dir-error-text",
       "postcondition": {
-        "expected": "Read-only file system",
+        "expected": "Permission denied",
         "kind": "shown_contains"
       },
-      "reason": "Orellana's filesystem-permission class: the fault is invisible in a boolean and obvious in a string.",
+      "reason": "Orellana's filesystem-permission class: the fault is invisible in a boolean and obvious in a string. The string has to be the one this setup causes \u2014 a mode-500 directory is EACCES, and the row used to demand EROFS's text, which no fixture arm A can stage would ever print.",
       "setup": [
         {
           "dir": true,
@@ -1426,7 +1426,7 @@
           "tool": "Bash"
         }
       ],
-      "title": "a read-only filesystem says so in the answer"
+      "title": "a directory with no write permission says permission denied"
     },
     {
       "domain": "refusal_shapes",

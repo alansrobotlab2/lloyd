@@ -69,13 +69,24 @@ def test_a_protected_target_is_refused_before_dispatch(template):
             resolved.unlink()
 
 
-def test_the_guard_does_not_refuse_every_path(tmp_path):
+def test_the_guard_does_not_refuse_every_path():
     """Positive control for this file: a plain path under the run root is not
-    refused, so a refusal above cannot be the guard blocking everything."""
-    rec = R.run_task(_task(pointing_at=str(tmp_path / "plain.bin")))
+    refused, so a refusal above cannot be the guard blocking everything.
+
+    The write now lands INSIDE the run root and the postcondition checks it, so the control is
+    a GREEN record rather than merely a non-skipped one. That change is not a tightening for its
+    own sake: the row used to write to a tempfile outside the run root, where its own
+    postcondition could never see it, and that was harmless only while a payload miss always
+    printed a layer. #2929 made an unattributable miss RAISE instead of filing itself under
+    `model` — the layer arm A cannot earn — so this control started dying on `AttributionError`
+    for a reason that has nothing to do with the guard. A guard that lets an ordinary write
+    through, and leaves the row green, is the assertion this node means to make."""
+    rec = R.run_task(_task(pointing_at="{root}/plain.bin",
+                           post={"kind": "file_exists", "path": "plain.bin"}))
     assert rec["skipped"] is None, (
         f"the guard refused an ordinary path under the run root ({rec['evidence']}), so the "
         "refusals above say nothing about protected trees specifically")
+    assert rec["ok"] is True, f"{rec['rule']!r} / {rec['evidence']!r}"
 
 
 def test_the_run_root_is_never_under_a_protected_tree():
@@ -149,9 +160,12 @@ def test_the_surface_arm_a_drives_names_no_sending_tool(tmp_path):
             load_corpus(p, check_cross_row=False)
 
 
-def _task(pointing_at: str):
+def _task(pointing_at: str, post: dict | None = None):
     """A task whose single Write names `pointing_at` — built through the real loader
-    so a refusal cannot be an artefact of a malformed synthetic row."""
+    so a refusal cannot be an artefact of a malformed synthetic row.
+
+    `post` defaults to a digest no write can satisfy, which is what the refusal nodes want:
+    they never reach it, and if the guard ever stops firing the row goes red instead of green."""
     from eval.substrate_fuzz.corpus import load_corpus
     import tempfile
     d = Path(tempfile.mkdtemp())
@@ -159,8 +173,8 @@ def _task(pointing_at: str):
            "reason": "a test needs a step naming one path",
            "steps": [{"tool": "Write",
                       "args": {"file_path": pointing_at, "content": "planted"}}],
-           "postcondition": {"kind": "file_sha256", "path": "plain.bin",
-                             "expected": "0" * 64}}
+           "postcondition": post or {"kind": "file_sha256", "path": "plain.bin",
+                                     "expected": "0" * 64}}
     p = d / "corpus.json"
     p.write_text(json.dumps({"version": 1, "item": 2620, "tasks": [row]}))
     return load_corpus(p, check_cross_row=False)[0]

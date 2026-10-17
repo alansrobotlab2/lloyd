@@ -17,13 +17,32 @@ impossible to fail.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
-from _substrate_fuzz import (BY_ID, REAL, sf_corpus, sf_runner)
+from _substrate_fuzz import (BY_ID, REAL, parse_task_row, sf_corpus, sf_runner, sf_task)
 
 C = sf_corpus
 R = sf_runner
+
+
+def _miss_row(tid: str, *, command: str, domain: str = "filesystem",
+              expected_layers: list[str] | None = None) -> dict:
+    """A row whose step answers cleanly with text that matches no digest: the payload miss
+    rule 5 has to attribute.
+
+    The expectation is sixty zeroes rather than a plausible digest, so the row is red on
+    every box and the test measures the ROUTING and not whether this machine's stdout is
+    lossy today.
+    """
+    row = sf_task(tid=tid, domain=domain,
+                  steps=[{"tool": "Bash", "args": {"command": command, "cwd": "{root}"}}],
+                  post={"kind": "stdout_sha256", "expected": "0" * 64},
+                  setup=[])
+    if expected_layers is not None:
+        row["expected_layers"] = list(expected_layers)
+    return row
 
 
 # ── clause 2 ────────────────────────────────────────────────────────────────
@@ -272,3 +291,177 @@ def test_the_run_is_confined_to_a_temporary_root_it_removes(tmp_path, monkeypatc
         f"{rec['run_root']} survived the run")
     spill = root / "sessions" / f"{rec['session_id']}.tool-results"
     assert not spill.exists(), "the run left its spill sidecar behind"
+
+
+# ── #2929 clause 1: a payload miss is attributed on its own evidence ────────
+#
+# Arm A dispatches with `NO_MODEL`: the option handed to `_execute_tool_call` is a stub that
+# raises if the loop reaches for a completion. So `model` is a layer this run cannot earn, and
+# yet rule 5 — the payload-miss rule — filed every miss there. In the first real run
+# (`~/lloyd-data/eval/substrate-fuzz/arm-a-2026-10-17.json`) 4 of the 14 red rows carried
+# `layers.model`, each with evidence in its own record naming a byte change, an E2BIG refusal
+# or a mode-500 fixture. These rows are RED at that commit and green after the fix.
+
+def test_attribute_never_files_a_payload_miss_under_the_layer_arm_a_cannot_earn():
+    """Four payload misses, each with the evidence the miss itself produces, and none of them
+    is filed under `model` — the two that name a layer get the layer their evidence names, and
+    the one that names nothing is the runner's own defect instead of a leftover label."""
+    shapes = [
+        # (id, task row, step, expected layer, the phrase the rule must contain)
+        ("probe-pair-disagrees",
+         _miss_row("probe-pair-disagrees", command="cat absent.txt"),
+         R.StepResult(tool="Bash", args={}, ok=True, raw_chars=6,
+                      shown_text="answer", tool_bytes=b"ANSWER"),
+         "interface", "the two sides of the boundary disagree"),
+        ("probe-host-text",
+         _miss_row("probe-host-text", command="printf x > rodir/inside.txt"),
+         R.StepResult(tool="Bash", args={}, ok=True, raw_chars=40,
+                      shown_text="bash: rodir/inside.txt: Permission denied\n",
+                      tool_bytes=b"bash: rodir/inside.txt: Permission denied\n"),
+         "host", "syscall"),
+        ("probe-guard-text",
+         _miss_row("probe-guard-text", command="cat absent.txt"),
+         R.StepResult(tool="Bash", args={}, ok=True, raw_chars=36,
+                      shown_text="Tool call denied: protected path",
+                      tool_bytes=b"Tool call denied: protected path"),
+         "harness", "guard"),
+    ]
+    for tid, row, step, want_layer, want_phrase in shapes:
+        task = parse_task_row(row)
+        got = R.attribute(task, step)
+        assert got["layer"] != "model", (
+            f"{tid}: rule 5 filed the miss under {got['layer']!r} although its own evidence "
+            f"names a layer — arm A runs with NO_MODEL, so that layer is unearnable")
+        assert got["layer"] == want_layer, f"{tid}: got {got['rule']!r} / {got['evidence'][:160]!r}"
+        assert want_phrase in got["rule"], f"{tid}: rule does not name its evidence: {got['rule']!r}"
+
+
+def test_a_payload_miss_that_names_no_layer_is_the_runners_defect_not_a_default():
+    """A miss whose two sides agree, whose text carries no replacement character and names no
+    guard or syscall error, is booked as `unattributed` (a runner defect). It used to be filed
+    under `model`, which is a claim about a component this run never called."""
+    task = parse_task_row(_miss_row("probe-names-nothing", command="cat absent.txt"))
+    step = R.StepResult(tool="Bash", args={}, ok=True, raw_chars=11,
+                        shown_text="a plain one", tool_bytes=b"a plain one")
+    with pytest.raises(R.AttributionError) as exc:
+        R.attribute(task, step)
+    assert "nothing in the miss names a layer" in str(exc.value)
+
+
+def test_a_binary_answer_captured_with_replacement_characters_is_an_interface_finding(tmp_path):
+    """`roundtrip-png` measured on this box: the fixture is 70 bytes of PNG whose digest starts
+    `5395c0d7`, and the answer arrived 102 bytes beginning `\\ufffdPNG` — U+FFFD, the decoder's
+    substitute — with the tool side and the shown side carrying the SAME digest `800f1d42`. So
+    the substitution happened inside the tool's own stdout capture, before the interface pair
+    was taken, and rule 1 (which compares those two sides) cannot see a fault both sides share.
+
+    The expected digest here is impossible on purpose, so the row is red on any box and this
+    node pins the ROUTING: the miss is filed at `interface` on the replacement character's own
+    evidence, never at `model`.
+    """
+    row = dict(BY_ID["roundtrip-png"].raw)
+    row["id"] = "probe-codec-miss"
+    row["postcondition"] = {"kind": "stdout_sha256", "expected": "0" * 64}
+    rec = R.run_task(parse_task_row(row), root=tmp_path)
+    assert rec["ok"] is False, "the row went green, so this node has stopped pinning anything"
+    assert rec["layer"] == "interface", f"{rec['rule']!r} / {rec['evidence'][:200]!r}"
+    assert "replacement character" in rec["rule"], rec["rule"]
+    pair = rec["interface_pair"]
+    assert pair["tool_sha256"] == pair["shown_sha256"], (
+        "the two sides now disagree, so rule 1 sees this fault and the codec route needs "
+        "re-measuring")
+    assert R._REPLACEMENT_CHAR in pair["shown_head"], repr(pair["shown_head"][:80])
+
+
+def test_the_verdict_line_names_every_finding_or_states_the_substrate_clean():
+    """The three verdicts, and only the third one is a clean bill."""
+    def rec(rid, *, ok, control=False, layer="interface", rule="1: a rule", limit=False):
+        return {"id": rid, "ok": ok, "is_control": control, "layer": layer, "rule": rule,
+                "expected_limit": limit, "domain": "byte_roundtrip"}
+
+    findings_run = R.verdict_line({
+        "results": [rec("roundtrip-png", ok=False),
+                    rec("bin-python-stdout", ok=True),
+                    rec("ctl-bin-python-flipped", ok=False, control=True,
+                        rule="1: tool bytes differ from shown bytes")],
+        "domains": {"byte_roundtrip": {"controls": 1, "controls_verified": 1}},
+        "control_breaks_verified": 1, "control_domains": 1, "tasks_run": 3})
+    assert "1 substrate finding(s)" in findings_run
+    assert "roundtrip-png" in findings_run and "[interface]" in findings_run
+    assert "ctl-bin-python-flipped" not in findings_run, "a control row is not a finding"
+    assert R.CLEAN_VERDICT not in findings_run
+
+    clean = R.verdict_line({
+        "results": [rec("bin-python-stdout", ok=True),
+                    rec("ctl-bin-python-flipped", ok=False, control=True)],
+        "domains": {"byte_roundtrip": {"controls": 1, "controls_verified": 1}},
+        "control_breaks_verified": 1, "control_domains": 1, "tasks_run": 2})
+    assert R.CLEAN_VERDICT in clean and "1 control break(s) verified" in clean
+
+    dark = R.verdict_line({
+        "results": [rec("bin-python-stdout", ok=True)],
+        "domains": {"byte_roundtrip": {"controls": 0, "controls_verified": 0}},
+        "control_breaks_verified": 0, "control_domains": 0, "tasks_run": 1})
+    assert R.CLEAN_VERDICT not in dark, (
+        "a board with no verified control is the #644 defect: it must never read as clean")
+
+
+def test_the_verdict_line_survives_into_the_report(tmp_path):
+    """The verdict is in the report dict a dated artefact is written from, not only on the
+    terminal: a conclusion that exists only in a scrollback is a conclusion nobody can read
+    after the window closes. One clean row plus its control: the control has to be verified or
+    the line is forbidden from declaring anything clean."""
+    report = R.run_corpus([BY_ID["bin-python-stdout"], BY_ID["ctl-bin-python-flipped"]],
+                          root=tmp_path)
+    assert report["control_breaks_verified"] == 1, report["domains"]
+    assert report["verdict_line"] == R.verdict_line(report)
+    assert R.CLEAN_VERDICT in report["verdict_line"], report["verdict_line"]
+
+
+def test_a_clean_board_without_a_verified_control_never_claims_clean(tmp_path):
+    """The same board minus its control is the #644 defect: nothing red because nothing was
+    proved. The line has to say so out loud."""
+    report = R.run_corpus([BY_ID["bin-python-stdout"]], root=tmp_path)
+    assert report["control_breaks_verified"] == 0
+    assert R.CLEAN_VERDICT not in report["verdict_line"], report["verdict_line"]
+    assert "NOT declared clean" in report["verdict_line"], report["verdict_line"]
+
+
+# ── #2929 clause 2: a declared fixture mode has to be applied ───────────────
+
+def test_a_mode_500_setup_directory_refuses_a_write_before_the_step_dispatches(tmp_path):
+    """`_do_setup` laid the directory down, checked its own write, and then never applied the
+    mode the row declared: the chmod it did read (`read_only`) is a key no corpus row has ever
+    carried — 0 hits in `corpus.json` — and the `item["mode"]` chmod sits below the `continue`
+    the directory branch takes. So `rodir` was 755, `printf x > rodir/inside.txt` succeeded,
+    and both filesystem-refusal rows went red blaming the substrate for a fixture that was
+    never unwritable. This asserts the ceiling exists at the moment setup ends, which is before
+    any step is dispatched."""
+    task = parse_task_row(sf_task(tid="probe-mode-dir", domain="filesystem",
+                                  setup=[{"path": "rodir", "dir": True, "mode": "500"}]))
+    R._do_setup(tmp_path, task, None)
+    target = tmp_path / "rodir"
+    assert oct(target.stat().st_mode & 0o777) == "0o500", oct(target.stat().st_mode & 0o777)
+    assert not os.access(target, os.W_OK), (
+        "this uid can write into a directory the row declared mode 500")
+    with pytest.raises(PermissionError):
+        (target / "inside.txt").write_text("x")
+
+
+def test_both_readonly_rows_are_green_once_the_fixture_really_refuses(tmp_path):
+    """The two rows that defect reported: `fs-write-into-readonly-dir` came back
+    `is_error=False (expected True)` and `rf-readonly-dir-error-text` came back with 11 bytes
+    of stdout instead of an error. Both are fixture bugs, not substrate bugs, so both go green
+    with the mode applied — and the second one only with a needle this setup can produce."""
+    for tid in ("fs-write-into-readonly-dir", "rf-readonly-dir-error-text"):
+        rec = R.run_task(BY_ID[tid], root=tmp_path / tid)
+        # A green record carries no layer: attribution is an act of explaining a failure, and
+        # the layer a passing row PROVED is the one it declares, which is `host` for both.
+        assert rec["expected_layers"] == ["host"], rec["expected_layers"]
+        assert rec["layer"] is None, f"{tid} went red: {rec['rule']!r} / {rec['evidence']!r}"
+        assert rec["ok"] is True, f"{tid}: {rec['rule']!r} / {rec['evidence']!r}"
+        step = rec["steps"][0]
+        assert step["error_class"] == "tool_error", (
+            f"{tid}: the write into a mode-500 directory did not come back as an error: "
+            f"{step['error_text']!r}")
+        assert "permission denied" in step["error_text"].lower(), step["error_text"]

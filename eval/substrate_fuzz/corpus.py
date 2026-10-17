@@ -44,9 +44,12 @@ rows to watch it refuse one of them is not declaring a corpus of two.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -310,6 +313,166 @@ def _no_bytes_reason(kind: str) -> str | None:
             "redden it — a control that cannot fail is a build failure (#2620 clause 3)")
 
 
+#: A `shown_contains` needle is a claim about what an answer will SAY, and for most needles
+#: the corpus authors that text itself. One class is not authorable: the string an
+#: operating-system error prints is decided by the errno behind it, and an errno appears in
+#: an answer only when the condition behind it exists. #2929's `rf-readonly-dir-error-text`
+#: pinned `Read-only file system` (EROFS — a read-only MOUNT) on a mode-500 directory
+#: (EACCES), so the needle could never fire however the substrate behaved and the row read
+#: as a refusal-shape defect that no substrate can cause.
+#:
+#: The needle set is derived and therefore closed: every string below is this machine's own
+#: `os.strerror` output, so a new errno joins the class without anyone editing a list. Only
+#: two things are hand-written — which errno needs which CAUSE, and how a row is recognised
+#: as staging that cause.
+def _os_error_needles() -> dict[str, int]:
+    """needle (lower-cased) -> the errno whose `strerror` it is.
+
+    :data:`errno.errorcode`'s KEYS are the error numbers and its values the names, which is
+    the direction its own documentation states and the one that tripped the first version of
+    this function: iterating the values handed back names, `os.strerror("EACCES")` raised
+    `TypeError`, the `except` swallowed it, and the map came out EMPTY — which made every
+    needle in the corpus look fine. A guard whose input map is empty reports a clean board, so
+    `test_the_os_error_needle_map_is_populated_before_it_is_trusted` pins its size (#2929).
+    """
+    out: dict[str, int] = {}
+    for code in sorted(errno.errorcode):
+        try:
+            out[os.strerror(code).lower()] = code
+        except (OSError, OverflowError, TypeError, ValueError):
+            continue
+    return out
+
+
+OS_ERROR_NEEDLES = _os_error_needles()
+ERRNO_NAMES = dict(errno.errorcode)
+
+#: The errno a needle can name, and the shapes that raise it. An errno missing from this
+#: table has no staging vocabulary at all, so any needle naming its message is refused: the
+#: honest default, because a needle nothing can stage is a claim about a string and not
+#: about the substrate. `read_only_mount` deliberately has no producer either — arm A runs
+#: inside an ordinary writable tree and cannot mount anything read-only, which is exactly
+#: why the shipped row had to stop asserting it.
+_ERRNO_CAUSES: dict[int, tuple[str, ...]] = {
+    errno.EACCES: ("mode_without_write", "protected_path"),
+    errno.EPERM: ("mode_without_write", "protected_path"),
+    errno.EROFS: ("read_only_mount",),
+    errno.ENOSPC: ("disk_full",),
+    errno.ENOMEM: ("memory_ceiling",),
+    errno.E2BIG: ("argv_ceiling",),
+    errno.EMFILE: ("fd_exhaustion",),
+    errno.ENFILE: ("fd_exhaustion",),
+    errno.EAGAIN: ("fd_exhaustion",),
+    errno.ETXTBSY: ("concurrent_writer",),
+}
+
+#: ENOENT is the errno a step raises for free: naming a path nothing creates IS the shape,
+#: and a row that reads a file its own step never wrote needs no setup entry to be able to
+#: fail. Refusing its needle would teach an author to write the message in a title instead.
+_UNSTAGED_OK_ERRNOS = frozenset({errno.ENOENT})
+
+#: A write into one of these is refused by the operating system for an unprivileged uid,
+#: which is the condition behind the EACCES text of `rf-write-into-proc-error-text`.
+_PROTECTED_WRITE_PREFIXES = ("/proc/", "/sys/", "/boot/", "/usr/lib/", "/dev/")
+
+#: A single command line this long is the argument-list ceiling: `res-oversized-arg-list`
+#: carries one of 200,022 characters, so a row that wants to assert E2BIG's text has to
+#: actually carry an argument list of the size that raises it.
+_ARGV_CEILING_CHARS = 100_000
+
+
+def _mode_lacks_write(item: dict) -> bool:
+    """Whether a setup entry declares a mode this uid cannot write through."""
+    mode = item.get("mode")
+    if mode is None:
+        return bool(item.get("read_only"))
+    try:
+        bits = int(str(mode), 8)
+    except (TypeError, ValueError):
+        return False
+    return not bits & stat.S_IWUSR
+
+
+def _step_strings(steps: list[dict]) -> list[str]:
+    return [v for s in steps for v in (s.get("args") or {}).values() if isinstance(v, str)]
+
+
+#: A shell output redirect — `> path`, never `2>` or `&>`, which are how the shipped rows
+#: send their stderr to /dev/null and do not claim anything about writing to it.
+_OUTPUT_REDIRECT = re.compile(r"(?<![0-9&|])>\s*(\S+)")
+
+
+def _absolute_write_targets(steps: list[dict]) -> list[str]:
+    out: list[str] = []
+    for text in _step_strings(steps):
+        for target in _OUTPUT_REDIRECT.findall(text):
+            if target.startswith("/"):
+                out.append(target)
+    return out
+
+
+def _staged_causes(setup: list[dict], steps: list[dict]) -> tuple[set[str], list[str]]:
+    """The error conditions this row really creates, plus what was measured and rejected.
+
+    A cause counts only when the condition behind it exists, so a needle asking for a
+    permission refusal is not "staged" by a step writing to a path that was never there — the
+    kernel answers ENOENT for that, and the row would sit red blaming the substrate for a
+    filename. The protected-path reading is therefore a probe of this machine, which is the
+    honest instrument: the claim is about the machine.
+    """
+    causes: set[str] = set()
+    notes: list[str] = []
+    if any(_mode_lacks_write(item) for item in setup):
+        causes.add("mode_without_write")
+    for target in _absolute_write_targets(steps):
+        if not target.startswith(_PROTECTED_WRITE_PREFIXES):
+            continue
+        if not os.path.exists(target):
+            notes.append(f"{target} does not exist, so a write there is refused with ENOENT "
+                         "before any permission check and can never print a permission error")
+        elif os.access(target, os.W_OK):
+            notes.append(f"{target} is writable by uid {os.getuid()}, so no permission refusal "
+                         "is available to print")
+        else:
+            causes.add("protected_path")
+    for text in _step_strings(steps):
+        if "setrlimit" in text or "RLIMIT_" in text:
+            causes.add("memory_ceiling")
+        if len(text) > _ARGV_CEILING_CHARS:
+            causes.add("argv_ceiling")
+    return causes, notes
+
+
+def errno_needle_reason(post: Post, setup: list[dict], steps: list[dict]) -> str | None:
+    """Why this row's `shown_contains` needle cannot be produced by its own setup or step,
+    or None when nothing about it is impossible.
+
+    The question is the row's own capability, never the substrate's behaviour: a needle that
+    needs an errno no part of the row stages stays red for every substrate on earth, which is
+    the difference between an instrument and a wish. Called by `_parse_task` at load time, and
+    by the corpus test that scans the shipped rows — one measurement, both sides (#2929).
+    """
+    if post.kind != "shown_contains" or not isinstance(post.expected, str):
+        return None
+    code = OS_ERROR_NEEDLES.get(post.expected.lower())
+    if code is None or code in _UNSTAGED_OK_ERRNOS:
+        return None
+    named = ERRNO_NAMES.get(code, f"errno {code}")
+    causes = _ERRNO_CAUSES.get(code)
+    if causes is None:
+        return (f"shown_contains needle {post.expected!r} is what {named} prints, and no "
+                "setup or step shape in this corpus stages that condition, so the needle can "
+                "never fire and the row would report a defect no substrate can cause")
+    staged, notes = _staged_causes(setup, steps)
+    if staged & set(causes):
+        return None
+    return (f"shown_contains needle {post.expected!r} is what {named} prints, which needs one "
+            f"of {sorted(causes)}; this row stages "
+            f"{sorted(staged) if staged else 'nothing'}"
+            + (f"; measured: {'; '.join(notes)}" if notes else "")
+            + ", so the needle can never fire")
+
+
 def _control_can_redden(control: Task, base: Task) -> str | None:
     """Why this control could NOT redden its own postcondition, or None if it can.
 
@@ -418,6 +581,9 @@ def _parse_task(row: Any, seen_ids: set[str] | None = None) -> Task:
                  f"it travels with, which hashes to {got}")
 
     post = postcondition_from_spec(row.get("postcondition"))
+
+    needle_reason = errno_needle_reason(post, row.get("setup") or [], parsed_steps)
+    _require(needle_reason is None, f"corpus task {tid}: {needle_reason}")
 
     control_for = row.get("control_for")
     control = row.get("control")

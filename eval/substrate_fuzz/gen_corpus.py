@@ -62,7 +62,16 @@ PDF = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\
 #: still reads as success.
 NUL_TEXT = b"before\x00after\n"
 EMOJI_TEXT = "face \U0001F600 grinning\n".encode("utf-8")
-COMBINING_TEXT = "cafe\u0301 combining\n".encode("utf-8")
+#: The bytes `printf 'cafe\xcc\x81\n'` actually emits: ASCII `cafe`, then U+0301 COMBINING
+#: ACUTE ACCENT in its DECOMPOSED form (`cc 81`), then a newline — 7 bytes. The row that reads
+#: this used to declare `"cafe\u0301 combining\n"` as its expected payload, a 16-byte string
+#: carrying a word the step never prints, so it went red against a substrate that had answered
+#: faithfully (declared `84720c67…`, observed `dcc49242…`, both of them correct digests of
+#: different strings) and the first arm-A run reported it as a normalisation finding. It is a
+#: corpus bug, and the constant now states the payload the step emits (#2929). The row still
+#: detects the fault it was written for: a boundary that precomposed the sequence would answer
+#: `caf\xc3\xa9\n`, 6 bytes, and fail this digest.
+COMBINING_TEXT = b"cafe\xcc\x81\n"
 CJK_TEXT = "日本語 nbsp\u00a0X\n".encode("utf-8")
 CRLF = b"a\r\nb\r\n"
 PLAIN = b"plain payload\n"
@@ -671,9 +680,11 @@ ctl("ctl-res-oversized-flipped", "resource_limits", "res-oversized-arg-list",
 
 # ══ refusal_shapes ══════════════════════════════════════════════════════════
 #: The three substrings below were read off real answers from this box's own tools
-#: (`bash: …: command not found`, `…: Permission denied`, `Read-only file system`) and the
-#: harness's own refusal line in `agent_mcp/main.py`. They are the error SHAPE the item
-#: asks for; pinning a whole message would pin bash's version too.
+#: (`bash: …: command not found`, `…: Permission denied` from a denied write, and the same
+#: `Permission denied` from a mode-500 directory) plus the harness's own refusal line in
+#: `agent_mcp/main.py`. They are the error SHAPE the item asks for; pinning a whole message
+#: would pin bash's version too.
+#:
 task(id="rf-missing-binary-error-text", domain="refusal_shapes",
      title="a missing binary's answer says not found",
      reason="the shape, not a stack trace — a caller has to be able to tell 'not "
@@ -683,23 +694,43 @@ task(id="rf-missing-binary-error-text", domain="refusal_shapes",
      postcondition={"kind": "shown_contains", "expected": "not found"},
      expected_layers=["host"])
 
+#: The path is `/proc/version` and not a name this corpus invented. The row used to write to
+#: `/proc/substrate-fuzz-nope`, which does not exist, so the kernel answered ENOENT —
+#: `/bin/sh: line 1: /proc/substrate-fuzz-nope: No such file or directory` — and the row's
+#: `Permission denied` needle could never appear; the first arm-A run reported it as a host
+#: defect. ENOENT arrives before any permission check, so a denied-permission needle needs a
+#: target that IS there and IS unwritable: `/proc/version`, mode 444 owned by `nobody`, which
+#: uid 1000 cannot open for writing (measured: `bash: line 1: /proc/version: Permission denied`,
+#: exit 1, nothing written). The loader refuses the invented-path shape on sight
+#: (`corpus.errno_needle_reason` measures the redirect target).
 task(id="rf-write-into-proc-error-text", domain="refusal_shapes",
      title="a denied write says permission denied",
      reason="the error text is the only thing that lets a caller attribute the refusal to "
-            "the kernel instead of to itself.",
-     steps=[{"tool": "Bash", "args": {"command": "printf x > /proc/substrate-fuzz-nope",
+            "the kernel instead of to itself, so the target has to be a file that exists and "
+            "refuses — a missing path yields ENOENT and tests nothing about permission.",
+     steps=[{"tool": "Bash", "args": {"command": "printf x > /proc/version",
                                       "cwd": "{root}"}}],
      postcondition={"kind": "shown_contains", "expected": "Permission denied"},
      expected_layers=["host", "harness"])
 
+#: The readonly row's needle used to be `Read-only file system`, and it could never have
+#: fired: that is EROFS, the message for a read-only MOUNT, while this row's fixture is a
+#: mode-500 DIRECTORY, which is EACCES. Measured on this box as uid 1000 —
+#: `mkdir -p /tmp/rotestcheck/rodir && chmod 500 $_ && printf x > $_/inside.txt` prints
+#: `bash: line 1: …/inside.txt: Permission denied`. Arm A runs inside an ordinary writable
+#: tree and cannot stage a read-only mount, so the row now asserts the error its own setup
+#: causes, and the loader refuses the old needle outright
+#: (`corpus.errno_needle_reason`).
 task(id="rf-readonly-dir-error-text", domain="refusal_shapes",
-     title="a read-only filesystem says so in the answer",
+     title="a directory with no write permission says permission denied",
      reason="Orellana's filesystem-permission class: the fault is invisible in a "
-            "boolean and obvious in a string.",
+            "boolean and obvious in a string. The string has to be the one this setup "
+            "causes — a mode-500 directory is EACCES, and the row used to demand EROFS's "
+            "text, which no fixture arm A can stage would ever print.",
      setup=[{"path": "rodir", "dir": True, "mode": "500"}],
      steps=[{"tool": "Bash", "args": {"command": "printf x > rodir/inside.txt",
                                       "cwd": "{root}"}}],
-     postcondition={"kind": "shown_contains", "expected": "Read-only file system"},
+     postcondition={"kind": "shown_contains", "expected": "Permission denied"},
      expected_layers=["host"])
 
 task(id="rf-destructive-command-refused", domain="refusal_shapes",

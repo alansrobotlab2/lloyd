@@ -728,6 +728,93 @@ def _expected_limit(task, step: StepResult) -> bool:
     return False
 
 
+#: U+FFFD, the character a decoder substitutes for bytes it could not decode. Its presence in
+#: an answer the corpus authored as clean bytes is the codec testifying against itself, and it
+#: is evidence the byte pair cannot supply: #2929's `roundtrip-png` came back with `\ufffdPNG`
+#: in front of it, so the substitution happened inside the tool's OWN stdout capture and the
+#: tool side and the shown side agreed on the mangled bytes. Rule 1 compares those two sides and
+#: therefore cannot see a fault both sides share; the replacement character is what makes that
+#: fault nameable instead of a default.
+_REPLACEMENT_CHAR = "\ufffd"
+
+
+def _payload_miss_layer(task, step: StepResult, detail: str, pair: dict) -> dict:
+    """Where a payload miss belongs, from the evidence the miss itself produced.
+
+    Never `model`, and that is not a stylistic choice. Arm A dispatches with `NO_MODEL`: the
+    option handed to `_execute_tool_call` is a stub that raises if the loop reaches for a
+    completion, so no arm-A row can have been failed by a model. Filing a miss there was a
+    layer the run could not earn, and it was the default — which is how the first real arm-A
+    run reported 4 of its 14 red rows as `model` while the evidence in each of those records
+    named a byte change, an E2BIG refusal or a mode-500 fixture (#2929).
+
+    Four readings, in order of how specifically the miss speaks for itself:
+
+    * the two sides of the boundary disagree — `interface`, the same measurement rule 1 makes
+      decisive for a control;
+    * the answer carries the decoder's replacement character and the row's own fixture does
+      not — `interface`, because a codec substituted bytes the corpus never authored (an
+      `interface` claim always requires the tool's own bytes, so this route refuses rather
+      than guesses when they were not recorded);
+    * the answer text names a guard or a syscall error although the step reported no error —
+      `harness` or `host`, the layer that text belongs to;
+    * none of the above — :class:`AttributionError`. A miss the runner cannot explain is the
+      runner's defect and is booked under `unattributed`, never parked in a layer that happens
+      to be free.
+    """
+    if step.tool_recorded and step.tool_bytes != step.effective_bytes:
+        return {"layer": "interface",
+                "rule": "5: the payload missed and the two sides of the boundary disagree",
+                "evidence": (f"{detail}; tool sha256 {step.tool_sha256} != shown sha256 "
+                             f"{step.shown_sha256} ({len(step.tool_bytes or b'')} bytes "
+                             f"answered, {len(step.effective_bytes)} bytes shown, "
+                             f"raw_chars={step.raw_chars})"),
+                "interface_pair": pair}
+
+    answer = step.effective_bytes.decode("utf-8", "surrogateescape")
+    # The witness is the row's OWN fixture bytes: a replacement character is proof of a
+    # substitution only beside the bytes the corpus authored. A row with no fixture has no
+    # such witness, and its miss keeps falling through to the markers below rather than
+    # claiming a codec fault from an absence.
+    fixture_fffd = (_REPLACEMENT_CHAR
+                    in (task.fixture or b"").decode("utf-8", "surrogateescape"))
+    if _REPLACEMENT_CHAR in answer and task.fixture and not fixture_fffd:
+        if not step.tool_recorded:
+            raise AttributionError(
+                f"{task.id}: the answer carries the decoder's replacement character, which is "
+                f"an interface claim, but the tool side is {NOT_MEASURED} so the bytes cannot "
+                "be put beside the ones that reached messages")
+        both_sides = ("; the tool side carries them too, so the substitution happened inside "
+                      "the tool's own capture and the interface pair cannot see it"
+                      if step.tool_bytes == step.effective_bytes else "")
+        return {"layer": "interface",
+                "rule": "5: the answer carries the decoder's replacement character where the "
+                        "corpus authored clean bytes",
+                "evidence": (f"{detail}; {answer.count(_REPLACEMENT_CHAR)} replacement "
+                             f"character(s) in the {len(step.effective_bytes)} bytes shown, "
+                             f"head={step.shown_head!r}; the row's {len(task.fixture)}-byte "
+                             f"fixture contains none" + both_sides),
+                "interface_pair": pair}
+
+    hit = _marker(answer, _HARNESS_MARKERS)
+    if hit:
+        return {"layer": "harness", "rule": f"5: the answer names a guard ({hit!r}) while the "
+                                            "step reported no error",
+                "evidence": f"{detail}; shown text: {answer[:400]}", "interface_pair": pair}
+    hit = _marker(answer, _HOST_MARKERS)
+    if hit:
+        return {"layer": "host",
+                "rule": f"5: the answer names a syscall-level error ({hit!r}) while the step "
+                        "reported no error",
+                "evidence": f"{detail}; shown text: {answer[:400]}", "interface_pair": pair}
+
+    raise AttributionError(
+        f"{task.id}: the payload missed and nothing in the miss names a layer — the two sides "
+        f"of the boundary agree, no replacement character appears, and the text names no guard "
+        f"or syscall error, so filing this anywhere would be a label and not a measurement: "
+        f"{detail}")
+
+
 def attribute(task, step: StepResult, *, root: Path | None = None) -> dict:
     """One layer from the fixed vocabulary, the rule that chose it, and its evidence.
 
@@ -741,10 +828,13 @@ def attribute(task, step: StepResult, *, root: Path | None = None) -> dict:
     4. the tool's answer carries a syscall-level error while the file it claims is present —
        `host` as well, because the kernel spoke;
     5. the payload does not match the corpus's own digest and the answer arrived without
-       error — `model`, in the corpus's sense: the bytes handed to the model are not the
-       bytes the task was authored against;
+       error — the miss's OWN evidence decides, by :func:`_payload_miss_layer`: `interface`
+       where the two sides of the boundary disagree or where the decoder's replacement
+       character stands in for bytes the row authored, `harness` or `host` where the answer
+       text names a guard or a syscall error despite a step that reported none. Never `model`:
+       arm A dispatches with `NO_MODEL`, so a miss is a verdict this run cannot earn (#2929);
     6. nothing matched — :class:`AttributionError`, which is the runner's defect and is
-       reported as one, never an `unknown` bucket.
+       reported as one, never an `unknown` bucket, and never `model` as a leftover either.
 
     An `interface` verdict requires the byte pair. A row that declares `interface` as its only
     expected layer and whose tool side was never captured raises too: the only layer that row
@@ -809,9 +899,7 @@ def attribute(task, step: StepResult, *, root: Path | None = None) -> dict:
 
     ok_, detail = check_postcondition(task, root if root is not None else Path.cwd(), step)
     if not ok_:
-        return {"layer": "model", "rule": "5: the payload the model was given is not the "
-                                          "payload the corpus row was authored against",
-                "evidence": detail, "interface_pair": pair}
+        return _payload_miss_layer(task, step, detail, pair)
     raise AttributionError(f"{task.id}: asked to attribute a result that did not fail "
                            f"({detail}) — a record with a layer and no failure would let a "
                            "passing task look like a defect, so the runner is blamed instead")
@@ -831,8 +919,16 @@ def _do_setup(root: Path, task, fixture_bytes: bytes | None) -> None:
         target = root / rel
         if item.get("dir"):
             target.mkdir(parents=True, exist_ok=True)
-            if item.get("read_only"):
-                os.chmod(target, 0o500)
+            # The mode chmod belongs HERE, on the directory branch. The shipped version read
+            # `item.get("read_only")` — a key no corpus row has ever carried (0 hits in
+            # `corpus.json`) — and fell through `continue` to the `item.get("mode")` chmod
+            # below, which the branch never reaches. Both mode-500 rows therefore ran against
+            # a 755 directory, `printf x > rodir/inside.txt` SUCCEEDED, and the pair of
+            # filesystem-refusal rows went red for a fixture that was never unwritable (#2929).
+            # A declared ceiling the runner does not apply is worse than no ceiling: the row's
+            # own expectation becomes a false claim about the substrate.
+            if item.get("mode") is not None:
+                os.chmod(target, int(str(item["mode"]), 8))
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         if item.get("fixture"):
@@ -1113,6 +1209,64 @@ def _failure_from(rec: dict, task) -> None:
     }
 
 
+# ── the verdict ─────────────────────────────────────────────────────────────
+
+#: The one sentence a green arm-A board is allowed to say, and the only one. A constant
+#: because the item's acceptance clause quotes that wording: a report that printed something
+#: merely similar would let the clause pass on a phrase nobody agreed to.
+CLEAN_VERDICT = "substrate clean for the enumerated shapes"
+
+
+def stated_findings(report: dict) -> list[dict]:
+    """Every red row that is not a control — the findings a reader has to act on.
+
+    A control row is meant to go red: that is the seeded break doing its job, and a run whose
+    controls all passed would be a run with eight dead detectors. So the findings are exactly
+    the rows that claim something about the substrate and did not get it."""
+    return [r for r in report["results"] if r["ok"] is False and not r["is_control"]]
+
+
+def verdict_line(report: dict) -> str:
+    """One line stating what the run concluded, not merely what it measured.
+
+    Before this, the report printed 52 per-row lines and a reader had to assemble the
+    sentence: the item's owed entry is that a run either names its defects or states the
+    substrate clean, and "a green board with missing controls is not a result". Three shapes,
+    and the middle one is the reason the line exists at all — a board with nothing red and no
+    live control looks identical to a clean one from the per-row lines alone.
+
+    A row filed as `unattributed` still appears: it is a red non-control row, and its layer
+    being unknown is a defect in this module, which is the last thing the verdict should
+    round off to a clean sentence."""
+    findings = stated_findings(report)
+    controls = report["control_breaks_verified"]
+    dark = sorted(name for name, per in report["domains"].items()
+                  if per["controls"] and not per["controls_verified"])
+    stayed_green = [r["id"] for r in report["results"]
+                    if r["is_control"] and r["rule"] == "control stayed green"]
+    if findings:
+        named = "; ".join(
+            f"{r['id']} [{r['layer'] if r['layer'] is not None else 'unattributed'}]"
+            + (" (limit shown live)" if r.get("expected_limit") else "")
+            for r in findings)
+        return (f"  VERDICT: {len(findings)} substrate finding(s) — {named}; "
+                f"{controls} control break(s) verified")
+    why = []
+    if not controls:
+        why.append("no control break was verified in this run")
+    if dark:
+        why.append(f"{len(dark)} domain(s) with no verified control ({', '.join(dark)})")
+    if stayed_green:
+        why.append(f"{len(stayed_green)} control(s) that stayed green "
+                   f"({', '.join(stayed_green)})")
+    if why:
+        return (f"  VERDICT: nothing red among the non-control shapes, but {'; '.join(why)}: "
+                "this board is not evidence and the substrate is NOT declared clean")
+    return (f"  VERDICT: {CLEAN_VERDICT} — nothing red among "
+            f"{report['tasks_run']} shapes, {controls} control break(s) verified across "
+            f"{report['control_domains']} domains")
+
+
 # ── the run ─────────────────────────────────────────────────────────────────
 
 def run_corpus(tasks=None, *, domains=None, limit: int | None = None,
@@ -1184,7 +1338,7 @@ def run_corpus(tasks=None, *, domains=None, limit: int | None = None,
                 layers[r["layer"]] += 1
         per_domain[r["domain"]] = f"{d['k']} / {d['n']}"
 
-    return {
+    report = {
         "arm": "A", "schema": 1, "item": 2620,
         # Wall clock AND the calendar window: an owed check asks whether a run fits the
         # budget, and a bare duration says nothing about what else on the box was awake.
@@ -1205,6 +1359,11 @@ def run_corpus(tasks=None, *, domains=None, limit: int | None = None,
         "control_domains": len({r["domain"] for r in records if r["is_control"]}),
         "results": records,
     }
+    # The verdict goes into the artefact and not only into stdout: the owed-check job reads the
+    # dated row, and a conclusion that exists only in a terminal scrollback is a conclusion
+    # nobody can read after the window closes.
+    report["verdict_line"] = verdict_line(report)
+    return report
 
 
 # ── the dated artefact ──────────────────────────────────────────────────────
@@ -1307,10 +1466,13 @@ _HTTPX_ORIG: dict[str, Any] = {}
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
-    """Run arm A headless and print the per-domain numbers. Exit 0 always except on a corpus
-    the loader refuses: what the first run finds is owed-check material, and until a fix
-    exists for each defect it names, a non-zero exit would make a scheduler treat an
-    instrument working as designed as an outage."""
+    """Run arm A headless: the per-domain numbers, then one verdict line.
+
+    Exit 0 always except on a corpus the loader refuses: what a run finds is owed-check
+    material, and until a fix exists for each defect it names, a non-zero exit would make a
+    scheduler treat an instrument working as designed as an outage. The verdict line is what
+    keeps that exit-code policy honest — the reader is not meant to infer the conclusion from
+    a list of layer counts."""
     ap = argparse.ArgumentParser(prog="python -m eval.substrate_fuzz.runner")
     ap.add_argument("--domains", nargs="*", default=None)
     ap.add_argument("--limit", type=int, default=None)
@@ -1340,6 +1502,7 @@ def main(argv: list[str] | None = None) -> int:
                       f"{r['failure']['evidence'][:120]}")
     if report["unattributed_count"]:
         print(f"  UNATTRIBUTED (runner defect): {', '.join(report['unattributed'])}")
+    print(report["verdict_line"])
     if not args.no_artifact:
         out = (write_artifact(report, out_dir=args.out) if args.out
                else write_artifact(report))
