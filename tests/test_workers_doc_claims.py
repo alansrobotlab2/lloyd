@@ -1963,6 +1963,75 @@ def test_section6_names_the_runs_table_as_the_effectiveness_denominator():
         "likely cause")
 
 
+def test_section6_names_the_day_growth_reviews_and_what_the_watermark_means():
+    """#2893 clause 5: two sentences §6 never had, each checked against the code.
+
+    The missing one that cost the bursts: §6 said the sweep runs once a day, which is
+    true, and never said WHICH day it counts — and that is the half that decides
+    whether a detector can fire at all. The missing one about the watermark:
+    `last_enqueued` reads like "the last row enqueued" and is in fact stamped after
+    every sweep, so a reader who trusts the name concludes a source that never
+    dispatched never ran.
+
+    Nothing here greps for a phrase and stops. The lag the doc states is compared to
+    `GROWTH_REVIEW_LAG_DAYS`, the helper it names is called, and the source file is
+    read to confirm the call really passes the shifted day AND the pass's own day as
+    the stamp — the pair the paragraph says cannot move apart.
+    """
+    sec = _section(SEC6)
+    sub = sec[sec.index("### `failure-ledger`"):]
+    from app import failure_ledger as app_fl
+
+    assert "growth_review_day" in sub and "GROWTH_REVIEW_LAG_DAYS" in sub, (
+        "§6 stopped saying which day growth counts, which is the fact that decides "
+        "whether the detector can ever see a burst")
+    lag = re.search(r"`GROWTH_REVIEW_LAG_DAYS`[^\d\n]{0,8}(\d+)", sub)
+    assert lag and int(lag.group(1)) == app_fl.GROWTH_REVIEW_LAG_DAYS, (
+        "§6 no longer states the review lag with the number the code uses "
+        f"(code: {app_fl.GROWTH_REVIEW_LAG_DAYS})")
+    assert app_fl.growth_review_day("2026-10-03") == "2026-10-02", (
+        "the helper the doc names no longer returns the day before the pass")
+
+    src = (ROOT / "workers" / "sources" / "failure_ledger.py").read_text(
+        encoding="utf-8")
+    one_line = re.sub(r"\s+", " ", src)
+    assert "fl.detect_growth(conn, day=fl.growth_review_day(day), detected_on=day)" \
+        in one_line, (
+        "the pass no longer counts the day before and stamps its own, which is the "
+        "pair §6's bullet describes: count D-1, stamp D, or dispatch never sees it")
+    assert "WHERE detected_on = ?" in sub, (
+        "§6 lost the reason the two days cannot move apart")
+
+    assert "last_enqueued" in sub and "last sweep" in sub, (
+        "§6 stopped saying what `last_enqueued` actually records")
+    assert "last_enqueue_ok" in sub, (
+        "§6 lost the pointer to the stamp that DOES say a pass completed")
+    assert one_line.rindex("sweep_and_dispatch, queue=queue") < one_line.index(
+        "queue.wm_set"), (
+        "the source no longer stamps `last_enqueued` after the sweep returns, so the "
+        "sentence saying it means 'last swept' is the one that needs rewriting")
+
+    # §6's two `app/failure_ledger.py:` line citations moved with this edit
+    # (`detect_growth` grew a `detected_on` parameter and the constant block above it
+    # grew the review-day rule), and a citation nobody re-checks is the kind that
+    # reads authoritative while pointing at a comment. Each is compared to the line
+    # the code actually has.
+    ledger_src = (ROOT / "app" / "failure_ledger.py").read_text(encoding="utf-8")
+    lines = ledger_src.splitlines()
+
+    def _cited(name: str) -> int:
+        m = re.search(rf"`app/failure_ledger\.py:(\d+)` `{name}", sub)
+        assert m, f"§6 no longer cites `app/failure_ledger.py:<line>` for {name}"
+        return int(m.group(1))
+
+    assert "def reconcile(" in lines[_cited("reconcile()") - 1], (
+        f"§6 cites line {_cited('reconcile()')} for reconcile(), which is now "
+        f"{lines[_cited('reconcile()') - 1]!r}")
+    cited_runs_total = re.search(r"reports `runs_total` \(`:(\d+)`\)", sub)
+    assert cited_runs_total and '"runs_total"' in lines[int(cited_runs_total.group(1)) - 1], (
+        "§6's `runs_total` line citation no longer lands on the dict key it names")
+
+
 def test_workers_md_does_not_restate_the_retired_unscheduled_claim():
     """The second carrier of the same retired claim, in the second workers doc.
 

@@ -471,6 +471,75 @@ def test_zero_days_are_not_in_the_growth_median(tmp_path):
     assert fl.detect_growth(conn, day=TODAY) == []
 
 
+def test_growth_reviews_the_day_before_the_pass_when_told_to(tmp_path):
+    """#2893 clause 3: the burst lives on the day BEFORE the pass.
+
+    The scheduled pass wakes around 02:00 UTC, so the day its own clock names holds
+    two hours of events and a burst that landed the previous evening is never
+    counted. Here the pass's day is `TODAY` (2026-10-02) and the reviewed day is
+    `growth_review_day(TODAY)` = 2026-10-01: five events dated 10-01 (18:00Z-22:00Z)
+    against a trailing window of 2 on 09-27 and 2 on 09-30 gives an active median of
+    2.0 and a 2x bar of 4.0, so 5 clears it.
+
+    Aimed at the pass's own day the SAME store yields zero — every node above this
+    one seeded its events on the day it reviewed, which is why the whole file stayed
+    green on a detector that has never fired in production.
+    """
+    conn = ledger(tmp_path)
+    sig = seed(conn, "voice worker dropped a turn: asr timeout", [
+        NOW - timedelta(days=5), NOW - timedelta(days=5, hours=-1),
+        NOW - timedelta(days=2), NOW - timedelta(days=2, hours=-1),
+        NOW - timedelta(hours=18), NOW - timedelta(hours=17),
+        NOW - timedelta(hours=16), NOW - timedelta(hours=15),
+        NOW - timedelta(hours=14)])
+    review = fl.growth_review_day(TODAY)
+    assert (review, TODAY) == ("2026-10-01", "2026-10-02"), \
+        "the reviewed day is exactly one day behind the pass's"
+    assert fl.GROWTH_REVIEW_LAG_DAYS == 1
+
+    own_day = conn.execute("SELECT COUNT(*) FROM failure_events WHERE ts LIKE ?",
+                           (f"{TODAY}T%",)).fetchone()[0]
+    assert own_day == 0, "nothing in this store belongs to the pass's own day"
+    assert fl.detect_growth(conn, day=TODAY) == [], \
+        "reviewed over ts[:10] == day_of(now) — the shape #2893 was filed against — " \
+        "this burst is invisible, which is the bug, not the expectation"
+
+    ids = fl.detect_growth(conn, day=review, detected_on=TODAY)
+    assert len(ids) == 1, f"five events against a 2.0 median is one growth finding, got {ids}"
+    assert kinds(conn) == [(sig, "growth")], \
+        "the finding is stamped the PASS's day: dispatch_findings selects " \
+        "WHERE detected_on = ? on that day, and a finding stamped 2026-10-01 would " \
+        "sit undispatched forever"
+    row = conn.execute("SELECT occurrences FROM failure_findings WHERE id = ?",
+                       (ids[0],)).fetchone()
+    assert row[0] == 5
+
+
+def test_reviewing_the_same_growth_day_twice_stamps_no_second_finding(tmp_path):
+    """#2893 clause 4 at the store level.
+
+    The reviewed day stays D-1 for every pass of day D, so re-reviewing it is the
+    normal case rather than an edge. `_emit_finding` keys on
+    (signature, kind, detected_on), so the second sweep returns the same finding id
+    instead of appending one — and one finding per day is what keeps the daily cap
+    from being asked to absorb a growing family several times a day.
+    """
+    conn = ledger(tmp_path)
+    seed(conn, "vision node published no frames", [
+        NOW - timedelta(days=6), NOW - timedelta(days=6, hours=-1),
+        NOW - timedelta(days=4), NOW - timedelta(days=4, hours=-1),
+        NOW - timedelta(hours=20), NOW - timedelta(hours=19),
+        NOW - timedelta(hours=18), NOW - timedelta(hours=17),
+        NOW - timedelta(hours=16)])
+    review = fl.growth_review_day(TODAY)
+    first = fl.detect_growth(conn, day=review, detected_on=TODAY)
+    again = fl.detect_growth(conn, day=review, detected_on=TODAY)
+    assert first and again == first, "re-review re-uses the finding rather than appending"
+    assert len(kinds(conn)) == 1
+    assert conn.execute("SELECT COUNT(*) FROM failure_findings").fetchone()[0] == 1, \
+        "one (signature, kind, detected_on) is one row, however many sweeps see it"
+
+
 def test_findings_are_rows_and_a_re_sweep_does_not_duplicate_them(tmp_path):
     conn = ledger(tmp_path)
     seed(conn, "voice worker dropped a turn: asr timeout",

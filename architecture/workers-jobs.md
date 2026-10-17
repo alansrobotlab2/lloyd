@@ -1144,6 +1144,31 @@ touching it are both about not lying to the reader.
   day, so a second dispatch the same day writes nothing, and the findings the cap
   held back stay in `failure_findings` with `dispatched = 0` — which is the figure
   that says how much was deliberately left uninvestigated.
+- **Growth counts the day BEFORE the pass and is stamped with the pass's own day.**
+  One sweep a day means the day a pass's clock names holds only the ~2 h before it
+  woke — the three logged passes ran at 01:51:42, 02:03:27 and 02:38:29 UTC — so
+  counting `ts[:10] == day_of(now)` looked at a slice too thin to contain the burst
+  the detector exists for. Measured over the live store on 2026-10-17: of the 8
+  signature-days that reached `GROWTH_MIN_COUNT` (3) across 22 event days, 6 had zero
+  events before 02:40 UTC on their own day (2026-09-06 n=6, 09-09 n=3, 09-14 n=3,
+  09-29 n=3, 09-30 n=11, 10-02 n=8), and an 83-event store held 0 rows in
+  `failure_findings` and 0 in `failure_dispatches` (#2893). So growth counts
+  `app/failure_ledger.growth_review_day(day)`, which is `day` minus
+  `GROWTH_REVIEW_LAG_DAYS` = 1 — a CLOSED day rather than a "since the last pass"
+  window whose start this store cannot verify without reading `workers.db`, which its
+  header rule forbids — and the finding is stamped `detected_on` with the pass's own
+  day, because `dispatch_findings` selects `WHERE detected_on = ?` on the day it is
+  called with. Move one without the other and findings accrue with `dispatched = 0`
+  forever while the pass logs a sensible-looking `0 finding(s)`-shaped summary:
+  `tests/test_failure_ledger_dispatch.py` pins the pair from a frozen 02:10 clock
+  through `enqueue_if_due` to the queue row.
+- **`last_enqueued` is the last sweep, not the last enqueued row.** The source stamps
+  it unconditionally after `sweep_and_dispatch` returns, whether or not a dispatch
+  happened, so it is the interval gate's clock and answers only "has this source been
+  asked today". A day with findings and a day with none move it identically, so nothing
+  about the day's outcome can be read out of it. The stamp that says a pass actually
+  completed is the pool's `last_enqueue_ok` (`workers/dispatch_watch.py`), written only
+  on a clean return.
 
 The prompt names at most `DISPATCH_MAX_RECORDS` finding ids plus a window of
 `DISPATCH_WINDOW_DAYS` around `first_seen`, and `execute` pastes the ledger's own
@@ -1163,9 +1188,9 @@ real ledger and the real guard logs before it, and this is what it had done
 (measured 2026-10-03): `reconcile()` over the real store reported 313 events across 30
 families, the top two holding 80 and 41 of them. Counting is what the sweep does
 alone; acting needs the pool. **The denominator is `runs`, not that event count** —
-`app/failure_ledger.py:595` `reconcile()` reports `runs_total` (`:626`) as
+`app/failure_ledger.py:638` `reconcile()` reports `runs_total` (`:669`) as
 `SELECT status, COUNT(*) FROM runs WHERE source = ? GROUP BY status` run with
-`source='failure-ledger'` against `workers.db` (`:617-621`, its own docstring at `:605`
+`source='failure-ledger'` against `workers.db` (`:660-664`, its own docstring at `:648`
 already names it "the denominator for 'how much did the ledger actually do?'"), and
 `runs` rows are written only by `workers/queue.py:245` when a worker finishes one. So
 `runs_total` is the one

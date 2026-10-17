@@ -47,6 +47,20 @@ DAY = fl.day_of(NOW)
 #: word is a second family that cannot merge into the first.
 WORDS = ("alpha", "beta", "gamma", "delta")
 
+#: The clock the real scheduled pass runs on (#2893). `interval_seconds: 3600` with
+#: `min_interval_seconds: 86400` lets exactly one sweep through per day, and the
+#: watermark says when the last one was: `workers.db`
+#: `watermarks('failure-ledger','last_enqueued')` is
+#: `2026-10-17T02:38:29.088606+00:00`. #2893's triage read the three logged pass
+#: instants off the worker log as 01:51:42, 02:03:27 and 02:38:29 UTC, the last
+#: matching that watermark to the second. So the pass that owns day D is awake for
+#: about the first two hours of D and never again. `NOW` above is midday — the one
+#: clock shape that cannot see the bug this section exists for.
+EARLY_PASS = datetime(2026, 10, 3, 2, 10, tzinfo=timezone.utc)
+#: The day that pass has to review. Named by arithmetic on the pass's own day, not
+#: by a typed literal, so the node and the library can never disagree about it.
+YESTERDAY = fl.day_of(EARLY_PASS - timedelta(days=1))
+
 
 @pytest.fixture(autouse=True)
 def frozen_ledger_clock(monkeypatch):
@@ -432,3 +446,163 @@ def test_derived_diagnosis_is_empty_once_the_days_findings_are_dispatched(tmp_pa
     assert failure_ledger.derive_diagnosis(conn, DAY) == "", \
         "nothing left undispatched, so the sweep must invent a question to dispatch"
     conn.close()
+
+
+# ------------------------------------------------------------- growth's day --
+
+
+def seed_yesterdays_burst(conn) -> str:
+    """One OLD family, five events yesterday, nothing on the pass's own day.
+
+    The shape #2893 measured over the live ledger: a burst in a family that
+    already existed. Two events on 2026-09-27 and two on 2026-09-29 make the
+    reviewed day's trailing-7-day active median 2.0, so the 2x bar is 4.0; the
+    five on 2026-10-02 clear `GROWTH_MIN_COUNT` (3) and that bar.
+
+    `first_seen` is 2026-09-27, more than 24 h before either test clock here, so
+    `detect_new_onset` cannot fire: a spike in a family the ledger already knows
+    has exactly one detector, and these nodes are about whether it can ever see
+    one. Every event is written with the same message, so `signature`'s digit
+    collapse and all of it is one signature.
+    """
+    stamps = [datetime(2026, 9, 27, 9, 0, tzinfo=timezone.utc),
+              datetime(2026, 9, 27, 10, 0, tzinfo=timezone.utc),
+              datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc),
+              datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)]
+    stamps += [datetime(2026, 10, 2, h, 0, tzinfo=timezone.utc)
+               for h in (18, 19, 20, 21, 22)]
+    sig = ""
+    for stamp in stamps:
+        sig = fl.record_failure(conn, logger_name="lloyd-worker",
+                                message="voice worker dropped a turn: asr timeout",
+                                ts=fl.iso_utc(stamp), run_id=stamp.isoformat())
+    fl.sweep(conn)
+    return sig
+
+
+def early_morning_pass(tmp_path, monkeypatch):
+    """Freeze the ledger's clock to the real pass's instant and hand back the pool
+    queue and the store path that pass will open by default."""
+    monkeypatch.setattr(fl, "now_utc", lambda: EARLY_PASS)
+    db = tmp_path / "failure_issues.sqlite"
+    conn = fl.connect(db)
+    sig = seed_yesterdays_burst(conn)
+    conn.close()
+    monkeypatch.setattr(paths, "FAILURE_LEDGER_DB", db)
+    return sig, db, make_queue(tmp_path)
+
+
+def test_the_morning_pass_finds_a_burst_dated_yesterday_as_one_growth_finding(
+        tmp_path, monkeypatch):
+    """The clause #2893 exists for, driven through the pool's own entry point.
+
+    A pass frozen a few hours into day D (02:10 UTC, the shape of every real
+    sweep) over a store whose >=3-event same-signature burst is dated the previous
+    UTC day must find it as exactly one `growth` finding. Before #2893 the same
+    store produced zero findings on this clock — the detector counted `ts[:10] ==
+    day_of(now)`, so the only part of any day it ever saw was the slice before
+    ~02:40, and the control at the end of this node is that fact still holding for
+    a review aimed at the pass's own day.
+    """
+    assert (YESTERDAY, DAY) == ("2026-10-02", "2026-10-03"), \
+        "the burst's day must be the day before the pass's, or this proves nothing"
+    sig, db, queue = early_morning_pass(tmp_path, monkeypatch)
+
+    asyncio.run(failure_ledger.enqueue_if_due(
+        queue, {"enabled": True, **fixture_cfg(tmp_path)}))
+
+    store = fl.connect(db)
+    rows = store.execute(
+        "SELECT signature, kind, detected_on, occurrences FROM failure_findings"
+    ).fetchall()
+    assert len(rows) == 1, f"one burst is one finding, got {tuple(rows)!r}"
+    assert tuple(rows[0]) == (sig, "growth", DAY, 5), \
+        "the burst is growth, stamped the day the pass ran (dispatch reads that " \
+        "day), with all five of yesterday's events counted"
+
+    # new_onset is silent on this store, so growth is the only detector in play…
+    assert fl.detect_new_onset(store, now=EARLY_PASS, day=DAY) == [], \
+        "the family is 6 days old: an onset finding here would hide which detector worked"
+    # …and a review aimed at the pass's own day still finds nothing, which is the
+    # exact shape that made 6 of the live ledger's 8 burst-days invisible.
+    own_day = store.execute(
+        "SELECT COUNT(*) FROM failure_events WHERE ts LIKE ?", (f"{DAY}T%",)).fetchone()[0]
+    assert own_day == 0 and fl.detect_growth(store, day=DAY) == []
+    store.close()
+
+
+def test_yesterdays_burst_reaches_the_queue_instead_of_sitting_undispatched(
+        tmp_path, monkeypatch):
+    """A finding nothing enqueued is a row, not an investigation.
+
+    The trap #2893 names in CHECK (2): `_emit_finding` stamps `detected_on` and
+    `dispatch_findings` selects `WHERE detected_on = ?` on the pass's day. Review
+    an earlier day without stamping the finding for the day that is dispatching,
+    and the finding is written, `dispatched` stays 0, `derive_diagnosis` goes empty,
+    the pass logs `no diagnosis — nothing dispatched`, and nothing fails.
+    """
+    sig, db, queue = early_morning_pass(tmp_path, monkeypatch)
+
+    asyncio.run(failure_ledger.enqueue_if_due(
+        queue, {"enabled": True, **fixture_cfg(tmp_path)}))
+
+    rows = queue.list_items(source=fl.SOURCE)
+    assert len(rows) == 1, f"yesterday's burst is today's one investigation, got {len(rows)}"
+    row = rows[0]
+    assert row.dedup_key == f"failure-ledger:{DAY}", \
+        "the dedup key stays the pass's own day — the cap is one run per day"
+    assert row.kind == fl.KIND and row.priority == 75
+    assert row.payload["day"] == DAY and row.payload["signatures"] == [sig], \
+        "the row is this pass's day and carries the burst's own family"
+    assert "Growth" in row.payload["diagnosis"] and "2026-09-27" in row.payload["diagnosis"], \
+        "the derived diagnosis names the kind and the family's onset, so the run is " \
+        "asked about a growth burst rather than a generic failure"
+
+    store = fl.connect(db)
+    assert undispatched(store, DAY) == [], \
+        "the finding was recorded AND dispatched: dispatched=0 here is the silent " \
+        "detected_on mismatch, not a fix"
+    assert [s for _, s, _ in dispatched(store, DAY)] == [sig]
+    assert store.execute(
+        "SELECT COUNT(*) FROM failure_dispatches WHERE day = ?", (DAY,)).fetchone()[0] == 1
+    store.close()
+
+
+def test_two_morning_passes_on_one_day_still_spend_one_run_on_the_burst(
+        tmp_path, monkeypatch):
+    """The fix must not double-spend the day it reviews.
+
+    Same store, same frozen clock (`enqueue_if_due` returns None on every path by
+    design, so the queue and the ledger are the evidence, not the return value). The
+    interval watermark is cleared between the sweeps so the second pass is not waved
+    off by the 86400-second wait: it runs the whole sweep, re-detects the same burst,
+    finds every finding already dispatched, so `derive_diagnosis` returns "" and it
+    enqueues nothing. And `dispatch_findings` called directly WITH a question to ask
+    still returns None, because its first statement is
+    `SELECT queue_id FROM failure_dispatches WHERE day = ?` — one burst buys one run
+    however many times the pool polls.
+    """
+    _, db, queue = early_morning_pass(tmp_path, monkeypatch)
+    cfg = {"enabled": True, **fixture_cfg(tmp_path)}
+
+    asyncio.run(failure_ledger.enqueue_if_due(queue, cfg))
+    first = queue.list_items(source=fl.SOURCE)
+    assert len(first) == 1, "the first pass enqueues the day's one investigation"
+
+    # The interval watermark is the POOL's (`workers.db`), not the ledger's, so it is
+    # cleared on the queue — which is also the proof that a second sweep, not a
+    # skipped one, is what the assertions below are reading.
+    queue.wm_set(failure_ledger.NAME, failure_ledger.WATERMARK_LAST_ENQUEUED, "")
+    asyncio.run(failure_ledger.enqueue_if_due(queue, cfg))
+    store = fl.connect(db)
+    assert fl.dispatch_findings(store, DAY, queue=queue,
+                                diagnosis="Establish what changed near the burst.") is None, \
+        "the daily cap row, not the interval, is what refuses a second run"
+    rows = queue.list_items(source=fl.SOURCE)
+    assert len(rows) == 1 and rows[0].id == first[0].id, \
+        f"two passes on one day must not spend two runs, got {len(rows)}"
+    assert store.execute("SELECT COUNT(*) FROM failure_dispatches").fetchone()[0] == 1
+    assert store.execute("SELECT COUNT(*) FROM failure_findings").fetchone()[0] == 1, \
+        "re-reviewing the same burst day re-uses the one (signature, kind, " \
+        "detected_on) finding rather than appending a second"
+    store.close()

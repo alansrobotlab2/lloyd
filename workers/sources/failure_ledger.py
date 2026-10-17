@@ -91,7 +91,8 @@ DEFAULT_MAX_TURNS = 12
 DEFAULT_TIMEOUT_SECONDS = 900
 
 #: `failure_findings.kind` carries the literals the detectors write
-#: (`app/failure_ledger.py:519,539`); a person reading the run row a week later
+#: (`app/failure_ledger.py:553,590`, the two `kind=` arguments); a person reading the
+#: run row a week later
 #: reads the diagnosis, so the sentence spells them out. An unknown kind falls
 #: through as its own name rather than being labelled wrong.
 KIND_LABELS = {"new_onset": "New onset", "growth": "Growth"}
@@ -168,6 +169,17 @@ def sweep_and_dispatch(*, queue, conn=None, day: str | None = None,
     `diagnosis=None` means "derive it from the day's strongest finding". Passing a
     string is the caller taking responsibility for the question, which is what
     `dispatch_findings`' empty-diagnosis refusal is there to make explicit.
+
+    Growth is counted over the day BEFORE `day` and stamped with `day`. This pass
+    wakes about 02:00 UTC — `interval_seconds: 3600` with `min_interval_seconds:
+    86400` lets exactly one sweep a day through — so the day its own clock names
+    holds only the ~2 h before it woke, and a burst that landed the previous evening
+    was never counted at all: 6 of the live ledger's 8 burst-days had zero events in
+    that slice, and the live store — 83 events since 2026-09-06 — still has 0 rows in
+    `failure_findings` and 0 in `failure_dispatches` (#2893). `day` itself stays the
+    pass's own day for everything else, because that
+    is what `dispatch_findings` selects `detected_on` on, what the dedup key is
+    stamped with, and what the one-run-a-day cap row is written under.
     """
     own_conn = conn is None
     conn = fl.connect() if own_conn else conn
@@ -181,7 +193,11 @@ def sweep_and_dispatch(*, queue, conn=None, day: str | None = None,
         ingested = fl.ingest_promotions(conn, live=live, archives=archives)
         swept = fl.sweep(conn)
         new_onset = fl.detect_new_onset(conn, now=when, day=day)
-        growth = fl.detect_growth(conn, day=day)
+        # Counted a day back, stamped with this pass's day — see the docstring: the
+        # two days are different by construction, and dispatch_findings only ever
+        # selects the stamp.
+        growth = fl.detect_growth(conn, day=fl.growth_review_day(day),
+                                  detected_on=day)
         findings = list(dict.fromkeys([*new_onset, *growth]))
         text = derive_diagnosis(conn, day) if diagnosis is None else diagnosis
         queue_id: int | None = None

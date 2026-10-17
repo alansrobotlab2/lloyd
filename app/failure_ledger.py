@@ -468,6 +468,32 @@ GROWTH_MEDIAN_MULTIPLE = 2.0
 GROWTH_MIN_COUNT = 3
 GROWTH_WINDOW_DAYS = 7
 
+#: How far behind the pass's own clock growth counts. The scheduled pass wakes
+#: around 02:00 UTC (`interval_seconds: 3600` in `config.yaml` plus
+#: `min_interval_seconds: 86400` in the source, so one sweep a day), which means the
+#: day its own clock names contains only the ~2 h before it woke up. Measured over
+#: the live ledger on 2026-10-17: of the 8 signature-days that reached
+#: `GROWTH_MIN_COUNT` across 22 event days, 6 had ZERO events inside that slice
+#: (2026-09-06 n=6, 09-09 n=3, 09-14 n=3, 09-29 n=3, 09-30 n=11, 10-02 n=8), so
+#: `failure_findings`, `failure_dispatches` and every queue row for
+#: `source='failure-ledger'` sat at 0 and no burst had ever been reported (#2893).
+#:
+#: D-1 whole is chosen over "since the previous pass" deliberately. The instant of
+#: the last pass is the pool's watermark, which lives in `workers.db` — and this
+#: module's header rule is that nothing here reads that store, so the ledger can be
+#: queried with plain SQL on its own. Copying the stamp in would give the ledger a
+#: second answer to "when did I last run", and the two disagreeing is exactly the
+#: silent skip this constant exists to end. D-1 is also a CLOSED day: it gains no
+#: more events, so a finding made for it cannot be overtaken by late arrivals the
+#: way a rolling window from an unverifiable start time would be.
+GROWTH_REVIEW_LAG_DAYS = 1
+
+
+def growth_review_day(day: str) -> str:
+    """The day growth counts, given the day the pass is running. Pure arithmetic."""
+    return (datetime.strptime(day, "%Y-%m-%d")
+            - timedelta(days=GROWTH_REVIEW_LAG_DAYS)).strftime("%Y-%m-%d")
+
 
 def trailing_counts(conn: sqlite3.Connection, sig: str, day: str,
                     window: int = GROWTH_WINDOW_DAYS) -> dict[str, int]:
@@ -530,8 +556,25 @@ def detect_new_onset(conn: sqlite3.Connection, *, now: datetime,
     return ids
 
 
-def detect_growth(conn: sqlite3.Connection, *, day: str) -> list[int]:
-    """Signatures whose count on `day` is >=2x their trailing-7-day active median."""
+def detect_growth(conn: sqlite3.Connection, *, day: str,
+                  detected_on: str | None = None) -> list[int]:
+    """Signatures whose count on `day` is >=2x their trailing-7-day active median.
+
+    `day` is the day COUNTED and keeps its old meaning exactly; the caller decides
+    which day that is, and the scheduled source passes `growth_review_day(its day)`
+    because a pass awake at 02:10 has no whole day of its own to count (#2893).
+
+    `detected_on` is the day the finding is STAMPED, and it defaults to `day`. The
+    two must be separable: `dispatch_findings(conn, D, ...)` selects
+    `WHERE detected_on = ?` on the day it is called with, so a finding stamped for
+    the day it describes instead of the day that is dispatching is never picked up —
+    it is written, `dispatched` stays 0, `derive_diagnosis` returns `""`, the pass
+    logs "no diagnosis — nothing dispatched", and nothing anywhere fails (#2893
+    CHECK 2). A store holding >=3 same-signature events dated only the day before
+    the pass therefore yields a finding AND a queue row; the pass calls this with
+    `day=growth_review_day(day), detected_on=day`.
+    """
+    stamp = detected_on or day
     ids: list[int] = []
     counts: dict[str, int] = {}
     for sig, ts in conn.execute("SELECT signature, ts FROM failure_events").fetchall():
@@ -544,7 +587,7 @@ def detect_growth(conn: sqlite3.Connection, *, day: str) -> list[int]:
         if median is None:
             continue
         if count >= GROWTH_MEDIAN_MULTIPLE * median:
-            ids.append(_emit_finding(conn, sig=sig, kind="growth", day=day,
+            ids.append(_emit_finding(conn, sig=sig, kind="growth", day=stamp,
                                      occurrences=count))
     conn.commit()
     return ids
