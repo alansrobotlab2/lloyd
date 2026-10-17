@@ -1176,10 +1176,13 @@ did the same read for 101 — so their two rows here are stated from the script 
 which is the caveat #98 carries at §Canonicalize for the same reason. Both append one dated
 row to one journal outside this repo — #100 by running `python -m scripts.eval_instrument_index`
 with nothing added to it, #101 by `scripts/maintenance/gate_to_land_lag.py --record`, where
-the flag is the only thing that makes the run append rather than merely print — which is the
-recorder shape #97 (#2572) arrived with. Whether #100 belongs in §Measure instead
-is a ruling the owed-check pass carries (#2881's owed list), so §Measure's own id
-table and its counts are deliberately untouched here.
+the flag is the only thing that makes the run append rather than merely print. That is the
+recorder shape #97 (#2572) arrived with, and it is what settled #100's group: the owed-check
+pass ruled on 2026-10-17 (#2881's owed list) that #100 belongs here beside #97 — it appends
+one dated row to one journal outside the repo and files nothing — and that §Measure stays
+closed to it, because §Measure is the group whose jobs score the fleet: being about an
+instrument is not the same as measuring it. Re-opening the placement needs a measurement of
+§Measure's counts moving, not a subject-matter preference.
 
 | ID | Freq | Job | Reads | Writes | Must not |
 |----|------|-----|-------|--------|----------|
@@ -1517,10 +1520,12 @@ decide what gets worked on next.
   backlog item or opens a round, which is #97's position and the opposite of
   #92–#94's and #99's; their two task files carry `tool_not_called: Write` and
   `tool_not_called: Edit`, so the tier reading is the runner's, not this doc's
-  inference. Whether #100's subject — the instrument index — belongs in §Measure
-  instead is a ruling the owed-check pass carries (#2881's owed list); §Measure's id
-  table and its own counts are untouched, because moving a member there drags that
-  group's figures with it. The hand-typed floor moved to `24 through 101 or beyond`
+  inference. The owed-check pass ruled on 2026-10-17 (#2881's owed list) that the
+  placement written here is the settled one: #100 sits beside #97 in §Watch the
+  machinery and §Measure stays closed to it, because being about an instrument is not
+  the same as measuring the fleet. This entry moved no membership, so §Measure's id
+  table and its own counts stayed as they were. The hand-typed floor moved to
+  `24 through 101 or beyond`
   and every figure the membership moves with it: seven members became ten, the
   `objective_checks` count six to eight (both new files carry a block, so #91 and #92
   stay the group's only two without one), the report-only half four became six, and

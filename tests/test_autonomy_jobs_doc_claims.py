@@ -4718,3 +4718,338 @@ def test_the_name_prior_report_row_states_a_utc_date_key_and_keeps_its_four_toke
         assert want in row, (
             f"the #96 row no longer contains {want!r}, one of the four tokens "
             "`WATCH_JOBS[96]` pins and the per-job doc-claim grader requires")
+
+
+# ── #2894 — the #100 §Watch-vs-§Measure placement reads as ruled, not as owed ──
+
+#: The three strings the pending framing was made of, copied verbatim from the tree
+#: #2894 was triaged on (`f1cd276e`, live at :1180-1182 and :1520-1522). The §Watch
+#: paragraph closed with "Whether #100 belongs in §Measure instead is a ruling the
+#: owed-check pass carries (#2881's owed list), so §Measure's own id table and its
+#: counts are deliberately untouched here", and the 2026-10-17 §Review log entry
+#: repeated the deferral in its own words. What #2894 objects to is not a wrong
+#: placement — the placement was already landed in §Watch, in the heading, the
+#: functions row, both anchors and the tier row — but a reader who cannot tell the
+#: decision was taken, and so re-takes it.
+PENDING_PLACEMENT_STRINGS = (
+    "owed-check pass carries",
+    "is a ruling the owed-check",
+    "deliberately untouched here",
+)
+
+#: The interrogative half of the same framing, in both spellings the doc used:
+#: "Whether #100 belongs in §Measure instead" (the paragraph) and "Whether #100's
+#: subject — the instrument index — belongs in §Measure instead" (the log entry).
+PENDING_PLACEMENT_QUESTION = re.compile(r"Whether #100[^.]{0,60}?belongs in §Measure")
+
+#: A sentence that leaves this verdict to somebody else's future pass. Naming the
+#: owed-check pass is not itself forbidden — clause 3 requires it, attributed and
+#: dated — so what is banned is the deferral hanging off it.
+PENDING_PLACEMENT_CLAIM = re.compile(
+    r"\bis a ruling\b|\bawaits? a ruling\b|\bis (?:still )?pending\b"
+    r"|\bremains (?:open|unruled|pending)\b|\blater pass\b|\bcarries \(#2881",
+    re.I)
+
+#: Clause 4: the condition for re-opening the placement, in words. It is the ruling's
+#: own closing sentence, which the doc never carried — recovered from the run that
+#: made it and from #2881's activity log: "Re-opening it later needs a measurement of
+#: §Measure's counts moving, not a subject-matter preference." Without it the doc
+#: states a placement with no stated reason anyone could overturn it.
+REOPEN_CONDITION = re.compile(
+    r"re-open\w*[^.]{0,90}?§Measure's counts[^.]{0,90}?subject-matter preference", re.I)
+
+#: §Measure's membership as the 2026-10-17 ruling left it, typed in heading order.
+#: Typed rather than derived from the heading — this file's usual habit — because the
+#: thing being pinned is that the group is *closed* to #100: an expectation read off
+#: the line under test cannot report that line as closed.
+MEASURE_IDS_AT_RULING = ("#60", "#82", "#70", "#36", "#76", "#86")
+
+
+def _watch_intro() -> str:
+    """§Watch the machinery's opening paragraph, its table excluded.
+
+    The paragraph and not the section: the section's ten rows are each a paragraph in
+    their own right, and a ruling checked "in §Watch" could otherwise be credited to
+    a table cell while the prose above it still read as pending — the double-assertion
+    shape #1524 pinned for §Build the graph and §Canonicalize.
+    """
+    lines = _text().splitlines()
+    starts = [i for i, ln in enumerate(lines) if ln.startswith("## Watch the machinery")]
+    assert len(starts) == 1, (
+        f"{len(starts)} headings begin `## Watch the machinery`; the ruling has one home")
+    body: list[str] = []
+    for line in lines[starts[0] + 1:]:
+        if line.startswith("## ") or line.startswith("| ID |"):
+            break
+        body.append(line)
+    intro = _flat("\n".join(body))
+    assert "#100" in intro and "#101" in intro, (
+        f"the §Watch intro no longer names both 2026-10-16 arrivals, so there is no "
+        f"paragraph left to state #100's placement in: {intro[:120]!r}")
+    return intro
+
+
+def _review_sentences() -> list[str]:
+    """The §Review log as sentences — the log's own half of clause 1.
+
+    `_live_sentences()` drops table rows because a cell is not a sentence. The log has
+    no tables but has one bullet per dated entry, so it is split the same way to keep
+    a claim from matching across a bullet boundary and lending one entry a phrase
+    another entry wrote.
+    """
+    return [s.strip() for s in _SENT_SPLIT.split(_flat(_review_log())) if s.strip()]
+
+
+def _review_entry(first_line: str) -> str:
+    """The body of the one §Review log entry whose own first line matches `first_line`."""
+    hits = [(f, b) for f, b in _review_log_entries() if re.search(first_line, f)]
+    assert len(hits) == 1, (
+        f"{len(hits)} §Review log entries match {first_line!r} on their own first line. "
+        f"The dated-entry nodes read a ruling out of exactly one entry, and zero means "
+        f"it was deleted or re-dated while two means it was duplicated")
+    return hits[0][1]
+
+
+def test_no_sentence_leaves_the_100_placement_to_a_later_pass():
+    """Clause 1. #2881's owed-check run ruled on 2026-10-17 that #100 sits in §Watch
+    the machinery beside #97 and that §Measure stays closed to it, and the document
+    went on presenting the question as somebody's later job — "is a ruling the
+    owed-check pass carries (#2881's owed list)" in live prose and again inside the
+    dated log entry, which is what `grep -c 'owed-check pass carries'` → 2 measured at
+    filing.
+
+    A deferral is not neutral wording here. The harm #2894 names is a later round
+    re-opening a settled placement, and the sentence that invites a re-open is exactly
+    the one that says the decision is still owed. So the ban runs three ways: the
+    deferral strings nowhere in the file (the acceptance check's `grep -c` is the
+    first of them, as an absence rather than a count), the "Whether #100 … belongs in
+    §Measure" interrogative nowhere — it is the framing, not merely the verb — and no
+    sentence, live or logged, that names both #100 and §Measure while leaving the
+    verdict to a future pass.
+    """
+    doc = _flat(_text())
+    for dead in PENDING_PLACEMENT_STRINGS:
+        assert dead not in doc, (
+            f"{dead!r} is back in architecture/autonomy-jobs.md. It is the sentence "
+            f"that reads as a live branch: the placement was ruled on 2026-10-17, and "
+            f"prose handing it to a later pass invites a round to re-take it")
+    assert not PENDING_PLACEMENT_QUESTION.search(doc), (
+        "a sentence still asks whether #100 belongs in §Measure. Both spellings of that "
+        "question — §Watch the machinery's and the §Review log's — were the pending "
+        "framing #2894 was filed to retype")
+    offenders = [s for s in (*_live_sentences(), *_review_sentences())
+                 if "#100" in s and "§Measure" in s and PENDING_PLACEMENT_CLAIM.search(s)]
+    assert not offenders, (
+        f"{len(offenders)} sentence(s) name both #100 and §Measure and defer the verdict: "
+        f"{[o[:140] for o in offenders]}")
+
+
+def test_the_watch_paragraph_states_the_ruling_with_its_authority_and_reason():
+    """Clause 2. The paragraph already carried the reason one sentence earlier — both
+    jobs append one dated row to one journal outside this repo, which is the recorder
+    shape #97 (#2572) arrived with — and then let the placement hang on a future pass
+    instead of on that reason.
+
+    The settled form has to be attributable on the page, which is what
+    `test_canonicalize_names_the_authority_for_the_apply` demands of an unattended
+    apply: the pass that ruled, the date it ruled, the owed list it ruled against, and
+    the criterion in words. The criterion is the part that stays the doc's own:
+    §Measure is the group whose jobs score the fleet, so being about an instrument is
+    not the same as measuring it.
+    """
+    intro = _watch_intro()
+    assert re.search(r"owed-check pass [^.]{0,40}?ruled[^.]{0,40}?2026-10-17"
+                     r"[^.]{0,40}?#2881", intro), (
+        "the paragraph states a placement but never names the ruling behind it. An "
+        "unattributed placement is a doc edit, and a doc edit is not the thing a later "
+        "round has to argue with")
+    assert re.search(r"#100 [^.]{0,40}?belongs here beside #97", intro), (
+        "the paragraph no longer says where #100 sits and beside what, which is the "
+        "placement the ruling settled")
+    assert ("appends one dated row to one journal outside the repo and files nothing"
+            in intro), (
+        "the reason is gone. #100's shape — one appended row, nothing filed — is the "
+        "whole argument for the group, and without it the placement reads as taste")
+    assert re.search(r"recorder shape #97 \(#2572\)", intro), (
+        "the shape is not tied to the precedent that brought it (#97, in through "
+        "#2572), so the reason has no anchor in the group's own history")
+    assert re.search(r"§Measure is the group whose jobs score the fleet", intro), (
+        "§Measure's role is never stated, so the paragraph rules without naming its "
+        "criterion — and the criterion is the only thing a reader can apply next time")
+    assert re.search(r"being about an instrument is not the same as measuring", intro, re.I), (
+        "the ruling's one-line form is missing. #100's subject IS the instrument index, "
+        "so subject matter is the pull this ruling has to resist by name")
+
+
+def test_the_2026_10_17_review_entry_records_the_ruling_with_authority_and_date():
+    """Clause 3. `_review_log()`'s own contract is that the log "records what was true
+    on the day it says", so the 2026-10-17 entry gains the ruling on its own date
+    rather than being deleted or re-dated — the third shape of the same defect, since
+    re-dating a log entry is how a dated record stops being one.
+
+    At filing the entry closed with "is a ruling the owed-check pass carries (#2881's
+    owed list)", which put a decision taken on 2026-10-17 in the future of an entry
+    itself dated 2026-10-17 — the pass and the entry are the same day's work, and a
+    reader cannot tell from the page that the pass had already run.
+    """
+    entry_line = r"2026-10-17.*again"
+    body = _review_entry(entry_line)
+    first = [f for f, _ in _review_log_entries() if re.search(entry_line, f)][0]
+    assert re.match(r"^- \*\*2026-10-17", first), (
+        f"the entry's own line reads {first!r}. Its date is what makes the log a log: "
+        f"moving a later ruling onto an earlier entry's date, or the entry onto a later "
+        f"one, destroys the only thing that makes the entry checkable")
+    assert re.search(r"owed-check pass [^.]{0,40}?ruled[^.]{0,40}?2026-10-17"
+                     r"[^.]{0,40}?#2881", body), (
+        "the entry does not record the owed-check pass as having ruled on 2026-10-17 "
+        "against #2881's owed list — authority, date and attribution, the three parts "
+        "test_canonicalize_names_the_authority_for_the_apply pins for a ruling")
+    assert re.search(r"#100[^.]{0,140}?§Measure", body), (
+        "the entry never names both ids the ruling is about, so the decision is logged "
+        "somewhere a reader arriving from either id cannot find it")
+    assert not (PENDING_PLACEMENT_CLAIM.search(body)
+                or PENDING_PLACEMENT_QUESTION.search(body)), (
+        "the entry still defers: it may record what the pass decided, but not that "
+        "deciding is somebody's future job — that half is what clause 1 bans")
+
+
+def test_the_file_states_once_what_would_justify_re_opening_the_placement():
+    """Clause 4. The ruling's own text ends on its re-entry condition and the doc
+    carried neither half of it, so the page presented a placement with no stated
+    ground for ever moving it — which is how a preference ("but its subject is the
+    instrument index") becomes a re-open.
+
+    Exactly one sentence may state it. Zero leaves re-opening open-ended; two is a
+    second copy on its own rotting schedule, which is the defect class #1524 is about,
+    and this file's whole habit is to say a thing once and point at it.
+    """
+    hits = REOPEN_CONDITION.findall(_flat(_text()))
+    assert len(hits) == 1, (
+        f"{len(hits)} sentences state the condition for re-opening the placement "
+        f"({[h[:120] for h in hits][:3]}). Zero leaves a settled placement re-openable "
+        f"on a whim; two is a copy that will disagree with the first")
+    assert REOPEN_CONDITION.search(_watch_intro()), (
+        "the condition lives somewhere other than §Watch the machinery's own paragraph "
+        "— the paragraph a reader is standing in when the question first occurs")
+    assert re.search(r"not a subject-matter preference", _flat(_text()), re.I), (
+        "the condition names only the measurement half and never excludes the pull "
+        "that would otherwise re-open it: #100's subject being an instrument")
+
+
+def _measure_section() -> str:
+    """The §Measure section: its own heading line through the next `##` heading.
+
+    Both halves of clause 5 read the group's id table through here — the guard and its
+    seeded probe weigh one measurement, not two. Scoped on purpose: `| #100 | daily |
+    eval instrument index publish …` is a row of §Watch the machinery's table, so a row
+    scan over the whole doc reports #100 whatever §Measure says, which is a green that
+    certifies nothing. Line-anchored rather than sliced at
+    `doc.index(_measure_heading())`: that heading string occurs exactly once today
+    (:923), so the two spellings agree, but only this one stays correct if the group's
+    membership is ever spelled a second time above the heading.
+    """
+    lines = _text().splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("## Measure:")), None)
+    assert start is not None, (
+        "architecture/autonomy-jobs.md has no `## Measure:` heading line to scope to")
+    end = next((j for j in range(start + 1, len(lines))
+                if lines[j].startswith("## ")), len(lines))
+    section = "\n".join(lines[start:end])
+    assert "| #60 |" in section, (
+        "the region under the §Measure heading holds no `| #60 |` row, so it is not "
+        "the section that heading introduces and its table cannot be read from here")
+    return section
+
+
+def test_measure_stays_closed_to_100_after_the_ruling():
+    """Clause 5, the negative half of the ruling. §Measure's heading and its id table
+    hold the six jobs they held before #100 arrived, and #100 appears in neither.
+
+    Two nodes above already reconcile the heading with its table and every count
+    derived from the membership —
+    `test_the_measure_id_table_lists_the_heading_membership_and_nothing_else` and
+    `test_every_count_of_the_measure_group_matches_its_membership` — and those are the
+    half of this clause that says *unchanged*. What nothing checked is the closed set:
+    a #100 added to the heading would drag its table and its counts with it and leave
+    both of those nodes green, which is precisely how a settled placement gets
+    re-taken by a round that never mentions the ruling. This round moves no membership
+    at all, and that restraint is part of what is pinned here.
+    """
+    ids = _measure_ids()
+    assert tuple(ids) == MEASURE_IDS_AT_RULING, (
+        f"§Measure's heading lists {ids}, not the six the 2026-10-17 ruling left: "
+        f"{MEASURE_IDS_AT_RULING}")
+    assert "#100" not in ids, (
+        "#100 is in §Measure's heading. The ruling closed the group to it on the "
+        "recorder-shape reason, and moving it is owed only to the measurement the "
+        "re-entry condition names")
+    rows = re.findall(r"^\| (#\d+) \|", _measure_section(), re.M)
+    assert rows == list(MEASURE_IDS_AT_RULING), (
+        f"§Measure's id table holds {rows}. Its heading and its table are the two "
+        f"membership statements of one group and both are closed to #100")
+    assert "#100" not in _measure_section(), (
+        "#100 is named inside the §Measure section — the placement the ruling ruled "
+        "out, and a mention there is what a later round would read as precedent")
+
+
+def test_the_measure_membership_guard_fires_on_a_seeded_100(tmp_path, monkeypatch):
+    """Clause 5's own sensitivity, demonstrated rather than described — the convention
+    this file's header sets for a membership claim (#2806: "its failure is demonstrated
+    on a seeded heading rather than described").
+
+    The reason it matters for this clause specifically is that the clause is a
+    negative. A guard whose expectation is derived from the line under test is green
+    whatever that line says, so "§Measure is closed to #100" is exactly the kind of
+    sentence such a guard certifies for free. Here the six ids are typed, and this
+    node proves the typing has teeth: #100 is seeded into both of the group's
+    membership statements, in a temp copy of the doc with `DOC` repointed at it, and
+    the same helpers must then read back something that is not the settled six. Each
+    half reads a control off the unseeded doc first, because a readback that would come
+    back the same with nothing seeded is not a probe of the seed.
+    """
+    doc = _text()
+    heading = _measure_heading()
+    lines = doc.splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("## Measure:")), None)
+    assert start is not None, "the doc's §Measure heading is not a `## Measure:` line"
+    assert lines[start] == f"## {heading}", (
+        f"the heading line reads {lines[start]!r} while `_measure_heading()` returns "
+        f"{heading!r}. Seeding a line the helpers do not read — §The functions' link "
+        f"to this heading spells the same membership earlier in the doc — would test a "
+        f"membership the doc does not have")
+    lines[start] = f"{lines[start]} #100"
+    for i in range(start, len(lines)):
+        if lines[i].startswith("| #60 |"):
+            lines.insert(i, "| #100 | seeded | seeded row |")
+            break
+    else:
+        raise AssertionError(
+            "the §Measure id table's first row no longer starts `| #60 |`, so the "
+            "seeded row had nowhere to go and the table half went untested")
+    # The control, read off the unseeded doc through the same helper the seeded
+    # readback uses. Scoping is the whole point of this half: `| #100 | daily | eval
+    # instrument index publish …` is a row of §Watch the machinery's table, so a row
+    # scan over the whole document finds #100 whether or not anything was seeded — the
+    # shape of a check that cannot fail. On the real doc §Measure's own table is the
+    # settled six, and that is what makes the read below say something about the seed.
+    before = re.findall(r"^\| (#\d+) \|", _measure_section(), re.M)
+    assert before == list(MEASURE_IDS_AT_RULING), (
+        f"§Measure's table already reads {before} before any seeding, so the settled "
+        f"six are not what the helper finds and the seeded readback would be weighing "
+        f"a seed against a region it never read")
+    path = tmp_path / "seeded-autonomy-jobs.md"
+    path.write_text("\n".join(lines))
+    monkeypatch.setitem(globals(), "DOC", path)
+
+    assert "#100" in _measure_ids(), (
+        "adding #100 to the group's heading did not move what `_measure_ids()` reads, "
+        "so the heading half of the closed-set assertion cannot fail and certifies "
+        "nothing")
+    assert tuple(_measure_ids()) != MEASURE_IDS_AT_RULING, (
+        "the typed six matched a heading that had been widened to seven, which is the "
+        "green-that-means-nothing this node exists to rule out")
+    after = re.findall(r"^\| (#\d+) \|", _measure_section(), re.M)
+    assert after[0] == "#100" and after[1:] == before, (
+        f"§Measure's section rows read {after} against the control {before}: the seeded "
+        f"row did not arrive inside that table as seen through the helper clause 5's "
+        f"node reads, so a real membership move would sit through it too")
