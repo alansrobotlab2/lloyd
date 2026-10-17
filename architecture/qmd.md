@@ -98,11 +98,11 @@ supervisord program agent-qmd-daemon
   narrowed it to that rather than retiring the eleven: under the old vault-wide
   `**/*.md` glob every note a segment collection owns was indexed a second time
   under this collection's name. That narrowing is in the tracked template
-  (`agent-services/conf/qmd-index.yml`) as of #2728; the daemon's own
-  `~/.config/qmd/index.yml` keeps the wide glob until the operator leg runs it,
-  and the nightly `config_drift` reports the gap as a `pattern` row — the
-  half-landed state, not a regression. A hit arriving through `subliminal` is
-  folded back onto its segment path by
+  (`agent-services/conf/qmd-index.yml`) as of #2728, and the operator leg ran on
+  2026-10-15, so the tracked template and the daemon's own
+  `~/.config/qmd/index.yml` both now carry `pattern: "*.md"` and the nightly
+  `config_drift` has no `pattern` row to report for it. A hit arriving through
+  `subliminal` is folded back onto its segment path by
   `agent_mcp/vault.py::_qmd_normalize_global`. The three are still embedded, so
   they count toward every re-embed. The vault's
   `architecture/` is an old OpenClaw-era set; the current docs in

@@ -1053,6 +1053,70 @@ OLD_SUBLIMINAL_CLAIM = ("`subliminal` is the whole\n"
 #: that deleted the sentence and named nothing in its place.
 ROOT_LEVEL_CLAIM = 'root at `pattern: "*.md"`'
 
+# --- #2923: the same bullet still described a pair that had already reconciled ----
+#
+# The sentence after the one above read "the daemon's own `~/.config/qmd/index.yml`
+# keeps the wide glob until the operator leg runs it, and the nightly `config_drift`
+# reports the gap as a `pattern` row — the half-landed state, not a regression". It
+# was true when #2728 wrote it and went false at 2026-10-15 21:15, when the leg ran:
+# the live file's :28 is `pattern: "*.md"` (mtime measured, and `diff` against
+# `index.yml.bak-20261015` is that one line), and the nightly reports go
+# `drift_count: 1 / in_sync: false` on 2026-10-15 (run 05:01, before the edit) to
+# `0 / true` on 2026-10-16 and 2026-10-17. So the doc is the stale half of a pair
+# that has nothing left to reconcile, and #2728's own node could not see it: the
+# wording it banned was the *other* sentence.
+#
+# The two banned phrases are not equally hard to find, which is why both need the
+# fold. `keeps the wide glob until the operator leg runs it` sits whole on one line,
+# so a raw grep hits it. `the half-landed state, not a regression` breaks across the
+# next two lines with a two-space continuation indent, so `"the half-landed state,
+# not a regression" in _doc()` is False on the UN-edited file and the ban would pass
+# green doing nothing — the same trap #2728's comment above names for its own phrase.
+
+#: The banned phrase, as one string, shared by the control and the absence check
+#: below so neither can drift from the other: the control has to fold to a HIT of
+#: exactly this string before its absence downstream is believed.
+BANNED_HALF_LANDED = "the half-landed state, not a regression."
+
+#: The file's real bytes around that break, measured at `a79aead3` over
+#: `architecture/qmd.md:103-104`: `… a \`pattern\` row — the` then a newline and two
+#: spaces. Deliberately not a one-line paraphrase — the assertion that guards that
+#: is in the node, not in this comment.
+HALF_LANDED_CLAIM = ("the nightly `config_drift` reports the gap as a `pattern` row — the\n"
+                     "  half-landed state, not a regression.")
+
+#: The other half of the now-false pair. Wholly on :102, so `_flat` costs nothing
+#: here and the ban is a plain substring test through the same fold.
+WIDE_GLOB_CLAIM = "keeps the wide glob until the operator leg runs it"
+
+#: What replaces the pair, in the present tense. Pinned inside the bullet the way
+#: `ROOT_LEVEL_CLAIM` is: a bullet that only deleted the old sentence clears the ban
+#: and tells the next reader nothing about which side is true — and this bullet is
+#: the file a person reads just before widening a glob.
+RECONCILED_PAIR_CLAIM = 'both now carry `pattern: "*.md"`'
+
+#: The reason #2180 measured, which is what makes the narrowing safe rather than
+#: merely smaller. Nothing pinned it before this node: `git grep -n "second time" --
+#: tests/test_qmd_doc_claims.py` returned 0 hits at filing, so a rewrite that trimmed
+#: the clause for brevity passed green and left the glob with a rule and no reason.
+DUPLICATE_INDEXING_REASON = "indexed a second time"
+
+
+def _collections_bullet() -> str:
+    """§2's `**Collections**` bullet — the one item #2728 and #2923 both edit.
+
+    The split #2728's node used inline, factored out so the ban, the replacement and
+    the retained reason are all aimed at the same bullet rather than at three copies
+    of the slice. Asserts its own cardinality, so a reworded heading fails here with
+    a reason instead of at an index.
+    """
+    hits = [b for b in _section("## 2. The daemon").split("\n- ")
+            if "**Collections**" in b]
+    assert len(hits) == 1, (
+        f"§2 has {len(hits)} '**Collections**' bullets, so what this node calls 'the "
+        "bullet' is no longer one bullet")
+    return hits[0]
+
 
 def test_the_collections_bullet_describes_a_root_level_collection_not_the_whole_vault():
     """#2728 clause 4: the whole-vault wording is gone, the root-level pattern is
@@ -1078,12 +1142,7 @@ def test_the_collections_bullet_describes_a_root_level_collection_not_the_whole_
         "below is a match that silently never matches — which is the failure mode "
         "this node exists to avoid, not a result it may report")
 
-    hits = [b for b in _section("## 2. The daemon").split("\n- ")
-            if "**Collections**" in b]
-    assert len(hits) == 1, (
-        f"§2 has {len(hits)} '**Collections**' bullets, so what this node calls 'the "
-        "bullet' is no longer one bullet")
-    bullet = _flat(hits[0])
+    bullet = _flat(_collections_bullet())
 
     assert "the whole vault as one collection" not in _flat(_doc()), (
         "§2 still calls `subliminal` the whole vault. The 2026-10-07 ruling on #2180 "
@@ -1100,6 +1159,101 @@ def test_the_collections_bullet_describes_a_root_level_collection_not_the_whole_
         "the fold-back is gone from the bullet. It is the mechanism that makes "
         "narrowing cost retrieval nothing, and the reason the narrowing was allowed "
         "at all")
+
+
+def test_the_collections_bullet_no_longer_describes_a_half_landed_pair():
+    """#2923 clauses 1 and 3: the half-landed wording is gone, and the fold that
+    proves it is proven on the bytes the file really broke at.
+
+    The seam is prose to config — the bullet is what tells a reader whether the
+    tracked template and the daemon's live `~/.config/qmd/index.yml` agree, and since
+    2026-10-15 21:15 they do. Two ways to pass this node falsely exist, and each gets
+    its own half:
+
+    * **the ban matching nothing.** The banned phrase breaks :103→:104, so it is
+      absent from the raw doc even BEFORE this fix — an unfolded `assert ... not in
+      _doc()` was already green at the commit that wrote the sentence. The control
+      folds the real two-line bytes through the same `_flat` and requires a hit, and
+      the assertion after it refuses the constant if it ever stops being two lines,
+      so a `_flat` that lost its whitespace join, or a constant that was quietly
+      reflowed, reddens the control before the absence downstream is believed.
+    * **the ban reading only the bullet.** A neighbouring paragraph could carry the
+      same claim and the bullet alone would look clean, so both absences are asserted
+      over the fold of the whole document.
+    """
+    control = _flat(HALF_LANDED_CLAIM)
+    assert BANNED_HALF_LANDED in control, (
+        "the control wording no longer folds to the banned phrase, so the absence "
+        "below is a match that silently never matches — which is the failure #2728's "
+        "node above was cut to avoid, not a result this one may report")
+    assert BANNED_HALF_LANDED not in HALF_LANDED_CLAIM, (
+        "the control constant now holds the banned phrase on one line, so it is a "
+        "paraphrase rather than the file's real broken bytes and folding it proves "
+        "only that `_flat` is the identity function")
+
+    flat_doc = _flat(_doc())
+    assert WIDE_GLOB_CLAIM not in flat_doc, (
+        "the doc still says the daemon's own `~/.config/qmd/index.yml` keeps the wide "
+        'glob until the operator leg runs it. The leg ran on 2026-10-15 and that '
+        'file carries `pattern: "*.md"`, so the sentence is telling a reader to wait '
+        "for an edit that has already happened")
+    assert BANNED_HALF_LANDED not in flat_doc, (
+        "the doc still calls the pair a half-landed state reported by `config_drift`. "
+        "The nightly reports go `drift_count: 1 / in_sync: false` on 2026-10-15 (run "
+        "05:01, before the 21:15 edit) to `0 / true` on 2026-10-16 and 2026-10-17, so "
+        "there is no gap left to describe and a reader would go looking for one")
+    assert "half-landed" not in flat_doc, (
+        "'half-landed' survives somewhere in the doc — the phrase the replaced "
+        "sentence coined, and the one this clause retires however it is reworded")
+
+
+def test_the_collections_bullet_says_the_tracked_and_live_files_now_agree():
+    """#2923 clause 2: the bullet states the reconciled pair, in the present tense.
+
+    Deleting the stale sentence is half the edit and, on its own, the kind that reads
+    as finished. The reader who lands here is the one a nightly `config_drift` row
+    pointed at a live file, so a bullet that says only "`subliminal` is root-level"
+    still leaves them unable to tell which side needs moving. The replacement is
+    therefore pinned as a phrase constant asserted inside this one bullet — the shape
+    `ROOT_LEVEL_CLAIM` uses above — and the constant carries the present-tense verb
+    ("now carry") rather than a date nobody downstream will be able to re-verify.
+    """
+    bullet = _flat(_collections_bullet())
+    assert RECONCILED_PAIR_CLAIM in bullet, (
+        "the Collections bullet no longer states that both the tracked template and "
+        f"the daemon's own `~/.config/qmd/index.yml` carry the root-level glob "
+        f"({RECONCILED_PAIR_CLAIM!r} inside the bullet). Deleting the old half-landed "
+        "sentence without naming the reconciled state is the deletion this clause "
+        "exists to refuse")
+    assert "`~/.config/qmd/index.yml`" in bullet, (
+        "the reconciled statement has to name the live file by path: it is the file a "
+        "reported drift points at and the one the operator leg edited")
+    assert "#2728" in bullet, (
+        "the bullet lost the attribution of which round narrowed the tracked half, so "
+        "the two sides agreeing has no record of how it happened")
+
+
+def test_the_collections_bullet_keeps_the_duplicate_indexing_reason():
+    """#2923 clause 4: the reason behind the narrowing outlives the rewrite.
+
+    Three of the four retentions in that bullet were already pinned by #2728's node
+    (`ROOT_LEVEL_CLAIM`, `#2180` and `2026-10-07`, the `_qmd_normalize_global`
+    fold-back), so clause 4 asks only that a rewrite keep them. This one had no node
+    at all before #2923 — nothing in this file spoke of indexing twice — so a rewrite
+    that trimmed the clause for length would have shipped a glob with a rule attached
+    and no argument beside it, which is the shape that let the vault-wide glob stand
+    from 2026-09-07 to 09-19.
+    """
+    bullet = _flat(_collections_bullet())
+    assert DUPLICATE_INDEXING_REASON in bullet, (
+        f"the bullet no longer says what was wrong with the wide glob "
+        f"({DUPLICATE_INDEXING_REASON!r}). #2180's finding was that every note a "
+        "segment collection owns was a `subliminal` row as well, so the same file "
+        "reached the merge as two candidates; a narrowing with no reason beside it is "
+        "undone by the next reported drift")
+    assert "`**/*.md`" in bullet, (
+        "the glob the ruling replaced is gone from the bullet, so the reason has "
+        "nothing left to point at")
 
 
 # ── The family-wide citation rule (#2755): a cited report resolves or the suite is red ──

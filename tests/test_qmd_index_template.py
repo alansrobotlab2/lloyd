@@ -432,12 +432,14 @@ def test_the_sessions_comment_names_the_background_split_it_does_not_show():
 # `documents` and in `documents_fts` twice and arrived at the merge as two
 # candidates. The ruling of 2026-10-07 (carried by #2351) was to narrow this
 # collection to the vault root and keep the eleven, not to retire them. What lands
-# here is the tracked half of that ruling. The daemon's own file is a person's
-# edit and is still owed (#2728's operator leg), so from this commit the nightly
-# `config_drift` prints a `pattern` row for `subliminal` — a report entry and never
-# an exit code (`scripts/maintenance/qmd_index_maintenance.py:85-86`), and the
-# wrong way to silence it is to widen the glob back or to run the re-sync this
-# file's own header documents, which copies the un-narrowed live file over the
+# here is the tracked half of that ruling; the daemon's own file, being a person's
+# edit, was the owed half until #2728's operator leg ran it on 2026-10-15. Both
+# sides now carry `pattern: "*.md"`, so `config_drift` has no `pattern` row to
+# report for it — but the comparison still runs on every nightly
+# (`scripts/maintenance/qmd_index_maintenance.py:84-87`), and the instruction that
+# comes with it is unchanged: should a `pattern` row for `subliminal` ever come
+# back, the wrong ways to silence it are widening this glob back or running the
+# re-sync this file's own header documents, which copies the live file over the
 # template.
 
 #: The vault root. `subliminal` is the only collection rooted here rather than
