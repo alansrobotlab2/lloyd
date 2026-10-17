@@ -719,6 +719,92 @@ def test_a_worktree_path_held_in_a_variable_the_same_command_assigns_is_not_live
         assert check_live_git_writes(cmd, _BG, cwd=_LIVE) is None, cmd
 
 
+#: #2877: the corpus the persistence window's own commit step is allowed to write, and
+#: the step itself. Both shapes are pinned here because the lane and the script guard the
+#: same tree from opposite sides.
+_CANARY_ROWS = "eval/measurements/injection-canary/rows.jsonl"
+_CANARY_STEP = "scripts/maintenance/commit_injection_canary_corpus.py"
+_CANARY_PYTHON = "/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python"
+
+
+def test_the_canary_commit_step_leaves_the_lane_refusing_the_raw_verbs_it_replaces():
+    """#2877 clause 4: giving the persistence window a committer of its own must not
+    soften this lane for the shapes an unattended turn would use instead of it.
+
+    Two halves, answering different questions.
+
+    The first is that the lane still refuses the raw writes over the exact paths the new
+    step is allowed to write — a `git add`/`git commit` of
+    `eval/measurements/injection-canary/rows.jsonl` in the live checkout. The corpus in
+    particular has to be pinned, because every arm of `_LIVE_WRITES` names
+    `architecture/*`: without these four the lane could gain a canary-shaped hole and
+    stay green, which is the reading a future change to accommodate the step would leave
+    behind.
+
+    The second half is the honest limit of the caller check. The step's own invocation
+    names no git verb, so *this lane does not answer it* — `assert _lane(...) is None`
+    pins the gap rather than the safety. What closes it belongs to the script alone, and it
+    is not `INVOCATION_ID`'s presence: an agent Bash fork on this box HAS that variable,
+    inherited down the tree from the backend's own unit (measured twice:
+    `INVOCATION_ID=862d3b6355d542dea3b564f72aae7174`), so the discriminator is which unit's
+    cgroup the process runs in, read from `/proc/self/cgroup`. The last two assertions check
+    that pair at this boundary — the lane does not refuse this caller, and the script's own
+    check does, because this process is a `.scope` and not the window unit. The pair is the
+    contract: the lane refuses the verb, the script refuses the caller, and neither may lean
+    on the other.
+    """
+    for verb, cmd, cwd in (
+            ("add", f"git -C {_LIVE} add -- {_CANARY_ROWS}", None),
+            ("commit", f"git -C {_LIVE} commit -m x -- {_CANARY_ROWS}", None),
+            ("add", f"git add -- {_CANARY_ROWS}", _LIVE),
+            ("commit", f"git commit -m x -- {_CANARY_ROWS}", _LIVE)):
+        label = _lane(cmd, cwd)
+        assert label is not None, f"{cmd}: the live-checkout git lane let it through"
+        assert label.startswith(f"live-checkout git write: `git {verb}` in the live "
+                                f"checkout"), \
+            f"{cmd}: refused on the wrong verb: {label!r}"
+        assert _LIVE in label, f"{cmd}: the message does not name the live checkout"
+
+    step_path = f"{_LIVE}/{_CANARY_STEP}"
+    for wrapper in (f"{_CANARY_PYTHON} {step_path}",
+                    f"{_CANARY_PYTHON} {_CANARY_STEP}",
+                    f"env INVOCATION_ID=8f14e45f python {_CANARY_STEP}"):
+        assert _lane(wrapper) is None, \
+            f"the git lane answered a command that names no git verb: {wrapper!r} — " \
+            "which lane refused it, and does the script still get to run?"
+
+    # The tree this file lives in, not `_LIVE`: the same reason `tests/
+    # test_persistence_window_unit.py::_fork_head` resolves the report script into
+    # `ROOT` — a node that imports the installed copy cannot pin a change to the file it
+    # exists to test, and before this lands the installed copy does not exist at all.
+    script = Path(__file__).resolve().parent.parent / _CANARY_STEP
+    spec = importlib.util.spec_from_file_location("commit_injection_canary_corpus",
+                                                  script)
+    step = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(step)
+    assert step.invocation_refusal({}, cgroup_file=str(script) + ".no-such-cgroup") \
+        is not None, \
+        "a caller with no INVOCATION_ID — a Bash-tool fork, the arm this lane cannot see " \
+        "— must be refused on that arm alone"
+    # The arm that actually discriminates on this box. `INVOCATION_ID` being set is NOT
+    # enough and this is where that is pinned: this pytest process carries a real
+    # `INVOCATION_ID` (its ancestor is a systemd unit), so the only thing separating it
+    # from the window's own fire is the cgroup. If this assertion ever passes the other
+    # way, the script is refusing its own 02:10 fire or admitting every turn on the box.
+    assert step.is_systemd_invocation({"INVOCATION_ID": "8f14e45f"}) is True, \
+        "the variable is one arm of the conjunction; refusing it outright would refuse " \
+        "the real fire too — the discrimination below is what does the work"
+    assert step.runs_in_window_unit() is False, \
+        "this test process claims to run inside lloyd-persistence-window.service's cgroup, " \
+        "so the check has stopped separating a turn from the unit"
+    assert step.invocation_refusal({"INVOCATION_ID": "8f14e45f"}) is not None, \
+        "a caller holding a real INVOCATION_ID outside the unit's cgroup — which is what " \
+        "an agent Bash turn on this box is, measured INVOCATION_ID=862d3b6355d542dea3b5" \
+        "64f72aae7174 — must still be refused"
+    assert step.CORPUS_PATHSPEC == "eval/measurements/injection-canary/", \
+        "the step's write surface must stay the one directory this lane refuses by verb"
+
+
 TESTS = [
     test_seeding_a_broad_pattern_makes_the_benign_arm_strictly_worse,
     test_removing_a_pattern_makes_the_true_positive_arm_strictly_worse,
@@ -731,6 +817,7 @@ TESTS = [
     test_a_command_that_arrives_with_no_session_id_is_not_this_lanes_to_refuse,
     test_the_lane_replies_for_a_subagent_only_when_its_parent_is_unattended,
     test_a_worktree_path_held_in_a_variable_the_same_command_assigns_is_not_live,
+    test_the_canary_commit_step_leaves_the_lane_refusing_the_raw_verbs_it_replaces,
 ]
 
 

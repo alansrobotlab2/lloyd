@@ -26,8 +26,9 @@ Documentation=file:///home/alansrobotlab/lloyd/eval/run_persistence_arms.sh
 # leaves every rep on the tracked eval/measurements/injection-canary/rows.jsonl --
 # the file the leak-rate denominator behind #2194's owed entries is read from. A
 # window writing a scratch path measures itself into nowhere. The dated report is still
-# written, and by no variable: `ExecStartPost`, at the bottom of this file, asks the
-# bench for it by flag at its tracked dated name (#2596).
+# written, and by no variable: the first of the two `ExecStartPost` lines at the bottom
+# of this file asks the bench for it by flag at its tracked dated name (#2596), and the
+# second commits what that write put in the tracked directory (#2877).
 
 [Service]
 Type=oneshot
@@ -111,3 +112,36 @@ TimeoutStartSec=4h
 # the step costs it 0.07 s -- the render's measured wall clock over the shipped corpus
 # on 2026-10-12.
 ExecStartPost=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python /home/alansrobotlab/lloyd/eval/run_injection_canary.py report --write --force
+#
+# #2877: then commit what the fire wrote. Second, and after the line above, because what
+# it commits is that line's own output -- `report --write` appends the window's rows to
+# the git-tracked eval/measurements/injection-canary/rows.jsonl and lands
+# run-<UTC date>-persistence.md beside them, and nothing committed either one. The
+# 2026-10-15 fire's residue was still the whole of `git status --porcelain` four days
+# later, and #2866 closed with that commit owed to a human because no automated session
+# can make one. Retention cannot take the job either: `sweep_injection_canary`
+# (`scripts/groundskeeper/retention-sweep.py:3211`) accepts `apply` and ignores it on
+# purpose, deleting a git-tracked corpus being a repository write. So the producer
+# commits, and the order of the two lines is the order the work happens: render, then
+# commit the render's output.
+#
+# Direct again -- the repo venv python on
+# scripts/maintenance/commit_injection_canary_corpus.py by absolute path, with no shell,
+# no date literal and no `%`-specifier, for the same reasons the paragraph above gives
+# for the report line: the script derives its own UTC date from
+# `datetime.now(timezone.utc)`, and with no `WorkingDirectory=` set every path token has
+# to be absolute. It takes no argument, which is what lets
+# tests/test_persistence_window_unit.py pin the line as exactly two tokens and name no
+# directory but the script's own.
+#
+# And it exits 0 whatever it decides, including when it refuses. A `Type=oneshot` whose
+# `ExecStartPost` returns non-zero ends `Failed with result 'exit-code'`, so a commit
+# refused for an ordinary reason -- `index.lock` held by a landing, somebody else's path
+# already in the index, a fire that wrote nothing -- would read as a failed window and
+# bury the ~34 min of dispatch that fire just held. Leaving the dirt is the right outcome
+# in every one of those cases: the next fire's `git add` of that directory picks it up.
+# The step is also a route into the live checkout's index, so the script refuses a caller
+# with no `INVOCATION_ID` in its environment -- a systemd unit sets one for its
+# processes and a Bash-tool fork has none -- which is what keeps this from being the
+# wrapper that walks round the refusal of a raw `git add`/`git commit` in production.
+ExecStartPost=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python /home/alansrobotlab/lloyd/scripts/maintenance/commit_injection_canary_corpus.py

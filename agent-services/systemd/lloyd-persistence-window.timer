@@ -10,9 +10,15 @@ Description=Weekly (Monday) Lloyd persistence-arm window (#2428, bounded by #275
 # ~190 KB (190,226 B and 188,556 B) appended to the git-tracked
 # eval/measurements/injection-canary/rows.jsonl plus one dated report, every time. A
 # window a morning was therefore ~190 KB and a morning of held dispatch, with no
-# self-disabling in this unit and no retention store covering that directory
-# (`scripts/groundskeeper/retention-sweep.py` has no `injection-canary` entry), so the
-# bound is on how often, and the corpus it grows is owed its own retention ruling. What
+# self-disabling in this unit and no retention BOUND on that directory: store 18 of
+# `scripts/groundskeeper/retention-sweep.py` is an injection-canary entry, but
+# `sweep_injection_canary` (:3211) counts it -- present/files/bytes/rows/windows/oldest --
+# and documents `apply` as accepted and ignored on purpose, because the corpus is
+# git-tracked and deleting it would be a repository write. It is the second store that
+# reports without bounding, after tool-quality. Since #2877 the fire's own second
+# `ExecStartPost` commits what it writes, which bounds the checkout's dirt and not the
+# corpus's growth, so the bound here stays on how often, and the corpus it grows is owed
+# its own retention ruling. What
 # does NOT change: the hour, the 4200 s drain, the ten reps. ~3 h 20 m is what the drain
 # plus the reps can occupy (12000 s), which is a ceiling and not the observed 34 min —
 # the morning-after-morning slot had been sized from the ceiling, which is how holding

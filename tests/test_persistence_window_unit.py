@@ -757,18 +757,36 @@ REPORT_TABLE_HEADER = ("| window | rows (attack/control) | episodes ran "
 WRITING_FLAGS = ("--write", "--force")              # dropped to make a run read-only
 
 
-def _execstartpost() -> str:
-    """The unit's post-start line, or a failure that says what its absence costs."""
-    cp = _parse(SERVICE)
-    assert cp.has_option("Service", "ExecStartPost"), \
+def _post_lines() -> list[str]:
+    """Every `ExecStartPost=` value in the unit, in the order the FILE spells them.
+
+    Read off the raw text, never out of `_parse`. The shipped parser is
+    `strict=False`, and under it a repeated key is legal and LAST-WINS: measured on
+    `"[Service]\\nExecStartPost=/a x\\nExecStartPost=/b y\\n"`, `strict=True` raises
+    `DuplicateOptionError` while `strict=False` answers `'/b y'`. One `cp.get` after
+    #2877 appended its commit step would therefore have returned the COMMIT line and
+    silently hidden the report line from every node below, turning the four older
+    post-start nodes red over a unit that is fine — or, worse, green while reading a
+    command systemd never runs. systemd executes every `ExecStartPost` it is given, in
+    file order, so file order is what this returns."""
+    lines = [l.strip().split("=", 1)[1].strip()
+             for l in SERVICE.read_text(encoding="utf-8").splitlines()
+             if l.strip().startswith("ExecStartPost=")]
+    assert lines, \
         "the unit has no ExecStartPost, so a completed window renders its report to the " \
         "journal and writes nothing: the one report in the tracked dir is still the " \
         "hand-written run-2026-10-04-persistence.md"
-    return cp.get("Service", "ExecStartPost")
+    return lines
+
+
+def _execstartpost() -> str:
+    """The REPORT step — the first `ExecStartPost` line, which is the one that must
+    stay first: it is what writes the dated report the commit step then commits."""
+    return _post_lines()[0]
 
 
 def _post_argv() -> list[str]:
-    """`ExecStartPost` as argv, split with POSIX quoting exactly as `ExecStart` is."""
+    """The report step's argv, split with POSIX quoting exactly as `ExecStart` is."""
     return shlex.split(_execstartpost())
 
 
@@ -1007,7 +1025,7 @@ def test_the_unit_reaches_neither_override_on_any_surface_systemd_reads():
         "EnvironmentFile=/PassEnvironment= would hand the window an override this node's " \
         "Environment= scan never sees (#2428's post-review finding)"
 
-    for line in (_execstart(), _execstartpost()):
+    for line in (_execstart(), *_post_lines()):
         assert "LLOYD_CANARY" not in line, f"inline assignment: {line!r}"
         for pool_ism in ("curl", "wget", "enqueue", "/api/", "bash -c", "sh -c",
                          "python -c"):
@@ -1048,3 +1066,149 @@ def test_the_service_comment_describes_the_report_write_and_its_success_only_tri
         "the refused-drain case is named by the status the one fire this unit had returned"
     assert "--force" in prose, \
         "…and the comment must say why overwriting a same-day file is the right behaviour"
+
+
+#: The script the second `ExecStartPost` runs (#2877), and the ONE directory it may
+#: stage — repeated here rather than imported so the node fails if the unit and the
+#: script disagree about which corpus is theirs.
+COMMIT_SCRIPT = "scripts/maintenance/commit_injection_canary_corpus.py"
+COMMIT_PATHSPEC = "eval/measurements/injection-canary/"
+
+
+def _commit_step_module():
+    """The script the commit step names, imported by path from the tree under test.
+
+    The seam this crosses is the one a grep cannot see: the unit's argv on one side, and
+    the constants that decide what that argv will commit on the other. `scripts/` is not
+    a package, so this is the same `spec_from_file_location` shape
+    `tests/test_corpus_shape.py` uses for `scripts/maintenance/corpus_shape.py`.
+    """
+    import importlib.util
+    script = ROOT / COMMIT_SCRIPT
+    assert script.is_file(), \
+        f"{script} is missing, so the unit's second ExecStartPost exits 2 and fails a " \
+        "window that wrote its report correctly"
+    spec = importlib.util.spec_from_file_location("commit_injection_canary_corpus",
+                                                  script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_unit_commits_the_corpus_it_writes_after_rendering_the_report():
+    """#2877 clause 1: a SECOND `ExecStartPost` that execs the repo's venv python on
+    `scripts/maintenance/commit_injection_canary_corpus.py` by absolute path, after the
+    unchanged `report --write --force` line — with BOTH lines read in file order from the
+    raw text, because one `cp.get` under the shipped `strict=False` parser returns only
+    the last duplicate (measured `'/b y'`).
+
+    Why the order is load-bearing rather than tidy: `report --write` appends the fire's
+    rows to `eval/measurements/injection-canary/rows.jsonl` and lands
+    `run-<UTC date>-persistence.md` beside them, and the commit step records exactly that
+    output. Run first, it would commit the PREVIOUS fire and leave this one's rows in
+    `git status --porcelain` for another week — the failure this item exists to end.
+
+    Why `is_file()` is checked on `ROOT / COMMIT_SCRIPT` and not on `argv[1]`: the unit
+    spells its paths absolutely for the live checkout, so a round's worktree — where
+    this node runs before the script has landed — holds the file at a different path.
+    `_fork_head` reasons about the same trap for the report script; asserting the live
+    path here would test the deployment instead of the diff. What IS pinned about
+    `argv[1]` is that it is absolute, inside the same checkout `ExecStart` runs, ends in
+    the script's repo-relative path, and equals `step.LIVE_REPO + "/" + COMMIT_SCRIPT` —
+    i.e. the line and the script's own default agree on one tree.
+    """
+    import re
+    raw = SERVICE.read_text(encoding="utf-8")
+    lines = _post_lines()
+    assert lines == [s.strip() for s in re.findall(r"(?m)^ExecStartPost=(.*)$", raw)], \
+        "the helper is not reading the raw ExecStartPost lines in file order, and that " \
+        "is the only way both of them are visible: `cp.get` with strict=False returns " \
+        "the last duplicate alone, hiding the report line behind the commit line"
+    assert len(lines) == 2, \
+        f"expected the report step then the corpus commit step, got {len(lines)} " \
+        f"ExecStartPost line(s): {lines!r}"
+    assert lines[0].endswith("report --write --force"), \
+        f"the report step must stay first, unchanged: {lines[0]!r}"
+
+    step = _commit_step_module()
+    argv = shlex.split(lines[1])
+    assert argv[0].endswith(VENV_PY_SUFFIX) and os.path.isabs(argv[0]) \
+        and Path(argv[0]).is_file() and os.access(argv[0], os.X_OK), \
+        f"the commit step must run the repo's venv python, got {argv[0]!r}"
+    repo_root = str(Path(_exec_argv()[0]).parents[1])         # ExecStart's own checkout
+    assert argv[1] == step.LIVE_REPO + "/" + COMMIT_SCRIPT, \
+        f"the line runs {argv[1]!r} but the script defaults to committing in " \
+        f"{step.LIVE_REPO!r}: two trees, so the step commits nothing it wrote"
+    for token in argv[:2]:
+        assert token.startswith(repo_root + os.sep), \
+            f"{token!r} is outside the checkout ExecStart runs ({repo_root})"
+    assert step.LIVE_REPO == repo_root, \
+        f"the script would commit {step.LIVE_REPO!r}, not {repo_root!r}"
+    assert len(argv) == 2, \
+        f"a token after the script would be a pathspec the unit invented instead of the " \
+        f"script's own: {argv!r}"
+
+    for shell_ism in ("$(", "${", "`", "sh -c", "bash -c", "python -c", "date "):
+        assert shell_ism not in lines[1], \
+            f"{shell_ism!r} needs a shell, and this unit execs directly"
+    assert "%" not in lines[1], \
+        "a `%` on this line is a systemd specifier, and the dated filename is the " \
+        "script's own to derive from datetime.now(timezone.utc)"
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", lines[1]), \
+        f"a date literal cannot be interpolated by systemd: {lines[1]!r}"
+
+    assert step.CORPUS_PATHSPEC == COMMIT_PATHSPEC, \
+        f"the step stages {step.CORPUS_PATHSPEC!r}, not {COMMIT_PATHSPEC!r}"
+    assert step.CORPUS_PATHSPEC == f"{RC.OUT_DIR.relative_to(ROOT)}/", \
+        f"the committed directory {step.CORPUS_PATHSPEC!r} is not the report's own " \
+        f"output dir {RC.OUT_DIR}, so the fire's rows would stay uncommitted"
+
+
+def test_the_timer_says_the_canary_store_counts_the_corpus_without_bounding_it():
+    """#2877 clause 5: the timer's retention comment states what the sweep actually
+    does, and nothing in either unit still claims the store is missing.
+
+    The shipped sentence — ``(`scripts/groundskeeper/retention-sweep.py` has no
+    ``injection-canary` entry)`` — was true when it was written and is false now: store
+    18 was added by 13a8c238 (#2873, landing #2862's code half), and
+    `sweep_injection_canary` is in that file. A comment that names a missing guard is
+    worse than no comment here, because it is the reason a later reader keeps the cadence
+    bound and does not go looking for the store: the true statement is narrower and has
+    to be said exactly — the store COUNTS the corpus and does not BOUND it, because
+    `apply` is accepted and ignored on purpose and deleting a git-tracked corpus is a
+    repository write.
+
+    The claims are checked against the sweep's own source, not just against the prose,
+    because that is the boundary the sentence crosses: a comment can only be as true as
+    the function it describes.
+    """
+    prose = _comments(TIMER)
+    for label, text in (("timer", _comments(TIMER)), ("service", _comments(SERVICE))):
+        for stale in ("has no `injection-canary` entry", "no retention store covering"):
+            offender = [l.strip() for l in text.splitlines() if stale in l]
+            assert not offender, \
+                f"the {label} unit still claims the retention coverage is absent: " \
+                f"{offender}"
+
+    assert "sweep_injection_canary" in prose, \
+        "the comment must name the store that does cover the corpus"
+    assert "scripts/groundskeeper/retention-sweep.py" in prose, \
+        "…and name the file it lives in"
+    assert "counts it" in prose and "without bounding" in prose, \
+        "the comment must say the store counts the corpus without bounding it, which is " \
+        "the narrower true claim the cadence bound rests on now"
+    assert "accepted and ignored on purpose" in prose and "git-tracked" in prose, \
+        "…and why: `apply` is ignored because the corpus is git-tracked"
+    assert "retention ruling" in prose, \
+        "the owed retention ruling for the growing corpus must stay owed in the prose"
+
+    sweep = (ROOT / "scripts" / "groundskeeper" / "retention-sweep.py").read_text(
+        encoding="utf-8")
+    assert "def sweep_injection_canary(" in sweep, \
+        "the function the comment names is not in the file it names"
+    assert "accepted and ignored, on purpose" in sweep, \
+        "the comment repeats the store's own `apply` contract, so the source has to " \
+        "still carry it"
+    assert "reports without bounding" in sweep, \
+        "the comment calls this the second store that reports without bounding; the " \
+        "sweep's own docstring is where that is stated"
