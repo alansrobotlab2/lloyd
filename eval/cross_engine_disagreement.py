@@ -67,6 +67,23 @@ Surfaces (both reuse gold that exists; neither authors a label):
       first, and an engine asked a different question than the one it recorded an
       answer to is not a re-ask of anything.
 
+  shadow-gold-sample        arm 1 (#2824): `eval/cross_engine_disagreement_arm1/gold.jsonl`,
+      120 rows sampled read-only from the djev shadow store and labelled under a written
+      rubric (`rubric.py` in that directory). Unlike the two surfaces above, its gold is
+      NOT lifted from an artifact that already carried a label and NOT human: a sampler
+      admits a row only after re-deriving its canvas to the `inputs_digest` the seam
+      itself recorded, and labels it only where a rubric line yields the answer from an
+      artifact. It therefore measures the one quantity a Lloyd-authored label can
+      legitimately score — whether two different model families, shown the same canvas
+      and the same gold, agree and where they differ — and it does NOT measure
+      localization against a shipped answer, because no shipped subsystem ever answered
+      these canvases. What its recall therefore means is NOT the shipped surfaces'
+      recall: an arm-1 error is "an engine disagreed with the rubric gold", where a
+      shipped-surface error is "the verdict the shipped subsystem recorded was wrong".
+      `rows_with_shipped_answer` is 0 on this surface and non-zero on those two, which
+      is the field a reader checks before carrying a number across surfaces. `--gold`
+      points the surface at another file.
+
 Each row is asked `--repeats` times per engine (minimum 5, enforced) and reported as
 a per-case pass rate over those draws, never as one draw: a nondeterministic
 verifier sampled once is an anecdote. A surface whose non-abstaining denominator is
@@ -120,6 +137,10 @@ DEFAULT_RETRIEVAL_ARTIFACT = Path(
     "/label-agreement-20260929-005508.json")
 DEFAULT_ARMS_FINAL = Path("/home/alansrobotlab/lloyd-data/eval/owedcheck-2254/arms-final.jsonl")
 DEFAULT_CORPUS = REPO / "eval" / "durable_write_judge" / "corpus.jsonl"
+#: Arm 1's gold (#2824) is a tracked file beside the sampler that wrote it, so the
+#: table's denominators stay checkable from the checkout instead of from a runtime
+#: store that grows ~10k rows a day and rotates underneath a re-run.
+DEFAULT_ARM1_GOLD = REPO / "eval" / "cross_engine_disagreement_arm1" / "gold.jsonl"
 
 # ── thresholds (the item's, quoted verbatim into the artifact) ──────────────
 
@@ -408,10 +429,86 @@ def parse_durable(row: dict, reply: str) -> str | None:
     return verdict if verdict in ("flag", "accept") else None
 
 
+# ── arm 1: the labelled shadow gold sample (#2824) ──────────────────────────
+
+#: The options are matched as whole words, and anything that is not exactly one of
+#: them is an abstain. Loose matching is what turned the retrieval arm's 2000-row
+#: first run into a fake 0.0095: replies that echoed the question's own words scored as
+#: a pick there, and here a reply like "these are not the same, they are different"
+#: names two options at once, which is a non-answer rather than a coin flip.
+def parse_arm1(row: dict, reply: str) -> str | None:
+    import re as _re
+
+    text = str(reply or "").lower()
+    hits = [label for label in row["labels"]
+            if _re.search(rf"\b{_re.escape(str(label).lower())}\b", text)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def load_arm1_gold(path: Path) -> list[dict]:
+    """Read and validate arm 1's gold, and refuse the file if a row fails.
+
+    Validation is the sampler's own (`rubric.validate_gold_row`), called from here as
+    well as there, because this is the path that turns a row into a denominator. A
+    hand-edited row with no warrant, or a row whose rubric line has since been edited,
+    would otherwise produce a number that looks exactly like a valid one.
+    """
+    from eval.cross_engine_disagreement_arm1 import rubric
+
+    gold = rubric.load_gold(path)
+    if not gold:
+        raise RuntimeError(
+            f"arm 1 has no gold rows at {path}; the surface reports UNMEASURABLE "
+            "rather than a rate computed over nothing")
+    return gold
+
+
+#: Arm 1's question, assembled from the parts the seam itself sent. It is assembled
+#: rather than stored in `gold.jsonl` so the words an endpoint sees are produced by one
+#: function in this repo, readable by the clause-3 tests, and so the gold file stays the
+#: labelling artifact rather than also being a prompt file. `state` is the canvas text
+#: the seam put to djev, verified byte-for-byte against the row's own `inputs_digest` by
+#: the sampler before the row was ever written; `instructions` and `options` are the
+#: frozen typed-question set from `eval/djev/schemas.py`.
+def arm1_prompt(state: str, instructions: str, options: tuple[str, ...]) -> str:
+    return (f"CANVAS STATE:\n{state}\n\nQUESTION:\n{instructions}\n\n"
+            f"Answer with exactly one of: {', '.join(options)}\n")
+
+
+def arm1_rows(gold: list[dict], *, limit: int | None = None) -> list[dict]:
+    """Runner rows from validated gold rows — same shape, arm-native fields only."""
+    rows: list[dict] = []
+    for g in gold[:limit or len(gold)]:
+        labels = tuple(g["options"])
+        rows.append({
+            "surface": SURFACE_ARM1,
+            "id": f"{g['seam']}:{g['inputs_digest']}",
+            "seam": g["seam"],
+            "stratum": g["stratum"],
+            "inputs_digest": g["inputs_digest"],
+            "question_id": g["question_id"],
+            "labels": labels,
+            "gold": g["gold"],
+            "gold_verdict": g["gold"],
+            "warrant": g["warrant"],
+            "labelled_by": g["labelled_by"],
+            "rubric_sha256": g["rubric_sha256"],
+            "prompt": arm1_prompt(g["state"], g["question"], labels),
+        })
+    return rows
+
+
 SURFACE_RETRIEVAL = "retrieval-labels-offered"
 SURFACE_DURABLE_WRITE = "durable-write-judge"
+#: Arm 1 (#2824): the seeded, warrant-bearing gold sample of the djev shadow store.
+#: Its labels are Lloyd-authored under a written rubric rather than lifted from an
+#: artifact that already carried them, which is why its provenance block is the one
+#: block that says `human_label: false`. What that makes the number evidence OF is
+#: `eval/cross_engine_disagreement_arm1/README.md`'s question, not this file's.
+SURFACE_ARM1 = "shadow-gold-sample"
 
-PARSERS = {SURFACE_RETRIEVAL: parse_retrieval, SURFACE_DURABLE_WRITE: parse_durable}
+PARSERS = {SURFACE_RETRIEVAL: parse_retrieval, SURFACE_DURABLE_WRITE: parse_durable,
+           SURFACE_ARM1: parse_arm1}
 
 
 # ── asking ──────────────────────────────────────────────────────────────────
@@ -520,6 +617,13 @@ def localize(rows: list[dict], surface: str) -> dict:
             eng: _pass_rate_summary(rows, eng) for eng in engine_names
         },
         "measurable": n >= MIN_NON_ABSTAINING,
+        # How many rows in the cell carry a verdict a SHIPPED subsystem recorded. The
+        # two original surfaces have one per row; arm 1 has none, because no shipped
+        # reviewer ever put these canvases to a model. It does not empty the recall
+        # denominator — `row_error` is "an engine disagreed with the gold" — but it
+        # changes what the number means, so it is published rather than implied.
+        "rows_with_shipped_answer": sum(
+            1 for r in rows if r.get("primary_verdict") is not None),
     }
     if not cell["measurable"]:
         cell["unmeasurable"] = (f"UNMEASURABLE surface={surface} "
@@ -528,6 +632,11 @@ def localize(rows: list[dict], surface: str) -> dict:
                         "this item sets; the rates above are computed and published "
                         "for the record but are not a result, and this cell must not "
                         "be quoted as one.")
+    if cell["measurable"] and not cell["errors_total"]:
+        cell["localization_unmeasurable"] = (
+            f"UNMEASURABLE surface={surface} localization: none of the "
+            f"{n} non-abstaining pairs contains an error, so recall has no "
+            f"denominator and no rate is printed")
     cell["positive_gate"] = positive_for_surface(cell)
     return cell
 
@@ -640,6 +749,8 @@ def markdown(cells: list[dict], meta: dict) -> str:
             for eng in meta["engines"]))
         lines.append(f"  - POSITIVE here: {c['positive_gate']['positive']} — "
                      + ("; ".join(c['positive_gate']['reasons']) or "all three hold"))
+        if c.get("localization_unmeasurable"):
+            lines.append(f"  - {c['localization_unmeasurable']}")
     lines += ["", "Read `both_wrong_and_agreeing` before anything else. It is the "
                   "shared-convention case — four model families once produced the same "
                   "wrong total to the cent because they shared a sign convention the "
@@ -717,12 +828,16 @@ def load_corpus(path: Path) -> list[dict]:
 
 
 def build_rows(artifact_path: Path, corpus_path: Path, arms_path: Path,
-               arms: tuple[str, ...], limit: int | None) -> list[dict]:
+               arms: tuple[str, ...], limit: int | None,
+               arm1_gold_path: Path | None = None) -> list[dict]:
     rows: list[dict] = []
     if SURFACE_RETRIEVAL in arms:
         rows += retrieval_rows(load_retrieval_artifact(artifact_path))
     if SURFACE_DURABLE_WRITE in arms:
         rows += durable_rows(load_corpus(corpus_path), load_arms_final(arms_path))
+    if SURFACE_ARM1 in arms:
+        gold_path = Path(arm1_gold_path) if arm1_gold_path else DEFAULT_ARM1_GOLD
+        rows += arm1_rows(load_arm1_gold(gold_path))
     if limit:
         rows = rows[:limit]
     return rows
@@ -744,7 +859,11 @@ def main(argv: list[str] | None = None, transport: Transport | None = None,
                     help="directory for the dated JSON + markdown table")
     ap.add_argument("--repeats", type=int, default=MIN_REPEATS,
                     help=f"draws per row per engine (min {MIN_REPEATS})")
-    ap.add_argument("--arms", default=",".join((SURFACE_RETRIEVAL, SURFACE_DURABLE_WRITE)))
+    ap.add_argument("--arms", default=",".join((SURFACE_RETRIEVAL, SURFACE_DURABLE_WRITE,
+                                                SURFACE_ARM1)))
+    ap.add_argument("--gold", default=str(DEFAULT_ARM1_GOLD),
+                    help="arm 1's gold JSONL (eval/cross_engine_disagreement_arm1/"
+                         "gold.jsonl by default, the file the sampler writes)")
     ap.add_argument("--limit", type=int, default=None,
                     help="cap rows, for a smoke run; the published number is unlimited")
     ap.add_argument("--label-artifact", default=str(DEFAULT_RETRIEVAL_ARTIFACT))
@@ -763,7 +882,8 @@ def main(argv: list[str] | None = None, transport: Transport | None = None,
 
     engines = engines or resolve_engines()
     rows = build_rows(Path(args.label_artifact), Path(args.corpus),
-                      Path(args.arms_final), chosen, args.limit)
+                      Path(args.arms_final), chosen, args.limit,
+                      arm1_gold_path=Path(args.gold))
     asked = run_rows(rows, ask_, args.repeats, engines)
 
     meta = {
@@ -783,6 +903,14 @@ def main(argv: list[str] | None = None, transport: Transport | None = None,
             SURFACE_RETRIEVAL: f"{args.label_artifact} (offered labels only)",
             SURFACE_DURABLE_WRITE: f"{args.corpus} joined to {args.arms_final} "
                                    "(primary, arm=none, prompt sha256 verified)",
+            SURFACE_ARM1: f"{args.gold} — labels authored by Lloyd under the written "
+                          "rubric in eval/cross_engine_disagreement_arm1/rubric.py; "
+                          "each row names its rubric line, the evidence read, and that "
+                          "line's sha256. NOT a human label. No shipped subsystem "
+                          "answered these canvases, so an error on this surface is "
+                          "'an engine disagreed with the rubric gold', not 'the shipped "
+                          "verdict was wrong' — do not carry its recall across "
+                          "surfaces",
         },
         "wires_nothing": True,
     }
@@ -790,7 +918,7 @@ def main(argv: list[str] | None = None, transport: Transport | None = None,
     meta["verdict"] = overall_verdict(cells)
     paths = write_artifact(Path(args.out), meta, cells, asked)
     for cell in cells:
-        print(cell.get("unmeasurable")
+        print(cell.get("unmeasurable") or cell.get("localization_unmeasurable")
               or (f"{cell['surface']}: non_abstaining={cell['non_abstaining']} "
                   f"agreement={_rate(cell['agreement_rate']['num'], cell['agreement_rate']['den'])['value']} "
                   f"recall={cell['error_localization_recall']['value']} "

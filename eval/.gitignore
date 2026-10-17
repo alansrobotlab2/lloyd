@@ -38,3 +38,19 @@
 # keeps these two from quietly becoming it again.
 !skill_entity_overlap_pairs.json
 !skill_entity_overlap_pair_bodies.json
+
+# Arm 1's recorded-ids sidecar (#2824). `gold.jsonl` escaped the root `*.json` rule only
+# because its suffix is `.jsonl`; `sample.json` is the file that rule actually matches,
+# and it is the one an acceptance clause depends on — "recording the sampled ids so a
+# re-run at the same seed reproduces the same 120 inputs_digest values", and the item's
+# own post-landing verification is "re-running the sampler and confirming the recorded
+# ids reproduce". A sidecar that is not in the tree reproduces nothing for a reader, and
+# `git add -A` skipped it WITHOUT A WORD exactly as paragraph above describes: the round
+# that built this arm committed `gold.jsonl` and silently lost its sidecar, so 11 of its
+# own tests failed in the gate worktree on `FileNotFoundError: sample.json`.
+#
+# The file is a measurement record, not runtime state: seed, store path, stratum counts,
+# the 120 `inputs_digests`, the rubric sha. It is written by
+# `eval/cross_engine_disagreement_arm1/sample_gold.py` beside the gold it describes, and
+# `tests/test_cross_engine_arm1_gold.py` reads it back to prove the pair is consistent.
+!sample.json
