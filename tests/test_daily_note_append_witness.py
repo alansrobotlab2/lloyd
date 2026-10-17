@@ -1005,3 +1005,125 @@ def test_the_fold_above_the_writer_leaves_its_repeat_ruling_intact(
         f"no longer recording what was written: {[r['line_sha256'] for r in rows]}")
     result = shc.check_daily_note_appends(ledger=witness["ledger"])
     assert result["rows_examined"] == 3 and result["rows_lost"] == 0, result
+
+
+# ── #2890 clause 2: the throughput census line reaches this note ─────────────
+def test_the_worker_pool_throughput_census_line_lands_on_the_note_with_its_tallies(
+        witness, tmp_path, monkeypatch, caplog):
+    """Clause 2: the census's line arrives through the writer, witnessed, and readable.
+
+    The whole route runs, with one exception stated below: the pool watchdog's `_alert`
+    → `app.discord_notify.discord_alert` → its no-channel branch →
+    `app.autonomy.append_daily_alert_line` → this ledger. The one thing pinned rather
+    than read is `CONFIG`'s Discord block, because this box has no home channel
+    configured and a test must not decide that by loading the real config — with a
+    channel present the alert would have tried to POST to Discord instead of landing
+    here, which is the branch `_survive_the_dropped_alert` exists for.
+
+    What the line has to carry is the clause, not decoration: at least TWO failure-class
+    tallies (a bare "137 failed" names no cause and cannot be triaged from the note), and
+    the time bounds of the window they fall in, because #2890's incident was one
+    availability event spread over three windows and a count alone cannot say that.
+    """
+    import asyncio
+    import sqlite3
+
+    import workers.fleet_watchdog as fw
+    import app.discord_notify as dn
+    from workers.queue import WorkQueue
+
+    monkeypatch.setattr(dn, "CONFIG", {"discord": {}}, raising=False)
+    # The census records the day it reported in `fleet_watchdog._state` before it
+    # persists the row, and THIS file — unlike test_fleet_watchdog.py, which has an
+    # autouse `_both_states_restored` — has no fixture guarding that dict. So rebind it
+    # to a copy: the node still exercises the real write-through, and the module-global
+    # it lands on is this node's copy rather than the one every later node in the
+    # session reads. Leaking it would set today's suppression for whoever runs next,
+    # and in natural collection order that is a watchdog test that would have posted.
+    # The census records the day it reported in `fleet_watchdog._state` BEFORE it
+    # persists the row, and `_throughput_reported_day` takes the later of that cache and
+    # the watermark row — so a day left there by any earlier node in the session
+    # suppresses this one's census outright, which is how this node failed while passing
+    # on its own. Pin the ONE key this alarm owns through monkeypatch: copying the dict
+    # would have carried the poisoned day along with it, and rebinding the whole
+    # `_state` would churn the dict `scheduled_task` shares. Teardown restores the key
+    # to exactly its prior value, so this node leaves nothing set for whoever is
+    # collected next.
+    monkeypatch.setitem(fw._state, fw._THROUGHPUT_WM_KEY, None)
+
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+    twodays = (datetime.now(timezone.utc) - timedelta(days=2)).date().isoformat()
+    q = WorkQueue(tmp_path / "runs.db")
+    rows = ([("no structured answer: finalizer failed", "04:00")] * 99
+            + [("ConnectError: All connection attempts failed", "18:05")] * 24
+            + [("ConnectTimeout: ", "22:23")] * 2
+            + [("RuntimeError: model server unhealthy — deferring task", "23:14")]
+            + [("unclassified thing happened", "23:52")] * 11)
+    conn = sqlite3.connect(str(q.db_path))
+    for n, (summary, hhmm) in enumerate(rows):
+        day, mins = (yesterday, n) if n < len(rows) else (twodays, 0)
+        stamp = f"{day}T{hhmm}:{(mins % 60):02d}+00:00"
+        conn.execute(
+            "INSERT INTO runs (run_id, source, status, started_at, completed_at,"
+            " summary) VALUES (?,?,?,?,?,?)",
+            (f"r{n}", "owed-check", "failed", stamp, stamp, summary))
+    for n in range(7):                       # the quiet predecessor day
+        stamp = f"{twodays}T06:{n:02d}:00+00:00"
+        conn.execute(
+            "INSERT INTO runs (run_id, source, status, started_at, completed_at,"
+            " summary) VALUES (?,?,?,?,?,?)",
+            (f"p{n}", "autotriage", "failed", stamp, stamp, "one-off failure"))
+    conn.commit()
+    conn.close()
+
+    async def _one_tick():
+        # The loop is the one the coroutine is already running on, exactly as
+        # `tick` obtains it in the pool: `_census_failure_throughput` hands its
+        # store read to `run_in_executor`, and a loop built outside `asyncio.run`
+        # would be a different loop from the running one.
+        return await fw._census_failure_throughput(asyncio.get_running_loop(), q)
+
+    asyncio.run(_one_tick())
+
+    rows = _rows(witness["ledger"])
+    assert len(rows) == 1, (
+        "the throughput census posted an alert that this witness did not record — the "
+        f"line either never reached the note or reached it unwitnessed: {rows}")
+    note = Path(rows[0]["note_path"])
+    assert note.exists(), f"the row names a note that is not on disk: {rows[0]}"
+    lines = note.read_text(encoding="utf-8").splitlines()
+    mine = [ln for ln in lines
+            if hashlib.sha256(ln.encode("utf-8")).hexdigest()
+            == rows[0]["line_sha256"]]
+    assert mine, "the witnessed row hashes no line of the note it names"
+    line = mine[0]
+
+    assert f"{yesterday}" in line and f"{twodays}" in line, (
+        "the line does not name both days it counted: " + line)
+    assert "137 failed runs" in line and "against 7" in line, (
+        "the line does not name the two counts the rule weighed: " + line)
+    assert "classes:" in line, "the line carries no class tally at all: " + line
+    classes = line.split("classes:", 1)[1].split(";")[0]
+    nonzero = [part.strip() for part in classes.split(",")
+               if part.strip() and not part.strip().endswith(" 0")]
+    assert len(nonzero) >= 2, (
+        f"the line names {len(nonzero)} failure class(es); the clause requires at "
+        f"least two so the note says what kind of bad day it was: {line}")
+    assert "no structured answer 99" in line and "connect error 24" in line, (
+        "the two biggest classes are not the ones the seeded rows had: " + line)
+    assert f"failures span {yesterday}T" in line and "Z to " in line, (
+        "the line names no window bounds for the failures it counts: " + line)
+    # The clocks genuinely disagree on this surface — `runs.started_at` carries
+    # `+00:00` while `NOTE_DAY_TZ` is America/Los_Angeles — so the line has to say
+    # which one it counts. A reader who takes "2026-10-16" off a note named for a
+    # different day needs the sentence, not an inference.
+    assert "UTC" in line and "America/Los_Angeles" in line, (
+        "the line names a UTC day on a note keyed to another zone without saying so: "
+        + line)
+    # The line reached the note with the day recorded, and the pin above is what
+    # restores that key on teardown — so the node has exercised the real write-through
+    # without leaving a suppression behind for the rest of the session.
+    assert fw._state[fw._THROUGHPUT_WM_KEY] == yesterday, (
+        "the census posted the day without recording it in its own in-process key, so "
+        "the dedupe this node exists to prove is not the one being run: "
+        + repr(fw._state.get(fw._THROUGHPUT_WM_KEY)))

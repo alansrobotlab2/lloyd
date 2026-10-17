@@ -784,10 +784,16 @@ def _fresh_process_state(monkeypatch) -> dict:
     silently stop being "a fresh process" and the no-re-alert assertion below would
     then be measuring a fixture rather than the durable read.
     """
+    # `throughput_day` is #2890's failure-throughput census: the UTC day it last
+    # reported, and the only key in here that is a day rather than an instant. It is
+    # part of "what a second process starts with" like the rest, so it belongs in this
+    # literal — dropping it here would be the guard quietly passing on a state that had
+    # gained a key, which is exactly what the assertion below exists to refuse.
     fresh = {"unparseable_scan_at": None, "unparseable_alerted": set(),
              "stall_streak": 0, "stall_alerted_at": None,
              "nextrun_streak": 0, "nextrun_alerted_at": None,
-             "nextrun_parked_logged_at": None}
+             "nextrun_parked_logged_at": None,
+             "throughput_day": None}
     assert set(fresh) == set(fw._state), (
         f"fleet_watchdog._state has keys {sorted(fw._state)}, so this is no longer a "
         f"fresh process's surveillance state")
@@ -2184,3 +2190,298 @@ async def test_an_overdue_only_alert_names_no_source_and_binds_no_starvation_cla
         f"a quiet queue must not contribute a waiting-row clause: {msg}")
     assert reads == [], (
         f"an alert with no waiting row still paid a claim read: {reads}")
+
+# ── #2890: the worker pool's failure-throughput census ───────────────────────
+# The population these nodes seed is `workers.db`'s `runs` table, which no other
+# node in this file writes: the two stall alarms read task files and the QUEUE,
+# and that is exactly the seam #2890 is about — 137 `failed` runs on 2026-10-16
+# against 7 on 2026-10-15 reached no reader, because the fleet's only alarm seat
+# had never looked at the run history it was sitting next to.
+
+_THROUGHPUT_DAY = (dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=1)).isoformat()
+_THROUGHPUT_PREV = (dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=2)).isoformat()
+_THROUGHPUT_MINUS3 = (dt.datetime.now(dt.timezone.utc).date()
+                                 - dt.timedelta(days=3)).isoformat()
+
+
+def _unsuppressed_census(monkeypatch) -> None:
+    """Pin THIS alarm's in-process day to "never posted", for this node only.
+
+    `_throughput_reported_day` takes the LATER of `fw._state` and the watermark row, so a
+    day left in the module-global by any node suppresses the census for every node
+    collected after it — including against a store that never heard of that day, which is
+    how one of these nodes came to fail for a reason its own assertion does not describe.
+    `_state` is shared with `scheduled_task` and only `_both_states_restored` guards it, in
+    this file; the throughput nodes pin the ONE key they own through monkeypatch, which
+    restores that key to its prior state (absence included) at teardown instead of
+    rebinding the shared dict underneath another fixture.
+    """
+    monkeypatch.setitem(fw._state, fw._THROUGHPUT_WM_KEY, None)
+
+
+def _forget_census_day(monkeypatch) -> None:
+    """Drop the in-process day while leaving the STORE's row alone.
+
+    This is the durable-watermark question — does the suppression survive a process that
+    forgot it — asked without `_fresh_process_state`, which rebinds the dict
+    `scheduled_task` shares and is a far wider intervention than forgetting one key.
+    """
+    monkeypatch.setitem(fw._state, fw._THROUGHPUT_WM_KEY, None)
+
+
+def _throughput_queue(path, pairs) -> WorkQueue:
+    """Seed a `runs` table. `pairs` is `[(utc_day, summary, 'HH:MM'), …]`, one per row.
+
+    The day is written into `started_at` exactly as this store writes it — ISO with a
+    `+00:00` offset — because the census groups on the leading 10 characters of that
+    column, and a fixture stamped some other way would test a reader the pool does not
+    have. Every row is `status='failed'`: the census counts failures, and seeding a
+    success row to pad a count would let a green pass hide a `WHERE` clause that
+    dropped the status filter.
+    """
+    q = WorkQueue(path)
+    conn = sqlite3.connect(str(path))
+    for n, (day, summary, hhmm) in enumerate(pairs):
+        stamp = f"{day}T{hhmm}:00+00:00"
+        conn.execute(
+            "INSERT INTO runs (run_id, queue_id, source, task_id, status,"
+            " started_at, completed_at, summary) VALUES (?,?,?,?,?,?,?,?)",
+            (f"run-{n}", None, "owed-check", None, "failed", stamp, stamp, summary))
+    conn.commit()
+    conn.close()
+    return q
+
+
+def _throughput_rows(day, failed, first_minute=0):
+    """`failed` rows on `day`, spread one minute apart from `first_minute`."""
+    return [(day, f"run {n} failed: no structured answer",
+             f"{first_minute + n // 60:02d}:{first_minute + n % 60:02d}")
+            for n in range(failed)]
+
+
+async def test_the_census_posts_on_a_137_versus_7_day_and_stays_silent_at_8_versus_7(
+        board, monkeypatch, tmp_path):
+    """Clause 1: the ratio decides, on the two counts the incident actually had.
+
+    137 against 7 is 2026-10-16 over 2026-10-15 as `workers.db` reported them at
+    filing — the day the engine refused connections for three windows and the note
+    said nothing. 8 against 7 is the ordinary neighbour: 1.14x, nowhere near the 10x
+    rule, and the pair that keeps this a census of an event rather than a daily
+    report. Both days are seeded as COMPLETE (`_THROUGHPUT_DAY` is yesterday UTC), so
+    neither half is passing or failing because of which calendar day it is today.
+
+    The board is empty and the queue is empty, so the two stall alarms have nothing to
+    say and every alert captured here came from the census.
+    """
+    _unsuppressed_census(monkeypatch)
+    q = _throughput_queue(tmp_path / "spike.db",
+                          _throughput_rows(_THROUGHPUT_DAY, 137)
+                          + _throughput_rows(_THROUGHPUT_PREV, 7))
+    alerts = _watch_alerts(monkeypatch)
+    await fw.tick(q)
+    assert len(alerts) == 1, f"expected the one throughput alert: {alerts}"
+    assert "137 failed runs on UTC" in alerts[0], alerts[0]
+    assert f"against 7 on UTC {_THROUGHPUT_PREV}" in alerts[0], alerts[0]
+    assert _THROUGHPUT_DAY in alerts[0], alerts[0]
+
+    # The same seat, the same shape of store, one failure fewer on the newer day:
+    # silence, and silence for the right reason — the detector says None, so there is
+    # no message to suppress downstream.
+    quiet = _throughput_queue(tmp_path / "ordinary.db",
+                              _throughput_rows(_THROUGHPUT_DAY, 8)
+                              + _throughput_rows(_THROUGHPUT_PREV, 7))
+    alerts.clear()
+    await fw.tick(quiet)
+    assert alerts == [], (
+        f"an 8-vs-7 day is 1.14x, inside the {fw._THROUGHPUT_RATIO}x rule, yet the "
+        f"census posted: {alerts}")
+    assert fw._throughput_census(quiet) is None, (
+        "the detector returned a verdict for a sub-ratio pair, so the silence above "
+        "came from the watermark and not from the rule")
+
+
+async def test_the_throughput_line_is_repeated_only_once_per_day_by_its_own_watermark(
+        board, monkeypatch, tmp_path):
+    """Clause 3: two ticks over one pair, one line, and the other alarms' instants intact.
+
+    The dedupe is the alarm's OWN watermark row rather than a cadence, which is what
+    makes it observable at all: two consecutive `tick`s in one test are the same pair
+    of days read twice, so a second line can only mean the dedupe is broken. The other
+    two alarms' rows are SEEDED first, because a watermark that was never written has
+    no persisted instant to preserve — writing them here is the only way the second
+    half of this clause has anything to compare.
+    """
+    _unsuppressed_census(monkeypatch)
+    q = _throughput_queue(tmp_path / "dupe.db",
+                          _throughput_rows(_THROUGHPUT_DAY, 137)
+                          + _throughput_rows(_THROUGHPUT_PREV, 7))
+    q.wm_set(fw.NAME, fw._STALL_WM_KEY, "2026-10-16T00:00:00+00:00")
+    q.wm_set(fw.NAME, fw._NEXTRUN_WM_KEY, "2026-10-16T00:00:01+00:00")
+    before = _watermarks(q)
+
+    alerts = _watch_alerts(monkeypatch)
+    await fw.tick(q)
+    await fw.tick(q)
+    assert len(alerts) == 1, (
+        f"two ticks over the same triggering pair posted {len(alerts)} lines; the "
+        f"day watermark is what makes the second one silence: {alerts}")
+
+    after = _watermarks(q)
+    assert after.get(fw._THROUGHPUT_WM_KEY, (None, None))[0] == _THROUGHPUT_DAY, (
+        "the census posted a day it did not record, so the next process would post "
+        f"the same day again: {after}")
+    for key in (fw._STALL_WM_KEY, fw._NEXTRUN_WM_KEY):
+        assert after[key] == before[key], (
+            f"the throughput census moved the persisted instant of `{key}` — "
+            f"{before[key]} became {after[key]} — which is one alarm spending another's "
+            "silence, the failure #1704/#1735 removed")
+
+    # The durable half of the same watermark. `fw._state` is a process memory, and the
+    # row is what survives a restart, so the suppression has to be readable WITHOUT the
+    # memory: empty it and the census must still stay silent on the day it already
+    # posted. Reusing `_fresh_process_state` rather than hand-writing a literal is the
+    # point — that helper asserts its own key set against the module's, so a `_state`
+    # that grew a key cannot pass as "a fresh process" here either.
+    _forget_census_day(monkeypatch)
+    assert fw._state.get(fw._THROUGHPUT_WM_KEY) is None, (
+        "the in-process day was not forgotten, so the read-back below is still "
+        "reading the cache it was supposed to lose")
+    assert fw._throughput_reported_day(q) == _THROUGHPUT_DAY, (
+        "a second process could not read the day back from the store, so a restart "
+        "would post the same census again")
+    before_restart = len(alerts)
+    await fw.tick(q)
+    assert len(alerts) == before_restart, (
+        "with the in-process memory emptied, the census re-posted a day the store "
+        "already records")
+    # And the other two alarms' instants survived the restart read-back too, since
+    # `tick` above ran them against the seeded rows.
+    after_restart = _watermarks(q)
+    for key in (fw._STALL_WM_KEY, fw._NEXTRUN_WM_KEY):
+        assert after_restart[key] == before[key], (
+            f"`{key}` moved on the tick that only read the throughput watermark back: "
+            f"{before[key]} became {after_restart[key]}")
+
+
+def _watermarks(q: WorkQueue) -> dict:
+    """Every watermark row this watchdog owns, as {key: (value, updated_at)}."""
+    conn = sqlite3.connect(str(q.db_path))
+    try:
+        return {r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT key, value, updated_at FROM watermarks WHERE source = ?",
+            (fw.NAME,))}
+    finally:
+        conn.close()
+
+
+async def test_the_census_is_read_from_the_watch_seat_with_the_source_disabled(
+        board, tmp_path, monkeypatch):
+    """Clause 4, across the real seam: a STARTED pool, `enabled: false`, one census line.
+
+    The same construction as `test_the_scheduler_loop_watches_the_fleet_with_the_source_disabled`:
+    a real `WorkerPool.start()`, the source block saying `enabled: False`, and the
+    dispatch half stubbed out — so the only thing on this pool that could have produced
+    an alert is `_watch_fleet`. A census that consulted the source's `enabled` key would
+    post nothing here and still look healthy to every other node in this file, which is
+    the disarmament #1682 exists to remove.
+
+    The board is left EMPTY, so the two stall alarms have nothing to report and the one
+    line captured is the census's own.
+    """
+    _unsuppressed_census(monkeypatch)
+    q = _throughput_queue(tmp_path / "disabled.db",
+                          _throughput_rows(_THROUGHPUT_DAY, 137)
+                          + _throughput_rows(_THROUGHPUT_PREV, 7))
+    monkeypatch.setattr(sources, "SOURCE_REGISTRY", {"scheduled-task": st},
+                        raising=False)
+    monkeypatch.setattr(sources, "get_sources_config", lambda: {
+        "scheduled-task": {"enabled": False, "interval_seconds": 0,
+                           "max_duration_seconds": 1800}}, raising=False)
+    alerts = _watch_alerts(monkeypatch)
+
+    async def _noop(*_a, **_k):
+        return None
+
+    pool = WorkerPool(q, slots=0, poll_idle_seconds=0.01)
+    monkeypatch.setattr(pool, "_maybe_sweep_poisoned", _noop)
+    monkeypatch.setattr(pool, "_probe_services", _noop)
+    monkeypatch.setattr(pool, "_watch_dispatch", _noop)
+    # Count the seat's completed passes rather than polling wall clock for a message:
+    # the counter is incremented AFTER `tick` returns, so a non-zero count is proof the
+    # census was reached in that pass — a wait on `alerts` alone could time out for a
+    # reason that has nothing to do with the census, and then the assertion below would
+    # be a timing story instead of a verdict about the switch.
+    seen = {"watch": 0}
+    real_watch = pool._watch_fleet
+
+    async def _watch_spy():
+        await real_watch()
+        seen["watch"] += 1
+
+    monkeypatch.setattr(pool, "_watch_fleet", _watch_spy)
+    await pool.start()
+    try:
+        for _ in range(300):
+            if alerts or seen["watch"] >= 3:
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        await pool.stop()
+
+    assert seen["watch"] >= 1, (
+        "a started pool ran `_watch_fleet` zero times, so nothing on this seat had a "
+        "chance to report anything")
+    assert any("worker pool failure throughput" in a for a in alerts), (
+        f"the watch seat ran {seen['watch']} pass(es) and did not report the throughput "
+        f"census while the `scheduled-task` source block said `enabled: false`; the "
+        f"day it would have to suppress is "
+        f"{fw._throughput_reported_day(q)!r} of " + repr(alerts))
+    assert not q.list_items(source="scheduled-task", limit=50), (
+        "a source disabled in config enqueued work, so the line above could have come "
+        "from dispatch rather than from the watchdog seat")
+
+
+async def test_the_census_is_silent_and_raises_nothing_on_a_store_it_cannot_compare(
+        board, monkeypatch, tmp_path):
+    """Clause 5: the three shapes that are not a comparison, plus an unreadable store.
+
+    An EMPTY `runs` table; a store holding rows for ONE UTC day, which has no
+    predecessor to weigh; and a newest complete day whose predecessor is ABSENT (rows
+    two days back and one day back with the middle day missing). The last shape is the
+    one worth stating: a day the pool did not run is not a day the pool survived, so a
+    missing predecessor is read as no comparison, not as a zero that makes any count
+    infinite. And a store that cannot be opened at all must cost one log line, because
+    this runs on the scheduler's own tick beside two stall alarms.
+    """
+    _unsuppressed_census(monkeypatch)
+    alerts = _watch_alerts(monkeypatch)
+    # In `predecessor-absent` the rows two days back are real and the day BETWEEN them
+    # and yesterday has no row at all, so a reader that treated an absent day as a zero
+    # would report 137 against 0 and post.
+    shapes = {
+        "empty": [],
+        "one-day": _throughput_rows(_THROUGHPUT_DAY, 137),
+        "predecessor-absent": (_throughput_rows(_THROUGHPUT_DAY, 137)
+                               + _throughput_rows(_THROUGHPUT_MINUS3, 1)),
+    }
+
+    for name, pairs in shapes.items():
+        q = _throughput_queue(tmp_path / f"{name}.db", pairs)
+        alerts.clear()
+        await fw.tick(q)                       # must not raise into the caller
+        assert alerts == [], f"{name}: posted a line with nothing to compare: {alerts}"
+        assert fw._throughput_census(q) is None, (
+            f"{name}: the detector invented a comparison for a store that has none")
+
+    # Built as a real queue and then corrupted, because `WorkQueue.__init__` itself
+    # opens the file and would raise here rather than at the census: the shape under
+    # test is a store that opened once and cannot be read NOW.
+    broken = _throughput_queue(tmp_path / "broken.db", [])
+    with open(broken.db_path, "r+b") as fh:
+        fh.seek(0)
+        fh.write(b"not a sqlite database" * 40)
+    alerts.clear()
+    await fw.tick(broken)                      # a store that refuses to open
+    assert alerts == [], f"an unreadable store produced an alert: {alerts}"
+    assert fw._throughput_census(broken) is None, (
+        "an unreadable store raised or guessed instead of reporting nothing")

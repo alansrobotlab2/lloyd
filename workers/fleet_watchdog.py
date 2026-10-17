@@ -133,6 +133,40 @@ _STALL_WM_KEY = "stall_alerted_at"
 # well as from dispatch. 30 min costs one directory scan per interval at the
 # pool's 60 s tick and sits inside the one-hour ceiling #939 sets.
 _UNPARSEABLE_SCAN_SECONDS = 30 * 60
+# ── the worker pool's failure-throughput census (#2890) ──────────────────────
+#: The day-over-day ratio that is worth a line: the newer complete UTC day must
+#: carry at least this many times the older day's `failed` count, with the
+#: denominator floored at 1 so a quiet predecessor does not divide away a day of
+#: real failures. Priced on the live store rather than guessed — over the 24
+#: adjacent pairs of COMPLETE UTC days that `workers.db` could evaluate on
+#: 2026-10-17, this fires on 2: `2026-09-23` (10 failed vs 1) and `2026-10-16`
+#: (137 vs 7). Two lines across the 26 days of `runs` rows that store spans is a
+#: census of an event, which is why this is not the daily-note flap counter Config
+#: Application #40 declined on 2026-10-01 (`run_40_20261001_090101.md:67`) for
+#: instrumenting a channel whose flapper was already fixed: that one measured a
+#: producer known to be quiet, this one writes for a population no writer covered.
+_THROUGHPUT_RATIO = 10
+#: This alarm's own "we already told someone" row, holding the UTC DAY it last
+#: reported — a day string, not an instant. The dedupe unit is a day, so a
+#: cooldown in seconds would let the first tick after the pair rolls over post the
+#: SAME day again, and a promise about a day cannot be kept with a stopwatch. Keyed
+#: beside `_STALL_WM_KEY` and `_NEXTRUN_WM_KEY` under this module's own name, so no
+#: alarm can spend another's silence and no alarm's persisted instant moves when
+#: this one fires.
+_THROUGHPUT_WM_KEY = "throughput_day"
+#: Failure classes, read off `runs.summary` as substrings. These are the strings
+#: the 2026-10-16 census actually found (99 / 24 / 3 / 6 / 3 / 1 of its 137), not a
+#: taxonomy imposed on it — and the census reports an `other` remainder beside them
+#: regardless, so the tallies always sum to the count on the line and a failure mode
+#: nobody has classified yet reads as "other grew" instead of as silence.
+_THROUGHPUT_CLASSES: tuple[tuple[str, str], ...] = (
+    ("no structured answer", "no structured answer"),
+    ("connect error", "ConnectError"),
+    ("connect timeout", "ConnectTimeout"),
+    ("peer closed connection", "peer closed connection"),
+    ("turn never completed", "turn never completed"),
+    ("model server refused the task", "deferring task"),
+)
 # Surveillance state, module-global for the reason the source had it: the streaks and
 # cadence slots have to survive from one scheduler tick to the next, and
 # `tests/test_autonomy_scheduler.py` restores this dict's CONTENTS around every test
@@ -159,7 +193,13 @@ _state = {
           # business, and #1735's rationale was always the route to a person, not the
           # name of one key.
           "nextrun_streak": 0, "nextrun_alerted_at": None,
-          "nextrun_parked_logged_at": None}
+          "nextrun_parked_logged_at": None,
+          # `throughput_day` is the UTC day the failure-throughput census last put on
+          # the note (#2890) — a day string, mirroring `_THROUGHPUT_WM_KEY`, and the
+          # only key in here that is not an instant. The census has no streak: a day
+          # either carried the ratio or it did not, and re-confirming that across five
+          # ticks would add nothing a single read of the store does not already say.
+          "throughput_day": None}
 
 
 def _source_cfg() -> dict:
@@ -1154,6 +1194,194 @@ async def _alert(message: str) -> None:
     except Exception as e:
         logger.error("alert dispatch failed: %s", e)
 
+
+def _utc_day(now=None) -> str:
+    """Today's UTC day as `YYYY-MM-DD` — the key `runs.started_at` is grouped by."""
+    import datetime as _dt
+
+    return (now or _dt.datetime.now(_dt.timezone.utc)).date().isoformat()
+
+
+def _day_minus_one(day: str) -> str:
+    """The calendar day before `day`, which is also what "adjacent" means here."""
+    import datetime as _dt
+
+    return (_dt.date.fromisoformat(day) - _dt.timedelta(days=1)).isoformat()
+
+
+def _throughput_census(queue: WorkQueue) -> dict | None:
+    """The newest COMPLETE UTC day's failed runs, against its own predecessor.
+
+    What the reading is, stated exactly because every number on the line depends on
+    it: a day is COMPLETE when it is strictly older than today's UTC day, so the
+    census never compares a whole day against a partial one; the pair must be
+    calendar-ADJACENT, so a day with no rows at all cannot be silently skipped into a
+    comparison across a gap; and the day is the leading 10 characters of
+    `runs.started_at`, which this store writes in UTC
+    (`2026-10-17T09:24:16.250412+00:00`) — the same reading every count quoted on
+    #2890 used, hazards and all, including that a row stamped in a local zone would
+    be grouped by its own date digits.
+
+    Returns None — nothing to say, and no line — for each of the shapes the store can
+    hand back that is not a comparison: no complete day at all, a newest complete day
+    whose predecessor has no rows (an absent predecessor is NOT read as a zero,
+    because a day the pool did not run is not a day the pool survived), a count under
+    the ratio, or a store it cannot open. It never raises: this runs on the pool's
+    scheduler tick, beside two stall alarms, and #1682's whole point is that a fault
+    in one reader here may not be the thing that stops the others.
+
+    The connection is closed explicitly rather than left to `with`, unlike the
+    precedent read at `app/failure_ledger.py:615`: that one runs once per ledger
+    build, this one runs on every 60 s tick, so a handle that only commits on exit
+    would be a descriptor leaked once a minute for the life of the pool.
+    """
+    conn = None
+    try:
+        today = _utc_day()
+        conn = queue._connect()
+        complete = [r[0] for r in conn.execute(
+            "SELECT DISTINCT substr(started_at, 1, 10) FROM runs "
+            "WHERE substr(started_at, 1, 10) < ? ORDER BY 1", (today,))]
+        if not complete:
+            return None
+        day = complete[-1]
+        prev = _day_minus_one(day)
+        if prev not in complete:
+            return None
+        counts = dict(conn.execute(
+            "SELECT substr(started_at, 1, 10), count(*) FROM runs "
+            "WHERE status = 'failed' GROUP BY 1"))
+        newer, older = counts.get(day, 0), counts.get(prev, 0)
+        if newer < _THROUGHPUT_RATIO * max(older, 1):
+            return None
+        rows = conn.execute(
+            "SELECT summary, started_at FROM runs WHERE status = 'failed' "
+            "AND substr(started_at, 1, 10) = ?", (day,)).fetchall()
+    except Exception:
+        logger.exception("failure-throughput census: the runs store could not be "
+                        "read; saying nothing rather than guessing")
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+    # Tallied in Python, over the day's own rows, because the classes are substrings
+    # of a free-text `summary` and several can match one row: an `if` chain would
+    # file a `ConnectTimeout` under `connect error` and a `CASE` ladder in SQL would
+    # do the same and cost a recompile per tick. A row that matches more than one
+    # needle is counted once per class it matches, so the tallies can OVERCOUNT the
+    # headline number and the line says "classes" rather than a partition; `other` is
+    # the remainder that matched none, floored at zero for exactly that reason.
+    tallies = {label: 0 for label, _needle in _THROUGHPUT_CLASSES}
+    matched = 0
+    stamps = []
+    for summary, started_at in rows:
+        text = summary or ""
+        hit = False
+        for label, needle in _THROUGHPUT_CLASSES:
+            if needle in text:
+                tallies[label] += 1
+                hit = True
+        matched += 1 if hit else 0
+        if started_at:
+            stamps.append(started_at)
+    return {
+        "day": day, "prev": prev, "newer": newer, "older": older,
+        "ratio": newer / max(older, 1),
+        "classes": [(label, tallies[label]) for label, _ in _THROUGHPUT_CLASSES],
+        "other": max(newer - matched, 0),
+        "first": min(stamps) if stamps else None,
+        "last": max(stamps) if stamps else None,
+    }
+
+
+def _throughput_alert_message(census: dict) -> str:
+    """The one line the census writes. Every number in it came from those rows.
+
+    Both counts are named because "137 failed runs" alone cannot be checked against
+    anything, and the day is named twice with the clock on it: the census counts UTC
+    days while the note file is keyed to `NOTE_DAY_TZ = America/Los_Angeles`
+    (`app/discord_notify.py:126`), so the 00:xxZ failures of a UTC day land in the
+    PREVIOUS note. A line that said only "yesterday" would be read against the wrong
+    day by the one person it is written for, so it says which clock it counts and
+    that this note is keyed to another.
+    """
+    parts = [f"{label} {n}" for label, n in census["classes"] if n]
+    parts.append(f"other {census['other']}")
+    bounds = ""
+    if census["first"] and census["last"]:
+        bounds = (f"; failures span {census['day']}T{census['first'][11:16]}Z to "
+                  f"{census['day']}T{census['last'][11:16]}Z")
+    return (
+        f"worker pool failure throughput: {census['newer']} failed runs on UTC "
+        f"{census['day']} against {census['older']} on UTC {census['prev']} "
+        f"({_THROUGHPUT_RATIO}x rule: {census['ratio']:.1f}x); classes: "
+        f"{', '.join(parts)}{bounds}. Times and days are UTC; this note is keyed to "
+        f"America/Los_Angeles, so the day named is not necessarily this note's day.")
+
+
+def _throughput_reported_day(queue: WorkQueue) -> str | None:
+    """The UTC day this alarm last reached a person, fleet-wide.
+
+    The LATER of the two reads, for the reason `_last_alert_instant` gives at length:
+    `_state` is one process's cache and the watermark row is the fleet's memory, and
+    the pool restarts ~12x a day (#1735, #2662). ISO day strings sort lexicographically,
+    so "later" is `max` here and no parsing is needed. An unreadable row is read as no
+    durable knowledge, loudly, with the in-process answer standing.
+    """
+    in_process = _state.get(_THROUGHPUT_WM_KEY)
+    try:
+        raw = queue.wm_get(NAME, _THROUGHPUT_WM_KEY)
+    except Exception:
+        logger.exception("failure-throughput alarm: could not read the persisted "
+                        "reported day; falling back to this process's own record")
+        return in_process
+    if not raw:
+        return in_process
+    return max(raw, in_process) if in_process else raw
+
+
+def _record_throughput_day(queue: WorkQueue, day: str) -> None:
+    """Say that the census for `day` reached a person, here and durably.
+
+    Same ordering as the alarms beside it (#1704): record before dispatch, so a send
+    that fails still spends the day rather than handing the next process a fresh one.
+    A failed write is logged and the alert still goes out — an alarm that could not
+    record itself risks one duplicate line, and a recording failure that silenced it
+    would risk the silence this file exists to end.
+    """
+    _state[_THROUGHPUT_WM_KEY] = day
+    try:
+        queue.wm_set(NAME, _THROUGHPUT_WM_KEY, day)
+    except Exception:
+        logger.exception("failure-throughput alarm: the day was posted but its "
+                        "watermark could not be persisted; a restart may re-post it")
+
+
+async def _census_failure_throughput(loop, queue: WorkQueue) -> None:
+    """Post the day's failure-throughput census once, on its own watermark.
+
+    Read on every tick and posted at most once per day named: the store read is one
+    `GROUP BY` over `runs`, the same shape `WorkQueue.run_rollup_by_source` already
+    pays for the Background tab's poll, and the dedupe is the watermark rather than a
+    cadence, so two ticks over the same pair are one line and a restart inside the day
+    cannot post a second. A cadence here would make the SECOND tick of the pair a
+    non-event and the dedupe unobservable, which is the thing clause 3 of #2890 asks
+    to be true of the watermark and not of the clock.
+
+    Never raises past `_throughput_census`, which is where every store read lives.
+    """
+    census = await loop.run_in_executor(None, _throughput_census, queue)
+    if census is None:
+        return
+    day = census["day"]
+    if _throughput_reported_day(queue) == day:
+        return
+    _record_throughput_day(queue, day)
+    msg = _throughput_alert_message(census)
+    logger.error("%s", msg)
+    await _alert(msg)
+
 async def _scan_unparseable_task_files(loop) -> None:
     """Scan the task files and alert on a CHANGE in the unparseable set (#939).
 
@@ -1373,3 +1601,17 @@ async def tick(queue: WorkQueue) -> None:
                 logger.warning(
                     "nextrun stall alarm not posted, declared parks only: %s",
                     _nextrun_alert_message(stalled))
+
+    # The worker pool's failure-throughput census (#2890). Last in the tick, which is
+    # the whole of its safety argument and is stated here rather than hidden in a
+    # try/except: `tick` guards none of its alarms individually — the seat that calls
+    # it does, at `workers/pool.py` `_watch_fleet`, whose "Never raises" is what keeps a
+    # fault here from taking the loop and every enqueue in the fleet with it. Adding a
+    # per-alarm handler would be a second guard on a path that already has one, so what
+    # this placement buys instead is an ordering property: by the time the census is
+    # read, both stall alarms and the lost-cycle ledger have already run in this tick,
+    # so no bug in the new reader can be the reason a stall alert did not go out.
+    # And nothing here consults a source config's `enabled` key: the census counts what
+    # the POOL ran, which no source's dispatch switch has any standing to define away
+    # (#1682).
+    await _census_failure_throughput(loop, queue)
