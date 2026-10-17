@@ -30,10 +30,15 @@
 #     unit. Asking about a service can only produce a non-`enabled` verdict that is
 #     not a defect, so this check never asks.
 #   - One direction only: repo `.timer` file → `enabled`. NEVER set equality against
-#     `~/.config/systemd/user/timers.target.wants/`, because `lloyd-graph-backup.timer`
-#     is live on goliath and tracked nowhere under `agent-services/systemd/`
-#     (`tests/test_data_home.py` already rules membership-not-equality for that same
-#     unit). A live unit with no repo unit is not this check's business.
+#     `~/.config/systemd/user/timers.target.wants/`, because that directory can hold units
+#     this repository has no say in — on goliath today `freeclip-a2dp-fix.service` is live
+#     with nothing tracked behind it (#2864's other owed entry), and a hand-installed timer
+#     is the same shape one level up. `tests/test_data_home.py::_unresolved` rules
+#     membership-not-equality the same way for the cutover fleet. Since #2864 tracked
+#     `lloyd-graph-backup.timer`, box state no longer supplies a live-only TIMER to
+#     demonstrate this, so `test_a_live_timer_with_no_repo_unit_cannot_fail_the_check` in
+#     `tests/test_unit_enabledness_check.py` pins the rule over a planted name instead. A
+#     live unit with no repo unit is not this check's business.
 #   - `agent-services/systemd/*.timer`, one level deep. `agent-services/systemd/system/`
 #     holds SYSTEM-scope units, which `systemctl --user` cannot even see.
 #   - A glob matching zero timers FAILS. An empty unit set means nothing was looked

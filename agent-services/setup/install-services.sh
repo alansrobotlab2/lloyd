@@ -69,9 +69,10 @@ mkdir -p "$SYSTEMD_DST"
 
 # Every unit this run placed, as a source path, in link order. The arming block works off
 # THIS list and not off a fresh glob of $SYSTEMD_DST, because the deploy directory also
-# holds units this repo does not own (`lloyd-graph-backup.timer` is live on this box and
-# tracked nowhere under agent-services/systemd/), and arming one of those would be this
-# script taking responsibility for a unit it never installed.
+# holds units this repo does not own (`freeclip-a2dp-fix.service` is live on this box with
+# no file under agent-services/systemd/, and #2864's owed entry still has to rule on
+# whether it gets tracked or a HOST_LOCAL_UNITS disposition), and arming one of those would
+# be this script taking responsibility for a unit it never installed.
 LINKED=()
 
 for f in "$SYSTEMD_SRC"/*.service "$SYSTEMD_SRC"/*.timer; do
@@ -127,9 +128,10 @@ systemctl --user daemon-reload
 #    are the start a fresh box needs.
 #
 # 3. A unit with no `[Install]` section is not armable, and neither is a `.service` that
-#    its own `.timer` already starts. Six co-located services read `static` or `linked`
-#    (`lloyd-cert-renew`, `lloyd-data-snapshot`, `lloyd-guardian-nag`,
-#    `lloyd-persistence-window`, `lloyd-qmd-cleanup`, `lloyd-vault-backup`); `enable` on
+#    its own `.timer` already starts. Seven co-located services read `static` or `linked`
+#    (`lloyd-cert-renew`, `lloyd-data-snapshot`, `lloyd-graph-backup`,
+#    `lloyd-guardian-nag`, `lloyd-persistence-window`, `lloyd-qmd-cleanup`,
+#    `lloyd-vault-backup`); `enable` on
 #    one ERRORS, and with `set -euo pipefail` an unguarded `enable` would kill this script
 #    before the status print — so the filter is load-bearing AND every arming call is
 #    guarded, counted, and never fatal. The second half is subtler and is why the rule is

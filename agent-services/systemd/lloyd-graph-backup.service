@@ -1,0 +1,7 @@
+[Unit]
+Description=Lloyd knowledge-graph daily backup
+Documentation=https://github.com/alansrobotlab/lloyd
+
+[Service]
+Type=oneshot
+ExecStart=%h/lloyd/scripts/backup/backup-graph.sh

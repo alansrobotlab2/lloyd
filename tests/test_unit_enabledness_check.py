@@ -21,7 +21,9 @@ The host's `systemctl` is never reached: every run asserts the stub was consulte
 so a script that resolved an absolute path instead would fail here rather than
 quietly grade whatever box it happens to run on — the same reason
 tests/test_cert_renew_units.py declines to pin enabledness, and why no node in this
-file asserts anything about the machine running it.
+file asserts anything about the machine running it. The one host-adjacent read that
+exists, `USER_UNIT_DIR`, asks only that a planted name is not a unit on this box — a
+precondition on a string, never a verdict about what a unit here answers.
 
 #2702 widened that boundary rather than adding a new one: the guard now asks
 `systemctl --user show` for the arming evidence of a timer whose `is-enabled` verdict
@@ -46,10 +48,21 @@ REPO_UNIT_DIR = ROOT / "agent-services" / "systemd"
 CERT_UNITS_TEST = ROOT / "tests" / "test_cert_renew_units.py"
 REPO_TIMERS = sorted(p.name for p in REPO_UNIT_DIR.glob("*.timer"))
 CERT_TIMER = "lloyd-cert-renew.timer"
-# Live in ~/.config/systemd/user/timers.target.wants/ on goliath, tracked nowhere
-# under agent-services/systemd/ — the reason the check must be membership and not
-# set equality (tests/test_data_home.py rules the same thing for the cutover fleet).
-LIVE_TIMER_WITHOUT_REPO_UNIT = "lloyd-graph-backup.timer"
+#: #2864 tracked the graph backup pair, so this guard's own fleet gained a member.
+GRAPH_TIMER = "lloyd-graph-backup.timer"
+#: A name NO unit directory holds — planted here rather than borrowed from the box.
+#: The node below needs a timer that is live-but-untracked, i.e. one the check must
+#: refuse to ask about; `lloyd-graph-backup.timer` played that role until #2864
+#: tracked the pair, and any name taken from box state afterwards is a name some rebuild
+#: changes. An invented name is the only one that cannot quietly become real, and it
+#: keeps the rule stated as a rule — membership over the repo set, never set equality
+#: against `~/.config/systemd/user/timers.target.wants/`, which is what
+#: `tests/test_data_home.py::_unresolved` rules for the cutover fleet too.
+LIVE_TIMER_WITHOUT_REPO_UNIT = "planted-untracked-timer.timer"
+#: Read by the one precondition node below, and by nothing else: a precondition on the
+#: planted name is not a verdict about this machine's units, which stays the refusal
+#: this module's docstring states.
+USER_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 
 STUB = """#!/usr/bin/env python3
 import json, os, sys
@@ -297,14 +310,32 @@ def test_a_service_answering_static_is_never_asked_and_cannot_fail_it(tmp_path):
 def test_a_live_timer_with_no_repo_unit_cannot_fail_the_check(tmp_path):
     """Clause 4, first half: one-directional over the repo set.
 
-    `lloyd-graph-backup.timer` is live in goliath's `timers.target.wants/` and
-    tracked nowhere in the repo, so a check that walked the wants dir — or compared
-    it to the repo set — would fail on a unit this repository has no say in. The
-    stub is told that unit is `disabled`; the check must never ask, and must pass.
+    A user timer can be armed on a box with no tracked file behind it — that is what
+    `lloyd-graph-backup.timer` was until #2864 tracked it, and
+    `freeclip-a2dp-fix.service` is its live-only shape on this box today — so a check
+    that walked `timers.target.wants/`, or compared it to the repo set, would fail on a
+    unit this repository has no say in. Box state no longer supplies such a timer to
+    prove it with, so the name here is planted, and the teeth move with it: the first run
+    keeps the original statement (a name the stub knows as `disabled` is never asked, and
+    the run passes), and the SECOND run is what makes the node trippable again — a unit
+    dir holding ONLY the planted timer, over a box whose live user manager has eight
+    timers. This box's `timers.target.wants/` is a strict subset of `REPO_TIMERS` (seven
+    of the eight), so a guard that unioned the live set into the checked set would look
+    identical in the first run; in the second it asks about nine units where this node
+    demands exactly one. The two preconditions are what keep the name a name — if some
+    future unit file ever spelled itself this, the node would be asserting that a checked
+    unit is unchecked, which is a green worth nothing.
+
+    The planted name is the only host-adjacent read this module makes, and it is a
+    precondition on a string, not a verdict about the machine: no node here asserts
+    what any unit on this box answers.
     """
-    assert not (REPO_UNIT_DIR / LIVE_TIMER_WITHOUT_REPO_UNIT).is_file(), (
-        f"{LIVE_TIMER_WITHOUT_REPO_UNIT} is now tracked in the repo, so the "
-        "membership-not-equality premise this node pins has changed")
+    assert LIVE_TIMER_WITHOUT_REPO_UNIT not in REPO_TIMERS, (
+        f"{LIVE_TIMER_WITHOUT_REPO_UNIT} is in {REPO_UNIT_DIR}, so this node is "
+        f"asserting a repo timer is outside the repo set: {REPO_TIMERS}")
+    assert not (USER_UNIT_DIR / LIVE_TIMER_WITHOUT_REPO_UNIT).exists(), (
+        f"{LIVE_TIMER_WITHOUT_REPO_UNIT} exists under {USER_UNIT_DIR}, so the planted "
+        "name has become box state and this node would be grading a live unit")
 
     proc, out, queries = _run(REPO_UNIT_DIR,
                               {LIVE_TIMER_WITHOUT_REPO_UNIT: "disabled"},
@@ -314,6 +345,58 @@ def test_a_live_timer_with_no_repo_unit_cannot_fail_the_check(tmp_path):
     asked = {q[2] for q in queries}
     assert LIVE_TIMER_WITHOUT_REPO_UNIT not in asked, asked
     assert asked == set(REPO_TIMERS), f"{asked ^ set(REPO_TIMERS)} is off-set"
+
+    # The trippable half: the checked set is the directory the script was handed, never
+    # that directory unioned with whatever the box's user manager has armed. The planted
+    # timer is the ONLY file in this dir, and the stub answers every timer `enabled`, so
+    # one row and exit 0 is the whole contract here.
+    lone_dir = tmp_path / "lone-unit-dir"
+    lone_dir.mkdir()
+    (lone_dir / LIVE_TIMER_WITHOUT_REPO_UNIT).write_text(
+        "[Timer]\nOnCalendar=*-*-* 05:30:00\n", encoding="utf-8")
+
+    lone, lone_out, lone_queries = _run(lone_dir, {}, tmp_path, tag="loneplanted")
+
+    assert lone.returncode == 0, f"{lone.returncode}:\n{lone.stdout}{lone.stderr}"
+    lone_asked = {q[2] for q in lone_queries}
+    assert lone_asked == {LIVE_TIMER_WITHOUT_REPO_UNIT}, (
+        f"the checked set must be the unit dir it was handed and nothing else; "
+        f"{lone_asked ^ {LIVE_TIMER_WITHOUT_REPO_UNIT}} came from somewhere else — a "
+        f"guard that reads timers.target.wants/ fails here on any box")
+    assert _denominator(lone_out) == 1, lone_out
+
+
+def test_a_timer_tracked_into_the_repo_joins_the_checked_set_and_fails_nothing(tmp_path):
+    """#2864: a unit entering `agent-services/systemd/` enters this guard's set, and
+    enters it as one row — not as a new failure.
+
+    `lloyd-graph-backup.timer` has armed this box since 2026-09-03 (the live file's own
+    mtime) with no tracked file behind it, which is precisely the period over which this
+    guard printed nothing about it. Tracking the pair
+    has to move the denominator (pinned against `len(REPO_TIMERS)` by
+    `test_the_script_is_executable_and_prints_a_verdict_line_per_repo_timer`, so the
+    count is never memorised here) AND give the timer its own `unit<TAB>verdict` row:
+    the health route parses those rows into graded rows, and a unit the script asks
+    about without printing a row for is a unit whose verdict is dropped on the floor.
+    The green half is load-bearing: over a stub that answers every timer `enabled` the
+    run must exit 0 with NO FAIL line, so a unit joining the fleet cannot manufacture a
+    red. What the box itself answers for that timer — `systemctl --user is-enabled
+    lloyd-graph-backup.timer` — stays host state and unasserted, as everywhere else in
+    this file.
+    """
+    assert GRAPH_TIMER in REPO_TIMERS, (
+        f"{GRAPH_TIMER} is not tracked under {REPO_UNIT_DIR}, so #2864's tracking has "
+        f"regressed and this guard is not grading it: {REPO_TIMERS}")
+
+    proc, out, queries = _run(REPO_UNIT_DIR, {}, tmp_path, tag="graphjoin")
+
+    assert proc.returncode == 0, f"{proc.returncode}:\n{proc.stdout}{proc.stderr}"
+    rows = [line for line in _row_lines(out) if line.split("\t")[0] == GRAPH_TIMER]
+    assert rows == [f"{GRAPH_TIMER}\tenabled"], (
+        f"{GRAPH_TIMER} must print exactly one row of its own: {rows}")
+    assert _asked_about(queries, "is-enabled").count(GRAPH_TIMER) == 1, queries
+    assert not _fail_lines(out), out
+    assert _denominator(out) == len(REPO_TIMERS), out
 
 
 def test_a_unit_dir_holding_no_timers_fails_instead_of_passing_vacuously(tmp_path):

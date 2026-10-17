@@ -385,11 +385,14 @@ default run) now reports as a failing row per tracked unit file rather than leav
 unmentioned. `thunderbird.service`
 and `voxtype.service` are both `WantedBy=graphical-session.target` (Thunderbird hosts the
 `thunderbird-mcp` extension its 40 tools bridge over; voxtype is push-to-talk),
-so `enable` runs them with the desktop, not via supervisord. One unit is a gap
-rather than a stale copy: `lloyd-graph-backup.{service,timer}` (05:30) exists
-only as a plain untracked file under `~/.config/systemd/user/`, so a rebuild
-from `SETUP.md` loses it. (A groundskeeper timer was listed beside it until this
-pass — no such unit exists in the repo or on disk.) The root-only
+so `enable` runs them with the desktop, not via supervisord.
+`lloyd-graph-backup.{service,timer}` (05:30) reach the same `copy:` verdict from a
+different starting point: the pair was live with nothing in git owning it until #2864
+tracked it into `agent-services/systemd/`, and the only record of what ran was
+`SETUP.md`'s inline unit text — which is why that block is now gone. The deployed
+copies predate the tracking, so their two rows are #2714's finding and not a
+regression until `install-services.sh` re-runs. The
+root-only
 `nvidia-power-limit.service` is skipped
 by that glob (`SYSTEM_SCOPE_UNITS` in `install-services.sh`, #1108) — it used
 to be linked into the user manager, where it can never clamp anything; the copy

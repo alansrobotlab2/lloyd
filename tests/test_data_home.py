@@ -1363,10 +1363,14 @@ def _cutover_timers() -> list[str]:
 def _unresolved(names: list[str]) -> list[str]:
     """Names with no unit file in the repo's unit dir or this box's user unit dir.
 
-    Membership, never equality against the repo set: `lloyd-graph-backup.timer` is
-    live on this box and tracked nowhere under `agent-services/systemd/`, and
-    `lloyd-data-snapshot.timer` sits outside the fleet on purpose because the script
-    links and enables it separately at its step 8.
+    Membership over repo-OR-live, never equality against the repo set: a name is
+    unresolved only when neither directory can answer it, so a unit a box installs by
+    hand with nothing tracked behind it (`freeclip-a2dp-fix.service` is that unit here
+    today, and #2864's other owed entry still has to rule on it) reads as resolved as a
+    tracked one. `lloyd-graph-backup.timer` was the live-but-untracked witness until
+    #2864 tracked the pair, which is why the rule is stated as a rule rather than tied
+    to a name. `lloyd-data-snapshot.timer` sits outside the fleet on purpose because the
+    script links and enables it separately at its step 8.
     """
     return [n for n in names
             if not ((REPO_UNIT_DIR / n).is_file() or (USER_UNIT_DIR / n).is_file())]

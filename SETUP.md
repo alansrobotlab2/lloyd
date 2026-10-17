@@ -1375,30 +1375,13 @@ collector until #1142 lands one.
 
 `lloyd-graph-backup.timer` is the one that matters most and is easiest to
 forget, because it is the only copy of state that cannot be regenerated. Its
-units are not in the repo — write them on a fresh install:
-
-```ini
-# ~/.config/systemd/user/lloyd-graph-backup.service
-[Unit]
-Description=Lloyd knowledge-graph daily backup
-[Service]
-Type=oneshot
-ExecStart=%h/lloyd/scripts/backup/backup-graph.sh
-```
-
-```ini
-# ~/.config/systemd/user/lloyd-graph-backup.timer
-[Unit]
-Description=Daily Lloyd knowledge-graph backup
-[Timer]
-# 05:30 — after the 22:00-04:00 extraction/classifier write window closes and
-# before the morning report tasks read the graph.
-OnCalendar=*-*-* 05:30:00
-Persistent=true
-RandomizedDelaySec=300
-[Install]
-WantedBy=timers.target
-```
+pair is tracked in `agent-services/systemd/lloyd-graph-backup.{service,timer}`
+and `agent-services/setup/install-services.sh` links both like the guardian
+units, so the `enable --now` line above is the whole install. The `.service`
+carries no `[Install]` section and therefore reads `static`: its own timer
+starts it, which is this directory's convention for a timer-triggered oneshot
+(`lloyd-persistence-window.service` is the same), so only the timer is ever
+armed.
 
 The script takes a consistent SQLite backup plus a JSON export and keeps 30
 days under `_pipeline/backups/daily/`. It **refuses** — non-zero, previous

@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily Lloyd knowledge-graph backup
+
+[Timer]
+# 05:30 — after the 22:00–04:00 extraction/classifier write window closes
+# and before the morning report tasks (#81, #82) read the graph. At 03:15
+# the snapshot could catch a half-applied classifier run.
+OnCalendar=*-*-* 05:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
