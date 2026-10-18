@@ -14,7 +14,7 @@ tags:
 - knowledge
 - memory
 type: reference
-updated: 2026-09-18
+updated: 2026-10-18
 status: implemented
 ---
 
@@ -38,9 +38,9 @@ in Obsidian. Everything structural lives in one SQLite file.
 
 ```
 _pipeline/vault-derived/
-├── facts/<Entity>/<Entity>-<category>.md   # THE FACT LAYER (71,868 files, 2026-09-18)
+├── facts/<Entity>/<Entity>-<category>.md   # THE FACT LAYER (41,557 files, 2026-10-18)
 │                                            # YAML frontmatter + generated body
-└── kg.sqlite                                # THE STORE (192 MB, WAL)
+└── kg.sqlite                                # THE STORE (149 MB, WAL)
     ├── entities   name, kind, definition, source_hash, timestamps
     ├── aliases    surface -> canonical, with kind and origin
     ├── edges      typed, with provenance, evidence, supersede chain
@@ -100,6 +100,18 @@ the live tree names **977** entity dirs that
 `looks_like_junk_entity` rejects, against a gate that demands 0 — the gate that
 was never re-run after the junk was injected (2026-09-09), not a new defect.
 
+**Both of those blocks measure a tree that no longer exists.** The live store
+was wiped on 2026-09-22 and re-extracted whole by a completed rebuild that
+swapped in on 2026-09-23 (*The rebuild*); the 977 junk dirs, the 4,028
+mechanical aliases and the undated two-thirds went out with the old tree.
+Re-measured 2026-10-18 on the current one: **15,164 entity dirs · 41,557 fact
+files · 161,168 indexed rows · 85,416 edges with 50,558 active · 15,200
+registered entities · 239 aliases · `created_at` and `source_doc` NULL on 0
+rows.** The provenance gap this section called outstanding is closed — that is
+exactly what the rebuild bought. What the swap did not re-grow is the
+mechanical alias table (the sweep rebuilds it tier by tier) and the
+conversation-origin edges (#51 below).
+
 The 09-04 column is not history for its own sake: everything between it and
 09-08 was **one day of the pipeline running again**. #24 had been paused since
 2026-09-04 by a `kg_rebuild.py freeze` whose rebuild never passed its gate, and
@@ -109,14 +121,16 @@ coverage doubled on the first day back. Treat a flat edge count as an outage
 signal, not a quiet week. The three days to 09-11 are what that looks like
 sustained: edges tripled again and node coverage passed half the registry.
 
-Provenance is still the outstanding one, and it only improves going forward —
-the 0.37% floor was every fact written before the extractor started recording
-`created_at` and `source_doc`, and those cannot be dated now. What the column
-measures is therefore dilution, not repair — and as of 2026-09-18 the column has
-outrun its own metric: the gate's `provenance_pct` reads ~100% (314,566 of
-314,613 rows carry a `provenance`) while `created_at` is NULL on 204,733 rows and
-`source_doc` on 204,768, so two-thirds of the store still cannot be dated or
-reverted. A one-word column is not the same fact as a date and a source. Duplicate fact IDs used to sit beside it
+Provenance *was* the outstanding one until the 2026-09-23 swap: the rebuilt
+tree carries `created_at` and `source_doc` on every indexed row (0 NULL on
+2026-10-18), and the 0.37% floor — every fact written before the extractor
+started recording those columns, which could never be dated after the fact —
+went out with the deleted tree, so the rebuild was the repair, not more
+dilution. Until then the column had outrun its own metric: as of 2026-09-18
+`provenance_pct` read ~100% (314,566 of 314,613 rows carry a `provenance`)
+while `created_at` was NULL on 204,733 rows and `source_doc` on 204,768, so
+two-thirds of that store could not be dated or reverted. A one-word column is
+not the same fact as a date and a source. Duplicate fact IDs used to sit beside it
 here; they were repaired in place on 2026-09-08 and the tree has held at zero
 since, see *The rebuild*. The semantic-alias jump from 1 to 49 is the one row
 that is not growth — see *The declared-identity gate*.
@@ -183,7 +197,7 @@ s.backup(path)        # consistent under writers
 
 ```
 vault documents                    pipeline_config.yaml sources.paths
-  knowledge/ projects/ people/       -- an ALLOW-LIST. 2,837 documents.
+  knowledge/ projects/ people/       -- an ALLOW-LIST. 3,106 docs (2026-09).
   personal/ work/ memory/            Edit the config, not the script.
         │
         ▼
@@ -231,25 +245,27 @@ Three other writers:
   2026-09-09 were retired on 2026-09-23; see `architecture/memory.md`.
 - **`conversation_relations.py`** (#51) — co-access pairs from session
   trajectories become `co_accessed` edges, `provenance: INFERRED`, with the
-  trajectory as `source_doc`. It has produced **143 active edges, 0 expired**,
-  and it is writing daily now: 2 on 09-10, 31 on 09-12, 53 on 09-15, 28 on 09-16,
-  15 on 09-17, 14 on 09-18. The "2 edges" figure this section carried was true on
-  2026-09-11 and is seven days stale; the 08-22 precedent says an expired edge is
-  worse than none, and nothing has expired one.
+  trajectory as `source_doc`. On the pre-rebuild tree it had produced **143
+  active edges, 0 expired** and was writing daily (2 on 09-10, 31 on 09-12, 53
+  on 09-15, 28 on 09-16, 15 on 09-17, 14 on 09-18). Those edges did not survive
+  the 2026-09-23 swap: the carry-over set's `CARRY_EDGE_ORIGINS` is
+  `fact_relate`/`manual`, and #1161 measured `origin='conversation'` at 0 rows
+  on the new store. The linker writes into the new one daily, and nothing has
+  expired an edge.
 - **`entity_naming.register_schema_keys`** — writes the declared aliases, and it
   is not the only producer of `origin: schema` rows: `gate_entity_name` mints one
   whenever a raw name matches a declared key spelled differently from the
-  canonical (entity_naming.py:871). That is why the live count was 47 against the
+  canonical (`gate_entity_name` in `app/entity_naming.py`). That is why the live count was 47 against the
   41 aliases the schema file declares. It used to INSTALL only, so **a withdrawn
   declaration was permanent policy**: six `2026-09-10` rows survived the move from
   `extraction_schema.yaml` to JSON — including `Task` → `Entity Resolution Sweep`,
   which the landed schema's own `why` field says was deliberately not declared —
   and `gate_entity_name` answering `alias` before `typed_new` meant a generic word
   routed into the entity-resolution pipeline. It now reconciles as well
-  (`_retract_undeclared_schema_rows`, entity_naming.py:686): a row goes when
+  (`_retract_undeclared_schema_rows` in `app/entity_naming.py`): a row goes when
   `_schema_key` — the same fold the gate uses, not a literal pair — does not
   resolve it to the same canonical, or when the surface is one the declaration
-  path would refuse (`_brackets_balanced`, entity_naming.py:600, which is why
+  path would refuse (`_brackets_balanced`, which is why
   `Entity Resolution Sweep (Task` goes while `Knowledge Graph (KG)` stays). Only
   `origin='schema'` with a NULL `report_path` is retractable; migration/sweep/
   test/triage rows and #475's apply-provenance rows are not its to touch, and
@@ -267,8 +283,12 @@ Three other writers:
 
 Measured by origin on 2026-09-18, active edges: extractor 33,091, classifier
 16,614, migration 2,898, sweep 248, conversation 143, `fact_relate` 8. (The
-`semantic` origin carries 0 rows: #67 proposes, nothing has applied.) The extractor is the
-graph, and the classifier is what makes it typed; everything else is rounding.
+`semantic` origin carries 0 rows: #67 proposes, nothing has applied.) Measured
+again 2026-10-18 on the rebuilt tree: classifier 34,185, extractor 15,733,
+conversation 444, sweep 137, `fact_relate` 47, manual 12, `semantic` still 0 —
+the classifier's retypes now outnumber raw mentions, where pre-rebuild they
+were half. The extractor is still where edges are born, and the classifier is
+what makes the graph typed.
 
 `seed_relationship_edges.py` still exists but is a **backfill tool for trees
 extracted before the extractor emitted edges**, not part of the nightly chain.
@@ -319,7 +339,8 @@ whole of the scale table's 1 → 49 semantic-alias jump; `register_schema_keys`
 is idempotent, so the nightly run installs them without churning `created_at`.
 
 **A refusal is recorded, not swallowed.** `candidate` appends to
-`_pipeline/vault-derived/entity-candidates.jsonl` — 15 names so far — for
+`_pipeline/vault-derived/entity-candidates.jsonl` — 432 names on 2026-10-18
+(15 when this line was dated 2026-09-18) — for
 weekly human review. Refusing to mint is easy and quietly stops remembering
 things; the sidecar is the pressure valve that keeps the gate honest.
 
@@ -334,8 +355,11 @@ is `""`, a fact whose own entity is `junk` is dropped in the extractor as a
 `candidate` one already was, and the fan-out holds back any fact left with no
 entity or with the literal `general`, counting it on the document's stdout
 line and in the run summary (`N facts held back`). A fact that names no entity
-still files under a primary the gate accepted. The 365 already filed are
-untouched; their disposition is a data decision.
+still files under a primary the gate accepted. The 365 already filed were not
+re-filed into an entity; `scripts/memory/quarantine_general_facts.py`
+(#2303/#2443) has since moved `general` residue out of the live fact tree into
+a `facts-quarantine-<ts>` directory, which the retention sweep bounds as store
+18.
 
 **Reads opt out, writes cannot.** `enforce=False` is passed only where a name
 is being resolved to pull an entity's existing facts into the prompt
@@ -373,7 +397,7 @@ population at risk: one document supports many distinct claims, and the share
 that is one claim twice was measured on recent writes only (#1487, about a
 third), not on this row set.
 
-### The paraphrase gate (#1487, ships off)
+### The paraphrase gate (#1487, armed in `noop`)
 
 #499 refuses a byte-identical re-statement; a paraphrase walks through it, and
 ~a third of the writes after the 09-23 rebuild restated a fact the entity
@@ -387,7 +411,11 @@ appears in the new one (new appended, old stamped `expired_at` in the same
 atomic write), else **ADD**. Every djev failure is ADD; the result carries
 `verdict`. `knowledge_graph.write_gate.mode`: `off` | `shadow` | `noop` | `on`
 (`LLOYD_FACT_WRITE_GATE` overrides; a caller may pass `write_gate: "off"` —
-the rebuild's carry-over does — never on). Decisions log to
+the rebuild's carry-over does — never on). Production has run **`noop`** since
+the 2026-09-25 ship call (`config.yaml`): NOOPs apply, an UPDATE verdict is
+logged as ADD and expires nothing, and `on` stays reserved for an explicit
+decision plus a measured LloydMemEval `knowledge_update` gain — the 402 logged
+`verdict: "update"` rows do not authorise arming it. Decisions log to
 `fact-write-gate.jsonl` beside `kg.sqlite`. Held out on 400 writes: 76/77 NOOPs
 right, 3/3 UPDATEs safe, djev p50 341 ms on the 37% of writes it is asked
 about — `eval/measurements/fact-write-gate-2026-09-25.md`.
@@ -411,7 +439,8 @@ about — `eval/measurements/fact-write-gate-2026-09-25.md`.
 ```
 
 `expired_at` and `invalid_at` are different claims and are set by different
-things. `fact_invalidate` expires; `fact_resolve --auto_resolve` invalidates.
+things. `fact_invalidate` expires; `fact_resolve_apply` invalidates —
+`fact_resolve`'s `auto_resolve` parameter was removed outright by #1326.
 Retrieval filters both by default; `as_of` reconstructs a past state.
 
 `valid_at` is filled from the model's `event_date` when the fact dates itself,
@@ -473,13 +502,18 @@ see *Tools*.
    missing, unparseable, or carries no positive `active_edges` is now a refusal
    naming the path, before the tarball is written or the window rotated, and
    every successful run prints the reference's `recorded_at` beside the counts
-   (`tests/test_backup_graph.py`). `--apply` still fails open there:
-   `load_baseline` returns 0 on any exception and `degraded_reason` answers
-   "not degraded" for a baseline of 0 (entity-resolution-sweep.py:1162-1191),
-   and the sweep then ratchets the reference up to whatever the damaged store
-   reads. The baseline is also raised by the very program it guards
-   (`update_baseline`, :1170-1179), so a slow leak never trips it — which is
-   also what self-heals a refused backup within one nightly sweep. A backup
+   (`tests/test_backup_graph.py`). The `--apply` half no longer answers
+   "not degraded" for a baseline it cannot read: after the 2026-09-22 incident
+   (30 merges applied against a 77 KB store while its report called the graph
+   clean), #1557 made an empty store refuse whatever the baseline file says,
+   and a run with no baseline on disk is now labelled `unmeasured` in the apply
+   report, not clean. What still does not refuse is a degraded *but non-empty*
+   store whose baseline is missing: `load_baseline` answers 0 on any exception,
+   `update_baseline` is max-only and bootstraps `baseline := active` before the
+   guard, so the comparison has nothing to make (**#2968**) — and that same
+   max-only ratchet, run by the very program it guards, means a slow leak never
+   trips it, which is also what self-heals a refused backup within one nightly
+   sweep. A backup
    taken after a wipe is worse than no backup: it rotates the last good
    snapshot out of the window.
 4. **Expire, never delete.** The pre-merge graph must stay readable, and a
@@ -589,7 +623,7 @@ step exists to prevent.
 | `contamination_dirs` | 0 — a directory holding facts about another entity means a merge went wrong |
 | `junk_entity_dirs` | 0 |
 | `corpus_coverage_pct` | ≥ 98 of the allow-list |
-| `node_coverage_pct` | ≥ 30 (the live tree is at 14%) |
+| `node_coverage_pct` | ≥ 30 (the pre-rebuild tree was at 14% when this was set; the 2026-09-23 run measured 77.6% at its own gate) |
 | `carryover_facts` | every exported fact present in the new tree, junk-named ones excepted |
 | `eval_mrr_doc` / `eval_ndcg10` | at or above the frozen baseline |
 | `eval_category_regression` | no category down more than 0.05 MRR |
@@ -608,8 +642,11 @@ every other check.
 `swap` refuses a second way. The system stays usable while the rebuild runs, so
 a fact stated in a chat turn tonight lands in the tree `swap` is about to
 quarantine. `_facts_written_since_export` queries the live index for hand-stated
-facts newer than the export timestamp and refuses if it finds any — re-run
-`export` and `import`, then swap. `--force` exists and is documented as
+facts newer than the export timestamp, `_edges_written_since_export` (#1664)
+does the same for carryable edges — the facts-only guard once let a swap
+destroy an edge stated after the export while every check reported clean —
+and `swap` refuses if either finds any: re-run `export` and `import`, then
+swap. `--force` exists and is documented as
 something you should not use.
 
 ### The 2026-09-03 run: attempted, abandoned 2026-09-08
@@ -654,21 +691,41 @@ every fact stated since its freeze.
 So the trade was 222,532 facts of which 92% can never be dated, against 75,560
 that all can — and worse retrieval today. Abandoned. The tree, its store, its
 content hashes and its state file are deleted; `freeze.json`, `gate.json` and
-the eval runs are kept under `_pipeline/backups/rebuild-20260903T214511Z/`
-alongside `kg-before.sqlite`, a 2026-09-03 snapshot of the live store.
+the eval runs were kept under `_pipeline/backups/rebuild-20260903T214511Z/`
+alongside `kg-before.sqlite`, a 2026-09-03 snapshot of the live store — that
+directory has itself since been swept, and what stands under
+`_pipeline/backups/` now are the two `rebuild-20260922T*` run dirs below.
 
 If provenance ever becomes the binding constraint, the tool is `kg_rebuild.py`
 and this section is the record of what it costs. Do not restart one without
 first deciding what a two-query category is allowed to veto.
 
-Also outstanding, and unrelated to the rebuild: 977 junk-named entity
-directories (`_pipeline/memory-graph/junk-entities-review.json`) holding 6,898
-facts in the live tree. The extractor rejects these names before registration
-now, so the set cannot grow; removing the existing ones moves fact files and
-drops edges, which is a merge-class operation and goes through review. Still
-exactly 977 when re-measured on 2026-09-11 against the same predicate the gate
-uses (`looks_like_junk_entity`), across 25,155 directories — the containment
-holds, and the count is a stock, not a leak.
+### The 2026-09-22 run: completed, swapped 2026-09-23 on a forced gate
+
+The exercise was repeated twelve days later, and the veto question got its
+answer. The live store was wiped on 2026-09-22 — what remained measured 30
+entities and no edges (`a18dd985`, #1395) — and run `rebuild-20260922T212318Z`
+re-extracted the whole allow-list (3,106 documents, 100% coverage): 98,174
+facts, 11,561 entities, 32,808 active edges, `provenance_pct` 100, zero junk
+dirs, zero contamination. Its frozen eval baseline scored the *empty* graph —
+0.363 MRR / 0.421 NDCG@10, deliberate per `a18dd985`: after a wipe the rebuild
+must at least beat having no graph — so this run's retrieval half is a
+comparison against nothing, not against the 0.496 the 09-03 run was held to.
+The gate passed nine checks and failed one: `eval_category_regression`, hard
+−0.051 against the −0.05 limit — the same check class that abandoned 09-03.
+`swap` ran with `--force`, after an ABBA re-measure under the regression lock
+(run spread 0.013, every category delta inside it) and a rule stated *before*
+the result, on Alan's call — recorded in `FORCE-SWAP-REASON.md` beside that
+run's `gate.json`. But `rebuild-state.json` keeps only `gate: false` beside
+`swapped_at`: the override itself leaves no trace in the state every later
+reader reads (**#2967**). The live store today is that rebuild tree — see the
+2026-10-18 re-measure in *Scale*.
+
+And the 977 junk-named entity directories went out with the wiped tree rather
+than through review: the rebuild's own gate counted 0 junk dirs before
+swapping, the extractor rejects those names before registration, and
+`_pipeline/memory-graph/junk-entities-review.json` no longer exists. The stock
+was disposed of, not dispositioned.
 
 ---
 
@@ -691,16 +748,20 @@ to hold (`min_confidence`, default 0.0 = keep every edge).
 `architecture/memory.md` has why, and the `improve` loop (#84, nightly, plan
 mode), which runs from its script.
 
-Three of those address a fact by `<file, id>` -- `fact_resolve`,
+Three of those address a fact by `<file, id>` -- `fact_resolve_apply`,
 `fact_invalidate` and every revert report -- so the ID has to name exactly one
 fact. `scripts/memory/repair_fact_ids.py` is the repair when it does not; see
 **The rebuild** for what it fixed and why the merge path kept re-creating the
 problem.
 
-`fact_resolve` reports by default. It defaulted to `auto_resolve=True`, so a
-call that reads like a query silently expired facts — and its contradiction
-detector fires on token overlap above 0.6, which is two facts phrased
-similarly, not two facts that disagree.
+`fact_resolve` reports, and marks nothing. It used to default to
+`auto_resolve=True`, so a call that reads like a query silently marked facts;
+#1326 removed the parameter — a call that still passes it gets the report and
+a pointer to the verb that acts, and the old id-keyed marking, which aimed at
+an id that is a per-file counter and invalidated 25 facts from 2 planned
+actions on live `Assistant`, was replaced by `(file, id)` marks that refuse a
+mark whose file is unknown. Its contradiction detector fires on token overlap
+above 0.6, which is two facts phrased similarly, not two facts that disagree.
 
 `fact_resolve` and `fact_resolve_apply` share that detector, and it is pairwise —
 O(n²) in the entity's fact count. It is refused above `FACT_GODNODE_THRESHOLD`
@@ -713,6 +774,25 @@ overlap heuristic firing on two facts phrased alike. Both tools now take
 
 ## Review log
 
+- **2026-10-18 — stale.** All the machinery is live and re-verified against the
+  tree (store API, gate order, write chain, tools, the doc-claim tests), but the
+  document's *measured state* was three weeks behind an event it never
+  mentioned: the live store was wiped on 2026-09-22 and a completed rebuild
+  swapped in on 2026-09-23 with `--force` after `eval_category_regression`
+  failed by 0.001 against a baseline scored on the empty graph. Added *The
+  2026-09-22 run*; re-measured Scale on the current tree (15,164 dirs / 41,557
+  files / 161,168 rows / 50,558 active edges / 239 aliases / 0 NULL
+  `created_at`/`source_doc` — the provenance gap called "still outstanding"
+  closed with the swap, and the 977 junk dirs and 4,028 mechanical aliases went
+  out with the old tree, which also carries `conversation`-origin edges, 0 in
+  the new store until #51 re-grew them); corrected the paraphrase gate from
+  *ships off* to its live `noop` mode; narrowed the sweep's `--apply` fail-open
+  claim to what #1557 left open; replaced `fact_resolve --auto_resolve`, a verb
+  #1326 removed, with `fact_resolve_apply`; re-dated the candidate sidecar
+  (432 names); dropped three drifted `file:line` citations; recorded that the
+  09-03 run's kept artifacts dir is itself gone. Filed **#2967** (a forced
+  `kg_rebuild swap` leaves no trace in `rebuild-state.json`) and **#2968** (a
+  degraded-but-nonempty store with a missing baseline still applies unrefused).
 - **2026-10-13 — #2641 fixed: the apply rule now shows its narrowing.** Two sites
   in this file still said #48 only ever proposes and that a person is the one who
   applies: rule 2 in §Rules that came out of the incidents, and the write-path
