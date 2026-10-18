@@ -1365,12 +1365,13 @@ def _unresolved(names: list[str]) -> list[str]:
 
     Membership over repo-OR-live, never equality against the repo set: a name is
     unresolved only when neither directory can answer it, so a unit a box installs by
-    hand with nothing tracked behind it (`freeclip-a2dp-fix.service` is that unit here
-    today, and #2864's other owed entry still has to rule on it) reads as resolved as a
-    tracked one. `lloyd-graph-backup.timer` was the live-but-untracked witness until
-    #2864 tracked the pair, which is why the rule is stated as a rule rather than tied
-    to a name. `lloyd-data-snapshot.timer` sits outside the fleet on purpose because the
-    script links and enables it separately at its step 8.
+    hand with nothing tracked behind it reads as resolved as a tracked one.
+    `freeclip-a2dp-fix.service` is that unit on this box today, and #2949 is the ruling
+    that keeps it that way — its disposition is recorded in `install-services.sh`'s
+    `HOST_LOCAL_UNITS`, not in the repo. `lloyd-graph-backup.timer` was the
+    live-but-untracked witness until #2864 tracked the pair, which is why the rule is
+    stated as a rule rather than tied to a name. `lloyd-data-snapshot.timer` sits outside
+    the fleet on purpose because the script links and enables it separately at its step 8.
     """
     return [n for n in names
             if not ((REPO_UNIT_DIR / n).is_file() or (USER_UNIT_DIR / n).is_file())]

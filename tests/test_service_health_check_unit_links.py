@@ -36,6 +36,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -340,6 +341,240 @@ def test_an_undispositioned_orphan_turns_the_deploy_heading_degraded_through_mai
                      "owed a tracking ruling (#2756); live on one box only")
     doc = _deploy_payload()
     assert doc["summary"][shc.DEPLOY_CATEGORY] == "healthy", doc["summary"]
+
+
+# ---------------------------------------------------------------------------
+# The dispositions the REAL installer records (#2949)
+# ---------------------------------------------------------------------------
+#
+# Everything above this line grades `INSTALLER_STUB`, which is the right fixture for a READ
+# shape and the wrong one for the question "did anyone actually record the disposition?".
+# The four nodes below open `agent-services/setup/install-services.sh` itself and hand it to
+# `shc._host_local_dispositions`, the same call `check_unit_file_links` makes on a real run.
+# None of them names the unit it is about: the name comes out of the installer's own array
+# and out of its own comment block, so the nodes say nothing about which box's hardware the
+# unit is for and none of them can be narrowed by editing a string here.
+
+REAL_INSTALLER = shc.INSTALL_SERVICES
+
+
+def _real_dispositions() -> dict:
+    """The real installer's `HOST_LOCAL_UNITS`, as the deploy check reads it (#2949)."""
+    return shc._host_local_dispositions(REAL_INSTALLER)
+
+
+def _linked_comment_block() -> str:
+    """The installer's comment block immediately above `LINKED=()`, contiguous only.
+
+    Scanned upward from the `LINKED=()` line to the first line that is not a comment,
+    because a `HOST_LOCAL_UNITS` mention somewhere else in a near-300-line script is not the
+    text a reader consulting the reason for the arming loop's shape would find.
+    """
+    lines = REAL_INSTALLER.read_text(encoding="utf-8").splitlines()
+    at = next(i for i, ln in enumerate(lines) if ln.startswith("LINKED=()"))
+    out = []
+    i = at - 1
+    while i >= 0 and lines[i].lstrip().startswith("#"):
+        out.append(lines[i])
+        i -= 1
+    return "\n".join(reversed(out))
+
+
+def _units_named(text: str) -> set:
+    """Unit filenames spelled in `text`, as bare names whatever punctuation surrounds them."""
+    return {tok.strip("`\"'(),") for tok in re.findall(r"\S*\.(?:service|timer)", text)}
+
+
+def test_the_real_installer_records_a_disposition_the_checker_can_read():
+    """#2949 clause 1: the installer's `HOST_LOCAL_UNITS` array is present in the shape
+    `HOST_LOCAL_RE` parses, the unit its own `LINKED=()` comment discusses is a key of the
+    dict read from the real file, and that key's why is non-empty and carries no `)`, no `#`
+    and no line break.
+
+    The name is derived from the installer twice over — once out of the array, once out of
+    the comment block that explains why the arming loop iterates the units this run placed
+    — and the two are required to agree, so the node pins "the disposition that is owed here
+    is recorded here" rather than "some array exists". The three why-shape assertions are the
+    two silent truncations plus the empty case: the reader's capture body is `[^)]*`, so one
+    closing paren anywhere in a why ends the array on that character and every entry below
+    it reverts to `untracked:` with no error in bash, in systemd or in this checker.
+    """
+    dispositions = _real_dispositions()
+    assert dispositions, (
+        f"{REAL_INSTALLER} declares no HOST_LOCAL_UNITS the reader can parse, so every "
+        "live-only unit still grades untracked")
+
+    block = _linked_comment_block()
+    discussed = _units_named(block)
+    assert discussed, "the comment block above LINKED=() names no unit at all"
+    assert discussed <= set(dispositions), (
+        f"the units the installer's comment discusses ({sorted(discussed)}) are not units "
+        f"its array dispositions ({sorted(dispositions)}), so the comment points at a "
+        "disposition that does not exist")
+
+    for name in sorted(discussed):
+        why = dispositions[name]
+        assert why, (
+            f"{name} is dispositioned with no why on its line, so the row the check prints "
+            "would excuse the unit and tell nobody why")
+        assert ")" not in why, (
+            f"a closing paren in {name}'s why silently truncates HOST_LOCAL_UNITS at that "
+            f"character and drops every entry below it: {why!r}")
+        assert "#" not in why, (
+            f"{name}'s why carries a second hash, which the reader folds into the why "
+            f"rather than treating as a comment: {why!r}")
+        assert why == why.strip() and len(why.splitlines()) == 1, (
+            f"{name}'s why is not the one-line form the array documents: {why!r}")
+
+
+def test_no_name_in_the_real_array_is_a_unit_the_repo_could_have_tracked():
+    """#2949 clause 2, both directions: no name in the real `HOST_LOCAL_UNITS` has a file of
+    the same name under `agent-services/systemd/`, and a unit the repo DOES track is still
+    graded even when the array spells its name.
+
+    The first half is a subset test with a positive control, because a glob that matched
+    nothing would make it true of an array full of tracked units — the same vacuous green
+    that cost #2756 its `assert all(why.strip() ...)` node. The glob is therefore checked
+    against the directory's own listing before it is trusted to exclude anything.
+
+    The second half is the reason the array is a disposition and not a mute: the array's own
+    name is planted into a synthetic tracked unit directory, and `check_unit_file_links`
+    still files a `unitlink:` row for it (`missing:` — nothing deployed behind it) and no
+    `orphanunit:` row. An entry cannot excuse a unit the installer genuinely could own.
+    """
+    dispositions = _real_dispositions()
+    assert dispositions, "the real installer declares no host-local disposition at all"
+
+    tracked = {p.name for pattern in shc.UNIT_GLOBS
+               for p in shc.SYSTEMD_UNIT_TREE.glob(pattern) if not p.is_dir()}
+    assert tracked == {p.name for p in shc.SYSTEMD_UNIT_TREE.iterdir()
+                       if p.suffix in (".service", ".timer")}, (
+        "the unit glob stopped matching the files that are in the tree, so the exclusion "
+        "below proves nothing — this is the vacuous-green control, not a failure of the array")
+    assert not (set(dispositions) & tracked), (
+        f"{sorted(set(dispositions) & tracked)} is in HOST_LOCAL_UNITS AND tracked under "
+        "agent-services/systemd/, so the array is excusing a unit this script could install")
+
+    # The other direction — a tracked unit whose name the array spells is still graded — is
+    # its own node, over a synthetic tree, so no node here reads this box's deploy directory.
+
+
+@pytest.mark.parametrize("deploy_state", ["not-deployed", "linked"])
+def test_a_tracked_unit_named_in_the_real_array_is_still_graded(tmp_path, deploy_state):
+    """#2949 clause 2's second half, over the real installer's real array.
+
+    Every name the array spells is planted into a synthetic unit directory, exactly as a
+    commit under `agent-services/systemd/` would put it there. None of them may come back as
+    an `orphanunit:` row — the reverse walk skips tracked names before it consults the array
+    — and each must come back as a graded `unitlink:` row instead, healthy only in the
+    `linked` case, where a correct deployed symlink was placed as well. A `HOST_LOCAL_UNITS`
+    entry that silenced a tracked unit would make a real unit undeployable and invisible at
+    once, which is the failure this node exists to make impossible.
+    """
+    dispositions = _real_dispositions()
+    assert dispositions, "the real installer declares no host-local disposition at all"
+    fleet = _Fleet(tmp_path)
+    fleet.installer.write_text(REAL_INSTALLER.read_text(encoding="utf-8"),
+                               encoding="utf-8")
+    for name in sorted(dispositions):
+        fleet.track(name)
+        if deploy_state == "linked":
+            fleet.link_to_tree(name)
+    fleet.track("alpha.service")
+    fleet.link_to_tree("alpha.service")
+
+    rows = {r["name"]: r for r in fleet.rows()}
+    for name in sorted(dispositions):
+        assert f"orphanunit:{name}" not in rows, (
+            f"a tracked unit named by HOST_LOCAL_UNITS was graded as an orphan instead: "
+            f"{rows.get(f'orphanunit:{name}')}")
+        row = rows[f"unitlink:{name}"]
+        assert row["healthy"] is (deploy_state == "linked"), row
+
+
+def test_the_real_array_excuses_only_the_name_it_spells(fleet, monkeypatch, capsys):
+    """#2949 clause 3: with the REAL installer as the disposition source, a planted deployed
+    unit that has no tracked source and no array entry still produces an `untracked:` row and
+    still turns the `Deploy:` heading degraded through `main()`.
+
+    Both halves ride one run so the two ways the array could be wrong are both caught: a
+    list that excused everything leaves this node no fault row to find, and a list that
+    excused nothing has its own name reading `untracked:` in the same payload as the
+    stranger. Deleting the planted unit and re-driving is the differential that proves the
+    stranger and not the dispositioned unit is what held the heading down, so the node cannot
+    be satisfied by a `degraded` that has some other cause. `real` captures the function
+    before the patch for the reason
+    `test_an_undispositioned_orphan_turns_the_deploy_heading_degraded_through_main` gives: a
+    lambda that reached the module attribute would call itself.
+    """
+    dispositions = _real_dispositions()
+    assert dispositions, "the real installer declares no host-local disposition at all"
+    fleet.installer.write_text(REAL_INSTALLER.read_text(encoding="utf-8"),
+                               encoding="utf-8")
+    fleet.track("alpha.service")
+    fleet.link_to_tree("alpha.service")
+    for name in sorted(dispositions):
+        fleet.copy(name)
+    stranger = "planted-with-no-disposition.service"
+    assert stranger not in dispositions
+    deployed_stranger = fleet.copy(stranger)
+
+    real = shc.check_unit_file_links
+
+    def _deploy_payload():
+        monkeypatch.setattr(shc, "check_unit_file_links",
+                            lambda: real(tree_dir=fleet.tree,
+                                         deployed_dir=fleet.deployed,
+                                         installer=fleet.installer))
+        monkeypatch.setattr(shc, "check_deployed_copies", lambda: [])
+        monkeypatch.setattr(shc, "_switched_off", lambda: set())
+        monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--category",
+                                          shc.DEPLOY_CATEGORY, "--format", "json"])
+        shc.main()
+        return json.loads(capsys.readouterr().out)
+
+    rows = {s["name"]: s for s in _deploy_payload()["services"]}
+    fault = rows[f"orphanunit:{stranger}"]
+    assert fault["status"].startswith("untracked:"), fault
+    assert fault["healthy"] is False, fault
+    for name in sorted(dispositions):
+        excused = rows[f"orphanunit:{name}"]
+        assert excused["status"].startswith("ok:"), excused
+        assert excused["healthy"] is True, excused
+
+    doc = _deploy_payload()
+    assert doc["summary"][shc.DEPLOY_CATEGORY] == "degraded", doc["summary"]
+
+    deployed_stranger.unlink()
+    doc = _deploy_payload()
+    assert doc["summary"][shc.DEPLOY_CATEGORY] == "healthy", doc["summary"]
+
+
+def test_the_installer_s_comment_names_the_array_instead_of_an_owed_ruling():
+    """#2949 clause 4: the comment block above `LINKED=()` — the block that explains why the
+    arming loop works off the units this run placed rather than a fresh glob of the deploy
+    directory — points at `HOST_LOCAL_UNITS` as where the live-only unit's disposition is
+    RECORDED, and the phrase telling the next reader that a ruling is still owed is gone from
+    the whole file.
+
+    Absence alone would be a green a deletion could earn, so the block is asserted to carry
+    both the array's name and the word for what it records, and the unit it is about is
+    checked against the array in the node above. A comment anywhere else in the script would
+    not do: the block is delimited by scanning up from `LINKED=()`, which is where the
+    reader who wonders why the loop is not a glob actually looks.
+    """
+    text = REAL_INSTALLER.read_text(encoding="utf-8")
+    block = _linked_comment_block()
+    assert block.strip(), "no comment block sits above LINKED=()"
+    assert "HOST_LOCAL_UNITS" in block, (
+        "the block no longer names the array that records the disposition, so a reader "
+        f"rebuilding the arming guard cannot find it: {block}")
+    assert "disposition" in block.lower(), (
+        f"the block has to say what the array records, not just that the array exists: {block}")
+    assert "still has to rule" not in text, (
+        "install-services.sh still tells a reader a ruling on a live-only unit is owed, "
+        "which is the sentence that made the deploy check's red row read as unfinished "
+        "work rather than as a recorded decision")
 
 
 # ---------------------------------------------------------------------------

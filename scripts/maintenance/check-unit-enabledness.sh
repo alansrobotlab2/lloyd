@@ -32,7 +32,8 @@
 #   - One direction only: repo `.timer` file → `enabled`. NEVER set equality against
 #     `~/.config/systemd/user/timers.target.wants/`, because that directory can hold units
 #     this repository has no say in — on goliath today `freeclip-a2dp-fix.service` is live
-#     with nothing tracked behind it (#2864's other owed entry), and a hand-installed timer
+#     with nothing tracked behind it (its disposition is recorded in install-services.sh's
+#     HOST_LOCAL_UNITS by #2949), and a hand-installed timer
 #     is the same shape one level up. `tests/test_data_home.py::_unresolved` rules
 #     membership-not-equality the same way for the cutover fleet. Since #2864 tracked
 #     `lloyd-graph-backup.timer`, box state no longer supplies a live-only TIMER to

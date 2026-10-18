@@ -58,6 +58,30 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SYSTEMD_SRC="$PROJECT_DIR/systemd"
 SYSTEMD_DST="$HOME/.config/systemd/user"
 SYSTEM_SCOPE_UNITS=(nvidia-power-limit.service)
+# The repo's TWO deliberate gaps, declared side by side because `scripts/service_health_check.py`
+# reads both out of THIS file instead of carrying a second copy of either (#2756, #2949).
+#
+#   SYSTEM_SCOPE_UNITS is a tracked unit this script refuses to place into the user manager,
+#     because clamping GPU power needs root and a user-scope link can only pretend to (#1108).
+#   HOST_LOCAL_UNITS is its mirror image: a unit that is LIVE in ~/.config/systemd/user and
+#     that the repo deliberately refuses to own. Recording it here is what tells the deploy
+#     check the gap is a decision rather than drift. An unlisted live unit reads `untracked:`
+#     and turns the `Deploy:` heading degraded; a listed one reads ok and the row quotes the
+#     why written on its line. The array is NOT a silencer — it excuses only the names it
+#     spells, so a live unit that appears later with nothing behind it still reads untracked.
+#
+# The shape the reader accepts is strict, and two of its rules fail SILENTLY, so change this
+# array only in this shape: one bare deployed unit name per line, the one-line why as that
+# line's `#` comment, and the why contains no closing parenthesis and no second hash. The
+# reader's capture group is `[^)]*`, so a closing paren anywhere in a why ends the array at
+# that character and every entry below it silently goes back to reading untracked; a second
+# hash just becomes part of the why. Nothing in bash or systemd notices either mistake.
+#
+# Pinned by the five HOST_LOCAL_UNITS nodes in tests/test_service_health_check_unit_links.py,
+# which read this file through the checker's own parser rather than restating it.
+HOST_LOCAL_UNITS=(
+    freeclip-a2dp-fix.service  # host-local fix for the FreeClip earbuds A2DP profile, whose ExecStart script hardcodes this box speaker MAC, so the repo could not own a unit that means something on exactly one machine
+)
 # The guard that asserts every repo timer is enabled, and the read this script's own
 # verdict has to agree with (#2774). Absolute, because the installer is run from wherever
 # a rebuild happens to be standing.
@@ -69,10 +93,10 @@ mkdir -p "$SYSTEMD_DST"
 
 # Every unit this run placed, as a source path, in link order. The arming block works off
 # THIS list and not off a fresh glob of $SYSTEMD_DST, because the deploy directory also
-# holds units this repo does not own (`freeclip-a2dp-fix.service` is live on this box with
-# no file under agent-services/systemd/, and #2864's owed entry still has to rule on
-# whether it gets tracked or a HOST_LOCAL_UNITS disposition), and arming one of those would
-# be this script taking responsibility for a unit it never installed.
+# holds units this repo does not own — `freeclip-a2dp-fix.service` is live on this box with
+# no file under agent-services/systemd/, and that disposition is RECORDED, in the
+# HOST_LOCAL_UNITS array above, which is where the deploy check reads it from — and arming
+# one of those would be this script taking responsibility for a unit it never installed.
 LINKED=()
 
 for f in "$SYSTEMD_SRC"/*.service "$SYSTEMD_SRC"/*.timer; do

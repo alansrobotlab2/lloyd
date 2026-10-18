@@ -438,11 +438,13 @@ def test_the_health_checker_no_longer_calls_the_tracked_pair_orphans():
     live, and the assertion below is that sentence becoming true.
 
     Two things are deliberately NOT asserted, both by the item's own clause: that the pair's
-    `unitlink:` rows are healthy (the deployed files are still the plain copies that predate
-    tracking, so `copy:` standing is #2714's by-design finding until someone re-links them),
-    and that `Deploy:` turns green (freeclip's row and the other plain copies keep it
-    degraded, and a node that asserted green would be asserting a host state this diff does
-    not cause). The freeclip row IS asserted: it is the witness that the checker really
+    `unitlink:` rows are healthy (whether the deployed file is still the plain copy that
+    predates the tracking or the symlink the installer writes is this box's state, and
+    `copy:` standing for a re-link somebody owes is #2714's by-design finding either way),
+    and that `Deploy:` turns green (what holds that heading down is host state — a `copy:`
+    row, or a live-only unit whose disposition nobody has recorded, each does it on its own —
+    and a node that asserted green would be asserting a host state this diff does not cause).
+    The live-only unit's row IS asserted: it is the witness that the checker really
     walked this box's live directory, so the absent graph-backup rows above are caused by
     the repo and not by a check that silently stopped running.
     """
@@ -464,9 +466,10 @@ def test_the_health_checker_no_longer_calls_the_tracked_pair_orphans():
 
     # Positive control: the orphan pass must be seen grading SOMETHING, or the empty
     # assertion above is a green the checker never granted. Named by property and not by
-    # unit, because the one live-only unit on this box (`freeclip-a2dp-fix.service`) is
-    # exactly what #2864's third owed entry has to rule on — tracking it or dispositioning
-    # it by name here would make this node fail the day that ruling lands. If a future box
+    # unit, and it stays that way now the ruling is in: #2949 recorded this box's one
+    # live-only unit (`freeclip-a2dp-fix.service`) in install-services.sh's
+    # HOST_LOCAL_UNITS — the decision #2864's third owed entry asked for — so its row
+    # reads ok, and a name hardcoded here would have snapped the day that landed. If a future box
     # has no live-only user unit at all, plant one in a synthetic fleet the way
     # tests/test_service_health_check_unit_links.py's `fleet` fixture does, which is the
     # only durable way to hold a positive control over host state.
