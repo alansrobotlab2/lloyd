@@ -824,10 +824,24 @@ def check_ca_trust(runner=subprocess.run) -> list:
 #     unattended turn, but that hook classifies the Bash string an AGENT issues, and a
 #     systemctl this script spawns never crosses it.
 #   * An idle pool only. `agent-services/systemd/lloyd-egress-window.timer` carries
-#     `Persistent=true` with no stamp dir on this box, so `enable --now` fires the
-#     window at the arming instant, and its `.service` runs `--drain-wait 3600`: a
-#     health route run from inside a worker turn would otherwise arm the thing that
-#     drains the pool its own check is asking about. The reading is the two-part one
+#     `Persistent=true`, and `man 5 systemd.timer` makes the trigger at activation a
+#     CONDITION: the service "is triggered immediately if it would have been triggered
+#     at least once during the time when the timer was inactive". Two inputs decide the
+#     count, in the order systemd reads them: the timer's stored trigger time
+#     (`~/.local/share/systemd/timers/`, which on this box has held
+#     `stamp-lloyd-egress-window.timer` since the 2026-10-18 activation) or, with no
+#     stamp, the unit file's own mtime. Arming can therefore start the window the very
+#     instant it runs, and its `.service` runs `--drain-wait 3600`: a health route run
+#     from inside a worker turn would otherwise arm the thing that drains the pool its
+#     own check is asking about. Measured on the one real arming (2026-10-18T16:02:42Z),
+#     which did NOT fire it: `ActiveState=inactive`, `ExecMainStartTimestamp=` empty,
+#     `journalctl --user -u lloyd-egress-window.service` prints `-- No entries --`, and
+#     the next elapse went straight to Mon 2026-10-19 06:26:53 PDT — because the deployed
+#     unit's mtime (2026-10-17 06:24:31 -0700) postdates the last
+#     `OnCalendar=Mon *-*-* 06:23:00` elapse (Mon 2026-10-13), so none had been missed.
+#     The rail stays, justified rather than assumed: a unit file that PREDATES a missed
+#     Monday does fire at the arming instant, and that is the case a worker-turn health
+#     run must not hit. The reading is the two-part one
 #     `eval/persistence_arms.py::in_flight` takes, and an unreadable reading defers too.
 #   * The re-run is the verdict, never the act. A row says `enabled` only because the
 #     guard's RE-RUN put the timer in an enabled row; an `enable --now` that exits 0 on

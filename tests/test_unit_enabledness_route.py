@@ -404,6 +404,98 @@ def test_no_second_systemd_act_is_nameable_from_the_units_path():
         "assertion above is guarding an argv the route no longer runs")
 
 
+def _arm_rationale_prose() -> list:
+    """The arming-rationale comment block of the route, comment lines only.
+
+    The mirror of `_code_strings()`, which deliberately cannot see comments — that is
+    what lets a comment name `systemctl` harmlessly, and it is also why nothing in this
+    suite could read the arming rail's REASON. This walk sees comments and nothing else,
+    so moving the reason into a string constant to dodge it would put it where
+    `_code_strings()` is waiting.
+    """
+    lines = SCRIPT.read_text(encoding="utf-8").splitlines()
+    anchor = next((i for i, ln in enumerate(lines) if "WHAT #2792 ADDED" in ln), None)
+    assert anchor is not None, (
+        "the arming-rationale block lost its `WHAT #2792 ADDED` anchor, so this walk "
+        "has nothing to read and every assert below would be vacuous")
+    block = []
+    for ln in lines[anchor:]:
+        if not ln.lstrip().startswith("#"):
+            break
+        block.append(ln.strip().lstrip("#").strip())
+    assert len(block) > 3, f"the arming-rationale block is {len(block)} line(s): {block}"
+    return block
+
+
+def test_the_idle_pool_rail_is_justified_by_a_missed_elapse_not_by_an_immediate_fire():
+    """#2980: the rail on the idle pool must rest on the condition systemd applies.
+
+    The comment used to read "`Persistent=true` with no stamp dir on this box, so
+    `enable --now` fires the window at the arming instant". False as an unconditional
+    claim: the one real arming (2026-10-18T16:02:42Z) started nothing —
+    `lloyd-egress-window.service` answers `ActiveState=inactive` with an empty
+    `ExecMainStartTimestamp`, its journal prints `-- No entries --`, and the timer's
+    next elapse went straight to Mon 2026-10-19 06:26:53 PDT. `man 5 systemd.timer`
+    gives the rule as a condition: the service "is triggered immediately if it would
+    have been triggered at least once during the time when the timer was inactive",
+    counted from the timer's stored trigger time — `~/.local/share/systemd/timers/`,
+    which has held `stamp-lloyd-egress-window.timer` since that activation — or, with
+    no stamp, the unit file's own mtime.
+
+    A false justification for a safety rail invites a later reader to delete the rail,
+    and no assertion here could have stopped one: `_code_strings()` sees constants, not
+    comments, so this node reading the file's TEXT is the only thing that pins the
+    reason. It goes red if the conditional, the deciding inputs, or the measured witness
+    is dropped — and also if the block stops justifying the rail with the case that
+    genuinely does fire, which is the half that keeps a worker-turn health run from
+    arming a one-hour drain.
+    """
+    block = _arm_rationale_prose()
+    prose = " ".join(" ".join(block).split())
+
+    # The trigger must be stated as the condition, not as a consequence of the act.
+    assert "if it would have been triggered at least once during the time when the " \
+           "timer was inactive" in prose, (
+        "the rail must state the activation-time trigger as systemd's own condition — "
+        "a calendar elapse missed while the timer was inactive — because the "
+        "unconditional sentence it replaced is measured false")
+    assert "no stamp dir on this box" not in prose, (
+        "the refuted antecedent: this box has held a stamp dir for the user instance "
+        "since the 2026-10-18 activation")
+    assert "fires the window at the arming instant" not in prose, (
+        "`enable --now` does not fire the window; it fires it only across a missed "
+        "elapse, which is the claim this node exists to keep straight")
+
+    # The input that decides it, named in the order systemd reads them.
+    stamp, mtime = prose.find("~/.local/share/systemd/timers/"), prose.find("mtime")
+    assert stamp != -1 and mtime != -1, (
+        "the comment must name what decides the count: the timer's timestamp file and, "
+        "with none, the unit file's own mtime")
+    assert "stamp-lloyd-egress-window.timer" in prose, (
+        "the stamp file this box actually has is the witness that the store is real")
+    assert prose.find("or, with no stamp") > stamp, (
+        "the unit-file mtime is the FALLBACK, named after the timestamp file")
+
+    # The measurement, and the case that keeps the rail standing.
+    assert "2026-10-18T16:02:42Z" in prose and "Mon 2026-10-19 06:26:53 PDT" in prose, (
+        "the arming that did NOT fire is the evidence; without the date and the next "
+        "elapse the rewrite is an assertion again, not a measurement")
+    assert "ExecMainStartTimestamp" in prose, (
+        "the no-service-start witness is what refutes the old sentence")
+    fire_sents = [s for s in prose.split(". ") if "arming instant" in s]
+    assert fire_sents, (
+        "the rail is kept because a unit file predating a missed Monday DOES fire at "
+        "the arming instant; that sentence must still name the instant")
+    assert all("predates" in s.lower() for s in fire_sents), (
+        f"every sentence still saying the window fires at the arming instant must be "
+        f"the conditional one: {fire_sents}")
+
+    # What the rewrite must not have touched: the rail itself, and its two pointers.
+    for kept in ("idle pool only", "--drain-wait 3600",
+                 "eval/persistence_arms.py::in_flight", "unreadable reading defers"):
+        assert kept in prose, f"the rail or one of its pointers went missing: {kept!r}"
+
+
 def test_a_whole_fleet_run_and_the_category_carry_the_rows(monkeypatch, capsys, stand_in):
     """Clause 2: present on a default run and on `--category units`."""
     stand_in(ALL_ENABLED, 0)
@@ -668,8 +760,10 @@ def test_a_run_through_main_asks_systemd_nothing_when_every_timer_is_enabled(
 def test_arming_defers_while_the_pool_has_work_in_flight():
     """Clause 3: a busy pool stops the act, and the row says which half was busy.
 
-    `lloyd-egress-window.timer` is `Persistent=true` with no stamp dir, so arming it runs
-    its window at that instant, and that window holds the pool for up to `--drain-wait
+    `lloyd-egress-window.timer` is `Persistent=true`, so arming it can run its window at
+    that instant — `man 5 systemd.timer` triggers the service immediately if a calendar
+    elapse was missed while the timer was inactive, counted from the timer's stamp file
+    or the unit file's mtime — and that window holds the pool for up to `--drain-wait
     3600`. A health route run from inside a worker turn would otherwise be arming the
     thing that drains the pool it is reporting on, so the reading that stops it is the
     two-part one `eval/persistence_arms.py::in_flight` takes: `pool.in_flight_count` and
@@ -911,9 +1005,11 @@ def test_a_never_armed_timer_is_deferred_while_work_is_in_flight():
 
     The idle-pool condition is load-bearing on THIS unit in a way it was not for a
     `disabled` one. `lloyd-egress-window.service` carries `--drain-wait 3600`, and the timer
-    is `Persistent=true` with no user stamp dir on this box (`StateDirectory=` is empty and
-    `/run/user/1000/systemd/timers/` does not exist), so the window can start AT the arm
-    instant and hold dispatch for up to an hour — from a route a worker turn itself runs. So
+    is `Persistent=true` with `OnCalendar=Mon *-*-* 06:23:00`, so an arming that finds a
+    Monday elapse missed since its stamp was last written starts the window AT the arm
+    instant and holds dispatch for up to an hour — from a route a worker turn itself runs.
+    (The 2026-10-18 arming did not: see the route's own comment, and
+    `test_the_idle_pool_rail_is_justified_by_a_missed_elapse_not_by_an_immediate_fire`.) So
     the reading has to stop the act, say what stopped it, and exec no systemctl: a deferred
     row that had also armed the timer would be the worst of both outcomes at once.
     """
