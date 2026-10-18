@@ -1335,6 +1335,22 @@ def _rederive_command(artifact: str, ext: str) -> str:
     what an extract of a subset cannot fake, and together they mean an extract
     reproduces the quoted figure only by carrying the data.
 
+    The store branch opens the file READ-ONLY (#2960). `sqlite3.connect(a)` is a
+    read-write open, and a read-write open of a WAL-mode database whose `-wal`
+    still holds uncheckpointed frames CHECKPOINTS those frames into the main file
+    and then deletes the `-wal`, so proving a witness rewrote the bytes the
+    witness is: measured over a synthetic WAL-mode db here, the main file went
+    `7521076b`/4,096 B to `de0fbd28`/16,384 B and its 24,752-byte `-wal` was
+    consumed, while the `?mode=ro` URI form left both untouched and still printed
+    the row count. That is not hypothetical for a committed witness: the vault
+    tracks `backlog/data/usage.db`, whose frozen bytes had ALREADY moved in HEAD
+    (blob `4dd64e71`/233,472 B, the size #1919's freeze message pins, replaced by
+    `0c73fbd5`/339,968 B in the pre-flight commit `ab50e4bc`) before this round
+    opened. `mode=ro` protects the witness BYTES only: a read-only open of a
+    WAL-mode db with no sidecars still creates `-shm` (32,768 B) and an empty
+    `-wal`, so keeping those out of a vault commit is the vault's own ignore-rule
+    job (#2960 clause 2), not this command's.
+
     The command is deliberately terse because it is not free-form: `_over_bound_extract_demand`
     embeds it in an owed note that `clean_clauses` cuts from the END at
     `CLAUSE_MAX_CHARS`, and the part that gets cut is the fallback sentence. The
@@ -1346,9 +1362,20 @@ def _rederive_command(artifact: str, ext: str) -> str:
     the compact one. Both bounds are pinned by
     `tests/test_witness_artifact_clause.py::test_the_sqlite_command_stays_inside_the_owed_note_budget`;
     a longer figure has to be paid for out of that budget, not out of the fallback.
+    The read-only URI costs 27 characters over the bare `sqlite3.connect(a)`, and
+    the 25-character shape had only 27 unspent of its 189, so it is spent to the
+    last one — 189 against 189, 229 against 233 — which is why the URI is
+    f-STRINGED (emitted as `f'file:{a}?mode=ro'`) and nothing else in the command
+    moves: the
+    concatenation spelling (`'file:'+a+'?mode=ro'`) is one character DEARER, so with
+    `uri=True` spelled out it lands at 190 and misses that bound by one. Triaging
+    #2960 measured the two spellings under `uri=1`, where they do differ, and
+    recommended the dearer one; the one character of difference is what this
+    paragraph records.
     """
     if ext in _SQL_WITNESS_EXTS:
-        return (f"python3 -c \"import sqlite3,os;a='{artifact}';c=sqlite3.connect(a);"
+        return (f"python3 -c \"import sqlite3,os;a='{artifact}';"
+                f"c=sqlite3.connect(f'file:{{a}}?mode=ro',uri=True);"
                 f"print(sum(1 for l in c.iterdump() if l.startswith('INSERT')),"
                 f"os.path.getsize(a))\"")
     return f"wc -l -c < {artifact}"

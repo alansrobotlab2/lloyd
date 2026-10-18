@@ -33,9 +33,11 @@ unreachable by it.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -705,6 +707,713 @@ def test_the_sqlite_command_stays_inside_the_owed_note_budget():
         f"the long path stopped taking the compact form, so something else gave: "
         f"{compact}")
     assert "extract" in compact.lower(), compact
+
+
+_BUILD_DIRTY_WAL = '''\
+import os, sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("pragma journal_mode=wal")
+con.executescript("create table items(id primary key, title);"
+                  "create table docs(id primary key, body);")
+con.executemany("insert into items values(?,?)", [(i, f"t{i}") for i in range(3)])
+con.executemany("insert into docs values(?,?)", [(i, f"b{i}") for i in range(500)])
+con.commit()
+os._exit(0)  # never closed: SQLite folds the -wal in only on the LAST clean close
+'''
+
+#: Rows `_BUILD_DIRTY_WAL` commits, and the figure both commands must print.
+_DIRTY_WAL_ROWS = 503
+
+
+def _dirty_wal_extract(tmp_path: Path, name: str) -> Path:
+    """A WAL-mode store extract whose `-wal` still holds uncheckpointed frames.
+
+    This is the state a committed `.db` witness can be found in — SQLite writes
+    committed frames to the `-wal`, not to the main file, and only the last
+    clean connection close folds them back — and it is the ONLY state in which
+    the MODE of an open is observable: on a sidecar-less database every form of
+    `connect` reads the same bytes. So the builder hard-exits without closing
+    (`os._exit`) to leave the frames where a read-write open will checkpoint them
+    into the main file, and asserts here that they really are there. A build that
+    left no `-wal` would make every byte-identity claim below true of the
+    read-write form too, which is the vacuity this helper exists to refuse.
+    """
+    script = tmp_path / "build-wal-db.py"
+    if not script.exists():
+        script.write_text(_BUILD_DIRTY_WAL, encoding="utf-8")
+    p = tmp_path / name
+    done = subprocess.run([sys.executable, str(script), str(p)],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, (done.stdout, done.stderr)
+    wal = p.parent / (p.name + "-wal")
+    assert wal.exists() and wal.stat().st_size > 0, (
+        "positive control for the premise: the build left no uncheckpointed "
+        "`-wal`, so no open of this file could rewrite its bytes and the "
+        "assertion that the read-only form changes nothing would prove nothing")
+    return p
+
+
+def _retired_bare_command(artifact) -> str:
+    """The command this file's store branch emitted before #2960, verbatim.
+
+    Kept as a string and not reconstructed from `_rederive_command`, because the
+    point of running it is to show the OLD form drifts: a control rebuilt out of
+    the new emitter would drift with it and the pair would agree.
+    """
+    return ("python3 -c \"import sqlite3,os;a='%s';c=sqlite3.connect(a);"
+            "print(sum(1 for l in c.iterdump() if l.startswith('INSERT')),"
+            "os.path.getsize(a))\"" % artifact)
+
+
+def test_the_store_command_opens_the_witness_read_only(tmp_path):
+    """#2960 clause 3: the store branch opens read-only, and loses no figure.
+
+    `sqlite3.connect(a)` is a READ-WRITE open, and a read-write open of a
+    WAL-mode database checkpoints the `-wal` into the main file — so the act of
+    proving a committed witness rewrote the witness. The vault's tracked
+    `backlog/data/usage.db` is the victim: its frozen blob `4dd64e71`
+    (233,472 B, the size #1919's freeze message pins) is no longer in HEAD,
+    which holds `0c73fbd5` at 339,968 B. The string must therefore carry the
+    read-only URI form for every store extension the convention takes, and
+    `uri=True` with it — `?mode=ro` in a PLAIN filename is just a filename to
+    SQLite, so the flag is what makes the mode apply and not decoration. The two
+    figures #2751 settled on (`iterdump()` INSERT count beside
+    `os.path.getsize`) are still what it prints: a read-only open that stopped
+    reporting rows would be a fix that broke the clause the command is for.
+    """
+    for ext in sorted(B._SQL_WITNESS_EXTS):
+        cmd = B._rederive_command(f"{B.WITNESS_ARTIFACT_DIR}/usage.{ext}", ext)
+        assert "?mode=ro" in cmd and "uri=True" in cmd, (
+            f"a .{ext} witness is opened read-write again, so verifying it can "
+            f"checkpoint its own -wal into its bytes: {cmd}")
+        assert "sqlite3.connect(a)" not in cmd, (
+            f"a .{ext} witness still opened by the bare read-write form: {cmd}")
+        assert "iterdump" in cmd and "os.path.getsize" in cmd, (
+            f"a .{ext} read-only command that no longer prints the row count "
+            f"beside the byte size: {cmd}")
+
+        # The string predicates above are only worth having if the string they pin is
+        # the thing that decides what happens to a witness. So this node runs both
+        # forms over a dirty-WAL twin pair before believing them: the command the
+        # emitter emits NOW leaves the twin's md5 alone, and the retired command the
+        # `sqlite3.connect(a)` predicate forbids rewrites its twin. A reader who
+        # reverts the emitter while editing this assertion's prose therefore fails
+        # here on bytes, not just on a substring. (`test_the_read_only_store_command_
+        # leaves_a_dirty_wal_witness_untouched` owns the mechanism clause and adds the
+        # `-wal`, size and relative-path halves; this is the control that stops the
+        # string check from being a text-diffing test.)
+        keep, drift = (_dirty_wal_extract(tmp_path, f"shape-{n}.{ext}")
+                       for n in ("keep", "drift"))
+        keep_md5 = hashlib.md5(keep.read_bytes()).hexdigest()
+        shipped = subprocess.run(B._rederive_command(str(keep), ext), shell=True,
+                                 capture_output=True, text=True)
+        assert shipped.returncode == 0, (ext, shipped.stdout, shipped.stderr)
+        assert hashlib.md5(keep.read_bytes()).hexdigest() == keep_md5, (
+            f"the command this node just certified read-only by STRING inspection "
+            f"changed a dirty-WAL .{ext} witness's md5 ({keep_md5}) — the predicates "
+            "above are not the property they name")
+        drift_md5 = hashlib.md5(drift.read_bytes()).hexdigest()
+        bare = subprocess.run(_retired_bare_command(drift), shell=True,
+                              capture_output=True, text=True)
+        assert bare.returncode == 0, (ext, bare.stdout, bare.stderr)
+        assert hashlib.md5(drift.read_bytes()).hexdigest() != drift_md5, (
+            f"the retired bare open left a dirty-WAL .{ext} witness's md5 at "
+            f"{drift_md5}, so nothing rewrites these files and the byte assertion "
+            "above certifies an event that never happens")
+
+
+def test_the_read_only_store_command_leaves_a_dirty_wal_witness_untouched(tmp_path):
+    """#2960 clause 4: the emitted command cannot move a WAL witness's bytes.
+
+    The clause the string-shape node above cannot reach: `mode=ro` is only worth
+    its two characters if the open leaves a dirty WAL alone. Over a WAL-mode
+    extract with 503 rows of committed frames still in its `-wal`, the read-only
+    form prints the row count and the main file's size, exits 0, and changes
+    neither the main file's md5 nor the `-wal` that holds the frames; the
+    retired bare form, over a twin built the same way, rewrites the main file and
+    consumes the `-wal`. That control is the whole node — measured on this box, the
+    drift turned this fixture's 4,096-byte main file into 36,864 while its
+    61,832-byte `-wal` went away — because an assertion that the bytes are unchanged
+    is worth nothing unless something else demonstrably changes them. The size is
+    asserted to GROW, at the exact figure that drift measured: a checkpoint appends
+    the WAL's pages, and the vault's own victim moved the same way, `ab50e4bc`
+    taking 233,472 B to 339,968 B.
+
+    The main file's byte size is pinned both ways: the read-only form must print
+    the size the file had BEFORE the open (the size an item quotes), not a
+    post-checkpoint figure, and the file must still be that size afterwards.
+    """
+    for ext in sorted(B._SQL_WITNESS_EXTS):
+        # The artifact carries the extension under test, not `.db` for all three:
+        # `_rederive_command` picks its branch from `ext`, so a node that handed it
+        # `sqlite3` over a file named `usage.db` would never show a reader what a
+        # real `.sqlite3` extract looks like on disk — and SQLite names a
+        # `.sqlite`-store's sidecars `foo.sqlite-wal`, which is the shape the vault's
+        # two rules do NOT cover (recorded on the item as a gap this item does not
+        # take).
+        keep, drift = (_dirty_wal_extract(tmp_path, f"usage-{n}.{ext}")
+                       for n in ("keep", "drift"))
+        retired = _retired_bare_command(drift)
+        assert retired != B._rederive_command(str(drift), ext), (
+            "the control and the shipped command are the same string, so the "
+            "drift measured below is not evidence about the shipped one — the "
+            f"emitter has been reverted to it: {retired}")
+        keep_bytes, keep_size = keep.read_bytes(), keep.stat().st_size
+        # Clause 4's own unit: md5 of the main file, before and after. The byte
+        # equality below is the stronger claim; this is the one the clause names, and
+        # the one `ab50e4bc` would have failed had anyone printed it.
+        keep_md5 = hashlib.md5(keep_bytes).hexdigest()
+        keep_wal = (tmp_path / (keep.name + "-wal")).read_bytes()
+        done = subprocess.run(B._rederive_command(str(keep), ext), shell=True,
+                              capture_output=True, text=True)
+        assert done.returncode == 0, (ext, done.stdout, done.stderr)
+        assert done.stdout.split() == [str(_DIRTY_WAL_ROWS), str(keep_size)], (
+            f"a .{ext} read-only open stopped printing the row count beside the "
+            f"pre-open byte size: {done.stdout!r}")
+        assert hashlib.md5(keep.read_bytes()).hexdigest() == keep_md5, (
+            f"the read-only open of a .{ext} witness changed its md5 "
+            f"({keep_md5}) — the clause's own measure")
+        assert keep.read_bytes() == keep_bytes, (
+            f"the read-only open of a .{ext} witness still rewrote the witness")
+        assert (tmp_path / (keep.name + "-wal")).read_bytes() == keep_wal, (
+            f"the read-only open of a .{ext} witness consumed its -wal frames")
+
+        drift_bytes, drift_size = drift.read_bytes(), drift.stat().st_size
+        drift_md5 = hashlib.md5(drift_bytes).hexdigest()
+        ctl = subprocess.run(retired, shell=True, capture_output=True, text=True)
+        assert ctl.returncode == 0, (ext, ctl.stdout, ctl.stderr)
+        assert hashlib.md5(drift.read_bytes()).hexdigest() != drift_md5, (
+            f"positive control: the bare open left a .{ext} witness's md5 at "
+            f"{drift_md5}, so nothing rewrote the file and the assertion above about "
+            "the read-only form is measuring an event that never happens")
+        assert drift.read_bytes() != drift_bytes, (
+            f"positive control for the premise: the bare read-write open did NOT "
+            f"rewrite a dirty-WAL .{ext} file either, so the byte-identity "
+            f"assertion above pins nothing — {drift_size} B unchanged")
+        # Growth, not merely difference: a checkpoint APPENDS the WAL's pages, which
+        # is why the vault's witness went UP from 233,472 B to 339,968 B in
+        # `ab50e4bc` rather than changing in place. Measured on this fixture: 4,096 B
+        # before the bare open, 36,864 B after.
+        assert drift.stat().st_size > drift_size, (
+            f"positive control: the bare open changed a .{ext} witness's bytes "
+            f"without growing it ({drift_size} B), so it is not the checkpoint this "
+            "mechanism claims — and the clause-4 byte pin below would be answering a "
+            "different failure")
+        moved_wal = tmp_path / (drift.name + "-wal")
+        assert not moved_wal.exists() or moved_wal.stat().st_size == 0, (
+            f"the bare open left the -wal standing at "
+            f"{moved_wal.stat().st_size if moved_wal.exists() else 'n/a'} B, so the "
+            f"checkpoint that moved the bytes above came from somewhere else")
+
+        # And the shape the owed note actually carries: a VAULT-RELATIVE artifact,
+        # opened from the directory it is relative to. `file:backlog/data/usage.db`
+        # resolves against the opening process's cwd, so an absolute-path test does
+        # not cover it, and the fallback command the convention emits is never
+        # absolute (#2738: an absolute vault path is refused by the path rails).
+        rel = str(keep.relative_to(tmp_path))
+        rel_done = subprocess.run(B._rederive_command(rel, ext), shell=True,
+                                  capture_output=True, text=True, cwd=tmp_path)
+        assert rel_done.returncode == 0, (ext, rel, rel_done.stdout, rel_done.stderr)
+        assert rel_done.stdout.split() == [str(_DIRTY_WAL_ROWS), str(keep_size)], (
+            f"a .{ext} witness opened by its relative path through the URI form "
+            f"printed {rel_done.stdout!r} instead of the row count beside the byte "
+            "size — the owed note the reader is given would be unusable")
+        assert keep.read_bytes() == keep_bytes, (
+            f"the relative-path open of a .{ext} witness rewrote the witness")
+
+
+#: The two lines #2960 added to the VAULT's `.gitignore`, spelled here so a scratch
+#: tree can be swept under exactly the rule the vault carries. The vault does not
+#: travel into a round with the code, so the mechanism is measured against this
+#: constant and `test_the_vault_index_carries_no_witness_sidecar_anymore` pins the
+#: same two strings against the real file.
+_SIDECAR_IGNORE_RULES = ("backlog/data/*.db-wal", "backlog/data/*.db-shm")
+
+#: The witness #2960 protects, by the relative path its owed note carries —
+#: `WITNESS_ARTIFACT_DIR` plus the one name the vault pins a blob for.
+WITNESS_STORE = f"{B.WITNESS_ARTIFACT_DIR}/usage.db"
+
+#: A SQLite sidecar as a file list shows it — the names the engine writes beside an
+#: open database. `journal` is the rollback name a non-WAL database uses: #2960's
+#: census found none in the vault, and the two shipped rules do not cover it.
+_SIDECAR_RX = re.compile(r"\.(?:db|sqlite3?)-(?:wal|shm|journal)$")
+
+
+def _git(repo: Path, *args: str,
+        input: "str | None" = None) -> subprocess.CompletedProcess:
+    """`git` in `repo`, with an identity, since a scratch repo has none of its own."""
+    return subprocess.run(["git", "-c", "user.name=witness-pin",
+                           "-c", "user.email=pin@invalid",
+                           "-C", str(repo), *args],
+                          input=input, capture_output=True, text=True)
+
+
+def _git_ok(repo: Path, *args: str) -> str:
+    done = _git(repo, *args)
+    assert done.returncode == 0, (args, done.stdout, done.stderr)
+    return done.stdout
+
+
+def _witness_sweep_repo(tmp_path: Path) -> Path:
+    """A scratch tree in the state #2960 starts from: a witness committed WITH its
+    `-wal` and `-shm` beside it, and no ignore rule, which is exactly what
+    `~/obsidian` looked like before vault commit `da452331` — the sidecar pair
+    included, at the sizes the vault's copies had (an empty `-wal`, a 32,768-byte
+    `-shm`). Sweep it and `git add -A` commits the pair forever; that is the
+    producer #2960 names.
+    """
+    repo = tmp_path / "repo"
+    data = repo / B.WITNESS_ARTIFACT_DIR
+    data.mkdir(parents=True)
+    (data / "usage.db").write_bytes(b"SQLite format 3\x00" + b"\x00" * 4055)
+    (data / "usage.db-wal").write_bytes(b"")
+    (data / "usage.db-shm").write_bytes(b"\x00" * 32768)
+    (repo / ".gitignore").write_text("", encoding="utf-8")
+    _git_ok(repo, "init", "-q", "-b", "main")
+    _git_ok(repo, "add", "-A")
+    _git_ok(repo, "commit", "-qm", "witness committed with its sidecars")
+    return repo
+
+
+def _sidecars(paths: "list[str]") -> "list[str]":
+    return sorted(p for p in paths if _SIDECAR_RX.search(p))
+
+
+def test_the_shipped_sidecar_rule_holds_a_removal_against_the_next_sweep(tmp_path):
+    """#2960 clause 1 and 2's mechanism, measured in a real git tree.
+
+    The vault's index state is not testable from this repo — the vault does not
+    travel into a round with the code — but the property the two added lines exist
+    for is a git property and the whole fix rests on it: a sidecar that is tracked,
+    then removed, must STAY removed against the whole-tree `git add -A` that keeps
+    re-committing it (`c3a3f8fd` and `8c56389f`, both "autonomy-data-pipeline:
+    pre-flight 2026-10-17 (unattributed dirty state)"). So the sequence the vault
+    went through is replayed here: the pair committed, then the two shipped rules
+    plus an index removal, then the sweep again with SQLite having put the pair back
+    on disk — which is what any open of the witness does, `?mode=ro` included.
+
+    The untrack here keeps the files on disk, which is STRICTER than the route the
+    vault took (`git rm`, which unlinks, because that is the only shape
+    `automod_vault_land` can stage — the last assertion below is that fact). If the
+    rule holds with the bytes still lying there, it holds with them deleted.
+
+    The control is step 5: with the rule lines taken back out, the same sweep re-
+    admits both files. An assertion that nothing was re-admitted proves nothing
+    until something else demonstrably re-admits them.
+    """
+    repo = _witness_sweep_repo(tmp_path)
+    data = repo / B.WITNESS_ARTIFACT_DIR
+    wal, shm = f"{B.WITNESS_ARTIFACT_DIR}/usage.db-wal", f"{B.WITNESS_ARTIFACT_DIR}/usage.db-shm"
+
+    # Step 1, the premise: the sweep has already committed the pair.
+    assert _sidecars(_git_ok(repo, "ls-files").split()) == [shm, wal], (
+        "positive control for the premise: the scratch repo did not start with the "
+        "sidecars tracked, so there was nothing for the rule to keep out")
+
+    # Step 2, the change: the two rules, and the pair out of the index.
+    (repo / ".gitignore").write_text("\n".join(_SIDECAR_IGNORE_RULES) + "\n",
+                                     encoding="utf-8")
+    _git_ok(repo, "rm", "-q", "--cached", "--", wal, shm)
+    _git_ok(repo, "add", "--", ".gitignore")
+    _git_ok(repo, "commit", "-qm", "untrack the sidecars")
+    tracked = _git_ok(repo, "ls-files").split()
+    assert _sidecars(tracked) == [], (
+        f"the untracked sidecars are in the index again: {_sidecars(tracked)}")
+    assert f"{B.WITNESS_ARTIFACT_DIR}/usage.db" in tracked, (
+        "the witness itself left the index with them — clause 1 asks for the "
+        "sidecars gone and the witness kept")
+    assert (data / "usage.db-wal").exists() and (data / "usage.db-shm").exists(), (
+        "the scratch witness's sidecars vanished from disk, so the state this node "
+        "is about (bytes present, index clear) was never measured")
+    assert _git_ok(repo, "status", "--porcelain") == "", (
+        "a present-and-untracked sidecar shows up as dirty, which is the sweep's "
+        "cue to commit it: " + _git_ok(repo, "status", "--porcelain"))
+    named = _git_ok(repo, "check-ignore", "-v", shm, wal).split("\n")
+    # `check-ignore -v` prints `<source>:<line>:<pattern>\t<pathname>`.
+    matched = sorted(n.split("\t")[0].rsplit(":", 1)[-1] for n in named if n)
+    assert matched == sorted(_SIDECAR_IGNORE_RULES), (
+        f"the sidecars are matched by a rule other than the shipped pair: {named}")
+    # `--no-index` is what makes this assertion able to fail, and it is the finding
+    # this line carries. `git check-ignore` WITHOUT it never reports a path the
+    # index already carries: `backlog/data/usage.db` is committed in this repo, so a
+    # plain `check-ignore` exits 1 whatever `.gitignore` says and a global `*.db`
+    # rule — the exact rule clause 2 forbids — would have left it green. Measured:
+    # with `*.db` written to this repo's `.gitignore`, `check-ignore` still prints
+    # nothing (exit 1) while `check-ignore --no-index -v` prints
+    # `.gitignore:2:*.db<TAB>backlog/data/usage.db` and exits 0. `--no-index` applies
+    # the rule set as if the path were untracked, which is the question actually in
+    # interest: would the NEXT witness, not yet in the index, be skipped?
+    # `test_a_global_db_ignore_rule_would_hide_the_witness_it_was_written_for` is
+    # this assertion's control and runs the identical call under `*.db`.
+    unindexed = _git(repo, "check-ignore", "--no-index", "-v",
+                     f"{B.WITNESS_ARTIFACT_DIR}/usage.db")
+    assert unindexed.stdout == "" and unindexed.returncode == 1, (
+        "a rule in the shipped pair matches the witness database once the index "
+        "exemption is lifted, so the next sweep's whole-tree `git add` would skip "
+        f"archiving a fresh witness beside it: {unindexed.stdout!r}")
+
+    # Step 3, the sweep runs again over a witness that has been opened since.
+    (data / "usage.db-wal").write_bytes(b"\x75\x7a\x77\x01" + b"\x00" * 8188)
+    (data / "usage.db-shm").write_bytes(b"\x00" * 32768)
+    _git_ok(repo, "add", "-A")
+    assert _git_ok(repo, "diff", "--cached", "--name-only") == "", (
+        "the sweep staged something after #2960 landed: "
+        + _git_ok(repo, "diff", "--cached", "--name-only"))
+    assert _sidecars(_git_ok(repo, "ls-files").split()) == [], (
+        "the sweep re-admitted a sidecar the rule was written to keep out")
+
+    # Step 4, why the landing route deletes: once the rule exists, naming an
+    # on-disk sidecar to `git add -A` is an error, and `land()` propagates it.
+    refused = _git(repo, "add", "-A", "--", wal)
+    assert refused.returncode != 0, (
+        "an ignored-but-present sidecar was addable by path, so "
+        "`automod_vault_land` could have taken an index-only untrack after all "
+        "and this round's premise about the route is wrong: " + refused.stdout)
+
+    # Step 5, control: take the rules out and the same sweep re-admits both.
+    (repo / ".gitignore").write_text("", encoding="utf-8")
+    dirty = _git_ok(repo, "status", "--porcelain")
+    assert {line[3:] for line in dirty.split("\n") if line} >= {wal, shm}, (
+        "positive control for the rule: with no ignore rule the sweep still left "
+        f"both sidecars alone, so their absence above was never the rule's doing: "
+        f"{dirty!r}")
+
+
+def test_a_global_db_ignore_rule_would_hide_the_witness_it_was_written_for(tmp_path):
+    """#2960 clause 2's `no global *.db rule`, paid for with the failure it prevents.
+
+    The vault holds tracked witness databases, so a rule broad enough to be
+    convenient is broad enough to make a witness invisible: `git add -A` skips an
+    ignored path silently when it is sweeping a whole tree, and refuses it when
+    asked by path — either way the archive never lands and nothing is red. This
+    asks for the same new witness under both rule shapes and requires the shipped
+    pair to admit it where `*.db` refuses.
+    """
+    repo = _witness_sweep_repo(tmp_path)
+    data = repo / B.WITNESS_ARTIFACT_DIR
+    new = f"{B.WITNESS_ARTIFACT_DIR}/2026-10-18.2960-lloyd-data-usage.db"
+    (data / Path(new).name).write_bytes(b"SQLite format 3\x00" + b"\x00" * 201)
+
+    (repo / ".gitignore").write_text("*.db\n", encoding="utf-8")
+    broad = _git(repo, "add", "-A", "--", new)
+    assert broad.returncode != 0 and new not in _git_ok(repo, "ls-files").split(), (
+        "a global `*.db` rule admitted a fresh witness anyway, so the narrowness "
+        f"this clause pins buys nothing: rc={broad.returncode}")
+
+    (repo / ".gitignore").write_text("\n".join(_SIDECAR_IGNORE_RULES) + "\n",
+                                     encoding="utf-8")
+    _git_ok(repo, "add", "-A", "--", new)
+    assert new in _git_ok(repo, "ls-files").split(), (
+        "the shipped pair made a fresh witness unaddable, which is the failure the "
+        "rule was supposed to avoid and the reason it is scoped to one directory "
+        "and two suffixes")
+
+    # Control for the `--no-index` probe in
+    # `test_the_shipped_sidecar_rule_holds_a_removal_against_the_next_sweep`, and
+    # the reason that probe is not a self-true assertion: the identical call under a
+    # global `*.db` rule. The witness here is TRACKED, so a plain `check-ignore`
+    # reports nothing and exits 1 either way; only `--no-index` shows the rule that
+    # would hide the next witness. Without this half, an assertion that
+    # `--no-index` is silent under the shipped pair would be indistinguishable from
+    # an assertion that can never fire.
+    (repo / ".gitignore").write_text("*.db\n", encoding="utf-8")
+    broad = _git(repo, "check-ignore", "--no-index", "-v",
+                 f"{B.WITNESS_ARTIFACT_DIR}/usage.db")
+    assert broad.returncode == 0 and broad.stdout.strip(), (
+        "`--no-index` stayed silent under a global `*.db` rule over a tracked "
+        "witness, so the sibling node's silence under the shipped pair proves "
+        f"nothing about the rule set: rc={broad.returncode} out={broad.stdout!r}")
+    assert broad.stdout.split("\t")[0].endswith("*.db"), (
+        f"`--no-index` named a rule other than the global one: {broad.stdout!r}")
+
+
+def _live_vault() -> Path:
+    """`~/obsidian` as a git tree, or a FAILURE — never a skip.
+
+    Shared by the two nodes that read it. `tests/board_presence.py` gives the route
+    (`LLOYD_OBSIDIAN_VAULT`, else `~/obsidian`) and the reason for failing on an
+    absent corpus: an absent vault makes the only measurement of these clauses "not
+    run", and a `skipped` line files a missing pin as nobody's problem.
+    """
+    import board_presence
+
+    vault = board_presence.vault_root()
+    if not (vault / ".git").exists():
+        pytest.fail(
+            f"{vault} is not a git vault, so #2960's vault clauses cannot be "
+            "measured. Failing rather than skipping, the way board_presence.py "
+            "fails on an absent board: the vault IS the corpus these clauses "
+            "certify, and `skipped` would file the missing pin as nobody's "
+            "problem. The vault half of #2960 is NOT pinned by this run.")
+    return vault
+
+
+def test_the_vault_index_carries_no_witness_sidecar_anymore():
+    """#2960 clause 1 and 2's STRUCTURE, read off the live vault read-only.
+
+    The vault half of #2960 is vault commit `da452331`, and a repo round cannot
+    carry it: the two sidecars left the vault index and `.gitignore` gained the two
+    shipped lines. Both are live facts about `~/obsidian`, and this node is the
+    recurrence guard for them — the reason a later sweep that commits a `-wal`
+    again goes red in a suite run rather than in someone reading
+    `git log -- backlog/data/usage.db-wal`. It shells out to `git` with read-only
+    subcommands only (`ls-files`, `check-ignore`, `rev-parse`): no `git status`, no
+    `git add`, nothing that takes the vault's index lock while a job may be
+    committing.
+
+    WHY THIS NODE IS NOT MARKED `live_vault`, and the half that is. `pytest.ini`
+    marks a node `live_vault` when "a file an hourly autoresearch promotion or a
+    nightly job can rewrite between rounds" is what it asserts, because the gate
+    runs `-m "not live_vault and not fault_injection"` and such a node would fail
+    the next author for the previous writer's change. What is left here is the
+    shape #2960 lands, and the ignore pair makes it self-enforcing: while those two
+    lines stand, no whole-tree sweep CAN re-admit a `.db-wal`/`.db-shm`, so the only
+    way this node goes red is the regression it exists to catch — someone removed
+    the rules or tracked a sidecar again. The volatile half, the witness's own BYTES
+    (blob `0c73fbd5`, 339,968 B, 3,787 rows), is a content claim about data a future
+    item may legitimately re-publish, and it lives in
+    `test_the_live_vault_witness_bytes_survive_their_own_verification_command`,
+    marked. Both are read here rather than assumed, and the mechanism behind them is
+    pinned hermetically in this file by
+    `test_the_shipped_sidecar_rule_holds_a_removal_against_the_next_sweep` and
+    `test_the_real_sweep_producer_cannot_re_admit_the_sidecars_it_committed_once`,
+    which run under the gate's mark expression from a `tmp_path` tree.
+
+    The vault is read the way `tests/board_presence.py` reads it
+    (`LLOYD_OBSIDIAN_VAULT`, else `~/obsidian`) and its absence FAILS rather than
+    skips, for the reason that file gives: an absent vault makes the only
+    measurement of this clause "not run", and the clause is either pinned or it is
+    not.
+    """
+    vault = _live_vault()
+
+    tracked = _git_ok(vault, "ls-files").split()
+    assert _sidecars(tracked) == [], (
+        f"the vault tracks SQLite sidecars again: {_sidecars(tracked)} — the "
+        "whole-tree pre-flight sweep re-commits them and any read-write open "
+        "checkpoint moves the witness's own bytes (measured: md5 7521076b/4,096 B "
+        "to de0fbd28/16,384 B, the 24,752-byte -wal consumed)")
+    assert f"{B.WITNESS_ARTIFACT_DIR}/usage.db" in tracked, (
+        "the pinned witness left the vault index; #2960 removes its sidecars and "
+        "nothing else")
+    witnesses = [p for p in tracked if re.search(r"\.(?:db|sqlite3?)$", p)]
+    # A floor, not a membership re-assertion: `usage.db in witnesses` is already
+    # implied by the line above, so what the probe below needs proving independently
+    # is that the list is not empty — an empty `witnesses` would make `check-ignore`
+    # over it silently empty and the clause unmeasured. 20 is well under the 28
+    # tracked witness databases today (23 `.db` under `backlog/data`, 5 `.sqlite*`,
+    # one of them `index.sqlite`), and #2960 adds none and removes none; a legitimate
+    # re-publish only ever adds, so nothing above the floor can pin.
+    assert len(witnesses) >= 20, (
+        f"only {len(witnesses)} witness databases are tracked, so the probe below "
+        "that no witness is ignorable is reading a near-empty list — check-ignore "
+        "over zero paths exits 1 and prints nothing, which is what an unmeasured "
+        "clause looks like from green")
+    # `--no-index`, and for the same reason as the scratch-repo probe two nodes
+    # above: every path in `witnesses` is in the index, so a plain `check-ignore`
+    # over them reports nothing and exits 1 no matter what the vault's `.gitignore`
+    # says — including a future `*.db` line, which is precisely the rule clause 2
+    # forbids and the only thing this assertion is here to catch. `--no-index`
+    # applies the rule set as if each path were untracked, so the assertion fires on
+    # the rule and not on the index. Its control — the same call, non-empty under
+    # `*.db` — is in `test_a_global_db_ignore_rule_would_hide_the_witness_it_was_written_for`.
+    ignored = _git(vault, "check-ignore", "--no-index", "--stdin",
+                   input="\n".join(witnesses))
+    assert ignored.stdout == "", (
+        f"a rule in the vault's .gitignore matches a tracked witness database once "
+        "the index exemption is lifted, so the next sweep would skip archiving a "
+        f"new witness beside it: {ignored.stdout!r}")
+
+    rules = [ln.strip() for ln in (vault / ".gitignore").read_text(
+        encoding="utf-8").split("\n") if ln.strip() and not ln.startswith("#")]
+    for shipped in _SIDECAR_IGNORE_RULES:
+        assert shipped in rules, (
+            f"the vault's .gitignore no longer carries the rule #2960 added: "
+            f"{shipped!r} missing from {rules}")
+    for rule in (r for r in rules if _SIDECAR_RX.search(r.replace("*", "x"))):
+        assert rule.startswith(f"{B.WITNESS_ARTIFACT_DIR}/"), (
+            f"an unscoped sidecar rule entered the vault's .gitignore, and the "
+            f"vault holds witness stores outside {B.WITNESS_ARTIFACT_DIR}/: {rule!r}")
+
+    # `git check-ignore -v` naming the shipped rule is the clause's own check, and
+    # it exits 1 when the path is tracked again — which is the regression that
+    # would make the whole node meaningless, so it is asserted here rather than
+    # assumed.
+    named = _git_ok(vault, "check-ignore", "-v",
+                    f"{B.WITNESS_ARTIFACT_DIR}/usage.db-shm",
+                    f"{B.WITNESS_ARTIFACT_DIR}/usage.db-wal").split("\n")
+    matched = sorted(n.split("\t")[0].rsplit(":", 1)[-1] for n in named if n)
+    assert matched == sorted(_SIDECAR_IGNORE_RULES), (
+        f"the sidecar paths resolve to a rule other than the shipped pair: {named}")
+
+    # `test_the_vault_index_carries_no_witness_sidecar_anymore` stops here: every
+    # assertion above is about the SHAPE #2960 landed, which the shipped pair keeps
+    # true on its own. The witness's own bytes are the volatile half, and they moved
+    # once before this item existed. They are pinned, marked, two nodes down.
+
+
+@pytest.mark.live_vault
+def test_the_live_vault_witness_bytes_survive_their_own_verification_command():
+    """#2960's byte pin, marked `live_vault` because it is a CONTENT claim.
+
+    The witness whose sidecars were untracked must still be the bytes the untracking
+    left behind: blob `0c73fbd5` at 339,968 B — NOT the 233,472 B / blob `4dd64e71`
+    that #1919's freeze message names, because the pre-flight commit `ab50e4bc` had
+    already moved those bytes before this item was filed. `pytest.ini` excludes
+    exactly this kind of node from the gate (`-m "not live_vault and not
+    fault_injection"`): the bytes are live vault content that a future, legitimate
+    re-publish of the witness moves on purpose, and a hard gate rung must not fail
+    the next author for the previous writer's change. The shape that must NOT move —
+    no sidecar in the index, the two rules standing, no rule touching a witness — is
+    unmarked in the node above and runs at the gate, and the mechanism both rest on
+    is pinned hermetically by the `tmp_path` nodes in this file. A deliberate
+    re-publish moves the blob, the byte size and the row count together, and this
+    node is where that re-publish has to be recorded.
+
+    The last block is the item's own acceptance check, run as written: the command
+    the convention emits, from the vault root, at the relative path the owed note
+    carries, with the worktree hash taken before and after. That is the one place the
+    whole claim — verifying the witness is no longer an act that rewrites it — is
+    measurable against the real file. `hash-object` reads a file and hashes it; it
+    takes no index lock, and the open it brackets creates only the sidecar pair the
+    shipped rules already hide.
+    """
+    vault = _live_vault()
+    blob = _git_ok(vault, "rev-parse", f"HEAD:{B.WITNESS_ARTIFACT_DIR}/usage.db").strip()
+    size = int(_git_ok(vault, "cat-file", "-s", blob).strip())
+    assert (blob, size) == ("0c73fbd542e699c56550161378e35fb27487b668", 339968), (
+        f"the witness moved: blob {blob} at {size:,} B, pinned at "
+        "`0c73fbd5`/339,968 B by vault commit da452331 (which removed its sidecars "
+        "and nothing else)")
+
+    before = _git_ok(vault, "hash-object", WITNESS_STORE).strip()
+    opened = subprocess.run(B._rederive_command(WITNESS_STORE, "db"),
+                            shell=True, capture_output=True, text=True, cwd=vault)
+    assert opened.returncode == 0, (opened.stdout, opened.stderr)
+    assert opened.stdout.split() == ["3787", str(size)], (
+        f"the emitted command over the real witness printed {opened.stdout!r}, not "
+        "the 3,787 rows and the byte size the item and #1918/#1919 quote — "
+        "everything a reader is told to run is broken, not just this node")
+    assert before == blob, (
+        f"the witness in the working tree ({before}) is not the committed witness "
+        f"({blob}); the end-to-end open below proves nothing about the tracked file")
+    after = _git_ok(vault, "hash-object", WITNESS_STORE).strip()
+    assert after == before, (
+        f"the read-only open of the witness still rewrote it: hash {before} -> "
+        f"{after} — which is the exact damage #2960 exists to stop")
+
+
+#: The producer #2960's triage names for the re-committing: a nightly job's
+#: pre-flight step is `scripts/util/vault-commit.sh` invoked with NO pathspec, and
+#: line 299 of it is the whole-tree `git add -A` that put the pair into `c3a3f8fd`
+#: and `8c56389f`. `VAULT_DIR` (line 129) is how a test points it at a scratch tree,
+#: which is the route `tests/test_vault_commit_attribution.py` already uses.
+VAULT_COMMIT_SH = (Path(__file__).resolve().parents[1]
+                   / "scripts" / "util" / "vault-commit.sh")
+
+
+def _real_pre_flight_sweep(repo: Path) -> subprocess.CompletedProcess:
+    """Run the actual sweep producer over `repo`, the way a pre-flight step does:
+    one argument, no ` -- <path>` tail, so the wrapper sweeps the whole tree. The
+    env is the minimal one `test_vault_commit_attribution.py` uses for the same
+    script — `VAULT_DIR` for the target, no HOME so no `~/.gitconfig` leaks an
+    identity, and `LLOYD_PYTHON` naming this interpreter for the rungs the wrapper
+    shells out to."""
+    assert VAULT_COMMIT_SH.exists(), f"the sweep producer moved: {VAULT_COMMIT_SH}"
+    return subprocess.run(
+        ["bash", str(VAULT_COMMIT_SH), "autonomy-data-pipeline: pre-flight 2026-10-18"],
+        capture_output=True, text=True, timeout=240, cwd=str(repo),
+        env={"VAULT_DIR": str(repo), "PATH": "/usr/bin:/bin:/usr/local/bin",
+             "LLOYD_PYTHON": sys.executable})
+
+
+def test_the_real_sweep_producer_cannot_re_admit_the_sidecars_it_committed_once(tmp_path):
+    """#2960 clauses 1 and 2 measured across the seam they actually occur at.
+
+    The scratch `git add -A` two nodes above is the operation but it is not the
+    producer, and the review said so: the thing that committed the pair twice on
+    2026-10-17 is `scripts/util/vault-commit.sh` with no pathspec, whose `git add -A`
+    at line 299 sweeps whatever it finds and whose `unattributed dirty state:` block
+    (line 383) is the string in both commit messages. That script ships in this repo,
+    so the recurrence guard runs IT over the replayed vault state rather than a
+    stand-in — `VAULT_DIR` pointed at the scratch tree, which is the established
+    route for this wrapper.
+
+    Sequence: the witness committed with its pair, then the shipped rules and the
+    index removal, then SQLite puts both bytes back on disk (which is what any open
+    does, `?mode=ro` included), then the real producer runs. Its commit must name
+    neither sidecar, the index must still carry no sidecar, and the tree must be
+    clean — a present-and-ignored file is precisely what the sweep used to eat.
+
+    The control is the same producer over the same state with the two rule lines
+    gone: it commits both sidecars, and it labels its own commit with the
+    `unattributed dirty state:` block the vault's two commits carry. Without that
+    half, "the producer named neither sidecar" would be indistinguishable from a
+    producer that never commits anything.
+    """
+    repo = _witness_sweep_repo(tmp_path)
+    data = repo / B.WITNESS_ARTIFACT_DIR
+    wal, shm = f"{B.WITNESS_ARTIFACT_DIR}/usage.db-wal", f"{B.WITNESS_ARTIFACT_DIR}/usage.db-shm"
+    # The wrapper commits under whatever identity git resolves, and the fixture env
+    # carries no HOME, so the identity lives in the repo's own config — the way
+    # `test_vault_commit_attribution.py`'s fixture sets it.
+    _git_ok(repo, "config", "user.email", "autonomy-data-pipeline@lloyd.invalid")
+    _git_ok(repo, "config", "user.name", "autonomy-data-pipeline")
+
+    (repo / ".gitignore").write_text("\n".join(_SIDECAR_IGNORE_RULES) + "\n",
+                                     encoding="utf-8")
+    _git_ok(repo, "rm", "-q", "--cached", "--", wal, shm)
+    _git_ok(repo, "add", "--", ".gitignore")
+    _git_ok(repo, "commit", "-qm", "untrack the sidecars")
+    # Prose the sweep has to carry, so its commit exists: with ONLY an ignored
+    # sidecar on disk the wrapper exits at its porcelain check without committing,
+    # and `git show HEAD` would then be read as "named no sidecar" whether the
+    # producer ran or not. This file is what makes the assertion below a reading of
+    # a real commit.
+    (repo / "memory").mkdir(exist_ok=True)
+    (repo / "memory" / "sweep-note.md").write_text("---\ntype: note\n---\n\n"
+                                                   "a job's own write.\n",
+                                                   encoding="utf-8")
+    (data / "usage.db-wal").write_bytes(b"\x75\x7a\x77\x01" + b"\x00" * 8188)
+    (data / "usage.db-shm").write_bytes(b"\x00" * 32768)
+
+    swept = _real_pre_flight_sweep(repo)
+    assert swept.returncode == 0, (
+        "the real sweep producer exited nonzero, so everything below is a broken "
+        f"harness rather than a verdict: {swept.stdout[-400:]} {swept.stderr[-400:]}")
+    names = [ln for ln in _git_ok(repo, "show", "--format=", "--name-only",
+                                  "HEAD").split("\n") if ln.strip()]
+    assert "memory/sweep-note.md" in names, (
+        "the sweep producer ran but committed no prose, so it never reached its "
+        f"`git add -A` and the two assertions below read a stale HEAD: {names}")
+    assert not _sidecars(names), (
+        f"the sweep's own commit carries a sidecar again: {_sidecars(names)} — this "
+        "is the shape of `c3a3f8fd`, the commit #2960 exists to make impossible")
+    assert _sidecars(_git_ok(repo, "ls-files").split()) == [], (
+        "the sweep re-admitted a sidecar into the index")
+    assert _git_ok(repo, "status", "--porcelain") == "", (
+        "the sweep left the tree dirty over a present-and-ignored sidecar, which is "
+        "the cue every later sweep takes as work: "
+        + _git_ok(repo, "status", "--porcelain"))
+
+    # Control: without the two lines the same producer commits both sidecars, and
+    # says it is carrying state it did not write.
+    (repo / ".gitignore").write_text("", encoding="utf-8")
+    (repo / "memory" / "sweep-note.md").write_text("---\ntype: note\n---\n\n"
+                                                   "a job's own write, again.\n",
+                                                   encoding="utf-8")
+    (data / "usage.db-wal").write_bytes(b"\x75\x7a\x77\x01" + b"\x00" * 8188)
+    (data / "usage.db-shm").write_bytes(b"\x00" * 32768)
+    bare = _real_pre_flight_sweep(repo)
+    assert bare.returncode == 0, (bare.stdout[-400:], bare.stderr[-400:])
+    control = [ln for ln in _git_ok(repo, "show", "--format=", "--name-only",
+                                    "HEAD").split("\n") if ln.strip()]
+    assert set(_sidecars(control)) == {wal, shm}, (
+        "control: with no ignore rule the real producer still refused to commit the "
+        f"sidecars, so the clean result above proves nothing about the rules: {control}")
+    assert "unattributed dirty state" in _git_ok(repo, "log", "-1", "--format=%B"), (
+        "the control commit does not carry the block that names the vault's two "
+        "incidents, so this replay is not the incident's shape")
 
 
 def test_no_format_the_convention_archives_is_handed_a_vacuous_proving(tmp_path):
