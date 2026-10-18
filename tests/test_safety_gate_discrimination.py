@@ -571,6 +571,54 @@ def test_a_read_of_the_live_checkout_and_a_talk_about_commits_are_not_writes():
         assert _lane(cmd, _LIVE) is None, f"{cmd} was refused as a write ({match})"
 
 
+#: #2987: the two verdicts one byte of difference has to move. 9 of the 13 rows this
+#: lane journalled after it landed (window 2026-10-16T13:05:10Z..2026-10-18T22:47:57Z in
+#: ~/lloyd-data/safety/denials.jsonl) were refusals of a git write that existed only as
+#: TEXT inside a heredoc body, and the three `owedcheck_*` sessions among them were
+#: refused for writing a probe about this very guard inside a `<<'PY'` body.
+_HEREDOC_BODY = f"cat >> /tmp/t2987.py <<'EOF'\ncd {_LIVE} && git add f\nEOF\n"
+_HEREDOC_OPERATOR = f"cd {_LIVE} && git commit -q -F - <<'MSG'\nmsg\nMSG"
+
+
+def test_a_heredoc_body_that_is_not_shell_is_not_walked_as_shell_by_the_git_lane():
+    """#2987 clause 1, at the real boundary: `check_bash_command`, not the lane alone.
+
+    The body line is the SAME text as the operator arm below it — `cd <live> && git add`
+    — and only the position differs: inside a `<<'EOF'` body handed to `cat`, the shell
+    never executes it, it is the bytes of a file. `_walk` tokenised the raw command, so
+    the body's line was visited as its own segment and the lane refused a write the
+    command cannot perform. The same call already strips bodies for its OTHER lane
+    (`protected_paths.extract_write_targets`), which is why this shape refused on one
+    lane of one command and not the other.
+
+    Positive control in the same call sequence, because `_lane` returns None for a
+    command the lane never saw: the operator-line arm has to be refusing while the body
+    arm answers None, or this node is measuring a dead lane.
+    """
+    assert _lane(_HEREDOC_BODY, _LIVE) is None, (
+        "a git write that exists only inside a non-shell heredoc body was refused")
+    assert _lane(_HEREDOC_OPERATOR, _LIVE) is not None, (
+        "the lane is not answering at all, so the None above proves nothing")
+
+
+def test_a_git_write_on_the_operators_own_line_is_judged_around_its_heredoc():
+    """#2987 clause 3: stripping a body may not strip the line that opened it.
+
+    `cd <live> && git commit -q -F - <<'MSG'` puts the write on the command line and
+    feeds only the MESSAGE by heredoc, so the verb is real and the refusal has to name
+    it. The body and the delimiter line are the parts that go; a tail after a delimiter
+    comes back as shell and is judged too (arms below). The verb is matched at the HEAD
+    of the message, never as a substring, because the lane's own boilerplate says "The
+    source commits production" and would satisfy a substring test for any verb.
+    """
+    match = _gate(_HEREDOC_OPERATOR, _LIVE)
+    assert match is not None, "the operator line's own git commit was let through"
+    label = match[0]
+    assert label.startswith("live-checkout git write: `git commit` in the live "
+                            "checkout"), label[:120]
+    assert _LIVE in label, label[:120]
+
+
 def test_the_same_commit_from_a_chat_session_is_not_refused():
     """Clause 1's other half: this is a guard on *unattended* sessions, so the
     person whose tree it is keeps every verb. `chat_list_sessions` on this box

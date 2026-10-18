@@ -306,8 +306,10 @@ def _record_says_attended(sid: str) -> bool:
 #: delimiter, so the assignment is not recorded at all rather than recorded as the
 #: prefix `/home/x/lloyd/$` — a value that would resolve *outside* the tree the
 #: command actually cd's into. `W=$(mktemp -d)`, the fleet's scratch-clone recipe, is
-#: cut the same way and is not recorded either, which leaves it answering as it did
-#: before this lane read assignments at all: fall back to the dispatch cwd.
+#: cut the same way and is NOT recorded here — a pure substitution is `_assignments`'
+#: and `_substitution_is_outside`'s case, not this pattern's, and a mixed one like the
+#: line above stays unrecorded and answers as it did before this lane read assignments at
+#: all: fall back to the dispatch cwd.
 _VAR_ASSIGN = re.compile(
     r"(?:^|[;&|\n(])\s*(?:export\s+)?"
     r"([A-Za-z_][A-Za-z0-9_]*)="
@@ -328,8 +330,48 @@ def _var_ref(name: str) -> re.Pattern:
                       + r"(?![A-Za-z0-9_])")
 
 
-def _assignments(text: str) -> dict[str, str]:
-    """`{NAME: value}` for the literal assignments this shell string makes.
+#: The stand-in a believed command substitution resolves to (#2987). A path that
+#: cannot be inside the live checkout by construction, so the target built on it
+#: (`/command-substitution-outside-live/…`) is an ordinary location and nothing later in
+#: the lane has to know the name.
+_CMDSUB_OUTSIDE = "/command-substitution-outside-live"
+
+#: Absolute paths named inside a substitution's own text: what decides whether the
+#: substitution can be trusted to be somewhere else.
+_ABS_PATH = re.compile(r"/(?:[^\s\"'`;|&()<>])+")
+
+#: `NAME=$(…)`, the form `_VAR_ASSIGN` excludes by design. Same delimiters and same
+#: trailing lookahead, so it recognises an assignment of a pure substitution and nothing
+#: else — `W=/srv/prod/lloyd/$(echo sub)` is not this form and stays unrecorded.
+_CMDSUB_ASSIGN = re.compile(
+    r"(?:^|[;&|\n(])\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=\$\(([^()]*)\)"
+    r"(?=\s*(?:[;&|\n)]|$))")
+
+
+def _substitution_is_outside(body: str, live: str) -> bool:
+    """True only when a command substitution CANNOT name the live tree.
+
+    The rule reads what the text *names*, not what it runs. `mktemp -d /tmp/ci-XXXX`
+    names `/tmp/ci-XXXX` and no live path, so it is believed; `echo <live>` names the
+    live tree, so it is not, and the name stays unresolved — which puts the target back
+    on the dispatch cwd, the fail-closed direction #2801 clause 4 pinned and the arm
+    that keeps a substitution from becoming a way to smuggle a live path past the lane.
+
+    A substitution naming NO absolute path at all is not believed either: `$(pwd)` and
+    `$(git rev-parse --show-toplevel)` are named from the repo root and answer the root,
+    so refusing them costs a background round a retry while believing them would open the
+    lane. Widening this to path-free substitutions is a ruling on post-landing traffic
+    (#2987's owed entry 2), not a call a diff gets to make.
+
+    Every path in the body is checked rather than the first, so a substitution that
+    mentions a scratch template AND a live path is not believed by luck of ordering.
+    """
+    names = _ABS_PATH.findall(body or "")
+    return bool(names) and not any(_is_live_root(p, live) for p in names)
+
+
+def _assignments(text: str, live: str) -> dict[str, str]:
+    """`{NAME: value}` for the assignments this shell string makes.
 
     #2801's whole fix. `_norm` resolves a `$W` through `os.path.expandvars`, which
     reads `os.environ` and nothing else — so a path a turn assigned two segments
@@ -341,9 +383,24 @@ def _assignments(text: str) -> dict[str, str]:
     `/a/b`. A value naming a variable the command never assigned keeps its `$`, and
     `_norm` resolves it from the process environment exactly as the shell would
     (`W=$HOME/lloyd` is a real spelling, and `$HOME` is true in both).
+
+    `text` is the command's **shell** text, not its raw text: `_walk` hands it the string
+    with the non-shell heredoc bodies already removed (#2987). Reading the raw string was
+    that item's second false positive on the same root — a `W=<live>` line existing only
+    as data inside a `<<'PY'` body written for `cat` was believed as an assignment and
+    retargeted the real `cd $W && git add -A` that followed it, from a scratch dispatch cwd
+    that was the only true fact the lane had.
+
+    A **command substitution** used to be recorded never, and #2987 replaced that with
+    `_substitution_is_outside`: `d=$(mktemp -d /tmp/ci-XXXX); cd "$d"; git init; git add
+    -A` is the fleet's scratch-clone recipe, and with no value at all the unresolved `$d`
+    joined onto the dispatch cwd — which for a background round IS the live checkout — so
+    the one command written specifically to stay out of the tree was the one refused (the
+    1 command-substitution row among the 13 this lane journalled after it landed, in the
+    window 2026-10-16T13:05:10Z..2026-10-18T22:47:57Z).
     """
     out: dict[str, str] = {}
-    for m in _VAR_ASSIGN.finditer(text):
+    for m in _VAR_ASSIGN.finditer(text or ""):
         single, double, bare = m.group(2), m.group(3), m.group(4)
         if single is not None:
             out[m.group(1)] = single      # a single-quoted value is literal
@@ -352,6 +409,9 @@ def _assignments(text: str) -> dict[str, str]:
         for name, known in list(out.items()):
             value = _var_ref(name).sub(lambda _m, v=known: v, value)
         out[m.group(1)] = value
+    for m in _CMDSUB_ASSIGN.finditer(text or ""):
+        if m.group(1) not in out and _substitution_is_outside(m.group(2), live):
+            out[m.group(1)] = _CMDSUB_OUTSIDE
     return out
 
 
@@ -470,13 +530,27 @@ def _walk(text: str, cwd: str, live: str, depth: int) -> str | None:
     happens once per shell string, on the raw text rather than per token, so the
     delimiter test that rejects a value cut by a command substitution has the raw
     text to look at.
-    """
-    from app.harness.protected_paths import _segments, _tokens
 
-    assigns = _assignments(text)
+    The string it tokenises is the command's **shell** text, with the body of every
+    heredoc whose recipient is not a shell removed (#2987). Such a body is program text
+    and the shell never executes it, so walking it raw turned a commit message naming
+    `git add`, an appended test body, and a python probe body into refusals — 9 of the
+    13 rows this lane journalled in the window 2026-10-16T13:05:10Z..2026-10-18T22:47:57Z,
+    three of them owed-check turns refused for writing a probe about this guard inside a
+    `<<'PY'` body. The helper is `protected_paths._split_heredocs`, the same one
+    `extract_write_targets` uses for its heredoc rule, and what it returns is not merely
+    the command with the body blanked: a **shell** recipient's body stays in the stream it
+    hands back (`bash <<'EOF'` is therefore still walked, clause 2), the operator's own
+    line is untouched (clause 3), and the text after a delimiter comes back as shell and
+    is judged on its own merits.
+    """
+    from app.harness.protected_paths import _segments, _split_heredocs, _tokens
+
+    shell_text, _heredoc_bodies = _split_heredocs(text)
+    assigns = _assignments(shell_text, live)
     running = cwd
     try:
-        segs = _segments(_tokens(text))
+        segs = _segments(_tokens(shell_text))
     except ValueError:      # pragma: no cover - the tokeniser's own fallback
         return None
     for seg in segs:

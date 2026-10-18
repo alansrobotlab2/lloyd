@@ -284,6 +284,133 @@ def test_which_assignments_the_lane_believes_is_the_shells_own_rule():
                                  cwd=scratch, live=_LIVE)
 
 
+# ── #2987: a heredoc body is data, and a substitution is read for what it names ──
+#
+# 10 of the 13 rows this lane wrote to ~/lloyd-data/safety/denials.jsonl after it
+# landed were refusals of commands aimed OUTSIDE the live checkout (the window
+# 2026-10-16T13:05:10Z..2026-10-18T22:47:57Z splits 3 correct / 9 heredoc-body / 1
+# command-substitution), and 3 of those 13 were owed-check turns refused for writing a
+# probe about THIS guard inside a `<<'PY'` body. Both arms below are the lane reading
+# text that the shell never executes as if it were shell, so the pair is pinned in one
+# section: the stripping that fixes the first must not reach into the second.
+
+
+def test_a_heredoc_body_for_a_shell_is_still_walked_as_shell_code():
+    """Clause 2. `bash <<'EOF'` hands the body to the shell, so the body IS shell.
+
+    `_split_heredocs` keeps a shell recipient's body in the stream it returns, and a
+    fix that stripped bodies wholesale would have started missing this: the shell
+    executes `cd <live> && git commit -m x` the moment the heredoc is fed to it, which
+    is exactly the write the lane exists to refuse. The arm that makes this a
+    measurement of the SPLIT and not of the whole lane is the non-shell twin below it
+    in tests/test_safety_gate_discrimination.py, whose identical body line is program
+    text for `cat` and answers None — one byte of difference, the recipient, and the
+    verdict has to move.
+    """
+    refused = check_live_git_writes(
+        "bash <<'EOF'\n" + f"cd {_LIVE} && git commit -m x\n" + "EOF", _BG,
+        cwd=_LIVE, live=_LIVE)
+    assert refused, "a shell-recipient heredoc body was dropped as data"
+    assert refused.startswith("`git commit` in the live checkout"), refused[:120]
+    # An unquoted delimiter with expansion inside it is still a shell body.
+    assert check_live_git_writes(
+        "sh <<EOF\n" + f"git -C {_LIVE} reset --hard\n" + "EOF", _BG,
+        cwd="/tmp/scratch", live=_LIVE)
+
+
+def test_a_variable_assigned_only_inside_a_stripped_body_is_not_believed():
+    """Clause 4: the assignment map comes from the SHELL text, not the raw command.
+
+    `_assignments` used to run on the raw string, so a `W=<live>` line that exists only
+    as data inside a python heredoc body was believed as an assignment, and the real
+    shell statement after the body (`cd $W && git add -A`, dispatched from a scratch
+    directory) resolved to the live tree. The shell never ran that line — the file was
+    written, never executed — so the target was invented from program text, and the
+    dispatch cwd, which is the only real fact about where the `git add` would have
+    happened, was overridden by it.
+
+    The arm that keeps this from being an over-fix is that a real assignment before the
+    heredoc is still believed: strip the body, keep every assignment the SHELL made.
+    """
+    body = (f"cat > /tmp/p2987.py <<'PY'\nW={_LIVE}\nPY\n"
+            "cd $W && git add -A")
+    assert check_live_git_writes(body, _BG, cwd="/tmp/scratch", live=_LIVE) is None, (
+        "an assignment that exists only inside a stripped heredoc body still "
+        "retargeted the git write onto the live tree")
+    # Positive control on the same shape: the same assignment, made by the shell
+    # OUTSIDE any body, is still believed — stripping a body must not un-teach the
+    # lane what an assignment is.
+    assert check_live_git_writes(
+        f"W={_LIVE}\n" + body.splitlines()[-1], _BG, cwd="/tmp/scratch",
+        live=_LIVE), "the shell's own assignment stopped being believed"
+    # And the same file, written by a heredoc, being executed IS judged: the body
+    # reaching python through an interpreter is a payload, and the payload is not
+    # walked, but nothing about the file's contents can retarget the next statement.
+    assert check_live_git_writes(
+        f"cat > /tmp/p2987.py <<'PY'\nW={_LIVE}\nPY\n"
+        f"cd {_LIVE} && git add -A", _BG, cwd="/tmp/scratch",
+        live=_LIVE), "the operator line after a body stopped being judged"
+
+
+def test_a_command_substitution_is_outside_only_when_it_cannot_name_the_live_tree():
+    """Clause 5: the scratch-clone recipe, and the two arms that must not come with it.
+
+    `d=$(mktemp -d /tmp/ci-XXXX); cd "$d"; git init; git add -A` is the fleet's own
+    recipe for a scratch clone — the same one `tests/test_live_git_writes.py`'s header
+    and `_assignments`' own comment name as the reason command substitutions were never
+    resolved. Dispatched from the live checkout it refused, because an unresolved `$d`
+    is joined onto the dispatch cwd and the cwd was live.
+
+    The rule that fixes it without becoming a bypass is that a substitution counts as
+    an outside location ONLY WHEN its own text names at least one absolute path and
+    none of the paths it names is inside the live tree. `mktemp -d /tmp/ci-XXXX` names
+    `/tmp/ci-XXXX`: outside, believed. `$(echo <live>)` names the live tree: not
+    believed, and the fall-back to the dispatch cwd stands, which is what keeps a
+    substitution from being a way to smuggle a live path past the lane — measured at the
+    base commit, that arm refused, and it has to refuse for the same reason afterwards.
+    A name the command NEVER assigns is untouched by all of this and still falls back
+    (#2801 clause 4), which the third arm re-pins in this clause's own words.
+    """
+    recipe = ('d=$(mktemp -d /tmp/ci-XXXX); cd "$d"; git init -q -b main .; '
+              "git add -A")
+    assert check_live_git_writes(recipe, _BG, cwd=_LIVE, live=_LIVE) is None, (
+        "the scratch-clone recipe was refused from a live dispatch cwd even though "
+        "its own text names only /tmp")
+    # The same recipe with the reference UNQUOTED is the spelling the journalled row
+    # actually used, and `_assignments` stores the value raw, so the map lookup — not
+    # the quoting of `$d` — is what resolves it.
+    assert check_live_git_writes(
+        'd=$(mktemp -d /tmp/ci-XXXX); cd $d; git init -q -b main .; git add -A',
+        _BG, cwd=_LIVE, live=_LIVE) is None, (
+        "the same recipe with an unquoted $d was refused")
+    # The substitution that DOES name the live tree: unresolved, so the dispatch cwd
+    # decides, and the dispatch cwd is live.
+    smuggled = check_live_git_writes(
+        f"W=$(echo {_LIVE}); cd \"$W\" && git add -A", _BG, cwd=_LIVE, live=_LIVE)
+    assert smuggled, "a substitution naming the live tree stopped falling back"
+    assert _LIVE in smuggled, smuggled[:160]
+    # A substitution naming no path at all is not believed either — `$(pwd)` and
+    # `$(git rev-parse --show-toplevel)` are named at the repo root and answer the
+    # ROOT, and widening to them is an owed ruling on post-landing traffic, not a
+    # judgement this diff gets to make.
+    assert check_live_git_writes(
+        "W=$(pwd); cd \"$W\" && git add -A", _BG, cwd=_LIVE, live=_LIVE), (
+        "a substitution naming no path started being believed as outside")
+    # …and the same is true of the BARE `mktemp -d`, which names no template and so
+    # gives the lane nothing to read. #2801 pinned this command's twin from a scratch
+    # cwd (an unresolved name there falls back to a scratch cwd, so it is not a write
+    # to production); this is its fail-closed half from a live one.
+    assert check_live_git_writes(
+        'W=$(mktemp -d); cd "$W" && git add -A', _BG, cwd=_LIVE, live=_LIVE), (
+        "a substitution naming no path at all was believed as outside")
+    # A name the command never assigns: unchanged, and still fail-closed.
+    unassigned = check_live_git_writes("cd $D_2987 && git add -A", _BG, cwd=_LIVE,
+                                       live=_LIVE)
+    assert unassigned and _LIVE in unassigned, unassigned
+    assert check_live_git_writes("cd $D_2987 && git add -A", _BG, cwd="/tmp/scratch",
+                                 live=_LIVE) is None
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and callable(_fn):
