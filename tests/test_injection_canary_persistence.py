@@ -737,9 +737,10 @@ def test_the_persistence_report_prints_both_split_counts_beside_the_verbatim_one
 
 
 def test_the_per_episode_line_reports_the_split_so_a_live_run_records_both():
-    """The live `--rep` sweep is owed after landing, and it is this line it will
-    record. A row scored before the split must print the old shape, not a 0 that
-    reads as a clean result."""
+    """What the live `--rep` window writes per episode is this line, and the
+    window has run three times since the unit shipped (2026-10-13, -14, -15),
+    so these are the figures its rows carry. A row scored before the split
+    must print the old shape, not a 0 that reads as a clean result."""
     after = _prow("persistence-web-digest", leak={
         "planted": 6, "found": 5, "found_tokens": PLANTED, "missing": ["x", "y", "z"],
         "attributed": 5, "unattributed": 0, "attributed_tokens": PLANTED,
@@ -1613,3 +1614,44 @@ def test_the_all_rows_columns_say_all_rows_and_the_shipped_summarisers_are_untou
         assert name not in inspect.getsource(RC.summarize), (
             f"`{name}` reached the scored figures' own function: the all-rows sums belong "
             "in the render path, beside the raw row counts")
+
+
+# ── #2933: the verdict page's window table against the renderer that produced it ──
+
+def test_the_verdict_page_reports_the_figures_the_renderer_prints():
+    """The seam #2933's prose crosses: `eval`'s report → the scored corpus → the architecture
+    page that quotes it.
+
+    `architecture/context-window.md` now carries a window table whose leak and benign
+    cells are this module's own `leak (all rows)` / `benign control (all rows)` columns.
+    The doc-side nodes in `tests/test_architecture_coverage_doc_claims.py` can only check
+    what the page SAYS; a mis-transcription reads identically, so this node asks the
+    shipped renderer, over the corpus in the tree, for the same two cells and refuses any
+    page that disagrees with it.
+
+    Only 2026-10-13 and 2026-10-14 are cross-checkable from a clean checkout: the
+    2026-10-15 window is the timer's residue, its rows are not in HEAD's corpus, and its
+    page is not in HEAD's tree — which is why the architecture page names all three windows
+    by date and directory rather than citing three files, and why one day's figures live
+    only in prose until `ExecStartPost`'s committer lands the rest (#2877). Quoting that
+    day is the doc-side node's job; inventing a corpus row for it is not this one's.
+    """
+    page = (ROOT / "architecture" / "context-window.md").read_text(encoding="utf-8")
+    text = RC.render_persistence_report(RC.report_rows())
+    checked = 0
+    for day in ("2026-10-13", "2026-10-14"):
+        cells = _cells(_line(text, day))
+        leak_all, benign_all = cells[8], cells[9]
+        rows = [ln for ln in page.splitlines() if ln.startswith(f"| {day}")]
+        assert len(rows) == 1, f"the page carries {len(rows)} rows for {day}, want one"
+        assert leak_all in rows[0], (
+            f"the page's {day} leak is not the renderer's: report says {leak_all}, "
+            f"page says {rows[0]!r}")
+        assert benign_all in rows[0], (
+            f"the page's {day} benign control is not the renderer's: report says "
+            f"{benign_all}, page says {rows[0]!r}")
+        checked += 1
+    assert checked == 2, (
+        "the cross-check silently narrowed to fewer than the two windows HEAD's corpus "
+        f"can vouch for ({checked}) — the day that cannot be checked is named in the "
+        "docstring, not discovered by shrinking this loop")

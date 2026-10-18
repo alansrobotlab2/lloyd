@@ -5904,3 +5904,167 @@ def test_the_body_ruling_check_fails_on_a_paragraph_that_lost_the_ruling():
         assert "#2589" in missing, (
             f"dropping {needle} took the ruling's subject with it, so the fixture "
             "tested the whole-ruling case a second time")
+
+
+# --------------------------------------------------------------------------- #
+# context-window.md §What a summary re-injects as — the persistence window is
+# measured, not owed (#2933, 2026-10-18)
+# --------------------------------------------------------------------------- #
+
+#: The two sentences #2933 retires. Both advertised the 10-rep `--rep` window as a run
+#: that had not happened, from a page written before `lloyd-persistence-window.timer`
+#: ever fired. It has: 2026-10-13, -14 and -15 each rendered a full window, and the
+#: keep/revert ruling those windows produced existed nowhere in this repo until this
+#: block. A line saying the run is OWED is what makes the next job book an absence that
+#: already closed — the #2371 → #2379 → #2397 chain was forward-closed on exactly such a
+#: sentence — so the phrases are pinned out of the section rather than merely absent.
+RETIRED_SWEEP_CLAIMS = ("verdict on the channel is therefore open",
+                        "owed after landing")
+
+#: What the section has to carry instead: each 10-rep window's date with its leak and
+#: benign-control figures summed over EVERY row of the window. These are quoted from the
+#: shipped report and asserted as prose against the page, deliberately not recomputed
+#: from the scored corpus: the 2026-10-15 rows are still the timer's uncommitted residue
+#: (`eval/measurements/injection-canary/rows.jsonl` is 82 lines at the commit this block
+#: was written, and renders no 2026-10-15 window at all), so a node that re-summed them
+#: would fail in a fresh gate worktree for a reason that is not the doc's.
+MEASURED_PERSISTENCE_WINDOWS = {
+    "2026-10-13": ("43/60", "44/60"),
+    "2026-10-14": ("42/60", "48/60"),
+    "2026-10-15": ("50/60", "49/60"),
+}
+
+#: The section, bounded at the next `## ` like
+#: `test_the_verdict_page_records_the_role_ruling_instead_of_leaving_it_open` bounds it:
+#: a mark satisfied by some later section would say nothing about where the ruling was
+#: recorded.
+def _persistence_section() -> str:
+    return _section(_text("context-window.md"), "What a summary re-injects as")
+
+
+def _sweep_claim_gaps(text: str) -> list[str]:
+    """Which retired claims this text still makes.
+
+    Read through `_flat` (defined with the #1890 delegate nodes above — the page is
+    hand-wrapped, and #2194's own round lost a node to a rewrap splitting
+    `"output boundary"`, so a prose span is never matched against raw bytes). One function
+    reads the live section and the fixture below, so the two cannot disagree about what
+    the pattern is."""
+    flat = _flat(text)
+    return [phrase for phrase in RETIRED_SWEEP_CLAIMS if phrase in flat]
+
+
+def _window_row(body: str, day: str) -> str:
+    """The table row this page records for one measurement window."""
+    hits = [ln for ln in body.splitlines() if ln.startswith(f"| {day}")]
+    assert len(hits) == 1, (day, hits)
+    return hits[0]
+
+
+def test_the_persistence_page_no_longer_owes_the_window_it_has_records():
+    """Clause 1's absence half: neither retired phrase survives in the verdict section.
+
+    The negative control is the point of the node rather than an aside — an absence check
+    whose pattern matches nothing anywhere is a green light permanently fixed on. The
+    fixture is the two sentences exactly as the page carried them (its `:186` and its
+    post-command line), fed through the same reader: if that text stopped flagging, the
+    assertion above would be reporting a retirement that could never have been violated.
+    """
+    body = _persistence_section()
+    assert not _sweep_claim_gaps(body), (
+        f"the verdict section still advertises the 10-rep window as unrun: "
+        f"{_sweep_claim_gaps(body)}")
+
+    stale = ("it is shut. The verdict on the channel is therefore open, and this is the "
+             "command that closes it:\n\nThe first line needs the live aggregator and the "
+             "engine, which is why it is owed after landing rather than run from a "
+             "round.")
+    assert _sweep_claim_gaps(stale) == list(RETIRED_SWEEP_CLAIMS), (
+        "the retired phrases did not both fire on the sentences they were taken out of, "
+        "so the absence above is a pattern that could never have matched this page")
+
+
+def test_the_persistence_page_names_the_three_measured_windows_and_keeps_the_frame():
+    """Clause 1's positive half and item check (2): the three dated windows, their
+    all-row leak and benign-control figures, the unattributed zero that decides the
+    frame, and the ruling itself.
+
+    The figures are the shipped report's own `leak (all rows)` / `benign control (all
+    rows)` cells, and `leak_unattributed` printed `0/6 (n=2, framed 2/2)` in all three, so
+    the condition this section states for reopening the question —
+    `leak_unattributed > 0` over at least 10 reps — was met by none of them. That
+    non-event IS the keep ruling, and before #2933 it existed only inside the backlog
+    item: `git grep -in 'unattributed survival'` reached one test comment and no prose.
+    """
+    body = _persistence_section()
+    for day, (leak, benign) in MEASURED_PERSISTENCE_WINDOWS.items():
+        row = _window_row(body, day)
+        assert leak in row, f"{day}'s window row does not carry its leak of {leak}"
+        assert benign in row, (
+            f"{day}'s window row does not carry its benign control of {benign}")
+        assert "0 of 6" in row, (
+            f"{day}'s row omits the unattributed zero, which is the number the frame is "
+            f"judged on: {row!r}")
+
+    base = _window_row(body, "2026-10-04")
+    assert "5/6" in base and "3/6" in base, (
+        f"the pre-#2194 baseline row is what the three windows are compared to, and it "
+        f"must be on the same page: {base!r}")
+    assert "not scored" in base, (
+        "the baseline predates the attribution split, so its row must say the frame half "
+        f"was never scored there rather than print a zero: {base!r}")
+
+    flat = _flat(body)
+    assert "`9da6855f` frame is kept" in flat, (
+        "the keep ruling is the whole content of the three windows and the page must "
+        "state it, not leave a reader to infer it from a zero")
+    assert "eval/measurements/injection-canary/" in body, (
+        "the dated report pages have to be findable from the verdict that quotes them")
+    assert "`--rep`" in body, "the window is the flag, and the page must name it"
+    for mark in ("leak_unattributed > 0", "at least 10 reps"):
+        assert mark in body, f"the reopening condition went with the old prose: {mark!r}"
+
+
+def test_the_frame_the_persistence_page_keeps_is_a_commit_this_repo_has():
+    """The keep ruling names a commit, so the ruling is only as checkable as that sha.
+
+    `architecture/automod.md`'s stamp nodes are the precedent: a prose citation to a
+    commit that resolves is a pointer a reader can open, and one that does not is how a
+    ruling becomes folklore. `9da6855f` is #2194's landing — the summary row quoting what
+    it carries — and its subject is checked too, because a sha that resolves to an
+    unrelated commit would otherwise still satisfy the node above.
+    """
+    assert _git_lines("cat-file", "-t", "9da6855f") == ["commit"], (
+        "the frame the page rules to keep is named by a sha this repo has no object for")
+    subject = _git_lines("log", "-1", "--format=%s", "9da6855f")
+    assert subject and "summary row quotes" in subject[0], (
+        f"9da6855f is {subject}, which is not the commit that put the quote frame on the "
+        "summary row")
+
+
+def test_the_persistence_page_keeps_the_two_denominators_apart():
+    """Item check (3): the collapsed `n=` and the all-row denominator are stated as the
+    two different quantities they are.
+
+    This is the misreading the shipped report had to add its own caveat for, and the page
+    quotes the report's numbers: `summarize` collapses a 30-row window to the last rep of
+    each arm key, so the same table row can print `6/6 (n=2)` and `43/60`. Read as one
+    denominator that says a two-rep window leaked two thirds; read correctly it says two
+    keys of six tokens, and twenty attack rows of sixty. The node pins both spellings and
+    the sentence that separates them, because the figures alone do not.
+    """
+    body = _persistence_section()
+    flat = _flat(body)
+    assert "6/6 (n=2)" in flat and "43/60" in flat, (
+        "both denominators have to be on the page for the separation to mean anything")
+    for phrase in ("arm keys", "a rep count", "two keys, not two runs"):
+        assert phrase in flat, (
+            f"the page prints both figures but no longer says {phrase!r}, so a scored "
+            "`n=2` beside 30 rows reads as a 2-rep window again")
+    assert "20 attack rows × 3 planted tokens" in flat, (
+        "the all-row denominator has to be derived on the page, not just printed")
+    assert "10 control rows × 6 markers" in flat, (
+        "…and so does the control's, or 44/60 is a number with no stated basis")
+    assert "`n=1`" in flat, (
+        "the 2026-10-04 baseline's 3/6 is one control row, and comparing it to a 60-token "
+        "window is the cross-denominator read this node exists to refuse")

@@ -11,7 +11,7 @@ GROUP BY source, state`, which does not exclude the caller. So a pool job burns 
 refuses the production tree, and the window needs the live aggregator and engine).
 As of triage, 13 `lloyd-*` user units were installed and none of them, and none
 tracked under `agent-services/systemd/`, was the missing caller — the measurement
-#2194 is owed sat at three rows of `rep: 1`, unchanged since 2026-10-04.
+#2194 asked for then sat at three rows of `rep: 1`, unchanged since 2026-10-04.
 
 These nodes pin the caller as configuration, the way `tests/test_cert_renew_units.py`
 pins the renewal units: parsed through the INI shape systemd reads, the service must
@@ -27,9 +27,11 @@ RUNNING the installer against a throwaway
 
 What is NOT pinned here, deliberately: that the window runs and lands a hold on the
 live box. That needs the aggregator, the engine and the ~3 h 20 m of drain, reps and
-grade that `ExecStart` now budgets, and pausing this box's
-pool from a test is exactly what the runner refuses to do to somebody else's landing.
-It is owed after landing and named in the item.
+grade that `ExecStart` now budgets, and pausing this box's pool from a test is exactly
+what the runner refuses to do to somebody else's landing. The timer has since made the
+window — three 10-rep runs on 2026-10-13, -14 and -15, the rows
+`tests/test_injection_canary_persistence.py` reads — but a test still cannot make one,
+and that gap is what stays unpinned here on purpose.
 
 Run: .venvs/lloyd/bin/python -m pytest tests/test_persistence_window_unit.py
 """
@@ -1212,3 +1214,85 @@ def test_the_timer_says_the_canary_store_counts_the_corpus_without_bounding_it()
     assert "reports without bounding" in sweep, \
         "the comment calls this the second store that reports without bounding; the " \
         "sweep's own docstring is where that is stated"
+
+
+# ── #2933: the window ran, so this file says so instead of owing it ─────────────
+#
+# Both persistence modules shipped telling a reader the 10-rep window had not
+# happened yet. That was true the day they landed and false from the first timer
+# fire: `lloyd-persistence-window.service` rendered a full window on 2026-10-13,
+# 2026-10-14 and 2026-10-15, and the rows those runs wrote are the ones
+# `tests/test_injection_canary_persistence.py` reads. A sentence saying a
+# measurement is owed gets read downstream as an absence — which is how the
+# #2371 → #2379 → #2397 chain came to be forward-closed on a run that had already
+# happened — so the stale state is pinned out of both files here.
+
+#: The stale state. Assembled from two fragments on purpose: this file is one of the
+#: two the retired wording is grepped out of, so a pattern spelled out in full would
+#: re-introduce the very string the clause refuses. The concatenation is the phrase;
+#: the bytes of this file stay clean, and the node below reads the same bytes a
+#: reviewer's `git grep` reads.
+RETIRED_WINDOW_CLAIMS = ("owed after " "landing",)
+
+
+def _owed_window_claims(text: str) -> list[str]:
+    """Which retired claims `text` makes, read whitespace-collapsed.
+
+    Collapsing is load-bearing, not tidiness. One of the two instances this retires sat
+    whole on a line; the other was split by the architecture page's hand-wrap into two
+    lines, and a phrase a wrap broke in two is invisible to the line-per-line grep this
+    item's clause is written as. Reading flat catches both spellings, so the absence
+    cannot be satisfied by re-wrapping the sentence."""
+    flat = " ".join(text.split())
+    return [claim for claim in RETIRED_WINDOW_CLAIMS if claim in flat]
+
+
+def test_neither_module_owes_the_window_it_has_records():
+    """Clause 4: neither this module nor the canary persistence module still
+    describes the 10-rep window as a run somebody owes.
+
+    The scan covers each file's whole text, not just its docstring — the stale
+    claim is a statement about host state, and nothing about a docstring makes it
+    structurally the right place to look for one.
+    """
+    own = Path(__file__).read_text(encoding="utf-8")
+    sibling = (ROOT / "tests" / "test_injection_canary_persistence.py").read_text(
+        encoding="utf-8")
+    for label, text in (("this module", own),
+                        ("the canary persistence module", sibling)):
+        gaps = _owed_window_claims(text)
+        assert not gaps, (
+            f"{label} still tells a reader the window has not been run: {gaps}")
+
+
+def test_the_rewording_left_the_claim_that_was_true_alone():
+    """What is NOT pinned here is still not pinned here.
+
+    The sentence #2933 retired was the tail of a paragraph whose point is that a
+    pytest round cannot make a window: it needs the aggregator, the engine and the
+    ~3 h 20 m the `ExecStart` budgets, and taking this box's pool away from a test is
+    precisely what the runner refuses to do to somebody else's landing. Only its
+    tense was wrong. So this node refuses the other failure mode — a fix that
+    deletes the true claim to dodge the stale one — and shows the reader above is
+    able to fire on the wording it replaced, which makes the absence pinned next to
+    it a check rather than a tautology."""
+    flat = " ".join((__doc__ or "").split())
+    assert "What is NOT pinned here" in flat, "the paragraph is gone entirely"
+    for mark in ("the aggregator", "the engine", "~3 h 20 m",
+                 "pausing this box's pool", "refuses to do to somebody else's landing"):
+        assert mark in flat, \
+            f"the unpinned-here claim lost {mark!r}, the part that makes it a " \
+            "boundary rather than an excuse"
+
+    assert "2026-10-13, -14 and -15" in flat, (
+        "the rewording has to name the runs that changed the tense, or a later "
+        "reader cannot check it")
+    assert "a test still cannot make" in flat, (
+        "the state changed; the impossibility did not, and the paragraph says so")
+
+    stale = ("That needs the aggregator, the engine and the ~3 h 20 m of drain, "
+             "reps and grade that `ExecStart` now budgets. It is owed after "
+             "landing and named in the item.")
+    assert _owed_window_claims(stale) == list(RETIRED_WINDOW_CLAIMS), (
+        "the reader did not fire on the wording it was written to catch, so the "
+        "absence pinned beside it is one that could never have been violated")
