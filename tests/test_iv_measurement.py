@@ -273,3 +273,222 @@ def test_the_observer_replay_scores_only_what_it_can(tmp_path):
     assert [(c["session_id"], c["_want"]) for c in cases] == [("a", "inject")]
     p = review_prompt(cases[0])
     assert "load it" in p and "TERMINAL" in p and "noop, inject, or cancel" in p
+
+
+# ---------------------------------------------------------------------------
+# The iv-chat-1 reading recorded in architecture/inner-voice.md §3 (#2963)
+# ---------------------------------------------------------------------------
+
+#: The repo doc is the live one. `workers/sources/arch_review.py::doc_slugs`
+#: globs top-level `architecture/*.md`, and the vault's copy of the same name
+#: (mtime 2026-08-24) has no §3 at all, so a test that read that file would be
+#: grading a stale fork while the doc the cadence reviews went unread.
+DOC = ROOT / "architecture" / "inner-voice.md"
+VAULT_DOC = Path.home() / "obsidian" / "architecture" / "inner-voice.md"
+SECTION_HEADING = "## 3. The measurement loop"
+
+#: The window `config.yaml` armed, exactly as `window_open` reads it: `start`
+#: inclusive, `end` exclusive, both local dates.
+WINDOW = "[2026-09-25, 2026-10-09)"
+#: The day the reading was taken (`iv_ab_report.py --experiment iv-chat-1`).
+READ_DATE = "2026-10-18"
+OWED_SENTENCE = "whose reading by `iv_ab_report` is still owed"
+_RATE_WORDS = ("bad-stop", "bad_stop", "tool-error", "tool_error", "correction")
+
+
+def _flat(text: str) -> str:
+    """One line per line, markup and wrapping gone.
+
+    The doc is wrapped at ~80 columns and its load-bearing phrases are bolded,
+    so a match written against the prose has to survive both, or the check fails
+    on a re-wrap rather than on a changed fact.
+    """
+    return " ".join(text.replace("`", "").replace("*", "").split())
+
+
+def _section_3(text: str) -> str:
+    """§3 and nothing else: from its heading to the next `## ` heading.
+
+    Scoped because every clause says §3 — a ruling parked in the Review log
+    would satisfy a whole-file `in` test while being invisible to the reader who
+    opens the doc for the measurement loop.
+    """
+    assert SECTION_HEADING in text, f"no {SECTION_HEADING!r} heading in {DOC.name}"
+    rest = text.split(SECTION_HEADING, 1)[1]
+    end = rest.find("\n## ")
+    assert end != -1, "§3 runs to the end of the file, so its span is unbounded"
+    body = rest[:end]
+    assert len(body) > 500, f"§3 extracted only {len(body)} chars — vacuous"
+    return body
+
+
+def _py_function(name: str, rel: str = "app/sessions_io.py") -> str:
+    """The source of one top-level function, for claims about what code calls."""
+    import ast
+
+    tree = ast.parse((ROOT / rel).read_text())
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return ast.unparse(node)
+    raise AssertionError(f"no top-level {name}() in {rel}")
+
+
+def _cited_span(rel: str, start: int, end: int) -> str:
+    """The lines a doc citation points at, 1-based and inclusive."""
+    lines = (ROOT / rel).read_text().splitlines()
+    assert 0 < start <= end <= len(lines), f"{rel}:{start}-{end} is past EOF ({len(lines)} lines)"
+    return "\n".join(lines[start - 1:end])
+
+
+def test_section_3_records_the_zero_population_without_inventing_a_rate():
+    """Clause 1: the reading is recorded, and zero turns buys no rate.
+
+    Both arms really are 0 sessions / 0 turns, so the honest record is the zero
+    plus the fact that `iv_ab_report` prints `null` for every rate. A bad-stop,
+    tool-error or correction figure quoted from this experiment would be a
+    division by nothing wearing the clothes of a measurement.
+    """
+    s = _flat(_section_3(DOC.read_text()))
+
+    assert "both arms: 0 sessions, 0 turns" in s, s[:400]
+    assert WINDOW in s, "the reading is not tied to the window it was taken over"
+    assert READ_DATE in s, "a reading without its date is a claim about no particular day"
+    assert "null" in s, "the report's own nulls are the evidence that no rate exists"
+    assert "no arm-level bad-stop, tool-error or correction rate exists for iv-chat-1" in s
+
+    for word in _RATE_WORDS:
+        for sentence in (p for p in s.split(". ") if word in p):
+            assert "%" not in sentence, f"{word} carries a percentage: {sentence!r}"
+            for banned in ("precision", "lift", "0.0", "0.1"):
+                assert banned not in sentence, \
+                    f"{word} sentence carries a rate figure ({banned!r}): {sentence!r}"
+
+
+def test_section_3_records_that_the_reopen_condition_ran_and_closed():
+    """Clause 2: #2149's condition was a promise about this day, and it fired.
+
+    The condition is quoted rather than paraphrased: the whole point is that the
+    ruling is no longer open, so the sentence that closed it has to survive in
+    the doc that now carries the verdict.
+    """
+    s = _flat(_section_3(DOC.read_text()))
+
+    assert "#2149" in s, "the ruling's provenance is not recorded"
+    assert "after the inner_voice.ab window end 2026-10-09, if iv_ab_report still " \
+           "reads 0/0 arms, record-only is permanent" in s
+    assert "permanent" in s
+    assert "record-only" in s
+    assert "#833" in s, "the ruling the condition guards is #833's; name it"
+    assert "no observer-prompt change" in s.lower(), "permanence must say what it forbids"
+
+
+def test_section_3_names_the_wiring_gap_and_its_citations_resolve():
+    """Clause 3: the empty arms are a wiring fact, and the pointers are live.
+
+    Three things have to hold together: the doc names both writers, the line
+    ranges it cites really are those functions, and the code really does call
+    ab.assignment from one place only — because the one place is the branch a
+    chat cannot reach, since create_session has already written the file.
+    """
+    s = _flat(_section_3(DOC.read_text()))
+
+    assert "_save_session_meta" in s and "create_session" in s and "ab.assignment" in s
+    assert "app/sessions_io.py:1360-1368" in s and "app/sessions_io.py:398" in s
+
+    cited_branch = _cited_span("app/sessions_io.py", 1360, 1368)
+    assert "ab import assignment" in cited_branch and "_iv_ab(session_id)" in cited_branch
+    assert "mission-control" in cited_branch
+    assert _cited_span("app/sessions_io.py", 398, 398).startswith("def create_session(")
+
+    create = _py_function("create_session")
+    assert "assignment" not in create, "create_session stamps now, so the doc is stale"
+    assert "assignment(" in _py_function("_save_session_meta") or \
+           "ab import assignment" in _py_function("_save_session_meta")
+
+    hits = [p.relative_to(ROOT) for p in (ROOT / "app").rglob("*.py")
+            if "ab import assignment" in p.read_text()]
+    assert [Path("app/sessions_io.py")] == hits, \
+        f"ab.assignment is called from {hits}, not only from sessions_io"
+
+
+def test_section_3_says_the_arms_are_unrecoverable_and_where_to_stamp():
+    """Clause 4: ab.py promises a recompute the reading half does not perform.
+
+    `iv_ab_report.py` selects sessions from the stored `inner_voice_ab` stamp and
+    never recomputes from the session id, so an experiment that was never stamped
+    reads 0/0 for the rest of its life — iv-chat-1 included. The doc has to carry
+    that asymmetry, or the next window is armed the same way and fails the same way.
+    """
+    s = _flat(_section_3(DOC.read_text()))
+
+    assert "inner_voice_ab" in s and "stamp" in s
+    assert ":67" in s and ":144" in s, "the two lines that make the arms unrecoverable"
+    assert "cannot be reconstructed after the fact" in s
+    assert "future window must stamp at the single create writer (create_session)" in s
+
+    report_src = (ROOT / "scripts" / "iv_ab_report.py").read_text()
+    assert "assignment(" not in report_src, \
+        "the report recomputes now, so the doc's unrecoverability claim is stale"
+    assert "inner_voice_ab" in _py_function("load_sessions", "scripts/iv_ab_report.py")
+    assert "inner_voice_ab" in _cited_span("scripts/iv_ab_report.py", 67, 67)
+    assert "inner_voice_ab" in _cited_span("scripts/iv_ab_report.py", 144, 144)
+
+
+def test_the_owed_sentence_is_gone_and_the_ruling_is_read_from_the_repo_doc():
+    """Clause 5: the debt is paid in the file that owed it, and re-failing works.
+
+    Two failure modes are pinned here. A rewrite that drops the ruling must go
+    red — hence 0/0 and `permanent` are both required, not just the absence of
+    the owed sentence. And a rewrite that points this check at
+    ~/obsidian/architecture/inner-voice.md, the stale fork with no §3, must go
+    red too — hence the section extractor is shown to fail on exactly that shape
+    of text, written here rather than read from the vault so the proof does not
+    depend on how long the fork stays stale.
+    """
+    text = DOC.read_text()
+
+    assert OWED_SENTENCE not in text
+    assert "still owed" not in text, "an owed-marker survived in the doc that just paid it"
+    assert "#2963" in text, "the item that closed must be named by the text that closed it"
+
+    s = _flat(_section_3(text))
+    assert "0 sessions" in s and "permanent" in s and READ_DATE in s
+
+    assert DOC == ROOT / "architecture" / "inner-voice.md"
+    assert not str(DOC).startswith(str(VAULT_DOC.parent)), "grading the vault fork"
+    fork_shape = "Intro prose only.\n\n## Some other section\n\nNothing here.\n"
+    try:
+        _section_3(fork_shape)
+    except AssertionError as e:
+        assert "heading" in str(e), f"failed for the wrong reason: {e}"
+    else:
+        raise AssertionError("_section_3 accepted a page with no §3: "
+                             "pointing it at the vault copy would pass vacuously")
+
+
+def test_the_grep_command_section_3_publishes_reproduces_the_call_site():
+    """The command §3 tells an operator to run has to run.
+
+    The first draft of this record published `git grep -n "ab.assignment" -- app/`,
+    which returns nothing: the only call site is written
+    `from app.inner_voice.ab import assignment`, so no pattern of that shape
+    matches it. A verify command that exits 1 is worse than none — the reader
+    concludes the call site is gone. So the command is extracted from the prose and
+    executed, here rather than eyeballed, because the same mistake is one edit
+    away for whoever rewrites this bullet.
+    """
+    import re as _re
+    import subprocess
+
+    commands = _re.findall(r"`(git grep [^`]+)`", _section_3(DOC.read_text()))
+    assert len(commands) == 1, f"expected one published command in §3, got {commands}"
+
+    proc = subprocess.run(commands[0], shell=True, cwd=ROOT,
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, (
+        f"the command §3 publishes exits {proc.returncode}: {proc.stderr.strip()!r}")
+    hits = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    assert len(hits) == 1, f"§3 says one line, the command returned {len(hits)}: {hits}"
+    assert hits[0].startswith("app/sessions_io.py:1363:"), \
+        f"the one hit is not the stamping call site: {hits[0]!r}"
+    assert "import assignment" in hits[0]

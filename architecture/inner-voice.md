@@ -185,8 +185,7 @@ edit lands at once, so a prompt change that assumes new code ships with it.
 
 - **On/off A/B** (`app/inner_voice/ab.py`, `inner_voice.ab`; the code default
   is off and the window is the switch — the shipped config armed the first
-  experiment `iv-chat-1` at `fraction_on: 0.5` over `[2026-09-25, 2026-10-09)`,
-  a window now closed whose reading by `iv_ab_report` is still owed — #2963).
+  experiment `iv-chat-1` at `fraction_on: 0.5` over `[2026-09-25, 2026-10-09)`).
   A new
   chat created inside `[start, end)` is assigned an arm by
   `sha256(name:session_id)` against `fraction_on`, at file creation in
@@ -198,6 +197,46 @@ edit lands at once, so a prompt change that assumes new code ships with it.
   bad-stop rate, tool-error rate, correction proxy (z against the other arm),
   median iterations and duration; a session flipped by hand is `crossed_over`
   and left out. **This is the acceptance test for the concept.**
+- **iv-chat-1 read 0/0, and that closed the keep/change question (2026-10-18).**
+  Read over the closed window `[2026-09-25, 2026-10-09)`, `iv_ab_report.py`
+  reports **both arms: 0 sessions, 0 turns**, with `crossed_over: 0` and `null`
+  in every `z` — the experiment enrolled nobody. So **no arm-level bad-stop,
+  tool-error or correction rate exists for iv-chat-1**, and none may ever be
+  quoted from it: with zero turns each of those is a division by nothing, and the
+  report prints `null` rather than a number for exactly that reason. Reproduce:
+  `.venvs/lloyd/bin/python scripts/iv_ab_report.py --experiment iv-chat-1 --json`
+  (read-only; its only write is its own stdout).
+  The condition that reopens the IV authority ruling was recorded in **#2149**:
+  *"after the inner_voice.ab window end 2026-10-09, if `iv_ab_report` still reads
+  0/0 arms, record-only is permanent."* It has now run against that reading, so
+  the ruling it was guarding — #833's, recorded on 2026-10-04 as authority
+  **record-only** on the inject[model] flag's own numbers (precision 0.08, lift
+  4.82, base rate 0.0166 — flag metrics from `iv_outcome_score`, *not* arm
+  comparisons) — is **permanent: record-only stays permanent**. No observer-prompt
+  change and no widening of IV's scope can be bought with an A/B result, because
+  no A/B has produced a population to compare.
+  **Why the arms are empty is a wiring fact, not thin traffic.** `ab.assignment`
+  is called from exactly one place in `app/`: the create branch of
+  `sessions_io._save_session_meta` (`app/sessions_io.py:1360-1368`, gated on
+  `platform == "mission-control"`), and `git grep -n "from app.inner_voice.ab import assignment" -- app/`
+  returns that one line and nothing else. But every chat is minted by
+  `create_session` (`app/sessions_io.py:398`), the one writer for every create,
+  and that function never calls `ab.assignment` — so the file exists before the
+  chat's first turn ever reaches `_save_session_meta`, whose create branch is
+  skipped for any file that already exists. **No chat could have been enrolled.**
+  Measured on 2026-10-18: 0 of the 11,173 files in `~/lloyd-data/sessions` carry
+  an `inner_voice_ab` key at all, and all 29 `platform: mission-control` sessions
+  created inside the window carry both `id` and `inner_voice_evaluate_user_turns`
+  — the two keys only `create_session` writes.
+  **The arms cannot be reconstructed after the fact.** `app/inner_voice/ab.py`
+  advertises that an arm is a pure function of the session id and so recomputable
+  without trusting a stored field, but the reading half does not do it:
+  `scripts/iv_ab_report.py` selects its sessions solely from the stored
+  `inner_voice_ab` stamp (`:67` filters on its `experiment`, `:144` indexes its
+  `arm`), so an experiment nobody stamped reads 0/0 forever. **A future window
+  must stamp at the single create writer (`create_session`) or it cannot be read
+  at all** — and re-arming is a decision that needs weeks of real chat traffic to
+  mean anything, so it is a human call, not a re-run.
 - **Human labels**: thumbs on `ObservationBubble` for inject / cancel /
   ambient / clarify rows → `POST /api/inner_voice/observations/{id}/verdict`
   → `verdict`, `verdict_at`.
