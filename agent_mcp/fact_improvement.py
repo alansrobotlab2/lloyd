@@ -656,24 +656,33 @@ def read_correction_signals(limit: int = 25, window_days: int = CORRECTIONS_WIND
     in-window content arrived that way reports the status `fallback_admitted`
     rather than `entries_no_entity` or `signals` — so a standing correction whose
     log was rewritten tonight cannot be read back as a correction made today. Why
-    a fallback exists at all: the live log is `lloyd/USER.md`'s `## corrections_log`
-    and its bullets are standing prose (`lloyd/USER.md:74` says the section is
-    standing corrections, not a write-changelog), written both by hand and by the
-    nightly reflection job, so the reader cannot require future bullets to carry a
-    date. `last_corrections_read()["undated_fallback"]` states the count, the date
-    and which leg of the waterfall supplied it.
+    a fallback exists at all: `lloyd/USER.md`'s `## corrections_log` is a standing
+    prose surface, not a dated record — `lloyd/USER.md:74` says the section holds
+    standing corrections and not a write-changelog, and its bullets arrive both from
+    a hand edit and from the nightly reflection job — whereas a dated ruling the
+    operator issues lands in `lloyd/MEMORY.md`'s `[feedback]` index now. The reader
+    therefore cannot require those bullets to carry a date.
+    `last_corrections_read()["undated_fallback"]` states the count, the date and
+    which leg of the waterfall supplied it.
 
     Reads every path in `corrections_paths()` — the compiled-in
     `memory/corrections.md`, `lloyd/USER.md`'s `## corrections_log`, and since
     #2789 `lloyd/MEMORY.md`, whose dated `[feedback]` index bullets are where a
-    ruling the operator issued is recorded now. The earlier sentence here called
-    USER.md alone the live log; that stopped being true when the 2026-09-14 ruling
-    reduced its `## corrections_log` to standing prose (2 bullets, both dated only
-    by the file's own clock), and whether that file should be a corrections source
-    at all is the ruling #2789 leaves to its owed pass — this round keeps reading
-    it rather than deciding. An entry is credited to an entity only when a token in
-    it is a registered entity name; dates and prose are stripped first, so
-    "TTS service status" yields `TTS` and nothing else does.
+    ruling the operator issued is recorded now.
+
+    #2789's owed pass ruled on 2026-10-18 that `lloyd/USER.md` stays a corrections
+    source, so this states the settled decision instead of deferring it: dropping the
+    file would buy a measured zero and remove the surface the inline
+    correction-handling route can still write. Read that as what each shape costs: a
+    dated bullet in its `## corrections_log` is admitted on its own date exactly like
+    any other entry, and the file's two standing bullets carry no date of their own,
+    so they reach the window only through the `_file_fallback_date` leg above — whose
+    winning source for that file is its front-matter
+    `timestamp: '2026-07-11T18:49:41'`, far outside `CORRECTIONS_WINDOW_DAYS`. USER.md
+    contributing 0 signals is therefore the design, not a channel that broke; the
+    live dated channel is `lloyd/MEMORY.md`. An entry is credited to an entity only
+    when a token in it is a registered entity name; dates and prose are stripped
+    first, so "TTS service status" yields `TTS` and nothing else does.
 
     The `[]` case is where the honesty lives — see `last_corrections_read()`.
     """

@@ -727,12 +727,58 @@ def test_the_corrections_reader_docstring_names_the_route_and_the_window():
     that denies the call path is how a dead channel survives: the reader, the
     record and the metric all said "no corrections" and nothing said "the
     channel is the fact-quality signal, and here is its window".
+
+    The same node now pins the other prose failure in that passage: a sentence
+    that defers a decision already made. #2789's owed pass ruled on 2026-10-18
+    that `lloyd/USER.md` stays a corrections source, and the docstring kept
+    saying the question was left "to its owed pass — this round keeps reading it
+    rather than deciding", while an earlier sentence in the same block still
+    called that file the live log. Both are pinned by what the text must NOT
+    contain, and the settled ruling by what it MUST: `lloyd/MEMORY.md`'s dated
+    `[feedback]` bullets as the channel a dated ruling lands in, and USER.md's
+    `## corrections_log` as the standing-bullet surface that reaches a window
+    only through `_file_fallback_date`. The presence arm is what stops the
+    absence arm being satisfied by deleting the paragraph.
+
+    Phrases are compared against the docstring with line wraps collapsed, and
+    always against `inspect.getdoc` — never a grep of this module or of the
+    source file. Two reasons: a docstring gets re-wrapped by anybody who edits it
+    and a pin that snaps on a line break is a pin people delete; and the phrase
+    `the live log is `lloyd/USER.md`` occurs legitimately in this module's own
+    comment above the undated-log section, so a file-wide absence grep fails with
+    the code correct.
     """
     doc = inspect.getdoc(fi.read_correction_signals)
     assert "nothing routes" not in doc, doc
     for named in ("fact quality", "collect_signals", "run_improvement",
                   "CORRECTIONS_WINDOW_DAYS"):
         assert named in doc, f"docstring must name {named!r}: {doc}"
+
+    flat = " ".join(doc.split())
+
+    # The deferral, and the refuted live-log claim, both gone. Named in full and
+    # verbatim on purpose: the bare substring "live log" is legitimate elsewhere
+    # in this module, so a shorter pattern would refuse valid prose.
+    for gone in ("leaves to its owed pass", "rather than deciding",
+                 "the live log is `lloyd/USER.md`", "USER.md alone the live log"):
+        assert gone not in flat, \
+            f"docstring still defers the #2789 ruling or still claims {gone!r}: {doc}"
+
+    # What the ruling actually says, so the gap left by those sentences is filled
+    # with the decision and not with silence. Each fragment is a clause of the
+    # ruling on #2789's activity log, not a phrasing preference.
+    for settled in (
+            "lloyd/USER.md` stays a corrections source",       # the ruling itself
+            "admitted on its own date",                        # a dated bullet wins
+            "standing",                                        # the 2 bullets' shape
+            "_file_fallback_date",                             # the only leg for them
+            "timestamp: '2026-07-11T18:49:41'",                # that file's fallback
+            "lloyd/MEMORY.md",                                 # the dated surface
+            "[feedback]",                                      # its entry shape
+            "recorded now",                                    # it is the live channel
+    ):
+        assert settled in flat, \
+            f"docstring must record the settled #2789 ruling ({settled!r}): {doc}"
 
 
 # ── 1c. an UNDATED correction is still a correction (#2198) ──────────────────
