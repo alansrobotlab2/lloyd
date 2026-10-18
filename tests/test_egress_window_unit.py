@@ -1594,3 +1594,158 @@ def test_the_unit_systemd_loads_by_name_links_to_the_tracked_one_and_fires_the_p
     assert re.search(r"(?i)\bmon\b", parsed.stdout), (
         f"systemd's own parse of OnCalendar={repo_cal!r} does not name a Monday, so the weekly "
         f"cadence the units and SETUP.md claim is not what will fire: {parsed.stdout[:300]}")
+
+
+# ── #2976: the fire commits the corpus it wrote ────────────────────────────────────────
+#
+# `LLOYD_CANARY_ROWS` is left unset above so this window's rows land on the git-tracked
+# `eval/measurements/injection-canary/rows.jsonl`, which makes this unit a writer into a
+# tracked file. Its sibling has committed its own writes since #2877; this unit had no
+# `ExecStartPost` at all, so its rows reached HEAD only at the NEXT Monday's 02:10 sibling
+# fire — this timer goes off at 06:23 plus jitter, after that step has already run that
+# morning. A doc-claim node that recomputes the published per-arm pair from the corpus
+# cannot exist while the newest rows are uncommitted, which is on the record in
+# `tests/test_architecture_coverage_doc_claims.py`: it weakened its claim instead of
+# re-running the figures because the newest rows were "still the timer's uncommitted
+# residue" and a fresh gate worktree would fail the node for a reason that is not the doc's.
+
+COMMIT_SCRIPT = "scripts/maintenance/commit_injection_canary_corpus.py"
+COMMIT_PATHSPEC = "eval/measurements/injection-canary/"
+VENV_PY_SUFFIX = ".venvs/lloyd/bin/python"
+
+
+def _post_lines() -> list[str]:
+    """Every `ExecStartPost=` value in this unit, in the order the FILE spells them.
+
+    Read off the raw text rather than out of `_parse`. The sibling had to learn this the
+    hard way (`tests/test_persistence_window_unit.py::_post_lines`): under a
+    `configparser(strict=False)` a repeated key is legal and LAST-WINS, so one `.get`
+    returns the final duplicate and silently hides every earlier one. This unit carries one
+    post-start step today, and a helper that reads only the last would let the second one
+    that somebody appends retire this one without a single node noticing. systemd executes
+    every `ExecStartPost` it is given, in file order, so file order is what this returns.
+    """
+    raw = SERVICE.read_text(encoding="utf-8")
+    lines = [l.strip().split("=", 1)[1].strip()
+             for l in raw.splitlines() if l.strip().startswith("ExecStartPost=")]
+    assert lines == [s.strip() for s in re.findall(r"(?m)^ExecStartPost=(.*)$", raw)], \
+        "the helper is not reading the raw ExecStartPost lines in file order"
+    assert lines, (
+        "the egress window has no ExecStartPost at all, so its rows sit in "
+        "`git status --porcelain` until the sibling's next Monday fire commits them — the "
+        "one-week-behind corpus that made a recomputing doc-claim node unwritable")
+    return lines
+
+
+def _commit_step_module():
+    """The committer, loaded from THIS tree. Re-declared rather than imported from
+    `tests/test_commit_injection_canary_corpus.py` for the reason this file already gives
+    for `_parse`: pytest's rootdir-only conftest makes a cross-test-file import land as
+    `tests.foo`, which the repo's module-import guard refuses."""
+    import importlib.util
+    script = REPO / COMMIT_SCRIPT
+    assert script.is_file(), f"{script} is missing, so this unit's ExecStartPost exits 2"
+    spec = importlib.util.spec_from_file_location("commit_injection_canary_corpus", script)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_execstartpost_commits_the_corpus_this_fire_wrote():
+    """#2976 clause 1: the unit ends with a post-start step that execs the repo's venv
+    python on `scripts/maintenance/commit_injection_canary_corpus.py`, by absolute path,
+    with nothing after the script — read off the raw text in file order, so deleting the
+    line reddens this node instead of leaving a unit that writes a tracked file and
+    commits nothing.
+
+    Direct exec, absolute, no `-` prefix: the same three checks the `ExecStart` node above
+    applies, and for a reason here too. A leading `-` is systemd's "ignore a non-zero exec
+    exit", and this step's exit is 0 by its own contract, so the prefix would add nothing
+    that the step does not already guarantee while swallowing the one case the contract does
+    NOT cover — a `python` that cannot start at all, which would then read as a clean fire.
+    No shell, no `%`-specifier and no date literal, because the script derives its own UTC
+    date from `datetime.now(timezone.utc)` and a literal date in the line could only
+    contradict the rows it is committing.
+
+    `is_file()` is checked on `REPO / COMMIT_SCRIPT`, not on the token the unit spells: the
+    line names the LIVE checkout, so in a round's worktree the token points at a tree that
+    is not the one under test. What IS pinned about the token is that it is absolute, inside
+    the same checkout `ExecStart` runs, and agrees with the script's own `LIVE_REPO` default
+    — a step that commits a different tree than it wrote is the same no-op as no step.
+    """
+    import shlex
+    step = _commit_step_module()
+    lines = _post_lines()
+    commits = [l for l in lines if l.rstrip().endswith("/" + COMMIT_SCRIPT)]
+    assert len(commits) == 1, \
+        f"expected exactly one ExecStartPost running the corpus committer, got {lines!r}"
+    argv = shlex.split(commits[0])
+
+    assert not commits[0].startswith("-"), \
+        f"ExecStartPost={commits[0]!r} carries systemd's exec-failure-ignore prefix"
+    assert len(argv) == 2, \
+        f"a token after the script would be a pathspec this unit invented instead of the " \
+        f"script's own: {argv!r}"
+    py, script = argv
+    assert py.endswith(VENV_PY_SUFFIX) and os.path.isabs(py) \
+        and Path(py).is_file() and os.access(py, os.X_OK), \
+        f"the commit step must run the repo's venv python, got {py!r}"
+    exec_target = _execstart(_parse(SERVICE.read_text(encoding="utf-8"))).split()[0]
+    checkout = str(Path(exec_target).parents[1])            # ExecStart's own checkout
+    for token in argv:
+        assert token.startswith(checkout + os.sep), \
+            f"{token!r} is outside the checkout ExecStart runs ({checkout})"
+    assert script == step.LIVE_REPO + "/" + COMMIT_SCRIPT, \
+        (f"the line runs {script!r} but the script defaults to committing in "
+         f"{step.LIVE_REPO!r}: two trees, so the step commits nothing it wrote")
+    assert (REPO / COMMIT_SCRIPT).is_file()
+
+    for shell_ism in ("$(", "${", "`", "sh -c", "bash -c", "python -c", "date "):
+        assert shell_ism not in commits[0], \
+            f"{shell_ism!r} needs a shell, and this unit execs directly"
+    assert "%" not in commits[0], \
+        "a `%` on this line is a systemd specifier; the UTC date is the script's own"
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", commits[0]), \
+        f"a date literal cannot be interpolated by systemd: {commits[0]!r}"
+    assert step.CORPUS_PATHSPEC == COMMIT_PATHSPEC, \
+        f"the step stages {step.CORPUS_PATHSPEC!r}, not the corpus this fire writes " \
+        f"({COMMIT_PATHSPEC!r}), so the rows this unit produced would stay uncommitted"
+
+
+def test_the_committer_is_authorized_for_this_unit_and_labels_its_own_rows(tmp_path):
+    """The added line is worth nothing unless the step it runs accepts THIS unit's fire.
+
+    `commit_injection_canary_corpus.py` refuses a caller whose `/proc/self/cgroup` names no
+    accepted window unit and EXITS 0 on a refusal — the exit-0-on-refusal contract is what
+    keeps a refused commit from marking a window `Failed`. That combination makes a
+    single-name guard and a copied unit line a SILENT green no-op: the step runs, logs
+    "refused: not running in … cgroup", commits nothing, and the unit still reads clean.
+    #2976 was filed precisely because mirroring the sibling's line was not sufficient.
+
+    So the two files are pinned to one structure: this unit's name must be a key of the
+    script's `WINDOW_UNITS`, a witness cgroup ending in it must authorize the step, and the
+    window kind the subject will carry must not be the sibling's. The end-to-end commit and
+    the refusal arms are in `tests/test_commit_injection_canary_corpus.py`; what lives here
+    is the agreement between the unit and the guard, which is the thing a later edit to
+    either file can break alone.
+    """
+    step = _commit_step_module()
+    assert step.EGRESS_UNIT == SERVICE.name, \
+        f"the script authorizes {step.EGRESS_UNIT!r} but the unit this file guards is " \
+        f"{SERVICE.name}: the fire would be refused by name"
+    assert step.EGRESS_UNIT in step.WINDOW_UNITS, \
+        f"{SERVICE.name} is not an accepted caller, so this unit's ExecStartPost is a " \
+        f"no-op that exits 0: {sorted(step.WINDOW_UNITS)}"
+    assert step.WINDOW_UNITS[step.EGRESS_UNIT] != step.WINDOW_UNITS[step.PERSISTENCE_UNIT], \
+        "both windows would be recorded under one kind, which is the mislabel #2976 names"
+
+    witness = tmp_path / f"cgroup-{SERVICE.name}.witness"
+    witness.write_text("0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                       f"{step.EGRESS_UNIT}\n", encoding="utf-8")
+    assert step.authorized_unit(str(witness)) == step.EGRESS_UNIT, \
+        "a cgroup whose leaf is this unit did not authorize the step"
+    assert step.runs_in_window_unit(str(witness)) is True
+    assert step.invocation_refusal({"INVOCATION_ID": "8f14e45fceea167a5a36dedd4bea2543"},
+                                   cgroup_file=str(witness)) is None, \
+        "the step still refuses the unit whose ExecStartPost runs it"

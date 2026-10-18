@@ -118,6 +118,45 @@ ExecStartPre=/usr/bin/mkdir -p /home/alansrobotlab/lloyd-data/egress-arms
 #
 # And the interpreter, so the wrapper's `$HOME`-derived default is not load-bearing.
 Environment=LLOYD_PYTHON=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
+# #2976: then commit what the fire wrote, as the sibling unit has done since #2877.
+#
+# WHY THE PRODUCER HAS TO BE THIS UNIT. The paragraph above deliberately leaves
+# `LLOYD_CANARY_ROWS` unset so this fire's rows land on the git-tracked
+# `eval/measurements/injection-canary/rows.jsonl` — and nothing in this unit committed
+# them. The sibling's commit step does cover that whole directory, so the egress rows do
+# reach HEAD, but only at the NEXT Monday's 02:10 fire: this unit fires at 06:23 with
+# jitter, after that step has already run that morning. So on the day a per-arm pair is
+# measured, the tracked corpus is exactly this fire's rows behind. The hazard is already on
+# the record: `tests/test_architecture_coverage_doc_claims.py` weakened a recomputing claim
+# rather than re-run its figures, on the stated ground that the newest rows were "still the
+# timer's uncommitted residue" and a node re-summing them would fail in a fresh gate
+# worktree for a reason that is not the doc's. A node that recomputes the published pair
+# from the corpus needs the producing unit to commit the corpus.
+#
+# Direct exec again — the repo venv python on
+# scripts/maintenance/commit_injection_canary_corpus.py by absolute path, no shell, no `-`
+# prefix, no `%`-specifier and no date literal — for the two reasons this directory already
+# gives for `ExecStart`: a leading `-` is systemd's "ignore a non-zero exec exit" marker
+# (and this step's exit is 0 by its own contract, so a prefix would be pure noise that
+# would also swallow a `python` that could not start), and the script derives its own UTC
+# date from `datetime.now(timezone.utc)`, so a date literal in the line could only
+# contradict it. With no `WorkingDirectory=` set every path token has to be absolute. It
+# takes no argument, which is what lets
+# tests/test_egress_window_unit.py pin the line as exactly two tokens naming no directory
+# but the script's own.
+#
+# AND THE GUARD HAS TO KNOW THIS UNIT'S NAME — the half a copied line does not give you.
+# `commit_injection_canary_corpus.py` refuses a caller whose `/proc/self/cgroup` names no
+# accepted window unit, and it EXITS 0 on a refusal, because a refused commit must not mark
+# a window `Failed`. A single-name guard therefore made this line a silent green no-op: it
+# would run, log "refused: not running in … cgroup", commit nothing, and leave the unit
+# reading clean — the exact failure mode #2877's own message warns the exit-0 contract
+# creates. `WINDOW_UNITS` in that script now carries this unit beside the persistence one,
+# and the window kind in the commit subject is read off the same cgroup component, so a
+# fire of this unit is recorded as an egress-arm window and not as its sibling's.
+# tests/test_commit_injection_canary_corpus.py pins both halves; the journal line of a real
+# fire is what closes the arm no test can reach.
+ExecStartPost=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python /home/alansrobotlab/lloyd/scripts/maintenance/commit_injection_canary_corpus.py
 # The whole reason the unit must state a timeout: systemd's user-manager default SIGTERMs
 # a starting unit at 90 s, and this window spends that 90 s in its very first drain poll.
 #

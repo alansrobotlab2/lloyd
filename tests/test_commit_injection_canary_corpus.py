@@ -146,7 +146,7 @@ def as_unit(tmp_path):
     """
     witness = tmp_path / "cgroup.witness"
     witness.write_text("0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
-                       f"{STEP.UNIT_NAME}\n", encoding="utf-8")
+                       f"{STEP.PERSISTENCE_UNIT}\n", encoding="utf-8")
     return {"env": {"INVOCATION_ID": IV}, "cgroup_file": str(witness)}
 
 
@@ -268,7 +268,7 @@ def test_the_commit_takes_the_corpus_and_nothing_else(repo, as_unit):
     subject = _git(repo, "log", "-1", "--pretty=%s").stdout.strip()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     assert subject == (f"#{STEP.ITEM}: record the {today} persistence-arm window "
-                       f"(auto-committed by {STEP.UNIT_NAME})"), \
+                       f"(auto-committed by {STEP.PERSISTENCE_UNIT})"), \
         f"unexpected commit subject: {subject!r}"
 
     author = _git(repo, "log", "-1", "--pretty=%an <%ae>").stdout.strip()
@@ -509,14 +509,15 @@ def test_the_cgroup_reader_separates_a_unit_from_a_generated_scope(tmp_path):
 
     The `.d` arm is the trap in a substring match: `lloyd-persistence-window.service.d` is a
     drop-in directory that exists beside a unit on any box systemd has ever touched, and
-    `UNIT_NAME in line` would read it as an invocation. A component equality does not."""
+    testing `unit_name in line` against either accepted name would read it as an invocation.
+    A component equality against a key of `WINDOW_UNITS` does not."""
     unit_witness = _witness(tmp_path, f"0::/user.slice/user-1000.slice/"
-                                      f"user@1000.service/app.slice/{STEP.UNIT_NAME}",
+                                      f"user@1000.service/app.slice/{STEP.PERSISTENCE_UNIT}",
                             "unit")
     assert STEP.runs_in_window_unit(unit_witness) is True, \
         "the shape systemd writes for a unit's processes has to be accepted, or the " \
         "2026-10-19 fire commits nothing and #2866's owed commit silently survives"
-    assert STEP.cgroup_components(unit_witness)[-1] == STEP.UNIT_NAME
+    assert STEP.cgroup_components(unit_witness)[-1] == STEP.PERSISTENCE_UNIT
 
     other_unit = _witness(tmp_path, REAL_UNIT_CGROUP, "other-unit")
     assert STEP.runs_in_window_unit(other_unit) is False, \
@@ -529,7 +530,7 @@ def test_the_cgroup_reader_separates_a_unit_from_a_generated_scope(tmp_path):
     assert STEP.cgroup_components(bash_fork)[-1] == \
         "lloyd-bash-ceiling-15230-b609326e.scope"
 
-    dropin = _witness(tmp_path, f"0::/user.slice/x/{STEP.UNIT_NAME}.d", "dropin")
+    dropin = _witness(tmp_path, f"0::/user.slice/x/{STEP.PERSISTENCE_UNIT}.d", "dropin")
     assert STEP.runs_in_window_unit(dropin) is False, \
         "a `.d` drop-in directory component was read as an invocation of the unit"
 
@@ -541,15 +542,23 @@ def test_the_cgroup_reader_separates_a_unit_from_a_generated_scope(tmp_path):
     assert STEP.is_systemd_invocation({"INVOCATION_ID": IV}) is True
 
 
-def test_the_step_is_not_a_package_and_the_unit_line_is_its_only_invocation():
+def test_the_step_is_not_a_package_and_the_window_pair_are_its_only_invocation():
     """The seam the two files have to agree on: this script is invoked by absolute path
     from the unit, and nothing in the repo imports it or wires it into anything else.
 
     `scripts/` is not a package and the step has no side effects at import, so the only way
-    it runs in production is the `ExecStartPost` line — which
-    `tests/test_persistence_window_unit.py` pins to exactly two tokens. What this node adds
-    is the other direction: a second caller — a timer, an autonomy task, an `__init__`-time
-    hook — would give an unattended job a committer designed for one unit's own invocation.
+    it runs in production is an `ExecStartPost` line — which
+    `tests/test_persistence_window_unit.py` and `tests/test_egress_window_unit.py` each pin
+    to exactly two tokens. What this node adds is the other direction: a second caller — a
+    timer, an autonomy task, an `__init__`-time hook — would give an unattended job a
+    committer designed for a window's own invocation.
+
+    The set is TWO window units as of #2976, and it is now checked against the guard's own
+    authorized set rather than listed freehand: a caller named here but absent from
+    `WINDOW_UNITS` is the silent-green-no-op bug (the unit fires a step that refuses and
+    exits 0), and one present in `WINDOW_UNITS` but absent here is a unit that gained the
+    right to commit the live checkout without this rail knowing. Either drift fails, so the
+    units in the allowlist and the keys of the guard cannot come apart.
     """
     assert SCRIPT.is_file() and not (SCRIPT.parent / "__init__.py").exists(), \
         "`scripts/` is a package, so importing this module could run it — the whole design " \
@@ -557,13 +566,181 @@ def test_the_step_is_not_a_package_and_the_unit_line_is_its_only_invocation():
     importers = subprocess.run(
         ["git", "-C", str(ROOT), "grep", "-l", "commit_injection_canary_corpus"],
         capture_output=True, text=True).stdout.split()
-    allowed = {
-        "agent-services/systemd/lloyd-persistence-window.service",
+    units = {"agent-services/systemd/" + unit for unit in STEP.WINDOW_UNITS}
+    allowed = units | {
         "scripts/maintenance/commit_injection_canary_corpus.py",
         "tests/test_commit_injection_canary_corpus.py",
         "tests/test_persistence_window_unit.py",
+        "tests/test_egress_window_unit.py",
         "tests/test_safety_gate_discrimination.py",
     }
     assert set(importers) <= allowed, \
-        f"something besides the window unit and its tests names the committer: " \
-        f"{sorted(set(importers) - allowed)}"
+        f"something besides the window units and their tests names the committer: " \
+        f"{sorted(set(importers - allowed))}"
+    naming = set(importers) & units
+    assert naming == units, \
+        f"the units named here {sorted(naming)} are not the units the guard authorizes " \
+        f"{sorted(units)}: one of them is a step that would be refused in silence, or an " \
+        f"authorized caller this rail stopped watching"
+
+
+# ── #2976: a second window unit drives this step ───────────────────────────────────────
+#
+# `lloyd-egress-window.service` appends into this same tracked corpus and carried no commit
+# step of its own, so its rows reached HEAD only at the NEXT Monday's persistence fire — this
+# timer goes off at 06:23 plus jitter, after 02:10 has already passed. The unit line is half
+# the change; what a unit line cannot do is make the guard accept the fire that runs it.
+# `commit_corpus` returns 0 on a refusal — deliberately, so a refused commit cannot mark a
+# ~34-minute window `Failed` — which is precisely what makes a step refused by NAME
+# indistinguishable, from the unit's side, from a step that committed. So the arms below
+# drive the whole function from an egress witness rather than reading the guard, and then
+# re-check the refusals against the WIDENED guard rather than the old one.
+
+#: The cgroup systemd writes for a process it started for the EGRESS window, in the shape
+#: `REAL_UNIT_CGROUP` measures for a live user unit on this box: the unit name as the leaf.
+EGRESS_CGROUP = ("0::/user.slice/user-1000.slice/user@1000.service"
+                 f"/lloyd.slice/{STEP.EGRESS_UNIT}")
+
+
+def _as_fire(tmp_path: Path, cgroup_body: str, name: str = "fire") -> dict:
+    """`commit_corpus` kwargs making an in-process call a fire of the unit whose cgroup line
+    is `cgroup_body` — the kwargs `as_unit` builds, for whichever unit is asked."""
+    return {"env": {"INVOCATION_ID": IV},
+            "cgroup_file": _witness(tmp_path, cgroup_body, name)}
+
+
+def test_an_egress_fire_stages_the_corpus_and_commits_it(tmp_path, repo):
+    """#2976 clause 2, on disk: a fire whose cgroup leaf is
+    `lloyd-egress-window.service` stages the corpus directory, commits the fire's rows and
+    report, and leaves the index clean.
+
+    Reading `authorized_unit` cannot give this answer. The refusal arm exits 0, so a widened
+    name that never reached the guard, or a guard that still knew only the persistence unit,
+    would produce a green egress fire with no commit behind it AND a passing read of the
+    constant. Driving `commit_corpus` from a witness whose leaf is the egress unit is what
+    shows the rows that unit appends actually reach HEAD in the same fire that wrote them.
+    """
+    produced = _dirty_window(repo)
+    before = _head(repo)
+    assert STEP.commit_corpus(str(repo), **_as_fire(tmp_path, EGRESS_CGROUP)) == 0, \
+        "an egress fire was refused, so its rows wait a week for the sibling's next fire"
+
+    assert _head(repo) != before, \
+        "the egress fire made no commit: its ExecStartPost would still exit 0 and read green"
+    assert _git(repo, "rev-parse", "HEAD~1").stdout.strip() == before, \
+        "the step made more than one commit"
+    names = _git(repo, "show", "--pretty=format:", "--name-only", "HEAD").stdout.split()
+    assert sorted(names) == sorted(produced), \
+        f"the egress commit touched {names}, not the corpus that fire wrote"
+    assert not _staged(repo), f"the step left an index behind: {_staged(repo)!r}"
+
+
+@pytest.mark.parametrize("leaf,kind,other", [
+    (STEP.PERSISTENCE_UNIT, "persistence-arm", "egress"),
+    (STEP.EGRESS_UNIT, "egress-arm", "persistence"),
+])
+def test_the_commit_subject_names_the_unit_and_window_that_actually_fired(
+        tmp_path, repo, leaf, kind, other):
+    """#2976 clause 4: both halves of the subject — the window kind and the unit in
+    `auto-committed by` — come from the cgroup component that authorized the commit, so a
+    fire of one window is never filed under the other.
+
+    Both were hardcoded before: `f"#{ITEM}: record the {today} persistence-arm window
+    (auto-committed by {UNIT_NAME})"`, with `UNIT_NAME` the same constant the guard read.
+    Once the guard could accept an egress fire, that literal would have recorded a fire's
+    egress rows as a `persistence-arm window (auto-committed by
+    lloyd-persistence-window.service)` — rows attributed to a window that did not write them,
+    in the one place a later reader looks to ask which fire produced a commit. Pinned both
+    ways round, and against the firing unit rather than any constant, which is what makes a
+    hardcoded subject impossible here.
+    """
+    _dirty_window(repo)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    body = ("0::/user.slice/user-1000.slice/user@1000.service/app.slice/" + leaf)
+    assert STEP.commit_corpus(str(repo), **_as_fire(tmp_path, body, name=leaf)) == 0
+
+    subject = _git(repo, "log", "-1", "--pretty=%s").stdout.strip()
+    assert subject == (f"#{STEP.ITEM}: record the {today} {kind} window "
+                       f"(auto-committed by {leaf})"), \
+        f"a fire of {leaf} produced the subject {subject!r}"
+    assert other not in subject.lower(), \
+        f"the subject of a {leaf} fire mentions {other!r}: {subject!r}"
+
+
+@pytest.mark.parametrize("label,cgroup_body,env", [
+    ("agent-bash-scope-and-no-invocation-id", REAL_BASH_FORK_CGROUP, {}),
+    ("agent-bash-scope-with-inherited-invocation-id", REAL_BASH_FORK_CGROUP,
+     {"INVOCATION_ID": IV}),
+    ("parent-user-scope", "0::/user.slice/user-1000.slice/user@1000.service",
+     {"INVOCATION_ID": IV}),
+    ("another-lloyd-unit-leaf", REAL_UNIT_CGROUP, {"INVOCATION_ID": IV}),
+    ("persistence-drop-in-dir", f"0::/user.slice/x/{STEP.PERSISTENCE_UNIT}.d/exec.conf",
+     {"INVOCATION_ID": IV}),
+    ("egress-drop-in-dir", f"0::/user.slice/x/{STEP.EGRESS_UNIT}.d/exec.conf",
+     {"INVOCATION_ID": IV}),
+])
+def test_widening_the_accepted_units_did_not_loosen_the_guard(tmp_path, repo, label,
+                                                             cgroup_body, env):
+    """#2976 clause 3: after accepting a second unit, a non-window caller still commits
+    nothing, leaves the tracked tree untouched and exits 0 — including a `.scope` leaf (an
+    agent Bash fork's real shape) and a `.d` drop-in component of EITHER window unit.
+
+    Re-checked against the widened guard rather than inherited from the nodes above, because
+    taking a second name is exactly how a whole-component match decays into a substring
+    match: `lloyd-egress-window.service.d/exec.conf` is a directory that exists beside the
+    accepted leaf on any box systemd has touched, and shares a prefix with it, so a guard
+    that stopped splitting on `/` would wave a drop-in through. The `.d` sweep now runs over
+    both unit names for that reason.
+
+    Exit 0 is the contract, not a courtesy — see the module docstring: a refused commit is a
+    success-by-refusal, and a non-zero exit marks the window `Failed`. What must not move is
+    the index: the corpus keeps its rows either way, and the outcome an agent turn must never
+    reach is removing them from `git status` in the production checkout.
+    """
+    _dirty_window(repo)
+    before = _head(repo)
+    w = _witness(tmp_path, cgroup_body, "refuse")
+    assert STEP.runs_in_window_unit(w) is False, \
+        f"{label}: a cgroup naming no window unit authorized the step"
+    assert STEP.commit_corpus(str(repo), env, cgroup_file=w) == 0, \
+        f"{label}: refusing a non-window caller must exit 0, not fail the window"
+    assert _head(repo) == before, f"{label} committed into the checkout"
+    assert not _staged(repo), f"{label} staged: {_staged(repo)!r}"
+
+
+def test_a_turn_without_an_invocation_id_still_exits_zero_at_the_boundary(repo):
+    """Clause 3's exit code across the real process boundary rather than the function's: a
+    subprocess whose environment carries no `INVOCATION_ID` — the environment an agent Bash
+    fork has when the backend itself is not the caller — exits 0, stages nothing and commits
+    nothing, measured against the widened guard.
+
+    `_run_as_agent_turn` deliberately carries `INVOCATION_ID`, because the shape it exists to
+    test is the cgroup arm; this is the other arm, and it has to be a real process: an
+    in-process `{}` passes even if `is_systemd_invocation` were inverted, since neither an
+    absent key nor an empty dict carries the string.
+
+    No cgroup witness is handed over, because there is no flag that would take one and that is
+    deliberate — an option naming a cgroup file would be a switch a refused caller could pass
+    itself. The child inherits THIS process's cgroup, so the first assertion asks the real
+    `/proc/self/cgroup` to name no window unit: that precondition is what makes the inherited
+    cgroup a refusal rather than an accident, and it is the same precondition
+    `test_a_real_subprocess_carrying_invocation_id_is_still_refused` states for its arm.
+    """
+    _dirty_window(repo)
+    before = _head(repo)
+    assert STEP.runs_in_window_unit() is False, \
+        "this test process is itself running in a window unit's cgroup, so a child would " \
+        "inherit authorization and the arm would measure nothing"
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(repo.parent), "LANG": "C"}
+    assert "INVOCATION_ID" not in env
+    proc = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(repo)],
+                          capture_output=True, text=True, env=env, timeout=180)
+    assert proc.returncode == 0, \
+        f"a refused commit from a turn exited {proc.returncode}: {proc.stderr[-300:]}"
+    assert proc.stderr == "" and proc.stdout.count("\n") == 1, \
+        f"one journal line and no traceback: {proc.stdout!r} {proc.stderr!r}"
+    assert STEP.PREFIX in proc.stdout and "invocation" in proc.stdout.lower(), \
+        "the refusal has to be attributable to this step and name the arm that refused: " \
+        f"{proc.stdout!r}"
+    assert _head(repo) == before and not _staged(repo), \
+        "a turn with no INVOCATION_ID changed the checkout"

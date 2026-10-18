@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""#2877 — commit the injection-canary corpus the persistence-window fire just wrote.
+"""#2877 — commit the injection-canary corpus a window fire just wrote.
+
+TWO UNITS DRIVE THIS STEP, which is why it takes a SET of unit names and not one name:
+`lloyd-persistence-window.service` since #2877, and `lloyd-egress-window.service` since
+#2976. Both append rows to the same tracked corpus, so the committer is shared; the one
+thing that differs between them is which unit's name and which window kind go in the
+commit subject, and both are read off the cgroup component that authorized the commit
+rather than hardcoded — so an egress fire is never recorded as a `persistence-arm window
+(auto-committed by lloyd-persistence-window.service)`. See `WINDOW_UNITS` for why the
+accepted set and the message have to come from one place.
 
 WHY THE PRODUCER HAS TO BE THE COMMITTER. `lloyd-persistence-window.service` appends
 about 30 rows / ~190 KB to the git-tracked
@@ -17,6 +26,19 @@ ignored, on purpose… the corpus is git-tracked, so deleting it is a repository
 and reports counts only. So the unit that writes the corpus is the only thing standing
 beside it at the moment the rows land, which is why this is a second `ExecStartPost` and
 not a new timer.
+
+WHY THE EGRESS WINDOW WAS ADDED (#2976). `lloyd-egress-window.service` writes into the same
+tracked `rows.jsonl` — its fire is the 1 rep x 18 scenarios x 2 arms = 36 rows the per-arm
+pair is to be published from — and carried no commit step at all, while its sibling has had
+one since #2877. The condition was a one-week lag rather than permanent loss, and a lag on
+exactly the wrong day: the egress timer fires Monday 06:23 local plus jitter, which is AFTER
+the persistence unit's 02:10 commit step has already run that morning, so a fresh egress
+fire's rows reached HEAD only at the FOLLOWING Monday's 02:10 fire. The repo already had to
+work round that: `tests/test_architecture_coverage_doc_claims.py` weakened a recomputing
+claim instead of re-running the figures, on the stated ground that the 2026-10-15 rows were
+"still the timer's uncommitted residue" and a node re-summing them would fail in a fresh gate
+worktree for a reason that is not the doc's. A doc-claim node that recomputes the published
+pair from the corpus needs the producing unit to commit it, which is what this adds.
 
 WHAT IT COMMITS, AND WHAT IT REFUSES TO COMMIT. One staging command, one directory::
 
@@ -62,17 +84,20 @@ unit and the variable is exported down the whole process tree: measured twice in
 `INVOCATION_ID=862d3b6355d542dea3b564f72aae7174` in both, the same value in both. Presence
 would therefore admit exactly the caller the clause is about.
 
-What separates the two callers is which unit the process runs in, and systemd records that
-in `/proc/self/cgroup`. Measured on this box: an agent Bash fork is
+What separates a window's fire from an agent's turn is which unit the process runs in, and
+systemd records that in `/proc/self/cgroup`. Measured on this box: an agent Bash fork is
 `0::/user.slice/user-1000.slice/user@1000.service/lloyd.slice/`
 `lloyd-bash-ceiling-15230-b609326e.scope` — a `.scope`, naming no service — while the main
 process of a live user unit (`agent-supervisord.service`, PID 1695, `systemctl --user show
 --value -p MainPID`) is
 `0::/user.slice/user-1000.slice/user@1000.service/lloyd.slice/agent-supervisord.service`,
-leaf equal to the unit name. systemd runs every `Exec*=` of a unit in that unit's cgroup,
-so the 02:10 fire's commit step will carry a `lloyd-persistence-window.service` component
-and nothing else on this machine will. The rail is therefore: `INVOCATION_ID` set AND a
-cgroup component equal to `UNIT_NAME`. `INVOCATION_ID` stays in the conjunction because the
+leaf equal to the unit name. systemd runs every `Exec*=` of a unit in that unit's cgroup, so
+a window's commit step carries its own unit's component — `lloyd-persistence-window.service`
+for its 02:10 fire, `lloyd-egress-window.service` for the egress window's Monday 06:23 fire
+— and no other process on this machine carries either. The rail is therefore:
+`INVOCATION_ID` set AND a cgroup component equal to a KEY of `WINDOW_UNITS`, matched on a
+whole path component, which authorizes exactly the two window fires and nothing else.
+`INVOCATION_ID` stays in the conjunction because the
 clause asks for it and because a caller without it cannot be a unit invocation at all.
 
 Not a wall, and stated so a reader does not over-trust it: a turn that bind-mounted a
@@ -81,13 +106,14 @@ is a materially higher bar than setting an environment variable and is the open-
 #2780 argues about (`/proc/<pid>/cgroup` is readable but the set of unit names is not
 enumerable from a policy file, so a closed set for it wants the same grant mechanism). The
 raw verbs stay refused and pinned in `tests/test_safety_gate_discrimination.py` for that
-reason, and the real-fire arm of this check is only closed by the 2026-10-19 fire.
+reason, and the real-fire arm of this check is only closed by the 2026-10-19 fires: the
+persistence window's at 02:10 and, for the arm #2976 adds, the egress window's at 06:23.
 
 `--repo` exists for the tests and for the scratch-worktree check the item asks for:
 this script's contract is about ONE checkout, and no test may seed a dirty index in
-production. The unit passes no arguments, so the shipped path is the default, and
-`tests/test_persistence_window_unit.py` pins that the `ExecStartPost` line carries
-nothing after the script path.
+production. Both units pass no arguments, so the shipped path is the default, and
+`tests/test_persistence_window_unit.py` and `tests/test_egress_window_unit.py` each pin
+that their own `ExecStartPost` line carries nothing after the script path.
 
 Run (the unit's own invocation): .venvs/lloyd/bin/python
     scripts/maintenance/commit_injection_canary_corpus.py
@@ -113,9 +139,21 @@ LIVE_REPO = "/home/alansrobotlab/lloyd"
 CORPUS_DIR = "eval/measurements/injection-canary"
 CORPUS_PATHSPEC = CORPUS_DIR + "/"
 
-#: The unit that fires this step, quoted in the commit message so a reader of
-#: `git log` knows which job is speaking and does not look for an interactive author.
-UNIT_NAME = "lloyd-persistence-window.service"
+#: The TWO units allowed to drive this step, each mapped to the window kind its commit
+#: subject must name. One structure for both the guard and the message on purpose: a set
+#: that was widened without the message following it is the exact bug #2976 would otherwise
+#: ship — the egress `ExecStartPost` added by that item is refused by a single-name guard,
+#: and `commit_corpus` exits 0 on a refusal, so the unit would read green with no commit
+#: behind it; and a two-name guard with a hardcoded subject would file an egress fire under
+#: `persistence-arm window (auto-committed by lloyd-persistence-window.service)`, which is
+#: a wrong attribution of rows to a window that never wrote them. A unit that is not a key
+#: here is not authorized, so widening this dict is the only way to widen the guard.
+PERSISTENCE_UNIT = "lloyd-persistence-window.service"
+EGRESS_UNIT = "lloyd-egress-window.service"
+WINDOW_UNITS: dict[str, str] = {
+    PERSISTENCE_UNIT: "persistence-arm",
+    EGRESS_UNIT: "egress-arm",
+}
 ITEM = "2877"
 
 #: Where a process reads which unit it runs in. A parameter to `commit_corpus` so the
@@ -202,21 +240,32 @@ def cgroup_components(cgroup_file: str = PROC_CGROUP) -> list[str]:
     return []
 
 
-def runs_in_window_unit(cgroup_file: str = PROC_CGROUP) -> bool:
-    """Whether this process runs in the persistence-window unit's own cgroup.
+def authorized_unit(cgroup_file: str = PROC_CGROUP) -> str | None:
+    """Which window unit this process runs in, or None if it runs in neither.
 
-    systemd places every `Exec*=` process of a unit in that unit's cgroup, so the fire's
-    commit step carries a `lloyd-persistence-window.service` component and no other caller
-    on this machine does. Measured here: a live user unit's main process is
+    systemd places every `Exec*=` process of a unit in that unit's cgroup, so a window
+    fire's commit step carries its own unit's component and no other caller on this machine
+    does. Measured here: a live user unit's main process is
     `…/lloyd.slice/agent-supervisord.service` (`agent-supervisord.service`, PID 1695),
     while an agent Bash fork is `…/lloyd.slice/lloyd-bash-ceiling-15230-b609326e.scope` —
     a `.scope` that names no service at all.
 
-    Matched on a whole path component, not a substring, so a `lloyd-persistence-window.service.d`
-    drop-in directory or a scope that merely contains the name inside a longer string
+    Matched on a whole path component against a KEY of `WINDOW_UNITS`, never a substring, so
+    a `lloyd-persistence-window.service.d` or `lloyd-egress-window.service.d` drop-in
+    directory, or a scope that merely contains one of the names inside a longer string,
     cannot satisfy it — a `.d` directory is a real shape on this box and is not an
-    invocation of the unit."""
-    return UNIT_NAME in cgroup_components(cgroup_file)
+    invocation of the unit. This is the single source both the guard and the commit subject
+    read, so an accepted fire and a correctly-labelled fire cannot come apart."""
+    components = cgroup_components(cgroup_file)
+    for unit in WINDOW_UNITS:
+        if unit in components:
+            return unit
+    return None
+
+
+def runs_in_window_unit(cgroup_file: str = PROC_CGROUP) -> bool:
+    """Whether this process runs in one of the two window units' own cgroups."""
+    return authorized_unit(cgroup_file) is not None
 
 
 def invocation_refusal(env: dict[str, str] | None = None,
@@ -230,8 +279,9 @@ def invocation_refusal(env: dict[str, str] | None = None,
                 "invocation")
     if not runs_in_window_unit(cgroup_file):
         seen = "/" + "/".join(cgroup_components(cgroup_file))
-        return (f"not running in {UNIT_NAME}'s cgroup — /proc/self/cgroup reads "
-                f"{seen!r} — so this caller is not the window's own fire")
+        return (f"not running in either window unit's cgroup (a component "
+                f"{' or '.join(sorted(WINDOW_UNITS))}) — /proc/self/cgroup reads "
+                f"{seen!r} — so this caller is not a window's own fire")
     return None
 
 
@@ -274,8 +324,14 @@ def commit_corpus(repo: str = LIVE_REPO,
              f"{repo}, so this fire wrote no corpus rows or they were already recorded")
         return 0
 
-    message = (f"#{ITEM}: record the {today} persistence-arm window "
-               f"(auto-committed by {UNIT_NAME})")
+    # Non-None by construction: `invocation_refusal` returned None, and its second arm is
+    # exactly this lookup. Both halves of the subject come from that one component, which is
+    # what makes an egress fire's commit read `egress-arm window (auto-committed by
+    # lloyd-egress-window.service)` — see `WINDOW_UNITS`.
+    unit = authorized_unit(cgroup_file)
+    kind = WINDOW_UNITS[unit]
+    message = (f"#{ITEM}: record the {today} {kind} window "
+               f"(auto-committed by {unit})")
     committed = _git(repo, "commit", "--only", "-m", message, "--", CORPUS_PATHSPEC)
     if committed.returncode != 0:
         _log(f"refused: `git commit --only -- {CORPUS_PATHSPEC}` exited "
@@ -292,8 +348,9 @@ def commit_corpus(repo: str = LIVE_REPO,
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description=f"Commit the {CORPUS_PATHSPEC} corpus one "
-                    f"{UNIT_NAME} fire just wrote (#{ITEM}).")
+        description=f"Commit the {CORPUS_PATHSPEC} corpus a window fire just wrote "
+                    f"(#{ITEM}); authorized by a "
+                    f"{' or '.join(sorted(WINDOW_UNITS))} cgroup.")
     ap.add_argument("--repo", default=LIVE_REPO,
                     help=f"checkout to commit in (default: the live one, {LIVE_REPO})")
     ns = ap.parse_args(argv)
