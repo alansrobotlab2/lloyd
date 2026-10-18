@@ -59,7 +59,7 @@ import os
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -386,6 +386,154 @@ def test_a_dry_run_prints_the_answer_and_writes_nothing(tmp_path):
     assert len(would) == 1
     assert would[0]["path"] == ""
     assert _drafts(backlog) == []
+
+
+# ---------------------------------------------------------------------------
+# #2944 — the reproducer a draft prints is the command that flagged the run
+# ---------------------------------------------------------------------------
+
+
+def _recent(specs, *, days_ago: int = 2):
+    """Stamp a fixture corpus `days_ago` days back from now, so a windowed replay can see it.
+
+    Every other corpus in this file is stamped 2026-09-10, which falls outside a `--days 7`
+    window as soon as the calendar passes 2026-09-17 — and a `--days` token that filters every
+    run out of the replay flags nothing, so a test of a windowed reproducer has to move its own
+    history inside the window it is testing. Two days back is inside `--days 7` and still older
+    than `DEFAULT_GRACE_SECONDS` (6 h), so the deviation flags rather than sitting pending. The
+    trajectory stamp is machine-local wall clock on purpose: `load_traces` parses a naive
+    trajectory timestamp as local (`_parse_ts(..., assume_local=True)`), which is what a real
+    session JSONL row is."""
+    then = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    for spec in specs:
+        spec["started"] = then.isoformat(timespec="seconds")
+        spec["completed"] = (then + timedelta(minutes=12)).isoformat(timespec="seconds")
+        spec["timestamp"] = then.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+    return specs
+
+
+def _reproducer(text: str) -> str:
+    """The one line of a draft a window is allowed to change: the command in the fenced block.
+
+    Matched on the `python3` prefix, not on the module path: the body's opening paragraph names
+    `scripts/step_conformance.py replay` in prose too, and a matcher that collected that line as
+    well would make "exactly one reproducer" unassertable."""
+    lines = [ln for ln in text.splitlines() if "python3 scripts/step_conformance.py replay" in ln]
+    assert len(lines) == 1, f"expected exactly one reproducer line, got {lines}"
+    return lines[0]
+
+
+def test_a_draft_filed_by_a_seven_day_run_carries_that_window_as_its_reproducer(tmp_path):
+    """#2944 clause 1, across the process boundary the nightly filer actually crosses. Job 93
+    runs `replay --days 7 --support 1.0 --escalate-writes` — the command the clause-5
+    drift-witness nodes pin — so the draft it files has to send the adjudicator to that same
+    window. The body used to print a hardcoded `--days 14`, and a 14-day window is a different
+    judgement, not a wider one: over 14 days a step two other runs also skipped leaves the
+    expectation at strict support, so the printed command prints nothing about the run it was
+    filed for. That dead reproducer is recorded in draft 2705's own adjudication, and 12 of the
+    21 drafts filed inside the live 7-day window reproduce zero lines today."""
+    corpus, backlog = tmp_path / "corpus", tmp_path / "backlog"
+    base._write_corpus(corpus, _recent(_specs(6, faulty_at=5, missing="write")))
+    proc = _run_cli(corpus, backlog, "--escalate-writes", "--days", "7", "--support", "1.0")
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    assert "escalations_filed=1/1" in proc.stdout, proc.stdout[-2000:]
+    drafts = _drafts(backlog)
+    assert len(drafts) == 1, [p.name for p in drafts]
+    assert _reproducer(drafts[0].read_text(encoding="utf-8")) == (
+        "python3 scripts/step_conformance.py replay --days 7 --support 1.0"
+        " | grep -F 'run_ok_5'"
+    )
+
+
+def test_a_draft_filed_at_a_loosened_support_carries_that_support_not_the_default(tmp_path):
+    """#2944 clause 2. `--support` is not decoration: with `--days` it is what makes a step
+    expected, so a draft filed at 0.9 is a different claim from one filed at the 1.0 default,
+    and an adjudicator who re-runs the default re-runs a different detector. The value the
+    invocation passed has to reach the body, not the value `DEFAULT_SUPPORT` happens to hold."""
+    corpus, backlog = tmp_path / "corpus", tmp_path / "backlog"
+    base._write_corpus(corpus, _recent(_specs(6, faulty_at=5, missing="write")))
+    proc = _run_cli(corpus, backlog, "--escalate-writes", "--days", "7", "--support", "0.9")
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    assert "escalations_filed=1/1" in proc.stdout, proc.stdout[-2000:]
+    reproducer = _reproducer(_drafts(backlog)[0].read_text(encoding="utf-8"))
+    assert "--support 0.9" in reproducer, reproducer
+    assert "--support 1.0" not in reproducer, reproducer
+
+
+def test_a_draft_filed_over_whole_history_omits_the_days_token_and_keeps_the_support(tmp_path):
+    """#2944 clause 3, on the CLI's own default. `--days` is optional
+    (`common.add_argument("--days", type=int, default=None)`) and `None` means the whole history,
+    so the default invocation has to produce a command carrying no `--days` token at all:
+    `--days None` is an unrunnable command, which is the failure mode a naive render of the
+    value would ship. `--support` always has a value, so it is still named."""
+    corpus, backlog = tmp_path / "corpus", tmp_path / "backlog"
+    base._write_corpus(corpus, _specs(6, faulty_at=5, missing="write"))
+    proc = _run_cli(corpus, backlog, "--escalate-writes")
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    assert "escalations_filed=1/1" in proc.stdout, proc.stdout[-2000:]
+    reproducer = _reproducer(_drafts(backlog)[0].read_text(encoding="utf-8"))
+    assert "--days" not in reproducer, reproducer
+    assert "--support 1.0" in reproducer, reproducer
+    assert "grep -F 'run_ok_5'" in reproducer, reproducer
+
+
+@pytest.mark.parametrize("days", [None, 3, 7, 14, 30])
+def test_the_draft_never_prints_a_days_window_the_invocation_did_not_ask_for(tmp_path, days):
+    """#2944 clause 4, over every window the filer can be handed. The printed token is the
+    invoking replay's `days`, or no token when it passed none — so `--days 14` survives in a
+    draft only because somebody actually ran `--days 14`. That is why the 14 case asserts the
+    token IS printed: the fix carries the value, it does not delete the number. The whole-history
+    corpus here is stamped two days back so every one of these windows flags the same run,
+    otherwise a zero-window would be indistinguishable from a correct render."""
+    corpus, backlog = tmp_path / "corpus", tmp_path / "backlog"
+    result = _replay(corpus, _recent(_specs(6, faulty_at=5, missing="write")), days=days)
+    assert len(sc.escalation_targets(result)) == 1, (
+        f"days={days}: the corpus stopped flagging, so this asserts nothing about the render")
+    sc.file_escalations(result, backlog_dir=backlog)
+    reproducer = _reproducer(_drafts(backlog)[0].read_text(encoding="utf-8"))
+    if days is None:
+        assert "--days" not in reproducer, reproducer
+    else:
+        assert f"--days {days} --support" in reproducer, reproducer
+    assert ("--days 14" in reproducer) == (days == 14), reproducer
+    assert "--support 1.0" in reproducer, reproducer
+
+
+def test_the_window_changes_the_reproducer_line_and_nothing_else_in_the_body(tmp_path):
+    """#2944 clause 5. Two escalating runs of two tasks, filed at `--days 7 --support 1.0`: still
+    exactly one draft per run, both reproducers carry that window, and every field the body
+    carried before this change is still there verbatim — task id, session source, run id, session
+    key, run status, the offending step, the reason, `written_elsewhere`, and the `learned_from`
+    ids. Naming the whole field block is what pins "only the reproducer line changed": a body
+    that quietly dropped a field while gaining a flag would pass a test that only looked at the
+    command."""
+    corpus, backlog = tmp_path / "corpus", tmp_path / "backlog"
+    specs = _recent(_specs(6, faulty_at=5, missing="write"))
+    specs += _recent(_specs(6, faulty_at=2, missing="write",
+                           source="autonomy-task:8", prefix="run_other"))
+    result = _replay(corpus, specs, days=7, support=1.0)
+    assert len(_flagged(result)) == 2, [(r["task_id"], _steps(r)) for r in _flagged(result)]
+    filed = sc.file_escalations(result, backlog_dir=backlog)
+    assert len(filed) == 2, filed
+    drafts = _drafts(backlog)
+    assert len(drafts) == 2, [p.name for p in drafts]
+    for draft in drafts:
+        assert "--days 7 --support 1.0" in _reproducer(draft.read_text(encoding="utf-8"))
+    text = _drafts(backlog)[0].read_text(encoding="utf-8")
+    for line in (
+        "- task_id: 7",
+        "- session_source: autonomy-task:7",
+        "- run_id: run_ok_5",
+        "- session_key: 20260915_050050_autonomy_run_ok5",
+        "- run_status: success",
+        "- missing_step: write:report-latest.md",
+        f"- reason: {sc.REASON_MISSING}",
+        "- written_elsewhere: (none: no same-named write anywhere else in this run)",
+        "- learned_from_n: 5 of 6 baseline runs",
+        "- learned_from: run_ok_0, run_ok_1, run_ok_2, run_ok_3, run_ok_4",
+        "- run_completed_at: ",
+    ):
+        assert line in text, f"the body lost the field line {line!r}"
 
 
 # ---------------------------------------------------------------------------

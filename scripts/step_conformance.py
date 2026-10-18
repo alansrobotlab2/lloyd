@@ -1769,9 +1769,24 @@ def escalation_name(target: dict) -> str:
             f" never wrote {artifact}")
 
 
-def escalation_body(target: dict) -> str:
+def escalation_body(target: dict, *, days: int | None = None,
+                    support: float | None = None) -> str:
     """The draft's prose: every identifier needed to reproduce the judgement, and the reason it
-    is a candidate rather than a finding."""
+    is a candidate rather than a finding.
+
+    `days` and `support` are the window and the support of the replay that FLAGGED the run, and
+    the reproducer prints exactly those two flags and nothing it was not given (#2944). They are
+    what makes the printed command the same judgement the filer made rather than a similar one:
+    `support` decides whether a step is expected at all, and a wider `--days` adds baseline runs,
+    so at strict support a step two other runs also skipped leaves the expectation and the flag
+    vanishes. The line used to name a hardcoded two-week window while job 93 files from `--days 7
+    --support 1.0`, and 12 of the 21 drafts whose run is still inside the live 7-day window
+    reproduce zero lines under their own printed command — draft 2705's adjudication records
+    exactly that. `days` is None when the invocation passed no `--days` (the CLI default, which
+    means the whole history), so the token is omitted rather than rendered as the unrunnable
+    `--days None`; `support` always has a value, because the flag has a default."""
+    window = f" --days {days}" if days is not None else ""
+    floor = f" --support {support}" if support is not None else ""
     learned = ", ".join(target["learned_from"]) or "(none recorded)"
     return "\n".join([
         "The read-only step-conformance replay (`scripts/step_conformance.py replay`) flagged"
@@ -1807,7 +1822,8 @@ def escalation_body(target: dict) -> str:
         " and this item is what that flag writes):",
         "",
         "```",
-        f"python3 scripts/step_conformance.py replay --days 14 | grep -F {target['run_id']!r}",
+        f"python3 scripts/step_conformance.py replay{window}{floor}"
+        f" | grep -F {target['run_id']!r}",
         "```",
     ])
 
@@ -1838,7 +1854,10 @@ def file_escalations(result: dict, *, backlog_dir=None, dry_run: bool = False) -
             continue
         item = store.new_item(
             name,
-            escalation_body(target),
+            # The window and support of THIS result, so the draft's reproducer is the command
+            # that flagged the run and not one a reader gets zero lines from (#2944). `replay`
+            # reports both in its own result dict — the same pair `print_replay` prints.
+            escalation_body(target, days=result.get("days"), support=result.get("support")),
             priority="low",
             tags=(ESCALATION_TAG,),
             status=ESCALATION_STATUS,
