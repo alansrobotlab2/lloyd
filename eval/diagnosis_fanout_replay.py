@@ -639,20 +639,68 @@ def no_claims_message(slot: Any) -> str:
             "a prose conclusion is not evidence to rank")
 
 
-def turn_cap_message(slot: Any, num_turns: Any = None) -> str:
-    """The complaint for a theory the turn budget stopped, in its own wording.
+def turn_cap_message(slot: Any, num_turns: Any = None, *,
+                     subject: str | None = None) -> str:
+    """The complaint for a run the turn budget stopped, in its own wording.
 
     A separate wording is the point (#2807): `no_claims_message` says the model
     answered in prose, and reusing it on a truncated dispatch would put that
     sentence on a row whose model never got to answer. `num_turns` is the count
     the harness reported, so the row also says how far it got.
+
+    `subject` is who the sentence is about — ONE definition read twice (#2984).
+    Arm B's refusal row leaves it unset and keeps saying `theory 'c2'`; arm A's
+    no-claims raise passes its own investigator, because that arm has one
+    dispatch and no slots to name. A second truncation wording for the same
+    mechanism is the drift #2807 was written against: two sentences for one cause
+    is how a reader books a budget follow-up against the wrong arm.
     """
     reached = (f" at its {int(num_turns)}-turn budget"
                if isinstance(num_turns, (int, float)) else " at its turn budget")
-    return (f"theory {slot!r} ran out of turns{reached} — stop_reason "
+    who = f"theory {slot!r}" if subject is None else subject
+    return (f"{who} ran out of turns{reached} — stop_reason "
             f"{STOP_MAX_TURNS!r}: the harness cut the run off before any structured "
             "answer was restated, so this is truncation, not a theory that "
             "declined to cite")
+
+
+def arm_a_no_claims_complaint(arm: Any, case_key: Any, result: dict) -> str:
+    """Arm A's complaint for an answer with no cause, now naming its mechanism.
+
+    The base sentence is the one this arm has always raised: an empty
+    `chosen_cause` is worse than a wrong one, so the arm refuses the row rather
+    than fill one in from the case's own answer key. What it never said is WHY
+    there was nothing to record, and the two answers need opposite follow-ups — a
+    run the harness cut off at its turn budget wants a dispatch budget, a model
+    that finished and produced nothing wants a prompt. Both values were already in
+    `result`: `investigate_live` re-emits the pair (#2807) and arm B has read it
+    since, while arm A's message listed only the KEYS, printing the words
+    `stop_reason` and `num_turns` and telling the reader nothing — worse than
+    silence, because it shows the pair came back.
+
+    The pair is read exactly as arm B reads it: a falsy `stop_reason` is ABSENCE,
+    not a stop, and `num_turns` is a count only when the harness reported a number
+    ("absence is not evidence of a cap"). An investigator that reports neither —
+    the older single-shape fakes, or any wrapper that rebuilds the dict — gets the
+    complaint byte for byte as it did before, with nothing invented beside it.
+    """
+    base = (f"the investigator for case {case_key} returned no non-empty claim, so "
+            f"there is no cause to record and inventing one is the one thing this "
+            f"instrument must not do.")
+    stop_reason = result.get("stop_reason") or None
+    reported_turns = result.get("num_turns")
+    num_turns = (int(reported_turns)
+                 if isinstance(reported_turns, (int, float)) else None)
+    how = ""
+    if stop_reason == STOP_MAX_TURNS:
+        how = " " + turn_cap_message(
+            None, num_turns, subject=f"The investigator on arm {arm}") + "."
+    elif stop_reason:
+        turns = (f" and num_turns {num_turns}" if num_turns is not None
+                 else " with no turn count reported")
+        how = (f" It reported stop_reason {stop_reason!r}{turns}, so the run reached "
+               f"its stop and the model itself handed back nothing to record.")
+    return f"{base}{how} Keys it did return: {sorted(result)}."
 
 
 def validate_investigation(row: dict) -> list[dict]:
@@ -968,10 +1016,15 @@ async def run_case_a(case: dict, *, investigate: Callable[[dict, str], Awaitable
     chosen = next((str(c.get("claim") or "").strip() for c in claims
                    if str(c.get("claim") or "").strip()), "")
     if not chosen:
-        raise RuntimeError(
-            f"[2258] {arm}: the investigator for case {case_key} returned no non-empty "
-            f"claim, so there is no cause to record and inventing one is the one thing "
-            f"this instrument must not do. Keys it did return: {sorted(result)}.")
+        # Still a raise, and still BEFORE the writer is touched: the refused cell
+        # must leave no row, or `report` counts an unmeasured arm as a miss. What
+        # the message now does is say which of the two nothings happened, from the
+        # pair `investigate_live` already handed back (#2984) — `cmd_run`'s per-arm
+        # guard prints this text into the pass's `run.log`, which is the only place
+        # anyone ever reads it, and until now that log could not tell a truncated
+        # dispatch from an honest empty answer.
+        raise RuntimeError(f"[2258] {arm}: "
+                           f"{arm_a_no_claims_complaint(arm, case_key, result)}")
     writer.append({"seq": 1, "run_id": run_id, "case_key": case_key, "arm": arm,
                    "kind": "tool", "ts": _now(), "slot": None,
                    "tool": result.get("tool") or "linear-trace",

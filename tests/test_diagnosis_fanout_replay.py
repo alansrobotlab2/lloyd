@@ -1144,6 +1144,137 @@ def test_a_single_trace_arm_reads_the_older_shape_and_refuses_a_silent_answer(tm
         "counted into the denominator as though it had been measured")
 
 
+# ── #2984: arm A's no-claims raise names its mechanism ───────────────────────
+#
+# Arm B has said WHICH refusal it got since #2807 (`turn-cap` versus `no-claims`,
+# chosen from the `stop_reason`/`num_turns` pair `investigate_live` re-emits). Arm
+# A, wired to that same investigator by `cmd_run`, raised one message for both: a
+# run the harness cut off at its turn budget and a model that finished with nothing
+# to record printed the same line, and the only reader of that line is
+# `cmd_run`'s per-arm guard in the pass's `run.log`. The three nodes below pin the
+# raise's own TEXT for each of the three shapes an investigator can hand back —
+# capped, stopped, and reporting no stop at all.
+
+def test_a_turn_capped_arm_a_raises_the_truncation_message_with_its_turn_count(
+        tmp_path):
+    """Clause 1: `stop_reason='max_turns'` + `num_turns=40` says truncation, in words.
+
+    The message has to carry the pair AND the cause. `max_turns` alone would be a
+    bare value a reader has to interpret, and arm B's `no_claims_message` wording
+    — "handed back no claims", which means the model answered and declined to cite
+    — is the specific misreading #2807 put a separate sentence in for: putting it
+    on a truncated dispatch sends a prompt follow-up at a run that never got to
+    answer. So the truncation sentence is asserted present and the prose-declined
+    sentence absent, and the raise itself is unchanged: a `RuntimeError`, with the
+    base complaint still in it, and no row on disk.
+    """
+    case = _study_corpus()[1]
+    rows_path = tmp_path / "capped.jsonl"
+
+    async def capped(case_arg, theory):
+        return {"tool": "Task", "model": "primary", "tokens": 179_186,
+                "claims": [], "stop_reason": "max_turns", "num_turns": 40}
+
+    with pytest.raises(RuntimeError) as raised:
+        asyncio.run(run_case_a(case, investigate=capped,
+                               writer=RowWriter(rows_path), run_id="c2984cap"))
+    msg = str(raised.value)
+    assert "no non-empty claim" in msg, msg
+    assert "max_turns" in msg, msg
+    assert "40-turn budget" in msg and "40" in msg, msg
+    assert "harness cut the run off" in msg, msg
+    assert "handed back no claims" not in msg, (
+        f"the message reads {msg!r} — that is arm B's prose-declined wording, and "
+        "putting it on a truncated dispatch is the misreading #2807 forbids")
+    assert not (rows_path.exists() and rows_path.read_text().strip()), (
+        "the truncated cell left rows on disk; the raise still writes no verdict")
+
+
+def test_a_stopped_arm_a_reports_the_stop_and_no_turn_cap_wording(tmp_path):
+    """Clause 2: `stop_reason='stop'` + `num_turns=27` says the model came up empty.
+
+    The negative half is the point. Arm A's message is built from the same pair, so
+    a reader who has only `run.log` must be able to tell this dispatch from the
+    capped one above — hence no `max_turns`, no "turn budget", no "ran out of
+    turns", no "harness cut the run off", no word of truncation anywhere in a
+    message about a run that reached its stop. The two numbers the clause names are
+    asserted present so the message stays a measurement rather than a guess.
+    """
+    case = _study_corpus()[1]
+    rows_path = tmp_path / "stopped.jsonl"
+
+    async def stopped(case_arg, theory):
+        return {"tool": "Task", "model": "primary", "tokens": 100,
+                "claims": [], "stop_reason": "stop", "num_turns": 27}
+
+    with pytest.raises(RuntimeError) as raised:
+        asyncio.run(run_case_a(case, investigate=stopped,
+                               writer=RowWriter(rows_path), run_id="c2984stp"))
+    msg = str(raised.value)
+    assert "no non-empty claim" in msg, msg
+    assert "stop" in msg and "27" in msg, msg
+    assert "max_turns" not in msg, msg
+    for capped_wording in ("turn budget", "ran out of turns", "cut the run off",
+                           "truncat", "turn-cap"):
+        assert capped_wording not in msg.lower(), (
+            f"{capped_wording!r} appears in a message about a run that reached its "
+            f"stop: {msg!r}")
+    assert not (rows_path.exists() and rows_path.read_text().strip()), (
+        "the refused cell left rows on disk")
+
+
+def test_an_arm_a_investigator_reporting_no_stop_keeps_the_plain_complaint(tmp_path):
+    """Clause 3: no pair reported, no wording invented — and no error of its own.
+
+    Absence is not evidence of a cap (#2807), so an investigator that names neither
+    field gets the complaint exactly as it read before this item: the two fakes
+    above had to be written, the two fakes below always existed and always raised
+    `RuntimeError, match="no non-empty claim"`. What is new here is the shapes that
+    could make BUILDING the message fail — a `num_turns` that is not a number, a
+    cap with no count beside it — because a `TypeError` escaping the raise would
+    replace the complaint rather than improve it. `pytest.raises` is the pin: any
+    `KeyError`/`TypeError`/`ValueError` escapes it and fails the node.
+    """
+    case = _study_corpus()[1]
+    rows_path = tmp_path / "nostop.jsonl"
+
+    async def bare(case_arg, theory):
+        return {"tool": "Task", "tokens": 100, "claims": []}
+
+    with pytest.raises(RuntimeError, match="no non-empty claim") as raised:
+        asyncio.run(run_case_a(case, investigate=bare,
+                               writer=RowWriter(rows_path), run_id="c2984bare"))
+    msg = str(raised.value)
+    assert msg == (
+        f"[2258] A: the investigator for case {case['key']} returned no non-empty "
+        f"claim, so there is no cause to record and inventing one is the one thing "
+        f"this instrument must not do. Keys it did return: "
+        f"['claims', 'tokens', 'tool']."), msg
+
+    async def junk_turns(case_arg, theory):
+        return {"tool": "Task", "tokens": 100, "claims": [],
+                "stop_reason": "stop", "num_turns": "many"}
+
+    with pytest.raises(RuntimeError, match="no non-empty claim") as raised:
+        asyncio.run(run_case_a(case, investigate=junk_turns,
+                               writer=RowWriter(rows_path), run_id="c2984junk"))
+    assert "stop_reason 'stop'" in str(raised.value), str(raised.value)
+    assert "many" not in str(raised.value), (
+        "a non-numeric turn count was printed as though it were one")
+
+    async def capped_without_a_count(case_arg, theory):
+        return {"tool": "Task", "tokens": 100, "claims": [],
+                "stop_reason": "max_turns"}
+
+    with pytest.raises(RuntimeError, match="no non-empty claim") as raised:
+        asyncio.run(run_case_a(case, investigate=capped_without_a_count,
+                               writer=RowWriter(rows_path), run_id="c2984nocount"))
+    assert "at its turn budget" in str(raised.value), str(raised.value)
+    assert "None-turn" not in str(raised.value), str(raised.value)
+    assert not (rows_path.exists() and rows_path.read_text().strip()), (
+        "none of the three refusals may leave a row")
+
+
 # ── #2624: the live wiring's budgets ────────────────────────────────────────
 #
 # `investigate_live`'s 20-turn default and the 120,000 ceiling were read by
@@ -1909,7 +2040,7 @@ THEORY_SET = ["the flake", "the config", "the slot collision"]
 
 
 def _drive_pass(tmp_path, monkeypatch, capsys, *, arms, keys, fail_theory_set=False,
-                fail_case=None, fail_arm=None):
+                fail_case=None, fail_arm=None, fail_stop=None):
     """Run the real `cmd_run` over several cases with only its ENGINE calls replaced.
 
     The arm functions themselves are NOT stubbed: `run_case_a`, `run_case_b`,
@@ -1922,7 +2053,9 @@ def _drive_pass(tmp_path, monkeypatch, capsys, *, arms, keys, fail_theory_set=Fa
     validator: `fail_arm="B"` makes arm B generate a duplicate theory, so
     `validate_theories` raises `RecordError`; `fail_arm="A"` makes arm A's single
     trace return a claim with no text, which is the empty-cause `RuntimeError` at the
-    arm's own guard.
+    arm's own guard. `fail_stop=("max_turns", 40)` is that same arm A failure in the
+    shape the live investigator hands back (#2807): an EMPTY claim list carrying the
+    `stop_reason`/`num_turns` pair, which is what the raise's message is built from.
     """
     import argparse
 
@@ -1950,6 +2083,11 @@ def _drive_pass(tmp_path, monkeypatch, capsys, *, arms, keys, fail_theory_set=Fa
         slot = "single" if arm_a else slot_labels(case["key"])[THEORY_SET.index(theory)]
         calls.append((slot, case["key"]))
         if fail_arm == ARM_A and fail_case == case["key"] and arm_a:
+            if fail_stop is not None:
+                # The live truncated shape (#2807): no claims AT ALL, plus the pair
+                # `investigate_live` re-emits. The arm's guard still refuses.
+                return {"tool": "Task", "tokens": 100, "claims": [],
+                        "stop_reason": fail_stop[0], "num_turns": fail_stop[1]}
             # Non-empty list, citations present, but no claim TEXT: the validator
             # passes it and the arm's own guard refuses to record an empty cause.
             return {"tool": "Task", "tokens": 100,
@@ -2048,6 +2186,35 @@ def test_arm_as_no_cause_failure_also_lets_the_remaining_cases_run(tmp_path,
         "an arm that was not asked for wrote rows")
     assert f"FAILED {keys[0]} {ARM_A}" in out and "RuntimeError" in out
     assert code == 1
+
+
+def test_a_truncated_arm_a_reports_its_turn_cap_in_the_pass_log_and_still_exits_one(
+        tmp_path, monkeypatch, capsys):
+    """#2984 clause 4's last hop: the mechanism survives the guard into `run.log`.
+
+    This is the only place arm A's message is ever read — `cmd_run` prints
+    `FAILED <key> <arm>: RuntimeError: <message>` and `launch-pass.sh` redirects that
+    stdout to `2258/run.log`, which is the sole artefact of a ~23.6-engine-hour pass.
+    So the clause is not satisfied by a better string inside the raise: the truncated
+    dispatch has to be recognisable in the guard's own line, while the guard's
+    behaviour stays as #2623 left it — the case's arm B still records its verdict,
+    the failing arm records nothing, and the pass exits 1.
+    """
+    keys = ("flaky-SM_A_CAPPED", "flaky-SM_A_CAPPED_SURVIVOR")
+    code, calls, rows, out = _drive_pass(
+        tmp_path, monkeypatch, capsys, arms="A,B", keys=keys,
+        fail_arm=ARM_A, fail_case=keys[0], fail_stop=("max_turns", 40))
+    assert f"FAILED {keys[0]} {ARM_A}" in out, out
+    assert "RuntimeError" in out, out
+    assert "max_turns" in out and "40-turn budget" in out, (
+        f"the pass log line carries no mechanism: {out!r}")
+    assert "harness cut the run off" in out, out
+    assert code == 1, f"exit {code}; a pass that lost an arm exits non-zero"
+    assert not [r for r in rows if r["case_key"] == keys[0] and r["arm"] == ARM_A], (
+        "the truncated arm A wrote rows; the refusal still records no verdict")
+    assert [r for r in rows if r["kind"] == "verdict"
+            and r["case_key"] == keys[0] and r["arm"] == ARM_B], (
+        "arm A's truncation cancelled that same case's arm B")
 
 
 def test_a_pass_where_nothing_raises_still_exits_zero(tmp_path, monkeypatch, capsys):
