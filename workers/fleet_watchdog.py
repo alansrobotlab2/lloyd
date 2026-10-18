@@ -80,7 +80,9 @@ _STALL_ALERT_INTERVAL_SECONDS = 6 * 3600
 _STALL_NEXTRUN_TICKS = 5
 _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS = 24 * 3600
 #: How far past its OWN `next_run` an upstream may sit, with a `success` newest run
-#: record, before its lateness is a reason to name the chain: half an hour. #2695.
+#: record, before its lateness is a reason to name the chain: one hour. #2695 set the
+#: shape and the width it shipped with (30 min); #2950 widened the width to what its
+#: own measurement said.
 #:
 #: A completion is what moves `next_run` (`app/autonomy.py`, `next_run_gap`'s own
 #: docstring), so between an upstream's launch and its finish its stamp is behind by
@@ -99,16 +101,32 @@ _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS = 24 * 3600
 #: `test_a_dependent_three_hours_behind_a_failed_upstream_is_flagged`. Sibling in
 #: reasoning: `MISSING_ARTIFACT_GRACE_HOURS` (`grep -n '^MISSING_ARTIFACT_GRACE_HOURS'
 #: app/autonomy.py`) bounds a hold that no longer has a thing to wait for, the same
-#: shape of judgement on the dispatch side; and the width here is a first estimate,
-#: not a ruling — whether 30 min fits chains whose runs routinely exceed it is the
-#: owed measurement on #2695.
+#: shape of judgement on the dispatch side.
 #:
-#: One scan says so in the log per suppressed chain, unsuppressed by any cooldown:
-#: the window this closes is at most `_NEXTRUN_UPSTREAM_GRACE_HOURS` long, so the
-#: record cannot repeat the way the declared-park log could, and that log's 24 h slot
-#: is what keeps "nothing is late" and "everything late was parked" two sentences
-#: rather than this one's budget.
-_NEXTRUN_UPSTREAM_GRACE_HOURS = 0.5
+#: The width is a ruling, and a measured one — #2695's `ruling` field, executed here.
+#: Over 2026-10-14..10-17 the readings this grace actually suppressed ran 1…29 min
+#: (`grep -ho "sits [0-9]* min past its own" ~/lloyd-data/logs/server.err*` over the
+#: retained logs), so the 30 min it shipped with sat at 97% of its own tail and one
+#: slightly longer upstream run would have re-opened the alarm #2695 killed; #24's
+#: 28.8-min run at 2026-10-17T16:18Z is that same reading from the run side. One hour
+#: is 2x the worst measured run. The alternative #2695 weighed and REJECTED is deriving
+#: the grace as a fraction of the UPSTREAM's own interval, and it stays rejected for two
+#: reasons: an interval says nothing about run length — #24 is `daily` and its run was
+#: 28.8 min, so a fraction wide enough for it is nowhere near wide enough for an
+#: `every-15min` upstream, which is exactly where the nightly arithmetic #2695 closed
+#: lives — and a bound that moves with a schedule field cannot be read off the line this
+#: record prints, which is the only evidence a reader of `server.err` has. One fixed
+#: named constant, widened when a measurement says the tail moved, is the ruling.
+#:
+#: One scan says so in the log per suppressed chain, unsuppressed by any cooldown: the
+#: window this closes runs from zero to `_NEXTRUN_UPSTREAM_GRACE_HOURS`, so the record
+#: cannot repeat the way the declared-park log could, and that log's 24 h slot is what
+#: keeps "nothing is late" and "everything late was parked" two sentences rather than
+#: this one's budget. Its LOWER edge is #2950: an upstream whose own stamp is still in
+#: the future is not a late upstream being forgiven, and printing it as one is what put
+#: 3,556 lines reading `sits -167 min past its own next_run` for #98 -> #24 into four
+#: days of log.
+_NEXTRUN_UPSTREAM_GRACE_HOURS = 1.0
 #: Where the `next_run` alarm's last-reached-a-person instant is persisted: the
 #: queue's own watermark table, under this source, in the same row pattern the
 #: operator pause uses (`workers/pool.py:PAUSE_WM_SOURCE`). See
@@ -396,6 +414,16 @@ def _upstream_block(task: dict, gap: dict, resolution: list[dict], now) -> dict:
     which made `> 0` a line the fleet could not stop printing — six nights running,
     about a chain that completed minutes later each time.
 
+    The suppression RECORD that sits beside the verdict carries BOTH edges of that
+    threshold, and that is #2950: it is emitted only for
+    `0 < up_hours <= _NEXTRUN_UPSTREAM_GRACE_HOURS`, because what it prints asserts the
+    upstream is behind, while `not late_or_dead` is equally true of a negative
+    `up_hours` — a `daily` upstream whose own completion moved its stamp hours into the
+    future, which is the ordinary state of the fleet's most reliable chain and was the
+    3,556-line `sits -167 min` record. The VERDICT is not part of that change: an
+    upstream ahead of its own stamp has never named a chain, and the dependent's own
+    lateness stays the one-period bound's sentence.
+
     What the grace lets through is unchanged in kind: an early report here still
     means the upstream has not finished what the dependent is waiting on, either
     because its newest record says so or because it is late doing it. A `paused` or
@@ -435,7 +463,18 @@ def _upstream_block(task: dict, gap: dict, resolution: list[dict], now) -> dict:
     late_or_dead = (status != autonomy.RUN_STATUS_SUCCESS
                     or (up_hours is not None
                         and up_hours > _NEXTRUN_UPSTREAM_GRACE_HOURS))
-    if not late_or_dead and status == autonomy.RUN_STATUS_SUCCESS:
+    # Both edges of the grace, not just the upper one (#2950). The record below claims
+    # "the upstream IS past its own `next_run`, just not by enough to say so", and
+    # `not late_or_dead` alone does not establish the first half: the only lateness bound
+    # in this function is the DEPENDENT's (`hours_past` above), so the conjunction was
+    # true for every `up_hours <= 0` — a healthy upstream whose completion moved its
+    # stamp forward, still hours ahead of the tick. #98 -> #24 printed 3,556 of those
+    # between 2026-10-14 and 2026-10-17, each attributing a healthy hold to the grace.
+    # The VERDICT is unchanged by this: an upstream ahead of its own stamp never names a
+    # chain, and the dependent's own lateness stays the one-period bound's sentence.
+    if (status == autonomy.RUN_STATUS_SUCCESS
+            and up_hours is not None
+            and 0.0 < up_hours <= _NEXTRUN_UPSTREAM_GRACE_HOURS):
         # The grace is what closed the door: the upstream IS past its own `next_run`,
         # just not by enough to say so. One record names both ends of the chain and
         # the minutes, so a reader of the log can see the suppression and the size of
@@ -444,7 +483,7 @@ def _upstream_block(task: dict, gap: dict, resolution: list[dict], now) -> dict:
             "nextrun stall alarm did not name the chain #%s -> #%s: the upstream's "
             "newest run record is a success and it sits %.0f min past its own "
             "next_run, inside the %.1f h grace",
-            task.get("id"), up.get("id"), (up_hours or 0.0) * 60.0,
+            task.get("id"), up.get("id"), up_hours * 60.0,
             _NEXTRUN_UPSTREAM_GRACE_HOURS)
     return {
         "upstream_id": up.get("id"),

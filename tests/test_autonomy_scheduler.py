@@ -5674,22 +5674,43 @@ def test_a_failed_upstream_opens_the_door_at_minutes_of_lateness_too(
 
 def test_a_success_upstream_past_the_grace_still_names_its_chain(
         aut, monkeypatch, tmp_path):
-    """#2695 clause 3: past the grace, the nightly line is exactly the line it was.
+    """#2695 clause 3, widened by #2950: the bound is an hour, and both edges moved.
 
-    One number moves — #38's stamp goes from 4 min to 45 min behind, so it is late by
-    more than it is running — and everything else is the board above. The row must come
-    through #2417's door (`past_period` False, so the one-period bound did not move),
-    and the sentence must still carry the detail the suppressed case was stripped of:
-    `held: waiting on #38 (inside its 36 h stale_bypass window: #38 ran 23.9 h ago)`
-    plus the blocked-by clause, 0.8 h being what the alarm's one-decimal formatter says
-    of 45 minutes. A grace that suppressed this too would be the same alarm with a
-    longer fuse, and the genuinely-slipped night #2695's acceptance asks about would
-    never be reported at all.
+    One number moves — #38's stamp goes from 4 min to 75 min behind, so it is late by
+    more than it is running — and everything else is the board above. Seventy-five and
+    not the 45 this node carried: 45 min is inside the hour #2695's ruling decreed, and
+    the node that pins a bound has to sit outside it. The row must come through #2417's
+    door (`past_period` False, so the one-period bound did not move), and the sentence
+    must still carry the detail the suppressed case was stripped of: `held: waiting on
+    #38 (inside its 36 h stale_bypass window: #38 ran 23.9 h ago)` plus the blocked-by
+    clause, 1.2 h being what the alarm's one-decimal formatter says of 75 minutes. A
+    grace that suppressed this too would be the same alarm with a longer fuse, and the
+    genuinely-slipped night #2695's acceptance asks about would never be reported at all.
+
+    The reading below it is the pin that the constant moved rather than drifted: 45 min,
+    the figure this node used to stand on, is now the grace's own territory —
+    `late_or_dead` False on the same board — and neither number means anything unless
+    `_NEXTRUN_UPSTREAM_GRACE_HOURS` is the 1.0 #2695's ruling set it to, so that is
+    asserted before either reading is taken.
     """
+    assert fw._NEXTRUN_UPSTREAM_GRACE_HOURS == 1.0, (
+        "the two fixtures below are chosen against a one-hour bound; at any other width "
+        "they are grading an arithmetic this file no longer contains: "
+        f"{fw._NEXTRUN_UPSTREAM_GRACE_HOURS!r}")
+
     _mid_flight_chain(aut, up_minutes_past=45)
+    graced = _chain_door(aut, monkeypatch)
+    assert (graced["late_or_dead"], graced["upstream_status"]) == (False, "success"), (
+        "45 minutes past a `success` upstream's own next_run still opened the door, so "
+        f"the bound is not the hour the constant claims: {graced!r}")
+    assert 0.74 <= graced["upstream_hours_past"] <= 0.76, (
+        f"the reading inside the widened grace is not 45 min: "
+        f"{graced['upstream_hours_past']!r}")
+
+    _mid_flight_chain(aut, up_minutes_past=75)
     blocked = _chain_door(aut, monkeypatch)
     assert blocked["late_or_dead"] is True and blocked["upstream_status"] == "success", (
-        "45 minutes past a `success` upstream's own next_run did not open the door: "
+        "75 minutes past a `success` upstream's own next_run did not open the door: "
         f"{blocked!r}")
 
     flagged = _chain_flagged(aut, tmp_path)
@@ -5699,7 +5720,7 @@ def test_a_success_upstream_past_the_grace_still_names_its_chain(
     assert fw._stall_line(flagged[42]) == (
         "#42 (task42) is 0.1h past its next_run — held: waiting on #38 (inside its "
         "36 h stale_bypass window: #38 ran 23.9 h ago), blocked-by #38, which is "
-        "0.8h past its own next_run"
+        "1.2h past its own next_run"
     ), f"the genuine hold is not the line it was: {fw._stall_line(flagged[42])!r}"
     msg = fw._nextrun_alert_message(list(flagged.values()))
     assert "less than one period" in msg, (

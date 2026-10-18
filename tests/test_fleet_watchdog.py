@@ -712,6 +712,72 @@ async def test_a_row_the_grace_suppressed_is_logged_once_and_posts_nothing(
         f"the suppression is not at the level the route precedent uses: {said!r}")
 
 
+async def test_a_success_upstream_whose_stamp_is_still_ahead_logs_no_suppression(
+        board, monkeypatch, tmp_path, caplog):
+    """#2950 clause 1: an upstream ahead of its own `next_run` is not inside a grace.
+
+    The record above says "the upstream IS past its own `next_run`, just not by enough
+    to name the chain". A stamp still in the FUTURE is the opposite fact, and the gate
+    on that record never tested it: `not late_or_dead` is true for every `up_hours <= 0`
+    too, because the only bound on lateness in this function is the DEPENDENT's. So the
+    live board of #98 -> #24 — #24 `daily`, its stamp ~2.5 h ahead once its own
+    completion moved it forward — printed 3,556 records between 2026-10-14 and 2026-10-17
+    reading `it sits -167 min past its own next_run, inside the 0.5 h grace`, each one
+    attributing a healthy hold to a grace that had nothing to do with it.
+
+    #38 here is that upstream: `daily`, `last_run` 21 h ago, so its `next_run` is 3 h in
+    the future, newest run record a `success`. #42 is the shape that gets the door
+    consulted at all — `daily`, `depends_on: 38`, `stale_bypass_hours: 36`, six minutes
+    behind its own stamp, nowhere near the one-period bound. The verdict must stay
+    `late_or_dead: False` (clause 1 moves the record, not the door), and
+    `upstream_hours_past` must come back NEGATIVE, which is the datum the record
+    misread. Then the tick, seeded one alert away, posts nothing and — the assertion the
+    3,556 lines are the premise for — emits no `did not name the chain` record at all.
+    """
+    import logging
+
+    write_task(board, 38, frequency="daily",
+               last_run=_ago(hours=21), next_run=_ago(hours=-3))   # negative age: 3 h ahead
+    _run_record(38, "run_38_20261017_050812", completed_at=_ago(hours=21))
+    write_task(board, 42, frequency="daily", depends_on=38, stale_bypass_hours=36,
+               last_run=_ago(hours=23, minutes=30), next_run=_ago(minutes=6))
+    q = WorkQueue(tmp_path / "future-stamp.db")
+
+    dep = autonomy._parse_task_file(autonomy._find_task_file(42))
+    blocked = fw._upstream_block(dep, autonomy.next_run_gap(dep),
+                                 autonomy.dependency_resolution_set(),
+                                 dt.datetime.now(dt.timezone.utc))
+    assert (blocked["upstream_status"], blocked["late_or_dead"]) == ("success", False), (
+        "the door did not close on the future-stamped upstream, so the silence below is "
+        f"not this clause answering: {blocked!r}")
+    assert (blocked["upstream_hours_past"] is not None
+            and blocked["upstream_hours_past"] < 0), (
+        "the fixture's upstream is not ahead of the tick, so this board holds nothing for "
+        f"the bound to reject: {blocked!r}")
+
+    _streak_at_alerting_threshold(monkeypatch, stall_streak=0,
+                                  nextrun_streak=fw._STALL_NEXTRUN_TICKS - 1)
+    alerts = _watch_alerts(monkeypatch)
+    assert fw._last_alert_instant(q, fw._NEXTRUN_WM_KEY, "next_run") is None, (
+        "the cooldown slot was already spent by another test's tick, so `no alert` "
+        "below would not distinguish the grace from a cooldown")
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=fw.logger.name):
+        await fw.tick(q)
+
+    said = [r.getMessage() for r in caplog.records
+            if "did not name the chain" in r.getMessage()]
+    assert said == [], (
+        "a `success` upstream whose own `next_run` is still in the future was logged as "
+        f"suppressed by the grace — the negative-minute record #2950 is about: {said}")
+    assert alerts == [], (
+        f"the tick posted an alert for a chain held by a healthy upstream: {alerts}")
+    assert fw._last_alert_instant(q, fw._NEXTRUN_WM_KEY, "next_run") is None, (
+        "the future-stamped row spent the 24 h alert slot, which is the night a genuinely "
+        "slipped chain goes unreported")
+
+
 async def test_the_parse_scan_keeps_its_30_minute_cadence(
         board, monkeypatch, tmp_path):
     """Clause 4, third reader: the scan still scans on its 30 min slot, not per tick.
