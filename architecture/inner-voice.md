@@ -2,7 +2,7 @@
 title: Inner Voice — Architecture
 status: implemented
 created: 2026-05-02
-updated: 2026-09-24
+updated: 2026-10-18
 related:
   - ~/obsidian/knowledge/software/lloyd-inner-voice-history-to-v5.4-2026-09-24.md
   - architecture/harness.md
@@ -58,7 +58,7 @@ second call fills in what the first did not know. Installed at:
 | path | where |
 |---|---|
 | chat: stream, ambient, voice | `app/routers/messages.py::_run_turn` (all three routes pass through it) |
-| chat: sync route | `app/routers/messages.py` beside the safety hook |
+| chat: the other turn kinds | the sync `POST /api/message` that used to install beside the safety hook was **deleted** (P13.6, 2026-09-24); all four chat turn kinds are now built once in `app/routers/turn_options.py::build_turn_options`, and the model turns among them get their guards from `_run_turn` |
 | direct worker turns | `workers/sources/_common.py::_worker_run_options` |
 | scheduled tasks | `app/autonomy.py::run_task` |
 | `Task` subagents | `agent_mcp/builtin_task.py`, after the skill deliverer and grant gate |
@@ -127,6 +127,12 @@ Tool output that reaches a prompt is framed `<untrusted_tool_output>` and the
 prompt states the rule (`UNTRUSTED_RULE`): it can carry instructions; they are
 not addressed to the observer.
 
+And a flagged session contributes nothing at all: when `app/thinking_fidelity.py`
+flags a session's recorded reasoning as describing a request that was never
+made, that session yields no messages to the review summary or to the IV
+graders (#1656, 2026-09-27). `app/inner_voice/session_input.py` is the one
+place that decides, for both the observer and the `iv_*` scripts.
+
 ### Three levers
 
 `app/inner_voice/lever_tools.py`: `noop`, `inject`, `cancel`, forced with
@@ -177,7 +183,11 @@ edit lands at once, so a prompt change that assumes new code ships with it.
 
 ## 3. The measurement loop
 
-- **On/off A/B** (`app/inner_voice/ab.py`, `inner_voice.ab`, ships off). A new
+- **On/off A/B** (`app/inner_voice/ab.py`, `inner_voice.ab`; the code default
+  is off and the window is the switch — the shipped config armed the first
+  experiment `iv-chat-1` at `fraction_on: 0.5` over `[2026-09-25, 2026-10-09)`,
+  a window now closed whose reading by `iv_ab_report` is still owed — #2963).
+  A new
   chat created inside `[start, end)` is assigned an arm by
   `sha256(name:session_id)` against `fraction_on`, at file creation in
   `sessions_io._save_session_meta`, as the same `inner_voice` /
@@ -204,8 +214,16 @@ edit lands at once, so a prompt change that assumes new code ships with it.
 - **Weekly outcome score**: `scripts/iv_metrics_record.py` attaches
   `outcome_score` (a child `iv_outcome_score.py --json` over 7 days) to the
   nightly metrics row once a week. The scorer leaves out the six test-suite
-  sessions (`TEST_SESSION_IDS`) whose logs hold 580 of the 583
-  `observer_injected` events on disk.
+  sessions (`TEST_SESSION_IDS`), whose logs held 580 of the then 583
+  `observer_injected` events on disk when the scorer shipped; the same 580 sit
+  inside 11,386 total events as of 2026-10-18 — real traffic dominates now, and
+  the exclusion is about test fixtures, not volume (#2964 covers the same
+  re-dating for the script's own comment).
+- The nightly `iv-metrics.jsonl` is mirrored into
+  `~/obsidian/knowledge/inner-voice/` by `scripts/iv_metrics_mirror.py` (#2121,
+  2026-10-03): the vault copy is the only committed one, and a bare `cp` once
+  shrank it by 10 rows during the data-root cutover, so the mirror refuses a
+  shrink rather than copy.
 - `scripts/iv_grade.py` is unchanged — proxies, and it says so.
 
 ## Persistence
@@ -227,7 +245,9 @@ Event log: `inner_voice.observer_injected` (with `deterministic`, `guard`),
 - `GET /api/inner_voice/observations?session_id=&turn_id=&limit=`
 - `POST /api/inner_voice/observations/{id}/verdict` `{"verdict": "up"|"down"|null}`
 - `GET /api/inner_voice/state?session_id=` — flags, `ab_arm`, counts, latest goal card
-- `GET /api/inner_voice/events` — the session event log
+- `GET /api/inner_voice/event_log` — the session event log (`/api/inner_voice/sessions`
+  lists the sessions that have one; oversized payloads spill to
+  `/api/inner_voice/event_log/blob/{sha}`)
 
 ## Retired (IV plan R5)
 
@@ -286,3 +306,13 @@ observer, one through the real loop), `tests/test_iv_one_review.py` (R2/R4),
 `tests/integration/test_iv_*`, `tests/integration/test_observer.py`. After R2
 the nightly series should show `input_tokens_per_turn` and
 `observer_ms_per_turn` falling (predicted ~15–20k tokens a turn against ~62k).
+
+## Review log
+
+- 2026-10-18: stale — the sync-route install row names a route deleted by
+  P13.6 (`build_turn_options` is the single builder now);
+  `/api/inner_voice/events` corrected to `/event_log`; the A/B "ships off"
+  line records the armed `iv-chat-1` window `[2026-09-25, 2026-10-09)` now
+  closed with its reading owed (#2963); the test-session exclusion re-dated
+  (#2964); added the `session_input` fabricated-thinking exclusion (#1656)
+  and the vault metrics mirror (#2121).
