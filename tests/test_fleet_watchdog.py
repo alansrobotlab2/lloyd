@@ -2787,3 +2787,276 @@ async def test_the_floor_leg_reaches_a_person_from_the_watch_seat_on_a_ratio_bli
     assert not q.list_items(source="scheduled-task", limit=50), (
         "a source disabled in config enqueued work, so the line above could have come "
         "from dispatch rather than from the watchdog seat")
+
+
+# ── #2956: the same line, readable against the host's own clock ──────────────
+# The defect here is in a READING, not in a rule. The 2026-10-17 census fired the
+# FLOOR leg on 45 failed runs: 43 of them sat inside one ~29-minute window that
+# straddled both the UTC midnight boundary and the instant the host came up
+# (`uptime -s` = 2026-10-16 17:26 PDT = 2026-10-17T00:26Z), and the other 2 fell in
+# the ~23 hours left over. "45 failed runs on UTC 2026-10-17" is a true sentence
+# about that day and an incident-shaped one, and nothing on the line said the pool
+# had been quiet since the machine came up — a recovery day read as a fresh event.
+# What these nodes pin is the number that fixes it: the same day's failures counted
+# again from the host boot instant, with the instant and a per-15-minute rate beside
+# the day count. Nothing here moves a threshold or adds a leg: the floor stays at 40
+# (`test_the_floor_leg_posts_on_a_40_versus_20_day_the_ratio_leg_is_blind_to` pins
+# the constant), the ratio stays at 10, and no rule reads the new figure.
+#
+# Every node holds the clock still TWICE over, because two clocks are in the reading:
+# `_host_boot_instant` is monkeypatched to a fixed instant (it is the census's only
+# route to the host clock, and `/proc/uptime` moves every tick by construction), and
+# `_throughput_census` is handed `now`, so `minutes_since_boot` is arithmetic the node
+# writes as a literal rather than a figure that drifts with the wall clock — and the
+# day gate cannot roll over under it at midnight.
+
+#: Five minutes into TODAY UTC — the clock these nodes read instead of the real one.
+#: `_THROUGHPUT_DAY` is then the newest COMPLETE day and `_THROUGHPUT_PREV` its
+#: adjacent predecessor, which is exactly the pair the seeding below writes.
+_THROUGHPUT_NOW = dt.datetime.combine(
+    dt.datetime.now(dt.timezone.utc).date(), dt.time(0, 5), tzinfo=dt.timezone.utc)
+#: The boot instant they pin: 06:00Z on the counted day, so that day's rows split 33
+#: before it and 12 at-or-after it, the shape the live day had on its own boot.
+_THROUGHPUT_BOOT = dt.datetime.fromisoformat(f"{_THROUGHPUT_DAY}T06:00:00+00:00")
+
+
+def _boot_pinned(monkeypatch, boot=_THROUGHPUT_BOOT) -> None:
+    """Hold the ONE boot route the census has, still, at `boot`.
+
+    The instant moves every tick by construction, so a node that asserted a count
+    over the real one could not write its own expected value down. Overriding this
+    function is the whole of the fixture because the census reaches the host clock
+    through it and through nothing else.
+    """
+    monkeypatch.setattr(fw, "_host_boot_instant", lambda: boot)
+
+
+def _boot_split_rows(day=_THROUGHPUT_DAY):
+    """45 failures on `day`: 33 before 06:00Z, 10 in 06:00–06:10Z, 2 at 20:00Z.
+
+    2026-10-17's shape at fixture size — a pre-boot cluster, a burst beside the boot
+    instant, two ordinary failures hours later — with the first burst row stamped
+    EXACTLY at the boot instant so the "at or after" edge is exercised and not
+    assumed. Two real classes plus an unclassified remainder, because the tallies the
+    line already carries have to survive the new clause.
+    """
+    return ([(day, "run failed: no structured answer", f"00:{n:02d}")
+             for n in range(33)]
+            + [(day, "ConnectError: all connection attempts failed", f"06:{n:02d}")
+               for n in range(10)]
+            + [(day, "unclassified thing happened", "20:00")] * 2)
+
+
+def test_the_boot_helper_reads_the_uptime_file_and_says_nothing_when_it_is_absent(
+        monkeypatch, tmp_path):
+    """The helper every node below overrides, tested at the helper itself.
+
+    A node that only ever patches this function would leave the real read unpinned,
+    and the real read is the mechanism: `/proc/uptime`'s first field is seconds since
+    boot, so boot is `now - uptime`. The 45-minute-old-host case is the one that
+    matters for the rate, so the returned instant is checked against the seeded 3600 s
+    rather than against a second reading of the same file. Two failure shapes return
+    None rather than raising, because the census that calls this runs on the pool's
+    scheduler tick beside two stall alarms: garbage in the file, and no file at all
+    (which is every non-Linux box this could run on).
+    """
+    fake = tmp_path / "uptime"
+    fake.write_text("3600.5 7200.0\n", encoding="utf-8")
+    monkeypatch.setattr(fw, "_PROC_UPTIME_PATH", str(fake))
+    boot = fw._host_boot_instant()
+    assert boot is not None, "a readable /proc/uptime yielded no instant"
+    elapsed = (dt.datetime.now(dt.timezone.utc) - boot).total_seconds()
+    assert 3599.0 <= elapsed <= 3602.0, (
+        f"{fake} said the host has been up 3600.5 s and the helper returned {boot}, "
+        f"{elapsed} s ago; boot is `now - uptime`, not any other reading")
+    assert boot.utcoffset() == dt.timedelta(0), (
+        f"the boot instant has to be UTC to sit beside `runs.started_at`, and "
+        f"{boot} is not")
+
+    fake.write_text("not a number\n", encoding="utf-8")
+    assert fw._host_boot_instant() is None, (
+        "an unparseable uptime file raised or guessed instead of yielding no instant")
+    monkeypatch.setattr(fw, "_PROC_UPTIME_PATH", str(tmp_path / "absent"))
+    assert fw._host_boot_instant() is None, (
+        "an absent uptime file (a non-Linux box) raised instead of yielding no "
+        "instant, which would take the throughput census down with it")
+
+    # No fork per minute: the census is on a 60 s tick, and `uptime -s` is a subprocess
+    # per call. Pinned structurally because a slow line is invisible to every other
+    # assertion in this file.
+    boot_names = set(fw._host_boot_instant.__code__.co_names)
+    assert not (boot_names & {"Popen", "popen", "check_output", "subprocess", "system"}), (
+        f"_host_boot_instant reaches the host clock through a subprocess "
+        f"({sorted(boot_names & {'Popen', 'popen', 'check_output', 'subprocess', 'system'})}), "
+        "which forks on every surveillance tick; the item's finding is to read the file")
+
+
+def test_the_census_counts_the_day_and_the_failures_since_the_host_booted(
+        monkeypatch, tmp_path):
+    """Clause 1: one reading, four numbers — 45 on the day, 12 of them since boot.
+
+    The seeded day is `_boot_split_rows()`: 33 failures before the pinned 06:00Z boot,
+    10 inside 06:00–06:10Z, 2 at 20:00Z, so the since-boot count is 12 and the day
+    count stays 45. 20 on the predecessor keeps the pair at 2.25x, so the ONLY thing
+    that can produce a verdict is the floor leg, exactly as on the day this came from.
+    `minutes_since_boot` is 1085 because the pinned clock is 00:05Z today and the
+    pinned boot is 06:00Z yesterday: 18 h 5 min.
+    """
+    _boot_pinned(monkeypatch)
+    q = _throughput_queue(tmp_path / "since-boot.db",
+                          _boot_split_rows() + _throughput_rows(_THROUGHPUT_PREV, 20))
+    census = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    assert census is not None, (
+        "45 failed against 20 trips the pinned floor of 40, so the census said "
+        "nothing and there would be no reading to report")
+    assert census["day"] == _THROUGHPUT_DAY and census["newer"] == 45, (
+        f"the day count the line already prints changed: {census['day']} / "
+        f"{census['newer']} — #2956 adds a number, it does not move this one")
+    assert census["boot"] == _THROUGHPUT_BOOT, (
+        f"the census did not report the host boot instant the helper returned: "
+        f"{census['boot']!r} against {_THROUGHPUT_BOOT!r}")
+    assert census["since_boot"] == 12, (
+        "33 of the seeded 45 failures start before the pinned boot instant, so the "
+        f"count at-or-after it must be 12 (the 10:00-window burst plus the two at "
+        f"20:00Z), not {census['since_boot']} — the burst row stamped exactly at "
+        "06:00:00 has to count, that is the boot ramp")
+    assert census["minutes_since_boot"] == 1085, (
+        f"06:00Z yesterday to 00:05Z today is 18 h 5 min = 1085 whole minutes, and "
+        f"the census reported {census['minutes_since_boot']}; the rate's denominator "
+        "is this number floored at 15")
+
+
+def test_the_throughput_line_prints_the_day_count_and_the_since_boot_reading(
+        monkeypatch, tmp_path):
+    """Clause 2: the line carries the new numbers and loses nothing it printed before.
+
+    Same census as clause 1, rendered. The since-boot figure is `12 of them`, not a
+    replacement count: the day count is what both rules weighed and what the owed
+    re-pricing of the floor counts (#2899 owed 1), so a line that swapped one number
+    for the other would close the very measurement the floor is waiting on. The rate
+    is 12 x 15 / 1085 = 0.1659 -> `0.17 / 15 min`, printed beside the 1085 minutes it
+    was divided by and the boot instant in ISO UTC, so a reader can see how long a
+    window the rate describes. The fired-rule parenthetical, the class tallies and the
+    `failures span …Z to …Z` bounds are what made the 2026-10-16 line triageable
+    (#2890, #2899), so they are asserted here rather than assumed to survive.
+    """
+    _boot_pinned(monkeypatch)
+    q = _throughput_queue(tmp_path / "line.db",
+                          _boot_split_rows() + _throughput_rows(_THROUGHPUT_PREV, 20))
+    census = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    assert census is not None and census["since_boot"] == 12, (
+        "this node asserts against a literal rendered from the census clause 1 "
+        f"describes, and got a different reading: {census}")
+    line = fw._throughput_alert_message(census)
+
+    assert "45 failed runs on UTC" in line, line
+    assert f"against 20 on UTC {_THROUGHPUT_PREV}" in line, line
+    assert "12 of them since host boot" in line, (
+        f"the line carries no since-boot count beside the day count: {line}")
+    assert f"since host boot {_THROUGHPUT_BOOT.isoformat()} " in line, (
+        f"the since-boot count names no boot instant, or not in ISO UTC — a reader "
+        f"cannot tell a 10-minute-old window from a day-old one without it: {line}")
+    assert "= 0.17 / 15 min" in line, (
+        f"12 failures over 1085 min since boot is 12*15/1085 = 0.1659 per 15 min, so "
+        f"the line prints a different rate or none: {line}")
+    assert "(1085 min since boot)" in line, (
+        f"the rate does not say how wide its own window was: {line}")
+
+    assert "floor rule: >= 40" in line, (
+        f"the fired-rule parenthetical is gone or wrong: {line}")
+    assert "10x rule" not in line, (
+        f"45 against 20 is 2.25x, so the ratio leg did not fire and must not be "
+        f"printed as the trigger: {line}")
+    assert "classes:" in line and "no structured answer 33" in line, line
+    assert "connect error 10" in line and "other 2" in line, line
+    assert f"failures span {_THROUGHPUT_DAY}T" in line and "Z to " in line, (
+        f"the day's own failure bounds were dropped to make room for the new "
+        f"clause: {line}")
+    assert "America/Los_Angeles" in line, (
+        f"the clock sentence went missing: {line}")
+
+
+def test_the_since_boot_rate_window_is_floored_at_fifteen_minutes(monkeypatch, tmp_path):
+    """Clause 3: 3 failures in the 5 minutes since boot print 3 / 15 min, never 9.
+
+    The window here is genuinely five minutes: boot is pinned to 23:57Z on the counted
+    day and the clock to 00:02Z the next, so the census is reading a machine that came
+    up five minutes ago — the first minutes after a reboot, when the pool's backlog
+    and its connection errors all land at once. Dividing by the elapsed minutes would
+    print 3 x 15 / 5 = `9.00 / 15 min`, a figure that describes how recently the
+    machine was switched on and reads louder than the incident the alarm exists to
+    catch. The denominator is `max(minutes_since_boot, 15)`, so the rate is 3 x 15 / 15
+    = `3.00`, and the parenthetical still says `(5 min since boot)` because the
+    narrowness of the window is the reader's business too.
+    """
+    boot = dt.datetime.fromisoformat(f"{_THROUGHPUT_DAY}T23:57:00+00:00")
+    now = dt.datetime.combine(dt.datetime.now(dt.timezone.utc).date(),
+                              dt.time(0, 2), tzinfo=dt.timezone.utc)
+    _boot_pinned(monkeypatch, boot)
+    pairs = (_throughput_rows(_THROUGHPUT_DAY, 40)
+             + [(_THROUGHPUT_DAY, "run failed: no structured answer", "23:58")] * 2
+             + [(_THROUGHPUT_DAY, "ConnectError: all connection attempts failed",
+                 "23:59")]
+             + _throughput_rows(_THROUGHPUT_PREV, 20))
+    q = _throughput_queue(tmp_path / "ramp.db", pairs)
+    census = fw._throughput_census(q, now=now)
+    assert census is not None, (
+        "40 pre-boot failures plus 3 in the boot ramp is 43, over the pinned floor of "
+        "40, so this day has to reach a line")
+    assert census["since_boot"] == 3 and census["minutes_since_boot"] == 5, (
+        f"the window under test is 3 failures in 5 minutes; the census read "
+        f"{census['since_boot']} in {census['minutes_since_boot']}")
+    line = fw._throughput_alert_message(census)
+    assert "= 3.00 / 15 min" in line, (
+        f"3 failures with a 5-minute window must be divided by the 15-minute floor: "
+        f"{line}")
+    assert "9.00" not in line, (
+        f"the rate divided by the raw 5-minute window, which is the artefact the "
+        f"floor exists to stop: {line}")
+    assert "(5 min since boot)" in line, (
+        f"the line hid how narrow its window was: {line}")
+
+
+async def test_the_line_keeps_its_old_shape_when_the_host_will_not_give_a_boot_instant(
+        board, monkeypatch, tmp_path):
+    """Clause 4: no instant, no rate — and the alarm still posts what it always posted.
+
+    `None` is the helper's real answer wherever `/proc/uptime` is unreadable, so this
+    is not a hypothetical branch: the census has to be as informative as it was before
+    #2956 and not one bit more inventive. The census is called directly first, because
+    "nothing raises past `_throughput_census`" is only witnessed at the census; then
+    through `tick`, because the same shape has to still REACH a person — a census that
+    returned None on a missing boot anchor would silence the alarm entirely, which is a
+    worse failure than the unreadable line it was meant to improve. The printed line is
+    then checked for the absence of the new clause and the presence of everything the
+    old line had: a rate measured from no anchor is the invention this defect was.
+    """
+    _unsuppressed_census(monkeypatch)
+    monkeypatch.setattr(fw, "_host_boot_instant", lambda: None)
+    q = _throughput_queue(tmp_path / "no-boot.db",
+                          _boot_split_rows() + _throughput_rows(_THROUGHPUT_PREV, 20))
+    census = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    assert census is not None, (
+        "a day over the floor stopped triggering just because the host would not say "
+        "when it booted")
+    assert census["boot"] is None and census["since_boot"] is None \
+        and census["minutes_since_boot"] is None, (
+        f"the census invented a boot figure out of a missing anchor: {census}")
+
+    alerts = _watch_alerts(monkeypatch)
+    await fw.tick(q)                        # nothing raises past the census
+    assert len(alerts) == 1, (
+        f"the census posts on a triggered day only when it knows the boot instant: "
+        f"{alerts}")
+    line = alerts[0]
+    assert "since host boot" not in line, (
+        f"the line names a boot instant the census does not have: {line}")
+    assert "/ 15 min" not in line, (
+        f"the line printed a rate with no window to compute it from: {line}")
+    assert "45 failed runs on UTC" in line, line
+    assert f"against 20 on UTC {_THROUGHPUT_PREV}" in line, line
+    assert "floor rule: >= 40" in line, line
+    assert "classes:" in line and "no structured answer 33" in line, line
+    assert "other 2" in line, line
+    assert f"failures span {_THROUGHPUT_DAY}T" in line and "Z to " in line, line
+    assert "America/Los_Angeles" in line, line

@@ -208,6 +208,23 @@ _THROUGHPUT_CLASSES: tuple[tuple[str, str], ...] = (
     ("turn never completed", "turn never completed"),
     ("model server refused the task", "deferring task"),
 )
+#: The floor on the since-boot window, in minutes (#2956). The line expresses the
+#: day's failures that fall at or after the host boot instant as a rate per this many
+#: minutes, so a boot-window burst and an hour of live pressure are readable on one
+#: scale. It is a FLOOR on the denominator, not a fixed denominator: a census that
+#: runs two minutes after a boot with 3 failures behind it would divide by 2 and
+#: print 22.5 / 15 min, which is arithmetic about how recently the machine came up
+#: rather than a rate anything can be compared to. Fifteen minutes is the unit the
+#: defect was argued in ("with a post-boot rate of 0 / 15 min, report the post-boot
+#: rate beside the raw day count"), so the line keeps that unit.
+_THROUGHPUT_RATE_WINDOW_MINUTES = 15
+#: Where the host's uptime is read (#2956). `/proc/uptime`'s first field is seconds
+#: since boot, so boot is `now - uptime`, and that is one `open()` beside the
+#: `workers.db` read the census already does. `uptime -s` returns the same instant and
+#: costs a fork on a tick that runs every 60 s, which is the reason this reads the
+#: file rather than shelling out. Absent outside Linux, and the caller reads that as
+#: no boot knowledge and prints the line it prints today — never as a guess.
+_PROC_UPTIME_PATH = "/proc/uptime"
 # Surveillance state, module-global for the reason the source had it: the streaks and
 # cadence slots have to survive from one scheduler tick to the next, and
 # `tests/test_autonomy_scheduler.py` restores this dict's CONTENTS around every test
@@ -1271,7 +1288,42 @@ def _day_minus_one(day: str) -> str:
     return (_dt.date.fromisoformat(day) - _dt.timedelta(days=1)).isoformat()
 
 
-def _throughput_census(queue: WorkQueue) -> dict | None:
+def _host_boot_instant():
+    """The HOST's boot instant in UTC, or None when this machine will not say.
+
+    The anchor is the machine's, never this process's: the watchdog restarts ~12x a
+    day (#1735, #2662), so a process-relative "since boot" would reset a dozen times
+    a day and the figure it prints would describe the restart rather than the pool.
+    One module-level helper is the census's only route to it, which is also what lets
+    a test hold the anchor still — the instant moves every tick by construction, so a
+    node that read the real one could not assert a count over it.
+
+    `/proc/uptime`'s first field is seconds since boot, so boot is `now - uptime`,
+    truncated to whole seconds because that is finer than the counter is read; on
+    this box the result agreed with `uptime -s` to the second (#2956). Reading the
+    file rather than shelling out is deliberate: this is called from the 60 s
+    surveillance tick, where a fork per minute buys nothing.
+
+    Any failure to read or parse — no `/proc/uptime` at all, a short file, a
+    non-numeric field — returns None rather than raising: the census that calls this
+    has to print the line it prints today instead of dying on the pool's scheduler
+    loop beside the two stall alarms.
+    """
+    import datetime as _dt
+
+    try:
+        with open(_PROC_UPTIME_PATH, encoding="utf-8") as fh:
+            uptime_seconds = float(fh.read().split()[0])
+    except Exception:
+        logger.debug("failure-throughput census: %s could not be read, so the "
+                     "since-boot figure is being left off the line",
+                     _PROC_UPTIME_PATH)
+        return None
+    now = _dt.datetime.now(_dt.timezone.utc)
+    return (now - _dt.timedelta(seconds=uptime_seconds)).replace(microsecond=0)
+
+
+def _throughput_census(queue: WorkQueue, now=None) -> dict | None:
     """The newest COMPLETE UTC day's failed runs, against its own predecessor.
 
     What the reading is, stated exactly because every number on the line depends on
@@ -1295,6 +1347,27 @@ def _throughput_census(queue: WorkQueue) -> dict | None:
     still not a comparison and still says nothing. The point of the second leg is a
     different threshold, not a different query.
 
+    NEITHER rule is asked what it is counting its failures against, and that is the
+    defect #2956 is about: the 2026-10-17 line fired the floor on 45 failures, 43 of
+    them inside one ~29-minute window that straddled both the UTC midnight boundary
+    and the instant the host came up, so a day that was quiet for the other ~23 hours
+    reached a person as an incident. The trigger stays exactly as #2899 priced it —
+    this reads the same day again, from the rows it already fetched, and reports three
+    more numbers with it: `boot`, the host's boot instant from `_host_boot_instant()`
+    (None when the machine will not say, in which case the two counts beside it are
+    None too and the line keeps the shape it has today); `since_boot`, how many of
+    THIS day's failed rows start at or after that instant; and
+    `minutes_since_boot`, the whole minutes from the instant to `now`, the clock
+    reading this census took. Those three are a reading, not a rule: no threshold
+    reads them, no leg fires on them, and `_THROUGHPUT_FLOOR` is untouched. They are
+    what lets a reader tell "43 failures in a boot ramp" from "45 failures spread
+    across a day of pressure" — the first is the machine coming up, the second is the
+    pool failing now.
+
+    `now` is the census's clock, defaulted to wall clock: the day gate and
+    `minutes_since_boot` are both read from it, so a test that pins it pins the whole
+    reading instead of racing the tick against midnight.
+
     Returns None — nothing to say, and no line — for each of the shapes the store can
     hand back that is not a comparison: no complete day at all, a newest complete day
     whose predecessor has no rows (an absent predecessor is NOT read as a zero,
@@ -1308,9 +1381,12 @@ def _throughput_census(queue: WorkQueue) -> dict | None:
     build, this one runs on every 60 s tick, so a handle that only commits on exit
     would be a descriptor leaked once a minute for the life of the pool.
     """
+    if now is None:
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
     conn = None
     try:
-        today = _utc_day()
+        today = _utc_day(now)
         conn = queue._connect()
         complete = [r[0] for r in conn.execute(
             "SELECT DISTINCT substr(started_at, 1, 10) FROM runs "
@@ -1336,6 +1412,9 @@ def _throughput_census(queue: WorkQueue) -> dict | None:
         rows = conn.execute(
             "SELECT summary, started_at FROM runs WHERE status = 'failed' "
             "AND substr(started_at, 1, 10) = ?", (day,)).fetchall()
+        # Read after the legs, so a tick that trips neither — the ordinary case, every
+        # minute of the day — never opens the uptime file for a figure nobody prints.
+        boot = _host_boot_instant()
     except Exception:
         logger.exception("failure-throughput census: the runs store could not be "
                         "read; saying nothing rather than guessing")
@@ -1354,6 +1433,16 @@ def _throughput_census(queue: WorkQueue) -> dict | None:
     tallies = {label: 0 for label, _needle in _THROUGHPUT_CLASSES}
     matched = 0
     stamps = []
+    # The since-boot count walks the SAME rows the tallies walk rather than issuing a
+    # second query: the population it is asked about is this day's failed runs, which
+    # `rows` already is, and a second `SELECT` would be a second reading of a store
+    # the census is supposed to have taken once. `_parse_iso_safe` is this file's own
+    # reader for a stored instant — it returns an aware datetime (naive read as UTC,
+    # `Z` normalised) or None — so an unparseable stamp is left out of the count, as
+    # it is left out of `stamps`, instead of being compared against an aware instant
+    # and raising past the census. A row stamped exactly at the boot instant counts:
+    # the boot ramp's failures are the whole reason the figure exists.
+    since_boot = 0 if boot is not None else None
     for summary, started_at in rows:
         text = summary or ""
         hit = False
@@ -1364,6 +1453,16 @@ def _throughput_census(queue: WorkQueue) -> dict | None:
         matched += 1 if hit else 0
         if started_at:
             stamps.append(started_at)
+            if boot is not None:
+                stamp = _parse_iso_safe(started_at)
+                if stamp is not None and stamp >= boot:
+                    since_boot += 1
+    # Whole minutes, floored: `// 60` on seconds is the same reading the rate below
+    # takes, and a fractional minute is precision the line cannot use. A boot in the
+    # future — a clock step, an NTP correction — goes negative here and is clamped by
+    # the window floor at print time rather than by a second rule invented here.
+    minutes_since_boot = (int((now - boot).total_seconds() // 60)
+                          if boot is not None else None)
     return {
         "day": day, "prev": prev, "newer": newer, "older": older,
         "ratio": newer / max(older, 1),
@@ -1375,6 +1474,12 @@ def _throughput_census(queue: WorkQueue) -> dict | None:
         "other": max(newer - matched, 0),
         "first": min(stamps) if stamps else None,
         "last": max(stamps) if stamps else None,
+        # #2956's reading, and all three of them travel together: no boot instant
+        # means no count and no elapsed window, so the formatter can print the line it
+        # printed before this existed rather than a rate measured from an anchor it
+        # does not have. None is also the shape a test overrides the helper to return.
+        "boot": boot, "since_boot": since_boot,
+        "minutes_since_boot": minutes_since_boot,
     }
 
 
@@ -1395,6 +1500,30 @@ def _throughput_alert_message(census: dict) -> str:
     comparison nobody made. A day that trips both legs says so twice, which is also
     what makes the two rules distinguishable from the notes alone — the owed
     re-pricing of the floor is a count of these lines.
+
+    The since-boot clause is #2956, and it exists because the two counts above cannot
+    answer the one question a reader of that line actually had. 2026-10-17 fired the
+    floor on 45 failures: 43 of them landed inside one ~29-minute window that straddled
+    both UTC midnight and the instant the host came up, and the other 2 were spread over
+    the remaining ~23 hours. "45 failed runs against 20" and "45 ≥ 40" are both true of
+    that day and neither says whether the pool is failing NOW or was failing before the
+    machine came up, which is the difference between an incident and a reboot. So the
+    line prints the same day's failures again, measured from the host boot instant, with
+    the instant itself on it so the reader can see how long the window was: `12 of them
+    since host boot 2026-10-17T00:26:00+00:00 = 0.13 / 15 min (1415 min since boot)` is
+    the reading that day would have got, beside the 45 it still says. The day count is
+    NOT replaced — the day is what the rules weighed and what a reader re-pricing the
+    floor counts — and no rule reads the new number: it is legibility, not a third leg.
+
+    The rate's denominator is `max(minutes_since_boot, 15)`, not the elapsed minutes:
+    three failures two minutes after a boot are 22.5 / 15 min un-floored, a figure that
+    describes how recently the machine was switched on rather than how hard the pool is
+    failing, and would itself read as the incident this clause is meant to discount.
+
+    When the machine would not give an instant the clause is absent entire — no count,
+    no rate, no anchor — because the alternative is printing a rate measured from a boot
+    the census does not know, which is the invention the defect being fixed was. The
+    line is otherwise byte-identical to the one before this clause existed.
     """
     parts = [f"{label} {n}" for label, n in census["classes"] if n]
     parts.append(f"other {census['other']}")
@@ -1407,10 +1536,17 @@ def _throughput_alert_message(census: dict) -> str:
     if census["first"] and census["last"]:
         bounds = (f"; failures span {census['day']}T{census['first'][11:16]}Z to "
                   f"{census['day']}T{census['last'][11:16]}Z")
+    boot_part = ""
+    if census["boot"] is not None:
+        window = max(census["minutes_since_boot"], _THROUGHPUT_RATE_WINDOW_MINUTES)
+        rate = (census["since_boot"] * _THROUGHPUT_RATE_WINDOW_MINUTES / window)
+        boot_part = (f"; {census['since_boot']} of them since host boot "
+                     f"{census['boot'].isoformat()} = {rate:.2f} / 15 min "
+                     f"({census['minutes_since_boot']} min since boot)")
     return (
         f"worker pool failure throughput: {census['newer']} failed runs on UTC "
         f"{census['day']} against {census['older']} on UTC {census['prev']} "
-        f"({'; '.join(rules)}); classes: "
+        f"({'; '.join(rules)}){boot_part}; classes: "
         f"{', '.join(parts)}{bounds}. Times and days are UTC; this note is keyed to "
         f"America/Los_Angeles, so the day named is not necessarily this note's day.")
 

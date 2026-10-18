@@ -1235,3 +1235,115 @@ def test_a_floor_triggered_census_line_lands_on_the_note_naming_its_own_rule(
         "the floor leg posted a day it did not record in the ONE key both legs share, "
         "so a restart would post it again: "
         + repr(fw._state.get(fw._THROUGHPUT_WM_KEY)))
+
+
+# ── #2956: the since-boot reading reaches this note too ──────────────────────
+def test_a_floor_line_with_the_since_boot_reading_lands_on_the_note(
+        witness, tmp_path, monkeypatch):
+    """Clause 5: the number that makes a recovery day legible survives the whole route.
+
+    Same route as the two nodes above — `fleet_watchdog._alert` →
+    `app.discord_notify.discord_alert` → its no-channel branch →
+    `app.autonomy.append_daily_alert_line` → this ledger — and the same single pin on
+    `CONFIG`'s Discord block. What is under test here is not the formatter, which the
+    fleet-watchdog file pins down to the literal: it is whether the NEW clause survives
+    the trip to the artifact a human actually reads a day later. The 2026-10-17 line
+    that started this lives in `~/obsidian/memory/2026-10-17.md`, not in a log, and a
+    since-boot figure that got truncated by the note writer, or folded by the
+    repeat-suppression above it, would fix nothing where the defect was observed.
+
+    The seeding is the same 45-failure day the fleet-watchdog nodes use (33 failures
+    before a boot pinned to 06:00Z, 10 in the ramp beside it, 2 at 20:00Z) over 20 on
+    the predecessor, so 2.0-2.25x and the floor leg is the only trigger. The rate is
+    asserted as a SHAPE and an order of magnitude rather than a literal, because this
+    route takes the census at wall clock — `minutes_since_boot` is the real distance
+    from 06:00Z yesterday to now, at least 19 h — and that is the point of the figure
+    on a note: ~0.1 failures per 15 min beside a headline of 45 says the pool was not
+    failing when this was written.
+    """
+    import asyncio
+    import re
+    import sqlite3
+
+    import workers.fleet_watchdog as fw
+    import app.discord_notify as dn
+    from workers.queue import WorkQueue
+
+    monkeypatch.setattr(dn, "CONFIG", {"discord": {}}, raising=False)
+    # The same watermark pin the two nodes above need: this file has no fixture
+    # guarding that module-global, so a day left there by an earlier node would
+    # suppress this node's census outright.
+    monkeypatch.setitem(fw._state, fw._THROUGHPUT_WM_KEY, None)
+
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+    twodays = (datetime.now(timezone.utc) - timedelta(days=2)).date().isoformat()
+    # The host came up at 06:00Z on the counted day, so 12 of its 45 failures are
+    # at-or-after the boot and 33 are not. Pinned rather than read, because
+    # `/proc/uptime` moves every second and an assertion over the real instant could
+    # not state its own expected value.
+    boot = datetime.fromisoformat(f"{yesterday}T06:00:00+00:00")
+    monkeypatch.setattr(fw, "_host_boot_instant", lambda: boot)
+
+    q = WorkQueue(tmp_path / "since-boot.db")
+    rows = ([("run failed: no structured answer", f"00:{n:02d}") for n in range(33)]
+            + [("ConnectError: All connection attempts failed", f"06:{n:02d}")
+               for n in range(10)]
+            + [("unclassified thing happened", "20:00")] * 2)
+    conn = sqlite3.connect(str(q.db_path))
+    for n, (summary, hhmm) in enumerate(rows):
+        stamp = f"{yesterday}T{hhmm}:00+00:00"
+        conn.execute(
+            "INSERT INTO runs (run_id, source, status, started_at, completed_at,"
+            " summary) VALUES (?,?,?,?,?,?)",
+            (f"s{n}", "owed-check", "failed", stamp, stamp, summary))
+    for n in range(20):                       # the predecessor: 20, so 2.25x
+        stamp = f"{twodays}T06:{n:02d}:00+00:00"
+        conn.execute(
+            "INSERT INTO runs (run_id, source, status, started_at, completed_at,"
+            " summary) VALUES (?,?,?,?,?,?)",
+            (f"p{n}", "autotriage", "failed", stamp, stamp, "one-off failure"))
+    conn.commit()
+    conn.close()
+
+    async def _one_census():
+        return await fw._census_failure_throughput(asyncio.get_running_loop(), q)
+
+    asyncio.run(_one_census())
+
+    led = _rows(witness["ledger"])
+    assert len(led) == 1, (
+        "a census with a since-boot reading posted a line this witness did not "
+        f"record — it either never reached the note or reached it unwitnessed: {led}")
+    note = Path(led[0]["note_path"])
+    assert note.exists(), f"the row names a note that is not on disk: {led[0]}"
+    line = [ln for ln in note.read_text(encoding="utf-8").splitlines()
+            if hashlib.sha256(ln.encode("utf-8")).hexdigest()
+            == led[0]["line_sha256"]][0]
+
+    # The count the rules weighed is still on the line (#2899's owed re-pricing of the
+    # floor counts these lines), and beside it the count that says when they happened.
+    assert "45 failed runs" in line and "against 20" in line, (
+        "the line no longer names the day counts the alarm's rules fired on: " + line)
+    assert f"12 of them since host boot {boot.isoformat()}" in line, (
+        "the note carries no since-boot count with its boot instant, so a reader "
+        "still cannot tell a boot-window burst from a day of pressure: " + line)
+    rate = re.search(r"= (\d+\.\d{2}) / 15 min \((\d+) min since boot\)", line)
+    assert rate, (
+        "the since-boot count reaches the note with no rate and no window width: "
+        + line)
+    elapsed = int(rate.group(2))
+    assert elapsed >= 1140, (
+        f"boot was 06:00Z yesterday and the clock is now, so the window cannot be "
+        f"shorter than 19 h; the line says {elapsed} min: " + line)
+    assert float(rate.group(1)) < 1.0, (
+        f"12 failures across a window of {elapsed} min is {rate.group(1)} per 15 min, "
+        "well under one — a rate that reads like live pressure over a 19-hour window "
+        "is the number this clause exists to keep small: " + line)
+    assert "floor rule: >= 40" in line, (
+        "the fired-rule parenthetical did not survive the trip: " + line)
+    assert "classes:" in line and f"failures span {yesterday}T" in line, (
+        "the tallies or the bounds the 2026-10-16 line was triaged with are gone: "
+        + line)
+    assert fw._state[fw._THROUGHPUT_WM_KEY] == yesterday, (
+        "the census reached the note without recording the day, so the next process "
+        "would post it again: " + repr(fw._state.get(fw._THROUGHPUT_WM_KEY)))
