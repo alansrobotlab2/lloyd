@@ -307,9 +307,25 @@ def fake_surfaces(tmp_path, monkeypatch):
     monkeypatch.setattr(hg, "SOUL_PATH", soul)
     monkeypatch.setattr(hg, "MEMORY_PATH", memory)
     monkeypatch.setattr(hg, "USER_PATH", tmp_path / "absent.md")
-    monkeypatch.setattr(hg, "CORRECTIONS_PATH", tmp_path / "absent2.md")
+    _corrections_channel_nowhere(monkeypatch, tmp_path)
     monkeypatch.setattr(hg, "KNOWLEDGE_HEALTH_PATH", tmp_path / "absent3.md")
     return soul, memory
+
+
+def _corrections_channel_nowhere(monkeypatch, tmp_path):
+    """Point all three correction surfaces at files that are not there, so a test
+    that asserts a prompt has no corrections block is not passing by accident.
+
+    #2977 retired the single `hg.CORRECTIONS_PATH` this fixture used to patch: the
+    proposer's corrections block is now built by
+    `agent_mcp.fact_improvement.recent_corrections_text()`, so silencing it means
+    silencing that module's three surfaces, not this module's one.
+    """
+    import agent_mcp.fact_improvement as fi
+    monkeypatch.setattr(fi, "CORRECTIONS_PATH", tmp_path / "absent-corrections.md")
+    monkeypatch.setattr(fi, "CORRECTIONS_BULLETS_PATH", tmp_path / "absent-user.md")
+    monkeypatch.setattr(fi, "CORRECTIONS_MEMORY_INDEX_PATH",
+                        tmp_path / "absent-memory-index.md")
 
 
 def _cfg(tmp_path):
@@ -1085,7 +1101,7 @@ def tall_memory_with_a_leading_sentinel(tmp_path, monkeypatch):
     monkeypatch.setattr(hg, "SOUL_PATH", soul)
     monkeypatch.setattr(hg, "MEMORY_PATH", memory)
     monkeypatch.setattr(hg, "USER_PATH", tmp_path / "absent.md")
-    monkeypatch.setattr(hg, "CORRECTIONS_PATH", tmp_path / "absent2.md")
+    _corrections_channel_nowhere(monkeypatch, tmp_path)
     monkeypatch.setattr(hg, "KNOWLEDGE_HEALTH_PATH", tmp_path / "absent3.md")
     return memory, sentinel
 
@@ -1309,3 +1325,64 @@ def test_a_prune_logs_prefix_count_and_newest_retained(redirect_debug_dir, tmp_p
     msgs = [r.getMessage() for r in caplog.records if r.name == "autoresearch.hypothesis"]
     newest = time.strftime("%Y-%m-%dT%H:%M", time.gmtime(base + 60 * 52))
     assert any("pruned 3 hypothesis_reject_*" in m and newest in m for m in msgs), msgs
+
+
+# ── the corrections block reads all three surfaces (#2977, follow-through #2789) ──
+
+def test_a_memory_index_feedback_bullet_reaches_the_prompt_with_corrections_md_empty(
+        fake_surfaces, tmp_path, monkeypatch):
+    """Clause 4. An operator ruling recorded ONLY as a dated `[feedback]` index line
+    in `lloyd/MEMORY.md` must reach the proposer prompt even when
+    `memory/corrections.md` holds nothing. Before #2977 the block was
+    `_read(CORRECTIONS_PATH, tail=2000)` — one file's tail — so a correction made on
+    the surface operators actually use today produced a round that proposed the same
+    mistake, and the operator could watch it happen.
+    """
+    import agent_mcp.fact_improvement as fi
+    rule = "Never widen a retention window to make a report green."
+    # Laid out as the three real surfaces are laid out — `memory/corrections.md`
+    # beside `lloyd/USER.md` and `lloyd/MEMORY.md` — because the label on a
+    # corrections line IS its directory plus filename, so a flat tmp layout would
+    # label them with a pytest directory name no operator or skill ever reads.
+    (tmp_path / "memory").mkdir(exist_ok=True)
+    (tmp_path / "lloyd").mkdir(exist_ok=True)
+    (tmp_path / "memory" / "corrections.md").write_text(
+        "---\ntype: note\n---\n\n# Operator Corrections\n\nNothing here.\n",
+        encoding="utf-8")
+    (tmp_path / "lloyd" / "USER.md").write_text(
+        "# User\n\n## corrections_log\n\nStanding prose only.\n", encoding="utf-8")
+    stamp = time.strftime("%Y-%m-%d", time.gmtime())
+    (tmp_path / "lloyd" / "MEMORY.md").write_text(
+        "---\ntype: note\n---\n\n# Lloyd Long-Term Memory\n\n"
+        f"- [feedback] ({stamp}): **{rule}**\n"
+        "- [project]: A remembered fact, not a ruling.\n", encoding="utf-8")
+    monkeypatch.setattr(fi, "CORRECTIONS_PATH", tmp_path / "memory" / "corrections.md")
+    monkeypatch.setattr(fi, "CORRECTIONS_BULLETS_PATH", tmp_path / "lloyd" / "USER.md")
+    monkeypatch.setattr(fi, "CORRECTIONS_MEMORY_INDEX_PATH",
+                        tmp_path / "lloyd" / "MEMORY.md")
+
+    prompt = hg._build_single_variant_prompt(_cfg(tmp_path), ["prompts"],
+                                             target_file_hint="SOUL.md")
+
+    assert rule in prompt, "a [feedback] ruling must reach the proposer"
+    assert "[lloyd/MEMORY.md]" in prompt, prompt
+    assert "A remembered fact, not a ruling." not in prompt
+    assert "Standing prose only." not in prompt
+    # The label is what proves the ruling arrived as a corrections line and not as a
+    # byte of the prompt's own MEMORY.md surface, which `fake_surfaces` leaves absent.
+    assert "## Recent corrections" in prompt, prompt
+
+
+def test_the_corrections_block_is_not_read_from_one_path_anymore():
+    """Clause 4's other half, and the reason the fix cannot rot back quietly:
+    `hypothesis_generator.py` must not define or read a single corrections path. The
+    one list of correction surfaces is `fact_improvement.corrections_paths()`, so a
+    second list in this file could only drift from it — which is how the block ended
+    up showing one log while operators wrote rulings on two others.
+    """
+    src = (Path(hg.__file__).read_text(encoding="utf-8"))
+    assert "CORRECTIONS_PATH" not in src, (
+        "a single-path corrections constant is back in the proposer")
+    assert "recent_corrections_text" in src, (
+        "the proposer must take its corrections block from the shared renderer")
+    assert "recent_corrections_text(" in src

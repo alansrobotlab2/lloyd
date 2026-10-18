@@ -153,6 +153,96 @@ def corrections_paths() -> list[Path]:
         return list(CORRECTIONS_SOURCES)
     # Read the module globals, so repointing any one constant repoints the read.
     return [CORRECTIONS_PATH, CORRECTIONS_BULLETS_PATH, CORRECTIONS_MEMORY_INDEX_PATH]
+
+
+def corrections_source_label(path: Path) -> str:
+    """The surface a corrections source is: its containing directory and its
+    filename, `memory/corrections.md`, `lloyd/USER.md`, `lloyd/MEMORY.md`.
+
+    Never absolute, so a label in a prompt or a report means the same thing under
+    another `VAULT_ROOT` or in a `tmp_path` fixture, and the label a reader sees is
+    the string that reader would grep for. The three live sources resolve to exactly
+    those three strings because `lloyd/USER.md` and `lloyd/MEMORY.md` sit in the
+    `lloyd/` directory beside the vault root and `corrections.md` in `memory/`.
+    """
+    return f"{path.parent.name}/{path.name}"
+
+
+#: Stands in for a date on an entry whose source has none — a `## corrections_log`
+#: section with no dated bullet is status `undated` and is still an operator ruling.
+CORRECTIONS_UNDATED_STAMP = "[no date]"
+
+#: Default cap on the rendered block. `scripts/autoresearch/hypothesis_generator.py`
+#: is the caller this was sized for, and its own comment records why a cap is
+#: load-bearing there: the whole rendered prompt measured 47,228 chars (~11.8k
+#: tokens) against the live vault, of a 131,072-token engine context, and the block
+#: this replaces was a `tail=2000` of ONE file. Three sources at 2,000 each would
+#: have tripled it, so the bound is pinned by
+#: `tests/test_memory_improvement.py::test_recent_corrections_text_is_bounded_by_limit_chars_and_keeps_labels`
+#: rather than trusted.
+CORRECTIONS_TEXT_BUDGET_CHARS = 2500
+
+
+def recent_corrections_text(limit_chars: int = CORRECTIONS_TEXT_BUDGET_CHARS) -> str:
+    """The operator's corrections from EVERY source, each line labelled with its
+    source — for a reader that must not miss a ruling recorded somewhere other than
+    `memory/corrections.md`.
+
+    Renders `corrections_paths()` in order: `memory/corrections.md`,
+    `lloyd/USER.md` `## corrections_log`, and the `lloyd/MEMORY.md` index's
+    `[feedback]` bullets. Every returned line is prefixed by
+    `corrections_source_label()` — `[memory/corrections.md]`, `[lloyd/USER.md]`,
+    `[lloyd/MEMORY.md]` — then its date
+    (or `CORRECTIONS_UNDATED_STAMP`), newest first, so a reader can attribute a
+    ruling to the surface it was made on.
+
+    Entries come from `_corrections_entries(path)`, the same shape-dispatching
+    per-source parser `read_correction_signals` uses, NOT a raw tail of each file.
+    That distinction is the point of the function: the MEMORY.md leg yields only
+    `[feedback]` index bullets, so a `[project]` or `[reference]` bullet on that
+    surface never reaches a prompt as though it were a correction, and no file's
+    arbitrary standing prose reaches it either. A source that parses to no entries
+    contributes nothing; a source that is absent, unreadable or `missing` contributes
+    nothing and raises nothing — a reader is not the place to complain about a
+    missing log.
+
+    `limit_chars` bounds the RETURNED string. Overflow is dropped whole at an entry
+    boundary, so a line is never cut mid-sentence and a label is never cut off. One
+    deliberate exception: if the single newest entry is itself longer than the cap,
+    its label survives and only its text is ellipsised — a caller asking for 40
+    characters still gets an attributable correction instead of the first 40
+    characters of an unattributed file.
+
+    Deliberately does NOT apply `CORRECTIONS_WINDOW_DAYS`. That window is why
+    `read_correction_signals` can report a stale log as stale; a proposer prompt that
+    silently dropped a ruling the operator made 40 days ago would be worse than one
+    that shows it. Recency here is the ordering (newest first) plus the byte budget.
+    """
+    rows: list[tuple[str | None, str, str]] = []
+    for path in corrections_paths():
+        entries, _status = _corrections_entries(path)
+        label = corrections_source_label(path)
+        for d, text in entries:
+            rows.append((d, label, text))
+    # Newest first. An undated entry sorts last rather than first: "no date" is not
+    # evidence of recency, and it is not evidence of long ago either.
+    rows.sort(key=lambda r: r[0] or "", reverse=True)
+    lines: list[str] = []
+    for d, label, text in rows:
+        head = f"[{label}] {d or CORRECTIONS_UNDATED_STAMP} "
+        line = head + text
+        if not lines and len(line) > limit_chars:
+            # The newest entry alone busts the whole budget: keep the attribution,
+            # ellipsize only the text.
+            if limit_chars <= len(head):
+                return line[:limit_chars]
+            return head + text[: max(0, limit_chars - len(head) - 1)] + "…"
+        if lines and len("\n".join(lines + [line])) > limit_chars:
+            break                        # every remaining entry is at least as old
+        lines.append(line)
+    return "\n".join(lines)
+
+
 # A correction is evidence about a *recent* mistake. Undated, a March heading fed
 # the nightly loop forever and its two entities outranked every fresh drift write
 # in every run, permanently. Entries outside the window are counted in the record

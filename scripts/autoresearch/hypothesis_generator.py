@@ -1,8 +1,8 @@
 """Hypothesis generator — proposes variant overlays for an autoresearch round.
 
 Reads current prompt surfaces (SOUL/MEMORY/USER) + recent signal (bench losers,
-baseline failures, correction log, knowledge-health) and asks the local model
-to return candidate variants. Each variant is a list of anchored edits against
+baseline failures, corrections from EVERY corrections surface, knowledge-health) and
+asks the local model to return candidate variants. Each variant is a list of anchored edits against
 ONE prompt surface; the sandbox applies them mechanically to the canonical text
 and materializes the result, and the bench runner evaluates that under
 LLOYD_OVERLAY_DIR.
@@ -52,7 +52,12 @@ logger = logging.getLogger("autoresearch.hypothesis")
 SOUL_PATH = LLOYD_HOME.parent / "obsidian" / "lloyd" / "SOUL.md"
 MEMORY_PATH = LLOYD_HOME.parent / "obsidian" / "lloyd" / "MEMORY.md"
 USER_PATH = LLOYD_HOME.parent / "obsidian" / "lloyd" / "USER.md"
-CORRECTIONS_PATH = LLOYD_HOME.parent / "obsidian" / "memory" / "corrections.md"
+# No single-path corrections constant lives here any more (#2977, follow-through of
+# #2789): one path was what let a single log's tail stand for the operator's
+# corrections. The block is built by
+# `agent_mcp.fact_improvement.recent_corrections_text()`, whose `corrections_paths()`
+# is the one list of correction surfaces in this repo — a second list here could only
+# ever disagree with it.
 KNOWLEDGE_HEALTH_PATH = PIPELINE_DIR / "reports" / "knowledge-health-latest.md"
 DEBUG_DIR = PIPELINE_DIR / "research" / "_debug"
 # `R_YYYYMMDD_HHMMSS` round dirs (UTC, `common.new_round_id`); the newest one's
@@ -412,7 +417,21 @@ def _build_single_variant_prompt(
     # tokens) against the live vault, of a 131,072-token engine context.
     memory = _read(MEMORY_PATH)
     user = _read(USER_PATH, tail=2000)
-    corrections = _read(CORRECTIONS_PATH, tail=2000)
+    # #2977: every corrections surface, not just `memory/corrections.md`. One file's
+    # 2,000-char tail was the whole block while operators had been recording rulings
+    # as `lloyd/USER.md` `## corrections_log` bullets and as `lloyd/MEMORY.md`
+    # `[feedback]` index lines since #2789 put them there — an operator who corrected
+    # the agent and then watched a round propose the same mistake again had made that
+    # correction on a surface this prompt does not read. Shared with
+    # `agent_mcp/fact_improvement.py`'s own reader, so this caller and that one cannot
+    # disagree about which surfaces count, and bounded by the same
+    # `CORRECTIONS_TEXT_BUDGET_CHARS` (2,500 chars — 500 more than the single tail this
+    # replaces, still under 1 % of the 131,072-token engine context above). Imported
+    # here rather than at module scope, following how other scripts reach `agent_mcp`,
+    # so this module's import stays as light as it was.
+    from agent_mcp.fact_improvement import recent_corrections_text
+
+    corrections = recent_corrections_text()
     knowledge = _read(KNOWLEDGE_HEALTH_PATH, tail=2000)
 
     # #549: this block is how a bench task's name reaches a hypothesis, and a
@@ -476,7 +495,7 @@ that might score higher on Lloyd's benchmark.
 ## Current USER.md tail
 {user}
 
-## Recent correction log (tail)
+## Recent corrections (every surface, newest first, each line labelled with its source)
 {corrections or '(none)'}
 
 ## Recent knowledge-health snapshot

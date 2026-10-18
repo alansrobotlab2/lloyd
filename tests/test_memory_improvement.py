@@ -4184,3 +4184,151 @@ def test_the_cli_prints_one_corrections_line_per_source_with_its_own_counts(
     # The channel as a whole is not stale, and no line may say it is.
     assert "0 signals in window" not in out, out
     assert out.count("log stale since") == 1, out
+
+
+# ── recent_corrections_text: the renderer shared with the autoresearch proposer ──
+# #2977, follow-through of #2789. `read_correction_signals` above consumes these
+# three logs to NAME entities; this function renders the same three for a reader
+# that has no KG to consult — the proposer prompt, whose whole corrections block
+# used to be one file's 2,000-char tail.
+
+def _no_correction_surfaces(vault_root):
+    """The manual log and the USER.md log present and saying nothing, so a test that
+    expects only one surface's line is not passing because two files are missing."""
+    (vault_root / "memory" / "corrections.md").write_text(
+        "---\ntype: note\n---\n\n# Operator Corrections\n\nNothing here.\n",
+        encoding="utf-8")
+    (vault_root / "lloyd" / "USER.md").write_text(
+        "# User\n\n## corrections_log\n\nStanding prose only, no dated bullet.\n",
+        encoding="utf-8")
+
+
+def test_recent_corrections_text_labels_only_the_source_that_has_entries(world):
+    """Every line carries the label of the surface it came from, and a surface with
+    nothing to contribute adds no line AND no label: three headers over nothing
+    would tell a reader the channel is empty in a way that reads as three quiet
+    logs rather than two empty and one parsed to nothing.
+    """
+    facts_root, st, vault_root = world
+    _no_correction_surfaces(vault_root)
+    _corrections_log(vault_root / "memory" / "corrections.md",
+                     [(_ago(3), "TTS stays on the local engine")])
+    _memory_index(vault_root / "lloyd" / "MEMORY.md", [],
+                  others=[("project", "The KG rebuild was abandoned in 34e3016.")])
+
+    out = fi.recent_corrections_text()
+
+    assert out.startswith("[memory/corrections.md] "), out
+    assert "TTS stays on the local engine" in out, out
+    assert "[lloyd/USER.md]" not in out, out
+    assert "[lloyd/MEMORY.md]" not in out, out
+    assert "Standing prose only" not in out, out
+    assert "abandoned in 34e3016" not in out, out
+    assert "\n" not in out, f"one entry in, one line out: {out!r}"
+
+
+def test_recent_corrections_text_carries_a_memory_index_bullet_with_corrections_md_empty(world):
+    """The case #2977 exists for. An operator ruling recorded ONLY as a dated
+    `[feedback]` index line has to reach a caller that reads
+    `memory/corrections.md`, and the `[project]` / `[reference]` lines sitting in the
+    same file still may not: the tag is the whole difference between a correction and
+    a remembered fact (#2789).
+    """
+    facts_root, st, vault_root = world
+    _no_correction_surfaces(vault_root)
+    _memory_index(vault_root / "lloyd" / "MEMORY.md",
+                  [(_ago(2), "Never restart the engine from a round.")],
+                  others=[("project", "The uptake probe table is usually swept."),
+                          ("reference", "USER.md lines have a ledger.")])
+
+    out = fi.recent_corrections_text()
+
+    assert "[lloyd/MEMORY.md] " in out, out
+    assert _ago(2) in out, out
+    assert "Never restart the engine from a round." in out, out
+    assert "usually swept" not in out, out
+    assert "USER.md lines have a ledger" not in out, out
+    assert "[memory/corrections.md]" not in out, out
+
+
+def test_recent_corrections_text_is_bounded_by_limit_chars_and_stays_labelled(world):
+    """Three logs together over the cap come back at or under it, and what survives
+    is still entries with their labels — never an unlabelled raw tail, which is the
+    failure this replaces. The cap is load-bearing: the proposer prompt documents a
+    47,228-char render against a 131,072-token engine context, so an uncapped
+    three-source block is an unbounded prompt.
+    """
+    facts_root, st, vault_root = world
+    filler = "".join(f"correction {i} about the worker pool. " for i in range(40))
+    _corrections_log(vault_root / "memory" / "corrections.md",
+                     [(_ago(2), filler), (_ago(4), filler)])
+    _standing_log(vault_root / "lloyd" / "USER.md", [f"- {_ago(3)}: {filler}"])
+    _memory_index(vault_root / "lloyd" / "MEMORY.md", [(_ago(1), filler)])
+
+    over = fi.recent_corrections_text(limit_chars=10 ** 6)
+    assert len(over.splitlines()) == 4, over
+
+    cap = 260
+    out = fi.recent_corrections_text(limit_chars=cap)
+
+    assert 0 < len(out) <= cap, f"{len(out)} chars against a cap of {cap}"
+    for line in out.splitlines():
+        assert re.match(r"^\[(memory/corrections\.md|lloyd/USER\.md|lloyd/MEMORY\.md)\] "
+                        r"\d{4}-\d{2}-\d{2} ", line), line
+    assert out.endswith("…"), f"a cut line is the only way to land under the cap: {out[-8:]!r}"
+
+
+def test_recent_corrections_text_is_empty_when_no_surface_holds_a_correction(world):
+    """An honest empty, so a caller writes `(none)` and not three labelled headers
+    claiming surfaces that said nothing."""
+    facts_root, st, vault_root = world
+    _no_correction_surfaces(vault_root)
+    _memory_index(vault_root / "lloyd" / "MEMORY.md", [],
+                  others=[("project", "Only facts here.")])
+
+    assert fi.recent_corrections_text() == ""
+
+
+# ── the signals skill's pre-flight names the same three surfaces (#2977 clause 5) ──
+
+_SIGNALS_SKILL = (Path.home() / "obsidian" / "skills" / "nightly-reflection-signals"
+                  / "SKILL.md")
+
+
+def _signals_preflight_section() -> str:
+    """The `## Pre-Flight Data Load` section of the live signals skill, and only it.
+
+    Fails rather than passing an absence, the way `test_ambient_inject` does for its
+    skill. Scoped because the file-wide grep is useless here: `lloyd/MEMORY.md`
+    already occurs six times in that 628-line file in unrelated prose (the #1070
+    data-loss check, the probe rules), so a whole-file count of 6 was reported as
+    evidence the pre-flight named the surface while item 1 loaded one file.
+    """
+    if not _SIGNALS_SKILL.exists():
+        pytest.fail(f"the live vault is not at {_SIGNALS_SKILL.parent.parent.parent}")
+    text = _SIGNALS_SKILL.read_text(encoding="utf-8")
+    m = re.search(r"^## Pre-Flight Data Load\n(.*?)\n---\n", text, re.S | re.M)
+    if not m:
+        pytest.fail("the signals skill has no `## Pre-Flight Data Load` section")
+    return m.group(1)
+
+
+def test_the_signals_skill_preflight_names_every_corrections_surface():
+    """Item 1 of the pre-flight load has to send this job to all three logs, because
+    the manual log has held no entry since its newest `## 2026-05-08` heading while
+    the other two have carried rulings — a job reading only the first reports a
+    corrections channel that is quiet, which is the same misreading #2789 was filed
+    for, one surface further along.
+    """
+    section = _signals_preflight_section()
+
+    assert "memory/corrections.md" in section, section
+    assert "lloyd/USER.md" in section, section
+    assert "lloyd/MEMORY.md" in section, section
+    # Each surface is named with the shape its entries take, so a reader who has the
+    # file in hand can tell an entry from the prose sitting around it.
+    assert "corrections_log" in section, section
+    assert "[feedback]" in section, section
+    # Positive control that the section is the real item list and not an empty
+    # heading: item 2 of the same load names the daily notes.
+    assert "memory/YYYY-MM-DD.md" in section, section

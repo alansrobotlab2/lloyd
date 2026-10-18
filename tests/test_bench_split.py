@@ -216,11 +216,27 @@ def test_the_block_is_built_from_the_filtered_rows_in_the_real_prompt(cfg, monke
     bench_split.write_split(cfg, tasks_fixture(), "R_20260910_074456")
 
     for attr, name in (("SOUL_PATH", "soul.md"), ("MEMORY_PATH", "memory.md"),
-                       ("USER_PATH", "user.md"), ("CORRECTIONS_PATH", "corr.md"),
+                       ("USER_PATH", "user.md"),
                        ("KNOWLEDGE_HEALTH_PATH", "kh.md")):
         f = tmp_path / name
         f.write_text(f"canonical {name}\n", encoding="utf-8")
         monkeypatch.setattr(hg, attr, f)
+    # The corrections block moved out of this module's own constants (#2977): the
+    # proposer now reads the three surfaces through
+    # `agent_mcp.fact_improvement.recent_corrections_text()`, so redirecting all the
+    # paths on `hg` would leave that reader holding the REAL vault and break the
+    # property this fixture exists to hold. Patched in `corrections_paths()` order,
+    # with the vault's own directory names, because the label each line carries is
+    # its parent directory plus its filename.
+    import agent_mcp.fact_improvement as fi
+    for attr, name in (("CORRECTIONS_PATH", "corrections.md"),
+                       ("CORRECTIONS_BULLETS_PATH", "USER.md"),
+                       ("CORRECTIONS_MEMORY_INDEX_PATH", "MEMORY.md")):
+        sub = "memory" if name == "corrections.md" else "lloyd"
+        d = tmp_path / sub
+        d.mkdir(exist_ok=True)
+        (d / name).write_text(f"canonical {sub}/{name}\n", encoding="utf-8")
+        monkeypatch.setattr(fi, attr, d / name)
 
     prompt = hg._build_single_variant_prompt(cfg, ["prompts"])
     disclosed = {line.split()[1].removeprefix("task=")
