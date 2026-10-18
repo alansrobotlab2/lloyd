@@ -68,10 +68,15 @@ from scripts.iv_grade import (  # noqa: E402
 
 MIN_RATED = 30
 # Test-suite output written into the LIVE event-log directory before conftest
-# isolated it. These six files hold 580 of the 583 `observer_injected` events
-# on disk (counted 2026-09-24), so an all-time run that joined them would be
-# scoring the suite's fixtures. Excluded from every run; `--include-test-sessions`
-# puts them back for anyone auditing that claim.
+# isolated it, so what excludes these six is their identity as the suite's own
+# fixtures, not their share of the volume. The two counts below are dated context,
+# never the justification. At shipping the six held 580 of the then 583
+# `observer_injected` events on disk (counted 2026-09-24); the same 580 sit inside
+# 11,386 such events on disk as of 2026-10-18, so an all-time run that joined them
+# would be CONTAMINATED by the suite's fixtures rather than made of them — real
+# traffic dominates now. `architecture/inner-voice.md` carries the same pair and
+# the two move together. Excluded from every run; `--include-test-sessions` puts
+# them back for anyone auditing the number.
 TEST_SESSION_IDS = frozenset({
     "test_sess", "guard_sess", "loop_sess", "v52_sess", "loop_replay", "goal_test_sess",
 })
