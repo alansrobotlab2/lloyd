@@ -34,8 +34,8 @@ unsupportable. The precedent's own failure was a CITATION, not a setting:
 those lines had become the boot-time interrupted-run recovery sweep, and nothing noticed
 because nothing re-read the file. #2772 retired both services' numbers in favour of naming
 `depth_by_source()`, and `_resolve_pool_query_pointer` here re-reads every window unit's
-pointer against `workers/queue.py` — including a surviving line number, which is allowed
-only while it resolves.
+pointer against `workers/queue.py`. #2971 retired every number corpus-wide, so each pointer
+today is a symbol; the resolver's NUMBER branch is reachable only from its own red paths.
 
 What is NOT tested, and is owed instead (see the item): arming the timer and proving
 `ActiveState` beside `is-enabled`; the first real run and the >=36 arm-stamped rows it
@@ -131,8 +131,8 @@ def _resolve_pool_query_pointer(comment: str, qlines: list[str], *, src: str) ->
     """Resolve every pointer `comment` makes to `workers/queue.py` against that file.
 
     Two forms resolve. A SYMBOL — `` `depth_by_source()` … workers/queue.py `` — needs
-    `def <name>` to exist in the file. A NUMBER — ``workers/queue.py:1103`` — needs the
-    cited line's own window (that line plus the three below it, so a `:1103-1111` range
+    `def <name>` to exist in the file. A NUMBER — ``workers/queue.py:<n>`` — needs the
+    cited line's own window (that line plus the three below it, so a `:<n>-<m>` range
     counts) to hold the pool-status SQL, AND `def depth_by_source` to sit at or above it.
 
     Everything else raises, and there is deliberately no third form: an anchor naming the
@@ -660,12 +660,12 @@ def test_the_window_units_point_at_the_live_pool_query_and_refuse_to_claim_the_h
     false claim about the hour is absent.
 
     This node used to open ONE file — the egress timer — and to assert against it a
-    literal line (`"workers/queue.py:1253" in c`), which is the pattern the item forbids:
+    literal line (`"workers/queue.py:<n>" in c`), which is the pattern the item forbids:
     the guard rotted with the number it quoted. It now walks every `.service`/`.timer` in
     the directory whose comments name `workers/queue.py`, hands each comment to
     `_resolve_pool_query_pointer`, and requires the three #2772 names to be in the set it
-    resolved. Both `.service` files point by symbol now; the timer still names a line, and
-    that line is re-read from `workers/queue.py` here rather than remembered.
+    resolved. All three point by symbol: #2971 retired the timer's surviving line number
+    too, so the resolver's NUMBER branch is now reachable only from its own red-path tests.
 
     Why the number is unsafe and the symbol is not: the mechanism is on the record in the
     resolver's own header — a pointer aims at a line, `queue.py` grows above it, and
@@ -948,3 +948,649 @@ def test_the_drain_still_has_no_self_exclusion_so_the_unit_is_still_needed():
     assert len(keys) == 18, (len(keys), keys)
     assert "collect.off-allow-list.invalid" in DRIVER.read_text(encoding="utf-8"), \
         "the canary host literal the leak witness counts on moved; the unit comment is stale"
+
+
+# ── #2971: numeric `workers/queue.py:<n>` citations are retired corpus-wide ────────────
+#
+# `_resolve_pool_query_pointer` above can re-read a NUMBER, but only where a caller hands
+# it the text: its one caller walks `agent-services/systemd` comments, and the absence it
+# asserts is over the two `.service` files. The same citation sat on 17 lines across 13
+# tracked files under the six roots, and 14 of those 17 pointed at lines that had moved.
+# The drift mechanism is on the record: `691df24b` landed #2615's `pause_journal` DDL above
+# `def depth_by_source` and pushed it from 1226 to 1253 with no test noticing — verified with
+# `git show 691df24b^:workers/queue.py | grep -n 'def depth_by_source'` (1226) against
+# `git show 691df24b:...` (1253). The two unit citations that resolve today resolve only
+# because #2772 re-aimed them a week ago, and they would have rotted again at the next
+# DDL above them.
+#
+# A resolver has to be handed the corpus, so it cannot outlast it; an absence can. The ban
+# is therefore TOTAL over the six roots, including the citations that currently resolve —
+# a partial retirement is not greppable, and today's live number is next release's dead
+# one. What is NOT done here: the resolver's NUMBER branch is left in place (deleting it is
+# an owed ruling on #2971), and `tests/test_architecture_coverage_doc_claims.py`'s span
+# sweep is untouched — it asks whether a line falls inside some definition, which is a
+# different property, and it passes all three dead architecture anchors today.
+
+#: The six roots the ban covers. Exhaustive at filing: `git grep -c -E
+#: 'workers/queue[.]py:[0-9]+'` over the base commit named 18 files — 13 of them here
+#: (17 citations) and 5 under the record roots (12 citations). Nothing outside these
+#: seventeen files, in `web/` or `docs/` or the repo root, carried one.
+CORPUS_ROOTS = ("app", "agent-services", "architecture", "eval", "scripts", "tests")
+
+#: The four excluded prefixes, and the ONLY exclusions. By directory prefix rather than a
+#: list of files so no per-citation allowlist can grow: each is a frozen corpus the
+#: citations are evidence INSIDE, and rewriting a baseline or a recovered row to satisfy a
+#: guard would falsify the artifact. Their existence is asserted, so a renamed record root
+#: cannot silently turn a record root into a free exemption for a new directory.
+RECORD_ROOTS = ("eval/baselines", "eval/iv", "eval/cross_engine_disagreement_arm1",
+                "tests/fixtures")
+
+#: A line number handed to the synthetic corpus below, to prove the reader is not a no-op.
+#: Spelled as a separate constant because THIS file is inside the corpus: the literal
+#: `workers/queue.py:` + digits may not appear anywhere in it, and an f-string that builds
+#: the synthetic citation from this number is the one spelling that is both honest and
+#: invisible to the checker that reads this file.
+SYNTHETIC_CITED_LINE = 999
+
+
+def _is_derived(rel: str) -> bool:
+    """True for a file the compiler wrote, not a file a person wrote a sentence into.
+
+    `__pycache__` and bytecode are excluded from the walk, and they are the ONLY thing
+    excluded besides the four record prefixes. They have to be: `quote`-style bytecode
+    embeds every docstring and comment string constant of the module it was built from, so
+    a stale `app/__pycache__/failure_ledger.cpython-313.pyc` left by a pre-retirement
+    import still holds a `workers/queue.py:` citation that no tracked file contains — a red
+    guard on a clean tree, which is the false alarm this whole item exists to end. The
+    Filter by KIND (a compiled artifact), and the reason there is a filter at all is measured
+    rather than assumed. Bytecode keeps a module's DOCSTRINGS and string constants but drops
+    comments, so a citation survives compilation exactly when it sits in a docstring: compiling
+    the thirteen pre-retirement Python files at 9c913df5 and grepping the resulting `.pyc` keeps
+    8 of the 17 citations (`app/routers/dashboard.py`, `eval/persistence_arms.py`,
+    `scripts/automod/landed_outcomes.py` and the four test files), while `app/failure_ledger.py`
+    and `scripts/step_conformance.py` come back with 0 because theirs sat in a comment. A machine
+    that imported any of the first group before this round holds a numeric citation that no
+    tracked file contains any more, and a reader that reached it would be red on a clean tree
+    depending on what was imported last — the false alarm this item exists to end. The second
+    reason is the ban's own definition: the acceptance check is `git grep`, which reports no
+    lines inside binary files either, and 850 files under these six roots begin with a NUL, so a
+    reader that took every byte would be stricter than the instrument the item names and would
+    redden on a local `agent-services/models/**` blob.
+
+    Declining by name is still a hole — a hand-written `.py` parked under `__pycache__/` is
+    declined too — and `_prose_declined_by_name` is what closes it. Its edges are proven on a
+    planted tree in the synthetic node, because whether residue exists is a property of a working
+    tree and not of a commit.
+    """
+    return "__pycache__" in rel.split("/") or rel.endswith((".pyc", ".pyo"))
+
+
+def _compiled_by_content(path: Path) -> bool:
+    """Whether the file's OWN BYTES say it is a compiled artifact, whatever its name says.
+
+    CPython writes a four-byte magic number then a four-byte flags word that has been zero
+    since 3.7, so every real `.pyc` has a NUL inside its first eight bytes and no text file
+    does. Measured on the live checkout: of the 777 files the name filter declines under these
+    six roots, none lacks that NUL — the two predicates agree over the whole real corpus, and
+    the corpus node asserts the tracked half of that agreement rather than a count quoted here.
+    This function deliberately never calls `_is_derived`, which is what lets it disagree with
+    the name filter instead of restating it: restating it was the whole defect of the first
+    witness.
+    """
+    return b"\x00" in path.read_bytes()[:8]
+
+
+def _prose_declined_by_name(root: Path) -> list[str]:
+    """Paths declined as bytecode whose own bytes are prose, so a sentence could live there.
+
+    The witness this replaces computed the dropped set by subtracting two walks that shared
+    `_is_derived`, so the difference was bytecode by construction and the assertion could not
+    fail (review attempt 2). This asks each declined file. Who owns what comes back is the
+    caller's business: `git` residue is not part of a tree a reviewer can read, while a path
+    `git` TRACKS is corpus by definition and no directory name excuses it.
+    """
+    declined: list[str] = []
+    for rel in CORPUS_ROOTS:
+        base = root / rel
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            if not path.is_file():
+                continue
+            rp = path.relative_to(root).as_posix()
+            if any(rp == ex or rp.startswith(ex + "/") for ex in RECORD_ROOTS):
+                continue
+            if _is_derived(rp) and not _compiled_by_content(path):
+                declined.append(rp)
+    return declined
+
+
+def _tracked(root: Path) -> set[str]:
+    """Paths `git` tracks under the six roots — the corpus a reader of the repo can see.
+
+    This is the same corpus the item's own acceptance check reads, since `git grep` walks
+    tracked files and nothing else, so the two instruments cannot disagree about what is banned.
+    """
+    out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", *CORPUS_ROOTS],
+                         capture_output=True, text=True, check=True)
+    return {p for p in out.stdout.split("\0") if p}
+
+
+def _corpus_files(root: Path):
+    """Yield `(relpath, path)` for every file of the ban's corpus inside `root`.
+
+    The six roots walked with `rglob`, the four record prefixes dropped by path element (a
+    file named `eval/iveil.py` is not under `eval/iv`) and compiled artifacts dropped by
+    kind — see `_is_derived`, whose exclusions the corpus node witnesses one by one. Files
+    are decoded with `errors="ignore"` rather than skipped when they are not valid UTF-8: a
+    size or encoding exemption would be an unauthorised hole, and the walk has to be able to
+    say "nothing here" only because nothing here matches.
+    """
+    for rel in CORPUS_ROOTS:
+        base = root / rel
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            if not path.is_file():
+                continue
+            rp = path.relative_to(root).as_posix()
+            if any(rp == ex or rp.startswith(ex + "/") for ex in RECORD_ROOTS):
+                continue
+            if _is_derived(rp):
+                continue
+            yield rp, path
+
+
+def _numeric_queue_citations(root: Path) -> list[str]:
+    """Every `workers/queue.py:<digits>` citation under the six roots of `root`.
+
+    One regex, the same `_QUEUE_NUMERIC` the resolver above already uses, so the ban and
+    the pointer checker cannot disagree about what a numeric citation is. Returns
+    `relpath:line` plus the offending text, because a failure that names only a count is a
+    failure the next reader has to go and find.
+    """
+    hits: list[str] = []
+    for rp, path in _corpus_files(root):
+        text = path.read_bytes().decode("utf-8", "ignore")
+        for n, line in enumerate(text.splitlines(), 1):
+            if _QUEUE_NUMERIC.search(line):
+                hits.append(f"{rp}:{n}: {line.strip()[:100]}")
+    return hits
+
+
+def test_the_six_roots_hold_not_one_numeric_workers_queue_citation():
+    """#2971 clauses 1-2: the corpus is clean, read from the tree rather than from a list.
+
+    At filing the scoped grep returned 17 citations in 13 files, and 14 of the 17 were
+    dead —
+    `app/routers/dashboard.py` pointing at `mark_failed` on 394-430 when the def is at 925,
+    `architecture/research-pipeline.md` pointing at `list_runs_joined` on 677 when it is at
+    1577, four citations at 1353/1301 landing inside `claims_by_source` and
+    `pending_wait_by_source` while `run_rollup_by_source` is at 1428. The property is
+    re-derived from the filesystem here, not from that list, so a fifteenth citation added
+    next month reddens this node without anybody updating it.
+
+    The walk's own reach is asserted alongside the result: roots present, all four record
+    prefixes still directories (so an exclusion cannot be "widened" by renaming the thing
+    it excludes), and a file count large enough to show the walk is not standing in an
+    empty directory. The checker's non-vacuity — the case where the corpus is clean because
+    the reader reads nothing — is the next node's, over a synthetic tree.
+    """
+    for rel in CORPUS_ROOTS:
+        assert (REPO / rel).is_dir(), f"the ban's corpus lost a root: {rel}"
+    for rel in RECORD_ROOTS:
+        assert (REPO / rel).is_dir(), (
+            "record root " + rel + " is gone, and its absence would silently widen the "
+            "exemption — the exclusion list must move only with a deliberate edit")
+    scanned = [rp for rp, _ in _corpus_files(REPO)]
+    assert len(scanned) > 2000, f"the walk reached only {len(scanned)} files"
+    #: Nothing the walker declines by NAME may be a file git tracks. The first draft witnessed
+    #: the kind filter with `set(all) - set(scanned)`, and `_corpus_files` IS that walk minus
+    #: `_is_derived`, so the leftovers were bytecode by construction and the assertion could
+    #: never fail (review attempt 2, finding 1). `_prose_declined_by_name` instead asks each
+    #: declined file's own bytes, through a predicate that never calls `_is_derived`, and the
+    #: rule below is the one that matters: compiler residue is nobody's corpus, but a TRACKED
+    #: file declined by name is a sentence parked outside the ban. The agreement half of it is
+    #: not vacuous on a box that has ever run the code — 777 files under these roots are
+    #: declined by name, and every one of them has the header that says it was compiled — and
+    #: both edges of the TRACKED half are proven on a planted tree in the next node, because
+    #: whether residue exists is a property of a working tree, not of a commit.
+    declined = _prose_declined_by_name(REPO)
+    hiding = sorted(set(declined) & _tracked(REPO))
+    assert hiding == [], (
+        "the walker declines these as bytecode by name but git tracks them, so they are "
+        "corpus and a citation can hide there: " + ", ".join(hiding[:10]))
+    #: Files the ban must reach, named so a broken root shows up as a missing name rather
+    #: than as a suspiciously clean corpus.
+    for must_see in ("app/routers/dashboard.py", "architecture/threat-model.md",
+                     "agent-services/systemd/lloyd-egress-window.timer",
+                     "eval/persistence_arms.py", "scripts/step_conformance.py",
+                     "tests/test_persistence_window_unit.py"):
+        assert must_see in scanned, must_see
+    assert not any(rp.startswith(("eval/baselines", "eval/iv",
+                                  "eval/cross_engine_disagreement_arm1", "tests/fixtures"))
+                   for rp in scanned), "a record prefix leaked back into the corpus"
+
+    hits = _numeric_queue_citations(REPO)
+    assert hits == [], (
+        "numeric workers/queue.py line citations are banned under the six roots: they rot "
+        "silently (691df24b moved depth_by_source 1226->1253). Re-aim each at the symbol "
+        "its own sentence names. Found:\n" + "\n".join(hits))
+
+
+def test_the_citation_reader_reddens_on_a_synthetic_corpus_and_its_four_prefixes(tmp_path):
+    """#2971 clause 3: the checker is not a no-op, and its exemptions are exactly four.
+
+    Proven the way #2772 proved the resolver's red paths — with a synthetic tree, so the
+    real corpus never has to be damaged. Both directions are needed: a tree carrying one
+    numeric citation must come back naming it (otherwise the clean real corpus could mean
+    "the walk reached nothing"), and the same citation placed under each record prefix must
+    come back clean (otherwise the exclusion is not what these nodes claim it is). A
+    lookalike directory is included because prefix matching by string alone would exempt
+    `eval/iveil/`: the exclusion is by path element, and that is what is asserted.
+
+    The same node proves the two edges of the KIND filter, which no real tree can show at once
+    (finding 1). A genuine `.pyc` is planted carrying the retired citation and must come back
+    clean — bytecode keeps docstrings, and 8 of the 17 retired citations do survive compilation,
+    so a reader that reached a stale one would be red on a clean tracked tree. And a prose `.py`
+    planted in the same directory must be NAMED by
+    `_prose_declined_by_name`, because declining it by name is exactly the hole a witness has to
+    see. Then `git init` decides who owns it: untracked, it is residue; staged, the corpus node's
+    rule must catch it.
+    """
+    def plant(rel: str, marker: str) -> Path:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        cited = f"workers/queue.py:{SYNTHETIC_CITED_LINE}"
+        p.write_text(f"{marker} see {cited} for the query\n", encoding="utf-8")
+        return p
+
+    planted = plant("app/synthetic_reader.py", "#")
+    plant("architecture/synthetic_reader.md", "<!--")
+    plant("eval/synthetic/synthetic_reader.py", "#")
+    for rel in RECORD_ROOTS:
+        plant(f"{rel}/synthetic_reader.txt", "")
+    #: A genuine bytecode header (this interpreter's four magic bytes, then the zeroed flags
+    #: word and the mtime/size fields that follow) and then the retired citation, as a stale
+    #: `.pyc` really does carry it. Local import because this file's header block is itself
+    #: cited by line number elsewhere, and a guard against stale line numbers has no business
+    #: moving one.
+    import importlib.util
+    pyc = tmp_path / "app/__pycache__/synthetic.cpython-312.pyc"
+    pyc.parent.mkdir(parents=True, exist_ok=True)
+    pyc.write_bytes(importlib.util.MAGIC_NUMBER + b"\x00" * 12
+                    + f"see workers/queue.py:{SYNTHETIC_CITED_LINE} for the query\n".encode())
+
+    hits = _numeric_queue_citations(tmp_path)
+    assert len(hits) == 3, hits
+    assert any(h.startswith("app/synthetic_reader.py:") for h in hits), hits
+    assert str(planted.relative_to(tmp_path)).replace("\\", "/") in "".join(hits)
+    #: The number the reader reports is the number in the text, not a bare count.
+    assert any(f":{SYNTHETIC_CITED_LINE}" in h for h in hits), hits
+    assert not any("synthetic_reader.txt" in h for h in hits), (
+        f"a record prefix was not honoured: {hits}")
+    #: Bytecode is declined, and on purpose: the planted `.pyc` above does carry the citation.
+    assert not any("__pycache__" in h for h in hits), (
+        f"the reader reached compiled residue, which is the false alarm on a clean tracked "
+        f"tree that `_is_derived` exists to prevent: {hits}")
+    #: And the witness agrees nothing was declined under a false name — the planted `.pyc` has
+    #: a header that says it was compiled, so no prose is being swallowed here.
+    assert _prose_declined_by_name(tmp_path) == [], (
+        "a planted file whose bytes are a real bytecode header was reported as swallowed prose")
+    #: Now the disguise: same directory, same citation, but the bytes are prose. The reader
+    #: still declines it — the filter is by name — so `_prose_declined_by_name` naming this one
+    #: file is the only thing between a sentence and the ban. This is the case the set
+    #: difference could never have shown, whatever tree it ran on.
+    disguised = tmp_path / "app/__pycache__/disguised_prose.py"
+    disguised.write_text(f"# see workers/queue.py:{SYNTHETIC_CITED_LINE} for the query\n",
+                         encoding="utf-8")
+    assert _prose_declined_by_name(tmp_path) == ["app/__pycache__/disguised_prose.py"], (
+        "the witness cannot see a prose file hidden under __pycache__, so the name filter is "
+        "an unwitnessed exemption again and the corpus node's rule is vacuous")
+    #: Untracked, that file is residue the ban does not own. Staged, it is corpus, and the
+    #: corpus node's `set(declined) & _tracked(...)` is what stops a tracked sentence sitting
+    #: outside the walk — so `_tracked` has to answer for a staged file, which is proven here
+    #: rather than assumed.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert "app/__pycache__/disguised_prose.py" not in _tracked(tmp_path), (
+        "git reports an unstaged file as tracked, so the corpus node's rule would excuse "
+        "anything left in the working tree")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-f", "--",
+                    "app/__pycache__/disguised_prose.py"], check=True)
+    assert "app/__pycache__/disguised_prose.py" in _tracked(tmp_path), (
+        "a staged file is not reported as tracked, so `set(declined) & _tracked(...)` could "
+        "never fire and the kind filter is unwitnessed after all")
+    #: And the near-miss directory is NOT exempt: `eval/iveil/` is under `eval/`, not under
+    #: `eval/iv/`.
+    plant("eval/iveil/synthetic_reader.py", "#")
+    hits2 = _numeric_queue_citations(tmp_path)
+    assert len(hits2) == 4, hits2
+    assert any(h.startswith("eval/iveil/") for h in hits2), hits2
+
+
+#: Each retired citation's file → the symbol(s) its sentence names, a phrase from the
+#: mechanism that citation was attached to, and the term that must be found INSIDE the
+#: named queue.py definition. All three are needed because the three failures are
+#: different: a deleted citation (first check), a deleted explanation (second), and a
+#: sentence that names a real symbol for a claim that symbol does not carry — which is
+#: what the review caught in the first draft of this list, where `quarantine()` was named
+#: for the poisoned/quarantined spelling although `quarantine()` moves an already-poisoned
+#: row to `quarantined` and `mark_failed()` is what writes `poisoned` at
+#: `attempts >= max_attempts`. The grounding term makes that a test failure, not a reread.
+#:
+#: Symbols and terms were measured at the base commit: mark_failed 925, claim_next 705
+#: (its due-gate is `not_before`), mark_running 844, _RUN_INSERT_SQL 374, _insert_run 381,
+#: run_rollup_by_source 1428 (`gpu_hours` and the failed/interrupted SUM inside it),
+#: wm_get 1594 (`watermarks`), quarantine 1195 ("needs attention"), list_runs_joined 1577
+#: (`LEFT JOIN`), depth_by_source 1253 (`GROUP BY source, state`).
+#: What the second element of each entry is NOT: a term the file happens to contain.
+#: `gpu_hours` occurs 8 times in `tests/test_landed_outcomes_by_author.py` and the
+#: `gpu_hours|duration_seconds` disjunction occurs 15 times across
+#: `scripts/automod/landed_outcomes.py`, so those two patterns stayed green with the retired
+#: sentence deleted outright (review attempt 2, finding 3) — a pattern drawn from a file's
+#: vocabulary witnesses the file's existence, not the sentence's. Each entry now holds ONE
+#: FINGERPRINT PER RETIRED CITATION, and the node asserts of every one of them that it names
+#: one of the entry's SYMBOLS and matches the file EXACTLY ONCE. Both halves are load-bearing:
+#: the symbol is what makes the fingerprint that sentence rather than a keyword, and a single
+#: match is what stops it being the file's idiom. Measured over the current tree: 17
+#: fingerprints, one per retired citation, each with exactly one match.
+RETIRED_CITATIONS: dict[str, tuple[tuple[str, ...], tuple[str, ...], dict[str, ...]]] = {
+    "app/failure_ledger.py": (
+        ("mark_failed", "quarantine"),
+        (r"mark_failed\(\)`[\s\S]{0,80}?`quarantine\(\)`",
+         r"quarantine\(\)`[\s\S]{0,140}?quarantined[\s\S]{0,140}?needs attention"),
+        {"mark_failed": "poisoned", "quarantine": "needs attention"}),
+    "app/routers/dashboard.py": (
+        ("mark_failed",),
+        # The sentence's claim is that the DEF owns the ceiling. That is checkable, and it
+        # is what the span says: `if attempts >= cap:` inside `mark_failed`, with `cap`
+        # coming from the `max_attempts` argument. A re-aim that moved the decision to the
+        # caller would be a sentence about a function that does not exist, so the grounding
+        # terms are the condition itself, not just the state name.
+        (r"mark_failed`[\s\S]{0,60}?writes `poisoned`[\s\S]{0,80}?attempt "
+         r"ceiling[\s\S]{0,80}?`queued`",),
+        {"mark_failed": ("poisoned", "attempts >=", "max_attempts")}),
+    "architecture/research-pipeline.md": (
+        ("list_runs_joined",),
+        (r"list_runs_joined`[\s\S]{0,80}?LEFT JOIN[\s\S]{0,60}?r\.queue_id = q\.id",),
+        {"list_runs_joined": "LEFT JOIN"}),
+    "architecture/threat-model.md": (
+        ("claim_next",),
+        (r"due-gates[\s\S]{0,60}?claim_next\(\)",),
+        {"claim_next": "not_before"}),
+    "architecture/workers-jobs.md": (
+        ("_insert_run", "_RUN_INSERT_SQL"),
+        (r"rows are written only by[\s\S]{0,60}?_insert_run\(\)",),
+        {"_insert_run": "_RUN_INSERT_SQL", "_RUN_INSERT_SQL": "INSERT INTO runs"}),
+    "eval/persistence_arms.py": (
+        ("claim_next", "mark_running", "wm_get"),
+        (r"claim_next\(\)`[\s\S]{0,30}?state=.claimed.[\s\S]{0,40}?mark_running"
+         r"\(\)` [\s\S]{0,30}?state=.running.",
+         r"wm_get`[\s\S]{0,60}?workers/queue[.]py[\s\S]{0,80}?hand-rolled"),
+        {"claim_next": "state='claimed'", "mark_running": "state='running'",
+         "wm_get": "watermarks"}),
+    "scripts/automod/landed_outcomes.py": (
+        ("run_rollup_by_source",),
+        (r"summed into `gpu_hours` per task by[\s\S]{0,60}?run_rollup_by_source",
+         r"divided by 3600 into `gpu_hours` per TASK by[\s\S]{0,80}?run_rollup_"
+         "by_source",
+         r"prints as `gpu_hours`, via[\s\S]{0,80}?run_rollup_by_source"),
+        {"run_rollup_by_source": "gpu_hours"}),
+    "scripts/step_conformance.py": (
+        ("run_rollup_by_source",),
+        (r"rollup bills as failures[\s\S]{0,80}?run_rollup_by_source[\s\S]{0,120}?"
+         r"SUM\(status IN",),
+        {"run_rollup_by_source": "SUM(status IN ('failed','interrupted'))"}),
+    "tests/test_egress_window_unit.py": (
+        ("depth_by_source",),
+        (r"A NUMBER[\s\S]{0,240}?def depth_by_source[\s\S]{0,60}?at or above it",),
+        {"depth_by_source": "GROUP BY source, state"}),
+    "tests/test_fleet_watchdog.py": (
+        ("claim_next",),
+        (r"claim_next`[\s\S]{0,80}?claimed_at[\s\S]{0,120}?workers/queue[.]py",),
+        {"claim_next": "claimed_at"}),
+    "tests/test_landed_outcomes_by_author.py": (
+        ("run_rollup_by_source",),
+        (r"calls `gpu_hours`[\s\S]{0,80}?run_rollup_by_source[\s\S]{0,120}?"
+         "no GPU-seconds",),
+        {"run_rollup_by_source": "gpu_hours"}),
+    "tests/test_persistence_window_unit.py": (
+        ("depth_by_source",),
+        (r"depth_by_source\(\)` in `workers/queue[.]py`[\s\S]{0,140}?GROUP BY "
+         r"source, state[\s\S]{0,80}?does not exclude the caller",),
+        {"depth_by_source": "GROUP BY source, state"}),
+    "agent-services/systemd/lloyd-egress-window.timer": (
+        ("depth_by_source",),
+        (r"depth_by_source\(\)`[\s\S]{0,40}?workers/queue[.]py[\s\S]{0,80}?"
+         "counts the window's own row",),
+        {"depth_by_source": "COUNT("}),
+}
+
+
+def _queue_def_span(sym: str) -> str | None:
+    """The source of `workers/queue.py`'s definition of `sym`, or None if it has none.
+
+    Methods and module-level constants both count: `_RUN_INSERT_SQL` is the SQL the
+    retirement points at as much as `_insert_run()` is, and it is an assignment, not a def.
+    """
+    tree = ast.parse(QUEUE.read_text(encoding="utf-8"))
+    lines = QUEUE.read_text(encoding="utf-8").splitlines(keepends=True)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == sym:
+            return "".join(lines[node.lineno - 1:node.end_lineno])
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == sym for t in node.targets):
+            return "".join(lines[node.lineno - 1:node.end_lineno])
+    return None
+
+
+def test_every_retired_citation_kept_its_mechanism_and_named_the_symbol_it_described():
+    """#2971 clause 4: thirteen files lost a number and kept the sentence it explained.
+
+    Three assertions per file, each against a different way the retirement could have been
+    done badly. The file holds no numeric citation. It names the symbol in a POINTER form —
+    backtick-quoted, `WorkQueue.sym`, or `sym()` — because the review caught that a bare
+    `sym in text` is satisfied by any incidental use of the word, which is not a pointer.
+    And the mechanism phrase the citation was attached to survives, in the file AND inside
+    the definition it now names: a sentence that points at a real function for a claim that
+    function does not make is exactly how the retired citation read: it pointed at the
+    import block at the top of queue.py for a poisoned/quarantined distinction that lives in
+    `mark_failed()` and `quarantine()`, some way down. The claim is therefore checked against
+    the definition's own text, not against a name that merely exists.
+    """
+    for rel, (symbols, mechanisms, grounding) in RETIRED_CITATIONS.items():
+        path = REPO / rel
+        assert path.is_file(), f"{rel} is gone; the pair list needs updating, not deleting"
+        text = path.read_text(encoding="utf-8")
+        if rel == Path(__file__).relative_to(REPO).as_posix():
+            # This file's OWN DATA BLOCK is not prose: a fingerprint stored in the list would
+            # otherwise match its own source text and be counted a second time, so every
+            # self-entry would report "matched twice" for a reason that has nothing to do with
+            # the sentence it guards. The block is located by AST, never by a line number —
+            # which would be exactly the thing this item is retiring.
+            decl = next(n for n in ast.parse(text).body
+                        if isinstance(n, ast.AnnAssign)
+                        and getattr(n.target, "id", "") == "RETIRED_CITATIONS")
+            text = text.replace(ast.get_source_segment(text, decl), "")
+        assert not _QUEUE_NUMERIC.search(text), \
+            f"{rel} is back to citing workers/queue.py by line number"
+        for sym in symbols:
+            assert (f"`{sym}" in text or f".{sym}" in text or f"{sym}()" in text), (
+                f"{rel} does not point at `{sym}` in any pointer form; the sentence lost "
+                "the symbol its retired citation was about")
+            span = _queue_def_span(sym)
+            assert span is not None, (
+                f"{rel} now points at `{sym}`, which workers/queue.py does not define")
+            for term in ([grounding[sym]] if isinstance(grounding[sym], str)
+                         else grounding[sym]):
+                assert term in span, (
+                    f"{rel} attributes a claim to `{sym}` that its own definition in "
+                    f"workers/queue.py does not make — {term!r} is not in that span")
+        for pattern in mechanisms:
+            assert any(sym in pattern for sym in symbols), (
+                f"{rel}'s fingerprint {pattern!r} names none of its entry's symbols "
+                f"{symbols}. A bare term is not a fingerprint of the retired sentence: "
+                "`gpu_hours` occurs 8 times in tests/test_landed_outcomes_by_author.py, and "
+                "the pattern built from it alone stayed green with the sentence deleted "
+                "(review attempt 2), because it was matching the file's vocabulary.")
+            found = list(re.finditer(pattern, text, re.S))
+            assert len(found) == 1, (
+                f"{rel}: fingerprint {pattern!r} matched {len(found)} times, so the node "
+                "cannot tell which sentence the retired citation sat in — either it is file "
+                "vocabulary rather than that sentence, or the sentence has been duplicated.")
+
+
+def test_the_guard_illustrates_its_own_ban_and_the_timer_now_points_by_symbol():
+    """#2971 clause 5: the ban applies to this file's prose and to the timer's pointer.
+
+    Two self-references had to go, because a guard that quotes the forbidden form is a
+    corpus that never goes clean: this file's `_resolve_pool_query_pointer` docstring
+    illustrated a NUMBER with a real line, and the node above it described the OLD egress
+    node as asserting a literal line, quoted. Both now read
+    ``workers/queue.py:<n>`` — a placeholder, which is the point: the ban's reader cannot
+    match it, which is asserted here rather than assumed, so the placeholder form is a
+    spelling that is known safe and not a coincidence.
+
+    The timer is the pointer the ban had to be shaped around. `_QUEUE_SYMBOL` binds a
+    ``symbol()`` to the file across at most ten non-digit characters, so the comment reads
+    The binding window is ten characters, so it reads "`depth_by_source()` at
+    workers/queue.py" and not "the pool-status query at workers/queue.py" — the latter is a
+    mention the resolver rejects as neither a line nor a bound symbol,
+    which is the resolver's own red path and would have turned a comment tidy-up into a
+    broken unit guard. The three named units are then asserted to resolve, as symbols.
+    """
+    #: Read off the two functions' own `__doc__`, not off a count in the file: an earlier
+    #: draft asserted `own.count(placeholder) >= 2`, which this node's own docstring and
+    #: assert literal already satisfy, so restoring the two real numbers elsewhere in them
+    #: could not have reddened it. Each docstring must carry the placeholder AND hold no
+    #: numeric citation, so putting a number back in either one is a failure.
+    window_node = (
+        test_the_window_units_point_at_the_live_pool_query_and_refuse_to_claim_the_hour_avoids_rounds
+    )
+    for fn in (_resolve_pool_query_pointer, window_node):
+        doc = fn.__doc__ or ""
+        assert "workers/queue.py:<n>" in doc, (
+            f"{fn.__name__}'s docstring no longer illustrates the banned form with the "
+            "<n> placeholder — if the real number came back, this is where it shows")
+        assert not _QUEUE_NUMERIC.search(doc), (
+            f"{fn.__name__}'s docstring cites workers/queue.py by line number again")
+    #: A POSITIVE CONTROL on the regex the two assertions above lean on. Asking whether the
+    #: placeholder literal itself looks numeric is a question about a string this file types,
+    #: which is why the first draft of it was called unfalsifiable; what has to be true is that
+    #: `_QUEUE_NUMERIC` matches the shape the placeholder stands for, because every
+    #: `assert not _QUEUE_NUMERIC.search(...)` in this file — the pair list, the unit comments,
+    #: the whole corpus — is only as strong as that match. Break the regex and the whole ban
+    #: greens, so the shape it must catch is asserted here in the one file that owns it.
+    assert _QUEUE_NUMERIC.search(f"workers/queue.py:{SYNTHETIC_CITED_LINE}"), (
+        "_QUEUE_NUMERIC no longer matches the form it exists to catch, so every absence "
+        "assertion in this file is a green light by default")
+    assert not _QUEUE_NUMERIC.search("workers/queue.py:<n>"), (
+        "the placeholder form the ban's prose uses has stopped being a placeholder — "
+        "something has put a number back into it")
+
+    qlines = QUEUE.read_text(encoding="utf-8").splitlines()
+    timer_c = _comments(TIMER)
+    bound = _QUEUE_SYMBOL.findall(timer_c)
+    assert "depth_by_source" in bound, (
+        "the timer's pointer must keep `depth_by_source()` bound to workers/queue.py: "
+        f"the resolver reads only a bound symbol or a line number, and found {bound}")
+    assert _resolve_pool_query_pointer(timer_c, qlines, src=TIMER.name), \
+        "the timer's pointer stopped resolving against workers/queue.py"
+    for name in WINDOW_UNITS_WITH_POOL_POINTER:
+        unit = UNIT_DIR / name
+        assert _QUEUE_NUMERIC.search(_comments(unit)) is None, (
+            f"{name} is back to a numeric pointer, which the resolver can only re-read "
+            "until the next DDL above the query")
+
+
+#: Where a user-level systemd manager looks for a unit given only its name. Conventional and
+#: fixed (`$XDG_CONFIG_HOME/systemd/user`), which is what makes it readable from a test — see
+#: the node below for why the manager itself cannot be asked.
+USER_UNIT_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "systemd" / "user"
+
+
+def _loaded_by_name(name: str) -> Path | None:
+    """The file a user systemd would load for the unit NAME, or None where it is not installed."""
+    path = USER_UNIT_DIR / name
+    return path if path.is_file() else None
+
+
+def test_the_unit_systemd_loads_by_name_links_to_the_tracked_one_and_fires_the_pinned_cadence():
+    """#2971's post-landing seam: the consumer of a unit comment is systemd, not pytest.
+
+    The review's fourth finding, and the one thing no assertion inside the repository can show
+    on its own: every node above reads `agent-services/systemd/` through this suite's own view,
+    while what ACTS on those lines is a manager that resolves a unit name through its own load
+    path. `#2555` is the precedent for what an unheld boundary costs — a node read unit settings
+    from the repository and passed for weeks while systemd used a shadowed copy under
+    `~/.config/systemd/user/`, so the settings the guard read and the settings the machine used
+    were different files. Three things are therefore asked of the file at the load path:
+
+    * it is a SYMLINK into an `agent-services/systemd/` directory, not a private copy. A copy is
+      the shadowing case, and it is how a retired numeric citation could survive out of sight of
+      a corpus node that walks the repository.
+    * the cadence in it is the cadence in the file these guards read. Inside a review worktree
+      those are genuinely two files — the edit is in the worktree, the load path points at the
+      live checkout — so the comparison is not reading one file twice.
+    * systemd's own parser, `systemd-analyze calendar`, turns that cadence into a Monday. The
+      weekly cadence is what SETUP.md and the sibling unit claim, and a parser the machine
+      agrees with is the only reading of a calendar expression that counts.
+
+    What this node deliberately does NOT do is ask the manager. `systemctl` is refused inside the
+    suite by `tests/conftest.py::_no_live_service_control_in_tests` (`DANGEROUS_SUBPROCESS_COMMANDS`,
+    #1853) — read-only properties included, because the guard decides on argv[0] and a test that
+    can read state is one `--user restart` away from acting on the box — and a `monkeypatch`
+    stub of `systemctl show` would assert only its own return value, which is not a seam. So the
+    identity half is taken at the load path and the parse half through systemd's parser, and the
+    unit's live `ActiveState` and first real firing stay with the item's post-landing owed check,
+    which is the only place they can be observed. `systemd-analyze verify` over these same files
+    is already pinned by
+    `test_systemd_itself_still_parses_every_window_unit_after_the_comment_edits`; that node is
+    the grammar half, this one is the identity-and-cadence half.
+    """
+    installed = {u.name: _loaded_by_name(u.name) for u in (TIMER, SIBLING_SERVICE)}
+    present = sorted(n for n, p in installed.items() if p is not None)
+    if not present:
+        pytest.skip(f"neither unit is installed under {USER_UNIT_DIR}, so there is no load path "
+                    "to hold to the repository on this box")
+
+    for name in present:
+        path = installed[name]
+        assert path.is_symlink(), (
+            f"{name} is installed as a regular file at {path}, not a link into the repository — "
+            "the shadowing shape that spent #2555: an edit to agent-services/systemd/ can never "
+            f"reach the running system, and a retired citation could live in {path} unseen by "
+            "the corpus node, which walks the repository")
+        target = path.resolve()
+        assert target.parent.name == "systemd" and target.parent.parent.name == "agent-services", (
+            f"{name} links from {path} to {target}, which is not an agent-services/systemd "
+            "directory, so the file these guards read is not the file systemd acts on")
+
+    def setting(path: Path, key: str) -> str | None:
+        m = re.search(rf"(?m)^{key}=(.+)$", path.read_text(encoding="utf-8"))
+        return m.group(1).strip() if m else None
+
+    repo_cal = setting(TIMER, "OnCalendar")
+    assert repo_cal is not None, "the repo timer lost its OnCalendar line"
+    loaded_timer = installed.get(TIMER.name)
+    if loaded_timer is None:
+        pytest.skip(f"{TIMER.name} is not installed, so the cadence systemd would fire cannot "
+                    "be compared with the file these guards read")
+    loaded_cal = setting(loaded_timer, "OnCalendar")
+    assert repo_cal == loaded_cal, (
+        f"the unit at systemd's load path fires on OnCalendar={loaded_cal!r} while the file "
+        f"these guards read says {repo_cal!r}: the weekly cadence pinned in "
+        "tests/test_persistence_window_unit.py and SETUP.md is not the cadence the machine has")
+    import shutil
+    analyze = shutil.which("systemd-analyze")
+    if analyze is None:
+        pytest.skip("systemd-analyze is absent, so the cadence cannot be asked of systemd's "
+                    "own parser on this box")
+    parsed = subprocess.run([analyze, "calendar", repo_cal],
+                            capture_output=True, text=True, timeout=120)
+    assert parsed.returncode == 0, (
+        f"systemd cannot parse the cadence it is being handed, OnCalendar={repo_cal!r}: "
+        f"{parsed.stderr.strip()[:200]}")
+    assert re.search(r"(?i)\bmon\b", parsed.stdout), (
+        f"systemd's own parse of OnCalendar={repo_cal!r} does not name a Monday, so the weekly "
+        f"cadence the units and SETUP.md claim is not what will fire: {parsed.stdout[:300]}")

@@ -1656,7 +1656,7 @@ def escalates(step: str) -> bool:
 
 
 #: The terminal statuses the fleet already records with a cause (#2477) — the same pair the
-#: queue's own rollup bills as failures (`workers/queue.py:1301`:
+#: queue's own rollup bills as failures (`run_rollup_by_source()` in `workers/queue.py`:
 #: `SUM(status IN ('failed','interrupted'))`). The measured vocabulary of the 14-day ledger at
 #: 2026-10-09 is `success` 5008, `skipped` 1923, `failed` 440, `interrupted` 3, and `skipped`
 #: is not here because it is not a failure (`workers/pool.py:41-42`).

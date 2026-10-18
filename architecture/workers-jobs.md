@@ -1192,8 +1192,8 @@ alone; acting needs the pool. **The denominator is `runs`, not that event count*
 `SELECT status, COUNT(*) FROM runs WHERE source = ? GROUP BY status` run with
 `source='failure-ledger'` against `workers.db` (`:660-664`, its own docstring at `:648`
 already names it "the denominator for 'how much did the ledger actually do?'"), and
-`runs` rows are written only by `workers/queue.py:245` when a worker finishes one. So
-`runs_total` is the one
+`runs` rows are written only by `_insert_run()` (`_RUN_INSERT_SQL`) when a worker finishes
+one. So `runs_total` is the one
 figure here the thing being judged cannot produce, `runs.status` splits it into
 outcomes, and `runs_total: 0` is not a quiet ledger: the events say what the sweep
 found, and only a run row says anything read them. Before this module existed the

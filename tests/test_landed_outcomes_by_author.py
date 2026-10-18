@@ -629,8 +629,8 @@ def test_cost_block_divides_ledger_seconds_by_achieved_landing_with_n_window_pro
     480 s of ledger seconds inside the one promoted round, over the one landing
     that has seconds, is 0.1333 hours — printed under the autonomy page's own
     wording, because `duration_seconds/3600` is what that page calls `gpu_hours`
-    (`workers/queue.py:1353`) and the store holds no GPU-seconds term to be
-    precise about. `n=1` and the window share the line with the figure, and the
+    (via `run_rollup_by_source()` in `workers/queue.py`) and the store holds no GPU-seconds
+    term to be precise about. `n=1` and the window share the line with the figure, and the
     window IS the arms' window: a cost measured over a different span than the
     quality is not a comparison, it is a second report (#1667's lesson).
     """

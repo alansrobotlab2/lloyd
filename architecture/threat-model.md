@@ -93,7 +93,7 @@ prompt cannot be access control — is for.
 | B9 | an unattended session → the tool surface | every tool call from a worker or a round | two tuples and the session's platform | `app/tool_bans.py:23` |
 | B10 | a grant → authority | a scope predicate, an expiry, a quota | a human at Mission Control, or a task file's front matter | `agent_mcp/builtin_grants.py`, `app/harness/policy.py:1363` |
 | B11 | an automod round → live `main` | a diff, then a restart of the running system | the gate ladder and the guardian | `scripts/automod/spec.py:441`, `scripts/automod/gate.py:3532` |
-| B12 | scheduler → a worker turn | a queue row, and the turn it becomes | the queue's own due-gates | `workers/queue.py:678` |
+| B12 | scheduler → a worker turn | a queue row, and the turn it becomes | the queue's own due-gates | `workers/queue.py`, `claim_next()` |
 | B13 | a run's output → a durable store | loaded memory, facts, the entity store, eval baselines, `-latest` pointers | the job that owns the file, with no cross-job reader | `app/memory_flush.py`, `app/kg_store.py` |
 | B14 | a network peer → the backend API | an HTTP request that can start a turn | the peer's address, and a fingerprint if one arrives | `server.py:241`, `server.py:181` |
 | B15 | a nested RPC call → tool dispatch | a tool call issued from inside a `Bash` child | the allowlist stamped when the parent call began | `app/harness/rpc_policy.py:76` |

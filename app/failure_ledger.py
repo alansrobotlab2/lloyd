@@ -625,12 +625,12 @@ DISPATCH_WINDOW_DAYS = 3
 
 
 #: The queue states that mean "a worker ran this and the engine gave up", and the
-#: ones that mean "an attempt is happening or is owed". `workers/queue.py:16-22`
-#: spells the difference out — `poisoned` is attempts exhausted before a verdict,
-#: `quarantined` is blocked pre-flight — and `app/routers/dashboard.py` puts both
-#: under `by_state`/`depth_by_source`, which its own docstring calls queue DEPTH,
-#: while `runs`/`run_outcomes` is the per-attempt outcome table. Two different
-#: stores, and the dashboard prints the same word `failed` for both of them.
+#: ones that mean "an attempt is happening or is owed". In `workers/queue.py` the two
+#: are written apart: `mark_failed()` sets `poisoned` once `attempts >= max_attempts`
+#: with no verdict, `quarantine()` moves a poisoned row to terminal `quarantined` so
+#: `poisoned` keeps meaning "needs attention". `app/routers/dashboard.py` prints both
+#: as queue DEPTH under `by_state`/`depth_by_source`, and says `failed` for the queue
+#: and for the per-attempt `runs` table alike — the ambiguity this list exists to split.
 QUEUE_UNRECOVERED_STATES = ("poisoned", "quarantined")
 QUEUE_OPEN_STATES = ("queued", "claimed", "running")
 

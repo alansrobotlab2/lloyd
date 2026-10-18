@@ -173,7 +173,7 @@ returns `failed` and expects a queue retry does not get one, and `release()` /
 A topic row carries `queue_id` (the `workers.db` item that researched it) and
 `session_id` (the transcript). `runs.queue_id` is the join back to the run
 record, and it is what `autonomy` leans on too: `/api/autonomy/health` reads
-`WorkQueue.list_runs_joined` (`workers/queue.py:677`, a `LEFT JOIN` on
+`WorkQueue.list_runs_joined` in `workers/queue.py` (a `LEFT JOIN` on
 `r.queue_id = q.id`) and `_row_task_id` (`app/autonomy.py:1999`) recovers the task
 id from the joined queue payload when the run row carries none. The pool never
 passes its `run_id` into `execute`, so the queue id is the link.

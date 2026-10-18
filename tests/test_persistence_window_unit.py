@@ -5,8 +5,8 @@ from inside the pool it holds: `PersistenceHold.take()`
 (`eval/persistence_arms.py:234`) pauses dispatch and then `wait_idle()` (`:271-287`)
 refuses while any queue row is in flight, and the dispatched run of the window is
 itself such a row — `IN_FLIGHT_STATES` at `:89` is read off the depth that
-`workers/queue.py:1103-1111` builds with `SELECT source, state, COUNT(*) FROM queue
-GROUP BY source, state`, which does not exclude the caller. So a pool job burns the
+`depth_by_source()` in `workers/queue.py` builds with `SELECT source, state, COUNT(*) FROM
+queue GROUP BY source, state`, which does not exclude the caller. So a pool job burns the
 900 s drain and exits 2; a pytest round cannot run it either (tests/conftest.py
 refuses the production tree, and the window needs the live aggregator and engine).
 As of triage, 13 `lloyd-*` user units were installed and none of them, and none

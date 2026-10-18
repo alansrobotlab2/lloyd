@@ -87,7 +87,7 @@ ARMS = ("persistence-web-digest", "persistence-relay-email", "persistence-contro
 from workers.pool import PAUSE_WM_KEY, PAUSE_WM_SOURCE  # noqa: E402
 
 #: Queue states that mean a job has left the queue and is inside a worker
-#: (`workers/queue.py:679` `state='claimed'`, `:711` `state='running'`). A `queued`
+#: (`claim_next()` `state='claimed'`, `mark_running()` `state='running'`). A `queued`
 #: row is WAITING, which is precisely the state a held dispatch produces on purpose:
 #: counting it as in flight would make this window impossible to open.
 IN_FLIGHT_STATES = ("claimed", "running")
@@ -137,7 +137,7 @@ def workers_db() -> Path:
 def operator_pause_set(db: Path) -> bool | None:
     """The persisted operator hold as the store records it: True, False, or None.
 
-    Read through the queue's OWN accessor (`WorkQueue.wm_get`, `workers/queue.py:1402`),
+    Read through the queue's OWN accessor (`WorkQueue.wm_get` in `workers/queue.py`),
     not a hand-rolled `sqlite3` query: `tests/test_counterfactual_eval.py::
     test_no_script_under_eval_opens_the_knowledge_store_file` is the standing rule that
     a script under `eval/` reaches a store through its class and never raw, and the

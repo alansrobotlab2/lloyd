@@ -430,7 +430,7 @@ def _run_outcomes(q: Any) -> dict[str, Any]:
     (measured 2026-09-18T10:40Z against `workers.db`; the single queue row
     behind that `1` is a `domain-research` item from 2026-09-09 belonging to no
     configured source). A queue row is a slot that gets re-used:
-    `WorkQueue.mark_failed` (`workers/queue.py:394-430`) writes `poisoned` at
+    `WorkQueue.mark_failed` in `workers/queue.py` writes `poisoned` at
     the attempt ceiling and `queued` with a backoff below it, and never the
     `failed` state this figure used to read — so a source whose runs all failed
     reported a queue-state failure count of zero forever. `runs` is where the

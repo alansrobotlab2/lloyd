@@ -42,7 +42,7 @@ Description=Weekly (Monday) timer for the egress two-arm canary window (#2555; b
 # measured here and lets the window wait a round out instead of refusing (which is how
 # `lloyd-persistence-window.service`'s first timer run died at 02:26:39-07:00 with
 # `{'in_flight': 1, 'autocode:running': 1}` — the queue's pool-status query is
-# `depth_by_source()` at workers/queue.py:1253, which counts the window's own row because
+# `depth_by_source()` at workers/queue.py, which counts the window's own row because
 # there is nothing excluding it).
 
 [Timer]

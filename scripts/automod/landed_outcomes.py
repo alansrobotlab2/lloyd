@@ -41,8 +41,8 @@ What the loop PAYS per landing (#2378) is the other half of the page and the
 half that did not exist: `cost` and `latency` ride in the same row, and change
 the denominator from the activity performed to the outcome achieved. Every
 compute figure this system shows elsewhere is per-run — `runs.duration_seconds`
-summed into `gpu_hours` per task (`workers/queue.py:1353`) — so a three-hour
-implementer turn that lands nothing was one more run inside a budget, and the
+summed into `gpu_hours` per task by `run_rollup_by_source()` in `workers/queue.py` — so
+a three-hour implementer turn that lands nothing was one more run inside a budget, and the
 program could answer "were landed changes undone?" but never "what did a
 landing cost, and how long from the signal to the landing?":
 
@@ -263,9 +263,9 @@ def rounds_text(row: dict) -> str:
 #
 # Everything above is a quality signal. None of it is an economic one, and every
 # compute figure the system shows elsewhere is activity-denominated:
-# `runs.duration_seconds` summed and divided by 3600 into `gpu_hours` per TASK
-# (`workers/queue.py:1353`), and `app/autonomy.py` (`:5157` at filing) summing
-# the same quotient per run per task. A task that burns three hours and lands
+# `runs.duration_seconds` summed and divided by 3600 into `gpu_hours` per TASK by
+# `run_rollup_by_source()` in `workers/queue.py`, and `app/autonomy.py` (`:5157` at filing)
+# summing the same quotient per run per task. A task that burns three hours and lands
 # nothing is therefore one more run inside its budget, and the loop can answer
 # "were landed changes undone?" but never "what did a landing cost". Denominator
 # = the achieved outcome, not the activity, is the whole of the change below.
@@ -306,9 +306,9 @@ ROUND_SPEND_FIELDS: tuple[tuple[str, str], ...] = (
     ("pause_set", "seconds"),
     ("restart_flushed", "waited_s"),
 )
-#: `duration_seconds / 3600` is what the autonomy page prints as `gpu_hours`
-#: (`workers/queue.py:1353`). It is wall-clock and it carries gate-rung
-#: subprocess time inside the same run, so the column says that rather than
+#: `duration_seconds / 3600` is what the autonomy page prints as `gpu_hours`, via
+#: `run_rollup_by_source()` in `workers/queue.py`. It is wall-clock and it
+#: carries gate-rung subprocess time inside the same run, so the column says that rather than
 #: inventing a GPU-second precision the store does not have (#2378's own risk).
 WALLCLOCK_PROXY = ("wall-clock seconds/3600 — the same proxy the autonomy page "
                    "prints as gpu_hours, not measured GPU time")

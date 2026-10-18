@@ -1951,8 +1951,8 @@ def _claim_rows(q, *, source: str, n: int, age_min: int = 0,
                 hold: tuple[str, ...] = ("owed-check", "scheduled-task")) -> None:
     """Have the pool claim `n` rows of one source, `age_min` minutes in the past.
 
-    Through `claim_next`, not raw SQL: `claimed_at` is that method's column to write
-    (workers/queue.py:829), so the fixture leaves the same trace a real worker does —
+    Through `claim_next`, not raw SQL: `claimed_at` is that method's column to write in
+    `workers/queue.py`, so the fixture leaves the same trace a real worker does —
     state `claimed`, `claimed_at` stamped, `attempts` bumped. `hold` are the sources
     whose rows must stay queued: it keeps the starving heads unclaimed, which is the
     whole state under test — work going out of the queue past a row that stays. The
