@@ -478,8 +478,11 @@ def test_swap_refuses_when_a_carry_worthy_edge_landed_after_the_export(tmp_path,
     assert (live / "Old").exists() and rebuild.exists(), "the refusal must move nothing"
 
     # `--force` swaps anyway, exactly as it does for the facts guard: the operator
-    # who re-ran `export` and `import` must still be able to promote.
-    assert m.cmd_swap(_Args(force=True)) == 0
+    # who re-ran `export` and `import` must still be able to promote. It now has
+    # to say why first — #2967 clause 2 makes a bare `--force` exit non-zero and
+    # rename nothing, so the reason travels with the flag that used to stand alone.
+    assert m.cmd_swap(_Args(force=True, reason="re-exported and re-imported; "
+                                               "promoting this rebuild")) == 0
     assert (live / "New").exists()
     promoted = KGStore(live_db)
     assert promoted.edges.find_active("Alan", "Lloyd", "uses") is None, (

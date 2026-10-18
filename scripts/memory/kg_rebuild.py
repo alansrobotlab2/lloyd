@@ -85,8 +85,18 @@ def load_state() -> dict:
         return {}
 
 
-def save_state(**kw) -> dict:
+def save_state(_drop=(), **kw) -> dict:
+    """Merge `kw` into rebuild-state.json, removing `_drop` first.
+
+    The merge is the point of the function, and it is also why a key that means
+    "this run is special" has to be removable: `forced` written by an overriding
+    swap would otherwise sit in the file through the next clean swap and relabel
+    that one as an override too. `_drop` is positional-by-name rather than a
+    second function so the write, the mkdir and `updated_at` stay in one place.
+    """
     state = load_state()
+    for key in _drop:
+        state.pop(key, None)
     state.update(kw)
     state["updated_at"] = _now()
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -862,12 +872,37 @@ def _edges_written_since_export(state: dict) -> list[dict]:
         st.close()
 
 
+# The keys a `--force` swap writes, and the keys a later clean swap has to
+# remove. `save_state` merges, so an override marker left by one run would sit in
+# the file through the next swap that needed no override and relabel it as one.
+OVERRIDE_KEYS = ("forced", "force_reason", "force_overrode", "force_destroyed")
+
+
 def cmd_swap(args) -> int:
-    """Two renames and a reindex. Refuses without a passing gate."""
+    """Two renames and a reindex. Refuses without a passing gate.
+
+    `--force` may cross that refusal, but only with a `--reason`, and it then
+    records the override on the same surface the swap itself writes:
+    ``forced: true``, the reason verbatim, which refusal was crossed
+    (``force_overrode``) and how many hand-stated rows the carry-over guard had
+    found (``force_destroyed``). Before that, the 2026-09-23 swap left
+    ``gate: false`` beside ``swapped_at`` and nothing else — the whole record of
+    the decision was a hand-written ``FORCE-SWAP-REASON.md`` in the run dir, which
+    `status`, `rollback` and the next operator never read. A state that cannot
+    tell a governed override from a bug is not a record of one.
+    """
     state = load_state()
+    reason = getattr(args, "reason", None) or ""
+    if args.force and not reason.strip():
+        print("--force needs --reason: an override nobody wrote down is "
+              "indistinguishable from a bug. Nothing was renamed.", file=sys.stderr)
+        return 2
+    if reason.strip() and not args.force:
+        print("note: --reason is only recorded with --force; this swap overrides "
+              "nothing, so nothing was recorded", file=sys.stderr)
     if not state.get("gate") and not args.force:
-        print("gate has not passed; run `gate` first (or --force, which you should not)",
-              file=sys.stderr)
+        print("gate has not passed; run `gate` first (or --force --reason \"<why>\", "
+              "which you should not)", file=sys.stderr)
         return 2
     if not REBUILD_FACTS.is_dir():
         print(f"no rebuild tree at {REBUILD_FACTS}", file=sys.stderr)
@@ -907,6 +942,26 @@ def cmd_swap(args) -> int:
               file=sys.stderr)
         return 3
 
+    # Both refusals above fire only on the non-force path, so on the force path
+    # nothing has yet said what was crossed — and the rows the carry-over guard
+    # found are about to be quarantined with the tree they live in, permanently.
+    # `overrode` is the machine-readable answer, `overrode_words` the same for a
+    # human reading the terminal, and neither exists unless a refusal happened.
+    overrode, overrode_words = [], []
+    if args.force and not state.get("gate"):
+        overrode.append("gate")
+        overrode_words.append("the failed gate verdict")
+    if args.force and (missed or missed_edges):
+        overrode.append("carry_over")
+        overrode_words.append(
+            f"the carry-over guard ({len(missed)} hand-stated fact(s) and "
+            f"{len(missed_edges)} carry-worthy edge(s) it found after the export)")
+    destroyed = {"hand_stated_facts": len(missed), "carryworthy_edges": len(missed_edges)}
+    override_state = {}
+    if overrode:
+        override_state = {"forced": True, "force_reason": reason,
+                          "force_overrode": overrode, "force_destroyed": destroyed}
+
     ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     quarantine = VAULT_DERIVED_ROOT / f"facts-quarantine-{ts}"
     old_db = VAULT_DERIVED_ROOT / f"kg-quarantine-{ts}.sqlite"
@@ -917,6 +972,14 @@ def cmd_swap(args) -> int:
         print(f"would move {VAULT_KG_DB} -> {old_db}")
         print(f"would move {REBUILD_DB} -> {VAULT_KG_DB}")
         return 0
+
+    if overrode:
+        # Say it before the renames: from here the hand-stated rows are gone, and
+        # an operator watching the terminal needs to know a refusal was crossed
+        # while there is still a chance to stop. A dry run has returned above, so
+        # this only ever prints about a swap that is actually happening.
+        print(f"FORCE: overriding {' and '.join(overrode_words)}. "
+              f"Reason given: \"{reason}\"", file=sys.stderr)
 
     VAULT_FACTS_ROOT.rename(quarantine)
     REBUILD_FACTS.rename(VAULT_FACTS_ROOT)
@@ -934,8 +997,15 @@ def cmd_swap(args) -> int:
     st.close()
 
     _set_write_enabled(True)
-    save_state(swapped_at=_now(), quarantine=str(quarantine), quarantine_db=str(old_db),
-               after_swap=stats)
+    # `_drop` first: a clean swap must not inherit an earlier run's marker, and a
+    # forced one rewrites all four keys anyway, so one call covers both.
+    save_state(_drop=OVERRIDE_KEYS, swapped_at=_now(), quarantine=str(quarantine),
+               quarantine_db=str(old_db), after_swap=stats, **override_state)
+    if overrode:
+        print(f"OVERRIDE RECORDED in {STATE_PATH.name}: this swap is overriding "
+              f"{' and '.join(overrode_words)}, and the override plus the reason are "
+              f"now beside its own swapped_at: forced: true, force_overrode: {overrode}, "
+              f"force_destroyed: {destroyed}, force_reason: \"{reason}\"")
     print(f"swapped. quarantine: {quarantine}\nstore: {stats}")
     print("\nRestart the backend and the aggregator when idle:")
     print("  supervisorctl -c agent-services/supervisor/supervisord.conf "
@@ -1054,6 +1124,10 @@ def main() -> int:
     p = sub.add_parser("swap")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--force", action="store_true")
+    p.add_argument("--reason", default=None,
+                   help="Required with --force. Why the override is legitimate, "
+                        "stored verbatim as force_reason in rebuild-state.json beside "
+                        "the swapped_at it authorises.")
     p.set_defaults(fn=cmd_swap)
     sub.add_parser("rollback").set_defaults(fn=cmd_rollback)
     sub.add_parser("unfreeze").set_defaults(fn=cmd_unfreeze)
