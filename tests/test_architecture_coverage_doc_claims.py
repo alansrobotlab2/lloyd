@@ -922,9 +922,25 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
 #: the list grew by five entries and every one of them is `generated:` about a file that
 #: exists, so a bound on the whole list would have reddened honest reporting and taught the
 #: next reader to distrust it. At zero, one new rot exemption fails the suite by itself.
-#: Whether it stays at zero across a week of nightly runs, and whether `stale` should then
-#: leave the admitted kinds in the node above, is what the owed-check on #2582 rules on
-#: (#2795's owed entry 1).
+#: It has stayed there, and the residue #2795 left open was ruled on 2026-10-18 at
+#: `917f669b`, not left as a question. Measurement: 107 exemptions across 29 docs —
+#: other-tree 43, generated 33, historical 31 — and NONE of them is `stale:`; and `git log
+#: -L` on the line below names `24228136` and nobody since, so the bound has not moved in
+#: the 93 commits landed since it was cut. No run count is quoted here because the ledger
+#: cannot produce one: a `promotions.jsonl` gate row has no field marking a full-suite run.
+#: The ruling, from that owed-check: `stale` STAYS an admitted kind, and this ceiling — not
+#: the kind list — is the rail. Deleting the kind was refused for a reason worth keeping
+#: beside the number, because it is the rail's own text: the failure message of
+#: `test_the_stale_population_is_at_or_under_its_bound_and_names_every_offender` tells a
+#: cleared-entry reader to re-kind the entry `historical:` where the sentence is dated
+#: narrative about the retirement, so a kind list that no longer admitted `stale` would be
+#: instructing a re-labelling that the kind gate — `assert kind in ("generated",
+#: "historical", "other-tree", "stale")` in
+#: `test_every_path_citation_exemption_is_a_citation_the_doc_actually_makes` — then refuses
+#: as a fifth kind nobody reviewed. The clear would have become a re-kind, which is the
+#: parking lot this list exists to keep shut. The node reading this ruling out of these
+#: bytes, and checking its figures against the list the AST sees, is
+#: `test_the_ceiling_s_ruling_is_recorded_in_its_own_comment`.
 STALE_EXEMPTION_CEILING = 0  # 13 at `ef7ec109` (measured 2026-10-15) -> 0 on 2026-10-16, #2795
 
 
@@ -5770,6 +5786,94 @@ def test_the_rot_bound_is_shown_able_to_bite():
     assert "the module moved" in msg, msg[:300]
     assert "lower STALE_EXEMPTION_CEILING in the same commit" in msg, msg[-400:]
     test_the_stale_population_is_at_or_under_its_bound_and_names_every_offender()
+
+
+def test_the_ceiling_s_ruling_is_recorded_in_its_own_comment():
+    """#2982: the ceiling's comment reports a ruling, not a question nobody owns.
+
+    The block above `STALE_EXEMPTION_CEILING` used to end by sending a reader to the
+    owed-check on `#2582` for two answers — whether the bound stays at zero, and whether
+    `stale` should leave the admitted kinds. Both were settled before this file was next
+    opened: #2582 closed 2026-10-15T23:38:52Z with follow-up #2795, and #2795's owed entry
+    was ruled on 2026-10-18 at `917f669b` that `stale` stays admitted and the ceiling is
+    the rail. A comment pointing at a closed item as an open owner invites the next reader
+    to re-litigate a decided question, so the decision now lives in the comment and this
+    node reads it out of the module's own bytes — the `Path(__file__)` idiom this file
+    already uses above.
+
+    The figures are recomputed here rather than compared with a second copy of the prose:
+    an exemption list that grew, or gained a `stale:` entry, reddens this node instead of
+    leaving the comment describing a population nobody lives in. That is also why it
+    survives the wrapped comment lines — `#:` prose is judged after whitespace
+    normalization, so a reflow is not a retraction.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    lines = src.splitlines()
+    decl = next(i for i, ln in enumerate(lines) if ln.startswith("STALE_EXEMPTION_CEILING"))
+    start = decl
+    while start and lines[start - 1].startswith("#:"):
+        start -= 1
+    assert decl - start >= 30, f"the block above the constant is {decl - start} lines: the " \
+        "rationale went missing, and a one-line comment cannot carry a ruling"
+    block = re.sub(r"\s+", " ", " ".join(ln[3:] for ln in lines[start:decl]))
+
+    # The ruling and its reason: the kind is admitted, the ceiling is the rail, and the
+    # rail's own message is why the kind cannot be deleted.
+    assert "STAYS an admitted kind" in block, block[:300]
+    assert "kind gate" in block and "fifth kind" in block, \
+        "the comment must say WHICH gate refuses a re-label, not just that one exists"
+    assert "`historical:`" in block, \
+        "re-kindling to `historical:` is the mechanism that makes deleting the kind harmful"
+    assert '"generated", "historical", "other-tree", "stale"' in block, \
+        "the comment quotes the kind gate's own tuple, so moving the gate moves this"
+    # Read the gate out of the parse, not out of the file text: the four names below this
+    # node are also written in this node, and prose checked against a copy of itself is the
+    # exact vacuity #2982 is about.
+    admitted = {tuple(e.value for e in n.comparators[0].elts if isinstance(e, ast.Constant))
+                for n in ast.walk(ast.parse(src))
+                if isinstance(n, ast.Compare) and isinstance(n.ops[0], ast.In)
+                and isinstance(n.comparators[0], ast.Tuple)
+                and getattr(n.left, "id", None) == "kind"}
+    assert admitted == {("generated", "historical", "other-tree", "stale")}, (
+        f"the kind gate now admits {sorted(admitted)}; the ruling that `stale` is admitted "
+        "has to be rewritten with that gate, not left beside it")
+    assert "test_the_stale_population_is_at_or_under_its_bound_and_names_every_offender" \
+        in block, "the comment must name the rail whose message it is quoting"
+
+    # The measurement, recomputed. Every number in the block comes from here or from git.
+    entries = [reason for e in PATH_CITATION_EXEMPTIONS.values() for reason in e.values()]
+    counts = collections.Counter(r.split(":", 1)[0].strip() for r in entries)
+    docs, total = len(PATH_CITATION_EXEMPTIONS), len(entries)
+    stale = counts.get("stale", 0)
+    assert stale == 0 == STALE_EXEMPTION_CEILING, (
+        f"the comment records a cleared rot kind; the list now holds {stale} at ceiling "
+        f"{STALE_EXEMPTION_CEILING} — the measurement it reports is no longer the box")
+    assert f"{total} exemptions across {docs} docs" in block, (
+        f"the list is {total} entries across {docs} docs; the block says otherwise, and a "
+        "stale figure in a measurement is how a comment stops being evidence")
+    for kind in ("other-tree", "generated", "historical"):
+        assert f"{kind} {counts[kind]}" in block, (
+            f"`{kind}:` is {counts[kind]} entries; correct the block's figure in the "
+            "same commit that moved it")
+    assert "2026-10-18" in block and "917f669b" in block, \
+        "a dated measurement is what lets a reader know how old the reading is"
+    assert "24228136" in block and "93 commits" in block, \
+        "git log -L on the constant names the commit that cut it; the block must too"
+    assert "102" not in block, (
+        "no ledger field marks a full-suite gate run, so the run count this item was "
+        "filed with cannot be re-derived; do not put it back")
+
+    # The owner citation is gone, and the refused half of the ruling stays refused. The id
+    # is the whole test — a bare `#2582` is what the item's grep is a stricter form of — and
+    # this node deliberately does not spell that grep's needle out, so the file keeps only
+    # the legend's two pre-existing mentions and the search stays readable.
+    assert "#2582" not in block, (
+        "the block points at a closed item as an open owner again; its owed entry was "
+        "settled 2026-10-15T23:38:52Z as outcome=work with follow-up #2795")
+    assert "#2795" in block and "was ruled on 2026-10-18" in block, (
+        "the block must name the ruling as settled, which is what replaces the pointer")
+    for refused in ("leave the admitted kinds", "drop `stale`", "drop the kind"):
+        assert refused not in block, f"the block proposes {refused!r}, which was refused"
 
 
 # ── #2804 — the Bash-lane ruling has to carry the body rule it leaves open ────
