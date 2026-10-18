@@ -23,6 +23,33 @@ sys.modules[_spec.name] = R
 _spec.loader.exec_module(R)
 
 
+def _main_restoring_spill_root(argv: list[str]) -> int:
+    """`R.main` over argv, with the spill writer's module binding handed back.
+
+    #2947. `eval/run_compaction_recall_eval.py:2370` is a bare module-global write —
+    `_trs.SESSIONS_DIR = data_root / "sessions"` — with no matching restore, and it sits
+    BEFORE the unknown-arm check at `:2376`, so even the call this file makes to prove an arm
+    name is rejected leaves it behind. Left alone, that write points every spill for the rest
+    of the worker at the calling node's `--data-root`, which pytest deletes when the node
+    ends: `tests/test_compaction.py`'s three spill-path nodes took the failure (their
+    markers named a dead tmp dir), and the two that only look for a `.tool-results`
+    substring took the leak silently and wrote their spill files somewhere nobody would
+    delete. The runner's own rebind is #2511's contract — it is how a run keeps its spills
+    out of production — so the restore belongs here, on the caller, and not in
+    `eval/run_compaction_recall_eval.py`.
+
+    Pinned by `test_a_cli_run_leaves_the_spill_writer_where_it_found_it`, which samples the
+    binding DURING a run as well as after it.
+    """
+    import app.harness.tool_result_spill as trs
+
+    saved = trs.SESSIONS_DIR
+    try:
+        return R.main(argv)
+    finally:
+        trs.SESSIONS_DIR = saved
+
+
 @pytest.fixture
 def corpus(tmp_path):
     rng = random.Random(1)
@@ -934,10 +961,11 @@ def test_the_cli_pointer_run_prints_retention_beside_correctness(tmp_path, monke
                                                for n in ("Read", "Grep", "Bash")]]]))
     root = tmp_path / "data"
     monkeypatch.setenv("LLOYD_DATA", str(root))
-    rc = R.main(["--sessions", "1", "--sizes", "12000", "--depths", "0.5",
-                 "--arms", "none", "--seed", "600", "--pointer", "--dry",
-                 "--data-root", str(root), "--tools-snapshot", str(snap),
-                 "--out", str(tmp_path / "out.json")])
+    rc = _main_restoring_spill_root([
+        "--sessions", "1", "--sizes", "12000", "--depths", "0.5",
+        "--arms", "none", "--seed", "600", "--pointer", "--dry",
+        "--data-root", str(root), "--tools-snapshot", str(snap),
+        "--out", str(tmp_path / "out.json")])
     assert rc == 0
     printed = json.loads(capsys.readouterr().out.strip().split("\n{", 1)[1].rsplit("}", 1)[0].join(("{", "}")))
     arm = printed["none"]
@@ -1002,11 +1030,11 @@ def test_the_sidecar_arm_is_selectable_via_arms(tmp_path, monkeypatch):
                 "--data-root", str(root), "--tools-snapshot", str(snap),
                 "--out", str(tmp_path / "out.json")]
 
-    assert R.main(argv("tool_clear,sidecar")) == 0
+    assert _main_restoring_spill_root(argv("tool_clear,sidecar")) == 0
     doc = json.loads((tmp_path / "out.json").read_text())
     assert {r["arm"] for r in doc["rows"]} == {"tool_clear", "sidecar"}
     assert all(r["status"] in ("dry", "dropped") for r in doc["rows"]), doc["rows"]
-    assert R.main(argv("sidecar_not_an_arm")) == 2
+    assert _main_restoring_spill_root(argv("sidecar_not_an_arm")) == 2
 
 
 def _stub_the_loop(corpus, tmp_path, monkeypatch, spy_sidecar=False):
@@ -1421,15 +1449,72 @@ def test_the_dry_rows_carry_the_applied_count_field(tmp_path, monkeypatch):
                                                for n in ("Read", "Grep", "Bash")]]]))
     root = tmp_path / "data"
     monkeypatch.setenv("LLOYD_DATA", str(root))
-    rc = R.main(["--sessions", "1", "--sizes", "12000", "--depths", "0.5",
-                 "--arms", "tool_clear,sidecar", "--seed", "600", "--dry",
-                 "--data-root", str(root), "--tools-snapshot", str(snap),
-                 "--out", str(tmp_path / "out.json")])
+    rc = _main_restoring_spill_root([
+        "--sessions", "1", "--sizes", "12000", "--depths", "0.5",
+        "--arms", "tool_clear,sidecar", "--seed", "600", "--dry",
+        "--data-root", str(root), "--tools-snapshot", str(snap),
+        "--out", str(tmp_path / "out.json")])
     assert rc == 0
     doc = json.loads((tmp_path / "out.json").read_text())
     assert doc["rows"], "the dry grid emitted nothing to audit"
     assert all("sidecar_applied" in r for r in doc["rows"]), (
         "a row in the results document carries no applied count")
+
+
+def test_a_cli_run_leaves_the_spill_writer_where_it_found_it(tmp_path, monkeypatch):
+    """#2947 clause 4: a node that drives the runner's `--dry` CLI hands the spill
+    writer's `SESSIONS_DIR` back as it found it, and the value it hands back is
+    `app.paths.SESSIONS_DIR` — the one value every other test in the process reads.
+
+    The mid-run sample is the half that makes this a test and not a tautology. `main` rebinds
+    the writer at `eval/run_compaction_recall_eval.py:2370` and never restores it, so
+    `test_the_dry_rows_carry_the_applied_count_field` and the three other `R.main` nodes here
+    left every later spill in the worker aimed at the calling node's `--data-root`, which
+    pytest deletes when that node ends; that is the leak that turned
+    `tests/test_compaction.py::test_microcompact_marker_names_the_call_and_the_spill_file` red
+    in file order. Asserting only "it equals `app.paths.SESSIONS_DIR` afterwards" would also
+    pass on a runner that never touched the module at all, so this node spies the binding from
+    inside the run (through `_corpus_files`, which `main` calls at `:2382`, twelve lines after
+    the rebind) and requires it to have been the run's data root WHILE the run was in
+    progress. Delete the `finally` in `_main_restoring_spill_root` and the last assertion
+    fails; make the runner never rebind and the mid-run assertion fails.
+    """
+    import app.harness.tool_result_spill as trs
+    from app import paths as app_paths
+
+    snap = tmp_path / "tools.json"
+    snap.write_text(json.dumps([["lloyd-mcp", [{"name": n, "description": n,
+                                                "inputSchema": {"type": "object",
+                                                                "properties": {}}}
+                                               for n in ("Read", "Grep", "Bash")]]]))
+    root = tmp_path / "data"
+    monkeypatch.setenv("LLOYD_DATA", str(root))
+
+    seen: dict[str, Path] = {}
+    real_corpus_files = R._corpus_files
+
+    def _spy(*args, **kwargs):
+        seen["during"] = trs.SESSIONS_DIR
+        return real_corpus_files(*args, **kwargs)
+
+    monkeypatch.setattr(R, "_corpus_files", _spy)
+    before = trs.SESSIONS_DIR
+
+    rc = _main_restoring_spill_root([
+        "--sessions", "1", "--sizes", "12000", "--depths", "0.5",
+        "--arms", "none", "--seed", "600", "--dry",
+        "--data-root", str(root), "--tools-snapshot", str(snap),
+        "--out", str(tmp_path / "out.json")])
+
+    assert rc == 0, "the dry run refused, so it never reached the rebinding under test"
+    assert seen.get("during") == root / "sessions", (
+        f"the runner never rebound the writer during the run (saw {seen.get('during')!r}), so "
+        "the restore below would be excused by a call that did nothing")
+    assert trs.SESSIONS_DIR == app_paths.SESSIONS_DIR, (
+        f"a CLI run left the spill writer at {trs.SESSIONS_DIR}, which is a directory from a "
+        f"finished node — every spill after it in this worker lands there")
+    assert trs.SESSIONS_DIR == before, (
+        f"the writer was left at {trs.SESSIONS_DIR} instead of the {before} this node found")
 
 
 def test_the_sidecar_header_states_the_two_pass_procedure():

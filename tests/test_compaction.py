@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.compaction import (  # noqa: E402
@@ -28,6 +30,31 @@ def _run(coro):
     """Sync runner for the now-async load_and_compact_session."""
     return asyncio.get_event_loop().run_until_complete(coro) if False \
         else asyncio.run(coro)
+
+
+@pytest.fixture
+def spill_scratch(tmp_path, monkeypatch):
+    """A sessions dir under THIS node's `tmp_path`, with the spill writer aimed at it.
+
+    #2947. The writer resolves its own module binding — `app/harness/tool_result_spill.py:47`
+    (`from app.paths import SESSIONS_DIR`), consumed by `_spill_dir` at `:61`, and
+    `app/harness/microcompact.py:320` reads that same binding for the reduction sidecar — so
+    rebinding THAT is what moves every spill a test can produce. Rebinding nothing and
+    deriving the expected path from `app.paths.SESSIONS_DIR` instead, which is what three
+    nodes here used to do, reads a directory the node never created:
+    `eval/run_compaction_recall_eval.py:2370` assigns `_trs.SESSIONS_DIR = data_root /
+    "sessions"` with no restore, reached from every `R.main` node in
+    `tests/test_compaction_recall_eval.py`, so any run order that put one of those ahead of a
+    reader here had the writer spilling into a finished node's scratch dir while the
+    assertion still named this session's data root. The restore that keeps the leak from
+    reaching this file at all is pinned by
+    `tests/test_compaction_recall_eval.py::test_a_cli_run_leaves_the_spill_writer_where_it_found_it`;
+    this fixture is the half that makes a node's own assertions unforgeable either way.
+    """
+    root = tmp_path / "sessions"
+    root.mkdir()
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR", root)
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -311,16 +338,24 @@ def test_microcompact_skips_results_too_small_to_be_worth_clearing():
     assert cleared == 0, f"cleared {cleared} sub-threshold results"
 
 
-def test_microcompact_marker_names_the_call_and_the_spill_file():
+def test_microcompact_marker_names_the_call_and_the_spill_file(spill_scratch):
     """"[content cleared — retrieve via Read if needed]" is an instruction
-    the model cannot follow: it names neither the file nor the call."""
+    the model cannot follow: it names neither the file nor the call.
+
+    The expected directory comes from this node's own `spill_scratch` (#2947), which is also
+    where the writer is bound to put it, so the two assertions below can only be satisfied by
+    a spill THIS node caused. Deriving it from `app.paths.SESSIONS_DIR` — what this node did
+    until #2947 — let a spill written anywhere pass the `glob` and fail only the path
+    comparison, which is exactly the shape the order-dependent red at
+    `tests/test_compaction_recall_eval.py`'s `R.main` nodes took: the marker named the leaked
+    dir, the assertion named this session's data root, and the file was real in both.
+    """
     from app.harness.microcompact import microcompact
-    from app.paths import SESSIONS_DIR
 
     sid = "test_microcompact_marker"
     msgs = _tool_pairs(20, chars=4_000)
     est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
-    spill_dir = SESSIONS_DIR / f"{sid}.tool-results"
+    spill_dir = spill_scratch / f"{sid}.tool-results"
     try:
         out, cleared = microcompact(
             msgs, token_budget=1, estimate_fn=est,
@@ -330,7 +365,8 @@ def test_microcompact_marker_names_the_call_and_the_spill_file():
         marker = _marker_text([m for m in out if m.get("role") == "tool"][0])
         assert "Read" in marker, marker
         assert "file_path=" in marker, marker
-        assert str(spill_dir) in marker, marker
+        assert str(spill_dir) in marker, (
+            f"the marker names a path outside the dir this node pinned the writer to: {marker}")
         # And the content is genuinely on disk, not merely named.
         assert list(spill_dir.glob("*.txt")), "marker names a file that was never written"
     finally:
@@ -340,7 +376,7 @@ def test_microcompact_marker_names_the_call_and_the_spill_file():
             spill_dir.rmdir()
 
 
-def test_microcompact_marker_names_a_route_the_turn_can_take():
+def test_microcompact_marker_names_a_route_the_turn_can_take(spill_scratch):
     """The same false promise in the pass that fires most.
 
     `microcompact` writes the marker half of the corpus's denials were answering
@@ -351,10 +387,9 @@ def test_microcompact_marker_names_a_route_the_turn_can_take():
     notice is answering. What changes is the verb.
     """
     from app.harness.microcompact import microcompact
-    from app.paths import SESSIONS_DIR
 
     sid = "test_microcompact_marker_denied"
-    spill_dir = SESSIONS_DIR / f"{sid}.tool-results"
+    spill_dir = spill_scratch / f"{sid}.tool-results"
     est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
 
     def _first_marker(disallowed):
@@ -375,9 +410,16 @@ def test_microcompact_marker_names_a_route_the_turn_can_take():
     denied = _first_marker(["Read", "Bash", "Grep"])
     assert "Read that path" not in denied, "the marker still orders a refused call"
     assert "re-run the call" in denied, denied[:200]
-    assert ".tool-results" in denied, "the path is still named, as it should be"
-    # The chat turn that owns Read keeps the wording every other test here pins.
-    assert "Read that path if you need it again." in _first_marker(["Bash"])
+    assert str(spill_dir) in denied, (
+        "the path is still named, as it should be — and it has to be the dir this node "
+        f"pinned the writer to, not wherever it was left pointing: {denied[:300]}")
+    # The chat turn that owns Read keeps the wording every other test here pins, and the
+    # same path test applies to it: a `.tool-results` substring alone would pass on a
+    # stranger's directory, which is how this node read green under the leak (#2947).
+    allowed = _first_marker(["Bash"])
+    assert "Read that path if you need it again." in allowed, allowed[:300]
+    assert str(spill_dir) in allowed, (
+        f"the Read-owning wording names a path outside this node's spill dir: {allowed[:300]}")
 
 
 def test_the_pre_turn_pass_carries_the_turn_s_deny_list(monkeypatch):
@@ -1118,23 +1160,34 @@ def test_the_intra_turn_pass_reads_the_deny_list_from_config():
 # ---------------------------------------------------------------------------
 
 
-def _clean_spill_dir(sid: str) -> None:
-    from app.paths import SESSIONS_DIR
+def _clean_spill_dir(spill_dir: Path) -> None:
+    """Delete one spill dir, given as a path.
 
-    d = SESSIONS_DIR / f"{sid}.tool-results"
-    if d.exists():
-        for f in d.iterdir():
+    #2947 took the `app.paths.SESSIONS_DIR` derivation out of here. It used to take a session
+    id and rebuild the path from the paths module, which is not where the writer necessarily
+    wrote: whenever the writer had been rebound — by this file's own `monkeypatch`es, or by a
+    leaked eval `--data-root` — this deleted nothing and left every spill file the nodes below
+    produce standing in somebody else's scratch dir, silently, in a pass that reported green.
+    Taking the path means the caller is the one place that knows where its spill went.
+    """
+    if spill_dir.exists():
+        for f in spill_dir.iterdir():
             f.unlink()
-        d.rmdir()
+        spill_dir.rmdir()
 
 
-def _spill_block(disallowed, tool_name="Grep"):
+def _spill_block(spill_scratch, disallowed, tool_name="Grep"):
     """One spilled `<persisted-output>` block, with the turn's deny list and
     the tool that produced the result.
 
     The tool defaults to `Grep` because every test written before #2067 asks
     about a spill the knob list really describes, and #1066's fix must not
     move for it.
+
+    `spill_scratch` is the calling node's own dir (the `spill_scratch` fixture, #2947), and
+    the block is checked against it on the way out: a block whose `saved to:` path lives in a
+    directory this node never created is a spill nobody here owns, and the six nodes that read
+    these blocks for wording would otherwise pass on it.
     """
     from app.harness.tool_result_spill import maybe_spill
 
@@ -1142,13 +1195,18 @@ def _spill_block(disallowed, tool_name="Grep"):
     # produce byte-identical blocks, and a per-call id would put a different
     # spill path in each and make that comparison always fail.
     sid = "spill_notice_probe"
+    spill_dir = spill_scratch / f"{sid}.tool-results"
     try:
-        return maybe_spill(
+        block = maybe_spill(
             "y" * 60_000, tool_name=tool_name, tool_use_id="call_spill",
             session_id=sid, disallowed_tools=disallowed,
         )
+        assert str(spill_dir) in block, (
+            f"the block names a spill dir outside the one this node pinned the writer to "
+            f"({spill_dir}): {block[:300]}")
+        return block
     finally:
-        _clean_spill_dir(sid)
+        _clean_spill_dir(spill_dir)
 
 
 #: Every argument the without-Read sentence used to name. None of them is a
@@ -1159,7 +1217,7 @@ _KNOB_PHRASES = ("narrower query", "hops", "min_confidence", "--glob",
                  "--type", "head_limit")
 
 
-def test_spill_notice_stops_offering_read_to_a_turn_that_cannot_use_it():
+def test_spill_notice_stops_offering_read_to_a_turn_that_cannot_use_it(spill_scratch):
     """The notice ordered a call the same turn's policy refused.
 
     10 of the 25 deep-research denials in the 09-14→09-17 window were the
@@ -1171,24 +1229,24 @@ def test_spill_notice_stops_offering_read_to_a_turn_that_cannot_use_it():
     denial against the same directory.
     """
     for denied in (["Read", "Bash"], ["mcp__lloyd-mcp__Read"]):
-        block = _spill_block(denied)
+        block = _spill_block(spill_scratch, denied)
         assert "Read the full file" not in block, f"{denied}: the false promise stands"
         assert "narrower query" in block, "the recovery it offers is not a real one"
         assert "saved to:" in block, "the file itself is still named, as it should be"
 
 
-def test_the_spill_notice_is_unchanged_for_a_turn_that_has_read():
+def test_the_spill_notice_is_unchanged_for_a_turn_that_has_read(spill_scratch):
     """The chat agent owns Read, and the wording it relies on must not move —
     this rung fires on every oversized result a chat turn produces."""
-    with_read = _spill_block(["Bash"])
+    with_read = _spill_block(spill_scratch, ["Bash"])
     assert "Read the full file with the Read tool" in with_read
     assert "narrow your next query" in with_read
     # Omitting the argument is the other shape of "allowed": a caller that
     # passes nothing must not read as a turn with everything denied.
-    assert _spill_block(None) == with_read
+    assert _spill_block(spill_scratch, None) == with_read
 
 
-def test_a_spilled_fetch_on_a_read_denied_turn_is_told_there_is_no_route():
+def test_a_spilled_fetch_on_a_read_denied_turn_is_told_there_is_no_route(spill_scratch):
     """The pointer named an argument the fetching tool does not have (#2067).
 
     `recovery_notice` chose its sentence from the deny list alone, so a
@@ -1213,7 +1271,7 @@ def test_a_spilled_fetch_on_a_read_denied_turn_is_told_there_is_no_route():
     """
     for denied in (["Read", "Bash"], ["mcp__lloyd-mcp__Read"]):
         for fetch in ("http_fetch", "mcp__lloyd-mcp__http_fetch"):
-            block = _spill_block(denied, tool_name=fetch)
+            block = _spill_block(spill_scratch, denied, tool_name=fetch)
             for phrase in _KNOB_PHRASES:
                 assert phrase not in block, (
                     f"{fetch} on {denied}: the block still names {phrase!r}, "
@@ -1229,17 +1287,17 @@ def test_a_spilled_fetch_on_a_read_denied_turn_is_told_there_is_no_route():
                 "only lean on the header line that already does")
 
 
-def test_a_spilled_fetch_points_at_read_and_says_so_when_the_turn_has_read():
+def test_a_spilled_fetch_points_at_read_and_says_so_when_the_turn_has_read(spill_scratch):
     """The other branch of the same tool test: a chat turn owns `Read`, and
     for a fetch that is not merely the route it is the *only* one, so the
     sentence says that instead of offering a narrower query as well."""
-    block = _spill_block(["Bash"], tool_name="http_fetch")
+    block = _spill_block(spill_scratch, ["Bash"], tool_name="http_fetch")
     assert "Read the full file with the Read tool" in block
     for phrase in _KNOB_PHRASES:
         assert phrase not in block, f"a fetch was told about {phrase!r} anyway"
 
 
-def test_a_grep_or_graph_spill_keeps_the_narrowing_it_really_has():
+def test_a_grep_or_graph_spill_keeps_the_narrowing_it_really_has(spill_scratch):
     """#2067 must not undo #1066: for a tool that does take an argument
     selecting a smaller slice, "re-run it narrower" is the true advice, on a
     denied turn as much as on any other.
@@ -1252,19 +1310,27 @@ def test_a_grep_or_graph_spill_keeps_the_narrowing_it_really_has():
     cannot quietly widen the fix past the tools that need it.
     """
     for tool in ("Grep", "graph_affected", "mcp__lloyd-mcp__Grep"):
-        block = _spill_block(["Read", "Bash"], tool_name=tool)
+        block = _spill_block(spill_scratch, ["Read", "Bash"], tool_name=tool)
         assert "narrower query" in block, f"{tool} lost advice that is real for it"
         assert "Read the full file" not in block
 
 
-def test_context_pressure_notice_stops_offering_read_to_a_turn_that_cannot_use_it():
+def test_context_pressure_notice_stops_offering_read_to_a_turn_that_cannot_use_it(spill_scratch):
     """`_truncate_largest_tool_results` is the notice the corpus actually shows,
     so it gets the same treatment as the spill block — and the same test: a
-    turn with `Read` allowed keeps its wording."""
+    turn with `Read` allowed keeps its wording.
+
+    The spill dir is this node's own (`spill_scratch`, #2947) and both branches assert the
+    notice names a path inside it. What this node used to assert — `".tool-results/" in denied`
+    — is satisfied by a spill from any run in any directory, which is how it and
+    `_clean_spill_dir` below it both read green while the writer was pointed at another
+    node's scratch dir and this one deleted nothing.
+    """
     from app.harness.loop import _truncate_largest_tool_results
 
     def _notice(disallowed, sid):
         msgs = _tool_pairs(4, chars=30_000)
+        spill_dir = spill_scratch / f"{sid}.tool-results"
         try:
             truncated, _freed = _truncate_largest_tool_results(
                 msgs, target_chars=10_000, session_id=sid, min_chars=4_096,
@@ -1276,16 +1342,19 @@ def test_context_pressure_notice_stops_offering_read_to_a_turn_that_cannot_use_i
                     return _marker_text(m)
             raise AssertionError("no cleared-under-pressure notice was produced")
         finally:
-            _clean_spill_dir(sid)
+            _clean_spill_dir(spill_dir)
 
     denied = _notice(["Read"], "truncate_read_denied_probe")
     assert "Read that path" not in denied
     assert "narrower query" in denied, "the recovery it offers is not a real one"
-    assert ".tool-results/" in denied, "the spilled evidence is still named"
+    assert str(spill_scratch / "truncate_read_denied_probe.tool-results") in denied, (
+        f"the spilled evidence is not named as a path inside this node's own dir: {denied[:300]}")
 
     allowed = _notice([], "truncate_read_allowed_probe")
     assert "Read that path if you need it again." in allowed, (
         "the wording a turn that owns Read depends on moved")
+    assert str(spill_scratch / "truncate_read_allowed_probe.tool-results") in allowed, (
+        f"the Read-owning notice names a path outside this node's own dir: {allowed[:300]}")
 
 
 # ---------------------------------------------------------------------------
