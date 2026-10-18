@@ -26,12 +26,12 @@ sys.path.insert(0, str(REPO))
 
 from eval import diagnosis_fanout_replay as replay  # noqa: E402
 from eval.diagnosis_fanout_replay import (  # noqa: E402
-    ARM_A, ARM_B, ARM_RETRY, DEFAULT_TOKEN_CEILING, MIN_CASES, RecordError,
-    THEORIES_PER_CASE, VAULT_WITNESS, WITNESS_CASES, WITNESS_ROWS, WITNESS_SHA,
-    RowWriter, agrees, baseline_problem, build_cases, case_complete,
-    citation_rows, excluded_note, format_report, investigate_live,
-    learnings_cases, load_cases, rank_theories, run_case_a, score, select_cases,
-    slot_labels, verify_citation, verify_citations, witness_census,
+    ARM_A, ARM_B, ARM_RETRY, DEFAULT_INVESTIGATION_TURNS, DEFAULT_TOKEN_CEILING,
+    MIN_CASES, RecordError, THEORIES_PER_CASE, VAULT_WITNESS, WITNESS_CASES,
+    WITNESS_ROWS, WITNESS_SHA, RowWriter, agrees, baseline_problem, build_cases,
+    case_complete, citation_rows, excluded_note, format_report, investigate_live,
+    learnings_cases, load_cases, rank_theories, run_case_a, run_case_b, score,
+    select_cases, slot_labels, verify_citation, verify_citations, witness_census,
     write_baseline, write_cases)
 
 LEDGER = REPO / ".git"  # exists, so a missing-ledger path is never confused with one
@@ -1291,20 +1291,23 @@ def test_the_live_investigation_budget_reaches_the_engine_turn_it_must_fit_in(
     read off `investigate_live`'s own signature — `cmd_run` never passes `max_turns`,
     so the default IS the study's budget — and is then followed across into
     `_engine_turn`, the single call that hands the number to
-    `app.harness.loop.run_query`. A signature saying 40 over a call that dropped the
+    `app.harness.loop.run_query`. A signature saying 60 over a call that dropped the
     argument would satisfy a signature-only test and still stop at the harness's own
     default, and nothing in the file would have looked wrong.
 
-    The figure is measured, not chosen: investigating `flaky-SM_20260928_080412` on
-    this engine reached `stop_reason: stop` at 27 turns under a cap of 40
+    The value is `DEFAULT_INVESTIGATION_TURNS`, named at module level for #2985 so a
+    reader sees it is one arithmetic property with `DEFAULT_TOKEN_CEILING` rather than
+    a bare literal in a signature. Its floor is the measured pair, which brackets the
+    cost instead of averaging it out: investigating `flaky-SM_20260928_080412` on this
+    engine reached `stop_reason: stop` at 27 turns
     (`~/lloyd-data/eval/2258/probe-maxturns-40.log`,
-    `META: {"stop_reason": "stop", "num_turns": 27, ...}`), while the shipped 20 ended
-    the same case at 21 turns with `stop_reason: max_turns`. Running out of turns is
-    not a shorter answer, it is no answer: the finalizer restates a `final_schema` only
-    for `stop`/`end_turn` (`FINALIZABLE_STOP_REASONS`, `app/harness/finalizer.py:66`,
+    `META: {"stop_reason": "stop", "num_turns": 27, ...}`), while smoke-b3's theory
+    was cut off at `num_turns: 41` with `stop_reason: max_turns`
+    (`~/lloyd-data/eval/2258/smoke-b3.jsonl`, line 2). Running out of turns is not a
+    shorter answer, it is no answer: the finalizer restates a `final_schema` only for
+    `stop`/`end_turn` (`FINALIZABLE_STOP_REASONS`, `app/harness/finalizer.py:78`,
     "no verdict to restate"), so the exhausted arm got `structured: {}`, hence
-    `claims: []`, hence a `run_case_a` refusal that read as "the model found no
-    evidence".
+    `claims: []`, hence a refusal that read as "the model found no evidence".
     """
     case = _study_corpus()[0]
     seen: list[dict] = []
@@ -1318,15 +1321,23 @@ def test_the_live_investigation_budget_reaches_the_engine_turn_it_must_fit_in(
 
     monkeypatch.setattr(replay, "_engine_turn", fake_turn)
 
-    assert inspect.signature(investigate_live).parameters["max_turns"].default >= 40, (
-        "the live investigator's turn budget is back under 40; the one case measured "
-        "end-to-end on this engine needed 27 turns to answer at all")
+    default = inspect.signature(investigate_live).parameters["max_turns"].default
+    assert default is DEFAULT_INVESTIGATION_TURNS, (
+        f"the budget reached the harness as {default}, which is not the named module "
+        "constant — a bare number in the signature is what #2985 removed, because the "
+        "turn cap and DEFAULT_TOKEN_CEILING are one arithmetic property and a literal "
+        "in a signature hides the pairing")
+    assert default >= 60, (
+        f"the live investigator's turn budget is {default}; smoke-b3's theory was cut "
+        "off at num_turns 41 with stop_reason max_turns, so a cap at or below 41 is "
+        "the truncation on record rather than a budget above it")
 
     out = asyncio.run(investigate_live(case, "parallel-load-flake at base"))
 
     assert len(seen) == 1, seen
-    assert seen[0]["max_turns"] == 40, (
-        f"the signature says 40 but the harness call got {seen[0]['max_turns']}")
+    assert seen[0]["max_turns"] == DEFAULT_INVESTIGATION_TURNS, (
+        f"the signature says {DEFAULT_INVESTIGATION_TURNS} but the harness call got "
+        f"{seen[0]['max_turns']}")
     assert seen[0]["schema"] is replay.CLAIMS_SCHEMA, (
         "an investigation answers the claims schema; a theories schema here would "
         "silently return no claims for a perfectly good trace")
@@ -1379,6 +1390,212 @@ def test_one_completed_investigation_fits_the_default_token_ceiling(tmp_path):
         f"a third row means the measured spend tripped the default ceiling: {rows}")
     assert verdict["tokens"] == 179_186
     assert agrees(case, verdict["chosen_cause"])
+
+
+# ── #2985: the fan-out's budget has to fit three theories ───────────────────
+#
+# The ceiling is CUMULATIVE and read before each dispatch (`spent >= token_ceiling`
+# in `run_case_b`), so it is a budget for the whole three-theory fan-out, not per
+# theory: a theory's cost is known only when it returns, so the arm can refuse the
+# NEXT dispatch and never the one in flight. 200,000 was therefore below arithmetic —
+# one measured theory costs 161,011 tokens
+# (`~/lloyd-data/eval/2258/smoke-b3.jsonl`, line 2, `run-20261018T220131Z`), so three
+# of THEM cost 483,033 and could never fit. What the old figure did to the record is
+# in `~/lloyd-data/eval/2258/rows.jsonl`: all 13 of that file's `kind: ceiling` rows
+# are `seq: 4` with `tokens_spent` between 280,279 and 362,808 against 200,000, so the
+# third theory of every case was refused, and `rank_theories` deliberately keeps a
+# ceiling-cut slot in the candidate list — the 2026-10-13 pass then wrote a verdict
+# whose chosen cause had no evidence row under it. The turn cap is the same property
+# read from the other side: smoke-b3's truncation happened at `num_turns: 41` under
+# the cap of 40 this module shipped, and a longer dispatch costs more tokens.
+#
+# The two numbers below are therefore ONE decision. The owed live pass (#2985 clause
+# 1) is what measures a theory's cost at 60 turns; until it reports, the ceiling is
+# sized against the worst dispatch RECORDED, which was taken under a 40-turn cap.
+
+#: What the ceiling must clear: three of the most expensive single dispatch in the
+#: study's own ledger (199,283 tokens, `~/lloyd-data/eval/2258/rows.jsonl`, line 126).
+WORST_DISPATCH_TOKENS = 199_283
+
+#: The trio the fan-out test below replays: two theories at smoke-b3's measured cost
+#: plus the third-worst dispatch on record. 161,011 + 184,976 + 161,011.
+MEASURED_TRIO_TOKENS = (161_011, 184_976, 161_011)
+
+
+def test_the_default_ceiling_clears_three_of_the_worst_dispatch_on_record():
+    """Clause 1: `DEFAULT_TOKEN_CEILING` is a named constant >= 3 x the worst theory.
+
+    The floor is arithmetic, not taste: the ceiling is charged `THEORIES_PER_CASE`
+    times before the fan-out can finish, so anything under
+    `THEORIES_PER_CASE x WORST_DISPATCH_TOKENS` (= 597,849) refuses the third theory
+    of a case that spent its worst-ever dispatch on each slot. The item's own stated
+    floor, 3 x 184,976 = 554,928, is checked alongside it because that is the figure
+    the clause names; the ledger's actual maximum is higher, at 199,283, so the
+    stronger bound is the one the constant has to clear — and 600,000 clears it by
+    2,151 tokens, which is arithmetic rather than comfort. A test that asserted only
+    `>= 600_000` would pass on 6,000,000 and tell nobody the number is a floor with a
+    derivation.
+    """
+    assert DEFAULT_TOKEN_CEILING >= THEORIES_PER_CASE * 184_976, (
+        f"{DEFAULT_TOKEN_CEILING} is under the item's own floor of "
+        f"{THEORIES_PER_CASE * 184_976}: three dispatched theories do not fit, so the "
+        "arm records a ceiling row and the case reaches `report` with a slot that has "
+        "no evidence under it")
+    assert DEFAULT_TOKEN_CEILING >= THEORIES_PER_CASE * WORST_DISPATCH_TOKENS, (
+        f"{DEFAULT_TOKEN_CEILING} is under 3 x the worst dispatch in the study's "
+        f"ledger ({THEORIES_PER_CASE * WORST_DISPATCH_TOKENS} = "
+        f"{THEORIES_PER_CASE} x {WORST_DISPATCH_TOKENS}, rows.jsonl line 126)")
+    assert sum(MEASURED_TRIO_TOKENS) < DEFAULT_TOKEN_CEILING, (
+        f"the measured trio {MEASURED_TRIO_TOKENS} sums to "
+        f"{sum(MEASURED_TRIO_TOKENS)}, which the shipped ceiling cannot hold")
+
+
+def test_three_measured_theory_costs_all_dispatch_at_the_default_ceiling(tmp_path):
+    """Clause 3: three real theory costs, three evidence rows, one verdict, no ceiling.
+
+    The costs are the measured ones (`MEASURED_TRIO_TOKENS`: smoke-b3's 161,011 twice
+    and the 184,976 dispatch at `rows.jsonl` line 50), not round numbers, because the
+    failure this guards is arithmetic — 506,998 tokens does not fit under 200,000 and
+    does fit under 600,000. No `kind: ceiling` row is the whole clause: that row is
+    what made `report` score a case whose third slot was never investigated, and it is
+    written by the `spent >= token_ceiling` break, which fires on the CUMULATIVE spend.
+    The assertion therefore uses the default ceiling by omission as well as by value —
+    a test that passed `token_ceiling=` itself would only prove the arithmetic, not that
+    the module's own default is the figure that holds.
+    """
+    case = _study_corpus()[0]
+    root = "parallel-load-flake"          # case 0's own expected-cause marker
+    labels = slot_labels(case["key"])
+    claims = {t: [{"claim": root, "citations": [{"path": "eval/README.md",
+                                                 "line": 1}]}] for t in labels}
+    spent = list(MEASURED_TRIO_TOKENS)
+
+    async def generate(c):
+        return list(labels)
+
+    async def investigate(c, theory):
+        return {"tool": "Task", "claims": claims[theory],
+                "tokens": spent[labels.index(theory)]}
+
+    rows_path = tmp_path / "rows.jsonl"
+    verdict = asyncio.run(run_case_b(case, run_id="r-trio", generate=generate,
+                                     investigate=investigate, writer=RowWriter(rows_path),
+                                     rank_fn=_rank_stub([0, 1, 2])))
+    rows = [json.loads(ln) for ln in rows_path.read_text().splitlines()]
+    kinds = [r["kind"] for r in rows]
+    assert kinds == ["theories", "tool", "tool", "tool", "rank", "verdict"], (
+        f"{kinds}: a `ceiling` row here is the bug — the third dispatch would have "
+        "been refused for having no budget left, and rank_theories keeps a "
+        "ceiling-cut slot in the candidate list anyway")
+    assert [r["tokens"] for r in rows if r["kind"] == "tool"] == list(
+        MEASURED_TRIO_TOKENS), "the fan-out did not pay the measured costs it was run at"
+    assert verdict["tokens"] == sum(MEASURED_TRIO_TOKENS) == 506_998
+    assert [r["kind"] for r in rows if r["kind"] == "refusal"] == [], (
+        "a theory was refused mid-fan-out, so the case is not three measured theories")
+    assert verdict.get("refused", []) == [], (
+        f"slots were refused at the default ceiling: {verdict.get('refused')}")
+    # All three slots reached the ranker, in slot order, and the top pick is a theory
+    # that was actually dispatched. (`agrees()` grades an arm-A claim against the
+    # case's markers; arm B's verdict carries the slot ORDER, which is what the
+    # ceiling row used to corrupt by leaving an unevidenced slot in the candidates.)
+    assert verdict["order"] == ["c0", "c1", "c2"], verdict["order"]
+    assert verdict["chosen_cause"] == labels[0], verdict["chosen_cause"]
+
+
+def test_the_recorded_truncation_still_refuses_with_its_stop_pair_at_the_new_budget(
+        tmp_path):
+    """Clause 4: smoke-b3's truncated theory still lands as a turn-cap refusal row.
+
+    Row-for-row the input is the witness itself — `claims: []`, `stop_reason:
+    max_turns`, `num_turns: 41`, 161,011 tokens
+    (`~/lloyd-data/eval/2258/smoke-b3.jsonl`, line 2) — because the thing being
+    protected is the row that witness IS: #2807's `REFUSAL_TURN_CAP` path plus the
+    `stop_reason`/`num_turns` cells `investigate_live` re-emits. A bigger turn cap and
+    a bigger ceiling may change WHEN a run is truncated, never how a truncation is
+    recorded: `num_turns` populated is what lets a later reader see the cap was
+    crossed rather than met. And the verdict's `refused` list has to name the slot, or
+    the case reads as three investigated theories with one that silently declined.
+    """
+    case = _study_corpus()[0]
+    root = "parallel-load-flake"          # case 0's own expected-cause marker
+    labels = slot_labels(case["key"])
+    truncated = labels[1]
+    claims = {t: ([{"claim": root, "citations": [{"path": "eval/README.md",
+                                                  "line": 1}]}]
+                  if t != truncated else []) for t in labels}
+
+    async def generate(c):
+        return list(labels)
+
+    async def investigate(c, theory):
+        if theory == truncated:
+            return {"tool": "Task", "model": "primary", "tokens": 161_011,
+                    "claims": [], "stop_reason": "max_turns", "num_turns": 41}
+        return {"tool": "Task", "model": "primary", "tokens": 161_011,
+                "claims": claims[theory], "stop_reason": "stop", "num_turns": 27}
+
+    rows_path = tmp_path / "rows.jsonl"
+    verdict = asyncio.run(run_case_b(case, run_id="r-cap", generate=generate,
+                                     investigate=investigate, writer=RowWriter(rows_path),
+                                     rank_fn=_rank_stub([0, 1])))
+    rows = [json.loads(ln) for ln in rows_path.read_text().splitlines()]
+    assert [r["kind"] for r in rows if r["kind"] == "ceiling"] == [], (
+        "the turn-cap refusal also wrote a token-ceiling row: the two records are "
+        "different failures and one row each is the whole point of #2807")
+    refusal = next(r for r in rows if r["kind"] == "refusal")
+    assert refusal["slot"] == truncated
+    assert refusal["reason"] == "turn-cap", refusal
+    assert refusal["stop_reason"] == "max_turns", refusal
+    assert refusal["num_turns"] == 41, refusal
+    assert refusal["tokens"] == 161_011
+    assert "41-turn budget" in refusal["detail"], refusal["detail"]
+    assert verdict["refused"] == [truncated], (
+        f"{verdict['refused']}: the truncated slot is absent from `refused`, so the "
+        "verdict claims three investigated theories")
+    assert verdict["tokens"] == 3 * 161_011
+
+
+def _comment_block_above(assignment: str) -> str:
+    """The `#:` block sitting directly above a module-level assignment."""
+    src = inspect.getsource(replay).splitlines()
+    i = next(k for k, ln in enumerate(src) if ln.startswith(assignment))
+    j = i
+    while j > 0 and (src[j - 1].lstrip().startswith("#") or not src[j - 1].strip()):
+        j -= 1
+    return "\n".join(src[j:i])
+
+
+def test_both_budget_settings_cite_both_measured_anchors():
+    """Clause 5: a reader can re-derive each figure from the text that sets it.
+
+    Both numbers arrived out of a live truncation nobody had recorded, so the docstring
+    IS the artefact: `git grep '161011|161,011'` over eval and tests returned nothing
+    before this round, which is why the 200,000/40 pair survived a whole pass of
+    evidence. Each setting therefore has to carry BOTH anchors — the new one (smoke-b3:
+    161,011 tokens at `num_turns: 41`) and the arm-A one it replaced (27 turns /
+    179,186 tokens, `probe-maxturns-40.log`) — plus its own new value. The ceiling's
+    text is a `#:` comment block rather than a docstring, so it is read from the
+    module's own source; `investigate_live.__doc__` is read as prose. Checking the
+    whole module text instead of these two blocks would pass on one lucky mention
+    somewhere and leave the setting itself unexplained.
+    """
+    anchors = {"161,011": "smoke-b3's measured cost of ONE theory",
+               "num_turns: 41": "the turn count smoke-b3 was truncated at",
+               "27 turns": "the turn count that reached stop_reason: stop",
+               "179,186": "the tokens that 27-turn answer cost"}
+
+    ceiling_text = _comment_block_above("DEFAULT_TOKEN_CEILING = ")
+    assert "600,000" in ceiling_text, "the ceiling's text never names the new figure"
+    turn_text = investigate_live.__doc__ or ""
+    assert "60 turns" in turn_text, "the turn budget's text never names the new figure"
+
+    for name, text in (("DEFAULT_TOKEN_CEILING", ceiling_text),
+                       ("investigate_live", turn_text)):
+        missing = [f"{figure} ({what})" for figure, what in anchors.items()
+                   if figure not in text]
+        assert not missing, (
+            f"{name}'s setting text does not cite: {'; '.join(missing)} — the figures "
+            "are the only reason the value is what it is")
 
 
 def test_the_refusal_to_record_an_empty_cause_survives_the_raised_budgets(tmp_path):

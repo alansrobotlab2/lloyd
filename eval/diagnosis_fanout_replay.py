@@ -129,20 +129,66 @@ ARM_A, ARM_RETRY, ARM_B = "A", "A-retry", "B"
 #: Matched token ceiling per case-arm, shared by every theory in arm B, so the
 #: fan-out has to buy its extra dispatches out of the same budget.
 #:
-#: 200,000, up from 120,000, because 120,000 sits below ONE completed
-#: investigation: the #2258 case that died at the 20-turn budget finished at 27
-#: turns having spent 179,186 tokens (`~/lloyd-data/eval/2258/probe-maxturns-40.log`,
-#: line `CAP=40 claims_n=1 tokens=179186`). At the old figure every arm-A row this
-#: study could record was ALSO a `kind: ceiling` "over-ceiling" row — see the
-#: spend-vs-ceiling append in `run_case_a` — so the spend line in `format_report`
-#: printed the same refusal for both arms and stopped discriminating, and spend is
-#: the only axis the arms are matched on. The 20,814 above the measurement is
-#: headroom, a judgement rather than a second measurement: a ceiling of exactly
-#: 180,000 clears 179,186 by 814 tokens, so the next case that read one more log
-#: would be back to recording a ceiling row. A case that really does spend past
-#: this still reports `kind: ceiling`, which is the true answer; what the number
-#: may not do is make an ordinary case look over budget.
-DEFAULT_TOKEN_CEILING = 200_000
+#: The ceiling is CUMULATIVE and read BEFORE each dispatch (`spent >= token_ceiling`
+#: in `run_case_b`), so it budgets the whole fan-out, not one theory: a theory's cost
+#: is known only when it returns, so the arm can refuse the NEXT dispatch and never
+#: the one in flight. 200,000 was therefore below arithmetic, not merely below one
+#: measurement — one measured theory costs 161,011 tokens, so three of them cost
+#: 483,033 and could never fit. The 2026-10-13 pass shows what that does to the
+#: record: every one of its 13 `kind: ceiling` rows is `seq: 4` with `tokens_spent`
+#: from 280,279 to 362,808 against this 200,000, so the third theory was cut off
+#: after the arm had already spent past the ceiling, and `rank_theories` then ranked
+#: the case with a slot that has no evidence under it still in the candidate list.
+#:
+#: 600,000, up from 200,000, is the smallest round number that holds three of the
+#: WORST dispatch on record: the most ever charged to one theory is 199,283 tokens
+#: (`~/lloyd-data/eval/2258/rows.jsonl`, line 126 — a `kind: refusal` row for slot
+#: `c1`, and a refused dispatch still pays its tokens into `spent`), and three of
+#: those are 597,849 — 2,151 tokens clear, which is arithmetic rather than comfort.
+#: The trio arm B's own test reproduces, 161,011 + 184,976 + 161,011 = 506,998, sits
+#: 93,002 under it. The arm-A anchor still holds beside the new figure: the one
+#: investigation ever followed end-to-end spent 179,186 tokens over 27 turns
+#: (`~/lloyd-data/eval/2258/probe-maxturns-40.log`, line
+#: `CAP=40 claims_n=1 tokens=179186`), and smoke-b3's truncation is the newer
+#: measurement — 161,011 tokens, `stop_reason: max_turns` at `num_turns: 41`
+#: (`~/lloyd-data/eval/2258/smoke-b3.jsonl`, line 2, `run-20261018T220131Z`).
+#:
+#: Two things this number does not claim. (a) A case that really does spend past it
+#: still records `kind: ceiling`, which is the true answer; what the figure may not do
+#: is make an ordinary three-theory case look over budget. (b) The per-theory cost at
+#: the RAISED turn cap below is unmeasured — the 199,283 census was taken under a
+#: 40-turn cap — so the ceiling is sized against the recorded worst case, and if a
+#: 60-turn dispatch costs more than 199,283 the next live pass says so with a ceiling
+#: row instead of this comment having guessed. `run --ceiling` is the per-pass knob,
+#: and note that the live launcher `~/lloyd-data/eval/2258/launch-pass.sh` passes
+#: `--ceiling 200000` explicitly: raising this default does not by itself raise the
+#: next real pass.
+DEFAULT_TOKEN_CEILING = 600_000
+
+#: Per-theory dispatch turn budget — the other half of the ONE arithmetic property
+#: above, not a second knob: a longer dispatch costs more tokens, so the ceiling has
+#: to absorb three of whatever this buys. 60, up from 40, because the cap that was in
+#: force is itself the truncation on record: the arm-B theory smoke-b3 came back
+#: `stop_reason: max_turns` at `num_turns: 41` for 161,011 tokens
+#: (`~/lloyd-data/eval/2258/smoke-b3.jsonl`, line 2, `run-20261018T220131Z`) — the
+#: harness reported 41 turns against the 40 this module shipped. A cap that produced
+#: the study's own truncation cannot be the cap the study ships.
+#:
+#: The older anchor stays beside it, because the two bracket the cost rather than
+#: averaging out: the same dispatch shape reached `stop_reason: stop` at 27 turns on
+#: 179,186 tokens under that same cap of 40
+#: (`~/lloyd-data/eval/2258/probe-maxturns-40.log`, line
+#: `META: {"stop_reason": "stop", "num_turns": 27, ...}`), and the 20 before that
+#: ended the case at 21 turns with `max_turns`. 60 is a round number above the only
+#: truncation on record, not a figure taken from a 60-turn run — no such run exists
+#: yet, which is what the owed live pass measures. Raising it is not free and is not
+#: optional either: an exhausted dispatch is NO answer rather than a short one, since
+#: the finalizer restates a `final_schema` only for `stop`/`end_turn`
+#: (`FINALIZABLE_STOP_REASONS`, `app/harness/finalizer.py:78`), so the turn cap and
+#: the token ceiling are the same decision read from two sides.
+#: `generate_theories_live` deliberately keeps its own much smaller cap: writing
+#: three candidate sentences is not an investigation.
+DEFAULT_INVESTIGATION_TURNS = 60
 
 #: Why a per-theory row was refused (#2635). Deliberately NOT the ceiling's word:
 #: a `kind: ceiling` row with `reason: "token-ceiling"` means the fan-out was
@@ -1163,16 +1209,27 @@ async def generate_theories_live(case: dict, *, max_turns: int = 6) -> list[str]
 
 
 async def investigate_live(case: dict, theory: str, *,
-                           max_turns: int = 40) -> dict:
+                           max_turns: int = DEFAULT_INVESTIGATION_TURNS) -> dict:
     """One scoped per-theory investigation: evidence for THIS theory only.
 
-    40 turns, up from 20, and the number is measured rather than chosen: a real
-    investigation of the case `flaky-SM_20260928_080412` on this engine took 27
-    turns to reach `stop_reason: stop`
+    The budget is `DEFAULT_INVESTIGATION_TURNS`, 60 turns, up from the 40 that used
+    to be spelled out here — and that 40 is not a number the study can keep shipping,
+    because it is the cap the study's own truncation was measured under: the arm-B
+    theory in smoke-b3 came back `stop_reason: max_turns` at `num_turns: 41` having
+    spent 161,011 tokens
+    (`~/lloyd-data/eval/2258/smoke-b3.jsonl`, line 2, `run-20261018T220131Z`), the
+    harness reporting 41 turns against a cap of 40.
+
+    Both figures are measured rather than chosen, and they bracket the cost rather
+    than averaging out. Under that same cap of 40, a real investigation of the case
+    `flaky-SM_20260928_080412` on this engine took 27 turns to reach
+    `stop_reason: stop`
     (`~/lloyd-data/eval/2258/probe-maxturns-40.log`, line
-    `META: {"stop_reason": "stop", "num_turns": 27, ...}`). 40 is the cap that
-    measurement was taken under; the same case at 20 ended at 21 turns with
-    `stop_reason: max_turns`.
+    `META: {"stop_reason": "stop", "num_turns": 27, ...}`); the same case at 20 ended
+    at 21 turns with `stop_reason: max_turns`. 60 is a round number above the only
+    truncation on record, not a figure read off a 60-turn run — no such run exists
+    yet, and the per-theory token cost at it is what the ceiling above is sized
+    against rather than measured at (#2985's owed live pass measures it).
 
     Running out of turns is not a short answer, it is NO answer. A run that ends
     `max_turns` gets no `final_schema` restatement — the finalizer's
