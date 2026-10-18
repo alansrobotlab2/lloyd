@@ -25,10 +25,20 @@ file asserts anything about the machine running it. The one host-adjacent read t
 exists, `USER_UNIT_DIR`, asks only that a planted name is not a unit on this box — a
 precondition on a string, never a verdict about what a unit here answers.
 
-#2702 widened that boundary rather than adding a new one: the guard now asks
-`systemctl --user show` for the arming evidence of a timer whose `is-enabled` verdict
-already failed, and the same stub answers it (see STUB for the two tables and the
-asymmetric defaults). Nothing here changed its refusal: the evidence a node can pin is
+#2702 widened that boundary rather than adding a new one: the guard asks `systemctl --user
+show` for arming evidence, and the same stub answers it (see STUB for the two tables and
+the asymmetric defaults). #2943 widened the same seam again rather than adding another:
+that question is now asked of EVERY timer, not only of one whose `is-enabled` verdict
+already failed, because the verdict that needs the reading is the one that PASSES — an
+`enabled` row over `ActiveState=inactive` with no fire instant is an installed, linked,
+never-armed job, which is what this box's `lloyd-egress-window.timer` was while the guard
+printed `checked 8 timers: 8 enabled, 0 not enabled` and exited 0. So the node #2702
+shipped to pin the old cost limit
+(`test_the_evidence_is_asked_only_of_the_timers_that_already_failed`) was REVISED, not
+kept: it pinned `show == []` on a green run, which is exactly the green #2943 exists to
+break, and it now pins the cost that did not grow — one `show` per timer, after its
+`is-enabled` answer, never a third call for the unit. Nothing here changed the module's
+refusal: the evidence a node can pin is
 what the guard prints given a stated `show` answer, never what this box's timer
 actually reports — `never-armed` is pinned by telling the stub the property is empty,
 which is the only way a marker can appear at all.
@@ -50,6 +60,13 @@ REPO_TIMERS = sorted(p.name for p in REPO_UNIT_DIR.glob("*.timer"))
 CERT_TIMER = "lloyd-cert-renew.timer"
 #: #2864 tracked the graph backup pair, so this guard's own fleet gained a member.
 GRAPH_TIMER = "lloyd-graph-backup.timer"
+#: The timer #2943 exists to arm: linked on disk, `ActiveState=inactive`,
+#: `LastTriggerUSec=` empty, absent from `systemctl --user list-timers --all`, and
+#: `journalctl --user -u lloyd-egress-window.service` → `-- No entries --`. The nodes below
+#: plant the never-armed signature on a unit the guard really enumerates rather than on an
+#: invented name, so if this unit ever leaves `agent-services/systemd/` the precondition
+#: assert trips instead of the node quietly grading a timer nothing checks.
+EGRESS_TIMER = "lloyd-egress-window.timer"
 #: A name NO unit directory holds — planted here rather than borrowed from the box.
 #: The node below needs a timer that is live-but-untracked, i.e. one the check must
 #: refuse to ask about; `lloyd-graph-backup.timer` played that role until #2864
@@ -70,8 +87,10 @@ import json, os, sys
 # Stand-in for `systemctl`, with the real command's semantics: `is-enabled <unit>`
 # prints the state and exits 0 only for `enabled`; any other state prints and exits
 # non-zero. Since #2702 the guard asks a second question — `show -l -p LastTriggerUSec
-# -p ActiveState <unit>`, for the arming evidence of a timer that failed that verdict —
-# so this stub answers that form too. It prints the properties SORTED BY NAME, which for
+# -p ActiveState <unit>` — and since #2943 it asks it of EVERY timer it checks rather than
+# only of one whose `is-enabled` verdict failed, because the never-armed verdict is read off
+# the rows that pass. So this stub answers that form too. It prints the properties SORTED BY
+# NAME, which for
 # the guard's request order is the reverse of it, because that is what the real command
 # does on this box: `show -p LastTriggerUSec -p ActiveState` answers ActiveState first.
 # Answering out of request order is what turns the guard's by-key parsing from an
@@ -89,7 +108,11 @@ import json, os, sys
 # rest. An unlisted unit answers `show` as an ARMED timer (ActiveState=active plus a
 # real-looking instant), so a node that expects `never-armed` or `no-answer` can only get
 # there by asking for a no-value property: no default can produce a marker, which is what
-# keeps a marker assertion from passing on a stub that was never configured.
+# keeps a marker assertion from passing on a stub that was never configured. Since #2943
+# that default carries a second job: the guard asks the question of EVERY timer now, so a
+# node describing one unit must still see an all-green run for the rest — the ARMED default
+# is what makes an un-described timer PASS rather than read as never-armed, and a default
+# changed to a no-value property would turn every green node in this file red at once.
 argv = sys.argv[1:]
 with open(os.environ["STUB_LOG"], "a") as fh:
     fh.write(json.dumps(argv) + "\\n")
@@ -224,6 +247,19 @@ def _asked_about(queries: list, verb: str) -> list[str]:
     return [q[-1] for q in queries if q[1] == verb]
 
 
+def _queried_units(queries: list) -> list[str]:
+    """Every unit the stub was asked about, one entry per query, in call order.
+
+    These nodes used a positional read (`query[2]`), which was the unit name for every form
+    the guard used to issue. #2943 made it ask `show` of EVERY timer rather than only of a
+    miss, and that argv carries its `-l -p …` flags before the name, so the unit of a query
+    is its LAST word for both verbs. The set-valued sites keep their exact meaning through
+    this helper; the count-valued ones state how many queries per timer the run now costs —
+    the number #2943 moved, so each of those sites writes it out rather than hiding it here.
+    """
+    return [q[-1] for q in queries]
+
+
 def test_the_script_is_executable_and_prints_a_verdict_line_per_repo_timer(tmp_path):
     """Clause 1: every `agent-services/systemd/*.timer` gets its `is-enabled` verdict
     on a line of its own, and a total line names how many were checked.
@@ -231,6 +267,12 @@ def test_the_script_is_executable_and_prints_a_verdict_line_per_repo_timer(tmp_p
     Run over the REAL repo unit dir (repo content, not host state) against a stub
     that answers `enabled`, so the expected denominator is whatever the tree
     actually tracks rather than a number this file memorised.
+
+    The query-log assertion at the end counted ONE query per timer while `is-enabled` was
+    the only question this guard asks. Since #2943 every timer also gets its one arming
+    `show`, so the count it states is two per timer now — the same property (every repo
+    timer asked, nothing outside the repo set asked) with the number the change moved. The
+    read is `REPO_TIMERS * 2`, so a third query for one unit and a skipped unit both fail.
     """
     assert SCRIPT.exists(), SCRIPT
     assert SCRIPT.stat().st_mode & 0o111, f"{SCRIPT} is not executable"
@@ -244,7 +286,10 @@ def test_the_script_is_executable_and_prints_a_verdict_line_per_repo_timer(tmp_p
         own = [line for line in out if line.split()[:1] == [name]]
         assert own, f"{name} has no line of its own in:\n{out}"
         assert own[0].split()[1] == "enabled", own[0]
-    assert sorted(q[2] for q in queries) == REPO_TIMERS, queries
+    assert sorted(_queried_units(queries)) == sorted(REPO_TIMERS * 2), (
+        f"the run must ask exactly two queries per repo timer — its `is-enabled`, plus the "
+        f"`show` every timer gets since #2943 — and never touch a unit outside the repo "
+        f"set: {queries}")
 
 
 def test_every_timer_answering_enabled_exits_zero(tmp_path):
@@ -257,7 +302,10 @@ def test_every_timer_answering_enabled_exits_zero(tmp_path):
     assert proc.returncode == 0, f"{proc.returncode}:\n{proc.stdout}{proc.stderr}"
     assert _denominator(out) == 3, out
     assert not _fail_lines(out), out
-    assert sorted(q[2] for q in queries) == ["alpha.timer", "beta.timer", "gamma.timer"]
+    assert _asked_about(queries, "is-enabled") == \
+        ["alpha.timer", "beta.timer", "gamma.timer"], queries
+    assert set(_queried_units(queries)) == {"alpha.timer", "beta.timer", "gamma.timer"}, \
+        queries
 
 
 def test_one_disabled_timer_exits_non_zero_and_names_only_that_unit(tmp_path):
@@ -275,7 +323,8 @@ def test_one_disabled_timer_exits_non_zero_and_names_only_that_unit(tmp_path):
     assert not any(line.startswith("FAIL ")
                    and ("alpha.timer" in line or "gamma.timer" in line)
                    for line in out), out
-    assert [q[2] for q in queries].count("beta.timer") == 1, queries
+    assert _asked_about(queries, "is-enabled").count("beta.timer") == 1, (
+        f"beta was asked its enabledness question more than once: {queries}")
 
 
 def test_a_service_answering_static_is_never_asked_and_cannot_fail_it(tmp_path):
@@ -295,7 +344,7 @@ def test_a_service_answering_static_is_never_asked_and_cannot_fail_it(tmp_path):
                               tag="services")
 
     assert proc.returncode == 0, f"a .service verdict failed the check:\n{proc.stdout}"
-    asked = {q[2] for q in queries}
+    asked = set(_queried_units(queries))
     assert not any(unit.endswith(".service") for unit in asked), asked
     assert CERT_TIMER in asked, f"{CERT_TIMER} was never asked about: {asked}"
 
@@ -342,7 +391,7 @@ def test_a_live_timer_with_no_repo_unit_cannot_fail_the_check(tmp_path):
                               tmp_path, tag="onedir")
 
     assert proc.returncode == 0, f"{proc.returncode}:\n{proc.stdout}{proc.stderr}"
-    asked = {q[2] for q in queries}
+    asked = set(_queried_units(queries))
     assert LIVE_TIMER_WITHOUT_REPO_UNIT not in asked, asked
     assert asked == set(REPO_TIMERS), f"{asked ^ set(REPO_TIMERS)} is off-set"
 
@@ -358,7 +407,7 @@ def test_a_live_timer_with_no_repo_unit_cannot_fail_the_check(tmp_path):
     lone, lone_out, lone_queries = _run(lone_dir, {}, tmp_path, tag="loneplanted")
 
     assert lone.returncode == 0, f"{lone.returncode}:\n{lone.stdout}{lone.stderr}"
-    lone_asked = {q[2] for q in lone_queries}
+    lone_asked = set(_queried_units(lone_queries))
     assert lone_asked == {LIVE_TIMER_WITHOUT_REPO_UNIT}, (
         f"the checked set must be the unit dir it was handed and nothing else; "
         f"{lone_asked ^ {LIVE_TIMER_WITHOUT_REPO_UNIT}} came from somewhere else — a "
@@ -615,42 +664,50 @@ def test_the_same_fail_line_separates_a_running_timer_from_a_stopped_one(tmp_pat
         assert "LastTriggerUSec=Wed 2026-10-14 02:12:27 PDT" in line, line
 
 
-def test_the_evidence_is_asked_only_of_the_timers_that_already_failed(tmp_path):
-    """#2702's own cost limit, pinned from the stub's query log.
+def test_the_arming_read_fires_once_per_timer_after_its_enabledness_answer(tmp_path):
+    """The guard's cost limit, re-pinned for the wider read #2943 gave it.
 
-    The arming question is asked of a timer only after `is-enabled` has already failed it:
-    one `show` per miss, none at all on a green run. That is both the guard's contract with
-    systemd (`service_health_check.py` runs it with a 30-second timeout, and the whole-fleet
-    health pass is not the place to add a round trip per healthy unit) and the reason
-    `test_the_script_is_executable_and_prints_a_verdict_line_per_repo_timer` can still assert
-    its query set by name: if the evidence call fired per timer, the argvs the stub logged
-    would no longer be one per timer.
+    This node shipped as `#2702's own cost limit`: the arming question asked of a timer
+    only after `is-enabled` had already failed it, and `show == []` on a green run. #2943
+    asks that same question of the rows that PASS — which IS the change — so the half
+    claiming "an all-enabled fleet must ask `show` nothing" is now the false half and is
+    replaced rather than deleted. The bound that survives, and the one this node exists to
+    hold, is ONE `show` per timer even though two consumers want the reading (the
+    never-armed verdict on a passing row, the evidence sentence on a FAIL line), so no run
+    ever costs three `systemctl` calls for one unit. That is the guard's contract with the
+    route that runs it: `service_health_check.py` gives it a 30-second timeout, and the
+    whole script over this box's eight timers — sixteen calls — measures 0.115 s.
 
-    The green run is the load-bearing half — an all-enabled fleet must ask `show` nothing.
-    The red run then pins which units were asked, that each was asked once, and that the
-    argv really carries both properties and the unit.
+    Order is load-bearing as well as count, because a bare count would still pass on a
+    guard that asked the arming question FIRST and graded enabledness off it. Both runs
+    assert the `is-enabled`/`show` interleaving pair by pair, in call order, and the argv
+    assertion keeps both property names on the request.
     """
     unit_dir = _unit_names(tmp_path, "alpha.timer", "beta.timer", "gamma.timer")
+    want = ["alpha.timer", "beta.timer", "gamma.timer"]
+    interleaved = ["is-enabled:alpha.timer", "show:alpha.timer",
+                   "is-enabled:beta.timer", "show:beta.timer",
+                   "is-enabled:gamma.timer", "show:gamma.timer"]
+
+    def _pairs(queries):
+        return [f"{q[1]}:{q[-1]}" for q in queries]
 
     green, green_out, green_queries = _run(unit_dir, {}, tmp_path, tag="greenask")
     assert green.returncode == 0, green_out
-    assert _asked_about(green_queries, "is-enabled") == \
-        ["alpha.timer", "beta.timer", "gamma.timer"], green_queries
-    assert _asked_about(green_queries, "show") == [], (
-        f"an all-enabled run went asking systemd for arming evidence: "
-        f"{green_queries}")
+    assert _pairs(green_queries) == interleaved, green_queries
 
     red, red_out, red_queries = _run(unit_dir, {"beta.timer": "disabled",
                                                 "gamma.timer": "disabled"},
                                      tmp_path, tag="redask")
     assert red.returncode != 0, red_out
-    assert sorted(_asked_about(red_queries, "show")) == ["beta.timer", "gamma.timer"], \
-        red_queries
-    assert _asked_about(red_queries, "is-enabled") == \
-        ["alpha.timer", "beta.timer", "gamma.timer"], red_queries
+    assert _pairs(red_queries) == interleaved, red_queries
     for argv in (q for q in red_queries if q[1] == "show"):
         assert argv[:2] == ["--user", "show"], argv
         assert "LastTriggerUSec" in argv and "ActiveState" in argv, argv
+    for tag, queries in (("green", green_queries), ("red", red_queries)):
+        asked = _asked_about(queries, "show")
+        assert sorted(asked) == want, f"{tag} run asked `show` of {asked}, not {want}"
+        assert len(asked) == len(set(asked)), f"{tag} run asked some timer twice: {asked}"
 
 
 def test_an_evidence_read_that_fails_leaves_the_verdict_and_remediation_alone(tmp_path):
@@ -668,6 +725,14 @@ def test_an_evidence_read_that_fails_leaves_the_verdict_and_remediation_alone(tm
     writes that message to stderr and exits non-zero for a unit whose `show` answer is
     `error`, so if the guard ever stopped discarding it, it would show up in the combined
     output this helper returns.
+
+    #2943 reads this rule from the opposite side. Here a failed read rides on a row that was
+    ALREADY red; there a failed read must leave a green row green, because "the question
+    could not be asked" is not evidence that the timer never armed — see
+    `test_only_the_never_armed_signature_moves_a_row_off_enabled`. The pair is why the new
+    verdict keys on the exact reading (`ActiveState=inactive` AND no instant) and not on
+    anything looser like "the arming read did not say armed", which would turn every box
+    with a quiet `systemctl show` into a fleet of false alarms.
     """
     unit_dir = _unit_names(tmp_path, "alpha.timer", "broken.timer")
 
@@ -685,6 +750,162 @@ def test_an_evidence_read_that_fails_leaves_the_verdict_and_remediation_alone(tm
     assert re.search(r"enable --now broken\.timer\b", line), line
     assert not [ln for ln in out if "stub systemctl" in ln], (
         f"the evidence call's stderr reached the parsed output: {out}")
+
+
+def test_an_enabled_timer_that_has_never_armed_fails_the_guard(tmp_path):
+    """#2943 clause 1: `enabled` on the unit FILE stopped being a green row on its own.
+
+    The state this node pins is the one this box sat in: `is-enabled` answers `enabled`,
+    `systemctl --user show` answers `ActiveState=inactive` with no `LastTriggerUSec`. That
+    is an installed, linked, never-armed job — `lloyd-egress-window.timer`, whose
+    `journalctl --user -u lloyd-egress-window.service` is `-- No entries --` — and before
+    #2943 the guard reported it as `enabled`, printed `checked 8 timers: 8 enabled, 0 not
+    enabled` and exited 0.
+
+    Three readings of that row are asserted, because each is a different consumer. The ROW
+    carries `enabled-never-armed`, not the bare `enabled`, so the status
+    `scripts/service_health_check.py` builds from it cannot read as a pass; the FAIL line
+    carries `ActiveState=inactive`, the literal `never-armed` and the `enable --now`
+    remediation; and the sentence is `is enabled but never armed`, never `is not enabled`,
+    which is false for this unit and would send its reader to re-link a file that is
+    already linked — the half-act that created this state.
+
+    Both no-value renderings of `LastTriggerUSec` run through the same assertions: systemd
+    prints the empty string for an unset timestamp and `n/a` is its other no-value spelling,
+    and this guard ships to more than one box.
+    """
+    for no_value, tag in (("", "empty"), ("n/a", "na")):
+        unit_dir = _unit_names(tmp_path, f"alpha-{tag}.timer", f"never-{tag}.timer")
+        never = f"never-{tag}.timer"
+
+        proc, out, _ = _run(unit_dir, {}, tmp_path, tag=f"neverarmed-{tag}",
+                            show={never: {"ActiveState": "inactive",
+                                          "LastTriggerUSec": no_value}})
+
+        assert proc.returncode == 1, (
+            f"[{tag}] an enabled but never-armed timer passed:\n{out}")
+        assert _row_lines(out) == [f"alpha-{tag}.timer\tenabled",
+                                  f"{never}\tenabled-never-armed"], out
+        assert _denominator(out) == 2, out
+        assert [ln for ln in out if ln.startswith("checked ")] == [
+            "checked 2 timers: 1 enabled, 1 not enabled"], out
+
+        line = _fail_line_for(out, never)
+        assert "ActiveState=inactive" in line, line
+        assert "never-armed" in line, line
+        assert re.search(rf"— run: systemctl --user enable --now {re.escape(never)}\b",
+                         line), line
+        assert "is not enabled" not in line, (
+            f"[{tag}] the unit FILE is enabled; saying otherwise sends the reader off to "
+            f"re-link it: {line}")
+        assert not [ln for ln in _fail_lines(out)
+                    if f"alpha-{tag}.timer" in ln], out
+
+
+def test_only_the_never_armed_signature_moves_a_row_off_enabled(tmp_path):
+    """#2943 clause 2: the new red is keyed on the signature ALONE, so it cannot misfire.
+
+    Five enabled timers, five different `show` answers, one run: exit 0, no FAIL line, and
+    every row still the bare word `enabled`.
+
+      * `unread.timer` — `show` exits non-zero and prints nothing. A read that could not be
+        made is not evidence that no fire happened.
+      * `blank.timer` — `show` answers both properties empty. `ActiveState` is not
+        `inactive`, so the signature does not hold.
+      * `armed.timer` — `active` plus a real instant: the ordinary healthy timer (and the
+        stub's own default for any unit a node leaves undescribed).
+      * `fresh.timer` — `active` with NO instant. This is a timer armed seconds ago, whose
+        first fire has not happened yet. It is the case that must not go red: the guard's
+        next green run after a successful arming would otherwise accuse the act that worked,
+        which is the false alarm #2792's route would then chase.
+      * `stopped.timer` — `inactive` WITH a real instant: a schedule that ran. "Keys on the
+        never-armed signature alone" means the instant is exactly the reading that
+        separates the two states, so this row stays green too.
+
+    A guard that dropped the signature check entirely passes every assertion here, which is
+    why this node is read beside `test_an_enabled_timer_that_has_never_armed_fails_the_guard`
+    above: that one is the witness that the same helper, with a no-value instant and
+    `ActiveState=inactive`, does go red.
+    """
+    names = ["unread.timer", "blank.timer", "armed.timer", "fresh.timer",
+             "stopped.timer"]
+    unit_dir = _unit_names(tmp_path, *names)
+    instant = "Wed 2026-10-14 02:12:27 PDT"
+    show = {
+        "unread.timer": "error",
+        "blank.timer": {"ActiveState": "", "LastTriggerUSec": ""},
+        "armed.timer": {"ActiveState": "active", "LastTriggerUSec": instant},
+        "fresh.timer": {"ActiveState": "active", "LastTriggerUSec": ""},
+        "stopped.timer": {"ActiveState": "inactive", "LastTriggerUSec": instant},
+    }
+
+    proc, out, queries = _run(unit_dir, {}, tmp_path, tag="signature", show=show)
+
+    assert proc.returncode == 0, f"a non-signature reading failed the guard:\n{out}"
+    assert not _fail_lines(out), out
+    assert _row_lines(out) == [f"{name}\tenabled" for name in sorted(names)], (
+        f"rows are the unit dir's sorted set, and every one of these five readings must "
+        f"still print the bare word `enabled`: {out}")
+    assert _denominator(out) == 5, out
+    assert not [ln for ln in out if "stub systemctl" in ln], (
+        f"the failed `show` leaked its stderr into the parsed output: {out}")
+    assert sorted(_asked_about(queries, "show")) == sorted(names), queries
+
+
+def test_a_never_armed_row_leaves_the_row_and_denominator_contract_intact(tmp_path):
+    """#2943 clause 3: the guard grew a verdict without growing a new output shape.
+
+    Run over the REAL repo unit dir so the denominator is the tree's own count — eight
+    timers since #2864 tracked `lloyd-graph-backup.timer` — and `len(REPO_TIMERS)` is where
+    that number comes from, never a count this file memorised.
+    `test_the_new_timer_is_inside_the_enabledness_denominator` in
+    tests/test_egress_window_unit.py re-derives the same number from the directory and
+    refuses a remembered one in either direction, so the count this node prints is a
+    reading of the tree rather than a claim about it.
+
+    One repo timer is planted with the never-armed signature and the whole parse contract
+    is asserted over the run that results, in the four shapes
+    `scripts/service_health_check.py` reads: one `<unit><TAB><verdict>` row per repo
+    `.timer` and the planted one NOT the bare word `enabled`; exactly one
+    `checked N timers: M enabled, K not enabled` line, still ahead of the FAIL lines;
+    `K` equal to the number of FAIL lines actually printed; and the remediation still
+    `systemctl --user enable --now <unit>`, never the bare form, with no `SETUP.md:<n>`
+    pointer.
+    """
+    assert EGRESS_TIMER in REPO_TIMERS, (
+        f"{EGRESS_TIMER} is no longer in agent-services/systemd/, so the signature planted "
+        f"below names a unit the guard does not enumerate: {REPO_TIMERS}")
+    total = len(REPO_TIMERS)
+
+    proc, out, _ = _run(REPO_UNIT_DIR, {}, tmp_path, tag="reponever",
+                        show={EGRESS_TIMER: {"ActiveState": "inactive",
+                                             "LastTriggerUSec": ""}})
+
+    assert proc.returncode == 1, f"a never-armed repo timer passed:\n{out}"
+    rows = _row_lines(out)
+    assert len(rows) == total, out
+    assert sorted(row.split("\t")[0] for row in rows) == REPO_TIMERS, rows
+    assert f"{EGRESS_TIMER}\tenabled-never-armed" in rows, rows
+    assert f"{EGRESS_TIMER}\tenabled" not in rows, (
+        "the row still reads the bare `enabled`, so the health route's status for this "
+        "unit stays a false green even with this script exiting 1")
+    assert sum(1 for row in rows if row.endswith("\tenabled")) == total - 1, rows
+
+    totals = [line for line in out if line.startswith("checked ")]
+    assert totals == [f"checked {total} timers: {total - 1} enabled, 1 not enabled"], out
+    assert _denominator(out) == total, out
+    fails = _fail_lines(out)
+    not_enabled = int(re.fullmatch(
+        r"checked \d+ timers: \d+ enabled, (\d+) not enabled", totals[0]).group(1))
+    assert not_enabled == len(fails) == 1, (totals[0], fails)
+    assert out.index(totals[0]) < min(out.index(line) for line in fails), out
+
+    line = _fail_line_for(out, EGRESS_TIMER)
+    assert re.search(rf"enable --now {re.escape(EGRESS_TIMER)}\b", line), line
+    for fail in fails:
+        assert re.search(r"enable (?!--now)\S*\.timer", fail) is None, \
+            f"bare `enable` does not arm a timer: {fail}"
+    assert not [line for line in out if re.search(r"SETUP\.md:\d+", line)], out
 
 
 def test_a_grown_fail_line_leaves_the_row_and_denominator_contract_intact(tmp_path):

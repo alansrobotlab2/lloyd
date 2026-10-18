@@ -418,6 +418,17 @@ unhealthy only where the guard exited non-zero and printed its own
 line verbatim (`tests/test_unit_enabledness_route.py`, driven through a
 stand-in script behind the pytest-only `UNIT_ENABLEDNESS_SCRIPT` seam).
 
+Since #2943 the assertion has a second half, and it is the half the first one
+could not see: an `enabled` timer is also asked whether systemd has ever armed
+it, and one reading `ActiveState=inactive` with no `LastTriggerUSec` answers
+`enabled-never-armed` on its row and fails like a miss. That is what makes the
+arming route reachable for it at all — `check_unit_enabledness` collects the
+units named on `FAIL` lines, so while the guard exited 0 the route returned
+before reading the pool, and this box's `lloyd-egress-window.timer` stayed
+linked-but-unarmed inside a green `Units:` section. Nothing wider: a timer
+whose `show` cannot be read, and one reading `active`, keep their `enabled`
+row.
+
 Thunderbird runs as a user service because `agent_mcp/thunderbird.py` talks
 to a live instance; a closed Thunderbird is the usual reason the aggregator
 reports `degraded`.

@@ -58,9 +58,20 @@
 # lloyd-persistence-window.service --since 2026-10-08` → `-- No entries --`). Pinning
 # the arming form is the least this guard can do. #2537 also recorded `ActiveState`
 # beside `is-enabled` as owed, not taken; #2702 takes it for the FAIL line, the line a
-# red run actually prints (next block). Still owed and still taken by nobody here:
-# `ActiveState` on every `unit<TAB>verdict` row, including the timers that pass — an
-# `enabled` but un-armed timer is invisible to this script's green.
+# red run actually prints (next block). What stayed owed until #2943 was the other half
+# of that sentence: a timer whose unit FILE is enabled but which has never armed read the
+# bare word `enabled` on its own row, so the run exited 0 and the green named eight
+# enabled timers while `lloyd-egress-window.timer` sat at `ActiveState=inactive`,
+# `LastTriggerUSec=`, absent from `list-timers --all`, with `journalctl --user -u
+# lloyd-egress-window.service` → `-- No entries --`. #2943 takes exactly that, and nothing
+# wider: a row answering `enabled` whose `show` read says `ActiveState=inactive` with no
+# fire instant becomes `enabled-never-armed`, joins the misses, and the run exits 1. A
+# full `ActiveState` column on every row is still NOT taken — the row word moves for that
+# one signature only, because a timer reading `inactive` WITH a real instant is a schedule
+# that ran, a timer reading `active` has no instant yet either and fires anyway, and a
+# timer whose question could not be asked is not evidence of a missing arm. Those three
+# keep their `enabled` row and the exit 0; making them red would trade a false green for
+# a false red.
 #
 # `--now` is also the only form an unattended turn can act on at all — and since #2541
 # (2026-10-11) that is a guard verdict on the TIMER, not a blanket property of the flag.
@@ -102,12 +113,33 @@
 # manager last restarted reads the same way. That still answers the question the alarm is
 # asked, because a recorded fire would be present and would name itself.
 #
-# The evidence is asked for only of a timer that already failed `is-enabled` — one `show`
-# call per miss — so an all-green run asks systemd exactly what it asked before this block
-# existed, which the stub's own query log pins. Its stderr is discarded on purpose: this
-# is information beside a verdict, and a failed read degrades to the two markers below
-# rather than adding a line that `scripts/service_health_check.py`, which folds this
-# script's stderr into the same text it parses, could mistake for a verdict of its own.
+# The `show` read is ONE call per timer, asked after that timer's `is-enabled` answer and
+# reused for both jobs it now serves: the pass-row never-armed signature above, and the
+# evidence sentence on a FAIL line. Before #2943 it was asked only of a miss — one call per
+# miss, none at all on a green run, which the stub's query log pinned — and a check that
+# reads the rows that PASS cannot be made without asking, so that node was revised rather
+# than kept. What it pins now is the cost that did NOT grow: two `systemctl` calls per
+# timer and never three, one `show` per unit even though two consumers want it. The read
+# stays bounded the same way the route expects: `service_health_check.py` runs this script
+# under a 30-second timeout, and the whole script over this box's eight timers — sixteen
+# `systemctl` calls — ran in 0.114-0.120 s over five back-to-back runs on the box it ships
+# to (0.118, 0.115, 0.114, 0.114, 0.120).
+# Stderr is discarded on purpose: this is information beside a verdict, and a
+# failed read degrades to the two markers below rather than adding a line that
+# `scripts/service_health_check.py`, which folds this script's stderr into the same text it
+# parses, could mistake for a verdict of its own.
+#
+# TWO FAIL SENTENCES, ONE FAIL SHAPE (#2943). The prefix `FAIL <unit> ` and the tail
+# `— run: systemctl --user enable --now <unit>` do not move: `scripts/service_health_check.py`
+# parses the prefix to decide which rows are unhealthy and which timers it may arm, and
+# `test_the_command_this_line_prints_is_runnable` lifts the tail out of the line to put it
+# through the harness guards. Only the middle clause changes with the reason — `is not
+# enabled` for a unit `is-enabled` refused, `is enabled but never armed` for one it
+# accepted and `show` says holds no fire instant. The second is the true sentence for that
+# unit: its unit FILE IS linked, and printing `is not enabled` about it would send the
+# reader off to re-link a file that is already linked, which is the act that produced this
+# state in the first place (the installed link on this box came from a `--dry-run` that
+# systemd 261 performed for real).
 #
 # tests/test_unit_enabledness_check.py drives this through a stub `systemctl` on
 # PATH and `--unit-dir`, so the suite never reads the live host — the same reason
@@ -119,10 +151,13 @@ usage() {
 usage: check-unit-enabledness.sh [--unit-dir DIR] [--help]
 
 Assert every *.timer in DIR (default <repo>/agent-services/systemd) answers
-`systemctl --user is-enabled` with `enabled`. Exit 0 only when all of them do; a
-DIR that holds no timer at all is itself reported as a failure, not a pass.
-Each FAIL line also names that timer's arming evidence — ActiveState and its last
-trigger instant, or `never-armed` when systemd holds none.
+`systemctl --user is-enabled` with `enabled` AND, for the ones that do, that systemd
+has armed it at least once: an enabled timer reading `ActiveState=inactive` with no
+`LastTriggerUSec` is reported as `enabled-never-armed` and fails like a miss. Exit 0
+only when every timer clears both; a DIR that holds no timer at all is itself
+reported as a failure, not a pass. Each FAIL line also names that timer's arming
+evidence — ActiveState and its last trigger instant, or `never-armed` when systemd
+holds none.
 EOF
 }
 
@@ -137,17 +172,32 @@ show_prop() {
   printf '%s' "${line#"${key}="}"
 }
 
-# The arming evidence for one timer the enabledness verdict already failed. Both fields
-# always render, so a line that could not read systemd still says so instead of printing
-# `ActiveState=, LastTriggerUSec=` and reading like an empty value.
-arming_evidence() {
-  local unit="$1" show state trigger
-  show="$(systemctl --user show -l -p LastTriggerUSec -p ActiveState "$unit" 2>/dev/null)"
-  state="$(show_prop ActiveState "$show")"
-  trigger="$(show_prop LastTriggerUSec "$show")"
+# The one arming read for one timer: both properties, in one call, stdout only. Every
+# timer gets exactly one of these, asked after its `is-enabled` answer, and BOTH consumers
+# parse this same capture — the pass-row signature and the FAIL-line evidence. That is what
+# keeps "we now inspect the rows that pass" from becoming a second round trip per unit.
+arm_show() {
+  systemctl --user show -l -p LastTriggerUSec -p ActiveState "$1" 2>/dev/null
+}
+
+# The two properties rendered for a FAIL line. Both fields always render, so a line that
+# could not read systemd still says so instead of printing `ActiveState=, LastTriggerUSec=`
+# and reading like an empty value.
+render_evidence() {
+  local state="$1" trigger="$2"
   [[ -z "$state" || "$state" == "n/a" ]] && state="no-answer"
   [[ -z "$trigger" || "$trigger" == "n/a" ]] && trigger="never-armed"
   printf 'ActiveState=%s, LastTriggerUSec=%s' "$state" "$trigger"
+}
+
+# The never-armed signature, from the two readings: the loaded unit is not running AND
+# systemd holds no fire instant for it. Both halves are required, which is the whole
+# reason an unreadable answer cannot turn a healthy timer red — a failed `show` leaves
+# `state` empty, and empty is not `inactive`. `active` is excluded on purpose too: a timer
+# armed five seconds ago has no instant yet either, and it is armed. Returns 0 for the
+# signature, 1 for everything else including `no answer at all`.
+is_never_armed() {
+  [[ "$1" == "inactive" && ( -z "$2" || "$2" == "n/a" ) ]]
 }
 
 UNIT_DIR=""
@@ -202,6 +252,8 @@ if (( TOTAL == 0 )); then
 fi
 
 MISS=()
+MISS_WHY=()
+MISS_EVID=()
 for path in "${TIMERS[@]}"; do
   unit="$(basename -- "$path")"
   # Combined capture: `is-enabled` writes the state to stdout for the known states
@@ -210,15 +262,49 @@ for path in "${TIMERS[@]}"; do
   verdict="$(systemctl --user is-enabled "$unit" 2>&1 | head -n 1)"
   verdict="${verdict//[[:space:]]/}"
   [[ -z "$verdict" ]] && verdict="no-answer"
+  # One arming read per timer, whatever `is-enabled` said, because the verdict that needs
+  # it is the one that PASSES. Both consumers parse this single capture.
+  show="$(arm_show "$unit")"
+  state="$(show_prop ActiveState "$show")"
+  trigger="$(show_prop LastTriggerUSec "$show")"
+  why=""
+  if [[ "$verdict" == "enabled" ]]; then
+    # An `enabled` row is the row nobody used to look at twice, which is where the
+    # installed-but-unarmed timer lived. The word on the row moves with the verdict:
+    # `scripts/service_health_check.py` copies it into the row's status, so a row still
+    # reading the bare `enabled` would keep the false green inside the health report even
+    # after this script started exiting 1.
+    if is_never_armed "$state" "$trigger"; then
+      verdict="enabled-never-armed"
+      why="never-armed"
+    fi
+  else
+    why="not-enabled"
+  fi
   printf '%s\t%s\n' "$unit" "$verdict"
-  [[ "$verdict" != "enabled" ]] && MISS+=("$unit")
+  if [[ -n "$why" ]]; then
+    MISS+=("$unit")
+    MISS_WHY+=("$why")
+    MISS_EVID+=("$(render_evidence "$state" "$trigger")")
+  fi
 done
 
 printf 'checked %d timers: %d enabled, %d not enabled\n' \
   "$TOTAL" "$(( TOTAL - ${#MISS[@]} ))" "${#MISS[@]}"
 
 if (( ${#MISS[@]} > 0 )); then
-  for unit in "${MISS[@]}"; do
+  # Three parallel arrays, one entry per miss: the name, the reason, the evidence read once
+  # in the loop above. `K` in the denominator line is `${#MISS[@]}`, so it is the number of
+  # FAIL lines this block prints and the route's unhealthy-row count moves with it — for a
+  # never-armed timer that means it is counted under `not enabled`, which reads loosely for
+  # a linked unit and is deliberately not re-worded: the line's shape is the contract
+  # `scripts/service_health_check.py` parses and `tests/test_unit_enabledness_check.py`
+  # pins, and the FAIL line beneath it is where the precise reason belongs.
+  for i in "${!MISS[@]}"; do
+    unit="${MISS[$i]}"
+    reason="is not enabled"
+    [[ "${MISS_WHY[$i]}" == "never-armed" ]] \
+      && reason="is enabled but never armed"
     # `--now` is the arming half, not decoration. Plain `enable` only links the unit
     # file into `timers.target.wants/`; the timer keeps reading `ActiveState=inactive`
     # until the user manager is restarted, so a hint that prints the bare form sends
@@ -241,7 +327,7 @@ if (( ${#MISS[@]} > 0 )); then
     # first to know what the second is for: on a timer whose `ActiveState` already reads
     # `active` the timer is running and only its unit FILE is disarmed, and on one that
     # never armed this line is the only place the missing action was ever written down.
-    echo "FAIL $unit is not enabled — armed evidence: $(arming_evidence "$unit")" \
+    echo "FAIL $unit $reason — armed evidence: ${MISS_EVID[$i]}" \
          "— run: systemctl --user enable --now $unit" \
          "(SETUP.md carries the enable route for each repo timer)"
   done

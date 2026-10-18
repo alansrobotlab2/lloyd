@@ -10,6 +10,21 @@ Since #2792 the route also ARMS what it finds disabled — it runs the
 act too: the one argv it can build, the idle-pool precondition, and the rule that the
 verdict a row reports is the guard's re-run rather than the arming.
 
+#2943 adds the failure shape that route had never had to arm against: a `.timer` whose
+unit FILE answers `enabled` and which has never armed, whose FAIL line therefore says
+`is enabled but never armed` and whose row word is `enabled-never-armed`. Before that
+change the arming was UNREACHABLE for such a unit, and not by oversight:
+`check_unit_enabledness` returns at `if not miss: return rows` when the guard exits 0, and
+the guard exited 0 — `checked 8 timers: 8 enabled, 0 not enabled` — over
+`lloyd-egress-window.timer` sitting at `ActiveState=inactive`, `LastTriggerUSec=` empty and
+absent from `systemctl --user list-timers --all`. The three nodes at the end of the #2792
+section are what the wider guard now owes: arming follows a never-armed FAIL line on an
+idle pool, defers it with the in-flight reading on a busy one, and refuses to call the unit
+fixed while the re-run's own never-armed FAIL line is still on the page. Their fixtures are
+mirrored against the real guard by
+`test_the_failure_fixture_is_the_line_the_guard_actually_prints`, which now runs it twice
+over three units to produce them.
+
 Nothing here executes the host `systemctl`. The real guard is never run: every node
 either hands `check_unit_enabledness` a fake runner or points the
 PYTEST_CURRENT_TEST-guarded `UNIT_ENABLEDNESS_SCRIPT` seam at a stand-in script that
@@ -507,6 +522,51 @@ TWO_DISABLED = (
 )
 
 
+# #2943: the red run whose unit FILE is fine. `beta.timer`'s row still leads with the word
+# `enabled` because `is-enabled` really did answer `enabled`; what moved is the row WORD, to
+# `enabled-never-armed`, and the FAIL SENTENCE, to `is enabled but never armed`. The
+# `FAIL <unit> ` prefix and the `— run: systemctl --user enable --now <unit>` tail do not
+# move, which is why arming falls out of the existing route: `_UNITS_FAIL_RE` reads the
+# prefix, `arm_timer_argv` is built from the captured name, and `_units_rows` puts the row
+# word at the head of the status — so a row that still read the bare `enabled` here would
+# carry the false green into the health report even with the guard exiting 1.
+NEVER_ARMED = (
+    "alpha.timer\tenabled\n"
+    "beta.timer\tenabled-never-armed\n"
+    "checked 2 timers: 1 enabled, 1 not enabled\n"
+    "FAIL beta.timer is enabled but never armed — armed evidence: ActiveState=inactive, "
+    "LastTriggerUSec=never-armed — run: systemctl --user enable --now beta.timer "
+    "(SETUP.md carries the enable route for each repo timer)\n"
+)
+# The same shape over three timers, twice, as one run's before-and-after: two never-armed
+# timers, and then a re-run in which one of them armed and one did not. The denominator is
+# what makes the pair useful — `1 enabled, 2 not enabled` and `2 enabled, 1 not enabled` are
+# different strings, so a row quoting the second one can only have been built from the
+# RE-RUN, which is the property `test_a_never_armed_timer_is_never_reported_fixed_while`
+# needs and cannot get from two identical runs.
+TWO_NEVER_ARMED = (
+    "alpha.timer\tenabled\n"
+    "beta.timer\tenabled-never-armed\n"
+    "gamma.timer\tenabled-never-armed\n"
+    "checked 3 timers: 1 enabled, 2 not enabled\n"
+    "FAIL beta.timer is enabled but never armed — armed evidence: ActiveState=inactive, "
+    "LastTriggerUSec=never-armed — run: systemctl --user enable --now beta.timer "
+    "(SETUP.md carries the enable route for each repo timer)\n"
+    "FAIL gamma.timer is enabled but never armed — armed evidence: ActiveState=inactive, "
+    "LastTriggerUSec=never-armed — run: systemctl --user enable --now gamma.timer "
+    "(SETUP.md carries the enable route for each repo timer)\n"
+)
+ONE_STILL_NEVER_ARMED = (
+    "alpha.timer\tenabled\n"
+    "beta.timer\tenabled\n"
+    "gamma.timer\tenabled-never-armed\n"
+    "checked 3 timers: 2 enabled, 1 not enabled\n"
+    "FAIL gamma.timer is enabled but never armed — armed evidence: ActiveState=inactive, "
+    "LastTriggerUSec=never-armed — run: systemctl --user enable --now gamma.timer "
+    "(SETUP.md carries the enable route for each repo timer)\n"
+)
+
+
 def test_arming_runs_only_the_enable_now_argv_for_the_named_timers():
     """Clause 1: the argv is exactly `systemctl --user enable --now <name>.timer`, and the
     names are the guard's FAIL names — not its rows, not the healthy timer's name.
@@ -812,6 +872,109 @@ def test_a_units_run_through_main_arms_the_timer_and_reports_the_green_re_run(
     assert doc["unhealthy"] == 0
 
 
+# --------------------------------------------------------------------------- #
+# #2943: the never-armed FAIL line is now a line this route has to arm against. #
+# --------------------------------------------------------------------------- #
+
+def test_a_never_armed_timer_is_armed_by_the_same_route_that_arms_a_disabled_one():
+    """Clause 4, the idle half: one argv, the guard's own words, then a re-run.
+
+    This arming was unreachable for `lloyd-egress-window.timer` until this change, and the
+    line that says why is in the route: `miss` is populated from FAIL lines only, and while
+    the guard exited 0 the function returned at `if not miss: return rows` — before the pool
+    was read and before any argv was built. So what this node pins is that nothing about the
+    ACT changed for the new failure shape: the same single `enable --now`, the same two guard
+    invocations, the same one idle reading, driven by a FAIL sentence and a row word the
+    route had never met.
+
+    The healthy timer appearing in no argv is the other half, and it is not decorative:
+    `alpha.timer` is on the page as an ordinary `enabled` row, and a route that armed what it
+    could SEE would arm a unit nothing reported broken.
+    """
+    log = CallLog(Proc(1, NEVER_ARMED), Proc(0), Proc(0, ALL_ENABLED))
+    pool = _Pool({})
+    rows = {r["name"]: r for r in
+            shc.check_unit_enabledness(runner=log, pool_reader=pool)}
+    assert log.systemctl == [["systemctl", "--user", "enable", "--now", "beta.timer"]], (
+        f"every argv naming systemd: {log.systemctl}")
+    assert log.guards == [shc._unit_enabledness_argv()] * 2, log.calls
+    assert len(log.calls) == 3, f"guard, one arming, re-run — nothing else: {log.calls}"
+    assert pool.calls == 1, "one idle reading gates the act; the route must not poll"
+    assert rows["timer:beta.timer"]["healthy"] is True, rows["timer:beta.timer"]
+    assert "checked 2 timers: 2 enabled, 0 not enabled" in (
+        rows["timer:beta.timer"]["status"])
+    assert rows["timer:alpha.timer"]["healthy"] is True, rows["timer:alpha.timer"]
+
+
+def test_a_never_armed_timer_is_deferred_while_work_is_in_flight():
+    """Clause 4, the busy half: the in-flight reading stops the act and names itself.
+
+    The idle-pool condition is load-bearing on THIS unit in a way it was not for a
+    `disabled` one. `lloyd-egress-window.service` carries `--drain-wait 3600`, and the timer
+    is `Persistent=true` with no user stamp dir on this box (`StateDirectory=` is empty and
+    `/run/user/1000/systemd/timers/` does not exist), so the window can start AT the arm
+    instant and hold dispatch for up to an hour — from a route a worker turn itself runs. So
+    the reading has to stop the act, say what stopped it, and exec no systemctl: a deferred
+    row that had also armed the timer would be the worst of both outcomes at once.
+    """
+    busy = {"in_flight": 1, "autocode:claimed": 1}
+    log = CallLog(Proc(1, NEVER_ARMED))
+    rows = {r["name"]: r for r in
+            shc.check_unit_enabledness(runner=log, pool_reader=lambda: busy)}
+    assert log.systemctl == [], f"a busy pool must stop the act: {log.systemctl}"
+    assert len(log.calls) == 1, "no re-run of a guard whose act never happened"
+    row = rows["timer:beta.timer"]
+    assert row["healthy"] is False
+    assert "not armed" in row["status"] and "work in flight" in row["status"], row["status"]
+    assert "in_flight=1" in row["status"] and "autocode:claimed=1" in row["status"], (
+        f"the row must name the reading that deferred: {row['status']}")
+    assert row["status"].startswith("enabled-never-armed"), (
+        f"a deferred row still reports the guard's own word, never a bare `enabled`: "
+        f"{row['status']}")
+    assert "checked 2 timers: 1 enabled, 1 not enabled" in row["status"]
+
+
+def test_a_never_armed_timer_is_never_reported_fixed_while_its_fail_line_stands():
+    """Clause 5: `enable --now` answering 0 is an argv that ran, not a timer that armed.
+
+    Both acts exit 0. One timer's arming takes effect and its row goes green on the re-run;
+    the other's does not — the manager has not reloaded it, the state #2537 found on
+    `lloyd-persistence-window.timer`, installed and never once fired — and its row must stay
+    red, leading with the guard's own `enabled-never-armed` and quoting the re-run's FAIL
+    line. A green row there would be the false green this item exists to remove, moved up one
+    layer: the guard stops lying about the unit and the report starts lying about the act.
+
+    The two runs print DIFFERENT denominators (`1 enabled, 2 not enabled`, then
+    `2 enabled, 1 not enabled`), and the red row must carry the second and not the first.
+    That is what makes this a node about the RE-RUN rather than about the first reading: over
+    two byte-identical runs the quoted strings would be indistinguishable and the assertion
+    could not say which run it had been taken from.
+    """
+    log = CallLog(Proc(1, TWO_NEVER_ARMED), Proc(0), Proc(0),
+                  Proc(1, ONE_STILL_NEVER_ARMED))
+    rows = {r["name"]: r for r in
+            shc.check_unit_enabledness(runner=log, pool_reader=lambda: {})}
+    assert sorted(a[-1] for a in log.systemctl) == ["beta.timer", "gamma.timer"], (
+        log.systemctl)
+    assert all(a[:4] == ["systemctl", "--user", "enable", "--now"] for a in log.systemctl), (
+        f"the only act this route may perform is the one its FAIL line prints: "
+        f"{log.systemctl}")
+
+    gamma = rows["timer:gamma.timer"]
+    assert gamma["healthy"] is False, (
+        f"an arming that returned 0 is not an armed timer: {gamma}")
+    assert gamma["status"].startswith("enabled-never-armed"), gamma["status"]
+    assert "FAIL gamma.timer is enabled but never armed" in gamma["status"], gamma["status"]
+    assert "checked 3 timers: 2 enabled, 1 not enabled" in gamma["status"], gamma["status"]
+    assert "1 enabled, 2 not enabled" not in gamma["status"], (
+        f"the row quotes the FIRST reading rather than the re-run: {gamma['status']}")
+    assert gamma["exit_code"] == 1, "the row's exit is the re-run's, not the arm's"
+
+    beta = rows["timer:beta.timer"]
+    assert beta["healthy"] is True, beta
+    assert beta["status"].startswith("enabled —"), beta["status"]
+
+
 def test_no_arm_keeps_a_units_run_read_only(monkeypatch, capsys, stand_in):
     """The design call #2792 had to make, and the half of it that is a promise.
 
@@ -842,22 +1005,42 @@ def test_the_failure_fixture_is_the_line_the_guard_actually_prints(tmp_path):
     owns a way to run the real guard without touching the host — a stub `systemctl` first
     on `PATH`, answering from a table the node dictates — so its `_run` is loaded and
     pointed at the same two units these fixtures name, with the stub's `show` table set to
-    the never-armed reading `ONE_DISABLED` carries. Both fixtures are compared, because a
+    the never-armed reading `ONE_DISABLED` carries. Every fixture is compared, because a
     guard that grew lines only on the green path would otherwise still read as faithfully
     mirrored here.
+
+    #2943 is the case that shows what that witness is for. Its three fixtures are not
+    hand-written guesses at the new wording: the two- and three-timer dirs are each run
+    through the real guard with the stub's `show` table dictating which units hold no fire
+    instant, and `ONE_STILL_NEVER_ARMED` is a SECOND run of the same three-unit dir with one
+    of those readings removed — the re-run the arming node drives, produced by the script
+    rather than imagined. If the guard's `enabled-never-armed` row word or its
+    `is enabled but never armed` sentence is ever re-worded on one side only, this node is
+    the one that says so.
     """
     spec = importlib.util.spec_from_file_location(
         "lloyd_unit_enabledness_check", ROOT / "tests" / "test_unit_enabledness_check.py")
     check = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(check)
 
-    unit_dir = check._unit_names(tmp_path, "alpha.timer", "beta.timer")
+    never = {"ActiveState": "inactive", "LastTriggerUSec": ""}
+    two_dir = tmp_path / "mirror-two"
+    two_dir.mkdir()
+    three_dir = tmp_path / "mirror-three"
+    three_dir.mkdir()
     cases = [
-        (ALL_ENABLED, {}, {}, 0, "mgreen"),
-        (ONE_DISABLED, {"beta.timer": "disabled"},
-         {"beta.timer": {"ActiveState": "inactive", "LastTriggerUSec": ""}}, 1, "mred"),
+        (check._unit_names(two_dir, "alpha.timer", "beta.timer"),
+         ALL_ENABLED, {}, {}, 0, "mgreen"),
+        (check._unit_names(two_dir, "alpha.timer", "beta.timer"),
+         ONE_DISABLED, {"beta.timer": "disabled"}, {"beta.timer": never}, 1, "mred"),
+        (check._unit_names(two_dir, "alpha.timer", "beta.timer"),
+         NEVER_ARMED, {}, {"beta.timer": never}, 1, "mnever"),
+        (check._unit_names(three_dir, "alpha.timer", "beta.timer", "gamma.timer"),
+         TWO_NEVER_ARMED, {}, {"beta.timer": never, "gamma.timer": never}, 1, "mnever2"),
+        (check._unit_names(three_dir, "alpha.timer", "beta.timer", "gamma.timer"),
+         ONE_STILL_NEVER_ARMED, {}, {"gamma.timer": never}, 1, "mnever3"),
     ]
-    for want, states, show, expected_rc, tag in cases:
+    for unit_dir, want, states, show, expected_rc, tag in cases:
         proc, out, _ = check._run(unit_dir, states, tmp_path, tag=tag, show=show)
         assert proc.returncode == expected_rc, f"{tag}: exit {proc.returncode}: {out}"
         assert out == [ln.strip() for ln in want.splitlines() if ln.strip()], (
