@@ -502,18 +502,25 @@ see *Tools*.
    missing, unparseable, or carries no positive `active_edges` is now a refusal
    naming the path, before the tarball is written or the window rotated, and
    every successful run prints the reference's `recorded_at` beside the counts
-   (`tests/test_backup_graph.py`). The `--apply` half no longer answers
-   "not degraded" for a baseline it cannot read: after the 2026-09-22 incident
-   (30 merges applied against a 77 KB store while its report called the graph
-   clean), #1557 made an empty store refuse whatever the baseline file says,
-   and a run with no baseline on disk is now labelled `unmeasured` in the apply
-   report, not clean. What still does not refuse is a degraded *but non-empty*
-   store whose baseline is missing: `load_baseline` answers 0 on any exception,
-   `update_baseline` is max-only and bootstraps `baseline := active` before the
-   guard, so the comparison has nothing to make (**#2968**) — and that same
-   max-only ratchet, run by the very program it guards, means a slow leak never
-   trips it, which is also what self-heals a refused backup within one nightly
-   sweep. A backup
+   (`tests/test_backup_graph.py`). The `--apply` half fails closed the same way now
+   (**#2968**): a floor that is absent, unparseable, or carries no positive
+   `active_edges` refuses an apply over a store that holds edges — exit 3, the path
+   named, the reason printed as *the guard could not run* rather than as a
+   degradation, nothing applied. `load_baseline` still answers 0 on any exception; what
+   changed is that the guard no longer reads that 0 as "no opinion". The empty-store
+   half has refused since #1557 and still does, and a measured floor of 0 still applies
+   labelled `unmeasured` — a recorded zero is a statement, an absent one is a missing
+   comparison, and the two are separate classes in `guard_vacuity.py` so a defaulted
+   `measured` argument cannot quietly re-widen the hole. A floor is bootstrapped only by
+   a run that went on to apply (or by a dry-run, which is the fresh-install route), so a
+   night that refuses leaves the floor as it found it instead of recording the damaged
+   count as the new normal. What still does not refuse, named so nobody rediscovers it:
+   (a) `--allow-degraded` on one of those runs both applies and seeds the floor from the
+   run's own count, re-arming the guard from a possibly-damaged store — deliberate, since
+   a permanently absent file strands every following night (#1395); (b) `update_baseline`
+   is max-only, so a slow leak never trips it, which is also what self-heals a refused
+   backup within one nightly sweep; (c) the floor is written by a job in the family that
+   reads it, which is Deliverable 3's independent-reference ask. A backup
    taken after a wipe is worse than no backup: it rotates the last good
    snapshot out of the window.
 4. **Expire, never delete.** The pre-merge graph must stay readable, and a

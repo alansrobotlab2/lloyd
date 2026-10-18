@@ -147,7 +147,22 @@ def test_degraded_reason():
     # The refusal is a fact about the store, not about the file: it stands with a
     # baseline on disk too, and it does not stand just because the floor is gone.
     assert ers.degraded_reason(0, 50_837) is not None
-    assert ers.degraded_reason(5, 0) is None       # a non-empty store, no floor: labelled, not refused
+    # ...until #2968 closed this line, and the two halves are now named rather than
+    # defaulted. `degraded_reason(5, 0)` reads the signature's DEFAULT `measured=True`,
+    # and a MEASURED floor of 0 keeps #1557's answer: the file is there, it parses, the
+    # count is a statement about the store rather than an absence, and since
+    # `update_baseline` is max-only a recorded 0 can only mean the store was empty when
+    # the count was taken. What changed is the half that default cannot reach: with no
+    # measured floor the COMPARISON is missing, and an apply on a store its own guard
+    # could not verify is the 2026-09-22 shape. Both classes are pinned by name because
+    # that default is the one way left to disarm the guard by forgetting an argument —
+    # `guard_vacuity.py` carries `baseline_zero` as BLOCK and `recorded_zero_baseline` as
+    # PASS, and `tests/test_guard_vacuity.py` runs both against this function.
+    assert ers.degraded_reason(5, 0) is None       # a MEASURED zero floor: labelled, not refused
+    no_floor = ers.degraded_reason(5, 0, measured=False)
+    assert no_floor is not None, \
+        "a non-empty store with no measured floor reads as healthy again (#2968)"
+    assert "could not run" in no_floor and "--allow-degraded" in no_floor
 
 
 def test_safety_record_labels_an_unmeasured_guard_apart_from_a_clean_one():
@@ -199,7 +214,58 @@ def _tree(tmp_path, edges: int = 2):
     st.close()
     return root, db
 
-def _run(root, db, out, *extra):
+def _write_floor(out, active, raw=None):
+    """Plant `<out>/graph-baseline.json` in the shape a test is about.
+
+    `raw=` writes bytes verbatim, which is how the file is made UNPARSEABLE: a garbage
+    string is not a count, and handing one to the count branch would test the wrong one.
+    """
+    (out / "graph-baseline.json").write_bytes(
+        raw if raw is not None else
+        json.dumps({"active_edges": active,
+                    "recorded_at": "2026-01-01T00:00:00+00:00"}).encode())
+    return out / "graph-baseline.json"
+
+
+def _live_edges(db):
+    """The number the guard compares: `len(st.edges.active())`, as `main` computes it."""
+    st = KGStore(db)
+    try:
+        return len(st.edges.active())
+    finally:
+        st.close()
+
+
+def _seed_floor(out, db):
+    """Seed `<out>/graph-baseline.json` at the store's own count, for the nodes that do
+    NOT go through `_run` — the ones calling `ers.main()` in process and `_run_tz`.
+
+    They never had a floor file either; they need one now because #2968 made an apply
+    without a floor refuse, and a node measuring something else (a gate cache path, a
+    kill mid-transaction, one stamp per run) must not spend its assertion on the guard.
+    """
+    return _write_floor(out, _live_edges(db))
+
+
+
+def _run(root, db, out, *extra, floor="auto"):
+    """Run the sweep against the fixture. `floor` is the state of graph-baseline.json.
+
+    `"auto"` (the default) seeds the floor with THIS store's own live count when the file
+    is not already there. That is what a healthy previous night leaves behind —
+    `update_baseline` is max-only, so a store that has not lost edges sits exactly at its
+    floor — and it is why the apply fixtures already in this file are untouched by #2968
+    instead of every one of them refusing on a file none of them ever wrote. It is NOT
+    `--allow-degraded`: the guard still runs, so a fixture that goes on to DELETE edges
+    from that store still refuses. `floor=None` leaves the file exactly as the test left
+    it (usually absent), which is how a node reaches the unmeasured state; `floor=<int>`
+    records a specific count.
+    """
+    if floor == "auto":
+        if not (out / "graph-baseline.json").exists():
+            _write_floor(out, _live_edges(db))
+    elif floor is not None:
+        _write_floor(out, floor)
     cmd = [sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
            "--out-dir", str(out), "--no-gate", *extra]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -252,22 +318,188 @@ def test_apply_refuses_a_store_with_no_active_edges_even_with_no_baseline(tmp_pa
     assert safety["baseline_measured"] is False, safety
     assert safety["degraded_graph"] == "bypassed: --allow-degraded", safety
 
-def test_a_store_with_edges_and_no_baseline_file_still_applies_and_says_unmeasured(tmp_path):
-    """The other half of #1557: no floor is not the same finding as an empty store.
-    Two active edges and no `graph-baseline.json` must still complete — every
-    fixture apply in this file runs that way, so an over-broad refusal would fail
-    them all — and the report must own up to the guard not having measured."""
+def test_a_usable_floor_leaves_the_guard_exactly_as_it_was(tmp_path):
+    """#2968 clause 4: the tightening is one window wide, and both directions of the
+    measured path are byte-for-byte the old behaviour — including the numbers the live
+    nightly job actually runs with.
+
+    The acceptance check for this item is that task #48's `--apply --tiers CASE,PUNCT`
+    gains NO new precondition while `graph-baseline.json` exists, and the pair that
+    matters is the live one: `{"active_edges": 50152}` recorded by the run before last,
+    20,000 active edges is below half of that and still refuses, 50,152 against itself
+    is at the floor and still applies. Both are asserted at the function first, because
+    those are the exact counts, and then end to end on the fixture, because the exit
+    code and the untouched store are what the job sees:
+
+      * 2 active edges against a recorded floor of 5 refuses — below
+        `DEGRADED_FRACTION`, the case #917 shipped and unchanged by this round;
+      * 2 active edges against a floor of 2 applies, with the alias actually rewritten.
+
+    The `measured=True` on the function calls is the point of the node rather than
+    decoration: it is what a caller holding a readable floor passes, and the answers are
+    the ones from before #2968, which is how the change stays a narrowing and not a
+    rewrite.
+    """
+    assert ers.degraded_reason(20_000, 50_152, measured=True) is not None, (
+        "20,000 edges against the live recorded 50,152 stopped refusing, so a wiped "
+        "graph would merge again")
+    assert ers.degraded_reason(50_152, 50_152, measured=True) is None, (
+        "a store exactly at its floor no longer applies, which is a new precondition "
+        "for the nightly job")
+    assert ers.degraded_reason(60_000, 50_152, measured=True) is None, (
+        "growth above the floor refuses, which would strand every healthy night")
+
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
-    assert not (out / "graph-baseline.json").exists()
-    r = _run(root, db, out, "--apply")
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert not (root / "vllm").exists()
-    safety = _applied_report(out)["safety"]
-    assert safety["degraded_graph"].startswith("unmeasured"), safety
-    assert safety["baseline_measured"] is False, safety
-    assert safety["active_edges"] == 2, safety
-    # and the floor it had no opinion about is now recorded for the next run
-    assert json.loads((out / "graph-baseline.json").read_text())["active_edges"] == 2
+    live = _live_edges(db)
+    _write_floor(out, live + 3)                       # 2 of 5: below half
+    r = _run(root, db, out, "--apply", floor=None)
+    got = r.stdout + r.stderr
+    assert r.returncode == 3, f"a degraded store stopped refusing:\n{got}"
+    assert "REFUSING --apply" in got
+    assert "graph is degraded" in got, \
+        "this must be the #917 shrink refusal, not the new #2968 one"
+    assert "could not run" not in got, "a MEASURED floor must not take the new branch"
+    assert list(out.glob("entity-merges-applied-*.json")) == []
+    assert (root / "vllm").exists()
+
+    _write_floor(out, live)                           # at the floor
+    r2 = _run(root, db, out, "--apply", floor=None)
+    assert r2.returncode == 0, f"a store at its own floor was refused (#2968 widened " \
+        f"the guard past its window):\n{r2.stdout}{r2.stderr}"
+    assert "guard unmeasured" not in r2.stdout, "a readable floor must read as measured"
+    assert not (root / "vllm").exists(), "the apply did not do its work"
+    st = KGStore(db)
+    assert st.aliases.resolve("vllm") is not None
+    st.close()
+    assert json.loads((out / "graph-baseline.json").read_text())["active_edges"] == live, (
+        "a measured floor was rewritten by a run that did not need to bootstrap it")
+
+
+def test_a_dry_run_under_a_missing_floor_is_untouched(tmp_path):
+    """#2968 clause 3: only the apply half changed.
+
+    A dry-run over the same store with the same absent floor still exits 0, still prints
+    the `guard unmeasured` note, still writes its plan, and writes no apply report — so an
+    operator or a job inspecting a store whose floor was lost can still read the plan,
+    and the fresh-install route (one dry-run seeds the floor the next apply compares
+    against) is intact. Refusing a READ would be the failure mode #1557 already named for
+    the empty store, and it stays closed.
+    """
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    r = _run(root, db, out, floor=None)                       # no --apply
+    got = r.stdout + r.stderr
+    assert r.returncode == 0, f"a dry-run with no floor now refuses, which blocks the " \
+        f"one route that re-seeds it:\n{got}"
+    assert "guard unmeasured" in got
+    assert "REFUSING" not in got
+    assert list(out.glob("entity-merges-applied-*.json")) == [], "a dry-run wrote a report"
+    assert list(out.glob("entity-merges-*.jsonl")), "the dry-run wrote no plan to read"
+    assert (root / "vllm").exists(), "a dry-run moved a fact dir"
+    st = KGStore(db)
+    assert st.aliases.resolve("vllm") is None, "a dry-run rewrote an alias"
+    st.close()
+    assert json.loads((out / "graph-baseline.json").read_text())["active_edges"] == 2, (
+        "the dry-run stopped seeding a floor it could not read, which removes the "
+        "fresh-install route #2968's fix direction asks to keep workable")
+
+
+def test_a_store_with_edges_and_no_baseline_file_refuses_the_apply(tmp_path):
+    """#2968 clause 1, end to end. This is the node #1557 pinned as `returncode == 0`
+    with `safety.degraded_graph` starting `unmeasured`, and it is the node that inverts:
+    an apply whose guard could not run no longer runs.
+
+    Three floor states are one window and each gets its own run below — absent,
+    present-but-unparseable, valid JSON carrying no positive count — because
+    `load_baseline` answers 0 for all three and the guard answered `None` for all three.
+    `degraded_reason` on its own cannot tell them apart and no longer has to: `main`
+    passes the PATH down, so the refusal says WHICH of the three it found, which is the
+    difference between restoring last night's copy and re-seeding a file that was wrong.
+
+    What did not change matters as much as what did. The run still prints the
+    `guard unmeasured` note, so whoever reads the log sees the same line whether the job
+    applied under #1557 or refused under #2968 — the signal that was already there, now
+    attached to a refusal instead of a success. And nothing is touched in any of the
+    three: the apply this guard let through moved 30 fact dirs, rewrote 0 edges and wrote
+    `entity-merges-applied-2026-09-22-20260922T204831Z.json` while in exactly this state.
+    """
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    assert _live_edges(db) == 2, "positive control: this fixture must HOLD edges, or every " \
+        "run below is the empty-store branch, which refused already under #1557"
+
+    for label, raw in (("absent", None),
+                       ("unparseable", b'{"active_ed'),
+                       ("no positive count", b'{"active_edges": 0}')):
+        (out / "graph-baseline.json").unlink(missing_ok=True)
+        if raw is not None:
+            (out / "graph-baseline.json").write_bytes(raw)
+        r = _run(root, db, out, "--apply", floor=None)
+        got = r.stdout + r.stderr
+        assert r.returncode == 3, f"{label}: an unmeasured apply exited {r.returncode}, not " \
+            f"the guard\'s 3 (#917 keeps one exit code for every guard reason):\n{got}"
+        assert "REFUSING --apply" in got, label
+        assert "graph-baseline.json" in got, \
+            f"{label}: the refusal did not name the path it could not read"
+        assert "could not run" in got, \
+            f"{label}: the refusal blamed the graph instead of the missing comparison"
+        assert "guard unmeasured" in got, label
+        assert list(out.glob("entity-merges-applied-*.json")) == [], \
+            f"{label}: a refused apply wrote a report"
+        assert (root / "vllm").exists(), f"{label}: a refused apply moved a fact dir"
+        st = KGStore(db)
+        assert st.aliases.resolve("vllm") is None, f"{label}: a refused apply rewrote an alias"
+        st.close()
+        # A refusal does not write the floor it could not read (owed 1): ratcheting it
+        # would leave a damaged count as the new floor AND re-arm `backup-graph.sh`,
+        # which reads this same file.
+        left = out / "graph-baseline.json"
+        assert (raw is None and not left.exists()) or left.read_bytes() == raw, \
+            f"{label}: the refusal rewrote the floor file it was refusing on"
+
+
+def test_an_unmeasured_apply_bootstraps_the_floor_only_once_it_applied(tmp_path):
+    """The ordering #2968 moved. `main` used to bootstrap the floor on the line after
+    `baseline_measured` and some fifty lines BEFORE the guard, so an unmeasured run wrote
+    its own count into `graph-baseline.json` and then compared itself against it: the
+    guard no-opped, the damaged count became the permanent floor (rule 3\'s own "records
+    the damage as the new normal"), and `backup-graph.sh`, which reads the same file, was
+    re-armed from the damaged store by that one night. The bootstrap now sits past the
+    decision, and `baseline_measured` is still computed from the file as it was BEFORE
+    this run wrote one (#1557\'s load-bearing order, and what lets a report tell these
+    routes apart afterwards).
+
+    Three routes, and the flag separates the two that write:
+
+    * a refusal writes no floor at all;
+    * an apply bypassed with `--allow-degraded` DOES seed it — that count is an accepted
+      one, and a permanently absent file strands every following night behind the same
+      refusal, which is the state #1395 recorded. Whether even that seeding should be
+      suppressed is owed 1\'s ruling; this node pins which way the shipped code went, so a
+      later change here is a decision and not drift.
+    * a dry-run still seeds it, unchanged, and that is the deliberate fresh-install route:
+      one run without `--apply` and the next apply has a floor to compare against.
+    """
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    floor = out / "graph-baseline.json"
+
+    r = _run(root, db, out, "--apply", floor=None)
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert not floor.exists(), "the refusal still ratcheted the floor to its own count"
+
+    r2 = _run(root, db, out, "--apply", "--allow-degraded", floor=None)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    rep = json.loads(sorted(out.glob("entity-merges-applied-*.json"))[-1].read_text())
+    assert rep["safety"]["baseline_measured"] is False, rep["safety"]
+    assert rep["safety"]["degraded_graph"].startswith("bypassed"), rep["safety"]
+    assert json.loads(floor.read_text())["active_edges"] == 2
+
+    floor.unlink()
+    # The count here is read from the store, not quoted: the bypassed apply above
+    # succeeded, so one of the fixture's two edges is now aliased and no longer active.
+    r3 = _run(root, db, out, floor=None)                       # no --apply: a dry-run
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    assert "guard unmeasured" in r3.stdout
+    assert json.loads(floor.read_text())["active_edges"] == _live_edges(db) == 1, \
+        "the dry-run no longer seeds the floor, which removes the fresh-install route"
 
 def test_apply_writes_aliases_and_stamps_the_ledger(tmp_path):
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
@@ -603,6 +835,7 @@ def test_a_kill_between_the_transaction_and_the_report_leaves_no_dangling_pointe
     carry, so the assertion reads the store, not the log.
     """
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    _seed_floor(out, db)   # in-process main(): #2968 refuses an apply with no floor
     real_dump = json.dump
 
     def dying_dump(obj, fh, *a, **kw):        # dies writing the FINAL report, nothing earlier
@@ -651,6 +884,7 @@ def test_the_gate_cache_path_is_plumbed_to_the_gate(tmp_path, monkeypatch):
     fake.SemanticGate = GateSpy
     monkeypatch.setitem(sys.modules, "entity_semantic_gate", fake)
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    _seed_floor(out, db)   # in-process main(): #2968 refuses an apply with no floor
     cache = tmp_path / "hermetic-verdicts.jsonl"
     monkeypatch.setattr(sys, "argv", [str(SWEEP), "--facts-dir", str(root), "--db", str(db),
                                      "--out-dir", str(out), "--apply",
@@ -675,6 +909,7 @@ def test_the_default_gate_cache_is_left_alone_when_a_run_names_its_own(tmp_path,
     fake.SemanticGate = GateSpy
     monkeypatch.setitem(sys.modules, "entity_semantic_gate", fake)
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    _seed_floor(out, db)   # in-process main(): #2968 refuses an apply with no floor
     monkeypatch.setattr(sys, "argv", [str(SWEEP), "--facts-dir", str(root), "--db", str(db),
                                      "--out-dir", str(out), "--apply"])
     assert ers.main() == 0
@@ -691,6 +926,7 @@ def test_an_apply_with_the_gate_on_reports_itself_as_not_bypassed(tmp_path):
     production verdict cache — a run that reads verdicts the live pipeline earned
     is not measuring the gate, it is replaying it."""
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    _seed_floor(out, db)   # in-process main(): #2968 refuses an apply with no floor
     r = subprocess.run([sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
                         "--out-dir", str(out), "--apply", "--tiers", "PUNCT,CASE",
                         "--gate-cache", str(tmp_path / "hermetic-verdicts.jsonl")],
@@ -1129,6 +1365,9 @@ def _run_tz(root, db, out, tz: str, *extra):
     """The CLI in a SUBPROCESS whose `TZ` is forced. Pinning it is the whole point:
     `TZ` is read at `datetime.now()` call time, so on a box whose clock is already
     UTC every one of the assertions below would hold with the bug still in place."""
+    if not (out / "graph-baseline.json").exists():
+        _seed_floor(out, db)   # #2968: an apply with no floor refuses, and this
+                              # node is naming artefacts under a forced zone
     cmd = [sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
            "--out-dir", str(out), "--no-gate", *extra]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=120,

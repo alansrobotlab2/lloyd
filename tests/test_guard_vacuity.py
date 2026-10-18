@@ -597,34 +597,64 @@ def test_a_symbol_the_item_named_by_name_is_in_the_inventory(symbol, guards):
     assert symbol in {g.symbol for g in guards}
 
 
-def test_the_degraded_graph_guard_has_a_witness_for_the_2026_09_22_apply(guards, report):
-    """#1557. This harness carried `baseline_zero` (50,908 edges, expect PASS) as
-    the only zero-baseline class, so the shape that actually fired had no witness:
-    `entity-merges-applied-2026-09-22-20260922T204831Z.json` records 0 active edges,
-    no baseline on disk, `safety.degraded_graph: "not degraded"`, 30 merges applied
-    and 0 edges rewritten. A BLOCK owed there and a BLOCK given is the difference
-    between a harness that scored the hole and one that green-lit it, so the class
-    must be present, must owe BLOCK, and the real guard must actually refuse it."""
+def test_the_degraded_graph_guard_has_a_witness_for_the_no_floor_apply(guards, report):
+    """#2968 clause 5: `baseline_zero` now OWES BLOCK, and it stands beside the
+    empty-store class rather than being amended away.
+
+    The 2026-09-22 apply is the shape both classes speak to —
+    `entity-merges-applied-2026-09-22-20260922T204831Z.json` records 0 active edges, no
+    baseline on disk, `safety.degraded_graph: "not degraded"`, 30 merges applied and 0
+    edges rewritten. #1557 closed the EMPTY-store half and deliberately left the other: a
+    store that still holds edges whose floor is gone reads as 0 through `load_baseline`
+    and, until #2968, read as no-refusal through the guard too. The reason it was left
+    open — that every fixture apply and every first run would refuse — turned out to be
+    paid for by an unattended nightly job nobody reads the output of, so the class that
+    pinned it as PASS had to flip, and a flipped expectation is worth nothing unless the
+    real guard moved with it. That is what `real` here is: the guard's own verdict, read
+    out of the harness's probe of the shipped function.
+
+    What makes this a PAIR rather than a rename, and the part that answers "the guard
+    cannot be disarmed by defaulting the caller's knowledge": `baseline_zero` and
+    `recorded_zero_baseline` carry the SAME store count and the SAME zero, and differ in
+    `measured` alone. An edit that inferred `measured` from `baseline <= 0`, or dropped
+    the argument at the call site, has to give both classes the same verdict — and one of
+    the two assertions below goes red whichever way it guessed.
+    """
     g = next(g for g in guards if g.symbol == "degraded_reason")
     rows = {r["class"]: r for r in g.results}
-    assert "empty_store_no_baseline" in rows, sorted(rows)
-    row = rows["empty_store_no_baseline"]
-    assert row["expect"] == gv.BLOCK, row
-    assert row["real"] == gv.BLOCK, "the guard still green-lights a 0-edge store"
-    assert row["status"] == "witnessed", row       # mutant=PASS, so this BLOCK is a real refusal
-    # the class the fix had to leave alone: a full store with a lost floor is not a
-    # refusal, or the first run against any new store would refuse itself
-    assert rows["baseline_zero"]["real"] == gv.PASS, rows["baseline_zero"]
-    # and the harness still runs to completion, printing the verdict it now owes
+    assert {"empty_store_no_baseline", "baseline_zero",
+            "recorded_zero_baseline"} <= set(rows), sorted(rows)
+
+    zero, recorded = rows["baseline_zero"], rows["recorded_zero_baseline"]
+    assert zero["expect"] == gv.BLOCK, (
+        "baseline_zero still owes PASS, which is #1557's answer to the window #2968 "
+        "closed")
+    assert zero["real"] == gv.BLOCK, (
+        "the witness owes a refusal and the guard still green-lights a full store with "
+        "no measured floor")
+    assert zero["status"] == "witnessed", zero    # mutant=PASS, so this BLOCK is a refusal
+    # The half #1557 ruled on and #2968 kept: a measured zero is a statement, not an
+    # absence, and refusing on it strands the dry-run-then-apply recovery route.
+    assert recorded["expect"] == gv.PASS and recorded["real"] == gv.PASS, recorded
+    assert recorded["status"] == "silent-ok", recorded
+    # And the pair really is one input wide: same 50,908-edge store, same 0 in the file.
+    payload = {c.name: c.payload for c in g.classes}
+    assert payload["baseline_zero"]["active"] == payload["recorded_zero_baseline"]["active"]
+    assert payload["baseline_zero"]["baseline"] == payload["recorded_zero_baseline"]["baseline"] == 0
+    assert payload["baseline_zero"]["measured"] is False
+    assert payload["recorded_zero_baseline"]["measured"] is True
+    assert "empty_store_no_baseline" in rows and rows["empty_store_no_baseline"]["real"] == gv.BLOCK
+
+    # The harness runs to completion on the flipped expectation and prints the verdict it
+    # now owes, with no FINDINGS disagreement between guard and witness.
     assert report["rc"] == 0, report["stderr"][-2000:]
     printed = [m for ln in report["lines"] if (m := CLASS_RE.match(ln))
-               and m["cls"] == "empty_store_no_baseline"]
-    assert len(printed) == 1 and printed[0]["guard"] == gv.BLOCK, printed
+               and m["cls"] in ("baseline_zero", "recorded_zero_baseline")]
+    assert {m["cls"] for m in printed} == {"baseline_zero", "recorded_zero_baseline"}, printed
+    assert [m["guard"] for m in printed if m["cls"] == "baseline_zero"] == [gv.BLOCK], printed
     tail = report["stdout"].split("FINDINGS", 1)
-    assert len(tail) == 1 or "empty_store_no_baseline" not in tail[1], \
-        "the guard's BLOCK and the witness's BLOCK disagree"
-
-
+    assert len(tail) == 1 or not any(
+        c in tail[1] for c in ("baseline_zero", "recorded_zero_baseline")), tail[1][:800]
 def test_the_corrected_gate_path_is_used_not_the_item_mistake(report):
     """#636's own proving command named `scripts/selfmod/gate.py`, which does not
     exist; the report must carry the real path and never the wrong one."""

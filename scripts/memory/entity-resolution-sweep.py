@@ -1460,8 +1460,32 @@ def update_baseline(active: int, path: Path | None = None) -> int:
     return current
 
 
+def floor_state(path: Path) -> str:
+    """What is wrong with the floor file, in the words a refusal prints (#2968).
+
+    Three states, named apart because they have different repairs — a wipe, a
+    truncated write, a file seeded wrong — and an operator reading a refusal should
+    not have to go and find out which one they are holding. Absence is the commonest:
+    the 2026-09-22 wipe took the file with `_pipeline`, and #1395 recorded that there
+    was no route to re-seed it from a 0-edge store.
+    """
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return f"there is no baseline file at {path}"
+    except OSError as exc:
+        return f"the baseline at {path} could not be read ({exc.strerror})"
+    try:
+        json.loads(raw)
+    except Exception:
+        return (f"the baseline at {path} is present but not parseable JSON "
+                f"({len(raw)} bytes)")
+    return f"the baseline at {path} holds no positive `active_edges` count"
+
+
 def degraded_reason(active: int, baseline: int, fraction: float = DEGRADED_FRACTION,
-                    *, measured: bool = True) -> str | None:
+                    *, measured: bool = True,
+                    baseline_path: "Path | None" = None) -> "str | None":
     """Why --apply must refuse, or None.
 
     An empty store refuses whatever the baseline file says (#1557). Before this,
@@ -1479,9 +1503,32 @@ def degraded_reason(active: int, baseline: int, fraction: float = DEGRADED_FRACT
     degree 0, every variant indistinguishable from every other — and it is a fact
     about the store, so it does not need the baseline file to be knowable.
 
-    `measured` says whether a floor was on disk before this run wrote one. It
-    only changes the wording: the refusal is the same either way, and a caller
-    that cannot know still gets the honest message.
+    `measured` says whether a floor was on disk before this run wrote one, and it
+    is deliberately NOT inferred from `baseline <= 0`: `update_baseline` is max-only
+    and bootstraps an absent file to the current count, so a caller that read the
+    number AFTER writing it could not tell a measured floor from a self-reference.
+
+    #2968 changed what an unmeasured floor costs, and this is the ruling: an apply
+    whose guard could not run REFUSES. `measured=False` over a store that holds edges
+    no longer labels the state and proceeds — the sweep is the second of the two
+    guards over this file to fail closed, after `scripts/backup/backup-graph.sh`
+    (#917, `81925622`): "an unreadable reference is exactly the state in which the
+    guard would be needed most — so neither is a permissive default." `measured=True`
+    with a RECORDED zero still proceeds, labelled, because that floor is a statement
+    rather than an absence and #1557 ruled on it; it is now reachable only by a caller
+    that says so. Defaulting `measured` to True is the sharp edge that remains, so
+    `guard_vacuity.py` pins BOTH sides and cannot be satisfied by a default:
+    `baseline_zero` (a non-empty store, no measured floor) is BLOCK,
+    `recorded_zero_baseline` (`measured=True`, floor 0) is PASS.
+
+    Why the tightening costs the shipped job nothing: task #48 applies daily
+    (`~/obsidian/autonomy/48-entity-resolution-sweep.md`, `frequency: daily`,
+    `--apply --tiers CASE,PUNCT`) and it HAS a floor — `graph-baseline.json` carried
+    `{"active_edges": 50152, "recorded_at": "2026-10-17T15:19:37Z"}` at triage,
+    stamped a minute before that night's apply — so the nightly run answers the
+    measured branch and gains no new precondition while the file exists. What the
+    window was worth closing: nobody is left in that loop to read the printed
+    `guard unmeasured` note, which used to be the only signal.
     """
     if active <= 0:
         floor = ("and no baseline was on disk before this run, so there was no recorded "
@@ -1495,10 +1542,28 @@ def degraded_reason(active: int, baseline: int, fraction: float = DEGRADED_FRACT
                 f"the real store and restore the graph, or pass --allow-degraded if you "
                 f"have reviewed the plan by hand.")
     if baseline <= 0:
-        # No floor recorded and a store that does hold edges: nothing to compare
-        # against, so nothing to refuse — but this is `unmeasured`, not healthy,
-        # and safety_record labels it as such rather than "not degraded".
-        return None
+        if measured:
+            # A floor was measured and it says 0 — the file is there, it parses, and
+            # the count is a statement about the store, not an absence (#1557, kept on
+            # purpose). `update_baseline` is max-only, so a recorded 0 can only mean the
+            # store was empty when the count was taken; refusing on it would strand a
+            # legitimate recovery behind a flag no unattended job passes.
+            return None
+        # Nothing was measured and the store holds edges, so the comparison itself is
+        # what is missing. An apply here runs on a store nothing has verified (#2968).
+        # `entity-merges-applied-2026-09-22-20260922T204831Z.json` is the shape: guard
+        # disarmed by a floor that answered 0, 146 merges, 0 edges rewritten, 30 fact
+        # dirs moved. Its tell was `store_before.edges_active: 0`, which the branch
+        # above catches on its own now; a store that still LOOKS populated has no such
+        # tell, which is exactly why this branch could not keep answering `None`.
+        where = (floor_state(baseline_path) if baseline_path is not None
+                 else "no baseline was read before this run")
+        return (f"the degraded-graph guard could not run: {where}, so nothing can be "
+                f"compared against this store's {active:,} active edges. An apply on an "
+                "unverifiable store is the 2026-09-22 incident. Re-seed the floor from "
+                "the daily `backup-graph.sh` count or restore last night's copy, or "
+                "pass --allow-degraded to apply anyway — which is a decision about an "
+                "UNVERIFIED store, not a clean run.")
     if active < baseline * fraction:
         return (f"graph is degraded: {active:,} active edges is below {fraction:.0%} of the "
                 f"recorded baseline {baseline:,}. Every entity looks disconnected on a broken "
@@ -1728,7 +1793,14 @@ def main() -> int:
     # sits at its own count. That lost distinction is what let 2026-09-22 apply 30
     # merges while the report said "not degraded" (#1557).
     baseline_measured = baseline_path.is_file() and load_baseline(baseline_path) > 0
-    baseline = update_baseline(len(active_edges), baseline_path)
+    # No bootstrap here any more (#2968). This used to be the very next line —
+    # `baseline = update_baseline(...)`, some fifty lines BEFORE the guard — so a run
+    # with no floor wrote its own count into `graph-baseline.json` and then compared
+    # itself against it: the guard no-opped, the damaged count became the permanent
+    # floor (rule 3's own "records the damage as the new normal"), and
+    # `backup-graph.sh`, which reads this same file, was re-armed from the damaged
+    # store by one unmeasured night. The bootstrap moved below, past the decision.
+    baseline = load_baseline(baseline_path) if baseline_measured else 0
     print(f"  Store:           {args.db}")
     print(f"  Baseline:        {baseline:,} active edges (now {len(active_edges):,})"
           + ("" if baseline_measured else "  [no baseline on disk before this run — guard unmeasured]"))
@@ -1771,14 +1843,36 @@ def main() -> int:
     print(f"Plan written: {plan_out}")
 
     if not args.apply:
+        # A dry-run still seeds a floor it could not read, exactly as it did before
+        # #2968 — this is the deliberate fresh-install route the item's fix direction
+        # asks to keep workable: one run without `--apply` and the next apply has a real
+        # count to compare against, instead of facing a refusal with no way back
+        # (#1395's permanent-refusal state). Nothing is at risk in seeding here: a
+        # read-only run cannot be the run that damaged the store, and it returns before
+        # the apply branch that decides whether to write.
+        if not baseline_measured:
+            baseline = update_baseline(len(active_edges), baseline_path)
         print()
         print(f"(dry-run — pass --apply to execute {plan['safe_clusters']} SAFE merges)")
         return 0
 
-    reason = degraded_reason(len(active_edges), baseline, measured=baseline_measured)
+    reason = degraded_reason(len(active_edges), baseline,
+                             measured=baseline_measured,
+                             baseline_path=baseline_path)
     if reason and not args.allow_degraded:
         print(f"\nREFUSING --apply: {reason}")
         return 3
+
+    # Past the decision, and only there, an unmeasured run seeds the floor it could
+    # not read (#2968). A refusal returned above and wrote nothing, so a night whose
+    # store is in trouble leaves the floor as it found it instead of lowering it — and
+    # a dry-run never reaches this line either, which is what keeps a read-only
+    # invocation read-only (rule 1). An unmeasured apply the operator chose to
+    # --allow-degraded DOES seed it: that count is an accepted one, and leaving the
+    # file absent would make every following night refuse with no route back, which is
+    # the permanent-refusal state #1395 recorded.
+    if not baseline_measured:
+        baseline = update_baseline(len(active_edges), baseline_path)
 
     # Apply. One stamp per run: the report's name, the store backup it takes, and the
     # `timestamp` field a `--resume` reads back all carry the plan emit's value, so no

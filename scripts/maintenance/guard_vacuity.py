@@ -632,17 +632,39 @@ def build_guards(autonomy, ers, kgr, gate_mod, shc, promote_mod, common):
              "baseline cannot disarm the guard; what #1557 closed is the other side — "
              "the file bootstraps itself to the current count when it is missing, so a "
              "lost baseline used to leave the whole run unmeasured while the report read "
-             "\"not degraded\". `empty_store_no_baseline` is the witness for that shape. "
-             "What still survives is provenance: the baseline is written by a job in the "
-             "same family that reads it, which is Deliverable 3's independent-reference ask",
-        real=degraded_real, mutant=lambda p: PASS,
+             "\"not degraded\". `empty_store_no_baseline` is the witness for that shape, "
+             "and #2968 closed the rest of it: a lost baseline over a store that still "
+             "holds edges refuses too (`baseline_zero`), because an apply whose comparison "
+             "could not run is the 2026-09-22 incident and the job runs unattended. What "
+             "still survives is provenance in the other direction: the floor is written by "
+             "a job in the same family that reads it, which is Deliverable 3's "
+             "independent-reference ask",
+    real=degraded_real, mutant=lambda p: PASS,
         classes=[
-            InputClass("baseline_zero", PASS, {"active": 50908, "baseline": 0},
-                       "no recorded baseline over a full store: nothing to compare "
-                       "against, so nothing to refuse. Distinct from "
-                       "empty_store_no_baseline below — the same 0 in the file means a "
-                       "lost reference here and an empty graph there, and only the "
-                       "store's own count tells them apart"),
+            # TWO classes over the same two numbers, because #2968 split what was one "
+            # answer and the input that separates them is a single keyword: whether a
+            # floor was MEASURED. A PASS left on the first would have this harness "
+            # contradict the guard it measures, and the pair is what keeps the guard's
+            # `measured=True` DEFAULT visible — with one class only, defaulting the "
+            # parameter away (or inferring it from `baseline <= 0`) would disarm the guard "
+            # quietly and nothing here could tell the two zeros apart.
+            InputClass("baseline_zero", BLOCK,
+                       {"active": 50908, "baseline": 0, "measured": False},
+                       "the live 2026-10-05 count over NO measured floor — the state a wipe "
+                       "of graph-baseline.json leaves, which is what 2026-09-22 was. #2968 "
+                       "refuses it. This class was PASS until then on #1557's reasoning that "
+                       "refusing strands a legitimate recovery, which is true of "
+                       "recorded_zero_baseline below and not of this shape"),
+            InputClass("recorded_zero_baseline", PASS,
+                       {"active": 50908, "baseline": 0, "measured": True},
+                       "the same store and the same 0, the floor MEASURED: the file is "
+                       "present, parses, and states 0. Still applies, labelled — "
+                       "update_baseline is max-only, so a recorded 0 can only mean the store "
+                       "was empty when the count was taken, and refusing on that would strand "
+                       "the recovery (a dry-run bootstraps the floor, the next apply has a "
+                       "real count) behind --allow-degraded, which nothing unattended passes. "
+                       "A class of its own because it differs from baseline_zero in "
+                       "`measured` and nothing else"),
             InputClass("healthy_growth", PASS, {"active": 50908, "baseline": 50837},
                        "the live pair at probe time"),
             InputClass("degraded_shrink", BLOCK, {"active": 2, "baseline": 50837},

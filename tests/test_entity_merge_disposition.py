@@ -193,6 +193,12 @@ def test_a_real_sweep_apply_is_the_disposition_the_audit_reports(tmp_path):
     st.edges.add({"source": "vLLM", "target": "Ray", "type": "mentions"}, origin="test")
     assert len(st.edges.active()) == 1, "the fixture store seeded no edge to measure"
     st.close()
+    # A floor at the store's own active count — what a healthy previous night leaves
+    # behind. #2968 made an apply with no floor REFUSE, and this node is measuring the
+    # disposition the audit reports, not the guard; the refusal it would otherwise hit
+    # now carries the whole text of that guard reason instead of an audit mismatch.
+    (out / "graph-baseline.json").write_text(json.dumps(
+        {"active_edges": 1, "recorded_at": "2026-01-01T00:00:00+00:00"}))
     r = subprocess.run([sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
                         "--out-dir", str(out), "--no-gate", "--apply"],
                        capture_output=True, text=True, timeout=180)
