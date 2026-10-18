@@ -1413,6 +1413,137 @@ def test_the_vault_witness_of_the_unbounded_baseline_reproduces_its_quoted_numbe
         "the copy asserts the original carried no label field; check it still holds"
     assert str(witness["source_file"]).endswith(
         "lloyd-data/eval/1480/runs/lloydmemeval-baseline-2026-09-25.json")
+
+
+# ── #2972: the #2778 witness extract — the baseline's own key list, sub-ceiling ──
+
+#: The vault path #2778's owed entry demands, and its committed mirror in this repo.
+#: The file that proves #2778's premise is the run itself — 1,630,965 B at
+#: `~/lloyd-data/eval/1480/runs/lloydmemeval-baseline-2026-09-25.json`, over the
+#: `WITNESS_MAX_BYTES` = 1,048,576 ceiling on what an owed entry may order whole — so
+#: what gets published is the extract: 3,217 B / 47 lines holding the store's own key
+#: list, its arms, and the whole store's byte count, line count and sha256.
+WITNESS_2778_VAULT = "2026-10-15.2778-runs-lloydmemeval-baseline-2026-09-25.json"
+WITNESS_2778_FIXTURE = "session_witness_2778_runs_lloydmemeval_baseline_2026-09-25.json"
+
+#: The 18 top-level keys of that run as the extract publishes them, and the sha256 it
+#: carries. The same digest is `_witness.source_sha256` at
+#: `tests/fixtures/session_witness_lloydmemeval_baseline_2026-09-25.json:15`.
+BASELINE_2026_09_25_KEYS = [
+    "answerer", "arms", "created", "dev", "dev_comparisons", "eval", "holdout",
+    "holdout_reserve_rule", "item", "judge", "judge_agreement", "label",
+    "min_category_n", "prefetch", "prefetch_corpus", "rows", "set", "wall_s",
+]
+BASELINE_2026_09_25_SHA256 = \
+    "d47f3b73c63e8917c205f274d7dbba66adcb046ef3e44437d115643e7eb40366"
+
+
+def test_the_2778_extract_of_the_baseline_proves_it_disclosed_no_fact_ordering():
+    """#2972: the committed proof that the 2026-09-25 baseline disclosed no fact
+    ordering — cut to fit under the witness ceiling, since the run it is cut from is
+    1,630,965 B and `WITNESS_MAX_BYTES` is 1,048,576.
+
+    #2778 (closed on 4dbd0f60) exists because `--arms` defaulted to
+    `closed_book,history,prefetch`, the `prefetch` arm rendered the CONFIDENCE order
+    while `config.yaml` ships `prefetch.facts.rank: relevance`, and neither the
+    artifact nor the printed summary said so. This run is the witness: it scored all
+    four arms, so the note at `eval/measurements/lloydmemeval-2026-09-25.md:80` could
+    label the confidence arm `prefetch (today)` — the mislabel the silent header
+    enables. Its own key list is the evidence of the silence: 18 keys, none matching
+    /rank/i, and neither of the two blocks the fix writes (`facts_rank` at
+    `eval/run_memory_eval.py:1448`, `fact_snapshot` at `:1548-1556`) among them.
+
+    Three process boundaries are crossed, and each is asserted below:
+
+    * the owed-entry writer's ceiling and the artifact it has to accept — the bytes
+      actually read are compared against `scripts.automod.backlog.WITNESS_MAX_BYTES`,
+      so padding this artifact past the cap, or moving the cap in code, goes red here
+      rather than at the next owed check;
+    * the vault working tree and this repo — the vault copy is read FIRST and required
+      to parse equal to the committed fixture (#2637's two-branch shape, used by
+      `test_the_vault_witness_of_the_unbounded_baseline_reproduces_its_quoted_numbers`
+      above), so the owed publication and the pinned mirror cannot drift apart;
+    * the runtime store and the committed bytes — neither is opened here, because
+      `~/lloyd-data/eval/1480/runs/` is a mutable directory the eval commands rewrite,
+      so byte identity with the 2026-09-25 run is proved across the two COMMITTED
+      witnesses of it: this extract's `source_sha256` must equal the #2170 extract's
+      `_witness.source_sha256`.
+
+    A rewrite that backfills a rank key, drops or renames an arm, restates a figure
+    the extract never carried, or re-copies #2170's header subset instead of standing
+    beside it as its companion goes red here."""
+    from scripts.automod import backlog as B
+
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    committed = fixtures / WITNESS_2778_FIXTURE
+    assert committed.exists(), (
+        f"{committed} is missing, so #2972's claim has no committed bytes at all — "
+        "the vault copy is absent too, which is the state the #2637 node used to "
+        "spend a skip on")
+
+    # The vault copy is authoritative when present; the fixture only stands in for it.
+    src = WITNESS_DIR / WITNESS_2778_VAULT
+    raw = (src if src.exists() else committed).read_bytes()
+    assert 0 < len(raw) < B.WITNESS_MAX_BYTES, (
+        f"{src if src.exists() else committed} is {len(raw):,} B against "
+        f"WITNESS_MAX_BYTES = {B.WITNESS_MAX_BYTES:,}: an owed entry may not order a "
+        "witness over the ceiling whole, which is the whole reason this artifact is "
+        "an extract rather than the store")
+    art = json.loads(raw)
+    if src.exists():
+        assert json.loads(src.read_text()) == json.loads(committed.read_text()), (
+            f"{src} and the committed extract disagree: the #2778 witness was "
+            "republished in the vault without re-deriving the fixture, so the "
+            "pre-fix key list now has two versions")
+
+    # What the extract says about the file it was cut from (clause 1).
+    assert str(art["source_file"]).endswith(
+        "lloyd-data/eval/1480/runs/lloydmemeval-baseline-2026-09-25.json"), art["source_file"]
+    assert art["source_bytes"] == 1_630_965, art["source_bytes"]
+    assert art["source_lines"] == 40_320, art["source_lines"]
+    assert art["_witness"]["companion"] == f"backlog/data/{WITNESS_2778_VAULT}", \
+        art["_witness"]["companion"]
+    assert art["_witness"]["cross_reference"] == \
+        "backlog/data/lloydmemeval-baseline-2026-09-25.json", \
+        "the extract must name the #2170 witness it is companion to"
+    # Companion, not duplicate: it re-copies none of the header subset #2170 owns.
+    for theirs in ("dev", "dev_comparisons", "run", "set"):
+        assert theirs not in art, (
+            f"`{theirs}` is #2170's extract's content; re-publishing it here makes "
+            "two authoritative copies of one figure instead of one more figure")
+
+    # The silence itself (clause 2): the store's own key list, with no rank key.
+    keys = art["top_level_keys"]
+    assert keys == BASELINE_2026_09_25_KEYS, keys
+    assert len(keys) == 18, len(keys)
+    rankish = [k for k in keys if re.search("rank", k, re.I)]
+    assert rankish == [], (
+        f"the premise being witnessed is that the pre-fix artifact named no fact "
+        f"ordering; {rankish} would be such a key")
+    assert art["facts_rank_key_present"] is False, art["facts_rank_key_present"]
+
+    # All four arms were scored, yet nothing says which order each rendered (clause 3)
+    # — which is what lets the confidence arm be labelled `prefetch (today)`.
+    assert art["arms"] == ["closed_book", "history", "prefetch", "prefetch_rel"], \
+        art["arms"]
+    assert "facts_rank" not in keys, "the #2778 fix writes this at run_memory_eval.py:1448"
+    assert "fact_snapshot" not in keys, "the #2778 fix writes this at run_memory_eval.py:1548-1556"
+
+    # One byte identity across the two committed witnesses of the same run (clause 4).
+    sibling = fixtures / "session_witness_lloydmemeval_baseline_2026-09-25.json"
+    sib_text = sibling.read_text()
+    sib_witness = json.loads(sib_text)["_witness"]
+    assert art["source_sha256"] == BASELINE_2026_09_25_SHA256, art["source_sha256"]
+    assert art["source_sha256"] == sib_witness["source_sha256"], (
+        "the #2972 extract and the #2170 extract are witnesses of one file; if these "
+        "digests differ, one of them was re-cut against a different run and the "
+        "byte-identity binding #2972 clause 4 asks for is gone")
+
+    # The companion is the 6,560 B / 334-line #2170 extract, unchanged: it is not in
+    # this round's diff, and its own node still says what it said.
+    assert (sib_witness["source_bytes"], sib_witness["source_lines"]) == (1_630_965, 40_320)
+    assert (len(sib_text.encode()), len(sib_text.splitlines())) == (6_560, 334), \
+        "the pinned #2170 extract moved underneath this round"
 # ── #2201: `--char-budget`, and the rawspan result priced at two budgets ────
 
 #: The measurement doc this round adds, and the two committed artifacts it is

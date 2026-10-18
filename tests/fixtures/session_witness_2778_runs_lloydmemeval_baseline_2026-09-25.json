@@ -1,0 +1,47 @@
+{
+ "_witness": {
+  "companion": "backlog/data/2026-10-15.2778-runs-lloydmemeval-baseline-2026-09-25.json",
+  "companion_is": "The vault path these bytes are published to. This committed fixture is that file's mirror in the code repo, which is what lets tests/test_memory_eval.py assert the claim with the vault working tree absent; the node reads the vault copy when it is there and requires the two to parse equal.",
+  "cross_reference": "backlog/data/lloydmemeval-baseline-2026-09-25.json",
+  "cross_reference_is": "#2170's clause-6 witness of the SAME run, already published and pinned by tests/test_memory_eval.py. Companion, not duplicate: it carries the run header, the v1 `set` block and the dev correct/correct_strict rates plus the paired comparison, and no key list; this extract carries the store's own top-level key list and its `arms`, and re-copies none of that header subset. Both witnesses bind to one byte identity: the source_sha256 here equals the `_witness.source_sha256` there.",
+  "extracted": [
+   "the store's own sorted top-level key list (`top_level_keys`)",
+   "the store's `arms` list",
+   "the whole store's byte count, newline count and sha256"
+  ],
+  "not_extracted": "the run header, the `set` block, the per-category dev rates and the paired comparison — all already published by #2170 at backlog/data/lloydmemeval-baseline-2026-09-25.json, which re-copies nothing of the 1068 per-question rows or the prefetch context dump either. No figure quoted in #2778 depends on those.",
+  "purpose": "#2972's sub-ceiling witness for #2778's premise: the 2026-09-25 baseline artifact disclosed no fact ordering at all. The source it is cut from is 1,630,965 B, over the WITNESS_MAX_BYTES = 1,048,576 ceiling an owed entry may order whole, so what is published is the subset that reproduces the figure - the key list and the arms - not the store.",
+  "why_it_matters": "eval/run_memory_eval.py defaulted `--arms` to closed_book,history,prefetch and rendered the `prefetch` arm in the CONFIDENCE order while config.yaml ships prefetch.facts.rank: relevance, and neither this artifact nor the printed summary said so. These bytes are the proof of that silence: 18 top-level keys, none matching /rank/i, and all four arms present - so the confidence arm could be, and in eval/measurements/lloydmemeval-2026-09-25.md:80 was, labelled `prefetch (today)`. The #2778 fix (4dbd0f60) writes a `facts_rank` block at eval/run_memory_eval.py:1448 and a `fact_snapshot` block at :1548-1556; neither key exists here, which is exactly the pre-fix state those lines changed."
+ },
+ "arms": [
+  "closed_book",
+  "history",
+  "prefetch",
+  "prefetch_rel"
+ ],
+ "facts_rank_key_present": false,
+ "source_bytes": 1630965,
+ "source_file": "/home/alansrobotlab/lloyd-data/eval/1480/runs/lloydmemeval-baseline-2026-09-25.json",
+ "source_lines": 40320,
+ "source_sha256": "d47f3b73c63e8917c205f274d7dbba66adcb046ef3e44437d115643e7eb40366",
+ "top_level_keys": [
+  "answerer",
+  "arms",
+  "created",
+  "dev",
+  "dev_comparisons",
+  "eval",
+  "holdout",
+  "holdout_reserve_rule",
+  "item",
+  "judge",
+  "judge_agreement",
+  "label",
+  "min_category_n",
+  "prefetch",
+  "prefetch_corpus",
+  "rows",
+  "set",
+  "wall_s"
+ ]
+}
