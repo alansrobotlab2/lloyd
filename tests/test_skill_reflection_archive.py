@@ -2811,3 +2811,88 @@ def test_a_retired_skill_is_named_with_its_retirement_where_an_active_skill_name
         "skills/skills-index.md lists nightly-day-end-synthesis under its Nightly Pipeline "
         "heading with no mark again"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #2931 clause 5: prose that replaces a retired job's HUMAN name must not answer by
+# naming its SLUG without its retirement.
+#
+# The rewording this item asked for moves three comments off the job's two-word human name
+# (the phrase #2931's own acceptance check greps the repo for, and which must survive in
+# exactly one place: an entity-alias assertion), and the natural way to write the
+# replacement is to name the job that actually went away — by its folder slug, which is
+# exactly the string this file's rule keys on. So the
+# replacement prose is inside the rule's own key set from the moment it is written, and a
+# sentence that named the slug bare would turn the unmarked hard-rung node above red. It is pinned here rather than trusted, because the failure would land in a
+# DIFFERENT file from the one being edited, and the sentence that causes it is the sentence
+# whose job is to explain the retirement.
+#
+# This node does not duplicate the rule above: it runs the same predicate over the two
+# surfaces #2931 rewrote, and — the part the rule above cannot do — shows the predicate
+# firing on a mutated copy of the real sentence, so a scan that matched nothing could never
+# satisfy it.
+
+PROSE_SURFACES_2931 = ("scripts/memory/knowledge-health-report.py",
+                       "tests/test_knowledge_health_hygiene.py")
+RETIRED_MORNING_SLUG = "nightly-morning-briefing"
+
+
+def _slug_sentences_marked(where_paragraphs, retired):
+    """The sentences that name a retired slug, with the verdict on each.
+
+    Reuses the rule's own `_RETIREMENT_WORD` and `_RETIREMENT_RECORD`, so this node cannot
+    drift into a second, laxer definition of 'marked'."""
+    hits = []
+    for where, text in where_paragraphs:
+        for sentence in _SENTENCE_END.split(text):
+            if not any(name in sentence for name in retired):
+                continue
+            hits.append((where, sentence,
+                         bool(_RETIREMENT_WORD.search(sentence))
+                         and bool(_RETIREMENT_RECORD.search(sentence))))
+    return hits
+
+
+def test_prose_naming_the_retired_briefing_slug_carries_its_retirement_record():
+    """Every sentence in the two #2931 surfaces that names the slug carries both halves of the
+    retirement, and at least one such sentence exists.
+
+    The non-empty assertion is the load-bearing half. A scan whose path was wrong, or whose
+    slug had stopped matching anything, would return zero hits and zero unmarked hits, and
+    that is the shape of a pass — which is why the rule this node guards was widened once
+    already for exactly that reason. So the node requires the citation it expects to find:
+    the #2931 comment in `tests/test_knowledge_health_hygiene.py` explains the retirement and
+    must therefore name the job it retired.
+
+    The mutation arm closes the other half: the real sentence, with its `#1508` and its date
+    stripped out, MUST be reported unmarked. Without that, a predicate that matched nothing
+    would report the same clean list as a predicate that is simply not looking.
+    """
+    retired = _retired_skill_names()
+    assert RETIRED_MORNING_SLUG in retired, (
+        f"{RETIRED_MORNING_SLUG} is no longer in the quarantined inventory, so this node's "
+        "subject moved and the sentence naming it is now an ordinary skill reference")
+    paragraphs = []
+    for rel in PROSE_SURFACES_2931:
+        path = ROOT / rel
+        assert path.is_file(), f"{rel} is gone; the #2931 surfaces moved"
+        paragraphs += _prose_paragraphs(path)
+    assert paragraphs, f"no docstring or comment read out of {PROSE_SURFACES_2931}"
+
+    hits = _slug_sentences_marked(paragraphs, retired)
+    assert hits, (
+        "nothing in the two #2931 surfaces names the retired briefing slug any more, so this "
+        "node is grading an empty list — either the retirement explanation was deleted, which "
+        "the item does not ask for, or the citation moved to a file this node does not read")
+    unmarked = [(w, s) for w, s, ok in hits if not ok]
+    assert not unmarked, "unmarked slug citations: " + " | ".join(
+        f"{w}: {s[:300]}" for w, s in unmarked)
+
+    where, real = next((w, s) for w, s, m in hits
+                        if m and RETIRED_MORNING_SLUG in s)
+    bare = re.sub(r"#\d+|\b\d{4}-\d{2}-\d{2}\b", "", real)
+    mutated = _slug_sentences_marked([(where, bare)], retired)
+    assert mutated and not mutated[0][2], (
+        f"the predicate still marks a sentence stripped of every date and every #nn — "
+        f"{real[:160]!r}: the record test is matching something it should not, so its "
+        "verdict on the real prose is not the verdict this node is claiming")

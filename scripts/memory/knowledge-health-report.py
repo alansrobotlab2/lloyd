@@ -35,9 +35,13 @@ from scripts.reflection_archive import (copy_gaps as _copy_gaps,
 
 DEFAULT_OUTPUT_DIR = PIPELINE_DIR / "reflection"
 
-# Rows rendered per long section. The report is read by a human and by the
-# morning briefing; a 23,564-row table is neither. The count is always given
-# in full, only the listing is capped.
+# Rows rendered per long section. The report's readers are the two jobs that open the file
+# it writes — research-queue-generator (#65), which surveys these numbers before proposing
+# research topics, and entity-resolution-sweep (#48), which folds the Hygiene totals into its
+# own run — and a human who opens it occasionally. None of them reads a table tens of
+# thousands of rows deep, so the LISTING is cut off; the count is always given in full,
+# because a truncated table with no total reads as a smaller corpus. No row count is quoted
+# here on purpose: the live figure is whatever this script prints today.
 SECTION_ROW_CAP = 50
 
 GOD_ENTITY_THRESHOLD = 20

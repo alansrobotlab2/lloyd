@@ -1,9 +1,13 @@
 """knowledge-health-report.py — the Hygiene section computed from loaded facts."""
+import ast
 import importlib.util
+import io
 import os
+import re
 import subprocess
 import sys
 import time
+import tokenize
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -193,9 +197,14 @@ def test_fact_level_duplicate_total_comes_from_facts_idx(tmp_path):
 
 
 def test_fact_level_duplicate_line_renders_distinct_from_name_clusters(tmp_path):
-    """The new line is its own row of Summary Stats, so the morning briefing
-    sees the trend where every other total already lives — and it is textually
-    distinct from the Hygiene section's name-cluster line, which stays put."""
+    """The new line is its own row of Summary Stats, so the two jobs that read this
+    report as a file — research-queue-generator (#65) and entity-resolution-sweep (#48) —
+    see the trend where every other total already lives, and it is textually distinct
+    from the Hygiene section's name-cluster line, which stays put.
+
+    The line used to justify itself by a 6 AM briefing that opens nothing; the job was
+    retired (#1508, 2026-09-25) and the consumer prose went out of the skill and the task
+    file, and this was the last copy of it (#2931)."""
     from app import kg_store
 
     root = tmp_path / "facts"
@@ -244,7 +253,8 @@ def test_the_script_prints_the_fact_level_total(tmp_path):
     """#499 clause 5 is about the *run*, not the helper: the nightly job invokes
     `knowledge-health-report.py` as a script, so the line has to survive
     `main()` — the wiring that drops it between `fact_duplicate_stats()` and the
-    file the morning briefing reads is the failure a unit test cannot see."""
+    file the two live readers open, research-queue-generator (#65) and
+    entity-resolution-sweep (#48), is the failure a unit test cannot see."""
     import subprocess
     from app import kg_store
 
@@ -507,3 +517,261 @@ def test_the_untagged_alarm_is_independent_of_the_contamination_one(tmp_path):
     alarms = khr._alarms({"edges_active": 100}, h, 0, 0)
     assert len(alarms) == 1 and "a merge went wrong" in alarms[0], alarms
     assert not any("entity tag" in a for a in alarms), alarms
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The report's own repo prose has to name its LIVE readers (#2931)
+#
+# Vault 4270b5ef removed the dead 6 AM consumer from the shipped skill and from
+# `autonomy/60-knowledge-health-report.md`, but three sentences in THIS repo still named
+# that job as somebody who opens the report. The retired-skill prose guard could not see
+# them because it keys on a quarantined skill's FOLDER SLUG, and those sentences used the
+# job's human name instead, which contains no slug. Measured the day this was triaged, the
+# guard read 136 paragraphs out of the report script and 36 out of this file and returned 0
+# violations on both, so it was never the instrument for this fix and the nodes below are
+# what it was blind to. The quarantined skill behind that slug is
+# `nightly-morning-briefing`, retired by #1508 on 2026-09-25.
+#
+# The human name is spelled nowhere in this file on purpose: the nodes below search for it,
+# so a sentence carrying it to announce its absence would be the hit. The needle is built by
+# joining two words, which is also why the search can be trusted — see the injection node.
+
+PROSE_SURFACES = ("scripts/memory/knowledge-health-report.py",
+                  "tests/test_knowledge_health_hygiene.py")
+#: Joined, not written: this file searches for the two-word phrase, and a file that states
+#: the phrase it searches for cannot be scanned by it.
+DEAD_READER_PHRASE = "morning" + " " + "briefing"
+LIVE_READERS = ("research-queue-generator", "entity-resolution-sweep")
+LIVE_READER_TASKS = ("#65", "#48")
+#: The one repo file whose citation of the retired job's name is legitimate: it resolves an
+#: entity alias, and the rewording must leave it out of its diff.
+ENTITY_SWEEP_FILE = "tests/test_entity_sweep.py"
+
+
+def _prose_of(text: str) -> str:
+    """Every comment line and every string literal in `text`, joined into one string.
+
+    String literals and not only docstrings: the retired claim sat in a TEST docstring, and
+    its successor could equally sit in an assert message. Raises on text that does not
+    compile, so a file the parse rejected is an error here and never a clean verdict.
+    """
+    found = [m.group(0) for m in re.finditer(r"#[^\n]*", text)]
+    found += [n.value for n in ast.walk(ast.parse(text))
+              if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    return "\n".join(found)
+
+
+def _reader_prose(path: str) -> str:
+    """`_prose_of` over a repo file, asserting the read was non-empty: a scan that read
+    nothing would report every phrase as absent."""
+    prose = _prose_of((ROOT / path).read_text(encoding="utf-8"))
+    assert prose.strip(), f"{path}: the prose read came back empty"
+    return prose
+
+
+def test_the_prose_scan_finds_the_dead_reader_name_when_it_is_present():
+    """Shown able to fail before its passing is believed.
+
+    A scan that reports the name absent because it read no prose at all — wrong path, empty
+    file, a walk over source that never parsed — is indistinguishable from a scan that found
+    the name nowhere. So a copy of each real file gets the name injected into both a comment
+    and a docstring, and the scan MUST see it there; only then does the real read below mean
+    anything.
+    """
+    for path in PROSE_SURFACES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        # Appended at top level rather than spliced in at the first blank line: a splice
+        # lands at whatever indentation that blank line sits at, and an indented def inside
+        # a function body is a SyntaxError, which the parse below would rightly report as
+        # an error instead of the injection this node is asking for.
+        docstring = '"' * 3 + DEAD_READER_PHRASE + '"' * 3
+        injected = (src + "\n\n# " + DEAD_READER_PHRASE + " reads this\n"
+                    "def _injected_2931():\n    " + docstring + "\n")
+        assert injected != src, f"{path}: nothing was injected"
+        assert DEAD_READER_PHRASE in _prose_of(injected).lower(), (
+            f"{path}: the scan cannot see the name even in prose written to contain it, so "
+            "its verdict on the real file would mean nothing")
+
+
+def test_no_comment_or_docstring_in_either_file_names_the_dead_reader():
+    """Neither file mentions the retired 6 AM job anywhere — not merely in the three
+    sentences #2931 named, because a fourth copy would be caught here rather than by someone
+    re-reading the file. The one legitimate survivor in the repo is an entity-alias assertion
+    in `tests/test_entity_sweep.py`, which resolves a real entity name and is a different
+    thing; this node reads only the two surfaces above."""
+    for path in PROSE_SURFACES:
+        assert DEAD_READER_PHRASE not in _reader_prose(path).lower(), path
+
+
+def test_the_row_cap_rationale_names_the_two_jobs_that_actually_read_the_report():
+    """The comment above `SECTION_ROW_CAP` justified the cap by a page a human scrolls, in a
+    report no human opens on a schedule. It has to name the two live jobs the shipped skill's
+    Notes bullet names — research-queue-generator (#65) and entity-resolution-sweep (#48) —
+    and keep the cap's own point, which is that the listing is cut off while the count is
+    always given in full."""
+    lines = (ROOT / "scripts/memory/knowledge-health-report.py").read_text(
+        encoding="utf-8").splitlines()
+    at = [i for i, v in enumerate(lines) if v.startswith("SECTION_ROW_CAP")]
+    assert len(at) == 1, f"SECTION_ROW_CAP is defined {len(at)} times, not once"
+    assert lines[at[0]] == "SECTION_ROW_CAP = 50", lines[at[0]]
+    start = at[0]
+    while start and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    block = "\n".join(lines[start:at[0]])
+    assert block.strip(), "the constant lost its rationale comment entirely"
+    for want in LIVE_READERS + LIVE_READER_TASKS:
+        assert want in block, f"{want} missing from the cap's rationale:\n{block}"
+    assert "count" in block and ("cap" in block or "cut off" in block), block
+    assert not re.search(r"\d{5,}", block), (
+        f"a five-digit row count is back in the rationale, and a snapshot number in a comment "
+        f"is a number nobody will re-measure:\n{block}")
+
+
+def test_the_two_live_readers_are_named_where_a_reader_is_named():
+    """The other half of the scan, and the control that keeps the deletion from passing on its
+    own: the replacement names have to be findable by the same reading, so a rewording that
+    removed the dead reader and named nobody in its place could not clear this file."""
+    script = _reader_prose("scripts/memory/knowledge-health-report.py")
+    for want in LIVE_READERS + LIVE_READER_TASKS:
+        assert want in script, f"{want} is named nowhere in the report script's prose"
+
+
+def _test_fn(name: str):
+    tree = ast.parse((ROOT / "tests/test_knowledge_health_hygiene.py").read_text(
+        encoding="utf-8"))
+    for fn in tree.body:
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name == name:
+            return fn
+    raise AssertionError(f"{name} is gone from this file")
+
+
+def test_the_two_rewritten_docstrings_keep_their_own_points():
+    """Neither docstring lost the thing it was there to say.
+
+    The first pins that the exact-duplicate line is its own row of Summary Stats, distinct
+    from the Hygiene section's name-cluster line, and keeps the live reason the printed line
+    matters at all: #65 and #48 read the report as a file. The second keeps that the nightly
+    job INVOKES the script as a program, which is why the print has to survive `main()` and
+    why that wiring is exactly what a unit test cannot see."""
+    doc_a = ast.get_docstring(_test_fn(
+        "test_fact_level_duplicate_line_renders_distinct_from_name_clusters"))
+    doc_b = ast.get_docstring(_test_fn("test_the_script_prints_the_fact_level_total"))
+    assert doc_a and doc_b, "one of the two docstrings is gone"
+    assert "own row of Summary Stats" in doc_a and "name-cluster" in doc_a, doc_a
+    assert "nightly job invokes" in doc_b and "unit test cannot see" in doc_b, doc_b
+    for doc in (doc_a, doc_b):
+        assert all(task in doc for task in LIVE_READER_TASKS), doc
+
+
+def _diff_by_file(diff_text: str):
+    """A unified diff as `{path: (deleted base line numbers, added head line numbers)}`.
+
+    Per file, because a flat list of deleted line numbers is meaningless across paths: the
+    first version of this helper reported the hygiene file's own docstring lines as deleted
+    non-prose from the report script, since both files' deletions shared one list."""
+    per = {}
+    for chunk in re.split(r"(?m)^diff --git a/\S+ b/", diff_text)[1:]:
+        path, _, body = chunk.partition("\n")
+        removed, added, b, h = [], [], 0, 0
+        for line in body.splitlines():
+            head = re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            if head:
+                b, h = int(head.group(1)), int(head.group(2))
+            elif line.startswith(("+++", "---", "\\")):
+                continue
+            elif line.startswith("-"):
+                removed.append(b)
+                b += 1
+            elif line.startswith("+"):
+                added.append(h)
+                h += 1
+            else:
+                b += 1
+                h += 1
+        per[path] = (removed, added)
+    assert per, "the diff carried no file header, so there was nothing to split"
+    return per
+
+
+def _prose_lines(src: str):
+    """Line numbers of `src` that are a comment, or sit inside a multi-line string."""
+    spans = set()
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.COMMENT:
+            spans.add(tok.start[0])
+        elif tok.type == tokenize.STRING and tok.start[0] != tok.end[0]:
+            spans.update(range(tok.start[0], tok.end[0] + 1))
+    return spans
+
+
+def _git(*args: str) -> str:
+    done = subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True, text=True)
+    assert done.returncode == 0, f"git {' '.join(args)}: {done.stderr[:200]}"
+    return done.stdout
+
+
+def _phrase_removal_commit(paths):
+    """The commit that took the two-word phrase out of `paths`, found by content.
+
+    Graded against a commit located this way rather than against `HEAD^`, because the round's
+    own commit is not necessarily HEAD's parent by the time the suite runs again: a rebase or
+    a landing merge changes the parent, and a node that then compared against the wrong base
+    would either grade an empty diff or grade someone else's change. The pickaxe lists every
+    commit whose diff changed the phrase's occurrence count, and the one this node wants is
+    the one where the phrase was there before and gone after.
+    """
+    listed = _git("log", "-S" + DEAD_READER_PHRASE, "--format=%H", "--", *paths)
+    for sha in listed.split():
+        parent = sha + "^"
+        try:
+            before = _git("show", f"{parent}:{paths[0]}")
+            after = _git("show", f"{sha}:{paths[0]}")
+        except AssertionError:
+            continue
+        if DEAD_READER_PHRASE in _prose_of(before).lower() \
+                and DEAD_READER_PHRASE not in _prose_of(after).lower():
+            return sha
+    return ""
+
+
+def test_the_rewording_removed_nothing_but_prose_and_touched_no_other_file():
+    """Clause 4 as a machine check over the diff rather than a promise in a commit message.
+
+    Every line the rewording DELETED from either file must be a comment line or a line inside
+    a multi-line string of the version before it — established by tokenising that version — so
+    no assertion, constant or signature can be edited away under cover of a rewording, and
+    `SECTION_ROW_CAP` is asserted to be `50` on the live read above. On the added side the
+    report script may gain prose only: the change there is comment-only.
+    `tests/test_entity_sweep.py` must not appear in that diff at all, because its one hit for
+    the phrase is an entity-alias assertion about a real entity name. The node asserts it
+    found a rewording commit before it grades one, so a pickaxe that matched nothing cannot
+    be reported as a clean diff.
+    """
+    removal = _phrase_removal_commit(list(PROSE_SURFACES))
+    assert removal, (
+        "no commit took the two-word phrase out of the two prose surfaces, so there is no "
+        "rewording here to grade — either the fix is absent or it moved the phrase somewhere "
+        "this node cannot follow")
+    base = removal + "^"
+    diff = _git("diff", "--unified=0", base, removal, "--", *PROSE_SURFACES,
+                ENTITY_SWEEP_FILE)
+    # Headers, never a substring over the diff body: this file's own prose cites that
+    # filename, so a substring test here would report the citation as a touched path.
+    per_file = _diff_by_file(diff)
+    touched = set(per_file)
+    assert ENTITY_SWEEP_FILE not in touched, (
+        "the rewording touched the entity-alias assertion, which names a real entity and is "
+        "not this item's prose")
+    assert touched and touched <= set(PROSE_SURFACES), sorted(touched - set(PROSE_SURFACES))
+    for path in sorted(touched):
+        removed, added = per_file[path]
+        assert removed, f"{path}: the rewording deletes no line, so that diff is empty"
+        spans = _prose_lines(_git("show", f"{base}:{path}"))
+        bad = [n for n in removed if n not in spans]
+        assert not bad, f"{path}: deleted non-prose line(s) {bad[:6]}"
+        if path == "scripts/memory/knowledge-health-report.py":
+            head_spans = _prose_lines(_git("show", f"{removal}:{path}"))
+            bad2 = [n for n in added if n not in head_spans]
+            assert not bad2, (
+                "the report script gained non-prose line(s) "
+                f"{bad2[:6]}; the change there is comment-only")
