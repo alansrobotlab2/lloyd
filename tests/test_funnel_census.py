@@ -332,7 +332,13 @@ def test_clause_2_an_empty_denominator_is_a_named_refusal_not_a_rate(tmp_path):
 
     benefited = by_name["benefited"]
     assert benefited["measured"] is False and benefited["denominator"] == 0
-    assert benefited["refusal"] in ("no_uptake_table", "uptake_table_not_read_in_v1")
+    # Exactly one name, not a disjunction. The autouse `_uptake_store_repointed`
+    # fixture gives every test in this module a store holding one fresh table, so
+    # the stage's two `no_uptake_table` branches are unreachable from here and the
+    # disjunct could never fail. Those branches are pinned on their own, over a
+    # real empty directory and a missing one, in
+    # `test_2733_clause_5_an_empty_store_still_refuses_by_name_and_no_branch_rates`.
+    assert benefited["refusal"] == "uptake_table_not_read_in_v1", benefited["detail"]
     used = by_name["used"]
     assert used["measured"] is False and "denominator" in used
 
@@ -892,37 +898,36 @@ def test_no_cannot_see_value_still_calls_a_ruling_open(corpus):
         "the reason has to name the instrument that already covers those classes")
 
 
-def test_the_cohort_text_reads_as_ruled_without_taking_2733_s_text():
-    """Clause 5: the three cohort notes are decided prose, and the only `open
-    ruling` strings left in the module are #2733's.
+def test_the_ruled_text_reads_as_ruled_with_no_ruling_advertised_open():
+    """Clause 1 (#2957), plus #2809's cohort clauses this node also pins: no line
+    of the module may call a settled ruling open.
 
-    The grep this item was filed with — `open ruling on #2507` returning 0 hits —
-    is not the check, and it was never achievable by this item alone. At this
-    round's base the module carried the phrase on 7 lines while that literal grep
-    matched only 5 of them: one note sat mid-sentence across a line break in
-    `_scan_embed_rows`'s docstring, and an eighth note (`pending cohort ruling` in
-    the name-cap comment) used different wording entirely, so the old check could
-    pass with stale text still in the file. Three of the 7 belong to
-    `benefited_stage` — its docstring plus the two branches of its refusal — which
-    #2733 owns in a round that is in flight, so they are left exactly as they are.
+    #2809's round could only forbid the phrase OUTSIDE `benefited_stage`'s own
+    span, because the three mentions inside it belonged to #2733 and that round
+    read as in flight — and the other half of that pin, `assert "open ruling" in
+    body`, then guarded a sentence no author was any longer obliged to keep: #2733
+    had already landed as `758e75e0`, 32 minutes before `aa18d2b6` added this very
+    test. #2957 pays that debt, so the phrase is forbidden module-wide.
 
-    The pin therefore is positional, not a line count: no `pending cohort` string
-    anywhere, no `open ruling` string outside `benefited_stage`'s own span, and
-    `benefited_stage`'s still present (which is what proves this round did not
-    reach into #2733's text to make a grep look clean).
+    The pin stays positional rather than a line count, for the reason #2809 itself
+    gave: a line count silently entitles any future line to one. The absence is
+    therefore asserted over the whole module, and `def benefited_stage` is pinned
+    present beside it — a module with that function deleted would grep just as
+    clean, which is the failure the second half exists to catch.
     """
     src = (ROOT / "scripts" / "funnel_census.py").read_text(encoding="utf-8")
+    offending = [f"{i}: {ln}" for i, ln in enumerate(src.splitlines(), 1)
+                 if "open ruling" in ln]
+    assert not offending, "a settled ruling is still advertised as open:\n" + "\n".join(
+        offending)
     assert "pending cohort" not in src, "a ruled note still says pending"
 
-    # The one remaining `open ruling` phrasing must be #2733's and nowhere else:
-    # pinning it to the function's own source span rather than to a line count,
-    # because a line count silently entitles any future line to one.
-    start = src.index("def benefited_stage")
-    end = src.index("\ndef ", start)
-    body, outside = src[start:end], src[:start] + src[end:]
-    assert "open ruling" in body, "#2733's text was edited by this round"
-    assert "open ruling" not in outside, (
-        "a settled ruling is still advertised as open outside benefited_stage")
+    # Positional, not a count: the stage whose prose carried the last three
+    # mentions has to still be there, so a clean grep cannot be bought by deleting
+    # the function that held them.
+    assert "def benefited_stage" in src, (
+        "benefited_stage is gone — the clean grep was bought by deletion, not by "
+        "naming the ruling")
 
     # The cohort constant's own comment states the boundary as a decision, with the
     # condition that would reopen it — that condition is what makes it a ruling
@@ -939,3 +944,169 @@ def test_the_cohort_text_reads_as_ruled_without_taking_2733_s_text():
     doc_start = src.index("def _scan_embed_rows")
     doc = src[doc_start:src.index("\ndef ", doc_start)]
     assert "RENDER MODE" in doc and "app/prefetch.py:733-734" in doc, doc
+
+
+#: Seven strings carrying the four mechanisms #2507's owed-check ruling of
+#: 2026-10-15 gives for why the `benefited` leg is unmeasurable, plus the marker
+#: that says the question is closed: the disabled secondary engine
+#: (`secondary_enabled: false`), the uncitable stamp that forces (`measured: false`
+#: on every block, `passed: false` on the run), the probe's exit-3 precision floor
+#: (two marks — the exit, and the 0.70 the floor sits at), and the per-turn join
+#: gap. They have to be named wherever a reader meets the leg, because `not
+#: measured` on its own cannot tell a closed question from an open one — exactly
+#: the failure that ruling was written to stop re-opening, and the reason #2957
+#: exists at all.
+_2507_RULING_MARKS = (
+    "#2507 ruled",               # the marker: decided, not pending
+    "secondary_enabled: false",  # mechanism 1 — config.yaml has the engine off
+    "measured: false",           # mechanism 2 — uptake_probe.stamp_engine forces…
+    "passed: false",             # …it, so a table such a run bought is uncitable
+    "exits 3",                   # mechanism 3 — the probe writes nothing…
+    "precision 0.70",            # …below this floor, and exits 3 instead
+    "the per-turn key the `used` leg has no predicate for",  # mechanism 4 — join gap
+)
+
+
+def test_2957_the_benefited_leg_names_the_2507_ruling_as_decided_in_all_three_places(
+        tmp_path, monkeypatch, corpus):
+    """Clauses 2 and 3: the docstring and BOTH `no_uptake_table` refusals state the
+    ruling as decided, each naming all four mechanisms — the disabled secondary
+    engine, the uncitable stamp that forces, the exit-3 precision floor, and the
+    join gap — and the two branches whose prose moved publish exactly what they
+    published before.
+
+    These are the three places a reader actually meets the leg: the docstring is
+    what an editor and `help()` show, and the two refusal strings are the `detail`
+    the census writes into its published JSON — one for a store directory that does
+    not exist, one for a directory that exists holding no table. So the check runs
+    on the runtime value, the bytes that reach the artifact, and on
+    `benefited_stage.__doc__` rather than on a grep of the source: a note that only
+    survives in a comment cannot pass it.
+
+    Whitespace is flattened before matching because the prose is wrapped — a pin on
+    a sentence has to survive the file re-wrapping that sentence.
+    """
+    def _reads_as_decided(text: str, where: str) -> None:
+        flat = " ".join(text.split())
+        for asked_open in ("open ruling", "whether to pay"):
+            assert asked_open not in flat.lower(), \
+                f"{where} still asks an answered question: {flat}"
+        for mark in _2507_RULING_MARKS:
+            assert mark in flat, f"{where} does not name {mark!r}:\n{flat}"
+
+    _reads_as_decided(fc.benefited_stage.__doc__ or "", "benefited_stage's docstring")
+
+    empty = tmp_path / "empty_store"
+    empty.mkdir()
+    missing = tmp_path / "never_created"
+    for stage in (fc.benefited_stage(empty), fc.benefited_stage(missing)):
+        assert stage["refusal"] == "no_uptake_table", stage["detail"]
+        _reads_as_decided(stage["detail"], "the no_uptake_table refusal")
+        # Clause 3, for the branches this round re-worded: a denominator of 0, no
+        # rate, and no key that could read as a measured zero. The matrix over all
+        # five outcomes the stage can return is
+        # `test_2733_clause_5_an_empty_store_still_refuses_by_name_and_no_branch_rates`.
+        assert stage["measured"] is False and stage["denominator"] == 0
+        for absent in ("k", "n", "rate", "ci95"):
+            assert absent not in stage, f"{absent} would read as a measured zero"
+
+    # The published seam, which is the boundary this change actually crosses: the
+    # census is a dated JSON artifact under the data root that some later reader
+    # opens, so the CLI is run and the WRITTEN bytes are read back — a refusal that
+    # reads as decided in the process but not on disk has not fixed anything.
+    data_root = tmp_path / "data_root"
+    monkeypatch.setattr(paths, "DATA_ROOT", data_root)
+    never_written = tmp_path / "store_the_probe_never_wrote"
+    assert fc.main(["--skills-root", str(corpus["skills"]),
+                    "--event-root", str(corpus["events"]),
+                    "--workers-db", str(corpus["db"]),
+                    "--uptake-dir", str(never_written)]) == 0
+    written = sorted((data_root / "eval" / "funnel").glob("funnel-*.json"))
+    assert len(written) == 1, f"one artifact expected, got {[str(p) for p in written]}"
+    artifact = written[0].read_text(encoding="utf-8")
+    published = _stages(json.loads(artifact))["benefited"]
+    assert published["refusal"] == "no_uptake_table", published["detail"]
+    _reads_as_decided(published["detail"],
+                      "the artifact's no_uptake_table detail")
+    assert published["measured"] is False and published["denominator"] == 0
+    assert "open ruling" not in artifact, (
+        "the published census still advertises a settled ruling as open")
+
+
+def test_2957_clause_3_the_reworded_prose_changed_no_published_measurement(tmp_path):
+    """Clause 3: every outcome `benefited_stage` can return still publishes
+    `measured: false` over a `denominator` of 0 and carries no `k`, `n`, `rate` or
+    `ci95` key. #2957 rewrote the ruling text; it rewrote no measurement.
+
+    All five outcomes are driven from real fixture stores, so the two branches whose
+    prose this round replaced (`no_uptake_table`, over a missing directory and an
+    empty one) are checked beside the other three: a table that is not JSON
+    (`uptake_table_unreadable`), a table past
+    `UPTAKE_TABLE_MAX_AGE_DAYS` (`uptake_table_uncitable`), and a fresh citable one
+    (`uptake_table_not_read_in_v1`).
+    `test_2733_clause_5_an_empty_store_still_refuses_by_name_and_no_branch_rates`
+    pins the same property over the same five outcomes; this node is the one that
+    re-checks it against the words #2957 put in their place, so no future edit to
+    that prose can slip a rate into a refusal.
+    """
+    missing = tmp_path / "never_created"
+    empty = tmp_path / "empty_store"
+    empty.mkdir()
+    unreadable = tmp_path / "broken_store"
+    _uptake_table(unreadable, "uptake-2026-10-10.json", days_ago=1.0)
+    (unreadable / "uptake-2026-10-10.json").write_text("{not json", encoding="utf-8")
+    stale = tmp_path / "stale_store"
+    _uptake_table(stale, "uptake-2026-01-01.json",
+                  days_ago=fc.UPTAKE_TABLE_MAX_AGE_DAYS + 1)
+    fresh = tmp_path / "fresh_store"
+    _uptake_table(fresh, "uptake-2026-10-10.json", days_ago=1.0)
+
+    outcomes = [fc.benefited_stage(d)
+                for d in (missing, empty, unreadable, stale, fresh)]
+    assert [o["refusal"] for o in outcomes] == [
+        "no_uptake_table", "no_uptake_table", "uptake_table_unreadable",
+        "uptake_table_uncitable", "uptake_table_not_read_in_v1"], (
+        "a branch of the stage is no longer the refusal it was, and clause 3's "
+        "coverage of it went stale")
+
+    for stage in outcomes:
+        assert stage["stage"] == "benefited"
+        assert stage["measured"] is False, stage
+        assert stage["denominator"] == 0, stage
+        assert isinstance(stage["detail"], str) and stage["detail"], stage
+        for absent in ("k", "n", "rate", "ci95"):
+            assert absent not in stage, f"{absent} would read as a measured zero"
+
+
+def test_2957_clause_4_the_benefited_assertion_names_one_refusal_not_a_disjunct():
+    """Clause 4: the benefited-stage assertion inside
+    `test_clause_2_an_empty_denominator_is_a_named_refusal_not_a_rate` accepts
+    exactly one refusal name, so the name that node can never produce is no longer
+    sitting in a tuple where it could not fail.
+
+    The autouse `_uptake_store_repointed` fixture near the top of this file writes
+    one fresh table and repoints `app.uptake.UPTAKE_ARTIFACT_DIR`, and
+    `build_census` threads `uptake_dir=None` into the stage, so from that node the
+    stage can only answer `uptake_table_not_read_in_v1`; the two `no_uptake_table`
+    branches need a directory they are never given. This was the gate reviewer's
+    non-blocking note on SM_20261015_031901.
+
+    The pin is source-level and positional for the same reason the module-wide grep
+    above is: what is under test is a line of this file, so it is read back as text
+    and located by the node's own name rather than by a line count — a line number
+    here would silently entitle any future line to the disjunct.
+    """
+    src = (ROOT / "tests" / "test_funnel_census.py").read_text(encoding="utf-8")
+    start = src.index(
+        "def test_clause_2_an_empty_denominator_is_a_named_refusal_not_a_rate")
+    body = src[start:src.index("\ndef ", start)]
+    line = next(ln for ln in body.splitlines() if 'benefited["refusal"]' in ln)
+
+    assert line.strip().startswith(
+        'assert benefited["refusal"] == "uptake_table_not_read_in_v1"'), (
+        f"the assertion is back to accepting several names: {line.strip()}")
+    assert "no_uptake_table" not in line, (
+        f"a refusal the autouse fixture makes unreachable is back in it: "
+        f"{line.strip()}")
+
+

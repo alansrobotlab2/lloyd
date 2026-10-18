@@ -609,13 +609,18 @@ def benefited_stage(uptake_dir: Path | None = None,
     published with each citability key's state, so "the store is absent" can only
     ever be said of a directory that really holds none.
 
-    Naming the store still cannot produce a rate: #552's table is the only
-    dispute-attribution instrument on this box, `scripts/uptake_probe.py` exits 3
-    and deliberately writes nothing below precision 0.70, joining its disputes
-    into a per-artifact denominator needs the per-turn key the `used` leg has no
-    predicate for, and whether to pay the secondary engine to attempt the leg at
-    all is an open ruling on #2507. Every branch of this function returns
-    `measured: false` with `denominator: 0`.
+    Naming the store still cannot produce a rate, and the question of whether to
+    buy a table at all is settled rather than pending: #2507 ruled on 2026-10-15
+    NOT to pay the secondary engine to attempt the leg, and the measurement
+    forecloses it rather than the cost — `config.yaml:38` carries
+    `secondary_enabled: false`, so the scorer reroutes away from the engine this
+    instrument names, and `scripts/uptake_probe.stamp_engine` stamps what such a
+    run scored uncitable: `measured: false` on every block, `passed: false` on the
+    run. Two gaps stand behind that one: `scripts/uptake_probe.py` exits 3 and
+    deliberately writes nothing below precision 0.70, and joining a table's
+    disputes into a per-artifact denominator needs the per-turn key the `used` leg
+    has no predicate for. So the leg ships as the named gap. Every branch of this
+    function returns `measured: false` with `denominator: 0`.
     """
     from app import uptake as _uptake
     uptake = Path(uptake_dir) if uptake_dir else Path(_uptake.UPTAKE_ARTIFACT_DIR)
@@ -626,20 +631,30 @@ def benefited_stage(uptake_dir: Path | None = None,
             "benefited", "no_uptake_table", 0,
             f"`{uptake}` does not exist — it is the directory "
             f"`app.uptake.UPTAKE_ARTIFACT_DIR` names, so the probe has written no "
-            f"table here (and exits 3 rather than write one below precision 0.70), "
-            f"which leaves no dispute signal to divide by. Attempting the leg "
-            f"means paying the secondary engine, an open ruling on #2507 and not a "
-            f"step here",
+            f"table here: it exits 3 rather than write one below precision 0.70, "
+            f"which leaves no dispute signal to divide by. Buying a table is ruled "
+            f"out rather than open: #2507 ruled on 2026-10-15 not to pay the "
+            f"secondary engine, because with `secondary_enabled: false` "
+            f"(`config.yaml:38`) the scorer reroutes and "
+            f"`scripts/uptake_probe.stamp_engine` stamps what such a run scored "
+            f"uncitable (`measured: false` on every block, `passed: false` on the "
+            f"run), and the join needs the per-turn key the `used` leg has no "
+            f"predicate for. The leg ships as the named gap, not a step here",
             unit="artifact", **detail)
     names = sorted(p.name for p in uptake.glob(UPTAKE_TABLE_GLOB))
     if not names:
         return _refused(
             "benefited", "no_uptake_table", 0,
             f"`{uptake}` exists but holds no `{UPTAKE_TABLE_GLOB}` table: "
-            f"`scripts/uptake_probe.py` refuses to write one below precision 0.70, "
-            f"so there is no dispute signal to divide by. Attempting the leg means "
-            f"paying the secondary engine, an open ruling on #2507 and not a step "
-            f"here",
+            f"`scripts/uptake_probe.py` exits 3 rather than write one below "
+            f"precision 0.70, so there is no dispute signal to divide by. Buying a "
+            f"table is ruled out rather than open: #2507 ruled on 2026-10-15 not "
+            f"to pay the secondary engine, because with `secondary_enabled: false` "
+            f"(`config.yaml:38`) the scorer reroutes and "
+            f"`scripts/uptake_probe.stamp_engine` stamps what such a run scored "
+            f"uncitable (`measured: false` on every block, `passed: false` on the "
+            f"run), and the join needs the per-turn key the `used` leg has no "
+            f"predicate for. The leg ships as the named gap, not a step here",
             unit="artifact", **detail)
     newest = uptake / names[-1]
     detail["uptake_table"] = newest.name
