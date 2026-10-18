@@ -1505,6 +1505,16 @@ _IMPORT_RESOLVED_PROSE_FILES: dict[str, Path] = {
     "tests/test_skill_reflection_archive.py": Path(__file__),
 }
 
+#: The bound on the drawer below, ruled by #2965 on 2026-10-18. Constants rather than a
+#: digit in a sentence, because the node that pins the block reads the number out of
+#: these: a bound widened in the code and left stale in the prose is the exact rot this
+#: file exists to catch. Declared ABOVE the block that documents the dict, never between
+#: that block and the dict — `_comment_block_above` walks up from the declaration and
+#: breaks at the first non-comment line, so a line squeezed in there would make the block
+#: read as empty and a pin that the number is in the block would pass having read nothing.
+MAX_UNMARKED_PROSE_EXEMPTIONS = 3
+MAX_PROSE_EXEMPTIONS_PER_RETIREMENT = 2
+
 #: A sentence that genuinely cannot carry a retirement mark — a quote of prose this repo
 #: does not own, whose wording the quoting round cannot change — goes here, as
 #: `(file label, where, sentence fragment): the reason, naming the backlog item`. The
@@ -1514,10 +1524,19 @@ _IMPORT_RESOLVED_PROSE_FILES: dict[str, Path] = {
 #: because `_split_by_prose_exemptions` returns an entry that matches no measured
 #: violation and the node turns red on it. EMPTY AS LANDED (#2752, 2026-10-15): the 7
 #: unmarked sentences that existed at `ce545b09` were all clearable by rewording, so this
-#: list opened empty and nothing here has to be taken on trust. How many sentences one
-#: archival may exempt instead of marking is a ruling that belongs to that archival round
-#: and is owed on #2752; what this file pins is that an entry is recorded, attributed to
-#: an item, and dies with the sentence it excuses.
+#: list opened empty and nothing here has to be taken on trust. Its SIZE is ruled HERE,
+#: not left to the round that wants the room (#2965, 2026-10-18): at most
+#: MAX_UNMARKED_PROSE_EXEMPTIONS (3) entries at once for the whole file, and at most
+#: MAX_PROSE_EXEMPTIONS_PER_RETIREMENT (2) hanging on one retirement — the single
+#: `#<item>` the reason names, because a reason citing two items spends a slot in BOTH
+#: budgets. The
+#: only admissible ground stays the one in the first sentence above: a quote of prose this
+#: repo does not own, whose wording the quoting round cannot change. Anything else is
+#: MARKED — the sentence itself says the skill was archived, with its date, vault commit or
+#: backlog item. What this file still pins beside that bound is that an entry is recorded,
+#: attributed to an item, and dies with the sentence it excuses; and
+#: `_assert_within_prose_exemption_bounds` is what refuses the 4th entry, and a 3rd against
+#: one archival, so the excess is never absorbed as a waiver.
 UNMARKED_PROSE_EXEMPTIONS: dict[tuple[str, str, str], str] = {}
 
 #: A sentence says a skill is out of circulation. `archive` alone is NOT in this list
@@ -1729,6 +1748,107 @@ def _split_by_prose_exemptions(
     return still_red, stale_entries
 
 
+def _assert_within_prose_exemption_bounds(
+    exemptions: dict[tuple[str, str, str], str],
+) -> None:
+    r"""Refuse an exemption drawer that has outgrown the bound #2965 rules: at most
+    `MAX_UNMARKED_PROSE_EXEMPTIONS` entries in all, and at most
+    `MAX_PROSE_EXEMPTIONS_PER_RETIREMENT` of them hanging on one retirement ref (the
+    `#\d{2,6}` the reason names).
+
+    A helper of its own rather than an assert inside `_split_by_prose_exemptions`, for two
+    reasons that are the same reason. The guard node hands that function the real, empty
+    dict and nothing else, so a bound living inside it could never be seen to fail — and a
+    bound nobody has watched fail is the defect #2965 was filed to close, since
+    `_split_by_prose_exemptions` as #2752 left it enforced only attribution, per-sentence
+    routing and stale-entry return. So the guard node calls this BEFORE the split, and the
+    node beside it calls it on seeded drawers, which is the only way either cap acquires
+    teeth. Step 5 of #2965 is why the frozen function's own semantics are untouched.
+
+    An entry is booked against EVERY ref its reason names, which is why the block above the
+    dict says a reason names the ONE item whose archival took the exemption: a reason citing
+    two items spends a slot in both budgets, and the 2-per-retirement bound double-books.
+
+    Both messages state the legal way out, because 2-per-retirement is reachable: this
+    guard's surface is every tracked `.py`, so one archival can surface more verbatim
+    quotes of prose this repo does not own than
+    `MAX_PROSE_EXEMPTIONS_PER_RETIREMENT` allows. A message that only said "too many" would
+    leave that round no move but widening the cap, which is a ruling the owed-check job
+    re-measures and the archival round does not take.
+    """
+    assert len(exemptions) <= MAX_UNMARKED_PROSE_EXEMPTIONS, (
+        f"the unmarked-prose exemption drawer holds {len(exemptions)} entries, past the "
+        f"total cap of {MAX_UNMARKED_PROSE_EXEMPTIONS} (#2965). The excess must be MARKED, "
+        "not waived: the sentence itself says the skill was archived, with its date, vault "
+        "commit or backlog item. An archival holding more verbatim quotes of prose this "
+        f"repo does not own than {MAX_UNMARKED_PROSE_EXEMPTIONS} splits across rounds, or "
+        "asks for the cap to be re-ruled where the number lives — it does not widen the "
+        "drawer here."
+    )
+    by_retirement: dict[str, int] = {}
+    for key, why in exemptions.items():
+        for ref in set(re.findall(r"#\d{2,6}", why)):
+            by_retirement[ref] = by_retirement.get(ref, 0) + 1
+    over = {ref: n for ref, n in by_retirement.items()
+            if n > MAX_PROSE_EXEMPTIONS_PER_RETIREMENT}
+    assert not over, (
+        f"{over}: those retirement ref(s) carry more than the "
+        f"{MAX_PROSE_EXEMPTIONS_PER_RETIREMENT} exemptions one archival may take (#2965). "
+        "The 3rd sentence against a single retirement has to be marked in its own sentence, "
+        "not waived here; an archival with more verbatim external quotes than that splits "
+        "into two rounds, or the number is re-ruled where it lives — the bound is not the "
+        "archival round's to widen."
+    )
+
+
+def _cap_stated_in(block: str, constant_name: str) -> int | None:
+    """The number the prose block states beside a bound constant's name, or None where the
+    block names the bound but never says what it is — the shape that leaves a reader
+    exempting a number nobody ruled."""
+    match = re.search(rf"{constant_name}\s*\((\d+)\)", block)
+    return int(match.group(1)) if match else None
+
+
+def _exemption_bound_deferrals(paragraphs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """`(where, sentence)` for every prose sentence that still hands the exemption bound to
+    a future round — the phrasing #2965 rules out of the file.
+
+    Keyed on the drawer plus a deferral, not on the item number alone: `#2752` stays in this
+    file as the round that built the drawer, and a rule that forbade citing it would be
+    forbidding history rather than a deferred ruling.
+    """
+    out: list[tuple[str, str]] = []
+    for where, text in paragraphs:
+        for sentence in _SENTENCE_END.split(text):
+            names_drawer = re.search(r"exempt", sentence, re.IGNORECASE)
+            defers = re.search(
+                r"\bowed on #\d{2,6}\b|belongs to that archival round"
+                r"|\bbelongs to the archival round\b",
+                sentence, re.IGNORECASE,
+            )
+            if names_drawer and defers:
+                out.append((where, sentence))
+    return out
+
+
+#: The two sentences that deferred the bound, quoted verbatim as they stood at `913e7eaf`:
+#: one from the comment block above the drawer, one from the guard node's docstring. String
+#: literals, not prose, so the node that reads them back is not reddened by carrying them —
+#: and they are its control, because a pin that has only ever passed cannot tell a deferred
+#: ruling from a past round's history, which is the distinction the pin exists to make.
+RETIRED_EXEMPTION_DEFERRALS: tuple[tuple[str, str], ...] = (
+    ("comment block (lines 1508-1521)",
+     "How many sentences one archival may exempt instead of marking is a ruling that "
+     "belongs to that archival round and is owed on #2752; what this file pins is that an "
+     "entry is recorded, attributed to an item, and dies with the sentence it excuses."),
+    ("docstring of test_no_prose_surface_states_a_retired_skill_as_live_spec (line 1732)",
+     "`UNMARKED_PROSE_EXEMPTIONS` is the recorded escape for a mention that genuinely "
+     "cannot carry a mark — empty as landed, because #2752 measured all 7 of them clearable "
+     "by rewording; shrink-only; and how many sentences one archival may take it up for is "
+     "a ruling that belongs to that archival round, owed on #2752."),
+)
+
+
 def test_no_prose_surface_states_a_retired_skill_as_live_spec():
     """Clause 3 of #2530, widened by #2752: a present-tense justification for a skill
     nobody advertises any more is caught in the prose of EVERY tracked `.py`, not only in
@@ -1800,8 +1920,12 @@ def test_no_prose_surface_states_a_retired_skill_as_live_spec():
     round that archives owns however many sentences the tree holds.
     `UNMARKED_PROSE_EXEMPTIONS` is the recorded escape for a mention that genuinely cannot
     carry a mark — empty as landed, because #2752 measured all 7 of them clearable by
-    rewording; shrink-only; and how many sentences one archival may take it up for is a
-    ruling that belongs to that archival round, owed on #2752.
+    rewording; shrink-only; and bounded since #2965 at `MAX_UNMARKED_PROSE_EXEMPTIONS` (3)
+    entries in all, of which one retirement may take at most
+    `MAX_PROSE_EXEMPTIONS_PER_RETIREMENT` (2). The bound is the ruling #2752 left unmade,
+    made here rather than left to the round that would rather not mark a sentence, and
+    `_assert_within_prose_exemption_bounds` below is what refuses an excess — so an archival
+    that wants the room has to ask for the number to move, not fill the drawer.
     """
     retired = _retired_skill_names()
     surface_files = _tracked_python_files()
@@ -1891,6 +2015,32 @@ def test_no_prose_surface_states_a_retired_skill_as_live_spec():
     # waiver drawer is enforced inside `_split_by_prose_exemptions` — an entry has to
     # attribute itself to a backlog item, it can only excuse the sentence it names, and it
     # comes back as a stale entry the moment that sentence is marked or deleted.
+    # Clauses 1 and 2 of #2965, and the size bound that round ruled is asserted HERE, on
+    # this line, before the split: a drawer holding more than
+    # `MAX_UNMARKED_PROSE_EXEMPTIONS` (3) entries, or more than
+    # `MAX_PROSE_EXEMPTIONS_PER_RETIREMENT` (2) against one archival, turns THIS node red
+    # rather than leaving the excess to be waived. On the empty dict as landed it passes.
+    _assert_within_prose_exemption_bounds(UNMARKED_PROSE_EXEMPTIONS)
+    # And the two caps have to be seen binding at the line above, not asserted of it: the
+    # real dict is empty, so the only way to show this node reddens on a filled one is to
+    # hand the same call the drawers an archival would be tempted to write. (The failure
+    # MESSAGES are pinned where each cap is exercised on its own —
+    # `test_a_recorded_prose_exemption_routes_only_its_own_sentence_and_expires_with_it`.
+    # What is pinned here is that this node is where the bound bites.)
+    seeded_label, seeded_where = "seeded by this node", "no file's prose"
+    four_entries = {(seeded_label, seeded_where, f"quote {i}"): f"#2752 seeded quote {i}"
+                    for i in range(MAX_UNMARKED_PROSE_EXEMPTIONS + 1)}
+    with pytest.raises(AssertionError, match="must be MARKED, not waived"):
+        _assert_within_prose_exemption_bounds(four_entries)
+    three_against_one = {(seeded_label, seeded_where, f"quote {i}"): "#2752 seeded quote"
+                         for i in range(MAX_PROSE_EXEMPTIONS_PER_RETIREMENT + 1)}
+    with pytest.raises(AssertionError, match="#2752"):
+        _assert_within_prose_exemption_bounds(three_against_one)
+    # Two against one retirement is inside the bound, so a refusal there would mean the
+    # cap had been written as "one per archival" and an honest 2-entry round was doomed.
+    _assert_within_prose_exemption_bounds(
+        {(seeded_label, seeded_where, f"quote {i}"): "#2752 seeded quote"
+         for i in range(MAX_PROSE_EXEMPTIONS_PER_RETIREMENT)})
     still_red, stale_entries = _split_by_prose_exemptions(violations,
                                                           UNMARKED_PROSE_EXEMPTIONS)
     assert not stale_entries, (
@@ -2029,9 +2179,9 @@ def test_a_recorded_prose_exemption_routes_only_its_own_sentence_and_expires_wit
 
     `UNMARKED_PROSE_EXEMPTIONS` is empty as landed — every one of the 7 sentences #2752
     measured was clearable by rewording — so the guard above runs the exemption code with
-    nothing in it, which means the list's three honest properties are pinned here and not
-    there. All three are exercised against sentences injected into a list this node builds;
-    nothing here writes to disk, and neither sentence is any file's prose:
+    nothing in it, which means the list's honest properties are pinned here and not there.
+    All four are exercised against sentences and drawers this node builds; nothing here
+    writes to disk, and neither sentence is any file's prose:
 
       1. An entry routes the sentence it names out of the violation set, and only that one
          — a waiver that reached a second sentence in the same paragraph of the same file
@@ -2042,6 +2192,12 @@ def test_a_recorded_prose_exemption_routes_only_its_own_sentence_and_expires_wit
          is held to two nodes below.
       3. An entry has to attribute itself to a backlog item, or it raises — a waiver with
          no item behind it has no owner and nothing that will ever remove it.
+      4. The two caps #2965 rules — `MAX_UNMARKED_PROSE_EXEMPTIONS` (3) entries in all, of
+         which one retirement may take `MAX_PROSE_EXEMPTIONS_PER_RETIREMENT` (2) — refuse
+         seeded drawers, and both refusals are READ, because a bound the guard node only
+         ever sees with zero entries in it has never refused anything and an excess a round
+         cannot act on is a dead end. The per-retirement refusal is additionally shown to
+         blame the retirement that is over the bound and stay silent about one that is not.
     """
     retired = _retired_skill_names()
     label = "tests/test_skill_reflection_archive.py"
@@ -2097,6 +2253,240 @@ def test_a_recorded_prose_exemption_routes_only_its_own_sentence_and_expires_wit
     with pytest.raises(AssertionError, match="backlog item"):
         _split_by_prose_exemptions(
             violations, {(label, where, "read-list shape"): "it was awkward to reword"})
+
+    # Property 4, on drawers this node seeds. The guard node calls the bound on the real
+    # dict and that dict is empty, so `len(...) <= 3` would be true forever without ever
+    # being seen to refuse — which is the exact way an unenforced bound survives a round
+    # that claims to have ruled it.
+    def seeded(n: int, ref: str) -> dict[tuple[str, str, str], str]:
+        return {(label, where, f"seeded quote {i}"): f"{ref} seeded by this node"
+                for i in range(n)}
+
+    with pytest.raises(AssertionError) as total_refused:
+        _assert_within_prose_exemption_bounds(
+            seeded(MAX_UNMARKED_PROSE_EXEMPTIONS + 1, "#2752"))
+    total_msg = str(total_refused.value)
+    assert f"total cap of {MAX_UNMARKED_PROSE_EXEMPTIONS}" in total_msg, (
+        f"the refusal of a {MAX_UNMARKED_PROSE_EXEMPTIONS + 1}-entry drawer did not name "
+        f"the cap it refused ({total_msg!r}), so the round reading it cannot tell the "
+        "total bound from any other refusal"
+    )
+    assert "must be MARKED, not waived" in total_msg, (
+        f"the refusal said only that the drawer is too big ({total_msg!r}), with no legal "
+        "way out — a round with no legal move re-litigates the number instead of marking "
+        "the sentence"
+    )
+
+    with pytest.raises(AssertionError) as retirement_refused:
+        _assert_within_prose_exemption_bounds(
+            seeded(MAX_PROSE_EXEMPTIONS_PER_RETIREMENT + 1, "#2752"))
+    retirement_msg = str(retirement_refused.value)
+    assert "#2752" in retirement_msg, (
+        f"a 3rd entry against one retirement was refused without naming that retirement "
+        f"({retirement_msg!r}), so nobody knows whose archival filled the drawer"
+    )
+    per_retirement_cap = (f"{MAX_PROSE_EXEMPTIONS_PER_RETIREMENT} exemptions one archival "
+                          "may take")
+    assert per_retirement_cap in retirement_msg, (
+        f"the refusal did not name the per-retirement cap ({retirement_msg!r})"
+    )
+    # Which ref it names is the whole content of clause 2's "naming that retirement". Three
+    # entries, all crediting #2752, and one of them also crediting #2990 — a reason naming
+    # two items is booked against both, which is why the block above the dict says a reason
+    # names the ONE item whose archival took the exemption. The refusal has to blame the
+    # retirement that is actually over the bound and say nothing about the one that is not,
+    # so `over` cannot be satisfied by any citation the drawer happens to contain. (The
+    # check goes through a second drawer rather than by reading `#2752` out of the refusal
+    # above: an `assert len(...) <= N` carries Python's own `where len(...) = N` clause, and
+    # that clause reprs the seeded dict, item citations included.)
+    shared_credit = {(label, where, "quote 0"): "#2752 and #2990 one quote, two credits",
+                     (label, where, "quote 1"): "#2752 quoted",
+                     (label, where, "quote 2"): "#2752 quoted again"}
+    with pytest.raises(AssertionError) as shared_refused:
+        _assert_within_prose_exemption_bounds(shared_credit)
+    shared_msg = str(shared_refused.value)
+    assert "#2752" in shared_msg and "#2990" not in shared_msg, (
+        f"a drawer over the bound on #2752 alone was refused with ({shared_msg!r}), so the "
+        "refusal does not identify the retirement whose archival filled the drawer"
+    )
+
+    # Two against one retirement is inside the bound. Refusing those would mean the cap had
+    # been written as one-per-archival, dooming an honest 2-entry round.
+    _assert_within_prose_exemption_bounds(seeded(MAX_PROSE_EXEMPTIONS_PER_RETIREMENT, "#2752"))
+    # And the drawer as landed is inside its own bound — the shape that makes the two
+    # refusals above the only reason those calls did not raise.
+    _assert_within_prose_exemption_bounds(UNMARKED_PROSE_EXEMPTIONS)
+
+
+def test_the_exempt_dict_block_states_the_bound_and_the_one_admissible_ground():
+    """Clause 4 of #2965, on the mechanism that already polices the OTHER exempt dict: a
+    node reading `_comment_block_above('UNMARKED_PROSE_EXEMPTIONS')` reddens when the cap
+    number has left the block.
+
+    Unmarked, and for the reason its sibling
+    `test_the_exempt_dict_comment_block_names_only_recorded_entries` gives for itself: the
+    block is documentation, documentation is what a round edits when it wants an escape to
+    look sanctioned, and the rung the gate runs is the one that reads prose rather than the
+    one that deselects it.
+
+    Three things, one per way this rots:
+    * the total bound's number is stated, and read back OUT of the block rather than
+      restated by the assertion, so prose that says 3 while the code says 9 goes red;
+    * the per-retirement bound's number is stated beside the word that scopes it, so a
+      reader cannot mistake 2 for the total;
+    * the ONE admissible ground is still in the block — a quote of prose this repo does not
+      own — and so is what happens to the excess: it is MARKED. A number with no ground and
+      no exit is a number a round negotiates around.
+
+    The negative control is the point: `== MAX_...` is also satisfied by a block that never
+    mentions a number, which is exactly how a sentence leaving the ruling to "that archival
+    round" read as a decision while stating none.
+    """
+    block = _comment_block_above("UNMARKED_PROSE_EXEMPTIONS")
+    total = _cap_stated_in(block, "MAX_UNMARKED_PROSE_EXEMPTIONS")
+    per_retirement = _cap_stated_in(block, "MAX_PROSE_EXEMPTIONS_PER_RETIREMENT")
+    assert total == MAX_UNMARKED_PROSE_EXEMPTIONS, (
+        f"the block above `UNMARKED_PROSE_EXEMPTIONS` states a total bound of {total!r}, "
+        f"which is not `MAX_UNMARKED_PROSE_EXEMPTIONS` = {MAX_UNMARKED_PROSE_EXEMPTIONS} "
+        "(#2965) — either the prose never says the number or it has rotted away from the "
+        "code, and the reader who trusts the block over the constant is the reader this node "
+        "exists for"
+    )
+    assert per_retirement == MAX_PROSE_EXEMPTIONS_PER_RETIREMENT, (
+        f"the block states a per-retirement bound of {per_retirement!r}, which is not "
+        f"`MAX_PROSE_EXEMPTIONS_PER_RETIREMENT` = {MAX_PROSE_EXEMPTIONS_PER_RETIREMENT} "
+        "(#2965) — the total and the per-archival number have to stay distinguishable in the "
+        "prose, because they bind differently and 3 is the number a round reaches first"
+    )
+    assert "does not own" in block, (
+        "the block no longer narrows exemption to prose this repo does not own, so the "
+        "drawer's one admissible ground is gone and any sentence a round would rather not "
+        "reword qualifies as exempt"
+    )
+    assert "MARKED" in block, (
+        "the block no longer says what happens to the excess over the bound, so a round that "
+        "fills the drawer reads a cap with no exit and concludes the cap is advisory"
+    )
+    # Teeth, run: a block with the numbers stripped has to stop satisfying both pins, or
+    # "states the bound" is met by any comment that happens to sit above the dict.
+    unnumbered = re.sub(r"(MAX_UNMARKED_PROSE_EXEMPTIONS|MAX_PROSE_EXEMPTIONS_PER_RETIREMENT)"
+                        r"\s*\(\d+\)", r"\1", block)
+    assert _cap_stated_in(unnumbered, "MAX_UNMARKED_PROSE_EXEMPTIONS") is None \
+        and _cap_stated_in(unnumbered, "MAX_PROSE_EXEMPTIONS_PER_RETIREMENT") is None, (
+        "both pins still passed on a block with the numbers deleted, so they were never "
+        "reading the numbers and any block naming these constants would satisfy them"
+    )
+    # And a wrong number is not the same as a missing one: the equality fires on both, so
+    # the pin has to be shown to read a value, not merely to find a name.
+    assert _cap_stated_in(block.replace(f"({MAX_UNMARKED_PROSE_EXEMPTIONS})", "(9)"),
+                          "MAX_UNMARKED_PROSE_EXEMPTIONS") == 9, (
+        "rewriting the block's total to 9 did not change what the pin reads, so the pin keys "
+        "on the constant's name and not on its value"
+    )
+
+
+def test_no_prose_defers_the_exemption_bound_to_a_future_round():
+    """Clause 5 of #2965: the ruling is MADE, so the sentences that left it owed to a later
+    archival round are gone from this file — and something keeps them from coming back.
+
+    Unmarked, because a deferred ruling is invisible to every hard rung: the tree stays
+    green, the drawer stays open, and the only trace of the missing decision is a comment
+    that reads as if somebody else still owes it. The rot this prevents is one line of
+    rewording by a round that hit the bound and would rather not mark its sentence.
+
+    Keyed on the drawer plus a deferral, never on `#2752` alone — that item built the drawer
+    and stays correctly cited through this file. The two controls are the real ones: the two
+    sentences deleted from this very file have to be caught when handed back, and a sentence
+    that cites #2752 beside the exemption mechanism without deferring anything must not be,
+    or the pin is a ban on an item number rather than on a deferred decision.
+    """
+    label = "tests/test_skill_reflection_archive.py"
+    paragraphs = _prose_paragraphs(_IMPORT_RESOLVED_PROSE_FILES[label])
+    assert paragraphs, (
+        f"no prose paragraphs could be read out of {label}, so the scan below would report "
+        "a clean file having read nothing — the file this rule polices has to be readable"
+    )
+    deferrals = _exemption_bound_deferrals(paragraphs)
+    assert not deferrals, (
+        f"{len(deferrals)} sentence(s) in {label} still hand the exemption bound to a future "
+        f"round ({[(where, sentence[:140]) for where, sentence in deferrals]}) — #2965 made "
+        "the ruling (3 entries in all, 2 per retirement, verbatim-external prose the only "
+        "admissible ground), so the deferral is now a false statement about an open debt: "
+        "the number is enforced in `_assert_within_prose_exemption_bounds`, and a round "
+        "reading the sentence would have no way to know that"
+    )
+    # Control one: the two sentences this round deleted, as they stood at `913e7eaf`. A
+    # finder that does not recognise them is not reading a deferral, just an item number.
+    for where, removed in RETIRED_EXEMPTION_DEFERRALS:
+        caught = _exemption_bound_deferrals([(where, removed)])
+        assert [sentence for _where, sentence in caught] == [removed], (
+            f"the finder let through the exact sentence #2965 deleted ({removed[:120]!r}), "
+            "so 'the deferral phrasing is gone' would be pinned by a rule that cannot see a "
+            "deferral — the file could put it back and stay green"
+        )
+    # Control two, the other direction: #2752 beside the exemption mechanism, stating who
+    # built what, is history and has to stay. Without this control the assert above could be
+    # satisfied by forbidding every sentence that names the drawer and an item.
+    history = (
+        "`_split_by_prose_exemptions` as #2752 left it enforced only attribution, "
+        "per-sentence routing and stale-entry return."
+    )
+    assert _exemption_bound_deferrals([("control (injected by this node)", history)]) == [], (
+        "the finder flagged a sentence that only records what #2752 built, so it is keying "
+        "on the citation and the green above is just this file having stopped naming the "
+        "round that built the drawer"
+    )
+
+
+def test_the_prose_guard_bounds_the_real_drawer_before_it_splits_it():
+    """Clause 1 of #2965 is a claim about WHERE the bound is checked — in the node that
+    guards the tree, on the real dict, before the split — so it is pinned off the node's own
+    syntax, not off a comment that says so.
+
+    The hole this closes is the one every other cap test in this file leaves open: the seeded
+    drawers call `_assert_within_prose_exemption_bounds` directly, so a round that deleted the
+    guard node's single call on `UNMARKED_PROSE_EXEMPTIONS` would keep all of them green while
+    a filled drawer went back to being reported as prose that must be marked — a red the round
+    could answer by emptying the drawer and losing the sentences it was allowed to keep, which
+    is the outcome the bound exists to make unnecessary. Deleting that line, or moving it below
+    the split, turns THIS node red; both are states a round can actually write.
+    """
+    guarded = next((n for n in ast.parse(Path(__file__).read_text(encoding="utf-8")).body
+                    if isinstance(n, ast.FunctionDef)
+                    and n.name == "test_no_prose_surface_states_a_retired_skill_as_live_spec"),
+                   None)
+    assert guarded is not None, (
+        "test_no_prose_surface_states_a_retired_skill_as_live_spec is gone, so the node that "
+        "guards the tree's prose has been renamed or deleted and the bound has nothing to sit "
+        "in front of"
+    )
+    bound_calls, split_calls = [], []
+    for stmt in ast.walk(guarded):
+        if isinstance(stmt, ast.Call) and isinstance(stmt.func, ast.Name):
+            if stmt.func.id == "_assert_within_prose_exemption_bounds":
+                bound_calls.append(stmt)
+            elif stmt.func.id == "_split_by_prose_exemptions":
+                split_calls.append(stmt)
+    on_real_drawer = [c for c in bound_calls
+                      if any(isinstance(a, ast.Name) and a.id == "UNMARKED_PROSE_EXEMPTIONS"
+                             for a in c.args)]
+    assert on_real_drawer, (
+        "the prose guard node never calls `_assert_within_prose_exemption_bounds` on "
+        f"`UNMARKED_PROSE_EXEMPTIONS` — it calls it {len(bound_calls)} time(s), on seeded "
+        "drawers only, so the cap is tested but not enforced: an archival could fill the real "
+        "drawer and this file would stay green"
+    )
+    assert split_calls, (
+        "the guard node no longer calls `_split_by_prose_exemptions` at all, so there is no "
+        "ordering to check and 'before the split' means nothing"
+    )
+    assert min(c.lineno for c in on_real_drawer) < min(c.lineno for c in split_calls), (
+        f"the bound is asserted at line "
+        f"{min(c.lineno for c in on_real_drawer)}, after the split at "
+        f"{min(c.lineno for c in split_calls)} — an over-full drawer would be reported as "
+        "unmarked prose to be fixed sentence by sentence rather than refused as a drawer, "
+        "which is the difference between a bound and a suggestion"
+    )
 
 
 @pytest.mark.live_vault
