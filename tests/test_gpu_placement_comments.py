@@ -284,3 +284,87 @@ def test_the_index_glance_map_names_all_three_gpu_2_candidates():
     pinned = sorted(_derived_cards()["2"])
     unnamed = [c for c in pinned if c not in row]
     assert not unnamed, f"index.md's GPU 2 row omits {unnamed} of {pinned}: {row!r}"
+
+
+# ── #2948: documentation on a candidate unit may not touch the unit ──────────
+DECIDER_CONF = CONF_D / "agent-decider.conf"
+
+#: Every non-comment line of `[program:agent-decider]`, byte for byte as of `f1d686a9` —
+#: the commit #2948 names as its before-state. `command=`, `environment=`, `autostart`,
+#: `startsecs` and the two log paths are what supervisord executes; the conf's prose is
+#: what a human reads, and only the prose is editable without a supervisor `update`.
+#:
+#: Copied in rather than read out of git with `git show f1d686a9:…`: this file's own
+#: `test_the_uuid_pinned_conf_resolves_to_the_card_the_map_names` walks its AST and
+#: fails on a `subprocess` import, because a shell-out would make these assertions about
+#: the box instead of about the tree. The literal is the trade — it names the commit it
+#: came from, and the node beside it says so if the file and the literal disagree.
+DECIDER_SECTION_LINES = (
+    '[program:agent-decider]',
+    'command=/bin/bash /home/alansrobotlab/lloyd/agent-services/bin/start-decider.sh',
+    'directory=/home/alansrobotlab/lloyd/agent-services',
+    'user=alansrobotlab',
+    'environment=HOME="/home/alansrobotlab",PATH="/home/alansrobotlab/.local/bin:'
+    '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",GPU="2",'
+    'PORT="8012",VLLM_PORT="5310",VARIANT="35b"',
+    'autostart=false',
+    'autorestart=true',
+    'startsecs=300',
+    'startretries=2',
+    'stopwaitsecs=60',
+    'stopsignal=TERM',
+    'stopasgroup=true',
+    'killasgroup=true',
+    'stdout_logfile=/home/alansrobotlab/lloyd-data/logs/services/agent-decider.log',
+    'stderr_logfile=/home/alansrobotlab/lloyd-data/logs/services/agent-decider.err',
+    'stdout_logfile_maxbytes=10MB',
+    'stderr_logfile_maxbytes=10MB',
+)
+
+
+def _decider_section_lines(text: str) -> tuple[str, ...]:
+    """The section's executable lines: everything from its header down that is not a
+    `;` comment. Blank lines drop out; there are none in this one, and one appearing
+    would not be a value change either way."""
+    lines = text.splitlines()
+    assert lines.count("[program:agent-decider]") == 1, (
+        "the unit's section header is duplicated or gone, so the slice below is not "
+        "the section")
+    start = lines.index("[program:agent-decider]")
+    return tuple(ln for ln in lines[start:] if ln.strip() and not ln.startswith(";"))
+
+
+def test_the_decider_unit_gained_prose_and_no_new_values():
+    """#2948 was filed as "comment only — do not touch `command=`, `environment=`,
+    `autostart` or any value", and a comment edit is exactly the kind of diff that
+    slips a value change past a reader who is scrolling prose.
+
+    So the pin is byte-identity of the section's non-comment lines against
+    `DECIDER_SECTION_LINES`, which is that section as of `f1d686a9`. It fails on a
+    reworded key, a reordered key, a key added — and on a key commented out, since a
+    `; startsecs=300` line leaves the section with no `startsecs` at all while still
+    looking annotated.
+
+    The other half is that the new prose has to stay inert to the derivations in this
+    file. `_pin` reads `environment=` only, so a comment that quotes a card cannot
+    re-file the unit onto it — that scoping is `lloyd-agent-worker.conf`'s trap and
+    `test_the_derivation_reads_the_environment_line_not_its_prose` owns it; what the
+    decider's header adds is a `_MAP_LINE` risk, because a comment shaped like
+    `; GPU 2: …` would one day be harvested as a tenant-map row from a file that is not
+    the map. It is asserted shape-free, and the pin still parses where the map expects.
+    """
+    text = DECIDER_CONF.read_text(encoding="utf-8")
+    assert _decider_section_lines(text) == DECIDER_SECTION_LINES, (
+        "the candidate unit's VALUES moved while #2948 was a comment-only change; the "
+        f"section now reads {_decider_section_lines(text)}")
+
+    assert not [ln for ln in text.splitlines() if _MAP_LINE.match(ln)], (
+        "a comment in this conf is shaped like a tenant-map row; `_map_rows` reads "
+        "lloyd-agent-worker.conf today, so nothing eats it yet, and the day the "
+        "harvester widens this file it invents a tenant here")
+
+    assert _pin(text) == "2", "the unit's own card pin stopped parsing out of environment="
+    assert "agent-decider" in _derived_cards()["2"], (
+        "the unit left the GPU 2 claimant set this file's map is derived from")
+    assert "agent-decider" in _map_rows()["2"], (
+        "the map no longer names the third claimant for the card")

@@ -585,3 +585,164 @@ def test_a_bare_enable_or_disable_without_the_flag_is_still_only_unit_file_state
     """
     assert find_service_control(command) is None, command
     assert check_service_control(command, WORKER) is None, command
+
+
+# ── #2948: the candidate unit's own header says who "by hand" means ──────────
+DECIDER_CONF = CONF_DIR / "agent-decider.conf"
+
+#: The two paths the hand-boot paragraph has to name. Named here once so the node
+#: below and the node that anti-rotates it cannot drift from each other.
+GUARD_MODULE = "app/harness/service_control.py"
+PREFLIGHT_SUITE = "tests/test_llm_slot_vram_preflight.py"
+
+
+def _hand_boot_paragraph(text: str) -> str:
+    """The unit's hand-boot block: from its CANDIDATE claim down to the line before
+    the `autostart=false` paragraph.
+
+    Slice boundaries chosen by TEXT, not by line number — this round is the proof that
+    a `file:line` citation moves under an edit to the file it cites: the paragraph grew
+    by 19 lines here and every number pointing below it in
+    `tests/test_service_health_check_supervisor_state.py` had to be re-pointed. A node
+    that re-created that bug by slicing on `:5-13` would rot the next time someone
+    added a sentence.
+    """
+    lines = text.splitlines()
+    start = next(i for i, ln in enumerate(lines)
+                 if "A CANDIDATE, NOT A SERVICE YET" in ln)
+    end = next(i for i, ln in enumerate(lines)
+               if ln.startswith("; autostart=false for the same reason"))
+    return "\n".join(lines[start:end])
+
+
+def test_the_candidate_unit_documents_who_may_boot_it_and_where_the_refusal_lives():
+    """#2948: "It is started and stopped by hand" named an actor nobody could find.
+
+    The line was true and useless. The hands that may run those three `supervisorctl`
+    commands are a person's or an attended chat session's, and the unit said nothing
+    about the other kind of reader this file gets — a worker, autonomy or round turn
+    that types the command, is refused by `app/harness/service_control.py`, and reads
+    the refusal as missing plumbing because the file above it just told it the route
+    is "by hand". #2716's owed check weighed that block on 2026-10-18 and kept it, so
+    the surviving half of the ruling is to make the file say what the rail does.
+
+    Every claim below is a claim the paragraph now makes and the guard really implements
+    — `test_the_paragraph_agrees_with_the_guard_and_the_probe_it_names` checks them
+    against the code rather than against this docstring.
+    """
+    para = _hand_boot_paragraph(DECIDER_CONF.read_text(encoding="utf-8"))
+
+    # Clause 1: the rail is named, and named as refusing BOTH acts to a background turn.
+    assert GUARD_MODULE in para, (
+        "the hand-boot paragraph does not name the module that refuses a background "
+        f"turn, so a reader still cannot tell who 'by hand' excludes: {para}")
+    refuse = [s for s in para.replace("\n", " ").split(".") if "refus" in s.lower()]
+    assert refuse, f"the paragraph names the module but never says what it does: {para}"
+    both = [s for s in refuse if "supervisorctl" in s and "boot" in s.lower()]
+    assert both, (
+        "the paragraph must say the same turn is refused BOTH the supervisorctl "
+        f"start/stop AND the hand boot of the launcher — naming one alone leaves the "
+        f"other looking like a way through: {refuse}")
+    for actor in ("worker", "autonomy", "round"):
+        assert actor in para.lower(), (
+            f"the paragraph omits {actor!r} from the list of turns that are refused, "
+            f"so a {actor} turn reading it cannot recognise itself")
+    allowed = [s for s in para.replace("\n", " ").split(".")
+               if "attended" in s.lower() or "person" in s.lower()]
+    assert allowed, (
+        f"the paragraph never names the actor that MAY do it — the exclusion reads as "
+        f"a blanket ban on touching the unit: {para}")
+    assert "None" in para, (
+        "the paragraph should state the attended edge the way the code does: the call "
+        "returns None for an attended id, so the absence of a refusal is the answer")
+
+    # Clause 2: the unattended route is the shimmed suite, and the live card is not it.
+    assert PREFLIGHT_SUITE in para, (
+        "the paragraph does not name the suite that can exercise the guard without the "
+        f"card, so an unattended turn has nowhere to go: {para}")
+    probe = para.replace("\n", " ")
+    assert "nvidia-smi" in probe and "shim" in probe.lower(), (
+        "the named suite is not described as a PATH-shimmed `nvidia-smi`, which is what "
+        f"makes it a probe rather than a boot: {probe}")
+    assert "fake engine" in probe.lower(), (
+        f"the paragraph does not say the engine is faked: {probe}")
+    assert "not that surface" in probe or "not the surface" in probe, (
+        "the paragraph must say the live card is NOT the probe surface — naming a "
+        f"suite while leaving the real card looking available is half a warning: {probe}")
+    assert "djev" in probe.lower(), (
+        "the thing a successful hand-boot would displace is the ranker holding the "
+        f"shared card, and that cost is the reason for the rail: {probe}")
+
+
+def test_the_paragraph_agrees_with_the_guard_and_the_probe_it_names():
+    """Clause 3's anti-rot: the sentence is checked against the two things it cites.
+
+    #1447 is the precedent that a comment about this card silently described a machine
+    that no longer existed, and #2948's sentence is the same species of claim — it
+    asserts a fact about a module and about a test suite. So this node does not merely
+    grep for the two paths: it re-derives each half of the claim from the thing named,
+    and the paragraph goes red if EITHER side moves.
+
+    Renaming `decider_fakes`/`boot_decider`, dropping the shim, or removing the
+    decider's launcher from `_LAUNCHERS` all make the conf's sentence false while the
+    sentence itself still reads perfectly. A node that only grepped the file would stay
+    green through all three, which is how the last placement comment rotted.
+    """
+    para = _hand_boot_paragraph(DECIDER_CONF.read_text(encoding="utf-8"))
+    # CONF_DIR is `<root>/agent-services/supervisor/conf.d`.
+    root = CONF_DIR.parents[2]
+
+    # The sentence itself: both paths named, or there is nothing here to cross-check.
+    assert GUARD_MODULE in para and PREFLIGHT_SUITE in para, (
+        "the hand-boot paragraph stopped naming the guard and the probe surface it was "
+        f"written to point at, so the claim this node exists to test is gone: {para}")
+
+    # (a) The module the paragraph names is the module that is loaded and enforcing.
+    assert (root / GUARD_MODULE).exists(), (
+        f"{GUARD_MODULE} moved, and the paragraph still points at it")
+    assert service_control.__name__ == "app.harness.service_control", service_control.__name__
+
+    # (b) The launcher the unit boots is in that module's launcher set, and is refused
+    #     for a background session and allowed for a chat — read out of THIS conf's own
+    #     `command=`, so the node follows the unit if the script is ever renamed.
+    command_line = next(ln for ln in DECIDER_CONF.read_text(encoding="utf-8").splitlines()
+                        if ln.startswith("command="))
+    launcher = next(tok for tok in command_line.split() if tok.endswith(".sh"))
+    assert launcher.rsplit("/", 1)[-1] in service_control._LAUNCHERS, (
+        f"{launcher} is what this unit runs, and it is not in _LAUNCHERS — so the "
+        "paragraph's 'both the supervisorctl start/stop AND the hand boot' is false "
+        "for the boot half")
+    assert check_service_control(f"bash {launcher}", WORKER), (
+        f"the paragraph promises a background turn is refused the hand boot of {launcher}")
+    assert check_service_control(f"bash {launcher}", AUTONOMY), "autonomy too"
+    assert check_service_control(f"bash {launcher}", CHAT) is None, (
+        "the paragraph says an attended session may boot it, and the guard must agree")
+    for verb in ("start", "stop"):
+        assert check_service_control(f"supervisorctl -c x.conf {verb} agent-decider",
+                                     WORKER), (
+            f"the paragraph claims `supervisorctl {verb} agent-decider` is refused to a "
+            f"background turn; it is not, and the sentence is now wrong")
+        assert check_service_control(f"supervisorctl -c x.conf {verb} agent-decider",
+                                     CHAT) is None
+
+    # (c) The suite the paragraph points an unattended turn at still reaches the
+    #     decider's guard through fakes rather than through the card.
+    suite = root / PREFLIGHT_SUITE
+    assert suite.exists(), f"{PREFLIGHT_SUITE} moved, and the paragraph still points at it"
+    src = suite.read_text(encoding="utf-8")
+    # Structural, not a grep for the word "shim": that word appears in prose and in
+    # comments, so it survives the harness being deleted — measured, a run with all 68
+    # occurrences of `shim` in the file replaced still passed this node. What carries
+    # the claim is the fixtures that build the fake binary and hand it to the child, and
+    # the two helpers the paragraph names by title.
+    for helper in ("decider_fakes", "boot_decider", "shim_dir"):
+        assert f"def {helper}" in src, (
+            f"the paragraph rests on `{helper}` — as the way in, or as the fixture that "
+            f"builds the fake `nvidia-smi` — and the suite no longer defines it")
+    assert "nvidia-smi" in src, (
+        "the fake binary this harness substitutes is no longer `nvidia-smi`, so the "
+        "guard the paragraph points at is not the one being exercised")
+    assert '{shim_dir}:{SYSTEM_PATH}' in src, (
+        "the fake `nvidia-smi` reaches the script by sitting FIRST on the child's PATH; "
+        "without that ordering the harness runs the real binary, which is the live-card "
+        "run the paragraph exists to warn a round away from")

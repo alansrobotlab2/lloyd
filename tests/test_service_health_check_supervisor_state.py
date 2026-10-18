@@ -279,7 +279,10 @@ def test_cli_reports_a_running_service_healthy_through_a_real_subprocess(tmp_pat
 # `[✗] agent-decider— STOPPED (process state only — no probe declared)` and
 # `Categories: Fleet: degraded`, and agent-decider was the only unhealthy row in that
 # category — so the word `degraded` was entirely this one unit. Its conf.d unit declares
-# `autostart=false` at conf.d/agent-decider.conf:32, and the file's own header calls it
+# `autostart=false` inside its own `[program:agent-decider]` section of
+# conf.d/agent-decider.conf — cited here as a line number until #2948 grew that file's
+# header comment by 19 lines, which is why it is named by its text now — and the file's
+# own header calls it
 # "A CANDIDATE, NOT A SERVICE YET", hand-started against djev because GPU 2 holds one
 # tenant. `_state_verdict` excused only `_switched_off()` names, so the declaration was
 # never read.
@@ -578,8 +581,11 @@ def test_the_declaration_is_read_from_the_named_program_s_own_section(tmp_path, 
 
     One file, two programs. `agent-watched-unit`'s section declares `autostart=true`;
     `agent-candidate-unit`'s section carries only a COMMENT that mentions
-    `autostart=false` — which is what conf.d/agent-decider.conf:14 does above its own
-    section. So neither another program's declaration nor a line of prose may excuse
+    `autostart=false` — which is what conf.d/agent-decider.conf does above its own
+    section, in the header line beginning `; autostart=false for the same reason as
+    agent-djev`. (#2948 grew that header by 19 lines, so the look-alike is named by its
+    text rather than by the line number that moved with it.) So neither another
+    program's declaration nor a line of prose may excuse
     this one: only a `key=value` inside the named section counts.
     """
     two_units = (
@@ -651,9 +657,12 @@ def test_the_parser_reads_the_real_candidate_unit_it_was_written_for():
 
     Every other test in this section writes a throwaway unit, which proves the rule
     but not that the rule meets the box. The unit this item is about carries its
-    look-alike at `agent-services/supervisor/conf.d/agent-decider.conf:14` — a header
+    look-alike in `agent-services/supervisor/conf.d/agent-decider.conf` — a header
     comment beginning `; autostart=false for the same reason as agent-djev`, well above
-    the `[program:agent-decider]` header at `:27` — and its real declaration at `:32`.
+    the `[program:agent-decider]` header — and its real declaration as the
+    `autostart=false` key inside that section. All three were cited by line number until
+    #2948 added 19 comment lines to that header, and nothing in the tree computes a
+    number: they are named by their text now so the next comment edit cannot rot them.
     A parser that choked on that shape would keep the suite green and quietly never
     fire, which is the failure this test exists to prevent.
 
