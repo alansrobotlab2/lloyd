@@ -233,12 +233,15 @@ DIGEST_GLOB = "knowledge/*/youtube-digest.md"
 #: it would train the reader to ignore the alert.
 #:
 #: Since #2737 this is `interest_profile_sweep`'s skip set ONLY: the promo sweep
-#: moved to the writer's shipped predicate, because a bare `"#"` is a prefix test
-#: for a heading that matches a tag run exactly, and that collision is what made
-#: the promo count return 0 over published residue. It is left alone here on
-#: purpose — #2039's denominator is pinned by three assertions in
-#: `tests/test_corpus_shape.py`, and whether that sweep should share the shipped
-#: predicate is a ruling on #2737's owed list, not a call for this round.
+#: moved to the writer's shipped heading-aware predicate, because a bare `"#"` is a
+#: prefix test for a heading that matches a tag run exactly, and that collision is
+#: what made the promo count return 0 over published residue. Whether THIS sweep
+#: should share that predicate is ruled, not pending: #2737's owed-check
+#: `20261018_032353_owedcheck_88b0` (2026-10-18) ruled the two sets stay SEPARATE —
+#: `interest_profile_sweep` keeps this tuple, `promo_residue_sweep` alone consults
+#: the writer's. What settles it is the denominator #2039 asked for: three
+#: assertions in `tests/test_corpus_shape.py` pin it at 2, 1 and 1 lines checked per
+#: digest, and sharing the predicate would move a number that measures nothing new.
 DIGEST_STRUCTURAL_PREFIXES = ("#", "---", "**Source:**", "[Link]")
 
 #: `scripts/intel-pipeline`, the package that owns the guard. This script is
@@ -357,8 +360,10 @@ def promo_residue_sweep(vault: Path, classify=None) -> dict:
     no space, so the two are separable, and the separation is the writer's shipped
     `_MD_HEADING_RE`, so a shape the write path can drop can never again be counted
     here as furniture. The interest-profile sweep still skips on this file's own
-    `DIGEST_STRUCTURAL_PREFIXES`: whether it should share this one is an open ruling
-    on #2737, and its denominator is pinned by tests that were written for it.
+    `DIGEST_STRUCTURAL_PREFIXES`, and #2737 ruled on 2026-10-18 (owed-check
+    `20261018_032353_owedcheck_88b0`) that the two skip sets stay SEPARATE: that
+    sweep keeps its own tuple, because the denominator its count reports is pinned
+    by tests that were written for it, not for this predicate.
     """
     classify = classify or _classify_promo_residue
     is_structure, skips = _load_digest_structure()

@@ -3,6 +3,7 @@
 Every test builds its corpora under tmp_path; nothing reads the real vault or
 the live `_pipeline/`.
 """
+import ast
 import importlib.util
 import json
 import os
@@ -1020,3 +1021,96 @@ def _body_mod():
     sys.path.insert(0, str(ROOT / "scripts" / "intel-pipeline"))
     import intel_pipeline.body as body
     return body
+
+
+# --- the #2737 skip-set sharing ruling, stated as RULED (#2958) ---
+
+#: The two spellings this file used for a question #2737 had already settled. Either
+#: one reads to the next reader as "nobody has decided this", which is what sent the
+#: ruling back onto the owed list.
+STILL_PENDING_MARKERS = ("open ruling", "not a call for this round")
+
+#: The owed-check pass that closed the sharing question, quoted from #2737's activity
+#: log at 2026-10-18T10:26:23: "# ruling: Keep them separate — CLOSED".
+OWED_CHECK = "20261018_032353_owedcheck_88b0"
+
+
+def _comment_block_above(name: str) -> str:
+    """The contiguous `#:` block the source carries directly above `name = ...`.
+
+    Read off the shipped file rather than transcribed, so the guard grades the
+    comment a person actually reads instead of a copy that can drift from it.
+    """
+    lines = SCRIPT.read_text(encoding="utf-8").splitlines()
+    at = next(i for i, ln in enumerate(lines) if ln.startswith(name + " "))
+    start = at
+    while start and lines[start - 1].lstrip().startswith("#:"):
+        start -= 1
+    assert start < at, f"{name} has no #: comment block above it"
+    return "\n".join(lines[start:at])
+
+
+def test_the_2737_skip_set_sharing_is_stated_as_ruled_in_both_passages():
+    """#2958 clauses 1-3: neither shipped passage may still advertise the ruling.
+
+    #2737 closed the sharing question on 2026-10-18 (owed-check
+    `20261018_032353_owedcheck_88b0`): the two skip sets stay separate —
+    `interest_profile_sweep` keeps this file's own tuple and only
+    `promo_residue_sweep` uses the writer's shipped heading-aware predicate. Until
+    this round the file said otherwise in two places: the `#:` block above
+    `DIGEST_STRUCTURAL_PREFIXES` called it "a ruling on #2737's owed list, not a
+    call for this round", and the `promo_residue_sweep` docstring called it "an open
+    ruling on #2737". A reader who believes either sentence re-opens a settled
+    ruling, which is the failure class #2957 pinned for the census at
+    `tests/test_funnel_census.py:873` — and that node is scoped to the census's own
+    `cannot_see` corpus, so it cannot see this file. Hence a node here.
+    """
+    passages = {
+        "#: block above DIGEST_STRUCTURAL_PREFIXES":
+            _comment_block_above("DIGEST_STRUCTURAL_PREFIXES"),
+        "promo_residue_sweep docstring": cs.promo_residue_sweep.__doc__ or "",
+    }
+
+    for label, text in passages.items():
+        for marker in STILL_PENDING_MARKERS:
+            assert marker not in text, (
+                f"{label} still presents the sharing question as pending: {marker!r}")
+        # Ruled, and named as such: the decision, the item that made it and the pass
+        # that recorded it — not just the absence of the old sentence.
+        assert "ruled" in text, f"{label} never says the question is ruled: {text!r}"
+        assert "#2737" in text, f"{label} does not name the item that ruled"
+        assert OWED_CHECK in text, (
+            f"{label} has to name the owed-check pass that closed it")
+        assert "separate" in text.lower(), (
+            f"{label} has to state WHICH way it was ruled: kept separate")
+
+    block = passages["#: block above DIGEST_STRUCTURAL_PREFIXES"]
+    assert "interest_profile_sweep" in block, block
+    assert "promo" in block, block
+
+
+def test_the_interest_skip_set_keeps_its_value_and_its_single_reader(tmp_path):
+    """#2958 clauses 4-5: the ruling was "keep them separate", so nothing moved.
+
+    Closing the comment must not quietly become the sharing the ruling refused. The
+    constant keeps its four prefixes and its one reader, and the denominator the
+    ruling exists to protect is still the same three numbers — 2, 1 and 1 — printed
+    and reported for the clean fixture.
+    """
+    assert cs.DIGEST_STRUCTURAL_PREFIXES == ("#", "---", "**Source:**", "[Link]")
+
+    readers = sorted(n.name for n in ast.parse(SCRIPT.read_text(encoding="utf-8")).body
+                     if isinstance(n, ast.FunctionDef)
+                     and any(isinstance(u, ast.Name)
+                             and u.id == "DIGEST_STRUCTURAL_PREFIXES"
+                             for u in ast.walk(n)))
+    assert readers == ["interest_profile_sweep"], (
+        f"the constant is now read outside the interest sweep: {readers}")
+
+    vault, _pipeline = _build(tmp_path)
+    rep = cs.interest_profile_sweep(vault)
+    assert rep["skips"] == ["#", "---", "**Source:**", "[Link]"], rep["skips"]
+    assert rep["total_flagged"] == 0, rep["files"]
+    rows = {f["file"]: f for f in rep["files"]}
+    assert rows["knowledge/robotics/youtube-digest.md"]["lines_checked"] == 2, rows
+    assert rows["knowledge/local-llm/youtube-digest.md"]["lines_checked"] == 1, rows
