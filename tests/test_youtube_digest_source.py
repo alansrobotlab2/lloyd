@@ -32,10 +32,21 @@ def _item(payload: dict, item_id: int = 1) -> QueueItem:
                      claimed_at=None, claimed_by=None, completed_at=None, error=None)
 
 
+#: A string that exists ONLY inside the bundle's third-party text files, so that
+#: "this prompt carries no raw bundle text" is a measurement and not a proxy. The
+#: review rung's advisory on the previous round was that
+#: `assert "words\n" not in prompt` — the string a transcript happens to contain —
+#: "would pass on a transcript inlined without a line ending in that word". A probe
+#: the producer plants is the form that cannot be accidentally absent.
+BUNDLE_PROBE = "THIRD-PARTY-BUNDLE-TEXT-PROBE-9f2c"
+
+
 def _meta(tmp_path: Path, *, existing: str | None = None) -> dict:
     bdir = tmp_path / "bundles" / "abc123"
     bdir.mkdir(parents=True, exist_ok=True)
-    (bdir / "transcript.txt").write_text("words\n" * 50)
+    (bdir / "transcript.txt").write_text(f"{BUNDLE_PROBE}\n" + "words\n" * 50)
+    (bdir / "meta.json").write_text(f'{{"probe": "{BUNDLE_PROBE}"}}')
+    (bdir / "measurements.json").write_text(f'{{"probe": "{BUNDLE_PROBE}"}}')
     target = existing or str(tmp_path / "vault" / "20260904-second-harness.md")
     return {
         "channel_key": "discover-ai", "channel_handle": "code4AI", "channel_name": "Discover AI",
@@ -82,19 +93,49 @@ class _Script:
 def _turn(text: str, *, writes: Path | None = None, video_id: str = "abc123",
           raises: Exception | None = None, stop_reason: str = "stop",
           structured: dict | None = None, structured_error: str = ""):
+    #: The document a two-stage reader hands over: the same bytes the pre-split fake
+    #: wrote to disk, now emitted inside the fenced section stage A is asked for. The
+    #: WRITER stage is the only turn that may put them there (#2932), so `writes=`
+    #: now means "stage B lands this", which is what every node below means by it.
+    document = (f"---\nsegment: knowledge\nvideo_id: {video_id}\n---\n# Note\n\n"
+                + "body " * 200)
+
+    def reader_text() -> str:
+        """The reader turn's reply with the document AHEAD of the RESULT block.
+
+        The real footer asks for the document as the LAST section; the fake puts it
+        first because `parse_result` reads a field to end-of-text, so a trailing
+        fenced block would be swallowed by `PAPERS:`. The doc-last shape, which is
+        what the reader stage is actually told, is exercised by
+        `test_the_two_stage_pilot_still_leaves_a_note_the_on_disk_check_accepts`.
+        """
+        return ("## NOTE_DOCUMENT\n\n```markdown\n" + document + "\n```\n\n" + text)
+
     async def run(prompt, **kwargs):
+        if writes is not None and Y.HANDOFF_MARK in prompt:
+            # Stage B: the only turn in this file that may put bytes at `writes`.
+            run.stage_b_prompt = prompt
+            run.stage_b_kwargs = kwargs
+            writes.parent.mkdir(parents=True, exist_ok=True)
+            writes.write_text(document, encoding="utf-8")
+            return {"text": "written", "session_id": "20260908_youtubed_ab12",
+                    "stop_reason": "stop", "num_turns": 3, "errors": [],
+                    "structured": None, "structured_error": ""}
+        # The READER turn — the pre-split digest turn — is what `run.prompt` and
+        # `run.kwargs` describe, so every node below still asserts about the
+        # dispatch it was written for. Stage B's own prompt is `stage_b_prompt`.
         run.prompt = prompt
         run.kwargs = kwargs
         if raises is not None:
             raise raises
-        if writes is not None:
-            writes.parent.mkdir(parents=True, exist_ok=True)
-            writes.write_text(f"---\nsegment: knowledge\nvideo_id: {video_id}\n---\n# Note\n\n" + "body " * 200)
-        return {"text": text, "session_id": "20260908_youtubed_ab12", "stop_reason": stop_reason,
+        return {"text": reader_text() if writes is not None else text,
+                "session_id": "20260908_youtubed_ab12", "stop_reason": stop_reason,
                 "num_turns": 9, "errors": [], "structured": structured,
                 "structured_error": structured_error}
     run.prompt = ""
     run.kwargs = {}
+    run.stage_b_prompt = ""
+    run.stage_b_kwargs = {}
     return run
 
 
@@ -1213,3 +1254,381 @@ async def test_a_paper_is_not_charged_for_a_drain_an_outage_or_a_missing_skill(
     result = await Y.execute(_paper_item())
     assert result["status"] == "failed" and result["meta"]["failure_count"] == 2
     assert script.modes() == ["--paper-fetch"], "the script already counted the attempt"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# #2932 — the digest split into a reader stage and a writer stage.
+#
+# Before this item ONE digest turn held the third-party transcript and the durable
+# writers: its compiled envelope reached `http_fetch` and `http_search` beside
+# `Write`, `vault_write`, `backlog_write_task`, `fact_add`, `fact_relate` and
+# `fact_invalidate` (n=23, the triage census of 2026-10-17), so an instruction
+# inside a transcript could name both the verb and the target of a durable write.
+# #2269's own residual-risk paragraph named exactly this, and its roster node could
+# not see it because `Write` and `vault_write` are tier-1.
+#
+# What is bought is bounded, and the nodes below say it: stage B lands text stage A
+# drafted while under injection influence. What changes is that THE WRITE TARGET AND
+# VERB ARE CHOSEN BY A CONTEXT THAT NEVER SAW THE PAYLOAD. Injection resistance per
+# se is unchanged — `run_injection_canary` (#590) and the outbound content gate
+# (#1136) keep that job.
+#
+# The refusals go through the REAL `_pre_dispatch` with the stage's real turn
+# options. No spy, no wrapper: #1136's review rung is the standing lesson that a
+# fake's verdict is not a boundary's verdict.
+# ══════════════════════════════════════════════════════════════════════════════
+
+import asyncio  # noqa: E402
+
+from app.harness.loop import _pre_dispatch  # noqa: E402
+from app.harness.tool_search import LoadedToolSet  # noqa: E402
+
+
+def _dispatch(opts, name: str, args: dict | None = None):
+    """The real pre-dispatch gate on one stage's options, with nothing replaced.
+
+    `None` means the call would have reached the MCP layer — that is what "still
+    dispatches" means — and a `NormalizedEvent` means it was refused before the
+    pool ever saw it. Same construction as the proven helper in
+    `tests/test_worker_capability_allowlist.py:158`.
+    """
+    return asyncio.run(_pre_dispatch(
+        tc={"id": "call_1", "function": {"name": name},
+            "_args_dict": args or {"file_path": "/tmp/x.md",
+                                   "url": "https://example.invalid",
+                                   "content": "x" * 40}},
+        options=opts, session_id="s",
+        loaded_set=LoadedToolSet(enabled=False, catalog=[], loaded=set())))
+
+
+#: The note stage A is asked to hand over: real front matter, the bundle's video
+#: id, `## Open Questions` last inside the document, and long enough to clear
+#: `_MIN_NOTE_BYTES` (400) on its own.
+NOTE_DOC = ("---\nsegment: knowledge\nvideo_id: abc123\ntitle: Second Harness\n"
+            "source: youtube\n---\n\n# Second Harness\n\n## Summary\n\n"
+            + "a digested sentence. " * 60 +
+            "\n\n## Open Questions\n\n- Does the second harness need its own budget?\n")
+
+
+def _reader_text(extra: str = "") -> str:
+    """A reader-stage reply: the RESULT block, then the fenced note document."""
+    return ("Done.\n\nRESULT: written\nNOTE: (handed over, not written)\n"
+            "RELEVANCE: 74\nVERDICT: actionable\nAREAS: harness, agent-architecture\n"
+            "SOURCE_KIND: concept\nAPPROACH: recreate\nIDEA: split the read from the write\n"
+            "DUPLICATE_OF: none\nFILED: none\n\n"
+            "## NOTE_DOCUMENT\n\n```markdown\n" + NOTE_DOC + "```\n" + extra)
+
+
+def test_the_reader_stage_refuses_every_durable_writer_and_keeps_its_egress():
+    """Clause 2: the turn holding the transcript cannot write durably, and can still read.
+
+    Each refusal is a refusal — a `tool_result` naming the tool, not a silent `None`
+    — and `http_fetch` dispatching on those SAME options is the control that proves
+    this is a real envelope rather than an empty one. The asymmetry is the item: the
+    context holding attacker-controlled text is not the context holding the vault.
+    """
+    opts = Y.reader_run_options()
+
+    for name in ("Write", "vault_write", "backlog_write_task", "fact_add"):
+        refused = _dispatch(opts, name)
+        assert refused is not None, f"{name} would have dispatched on the reader stage"
+        assert name in str(getattr(refused, "data", refused)), str(refused)[:300]
+    assert _dispatch(opts, "http_fetch") is None, (
+        "the reader stage must still reach the web, or the digest reads nothing")
+    # One outcome, not two. `X in str(result) or result is None` is true whatever the
+    # gate answers, so it could only ever have failed on a refusal naming something
+    # other than `Read` (the review rung's advisory on the previous round). `Read`
+    # reaching the pool is the claim: stage A's job is reading the bundle off disk.
+    assert _dispatch(opts, "Read") is None, (
+        "the reader stage cannot read its own bundle")
+
+
+def test_the_writer_stage_refuses_every_egress_verb_and_keeps_its_write():
+    """Clause 3: the turn holding the note write cannot reach out.
+
+    `Write` dispatching is the control. `http_fetch` beside `Write` in one envelope
+    is the combination the item exists to remove, so this node and the one above are
+    the two halves of the same property: neither stage may hold both.
+    """
+    opts = Y.writer_run_options()
+
+    for name in ("http_fetch", "http_search"):
+        refused = _dispatch(opts, name)
+        assert refused is not None, f"{name} would have dispatched on the writer stage"
+        assert name in str(getattr(refused, "data", refused)), str(refused)[:300]
+    assert _dispatch(opts, "Write") is None, (
+        "the writer stage is the one that lands the note")
+
+
+def test_read_handoff_refuses_the_three_ways_a_producer_can_lie(tmp_path, monkeypatch):
+    """Clause 4, the validator: absent, unparseable, and out-of-schema each refuse by name.
+
+    These are the three shapes a handoff fails in — the writer wrote nothing, wrote
+    something unparseable, or wrote JSON that is not the declared payload — and each
+    gets its own token, because "the handoff failed" without a reason is how a
+    fail-closed seam becomes an unsupportable incident three weeks later. The
+    out-of-schema case is a body under `_MIN_NOTE_BYTES` (400): the source's own
+    on-disk floor, so a stub cannot pass this gate and then fail the census.
+    """
+    target = tmp_path / "stage-a"
+    monkeypatch.setattr(Y, "handoff_dir", lambda vid: target / str(vid))
+    payload = {"video_id": "abc123", "title": "T", "url": "u", "channel_key": "c",
+               "published": "20261017", "target_note": str(tmp_path / "n.md"),
+               "note_document": NOTE_DOC, "verdict": "actionable", "relevance": 74,
+               "open_questions_path": str(tmp_path / "oq.md")}
+    path, refusal = Y.write_handoff("abc123", payload)
+    assert refusal == "" and path.is_file(), refusal
+
+    good, refusal = Y.read_handoff("abc123")
+    assert refusal == "" and good["note_document"] == NOTE_DOC
+
+    path.unlink()
+    assert Y.read_handoff("abc123")[1].startswith("handoff_absent")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json at all", encoding="utf-8")
+    assert Y.read_handoff("abc123")[1].startswith("handoff_unparseable")
+
+    import json as _json
+    for mutation, token in (({"note_document": "---\nvideo_id: abc123\n---\ntoo short"},
+                             "handoff_note_too_short"),
+                            ({"note_document": "no front matter at all"},
+                             "handoff_no_front_matter"),
+                            ({"video_id": "other-video"}, "handoff_video_id_mismatch"),
+                            ({"relevance": "74"}, "handoff_bad_type"),
+                            ({"note_document": ""}, "handoff_missing_field")):
+        bad = dict(payload)
+        bad.update(mutation)
+        _, why = Y.write_handoff("abc123", bad)
+        assert why.startswith(token), f"{mutation}: got {why!r}, wanted {token}"
+        path.write_text(_json.dumps({"payload": bad}), encoding="utf-8")
+        assert Y.read_handoff("abc123")[1].startswith(token), (
+            f"the writer would accept {mutation} on re-read")
+
+
+def _assert_writer_prompt_bytes(prompt: str, meta: dict, path) -> None:
+    """What a writer-stage prompt's BYTES must and must not contain.
+
+    One function, two callers: this file's direct node (the builder) and the pilot
+    node, which runs it on the string `execute` actually handed the session runner.
+    The review rung's advisory on the previous round was that the guarantee was
+    asserted on a prompt assembled by hand rather than on the dispatched one, and a
+    split whose prompt is only checked at the builder can be undone anywhere between
+    the builder and the pool. The content claim itself is unchanged.
+    """
+    assert Y.HANDOFF_MARK in prompt, "the writer prompt must identify the stage"
+    assert str(path) in prompt and "stage-a.json" in prompt, prompt[:300]
+    assert meta["target_note"] in prompt and "abc123" in prompt
+    for field in ("verdict", "relevance", "open_questions_path", "target_note"):
+        assert field in prompt, f"declared payload field {field} missing"
+    assert meta["transcript_path"] not in prompt, "the writer prompt names the transcript"
+    assert meta["meta_path"] not in prompt and meta["bundle_dir"] not in prompt
+    assert BUNDLE_PROBE not in prompt, (
+        "text from inside the bundle's own files reached the writer prompt — the probe "
+        "sits in transcript.txt, meta.json and measurements.json for this reason")
+    assert "a digested sentence" not in prompt, (
+        "stage A's note document was inlined into stage B's prompt; the writer takes it "
+        "from the artifact, and an artifact that is also pasted into the prompt is a "
+        "prompt with a file beside it")
+    assert "RESULT:" not in prompt, (
+        "the digest protocol is stage A's; a writer told to emit a RESULT block is a "
+        "writer being handed the old turn's job")
+
+
+def test_the_writer_prompt_names_the_artifact_and_never_the_bundle_text(tmp_path):
+    """Clause 4, the builder half: stage B is handed a named artifact and the declared
+    fields, not the content.
+
+    The sibling pilot node applies the same assertions to the dispatched bytes; this
+    one exists so a failure names the builder rather than the run.
+    """
+    meta = _meta(tmp_path)
+    from pathlib import Path as _P
+    payload = Y._stage_b_payload(meta, _P(meta["target_note"]), NOTE_DOC, "actionable", 74)
+    path, why = Y.write_handoff("abc123", payload)
+    assert why == ""
+
+    _assert_writer_prompt_bytes(Y._stage_b_prompt(payload, path), meta, path)
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_handoff_fails_the_run_and_dispatches_no_writer(tmp_path, backlog,
+                                                                         monkeypatch):
+    """Clause 4, the fail-closed half: stage A claims it wrote, hands over nothing.
+
+    The alternative — write something anyway — is what would make the split a
+    downgrade, so the run must record `failed`, tell the script `--fail`, never
+    dispatch stage B, and leave the target path empty. `--fail` matters as much as
+    the empty file: a claim of `written` with nothing on disk is not a `done` row.
+    """
+    meta = _meta(tmp_path)
+    script = _Script({"ok": True, "meta": meta})
+    seen: list[str] = []
+
+    async def runner(prompt, **kwargs):
+        seen.append(prompt)
+        return {"text": "Done.\n\nRESULT: written\nNOTE: /tmp/nowhere.md\nRELEVANCE: 70\n"
+                        "VERDICT: actionable\nAREAS: harness\nSOURCE_KIND: concept\n"
+                        "APPROACH: recreate\nIDEA: none\nDUPLICATE_OF: none\nFILED: none\n",
+                "session_id": "s_a", "stop_reason": "stop", "num_turns": 7,
+                "errors": [], "structured": None, "structured_error": ""}
+
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", runner)
+    monkeypatch.setattr(Y, "handoff_dir",
+                        lambda vid: tmp_path / "handoff" / str(vid))
+
+    result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
+
+    assert result["status"] == "failed", result
+    assert len(seen) == 1, "stage B was dispatched on a handoff that handed over nothing"
+    assert "handoff_missing_field:note_document" in str(result["meta"]), result["meta"]
+    assert script.modes() == ["--fetch", "--fail"], script.modes()
+    assert not Path(meta["target_note"]).exists(), "a note was created from no document"
+
+
+@pytest.mark.asyncio
+async def test_the_two_stage_pilot_still_leaves_a_note_the_on_disk_check_accepts(tmp_path,
+                                                                                backlog,
+                                                                                monkeypatch):
+    """Clause 5: the split did not cost the job its deliverable.
+
+    Checked by the source's OWN `_note_is_real` — `---` front matter, at least
+    `_MIN_NOTE_BYTES` (400) bytes, a `video_id:` line matching the bundle — not by a
+    re-implementation of it, because "safe, and not a digest" is a failure this item
+    must not be able to ship green. Stage A wrote nothing: the file on disk is stage
+    B's, taken from the artifact, and `stages: 2` in the run meta is what the owed
+    7-day census counts refusals over.
+    """
+    meta = _meta(tmp_path)
+    target = Path(meta["target_note"])
+    script = _Script({"ok": True, "meta": meta})
+    prompts: list[str] = []
+    stage_b_kwargs: dict = {}
+
+    async def runner(prompt, **kwargs):
+        prompts.append(prompt)
+        if Y.HANDOFF_MARK in prompt:                      # stage B
+            stage_b_kwargs.update(kwargs)
+            from json import loads as _loads
+            art = Y.handoff_dir("abc123") / Y.HANDOFF_FILENAME
+            document = _loads(art.read_text(encoding="utf-8"))["payload"]["note_document"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(document, encoding="utf-8")
+            return {"text": "written", "session_id": "s_b", "stop_reason": "stop",
+                    "num_turns": 3, "errors": [], "structured": None,
+                    "structured_error": ""}
+        return {"text": _reader_text(), "session_id": "s_a", "stop_reason": "stop",
+                "num_turns": 9, "errors": [], "structured": None,
+                "structured_error": ""}
+
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", runner)
+    monkeypatch.setattr(Y, "handoff_dir",
+                        lambda vid: tmp_path / "handoff" / str(vid))
+
+    result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
+
+    assert result["status"] == "success", result
+    assert len(prompts) == 2, "the pilot did not run two stages"
+    assert Y._note_is_real(target, "abc123"), target.read_text(encoding="utf-8")[:200]
+    assert len(target.read_bytes()) >= Y._MIN_NOTE_BYTES
+    assert target.read_text(encoding="utf-8").rstrip("\n") == NOTE_DOC.rstrip("\n"), (
+        "stage B altered the document it was handed; it is a writer, not an editor")
+    assert result["meta"]["stages"] == 2 and result["meta"]["writer_session_id"] == "s_b"
+    assert result["meta"]["handoff_path"].endswith("stage-a.json")
+    assert "note landed by the writer stage" in result["summary"]
+
+    # The seam, not the fake: every kwarg the writer stage hands the session runner
+    # must be a parameter that helper actually has. Every fake in this file takes
+    # `**kwargs`, so a kwarg the real helper does not accept dispatches green here and
+    # raises `TypeError` on the first production digest — the shape of failure this
+    # item's own risk list says will break first. `finalizer` and `run_options` were
+    # exactly that, and `extra_disallowed` is the one route that reaches
+    # `_pre_dispatch`, so it must carry the same deny `writer_run_options` compiles.
+    import inspect as _inspect
+
+    from workers.sources._common import run_prompt_in_session as _runner
+    params = set(_inspect.signature(_runner).parameters)
+    assert set(stage_b_kwargs) <= params, (
+        f"stage B passes kwargs the runner does not accept: "
+        f"{sorted(set(stage_b_kwargs) - params)}")
+    assert "extra_disallowed" in stage_b_kwargs
+    assert sorted(set(Y.DISALLOWED) | set(Y._STAGE_B_DENY)) == sorted(
+        stage_b_kwargs["extra_disallowed"]), (
+        "the dispatched deny and the measured envelope came apart, so the census is "
+        "describing an envelope no turn uses")
+
+    # The same seam one step earlier: the BYTES. `_pre_dispatch` decides what a stage
+    # may reach; the prompt decides what it can read. Asserted at the builder alone,
+    # the split would survive a change that appended the transcript path back onto
+    # stage B's prompt inside `execute` — the review rung named exactly that gap on the
+    # previous round. `prompts` is what `execute` handed the session runner, which is
+    # the object the pool would serialize.
+    stage_b_prompt = next(p for p in prompts if Y.HANDOFF_MARK in p)
+    stage_a_prompt = next(p for p in prompts if Y.HANDOFF_MARK not in p)
+    _assert_writer_prompt_bytes(stage_b_prompt, meta,
+                                Y.handoff_dir("abc123") / Y.HANDOFF_FILENAME)
+
+    # And stage A has to be TOLD, in the bytes it is dispatched with, that it holds no
+    # write tool. A reader stage whose prompt still says only "write the note" fails
+    # closed on its first production digest with `handoff_missing_field:note_document`
+    # — this item's own named risk, arriving with a green suite.
+    assert "## NOTE_DOCUMENT" in stage_a_prompt, (
+        "stage A was dispatched without being told to emit the document it is the only "
+        "source of")
+    assert meta["target_note"] in stage_a_prompt, (
+        "the reader is not told which file its document is destined for, so it cannot "
+        "produce the note it would have written")
+    assert "NO file-write tool" in stage_a_prompt, (
+        "the deny is invisible to the turn it applies to; a skill body naming `Write` "
+        "then reads as a tool that vanished rather than a split that was declared")
+
+
+def test_the_paper_turn_keeps_its_note_write_and_loses_every_egress_verb(tmp_path,
+                                                                       paper_skill,
+                                                                       monkeypatch):
+    """Clauses 2 and 3 applied to the third turn shape, the one the census almost missed.
+
+    `youtube-digest` dispatches three envelopes, not two: the PAPERS child
+    (`_execute_paper`) reuses this source's name and read a whole third-party document
+    beside `Write` and `vault_write`, so the split is only as wide as its widest
+    untrusted turn. Asserted the way clauses 2 and 3 are — the REAL `_pre_dispatch` on
+    the envelope `paper_run_options` compiles, with `Write` as the control — and then
+    against the bytes the turn actually carried, because an envelope no dispatch sends
+    is a description. What the paper turn uses is unchanged: `Read`/`Grep` on the
+    bundle and the note write. `paper-digest` itself forbids the fetch it just lost
+    ("Do not search for the paper and do not fetch it",
+    `~/obsidian/skills/paper-digest/SKILL.md:20-21`) — the producer landed the text
+    with `--paper-fetch`.
+    """
+    meta = _paper_meta(tmp_path)
+    note = Path(meta["target_note"])
+    script = _PaperScript({"ok": True, "meta": meta})
+    turn = _paper_turn(f"Read it.\n\nRESULT: written\nNOTE: {note}\n", note=note)
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", turn)
+
+    # Sync node on purpose: `_dispatch` runs the gate through `asyncio.run`, which
+    # cannot be nested in a running loop, and the dispatch claim is the point of the
+    # node. (`test_a_paper_row_becomes_a_full_note` above stays async.)
+    result = asyncio.run(Y.execute(_paper_item()))
+
+    assert result["status"] == "success", result
+    assert Y._paper_note_is_real(note, "2609.04148")
+
+    opts = Y.paper_run_options()
+    for name in ("http_fetch", "http_search"):
+        refused = _dispatch(opts, name)
+        assert refused is not None, f"{name} would have dispatched on the paper turn"
+        assert name in str(getattr(refused, "data", refused)), str(refused)[:300]
+    assert _dispatch(opts, "Write") is None, (
+        "the paper turn exists to land one note; stripping the write would have made a "
+        "safe job that digests nothing")
+    assert _dispatch(opts, "Read") is None, "the paper turn still reads its bundle"
+
+    # The seam: the deny the turn carried IS the deny the envelope compiles, so the
+    # census row describes the dispatch and not an idea of it.
+    assert sorted(turn.kwargs["extra_disallowed"]) == sorted(
+        Y.TURN_ENVELOPES["paper-note-turn"]), (
+        "the paper turn dispatched a deny the census does not measure")

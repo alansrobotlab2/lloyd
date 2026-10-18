@@ -189,3 +189,10 @@
 # this name belongs to `_pipeline/reflection/`, never here, so the negation only ever
 # reaches a witness somebody deliberately placed here.
 !qmd-side-copy-rebuild-*.json
+
+# …and #2932's co-presence baseline: the per-source, per-envelope census of whether
+# one dispatch context holds BOTH a third-party read/egress verb and a durable write.
+# The roster node recomputes it from the live `_worker_run_options` compile on every
+# run and fails on drift, so the table is the artifact acceptance clause (a) is
+# graded against and it has to be in the tree, not in a worktree.
+!worker_co_presence_baseline.json

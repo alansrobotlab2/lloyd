@@ -70,11 +70,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from app.paths import LLOYD_HOME, VAULT_ROOT
+from app.paths import LLOYD_HOME, VAULT_PENDING_RESEARCH_DIR, VAULT_ROOT
 from workers.queue import WorkQueue, QueueItem
 from workers.sources._common import (
-    WORKER_AUTOMOD_BAN, DrainActive, TurnTimeout, build_skill_prompt,
-    reconcile_fact_writes, run_prompt_in_session,
+    WORKER_AUTOMOD_BAN, DrainActive, TurnTimeout, _worker_run_options,
+    build_skill_prompt, reconcile_fact_writes, run_prompt_in_session,
 )
 
 logger = logging.getLogger("lloyd-workers.youtube-digest")
@@ -891,7 +891,7 @@ async def _execute_paper(item: QueueItem) -> dict[str, Any]:
         run = await run_prompt_in_session(
             prompt, title=f"Paper: {title[:58]}", source=NAME,
             max_turns=int(payload.get("max_turns") or _papers_cfg(src_cfg)["max_turns"]),
-            priority=1, extra_disallowed=list(PAPER_DISALLOWED))
+            priority=1, extra_disallowed=list(TURN_ENVELOPES["paper-note-turn"]))
     except DrainActive as exc:
         return {"status": "skipped", "summary": f"landing in progress: {_one_line(exc)}",
                 "meta": {**base_meta, "drain_active": True}}
@@ -1036,6 +1036,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     tracked = await asyncio.to_thread(tracked_items)
     try:
         prompt = await asyncio.to_thread(build_prompt, meta, tracked)
+        prompt = prompt + _stage_a_footer(note_path)
     except SkillProtocolMissing as exc:
         # The protocol lives in the vault skill now (#737), so a deleted or
         # emptied skill leaves this dispatch holding a bundle and no
@@ -1053,7 +1054,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             source=NAME,
             max_turns=int(payload.get("max_turns") or src_cfg.get("max_turns", 40)),
             priority=1,
-            extra_disallowed=list(DISALLOWED),
+            # Stage A of #2932: the digest's own deny plus every durable writer.
+            extra_disallowed=list(TURN_ENVELOPES["stage-a-reader"]),
             final_schema=RESULT_SCHEMA if want_structured else None,
             final_schema_prompt=(
                 "Restate the RESULT block above as a single JSON object "
@@ -1082,7 +1084,74 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     verdict_meta = {"verdict_source": parsed["source"] if parsed else "none",
                     "structured_error": structured_error,
                     **await asyncio.to_thread(reconcile_fact_writes, session_id, "")}
+    # ── 2b. The handoff and stage B (#2932) ───────────────────────────────────
+    # Stage A had no write tool, so the document it was asked to emit travels as a
+    # named artifact and a second turn lands it. The order below is the point: the
+    # artifact is written, then RE-READ and re-validated, and only then is the writer
+    # dispatched — so a refusal costs one session, not a bad file. Everything after
+    # this block is the pre-split code unchanged: `--mark-note`, `_note_is_real`,
+    # `_record_published` and the RESULT-block reconciliation now judge stage B's
+    # output, which is why the pilot must not need a new on-disk check.
+    #
+    # Only a turn that CLAIMS it wrote the note gets a writer stage. A `kept` or
+    # `failed` turn falls through to the disk checks below exactly as it did before.
+    stage_b_meta: dict[str, Any] = {}
+    if parsed and parsed.get("result") == "written":
+        handoff_path, refusal = await asyncio.to_thread(
+            write_handoff, video_id,
+            _stage_b_payload(meta, note_path, _note_document(text),
+                             str(parsed.get("verdict") or ""),
+                             parsed.get("relevance")))
+        stage_b_meta = {"handoff_path": str(handoff_path)}
+        if not refusal:
+            _payload, refusal = await asyncio.to_thread(read_handoff, video_id)
+        if refusal:
+            # The shape of the pre-split message is kept (`without a note` at the
+            # path), because that is what a reader of `runs.summary` has been
+            # matching for a year; what it now adds is WHY, which used to be
+            # unknowable — the turn said `written` and nothing was on disk.
+            why = (f"turn ended ({run.get('stop_reason')}, {run.get('num_turns')} "
+                   f"iterations) without a note at {note_path.name} "
+                   f"(handoff refused: {refusal})")
+            await _fail(channel, video_id, why)
+            return {"status": "failed",
+                    "summary": f"{channel} {video_id}: {_one_line(why)}",
+                    "response": text,
+                    # `stop_reason` and `empty_response` ride along because the
+                    # pre-split no-note failure carried them, and the readers of
+                    # `runs.meta_json` — the failure-ledger rollup above all — group
+                    # this row with that one.
+                    "meta": {**base_meta, "session_id": session_id,
+                             "stop_reason": stop_reason,
+                             "empty_response": not text.strip(),
+                             "handoff_refusal": refusal, **stage_b_meta}}
+        try:
+            writer_run = await _run_writer_stage(
+                _payload, handoff_path,
+                max_turns=int(payload.get("max_turns") or src_cfg.get("max_turns", 40)),
+                title=f"{meta.get('channel_name', channel)}: {title[:52]}", priority=1,
+                item_id=item.id)
+        except DrainActive as exc:
+            # The writer never got to run: the artifact is on disk and the row is not
+            # counted, so the retry lands the same document rather than re-reading it.
+            return {"status": "skipped",
+                    "summary": f"landing in progress: {_one_line(exc)}",
+                    "meta": {**base_meta, "drain_active": True, **stage_b_meta}}
+        except Exception as exc:  # noqa: BLE001 — a crashed writer is a failed run
+            logger.exception("youtube-digest: stage B crashed for %s %s", channel, video_id)
+            await _fail(channel, video_id, f"writer stage crashed: {exc}")
+            return {"status": "failed",
+                    "summary": f"{channel} {video_id}: writer stage crashed: "
+                               f"{_one_line(exc)}",
+                    "meta": {**base_meta, "writer_crashed": True, **stage_b_meta}}
+        stage_b_meta.update({"stages": 2, "writer_session_id": writer_run.get("session_id"),
+                             "writer_turns": writer_run.get("num_turns"),
+                             "writer_stop_reason": writer_run.get("stop_reason")})
+
     on_disk = await asyncio.to_thread(_note_is_real, note_path, video_id)
+    # Measured across BOTH stages now: a vault path that moved during either
+    # turn is unexpected, and stage B is exactly the stage whose writes must
+    # be the note and nothing else.
     unexpected = await asyncio.to_thread(_unexpected_vault_writes, vault_before)
 
     # 3a. An infra-shaped turn: no text and no stop reason means the harness
@@ -1186,6 +1255,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         bits.append(f"claimed #{eval_result['filed_unverified']} (unverified)")
     elif eval_result.get("duplicate_of"):
         bits.append(f"duplicate of #{eval_result['duplicate_of']}")
+    if stage_b_meta.get("stages") == 2:
+        # Says out loud, in the row a human reads, that the file on disk came from
+        # the writer stage rather than from the turn that read the transcript.
+        bits.append("note landed by the writer stage")
     if parsed and parsed.get("result") == "kept":
         bits.append("note kept")
     if papers_meta.get("papers_registered"):
@@ -1202,6 +1275,361 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         "response": text,
         "meta": {**base_meta, "session_id": session_id, "note": str(note_path),
                  "stop_reason": run.get("stop_reason"), "num_turns": run.get("num_turns"),
+                 # `stages: 2`, the artifact path and stage B's turn count. Readable
+                 # after the fact, which is what owed clause 1 needs: "zero production
+                 # refusals on the writer stage" is a query over these keys.
                  "eval": eval_result, "unexpected_vault_writes": unexpected,
-                 "parsed": parsed is not None, **verdict_meta, **papers_meta},
+                 "parsed": parsed is not None, **verdict_meta, **papers_meta,
+                 **stage_b_meta},
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# The two-stage split (#2932): a reader stage with no durable write, a writer
+# stage with no ingest reach.
+#
+# #2269 gave this source a capability allow-list, which narrows WHICH tools a
+# source can reach inside ONE turn, and its own residual-risk paragraph named what
+# that leaves behind: "an untrusted-ingest turn that legitimately must write durably
+# (a digest job writes a note) can still be steered into a bad durable write."
+# Measured at triage 2026-10-17, this source's compiled envelope (n=23) held
+# `http_fetch` and `http_search` beside `Write`, `vault_write`, `backlog_write_task`,
+# `fact_add`, `fact_relate` and `fact_invalidate` — and every one of those writers is
+# tier-1, which is why #2269's roster node, keyed on `durable_external()` =
+# TIER2 ∪ TIER3, structurally could not see the co-presence.
+#
+# So the change here is topological, not policy. Stage A reads the third-party
+# transcript with `http_*` reachable and NO durable writer; stage B holds the note
+# write, has no fetch/egress verb, and is handed a named, schema-validated artifact
+# instead of the content. What becomes true is a property about the topology: no
+# dispatch context pairs inbound untrusted text with both a write verb and an egress
+# read. It costs no model call and no GPU — the gate is a declared deny set and a
+# schema check.
+#
+# What is NOT bought, said once so nothing downstream over-claims it: stage B lands
+# text stage A drafted while under injection influence. What changes is that THE
+# WRITE TARGET AND THE VERB ARE CHOSEN BY A CONTEXT THAT NEVER SAW THE PAYLOAD.
+# Injection resistance per se is unchanged — `run_injection_canary` (#590) and the
+# outbound content gate (#1136) keep that job. #2269's sentence is the line this
+# inherits, and this does not close it either.
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: Stage A's deny, on top of the digest's own `DISALLOWED`.
+#:
+#: Derived from the turn's observed calls rather than from what the job description
+#: implies — #2269's `session-distill` finding (344 of 560 calls were `Bash`, so a
+#: derived set that omitted it would have clipped the job) is the precedent. Stage A's
+#: real work is `Read`/`Grep`/`Glob` on the bundle, the measurement scripts,
+#: `http_fetch` on the official page, `Task` for the PAPERS handoff, and the finalizer:
+#: every one of those stays reachable. What goes is the durable half — the note write,
+#: the vault, the backlog, the fact store, memory — plus `Scratchpad`, which is
+#: `side_effecting()` on both classifiers (#2269 denied it for the same reason in
+#: `SOURCE_CAPABILITIES`) and which this stage has no use for: its whole output travels
+#: as its reply.
+_STAGE_A_EXTRA_DENY = frozenset({
+    "Write", "Edit", "vault_write", "vault_overview", "backlog_write_task",
+    "backlog_boards", "backlog_tasks", "backlog_get_task",
+    "fact_add", "fact_relate", "fact_invalidate", "memory_add", "memory_replace",
+    "memory_remove", "tasks_create", "tasks_update", "calendar_create",
+    "calendar_update_event", "calendar_delete_event", "contacts_create",
+    "contacts_update", "contacts_delete", "autonomy_write_task",
+    "research_propose", "Scratchpad",
+})
+
+#: Every third-party read / egress verb, named once.
+#:
+#: This is the half of the #2932 pair that a context holding untrusted content must
+#: not share with a durable write, so it is one set rather than a copy per turn shape:
+#: stage B denies it because stage B is the writer, and the PAPER turn denies it
+#: because the paper turn reads a whole third-party document beside its `Write`. By
+#: the same triage that counted the video envelope at n=23, `PAPER_DISALLOWED` leaves
+#: `http_fetch`/`http_search`/`browser_navigate` reachable beside `Write` and
+#: `vault_write` in the paper turn (`_execute_paper`, `extra_disallowed=list(
+#: PAPER_DISALLOWED)`), so measuring only the two video stages would have published a
+#: clean row for a source whose third shape still pairs the halves.
+#:
+#: Nothing here costs the paper job a tool it uses: `paper-digest` says it in its own
+#: body — "The producer already fetched the paper onto disk … Do not search for the
+#: paper and do not fetch it" (`~/obsidian/skills/paper-digest/SKILL.md:20-21`) — and
+#: the fetch is a script call (`--paper-fetch`), not a turn tool.
+_EGRESS_DENY = frozenset({
+    "http_search", "http_fetch", "http_request",
+    "browser_navigate", "browser_snapshot", "browser_scroll", "browser_press",
+    "browser_select", "browser_tabs", "browser_wait", "browser_cookies",
+    "browser_evaluate", "browser_click", "browser_fill", "browser_drag",
+    "browser_screenshot",
+})
+
+#: Stage B's deny: every third-party read/egress verb, and every durable writer that
+#: is not the note itself.
+#:
+#: `_EGRESS_DENY` is the load-bearing half — `http_fetch` beside `Write` in one
+#: envelope is the combination this item exists to remove. The rest is the same
+#: one-way rule: a stage whose only job is to land a validated document has no use for
+#: the fact store, the backlog or memory, and every name left reachable is a name by
+#: which that context could still be steered. `Bash`, `Edit` and `Task` are already in
+#: `DISALLOWED` for this source, so they need no restating here.
+_STAGE_B_DENY = _EGRESS_DENY | frozenset({
+    "backlog_write_task", "backlog_boards", "backlog_tasks", "backlog_get_task",
+    "fact_add", "fact_relate", "fact_invalidate", "memory_add", "memory_replace",
+    "memory_remove", "tasks_create", "tasks_update", "calendar_create",
+    "calendar_update_event", "calendar_delete_event", "contacts_create",
+    "contacts_update", "contacts_delete", "autonomy_write_task",
+    "research_propose", "Scratchpad",
+})
+
+#: Every turn shape this module dispatches, by the deny set its own call site passes as
+#: `extra_disallowed`.
+#:
+#: This is the census's denominator, so it is a property rather than a convenience:
+#: `tests/test_worker_capability_allowlist.py` compiles one row per entry, and its
+#: AST node refuses a `extra_disallowed=` site in this module that is not a lookup
+#: here. Without that, the table could record a split source as fixed while a third
+#: shape it never measured still paired the halves — the exact way the first version
+#: of this file got it wrong with the paper turn.
+TURN_ENVELOPES: dict[str, tuple[str, ...]] = {
+    #: Stage A of the video path: reads the transcript, keeps egress, no durable writer.
+    "stage-a-reader": tuple(sorted(set(DISALLOWED) | _STAGE_A_EXTRA_DENY)),
+    #: Stage B: lands the validated note, no egress verb at all.
+    "stage-b-writer": tuple(sorted(set(DISALLOWED) | _STAGE_B_DENY)),
+    #: The PAPERS child: one whole third-party document beside one note write, so the
+    #: egress half of the pair goes. Its durable writes stay — it legitimately writes.
+    "paper-note-turn": tuple(sorted(set(PAPER_DISALLOWED) | _EGRESS_DENY)),
+}
+
+#: What the two stages are called in every refusal, log line and census row. The
+#: queue item's `source` stays `youtube-digest`: this splits ONE job into two turns, it
+#: does not register a worker, and inventing a source name here would put a name in the
+#: roster that `worker_source_names()` cannot resolve.
+STAGE_A_NAME = "youtube-digest/reader"
+STAGE_B_NAME = "youtube-digest/writer"
+
+#: Where stage A's handed-over document goes, and what it is called. Under the
+#: pipeline's pending-research root, in a directory per video — deliberately NOT the
+#: target note path, because stage A must not be able to write there, and a handoff
+#: that sits at the final destination is a write with extra steps.
+HANDOFF_FILENAME = "stage-a.json"
+
+#: The first line of every stage B prompt. One marker so a test, a refusal log and a
+#: run record can name the writer stage's turn without re-deriving it from the envelope.
+HANDOFF_MARK = "# Digest note write (stage B)"
+
+#: The declared payload: everything stage B is allowed to see, and nothing else. Every
+#: field is required; a missing one is a schema failure, not a blank to write around.
+#: `relevance` is the one integer, and -1 is a legal value meaning "the RESULT block
+#: stated no number" — the same sentinel `_eval_record` uses, not a fabricated score.
+HANDOFF_FIELDS: tuple[str, ...] = ("video_id", "title", "url", "channel_key",
+                                   "published", "target_note", "note_document",
+                                   "verdict", "open_questions_path")
+HANDOFF_INT_FIELDS: tuple[str, ...] = ("relevance",)
+HANDOFF_SCHEMA_VERSION = 1
+
+#: Stage A's note body travels as its last section, fenced, because `_extract_section`
+#: stops at the next `## ` and the note has headings of its own. Same fenced-JSON
+#: convention as `META:` above: the fence is what makes a heading inside the payload
+#: harmless.
+_NOTE_FENCE_RE = re.compile(
+    r"(?m)^##\s*NOTE_DOCUMENT\b[^\n]*\n+```[^\n]*\n(.*?)```", re.DOTALL)
+
+
+def reader_run_options(cfg: dict | None = None, max_turns: int | None = None):
+    """Stage A's turn options: the digest's own deny plus every durable writer.
+
+    The same `_worker_run_options` route as the pre-split turn and the same `source`
+    this source has always named itself by, so the split tightens one source's
+    declaration instead of inventing a capability entry nobody declared.
+    """
+    cfg = cfg or {}
+    return _worker_run_options(
+        int(max_turns or cfg.get("max_turns") or 40), source=NAME,
+        extra_disallowed=list(TURN_ENVELOPES["stage-a-reader"]))
+
+
+def writer_run_options(cfg: dict | None = None, max_turns: int | None = None):
+    """Stage B's turn options: every egress verb denied, `Write` left reachable."""
+    cfg = cfg or {}
+    return _worker_run_options(
+        int(max_turns or cfg.get("max_turns") or 40), source=NAME,
+        extra_disallowed=list(TURN_ENVELOPES["stage-b-writer"]))
+
+
+def paper_run_options(cfg: dict | None = None, max_turns: int | None = None):
+    """The PAPERS child's turn options: its own deny plus every egress verb."""
+    cfg = cfg or {}
+    return _worker_run_options(
+        int(max_turns or cfg.get("max_turns") or 40), source=NAME,
+        extra_disallowed=list(TURN_ENVELOPES["paper-note-turn"]))
+
+
+def handoff_dir(video_id: str) -> Path:
+    """Where this video's stage-A document lives."""
+    return VAULT_PENDING_RESEARCH_DIR / NAME / "stage-a" / str(video_id)
+
+
+def _stage_b_payload(meta: dict, note_path: Path, document: str, verdict: str,
+                     relevance: int | None) -> dict:
+    """The declared payload from the bundle's own metadata — never from the content."""
+    return {
+        "video_id": str(meta.get("video_id") or ""),
+        "title": str(meta.get("title") or ""),
+        "url": str(meta.get("url") or ""),
+        "channel_key": str(meta.get("channel_key") or ""),
+        "published": str(meta.get("published") or ""),
+        "target_note": str(note_path),
+        "note_document": document,
+        "verdict": str(verdict or ""),
+        "open_questions_path": str(handoff_dir(str(meta.get("video_id") or ""))
+                                   / "open-questions.json"),
+        "relevance": relevance if isinstance(relevance, int) and not isinstance(
+            relevance, bool) else -1,
+    }
+
+
+def _handoff_refusal(payload: dict, video_id: str,
+                     min_bytes: int = _MIN_NOTE_BYTES) -> str:
+    """Why this payload may NOT be written, or "" when it may.
+
+    Every check is a fact the writer stage can verify from the document itself, because
+    that is the value of the handoff: stage B does not trust stage A's prose, it
+    re-reads the artifact. `_MIN_NOTE_BYTES` is the source's own on-disk floor, so a
+    stub cannot pass the gate here and then fail the census there — and a document
+    whose `video_id` is not THIS bundle's is the one wrong-write shape that matters
+    most: the item's whole claim is that the write target is chosen without the
+    payload in the room.
+    """
+    for field in HANDOFF_FIELDS:
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return f"handoff_missing_field:{field}"
+    for field in HANDOFF_INT_FIELDS:
+        value = payload.get(field)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return f"handoff_bad_type:{field}"
+        if field == "relevance" and not -1 <= value <= 100:
+            return f"handoff_out_of_range:{field}"
+    if payload["video_id"] != str(video_id):
+        return f"handoff_video_id_mismatch:{payload['video_id']}"
+    document = payload["note_document"]
+    if not document.lstrip().startswith("---"):
+        return "handoff_no_front_matter"
+    if len(document.encode("utf-8")) < min_bytes:
+        return f"handoff_note_too_short:{len(document.encode('utf-8'))}"
+    return ""
+
+
+def write_handoff(video_id: str, payload: dict) -> tuple[Path, str]:
+    """Stage A's output → the named artifact. Returns (path, refusal); a refusal wins.
+
+    Validated BEFORE the write, so a document that could never be landed is not left on
+    disk for a later run to mistake for a handoff.
+    """
+    path = handoff_dir(video_id) / HANDOFF_FILENAME
+    refusal = _handoff_refusal(payload, video_id)
+    if refusal:
+        return path, refusal
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": HANDOFF_SCHEMA_VERSION, "source": NAME,
+                                "stage": STAGE_A_NAME, "payload": payload},
+                               ensure_ascii=False), encoding="utf-8")
+    return path, ""
+
+
+def read_handoff(video_id: str) -> tuple[dict, str]:
+    """Read and re-validate stage B's input. Returns (payload, refusal).
+
+    The three shapes are the three ways a producer can lie — it wrote nothing, it wrote
+    something unparseable, it wrote JSON that is not the declared payload — and each
+    gets its own token so the run record says which. None of them is "write something
+    anyway": that is the failure mode this whole seam exists to make impossible, and the
+    reason this returns a refusal rather than a best-effort dict.
+    """
+    path = handoff_dir(video_id) / HANDOFF_FILENAME
+    if not path.is_file():
+        return {}, f"handoff_absent:{path}"
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 — every parse failure is the same refusal
+        return {}, f"handoff_unparseable:{type(exc).__name__}"
+    if not isinstance(obj, dict) or not isinstance(obj.get("payload"), dict):
+        return {}, "handoff_not_an_object"
+    payload = obj["payload"]
+    refusal = _handoff_refusal(payload, video_id)
+    if refusal:
+        return {}, refusal
+    return payload, ""
+
+
+def _note_document(text: str) -> str:
+    """The note body stage A was asked to hand over, or "" when it did not emit one."""
+    m = _NOTE_FENCE_RE.search(text or "")
+    return m.group(1).rstrip() if m else ""
+
+
+def _stage_a_footer(note_path: Path) -> str:
+    """What stage A is told instead of "write the note": emit it, do not write it.
+
+    Appended to the digest prompt after the skill's own instructions, so the reader
+    stage's deny cannot surprise it: the skill body still names `Write`, and the footer
+    says in one place that the tool is not reachable here and what to do instead.
+    """
+    return ("\n\n---\n\n"
+            "## NOTE_DOCUMENT\n\n"
+            "You have NO file-write tool on this turn, and you must not try to use one: "
+            "this is the READER half of a two-stage digest (#2932). A separate writer "
+            "turn, with no web access and no view of this transcript, lands the file. So "
+            "emit the complete note as your last section, inside a fenced code block, "
+            "verbatim — front matter included, the `video_id:` line matching this bundle "
+            f"exactly, `## Open Questions` last inside it, and nothing after the fence. "
+            f"It is the same document you would have written to {note_path}. Anything you "
+            "leave out of that block is lost: no one can ask you again.\n")
+
+
+def _stage_b_prompt(payload: dict, path: Path) -> str:
+    """Stage B's whole prompt: the named artifact, the declared fields, the rules.
+
+    Deliberately short and deliberately not the digest. No `transcript_path`, no
+    `text_path`, no skill body and no channel profile — the only text this context can
+    put into a file is text that already survived validation.
+    """
+    return (
+        f"{HANDOFF_MARK}\n\n"
+        "You are the WRITER half of a two-stage YouTube digest (#2932). You have no web "
+        "access on this turn and you must not ask for any: what you are about to write "
+        "was read from the artifact named below, not fetched by you, and you cannot "
+        "check it against the source. That is the point — the turn that read the "
+        "third-party transcript has no write tool, and this turn has no reader tools.\n\n"
+        f"Artifact: {path}\n\n"
+        "Declared payload (already schema-validated: fields present, front matter, "
+        "minimum size, video_id matches this bundle):\n"
+        + "".join(f"- {key}: {payload[key]}\n" for key in
+                  ("video_id", "title", "url", "channel_key", "published", "verdict",
+                   "relevance", "open_questions_path", "target_note")) +
+        "\nDo exactly this:\n"
+        f"1. Read {path} and take `payload.note_document` from it.\n"
+        f"2. Write it verbatim to {payload['target_note']} with the Write tool. Do not "
+        "rewrite, shorten, translate or improve it, and do not add a line of your own.\n"
+        "3. Reply with the single word: written\n\n"
+        "If that file is missing, unparseable, or has no `note_document`, write NOTHING "
+        "and do not reconstruct a note from the fields above — reply `refused` and name "
+        "the reason. A missing note is a failure someone can re-run; a note assembled "
+        "from a summary is a file that looks like a digest and is not one.\n")
+
+
+async def _run_writer_stage(payload: dict, path: Path, *, max_turns: int,
+                            title: str, priority: int, item_id: int | None = None,
+                            finalizer=None):
+    """Dispatch stage B on its OWN fresh session and return the turn dict.
+
+    A fresh session, not stage A's: a session that carried the reader turn would carry
+    the transcript into the writing context and undo the split under a new label.
+    """
+    return await run_prompt_in_session(
+        _stage_b_prompt(payload, path), title=f"{title} [stage B]", source=NAME,
+        max_turns=max_turns, priority=priority,
+        # The deny travels as `extra_disallowed`, because that is the only route this
+        # helper has into `_pre_dispatch` — it takes no `run_options`, and passing one
+        # would raise `TypeError` on the first real digest (invisible to every fake in
+        # the test file, which accepts `**kwargs`). `writer_run_options` compiles the
+        # same union the census measures, and the node in
+        # `tests/test_youtube_digest_source.py` pins that the two agree.
+        extra_disallowed=list(TURN_ENVELOPES["stage-b-writer"]))
