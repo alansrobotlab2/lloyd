@@ -88,22 +88,29 @@ names: one scan per category (`plan_entity` → `_rescan_by_category`), the cate
 taken from the rows of the refused read rather than from a file listing, so the
 facts planned against and the facts scanned cannot disagree. The bound is not
 raised — each piece goes through the same check, and a category over 50 is skipped
-and named in `categories_skipped`. Cost falls with the coverage: Σn_c² ≤ 50·n
-comparisons against n², which is what took 113 seconds on `Lloyd`. The ratio moves
-with every re-extraction, so read it as a shape and not a figure: on 2026-09-21
-`QMD` was 5.5 million whole-entity pairs against 208 partitioned; re-measured
-2026-10-18 by counting `^- entity:` rows per category file it is 1,028 facts over
-8 files, of which `state` (579) and `event` (413) are over the bound and skipped —
-36 facts across 6 files scanned, ~195 comparisons against ~527,000 whole. That is
-3.5% of the entity, and the record says which categories were skipped by name but
-never how many facts they held, so a small `pairs_before` on a hub cannot be told
-apart from a clean one (#3007). What the
+and named in `categories_skipped`, its size kept alongside in `facts_excluded`.
+Cost falls with the coverage: Σn_c² ≤ 50·n comparisons against n², which is what
+took 113 seconds on `Lloyd`. Cost is not the figure a scan's reach is read from,
+though: a whole-entity pair count is quadratic in a fact count that moves with
+every re-extraction, so a hub's coverage is stated as a fraction of its facts.
+`QMD`, re-measured 2026-10-18 by counting `^- entity:` rows per category file, is
+1,028 facts over 8 files, of which `state` (579) and `event` (413) sit over the
+bound and are skipped — **36 of 1,028 facts scanned, 3.5% of the entity**. That
+fraction is what the plan and the record now publish, as `facts_excluded` and
+`facts_total` on the row and as a `facts scanned=N of M` percentage on the CLI
+line, because until #3007 the record named the skipped categories and published
+their pair counts while their sizes went unread: the 2026-10-18 pass covered 442
+of 1,638 facts across its partial rows — 27.0% — and printed a number that could
+only be read as a quiet tree. What the
 partition cannot do is pair a fact with one in a *different* category, which is why
 it runs only on the refusal path: an entity at or under the bound is still scanned
 whole, and an entity that reaches the retry had nothing scanned at all before. The
-plan and the record therefore carry `scan_scope` (`entity` / `by_category`) and
-`categories_skipped` — after #1251, `refused: false` no longer means "scanned
-whole", and only those two fields say which it was.
+plan and the record therefore carry `scan_scope` (`entity` / `by_category`),
+`categories_skipped`, and the fact denominator `facts_excluded` and `facts_total` —
+after #1251, `refused: false` no longer means "scanned whole", and only those three
+say which it was. A refused entity is the one shape where `checked` is not
+coverage: it is the size of the read that was never scanned, so the plan counts it
+as excluded and nothing as scanned.
 
 Two bounds sit under the evidence rules — `MAX_ACTIONS_PER_ENTITY = 5`, applied
 by `plan_entity` to one entity's plan, and `MAX_ACTIONS_PER_RUN = 25`, the budget

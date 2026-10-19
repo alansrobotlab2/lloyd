@@ -162,6 +162,26 @@ def main() -> int:
         if total is not None and corpus:
             scanned += (f" ({total}/{corpus} entity dirs = "
                         f"{100.0 * total / corpus:.2f}% of the corpus)")
+        # Facts, not entities (#3007): `entities scanned=40 of 1,383` says where
+        # the fraction was taken, not how much of it was read. The 2026-10-18 pass
+        # scanned 40 entities and, across its 9 partial ones, 442 of 1,638 facts —
+        # 27.0% — and printed none of that, so a hub covered at 3.5% and an entity
+        # scanned whole both read as "scanned". The fact fraction goes on this SAME
+        # stdout line, on the rule #1383 states for the store verdict: a caveat
+        # printed on another line is the false green again. A refused entity is not
+        # in the numerator, because on such a row `checked` is the size of the read
+        # that was never scanned (`facts.py` returns `checked=len(facts)` with
+        # `refused: True`) and counting it would present a refusal as 100%
+        # coverage. When nothing at all was scanned no fraction prints at all:
+        # there is nothing to divide, and a printed 0.0% over real totals would read
+        # as a coverage that was measured rather than an absence of one.
+        if n_scanned:
+            facts_scanned = sum(e.get("checked", 0) for e in rec["per_entity"]
+                                if not e.get("refused"))
+            facts_total = sum(e.get("facts_total") or 0 for e in rec["per_entity"])
+            if facts_total:
+                scanned += (f" facts scanned={facts_scanned:,} of {facts_total:,}"
+                            f" = {100.0 * facts_scanned / facts_total:.1f}%")
         if refused:
             scanned += f" refused={len(refused)} ({', '.join(refused)})"
         print(f"[{mode}] signals={rec['signals']} {scanned}"

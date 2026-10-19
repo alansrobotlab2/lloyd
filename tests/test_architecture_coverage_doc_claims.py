@@ -6172,3 +6172,81 @@ def test_the_persistence_page_keeps_the_two_denominators_apart():
     assert "`n=1`" in flat, (
         "the 2026-10-04 baseline's 3/6 is one control row, and comparing it to a 60-token "
         "window is the cross-denominator read this node exists to refuse")
+
+
+# ── #3007: memory.md §2 reads a hub's scan as a fraction of its facts ───────
+#
+# §2 of `architecture/memory.md` is the page the apply-mode decision is argued
+# from, and until #3007 the figure it led with was a whole-entity pair count —
+# quadratic in a fact count that moves with every re-extraction, which is why the
+# same passage carried two irreconcilable readings of one entity three weeks
+# apart. The clause this node pins is that the page states a hub's reach as a
+# fraction of its facts, and that the retired pair-count figures stay out of the
+# page and out of the code that quotes them.
+
+#: The coverage figure §2 has to lead with, and the retired readings of the same
+#: entity: pair counts and the fact counts that produced them, from both the
+#: 2026-09-20 and the 2026-10-18 pass.
+_HUB_FRACTION = "36 of 1,028 facts"
+_RETIRED_HUB_READINGS = ("~195", "527,000", "5.5 million", "208 partitioned",
+                         "3,321", "13 categories")
+
+
+def _memory_section_2() -> str:
+    """§2 of `architecture/memory.md`, flattened.
+
+    Selected by its section number and not by its wording, so a re-titled heading
+    fails here loudly instead of silently narrowing the graded window to nothing —
+    the empty-extraction trap this file's header names for every extractor it
+    carries.
+    """
+    sections = _h2_sections((ARCH / "memory.md").read_text(encoding="utf-8"))
+    hits = [head for head in sections if head.startswith("2.")]
+    assert len(hits) == 1, f"§2 of memory.md resolved to {hits}, not exactly one section"
+    body = _flat(sections[hits[0]])
+    assert body, "§2 of memory.md read back empty"
+    return body
+
+
+def _reads_as_a_fact_fraction(body: str) -> bool:
+    """The rule as a predicate, so the node below can demonstrate it failing on
+    text this file writes rather than only on text the doc happens to carry."""
+    return (_HUB_FRACTION in body
+            and not any(stale in body for stale in _RETIRED_HUB_READINGS))
+
+
+def test_memory_doc_reads_a_hub_scan_as_a_fraction_of_its_facts():
+    """#3007 clause 5, both halves: the page leads with the fraction, and the
+    retired QMD measurement is gone from the code that repeated it.
+
+    The 2026-09-20 reading of `QMD` (3,321 facts over 13 categories) and its
+    pair-count arithmetic survived in `fact_improvement.py`'s own docstring a month
+    after `architecture/memory.md` was corrected to 1,028 over 8 — the doc and the
+    code restating it drifted apart, which is the second half of this clause and
+    the reason the assertion below reads the module and not only the doc.
+    """
+    body = _memory_section_2()
+    assert _reads_as_a_fact_fraction(body), body[:900]
+    # A fraction has to name what it is a fraction of, or "3.5%" is the same
+    # denominator-less figure #3007 was filed for, one level up the page.
+    assert "1,028" in body and "3.5%" in body, body[:900]
+    # Every field the passage now cites has to be a field the code emits, or the
+    # rewrite has replaced a figure that moved with one that does not exist.
+    fi_src = (ROOT / "agent_mcp" / "fact_improvement.py").read_text(
+        encoding="utf-8", errors="replace")
+    for field in ("facts_excluded", "facts_total", "categories_skipped", "scan_scope"):
+        assert field in fi_src, (
+            f"§2 cites {field}, but agent_mcp/fact_improvement.py no longer emits it")
+    cli_src = (ROOT / "scripts" / "memory" / "fact-improvement.py").read_text(
+        encoding="utf-8", errors="replace")
+    assert "facts scanned=" in cli_src, (
+        "§2 points at the CLI's fact fraction; the CLI no longer prints one")
+    for stale in ("3,321", "13 categories"):
+        assert stale not in fi_src, (
+            f"the retired 2026-09-20 QMD figure {stale!r} is back in the planner")
+    # Can this node fail? Two mutations of the page's own text, both written here:
+    # put a retired pair count back, and take the fraction out. Each has to be
+    # rejected, or the assertions above are matching nothing.
+    assert not _reads_as_a_fact_fraction(
+        body + " ~195 comparisons against ~527,000 whole")
+    assert not _reads_as_a_fact_fraction(body.replace(_HUB_FRACTION, "some facts"))

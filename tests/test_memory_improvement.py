@@ -1649,8 +1649,240 @@ def test_cli_summary_counts_and_names_the_refusals(world, capsys, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["fact-improvement.py", "--entity", "GODNODE", "--entity", "CLEAN"])
     assert cli.main() == 0
     out = capsys.readouterr().out
-    assert "entities scanned=1 refused=1 (GODNODE)" in out, out
+    # Asserted in two parts on one line, not as one contiguous substring. #3007
+    # clause 4 puts the fact fraction between the entity count and the refusal list
+    # — "… entities scanned=1 facts scanned=3 of 54 = 5.6% refused=1 (GODNODE) …" —
+    # so the contiguity this assertion used to require is no longer the line's
+    # shape. What the node exists to pin is unchanged and still asserted in full:
+    # the refusal comes OFF the entity count, is named, and both land on the same
+    # stdout line a nightly report quotes. Asserting the same-line join is strictly
+    # more than the substring did, since it also fails if either half moves to
+    # another line.
+    line = next((ln for ln in out.splitlines() if "entities scanned=" in ln), "")
+    assert "entities scanned=1" in line, out
+    assert "refused=1 (GODNODE)" in line, out
     assert "entities scanned=2" not in out, out
+
+
+# ── #3007: a partial scan publishes its fact denominator ────────────────────
+#
+# Since #1251 an entity too large for one pairwise scan is scanned in
+# category-sized pieces, and a category over `FACT_GODNODE_THRESHOLD` is skipped
+# and named. The names were published; the sizes were computed to decide the skip
+# and then thrown away (`_rescan_by_category` sizes `groups[category]`, keeps only
+# the name). So the live 2026-10-18 record printed `Voice` 17 and `SKILL.md` 96
+# beside entities scanned whole, and the aggregate `checked` over its 9 partial
+# rows was 442 of 1,638 facts — 27.0% — with nothing on the row saying so.
+#
+# These nodes pin the denominator that comes off the SAME per-category read that
+# names the skipped categories: `facts_excluded` and `facts_total` on the plan, on
+# the run record's row beside `checked` and `pairs_before`, and as a fact fraction
+# on the CLI line beside the entity fraction. No new "facts scanned" number is
+# added: `checked` is already the facts the detector read, so a second field would
+# be a second source for one figure.
+
+def _write_facts_named_rows(root, entity, file_category, row_category, n):
+    """A facts file whose NAME says one category and whose ROWS say another.
+
+    `_facts_by_category` groups on the row's own `category` key, the same way the
+    display path does, so the partition the retry walks is a property of the read
+    and not of the directory listing. Writing name and rows apart is the only way
+    a test can tell those two sources apart: an implementation that enumerated
+    `FACTS_ROOT/<entity>/*.md` would name and size `file_category`, while every
+    assertion in the node below follows `row_category`.
+    """
+    d = root / entity
+    d.mkdir(parents=True, exist_ok=True)
+    rows = [{"fact": f["fact"], "confidence": 0.9, "category": row_category,
+             "id": f"{row_category[:4]}-{i:03d}", "invalid_at": None,
+             "expired_at": None, "provenance": "STATED",
+             "created_at": f["created_at"], "valid_at": f["created_at"],
+             "source_doc": None}
+            for i, f in enumerate(_filler(entity, n), start=1)]
+    fm = {"type": "facts", "entity": entity, "category": file_category, "facts": rows}
+    (d / f"{entity}-{file_category}.md").write_text(
+        f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {entity}\n", encoding="utf-8")
+
+
+def _file_row_count(path):
+    """How many fact rows one facts file carries, read back off its bytes."""
+    return len(yaml.safe_load(path.read_text(encoding="utf-8").split("---")[1])["facts"])
+
+
+def test_an_entity_scanned_whole_publishes_no_excluded_facts(world):
+    """#3007 clause 1, whole-entity shape: nothing was set aside, so the total IS
+    the scanned count — the shape that makes a partial row's fraction legible by
+    contrast."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "SMALL", "state", _filler("SMALL", 3))
+    _write_facts(facts_root, "SMALL", "event", _filler("SMALL", 2))
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("SMALL")
+    assert plan["refused"] is False and plan["scan_scope"] == "entity", plan
+    assert plan["checked"] == 5, plan
+    assert plan["facts_excluded"] == 0, plan
+    assert plan["facts_total"] == plan["checked"] == 5, plan
+
+
+def test_a_partial_scan_publishes_the_facts_it_never_read(world):
+    """#3007 clause 1, partial `by_category` shape: 4 facts scanned out of 114, so
+    the row has to say 110 excluded and 114 total. A `pairs_before` of 0 here was
+    indistinguishable from the clean entity in the node above."""
+    facts_root, st, _ = world
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD as BOUND
+    _write_facts(facts_root, "HUB", "state", _filler("HUB", BOUND + 7))   # 57, skipped
+    _write_facts(facts_root, "HUB", "event", _filler("HUB", BOUND + 3))   # 53, skipped
+    _write_facts(facts_root, "HUB", "general", _filler("HUB", 4))         # 4, scanned
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("HUB")
+    assert plan["refused"] is False and plan["scan_scope"] == "by_category", plan
+    assert plan["categories_skipped"] == ["event", "state"], plan
+    assert plan["checked"] == 4, plan
+    assert plan["facts_excluded"] == (BOUND + 7) + (BOUND + 3) == 110, plan
+    assert plan["facts_total"] == plan["checked"] + plan["facts_excluded"] == 114, plan
+    # Clause 3's third limb, checked against the files rather than the plan: every
+    # category the row names contributes more than `FACT_GODNODE_THRESHOLD` facts,
+    # so a name in `categories_skipped` is always a bound decision and never a
+    # category that simply went missing from the read — which would otherwise make
+    # `facts_excluded` understate the entity while still looking well-formed.
+    for name in plan["categories_skipped"]:
+        n = _file_row_count(facts_root / "HUB" / f"HUB-{name}.md")
+        assert n > BOUND, (name, n, BOUND)
+
+
+def test_a_refused_entity_reports_its_size_as_excluded_never_as_scanned(world):
+    """#3007 clause 1, refused shape — the trap the new field has to handle.
+
+    On a refused row `checked` is NOT the facts scanned: it is the size of the read
+    that was not scanned (`facts.py` returns `checked=len(facts)` with
+    `refused: True`). A fraction that used `checked` as its numerator there would
+    report 100% coverage of an entity it never compared, which is the same "did not
+    measure recorded as measured zero" error the god-node partition exists to
+    remove. So excluded = `checked` and nothing counts as scanned here.
+
+    `categories_skipped` stays empty on this path: the entity-level refusal stands
+    (`skipped_reason` quotes it) because no scope at all could scan the entity, so
+    the refusal flag is the qualifier `facts_excluded` reads against, not a
+    category list.
+    """
+    facts_root, st, _ = world
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD as BOUND
+    _write_facts(facts_root, "GOD", "state", _filler("GOD", BOUND + 1))   # 51
+    _write_facts(facts_root, "GOD", "event", _filler("GOD", BOUND + 9))   # 59
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("GOD")
+    assert plan["refused"] is True, plan
+    assert plan["checked"] == 110 == plan["facts_excluded"], plan
+    assert plan["facts_total"] == 110, plan
+    assert plan["categories_skipped"] == [] and plan["skipped_reason"], plan
+
+
+def test_the_run_record_row_shows_the_facts_it_skipped_beside_its_pair_count(world):
+    """#3007 clause 2: the nightly JSON is the artifact the apply-mode decision is
+    argued from, so numerator and denominator have to sit on the one row that also
+    carries `checked` and `pairs_before` — a reader of that row alone must not have
+    to re-walk the facts tree to know what the count covers."""
+    facts_root, st, _ = world
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD as BOUND
+    _write_facts(facts_root, "HUB", "state", _filler("HUB", BOUND + 7))
+    _write_facts(facts_root, "HUB", "general", _filler("HUB", 4))
+    _write_facts(facts_root, "SMALL", "state", _filler("SMALL", 3))
+    _reindex(st, facts_root)
+    rec = fi.run_improvement(entities=["HUB", "SMALL"])
+    entries = {e["entity"]: e for e in _persisted_record(rec)["per_entity"]}
+    hub, small = entries["HUB"], entries["SMALL"]
+    for key in ("checked", "pairs_before", "facts_excluded", "facts_total",
+                "scan_scope", "categories_skipped"):
+        assert key in hub and key in small, (key, sorted(hub))
+    assert hub["scan_scope"] == "by_category" and hub["categories_skipped"] == ["state"]
+    assert (hub["checked"], hub["facts_excluded"], hub["facts_total"]) == (4, 57, 61), hub
+    assert (small["checked"], small["facts_excluded"], small["facts_total"]) == (3, 0, 3), small
+
+
+def test_facts_excluded_is_counted_from_the_read_and_not_from_the_store(world):
+    """#3007 clause 3, first half: the denominator is the read's, not the index's.
+
+    The two are made to disagree on purpose — the second category file is written
+    AFTER the reindex, so `facts_idx` still reports 61 active facts while the read
+    the plan is built on holds 114. A store-sourced `facts_total` would come back
+    61, and the store's own count already sits on the row as `before_active`: two
+    denominators from two readers is the drift this clause refuses.
+    """
+    facts_root, st, _ = world
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD as BOUND
+    _write_facts(facts_root, "HUB", "general", _filler("HUB", 4))
+    _write_facts(facts_root, "HUB", "state", _filler("HUB", BOUND + 7))
+    _reindex(st, facts_root)
+    assert _active(st, "HUB") == 61, "fixture: the index saw only the first two files"
+    _write_facts(facts_root, "HUB", "event", _filler("HUB", BOUND + 3))
+    plan = fi.plan_entity("HUB")
+    assert plan["facts_total"] == 114, plan
+    assert plan["facts_total"] != _active(st, "HUB") == 61, plan
+    assert plan["before_active"] == 61, plan
+
+
+def test_the_excluded_count_follows_the_rows_not_the_file_names(world):
+    """#3007 clause 3, second half: the count and the names come from one read.
+
+    The over-bound rows live in `HUB-phantom.md` but carry `category: merged`, and
+    the grouping the retry walks is the rows'. An `facts_excluded` summed from a
+    listing of the entity's files would attribute those 57 to `phantom`, so the new
+    count and `categories_skipped` would disagree while both looked plausible. Each
+    named category is also asserted over the bound here — 57 > 50 — which is what
+    makes a skip a bound decision rather than a category that went missing.
+    """
+    facts_root, st, _ = world
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD as BOUND
+    _write_facts_named_rows(facts_root, "HUB", "phantom", "merged", BOUND + 7)
+    _write_facts(facts_root, "HUB", "general", _filler("HUB", 4))
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("HUB")
+    assert plan["categories_skipped"] == ["merged"], plan
+    assert "phantom" not in plan["categories_skipped"], plan
+    assert plan["facts_excluded"] == BOUND + 7 == 57, plan
+    assert plan["facts_total"] == 61 and plan["checked"] == 4, plan
+
+
+def test_cli_line_prints_the_fact_fraction_beside_the_entity_fraction(world, capsys, monkeypatch):
+    """#3007 clause 4: `entities scanned=40 of 1,383 drift candidates` is an entity
+    count, and an entity is where the fraction was taken, not how much of it was
+    read. The fact fraction goes on the SAME stdout line, because a caveat on a
+    second line is the false green #1383 already names for the store verdict."""
+    facts_root, st, _ = world
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD as BOUND
+    _write_facts(facts_root, "HUB", "state", _filler("HUB", BOUND + 7))   # 57 skipped
+    _write_facts(facts_root, "HUB", "general", _filler("HUB", 4))         # 4 scanned
+    _reindex(st, facts_root)
+    spec = importlib.util.spec_from_file_location("fact_improvement_cli_cov", _SCRIPT_PATH)
+    cli = importlib.util.module_from_spec(spec)
+    sys.modules["fact_improvement_cli_cov"] = cli
+    spec.loader.exec_module(cli)
+    monkeypatch.setattr(sys, "argv", ["fact-improvement.py", "--entity", "HUB"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    assert "entities scanned=1 facts scanned=4 of 61 = 6.6%" in out, out
+    line = next((ln for ln in out.splitlines() if "entities scanned=" in ln), "")
+    assert "facts scanned=" in line, out
+
+
+def test_cli_prints_no_fact_fraction_when_nothing_was_scanned(world, capsys, monkeypatch):
+    """#3007 clause 4, the zero case: every entity refused. Each refused row still
+    carries a `facts_total`, so a naive aggregate would divide 0 by a real total and
+    print 0.0% as though it had measured a coverage rather than an absence. No
+    fraction is printed, and the refusal is named, as #702 requires."""
+    facts_root, st, _ = world
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD as BOUND
+    _write_facts(facts_root, "GODNODE", "state", _filler("GODNODE", BOUND + 1))
+    _reindex(st, facts_root)
+    spec = importlib.util.spec_from_file_location("fact_improvement_cli_cov_none", _SCRIPT_PATH)
+    cli = importlib.util.module_from_spec(spec)
+    sys.modules["fact_improvement_cli_cov_none"] = cli
+    spec.loader.exec_module(cli)
+    monkeypatch.setattr(sys, "argv", ["fact-improvement.py", "--entity", "GODNODE"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    assert "facts scanned=" not in out, out
+    assert "entities scanned=0 refused=1 (GODNODE)" in out, out
 
 
 def test_run_with_no_signals_changes_nothing(world):

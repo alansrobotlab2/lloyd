@@ -1749,10 +1749,15 @@ def _rescan_by_category(entity: str, facts_view: list[dict]) -> dict:
     refuses a piece larger than `FACT_GODNODE_THRESHOLD`, so a category over the
     bound is skipped and named instead of scanned. The cost follows: the
     whole-entity scan is n² comparisons, the partition is Σn_c² ≤
-    `FACT_GODNODE_THRESHOLD` × n — linear in the entity, not quadratic. `QMD`
-    (3,321 live facts, 5 of its 13 categories over the bound) goes from 5.5 M
-    comparisons to a few hundred, against the 15 M that took 113 seconds on
-    `Lloyd` measured in `facts.py`.
+    `FACT_GODNODE_THRESHOLD` × n — linear in the entity, not quadratic. What that
+    buys in coverage, not cost, is what `facts_excluded` and `facts_total` carry:
+    `QMD` measured on the derived tree 2026-10-18 is 1,028 facts over 8 category
+    files, `state` (579) and `event` (413) over the bound and skipped, so the
+    partition reads 36 of 1,028 facts — 3.5% of the entity. The pair counts that
+    same entity produced on earlier readings are deliberately not quoted here:
+    a whole-entity pair count is C(n,2) in a number that moves with every
+    re-extraction, which is exactly why coverage is stated as a fraction of facts
+    and #3007 filed the pair count as unreadable.
 
     What the partition cannot do is pair a fact with one in a *different*
     category, so this is a coverage change and not only a cost change. That is why
@@ -1761,26 +1766,39 @@ def _rescan_by_category(entity: str, facts_view: list[dict]) -> dict:
     here had nothing scanned at all before — it loses no pair it ever had.
 
     Returns a detection-shaped dict so the pair-handling in `plan_entity` below is
-    untouched, plus the two lists that make the result readable:
-    `categories_scanned` (what the numbers cover) and `categories_skipped` (what
-    they do not). `refused` is True only when nothing at all could be scanned.
+    untouched, plus the fields that make the result readable:
+    `categories_scanned` (what the numbers cover), `categories_skipped` (what they
+    do not) and `facts_excluded` — the facts in the skipped categories, so the
+    names come with a denominator (#3007). `refused` is True only when nothing at
+    all could be scanned.
     """
     groups = _facts_by_category(facts_view)
     scanned: list[str] = []
     skipped: list[str] = []
     contradictions: list[dict] = []
     checked = 0
+    excluded = 0
     for category in sorted(groups):
         piece = _detect_contradictions_sync(entity, category, facts=groups[category])
         if piece.get("refused"):
+            # The size is read off `groups[category]` — the very list whose refusal
+            # produced the name two lines below — and not off a file listing or the
+            # fact store (#3007). Naming a skipped category while its size went
+            # unread is what let a hub scanned at 3.5% of its facts publish a
+            # `pairs_before` that read as a clean entity, and a count taken from a
+            # second source could disagree with the names while both looked
+            # plausible. Every category reaching here is over the bound by
+            # construction, since the bound is what refused it.
             skipped.append(category)
+            excluded += len(groups[category])
             continue
         contradictions.extend(piece.get("contradictions", []))
         checked += piece.get("checked", 0)
         scanned.append(category)
     return {"entity": entity, "category": None, "contradictions": contradictions,
             "checked": checked, "refused": not scanned,
-            "categories_scanned": scanned, "categories_skipped": skipped}
+            "categories_scanned": scanned, "categories_skipped": skipped,
+            "facts_excluded": excluded}
 
 
 def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
@@ -1844,6 +1862,10 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
     scan_scope = SCAN_ENTITY
     categories_scanned: list[str] = []
     categories_skipped: list[str] = []
+    # Facts set aside by the bound. 0 for a whole-entity scan — nothing was
+    # skipped, so `facts_total` below equals `checked` and the whole-scan row is
+    # visibly the 100% case a partial row is measured against (#3007).
+    facts_excluded = 0
     if detection.get("refused"):
         retry = _rescan_by_category(entity, facts_view)
         if not retry["categories_scanned"]:
@@ -1851,10 +1873,22 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
             # threshold exists for. The entity-level refusal stands exactly as it
             # was — nothing about this entity is scanable, so there is no partial
             # coverage to report and no scope to name beyond the refusal.
-            return {"entity": entity, "refused": True, "checked": detection.get("checked", 0),
+            # `checked` on this branch is the size of the read that was NOT
+            # scanned (`facts.py` returns `checked=len(facts)` with `refused:
+            # True`), so it goes to `facts_excluded` and nothing counts as
+            # scanned (#3007). A fraction that read `checked` as coverage would
+            # report 100% of an entity it never compared — the same "did not
+            # measure recorded as measured zero" error the partition exists to
+            # remove, arriving from the other side. `categories_skipped` stays
+            # empty because the entity-level refusal stands: no scope could scan
+            # it, so `refused` and `skipped_reason` are the qualifier this number
+            # reads against, not a category list.
+            refused_size = detection.get("checked", 0)
+            return {"entity": entity, "refused": True, "checked": refused_size,
                     "contradictions": 0, "actions": [],
                     "scan_scope": SCAN_ENTITY,
                     "categories_scanned": [], "categories_skipped": [],
+                    "facts_excluded": refused_size, "facts_total": refused_size,
                     "before_active": _active_count(entity),
                     "skipped_reason": detection.get("hint", "entity too large to scan")}
         # Some part of the entity was scanned. `refused` stays False for it and
@@ -1865,6 +1899,7 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
         scan_scope = SCAN_BY_CATEGORY
         categories_scanned = retry["categories_scanned"]
         categories_skipped = retry["categories_skipped"]
+        facts_excluded = retry["facts_excluded"]
 
     contradictions = detection.get("contradictions", [])
     # The lineage flag goes on EVERY pair the detector returned, before the
@@ -2093,7 +2128,17 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
             # refusal, which reports `refused: True` with no scope to name.
             "scan_scope": scan_scope,
             "categories_scanned": categories_scanned,
-            "categories_skipped": categories_skipped}
+            "categories_skipped": categories_skipped,
+            # The denominator the names need (#3007). `categories_skipped` says
+            # which files the bound set aside; these two say how much of the
+            # entity that was, over the same per-category read: `facts_total` is
+            # `checked` (the facts the detector actually compared) plus
+            # `facts_excluded`, so a hub whose 36 scanned facts sit against 992
+            # excluded ones can no longer be read as an entity scanned whole and
+            # found clean. `before_active` beside it is the index's own count and a
+            # different reader of a different tree — deliberately not this total.
+            "facts_excluded": facts_excluded,
+            "facts_total": detection.get("checked", 0) + facts_excluded}
 
 
 # ── applying a plan (through the existing writers) ───────────────────────────
@@ -2528,6 +2573,20 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
                  "lineage_withheld": None if plan["refused"] else plan.get("lineage_withheld", 0),
                  "refused": plan["refused"],
                  "checked": plan.get("checked", 0),
+                 # The facts the pair counts were computed over, and the facts
+                 # they were not (#3007). Both sit on this row beside `checked` and
+                 # `pairs_before`, so one row read out of the nightly JSON shows
+                 # its own numerator and denominator and a 27%-covered hub stops
+                 # reading as a clean entity. `facts_excluded` is the plan's, from
+                 # the same per-category read that produced `categories_skipped`
+                 # below it — never a store count, which the row already carries
+                 # separately as `before_active`. On a refused row `checked` is the
+                 # size of the read that was NOT scanned, so `facts_excluded`
+                 # repeats it and nothing counts as scanned; that inversion is why
+                 # the CLI's aggregate fraction skips refused rows rather than
+                 # dividing by them.
+                 "facts_excluded": plan.get("facts_excluded", 0),
+                 "facts_total": plan.get("facts_total", 0),
                  "skipped_reason": plan.get("skipped_reason") if plan["refused"] else None,
                  # Coverage, carried from the plan. `refused: False` stopped
                  # meaning "scanned whole" the moment an over-bound entity could
