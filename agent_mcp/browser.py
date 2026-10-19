@@ -1062,7 +1062,9 @@ async def _capture_state(tool_name: str) -> dict | None:
     """Build one Browser-tab frame: the current view plus its a11y refs.
 
     Returns None when no page exists — asking for state right after a tab
-    was closed is normal, not an error worth pushing.
+    was closed is normal, not an error worth pushing. Returns None when the
+    host check cannot answer either (#3043: a guard that raises drops the
+    frame rather than pushing it — see the comment at the check).
 
     JPEG rather than PNG because this travels on every single tool call: the
     same 1280x800 frame measured ~190 KB as PNG against ~15-25 KB here, and
@@ -1073,11 +1075,34 @@ async def _capture_state(tool_name: str) -> dict | None:
         return None
     # A frame is a screenshot plus an accessibility tree; both are page
     # content, and the tab is a surface a human reads. Same rule as snapshot.
+    #
+    # Fails CLOSED on an internal error, which is the opposite of
+    # `_guard_route` above — and deliberately so. That layer is defence in
+    # depth sitting behind the entry-point checks, so its failure mode should
+    # be losing depth; this call *is* the entry-point check for the
+    # screenshot path, the only thing between a LAN device's UI and the
+    # Browser tab. `_frame_sections` decides the same question closed for a
+    # frame of this same push. Losing one frame costs a stale thumbnail until
+    # the next tool call; pushing one that was never checked cannot be
+    # un-pushed, and would carry no mark saying the guard had not answered.
+    url = "<unknown>"
     try:
-        if await _host_block_reason_async(page.url):
-            return None
-    except Exception:
-        pass
+        url = page.url
+        blocked = await _host_block_reason_async(url)
+    except Exception as exc:
+        # `url` is still the sentinel when reading it was itself the raiser —
+        # a page mid-teardown that cannot name its own host is exactly the
+        # case this drops, so the sentinel is the honest thing to log. The
+        # second field is `_guard_route`'s `%s` slot carrying the type as well
+        # as `str(exc)`: a guard exception built with no message — `OSError()`
+        # from a teardown, `KeyError` from a resolver bug — would otherwise
+        # render a line naming nothing, and naming nothing is the gap this
+        # record exists to close.
+        logger.warning("browser: state guard failed closed on %s: %s",
+                       url[:120], f"{type(exc).__name__}: {exc}")
+        return None
+    if blocked:
+        return None
     try:
         shot = await page.screenshot(type="jpeg", quality=72, full_page=False)
     except Exception as exc:

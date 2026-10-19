@@ -684,6 +684,105 @@ async def test_the_mc_frame_carries_nothing_from_a_private_host(monkeypatch):
     assert await browser_module._capture_state("browser_navigate") is None
 
 
+class _GuardFaultPage:
+    """A page that would gladly produce a frame; only the guard can stop it.
+
+    `_LandingPage` has no `screenshot`, so on the path above a refused frame
+    and a stub with no camera look identical. This one counts the calls, which
+    is the only way to see the fail-open: an exception in the guard fell
+    through to `screenshot` and the frame was built anyway (#3043).
+    """
+    def __init__(self, url):
+        self.url = url
+        self.shots = 0
+
+    async def screenshot(self, **kw):
+        self.shots += 1
+        return b"\xff\xd8jpeg-bytes\xff\xd9"
+
+    async def title(self):
+        return "cam"
+
+
+async def _host_check_that_raises(url):
+    """The guard itself exploding — a resolver bug, not a private host."""
+    raise OSError("resolver exploded")
+
+
+async def test_a_frame_is_dropped_when_the_host_check_cannot_answer(monkeypatch, caplog):
+    """On the one path that cannot be un-pushed, an inconclusive check refuses.
+
+    `_guard_route` fails open, and says so, because it sits behind the
+    entry-point checks and a bug in it should cost depth rather than the
+    browser. `_capture_state` is not the deep layer: for a screenshot this
+    check *is* the entry point, and the module already decided the same
+    question closed one function over — `_frame_sections` reads an unchecked
+    host as "not read". Dropping a frame costs a stale thumbnail until the next
+    tool call; a LAN camera's UI on the dashboard cannot be un-pushed. The
+    choice is pinned here rather than left to the next refactor of that `try`.
+    """
+    page = _GuardFaultPage("http://192.168.0.9/cam")
+    monkeypatch.setattr(browser_module, "_existing_page", lambda: page, raising=False)
+    monkeypatch.setattr(browser_module, "_host_block_reason_async", _host_check_that_raises)
+
+    with caplog.at_level("WARNING", logger="lloyd-browser"):
+        assert await browser_module._capture_state("browser_navigate") is None
+
+    assert page.shots == 0, "a screenshot was taken for a host nobody checked"
+    warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warns) == 1, f"expected exactly one warning about the dropped frame: {warns}"
+    # `_guard_route`'s shape — `browser: <which guard> <which way> on <url>:
+    # <why>` — with the second slot carrying the exception *type* too, so a
+    # fault with an empty message still names something. Without the record a
+    # Browser tab that stops refreshing reads as a dead page rather than as a
+    # guard that stopped answering.
+    assert "failed closed" in warns[0], warns[0]
+    assert "http://192.168.0.9/cam" in warns[0], warns[0]
+    assert "OSError" in warns[0] and "resolver exploded" in warns[0], warns[0]
+
+
+async def test_no_state_is_posted_when_the_host_check_cannot_answer(monkeypatch):
+    """The consequence Mission Control actually experiences: no POST at all.
+
+    `_capture_state` returning None is internal; the human-visible boundary is
+    the httpx POST to `/api/browser/state`. This drives the real push over the
+    real capture with the guard faulting, so the seam is crossed with the fault
+    rather than asserted two functions away from it.
+    """
+    page = _GuardFaultPage("http://192.168.0.9/cam")
+    sent = []
+
+    class _RecordingClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None):
+            sent.append(url)
+
+            class _R:
+                status_code = 200
+
+            return _R()
+
+    import httpx
+
+    monkeypatch.setattr(browser_module, "_existing_page", lambda: page, raising=False)
+    monkeypatch.setattr(browser_module, "_host_block_reason_async", _host_check_that_raises)
+    monkeypatch.setattr(httpx, "AsyncClient", _RecordingClient)
+    monkeypatch.setattr(browser_module, "LLOYD_API", "http://127.0.0.1:8080", raising=False)
+
+    await browser_module._push_browser_state("browser_navigate")
+
+    assert sent == [], f"a frame reached the state route for an unchecked host: {sent}"
+    assert page.shots == 0
+
+
 def test_a_blank_page_is_not_a_private_host():
     """The bug this guard nearly shipped with.
 

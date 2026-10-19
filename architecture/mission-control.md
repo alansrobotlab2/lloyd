@@ -430,10 +430,22 @@ hit, which needs no enumeration of lanes and so also catches a meta-refresh and
 a `window.location`; leaving the page parked would let the next
 `browser_snapshot` read it and the state mirror push a screenshot of it. `_browser_snapshot` and `_browser_evaluate`
 call it; `_capture_state` checks directly, or a screenshot of a LAN device
-would be pushed to Mission Control. `browser.block_private_hosts: false` or
+would be pushed to Mission Control. That path's check **fails closed** (#3043):
+when `_host_block_reason_async` itself raises, `_capture_state` logs
+`browser: state guard failed closed on <url>: <ExcType>: <message>` and returns
+no frame, so a bug in the guard costs the Browser tab one stale thumbnail until
+the next tool call instead of publishing a LAN device's UI that nobody checked
+and nothing can un-push. It is the opposite of the interceptor above, and
+deliberately: that one fails open and says so because it sits *behind* the
+entry-point checks, so its failure should cost depth rather than the browser,
+while for a screenshot this check is the entry point — the same call
+`_frame_sections` makes for a frame of this same push, which also refuses to
+read a host it could not check. `browser.block_private_hosts: false` or
 `LLOYD_BROWSER_BLOCK_PRIVATE=0` turns it off, the env winning.
 `tests/test_browser_panel.py` asserts the entry points *invoke* it, which is
-the property that was missing.
+the property that was missing, and since #3043 two more nodes pin what the
+frame path does when the check cannot answer — no screenshot taken, no POST
+sent, one warning — so the direction is no longer a refactor's silent choice.
 
 ## Remote access
 
