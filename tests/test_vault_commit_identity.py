@@ -50,11 +50,14 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from app.data_root import ACCOUNT_HOME
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = REPO_ROOT / "scripts" / "util" / "vault-commit.sh"
@@ -580,3 +583,158 @@ def test_every_wrapper_caller_that_names_a_job_names_a_parseable_one():
                     job = line.split("LLOYD_JOB=", 1)[1].split()[0].strip("\"'")
                     assert VCI.JOB_NAME_RE.fullmatch(job), f"{skill.name}: {line}"
     assert len(seen) >= 10, f"expected the ten documented call sites, found {len(seen)}"
+
+
+# --------------------------------------------------------------------------
+# #3026: every job name the wrapper shows in its own comments is one a skill
+# declares.
+# --------------------------------------------------------------------------
+
+#: The knob for pointing the declared-job corpus somewhere else, named after the
+#: overrides this wrapper's own env contract already offers (`VAULT_DIR`, and
+#: `LLOYD_VAULT_ROOT` in `app.data_root`).
+SKILLS_CORPUS_ENV = "LLOYD_SKILLS_DIR"
+
+#: `LLOYD_JOB=<name>` exactly as a caller writes it. The `=` must follow the
+#: variable name directly, which is what keeps the colon-separated path list this
+#: wrapper also documents (`LLOYD_JOB_WRITES=`) out of the corpus. The name shape is
+#: `VCI.JOB_NAME_RE`, the same one the wrapper's own check applies — and that check
+#: is the whole defect: it validates a name's SHAPE and never asks whether any skill
+#: declares it, so copying a stale example mints a well-formed identity no job owns.
+LLOYD_JOB_LITERAL = re.compile(r"LLOYD_JOB=([A-Za-z0-9][A-Za-z0-9._+-]*)")
+
+
+def corpus_dir() -> Path:
+    """Where to read the declared job names from.
+
+    `ACCOUNT_HOME`, not `Path.home()`, and the difference is the gate itself: a
+    round's `HOME` is a symlink farm exposing `lloyd` alone (measured on round
+    SM_20261019_152637: `ls <round>/home` lists one entry), so
+    `Path.home() / "obsidian" / "skills"` — which `VAULT_SKILLS` above is, and the
+    four `live_vault` nodes read — globs to nothing inside every graded run.
+    `ACCOUNT_HOME` comes from `getpwuid`, so it answers the account home whatever
+    `$HOME` says, the same property `production_data_root()` is documented for.
+    """
+    override = os.environ.get(SKILLS_CORPUS_ENV)
+    if override:
+        return Path(override)
+    return ACCOUNT_HOME / "obsidian" / "skills"
+
+
+def declared_job_names(skills_dir: Path) -> set[str]:
+    """The `LLOYD_JOB=<name>` literals across `<skills_dir>/*/SKILL.md`, the shape a
+    skill's own command line spells."""
+    return {name
+            for skill in sorted(skills_dir.glob("*/SKILL.md"))
+            for name in LLOYD_JOB_LITERAL.findall(
+                skill.read_text(encoding="utf-8", errors="replace"))}
+
+
+def wrapper_comment_literals(wrapper: Path) -> list[tuple[int, str]]:
+    """`(line, name)` for each `LLOYD_JOB=<name>` in a COMMENT line of the wrapper.
+
+    Comments only. The token recurs in the runtime block (`JOB="${LLOYD_JOB:-}"`, the
+    refusal message) where it names the variable rather than an example job."""
+    out: list[tuple[int, str]] = []
+    for n, line in enumerate(wrapper.read_text(encoding="utf-8").splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            out.extend((n, name) for name in LLOYD_JOB_LITERAL.findall(line))
+    return out
+
+
+def undeclared(literals: list[tuple[int, str]], corpus: set[str]) -> list[str]:
+    """The names in `literals` that no skill declares."""
+    return sorted({name for _, name in literals if name not in corpus})
+
+
+def test_every_lloyd_job_example_in_the_wrapper_comments_names_a_declared_job():
+    """Clause 1: a usage example is a specification, and this one specified a job
+    that does not exist.
+
+    Until #3026 the example read `LLOYD_JOB=nightly-knowledge-write`, a name no skill
+    declares — the slug is `nightly-reflection-knowledge-write`. The wrapper accepts
+    it, because it checks only the shape, so a run that copies the line authors vault
+    history as `lloyd-nightly-knowledge-write
+    <nightly-knowledge-write@jobs.lloyd.local>`: a well-formed identity owned by
+    nothing, which no query can attribute to a job and no skill will ever adopt.
+    Two comment literals are in scope here — the knowledge-write example and the
+    `autonomy-data-pipeline` one beside it.
+
+    The positive control is `nightly-vault-maintenance`, a declared name that appears
+    in no comment: it is what tells a reader the glob read the skills tree rather than
+    some directory that stopped being it. An empty corpus cannot flatter the check the
+    other way — every literal would then read undeclared and this node would fail — so
+    the control guards only the reverse direction, a corpus path that still resolves
+    but names the wrong place."""
+    corpus = declared_job_names(corpus_dir())
+    assert "nightly-vault-maintenance" in corpus, (
+        f"the corpus at {corpus_dir()} does not look like the skills tree: "
+        f"{len(corpus)} declared name(s)")
+    assert len(corpus) >= 8, (
+        f"only {sorted(corpus)} declared — eight job names are spelled in the skills "
+        "as of 2026-10-19, so the read is too thin to judge membership against")
+    bad = undeclared(wrapper_comment_literals(WRAPPER), corpus)
+    assert bad == [], (
+        f"the wrapper's comments show job name(s) no skill declares: {bad} — a run "
+        "copying them mints an identity no job owns")
+
+
+def test_the_declared_job_check_is_overridable_and_catches_an_undeclared_name(tmp_path,
+                                                                              monkeypatch):
+    """Clause 2: non-vacuity in both directions, over a corpus this node builds.
+
+    A graded run must not be one that passes because it read nothing, so the same
+    three helpers are driven against a fixture corpus declaring exactly one name: the
+    declared name is accepted, the undeclared one is reported. Neither the corpus nor
+    the wrapper's example is consulted here, which is what makes the pair with the
+    node above a check rather than a tautology.
+
+    Nothing in this section carries `live_vault`. `pytest.ini` registers that marker
+    and the gate runs `-m "not live_vault"`, so a node that needed the live vault
+    would never be graded at all — the trap the item's note warns about."""
+    fixture = tmp_path / "skills"
+    (fixture / "alpha-job").mkdir(parents=True)
+    (fixture / "alpha-job" / "SKILL.md").write_text(
+        'Run it as `LLOYD_JOB=alpha-job ~/lloyd/scripts/util/vault-commit.sh "alpha" \\\n'
+        '    -- memory/`, with `LLOYD_JOB_WRITES=memory/today.md`.\n', encoding="utf-8")
+    (fixture / "ambient-job").mkdir(parents=True)
+    (fixture / "ambient-job" / "SKILL.md").write_text(
+        "~/lloyd/scripts/util/vault-commit.sh \"ambient: sweep\"\n", encoding="utf-8")
+
+    assert declared_job_names(fixture) == {"alpha-job"}, (
+        "the reader must take exactly the one declared name from the corpus, and must "
+        "not mistake an `LLOYD_JOB_WRITES=` path list for a job name")
+    monkeypatch.setenv(SKILLS_CORPUS_ENV, str(fixture))
+    assert corpus_dir() == fixture, f"{SKILLS_CORPUS_ENV} does not override the corpus"
+    corpus = declared_job_names(corpus_dir())
+    assert undeclared([(60, "alpha-job")], corpus) == [], (
+        "a declared name was reported undeclared, so nothing could ever pass")
+    assert undeclared([(60, "beta-job")], corpus) == ["beta-job"], (
+        "an undeclared name passed the check against a corpus that does not hold it")
+
+
+def test_the_replacement_example_still_shows_a_knowledge_write_nightly_job():
+    """Clause 3: the retired name became the real slug, not a name that makes the
+    example about something else.
+
+    `JOB` above is `nightly-reflection-knowledge-write`, the slug that is already the
+    job's identity in every autonomy task file's `skill_name:` and a declared corpus
+    member, and the line keeps the knowledge-write shape on both sides of the command
+    — the job named and the message quoted — because this is also the only place the
+    wrapper shows the nightly message style.
+
+    That the wrapper still BEHAVES as it did is pinned by the two nodes this change
+    leaves untouched, both in this file and both run with it:
+    `test_wrapper_without_the_job_env_keeps_the_identity_and_adds_no_trailer` (unset
+    `LLOYD_JOB` commits under the ambient identity with no `Job:` trailer) and
+    `test_wrapper_refuses_a_job_name_that_could_not_form_an_identity` (exit 3 on a name
+    that cannot form one). The diff is one comment line out and one in, so no line of
+    this wrapper moves and no `vault-commit.sh:<n>` cite drifts."""
+    lines = WRAPPER.read_text(encoding="utf-8").splitlines()
+    literals = wrapper_comment_literals(WRAPPER)
+    knowledge = [name for _, name in literals if "knowledge" in name]
+    assert knowledge == [JOB], (
+        f"expected exactly one knowledge-write example, naming {JOB!r}, got {knowledge}")
+    line = lines[next(n for n, name in literals if name == JOB) - 1]
+    assert "nightly: knowledge write" in line, (
+        f"the example no longer shows the nightly knowledge-write message style: {line}")

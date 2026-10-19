@@ -57,7 +57,7 @@
 #   # Only what this job wrote:
 #   ~/lloyd/scripts/util/vault-commit.sh "autonomy-data-pipeline: $(date -u +%Y-%m-%d)" \
 #       -- memory/ backlog/ autonomy/
-#   LLOYD_JOB=nightly-knowledge-write ~/lloyd/scripts/util/vault-commit.sh "nightly: knowledge write 2026-09-20"
+#   LLOYD_JOB=nightly-reflection-knowledge-write ~/lloyd/scripts/util/vault-commit.sh "nightly: knowledge write 2026-09-20"
 #   # …and the same scope, but reporting anything carried that this job did not write:
 #   LLOYD_JOB=autonomy-data-pipeline LLOYD_JOB_WRITES="memory/vault-maintenance/2026-09-30.md" \
 #       ~/lloyd/scripts/util/vault-commit.sh "autonomy-data-pipeline: 2026-09-30" \
