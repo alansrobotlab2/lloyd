@@ -179,6 +179,19 @@ WATCH_JOBS = {
     # reader of the published index outside the publisher itself.
     100: ("daily", "wc -l", "instrument-index.jsonl", "re-sort"),
     101: ("daily", "gate_to_land_lag.py", "gate_to_land_lag.jsonl", "re-sort"),
+    # #3012: the four probes read off ~/obsidian/autonomy/102-find-all-arms-run.md
+    # and 103-code-rules-census-weekly.md on 2026-10-19. Both declare
+    # `frequency: weekly` and both sit `status: draft`, which is no bar — #98 and #99
+    # are draft rows here already, because the table records what a filed task file
+    # names, not what the scheduler has armed. #102's read is the engine lock it
+    # waits on rather than the driver it launches: waiting on `primary.lock` with a
+    # bounded timeout is the whole reason the task exists (#2962 — a `flock -n`
+    # one-shot exits silently while a round holds that lock), and its bound is the
+    # one its description states, since the file carries no `objective_checks` block.
+    # #103's read is the rules file its hits are measured against and its bound the
+    # flag that would move the filing somewhere no later reader looks.
+    102: ("weekly", "primary.lock", "find-all-", "report the run"),
+    103: ("weekly", "code_rules.toml", "code-rules-census", "--no-file"),
 }
 
 #: The ten `depends_on` edges, as the wiring diagram's parent ─► child arrows.
@@ -1430,6 +1443,19 @@ WATCH_TIER = {
     # them here rather than beside #92–#94.
     "#100": "Reports only",
     "#101": "Reports only",
+    # #3012 asks the tier table's own question — may it write while nobody is
+    # watching — of the two arrivals, and they split. #102's driver publishes
+    # `eval/measurements/find-all-<UTC-date>.md` beside the trial rows it summarises
+    # and files nothing, so the artefact IS its report: #97's position, with one
+    # difference named rather than smoothed over, that its artefact lands inside the
+    # checkout where every other reporter here writes under a data root or the automod
+    # state dir. #103 is not a reporter. The script it drives reaches
+    # `scripts.automod.backlog.new_item` through `file_hits` whenever the census has
+    # hits, so a hit-week leaves a board item another job or a person acts on — which
+    # is exactly how #92, #93 and #99 were tiered, and it outranks the fact that the
+    # census also prints a one-line report.
+    "#102": "Reports only",
+    "#103": "Writes durable state unattended",
 }
 
 
@@ -3155,6 +3181,66 @@ def test_the_2881_pair_is_listed_once_in_each_table_and_the_watch_row_agrees():
         f"holds rows for {sorted(f'#{j}' for j in WATCH_JOBS)} — the heading node "
         f"checks the row against the heading, and only this one ties the group to "
         f"the entries and tiers typed above")
+
+
+def test_the_3012_pair_is_listed_once_in_each_table_and_the_bound_reaches_it():
+    """#3012 clauses 1, 2 and 4, gradable without the vault.
+
+    `test_every_live_task_file_is_named_once_in_each_membership_table` is the real
+    reconciler and carries `@live_vault`, so the gate has never run it and #102
+    (`find-all-arms-run`) and #103 (`code-rules-census-weekly`) were invisible to every
+    node in this file — the same blindness #2630, #2813 and #2881 each arrived through.
+    What #2881's node above already pins for any pair the two dicts carry — both tables
+    naming one id set, and §Watch the machinery's row agreeing with `WATCH_JOBS` — is not
+    repeated here. This adds only what nothing else reads: the two ids present in both
+    tables exactly once each, each sitting in the ONE tier this round assigned it by name,
+    and the numbering note's ceiling reaching the higher id.
+
+    The `orphan` check is #3012's own shape: a task file that exists and a membership
+    table that never heard of it. That asymmetry, not the symmetric pair of omissions the
+    equality check above is for, is what let the 2026-10-19 Pre-Flight be the discovery.
+    """
+    tiers = _table(TIERS_HEADER)
+    grouped, tiered = (ids for _, ids in _membership_tables())
+    orphan = [j for j in ("#102", "#103") if j not in grouped or j not in tiered]
+    assert orphan == [], (
+        f"{orphan} is named by neither membership table; both ids have a live task "
+        f"file, and the gate cannot see that because the node that reads the "
+        f"directory is `@live_vault`")
+    for job in ("#102", "#103"):
+        assert grouped.count(job) == 1, (
+            f"{job} appears {grouped.count(job)} times in the function table; #3012 "
+            "is one row per live task file in each table, and both files sit "
+            "`status: draft`, which is membership and not arming")
+        assert tiered.count(job) == 1, (
+            f"{job} appears {tiered.count(job)} times in the write-authority table, "
+            "which is the doc's answer to what that job may do unattended")
+    # Clause 2 named rather than inferred from `WATCH_TIER`: the two ids' tiers split in
+    # this round, and the split is the table's own question — may it write while nobody
+    # is watching — so a silent re-tier would change the doc's claim about a job's
+    # authority without changing a single row count anywhere else.
+    for job, tier in (("#102", "Reports only"),
+                      ("#103", "Writes durable state unattended")):
+        home = [t for t, (ids, _) in tiers.items() if job in ids]
+        assert home == [tier], (
+            f"{job} sits in {home} instead of exactly [{tier!r}]. #102 publishes a "
+            "measurement table of its own under `eval/measurements/` and files nothing, "
+            "so its write is its report; #103 drives a census script that opens a "
+            "backlog item on a hit tree, which is #92/#93/#99's shape. A job moving "
+            "tiers moves that row's count column too, which "
+            "`test_every_tier_row_count_equals_the_ids_listed_beside_it` holds.")
+    typed = re.search(r"(\d+)\s+through\s+(\d+)\s+or beyond", _numbering_note())
+    assert typed, (
+        "the numbering note no longer states a floor and an open ceiling as "
+        "`<low> through <high> or beyond`, so nothing here can hold that bound up "
+        "against the fleet")
+    newest = int(typed.group(2))
+    assert newest >= 103, (
+        f"the numbering note's typed ceiling is #{newest} while #103 has a row in both "
+        f"tables. `test_the_numbering_note_bounds_the_numbering_without_naming_"
+        f"the_ceiling` deliberately accepts any ceiling — naming a live highest id "
+        f"would make every future filing red, which is #3012's own failure mode — so "
+        f"the bound has to be held up to the fleet from somewhere other than itself")
 
 
 def test_no_live_sentence_calls_a_superseded_id_the_newest():

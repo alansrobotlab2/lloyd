@@ -1497,3 +1497,80 @@ def test_the_live_fleet_and_the_live_doc_reconcile_through_the_new_class():
         f"nothing about a fleet the scanner did not see\n{out[:400]}")
     hits = [ln for ln in out.splitlines() if "DOC_MEMBERSHIP" in ln]
     assert hits == [], "the live fleet and the live doc disagree:\n" + "\n".join(hits)
+
+
+def test_the_live_doc_names_the_3012_pair_and_the_linter_reads_its_rows(tmp_path):
+    """#3012 clause 5, run both ways so the class is a rail the gate can see.
+
+    `test_the_live_fleet_and_the_live_doc_reconcile_through_the_new_class` reads the live
+    board and asserts silence, and it carries `@live_vault` because that board is not the
+    tree under test — which is precisely how #102 `find-all-arms-run` and #103
+    `code-rules-census-weekly` stayed unlisted in BOTH membership tables for a day after
+    they were filed with every gate-run node green. A silence only the nightly hears is
+    not a rail. So this inverts which side is the fixture: the BOARD is seeded here (the
+    two filed filenames and nothing else) and the DOC is the repo's own
+    `architecture/autonomy-jobs.md`, which is a repo file rather than a vault one —
+    `jobs_membership.JOBS_DOC` resolves it two levels above `scripts/autonomy/`, into the
+    tree that is running, so a round's worktree doc is what gets read here.
+
+    Silence on the real doc is one half. The other half is the mutation: that same text
+    with every `#102`/`#103` token removed has to print two warnings per id, one per
+    table, which is the four-line block #3012 quotes back from the Pre-Flight that found
+    it. Without that second run, a row that stopped landing inside the table it is named
+    for would read as success — #2631 is the record of a parse coming back clean over ids
+    no row actually carried. Both runs filter to the two ids: a two-file board makes the
+    doc's other 44 rows ghosts, and the ghost rule is the paired node above's subject, not
+    this one's.
+    """
+    lint = Linter(tmp_path)
+    lint.add("102-find-all-arms-run.md", id=102, name="Find-all arms run",
+             status="draft", frequency="weekly", skill_name="heartbeat")
+    lint.add("103-code-rules-census-weekly.md", id=103, name="Code rules census weekly",
+             status="draft", frequency="weekly", skill_name="heartbeat")
+    real = SCRIPT.resolve().parents[2] / "architecture" / "autonomy-jobs.md"
+
+    def _pair(out: str) -> list[str]:
+        return [ln for ln in out.splitlines()
+                if "DOC_MEMBERSHIP" in ln and ("#102" in ln or "#103" in ln)]
+
+    rc, out = _membership_run(tmp_path, lint, real)
+    on_disk = len(list(lint.autonomy_dir.glob("*.md")))
+    # An unchecked doc prints ONE `DOC_MEMBERSHIP: unchecked` line naming neither id, and
+    # the filter below drops it — so silence would survive a doc the linter could not
+    # parse at all. Exit code and scan line are what say the check ran.
+    assert rc == 0, f"a doc that names the fleet must cost a run nothing, got exit {rc}"
+    assert "DOC_MEMBERSHIP: unchecked" not in out, (
+        f"the linter reported it could not read {real}, so the silence below is not a "
+        f"verdict:\n{out[:500]}")
+    scanned = re.search(r"^Scanned (\d+) task files in (.*)$", out, re.MULTILINE)
+    assert scanned, f"the run printed no scan line this node can count:\n{out[:500]}"
+    assert int(scanned.group(1)) == on_disk, (
+        f"the run counted {scanned.group(1)} task files while {on_disk} sit in "
+        f"{lint.autonomy_dir}: silence from a scan that saw no fleet is not evidence "
+        "about a doc")
+    assert _pair(out) == [], (
+        f"a board holding 102-find-all-arms-run.md and 103-code-rules-census-weekly.md "
+        f"is not named by the committed doc (exit {rc}):\n" + "\n".join(_pair(out)))
+
+    text = real.read_text(encoding="utf-8")
+    mutated = re.sub(r"#10[23]\b", "", text)
+    assert mutated != text, (
+        "the deletion landed on nothing, so the four warnings below would be a "
+        "coincidence rather than a consequence of the rows"
+    )
+    doc = tmp_path / "autonomy-jobs-without-the-3012-rows.md"
+    doc.write_text(mutated, encoding="utf-8")
+    rc2, out2 = _membership_run(tmp_path, lint, doc)
+    hits = _pair(out2)
+    assert len(hits) == 4, (
+        f"deleting both ids from both tables printed {len(hits)} warnings for them, not "
+        f"the 4 the 2026-10-19 Pre-Flight printed for #3012 (two tables, two ids):\n"
+        f"{out2[:700]}")
+    for tid in ("#102", "#103"):
+        named = [ln for ln in hits if tid in ln]
+        assert len(named) == 2, f"{tid} should be missing from two tables, got {named}"
+        assert any("functions table" in ln for ln in named) and any(
+            "write-authority" in ln for ln in named), (
+            f"{tid}'s warnings name only one of the two tables: {named}. #3012 is one row "
+            "in EACH membership table, and a warning that names one sends a reader to add "
+            "that one and leave the other wrong")

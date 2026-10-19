@@ -39,10 +39,11 @@ job is for, what it reads and writes, what it must not do, and what has already
 gone wrong with it.
 
 Jobs are numbered by their task id and that numbering is historical, not
-ordered: ids run 24 through 101 or beyond, with gaps where tasks were retired
-(2026-10-17). #101, the gate-to-land lag daily record, is the newest and was
-filed 2026-10-16; #100, the eval instrument index publish, was filed the same
-day, six hours before it. Which ids are live is
+ordered: ids run 24 through 103 or beyond, with gaps where tasks were retired
+(2026-10-19). #103, the code rules census weekly, is the newest and was filed
+2026-10-19; #102, the find-all arms run, was filed the day before it. #101, the
+gate-to-land lag daily record, was the newest when this note last moved, filed on
+2026-10-16 six hours after #100. Which ids are live is
 `GET /api/autonomy/tasks`'s business, not this document's. Typing a ceiling here
 has been wrong twice inside a week: the bound stopped at 85 while 86 was already
 running nightly, #1102 corrected it to 86, and #87–#90 overtook that correction
@@ -73,7 +74,7 @@ promised.** The seven task files #91 nightly
 thinking-fidelity prevalence series, #92 vLLM prefix-miss daily, #93
 step-conformance replay, #94 referential-integrity ledger, #95 mitigation drill,
 #96 djev name-prior probe and #97 landed-outcomes daily record have their
-entries, in [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101).
+entries, in [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101-102-103).
 #99 supply-chain inventory regen has one in that same group — a watcher whose
 subject is the evidence the self-modification loop is judged on, and one that can
 file a backlog item, which is why it sits beside #92–#94 rather than with the six
@@ -116,7 +117,7 @@ other direction, for three.
 | [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
 | [Bound entropy](#bound-entropy-79-81-78-80-90) | #79 #81 #78 #80 · #90 | stop the stores rotting or growing without limit |
 | [Measure](#measure-60-82-70-36-76-86) | #60 #82 #70 #36 #76 #86 | say whether any of it is working |
-| [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101) | #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 | read the machinery the rest of the fleet runs on — session traces, the engine's log window, run records, loaded memory, the mitigations, the decision engine, the loop's own landings, the instrument index — and report what it looks like |
+| [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101-102-103) | #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 #102 #103 | read the machinery the rest of the fleet runs on — session traces, the engine's log window, run records, loaded memory, the mitigations, the decision engine, the loop's own landings, the instrument index, the retrieval arms run, the shipped code rules — and report what it looks like |
 
 ### Write authority is the fault line
 
@@ -130,10 +131,10 @@ the row answers the permission question, never the size question:
 
 | Tier | Jobs | |
 |---|---|---|
-| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #48 #98 · #92 #93 #94 #99 | 26 |
+| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #48 #98 · #92 #93 #94 #99 #103 | 27 |
 | Injects expiring context unattended | #68 | 1 |
 | Proposes; an operator applies | #67 #84 | 2 |
-| Reports only | #60 #82 #70 #78 #80 #36 #86 #90 · #91 #95 #96 #97 · #100 #101 | 14 |
+| Reports only | #60 #82 #70 #78 #80 #36 #86 #90 · #91 #95 #96 #97 · #100 #101 #102 | 15 |
 | Acts on the fleet itself | #76 | 1 |
 
 The rows answer "may it write while nobody is watching", not "how much may it
@@ -213,12 +214,13 @@ grouping those three jobs sat in one list and the alternation was invisible.
 29 of the 39 tasks (2026-10-12) declare no dependency at all: ten jobs name a
 parent, one each, and those ten are exactly the arrows drawn above. None of
 #91–#97 declares a parent, so the arrows are the same ten #1520 verified and the
-pair moved by seven together. Neither #100 nor #101 declares a parent either, so
-naming the two newest jobs in the membership tables moves no arrow and no number
-in this paragraph — the 29 and the 39 are the fleet the route parsed on the day
+pair moved by seven together. Neither #100, #101, #102 nor #103 declares a parent
+either, so naming #102 (filed 2026-10-18) and #103 (filed 2026-10-19) in the
+membership tables moves no arrow and no number in this paragraph — the 29 and the
+39 are the fleet the route parsed on the day
 the sentence was written, and a job entering these tables is not a job entering
-that count. #101 is the newest file and #100 sits beside it; #99 was the newest
-when that sentence was written, and #98 before it — and #98 is still the only one
+that count. #103 is the newest file and #102 sits beside it; #101 was the newest
+when that sentence was written, and #99 before it, and #98 before that — and #98 is still the only one
 that declares a parent without being drawn: `depends_on: 24`, filed `status: draft`,
 so it is not in the fleet the diagram counts — arming it adds an eleventh arrow
 and takes one off the 29, which is the armed-state move the fleet-bound
@@ -1153,16 +1155,16 @@ name.
 
 ---
 
-## Watch the machinery: #91 #92 #93 #94 #95 #96 #97 #99 #100 #101
+## Watch the machinery: #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 #102 #103
 
-Measure asks whether the fleet is working. These ten ask a different question —
+Measure asks whether the fleet is working. These twelve ask a different question —
 whether the *machinery the fleet runs on* still looks like what its own
 documentation says — and they read it from outside: the engine's reasoning traces,
 the serving process's cache and KV window, other jobs' run records, the memory
 surface a prompt is assembled from, the mitigations that stop a run, the decision
 engine on GPU 2, and the self-modification loop's own landings. None of them is
 about a job's output, which is why they are not scattered through the six groups
-above and why they arrived as a block: seven of the ten were created between
+above and why they arrived as a block: seven of the twelve were created between
 2026-09-29 and 2026-10-11 and none of those seven had an entry here until #2630;
 the eighth, #99, joined the directory and this table both on 2026-10-16 (vault
 commit `5394a06e`, 01:35Z; its own `created:` is `2026-10-16T00:00:00Z`); the
@@ -1184,6 +1186,22 @@ closed to it, because §Measure is the group whose jobs score the fleet: being a
 instrument is not the same as measuring it. Re-opening the placement needs a measurement of
 §Measure's counts moving, not a subject-matter preference.
 
+The eleventh and twelfth, #102 find-all arms run and #103 code rules census weekly,
+landed in the directory on 2026-10-18 and 2026-10-19 (their own `created:` stamps
+are `2026-10-18T07:42:00Z` and `2026-10-19T01:40:00Z`) and entered these tables on
+2026-10-19 because the nightly skills-management Pre-Flight named the omission — the
+fourth time the directory ran ahead of the two tables, and the moment #2895's
+filing-time report was built to speak at. Both are `status: draft`, so neither is
+armed; the rows record what a filed task file names, which is how #98 and #100 are
+already listed here. Their tiers split, and the split is the tier table's own
+question — may it write while nobody is watching — not the size of what it leaves:
+#102 publishes its own measurement table and trial rows under `eval/measurements/`
+and files nothing, so its write *is* its report and it sits with the reporters,
+while #103 drives `scripts/maintenance/code_rules_census.py`, and that script opens
+a backlog item itself whenever the census has hits, which is a board file another
+job or a person acts on — the #92/#93/#99 shape, so #103 is in the unattended-writer
+tier. #3012 is where that reading was taken and where both rows were written.
+
 | ID | Freq | Job | Reads | Writes | Must not |
 |----|------|-----|-------|--------|----------|
 | #91 | daily | Nightly thinking-fidelity prevalence series (`thinking-fidelity-prevalence-series`, #1770) | every session file under `~/lloyd-data/sessions`, walked once by `scripts.thinking_fidelity_scan --record --per-day` (#2819: the day roll-up and the whole-store row were two walks over the 10,082 `*.json` of 2026-10-16, and the whole-store row now carries the walk's own `scan_seconds`) | one row per calendar day plus a final `scope: whole_store` row, appended to `~/lloyd-data/_pipeline/metrics/thinking-fidelity-prevalence.jsonl` | `config.yaml` or `preserve_thinking_iterations`: switching the capture to `false` makes the marker rate fall without one fabricated trace going away, which is the failure #1510 closed |
@@ -1196,25 +1214,31 @@ instrument is not the same as measuring it. Re-opening the placement needs a mea
 | #99 | weekly | supply-chain inventory regen (`supply-chain-inventory-regen`, #2796 from #2593): enumerate every distribution installed in the venv roots this box's launch scripts name, scan the set offline with `app/harness/supply_chain_inventory.py`, and compare the two headline numbers with the previous dated report, falling back to the values quoted in its own `description` (the committed artifact's 698/150 of 2026-10-11, the 2026-10-16 reading of 906/150) | every `~/lloyd/.venvs/<name>/lib/python3*/site-packages` a launcher under `agent-services/` names, plus the account user-site `~/.local/lib/python3.*/site-packages` — the roots `site_roots()` walks; no `~/lloyd-data/venvs` exists and no run opens `eval/supply-chain/baseline.yaml`, and the scan opens no network | the synthesised per-site requirements and the merged scan input under `~/lloyd-data/supply-chain/observed/`, one dated JSON report beside that directory, and a backlog item only when the *missed-advisory* delta moves or the committed verdict's meaning changes | calling `Write` or `Edit`; any `git` or `rm` command |
 | #100 | daily | eval instrument index publish (`eval-instrument-index-daily`, #2797): run the publisher once, unflagged, read the journal back with `wc -l` for the row count, and report its one headline line | the seven instruments' own artifacts — the retrieval baselines under `~/lloyd-data/eval/baselines`, `~/lloyd-data/_pipeline/reflection/iv-metrics.jsonl`, `~/.local/state/lloyd-automod/scorecard.jsonl`, `~/.local/state/lloyd-automod/landed_outcomes.jsonl`, `~/lloyd-data/eval/tool-quality`, `~/lloyd-data/eval/funnel` and `eval/uptake` — each one's newest dated row, tiered by the maturity rubric and trended by Theil–Sen in `scripts/eval_instrument_index.py`; plain Python over files already on disk (0.09 s on 2026-10-16), no model call, no engine touched | exactly one JSON row appended to `~/lloyd-data/eval/instrument-index/instrument-index.jsonl` by `append_row`, the module's only write, which creates nothing outside that directory | never add a flag: `--no-record` appends nothing and still exits 0, `--now` stamps a row whose `date` is not today, `--out-dir` grows a series nothing reads; never rewrite, re-sort, compact or dedupe the journal, run it twice in one turn, hand-write or patch a row to keep the streak when exit 1 refuses the totals, file a backlog item or open a round — exit 1 is the designed output |
 | #101 | daily | gate-to-land lag daily record (`gate-to-land-lag-daily-record`, #2858): join the newest passing `gate` row to the `promoted` row of the same `round_id` and append the day's lag distribution | `~/.local/state/lloyd-automod/promotions.jsonl` *and every* `promotions-archive-YYYYMM.jsonl.gz` beside it — 26,798 of the 47,767 ledger rows are archived (measured 2026-10-15), so a reader taking only the live file described under 60 % of the corpus and reported the shorter lag — through `scripts/maintenance/gate_to_land_lag.py --record`, and `--record` is the only flag the skill permits (`--state-dir` moves both sides off the live state dir, `--json` deletes the report lines a later reader checks) | exactly one JSON row appended to `gate_to_land_lag.jsonl` inside `~/.local/state/lloyd-automod/` — a file that does not exist yet, because the job has never run — whose receipt is the printed `recorded → <path>` line because `main()` returns 0 with or without the flag; every p50 travels with the `n_rounds` it is computed over, so a thin week cannot read as a tight one | never edit, truncate, re-sort or re-stamp the promotion ledger or this journal, never re-run the day to move a number, never a second copy of the command in one turn; `identity_refuse_count` stays `null` because this reader joins only `gate`/`promoted` rows, and a moved-tree trend belongs to a human ruling on the #2859 chase |
+| #102 | weekly | Find-all arms run (`find-all-arms-run`, #2962): drive the retrieval-phrasing A/B to completion and publish its table | the engine lock `~/.local/state/lloyd-automod/primary.lock`, waited on with a bounded timeout instead of `flock -n`'s silent exit, plus the four gold counts it re-derives before spending any engine time | `eval/measurements/find-all-<UTC-date>/trials.jsonl` and the published `eval/measurements/find-all-<UTC-date>.md` — the only artefact in this group that lands inside the checkout, left uncommitted as every measurement under `eval/measurements/` is | report the run's result from the turn that launched it: the driver runs 1.5-2.5 h against the pool's 3570 s cap and is started with `setsid nohup` precisely so it outlives the session, so the table is read on the next fire and never promised by this one |
+| #103 | weekly | Code rules census (`code-rules-census-weekly`, #2995 from #2810): one whole-tree pass of the shipped content rules, through the one command the skill gives with nothing added to it | every tracked `.py` the census scans (1397 scanned of 1397 tracked on the 2026-10-19 dry run) against the rules in `scripts/automod/code_rules.toml`, with the allowlist, the suppression markers and each rule's own `covered X of Y` counted beside the hits — the denominators are the only thing a month-old row cannot reconstruct | one dated row `~/lloyd-data/_pipeline/code-rules-census/code-rules-census-<UTC-date>.json`, at most one per UTC day, **and one backlog item whenever the census has hits** — `file_hits` opens it itself, before the same-day guard is reached | pass `--no-file`, `--out`, `--tree`, `--rules-path` or `--backlog-dir`, each of which moves the measurement or the filing somewhere the next reader will not look; do not run it twice in one UTC day on a tree with hits, because the filing happens before `write_row`'s `O_EXCL` guard and would open a second item for the same sites |
 
-Eight of the ten carry an `acceptance.objective_checks` block naming `Write` and
+Nine of the twelve carry an `acceptance.objective_checks` block naming `Write` and
 `Edit` in its `tool_not_called` list, so their read-only bound is checked by the
-runner and not by the prose. #91 and #92 carry no such block: for those two the
+runner and not by the prose. #91, #92 and #102 carry no such block: for those three the
 prohibition lives only in the `description` field a run is handed, which is why
-`preserve_thinking_iterations` and the staging rule are spelled out there in full.
+`preserve_thinking_iterations`, the staging rule and the launch-then-return rule are
+spelled out there in full.
 
-**Four of the ten are not report-only, whatever the report looks like.** The
+**Five of the twelve are not report-only, whatever the report looks like.** The
 write-authority table asks one question — may it write while nobody is watching —
 and #92 files a backlog item, #93 files a backlog draft and #94 overwrites a
 latest-path ledger in the vault plus a dated copy beside it, and #99 files a
-backlog item when the missed-advisory count moves. Those are vault files that another
-job or a person will act on, so the four sit in the unattended-writer
-tier beside #30 and #53. #91, #95, #96, #97, #100 and #101 are the report-only six: one dated
-artefact each under the data root or the automod state dir — #95 leaves not even
-that, since it reads a state file another process owns — and nothing in the vault
-or the queue. #2630's triage read all seven as report-only from the artefact paths;
-the three that file are the ones where reading the artefact path alone was wrong,
-and the tier is where that difference has to be visible.
+backlog item when the missed-advisory count moves, and #103's census script files a
+backlog item whenever the census has hits. Those are files another
+job or a person will act on, so the five sit in the unattended-writer
+tier beside #30 and #53. #91, #95, #96, #97, #100, #101 and #102 are the report-only seven: one dated
+artefact each under the data root, the automod state dir or `eval/measurements/` —
+#95 leaves not even that, since it reads a state file another process owns, and
+#102 is the one in this set whose artefact sits inside the checkout rather than
+under a data root — and none of the seven files anything in the vault or the queue.
+#2630's triage read all seven of its own arrivals as report-only from the artefact
+paths; the three of those that file are where reading the artefact path alone was
+wrong, and the tier is where that difference has to be visible.
 
 The group has one shape, and it is the shape #86 arrived with: read something the
 rest of the system produces, append or overwrite exactly one dated artefact, print
@@ -1541,3 +1565,31 @@ decide what gets worked on next.
   → 0 on 2026-10-17), so a task file can still land unseen between a directory write
   and the nightly Pre-Flight. That durable fix is deliberately not this round's; the
   owed-check pass is asked to split it into its own code item.
+- **2026-10-19 — `current` again, one day late, fourth time the same class.** #102
+  (`find-all-arms-run`, its own `created:` is `2026-10-18T07:42:00Z`) and #103
+  (`code-rules-census-weekly`, `2026-10-19T01:40:00Z`) reached the directory with no
+  row in either membership table, and the nightly skills-management Pre-Flight's
+  `live_vault` rung went red on 2026-10-19 for exactly that: 179 collected / 176
+  passed / 3 failed, each failing node reproducing alone, and `validate_tasks.py`
+  printing four `DOC_MEMBERSHIP` warnings — one per table per id. #3012 named both
+  ids in both tables. What moved with them: the group heading and §The functions'
+  anchor grew to twelve ids, `Writes durable state unattended` went 26 → 27 taking
+  #103, `Reports only` 14 → 15 taking #102, the numbering note's floor moved to
+  `24 through 103 or beyond`, and the §Watch counts recomputed — ten became twelve,
+  the `objective_checks` carriers eight became nine (#102 is the third file with no
+  block, beside #91 and #92), the report-only six became seven. §The wiring's
+  newest-file sentence moved off #101 onto #103 while its 29 and 39 stayed, for the
+  reason #2813 and #2881 each give: that sentence counts the fleet that actually
+  runs, and both new files sit `status: draft`. The tier split was taken here, at
+  the rows, on the table's own question: #102 publishes a measurement table of its
+  own under `eval/measurements/` and files nothing, so its write is its report;
+  #103 drives `scripts/maintenance/code_rules_census.py`, which opens a backlog item
+  itself whenever the census has hits, so it is the #92/#93/#99 shape and not a
+  reporter's. The class this entry belongs to is unchanged by it: both membership
+  nodes carry `@live_vault`, the gate runs `-m "not live_vault"`, and #2895's
+  filing-time report is written never to refuse a task file —
+  `tests/test_autonomy_task_membership_at_filing.py` pins that bound — so a filing
+  whose report was read and not acted on redds these same three nodes again at the
+  next task. Whether the report should ever withhold a filing is a decision no round
+  can take for itself, and #3012 hands it to the owed-check pass with the next
+  filing as the trigger.
