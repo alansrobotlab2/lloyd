@@ -820,11 +820,23 @@ def _write_target(mut: "_Mutation", p: Path) -> Path:
 def _write(args: dict, mut: _Mutation | None = None) -> str:
     mut = mut if mut is not None else _Mutation(kind="write")
     file_path = _expand(args.get("file_path", ""))
-    content = args.get("content", "")
     if not file_path:
         return json.dumps({"error": "file_path is required"})
     if not os.path.isabs(file_path):
         return json.dumps({"error": f"file_path must be absolute, got {file_path!r}"})
+    # Same guard as `_edit`, same key-presence test. `content = args.get(
+    # "content", "")` above let a `Write` that never sent a body through as a
+    # request to truncate: measured on a 280-byte file, `_write({"file_path":
+    # p})` returned `'File written: p (0 chars)'` and left 0 bytes on disk,
+    # with the undo record opened for a destruction nobody asked for. Presence
+    # rather than truthiness because `content: ""` is a real write — creating
+    # an empty file is a legitimate call — and because microcompaction keeps
+    # the key while replacing a spilled body's value. Refused here, before the
+    # gate, the ceiling checks and `_ledger_begin`, so a call that never
+    # happened enters no undo record. Pinned by tests/test_required_args.py.
+    if "content" not in args:
+        return json.dumps({"error": "content is required"})
+    content = args["content"]
     p = Path(file_path)
     mut.path = file_path
     mut.real = os.path.realpath(file_path)
@@ -907,14 +919,35 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
 def _edit(args: dict, mut: _Mutation | None = None) -> str:
     mut = mut if mut is not None else _Mutation(kind="edit")
     file_path = _expand(args.get("file_path", ""))
-    old_string = args.get("old_string", "")
-    new_string = args.get("new_string", "")
     replace_all = bool(args.get("replace_all", False))
 
     if not file_path:
         return json.dumps({"error": "file_path is required"})
     if not os.path.isabs(file_path):
         return json.dumps({"error": f"file_path must be absolute, got {file_path!r}"})
+    # The two string arguments are read only after their keys are proven
+    # present, and the test is `key not in args`, never truthiness. Defaulting
+    # them to `""` is what turned a forgotten argument into a destructive
+    # success: `Edit` with `file_path` + `old_string` and no `new_string` (a
+    # mis-sent `content`, which is `Write`'s key, is how it arrives) deleted
+    # the matched text and returned `'Edited … (1 replacement)'`, and the same
+    # call with `replace_all: true` and no `old_string` walked past the
+    # multi-match check — `original.count("")` is len+1 — into
+    # `original.replace("", new_string)`, measured on `'abcdef'` as
+    # `'-a-b-c-d-e-f-'` over 7 replacements. `""` is a legitimate value for
+    # `new_string` (the documented delete path), so presence is the only test
+    # that refuses the mistake and keeps that write. It is also the only test
+    # compatible with microcompaction: `shrink_assistant_arguments` spills a
+    # big body by replacing the *value* with `SHRUNK_ARG_MARKER` and leaves the
+    # key in place. No schema layer is involved — `arguments` is validated
+    # nowhere on the dispatch path (#1125's owed entry ruled switching that on
+    # NO on 2026-10-19), so this handler is the last place that can refuse.
+    # Pinned by tests/test_required_args.py.
+    for key in ("old_string", "new_string"):
+        if key not in args:
+            return json.dumps({"error": f"{key} is required"})
+    old_string = args["old_string"]
+    new_string = args["new_string"]
     if old_string == new_string:
         return json.dumps({"error": "old_string and new_string are identical"})
     p = Path(file_path)
