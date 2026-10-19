@@ -6466,3 +6466,190 @@ def test_the_runbook_step_zero_carries_the_reopened_names_too():
     assert "into the same result line" in flat, flat
     assert "re-minted deliberately or left to be re-mined" in flat, flat
     assert f"`{sv.LEDGER_REOPENED_LABEL}: 0 :: none` is the quiet night" in flat, flat
+
+# ── #3010: a `~/…` candidates directory has a home, and the detector must keep it ──
+#
+# Audit exited 1 on `input_lost 8` over a ledger whose falsifiers all reach their snapshots through
+# `~/lloyd-data/…`. Six of those eight were one bug in this file's own reader: `_CAND_DIR_FROM_TEXT_RE`
+# could only START a directory match at `/`, so from `~/lloyd-data/_pipeline/skills/candidates/` it
+# extracted `/lloyd-data/_pipeline/skills/candidates/` — a root that exists on no box — and
+# `_candidate_listing`'s `.expanduser()` sat two lines below with nothing left to expand. The stored
+# command itself is healthy: run under bash it exits 0 printing `input_rows=94`. So the falsifiers
+# reached their input and the AUDIT could not see it, and the mint side that the item blamed never
+# wrote a bare `/lloyd-data/` root at all.
+#
+# ── Fixtures ──
+# `tilde_home_3010` builds the fake `$HOME` these paths need; `tilde_row_cmd_3010` and
+# `tilde_seq_cmd_3010` are the ledger's two row shapes, the run-shaped count and the seq-shaped
+# `$C/$N` read. The predicate takes one stored `evidence_cmd` string and returns a detail string or
+# None; `run_audit` is the CLI boundary the nightly job reads.
+# ── Removing them ──
+# They pin one home expansion. A future reader that resolves candidate directories some other way
+# should replace the pair with one that still puts a `~/…` root in front of `candidate_input_lost`.
+
+#: The candidates root in the ledger's own spelling — tilde and `lloyd-data` segment included, no
+#: trailing slash, because that is how both the `ls` glob and the `C=` assignment spell it.
+TILDE_CANDS_3010 = "~/lloyd-data/_pipeline/skills/candidates"
+#: One of the six keys the mangled root named on 2026-10-19, so the fixtures read as real rows.
+TILDE_KEY_3010 = "seq-2-bash-fs-bash-explore"
+#: A candidate that is in the directory but NOT named by the row's glob — the true-attrition shape
+#: the real ledger's `seq-2-bash-fs-read` row is in, and the flattering stand-in for.
+TILDE_NEIGHBOUR_3010 = "candidate-another-key-20260920.md"
+
+
+def tilde_home_3010(tmp_path: Path, monkeypatch) -> Path:
+    """A fake `$HOME` holding `lloyd-data/_pipeline/skills/candidates` with one neighbour file.
+
+    The ledger spells its root `~/lloyd-data/…`, so a test of it has to put the directory at that
+    same position under a home the test controls: `Path.expanduser` resolves through
+    `os.path.expanduser`, which reads `$HOME` at call time, so `monkeypatch.setenv` moves the whole
+    root and nothing here touches the real home. Returns the home so a node can prune the directory
+    it just made — the two outcomes the predicate distinguishes are a directory whose glob hits and
+    one whose glob does not.
+    """
+    home = tmp_path / "home"
+    cand = home / "lloyd-data" / "_pipeline" / "skills" / "candidates"
+    cand.mkdir(parents=True)
+    (cand / TILDE_NEIGHBOUR_3010).write_text(
+        "---\npattern_key: another-key\n---\nbody\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def tilde_snapshot(home: Path, key: str = TILDE_KEY_3010) -> Path:
+    """The snapshot file the row's own glob names, written into that fake home."""
+    f = (home / "lloyd-data" / "_pipeline" / "skills" / "candidates"
+         / f"candidate-{key}-20261019.md")
+    f.write_text("---\npattern_key: seq-2/bash-fs\n---\nbody\n", encoding="utf-8")
+    return f
+
+
+def tilde_row_cmd_3010(key: str = TILDE_KEY_3010) -> str:
+    """The `run:*-nightly-mining` falsifier as the ledger stores it.
+
+    Verbatim from the 2026-10-19 row — three counted fields over the same tilde-rooted glob, one
+    `ls -1` and two `grep -l`s, each redirected `2>/dev/null`, and `echo` last so the compound exits
+    0 whatever the globs do — with one difference: the first glob is this key's, so the same bytes
+    can be used against a directory with the snapshot and without it. A paraphrase would not prove
+    the real command readable.
+    """
+    g = f"{TILDE_CANDS_3010}/candidate-{key}-*.md"
+    return (f'echo input_rows=$(ls -1 {g} | wc -l) '
+            f'error_snapshots=$(grep -l "^type: error$" {g} 2>/dev/null | wc -l) '
+            f'pending_snapshots=$(grep -l "^status: pending_review$" {g} 2>/dev/null | wc -l)')
+
+
+def tilde_seq_cmd_3010(key: str = TILDE_KEY_3010) -> str:
+    """`seq_row_2339`'s live shape with the directory assigned as `C=~/lloyd-data/…`.
+
+    The seq rows keep the directory in a variable and name the file only through `$C/$N`, and the
+    ledger spells that assignment with a tilde. `_candidate_dirs_assigned_in` refused it for want of
+    a leading `/`, so the row was handed no directory, the predicate returned None, and the key was
+    never examined — the silent direction of the same blind spot.
+    """
+    return (f'C={TILDE_CANDS_3010}; N=$(ls $C | grep -xE "candidate-{key}-[0-9]{{8}}\\.md" '
+            f'| sort | tail -1); echo "snapshot=$N '
+            f'snapshots=$(ls $C | grep -cE "^candidate-{key}-[0-9]{{8}}\\.md$")"')
+
+
+def test_a_tilde_rooted_candidate_directory_resolves_against_the_home(tmp_path, monkeypatch):
+    """Clause 1: with the snapshot on disk, a tilde-rooted falsifier has not lost its input.
+
+    All six keys audit named had their files present — 95 candidate files sit in the real directory
+    and the stored command exits 0 printing `input_rows=94` — so the only thing between them and a
+    clean audit was the home prefix. None is the answer here, and any detail is the bug.
+    """
+    home = tilde_home_3010(tmp_path, monkeypatch)
+    tilde_snapshot(home)
+    assert sv.candidate_input_lost(tilde_row_cmd_3010()) is None, (
+        "a tilde-rooted glob whose snapshot is on the disk read as lost input")
+
+
+def test_an_absent_tilde_rooted_directory_is_reported_with_its_home_expanded(
+        tmp_path, monkeypatch):
+    """Clause 2: the fix resolves a home, it does not retire the check — and the report names the
+    directory the ledger meant.
+
+    `/lloyd-data/…` exists on no box, so beyond mis-reporting it hides the real root from whoever
+    has to repair the row. The expanded path is the one that must appear.
+    """
+    home = tilde_home_3010(tmp_path, monkeypatch)
+    cand = home / "lloyd-data" / "_pipeline" / "skills" / "candidates"
+    shutil.rmtree(cand)                       # the root itself is gone, not merely its files
+    detail = sv.candidate_input_lost(tilde_row_cmd_3010())
+    assert detail is not None and "(no such directory)" in detail, detail
+    named = re.search(r"in (\S+) \(no such directory\)", detail).group(1)
+    assert named == str(cand), detail          # expanded: not `~/…`, and never `/lloyd-data/…`
+    assert named.startswith(str(home)), detail
+
+
+def test_a_tilde_rooted_C_assignment_grounds_a_seq_row(tmp_path, monkeypatch):
+    """Clause 3: `C=~/lloyd-data/…` IS an absolute candidates directory.
+
+    Two halves, because the two failure shapes differ: the extractor has to accept the value as the
+    directory it names, and the predicate then has to EXAMINE the row. A seq row it declines to
+    judge is a key that appears in no tally at all, which under-reports a ledger rather than
+    mis-reporting one.
+    """
+    home = tilde_home_3010(tmp_path, monkeypatch)
+    tilde_snapshot(home)
+    cmd = tilde_seq_cmd_3010()
+    cand = home / "lloyd-data" / "_pipeline" / "skills" / "candidates"
+    assert sv._candidate_dirs_assigned_in(cmd) == [str(cand)], cmd
+    assert sv.candidate_input_lost(cmd) is None, (
+        "a seq row whose snapshot is on disk, over a tilde-rooted C, was reported lost")
+    # And the same row with the snapshot pruned has to be EXAMINED, not declined: the neighbour file
+    # keeps the directory listable, so the only true finding is `none matching`.
+    tilde_snapshot(home, key="another-key")
+    (home / "lloyd-data" / "_pipeline" / "skills" / "candidates"
+     / f"candidate-{TILDE_KEY_3010}-20261019.md").unlink()
+    detail = sv.candidate_input_lost(tilde_seq_cmd_3010(key="yet-another-key"))
+    assert detail is not None and "none matching" in detail, (
+        f"a seq row with a tilde-rooted C was never examined: {detail}")
+
+
+def test_audit_reports_no_input_lost_for_a_tilde_rooted_row_that_resolves(tmp_path, monkeypatch):
+    """Clause 4, across the audit boundary: the key leaves the lines AND the tally.
+
+    The second ledger is the same row after its snapshot is pruned, and it still has to fail: a fix
+    that silenced `input_lost` would clear tonight's exit 1 exactly as well as one that resolves the
+    root, and only the pair tells them apart.
+    """
+    home = tilde_home_3010(tmp_path, monkeypatch)
+    snap = tilde_snapshot(home)
+    live = tmp_path / "tilde-live.jsonl"
+    stored_row(live, TILDE_KEY_3010, tilde_row_cmd_3010(), verdict="rejected")
+    rc, out = run_audit(live)
+    assert not [ln for ln in out.splitlines() if ln.startswith("INPUT_LOST")], out
+    assert out.splitlines()[-5] == "exit_drivers: none", out
+
+    snap.unlink()
+    lost = tmp_path / "tilde-lost.jsonl"
+    stored_row(lost, TILDE_KEY_3010, tilde_row_cmd_3010(), verdict="rejected")
+    rc_lost, out_lost = run_audit(lost)
+    assert rc_lost == 1, "pruning the snapshot must still cost the exit code"
+    assert f"INPUT_LOST {TILDE_KEY_3010}" in out_lost, out_lost
+    # `input_lost 1` has to be IN the tally, not necessarily the whole of it: with the snapshot gone
+    # the executed falsifier also dies loudly (`ls: cannot access … No such file or directory`), and
+    # this file's own header says the loud death is UNRUNNABLE's to decide, so `unrunnable 1` is
+    # counted beside it. Requiring exact equality here would assert that the silent class owns a row
+    # the loud path has also legitimately reported.
+    drivers_lost = out_lost.splitlines()[-5]
+    assert "input_lost 1" in drivers_lost, drivers_lost
+    assert drivers_lost.startswith("exit_drivers:"), drivers_lost
+    assert rc == 0, out                       # the resolving ledger was the clean one
+
+
+def test_a_tilde_rooted_directory_that_lists_but_matches_nothing_is_still_input_lost(
+        tmp_path, monkeypatch):
+    """Clause 5, the purpose check: the mangled root was wrong, and no claim would be wrong too.
+
+    Two of tonight's eight keys are genuine attrition and read exactly like this — the directory
+    lists, the glob names none of the files in it — and that finding is the detector doing its job.
+    Over a tilde root it used to be unreachable: `no such directory` fired first, naming a root that
+    was never the row's, so a real loss and a parsing artifact printed as the same line.
+    """
+    tilde_home_3010(tmp_path, monkeypatch)     # neighbour present, this row's glob hits nothing
+    detail = sv.candidate_input_lost(tilde_row_cmd_3010())
+    assert detail is not None and "(1 files there, none matching)" in detail, detail
+    assert "no such directory" not in detail, detail

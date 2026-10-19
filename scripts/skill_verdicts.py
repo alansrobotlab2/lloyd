@@ -1848,7 +1848,30 @@ def _reads_a_candidate(text: str, cand_vars: set[str]) -> bool:
 #: every file it ever named is pruned, which is the `$C/$N`-expands-to-the-directory case no
 #: execution can see because the compound command still ends in `echo`.
 _CAND_META_RE = re.compile(r"[*?\[{(|+]")
-_CAND_DIR_FROM_TEXT_RE = re.compile(r"(/[^\s'\"`;|&()<>$]*)$")
+# The `~?` is the whole of #3010. This match has to run from the path's ROOT to the end of the text
+# it was searched over, and written as `/…$` it could only ever START at a `/` — so the ledger's
+# dominant spelling, `~/lloyd-data/_pipeline/skills/candidates/`, came back as
+# `/lloyd-data/_pipeline/skills/candidates/`, a root that exists on no box, and `audit` printed
+# `input_lost` over commands that run clean and print `input_rows=94`. Six of that night's eight
+# `input_lost` keys were this — the other two are genuine attrition, listed over the correct root as
+# `(95 files there, none matching)` and still reported after the fix — while
+# `_candidate_listing`'s own `.expanduser()` sat two lines away with nothing left to expand. The
+# lookbehind is what keeps a tilde a home: `~` means home only at a word boundary, so a `~` inside
+# `sed 's/a~/b~/'`'s script is not read as the start of a path.
+_CAND_DIR_FROM_TEXT_RE = re.compile(r"((?:(?<![\w~/.])~)?/[^\s'\"`;|&()<>$]*)$")
+
+
+def _expand_home(path: str) -> str:
+    """`path` with a leading `~` resolved against the home root, for anything read by a human.
+
+    A tilde is part of a path's ROOT, not decoration: `~/lloyd-data/…` and `/lloyd-data/…` are two
+    different claims about this filesystem, and only the first is on the box. Both of this
+    predicate's directory extractors hand what they matched straight to a listing AND to the
+    `INPUT_LOST` detail, so the resolution belongs at the extraction seam — a report naming a root
+    with its home prefix removed sends whoever has to repair the row looking for a directory that
+    was never the ledger's claim (#3010).
+    """
+    return str(Path(path).expanduser())
 
 
 def _candidate_dirs_assigned_in(cmd: str) -> list[str]:
@@ -1857,14 +1880,22 @@ def _candidate_dirs_assigned_in(cmd: str) -> list[str]:
     The seq-shaped rows keep the directory in a variable (`C=/…/skills/candidates`) and reach the
     file only through `$C/$N`, so a bare pattern like `candidate-<key>-[0-9]{8}\.md` has nowhere to
     be resolved except the assignment the same command makes. `skills/candidates` is recognised by
-    the existing `_CANDIDATE_DIR_RE`; the leading `/` is required because a relative `candidates` in
-    a command whose cwd nobody knows is not a claim about any directory on this box.
+    the existing `_CANDIDATE_DIR_RE`; a leading `/` or `~/` is required because a relative
+    `candidates` in a command whose cwd nobody knows is not a claim about any directory on this box
+    — while `C=~/lloyd-data/…` is exactly such a claim, which the tilde-blind test for `/` threw
+    away: the row got no directory, the predicate returned None, and the key was never examined at
+    all (#3010). Under-reporting is the same blind spot facing the other way, so both spellings are
+    expanded here rather than compared literally: a value the detector can resolve is a value it
+    can be wrong about, which is the only state worth reporting on.
     """
     out: list[str] = []
     for name, (start, end) in _shell_assignments(cmd).items():
         value = cmd[start:end]
-        if value.startswith("/") and _CANDIDATE_DIR_RE.search(value) and value not in out:
-            out.append(value)
+        if not (value.startswith("/") or value.startswith("~/")):
+            continue
+        absolute = _expand_home(value)
+        if _CANDIDATE_DIR_RE.search(absolute) and absolute not in out:
+            out.append(absolute)
     return out
 
 
@@ -1961,7 +1992,12 @@ def candidate_input_lost(evidence_cmd: str) -> str | None:
         if not _CAND_META_RE.search(pattern):
             continue     # a literal dated path is UNRUNNABLE's, decided by running it
         head = _CAND_DIR_FROM_TEXT_RE.search(evidence_cmd[:match.start()])
-        own_dir = head.group(1) if head and len(head.group(1)) > 1 else None
+        # Expanded at the seam, not at the message: the string extracted here is both the directory
+        # that gets listed and the directory `INPUT_LOST` prints, and the second one is what a human
+        # goes looking for (#3010). `len(...) > 1` is against a bare `/`, and stays true of `~/`,
+        # whose expansion is what makes it a directory at all.
+        own_dir = (_expand_home(head.group(1))
+                   if head and len(head.group(1)) > 1 else None)
         where = [own_dir] if own_dir else assigned_dirs
         if not where:
             return None
