@@ -29,8 +29,11 @@ from app.paths import (PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB,
                        VAULT_ROOT)
 from app.kg_store import (EDGE_TYPES, StoreUnavailable, canonical_edge_type,
                           store as _kg_store)
-from scripts.reflection_archive import (copy_gaps as _copy_gaps,
+from scripts.reflection_archive import (EXPECTED_MTIME_WITNESSES,
+                                        copy_gaps as _copy_gaps,
+                                        mtime_witness as _mtime_witness,
                                         pattern_staleness as _pattern_staleness,
+                                        pointer_mtime_lag as _pointer_mtime_lag,
                                         reports_in as _reports_in)
 
 DEFAULT_OUTPUT_DIR = PIPELINE_DIR / "reflection"
@@ -1344,6 +1347,8 @@ def generate_report(
     trace_coverage: tuple[int, int] | None = None,
     stamp_cohort: dict | None = None,
     pattern_staleness: list | None = None,
+    pointer_lag: list | None = None,
+    mtime_witness=None,
     referential_ledger: Path | None = None,
 ) -> str:
     """Generate the markdown health report.
@@ -1382,6 +1387,21 @@ def generate_report(
     no pointer goes missing and the pointer check is silent while the file on disk is
     a cycle behind. Task 39's run of 2026-10-07 did exactly that and reported
     `status: success`. None means not measured.
+
+    `pointer_lag` is `reflection_archive.pointer_mtime_lag` over the same directory
+    (#2996): a `*-patterns-latest.md` whose own mtime predates the newest
+    `knowledge-write-*` report's day. It is what `pattern_staleness` above structurally
+    cannot see, because that check reads name stamps and never stats the pointer —
+    #2832 reproduced a bare `cp` of a stem printing `Pattern files behind the newest
+    report: 0 — every §2e archive is current.` over a pointer five days stale. None
+    means not measured, and the section says that rather than imply currency (#1227).
+
+    `mtime_witness` is `reflection_archive.mtime_witness` over the same directory: how
+    many `mtime=` lines the newest completion note carries, against the
+    `EXPECTED_MTIME_WITNESSES` §2e prescribes. It is a check on the NOTE, not on the
+    corpus — 2026-10-16, -17 and -18 each printed none — so its row is worded as a
+    reporting gap and never as lag. None, or a note that could not be read, means not
+    measured.
 
     `trace_coverage` is the `(n, m)` pair from `contradiction_trace_coverage`: how
     many of the m fact records carry a `conflicts_with` resolution trace (#1596).
@@ -1723,6 +1743,52 @@ def generate_report(
                          f"| `{stale.report}` |")
         if len(pattern_staleness) > SECTION_ROW_CAP:
             lines.append(f"| … | *{len(pattern_staleness) - SECTION_ROW_CAP:,} more* |")
+    lines.append("")
+
+    # The section's own zero above is computed from names, and a name is not a write:
+    # #2832 reproduced a bare `cp` of a stem clearing it while the pointer held an
+    # earlier cycle's bytes. This is the same retention question asked of the
+    # filesystem, which is the only witness that survives a copy.
+    if pointer_lag is None:
+        lines.append("*Not measured: the pattern pointers were not stat'ed, so nothing "
+                     "here says whether they were advanced.*")
+    elif not pointer_lag:
+        lines.append("Pattern pointers behind their newest report (by mtime): 0 — every "
+                     "`*-patterns-latest.md` in the directory was written on or after "
+                     "the newest completion note's day.")
+    else:
+        lines.append(f"Pattern pointers behind their newest report (by mtime): "
+                     f"{len(pointer_lag)}")
+        lines.append("")
+        lines.append("| Pattern pointer | Pointer mtime (UTC) | Newest report day |")
+        lines.append("|-----------------|---------------------|-------------------|")
+        for lag in pointer_lag[:SECTION_ROW_CAP]:
+            lines.append(f"| `{lag.stem}.md` | `{lag.mtime_date}` | `{lag.report_day}` |")
+        if len(pointer_lag) > SECTION_ROW_CAP:
+            lines.append(f"| … | *{len(pointer_lag) - SECTION_ROW_CAP:,} more* |")
+        lines.append("")
+        lines.append("*A dated copy's name can be current while the pointer behind it is "
+                     "not: `pattern_staleness` above reads name stamps and never stats "
+                     "the pointer (#2832).*")
+    lines.append("")
+
+    # Separate from the row above on purpose. Pointer mtimes measure the corpus; this
+    # counts how loudly the cycle that changed them said so in its own note. Three
+    # consecutive post-§2e-fix cycles (2026-10-16, -17, -18) printed none of the lines
+    # while their pointers were being written, which is a hole in the report and not a
+    # finding about the corpus — so it must never read as lag.
+    lines.append("### §2e `mtime=` witness in the newest completion note")
+    lines.append("")
+    if mtime_witness is None or mtime_witness.note is None:
+        lines.append("*Not measured: no dated completion note was readable, so whether "
+                     "its §2e lines were written is unknown.*")
+    else:
+        lines.append(f"`mtime=` witness lines in `{mtime_witness.note}`: "
+                     f"{mtime_witness.count} of {EXPECTED_MTIME_WITNESSES} expected"
+                     + ("" if mtime_witness.count >= EXPECTED_MTIME_WITNESSES else
+                        " — a REPORTING GAP in the completion note, NOT a lag in the "
+                        "pattern corpus: the pointer mtimes above are the measurement "
+                        "of that."))
     lines.append("")
 
     # #94's referential-integrity ledger, read here at generate time so the numbers in
@@ -2130,6 +2196,12 @@ def main():
     # The directory listing only — no second read of the report bodies, which the
     # line above already did for the pointer check (#2413).
     stale_patterns = _pattern_staleness(reflection_dir)
+    # Two more readings of the same directory listing, both read-only (#2996). The
+    # pointer mtimes are what a dated copy's name cannot show — #2832 cleared the check
+    # above with a bare `cp` and no pointer write — and the witness count says whether
+    # the cycle that did write them said so in its own note.
+    pointer_lag = _pointer_mtime_lag(reflection_dir)
+    witness = _mtime_witness(reflection_dir)
 
     # Generate report
     report = generate_report(entity_stats, rel_stats, edges, stale_facts, now, hygiene,
@@ -2138,6 +2210,8 @@ def main():
                              trace_coverage=trace_coverage,
                              stamp_cohort=stamp_cohort,
                              pattern_staleness=stale_patterns,
+                             pointer_lag=pointer_lag,
+                             mtime_witness=witness,
                              referential_ledger=args.referential_ledger)
 
     # Write output

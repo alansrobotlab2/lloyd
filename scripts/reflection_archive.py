@@ -53,6 +53,7 @@ the header is missing.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -548,3 +549,106 @@ def pattern_staleness(reflection_dir: Path) -> list[PatternStaleness]:
         if copy_key < report_key:
             out.append(PatternStaleness(stem, copy, report))
     return out
+
+
+#: A governed pattern pointer, matched by shape rather than by name. `PATTERN_STEMS`
+#: cannot be the enumeration here: it holds `tool-patterns-latest` and
+#: `conversation-patterns-latest` only, and the one pointer measured stale on the live
+#: tree (#2832, five days behind on 2026-10-18) is `tool-failure-patterns-latest.md`,
+#: which is not in that tuple. Whether that file is §2e-governed is a separate ruling;
+#: this check reports what the filesystem says about every pointer of the shape.
+_POINTER_LATEST = re.compile(r"^(.+-patterns-latest)\.md$")
+
+#: A completed cycle's note prints one of these per pointer it advanced (§2e). The
+#: count is the witness that the pointer write happened; the pointers' mtimes are the
+#: measurement, and this is the report that says whether the note said so.
+MTIME_WITNESS_MARKER = "mtime="
+
+#: §2e writes two governed pointers, so a full cycle's note carries two witness lines.
+EXPECTED_MTIME_WITNESSES = 2
+
+
+@dataclass(frozen=True)
+class PointerMtimeLag:
+    """A pattern pointer whose mtime is older than the newest completion note's day.
+
+    `stem` is the pointer's name without `.md`, `mtime_date` the UTC date its mtime
+    carries, `report` the newest note's file name and `report_day` the date inside it.
+    """
+    stem: str
+    mtime_date: str
+    report: str
+    report_day: str
+
+
+@dataclass(frozen=True)
+class MtimeWitness:
+    """How many `mtime=` lines the newest completion note carries.
+
+    `note` is None when the directory holds no readable dated note at all, which the
+    report must render as unmeasured rather than as zero — a note that could not be
+    read is not a note that said nothing.
+    """
+    note: str | None
+    count: int
+
+
+def pointer_mtime_lag(reflection_dir: Path) -> list[PointerMtimeLag]:
+    """One finding per `*-patterns-latest.md` whose mtime predates the newest report.
+
+    This is not `pattern_staleness` and does not replace it. That check compares the
+    stamp in an archive copy's NAME against the stamp in the report's name and never
+    stats the pointer — deliberately, per `_newest_matching`, because a hand-restored
+    copy's mtime describes the restoring. The cost is #2832: reproducing it took a bare
+    `cp` of a stem, which makes the NAME current and writes no pointer, and the report
+    then printed "Pattern files behind the newest report: 0 — every §2e archive is
+    current." over a pointer five days stale. The §2e `mtime=` lines were supposed to
+    be the second witness and printed zero times on three consecutive cycles, so this
+    row reads the one fact that cannot be satisfied by a file name: the pointer's own
+    mtime.
+
+    Read-only — it lists and stats, and never writes or `utime`s anything, because it
+    runs inside a nightly report over the live corpus. Like `pattern_staleness`, a
+    directory with no dated `knowledge-write-*` note, or none at all, returns nothing:
+    no completed cycle means no pointer is behind anything.
+    """
+    reflection_dir = Path(reflection_dir)
+    names = _listing(reflection_dir)
+    report, report_key = _newest_matching(names, KNOWLEDGE_WRITE_REPORT)
+    if report is None or report_key is None:
+        return []
+    report_day = "%04d-%02d-%02d" % report_key[:3]
+    out: list[PointerMtimeLag] = []
+    for name in names:
+        m = _POINTER_LATEST.match(name)
+        if not m:
+            continue
+        try:
+            stamp = (reflection_dir / name).stat().st_mtime
+        except OSError:
+            continue
+        mtime_day = datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%d")
+        if mtime_day < report_day:
+            out.append(PointerMtimeLag(m.group(1), mtime_day, report, report_day))
+    return out
+
+
+def mtime_witness(reflection_dir: Path) -> MtimeWitness:
+    """Count the `mtime=` witness lines in the newest completion note.
+
+    The pointer mtimes above are the measurement; this counts how loudly the cycle that
+    produced them said so. Zero means the note is silent about writes that may or may
+    not have happened, which is a reporting gap and never a statement about the corpus.
+    A directory with no dated note — or one that cannot be read — returns `note=None`
+    so the report can say *not measured* instead of reading a missing note as a silent
+    one (#1227).
+    """
+    reflection_dir = Path(reflection_dir)
+    report, _ = _newest_matching(_listing(reflection_dir), KNOWLEDGE_WRITE_REPORT)
+    if report is None:
+        return MtimeWitness(None, 0)
+    try:
+        body = (reflection_dir / report).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return MtimeWitness(None, 0)
+    return MtimeWitness(report, body.count(MTIME_WITNESS_MARKER))
