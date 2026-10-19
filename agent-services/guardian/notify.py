@@ -460,6 +460,44 @@ class Notifier:
             i += 1
         return lines[0], keys, "\n".join(lines[i:])
 
+    def alert_file_incident(self) -> tuple[str, bool] | None:
+        """`(title, sealed)` for the incident ALERT.md is holding, or None (#3019).
+
+        The read side of the single-slot file `_alert_file` writes and
+        `_alert_file_retract` seals. The retraction has always been able to answer
+        "is this file still mine to seal" for the title it was handed, and nothing
+        could answer the prior question — WHICH incident is this file asserting —
+        so a process that did not write it had no way to ask. That question is what
+        a restart reconciliation starts from: ALERT.md outlives its writer, and the
+        latch every guard retracts on does not.
+
+        Same parse and the same rule as the retraction, so the two cannot disagree
+        about what the file says: only a `^[a-z_]+: ` line is a header key, so alarm
+        prose that opens with a `key: value`-looking sentence can neither extend the
+        header nor pass itself off as a `cleared:` marker.
+
+        Three shapes all answer None — no file, a file that cannot be read, and a
+        file that is not this layout — because an incident whose title cannot be
+        read is one no caller may act on. The distinction between "no incident" and
+        "an unreadable one" is deliberately not made here: both leave a caller with
+        nothing it is allowed to seal, and `_alert_file_retract` already treats the
+        missing file as success rather than as a problem to report.
+        """
+        path = self.state_dir / ALERT_FILE_NAME
+        try:
+            if not path.is_file():
+                return None
+            body = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        split = self._alert_file_split(body)
+        if split is None:
+            return None
+        _, keys, _ = split
+        sealed = any(k.startswith(f"{ALERT_CLEARED_PREFIX} ") or k == ALERT_CLEARED_PREFIX
+                     for k in keys)
+        return split[0][len("# "):], sealed
+
     def _vault_note(self, title: str, text: str, *, coalesce: bool = False) -> bool:
         """Write this alert's section into today's daily note.
 

@@ -1004,6 +1004,39 @@ def test_plain_error_alert_still_files_no_backlog_task(tmp_path):
     assert "backlog" not in res, f"an unlabelled error alert reached the board: {res}"
 
 
+def _str_constants(src: str) -> dict[str, str]:
+    """Module-level `NAME = "string"` bindings of a source file, by name."""
+    import ast
+
+    out: dict[str, str] = {}
+    for node in ast.iter_child_nodes(ast.parse(src)):
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    out[tgt.id] = node.value.value
+    return out
+
+
+def _title_arg(node, consts: dict[str, str]):
+    """The string a call passes as its title — spelled out, or named (#3019).
+
+    The two latch-backed alert titles are module constants now, because
+    `Guardian.reconcile_stranded_alert` has to recognise them from ALERT.md's H1
+    without ever having raised them, and a second copy of a title is how a
+    reconciliation quietly stops sealing anything. The two nodes that read call sites
+    for exactly those titles therefore move from "the literal is spelled at the call
+    site" to "the title argument resolves to this literal" — resolved through
+    guardian.py's own assignments, so only a real binding satisfies it."""
+    import ast
+
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        return consts.get(node.id)
+    return None
+
+
 def test_the_no_spam_fixture_is_live():
     """Clause 2's bite depends on its fixture being a live site. The title and
     body above are transcribed from guardian.py, not read out of it, so a reword
@@ -1019,6 +1052,7 @@ def test_the_no_spam_fixture_is_live():
 
     src = (Path(__file__).resolve().parent.parent /
            "agent-services" / "guardian" / "guardian.py").read_text()
+    consts = _str_constants(src)
     site = None
     for node in ast.walk(ast.parse(src)):
         if (isinstance(node, ast.Call)
@@ -1027,7 +1061,7 @@ def test_the_no_spam_fixture_is_live():
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "self"
                 and len(node.args) >= 3
-                and getattr(node.args[1], "value", None) == SUPERVISORD_RESTART[0]):
+                and _title_arg(node.args[1], consts) == SUPERVISORD_RESTART[0]):
             site = node
     assert site is not None, "the `supervisord was unreachable` call site is gone"
     assert ast.literal_eval(site.args[0]) == "error", (
@@ -1854,14 +1888,23 @@ def test_the_three_sites_that_cannot_act_all_ask_for_a_human():
 
     src = (Path(__file__).resolve().parent.parent /
            "agent-services" / "guardian" / "guardian.py").read_text()
+    consts = _str_constants(src)
     sites = []
+    # (segment, resolved title) beside the bare segments: two of these titles are
+    # module constants since #3019, so a text search for the quoted literal would
+    # report a live call site as gone. The title below is what the call actually
+    # passes, read out of guardian.py's own bindings.
+    with_titles: list[tuple[str, "str | None"]] = []
     for node in ast.walk(ast.parse(src)):
         if (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "alert"
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "self"):
-            sites.append(ast.get_source_segment(src, node))
+            seg = ast.get_source_segment(src, node)
+            sites.append(seg)
+            with_titles.append((seg, _title_arg(node.args[1], consts)
+                                if len(node.args) >= 2 else None))
     # The denominator beside the count: guardian.py has 9 `self.alert(` call sites
     # today. A drop means the extractor stopped matching a real shape — an alert
     # reached through `self.alert` renamed or called off an alias would otherwise
@@ -1872,7 +1915,7 @@ def test_the_three_sites_that_cannot_act_all_ask_for_a_human():
     for title in ("Failure with nothing to revert",
                   "Guardian self-test failed",
                   "Service down, but no promotion to revert"):
-        at_title = [s for s in sites if f'"{title}"' in s]
+        at_title = [s for s, t in with_titles if t == title]
         assert at_title, f"the {title!r} alert call site is gone"
         assert all("needs_human=True" in s for s in at_title), (
             f"{title!r} still asks for a human in prose only, so it files nothing")
@@ -3937,3 +3980,198 @@ def test_the_supervisord_note_is_written_only_by_the_supervisor_it_was_handed(tm
     assert noisy.count(N.DAILY_STILL_OPEN) == 2, (
         "over the line the note must hold the supervisor's own marker AND the tmp "
         f"section — that pair is the count clause 2's node was red at: {noisy}")
+
+
+# ── #3019: the seal a restarted process owes an incident it never raised ─────
+# `resolve` has only ever been reached from a tick that watched a cause come back,
+# and the causes of these three incidents live in process memory
+# (`tmpwatch.TmpWatch.open_level`, `_sup_unreachable_open`, `_down_programs`). A
+# restart zeroes all three, so the inherited `ALERT.md` — the artefact an agent reads
+# FIRST — can never be sealed by the process that now holds the box. The nodes below
+# build that process: a fresh `_note_watching` guardian, whose latches have never
+# been set, handed an ALERT.md written by someone else.
+_STRAND_BODY = ("Act on this now: stop the writer, then remove the in-tree copy.\n"
+                "\n"
+                "This needs a human only if the path is still there.")
+
+
+def _cleared_lines_of(path):
+    """The `cleared:` header key lines of an ALERT.md, as written on disk."""
+    import notify as N
+
+    return [ln for ln in path.read_text(encoding="utf-8").splitlines()
+            if ln.startswith(f"{N.ALERT_CLEARED_PREFIX} ")]
+
+
+def test_the_restarted_guardian_seals_all_three_latch_backed_titles(tmp_path, monkeypatch):
+    """#3019 clause 2: the seal covers the whole stranded set, not just /tmp.
+
+    Three incidents, three different recovery conditions, three different latches —
+    and one shared failure: each is retracted only by a tick that remembers raising
+    the alarm. The three cases are the ones the acceptance names, each measured the
+    way its own guard measures it:
+
+    * `/tmp is running out of inodes`, over a reading below `CLEAR_FRACTION` (the
+      `/tmp` this harness measures is the one `_note_watching` hands it, 10,000 of
+      1,048,576 inodes — 0.95%, the same shape `df -i /tmp` reports today);
+    * `supervisord was unreachable`, over a snapshot whose supervisor ANSWERED;
+    * `Service down, but no promotion to revert`, over a liveness read that came
+      back not-down.
+
+    Two of the five `notifier.resolve` call sites are deliberately NOT in this set:
+    poolwatch's and the stray check's both recompute from the measured condition
+    instead of a latch, which is why they need no reconciliation — and the second
+    half of this node is the other side of the clause, where the condition does NOT
+    hold, and a seal there would be an all-clear nobody observed.
+    """
+    import guardian as gmod
+    import notify as N
+    import tmpwatch as TW
+
+    clear_cases = [
+        (TW.ALERT_TITLE, ["ok"], (False, "")),
+        (gmod.SUPERVISOR_ALERT_TITLE, ["ok"], (False, "")),
+        (gmod.SERVICE_DOWN_ALERT_TITLE, ["ok"], (False, "")),
+    ]
+    for n, (title, states, live) in enumerate(clear_cases):
+        box = tmp_path / f"clear-{n}"
+        g = _note_watching(box, monkeypatch, states=states,
+                           liveness=lambda _tick, _a=live: _a)[0]
+        raised = g.notifier.alert("error", title, _STRAND_BODY, coalesce=True)
+        assert raised["alert_file"] is True, raised
+        assert g.tmp.open_level is None and not g._sup_unreachable_open \
+            and not g._down_programs, "this process must hold none of the latches"
+
+        assert g.reconcile_stranded_alert() == "sealed", (
+            f"{title}: the cause is measurably gone and the incident is still a live "
+            "directive in the file an agent reads first")
+        path = box / "gstate" / N.ALERT_FILE_NAME
+        cleared = _cleared_lines_of(path)
+        assert len(cleared) == 1, f"{title}: expected one closing key, got {cleared!r}"
+        assert N.ALERT_CLEARED_BANNER in path.read_text(encoding="utf-8"), title
+
+    still_cases = [
+        # (title, supervisor answer, liveness answer) — the cause is still present.
+        (gmod.SUPERVISOR_ALERT_TITLE, ["unreachable"], (False, "")),
+        (gmod.SERVICE_DOWN_ALERT_TITLE, ["ok"], (True, "lloyd-mc:lloyd-backend FATAL")),
+    ]
+    for n, (title, states, live) in enumerate(still_cases):
+        box = tmp_path / f"still-{n}"
+        g = _note_watching(box, monkeypatch, states=states,
+                           liveness=lambda _tick, _a=live: _a)[0]
+        assert g.notifier.alert("error", title, _STRAND_BODY,
+                               coalesce=True)["alert_file"] is True
+        before = (box / "gstate" / N.ALERT_FILE_NAME).read_bytes()
+
+        assert g.reconcile_stranded_alert() == "still-open", title
+        assert (box / "gstate" / N.ALERT_FILE_NAME).read_bytes() == before, (
+            f"{title}: reconciled against a condition that does not hold, and still "
+            "wrote the seal")
+
+
+def test_the_reconciliation_writes_nothing_when_nothing_is_open(tmp_path, monkeypatch):
+    """#3019 clause 4: a startup with nothing to close leaves every byte where it was.
+
+    Two shapes, both seen by a process that never alerted:
+
+    * no ALERT.md at all. The hourly all-clear already has this contract on the
+      `resolve` side (`test_resolve_creates_no_alert_file_when_none_exists`), and the
+      reconciliation inherits it: conjuring a file to retract would manufacture an
+      incident in the surface agents read first.
+    * a second startup after an incident was already sealed. This is the state of
+      every future guardian restart once the seal exists — a restart per deploy, per
+      reboot, per watchdog kill — so if it were not silent the box would re-seal the
+      same closed incident for ever, and each re-seal would stamp a new `cleared:`
+      time onto an incident that ended weeks ago.
+
+    Byte-identical, not "equivalent": the sealed file carries the closing stamp that
+    a later reader ages, and a second write would move it.
+    """
+    import notify as N
+    import tmpwatch as TW
+
+    box = tmp_path / "quiet"
+    path = box / "gstate" / N.ALERT_FILE_NAME
+    first = _note_watching(box, monkeypatch, states=["ok"],
+                           liveness=lambda _t: (False, ""))[0]
+    assert not path.exists()
+
+    assert first.reconcile_stranded_alert() == "nothing-to-reconcile"
+    assert not path.exists(), "a reconciliation with nothing to seal created an ALERT.md"
+
+    # One real incident, sealed by the process that inherited it.
+    assert first.notifier.alert("error", TW.ALERT_TITLE, _STRAND_BODY,
+                                coalesce=True)["alert_file"] is True
+    assert first.reconcile_stranded_alert() == "sealed"
+    alert_bytes = path.read_bytes()
+    note_path = next((box / "memory").glob("*.md"))
+    note_bytes = note_path.read_bytes()
+    assert len(_cleared_lines_of(path)) == 1
+
+    # The NEXT restart, over the same state dir: nothing open, so nothing written.
+    again = _note_watching(box, monkeypatch, states=["ok"],
+                           liveness=lambda _t: (False, ""))[0]
+    assert again.reconcile_stranded_alert() == "nothing-to-reconcile"
+    assert path.read_bytes() == alert_bytes, (
+        "a second startup re-wrote a sealed incident, moving its `cleared:` stamp")
+    assert note_path.read_bytes() == note_bytes, (
+        "and re-sealed the daily note that the first one already closed")
+
+
+def test_a_sealed_alert_never_reports_an_out_of_window_note_as_cleared(tmp_path,
+                                                                       monkeypatch):
+    """#3019 clause 5: ALERT.md closes; an unreachable note is recorded, not swallowed.
+
+    `resolve` reaches back `DAILY_SCAN_DAYS = 3` days over daily notes and no further
+    (`_scan_days`), so the incident this item was filed from is exactly the hard case:
+    `~/obsidian/memory/2026-10-15.md` holds two open `/tmp is running out of inodes`
+    sections, four days outside a 2026-10-19 window. `resolve` therefore seals
+    ALERT.md and returns False — the bool folds in the note it cannot touch, which is
+    why the verdict on the seal is the file's bytes and the verdict on the incident is
+    the token, and why neither may be inferred from the other here.
+
+    Three things have to hold at once, and each is falsifiable by a different wrong
+    implementation: the state-dir file is still sealed (a `cleared:` key and the
+    CLEARED banner); the out-of-window note is byte-identical and gains no `cleared:`
+    line — claiming a recovery nobody observed is the #1590 defect this repo already
+    refused; and the run says so in its own verdict rather than reporting `sealed`.
+    The historical sweep cannot take the note either: `guardian_note_sweep.py`
+    declines tmpwatch's disk figures by design, which is why the leftover is left to a
+    human and not quietly relabelled.
+    """
+    import guardian as gmod
+    import notify as N
+    import tmpwatch as TW
+    from datetime import date, timedelta
+
+    box = tmp_path / "window"
+    g = _note_watching(box, monkeypatch, states=["ok"],
+                       liveness=lambda _t: (False, ""))[0]
+    assert g.notifier.alert("error", TW.ALERT_TITLE, _STRAND_BODY,
+                            coalesce=True)["alert_file"] is True
+
+    stale_day = date.today() - timedelta(days=N.DAILY_SCAN_DAYS + 2)
+    stale = box / "memory" / f"{stale_day.isoformat()}.md"
+    stale.write_text(f"# {stale_day.isoformat()}\n\n"
+                     f"## Self-mod guardian: {TW.ALERT_TITLE}\n\n"
+                     f"{_STRAND_BODY}\n\n{N.DAILY_STILL_OPEN}\n", encoding="utf-8")
+    stale_bytes = stale.read_bytes()
+    logged: list[str] = []
+    monkeypatch.setattr(gmod, "log", logged.append)
+
+    verdict = g.reconcile_stranded_alert()
+
+    path = box / "gstate" / N.ALERT_FILE_NAME
+    assert len(_cleared_lines_of(path)) == 1, "the state-dir alert was left unsealed"
+    assert N.ALERT_CLEARED_BANNER in path.read_text(encoding="utf-8")
+    assert stale.read_bytes() == stale_bytes, (
+        f"the note outside the {N.DAILY_SCAN_DAYS}-day window was rewritten")
+    assert N.DAILY_CLEARED_PREFIX not in stale.read_text(encoding="utf-8"), (
+        "a `cleared:` line landed in a note the retraction cannot reach: that is a "
+        "recovery claimed for a condition nobody watched")
+    assert verdict != "sealed", (
+        f"the run reported the incident fully cleared over an open note: {verdict}")
+    assert verdict == "sealed-note-out-of-reach", verdict
+    assert any("DAILY_SCAN_DAYS" in line and TW.ALERT_TITLE in line for line in logged), (
+        "the leftover note was swallowed: no log line names it or the window that "
+        f"cannot reach it: {logged!r}")

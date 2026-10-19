@@ -109,6 +109,19 @@ def level_for(fraction: float) -> str | None:
     return None
 
 
+def clear_body(r: Reading) -> str:
+    """The all-clear sentence for a reading, in the words the incident is closed with.
+
+    A function and not a line inside `tick()` because two callers must state this in
+    the same words: the latched tick that watched the counter come down, and
+    `Guardian.reconcile_stranded_alert` (#3019), which seals an incident this process
+    never saw by re-measuring the same counter. The second one writing its own
+    sentence is how a `cleared:` line and an `alert:` body start disagreeing about
+    the same number."""
+    return (f"{r.path} is back to {r.inodes_used:,} of "
+            f"{r.inodes_total:,} inodes ({r.inode_fraction:.0%}).")
+
+
 def top_consumers(path: str = PATH, limit: int = SCAN_LIMIT,
                   top_n: int = TOP_N) -> tuple[list[tuple[str, int]], bool]:
     """`([(name, entries), ...], truncated)` for the top-level entries of `path`.
@@ -193,8 +206,7 @@ class TmpWatch:
             return "alert", level, self.describe(r)
         if self.open_level and r.fraction < CLEAR_FRACTION:
             self.open_level = None
-            return "resolve", None, (f"{self.path} is back to {r.inodes_used:,} of "
-                                     f"{r.inodes_total:,} inodes ({r.inode_fraction:.0%}).")
+            return "resolve", None, clear_body(r)
         return "none", level, ""
 
     def describe(self, r: Reading) -> str:

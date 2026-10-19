@@ -1374,7 +1374,10 @@ def test_a_collected_count_the_command_contradicts_is_what_the_node_flags():
 #: (`guardian.py:2147` for a crash-loop verdict that `evaluate_liveness`
 #: decided at `:689`; both are `def` HEADS, and #2846 has since moved them to
 #: 2179 and 702, which is why the node below pins the two definitions rather
-#: than #2583's literals). The node below asks the second question: is line N inside
+#: than #2583's literals — and #3019 moved the two heads again (to 2317 and 713),
+#: which is that pin earning its keep: the numbers below are re-pointed by the
+#: round that moved them, never by a reader guessing which move a number is from).
+#: The node below asks the second question: is line N inside
 #: something the file *defines*.
 #:
 #: The tolerance is the span, and only the span. The rule reports an anchor that
@@ -1686,11 +1689,15 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
         spans = definition_spans(ROOT / rel)
         assert spans is not None, f"{rel} stopped parsing; the boundary is ungradeable"
         heads[rel] = {name: lo for lo, _hi, name in spans}
-    assert heads[guardian]["main"] == 2179, (
-        f"`main` moved off :2179 ({heads[guardian]['main']}) — if it is gone "
+    # Both heads re-pointed by #3019, which added a reconciliation method to
+    # `Guardian` and two module constants above it: 2179 → 2317 and 702 → 713.
+    # Nothing else moved them, which is the point of pinning a definition head at
+    # all — a change that shifts a cited line has to say so here first.
+    assert heads[guardian]["main"] == 2317, (
+        f"`main` moved off :2317 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
-    assert heads[guardian]["evaluate_liveness"] == 702, (
-        f"`evaluate_liveness` moved off :702 "
+    assert heads[guardian]["evaluate_liveness"] == 713, (
+        f"`evaluate_liveness` moved off :713 "
         f"({heads[guardian]['evaluate_liveness']}) — `architecture/threat-model.md`'s "
         "T-26 cell cites this head, so that row moves with it")
     assert heads[lease]["grant"] == 89

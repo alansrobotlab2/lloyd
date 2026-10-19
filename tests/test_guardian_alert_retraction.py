@@ -742,3 +742,120 @@ def test_the_tmp_reading_a_driven_tick_sees_is_the_one_the_builder_hands_it(tmp_
     assert noisy.count(notify.DAILY_STILL_OPEN) == 2, (
         "over the line the note must hold the incident's own marker AND the tmp "
         f"section — that pair is the count the two clause nodes were red at: {noisy}")
+
+
+# ── #3019: a seal that does not need the process that raised the alarm ──────
+# Everything above this line seals an incident from inside the process that alerted
+# for it, which is the only shape `resolve` has ever had a caller for. These two
+# nodes are the other shape: the file is still on disk, the process that wrote it is
+# not, and what is left is a Guardian that has never measured the cause.
+TMP_BODY = ("/tmp: 845,813 of 1,048,576 inodes used (81%); 6.8 of 126 GiB (5%).\n"
+            "\n"
+            "Look before deleting: `df -i /tmp`, then `du --inodes -x -d1 /tmp | "
+            "sort -n | tail`.")
+
+
+def test_a_process_that_never_raised_the_alarm_seals_the_incident_it_inherited(tmp_path,
+                                                                             monkeypatch):
+    """#3019 clause 1: ALERT.md outlives its writer, so the seal may not need a latch.
+
+    Every guard retracts on state inside its own process — `tmpwatch.TmpWatch.open_level`,
+    `_sup_unreachable_open`, `_down_programs` — and a restart zeroes all three. The new
+    process's first tick reads `/tmp`, finds the cause gone, and correctly reports
+    `none`, because nothing in it knows an alarm was ever raised; the previous
+    process's instructions therefore stay a live directive forever. That is this box at
+    filing: `/tmp is running out of inodes` written 2026-10-15T08:33:02.547375-07:00
+    with `grep -c 'cleared:'` → 0 while `df -i /tmp` reads 45,203 of 1,048,576 (4.3%)
+    against `tmpwatch.CLEAR_FRACTION = 0.70`, in a guardian that started Sat Oct 17
+    03:13:19 2026 and so could not have raised it.
+
+    The incident is raised through the shipped `alert()`, then reconciled by a Guardian
+    whose `open_level` is still None — a NEW process, not another tick of the one that
+    alerted. The bytes must show the shipped seal: one `cleared:` header key carrying
+    the retraction sentence, `ALERT_CLEARED_BANNER` above the alarm text now quoted
+    for the record, and the original `level:`/`written:` keys copied byte-for-byte so
+    a reader can still age the alarm itself.
+    """
+    import tmpwatch as TW
+
+    g, _ = _ticking(tmp_path, monkeypatch, liveness=lambda n: HEALTHY)
+    path = tmp_path / "gstate" / notify.ALERT_FILE_NAME
+
+    raised = g.notifier.alert("error", TW.ALERT_TITLE, TMP_BODY, coalesce=True)
+    assert raised["alert_file"] is True, raised
+    before = notify.Notifier._alert_file_split(path.read_text(encoding="utf-8"))
+    assert before is not None and before[0] == f"# {TW.ALERT_TITLE}", before
+    assert g.tmp.open_level is None, (
+        "the reconciling guardian must hold no latch. A process that DID raise the "
+        "alarm is the case the tick nodes above already own; inheriting one is the "
+        "case that has never had a test, and is the case that is broken")
+
+    assert g.reconcile_stranded_alert() == "sealed"
+
+    text = path.read_text(encoding="utf-8")
+    after = notify.Notifier._alert_file_split(text)
+    assert after is not None and after[0] == f"# {TW.ALERT_TITLE}", "the H1 title moved"
+    cleared = [k for k in after[1] if k.startswith(f"{notify.ALERT_CLEARED_PREFIX} ")]
+    assert len(cleared) == 1, f"expected one closing key, got {after[1]!r}"
+    assert after[1][:len(before[1])] == before[1], (
+        "the original header keys must survive byte-for-byte — a reader ages the "
+        f"`written:` stamp to tell a stale alarm from a fresh one\n"
+        f"  before: {before[1]!r}\n  after:  {after[1]!r}")
+    assert TW.clear_body(TW.measure(g.tmp.path, g.tmp.statvfs)) in cleared[0], (
+        "the closing line must state the reading that closed it, in the same words "
+        f"the in-process all-clear uses: {cleared[0]}")
+    assert notify.ALERT_CLEARED_BANNER in text, "the record/banner split is the seal"
+    assert text.index(notify.ALERT_CLEARED_BANNER) < text.index("> /tmp: 845,813"), (
+        "the banner closes the incident BEFORE the text that ordered the reader to "
+        "act, or the file still reads as a directive with a footnote")
+    assert not any(ln.startswith("Look before deleting:") for ln in text.splitlines()), (
+        "the alarm's own imperative survives, so it must survive quoted — at column "
+        "zero it is still an instruction")
+
+
+def test_an_incident_this_process_cannot_clear_is_left_byte_identical(tmp_path,
+                                                                      monkeypatch):
+    """#3019 clause 3: reconciliation never retracts a live incident, and never guesses.
+
+    Two ways an inherited ALERT.md is NOT this process's to close, and the cost of
+    getting either wrong is an all-clear nobody observed — strictly worse than the
+    stranded alarm, because the stranded one at least tells the truth:
+
+    * the title is one of the three it owns, and that guard's clear condition does
+      not hold. `/tmp` at 845,813 of 1,048,576 inodes (81%, the reading this box
+      actually reported when the alarm fired) is over `CLEAR_FRACTION`, so the
+      incident is live and the file is untouched;
+    * the title is not one of them at all. Runtime data is the other resident of the
+      single slot and its recovery is a measured read, not a latch, so it is
+      deliberately absent from the reconciliation map — and a /tmp that IS clear must
+      not become a licence to seal whatever the file happens to name.
+
+    Byte-identical is the claim, `written:` stamp and alarm body included, and the
+    daily note gains no `cleared:` line either: a retraction that reaches one surface
+    and not the other is the #1967 asymmetry this file exists to keep shut.
+    """
+    import tmpwatch as TW
+
+    g, _ = _ticking(tmp_path, monkeypatch, liveness=lambda n: HEALTHY)
+    path = tmp_path / "gstate" / notify.ALERT_FILE_NAME
+    assert g.notifier.alert("error", TW.ALERT_TITLE, TMP_BODY,
+                            coalesce=True)["alert_file"] is True
+    monkeypatch.setattr(g.tmp, "statvfs", _statvfs(845_813))    # 81%: still over the line
+    live_bytes = path.read_bytes()
+    note_before = _note(tmp_path)
+
+    assert g.reconcile_stranded_alert() == "still-open"
+    assert path.read_bytes() == live_bytes, "a live incident was edited by a reconciliation"
+    assert _note(tmp_path) == note_before, "and its daily note gained a retraction"
+    assert notify.DAILY_CLEARED_PREFIX not in _note(tmp_path)
+
+    # A different incident entirely, in the same slot, with /tmp clear again.
+    assert g.notifier.alert("error", TITLE, BODY, coalesce=True)["alert_file"] is True
+    monkeypatch.setattr(g.tmp, "statvfs", _statvfs(45_203))     # 4.3%: this one IS clear
+    foreign_bytes = path.read_bytes()
+
+    assert g.reconcile_stranded_alert() == "nothing-to-reconcile"
+    assert path.read_bytes() == foreign_bytes, (
+        "a clear condition holding for one guard must not seal a different guard's "
+        "incident — ALERT.md is one last-writer-wins slot and this is the guard "
+        "that keeps that from mattering")

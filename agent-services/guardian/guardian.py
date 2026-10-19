@@ -80,6 +80,17 @@ VAULT_TRIP_ACTOR = "guardian-vault-trip"
 #: one journal row, which is why neither contains the other's subject.
 DATA_TRIP_ACTOR = "guardian-data-trip"
 
+# ── the two latch-backed alert titles (#3019) ──────────────────────────────
+# Each is spelled ONCE and named by both the tick that raises it, the tick that
+# retracts it, and `reconcile_stranded_alert` below, which has to recognise the
+# title out of ALERT.md's H1 without having raised it. They were string literals at
+# four call sites until this: the reconciliation is exactly the site where a second
+# copy of a title would silently stop sealing anything, because a drifted string
+# looks like "no guard owns this incident" and is silently left alone. The third
+# member of the set needs no constant here — `tmpwatch.ALERT_TITLE` already is one.
+SUPERVISOR_ALERT_TITLE = "supervisord was unreachable"
+SERVICE_DOWN_ALERT_TITLE = "Service down, but no promotion to revert"
+
 
 def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [guardian] {msg}", flush=True)
@@ -1906,7 +1917,7 @@ class Guardian:
                 # without it carries no open marker, and `resolve` seals only a body that
                 # ends with one, so the 7 `supervisord was unreachable` blocks in the dated
                 # notes were un-retractable by construction, not by a forgotten call.
-                self.alert("error", "supervisord was unreachable",
+                self.alert("error", SUPERVISOR_ALERT_TITLE,
                            "Restarted agent-supervisord.service. No code was reverted — "
                            "an unreachable supervisor is infrastructure, not a bad promotion.",
                            evidence=evidence, coalesce=True)
@@ -1920,7 +1931,7 @@ class Guardian:
             # leave a reader unable to tell which recovery it named.
             self._sup_unreachable_open = False
             self.notifier.resolve(
-                "supervisord was unreachable",
+                SUPERVISOR_ALERT_TITLE,
                 "agent-supervisord answered again on the next tick.")
         self.sup_down_streak = 0
 
@@ -1954,7 +1965,7 @@ class Guardian:
             recovered = ", ".join(sorted(self._down_programs))
             self._down_programs = set()
             self.notifier.resolve(
-                "Service down, but no promotion to revert",
+                SERVICE_DOWN_ALERT_TITLE,
                 f"liveness read came back healthy: {recovered}.")
 
         if paused > 0:
@@ -2033,7 +2044,7 @@ class Guardian:
             # landed, so reverting the commit cannot be what brings it back.
             if not current or unrestarted:
                 log(f"liveness failure with nothing under observation: {live_reason}")
-                self.alert("error", "Service down, but no promotion to revert",
+                self.alert("error", SERVICE_DOWN_ALERT_TITLE,
                            f"{self._describe_down(live_reason)}\n\nHEAD is "
                            f"{(rb.head_commit(self.repo) or '?')[:8]} and "
                            + ("the promotion under observation restarted no service — "
@@ -2088,6 +2099,120 @@ class Guardian:
         self.maybe_settle(current)
         return "armed"
 
+    # ── restart reconciliation (#3019) ─────────────────────────────────────
+    def _tmp_is_clear(self) -> tuple[bool, str]:
+        """`/tmp` under `tmpwatch.CLEAR_FRACTION`, measured now rather than latched.
+
+        Read from `self.tmp`'s own injected `statvfs` so the watch stays the single
+        source of that reading — the same object the tick measures through, which is
+        how a test (or a future probe) redirects the /tmp both paths see."""
+        r = tmpwatch.measure(self.tmp.path, self.tmp.statvfs)
+        return r.fraction < tmpwatch.CLEAR_FRACTION, tmpwatch.clear_body(r)
+
+    def _supervisor_answered(self) -> tuple[bool, str]:
+        """The one fact that family's recovery is, without the latch it cannot read.
+
+        `tick` retracts `SUPERVISOR_ALERT_TITLE` on `snap["supervisord"] !=
+        "unreachable"` gated on `_sup_unreachable_open`; the gate is what dies on a
+        restart, and the reading is not, so this is the same predicate minus the
+        boolean — the shape `check_data`'s stray retraction at the `elif not strays`
+        branch already uses deliberately."""
+        snap = self.collect()
+        return (snap.get("supervisord") != "unreachable",
+                "agent-supervisord answered on the restarted guardian's first read.")
+
+    def _liveness_is_healthy(self) -> tuple[bool, str]:
+        """The liveness read came back not-down, which is where that retraction sits.
+
+        The in-process seal names the recovered programs out of `_down_programs`;
+        this process has no such set, so the note says what it actually measured
+        instead of inventing a name — the honest failure #2221's own comment on that
+        field accepts for a restart."""
+        snap = self.collect()
+        return (not self.evaluate_liveness(snap)[0],
+                "liveness read came back healthy on the restarted guardian's first "
+                "read; which program the alert named is not recoverable from this "
+                "process, so the note names none")
+
+    def reconcile_stranded_alert(self) -> str:
+        """Seal an ALERT.md incident this process did not raise but has outlived.
+
+        ALERT.md outlives its writer — `_alert_file` writes it on every run mode and
+        nothing in the tree read it back — while every guard's recovery is a latch in
+        the process that raised the alarm: `tmpwatch.TmpWatch.open_level`,
+        `_sup_unreachable_open`, `_down_programs`. A restart zeroes all three, so the
+        first tick after one finds the cause gone and reports `none`, and the alarm's
+        instructions stand forever as a live directive. Witnessed at filing: `/tmp is
+        running out of inodes` written 2026-10-15 while `df -i /tmp` read 4.3%
+        against `tmpwatch.CLEAR_FRACTION = 0.70`, in a guardian started 2026-10-17
+        that could not have raised it and so could never close it.
+
+        So the question the latch would have answered is asked again, from the file
+        instead of from memory: ALERT.md's H1 names a guard's title, that guard's OWN
+        clear condition holds on this process's first reading, therefore the incident
+        it asserts is over. `notifier.resolve` then performs the seal — title-scoped,
+        the original header keys copied byte-for-byte, the alarm's text surviving
+        quoted under `notify.ALERT_CLEARED_BANNER` — and nothing else's bytes.
+
+        Reconciling against the measured condition rather than persisting the latch
+        is the choice, not the variant: the stranded file was written by a process
+        that persisted nothing, so a latch written to disk from now on could never
+        seal the incident this item was filed from, nor any incident older than the
+        change, which is the same mechanism still holding it.
+
+        Only the three latch-backed titles are candidates. Two of the five
+        `notifier.resolve` sites already recompute from the measured condition
+        instead of a latch (poolwatch's `reason == "running"`, the stray check's
+        `not strays`) and need nothing; a title outside this map is left exactly as
+        found, because sealing an incident whose cause this process cannot measure
+        would be the worse failure — an all-clear nobody observed.
+
+        Returns a token, for the log and for the tests that pin it:
+        `nothing-to-reconcile` (no file, an unreadable one, one already sealed, or a
+        title no guard here owns), `still-open`, `sealed`, `sealed-note-out-of-reach`,
+        `not-sealed`. The out-of-window case is recorded, never swallowed: `resolve`
+        seals ALERT.md and still returns False when an open daily-note section sits
+        outside `notify.DAILY_SCAN_DAYS`, so its bool cannot be the verdict on the
+        seal and the note left open is a human's call, not this process's (#2221's
+        sweep declines tmpwatch's blocks by design).
+
+        Never raises by contract: `run` calls this before the first tick, where an
+        exception would look like a guardian that will not boot."""
+        incident = self.notifier.alert_file_incident()
+        if incident is None:
+            return "nothing-to-reconcile"
+        title, sealed = incident
+        if sealed:
+            return "nothing-to-reconcile"
+        conditions = {
+            tmpwatch.ALERT_TITLE: self._tmp_is_clear,
+            SUPERVISOR_ALERT_TITLE: self._supervisor_answered,
+            SERVICE_DOWN_ALERT_TITLE: self._liveness_is_healthy,
+        }
+        condition = conditions.get(title)
+        if condition is None:
+            return "nothing-to-reconcile"
+        clear, note = condition()
+        if not clear:
+            log(f"ALERT.md still asserts {title!r} — its clear condition does not "
+                f"hold, so the incident stays open: {note}")
+            return "still-open"
+        complete = self.notifier.resolve(title, note)
+        after = self.notifier.alert_file_incident()
+        if after is None or not after[1]:
+            log(f"ALERT.md still asserts {title!r} after reconciliation: resolve "
+                "could not seal the file — the incident stays as a live directive")
+            return "not-sealed"
+        if complete:
+            log(f"ALERT.md incident sealed on startup by a process that never "
+                f"raised it: {title} — {note}")
+            return "sealed"
+        log(f"ALERT.md incident sealed on startup: {title}, but a daily-note "
+            f"section for it is older than notify.DAILY_SCAN_DAYS="
+            f"{notify_mod.DAILY_SCAN_DAYS} and stays open for a human to seal — "
+            "this run does NOT report the incident as fully cleared")
+        return "sealed-note-out-of-reach"
+
     def run(self) -> int:
         log(f"guardian starting: repo={self.repo} programs={self.programs}")
         sd_notify("READY=1")
@@ -2096,6 +2221,19 @@ class Guardian:
         if pending:
             log(f"resuming interrupted rollback to {str(pending.get('to'))[:8]}")
             self.do_rollback("resume", f"resumed after guardian restart: {pending.get('reason','')}")
+
+        # The other thing a restart inherits: an ALERT.md whose incident ended while
+        # the previous process was alive, or while it was dead, and whose recovery
+        # latch died with that process. No tick below can seal it — every one of them
+        # retracts on a latch this process never set — so it is settled here, once,
+        # before the loop. Guarded because a stranded alarm is not worth a guardian
+        # that will not start: the tick path catches its own check failures the same
+        # way for the same reason.
+        try:
+            self.reconcile_stranded_alert()
+        except Exception as exc:  # noqa: BLE001 — a stranded alarm never outranks booting
+            log(f"ALERT.md reconciliation failed (continuing): "
+                f"{type(exc).__name__}: {exc}")
 
         state = "armed"
         while True:
