@@ -619,3 +619,235 @@ def test_the_live_fork_still_declares_the_pair_the_outer_tree_names():
     declared = json.loads((FORK / "package.json").read_text(encoding="utf-8"))["scripts"]
     assert declared["build"].startswith("node scripts/build.mjs"), declared["build"]
     assert declared["test"].startswith("node scripts/test-all.mjs"), declared["test"]
+
+
+# ── clause: LANDED must mean every local branch, not just the checked-out one ─
+#
+# Appended after the live-fork node above rather than inside the "dirty or
+# unpushed" section, because `tests/test_skip_inventory.py:528` cites that node's
+# `pytest.skip` by line number; inserting here keeps that citation true.
+#
+# The 2026-09-21 false green (round SM_20260921_120120, finding 3) is the shape
+# every node below builds: HEAD's branch clean, built, tested and pushed, and a
+# second local branch one vec-leg commit ahead that no remote ever received.
+# Reading `@{upstream}` off HEAD could not see it, so each node asserts against
+# the *repository* — which is what the word "landed" has to mean.
+
+PERF_SUBJECT = "vec-leg perf commit (never pushed)"
+
+
+def _unpushed_side_branch(root: Path, name: str = "lloyd-perf") -> tuple[str, str]:
+    """Commit one source edit on a new local branch and leave it unpushed, with
+    HEAD back on `lloyd` and its tree clean — the commit exists only in this
+    clone. Returns `(full sha, short sha)`.
+
+    The edit is a new file so switching branches never touches the working tree
+    half of the fixture: the HEAD branch stays as `_init_fork` left it, clean and
+    in sync with `origin/lloyd`, so the *only* thing wrong with the fork is the
+    other branch.
+    """
+    _git(root, "switch", "-c", name)
+    (root / "src" / "vecperf.ts").write_text("export const vecperf = 1;\n",
+                                             encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", PERF_SUBJECT)
+    full, short = _git(root, "rev-parse", "HEAD"), _git(root, "rev-parse", "--short", "HEAD")
+    _git(root, "switch", "-q", "lloyd")
+    assert _git(root, "status", "--porcelain") == "", "the HEAD branch is not clean"
+    assert _git(root, "rev-list", "--count", "origin/lloyd..HEAD") == "0", \
+        "the HEAD branch is not pushed, so it would fail the HEAD-leg too"
+    return full, short
+
+
+def _failing_line(out: str, prefix: str) -> str:
+    """The single `FAIL <prefix>:` line, so an assertion cannot be satisfied by
+    some other line that happens to carry the same sha."""
+    hits = [ln for ln in out.splitlines() if ln.startswith(prefix)]
+    assert len(hits) == 1, f"expected exactly one {prefix!r} line, got {hits} in {out}"
+    return hits[0]
+
+
+def _summary_line(out: str) -> str:
+    hits = [ln for ln in out.splitlines() if ln.startswith("NOT LANDED (")]
+    assert len(hits) == 1, f"expected one summary line in {out!r}"
+    return hits[0]
+
+
+def test_a_fork_holding_an_unpushed_second_local_branch_is_not_landed(tmp_path, remote):
+    """A fork whose checked-out branch is perfectly landed but which holds one
+    local commit no remote has ever received is NOT landed: the printed sha is a
+    pointer into one branch, not a statement about the repository.
+
+    This is the exact state that read `LANDED: branch lloyd @ ea2187e…` on
+    2026-09-21 with exit 0 while `lloyd-perf` @ `feabdff` sat unpushed in the same
+    repository — the false green #854 was filed for, and the reason a person is
+    the only caller of this verdict."""
+    fork = _make_fork(tmp_path, "sidebranch", remote)
+    _unpushed_side_branch(fork)
+    done = _run_check(tmp_path, "--fork", str(fork))
+    out = done.stdout
+    assert done.returncode != 0, out[-1500:]
+    assert "LANDED:" not in out, out
+    assert "FAIL unpushed:" in out, out
+    # The leg is named where a caller looks for the cause, not only in prose.
+    assert "unpushed" in _summary_line(out), out
+    # And it still answers the sha question the command exists to answer.
+    assert "branch: lloyd" in out and _git(fork, "rev-parse", "HEAD") in out, out
+    # The new leg is the sole cause: nothing about HEAD's own branch is wrong.
+    for other in ("FAIL dirty:", "FAIL ahead:", "FAIL upstream:"):
+        assert other not in out, f"{other} — the fixture's HEAD branch is clean, " \
+                                 "pushed and in sync, so only the side branch may fail"
+
+
+def test_the_unpushed_failure_names_the_branch_and_its_short_sha(tmp_path, remote):
+    """A red verdict a person cannot act on is a red verdict they re-run. The
+    line has to carry the branch to `git push` and the sha `git branch -v` shows
+    them — plus the tip subject, which is what distinguishes a vec-leg commit
+    worth shipping from a scratch commit worth deleting.
+
+    The sha is pinned by position, not by substring: `short in out` would also
+    pass on a line carrying the full 40-char sha, and the short form is the one
+    clause 2 asks for because it is the form a `git branch -v` reader recognises."""
+    fork = _make_fork(tmp_path, "shaped", remote)
+    full, short = _unpushed_side_branch(fork)
+    out = _run_check(tmp_path, "--fork", str(fork)).stdout
+    line = _failing_line(out, "FAIL unpushed:")
+    assert "branch lloyd-perf @" in line, line
+    assert short != full and len(short) < len(full)
+    assert line.split("branch lloyd-perf @", 1)[1].split()[0] == short, \
+        f"the branch's tip must be named by the short sha {short}, not otherwise: {line}"
+    assert PERF_SUBJECT in line, f"the tip subject tells a person what the commit is: {line}"
+    assert "1 commit" in line, f"the line must say how far ahead it is: {line}"
+    assert "push" in line.lower() and "delete" in line.lower(), \
+        f"the line must name the two ways out: {line}"
+
+
+def test_the_unpushed_leg_catches_a_branch_checked_out_in_a_linked_worktree(tmp_path, remote):
+    """The commit that got missed in 2026-09-21 was not in the tree `--fork`
+    named at all: `lloyd-perf` was checked out in a linked worktree under /tmp.
+
+    So the leg may not be a walk over the checked-out tree. `refs/heads` is
+    shared by every worktree of a repository, and this fixture proves the read is
+    the shared one: the unpushed commit is created *inside* the linked worktree,
+    the check is pointed only at the main fork, and the main fork's own working
+    tree, branch and ahead-count are all clean — so a leg that could not see
+    across worktrees has nothing else here to fail on."""
+    fork = _make_fork(tmp_path, "linkedwt", remote)
+    wt = tmp_path / "wt-perf"
+    _git(fork, "worktree", "add", "-q", "-b", "lloyd-perf", str(wt))
+    (wt / "src" / "vecperf.ts").write_text("export const vecperf = 1;\n",
+                                           encoding="utf-8")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-qm", PERF_SUBJECT)
+    short = _git(wt, "rev-parse", "--short", "HEAD")
+    # The main tree is unimpeachable, and the perf commit is not in it.
+    assert _git(fork, "status", "--porcelain") == ""
+    assert _git(fork, "rev-list", "--count", "origin/lloyd..HEAD") == "0"
+    assert len(_git(fork, "worktree", "list").strip().splitlines()) == 2
+    assert _git(fork, "log", "--branches", "--not", "--remotes",
+                "--format=%h") == short
+
+    done = _run_check(tmp_path, "--fork", str(fork))
+    out = done.stdout
+    assert done.returncode != 0, out[-1500:]
+    assert "LANDED:" not in out, out
+    line = _failing_line(out, "FAIL unpushed:")
+    assert "branch lloyd-perf @" in line and short in line, \
+        f"the branch held by the other worktree must be named: {line}"
+
+
+def test_the_unpushed_leg_reports_past_the_detached_head_early_return(tmp_path, remote):
+    """Two `return`s sit mid-`check_git_state`: the detached-HEAD one, and the
+    `FAIL upstream:` one (pinned by
+    ``test_the_unpushed_leg_reports_beside_the_upstream_failure_that_returns_early``).
+    A leg bolted on after them would be dead in exactly the states where an
+    unpushed branch is likeliest to be hiding — a detached or upstream-less HEAD
+    is what a person leaves behind while poking at a second branch — so the leg
+    runs first, before either.
+
+    Detached is the harder of the two: `check_git_state` fails HEAD by name
+    (`FAIL git:` + "detached") and returns, so with no checked-out branch to
+    report there is nothing left for a later leg to see. The side branch is the
+    whole finding, and it still has to be named."""
+    fork = _make_fork(tmp_path, "detached", remote)
+    _unpushed_side_branch(fork)
+    _git(fork, "checkout", "--detach", "-q")
+    # HEAD really is detached — `symbolic-ref` fails, which is the return whose
+    # reachability this node is testing. Pinning it here is what makes the
+    # `FAIL unpushed:` assertion below a test of the leg's ORDER and not of luck.
+    assert subprocess.run(["git", "-C", str(fork), "symbolic-ref", "--short", "-q",
+                           "HEAD"], capture_output=True, env=GIT_ENV).returncode != 0
+    done = _run_check(tmp_path, "--fork", str(fork))
+    out = done.stdout
+    assert done.returncode != 0, out[-1500:]
+    assert "FAIL git:" in out and "detached" in out, out
+    assert "FAIL unpushed:" in out, \
+        f"the detached-HEAD return must not hide the unpushed branch: {out[-1500:]}"
+    assert "lloyd-perf" in out, out
+    assert "unpushed" in _summary_line(out), out
+    assert "LANDED:" not in out, out
+
+
+def test_the_unpushed_leg_reports_beside_the_upstream_failure_that_returns_early(tmp_path, remote):
+    """The second early `return`: HEAD's branch has no upstream, so
+    `check_git_state` prints `FAIL upstream:` and leaves — and a fork in that
+    state also has to report every other branch the remotes never received.
+
+    The HEAD branch here is `scratch`, whose own commits all reached `origin` as
+    `origin/scratch`, so it is not itself the offender and the two failures are
+    genuinely independent: one is HEAD having no upstream to compare against, the
+    other is `lloyd-perf` holding a commit nowhere else. Both lines must be
+    printed, and the summary must name both, or a person fixing the upstream
+    silently un-hides the branch behind it."""
+    fork = _make_fork(tmp_path, "noupstream", remote)
+    _unpushed_side_branch(fork)
+    _git(fork, "push", "-q", "origin", "lloyd:refs/heads/scratch")
+    _git(fork, "branch", "--unset-upstream")
+    _git(fork, "branch", "-m", "lloyd", "scratch")
+    assert _git(fork, "for-each-ref", "--format=%(upstream:short)",
+                "refs/heads/scratch") == "", "HEAD's branch must have no upstream"
+    assert _git(fork, "rev-list", "--count", "refs/heads/scratch",
+                "--not", "--remotes") == "0", "scratch itself must not be the offender"
+    done = _run_check(tmp_path, "--fork", str(fork))
+    out = done.stdout
+    assert done.returncode != 0, out[-1500:]
+    assert _failing_line(out, "FAIL upstream:")
+    line = _failing_line(out, "FAIL unpushed:")
+    assert "lloyd-perf" in line, \
+        f"the upstream return must not hide the unpushed branch: {out[-1500:]}"
+    assert "unpushed" in _summary_line(out) and "upstream" in _summary_line(out), out
+    assert "LANDED:" not in out, out
+
+
+def test_a_fork_where_every_local_branch_is_pushed_still_reports_landed(tmp_path, remote):
+    """The new leg must not be able to turn a genuinely landed fork red — a
+    check that cries wolf gets ignored, and an ignored check is the false green
+    again with extra noise.
+
+    The fixture is the strongest case available: the second branch carries a
+    commit the HEAD branch does not have (so `lloyd` is genuinely behind it), and
+    that commit is on `origin` as `origin/lloyd-perf`. `--not --remotes` is a
+    reachability test against every remote-tracking ref, not a comparison with
+    `origin/lloyd`, so a divergent-but-pushed branch is landed and must read that
+    way — which is the difference between this leg and a ban on branches."""
+    fork = _make_fork(tmp_path, "allpushed", remote)
+    _git(fork, "switch", "-c", "lloyd-perf")
+    (fork / "src" / "vecperf.ts").write_text("export const vecperf = 1;\n",
+                                             encoding="utf-8")
+    _git(fork, "add", "-A")
+    _git(fork, "commit", "-qm", "vec-leg perf commit (pushed to its own branch)")
+    _git(fork, "push", "-q", "-u", "origin", "lloyd-perf")
+    _git(fork, "switch", "-q", "lloyd")
+    assert _git(fork, "rev-list", "--count", "lloyd..lloyd-perf") == "1", \
+        "the side branch must hold a commit HEAD lacks, or this proves nothing"
+    assert _git(fork, "rev-list", "--count", "lloyd-perf", "--not", "--remotes") == "0"
+
+    done = _run_check(tmp_path, "--fork", str(fork))
+    out = done.stdout
+    assert done.returncode == 0, out[-1500:] + done.stderr[-500:]
+    assert "LANDED:" in out, out
+    assert "FAIL unpushed:" not in out, out
+    # The green half prints too, so a reader sees the leg ran over both branches
+    # rather than inferring it from the absence of a failure.
+    assert "branches: 2 local, every one pushed" in out, out
+    assert "origin/lloyd" in out, out

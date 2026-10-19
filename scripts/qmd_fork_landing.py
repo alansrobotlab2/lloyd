@@ -21,10 +21,19 @@ and its own git state, and exits non-zero if any of them fails:
     build    node scripts/build.mjs      (the fork's `npm run build`)
     suite    node scripts/test-all.mjs   (the fork's `npm test`)
     git      branch + HEAD sha, clean tree, HEAD not ahead of its upstream
+    unpushed  EVERY local branch — including one checked out in a linked
+             worktree — holds only commits some remote already has
 
-A landed fork is one whose source builds, whose suite passes, and whose commit
-is on a branch with an upstream it is not ahead of. Anything else prints a
-`FAIL <what>:` line naming the failed step and exits 1.
+A landed fork is one whose source builds, whose suite passes, whose commit is
+on a branch with an upstream it is not ahead of, and to which no *other* local
+branch adds a commit the remotes have never seen. That last half is what the
+word has to mean: on 2026-09-21 the check printed `LANDED: branch lloyd @
+ea2187e…` while `lloyd-perf` @ `feabdff` — one vec-leg commit ahead, no
+upstream, standing in a linked /tmp worktree — was in the same repository
+(round SM_20260921_120120, finding 3). Reading HEAD alone was the bug, so the
+`unpushed` leg reads the repository's refs instead of its checkout, and a
+person is the only caller of a verdict that otherwise ships a fork silently.
+Anything else prints a `FAIL <what>:` line naming the failed step and exits 1.
 
     python -m scripts.qmd_fork_landing                 # against ~/lloyd/qmd
     python -m scripts.qmd_fork_landing --fork /some/fork
@@ -215,13 +224,111 @@ def check_steps(report: Report, fork: Path, *, timeout: float = STEP_TIMEOUT_SEC
             report.say(f"step {step}: ok — node {rel} in {took:.1f}s")
 
 
+#: One line per local branch: short name, short tip sha, tip subject.
+_BRANCH_FORMAT = "%(refname:short)%09%(objectname:short)%09%(subject)"
+
+
+def _local_branches(fork: Path) -> list[tuple[str, str, str]] | None:
+    """Every local branch as `(short name, short tip sha, tip subject)`, or None
+    if the repository's refs could not be read.
+
+    This is a *repository-level* read, not a checkout-level one: `for-each-ref`
+    walks `refs/heads`, which every worktree of the fork shares, so a branch
+    checked out in a **linked** worktree is listed too. That is the exact
+    2026-09-21 shape — `lloyd-perf` standing in a /tmp worktree while `--fork`
+    named the main one — and it is why one command catches it. Enumerating
+    `git worktree list` instead would mean a read per checkout to learn what one
+    read of the shared refs already answers.
+    """
+    listed = _git(fork, "for-each-ref", f"--format={_BRANCH_FORMAT}", "refs/heads")
+    if listed.returncode != 0:
+        return None
+    out: list[tuple[str, str, str]] = []
+    for line in listed.stdout.splitlines():
+        name, _, rest = line.partition("\t")
+        sha, _, subject = rest.partition("\t")
+        if name:
+            out.append((name, sha, subject))
+    return out
+
+
+def _unpushed_branches(fork: Path) -> list[tuple[str, str, int, str]] | None:
+    """The branches holding commits no remote-tracking ref holds, as
+    `(branch, short sha, commit count, tip subject)`; None if unreadable.
+
+    *Its staleness direction is fail-closed.* `--not --remotes` compares against
+    *this clone's* remote-tracking refs, so commits that reached `origin` from
+    somewhere else and were never fetched here count as unpushed. On a check a
+    person runs by hand before pushing, the cost of that false red is one
+    `git fetch`; the cost of the false green it replaces was a vec-leg commit
+    nobody shipped. A fork with no remote at all reports every branch unpushed,
+    which is true: nothing has received any of them.
+
+    A commit some remote already has is never counted, so a *pushed* branch that
+    sits ahead of `origin/lloyd` on its own `origin/lloyd-perf` is not a
+    finding — which is the difference between this leg and a ban on branches.
+    """
+    listed = _local_branches(fork)
+    if listed is None:
+        return None
+    offenders: list[tuple[str, str, int, str]] = []
+    for name, sha, subject in listed:
+        count = _git(fork, "rev-list", "--count", f"refs/heads/{name}",
+                     "--not", "--remotes")
+        got = count.stdout.strip()
+        # An unreadable count counts as unpushed rather than as pushed.
+        ahead = int(got) if (count.returncode == 0 and got.isdigit()) else 1
+        if ahead > 0:
+            offenders.append((name, sha, ahead, subject))
+    return offenders
+
+
+def check_all_branches_pushed(report: Report, fork: Path) -> None:
+    """Refuse a fork whose checked-out branch is landed but whose *repository*
+    holds a branch the remotes never received.
+
+    Deliberately the first git leg, ahead of both early `return`s in
+    `check_git_state`: an unpushed branch is likeliest to hide in exactly the two
+    states that return early (HEAD detached, or HEAD's branch has no upstream),
+    so a leg appended after them would be dead code precisely where it is needed.
+    Naming the offending branch rather than HEAD is what lets it report at all in
+    the detached case, where there is no branch to name.
+    """
+    offenders = _unpushed_branches(fork)
+    if offenders is None:
+        report.fail("unpushed", "the fork's refs could not be read "
+                                "(`git for-each-ref refs/heads` failed), so no "
+                                "claim about its pushed state can be made")
+        return
+    if not offenders:
+        # The green half, printed so a reader can see the leg ran and over how
+        # many branches — silence here would be indistinguishable from a leg
+        # that never executed.
+        report.say(f"branches: {len(_local_branches(fork) or [])} local, "
+                   "every one pushed")
+        return
+    shown = "; ".join(
+        f"branch {name} @ {sha} has {ahead} commit(s) origin has never received"
+        + (f' (tip: "{subject}")' if subject else "")
+        for name, sha, ahead, subject in offenders)
+    report.fail(
+        "unpushed",
+        f"{len(offenders)} of the fork's local branch(es) hold commits no "
+        "remote-tracking ref holds: " + shown + ". The checked-out sha is not the "
+        "whole fork: push each named branch to origin or delete it, then re-run.")
+
+
 def check_git_state(report: Report, fork: Path) -> None:
     """Print the branch and HEAD sha, and refuse a fork that is dirty or has
-    commits its upstream has never seen. That pair is what makes the printed
-    sha mean *landed*, not merely *checked out*."""
+    commits its upstream has never seen — on *any* local branch, not only the
+    checked-out one. That is what makes the printed sha mean *landed*, not
+    merely *checked out*."""
     if _git(fork, "rev-parse", "--git-dir").returncode != 0:
         report.fail("git", f"{fork} is not a git repository")
         return
+
+    # First leg, before either `return` below — see check_all_branches_pushed.
+    check_all_branches_pushed(report, fork)
 
     branch = _git(fork, "symbolic-ref", "--short", "-q", "HEAD")
     if branch.returncode != 0:
