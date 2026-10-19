@@ -2440,19 +2440,26 @@ export interface AutonomyTaskRow {
   next_run: string
   last_run: string
   /** Why the scheduler will not dispatch this task right now — "paused",
-   *  "outside hours 00-04,23", "waiting on #42". Null means nothing is
-   *  holding it, so a past-due task really is late. */
+   *  "outside hours 00-04,23", "waiting on #42". Null means nothing is holding
+   *  it, so a past-due task really is late. A non-null reason does NOT by itself
+   *  put the row in `held`: since #3016 an undeclared `draft`/`paused` hold more
+   *  than one own-period old is a miss and keeps its reason here, because a
+   *  status records that nobody armed the job, not that someone decided not to. */
   blocked: string | null
 }
 
 export interface AutonomyState {
   total: number
   by_status: Record<string, number>
-  /** Past due with nothing holding them back. These are the real misses. */
+  /** Past due with nothing holding them back — and, since #3016, past due with a
+   *  hold nobody declared: an undeclared `draft`/`paused` row more than one
+   *  own-period old is a real miss, so this bucket is not only `blocked: null`. */
   overdue: AutonomyTaskRow[]
   overdue_count: number
-  /** Past due, but deliberately held — paused, outside their hours, waiting
-   *  on a dependency. Normal, and separated so it cannot drown `overdue`. */
+  /** Past due, but held for a reason that still holds: a `draft`/`paused` whose
+   *  own file declares `parked:`, outside preferred hours, waiting on a
+   *  dependency, or inside the task's own period. Normal, and separated so it
+   *  cannot drown `overdue`. */
   held: AutonomyTaskRow[]
   held_count: number
   upcoming: AutonomyTaskRow[]

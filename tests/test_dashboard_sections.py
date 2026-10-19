@@ -149,15 +149,28 @@ def test_missing_autonomy_directory_is_empty_not_an_error(vault, monkeypatch):
 # ── Held is not overdue ────────────────────────────────────────────────
 #
 # The second half of the "overdue is not next up" lesson. A task can be
-# past its next_run for a wholly deliberate reason — paused, outside its
-# preferred_hours, waiting on an upstream task — and calling that overdue
+# past its next_run for a wholly deliberate reason — a park its own file declares,
+# outside its preferred_hours, waiting on an upstream task — and calling that overdue
 # keeps the counter permanently lit, which buries the one task that really
 # did miss. On 2026-09-06 the panel showed six overdue while the scheduler
 # considered none of them late.
 
 
-def test_a_paused_task_is_held_not_overdue(vault):
-    _task(vault, "paused-job", status="paused", next_run=_iso(days=-3))
+def test_a_declared_paused_task_is_held_not_overdue(vault):
+    """A hand-stopped job three days dark is held — because its file says so.
+
+    Narrowed by #3016, in the second file that carried this conflation (the first is
+    `tests/test_dashboard_overdue_held.py`). A bare `status: paused` three days past
+    `next_run` is no longer exempt on the status alone: `parked:` is what records a stop
+    as a decision, and the exemption now reads it through `autonomy.parked_declaration`
+    — the accessor `workers/fleet_watchdog.py:653` already suppresses its stall alert
+    on. A held task is still not a missed task, which is the lesson this section header
+    records from 2026-09-06; what changed is that holding now has to be stated somewhere
+    a machine can read, instead of inferred from a status that chain-filed hand-downs
+    arrive in too.
+    """
+    _task(vault, "paused-job", status="paused", next_run=_iso(days=-3),
+          parked="stopped by hand for the GPU move; the gap is the plan.")
     out = dash._autonomy()
     assert out["overdue"] == [] and out["overdue_count"] == 0
     assert [t["name"] for t in out["held"]] == ["paused-job"]

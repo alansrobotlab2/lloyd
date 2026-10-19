@@ -600,13 +600,12 @@ def _hold_is_a_miss(row: dict[str, Any], fm: dict[str, Any], now) -> bool:
 
     * No hold reason at all, and its `next_run` has passed. That is the
       definition of overdue, unchanged since the split was written.
-    * A hold reason that IS a dispatch-stopping status. `hold_reason` answers a
-      non-`up_next` task with its status verbatim, so a `blocked` of `draft` or
-      `paused` here means a person parked the task — the same two values the
-      scheduler reads as its kill switch (`autonomy.DISPATCH_STOPPING_STATUSES`).
-      Exempt however long the park runs: bounding these would light the alarm
-      permanently over parks that are rulings rather than slips (#68 is one of
-      them, by name), which is the exact failure the split exists to suppress.
+    * A hold reason that IS a dispatch-stopping status **and a file that declares the
+      park**. `hold_reason` answers a non-`up_next` task with its status verbatim, so a
+      `blocked` of `draft` or `paused` names the same two values the scheduler reads as
+      its kill switch (`autonomy.DISPATCH_STOPPING_STATUSES`) — but a status records
+      that the job is not armed, not that a person decided that, so the exemption keys
+      on the file's own `parked:` line. See branch 2 below.
     * Anything else — outside its hours, waiting on an upstream, `no skill`,
       a failure cooldown — is bounded by the task's OWN period, measured by
       `autonomy.next_run_gap`'s `past_next_run`, the predicate #1121 unified
@@ -630,7 +629,20 @@ def _hold_is_a_miss(row: dict[str, Any], fm: dict[str, Any], now) -> bool:
         from app import autonomy
     except Exception:
         return False
-    if str(row["blocked"]).strip() in autonomy.DISPATCH_STOPPING_STATUSES:
+    # Branch 2: a dispatch-stopping status exempts the row only where the task's own
+    # file declares the park. `status: draft` is also the shape every chain-filed
+    # hand-down arrives in — `app/harness/policy.py` deliberately leaves a `draft`
+    # create ungated as that documented hand-down shape — so the status alone says
+    # nobody armed the job, which is not a ruling. `parked:` is the one machine-readable
+    # record of a decision, read through the same accessor the fleet watchdog uses
+    # (`workers/fleet_watchdog.py:653`), so the two surfaces cannot disagree about which
+    # gaps are decisions: declared → a park, however long it runs (bounding those would
+    # light the alarm permanently over rulings, #68 among them by name); undeclared →
+    # fall through to the task's own period, which makes a stalled daily job a miss that
+    # keeps its `blocked` reason. A falsy value — `parked: false`, an empty string —
+    # declares nothing, exactly as in the watchdog's `t["parked"]` test.
+    if (str(row["blocked"]).strip() in autonomy.DISPATCH_STOPPING_STATUSES
+            and autonomy.parked_declaration(fm)):
         return False
     try:
         return bool(autonomy.next_run_gap(fm, now=now)["past_next_run"])

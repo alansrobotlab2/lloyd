@@ -123,26 +123,157 @@ def test_a_sub_period_hold_inside_the_off_hours_is_still_held(vault, monkeypatch
     assert out["held"][0]["blocked"] == "outside hours 03"
 
 
-# ── Clause 3: a deliberate stop is never a miss ────────────────────────
+# ── Clause 1: a DECLARED park is never a miss, however long it runs ────
 
 
-def test_a_deliberate_stop_is_never_moved_into_overdue(vault):
-    """Ten periods dark is the expected state of a task a person parked.
+def test_a_declared_park_is_never_moved_into_overdue(vault):
+    """Ten periods dark is the expected state of a task a person parked ON RECORD.
 
-    `hold_reason` answers a non-`up_next` task with its status verbatim, so
-    the exemption is keyed on the hold reason itself against
-    `autonomy.DISPATCH_STOPPING_STATUSES` — the same two values the scheduler
-    reads as a dispatch kill switch. Bounding these would re-light the alarm
-    over Alan's standing ruling that #68 stays in `draft`, and a permanently
-    lit alarm is the failure mode this whole split was written against.
+    Reworded by #3016, which also narrowed what this pins. The version before it
+    seeded `parked-draft` and `parked-paused` with no `parked:` key and called them
+    deliberate, which is the conflation the item exists to end: `hold_reason` answers a
+    non-`up_next` task with its status verbatim, so a bare `status: draft` records that
+    a job is not armed, not that anyone decided that — and a `draft` create is the
+    deliberately-ungated shape every chain-filed hand-down arrives in
+    (`app/harness/policy.py`, "the nightly chain's documented hand-down shape"). What
+    makes a stop a decision is the file's own `parked:` line, the same one
+    `workers/fleet_watchdog.py:653` suppresses its stall alert on. The rest of the
+    reasoning is unchanged: bounding a DECLARED park would re-light the alarm over
+    Alan's standing ruling that #68 stays in `draft`, and a permanently lit alarm is
+    the failure mode this whole split was written against.
     """
-    _task(vault, "parked-draft", status="draft", next_run=_iso(days=-10))
-    _task(vault, "parked-paused", status="paused", next_run=_iso(days=-10))
+    _task(vault, "parked-draft", status="draft", next_run=_iso(days=-10),
+          parked="Alan parked this on purpose 2026-09-17; the row stays draft.")
+    _task(vault, "parked-paused", status="paused", next_run=_iso(days=-10),
+          parked="paused by hand pending the GPU move.")
 
     out = dash._autonomy()
     assert out["overdue"] == [] and out["overdue_count"] == 0
     assert sorted(t["name"] for t in out["held"]) == ["parked-draft", "parked-paused"]
     assert sorted(t["blocked"] for t in out["held"]) == ["draft", "paused"]
+
+
+# ── Clause 2: an undeclared stop past its own period is a miss ─────────
+
+
+def test_an_undeclared_stop_past_its_own_period_is_a_miss_that_keeps_its_reason(vault):
+    """A draft with no `parked:` line is a job nobody armed, and now reads that way.
+
+    Three of these are live on the box today: #100, #101 and #102 were `status: draft`,
+    have zero run records under ~/lloyd-data/autonomy-runs/, and were past their own
+    declared period — while `GET /api/dashboard` answered `overdue_count: 0` and
+    `held_count: 6`, labelling every one of them a deliberate park. The row keeps its
+    `blocked` value when it is reclassified, because "why is this not dispatching" and
+    "is this a miss" are different questions and the panel still needs the first.
+    """
+    _task(vault, "never-armed-daily", status="draft", frequency="daily",
+          next_run=_iso(days=-2))
+    _task(vault, "never-armed-weekly", status="draft", frequency="weekly",
+          next_run=_iso(days=-8))
+    _task(vault, "never-armed-paused", status="paused", frequency="daily",
+          next_run=_iso(days=-2))
+
+    out = dash._autonomy()
+    assert sorted(t["name"] for t in out["overdue"]) == [
+        "never-armed-daily", "never-armed-paused", "never-armed-weekly"]
+    assert out["overdue_count"] == 3
+    assert [t["name"] for t in out["held"]] == []
+    # The hold reason survives the move; dropping it would trade one blind spot for
+    # another, since `draft` is precisely what a reader must see to know the fix is to
+    # arm the job rather than debug the scheduler.
+    assert sorted(t["blocked"] for t in out["overdue"]) == ["draft", "draft", "paused"]
+
+
+# ── Clause 3: `parked:` has to say something to count ──────────────────
+
+
+def test_parked_false_declares_nothing(vault):
+    """`parked: false` is a value, not a decision — same rule, same accessor.
+
+    `autonomy.parked_declaration` hands back '' for any non-string that is falsy, so a
+    YAML `false` reaches the caller falsy and the exemption does not fire, exactly as
+    the watchdog's `t["parked"]` truthiness test treats it. A key present with no value
+    declares nothing either: the point of the key is that a later reader can quote it
+    back as the ruling, and neither of these can be quoted.
+    """
+    _task(vault, "parked-false", status="draft", frequency="daily",
+          next_run=_iso(days=-2), parked=False)
+    _task(vault, "parked-empty", status="draft", frequency="daily",
+          next_run=_iso(days=-2), parked="")
+
+    out = dash._autonomy()
+    assert sorted(t["name"] for t in out["overdue"]) == ["parked-empty", "parked-false"]
+    assert out["overdue_count"] == 2
+    assert [t["name"] for t in out["held"]] == []
+
+
+# ── Clause 4: gating must not turn every short hold into a miss ────────
+
+
+def test_an_undeclared_stop_inside_its_own_period_is_still_held(vault):
+    """Under one declared period dark, an undeclared draft is a hold and not a miss.
+
+    The narrowing is bounded by the task's own cadence, not switched off: a daily 12
+    hours past `next_run` and a weekly 2 days past it are both inside the period they
+    declared, so they stay in `held` with `overdue_count` at 0. The third row is the
+    control that makes the first two evidence of a bound rather than of a blanket rule —
+    the same status and cadence, 30 hours old, and it is a miss.
+    """
+    _task(vault, "draft-daily-young", status="draft", frequency="daily",
+          next_run=_iso(hours=-12))
+    _task(vault, "draft-weekly-young", status="draft", frequency="weekly",
+          next_run=_iso(days=-2))
+    _task(vault, "draft-daily-old", status="draft", frequency="daily",
+          next_run=_iso(hours=-30))
+
+    out = dash._autonomy()
+    assert sorted(t["name"] for t in out["held"]) == [
+        "draft-daily-young", "draft-weekly-young"]
+    assert out["held_count"] == 2
+    assert [t["name"] for t in out["overdue"]] == ["draft-daily-old"]
+    assert out["overdue_count"] == 1
+
+
+# ── The two surfaces must agree about which gaps are decisions ─────────
+
+
+def test_the_dashboard_and_the_watchdog_read_the_same_declaration(vault):
+    """One record of a decision, read through one accessor, by both surfaces.
+
+    The premise of the fix is that `parked:` is that record, so the panel and the
+    watchdog must not disagree about the same row. This drives the dashboard's split and
+    the predicate the watchdog's rule encodes over ONE vault, across the four shapes a
+    fleet actually contains: declared/undeclared × past-period/inside-period. The
+    right-hand side is the watchdog's own expression (`not parked and past_one_period`),
+    so the node fails if either side is rewired to a second copy of the rule.
+    """
+    _task(vault, "declared-old", status="draft", frequency="daily",
+          next_run=_iso(days=-5), parked="ruled spent 2026-10-17, do not arm")
+    _task(vault, "undeclared-old", status="draft", frequency="daily",
+          next_run=_iso(days=-5))
+    _task(vault, "undeclared-young", status="draft", frequency="daily",
+          next_run=_iso(hours=-6))
+
+    out = dash._autonomy()
+    overdue_names = {t["name"] for t in out["overdue"]}
+    buckets = {t["name"]: ("overdue" if t["name"] in overdue_names else "held")
+               for t in out["held"] + out["overdue"]}
+    assert buckets == {"declared-old": "held",
+                       "undeclared-old": "overdue",
+                       "undeclared-young": "held"}, buckets
+
+    from app import autonomy
+    now = datetime.now(timezone.utc)
+    paths = sorted((vault / "obsidian" / "autonomy").glob("*.md"))
+    files = [dash._frontmatter(p) for p in paths]
+    resolution = autonomy.dependency_resolution_set(vault / "obsidian" / "autonomy")
+    for fm in files:
+        fm["status"] = str(fm.get("status") or "draft")
+        fm["blocked"] = autonomy.hold_reason(fm, resolution)
+        gap = autonomy.next_run_gap(fm)
+        assert dash._hold_is_a_miss({"blocked": fm["blocked"]}, fm, now) == (
+            not bool(autonomy.parked_declaration(fm)) and gap["past_next_run"]
+        ), fm["name"]
 
 
 # ── The bound is the task's own cadence, not a fixed number of hours ───
