@@ -756,11 +756,14 @@ def test_the_whole_tree_control_is_still_zero_hits_over_exactly_five_allowed_sit
 # file ships. Scope lines are pinned by #2810's three nodes in this file.
 #
 # What is deliberately NOT asserted anywhere below is the VALUE of a live soak figure.
-# "224 gate rows" and "120 landings" were true when written and are re-measured by the
-# owed-check pass, which is the only thing allowed to update them. A node that
-# re-read the ledger and demanded its flags still be 0 would enforce this instrument
-# through the test suite — and a rule that fails a round is precisely the flip #679
-# ruled has to be a human decision, so the suite must not make it.
+# The gate-row and landing counts in the header were true when written and age by the
+# day (~51 gate rows a day as of 2026-10-19), and #2809 recorded the re-measurement as
+# the owed-check pass's job; #2992 is the first ROUND to raise them, under an ownership
+# ruling that item's own owed clause says a person still has to settle. Neither route
+# makes a node read the ledger: #2992's nodes pin FLOORS (see below), because a node
+# that demanded today's flags still be 0 would enforce this instrument through the test
+# rung — and a rule that fails a round is precisely the flip #679 ruled has to be a
+# human decision, so the suite must not make it.
 # ---------------------------------------------------------------------------
 
 #: The landing that put these rules on the gate, as the header cites it. Clause 1's
@@ -993,8 +996,9 @@ def test_the_header_records_that_nothing_flipped_and_679_is_the_precedent_for_th
         "#679's zero-finding-soak close is not quoted: the phrase that settled a "
         "comparable soak is the thing a future reader needs")
     assert "790" in header and "400 promoted landing" in header, (
-        "the comparison's own denominators are missing, so this soak's 224 rows cannot "
-        "be read against the one that ruled first")
+        "the comparison's own denominators are missing, so this soak's "
+        f"{_recorded_figure(header, 'SOAK_GATE_ROWS_AT_RECORDING')} rows cannot be read "
+        "against the one that ruled first")
     assert "nothing flips" in low, (
         "the header quotes precedent but never states this file's own conclusion")
 
@@ -1151,3 +1155,290 @@ def test_the_soak_record_is_a_comment_edit_and_the_rule_surface_it_describes_is_
     assert int(quoted_cap.group(1)) == CR.MAX_RULES, (
         f"the header says the cap is {quoted_cap.group(1)} and the loader says "
         f"{CR.MAX_RULES}")
+
+
+# ---------------------------------------------------------------------------
+# #2992 — the soak figures are re-measured, and the pins are floors, not values.
+#
+# #2809 wrote the record; #2992 refreshed it. What the refresh must not do is turn a
+# figure back into an equality: rows accumulate (~51 gate rows a day as of 2026-10-19),
+# so a node that demanded the header match TODAY's ledger would be red by tomorrow and
+# green for exactly one day — and reading live flags into the suite is the flip #679
+# ruled a human has to make. So every figure node below pins a FLOOR: the value
+# measured at 2026-10-19T00:35Z, which the header can only ever move up, plus internal
+# consistency the prose itself cannot fake (a measurement dated before the last row it
+# counts is not a measurement, and a table whose denominator differs from the headline
+# denominator is two different soaks).
+#
+# The one node that leaves the file entirely reads `code_rules_census.py`'s own source,
+# because clause 4's claim is about what that program denominates over.
+# ---------------------------------------------------------------------------
+
+#: Measured 2026-10-19T00:35Z by the header's own commands, from #2992's triage. Floors
+#: because rows, rounds, landings and file-reads all accumulate over a fixed window.
+FLOOR_GATE_ROWS = 377
+FLOOR_DISTINCT_ROUNDS = 246
+FLOOR_LANDED_PY_COMMITS = 200
+FLOOR_SPAN_END = "2026-10-19T00:30:09Z"
+#: Per rule: (rows that saw >=1 file, file-reads), same instant. The three `**/*.py`
+#: rules see every row; the two narrow ones are the reason the zero is priced at all.
+FLOOR_COVERAGE = {
+    "opens-kg-store-outside-kg-store": (376, 1167),
+    "broad-except-swallow-same-line": (376, 1167),
+    "exports-lloyd-data-to-process-environ": (376, 1167),
+    "naive-now-in-artifact-name": (155, 245),
+    "guardian-import-hygiene": (6, 6),
+}
+#: #2810 widened `naive-now-in-artifact-name`'s scope in 1168247e, whose commit time is
+#: 2026-10-16T09:03:23Z UTC. Only rows from then on were gated against the wider scope.
+SCOPE_WIDENED_AT = "2026-10-16T09:03:23Z"
+FLOOR_ROWS_ON_WIDER_SCOPE = 157
+
+#: The shipped scopes as #2810 left them and #2992's comment edits found them: one
+#: guardian-scoped rule, three over every .py, and #2810's nine-entry widened scope.
+RULE_SCOPES_AT_RECORDING = [
+    ("agent-services/guardian/*.py",),
+    ("**/*.py",),
+    ("**/*.py",),
+    ("app/**", "agent_mcp/**", "workers/**", "server.py", "scripts/automod/**",
+     "agent-services/**/*.py", "scripts/memory/**", "scripts/benchmark.py",
+     "scripts/maintenance/**"),
+    ("**/*.py",),
+]
+
+#: The last commit that changed anything below the header block. A comment-only edit
+#: leaves the non-comment bytes exactly where this sha left them; a rule change moves
+#: this anchor on purpose, in the same shape as `RULE_IDS_AT_RECORDING` above.
+NON_COMMENT_SURFACE_ANCHOR = "1168247e"
+
+
+def _non_comment_lines(text: str) -> list[str]:
+    """`grep -v '^#'`, byte for byte: even blank lines survive it."""
+    return [ln for ln in text.splitlines() if not ln.startswith("#")]
+
+
+def _table_rows() -> dict[str, tuple[int, int, int]]:
+    """Every coverage table line as `rule -> (rows covered, denominator, file-reads)`."""
+    out: dict[str, tuple[int, int, int]] = {}
+    for ln in _header_lines():
+        m = re.match(r"^([a-z0-9][a-z0-9-]+)\s+(\d+)/(\d+) rows saw >=1 file,\s*(\d+) file-reads",
+                     ln.lstrip("# ").strip())
+        if m:
+            out[m.group(1)] = (int(m.group(2)), int(m.group(3)), int(m.group(4)))
+    return out
+
+
+def test_the_refreshed_soak_figures_carry_the_2026_10_19_floor():
+    """Clause 1: every soak figure is at or above the fresh measurement, and is dated.
+
+    Four figures, one node, because they are one measurement: rows, distinct rounds, the
+    `AS MEASURED ON` date and the span's end all come out of the same run of the
+    RECOMPUTE block, so a header that moved three of them and left one behind is a
+    header that did not re-measure. Two of the four are checked against each other
+    rather than against a number — a record "measured on 2026-10-16" whose last row is
+    stamped 2026-10-19 is arithmetically impossible, and that check still works in a
+    year when no floor means anything.
+    """
+    header = _header_prose()
+    rows = _recorded_figure(header, "SOAK_GATE_ROWS_AT_RECORDING")
+    assert rows >= FLOOR_GATE_ROWS, (
+        f"the header records {rows} gate rows; the same command returned "
+        f"{FLOOR_GATE_ROWS} at 2026-10-19T00:35Z and rows only accumulate. A stale-low "
+        "denominator is invisible to CI by design (this file pins floors, never "
+        "values), which is how 224 survived three days")
+
+    m = re.search(r"(\d+) `?gate`? rows from (\d+) distinct rounds", header)
+    assert m, (
+        "the header's row count and its distinct-round count are no longer one phrase, "
+        "so the prose denominator cannot be read next to the rounds it spans")
+    prose_rows, rounds = int(m.group(1)), int(m.group(2))
+    assert prose_rows == rows, (
+        f"the prose says {prose_rows} rows and the machine-readable denominator says "
+        f"{rows} — two denominators in one record means one of them is stale")
+    assert rounds >= FLOOR_DISTINCT_ROUNDS, (
+        f"the header spans {rounds} distinct rounds against a floor of "
+        f"{FLOOR_DISTINCT_ROUNDS}; rounds only accumulate over a fixed window")
+
+    landed = _recorded_figure(header, "LANDED_PY_COMMITS_AT_RECORDING")
+    assert landed >= FLOOR_LANDED_PY_COMMITS, (
+        f"the header claims {landed} promoted .py commits since {RULES_LANDED_AT} "
+        "against a floor of " + str(FLOOR_LANDED_PY_COMMITS) + "; the command it names "
+        "(`git log --oneline 4592296e..HEAD -- '*.py'`) returned 200 at 2026-10-19T00:35Z")
+
+    stamped = re.search(r"AS MEASURED ON (\d{4}-\d{2}-\d{2})", header)
+    assert stamped, "the header names no measurement date, so its figures cannot age visibly"
+    span = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) \.\. "
+                     r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)", header)
+    assert span, "the header names no date span for the soak"
+    stop = span.group(2)
+    assert stop >= FLOOR_SPAN_END, (
+        f"the soak's last row is stamped {stop}, older than the {FLOOR_SPAN_END} read at "
+        "2026-10-19T00:35Z — a span that stops short is an unrefreshed window")
+    assert stamped.group(1) >= stop[:10], (
+        f"'AS MEASURED ON {stamped.group(1)}' cannot describe a window whose last row is "
+        f"{stop}: the date has to be the day the block was re-run, not the day the "
+        "record was first written")
+    print(f"soak floor ok: rows {rows} (>= {FLOOR_GATE_ROWS}), rounds {rounds}, "
+          f"landed {landed}, span ends {stop}, measured {stamped.group(1)}")
+
+
+def test_the_coverage_table_and_the_sentences_naming_it_share_one_denominator():
+    """Clause 2: the five lines are fresh, and the prose quotes the SAME denominator.
+
+    A refreshed table with a stale sentence beside it is worse than a stale table,
+    because the sentence is the line people quote. Both prose figures are pulled out of
+    the header and compared to the table rather than to a literal, so the node survives
+    the next refresh and still catches a half-refresh.
+    """
+    header = _header_prose()
+    rows = _recorded_figure(header, "SOAK_GATE_ROWS_AT_RECORDING")
+    table = _table_rows()
+    assert set(table) == set(SHIPPED_RULE_IDS), (
+        f"the coverage table reads {sorted(table)}, not the five shipped rules "
+        f"{sorted(SHIPPED_RULE_IDS)} — an unparsed line is an unpriced rule")
+    for rid, (covered, denom, reads) in sorted(table.items()):
+        floor_cov, floor_reads = FLOOR_COVERAGE[rid]
+        assert denom == rows, (
+            f"{rid}'s line divides by {denom} while the record's denominator is {rows}")
+        assert covered >= floor_cov, (
+            f"{rid} covered {covered} rows against a floor of {floor_cov} at "
+            "2026-10-19T00:35Z")
+        assert reads >= floor_reads, (
+            f"{rid} reports {reads} file-reads against a floor of {floor_reads}; reads "
+            "accumulate over a fixed window, so a lower figure is an older measurement")
+
+    narrow = table["naive-now-in-artifact-name"][0]
+    priced = re.search(r"which is (\d+) rows of the (\d+)", header)
+    assert priced, (
+        "the sentence that prices `naive-now-in-artifact-name`'s zero no longer states "
+        f"its fraction; the table says {narrow}/{rows}")
+    assert (int(priced.group(1)), int(priced.group(2))) == (narrow, rows), (
+        f"the prose says '{priced.group(0)}' while the table says "
+        f"{narrow}/{rows} — the refreshed table and the stale sentence are both in "
+        "the file, which is the exact half-refresh this item was filed over")
+
+    over = re.search(r"— (\d+) rows over (?:the window|.*?days)", header)
+    assert over, (
+        f"the #679 comparison still has no row count for this soak, so it cannot be "
+        f"read against #679's 790; the record's denominator is {rows}")
+    assert int(over.group(1)) == rows, (
+        f"'{over.group(0)}' names {over.group(1)} rows beside a denominator of {rows}")
+
+
+def test_the_wider_scope_sub_figure_is_restated_over_the_refreshed_total():
+    """Clause 3: #2810's widening covers a restated sub-figure, not '4 rows out of 224'.
+
+    The old figure was not stale, it was unmeasurable: it counted rows in a window
+    whose start moved. The replacement has to carry its own bound — the widened scope
+    began at 1168247e's commit time, 2026-10-16T09:03:23Z UTC — so that a reader can
+    re-run the header's own `select` with that second bound and get the same number.
+    """
+    header = _header_prose()
+    rows = _recorded_figure(header, "SOAK_GATE_ROWS_AT_RECORDING")
+    assert "4 rows out of 224" not in header, (
+        "the widened-scope sub-figure is still the pre-refresh one")
+    m = re.search(r"(\d+) rows? (?:of the |out of )(\d+) .{0,80}wider scope|"
+                  r"wider scope at all[^.]*\((\d+) of (\d+)", header)
+    assert m, (
+        "no sentence states how many of the refreshed rows were gated against #2810's "
+        "wider scope; without it the reader cannot tell how much of the zero belongs to "
+        "the widened rule")
+    n, denom = (int(m.group(1)), int(m.group(2))) if m.group(2) and m.group(1) else \
+        (int(m.group(3)), int(m.group(4)))
+    assert denom == rows, (
+        f"the wider-scope sub-figure divides by {denom}, not the record's {rows}")
+    assert n >= FLOOR_ROWS_ON_WIDER_SCOPE, (
+        f"{n} rows were gated against the wider scope against a floor of "
+        f"{FLOOR_ROWS_ON_WIDER_SCOPE} measured 2026-10-19 — 4 rows of 224 is neither "
+        "the old measurement nor a possible new one")
+    assert SCOPE_WIDENED_AT in header, (
+        f"the sub-figure names no bound: {SCOPE_WIDENED_AT} is 1168247e's commit time, "
+        "and without it the count cannot be recomputed, only re-quoted")
+
+
+def test_the_census_keeps_the_rules_under_whole_tree_watch_not_the_fractions_current():
+    """Clause 4: the fractions come from the ledger block; the census watches the RULES.
+
+    The header used to close by saying the weekly census 'is what keeps them current',
+    and it does not: `scripts/maintenance/code_rules_census.py` denominates over
+    tracked .py (`tracked_python`, run with `whole_tree=True`, reported as
+    `"kind": "whole_tree"` beside `"of"`), and it never opens a ledger — `promotions`
+    does not occur in its source, which is what this node asserts rather than trusting.
+    A reader following the old sentence would have looked in the census for the gate-row
+    fractions and found a different denominator entirely.
+    """
+    census = (ROOT / "scripts" / "maintenance" / "code_rules_census.py").read_text(
+        encoding="utf-8")
+    assert "def tracked_python" in census and "whole_tree" in census, (
+        "the census no longer denominates over tracked .py; if its denominator moved, "
+        "the sentence in the header moves with it, in the same change")
+    assert "promotions" not in census, (
+        "the census now reads the automod ledger, so the claim that it never touches "
+        "gate rows has to be re-read before this node keeps passing")
+
+    header = _header_prose()
+    assert "keeps them current" not in header, (
+        "the header still sends a reader to the census for the gate-row fractions")
+    low = header.lower()
+    assert "code_rules_census.py" in header, "the census is no longer named at all"
+    assert "whole" in low and ("tracked .py" in low or "tracked python" in low), (
+        "the census sentence must say what it denominates over — tracked .py over the "
+        "whole tree — or the two instruments are still conflated")
+    fractions_to_block = re.search(
+        r"(?:re-?run(?:ning)?|the recompute block|RECOMPUTE-BEGIN)[^.]{0,160}(?:fractions|coverage)",
+        header) or re.search(
+        r"(?:fractions|coverage)[^.]{0,160}(?:recompute|re-?run)", header)
+    assert fractions_to_block, (
+        "nothing in the header says where the per-rule fractions come from now that the "
+        "census sentence is gone; the answer is the RECOMPUTE block's second command")
+
+
+@pytest.mark.parametrize("rule_id", SHIPPED_RULE_IDS)
+def test_the_coverage_floor_names_the_rule_it_prices(rule_id):
+    """Clause 2's table half, one rule at a time: a floor exists for what ships.
+
+    Parametrized over the shipped ids and keyed on `FLOOR_COVERAGE`, so a sixth rule
+    arrives with no floor and this node says so instead of the table quietly growing a
+    row nobody measured.
+    """
+    table = _table_rows()
+    assert rule_id in FLOOR_COVERAGE, (
+        f"{rule_id} ships but has no 2026-10-19 floor here — record what it covered and "
+        "add the floor, or its zero is unpriced")
+    assert rule_id in table, f"{rule_id} is missing from the coverage table"
+    covered, _denom, reads = table[rule_id]
+    floor_cov, floor_reads = FLOOR_COVERAGE[rule_id]
+    assert covered >= floor_cov and reads >= floor_reads, (
+        f"{rule_id}: the header records ({covered} rows, {reads} file-reads), under the "
+        f"({floor_cov}, {floor_reads}) measured at 2026-10-19T00:35Z")
+
+
+def test_the_rule_surface_below_the_comment_block_is_the_one_the_anchor_shipped():
+    """Clause 5: `diff <(grep -v '^#' new) <(git show <anchor>:… | grep -v '^#')` is empty.
+
+    Run as the clause states it, against the last commit that legitimately touched a
+    rule line rather than against HEAD — the point is that the rule surface has not
+    moved since #2810 widened a scope, through #2809's soak record and #2992's refresh,
+    both of which were prose. A rule change updates this anchor deliberately, exactly
+    like the id and matcher lists; it must never be a side effect of a comment edit.
+    """
+    shown = _git(ROOT, "show", f"{NON_COMMENT_SURFACE_ANCHOR}:scripts/automod/code_rules.toml")
+    before = _non_comment_lines(shown)
+    after = _non_comment_lines(RULES_PATH.read_text(encoding="utf-8"))
+    assert before, f"{NON_COMMENT_SURFACE_ANCHOR} shipped an empty rule file"
+    moved = [(i, b, a) for i, (b, a) in enumerate(zip(before, after)) if b != a]
+    assert not moved and len(before) == len(after), (
+        f"the non-comment surface differs from {NON_COMMENT_SURFACE_ANCHOR}: "
+        f"{moved[:3] or f'{len(after)} lines vs {len(before)}'} — a comment-only edit "
+        f"cannot move a rule, and if a rule genuinely changed, move "
+        f"NON_COMMENT_SURFACE_ANCHOR in the same commit that changed it")
+
+    rules = CR.load_rules(RULES_PATH)
+    assert [r.id for r in rules] == RULE_IDS_AT_RECORDING, (
+        "the ids moved under cover of a comment edit")
+    assert [(r.id, r.matcher) for r in rules] == RULE_MATCHERS_AT_RECORDING, (
+        "a matcher was swapped under cover of a comment edit")
+    assert [tuple(r.scope) for r in rules] == RULE_SCOPES_AT_RECORDING, (
+        f"the scopes moved: {[tuple(r.scope) for r in rules]} vs "
+        f"{RULE_SCOPES_AT_RECORDING}. #2810's widened scope is pinned by name in its own "
+        "three nodes; nothing in a comment edit licenses changing one")

@@ -14,20 +14,23 @@
 # instead of only from a closed item's activity log.
 #
 # ---------------------------------------------------------------------------
-# THE SOAK, AS MEASURED ON 2026-10-16 (#2809 — the record #2574 left owed).
+# THE SOAK, AS MEASURED ON 2026-10-19 (#2809 wrote the record #2574 left owed; #2992
+# re-ran the block below and raised the figures it had aged out of — see AGING, last).
 #
-#   0 flags. Zero hits, and zero sites rescued by an allow list, over 224 `gate`
-#   rows from 145 distinct rounds, every one of them `status: evaluated` — not a
+#   0 flags. Zero hits, and zero sites rescued by an allow list, over 384 `gate`
+#   rows from 249 distinct rounds, every one of them `status: evaluated` — not a
 #   single row came back `unevaluated`, which is the state in which a zero would
 #   mean only that the instrument never ran.
-#   Date span 2026-10-13T03:41:47Z .. 2026-10-16T09:33:28Z.
+#   Date span 2026-10-13T03:41:47Z .. 2026-10-19T03:14:48Z.
 #
 # 4592296e is the commit that put these rules on the gate, and the rung
 # (`scripts/automod/gate.py`, `rung_code_rules`) writes its own result onto every
 # `gate` event in the automod ledger, so the soak replays from the ledger rather than
-# being remembered. SOAK_GATE_ROWS_AT_RECORDING = 224 is that denominator, and the
-# block below is the command that recomputes the rows, the flag count and the span —
-# and then the per-rule coverage — read-only from that ledger:
+# being remembered. SOAK_GATE_ROWS_AT_RECORDING = 384 is that denominator, and the
+# block below is the command that recomputes the rows, the flag count, the distinct-round
+# count and the span — then the per-rule coverage, then how many of those rows were
+# gated against #2810's widened scope — read-only from that ledger. Every figure in this
+# block has a command in that block; a figure with no command is a caption.
 #
 # RECOMPUTE-BEGIN
 # L="${CODE_RULES_LEDGER:-$HOME/.local/state/lloyd-automod/promotions.jsonl}"
@@ -39,42 +42,55 @@
 #   | [$rs[] | .code_rules.totals.coverage | to_entries[] | [.key, .value.covered]]
 #   | group_by(.[0]) | .[]
 #   | "\(.[0][0]): \(.|map(select(.[1]>0))|length)/\($rs|length) rows saw >=1 file, \(.|map(.[1])|add) file-reads"' "$L"
+# WIDENED="${CODE_RULES_SCOPE_WIDENED:-2026-10-16T09:03:23Z}"   # 1168247e's commit time, UTC
+# jq -s --arg s "$SINCE" '[.[] | select(.event=="gate" and .code_rules and .created_at>=$s)]
+#   | "rows \(length)  distinct_rounds \([.[].round_id]|unique|length)  unevaluated \([.[]|select(.code_rules.status!="evaluated")]|length)"' "$L"
+# jq -s --arg w "$WIDENED" '[.[] | select(.event=="gate" and .code_rules and .created_at>=$w)]
+#   | "rows at or after the #2810 widening: \(length)"' "$L"
 # RECOMPUTE-END
 #
 # WHY THE DENOMINATOR IS THE LEDGER'S ROW COUNT AND NOT THE LANDING COUNT. The item
 # was filed with "110 promoted landings with .py changes"; the same command read 120
-# the day this was written — LANDED_PY_COMMITS_AT_RECORDING = 120, recompute with
+# the day #2809 wrote this, and 205 when #2992 re-ran it on 2026-10-19 —
+# LANDED_PY_COMMITS_AT_RECORDING = 205, recompute with
 # `git log --oneline 4592296e..HEAD -- '*.py' | wc -l` — so a bare count in prose is
 # false inside a week. `tests/test_automod_vet.py` learned exactly that ("a control
 # that pins a count rots within days") and `tests/test_automod_code_rules.py` restates
 # it: name the command beside the figure, and pin a figure as a lower bound, never as
 # an equality.
 #
-# COVERAGE, PER RULE, OVER THOSE SAME 224 ROWS — the figure that decides what the
+# COVERAGE, PER RULE, OVER THOSE SAME 384 ROWS — the figure that decides what the
 # zero is worth. `code_rules.run` carries `totals.coverage` for precisely this reason
 # (its own comment: "a rule that covered nothing for twenty landings has a zero nobody
 # should have believed"), and the second jq command above prints it per rule:
-#   opens-kg-store-outside-kg-store       224/224 rows saw >=1 file, 718 file-reads
-#   broad-except-swallow-same-line        224/224 rows saw >=1 file, 718 file-reads
-#   exports-lloyd-data-to-process-environ 224/224 rows saw >=1 file, 718 file-reads
-#   naive-now-in-artifact-name             84/224 rows saw >=1 file, 140 file-reads
-#   guardian-import-hygiene                 2/224 rows saw >=1 file,   2 file-reads
+#   opens-kg-store-outside-kg-store       383/384 rows saw >=1 file, 1181 file-reads
+#   broad-except-swallow-same-line        383/384 rows saw >=1 file, 1181 file-reads
+#   exports-lloyd-data-to-process-environ 383/384 rows saw >=1 file, 1181 file-reads
+#   naive-now-in-artifact-name            159/384 rows saw >=1 file,  249 file-reads
+#   guardian-import-hygiene                 6/384 rows saw >=1 file,    6 file-reads
 # A RULE'S ZERO IS ONLY AS STRONG AS ITS COVERAGE, so "0 flags" is a statement about
 # the three `**/*.py` rules and close to nothing about the other two. A round that
 # touched only `tests/` and non-scope `scripts/` offered `naive-now-in-artifact-name`
-# nothing to read, which is 84 rows of the 224, and #2810's widening of that rule's
-# scope (1168247e) landed inside this window, so 4 rows out of 224 were gated against
-# the wider scope at all. `guardian-import-hygiene` saw a file twice, because two
-# rounds touched `agent-services/guardian/`. Any later reading of this zero has to
-# carry those fractions with it, and the weekly whole-tree census
-# (`scripts/maintenance/code_rules_census.py`) is what keeps them current.
+# nothing to read, which is 159 rows of the 384, and #2810's widening of that rule's
+# scope (1168247e) landed inside this window, so only 162 rows of the 384 were gated
+# against the wider scope at all — the block's last command re-runs that cut at
+# 1168247e's commit time, 2026-10-16T09:03:23Z, which is the bound the count needs.
+# `guardian-import-hygiene` saw exactly one guardian file in each of 6 rows from 4
+# distinct rounds, because that is how many rounds touched
+# `agent-services/guardian/`. Any later reading of this zero has to carry those
+# fractions with it, and the two instruments that could carry them are different
+# instruments: the FRACTIONS above come only from re-running the RECOMPUTE block
+# against the ledger, while `scripts/maintenance/code_rules_census.py` watches the
+# RULES — it scores every tracked .py in the tree (its `of` denominator is
+# `tracked_python`, `whole_tree`; it never reads the ledger, so it can report whether a
+# rule still fires and says nothing about what the soak's denominator has become).
 #
 # NO RULE HAS FLIPPED TO BLOCKING, and this soak does not license flipping one. #679
 # is the precedent on the same shape of finding: its owed-human sweep ruled "keep
 # observe-only (1 s, costs nothing), flip nothing to blocking", and its owed-check
 # then closed the observe-only half on the zero-finding soak as "not the defect class
 # here", measured over 790 `vet` rows carrying a record and 400 promoted landing
-# events. This soak is smaller — 224 rows over four days — and two of its five rules
+# events. This soak is smaller — 384 rows over six days — and two of its five rules
 # barely ran, so the same call applies here with even less reason to reverse it.
 # Nothing flips.
 #
