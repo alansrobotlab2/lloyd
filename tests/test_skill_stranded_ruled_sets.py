@@ -34,9 +34,20 @@ the round's own HOME, where `~/lloyd-data` is an empty scaffold and a clean-look
 would be a measurement of nothing. Nothing here skips, and nothing here is marked: the
 gate runner hardcodes `-m "not live_vault and not fault_injection"`
 (`scripts/automod/gate.py:641`), so a marked node is deselected from the run meant to enforce
-it and pins nothing. The two nodes that exist to be able to fail are
-`test_deleting_ps_2_reopens_the_sixth_carrier` and `test_the_stale_claim_detector_fires_on_the
-_prose_it_replaces`, which run the checks against the pre-fix text.
+it and pins nothing. The nodes that exist to be able to fail are
+`test_deleting_ps_2_reopens_the_sixth_carrier`, `test_the_stale_claim_detector_fires_on_the
+_prose_it_replaces` and `test_the_marker_checker_refuses_a_state_the_store_contradicts`, which
+run the checks against readings that are wrong — the pre-fix text in the first two cases, and
+a RULED marker aged out of step with the store in the third.
+
+Which brings the store into this file's scope, and it needs saying plainly: every other node
+here is a read of one vault file and cannot go red on its own account. The three nodes added
+by #3031 additionally read `kg.sqlite` under `PRODUCTION_DATA_ROOT`, because a marker's
+execution state is a claim about that store and nothing else. They are the first nodes in this
+file that can go red because the vault and the fact diverged rather than because a sentence
+went missing — which is why all three name the store path in the message they refuse with, and
+why `_live_name_embedding_pairs` asserts the file is there before opening it instead of
+letting sqlite invent an empty one.
 """
 
 from __future__ import annotations
@@ -106,6 +117,14 @@ STALE_APPLY_CLAIMS = {
     "the verification list demands a new backup only": re.compile(
         r"one new[^\n]{0,40}kg-stranded", re.I),
 }
+
+# The one apply that has ever written a `name-embedding:` stranded edge: an attended by-hand
+# `--apply` at this instant, recorded by #3029 on the vault side and named by PS-2's and
+# PS-3's RULED markers on this side. It is a constant here rather than something scraped from
+# the comment because the point of comparing them is that a marker which LOSES the date is a
+# failure — a marker reading `EXECUTED` with no instant cannot be aged, re-checked, or
+# attributed to the `store-backups/kg-stranded-20261019T164420Z.sqlite` it is stored beside.
+APPLY_INSTANT = "2026-10-19T16:44:20Z"
 
 
 def _missing(path: Path) -> str:
@@ -230,10 +249,123 @@ def _stale_apply_claims(text: str) -> list[str]:
     return [label for label, rx in STALE_APPLY_CLAIMS.items() if rx.search(text)]
 
 
+# ── a RULED key's execution marker, weighed against the live store ───────────
+#
+# `RULED` records what has been RULED, never what has been WRITTEN, and a key stays in it
+# after its apply — so the comment beside a key is the ONLY place a reader of the set-check
+# learns whether that set's edges exist. #3029 re-cut PS-2's and PS-3's markers from
+# `NOT EXECUTED` to `EXECUTED` when the attended by-hand `--apply` ran, and the reading that
+# marker gives has to be weighed against the thing it describes rather than against more
+# prose: a stale `pending` invites a second apply of edges that are already live, and a
+# hollow `executed` is the false green #854 was filed for. Hence one function that reads the
+# marker and the store together, called by the clause nodes and by the can-fail node alike.
+
+def _live_name_embedding_pairs() -> tuple[int, set[tuple[str, str]]]:
+    """Active `name-embedding:` edges in the live store: `(count, {(source, target)})`.
+
+    The same read the skill's own `receipt:` probe makes, through `app.kg_store` — whose
+    constructor is the read-only URI — anchored on `PRODUCTION_DATA_ROOT` and not
+    `Path.home()`, for the reason spelled out at `LIVE_STORE` above: the gate runs the suite
+    under the round's scaffolded HOME, where a clean-looking answer would be a measurement of
+    nothing. The count comes back with the pairs because the skill's receipt condition is a
+    floor on it (the pilot's 12 edges plus `PS-3`'s 7 = 19)."""
+    from app.data_root import KG_DB_RELATIVE
+    from app.kg_store import KGStore
+    assert LIVE_STORE.is_file(), (
+        f"no live store at {LIVE_STORE} (the production data root, not the round's) to weigh "
+        "a RULED execution marker against")
+    rows = [(r["source"], r["target"]) for r in
+            KGStore(PRODUCTION_DATA_ROOT / KG_DB_RELATIVE).edges.all_rows(
+                include_expired=False)
+            if str(r["evidence"] or "").startswith("name-embedding:")]
+    return len(rows), set(rows)
+
+
+def _ruled_comment(section: str, key: str) -> str:
+    """The comment a RULED key carries: from its own `# <key>` line up to the set it opens.
+
+    Cut by position, not by line number, so re-wrapping the comment in the vault cannot make
+    this read the neighbouring key's text — which is the failure mode that would have an
+    execution-marker assertion grading the wrong set."""
+    cut = section.split(f'"{key}"')[0].rsplit(f"# {key}", 1)
+    assert len(cut) == 2, f"{key}'s own comment line is gone from the RULED block"
+    return cut[1]
+
+
+def _declared_execution(mark: str, key: str) -> tuple[str, str]:
+    """What a marker claims: `("executed", instant)` or `("pending", "")` — or it refuses.
+
+    `NOT EXECUTED` contains `EXECUTED`, so the pending reading is taken first and a comment
+    carrying both is refused rather than resolved by precedence: that ambiguity is the thing
+    #3029 removed, and a checker that silently picked a side would let it come back. The
+    instant is required *beside* the word, on the same line, because PS-2's comment also
+    carries its ruling instant `2026-10-18T23:41:30Z` three lines lower — accepting any
+    instant in the comment would let a pending set read as applied on a date that only names
+    the ruling."""
+    up = mark.upper()
+    pending = "NOT EXECUTED" in up
+    executed = "EXECUTED" in up.replace("NOT EXECUTED", "")
+    if pending and executed:
+        raise AssertionError(
+            f"{key}'s RULED marker declares both states: it carries `NOT EXECUTED` and a "
+            f"second `EXECUTED`: {mark[:160]!r}")
+    if pending:
+        return "pending", ""
+    if not executed:
+        raise AssertionError(
+            f"{key}'s RULED marker declares no execution state: {mark[:160]!r}. A key whose "
+            "apply is neither claimed nor disclaimed cannot be weighed against the store at "
+            "all, which is the sentence PS-1 sat without.")
+    hit = re.search(r"EXECUTED[^\n]{0,80}?(20\d\d-\d\d-\d\dT\d\d:\d\d:\d\dZ)", up)
+    if not hit:
+        raise AssertionError(
+            f"{key}'s RULED marker says EXECUTED without an instant beside it: "
+            f"{mark[:160]!r} — an applied set with no date is indistinguishable from one "
+            "whose apply is still owed.")
+    return "executed", hit.group(1)
+
+
+def _execution_claim(section: str, key: str,
+                     live: set[tuple[str, str]]) -> tuple[str, str]:
+    """The state `key`'s marker declares, after the live store has been asked about it.
+
+    Refuses three ways: a marker declaring neither state or both (inside
+    ``_declared_execution``), an `EXECUTED` with no instant beside it, and any marker the
+    store contradicts in either direction — `executed` while one of that set's own pairs is
+    not live at exact `source`+`target` under `expired_at IS NULL`, or `pending` while every
+    pair of it is. Both directions are load-bearing here: `PS-3` ⊇ `PS-2` ⊇ `PS-1`, so one
+    apply makes three sets live and a marker left stale on either of the other two is a
+    reader being told to re-apply edges the store already holds.
+    """
+    mark = _ruled_comment(section, key)
+    state, instant = _declared_execution(mark, key)
+    pairs = _ruled_dict(_setcheck_script(section))[key]
+    missing = sorted(f"{a} -> {b}" for a, b in pairs if (a, b) not in live)
+    if state == "executed" and missing:
+        raise AssertionError(
+            f"{key} declares itself EXECUTED at {instant}, but the live store does not hold "
+            f"{missing}: the marker is ahead of the write. The `receipt:` probe in "
+            "SD-stranded-1 is the command that settles it.")
+    if state == "pending" and not missing:
+        raise AssertionError(
+            f"{key} declares its apply still owed, but all {len(pairs)} of its pairs are "
+            "live in the store: the marker is behind the write, and a run that believes it "
+            "is being told to apply edges that already exist.")
+    return state, instant
+
+
 # ---------------------------------------------------------------- clause 1: PS-2 in RULED
 
 def test_ruled_holds_ps_2_with_the_six_pairs_the_dump_printed():
-    """`RULED` gained PS-2, and `RULED` means RULED — not executed."""
+    """`RULED` gained PS-2 with the six pairs the dump printed, and its marker now has to
+    declare the apply that #3029 recorded as run.
+
+    "`RULED` means RULED — not executed" stayed true of the *key* and stopped being true of
+    the *apply* on 2026-10-19T16:44:20Z, when the attended by-hand `--apply` wrote PS-3 ⊇
+    PS-2 ⊇ PS-1. So this node no longer demands `NOT EXECUTED` — it demands that the marker
+    state agree with the live store in whichever direction it points, which is the property
+    that survives the apply. PS-1 staying ruled beside PS-2 is unchanged, and so is the
+    requirement that PS-2's comment carry its 2026-10-18T23:41 ruling instant."""
     section = _step_2_5_section(_skill_text())
     ruled = _ruled_dict(_setcheck_script(section))
     assert "PS-2" in ruled, (
@@ -245,14 +377,21 @@ def test_ruled_holds_ps_2_with_the_six_pairs_the_dump_printed():
     assert "PS-1" in ruled and ruled["PS-1"] == PS_1_PAIRS, (
         "PS-1 must stay ruled alongside PS-2: the nine runs that printed the five-pair "
         "set printed a set that is still ruled, and deleting it would call them novel")
-    # Ruled, not executed: the dict comment carries the ruling instant and the pending apply,
-    # so a reader cannot mistake PS-2 for work already written.
-    ps2_comment = section.split('"PS-2"')[0].rsplit("# PS-2", 1)
-    assert len(ps2_comment) == 2, "PS-2's own comment line is gone from the RULED block"
-    mark = ps2_comment[1]
-    assert "NOT EXECUTED" in mark.upper() and "2026-10-18T23:41" in mark, (
-        f"PS-2's RULED comment says {mark[:120]!r}: it must carry the ruling instant "
-        "2026-10-18T23:41 and that the apply is still pending, as PS-1 sat unapplied")
+    # The comment must still carry the ruling instant, and it must declare which side of the
+    # apply the set is on — PS-2 was `NOT EXECUTED` from 2026-10-18T23:41:30Z until the
+    # attended by-hand `--apply` of 2026-10-19T16:44:20Z, which wrote PS-3 and so wrote all
+    # six of these pairs with it. Demanding the old wording would be demanding a marker that
+    # tells a reader to re-apply edges the store already holds.
+    mark = _ruled_comment(section, "PS-2")
+    assert "2026-10-18T23:41" in mark, (
+        f"PS-2's RULED comment says {mark[:120]!r}: it must still carry the ruling instant "
+        "2026-10-18T23:41, whichever state it declares")
+    state, instant = _execution_claim(section, "PS-2", _live_name_embedding_pairs()[1])
+    assert state == "executed" and instant == APPLY_INSTANT, (
+        f"PS-2's RULED marker declares {state}" + (f" at {instant}" if instant else "") +
+        f"; the apply that wrote it is {APPLY_INSTANT}, and the live store holds all six of "
+        "PS-2's pairs — a marker reading `NOT EXECUTED` here is a run being told to write "
+        "edges that already exist")
 
 
 def test_the_ps_2_witness_bytes_are_committed_in_the_vault_tree():
@@ -655,9 +794,16 @@ def _ps3_seven_pair_payload() -> str:
 def test_ps_3_is_ruled_in_the_setcheck_and_a_seven_pair_run_reads_covered(tmp_path):
     """#3017 clause 5, the machine-readable half: `RULED` gains PS-3 = PS-2 plus the
     seventh pair, and the set it names is covered — so the run that printed it does not
-    file a ninth carrier. PS-3 is marked RULED, NOT EXECUTED, in PS-2's shape, because the
-    apply is still owed: measured 2026-10-19T09:51Z the store reads 12 active
-    `name-embedding:` edges and 0 live edges for every one of the seven pairs."""
+    file a ninth carrier.
+
+    Its marker is checked too, and it no longer says what this docstring used to claim.
+    `NOT EXECUTED` was the state at 2026-10-19T09:51Z, when the store read 12 active
+    `name-embedding:` edges and 0 live for all seven pairs; the attended by-hand `--apply`
+    of 2026-10-19T16:44:20Z wrote them, and the same probe now prints
+    `ACTIVE_NAME_EMBEDDING=19 PAIRS_LIVE=7/7 MISSING=0` and exits 0. So the node demands the
+    state the STORE reports, with the apply instant beside it, rather than the pending wording
+    — which is what keeps a seventh carrier from being filed by a reader who trusts a marker
+    that has fallen behind the write."""
     section = _step_2_5_section(_skill_text())
     script = _setcheck_script(section)
     ruled = _ruled_dict(script)
@@ -668,11 +814,13 @@ def test_ps_3_is_ruled_in_the_setcheck_and_a_seven_pair_run_reads_covered(tmp_pa
         f"{sorted(PS_3_PAIRS)}")
     assert ruled["PS-2"] < ruled["PS-3"], "PS-3 is not a superset of PS-2"
     assert ruled["PS-3"] - ruled["PS-2"] == {("OCR-Assisted ASR", "ASR")}
-    mark = section.split('"PS-3"')[0].rsplit("# PS-3", 1)
-    assert len(mark) == 2, "PS-3's own comment line is gone from the RULED block"
-    assert "NOT EXECUTED" in mark[1].upper(), (
-        f"PS-3's RULED comment says {mark[1][:120]!r}: a ruled set whose apply is owed has "
-        "to say so, which is the sentence PS-1 sat without for eleven days")
+    state, instant = _execution_claim(section, "PS-3", _live_name_embedding_pairs()[1])
+    assert state == "executed" and instant == APPLY_INSTANT, (
+        f"PS-3's RULED marker declares {state}" + (f" at {instant}" if instant else "") +
+        f": a ruled set has to declare which side of the apply it is on, and the store holds "
+        f"all seven of its pairs, written at {APPLY_INSTANT}. Declaring neither state is the "
+        "sentence PS-1 sat without for eleven days; declaring `NOT EXECUTED` now is a run "
+        "being told to re-apply edges that are live.")
 
     out = _run_setcheck(script, "ps3-seven-pair", _ps3_seven_pair_payload(), tmp_path)
     assert out.endswith("pairs=7 novel=none covered_by=['PS-3']"), (
@@ -767,3 +915,101 @@ def test_the_standing_decision_records_the_hand_run_block_for_ps_3():
     assert "--apply" not in r and "SystemExit" in r, (
         "the receipt is not a read-only probe: it must exit non-zero until the by-hand run "
         "has happened, and it must never be the run itself")
+
+
+# ── the marker checker must be able to fail ─────────────────────────────────
+#
+# A node that asserts "the marker and the store agree" passes for exactly one reason: they
+# agree. If the checker could not see a disagreement, the two clause nodes above would be a
+# record of today's state and not a guard on tomorrow's. So the checker runs here against
+# readings that are each wrong in one specific way — three of them states this file has
+# actually held, and the fourth a store reading that really was measured.
+
+def test_the_marker_checker_refuses_a_state_the_store_contradicts():
+    """Every refusal direction of `_execution_claim`, on text and readings that are wrong in
+    one named way each.
+
+    (a) `PS-3`'s comment put back to `NOT EXECUTED`, the state #3017 published and the true
+        one until 16:44:20Z. All seven of its pairs are live now, so a checker that let this
+        through would be licensing a second apply of edges the store already holds — which is
+        the hazard #2986 exists because of.
+    (b) The live reading from before that apply, missing `OCR-Assisted ASR -> ASR`, against
+        the marker as it stands. `EXECUTED` while the store cannot produce the pair is the
+        false green #854 was filed for, in the one place a person reads before pushing work
+        they believe is written.
+    (c) Markers that declare both states, neither, or an `EXECUTED` with no instant: the three
+        shapes that make the state unreadable rather than merely wrong.
+    """
+    section = _step_2_5_section(_skill_text())
+    count, live = _live_name_embedding_pairs()
+
+    # The positive control first: the checker accepts the real pair of readings, or the three
+    # refusals below would be proving that it always raises.
+    assert _execution_claim(section, "PS-3", live) == ("executed", APPLY_INSTANT), (
+        f"the live store ({count} active `name-embedding:` edges) and PS-3's marker both "
+        "read executed-at-apply, so a refusal here is the checker, not the file")
+
+    stale = section.replace("# PS-3 — EXECUTED", "# PS-3 — NOT EXECUTED", 1)
+    assert stale != section, "PS-3's marker is not in the shape this check can age"
+    try:
+        _execution_claim(stale, "PS-3", live)
+        raise AssertionError(
+            "a `NOT EXECUTED` marker on a set whose seven pairs are all live was accepted: "
+            "the stale-pending direction is unguarded")
+    except AssertionError as exc:
+        assert "still owed" in str(exc), (
+            f"refused for the wrong reason — expected the stale-pending refusal, got: {exc}")
+
+    pre_apply = live - {("OCR-Assisted ASR", "ASR")}
+    try:
+        _execution_claim(section, "PS-3", pre_apply)
+        raise AssertionError(
+            "an `EXECUTED` marker was accepted while `OCR-Assisted ASR -> ASR` is absent from "
+            "the store: the hollow-executed direction is unguarded")
+    except AssertionError as exc:
+        assert "OCR-Assisted ASR -> ASR" in str(exc), (
+            f"refused for the wrong reason — expected the missing-pair refusal naming the "
+            f"pair, got: {exc}")
+
+    for mark, what in (
+        ("# PS-9 — EXECUTED by an attended by-hand --apply", "without an instant"),
+        ("# PS-9 — EXECUTED 2026-10-19T16:44:20Z; the apply is NOT EXECUTED",
+         "declaring both states"),
+        ("# PS-9 — ruled, supersedes PS-3", "declaring no state"),
+    ):
+        try:
+            _declared_execution(mark, "PS-9")
+            raise AssertionError(f"a marker {what} was accepted")
+        except AssertionError as exc:
+            assert "PS-9" in str(exc), (
+                f"the {what} refusal did not name the key it refused: {exc}")
+
+
+def test_every_ruled_key_besides_ps_1_declares_a_state_the_store_agrees_with():
+    """The agreement check runs over `RULED`'s keys, not over two names written into a node.
+
+    `RULED` is an open set — a fifth ruled set is the whole point of having a dict — so a
+    check that enumerates `PS-2` and `PS-3` by name leaves the next key born unchecked, which
+    is the class of guard that cannot hold. `PS-1` is the single named exception and it is
+    justified in the file it is excused by: PS-2's comment carries that set's own receipt
+    (`PS1_LIVE=5/5`, the pre-apply probe of #2998's bullet 10), so its status is recorded on
+    the page, beside a key that declares its own. Nothing else may be silent.
+    """
+    section = _step_2_5_section(_skill_text())
+    ruled = _ruled_dict(_setcheck_script(section))
+    count, live = _live_name_embedding_pairs()
+    assert "PS1_LIVE=5/5" in _ruled_comment(section, "PS-2"), (
+        "PS-1 is excused from declaring a state only because PS-2's comment carries its "
+        "receipt; without that sentence the exception is a hole and not a ruling")
+    for key in sorted(ruled):
+        if key == "PS-1":
+            continue
+        state, instant = _execution_claim(section, key, live)
+        assert state == "executed" and instant == APPLY_INSTANT, (
+            f"{key} ({len(ruled[key])} pairs) declares {state}"
+            + (f" at {instant}" if instant else "")
+            + f", and the live store holds all {len(ruled[key])} of its pairs — every ruled "
+            f"set whose edges are live has to name {APPLY_INSTANT} as its apply")
+    assert count >= 19, (
+        f"{count} active `name-embedding:` edges: the pilot wrote 12 on 2026-10-05T14:22:23Z "
+        f"and the PS-3 apply added 7, so a count under 19 is the store losing written work")
