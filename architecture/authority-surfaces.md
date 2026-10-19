@@ -97,7 +97,10 @@ marker for the set is `human-only:` at the head of a triage acceptance
 (`HUMAN_ONLY_PREFIX`, `is_human_only` in `scripts/automod/backlog.py`), **and
 since 2026-10-05 the marker is checked against the rail it cites**
 (`_names_a_guard`): it guards only when the path it names is one `spec.classify`
-calls denied or unlisted, lies outside the repo and the vault, sits in a vault
+calls denied or unlisted, lies outside the repo and the vault other than the
+loop's own runtime data root (`_RUNTIME_DATA_ROOTS`, #3027 — no rail refuses bytes
+there and a round cannot write them either, so a RUN over runtime data is a human
+clause, not a guard), sits in a vault
 subtree a vault round may not write (the autonomy tasks are the #724 dispatch rail's),
 or the head names something physical. A marker on a PROTECTED path is not a
 guard — protected paths land, with the drill — and neither is one on

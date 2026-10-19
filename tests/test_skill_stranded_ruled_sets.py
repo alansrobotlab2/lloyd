@@ -499,19 +499,34 @@ def test_the_live_store_figure_is_a_measurement_not_a_backup_listing():
 
 
 def test_the_witness_ceiling_cite_resolves_in_the_tree_it_names():
-    """`backlog.py:1240` was 28 lines off; the cite must land on the constant it names."""
+    """`backlog.py:1240` was 28 lines off; the cite must land on the constant it names.
+
+    The line is DERIVED from the tree, the way the applying check's line already is
+    at the bottom of this node, rather than written down here. This node hard-coded
+    one number, which meant any round that inserted module-level lines above the
+    constant failed it for a reason outside its own diff — #3027 added a documented
+    constant block up there, and what had to move was the SKILL's cite, not this
+    assertion. Nothing is weakened by deriving it: the number the prose carries must
+    still EQUAL the line the constant really sits on, so `:1240` cannot pass, a
+    second `backlog.py:<n>` cite in the section still fails, and a constant that was
+    renamed or deleted fails here instead of green."""
+    lines = BACKLOG_PY.read_text(encoding="utf-8").splitlines()
+    witness = [i + 1 for i, l in enumerate(lines) if "WITNESS_MAX_BYTES = 1_048_576" in l]
+    assert witness, (
+        f"no `WITNESS_MAX_BYTES = 1_048_576` assignment in {BACKLOG_PY}: the cite the "
+        "skill carries points at nothing, and re-measuring the line is not the fix")
+    assert len(witness) == 1, (
+        f"WITNESS_MAX_BYTES is assigned on more than one line ({witness}), so the cite "
+        "has no single line to resolve to")
+    cited = str(witness[0])
     section = _step_2_5_section(_skill_text())
     cites = set(RULED_CITE_RE.findall(" ".join(_witness_paragraph(section).split())))
-    assert cites == {"1268"}, (
-        f"the witness bullet cites backlog.py {sorted(cites)}; WITNESS_MAX_BYTES is the "
-        "constant at scripts/automod/backlog.py:1268 and :1240 is not")
-    assert RULED_CITE_RE.findall(" ".join(section.split())) == ["1268"], (
+    assert cites == {cited}, (
+        f"the witness bullet cites backlog.py {sorted(cites)}, but WITNESS_MAX_BYTES is the "
+        f"constant at scripts/automod/backlog.py:{cited} — move the cite, not the constant")
+    assert RULED_CITE_RE.findall(" ".join(section.split())) == [cited], (
         f"a second backlog.py line cite appeared in the Step 2.5 section: "
         f"{RULED_CITE_RE.findall(' '.join(section.split()))}")
-    lines = BACKLOG_PY.read_text(encoding="utf-8").splitlines()
-    assert "WITNESS_MAX_BYTES = 1_048_576" in lines[1268 - 1], (
-        f"scripts/automod/backlog.py:1268 is {lines[1268 - 1]!r}, not the "
-        "WITNESS_MAX_BYTES constant the skill cites — move the cite, not the constant")
     size_check = [i + 1 for i, l in enumerate(lines) if "size <= WITNESS_MAX_BYTES" in l]
     assert size_check, (
         f"no `size <= WITNESS_MAX_BYTES` check in {BACKLOG_PY}: the skill's companion "

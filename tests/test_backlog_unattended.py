@@ -960,20 +960,30 @@ def test_human_only_acceptances_are_never_handed_to_the_implementer(isolated):
 # the marker used to miss it. Each node below is one acceptance clause.
 
 def test_is_human_only_accepts_the_marker_wrapped_in_a_code_span():
-    """Clause 1: the wrapped marker parses, and the bare form still does."""
-    assert B.is_human_only("`human-only: ~/lloyd-data/x.jsonl` (siblings)") is True
-    assert B.is_human_only("`human-only: ~/lloyd-data/x.jsonl`") is True
-    assert B.is_human_only("human-only: ~/lloyd-data/x.jsonl") is True
+    """Clause 1: the wrapped marker parses, and the bare form still does.
+
+    The example is `~/.config/qmd/index.yml`, outside the repo and the vault, so
+    no rail lands those bytes and the value really is a guard. It used to be
+    `~/lloyd-data/x.jsonl`, which #3027 stopped being one: what this node pins is
+    the WRAPPER, so the path moved to one that is still refused."""
+    assert B.is_human_only("`human-only: ~/.config/qmd/index.yml` (siblings)") is True
+    assert B.is_human_only("`human-only: ~/.config/qmd/index.yml`") is True
+    assert B.is_human_only("human-only: ~/.config/qmd/index.yml") is True
     assert B.is_human_only('"human-only: web/vite.config.ts"') is True
     assert B.is_human_only("'human-only: .gitignore'") is True
 
 
 def test_a_backticked_human_only_row_is_skipped_end_to_end(isolated):
     """Clause 2: a confirmed ledger row carrying the wrapped marker reaches the
-    ledger's human-only id set and is never offered to the implementer."""
+    ledger's human-only id set and is never offered to the implementer.
+
+    The seeded path is `~/.cache/qmd/index.sqlite` — the live qmd index, which no
+    rail would let a round overwrite. It used to be a `~/lloyd-data/_pipeline/`
+    path, which #3027 made a non-guard; the wrapper-parsing property this node
+    pins is unchanged by that, so only the example moved."""
     write_item(isolated, 1, days_old=50)
     write_item(isolated, 2, days_old=40)
-    acc = ("`human-only: ~/lloyd-data/_pipeline/trajectories/2026-09-23.jsonl` "
+    acc = ("`human-only: ~/.cache/qmd/index.sqlite` "
            "(and the sibling buckets)")
     _confirm(1, acceptance=acc)
     _confirm(2)
@@ -985,8 +995,12 @@ def test_a_backticked_human_only_row_is_skipped_end_to_end(isolated):
 
 def test_acceptance_clauses_of_keeps_a_backticked_human_only_contract_whole():
     """Clause 3: the wrapped marker is not split into lettered clauses a round
-    could be graded on — the acceptance comes back as one clause, unsplit."""
-    acc = ("`human-only: ~/lloyd-data/x.jsonl` — (a) run the approved append "
+    could be graded on — the acceptance comes back as one clause, unsplit.
+
+    #3027 moved the example off `~/lloyd-data/` onto `~/.cache/qmd/index.sqlite`,
+    a path that is still a guard, so the unsplit contract is still a real
+    human-only one rather than an accidentally-unparked one."""
+    acc = ("`human-only: ~/.cache/qmd/index.sqlite` — (a) run the approved append "
            "over the frozen rows; (b) re-count the corpus afterwards")
     assert B.acceptance_clauses_of({"acceptance": acc}) == [" ".join(acc.split())], (
         "a human-only acceptance was lettered and graded as clauses")
@@ -1017,10 +1031,13 @@ NO_PATH_MARKERS = (
 )
 
 #: Values that DO name a guard, including the wrapped forms #1698 pinned. Every
-#: one of these is a live triage row's value, not an invented one.
+#: one of these is a live triage row's value, not an invented one — except the two
+#: wrapped ones at the top, which #1698 pinned on `~/lloyd-data/x.jsonl` and
+#: #3027 re-pointed at the qmd config and index: same wrapped shape, on paths no
+#: rail would ever land. See `RUNTIME_DATA_MARKERS` for the rows that moved out.
 GUARDED_MARKERS = (
-    "`human-only: ~/lloyd-data/x.jsonl` (siblings)",
-    "`human-only: ~/lloyd-data/x.jsonl`", '"human-only: web/vite.config.ts (in DENIED_GLOBS)"',
+    "`human-only: ~/.config/qmd/index.yml` (siblings)",
+    "`human-only: ~/.cache/qmd/index.sqlite`", '"human-only: web/vite.config.ts (in DENIED_GLOBS)"',
     "human-only: `.gitignore` — a person replaces line 92",
     "human-only: pytest.ini needs the marker",
     "human-only: qmd/src/cli/qmd.ts (the fork is a separate clone)",
@@ -1091,6 +1108,157 @@ def test_the_guard_asks_spec_and_does_not_restate_the_globs():
     for path in (".gitignore", "data/tool_overrides.yaml", "web/package.json"):
         assert spec.classify(path) == "denied"
         assert B.is_human_only(f"human-only: {path}") is True
+
+
+# ── #3027: the loop's own runtime data root is not a guard ─────────────────────
+#
+# `_names_a_guard` returned True for every token starting `~` or `/` outside the
+# repo and the vault, which counted `~/lloyd-data` — the runtime data root the
+# loop itself writes (`app/data_root.py::PRODUCTION_DATA_ROOT`) — as a path the
+# gate would refuse. It never would: `spec.DENIED_GLOBS` names no runtime-data
+# entry, and `spec.normalize` answers None for any `/`-leading path, so
+# `check_scope` is structurally blind to one (a diff is repo-relative). Two live
+# `draft` items sat parked on the belief: #2983, whose whole head is one
+# `~/lloyd-data/_pipeline/...md` path, and #3021, whose head then continues into
+# the bare prose fragment `its store-backups/`.
+
+#: Live ledger heads whose only paths are under the runtime data root: both root
+#: spellings, #2983's real head, and #3021's directory-fragment form.
+RUNTIME_DATA_MARKERS = (
+    "human-only: ~/lloyd-data/_pipeline/vault-derived/kg.sqlite — clauses 1-5 are "
+    "round-landable code and vault; the marker covers only the attended apply",
+    "human-only: ~/lloyd-data/_pipeline/stranded-authorized-set.jsonl — generate the "
+    "file, then a person runs the apply",
+    "human-only: /home/alansrobotlab/lloyd-data/_pipeline/vault-derived/kg.sqlite — the "
+    "same store under its absolute spelling",
+    "human-only: ~/lloyd-data/_pipeline/research/behavioural_pairs/NOISE_FLOOR_NOTE.draft.md",
+    "human-only: ~/lloyd-data/_pipeline/vault-derived/kg.sqlite and its store-backups/ "
+    "— clauses 1-5 are round-landable code and vault",
+)
+
+
+@pytest.mark.parametrize("acceptance", RUNTIME_DATA_MARKERS)
+def test_a_marker_naming_only_the_loops_runtime_data_root_is_not_a_guard(acceptance):
+    """#3027 clause 1: a contract whose head names only the loop's own runtime
+    data root stops parking its item.
+
+    `~/lloyd-data` and `/home/alansrobotlab/lloyd-data` are one directory. No rail
+    refuses bytes there, so the marker was inventing a guard — and the false-True
+    direction is the expensive one: a `draft` with a refused reopen is an item
+    nothing ever comes back for."""
+    assert B.is_human_only(acceptance) is False, acceptance
+
+
+def test_the_runtime_root_is_discarded_not_re_rooted_into_a_repo_relative_path():
+    """#3027 clause 2, first half: the token is DISCARDED, not re-rooted.
+
+    Copying the `~/lloyd/` handling two lines above — strip the root, judge the
+    remainder — leaves `_pipeline/vault-derived/kg.sqlite`, which `spec.classify`
+    calls `unlisted` because `ALLOWED_GLOBS` has no `_pipeline/**`, and the guard
+    comes straight back. Measured over the 41 guarded rows of the live ledger on
+    2026-10-19: re-rooting un-parked 1, discarding un-parked 7. The first
+    assertion pins the trap, the second the behaviour that avoids it."""
+    from scripts.automod import spec
+    assert spec.classify("_pipeline/vault-derived/kg.sqlite") == "unlisted", (
+        "this node's premise: the stripped remainder is still not a landable path")
+    assert B.is_human_only(
+        "human-only: ~/lloyd-data/_pipeline/vault-derived/kg.sqlite") is False
+
+
+def test_a_relative_fragment_naming_no_file_is_read_as_prose():
+    """#3027 clause 2, second half: the `its store-backups/` in #3021's live head
+    is prose, not a path — a relative token ending in `/` names no file.
+
+    The skip is bounded to exactly that shape, so nothing else widens: a relative
+    token that DOES name a file still goes to `spec.classify`, which is what keeps
+    the vendored clones guarded (`qmd/` and `chrome-extension/` are in neither the
+    allowed nor the denied set), and a `~`-leading directory stays outside the repo
+    and the vault, because the absolute branch is tested before the slash is."""
+    assert B.is_human_only("human-only: ~/lloyd-data/_pipeline/vault-derived/kg.sqlite "
+                           "and its store-backups/ — the rest is round-landable") is False
+    assert B.is_human_only(
+        "human-only: qmd/src/cli/qmd.ts (the fork is a separate clone)") is True
+    assert B.is_human_only(
+        "human-only: chrome-extension/src/background/service-worker.ts") is True
+    assert B.is_human_only(
+        "human-only: `~/.cache/qmd/` (the live index a swap moves aside)") is True
+
+
+#: Each of these is outside the repo and the vault and named by live ledger rows
+#: in #3027's blast radius as one of the 34 that must stay guarded: the qmd config
+#: and index a swap moves aside, a systemd user timer, an ssh private key.
+#: `~/obsidian/autonomy/**` is a different rail — the vault round's guarded subtree,
+#: whose dispatch fields are the #724 grant rail — and goes down the vault branch.
+NON_RUNTIME_GUARDS = (
+    "~/obsidian/autonomy/96-djev-name-prior-probe.md",
+    "/etc/shadow",
+    "~/secrets/id_ed25519",
+    "~/.config/qmd/index.yml",
+    "~/.cache/qmd/index.sqlite",
+    "~/.config/systemd/user/lloyd-cert-renew.timer",
+)
+
+
+@pytest.mark.parametrize("path", NON_RUNTIME_GUARDS)
+def test_every_absolute_path_outside_the_repo_and_vault_is_still_a_guard(path):
+    """#3027 clause 3: un-guarding one root must not widen the lane. `/etc/shadow`
+    is the shape the `~`/`/` branch exists for; the rest are real rows."""
+    assert B.is_human_only(f"human-only: {path}") is True, path
+
+
+def test_a_denied_repo_path_and_a_head_naming_only_hands_are_still_guards():
+    """#3027 clause 3, second half: the repo half of the rail and the physical
+    half are untouched by the runtime-root skip."""
+    for path in (".gitignore", "web/vite.config.ts", "pytest.ini"):
+        assert B.is_human_only(f"human-only: {path}") is True, path
+    assert B.is_human_only("human-only: sudo on the host to raise the inode limit") is True
+    assert B.is_human_only("human-only: a USB drive Alan plugs in") is True
+
+
+def test_a_runtime_data_ledger_row_leaves_the_human_only_set_and_is_offered(isolated):
+    """#3027 clause 1, end to end: what `human_only_ids` and the dispatch filter
+    actually read, over the row #2983 carries today beside a real rail.
+
+    The runtime row is the OLDER of the two, so before the fix the pool skipped it
+    and offered the sibling; after it the runtime row is in neither the id set nor
+    the skip and its own item is the pick. The rail sibling stays out of the pool
+    either way — one root ceasing to be a guard parks nothing and unparks nothing
+    else."""
+    write_item(isolated, 2983, days_old=50)
+    write_item(isolated, 2984, days_old=40)
+    runtime = ("human-only: ~/lloyd-data/_pipeline/research/behavioural_pairs/"
+               "NOISE_FLOOR_NOTE.draft.md")
+    rail = "human-only: ~/.cache/qmd/index.sqlite (the live index a swap moves aside)"
+    _confirm(2983, acceptance=runtime)
+    _confirm(2984, acceptance=rail)
+    assert B.human_only_ids(S.LEDGER_PATH) == {2984: rail}, (
+        "the runtime-data row is still counted as a guard")
+    picked = B.select_confirmed(S.LEDGER_PATH)
+    assert picked is not None and picked[0].id == 2983, (
+        "the un-parked runtime-data contract was never offered to the implementer")
+
+
+def test_the_module_comment_records_both_halves_of_the_runtime_root():
+    """#3027 clause 4: the comment is the half a future triage pass reads, and the
+    two facts it must carry pull opposite ways.
+
+    It is NOT a denial rail — so it must not park the code half of a contract —
+    AND it is not a surface a round can write either: `worktree.py::HOME_LINK_SKIP`
+    keeps the account's data root out of the round's symlink farm and
+    `round_data_root()` gives every rung that executes candidate code its own
+    `home/lloyd-data`, so a clause ordering a RUN or an emit over runtime data
+    writes a throwaway copy and passes its own in-sandbox test. Such a clause
+    belongs under `HUMAN_CLAUSES`/`owed`, not in the acceptance head."""
+    src = Path(B.__file__).read_text(encoding="utf-8")
+    # The block that holds `_RUNTIME_DATA_ROOTS` and its comment: from the vault
+    # constant it sits beside down to the predicate that reads it. Anchored on
+    # both by real code, so the slice cannot silently drift somewhere empty.
+    block = (src[src.index("_VAULT_GUARDED = "):src.index("def _names_a_guard")])
+    for fact in ("_RUNTIME_DATA_ROOTS", "DENIED_GLOBS", "normalize"):
+        assert fact in block, f"the runtime-root constant must record {fact}"
+    doc = B._names_a_guard.__doc__ or ""
+    for fact in ("HOME_LINK_SKIP", "round_data_root", "HUMAN_CLAUSES"):
+        assert fact in doc, f"the _names_a_guard docstring must record {fact}"
 
 
 def test_a_no_path_marker_dispatches_the_item_and_owes_no_decision(isolated):

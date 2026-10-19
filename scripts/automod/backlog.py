@@ -66,6 +66,7 @@ from app.backlog_tags import NEEDS_HUMAN_TAG, is_spawn_tag, new_task_tags, norma
 # Standard-library-only by design (see its docstring): this module is the light
 # one the automod CLI loads, so the shared fence rule must not drag in `mcp`.
 from app import frontmatter as FM
+from app.data_root import PRODUCTION_DATA_ROOT
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 
@@ -264,7 +265,10 @@ HUMAN_ONLY_WRAPPERS = "\"'`\u2018\u2019\u201c\u201d"
 # entry reading "its contract needs a path the loop may not write: human-only:
 # not required" (#1909). Compared against the value's HEAD segment only — see
 # `_human_only_head` — so a contract that names a path anywhere in its first
-# segment (`config.yaml`, `.gitignore`, `~/lloyd-data/x.jsonl`) stays guarded.
+# segment (`config.yaml`, `.gitignore`, `~/.cache/qmd/index.sqlite`) stays
+# guarded. It used to say `~/lloyd-data/x.jsonl` here; #3027 removed that
+# example because the loop's own runtime data root is NOT a guard — see
+# `_RUNTIME_DATA_ROOTS`.
 HUMAN_ONLY_NO_PATH = frozenset({
     "", "-", "\u2013", "\u2014", "none", "none required", "nothing",
     "nothing required", "no", "nope", "nil", "n/a", "na", "no path",
@@ -350,6 +354,40 @@ _PATH_TOKEN = re.compile(r"[~\w.*\-]*[/][\w.*/\-]*|\.[a-z]\w+(?:\.\w+)*|\b[\w\-]
 #: grant rail's (`vault_round.validate`).
 _VAULT_GUARDED = (".obsidian/", ".git/", ".trash/", "autonomy/", "lloyd/soul.md")
 
+#: The loop's own runtime data root, in the two spellings a triage row writes it
+#: in. `app/data_root.py::PRODUCTION_DATA_ROOT` answers the absolute one whatever
+#: `$HOME` or `$LLOYD_DATA` say, which is why deriving it is safe here.
+#:
+#: NOT a guard, for two reasons that pull opposite ways and therefore belong in
+#: one comment:
+#:
+#:   * It is not a DENIAL rail, so naming it must not park a contract. Nothing
+#:     refuses bytes there: `spec.DENIED_GLOBS` has no runtime-data entry, and
+#:     `spec.normalize` returns None for any `/`-leading path, so `classify` never
+#:     even sees one — `check_scope` is structurally blind to it, because a diff is
+#:     repo-relative. Counting it as a guard parked #2983 and #3021, whose heads
+#:     name nothing but `_pipeline/` paths under this root (#3027).
+#:   * Nor is it a surface a round can WRITE. `worktree.py::HOME_LINK_SKIP`
+#:     (`{"lloyd", "lloyd-data"}`) keeps the account's data root out of the round's
+#:     symlink farm, and `round_data_root()` gives every rung that executes
+#:     candidate code its own `<round>/home/lloyd-data` through `$LLOYD_DATA`. A
+#:     clause ordering the round to EMIT a file there writes the throwaway copy and
+#:     passes its own in-sandbox test.
+#:
+#: Together they mean a contract whose unlandable half is a RUN or an emit over
+#: runtime data belongs under `HUMAN_CLAUSES`/`owed` — which is what #3023's
+#: triage did at 13:25Z — and never in the acceptance head, where it would only
+#: park the half a round really can land.
+_RUNTIME_DATA_ROOTS = ("~/lloyd-data", str(PRODUCTION_DATA_ROOT).lower())
+
+
+def _under_runtime_data_root(low: str) -> bool:
+    """Whether an already-lowercased path token names the loop's runtime root.
+
+    A token equal to the root counts, so `human-only: ~/lloyd-data` cannot slip
+    past the trailing-slash form."""
+    return any(low == root or low.startswith(root + "/") for root in _RUNTIME_DATA_ROOTS)
+
 
 def _head_text(acceptance) -> str:
     """`_human_only_head`'s segment, in the acceptance's own case (paths are
@@ -371,6 +409,18 @@ def _names_a_guard(acceptance) -> bool:
     vault round. Anything else — a denied or unlisted path, a file outside the
     repo and the vault — is a guard. A head naming no path is a guard only when
     it names something physical: a decision is the loop's to make now.
+
+    Two shapes are skipped rather than judged, both #3027. The loop's own runtime
+    data root (`_RUNTIME_DATA_ROOTS`) is not a guard even though it is absolute:
+    `DENIED_GLOBS` holds no entry for it and `check_scope` cannot see an absolute
+    path at all — and a token under it is DISCARDED, never re-rooted to a
+    repo-relative remainder, which `spec.classify` would call unlisted. A relative
+    token with a trailing slash (`…and its store-backups/`) names no file and is
+    prose. The runtime root is not a denial rail, but it is not writable by a round
+    either: `worktree.py::HOME_LINK_SKIP` keeps the account's data root out of the
+    round's symlink farm and `round_data_root()` gives a round its own
+    `home/lloyd-data`, so a clause whose last half is a RUN or an emit over runtime
+    data belongs under `HUMAN_CLAUSES`/`owed`, not in the acceptance head.
 
     The cheap direction is still false-False: a round that meets a real rail
     reports it under `human_paths` and the owed entry is authored then."""
@@ -394,6 +444,12 @@ def _names_a_guard(acceptance) -> bool:
         return physical
     for tok in tokens:
         low = tok.lower()
+        if _under_runtime_data_root(low):
+            # The loop's own runtime data: no rail refuses those bytes. The token
+            # is DISCARDED, not re-rooted — stripping the root and judging the
+            # remainder would hand `spec.classify` an unlisted `_pipeline/...`
+            # path, which is exactly the guard this skip is removing (#3027).
+            continue
         for root in ("~/lloyd/", "/home/alansrobotlab/lloyd/"):
             if low.startswith(root):
                 tok, low = tok[len(root):], low[len(root):]
@@ -405,6 +461,8 @@ def _names_a_guard(acceptance) -> bool:
         else:
             if tok.startswith(("~", "/")):
                 return True            # outside the repo and the vault
+            if tok.endswith("/"):
+                continue               # "…and its store-backups/": prose, not a path
             if tok == "config.yaml":
                 continue               # rung 0 judges the content, not triage
             if spec.classify(tok) not in ("allowed", "protected"):
