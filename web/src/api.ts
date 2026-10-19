@@ -2503,6 +2503,12 @@ export interface BacklogOwed {
   entries: number
   due: number
   outside: { item_id: number; name: string; what: string; needs: string; since: string }[]
+  // #3017: a decision that is RULED but not EXECUTED, with the one command an
+  // attended session has to run by hand. Listed while the block's own receipt
+  // command still exits non-zero — `scripts/automod/owed.py`'s `hand_runs()`,
+  // which is why this list cannot be answered away the way `outside` can.
+  // Optional: absent on a snapshot written before the field existed.
+  hand_runs?: { item_id: number; name: string; set: string[]; cmd: string; since: string }[]
 }
 
 /** #904: what the queue decisions produced over the window. `outcome` carries

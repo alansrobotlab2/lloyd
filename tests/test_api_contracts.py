@@ -1220,3 +1220,32 @@ async def test_autonomy_tasks_reports_the_schedulers_retry_budget_for_a_keyless_
     assert rows[84]["max_retries"] == 2, (
         "a declared budget was overridden by the default — the fix must not "
         "change any task's real budget")
+
+
+# ── The pending hand-run readout reaches the web client (#3017) ─────────────
+
+def test_the_web_client_declares_the_pending_hand_run_row_the_board_emits():
+    """#3017 clause 3, the far side of the seam. `board_health`'s `owed` block now
+    carries `hand_runs`, and `web/src/api.ts`'s `BacklogOwed` is the type Mission
+    Control compiles against — a field the route emits and the client does not
+    declare is a field no panel can show. The two are pinned against ONE
+    measurement, the writer's own `owed.HAND_RUN_FIELDS`, rather than against each
+    other, so a row that grows a column while the interface stays put is red and not
+    merely un-rendered.
+    """
+    from scripts.automod import owed as O
+    src = _API_TS.read_text()
+    marker = "export interface BacklogOwed {"
+    assert marker in src, "the client type this pin reads is gone from api.ts"
+    block = src[src.index(marker):]
+    block = block[: block.index("\n}")]
+    declared = set(_re.findall(r"^  ([A-Za-z_]\w*)\??:", block, _re.M))
+    assert declared >= {"items", "entries", "due", "outside"}, \
+        f"positive control: only {sorted(declared)} parsed out of the interface"
+    assert "hand_runs" in declared, "the route emits it, the client does not declare it"
+    row = block[block.index("hand_runs"):]
+    row = row[row.index("{") + 1: row.index("}")]
+    fields = set(_re.findall(r"(\w+)\??:", row))
+    assert fields == set(O.HAND_RUN_FIELDS), \
+        f"api.ts declares {sorted(fields)}; owed.hand_runs() emits " \
+        f"{sorted(O.HAND_RUN_FIELDS)}"

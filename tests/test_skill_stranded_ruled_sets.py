@@ -290,23 +290,37 @@ def test_the_setcheck_covers_the_22_32z_set_as_ps_2(tmp_path):
     script = _setcheck_script(_step_2_5_section(_skill_text()))
     out = _run_setcheck(script, TS_PS2, _committed_ps2_bytes().decode(), tmp_path)
     assert out == (f"SD-STRANDED SETCHECK {TS_PS2}: pairs=6 novel=none "
-                   "covered_by=['PS-2']"), (
+                   "covered_by=['PS-2', 'PS-3']"), (
         f"the set-check reads {out!r} over the witness #2998 committed; the filing trigger "
         "at SKILL.md's novel=/covered_by= bullets turns anything naming a novel pair into "
-        "another carrier item, which is the loop that produced #2970 #2986 #2989 #2998")
+        "another carrier item, which is the loop that produced #2970 #2986 #2989 #2998. "
+        "PS-3 (#3017) is PS-2 plus `OCR-Assisted ASR -> ASR`, so from this round's change "
+        "onward a six-pair run names TWO covering sets; the ledger field still names the "
+        "smallest, which is PS-2.")
 
 
-def test_deleting_ps_2_reopens_the_sixth_carrier(tmp_path):
-    """The node above can fail: with PS-2 stripped, the same bytes print the novel pair.
+def test_deleting_the_sets_that_cover_the_sixth_pair_reopens_that_carrier(tmp_path):
+    """The node above can fail: with every set covering the sixth pair stripped, the same
+    bytes print the novel pair.
 
     This is the pre-fix reading, measured 2026-10-19T02:48Z before the edit:
     `pairs=6 novel=['False Absence Guard Pattern -> Guard'] covered_by=none`. Without this
-    node, a RULED dict quietly emptied of PS-2 — or a snippet that never reads the file —
-    could keep the node above green.
+    node, a RULED dict quietly emptied of the sets that cover it — or a snippet that never
+    reads the file — could keep the node above green. **What #3017 changed about this node:**
+    it used to strip `PS-2` alone, and PS-3 (`PS-2` plus `OCR-Assisted ASR -> ASR`, added to
+    `RULED` for #3017) is a superset of `PS-2`, so stripping `PS-2` alone now leaves the six
+    pairs covered and the node would measure PS-3 instead of the mechanism. What is stripped
+    here is therefore every ruled set that contains the sixth pair — `PS-2` and `PS-3` — which
+    is the same hole the node was written to probe.
     """
     script = _setcheck_script(_step_2_5_section(_skill_text()))
     ruled = _ruled_dict(script)
-    stripped = {k: v for k, v in ruled.items() if k != "PS-2"}
+    sixth = ("False Absence Guard Pattern", "Guard")
+    covering = {k for k, v in ruled.items() if sixth in set(v)}
+    assert covering == {"PS-2", "PS-3"}, (
+        f"only {sorted(covering)} cover {sixth[0]} -> {sixth[1]}; this node strips the sets "
+        "that cover it, so a new covering set has to be named here rather than ignored")
+    stripped = {k: v for k, v in ruled.items() if k not in covering}
     head, sep, tail = script.partition("RULED = {")
     assert sep, "the snippet no longer assigns RULED as a literal"
     _first, sep2, rest = tail.partition("\nnovel = ")
@@ -324,8 +338,9 @@ def test_a_five_pair_run_is_still_covered_and_names_the_smallest_set(tmp_path):
     committed_ps1 = VAULT / "backlog/data/stranded-proposals-2026-10-16T191722Z.jsonl"
     assert committed_ps1.is_file(), _missing(committed_ps1)
     out = _run_setcheck(script, TS_PS1, committed_ps1.read_text(encoding="utf-8"), tmp_path)
-    assert "novel=none" in out and "covered_by=['PS-1', 'PS-2']" in out, (
-        f"a run reprinting PS-1 now reads {out!r}: both sets cover it in dict order, and "
+    assert "novel=none" in out and "covered_by=['PS-1', 'PS-2', 'PS-3']" in out, (
+        f"a run reprinting PS-1 now reads {out!r}: all three sets cover it in dict order " \
+        "(PS-3 ⊇ PS-2 ⊇ PS-1 as of #3017), and "
         "the skill's receipt rule says the ledger names the SMALLEST covering set or a "
         "later reader cannot tell which decision licensed the silence")
     assert "smallest" in _step_2_5_section(_skill_text()).lower(), (
@@ -580,3 +595,160 @@ def test_the_gate_mark_expression_still_collects_every_node_here():
     assert count(plain.stdout) == count(marked.stdout), (
         f"{count(plain.stdout)} nodes collect plainly but {count(marked.stdout)} under the "
         "gate's mark expression — a marked node here is a clause with no enforcement")
+
+
+# ── PS-3 as a RULED-but-UNEXECUTED set, and the hand_run block that holds it (#3017) ──
+#
+# Eight carriers of the stranded apply went `status: done` with the write unrun, the last
+# of them (#3011) at 2026-10-19T09:06:29Z, answered by `ruling: see entry 1 — one entry
+# only`. #3017 gave a ruled-but-unexecuted hand-run a shape the loop cannot close — a
+# `hand_run:` front-matter block whose `receipt` command must exit 0 before any closer
+# fires — and PS-3 (PS-2 plus `OCR-Assisted ASR -> ASR`, the set the 2026-10-19T070503Z
+# run printed) is the decision that shape was built for. These nodes read the skill's own
+# records; none of them runs `--apply`, and none of them opens the live store, which is
+# still owed to an attended session by SD-stranded-1's executor rule at §3.
+
+PS_3_PAIRS = PS_2_PAIRS | {("OCR-Assisted ASR", "ASR")}
+
+#: PS-3's pairs as `hand_run.set` spells them, which is the spelling `STRANDED step 2.5:`
+#: prints and therefore the spelling the filing branch compares sets in.
+PS_3_SPELLED = [f"{s} -> {t}" for s, t in sorted(PS_3_PAIRS)]
+
+
+def _sd_stranded_1_section(text: str) -> str:
+    """The standing-decision section, from its heading to the next heading."""
+    head = "**Standing apply decision SD-stranded-1"
+    i = text.index(head)
+    rest = text[i + len(head):]
+    end = rest.find("\n## ")
+    return text[i:] if end < 0 else text[i:i + len(head) + end]
+
+
+def _ps3_seven_pair_payload() -> str:
+    """PS-2's committed witness rows plus a seventh row for `OCR-Assisted ASR -> ASR`, in
+    the shape `link_stranded_entities.py` writes. Synthesised rather than read out of
+    `_pipeline/`, because that directory has no history, the gate runs under a scaffolded
+    HOME, and the seventh pair's own artefact is on #3011's owed list, not in the tree."""
+    rows = [json.loads(l) for l in
+            _committed_ps2_bytes().decode().splitlines() if l.strip()]
+    extra = dict(rows[0])
+    extra.update({"source": "OCR-Assisted ASR", "target": "ASR",
+                  "evidence": "name-embedding:0.913"})
+    return "".join(json.dumps(r) + "\n" for r in rows + [extra])
+
+
+def test_ps_3_is_ruled_in_the_setcheck_and_a_seven_pair_run_reads_covered(tmp_path):
+    """#3017 clause 5, the machine-readable half: `RULED` gains PS-3 = PS-2 plus the
+    seventh pair, and the set it names is covered — so the run that printed it does not
+    file a ninth carrier. PS-3 is marked RULED, NOT EXECUTED, in PS-2's shape, because the
+    apply is still owed: measured 2026-10-19T09:51Z the store reads 12 active
+    `name-embedding:` edges and 0 live edges for every one of the seven pairs."""
+    section = _step_2_5_section(_skill_text())
+    script = _setcheck_script(section)
+    ruled = _ruled_dict(script)
+    assert "PS-3" in ruled, f"RULED holds only {sorted(ruled)}"
+    assert ruled["PS-3"] == PS_3_PAIRS, (
+        f"PS-3 reads {sorted(ruled['PS-3'])}, expected PS-2 plus "
+        "`OCR-Assisted ASR -> ASR`: "
+        f"{sorted(PS_3_PAIRS)}")
+    assert ruled["PS-2"] < ruled["PS-3"], "PS-3 is not a superset of PS-2"
+    assert ruled["PS-3"] - ruled["PS-2"] == {("OCR-Assisted ASR", "ASR")}
+    mark = section.split('"PS-3"')[0].rsplit("# PS-3", 1)
+    assert len(mark) == 2, "PS-3's own comment line is gone from the RULED block"
+    assert "NOT EXECUTED" in mark[1].upper(), (
+        f"PS-3's RULED comment says {mark[1][:120]!r}: a ruled set whose apply is owed has "
+        "to say so, which is the sentence PS-1 sat without for eleven days")
+
+    out = _run_setcheck(script, "ps3-seven-pair", _ps3_seven_pair_payload(), tmp_path)
+    assert out.endswith("pairs=7 novel=none covered_by=['PS-3']"), (
+        f"a run reprinting PS-3's seven pairs reads {out!r}; `novel=` naming a pair is the "
+        "filing trigger, and a ninth carrier for a set this file has already ruled is the "
+        "loop that produced #2970 #2986 #2989 #2998 #3011")
+
+
+def test_the_filing_branch_suppresses_a_filing_for_a_pending_hand_run(tmp_path):
+    """#3017 clause 4: the setcheck records `no-filing pending-hand-run-<id>` against the
+    carrier instead of FILED, and the read that decides it is a board read the run performs
+    from the checkout — never an import inside the set-check snippet.
+
+    The second half is not a style rule. `_run_setcheck` runs the snippet with only `HOME`
+    and `PATH` in its environment and the staged home as cwd, which is how the run runs it,
+    and a `from scripts.automod import owed` inside it dies with `ModuleNotFoundError: No
+    module named 'scripts'` — the exact red this node replaces. So the branch must ask the
+    board OUTSIDE the snippet, and the snippet's printed line keeps the two fields the
+    other nodes in this file pin.
+    """
+    section = _step_2_5_section(_skill_text())
+    script = _setcheck_script(section)
+    assert "no-filing pending-hand-run-" in section, (
+        "the filing branch no longer records a pending hand-run: a suppression that is a "
+        "run's judgement rather than a line in this file dies with the run — #2998's pass "
+        "wrote `no-filing novel-set-covered-by-open-carrier-2998` into the ledger, no rule "
+        "here defined it, and the next run filed #3011")
+    assert "hand_runs()" in section and "cd ~/lloyd" in section, (
+        "the branch does not say where the pending run is read from")
+    assert "scripts.automod" not in script and "hand_runs" not in script, (
+        "the set-check snippet itself imports the repo, so it cannot run under the "
+        "environment the run and `_run_setcheck` give it")
+    out = _run_setcheck(script, TS_PS2, _committed_ps2_bytes().decode(), tmp_path)
+    assert out == (f"SD-STRANDED SETCHECK {TS_PS2}: pairs=6 novel=none "
+                   "covered_by=['PS-2', 'PS-3']"), (
+        f"the printed line changed shape ({out!r}); the pending-hand_run field belongs to "
+        "the branch, not to the print the rest of this file pins")
+
+
+def test_the_standing_decision_records_the_hand_run_block_for_ps_3():
+    """#3017 clause 5, the record a newly filed carrier is stamped from.
+
+    `owed.hand_run_of` reads {set, cmd, receipt, since} and `owed.hand_run_pending` runs
+    `receipt`; this node pins that what SD-stranded-1 records is the same shape and the
+    same seven pairs, that `cmd` is the SD-stranded-1 apply command, and that `receipt` is
+    the 12 + 7 / every-pair-live probe rather than anything that could write: it must name
+    `app.data_root.PRODUCTION_DATA_ROOT` (#2998's round `SM_20261019_024744` lost a gate
+    anchoring a probe on `Path.home()`, fixed in `2cb58091`), and must NOT contain
+    `--apply`, because the thing that proves a write happened can never be the write.
+
+    It is never executed here: the gate runs the suite under a scaffolded HOME where
+    `~/lloyd-data` is empty, so a reading taken in this process would be a measurement of
+    nothing. Its measured form, taken 2026-10-19T09:51Z against the live store by hand
+    (0.21 s, exit 1, store md5 unchanged), is quoted in the skill beside the block.
+    """
+    import yaml
+    section = _sd_stranded_1_section(_skill_text())
+    # FENCE_RE at the top of this file matches ```bash only, and this block is yaml.
+    yaml_fences = re.compile(r"^[ \t]*```yaml\n(.*?)\n[ \t]*```", re.S | re.M)
+    block = [x for x in yaml_fences.findall(section) if x.lstrip().startswith("hand_run:")]
+    assert len(block) == 1, (
+        f"expected exactly one fenced `hand_run:` block in SD-stranded-1, found "
+        f"{len(block)} — this is the shape every newly filed carrier is stamped with")
+    hr = yaml.safe_load(block[0])["hand_run"]
+    assert sorted(hr) == ["cmd", "receipt", "set", "since"], (
+        f"the block carries {sorted(hr)}; `owed.hand_run_of` reads exactly "
+        "set, cmd, receipt, since")
+    assert len(hr["set"]) == 7 and set(hr["set"]) == set(PS_3_SPELLED), (
+        f"the block's set is {hr['set']}, expected the seven pairs PS-3 rules, spelled "
+        f"{PS_3_SPELLED} — the spelling Step 2.5 prints, which is what the filing branch "
+        "compares a run's set against. Order carries nothing and is not asserted: the branch "
+        "compares `set(h['set'])` against the run's set, and this list is written in the "
+        "order the artefact printed them.")
+    assert all(" -> " in x for x in hr["set"]), "a pair is not in `source -> target` spelling"
+    assert hr["cmd"].startswith("cd ~/lloyd") and hr["cmd"].rstrip().endswith("--apply")
+    assert "--min-facts 10" in hr["cmd"] and hr["cmd"].count("--apply") == 1
+    r = hr["receipt"]
+    assert "app.data_root import PRODUCTION_DATA_ROOT" in r, (
+        "the receipt anchors on something other than the production data root — #2998's "
+        "round lost a gate on exactly this (round SM_20261019_024744, fixed in 2cb58091)")
+    assert "KG_DB_RELATIVE" in r and "name-embedding:" in r, (
+        "the receipt does not count active `name-embedding:` edges")
+    assert "include_expired=False" in r, (
+        "the receipt does not read live edges only, which is `expired_at IS NULL` in the "
+        "probe #3011's bullet 10 spells")
+    assert "len(rows)>=19" in r.replace(" ", ""), (
+        "the receipt's count is not 12 + 7 = 19: the pilot wrote 12 on 2026-10-05T14:22:23Z "
+        "and PS-3 adds 7")
+    assert all(s in r and t in r for s, t in PS_3_PAIRS), (
+        "the receipt does not name every one of the seven pairs, so it could go green with "
+        "a pair still unwritten")
+    assert "--apply" not in r and "SystemExit" in r, (
+        "the receipt is not a read-only probe: it must exit non-zero until the by-hand run "
+        "has happened, and it must never be the run itself")

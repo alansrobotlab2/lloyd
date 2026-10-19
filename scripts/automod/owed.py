@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 import string
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -325,10 +326,126 @@ def recheck_date(value: str, now: datetime | None = None) -> str:
     return at.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# ── The pending hand-run (#3017) ────────────────────────────────────────────
+#
+# A decision can be RULED and still not EXECUTED, and until now the loop had no
+# state for that. PS-3 (#2765 authorized 2026-10-15, ruled every-pair by #2986
+# 2026-10-18) is the case: seven entity pairs sit in
+# `skills/autonomy-data-pipeline/SKILL.md`'s `RULED`, the write is a by-hand
+# `--apply` against `~/lloyd-data` that no round and no autonomy task may make,
+# and eight carrier items went `draft → done` with the apply still unrun, because
+# the moment an open item's last owed entry is settled the sweep at the bottom of
+# `apply_verdict` closes it. #3011's own closure is the proof: at
+# 2026-10-19T09:06:29Z owed-check answered its single apply-debt entry with
+# `ruling: see entry 1 — one entry only` and closed the item in the same write.
+# A debt with no command and no receipt is settled by a two-word ruling.
+#
+# So a hand-run is a block on the item, and the block carries its own proof of
+# being outstanding: `receipt` is a command that FAILS while the run has not
+# happened and passes afterwards. The item cannot close while it fails, and
+# `hand_runs()` puts it on the board readout an attended session reads, without
+# the owed-check job deciding anything.
+
+#: The front-matter key holding the block: {set, cmd, receipt, since}.
+HAND_RUN_KEY = "hand_run"
+
+# A receipt is a shell command, and running it is the point: it is the only way
+# "ruled but unexecuted" stops being a sentence in a body and becomes a reading.
+# That makes item front matter an execution surface, so three bounds hold. It runs
+# only for an item that carries the block; only through `/bin/bash -c` with a hard
+# timeout, so one wedged probe cannot hang `board_health`; and it FAILS CLOSED — a
+# receipt that cannot be run, or is missing, reads as non-zero, which holds the
+# item open rather than close a debt nobody executed. The failure mode this
+# exists to kill is a false `done`, never a false hold.
+RECEIPT_TIMEOUT_SECONDS = 10
+
+
+#: The keys of one `hand_runs()` row, in the order the writer emits them.
+#: `tests/test_api_contracts.py` pins the Mission Control client's
+#: `BacklogOwed.hand_runs` against this tuple, and `tests/test_owed_check.py` pins
+#: the rows against it too: the payload and the TypeScript declaration are checked
+#: against one measurement, so the two sides of that seam cannot drift apart.
+HAND_RUN_FIELDS = ("item_id", "name", "set", "cmd", "since")
+
+
+def hand_run_of(fm: dict) -> dict:
+    """The item's `hand_run:` block normalised, or `{}` when it carries none.
+
+    `{set, cmd, receipt, since}`: `set` the pair set the run applies, spelled
+    `"source -> target"` — the spelling `SD-STRANDED SETCHECK` prints, so the
+    Step 2.5 filing branch compares strings; `cmd` the one command the run is;
+    `receipt` the command that exits non-zero until it has been run; `since` when
+    the debt started. A block with no `cmd` is nothing to run and so nothing to
+    hold on; a block WITH a cmd and no receipt is kept, and `hand_run_pending`
+    treats its missing receipt as failing — that shape ("a hand-run debt with no
+    command and no receipt") is precisely what eight closed carriers settled with
+    a ruling, so it must hold, not release.
+    """
+    raw = fm.get(HAND_RUN_KEY)
+    if not isinstance(raw, dict):
+        return {}
+    cmd = _text(raw.get("cmd"), 500)
+    if not cmd:
+        return {}
+    pairs = raw.get("set")
+    pairs = pairs if isinstance(pairs, (list, tuple, set, dict)) else []
+    return {"set": [t for t in (_text(p, 200) for p in pairs) if t],
+            "cmd": cmd,
+            "receipt": " ".join(str(raw.get("receipt") or "").split()),
+            "since": str(raw.get("since") or "").strip()}
+
+
+def _receipt_passes(receipt: str) -> tuple[bool, str]:
+    """Run one receipt command: (passed, reading). Fails closed on every route
+    that is not an exit code of exactly 0, and never raises — a pending
+    hand-run is a state of the item, not an error of the reader."""
+    if not receipt:
+        return False, "names no receipt command"
+    try:
+        r = subprocess.run(["/bin/bash", "-c", receipt], capture_output=True, text=True,
+                           timeout=RECEIPT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return False, f"timed out after {RECEIPT_TIMEOUT_SECONDS}s"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"could not be run ({_text(exc, 120)})"
+    out = _text((r.stdout or "") + (r.stderr or ""), 160)
+    if r.returncode == 0:
+        return True, out
+    return False, f"exited {r.returncode}" + (f": {out}" if out else "")
+
+
+def hand_run_pending(fm: dict) -> tuple[dict, str]:
+    """The one measurement both closers read: `({}, "")` when the item's
+    hand-run is absent or its receipt passes, else `(block, why-still-open)`.
+
+    Deliberately silent about the item's status — a closed item is `close_item`'s
+    and `hand_runs`' business, not this predicate's — so both of the loop's
+    closers (`close_item` here and the landing finalizer in `backlog.py`) ask the
+    same question and cannot disagree about the answer.
+    """
+    block = hand_run_of(fm)
+    if not block:
+        return {}, ""
+    ok, reading = _receipt_passes(block["receipt"])
+    return ({}, "") if ok else (block, reading)
+
+
+def _hold_note(block: dict, why: str) -> str:
+    """The line an entry or an activity log carries when a receipt holds it:
+    names the receipt command and what running it said, so a reader of the item
+    can tell a held close from one nobody attempted."""
+    return _text(f"pending hand-run unexecuted — receipt {block['receipt']!r} {why}", 300)
+
+
 def close_item(path: Path, why: str) -> bool:
     """Close an open item on Lloyd's own ruling. The status move goes through
     the shared recorder, so `completed` and the activity line are the ones
-    every other closer writes."""
+    every other closer writes.
+
+    A pending hand-run (#3017) refuses the close: the receipt command exits
+    non-zero, the status is left exactly as it was, and the refusal is written to
+    the item's activity log naming the failing receipt, so a reader of the item
+    can tell "held" from "nobody tried"."""
     import yaml
     from app.backlog_move import record_status_move
     from scripts.automod import backlog as B
@@ -337,6 +454,10 @@ def close_item(path: Path, why: str) -> bool:
     if B._unparsed_guard(path, text, fm, "owed.close_item"):
         return False
     if str(fm.get("status") or "") in ("done",):
+        return False
+    block, receipt_why = hand_run_pending(fm)
+    if block:
+        B.update_frontmatter(path, {}, activity=_hold_note(block, receipt_why))
         return False
     if not record_status_move(fm, "done", f"closed by owed-check: {why}"[:600],
                               remove_tags=(B.NEEDS_HUMAN_TAG,)):
@@ -477,7 +598,6 @@ def _cite_label(token: str) -> str:
 def _cite_revision() -> str:
     """The short HEAD of each cite root that is a git checkout, e.g.
     `repo a03a7300, vault 29302c7f`; empty when none can be read."""
-    import subprocess
     parts = []
     for name, root in _cite_roots().items():
         try:
@@ -597,6 +717,11 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
     move_why = ""
     stamp = _stamp()
     is_open = str(fm.get("status") or "") != "done"
+    # One receipt read for the whole pass, on the item as it stands now: an
+    # outstanding hand-run makes every settle-shaped answer on this item a
+    # no-op on the debt (#3017). A closed item is not held — `close_item` is
+    # already a no-op there, and running a probe for it would be pure cost.
+    hand_block, hand_why = hand_run_pending(fm) if is_open else ({}, "")
     for n, e in enumerate(entries, 1):
         a = by_n.get(n)
         if a is None:
@@ -660,6 +785,22 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             else:
                 outside.append(ask)
             notes.append(f"#{n} needs Alan's hands: {_text(a.get('outside') or evidence, 200)}")
+            continue
+        if hand_block and out in ("settled", "ruling", "close"):
+            # #3017: a ruling cannot settle a hand-run that has not been run. The
+            # entry stays in `owed` — NOT `owed_settled`, because settling it is
+            # what closed the eight carriers: #3011 answered its one apply-debt
+            # with `ruling: see entry 1 — one entry only` at 2026-10-19T09:06:29Z
+            # and the sweep below closed the item in the same write. It gets a date
+            # so the item is not re-offered every tick, and no recheck is counted:
+            # the pass answered, the WRITE did not, and MAX_RECHECKS bounds a
+            # stubborn entry, not an un-performed command. `work` and `reopen` are
+            # deliberately not held — each moves the debt somewhere visible (a
+            # filed child item, a fresh attempt) instead of settling it here, and
+            # `close_item` still refuses the close whatever empties the list.
+            keep.append(_compact({**e, "recheck_after": recheck_date("", now),
+                                  "note": _hold_note(hand_block, hand_why)}))
+            notes.append(f"#{n} held, still owed: {_hold_note(hand_block, hand_why)}")
             continue
         record = {"what": e["what"], "outcome": out, "at": stamp}
         if evidence:
@@ -752,6 +893,41 @@ def outside_list(boards: tuple[str, ...] | None = None) -> list[dict]:
                 out.append({"item_id": item.id, "name": item.name,
                             "what": _text(o.get("what"), 300), "needs": _text(o.get("needs"), 300),
                             "since": str(o.get("since") or "")})
+    return out
+
+
+def hand_runs(boards: tuple[str, ...] | None = None) -> list[dict]:
+    """Every OPEN item whose `hand_run:` receipt still fails, for Mission
+    Control — the pending one-command run, visible without the owed-check job
+    ruling on it (#3017).
+
+    Beside `outside_list`, and deliberately not inside it: `outside` is "only
+    Alan's hands can do this" and a later ruling may mark one `done`
+    (`apply_verdict`'s `outside` branch writes it, `outside_list` skips rows
+    carrying `done`), which is how a hand-run debt got settled by a two-word
+    answer before. This list is decided by a command's exit code and nothing
+    else — no outcome vocabulary can empty it — and unlike `outside_list` it
+    reads open items only, because a CLOSED item holding an unexecuted run is
+    the exact state this exists to make impossible. The `set` field is the
+    pair set the run applies in `"source -> target"` spelling, which is what
+    lets `skills/autonomy-data-pipeline/SKILL.md`'s Step 2.5 filing branch match
+    a run's printed set against a pending run and log
+    `no-filing pending-hand-run-<id>` instead of filing a ninth carrier.
+    """
+    from app.backlog_status import CLOSED_STATUSES
+    from scripts.automod import backlog as B
+    out: list[dict] = []
+    for item in B.all_items(boards if boards is not None else B.DEFAULT_BOARDS):
+        if str(item.status or "").strip().lower() in CLOSED_STATUSES:
+            continue
+        try:
+            fm, _ = B._split_frontmatter(item.path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        block, _why = hand_run_pending(fm)
+        if block:
+            out.append({"item_id": item.id, "name": item.name, "set": block["set"],
+                        "cmd": block["cmd"], "since": block["since"]})
     return out
 
 

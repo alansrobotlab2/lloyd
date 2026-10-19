@@ -5023,3 +5023,77 @@ def test_a_held_by_head_close_records_the_taking_sha_as_its_landing(isolated):
     assert taking in p.read_text(), "the body section the close writes names it too"
     assert [m for m in S.read_events(path=S.LEDGER_PATH)
             if m.get("event") == "status_moved" and m.get("to") == "draft"] == []
+
+
+# ── The landing finalizer is the SECOND closer (#3017) ──────────────────────
+#
+# `owed.close_item` is not the only route by which the loop closes an item. This
+# sweep closes on the round's own report of the acceptance check, and it is the
+# route the most recent carrier of the PS-3 apply actually went out by:
+# `grep "closed by owed-check" backlog/2998-*.md` finds no match, while #2998's
+# body carries THIS branch's verbatim `**Closed.**` sentence — "the round reported
+# every acceptance clause met, so the item closes; still owed, for the owed-check
+# job". A guard living on only one of two write surfaces is no guard, so the same
+# predicate `owed.hand_run_pending` is read here: one measurement, one answer.
+
+
+def _hand_run_on(path, receipt):
+    """Stamp a pending hand-run and the apply debt on an item, the way its round
+    would leave them: the block plus a `human_clauses` debt and a `human_paths`
+    half the loop may never write."""
+    B.update_frontmatter(path, {
+        "hand_run": {"set": ["OCR-Assisted ASR -> ASR"],
+                     "cmd": "cd ~/lloyd && .venvs/lloyd/bin/python "
+                            "scripts/memory/link_stranded_entities.py --min-facts 10 "
+                            "--sample 0 --out "
+                            "~/lloyd-data/_pipeline/stranded-proposals-<UTCts>.jsonl --apply",
+                     "receipt": receipt, "since": "2026-10-19T09:02:39Z"},
+        "human_clauses": ["an attended write-permitted session runs the fresh dry run "
+                          "then --apply"]})
+
+
+#: This round's own report: every clause met, plus the one path the loop may never
+#: write. Named apart from the file's `MET_OUTCOME` at :4165 — a second module-level
+#: binding of that name would silently re-shape the older tests that pass it.
+HAND_RUN_MET_OUTCOME = {"acceptance": "met", "landed": True, "deferred_to": [], "spawned": [],
+               "summary": "shipped the receipt gate",
+               "clause_outcomes": [{"clause": 1, "outcome": "met", "evidence": "green",
+                                    "deferred_to": []}],
+               "human_paths": ["~/lloyd-data/_pipeline/vault-derived/kg.sqlite"]}
+
+
+def test_a_round_reporting_every_clause_met_still_cannot_close_a_pending_hand_run(isolated):
+    """#3017 clause 4: an item whose `hand_run.receipt` exits non-zero stays open
+    when a round reports its acceptance met, and what it owed in paths is recorded
+    on its `owed` list rather than lost with the close."""
+    held = write_item(isolated, 3017, status="up_next")
+    _hand_run_on(held, "exit 1")
+    done = write_item(isolated, 3018, status="up_next")
+    _hand_run_on(done, "exit 0")
+    _landed(3017, "SM_3017", "f00d3017f00d", outcome=dict(HAND_RUN_MET_OUTCOME))
+    _landed(3018, "SM_3018", "f00d3018f00d", outcome=dict(HAND_RUN_MET_OUTCOME))
+    assert B.close_settled_items(S.LEDGER_PATH) == [
+        {"item_id": 3017, "closed": False, "acceptance": "met"},
+        {"item_id": 3018, "closed": True, "acceptance": "met"}], \
+        "the failing receipt holds the close; the passing one closes as it always did"
+    fm = _fm(held)
+    assert fm["status"] != "done" and not fm.get("completed")
+    acts = "\n".join(str(a) for a in (fm.get("activity_log") or []))
+    assert "hand_run is still unexecuted" in acts
+    assert "receipt 'exit 1' exited 1" in acts, \
+        "the refusal names the failing receipt, not just that it refused"
+    body = held.read_text()
+    assert "**Left open.**" in body and "**Closed.**" not in body
+    assert "still owed, for the owed-check job" in held.read_text(), \
+        ("the owed sentence the branch that closed #2998 writes is still written to the "
+         "item, so refusing the close loses the debt's record of itself")
+    entries = O.entries_of(fm)
+    assert any(e["kind"] == "path" and "kg.sqlite" in e["what"] for e in entries), \
+        "#1910: a path the loop may not write is owed whether or not this closed"
+    assert any(e["kind"] == "check" and "--apply" in e["what"] for e in entries)
+    assert "hand_run" in fm, "and the block itself survives the sweep untouched"
+    closed = _fm(done)
+    assert closed["status"] == "done" and closed.get("completed"), \
+        "the exit code is the guard, not the presence of a block"
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_landed"]
+    assert [e["closed"] for e in ev] == [False, True], "the ledger row says it too"

@@ -4441,6 +4441,27 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
         else:
             close, why = False, ("the round recorded no structured outcome, and the review rung "
                                  "did not grade every clause met; owed-check decides")
+        # #3017: THE SECOND CLOSER. `owed.close_item` refuses an item whose
+        # `hand_run:` receipt exits non-zero, but this sweep closes on its own
+        # route, and that route is the one that actually killed the most recent
+        # carrier of the PS-3 apply: `grep "closed by owed-check" backlog/2998-*.md`
+        # has no match, while #2998's body carries THIS branch's verbatim
+        # `**Closed.**` paragraph ("the round reported every acceptance clause
+        # met, so the item closes; still owed…"). A guard living on only one of
+        # two write surfaces is no guard at all, so both read the same predicate —
+        # one measurement, one answer, and the two closers cannot disagree about
+        # whether the by-hand run has happened. What the round owed in paths stays
+        # on the item's `owed` list either way: the `add_owed` calls below are not
+        # conditional on the close (#1910).
+        if close:
+            from scripts.automod import owed as _O
+            _held, _receipt_why = _O.hand_run_pending(fm)
+            if _held:
+                close = False
+                why = (f"its hand_run is still unexecuted — receipt {_held['receipt']!r} "
+                       f"{_receipt_why} — so the item stays open as the standing carrier; "
+                       f"otherwise the round's own report would have closed it, because "
+                       f"{why}")
         # The row this landing would be recorded as. Built once so the dry run
         # reports exactly the row the live sweep appends — the rehearsal is only
         # worth having if a `closed` here is the `closed` on the ledger.
@@ -7121,7 +7142,14 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
         # items would read as 5.
         owing = O.owing_items(boards, due_only=False, stranded_cap=None)
         owed = {"items": len(owing), "entries": sum(len(o.entries) for o in owing),
-                "due": sum(len(o.due) for o in owing), "outside": O.outside_list(boards)}
+                "due": sum(len(o.due) for o in owing), "outside": O.outside_list(boards),
+                # #3017: a ruled-but-unexecuted hand-run, beside `outside` and on
+                # the same readout. `outside` is a ruling anyone may answer; this
+                # is a command whose own receipt says it has not been run, so an
+                # attended session sees the pending write without the owed-check
+                # job deciding it — which is how eight carriers closed with the
+                # apply still unrun.
+                "hand_runs": O.hand_runs(boards)}
     except Exception as exc:  # noqa: BLE001 — a count is never the board's shape
         logger.warning("owed counts failed: %s", exc)
         owed = None

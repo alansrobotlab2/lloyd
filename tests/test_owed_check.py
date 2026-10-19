@@ -1088,3 +1088,159 @@ def test_a_derived_clause_ruled_outside_is_not_derived_or_listed_again(isolated)
     assert [(o["item_id"], o["needs"]) for o in again] == [
         (4000, "attach a drive, then run the collector")]
     assert again[0]["since"] == first[0]["since"], "it has waited since the first ruling"
+
+
+# ── The pending hand-run (#3017) ────────────────────────────────────────────
+#
+# A decision can be RULED and still not EXECUTED. PS-3 is the case: seven entity
+# pairs sit in `skills/autonomy-data-pipeline/SKILL.md`'s `RULED`, authorized by
+# #2765 (2026-10-15T16:03Z) and ruled every-pair by #2986 (2026-10-18T23:41:30Z),
+# and the write is a by-hand `--apply` against `~/lloyd-data` that no round and no
+# autonomy task may make. Eight carriers went `draft → done` with the apply still
+# unrun, because the sweep at the bottom of `apply_verdict` closes an open item the
+# moment its last owed entry is settled. #3011's closure is the whole failure in
+# four lines: at 2026-10-19T09:06:29Z owed-check answered its single apply-debt
+# entry with `outcome: ruling`, `evidence: see entry 1`, `ruling: see entry 1 — one
+# entry only`, and the same write moved it `draft → done`. Half an hour later the
+# store still read 12 active `name-embedding:` edges and 0 live edges for every one
+# of the seven pairs. A debt with no command and no receipt is settled by a
+# two-word ruling. These pin the block that makes that impossible: `hand_run:`
+# {set, cmd, receipt, since}, whose `receipt` is a command that fails until the run
+# has happened.
+
+#: The debt PS-3 is about, as its standing carrier records it.
+APPLY_DEBT = ("run SD-stranded-1's --apply by hand: an attended, write-permitted "
+              "session, outside a freeze")
+
+#: The one command the hand-run is (`link_stranded_entities.py`'s apply command as
+#: SKILL.md's SD-stranded-1 spells it). `cmd` is a record, never something this
+#: module runs: only `receipt` is.
+APPLY_CMD = ("cd ~/lloyd && .venvs/lloyd/bin/python scripts/memory/link_stranded_entities.py"
+             " --min-facts 10 --sample 0"
+             " --out ~/lloyd-data/_pipeline/stranded-proposals-<UTCts>.jsonl --apply")
+
+#: PS-3's seven pairs, in the `"source -> target"` spelling the block uses because
+#: it is the spelling `SD-STRANDED SETCHECK` prints.
+PS3 = ["False Absence Guard Pattern -> Guard",
+       "Failure Taxonomy Induction -> Failure Taxonomy",
+       "Faros AI -> Faros",
+       "Isaac-Lift-Soft-Franka -> Franka",
+       "Perplexity Computer -> Perplexity",
+       "giodl73-repo -> Repo",
+       "OCR-Assisted ASR -> ASR"]
+
+
+def _hand_run_item(isolated, item_id, *, status="draft", receipt="exit 1",
+                   cmd=APPLY_CMD, pairs=None, hand_run=True):
+    """An item owing the apply and carrying a `hand_run:` block whose receipt is
+    `receipt` — `exit 1` while the by-hand run has not happened, `exit 0` after it
+    (where it is the store probe reading active `name-embedding:` 12 + N with each
+    of the seven pairs live at `expired_at IS NULL`)."""
+    extra: dict = {"owed": [{"what": APPLY_DEBT, "kind": "check",
+                             "since": "2026-10-19T09:02:39Z"}]}
+    if hand_run:
+        extra["hand_run"] = {"set": PS3 if pairs is None else pairs, "cmd": cmd,
+                             "receipt": receipt, "since": "2026-10-19T09:02:39Z"}
+    p = write_item(isolated, item_id, status=status, extra=extra)
+    return p, O.entries_of(fm_of(p))
+
+
+def test_a_ruling_cannot_settle_the_entry_of_a_hand_run_whose_receipt_still_fails(isolated):
+    """#3017 clause 1: the answer that closed #3011 no longer settles anything."""
+    p, entries = _hand_run_item(isolated, 300, status="draft")
+    out = O.apply_verdict(p, entries,
+                          [{"n": 1, "outcome": "ruling", "evidence": "authorized, not run",
+                            "ruling": "see entry 1 — one entry only"}], item_id=300)
+    fm = fm_of(p)
+    assert out["moved"] == "" and fm["status"] == "draft", \
+        "a ruled-but-unexecuted hand-run is not closeable"
+    assert out["settled"] == 0 and O.SETTLED_KEY not in fm, \
+        "the entry does not land in `owed_settled`"
+    held = O.entries_of(fm)
+    assert [e["what"] for e in held] == [APPLY_DEBT], "it stays in `owed`"
+    assert held[0]["recheck_after"] and not held[0].get("rechecks"), \
+        "dated so the item is not re-offered every tick, and no recheck is spent"
+    assert "receipt 'exit 1' exited 1" in held[0]["note"]
+    act = str((fm.get("activity_log") or [])[-1])
+    assert "pending hand-run" in act and "exit 1" in act, \
+        "the pass writes an activity line naming the failing receipt"
+
+
+def test_a_close_ruling_on_a_pending_hand_run_is_held_the_same_way(isolated):
+    """The other settle-shaped answer: `close` must not reach the closer either."""
+    p, entries = _hand_run_item(isolated, 304, status="draft")
+    out = O.apply_verdict(p, entries,
+                          [{"n": 1, "outcome": "close", "evidence": "ruled long ago",
+                            "ruling": "carry it on the board, no round needed"}], item_id=304)
+    fm = fm_of(p)
+    assert out["moved"] == "" and fm["status"] == "draft"
+    assert [e["what"] for e in O.entries_of(fm)] == [APPLY_DEBT]
+
+
+def test_close_item_refuses_a_pending_hand_run_and_says_which_receipt_failed(isolated):
+    """#3017 clause 1 at the closer itself: the shared route, so a caller that
+    never went through `apply_verdict` cannot close the item either."""
+    p, _ = _hand_run_item(isolated, 302, status="up_next")
+    assert O.close_item(p, "every owed entry is settled") is False
+    fm = fm_of(p)
+    assert fm["status"] == "up_next" and not fm.get("completed"), "the status is untouched"
+    act = str((fm.get("activity_log") or [])[-1])
+    assert "pending hand-run unexecuted" in act and "receipt 'exit 1' exited 1" in act, \
+        "a reader can tell held from never-tried"
+
+
+def test_a_passing_receipt_lets_the_ordinary_close_run(isolated):
+    """#3017 clause 2: the control that proves the guard is an exit code, not the
+    mere presence of a block. Same item, same ruling — only `receipt` differs, and
+    it exits 0. The close proceeds exactly as it did before this guard existed: the
+    entry lands in `owed_settled`, the sweep that empties the list closes the item,
+    and `completed`/`closed_by` are written as every other close writes them."""
+    p, entries = _hand_run_item(isolated, 301, status="draft", receipt="exit 0")
+    out = O.apply_verdict(p, entries,
+                          [{"n": 1, "outcome": "ruling",
+                            "evidence": "applied 7 edges; active name-embedding = 19"}],
+                          item_id=301)
+    fm = fm_of(p)
+    assert out["moved"] == "closed" and fm["status"] == "done"
+    assert fm["closed_by"] == "owed-check" and fm.get("completed")
+    assert O.entries_of(fm) == [], "the entry is gone from `owed`"
+    assert fm["owed_settled"][0]["outcome"] == "ruling"
+    assert "applied 7 edges" in fm["owed_settled"][0]["evidence"]
+
+    p2, _ = _hand_run_item(isolated, 303, status="up_next", receipt="exit 0")
+    assert O.close_item(p2, "the by-hand run has happened") is True
+    assert fm_of(p2)["status"] == "done"
+
+
+def test_hand_runs_lists_the_open_items_whose_receipt_fails_and_no_others(isolated):
+    """#3017 clause 3: the attended readout, decided by an exit code alone."""
+    _hand_run_item(isolated, 310, status="up_next")                    # failing, open
+    _hand_run_item(isolated, 311, status="draft", receipt="exit 0")    # executed
+    _hand_run_item(isolated, 312, status="done")                       # closed WITH the debt
+    _hand_run_item(isolated, 313, status="up_next", receipt="")        # block, no receipt
+    _hand_run_item(isolated, 314, status="up_next", cmd="")            # nothing to run
+    write_item(isolated, 315, status="up_next")                        # no block at all
+    listed = O.hand_runs()
+    assert [h["item_id"] for h in listed] == [310, 313], \
+        "a failing receipt and a missing one both hold; an executed, closed or " \
+        "commandless block does not appear"
+    h = listed[0]
+    assert tuple(h) == O.HAND_RUN_FIELDS, \
+        "the row's keys are the ones the client type is pinned against"
+    assert h["name"] == "A thing" and h["since"] == "2026-10-19T09:02:39Z"
+    assert h["set"] == PS3, "the pair set, in the spelling Step 2.5 prints"
+    assert h["cmd"] == APPLY_CMD and h["cmd"].endswith("--apply")
+    assert "receipt" not in h, "the readout names the run, not the probe that checks it"
+
+
+def test_board_health_lists_a_pending_hand_run_beside_the_outside_list(isolated):
+    """#3017 clause 3: on the same Mission Control readout that carries `outside`."""
+    _hand_run_item(isolated, 95, status="up_next")
+    p, entries = _owing(isolated, 96, ["run update-ca-trust as root"])
+    O.apply_verdict(p, entries, [{"n": 1, "outcome": "outside", "evidence": "e",
+                                  "outside": "run update-ca-trust as root"}], item_id=96)
+    owed = B.board_health(S.LEDGER_PATH)["owed"]
+    assert [h["item_id"] for h in owed["hand_runs"]] == [95]
+    assert [o["item_id"] for o in owed["outside"]] == [96], "the two lists sit side by side"
+    assert owed["items"] == 1 and owed["entries"] == 1, \
+        "the hand-run item still owes its apply; the outside answer emptied the other"
