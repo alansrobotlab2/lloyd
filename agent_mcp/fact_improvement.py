@@ -2418,7 +2418,23 @@ def _load_run_eval():
     return module
 
 
-def _fact_entity_recall_detail(limit: int = 20) -> dict | None:
+def _note_eval_refusal(status_out: dict | None, reason: str) -> None:
+    """Put the arm's refusal reason where the CALLER can still see it (#3008).
+
+    Every None path in `_fact_entity_recall_detail` already knows its reason —
+    it logs one — but a `logger.warning` is gone by the time anyone reads a
+    record, and the null pair it left behind was byte-identical to a pass that
+    never asked for the eval. The operation hands a dict in; the sentinel
+    (None) stays and the reason is quoted into the artefact beside it, the
+    shape `store_ok`/`store_error` (#1383) and `writes_refused_reason` (#1654)
+    established in this same record.
+    """
+    if status_out is not None:
+        status_out["reason"] = reason
+
+
+def _fact_entity_recall_detail(limit: int = 20,
+                               status_out: dict | None = None) -> dict | None:
     """Score the live fact tree with the eval's own scorer, on production knobs.
 
     `eval/run_eval.py` is a script, not a package, so it is loaded by path. Two
@@ -2442,6 +2458,12 @@ def _fact_entity_recall_detail(limit: int = 20) -> dict | None:
     Returns None when it could not be measured, so "did not run" can never be
     read as "measured zero"; otherwise `_recall_detail`'s dict — the score with
     the query count, how many answered, and the per-query hits behind it.
+
+    `status_out`, when the caller hands one in, receives the reason for a None
+    under key `reason` (#3008), so the improvement record can say WHICH state
+    its null pair is in instead of leaving four of them — never asked, queries
+    errored, fact leg read nothing, arm raised — to one byte-identical shape.
+    See `_note_eval_refusal` for why the log line is not the answer.
     """
     try:
         import yaml
@@ -2482,6 +2504,10 @@ def _fact_entity_recall_detail(limit: int = 20) -> dict | None:
         if summary["overall"]["errors"]:
             logger.warning("improve: %d eval queries errored; not reporting the metric",
                            summary["overall"]["errors"])
+            _note_eval_refusal(
+                status_out,
+                f"{summary['overall']['errors']} of {len(records)} eval queries "
+                "errored; not reporting the metric")
             return None
         if summary["overall"]["fact_entity_recall_avg"] is None:
             # #1250 clause 3, and the reason this is not the last consumer to
@@ -2500,12 +2526,21 @@ def _fact_entity_recall_detail(limit: int = 20) -> dict | None:
                 logger.warning(
                     "improve: the fact leg read nothing while the store indexes facts; "
                     "fact_entity_recall is not a measurement here — reporting None, not 0.0")
+                _note_eval_refusal(
+                    status_out,
+                    "the fact leg read nothing while the store indexes facts; "
+                    "fact_entity_recall is not a measurement here")
                 return None
             raise TypeError("fact_entity_recall_avg is null but the fact leg measured "
                             "facts — run_eval nulled it for a reason this reader cannot see")
         return _recall_detail(records, summary, run_config)
     except Exception as exc:  # noqa: BLE001 - a metric that cannot run is not a zero
         logger.warning("improve: fact_entity_recall could not be measured: %s", exc)
+        # The quote is `str(exc)`, not just the class: #1250's whole complaint
+        # was this handler swallowing the `TypeError` text and reporting a
+        # generic anomaly. The record gets the same words the log got.
+        _note_eval_refusal(status_out,
+                           f"fact_entity_recall could not be measured: {exc}")
         return None
 
 
@@ -2563,10 +2598,19 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
     consults them, and the record reports the corrections window it ran with as
     `corrections_window_days` so a zero in the record is reproducible.
 
-    Reports `fact_entity_recall` when asked: #376's own acceptance bar is that
-    a change which cannot move that metric is not this feature, so the number
-    has to come out of the operation, not out of a human remembering to run
-    the eval afterwards.
+    `report_eval` scores the fact tree and rides the score in the record, and
+    `--report-eval` is an apply-time operator act (#3008): the only shipped
+    invocation — task #84's nightly, `--limit 40 --days 3` per
+    `skills/fact-improvement/SKILL.md` — never passes it, so the fleet never
+    takes this score. The standing daily measurement of `fact_entity_recall`
+    is autonomy task #82's arm (`retrieval-eval`, writing
+    `summary.overall.fact_entity_recall_avg` to
+    `~/lloyd-data/eval/baselines/nightly-*.json`), not this flag. Whether a
+    pass never asked, measured, or asked and failed is stated by the record's
+    own `fact_entity_recall_status` / `fact_entity_recall_status_reason`,
+    beside the null pair they explain (#702 keeps its spelling). #376's bar —
+    a change which cannot move that metric is not this feature — is read from
+    #82's arm, not from a pass that did not score.
     """
     started = datetime.datetime.now(datetime.timezone.utc)
     now_iso = started.isoformat()
@@ -2723,7 +2767,12 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         per_entity.append(entry)
 
     after = _active_count()
-    recall = _fact_entity_recall_detail(eval_limit) if report_eval else None
+    # ONE call sets the eval verdict (#3008), on #1383's store-probe rule: the
+    # status the record states and the reason it quotes must come from the same
+    # read, so the artefact cannot name a state some other attempt produced.
+    eval_verdict: dict = {}
+    recall = (_fact_entity_recall_detail(eval_limit, status_out=eval_verdict)
+              if report_eval else None)
     record_obj = {
         "ran_at": now_iso,
         "apply": bool(apply),
@@ -2806,9 +2855,29 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         "keyword_only_flags": [f for e in per_entity
                                for f in (e.get("keyword_only_flags") or [])],
         "fact_entity_recall": None if recall is None else recall["score"],
-        # The evidence behind that number, or None when the eval did not run —
-        # null is the only spelling of "not measured" on both keys (#702).
+        # The evidence behind that number, or None when no score was measured.
+        # Null stays the spelling of "not measured" on both keys (#702, pinned
+        # at tests/test_memory_improvement.py:1589-1591); what the null MEANS
+        # is now stated beside it, not only in a `logger.warning` gone by the
+        # time anyone reads this file (#3008).
         "fact_entity_recall_detail": recall,
+        # Four states produced that null pair — the caller never asked (every
+        # nightly pass; `report_eval=False`), eval queries errored, the fact
+        # leg read nothing, or the arm raised — and the record could not name
+        # one. It now states which it is, and for asked-and-failed quotes the
+        # cause the log held alone: sentinel kept AND reason quoted in the same
+        # record, the shape `store_ok`/`store_error` (#1383) and
+        # `writes_refused_reason` (#1654) established. A pass that was never
+        # asked has no refusal to explain, so its reason is null exactly as
+        # #1654's is for a dry run.
+        "fact_entity_recall_status": (
+            "not_requested" if not report_eval
+            else "measured" if recall is not None
+            else "requested_not_measured"),
+        "fact_entity_recall_status_reason": (
+            (eval_verdict.get("reason")
+             or "the eval arm returned no score and recorded no reason")
+            if report_eval and recall is None else None),
         # Name the file the signals came from, not the one that was compiled in
         # first. Before this the field was `str(CORRECTIONS_PATH)` unconditionally,
         # so a record that had read USER.md still reported `memory/corrections.md`

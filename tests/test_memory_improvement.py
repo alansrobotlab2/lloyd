@@ -1577,7 +1577,10 @@ def test_run_reports_the_metric_it_claims_to_move(world, monkeypatch):
                              "fact_entities_matched": [], "expected_entities": [],
                              "error": None}]}
 
-    def _fake_report(limit):
+    def _fake_report(limit, status_out=None):
+        # `status_out` is the #3008 seam: the real arm writes its refusal
+        # reason into the caller's dict. This fake measures, so it writes
+        # nothing — but it has to accept the argument the operation passes.
         seen["limit"] = limit
         return detail
 
@@ -1599,14 +1602,20 @@ def test_run_reports_the_metric_it_claims_to_move(world, monkeypatch):
     assert saved["fact_entity_recall_detail"]["run_config"]["seed_top_k"] == 10
     assert (saved["fact_entity_recall_detail"]["run_config"]
             ["expand_graph_matches_production"]) is False
+    # #3008 clause 3: a pass that measured says so, and the score and detail
+    # — `run_config` included — keep exactly the shape above; the status is a
+    # third key beside them, never a re-spelling of them.
+    assert saved["fact_entity_recall_status"] == "measured"
+    assert saved["fact_entity_recall_status_reason"] is None
     skipped = fi.run_improvement(sources=("drift",), days=3)
     assert skipped.get("fact_entity_recall") is None, "off by default"
     assert skipped.get("fact_entity_recall_detail") is None, "null is the only 'did not run'"
     # The scheduled route (`report_eval` defaults False, and the autonomy task never
-    # passes `--report-eval`) is byte-for-byte what it was: no score, no detail, and
-    # so no config to name — a stubbed-in empty config would be the "measured
-    # nothing" reading #702 refuses, and #3009's scope bound says a scheduled record
-    # must not start carrying the new field.
+    # passes `--report-eval`) keeps those two keys exactly as they were: no score, no
+    # detail, and so no config to name — a stubbed-in empty config would be the
+    # "measured nothing" reading #702 refuses, and #3009's scope bound says a
+    # scheduled record must not start carrying `run_config`. What it does gain is the
+    # state below (#3008): the null pair now travels with the reason it is null.
     assert "run_config" not in str(skipped.get("fact_entity_recall_detail")), skipped
 
 
@@ -1631,6 +1640,49 @@ def test_the_recorded_run_config_survives_from_the_scorer_into_the_saved_record(
     for key in REQUIRED_RUN_CONFIG_KEYS:
         assert key in cfg, (key, sorted(cfg))
     assert cfg["seed_top_k"] == recorded["knobs"]["seed_top_k"], (cfg, recorded["knobs"])
+
+
+def test_a_pass_that_never_asked_for_the_eval_names_that_state_in_its_record(world):
+    """#3008 clause 1: `report_eval=False` is a state the artefact states.
+
+    Until #3008 a record from a pass that never asked was byte-identical, on
+    every eval key, to one from a pass whose eval ran and could not measure —
+    the reason lived only in a `logger.warning` that is gone when the JSON is
+    read. The null pair itself keeps its spelling (the test above pins it);
+    what changes is that a third key names which state the null is in, on the
+    file the nightly audit trail is made of, not just in the returned dict.
+    """
+    facts_root, st, _ = world
+    rec = fi.run_improvement(sources=("drift",), days=3)
+    saved = _persisted_record(rec)
+    assert "fact_entity_recall_status" in saved, (
+        "the state has to be in the artefact itself, not only in the return value")
+    assert saved["fact_entity_recall_status"] == "not_requested"
+    assert saved["fact_entity_recall_status_reason"] is None, (
+        "a pass that was never asked has no refusal to explain — the same rule "
+        "`writes_refused_reason` (#1654) follows for a dry run")
+    assert saved["fact_entity_recall"] is None
+    assert saved["fact_entity_recall_detail"] is None
+
+
+def test_the_docstring_stops_promising_a_score_the_fleet_never_takes():
+    """#3008 clause 4: `run_improvement`'s own doc claimed the score "has to
+    come out of the operation, not out of a human remembering to run the eval
+    afterwards", while the only shipped invocation (task #84 via
+    `skills/fact-improvement/SKILL.md`) never passes `--report-eval`. A
+    docstring asserting something production contradicts is how #3004's
+    headline got believed; the sentence is pinned out here the way
+    `tests/test_action_review.py:230` pins doc text.
+    """
+    doc = fi.run_improvement.__doc__
+    assert doc, "run_improvement must keep a docstring to pin"
+    assert "human remembering to run" not in doc, (
+        "the over-promising sentence is back: the fleet never takes this score")
+    assert "--report-eval" in doc, "the doc must still name the flag it describes"
+    assert "operator" in doc, "the flag is an apply-time operator act, and the doc says so"
+    assert "#82" in doc, (
+        "the standing daily measurement is autonomy task #82's arm, and the "
+        "doc has to point a reader at it rather than at this flag")
 
 
 def test_recall_detail_keeps_the_per_query_evidence_run_eval_returned():

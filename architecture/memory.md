@@ -127,8 +127,17 @@ measure" can never be recorded as "measured zero" — the same rule
 behind that score as well: `fact_entity_recall_detail` (`_recall_detail`) carries
 the query count, how many queries answered and `run_eval`'s per-query hits, and is
 null exactly when the score is — two apply runs that expired 24 and 8 facts had
-both reported a bare 0.375 with nothing to say whether 20 queries moved by zero or
-the eval never ran. The same rule reaches the per-entity rows: a refused entity is
+both reported a bare 0.375 with nothing to say how many of the 20 queries had
+answered at all. What that detail can separate holds only inside a pass that
+ASKED for the score: there it tells 20 queries moving by zero from an eval that
+ran and could not measure, but a pass that never requested one (the shipped
+nightly invocation, `--limit 40 --days 3`, never passes the flag) nulls the pair
+for a third reason, and until #3008 no artefact reading could tell those states
+apart — the reason lived only in a log line. The record now states its state:
+`fact_entity_recall_status` is `not_requested`, `measured`, or
+`requested_not_measured`, and in the last case `fact_entity_recall_status_reason`
+quotes the cause, the shape `store_ok`/`store_error` (#1383) already has. The
+same rule reaches the per-entity rows: a refused entity is
 written with `contradictions: null`, its `checked` fact count and the detector's
 `skipped_reason`, never the `contradictions: 0` a scanned-and-clean entity gets,
 and the CLI's `entities scanned=` line takes the refusals off the count and names

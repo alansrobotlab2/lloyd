@@ -189,3 +189,149 @@ def test_a_null_this_reader_cannot_explain_is_still_never_a_zero(tmp_path):
     assert "could not be measured" in log, (
         "an unexplained null has to be visible as an anomaly, not swallowed: "
         f"{log[-700:]}")
+
+
+# ── #3008: the record has to name which eval state it is in ──────────────────
+#
+# Everything above stops at `_fact_entity_recall_detail` returning None. The
+# record is where that None lands, and until #3008 it landed identically for
+# FOUR states — the caller never asked (`report_eval=False`, which is every
+# nightly pass task #84 has ever run), eval queries errored, the fact leg read
+# nothing, or the arm raised — each explained only by a `logger.warning` that
+# is gone by the time anyone reads the JSON. The nodes below run the WHOLE
+# pass through the same loader seam `_call` uses, and read the written record
+# back FROM DISK: the contract is about the artefact, not the return dict.
+# Same subprocess reasons as BODY (engine socket at import, env-before-import);
+# the empty `LLOYD_FACTS_ROOT` makes the pass plan nothing, so the only thing
+# under test is the eval arm and what the record says about it.
+
+BODY2 = '''
+import importlib.machinery
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, {repo!r})
+_records = json.loads({records!r})
+_summary = json.loads({summary!r})
+_raise_msg = {raise_msg!r}
+_report_eval = {report_eval!r}
+
+# Same stubs as BODY: the retrieval daemon is not under test here, and the
+# loader seam is the only seam `fact_improvement` offers for `run_eval.py`.
+_search = type(sys)("agent_mcp.search")
+async def _stub_search(query, max_results=5):
+    return [{{"file": "knowledge/glossary.md", "score": 1.0}}]
+_search.search_daemon = _stub_search
+sys.modules["agent_mcp.search"] = _search
+
+_real_exec = importlib.machinery.SourceFileLoader.exec_module
+def _exec(self, module):
+    _real_exec(self, module)
+    if str(getattr(module, "__file__", "")).endswith("eval/run_eval.py"):
+        module.summarize = lambda recs: _summary
+        if _raise_msg:
+            def _boom(queries, limit=20, **kw):
+                raise RuntimeError(_raise_msg)
+            module.run_eval = _boom
+        else:
+            module.run_eval = lambda queries, limit=20, **kw: _records
+importlib.machinery.SourceFileLoader.exec_module = _exec
+
+import agent_mcp.fact_improvement as fi
+rec = fi.run_improvement(sources=("drift",), days=3,
+                         report_eval=_report_eval, eval_limit=2)
+saved = json.loads(Path(rec["record_path"]).read_text(encoding="utf-8"))
+print(json.dumps(saved))
+'''
+
+
+def _improvement_record(tmp_path, records: list[dict], summary: dict, *,
+                        report_eval: bool, kg_db: Path | None = None,
+                        raise_msg: str = "") -> dict:
+    """One whole `run_improvement` pass under a faked eval; the record from disk."""
+    facts = tmp_path / "facts"
+    facts.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT), "LLOYD_FACTS_ROOT": str(facts)}
+    if kg_db is not None:
+        env["LLOYD_KG_DB"] = str(kg_db)
+    proc = subprocess.run(
+        [sys.executable, "-c", BODY2.format(
+            repo=str(REPO_ROOT),
+            records=json.dumps(records),
+            summary=json.dumps(summary),
+            raise_msg=raise_msg,
+            report_eval=report_eval)],
+        capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_a_silent_pass_and_a_failed_eval_pass_are_no_longer_the_same_record(tmp_path):
+    """#3008's acceptance check: these two records were byte-identical on every
+    eval key. They must now differ in the status pair, while BOTH keep the
+    null pair exactly as spelled — the new keys are additive, never a
+    re-spelling (`tests/test_memory_improvement.py:1589-1591` pins that)."""
+    silent = _improvement_record(tmp_path / "silent", [], _summary(0.5),
+                                 report_eval=False)
+    failed = _improvement_record(
+        tmp_path / "failed", [_record(1, 0.5)],
+        {"overall": {"errors": 2, "fact_entity_recall_avg": 0.4}},
+        report_eval=True)
+    for key in ("fact_entity_recall", "fact_entity_recall_detail"):
+        assert silent[key] is None and failed[key] is None, (
+            f"the null pair IS the ambiguity this item is filed under; {key} "
+            "must keep null on both paths")
+    assert silent["fact_entity_recall_status"] == "not_requested"
+    assert failed["fact_entity_recall_status"] == "requested_not_measured", (
+        "asked-and-failed has to be a value of its own, not the not-requested one")
+    assert silent["fact_entity_recall_status"] != failed["fact_entity_recall_status"], (
+        "byte-identical is the defect; the artefact alone must now tell these apart")
+    assert failed["fact_entity_recall_status_reason"], (
+        "a pass that asked and got nothing quotes WHY in the artefact itself — "
+        "a null reason here would re-create the log-only trace #3008 removed")
+    assert silent["fact_entity_recall_status_reason"] is None
+
+
+def test_errored_eval_queries_are_named_in_the_record_that_asked_for_them(tmp_path):
+    """Cause one (`fact_improvement.py:2429-2432`): the eval ran and queries
+    errored, so no metric is reported. The count the log carried has to be in
+    the record too — `writes_refused_reason` (#1654) quotes the probe's own
+    error, and this is the eval's version of that precedent."""
+    rec = _improvement_record(
+        tmp_path, [_record(1, 0.5)],
+        {"overall": {"errors": 2, "fact_entity_recall_avg": 0.4}},
+        report_eval=True)
+    assert rec["fact_entity_recall_status"] == "requested_not_measured"
+    reason = rec["fact_entity_recall_status_reason"]
+    assert "errored" in reason, reason
+    assert "2" in reason, f"the reason has to carry the count the log carried: {reason}"
+    assert rec["fact_entity_recall"] is None
+
+
+def test_an_eval_arm_that_raises_names_the_exception_it_swallowed(tmp_path):
+    """Cause two, the blanket handler (`fact_improvement.py:2454-2456`) — the
+    route the unexplainable-null `TypeError` takes, and any other raise. Before
+    #3008 the exception text reached the log and nothing else; a reader of the
+    record could not tell a broken harness from a pass that never asked."""
+    rec = _improvement_record(tmp_path, [], _summary(0.5), report_eval=True,
+                              raise_msg="retrieval daemon refused the socket")
+    assert rec["fact_entity_recall_status"] == "requested_not_measured"
+    reason = rec["fact_entity_recall_status_reason"]
+    assert "could not be measured" in reason, reason
+    assert "retrieval daemon refused the socket" in reason, (
+        f"the swallowed exception IS the reason; the record has to quote it: {reason}")
+
+
+def test_a_fact_leg_that_read_nothing_says_so_in_the_record(tmp_path):
+    """Cause three, #1250's empty-leg state: the arm refused before the
+    `round()` on the store's own evidence. Distinct text from both causes
+    above, so all four states a record can carry are told apart from the
+    artefact alone."""
+    rec = _improvement_record(tmp_path, [_record(0)] * 3, _summary(None),
+                              report_eval=True,
+                              kg_db=_store_with_facts(tmp_path / "kg.sqlite"))
+    assert rec["fact_entity_recall_status"] == "requested_not_measured"
+    assert "read nothing" in rec["fact_entity_recall_status_reason"]
+    assert rec["fact_entity_recall"] is None
+    assert rec["fact_entity_recall_detail"] is None

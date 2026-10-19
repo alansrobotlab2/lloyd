@@ -6319,3 +6319,55 @@ def test_memory_doc_states_the_graph_arm_non_parity_as_a_named_field():
         body + " So `matches_production_defaults` reads False for it.")
     assert not _parity_claim_is_a_named_field(
         body.replace("expand_graph_matches_production", "that field"))
+
+
+# ── #3008: §2 cannot credit the detail field with a state it never had ───────
+#
+# §2 credited `fact_entity_recall_detail` with telling "20 queries moved by zero"
+# apart from "the eval never ran" — a claim that holds only inside a pass that
+# ASKED for the score. A pass that never requested one nulls the pair for a third
+# reason and the artefact could not say which; #3008 added the status field so the
+# record states its state. This node bars the unscoped claim from returning and
+# requires the replacement's field names to stay named.
+
+#: The three states the status field takes, quoted as the code spells them.
+_EVAL_STATES = ("not_requested", "measured", "requested_not_measured")
+
+
+def _states_its_own_eval_state(body: str) -> bool:
+    """The rule as a predicate, on #3007's pattern: so the node below can
+    demonstrate it rejecting text this file writes, not only accept the text
+    the doc happens to carry."""
+    if ("or the eval never ran" in body or "fact_entity_recall_status" not in body):
+        return False
+    # Each value has to appear AS that value: plain `in` lets the bare
+    # "measured" be satisfied by the substring inside "requested_not_measured",
+    # so a page naming one state would pass. Underscores are word characters,
+    # so the lookarounds are what separate the two spellings.
+    return all(re.search(rf"(?<![A-Za-z_]){state}(?![A-Za-z_])", body)
+               for state in _EVAL_STATES)
+
+
+def test_memory_doc_lets_the_record_name_its_own_eval_state():
+    """#3008 clause 5: §2 must not claim the null detail pair answers "the eval
+    never ran" unscoped.
+
+    The barred reading is the one that treats a null as "did not run" full
+    stop — byte-identical nulls for a broken eval and a never-asked nightly
+    pass, which is exactly what every record back to 2026-10-03 carried. The
+    replacement states the field and its values, because the artefact is what
+    gets read at 3am, and it has to be a field the code really emits.
+    """
+    body = _memory_section_2()
+    assert _states_its_own_eval_state(body), body[:1200]
+    fi_src = (ROOT / "agent_mcp" / "fact_improvement.py").read_text(
+        encoding="utf-8", errors="replace")
+    assert '"fact_entity_recall_status"' in fi_src, (
+        "§2 cites a record field the code no longer emits")
+    # Can this node fail? Two mutations written here: put the unscoped claim
+    # back, and drop the field name. Each must be rejected.
+    assert not _states_its_own_eval_state(
+        body + " with nothing to say whether 20 queries moved by zero or"
+               " the eval never ran")
+    assert not _states_its_own_eval_state(
+        body.replace("fact_entity_recall_status", "the status field"))
