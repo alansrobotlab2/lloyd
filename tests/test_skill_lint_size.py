@@ -430,24 +430,184 @@ def test_every_uncapped_route_is_wired_at_its_call_site():
 #: Measured with `skill_size`'s own `body_lines` row (front matter excluded), which is
 #: the number `vault_round.skill_body_findings` refuses on. The item's target is
 #: `nightly-reflection-knowledge-write`, the sampled skill #2188 measured at the cap;
-#: the other four are the control — this round moves nothing in them, so their figures
-#: are pinned to the values triage recorded on 2026-10-04, and a drift in one is a
-#: drift this round caused.
+#: the other four are the control, whose figures are recorded below.
 CAP_HEADROOM = {"nightly-reflection-knowledge-write": 90}
+
+#: The control figures, measured from the vault's COMMITTED bytes — the source the
+#: headroom node below already uses, for the reason it gives ("an in-flight edit by
+#: another writer is a gate rung owned by nobody"; `pytest.ini`'s `live_vault` rationale
+#: says the same of these files, which "an hourly autoresearch promotion or a nightly job
+#: can rewrite between rounds").
+#:
+#: A committed vault change is NOT exempt, and that is what #3028 was: these four values
+#: sat at #2188's 2026-10-04 triage figures as though nothing could move them, and
+#: `system-health-check` went 84 → 95 when vault `bfb12eb6` (#3025's
+#: `api_trust_boundary` component section, +11 lines, 2026-10-19) landed through the
+#: rail that exists to land it. The red that filed #3028 was a stale measurement, not a
+#: round widening a skill outside its scope — so a drift now names the commit that moved
+#: the path instead of asserting "#2188's scope is one skill", which was the false half
+#: of the old message: it could only ever mean "someone's file moved", and it named the
+#: wrong someone. Refreshing a figure to a landed, rail-validated commit is a legitimate
+#: fix; the ceiling is not a figure but `MAX_BODY_LINES`, and that is guarded by
+#: `test_no_sampled_skill_sits_past_the_cap_the_lint_refuses_on`.
+#:
+#: The three that did NOT move are unchanged from 2026-10-04, which is checkable: the
+#: paths were last touched by `49e5c410` (powerpoint, deep-research, 2026-09-24) and
+#: `c0e889d4` (entity-resolution-sweep, 2026-09-26), both before the triage that recorded
+#: them.
 SAMPLE_BASELINE = {"powerpoint": 92, "deep-research": 96,
-                   "system-health-check": 84, "entity-resolution-sweep": 91}
+                   "system-health-check": 95, "entity-resolution-sweep": 91}
+
+
+def _vault() -> Path:
+    return Path.home() / "obsidian"
+
+
+def _committed_skill_text(vault: Path, name: str) -> str:
+    """`SKILL.md` as the vault's HEAD has it, not as some writer's disk has it.
+
+    Read through `git show` because the enforcement these pins defend
+    (`vault_round.skill_body_findings`) runs on a landing — on committed bytes.
+    """
+    rel = f"HEAD:skills/{name}/SKILL.md"
+    shown = subprocess.run(["git", "-C", str(vault), "show", rel],
+                           capture_output=True, text=True, timeout=30)
+    assert shown.returncode == 0, f"{name}: git show {rel} failed: {shown.stderr[:120]}"
+    return shown.stdout
+
+
+def _committed_body_lines(vault: Path, name: str) -> int:
+    """The figure a landing is judged by, from one ruler.
+
+    `skill_size` and not a copy of its expression, for the reason the headroom node
+    gives: two expressions for one ruler is how a pin starts disagreeing quietly with the
+    thing it defends. (The count is unchanged either way for all five sampled skills on
+    2026-10-19, so this half of the change moves no figure.)
+    """
+    text = _committed_skill_text(vault, name)
+    _, body = sl.parse_frontmatter(text)[:2]
+    return sl.skill_size(name, vault / "skills" / name / "SKILL.md",
+                         text, body)["body_lines"]
+
+
+def _moving_commit(vault: Path, name: str) -> str:
+    """The commit that last changed the path, so a drift can name its author."""
+    # `--` and the path as SEPARATE argv entries: `--skills/x/SKILL.md` as one token is
+    # an unknown option, git prints nothing, and the helper below would then report
+    # "<no commit names this path>" on a file with a whole history — a guard that reads
+    # its own missing input and still prints a verdict (#1044's family).
+    log = subprocess.run(["git", "-C", str(vault), "log", "-1", "--format=%h %s",
+                          "--", f"skills/{name}/SKILL.md"],
+                         capture_output=True, text=True, timeout=30)
+    return (log.stdout or "").strip() or "<no commit names this path>"
 
 
 @pytest.mark.parametrize("name,expected", sorted(SAMPLE_BASELINE.items()))
 def test_the_other_sampled_skills_are_untouched(name, expected):
-    root = Path.home() / "obsidian" / "skills"
-    path = root / name / "SKILL.md"
+    """The control of #2188's measurement, pinned to the vault's committed figure.
+
+    "Untouched" means nothing has moved this file since the value recorded in
+    `SAMPLE_BASELINE`. It does not mean "the round now gating is the only thing that
+    could": the vault is a live tree that any round, autonomy job or person commits to
+    through `automod_vault_land`, so the failure names the commit that moved the path and
+    a reader can attribute the drift in one step instead of being told, falsely, that it
+    was their diff.
+    """
+    vault = _vault()
+    path = vault / "skills" / name / "SKILL.md"
     if not path.is_file():
         pytest.skip(f"{path} not on this machine")
-    _, body = sl.parse_frontmatter(path.read_text(encoding="utf-8"))[:2]
-    got = len(body.strip("\n").splitlines())
+    got = _committed_body_lines(vault, name)
     assert got == expected, (
-        f"{name}: {got} body lines, was {expected} — #2188's scope is one skill")
+        f"{name}: {got} body lines at HEAD, pinned {expected}. The last commit to move "
+        f"the path is {_moving_commit(vault, name)} — if that is a legitimate landing, "
+        f"refresh SAMPLE_BASELINE, which is a recorded measurement and not a ceiling; "
+        f"the ceiling is MAX_BODY_LINES, guarded by "
+        f"test_no_sampled_skill_sits_past_the_cap_the_lint_refuses_on.")
+
+
+def test_the_control_reads_committed_bytes_and_ignores_an_in_flight_edit(tmp_path):
+    """The seam under this node is a `git show` into a tree no round controls.
+
+    In a throwaway vault: commit a 40-line body, then write a 60-line body to the same
+    path and leave it uncommitted — another writer mid-edit. The reader the control uses
+    must report 40, and the naive disk read is asserted at 60 in the same breath, because
+    without that the first assertion could pass on a fixture that had stopped being a
+    drift at all. That is the failure `pytest.ini`'s `live_vault` rationale is written
+    against, and the one that made main red for a landed document (#3028).
+    """
+    vault = tmp_path / "vault"
+    path = _skill(vault / "skills", "system-health-check", 40)
+    subprocess.run(["git", "init", "-q", str(vault)], check=True)
+    _git(vault, "add", "-A")
+    _git(vault, "commit", "-qm", "baseline")
+
+    committed = path.read_text(encoding="utf-8")
+    fm_end = committed.index("---\n\n") + len("---\n\n")
+    path.write_text(committed[:fm_end]
+                    + "\n".join(f"line {i} of system-health-check" for i in range(60))
+                    + "\n", encoding="utf-8")
+
+    assert _committed_body_lines(vault, "system-health-check") == 40
+    live = path.read_text(encoding="utf-8")
+    assert sl.skill_size("system-health-check", path, live,
+                         sl.parse_frontmatter(live)[1])["body_lines"] == 60, (
+        "the fixture is no longer a drift between disk and HEAD, so the assertion above "
+        "would be passing for the wrong reason")
+
+
+def test_a_drift_names_the_commit_that_moved_the_path(monkeypatch):
+    """The failure path, asked directly: a wrong figure must RED, and name its author.
+
+    Written because the first draft of the helper above passed a scratch check by
+    reporting `<no commit names this path>` — its argv glued `--` to the path, so git
+    printed nothing for a file with a whole history and the message would have blamed no
+    one. Here the pin is deliberately set one line off the vault's committed figure, so
+    the only way through is the assertion firing with a real hex sha in it.
+
+    This is also the round-trip proof that the control node still guards anything at all
+    after #3028 moved its figure: a stale pin on a drifted file is exactly the red that
+    filed this item, and it is still red.
+    """
+    vault = _vault()
+    name = "system-health-check"
+    if not (vault / "skills" / name / "SKILL.md").is_file():
+        pytest.skip(f"vault skill {name} not on this machine")
+    committed = _committed_body_lines(vault, name)
+    wrong = committed + 1
+    monkeypatch.setitem(SAMPLE_BASELINE, name, wrong)
+    with pytest.raises(AssertionError) as exc:
+        test_the_other_sampled_skills_are_untouched(name, wrong)
+    msg = str(exc.value)
+    # Both figures have to be in the message: the one HEAD says, and the one that was
+    # pinned. A message carrying only one is a reader guessing which is which.
+    assert f"{committed} body lines" in msg, msg
+    assert f"pinned {wrong}" in msg, msg
+    assert "<no commit names this path>" not in msg, msg
+    shas = [t for t in msg.split()
+            if len(t) >= 7 and all(c in "0123456789abcdef" for c in t)]
+    assert shas, f"no commit sha in the drift message: {msg}"
+
+
+def test_no_sampled_skill_sits_past_the_cap_the_lint_refuses_on():
+    """The ceiling, asked of all five sampled skills instead of #2188's one.
+
+    `skill_body_findings` refuses a landing whose sampled skill sits over
+    `MAX_BODY_LINES`, and until now exactly one of the five names was guarded against
+    that; the other four were guarded against *movement* instead, which is why a legal
+    +11-line section could turn main red while a sampled skill edging up to 99 of 100
+    would have passed this file unnoticed. `system-health-check` is at 95 on 2026-10-19 —
+    legal, with 5 lines of room, which is the state this node is content to call green and
+    the reason the +8-line-rule headroom property stays scoped to the one skill #2188
+    chose.
+    """
+    vault = _vault()
+    for name in sl.SPILL_SAMPLE:
+        lines = _committed_body_lines(vault, name)
+        assert lines <= sl.MAX_BODY_LINES, (
+            f"{name}: {lines} body lines at HEAD, cap {sl.MAX_BODY_LINES} — a landing "
+            f"would be refused at skill_body_findings. Last commit to move the path: "
+            f"{_moving_commit(vault, name)}")
 
 
 def test_the_skill_that_sat_at_the_cap_now_has_headroom():
