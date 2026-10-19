@@ -101,6 +101,9 @@ def test_a_failure_that_survives_the_serial_re_run_is_judged_as_it_always_was(tm
     real = "tests/test_mine.py::test_i_broke_this"
     script.append((1, f"FAILED {LOAD_FLAKE} - x\nFAILED {real} - assert False\n"
                       "2 failed, 5894 passed, 13 skipped in 71s\n"))
+    # One invocation per retried file, in sorted order: the load flake's file
+    # first, then the file that is actually red.
+    script.append((0, "53 passed in 1.39s\n"))
     script.append((1, f"FAILED {real} - assert False\n1 failed, 60 passed in 3s\n"))
     probed: list = []
 
@@ -139,6 +142,9 @@ def test_a_long_flake_list_compacts_the_sentence_and_nothing_but_the_sentence(tm
                         lambda python, root, ids, **k: ([], "repeats off for this node"))
     script.append((1, "".join(f"FAILED {n} - AssertionError\n" for n in flakes + [real])
                       + "41 failed, 5894 passed, 13 skipped in 71s\n"))
+    # Two files are retried, so two serial invocations (#2999 made the retry one
+    # invocation per file): the flake file passes on its own, the real one holds.
+    script.append((0, "40 passed in 5s\n"))
     script.append((1, f"FAILED {real} - assert False\n1 failed, 60 passed in 3s\n"))
     monkeypatch.setattr(G, "_failures_at_base", lambda *a, **k: (
         set(), "probed 2 file(s) at base: none failing"))
@@ -975,3 +981,192 @@ def test_the_skip_ceiling_survives_a_round_that_buys_headroom_elsewhere(tmp_path
         f"the refusal does not name the count it refused: {detail}")
     ok38, _, _ = g._tests_pass(counts_with(38), None, {})
     assert ok38 is True, "a suite at 38 skips must pass: #2637 wants margin, not limit"
+
+
+# ── #2999: a captured-log fragment may not speak for the suite ───────────────
+#
+# `parallel_only_failures` was built by scanning every `FAILED`/`ERROR` line of the
+# parallel output and taking its first token, on the premise that such a token names
+# a file. pytest's captured-log format breaks that premise: a log record printed
+# inside a failing node's report reads
+# `ERROR    lloyd-workers.fleet_watchdog:fleet_watchdog.py:1613 <msg>` — a logger
+# name, not a node id — and it contains `.py`, so it passed the only guard there
+# was. Being an argument to pytest rather than a path, it made the retry exit 4
+# before collecting ANYTHING, which is the one shape of failure that has no
+# explanation. Two rounds spent their attempts on it (SM_20261019_002125,
+# SM_20261019_002342) and one died on it as its final ladder (SM_20261018_013732,
+# item #2932's round).
+#
+# What the nodes below pin is the structural rule, not the literal string: a token
+# counts as a node only if it resolves to a path in THIS round's worktree or names a
+# node inside one. The tail of that fragment is a source location, so it drifts with
+# every commit to fleet_watchdog.py — `:1595` on 2026-10-18, `:1613 on 2026-10-19 —
+# and an allowlist built from either would let the next one through.
+
+# The line as pytest prints it, with a real fleet-watchdog alert body.
+CENSUS_LOG = ("ERROR    lloyd-workers.fleet_watchdog:fleet_watchdog.py:1613 "
+              "autonomy throughput: 45 failed runs on UTC 2026-10-18 against 20 on "
+              "UTC 2026-10-17 (floor rule: >= 40)")
+CENSUS_TOKEN = "lloyd-workers.fleet_watchdog:fleet_watchdog.py:1613"
+WATCHDOG_NODE = ("tests/test_fleet_watchdog.py::test_the_scheduler_loop_"
+                 "watches_the_fleet_with_the_source_disabled")
+
+
+def _seed(gate, *rels: str) -> None:
+    """Create the named files in the round's worktree, so a bare `ERROR <path>`
+    line about them names a path the retry really can be asked for."""
+    for rel in rels:
+        p = gate.worktree / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("def test_x():\n    assert True\n", encoding="utf-8")
+
+
+def test_a_captured_log_record_yields_one_node_id_and_one_refused_token():
+    """Clause 1, the parser half: a real `FAILED` node and the log fragment in one
+    block come back separated, and the refusal is returned rather than dropped.
+
+    Run against the fragment the gate recorded and the node listed beside it in
+    SM_20261019_002342's report — no `root`, so this node holds with the file absent
+    from the tree, which is the state the live gate was in.
+    """
+    block = (f"{CENSUS_LOG}\nWARNING  lloyd-workers.fleet_watchdog:fleet_watchdog.py:1600 "
+             "a warning is not a failure\n"
+             f"FAILED {WATCHDOG_NODE} - assert 0 == 1\n"
+             "1 failed, 20194 passed, 37 skipped in 470s\n")
+    assert G._failed_node_ids(block) == [WATCHDOG_NODE], (
+        "the fragment must not come back as a node id")
+    kept, refused = G._split_node_ids(block)
+    assert kept == [WATCHDOG_NODE]
+    assert refused == [CENSUS_TOKEN], (
+        f"the refused token vanished instead of being returned: {refused}")
+
+
+def test_the_retry_is_asked_only_for_files_that_exist_in_the_worktree(tmp_path, monkeypatch):
+    """Clause 1, the rung half: with the fragment and a real node side by side, every
+    entry of `serial_retry_files` is a path in this round's worktree, and the fragment
+    never reaches a command line at all.
+
+    Before #2999 the same output produced `serial_retry_files` holding
+    `lloyd-workers.fleet_watchdog:fleet_watchdog.py:1613`, and the single argv that
+    carried it exited 4 with `no tests ran in 0.00s`.
+    """
+    g, calls, script = _gate(tmp_path, monkeypatch)
+    _seed(g, "tests/test_fleet_watchdog.py")
+    script.append((1, f"{CENSUS_LOG}\nFAILED {WATCHDOG_NODE} - assert 0 == 1\n"
+                      "1 failed, 20194 passed, 37 skipped in 470s\n"))
+    script.append((0, "5895 passed, 13 skipped, 2 xfailed in 210.0s\n"))
+    _r, _text, counts = g._run_suite(None)
+    assert counts["serial_retry_files"] == ["tests/test_fleet_watchdog.py"]
+    assert all((g.worktree / f).exists() for f in counts["serial_retry_files"]), (
+        f"the retry was handed a non-path: {counts['serial_retry_files']}")
+    assert not any(CENSUS_TOKEN in c for call in calls for c in call), (
+        "the fragment reached a pytest argv, which is what aborted the retry")
+    assert counts["dropped_retry_tokens"] == [CENSUS_TOKEN]
+
+
+def test_one_unrunnable_token_cannot_deny_the_real_file_its_verdict(tmp_path, monkeypatch):
+    """Clause 2: the parallel run reports one real failing file and the fragment; the
+    real file's serial run is green, so the rung PASSES and names the real node in
+    `parallel_only_failures`.
+
+    This is the outcome the incident should have had: a flinch under load, recorded
+    as one, with the suite still green. What it got instead was a red rung whose
+    detail could not name a single test.
+    """
+    g, _calls, script = _gate(tmp_path, monkeypatch)
+    _seed(g, "tests/test_fleet_watchdog.py")
+    monkeypatch.setattr(G, "_reconfirm_candidate_failures",
+                        lambda python, root, ids, **k: ([], "repeats off for this node"))
+    script.append((1, f"{CENSUS_LOG}\nFAILED {WATCHDOG_NODE} - assert 0 == 1\n"
+                      "1 failed, 20194 passed, 37 skipped in 470s\n"))
+    script.append((0, "5895 passed, 13 skipped, 2 xfailed in 210.0s\n"))
+    monkeypatch.setattr(G, "_failures_at_base", lambda *a, **k: (set(), "probe off"))
+    ok, detail, data = g.rung_tests()
+    assert ok is True, detail
+    assert data["parallel_only_failures"] == [WATCHDOG_NODE]
+    assert data["failed"] == 0, detail
+    assert "failed only under parallel load and passed serially" in detail, detail
+    assert WATCHDOG_NODE in detail, "the flinch is not named for the reviewer"
+
+
+def test_each_retried_file_is_judged_in_its_own_invocation(tmp_path, monkeypatch):
+    """Clause 3: two retried files, one of them a pytest usage error (exit 4, nothing
+    collected), and the other one genuinely red. The red file still gets its verdict.
+
+    One argv holding both was the failure: pytest validates every argument before it
+    collects a single test, so the unrunnable entry answered for the real one and the
+    rung ended with `failed_node_ids: []` and no explanation. File by file, the
+    argument that yields nothing costs only its own file.
+    """
+    g, calls, script = _gate(tmp_path, monkeypatch)
+    _seed(g, "tests/test_edit_diagnostics.py", "tests/test_fleet_watchdog.py")
+    red = "tests/test_fleet_watchdog.py::test_the_scheduler_loop_watches_the_fleet"
+    script.append((1, f"FAILED tests/test_edit_diagnostics.py::test_the_rail_costs_under_150ms"
+                      f" - x\nFAILED {red} - assert 0 == 1\n2 failed, 20193 passed in 470s\n"))
+    # tests/test_edit_diagnostics.py first (sorted): the usage error that used to
+    # abort the whole retry, exactly as pytest reports it.
+    script.append((4, "ERROR: file or directory not found: "
+                      f"{CENSUS_TOKEN}\nno tests ran in 0.00s\n"))
+    script.append((1, f"FAILED {red} - assert 0 == 1\n1 failed, 60 passed in 3s\n"))
+    monkeypatch.setattr(G, "_reconfirm_candidate_failures",
+                        lambda python, root, ids, **k: ([], "repeats off for this node"))
+    monkeypatch.setattr(G, "_failures_at_base", lambda *a, **k: (set(), "probe off"))
+    ok, detail, data = g.rung_tests()
+    assert [c[-1] for c in calls[1:3]] == ["tests/test_edit_diagnostics.py",
+                                           "tests/test_fleet_watchdog.py"], (
+        f"the retry did not run one invocation per file: {calls[1:3]}")
+    assert ok is False
+    assert data["failed_node_ids"] == [red], (
+        "the file beside the usage error got no verdict")
+    assert "cannot say which tests broke" not in detail, detail
+    assert data["serial_retry_no_verdict"] == ["tests/test_edit_diagnostics.py"]
+
+
+def test_a_refused_token_is_recorded_rather_than_vanishing(tmp_path, monkeypatch):
+    """Clause 4: the token the parser refused is on the rung's data under
+    `dropped_retry_tokens`, which is what reaches gate.json.
+
+    A guard that silently drops an input is the same instrument reading nothing: the
+    one artefact this class of failure leaves behind is the token itself, and the
+    question of who emitted it is answerable only if it is still on the record.
+    """
+    g, _calls, script = _gate(tmp_path, monkeypatch)
+    _seed(g, "tests/test_fleet_watchdog.py")
+    script.append((1, f"{CENSUS_LOG}\nFAILED {WATCHDOG_NODE} - assert 0 == 1\n"
+                      "1 failed, 20194 passed, 37 skipped in 470s\n"))
+    script.append((0, "5895 passed, 13 skipped, 2 xfailed in 210.0s\n"))
+    _r, _text, counts = g._run_suite(None)
+    assert counts["dropped_retry_tokens"] == [CENSUS_TOKEN]
+
+
+def test_a_collection_error_for_a_file_that_exists_is_still_retried(tmp_path, monkeypatch):
+    """Clause 5: `ERROR tests/test_broken_import.py - SyntaxError` has no `::`
+    either, and it MUST be retried — the guard keys on path resolution, never on the
+    absence of `::`, or a genuinely broken tree would read as a clean run.
+
+    The same token with no file behind it is the refused case, so both halves of the
+    key are pinned by one node.
+    """
+    g, calls, script = _gate(tmp_path, monkeypatch)
+    broken = "tests/test_broken_import.py"
+    block = f"ERROR {broken} - SyntaxError: invalid syntax\n1 error in 0.11s\n"
+    _seed(g, broken)
+    assert G._split_node_ids(block, g.worktree) == ([broken], [])
+    script.append((1, block + "1 error, 20194 passed in 460s\n"))
+    script.append((1, f"ERROR {broken} - SyntaxError: invalid syntax\n1 error in 0.11s\n"))
+    monkeypatch.setattr(G, "_reconfirm_candidate_failures",
+                        lambda python, root, ids, **k: ([], "repeats off for this node"))
+    monkeypatch.setattr(G, "_failures_at_base", lambda *a, **k: (
+        set(), "probed 1 file(s) at base: none failing"))
+    ok, detail, data = g.rung_tests()
+    assert data["serial_retry_files"] == [broken], (
+        "a collection error was swallowed by the new guard")
+    assert calls[1][-1] == broken
+    assert ok is False and broken in detail, detail
+    assert data["failed_node_ids"] == [broken] and data["errors"] == 1, data
+    # And the same line about a path that is NOT there is refused, not retried.
+    assert G._split_node_ids(block, g.worktree)[0] == [broken]
+    gone = g.worktree / broken
+    gone.unlink()
+    assert G._split_node_ids(block, g.worktree) == ([], [broken]), (
+        "a token naming no file in the worktree was kept as a node id")

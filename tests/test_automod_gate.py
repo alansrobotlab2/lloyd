@@ -1642,8 +1642,13 @@ def _gate_with_a_long_flake_list(tmp_path, monkeypatch, *, n_flakes: int = 40,
     script = [(1, "".join(f"FAILED {n} - AssertionError\n" for n in flakes + REAL_FAILURES)
                   + f"{len(flakes) + len(REAL_FAILURES)} failed, 5890 passed, "
                     "13 skipped in 72s\n"),
-              (1, "".join(f"FAILED {n} - assert False\n" for n in REAL_FAILURES)
-                  + "2 failed, 60 passed in 3s\n")]
+              # The retry is ONE pytest invocation per retried file, in sorted order
+              # (#2999), so this run re-asks three files and gets three answers: the
+              # two files holding a real failure stay red, the flake file goes green.
+              # Merged, that is still exactly the two failures the serial run reports.
+              (1, f"FAILED {REAL_FAILURES[0]} - assert False\n1 failed, 30 passed in 2s\n"),
+              (1, f"FAILED {REAL_FAILURES[1]} - assert False\n1 failed, 30 passed in 2s\n"),
+              (0, "2 passed in 3s\n")]
 
     def run(cmd, cwd=None, env=None, timeout=900.0):
         if cmd[1:3] == ["-c", "import xdist"]:

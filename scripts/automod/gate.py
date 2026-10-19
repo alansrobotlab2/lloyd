@@ -641,24 +641,114 @@ EXTERNAL_PROBE_TIMEOUT = 600.0
 TESTS_MARK_EXPR = "not live_vault and not fault_injection"
 
 
-def _failed_node_ids(text: str) -> list[str]:
+def _failed_node_ids(text: str, root: Path | None = None) -> list[str]:
     """Node ids from pytest's short test summary, in order, deduplicated.
 
     Both `FAILED tests/x.py::test_y - AssertionError` and the bare
     `ERROR tests/x.py` a collection failure emits are node ids pytest will
     accept back on a command line, which is what the base probe needs.
+
+    With a `root` the tokens are additionally checked against the tree the run
+    happened in. Without one, the shape rule in `_split_node_ids` is all there
+    is — the same function reads a saved `gate.json` transcript, where there is
+    no tree left to ask. What gets refused, and why it has to be, is there.
     """
-    out: list[str] = []
+    return _split_node_ids(text, root)[0]
+
+
+def _split_node_ids(text: str,
+                    root: Path | None = None) -> tuple[list[str], list[str]]:
+    r"""`(node ids, refused tokens)` from pytest's summary, each in order, deduplicated.
+
+    The second list exists because of one string. On 2026-10-18 and 2026-10-19
+    three rounds' `tests` rung collected
+    `lloyd-workers.fleet_watchdog:fleet_watchdog.py:1613` as if it were a node
+    id. It is not one: pytest prints a captured log record inside a failing
+    node's report as `ERROR    <logger>:<file>.py:<line> <message>`, and that
+    record's logger location survives `(\S+)` looking exactly like a file —
+    because it names one. The only guard here was `if ".py" not in nid`, whose
+    premise ("a node id always names a file") is precisely what the fragment
+    defeats. So it went into the serial retry's argv as a FILE, pytest validates
+    every argument before it collects anything, and the retry died with
+    `ERROR: file or directory not found` and `no tests ran in 0.00s` at exit 4.
+    The genuinely failing file listed beside it was never judged, which left the
+    rung only ever able to say `pytest's output named no failing node, so this
+    rung cannot say which tests broke` with `failed_node_ids: []` — a red rung
+    naming nothing, and so excusable as neither flaky nor pre-existing.
+    SM_20261018_013732 died on that verdict (#2932); SM_20261019_002125 and
+    SM_20261019_002342 each spent two attempts on it (#2999).
+
+    The tail of that token is a source line, and it MOVES — the same alert read
+    `fleet_watchdog.py:1595` on 2026-10-18 — so no list of literals can hold.
+    The rule is structural instead. A token is a node id when:
+
+      * it contains `::`, pytest's own node syntax, which no log record emits; or
+      * `root` is given and the token names a path that exists in it. That is
+        what keeps the collection-error form `ERROR tests/x.py`, which has no
+        `::` and which MUST keep being retried — a tree that will not collect is
+        the one thing this guard may never swallow; or
+      * `root` is absent and the token carries no `:` outside a `::`, which is
+        the logger location's shape (`name:file.py:line`). With no tree to ask,
+        shape is the only evidence there is, and this is the conservative side of
+        it: a refused token is recorded and readable in the report, while a
+        retried phantom costs a verdict to every real node beside it.
+
+    A token that resolves through `..` to outside `root` is still passed, because
+    pytest would run it too; the guard is about whether the thing is addressable,
+    not about whether it is inside the tree.
+    """
+    kept: list[str] = []
+    refused: list[str] = []
+
+    def _one(bucket: list[str], nid: str) -> None:
+        if nid not in bucket:
+            bucket.append(nid)
+
     for raw in text.splitlines():
         m = re.match(r"^(?:FAILED|ERROR)\s+(\S+)", raw.strip())
         if not m:
             continue
         nid = m.group(1)
-        # Guard against prose: pytest writes "ERROR" in other contexts, and a
-        # node id always names a file.
-        if ".py" not in nid or nid in out:
+        # Prose guard, unchanged: pytest writes "ERROR" in other contexts, and a
+        # node id always names a file. Naming one, though, is not the same as
+        # being one — see the second paragraph above.
+        if ".py" not in nid:
             continue
-        out.append(nid)
+        if "::" in nid:
+            _one(kept, nid)
+        elif root is not None:
+            _one(kept if (root / nid).exists() else refused, nid)
+        elif ":" not in nid:
+            _one(kept, nid)
+        else:
+            _one(refused, nid)
+    return kept, refused
+
+
+def _merge_pytest_counts(runs: list[dict]) -> dict:
+    """Add up several `_parse_pytest_summary` results as one run's counts.
+
+    Needed the moment the serial retry became one invocation PER FILE (#2999, see
+    `_run_suite`): the rung's floors (`PYTEST_MIN_PASSED`, `PYTEST_MAX_SKIPPED`)
+    and its `still` arithmetic read a single dict, so N runs have to arrive as one
+    or a retry over four files reports a suite of one file's size.
+
+    The six numbers add; `pin_findings` unions in first-seen order, because a
+    no-execution finding is a fact about a file and the retry now asks file by
+    file. `collected` is summed rather than re-derived, and that is honest only
+    because each input derived its own from its own summary line — a file whose
+    run printed no summary contributes zeros, which is the same fail-closed answer
+    `_parse_pytest_summary` gives a run that died before reporting.
+    """
+    out: dict = {"passed": 0, "failed": 0, "errors": 0, "xfailed": 0,
+                 "tests_skipped": 0, "collected": 0, "pin_findings": []}
+    for counts in runs:
+        for key in ("passed", "failed", "errors", "xfailed", "tests_skipped",
+                    "collected"):
+            out[key] += int(counts.get(key) or 0)
+        for finding in counts.get("pin_findings") or []:
+            if finding not in out["pin_findings"]:
+                out["pin_findings"].append(finding)
     return out
 
 
@@ -2763,15 +2853,36 @@ class Gate:
         counts["workers"] = workers
         if r.returncode == 0:
             return r, text, counts
-        node_ids = _failed_node_ids(text)
+        node_ids, refused = _split_node_ids(text, self.worktree)
+        if refused:
+            # Readable in the report rather than gone: a token the parser refused is
+            # the only artefact this class of failure leaves (#2999).
+            counts["dropped_retry_tokens"] = refused
         files = sorted({nid.split("::", 1)[0] for nid in node_ids})
         if not files or len(files) > self.PARALLEL_RETRY_MAX_FILES:
             r2, text2, counts2 = serial([])
             counts2.update({"workers": workers, "serial_rerun": "whole suite",
                             "parallel_failures": node_ids[:50]})
             return r2, text2, counts2
-        r2, text2, counts2 = serial(files)
+        # One pytest invocation PER FILE. One argv holding them all is the shape
+        # #2999 died on: pytest validates every argument before it collects a
+        # single test, so the one unrunnable entry exited 4 with `no tests ran in
+        # 0.00s` and the real failure listed beside it — the node this rung exists
+        # to name — never received a verdict. File by file, an argument that
+        # yields nothing costs only its own file, and `serial_retry_no_verdict`
+        # says which file that was.
+        runs = [(f, *serial([f])) for f in files]
+        text2 = "\n".join(t for _f, _r, t, _c in runs)
+        codes = [done.returncode for _f, done, _t, _c in runs]
+        counts2 = _merge_pytest_counts([c for _f, _r, _t, c in runs])
+        no_verdict = [f for f, done, _t, c in runs
+                      if done.returncode != 0 and not c["collected"]]
+        r2 = subprocess.CompletedProcess(base_cmd + files,
+                                         0 if all(c == 0 for c in codes) else 1,
+                                         text2, "")
         counts["serial_retry_files"] = files
+        if no_verdict:
+            counts["serial_retry_no_verdict"] = no_verdict
         if r2.returncode == 0:
             counts["passed"] += counts["failed"] + counts["errors"]
             counts["failed"] = counts["errors"] = 0
@@ -2783,7 +2894,8 @@ class Gate:
         counts["passed"] += max(0, counts["failed"] + counts["errors"] - still)
         counts["failed"], counts["errors"] = counts2["failed"], counts2["errors"]
         counts["parallel_only_failures"] = [n for n in node_ids
-                                            if n not in set(_failed_node_ids(text2))]
+                                            if n not in set(_failed_node_ids(text2,
+                                                                             self.worktree))]
         return r2, text2, counts
 
     def rung_tests(self, only: list[str] | None = None):
@@ -3019,7 +3131,7 @@ class Gate:
           * an INCONCLUSIVE base probe grants nothing — fail closed.
         """
         tail = "\n".join(text.strip().splitlines()[-15:])
-        node_ids = _failed_node_ids(text)
+        node_ids = _failed_node_ids(text, self.worktree)
         touched = self._touched_paths()
         own = [n for n in node_ids if n.split("::", 1)[0] in touched]
         probe_ids = [n for n in node_ids if n not in own]
@@ -3152,6 +3264,19 @@ class Gate:
                 f"all {len(node_ids)} failure(s) are new in this round "
                 f"({_name_ids(node_ids)})",
                 counts, f"{probe_note}\n{tail[-600:]}"), data
+        # Nothing named a node — but the retry may still know WHICH file it could
+        # not judge, and naming that is the difference between a verdict a reader
+        # can act on and the sentence that finished SM_20261018_013732 (#2932).
+        # `_run_suite` records a retried file whose own invocation exited non-zero
+        # having collected nothing, which is a pytest usage error or a crash, not a
+        # green suite; and the tokens the parser refused outright, which is what a
+        # captured-log fragment leaves behind (#2999).
+        unjudged = [str(f) for f in (counts.get("serial_retry_no_verdict") or [])]
+        if unjudged:
+            return False, self._tests_verdict(
+                f"the serial retry of {_name_ids(unjudged)} exited non-zero having "
+                f"collected nothing, so those files got no verdict",
+                counts, f"{tail[-900:]}\n{probe_note}"), data
         return False, self._tests_verdict(
             "pytest's output named no failing node, so this rung cannot say which tests broke",
             counts, f"{tail[-900:]}\n{probe_note}"), data
