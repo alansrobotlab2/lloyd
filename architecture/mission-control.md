@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, frontend, dashboard]
 type: reference
 status: implemented
-date: 2026-09-19
+date: 2026-10-19
 ---
 
 # Mission Control
@@ -11,9 +11,10 @@ date: 2026-09-19
 The React (Vite + Tailwind) frontend in `web/`, served by the `lloyd-frontend`
 dev server on `:5173` — which proxies `/api` to the backend on `:8080`, that
 direction and not the other one: nothing in `server.py` mounts or serves the
-frontend, so a dead Vite is a dead UI against a perfectly healthy API. Sixteen
-tabs in the `Page` union, fifteen of them buttons on the one sidebar, each
-backed by a router under `app/routers/`.
+frontend, so a dead Vite is a dead UI against a perfectly healthy API. Seventeen
+tabs in the `Page` union, sixteen of them buttons on the one sidebar (`desktop`
+joined the union with the Desktop tab; `graph` is the one tab with no button),
+each backed by a router under `app/routers/`.
 
 | Tab | Backed by | Notes |
 |---|---|---|
@@ -25,18 +26,20 @@ backed by a router under `app/routers/`.
 | `autonomy` | `app/routers/autonomy.py` | the scheduled fleet, overdue vs held |
 | `backlog` | `app/routers/backlog.py` | the markdown kanban in `~/obsidian/backlog/` |
 | `memory`, `graph` | `app/routers/memory.py`, `entities.py` | facts, and the entity graph — which renders *inside* `memory`; the `graph` tab itself is still a stub page, with no sidebar button, reachable only by `mc_navigate` |
-| `skills`, `tools` | `skills.py`, `tools.py` | vault skills; tool toggles persisted to `data/tool_overrides.yaml` |
+| `skills`, `tools` | `skills.py`, `tools.py` | vault skills; tool toggles persisted to `DATA_ROOT/data/tool_overrides.yaml` (`app/paths.py::TOOL_OVERRIDES_PATH`) |
 | `services` | `services.py` → `app/supervisor_client.py` | supervisord status |
 | `settings` | `system.py`, `models.py` | config view, model identity |
 | `architecture` | `architecture.py` | a **source import-graph browser** for `.py`/`.ts`, not these docs |
 | `ide` | `ide.py`, `lsp.py` | file view with LSP diagnostics |
 | `browser` | `browser.py` | mirrors the agent's Chromium; the URL bar is the one control |
+| `desktop` | `desktop.py`, `app/desktop_lease.py` | mirrors the real desktop over SSE `GET /api/desktop/state`; the lease's grant/revoke buttons live here — see [[desktop]] |
 
 Six lists name the tabs and one file keeps them equal:
 `tests/test_mc_tab_parity.py`, over `Page` in
 `web/src/components/Sidebar.tsx`, `mc_state.VALID_TABS`,
 `mission_control_ui._VALID_TABS`, `VALID_TABS` in `useMcNavigationEvents.ts`,
-and `mc_ui._SUMMARIZERS`, the per-tab brief `mc_navigate` hands back. A tab
+and `mc_ui._SUMMARIZERS` in `app/routers/mc_ui.py` — the registry behind the
+per-tab brief `mc_navigate` hands back. A tab
 missing from one of the first four fails in the quietest direction: the state
 mirror keeps serving the previous tab and `mc_get_state` answers wrongly. A
 tab absent from the summarizer registry is not an error either:
@@ -44,17 +47,18 @@ tab absent from the summarizer registry is not an error either:
 sent the user, which is why `architecture`, `settings` and `graph` register an
 explicit `lambda: {}` rather than being left out.
 The sixth list is the one that decides whether the tab draws anything:
-`const PAGES` in `web/src/components/Layout.tsx:79`, the map
-`PageComponent = PAGES[page]` (`:315`) looks up and the `{PageComponent && …}`
-guard (`:557`) renders. Its failure is the loudest-looking and the most
+`const PAGES` in `web/src/components/Layout.tsx:80`, the map
+`PageComponent = PAGES[page]` (`:317`) looks up and the `{PageComponent && …}`
+guard (`:559`) renders. Its failure is the loudest-looking and the most
 silent-actual: `mc_navigate` returns 200, the brief comes back, the frontend
 switches `page`, and the pane stays empty — the same "nothing moves" symptom as
 the hook list, one level deeper, and until #1274 `tests/test_mc_tab_parity.py`
 parsed none of it. It parses the map now: the keys must satisfy
 `PAGES ∪ STICKY_PAGES == Page` in both directions. The exemption is a declared
-constant — `STICKY_PAGES = {chat, ide, memory}` — because those three tabs are
+constant — `STICKY_PAGES = {chat, ide, memory}` in the test file itself, not in
+`Layout.tsx` — because those three tabs are
 absent from the map on purpose: they are mounted elsewhere in `Layout.tsx` and
-deliberately kept mounted there (`:391`, `:528`, `:549`) so Monaco, the LiveKit
+deliberately kept mounted there (`:393`, `:530`, `:551`) so Monaco, the LiveKit
 room and the memory graph survive a tab switch. A fourth sticky tab has to be
 declared in that constant *and* really mounted — the same test refuses a
 declaration with no `page === '<name>'` guard behind it. Folding the three
@@ -108,9 +112,11 @@ Rules that keep the endpoint honest:
   (2) survive the live filter, which is applied *outside* the cache so a chat
   that just started never reads as finished for ten seconds;
 - "overdue" and "held" are different words: `autonomy.hold_reason` mirrors
-  `_is_task_due`'s six gates in their order — skill, `up_next`, frequency,
-  failure cooldown, `depends_on`, `preferred_hours` — and a past-due task is
-  overdue only when nothing holds it. `classifier` reports `naive` when
+  `_is_task_due`'s gates in their order — skill, `up_next`, frequency,
+  elapsed-due, the infra-rest ceiling (#1085), failure cooldown, `depends_on`,
+  `preferred_hours`, and last the run-record gate (#1296), which asks the
+  completion a disk record reports rather than the task file's `last_run` —
+  and a past-due task is overdue only when nothing holds it. `classifier` reports `naive` when
   `autonomy` could not be imported and every past-due task is being called
   overdue, because a downgrade that looks like success is the failure this
   split exists to prevent;
@@ -138,8 +144,12 @@ index; the wording is the incident record, kept whole.
 
 **`recent` is the cached section with a trap.** A session JSON carries its
 whole transcript (100 files, 7.5 MB when this was written), so the scan is
-bounded twice: only the newest `_RECENT_CANDIDATES` files by **mtime** are
-opened, and the parse is cached for 10 s. The mtime window is safe only because
+bounded twice: files are opened newest-**mtime** first and the walk stops at
+`_RECENT_KEPT` (8) user rows or `_RECENT_CEILING` (400) files opened —
+background ids are skipped by name without opening them — and the parse is
+cached for 10 s. (The flat `_RECENT_CANDIDATES` mtime slice this section once
+named was replaced by that two-sided bound; the rules above always described
+the newer shape.) The mtime ordering is safe only because
 mtime is never *earlier* than `last_active` — background writers (the titler,
 post-session capture, TodoWrite) push a file's mtime later than its last real
 message, so mtime can promote a stale chat but never demote a fresh one out of
@@ -197,7 +207,7 @@ row's `elapsed_s` is measured against `finished_at`, not `now`, or a task that
 ran for two seconds reads as hours old by evening.
 
 **Workers are not in that panel.** The worker pool lives in the backend
-(`workers.queue` + `workers.pool`, rendered by `WorkersPanel`). A worker job
+(`workers.queue` + `workers.pool`, rendered by `WorkersPage`). A worker job
 whose prompt calls `Task` does put subagent rows in the agents panel — via
 `workers/sources/_common.py::run_prompt_on_primary` — but anonymously: nothing
 on the row says which worker source it came from.
@@ -279,14 +289,14 @@ the reboot, not the pool wait.
 
 ## Sessions, titles, activity
 
-`app/sessions_io.py` is the writer for every session that goes through it
-(`create_session`) and the one definition of "is a human reading this"
+`app/sessions_io.py` is the only session writer (`create_session`) and the one
+definition of "is a human reading this"
 (`is_user_session`;
-`NON_USER_PLATFORMS = {autonomy, worker}`). It is not quite the *only* writer:
-`POST /api/sessions/create` mints its stub JSON itself (`app/routers/sessions.py:868`)
-with a bare `write_text` and a field set missing `id`, `title` and `source`, so
-a pre-created Inner Voice session is the third session shape on disk — filed as
-#1275. Titles come from the secondary
+`NON_USER_PLATFORMS = {autonomy, worker}`). `POST /api/sessions/create` used to
+mint its stub JSON itself — a bare `write_text` with a field set missing `id`,
+`title` and `source`, a third session shape on disk — but since #1275 it calls
+`sessions_io.create_session` like every other path, so the superset field set
+lands atomically through the one door. Titles come from the secondary
 on a geometric schedule (`app/session_titles.py`) and every surface shares
 the fallback chain in `web/src/lib/sessionLabel.ts`. The live activity line is
 six kinds — `starting → prefill → thinking`/`responding` → `tool` →
@@ -480,6 +490,28 @@ it is accepted. See [[infrastructure]].
 
 ## Review log
 
+- 2026-10-19 — **stale, corrected in place.** Re-checked every path, line
+  number, count, cadence and route against `641cf23a` and the live `:8080`
+  routes (the twelve dashboard sections and `/api/workers/health`'s clamp
+  fields re-measured live: `oldest_input`/`window_clamped_to_hours` both
+  `null`, the 7-day window really was covered). What had moved: the `desktop`
+  tab (`265d597d`) makes the `Page` union seventeen with sixteen sidebar
+  buttons, so the table gained its row; #1275 was fixed, so `sessions_io` is
+  now genuinely the only session writer; `_is_task_due` grew the infra-rest
+  gate (#1085) and the run-record gate (#1296), so "six gates" became the list
+  in order; `_RECENT_CANDIDATES` no longer exists — the scan is bounded by
+  `_RECENT_KEPT`/`_RECENT_CEILING`, which the rules bullet already said and the
+  trap section did not; `tool_overrides.yaml` lives under DATA_ROOT, not the
+  repo's `data/`; `WorkersPanel` is `WorkersPage`; and the `Layout.tsx` cites
+  moved (+1 on the map, +2 on the sticky mounts — `STICKY_PAGES` itself is the
+  test's constant, now named as such). The summarizer registry was pinned as
+  `app/routers/mc_ui.py::_SUMMARIZERS`, whose `desktop` entry the registry has
+  carried since `265d597d`. Everything else — TTLs, the drain/`X-Lloyd-Landing`
+  hold (2.5 s poll, 10-minute ceiling), `_frontmatter`'s 4 KB chunks under a
+  64 KB cap, the SSRF section's resolved-address policy, `PRE_AUTH_PATHS`,
+  `xfwd: true` and the inert `clientCertHeaders` — holds, with
+  `agent_mcp/egress.py` (#2794) now owning `_resolve_addrs`/`_is_private_host`
+  that the section describes. Filed #3041 #3042 #3043.
 - 2026-09-20 — **current for Remote access.** #683 closed the fail-open that
   section described, so its prose is rewritten rather than annotated. What was
   re-read rather than inherited: the `/api` proxy runs with `xfwd: true` and
