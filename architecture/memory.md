@@ -225,13 +225,29 @@ defaults use (`:2312`, `:2329`), imported at `:46-48` — #498 (`0a7c239e`,
 2026-09-14) deleted the restated literals, one of which, `rerank_alpha=0.5`
 against production's 0.3, is what made this section's first version measure a
 configuration nothing served. The knobs are still passed explicitly, so the
-measurement never depends on the pinning holding. The live divergence is a
-different knob: `expand_graph=True`, passed deliberately by
-`_fact_entity_recall_detail`, against a production that has defaulted
-`RECALL_EXPAND_GRAPH = False` since `7389a1fc` (2026-09-22, `agent_mcp/vault.py:510`).
-So the loop's acceptance metric scores an arm nothing serves, and
-`matches_production_defaults` reads False for it in the same way it would for a
-knob bug (#3005).
+measurement never depends on the pinning holding.
+
+The one knob this consumer deliberately does not take from production is
+`expand_graph=True`, and the honest way to say that is a field, not a verdict: for
+this arm `expand_graph_matches_production` is False while
+`matches_production_defaults` stays True. The flag stays green because #1000
+(`7389a1fc`, 2026-09-22) removed `and not args.no_graph` from that conjunction — a
+`store_true` flag compared with its own absence, which could only ever switch the
+verdict off — and gave the knob its own field instead, as
+`tests/test_eval_scorer.py:774` pins. Production's own default,
+`RECALL_EXPAND_GRAPH = False` (`agent_mcp/vault.py:510`), is not a recent change
+either: that commit *named* the literal that was already there
+(`params.get("expand_graph", False)` → the constant), so nothing flipped, and what
+the eval adds is a knob the caller may pass rather than a configuration nothing
+serves. Reading the non-parity as a knob bug is what #3005 was filed for; its
+mechanism never existed post-#1000 and the claim is retired here.
+
+What genuinely did redefine this metric between one record and the next is what the
+record now carries instead: `fact_entity_recall_detail.run_config` is
+`eval/run_eval.py::build_run_config`'s own output — the same 15 keys the nightly
+baseline stamps, `seed_top_k` and `semantic_seeding` among them — because
+`RECALL_SEED_TOP_K` 5→10 (2026-09-11) and semantic seeding #1486 (`dbfde750`,
+2026-09-25) both changed what the score means while its shape did not (#3009).
 
 | pass | facts expired | active facts | `fact_entity_recall` |
 |---|---|---|---|
@@ -353,3 +369,17 @@ a day before its code half).
   production's, undistinguishable from a knob bug), #3006 (a blast-radius halt
   exits 0) and #3007 (a partial hub scan publishes pair counts with no fact
   denominator).
+
+- 2026-10-19 — **corrected, same day.** The line above describes what the pass
+  believed when it was written and is left standing, but two readings of it were
+  wrong and §4 no longer carries them. `matches_production_defaults` does NOT read
+  False for the graph-expanded arm: `7389a1fc` removed `and not args.no_graph` from
+  that conjunction and added `expand_graph_matches_production`, which is where the
+  non-parity is recorded, and the same commit only *named* the literal that
+  production had already defaulted False — no flip occurred, so "an arm nothing
+  serves" was false too (#3005 closes `stale`: its mechanism never existed
+  post-#1000). What does make one record's `fact_entity_recall` incomparable with
+  the next is the knobs the record never carried — `RECALL_SEED_TOP_K` 5→10
+  (2026-09-11) and semantic seeding #1486 (`dbfde750`) — so the pass now stamps
+  `fact_entity_recall_detail.run_config` from `eval/run_eval.py::build_run_config`
+  over the same parsed namespace it scores with (#3009).

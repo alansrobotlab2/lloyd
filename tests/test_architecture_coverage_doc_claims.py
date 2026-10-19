@@ -6250,3 +6250,72 @@ def test_memory_doc_reads_a_hub_scan_as_a_fraction_of_its_facts():
     assert not _reads_as_a_fact_fraction(
         body + " ~195 comparisons against ~527,000 whole")
     assert not _reads_as_a_fact_fraction(body.replace(_HUB_FRACTION, "some facts"))
+
+
+# ── #3009: §4 states the arm's non-parity as a named field, not a false flag ──
+#
+# §4 of `architecture/memory.md` explained the loop's `expand_graph=True` by saying
+# production "has defaulted `RECALL_EXPAND_GRAPH = False` SINCE `7389a1fc`" and that
+# therefore the loop "scores an arm nothing serves, and `matches_production_defaults`
+# reads False for it". Both halves are false. `git show 7389a1fc -- agent_mcp/vault.py`
+# replaced the literal `params.get("expand_graph", False)` with the named constant:
+# production defaulted False before that commit and after it, so there was no flip to
+# be the divergence. And the same commit DELETED `and not args.no_graph` from the
+# parity conjunction and ADDED `expand_graph_matches_production` — which is why the
+# flag reads True for the graph-expanded arm today, as `tests/test_eval_scorer.py:774`
+# and `tests/test_eval_corpus_guard.py:634-640` both pin. A reader who believes the
+# page looks for a knob bug that the record says does not exist.
+
+#: The two claims the page must stop making. Both are substrings of sentences it
+#: wrote about itself, and both are refuted above.
+_RETIRED_PARITY_CLAIMS = ("reads False for it", "scores an arm nothing serves",
+                          "arm nothing serves")
+
+
+def _memory_section_4() -> str:
+    """§4 of `architecture/memory.md`, flattened.
+
+    Selected by section number, so a re-titled heading fails here rather than
+    narrowing the graded window to nothing and passing on an empty extraction.
+    """
+    sections = _h2_sections((ARCH / "memory.md").read_text(encoding="utf-8"))
+    hits = [head for head in sections if head.startswith("4.")]
+    assert len(hits) == 1, f"§4 of memory.md resolved to {hits}, not exactly one section"
+    body = _flat(sections[hits[0]])
+    assert body, "§4 of memory.md read back empty"
+    return body
+
+
+def _parity_claim_is_a_named_field(body: str) -> bool:
+    """The rule as a predicate, so the node below can show it failing on the text
+    this file is refusing rather than only on text the page happens to carry."""
+    i = body.find("expand_graph_matches_production")
+    j = body.find("matches_production_defaults")
+    if i < 0 or j < 0 or j < i:
+        return False
+    between = body[i + len("expand_graph_matches_production"):j]
+    after = body[j + len("matches_production_defaults"):j + 90]
+    return ("False" in between and "True" in after
+            and not any(claim in body for claim in _RETIRED_PARITY_CLAIMS))
+
+
+def test_memory_doc_states_the_graph_arm_non_parity_as_a_named_field():
+    """#3009 clause 4: §4 says `expand_graph_matches_production` is False for the
+    default arm while `matches_production_defaults` stays True, and no longer says
+    the flag reads False or that the loop scores an arm nothing serves."""
+    body = _memory_section_4()
+    assert _parity_claim_is_a_named_field(body), body[:1200]
+    for claim in _RETIRED_PARITY_CLAIMS:
+        assert claim not in body, claim
+    # The field named has to be a field the code emits — the same witness-count
+    # check every other node here applies to a page's field names.
+    fi_src = (ROOT / "agent_mcp" / "fact_improvement.py").read_text(
+        encoding="utf-8", errors="replace")
+    assert "run_config" in fi_src, (
+        "§4 now says the record names the arm; the pass records no such field")
+    # Can this node fail? Two mutations: put the refuted flag claim back, and make
+    # the field unnamed. Both are the page's own text, and each must be refused.
+    assert not _parity_claim_is_a_named_field(
+        body + " So `matches_production_defaults` reads False for it.")
+    assert not _parity_claim_is_a_named_field(
+        body.replace("expand_graph_matches_production", "that field"))

@@ -2354,7 +2354,8 @@ def _confidence_trace(action: dict) -> dict | None:
         action["entity"], action.get("reason", ""), "")
 
 
-def _recall_detail(records: list[dict], summary: dict) -> dict:
+def _recall_detail(records: list[dict], summary: dict,
+                   run_config: dict | None = None) -> dict:
     """The evidence behind the score, from what `run_eval` already returned.
 
     The record used to keep only `fact_entity_recall_avg` and discard the
@@ -2363,6 +2364,18 @@ def _recall_detail(records: list[dict], summary: dict) -> dict:
     queries answered, or which entity moved (#702). A per-query
     `fact_entity_recall` of None is a query with no expected entities — not
     run, not zero — and stays None here; `queries_answered` counts the rest.
+
+    `run_config` is the same argument for the other half of the question: a score
+    that names no knobs cannot be compared with next month's, and #843, #1000 and
+    #1486 all moved a knob this scorer reads (`RECALL_SEED_TOP_K` 5→10, the
+    `expand_graph` parity field, semantic seeding) while this record's shape stayed
+    identical. It is `eval/run_eval.py::build_run_config`'s own dict, passed in by
+    `_fact_entity_recall_detail` — this function never derives it, so there is one
+    builder of the shape in the tree and the two artifacts cannot drift into two
+    spellings of one configuration. A caller that ran the scorer passes the dict it
+    ran with; None is a detail nobody should be reading a score out of, which is why
+    the measured path returns no score at all rather than one whose arm it cannot
+    name.
     """
     per_query = [{"id": r.get("id"),
                   "fact_entity_recall": (r.get("scoring") or {}).get("fact_entity_recall"),
@@ -2374,7 +2387,11 @@ def _recall_detail(records: list[dict], summary: dict) -> dict:
             "queries": len(records),
             "queries_answered": sum(1 for q in per_query if q["fact_entity_recall"] is not None),
             "errors": int(summary["overall"].get("errors") or 0),
-            "per_query": per_query}
+            "per_query": per_query,
+            # Beside the score it describes, so the artifact that the apply-mode
+            # decision is argued from can be asked which arm produced this number
+            # without re-running anything (#3009).
+            "run_config": run_config}
 
 
 def _fact_entity_recall(limit: int = 20) -> float | None:
@@ -2382,6 +2399,23 @@ def _fact_entity_recall(limit: int = 20) -> float | None:
     the shape every reader of the metric had before the detail was kept."""
     detail = _fact_entity_recall_detail(limit)
     return None if detail is None else detail["score"]
+
+
+def _load_run_eval():
+    """`eval/run_eval.py` loaded by path, because it is a script and not a package.
+
+    A function rather than the four inline lines it replaces because it is the one
+    boundary between this pass and a retrieval run: a reader that wants to see which
+    configuration crosses it — as `tests/test_memory_improvement.py` now does — has
+    to be able to stand at the seam instead of patching `importlib`.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "lloyd_run_eval", LLOYD_HOME / "eval" / "run_eval.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _fact_entity_recall_detail(limit: int = 20) -> dict | None:
@@ -2395,11 +2429,13 @@ def _fact_entity_recall_detail(limit: int = 20) -> dict | None:
         (#498). They used to be restated literals, and one of them —
         `rerank_alpha=0.5` against production's 0.3 — was stale, so calling
         `run_eval(queries)` directly measured a configuration nothing serves;
-        this function's first version reported such a number. The knobs are
-        still passed explicitly, so the measurement never depends on the
-        pinning test holding. `expand_graph=True` is the one knob deliberately
+        this function's first version reported such a number. Every knob is now
+        taken from `build_parser()`'s own defaults and passed explicitly, so the
+        measurement never depends on the pinning test holding and the record's
+        `run_config` is stamped from the same namespace the call was made with
+        (#3009). `expand_graph=True` is the one knob deliberately
         not production's (the eval runs the graph leg expanded; #1000 owns that
-        claim).
+        claim), and it is what `expand_graph_matches_production` says so.
       * the corpus underneath must be readable. Measured rather than assumed:
         a failure to score returns None, not 0.0.
 
@@ -2408,22 +2444,39 @@ def _fact_entity_recall_detail(limit: int = 20) -> dict | None:
     the query count, how many answered, and the per-query hits behind it.
     """
     try:
-        import importlib.util
-
         import yaml
-        from agent_mcp import vault
 
-        script = LLOYD_HOME / "eval" / "run_eval.py"
-        spec = importlib.util.spec_from_file_location("lloyd_run_eval", script)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = _load_run_eval()
         queries = (yaml.safe_load(
             (LLOYD_HOME / "eval" / "vault_recall_queries.yaml").read_text()) or {}).get("queries") or []
-        knobs = {"expand_graph": True,
-                 "graph_rerank": vault.RECALL_GRAPH_RERANK,
-                 "rerank_alpha": vault.RECALL_RERANK_ALPHA,
-                 "graph_top_k": vault.RECALL_GRAPH_TOP_K,
-                 "graph_hops": vault.RECALL_GRAPH_HOPS}
+        # One namespace for the measurement and for the claim about it (#3009).
+        # `build_parser()`'s defaults ARE the live `RECALL_*` constants — that is
+        # #498's fix living inside `run_eval.py` — so parsing no arguments yields the
+        # arm that script's own CLI would run. Every knob it names is then passed
+        # explicitly, which used to stop at five: `seed_top_k` and `djev_rerank` were
+        # left to `run_eval`'s signature defaults, correct by silence and invisible
+        # in the record, so a move of either redefined the metric while the record
+        # shape stayed byte-identical. Passing them is a no-op against the same
+        # constants and is what lets `build_run_config(args)` below describe THIS run
+        # rather than today's constants. `expand_graph` is the one deliberate
+        # divergence from production, and it is the parser's default too: the eval
+        # scores the graph leg expanded on purpose (#1000), and says so in
+        # `expand_graph_matches_production` rather than in the parity flag.
+        args = module.build_parser().parse_args([])
+        knobs = {"expand_graph": not args.no_graph,
+                 "graph_rerank": args.graph_rerank,
+                 "rerank_alpha": args.alpha,
+                 "graph_top_k": args.graph_top_k,
+                 "graph_hops": args.graph_hops,
+                 "seed_top_k": args.seed_top_k,
+                 "djev_rerank": args.djev_rerank,
+                 "djev_rerank_top": args.djev_rerank_top,
+                 "report_dups": not args.no_dup_metrics,
+                 "collapse_dups": args.collapse_dups}
+        # Built before the run, not after it: if the arm cannot be named, the honest
+        # answer is no score at all (the handler below returns None), not a number
+        # whose configuration is discovered only if the retrieval happens to finish.
+        run_config = module.build_run_config(args)
         records = module.run_eval(queries[:limit], limit=limit, **knobs)
         summary = module.summarize(records)
         if summary["overall"]["errors"]:
@@ -2450,7 +2503,7 @@ def _fact_entity_recall_detail(limit: int = 20) -> dict | None:
                 return None
             raise TypeError("fact_entity_recall_avg is null but the fact leg measured "
                             "facts — run_eval nulled it for a reason this reader cannot see")
-        return _recall_detail(records, summary)
+        return _recall_detail(records, summary, run_config)
     except Exception as exc:  # noqa: BLE001 - a metric that cannot run is not a zero
         logger.warning("improve: fact_entity_recall could not be measured: %s", exc)
         return None

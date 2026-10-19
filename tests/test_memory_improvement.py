@@ -1562,6 +1562,14 @@ def test_run_reports_the_metric_it_claims_to_move(world, monkeypatch):
     facts_root, st, _ = world
     seen = {}
     detail = {"score": 0.5, "queries": 2, "queries_answered": 1, "errors": 0,
+              # #3009 clause 3: whatever the scorer's own shape carries, the saved
+              # record has to carry too — the config is a key of the detail, so it
+              # reaches the file with the score it describes and a reader of the
+              # JSON can ask which arm produced 0.5.
+              "run_config": {"seed_top_k": 10, "semantic_seeding": {"enabled": True, "k": 3},
+                             "expand_graph": True,
+                             "expand_graph_matches_production": False,
+                             "matches_production_defaults": True},
               "per_query": [{"id": "q1", "fact_entity_recall": 0.5,
                              "fact_entities_matched": ["A"], "expected_entities": ["A", "B"],
                              "error": None},
@@ -1584,9 +1592,45 @@ def test_run_reports_the_metric_it_claims_to_move(world, monkeypatch):
     assert saved["fact_entity_recall_detail"]["queries_answered"] == 1
     assert saved["fact_entity_recall_detail"]["queries"] == 2
     assert [q["fact_entity_recall"] for q in saved["fact_entity_recall_detail"]["per_query"]] == [0.5, None]
+    # #3009 clause 3: the config travels with the detail it describes — the record
+    # stores the detail whole, so a key the scorer adds cannot be dropped on the way
+    # to the file, which is where the 0.375 in `architecture/memory.md` §4 is read
+    # from and where "which arm?" has to be answerable without re-running anything.
+    assert saved["fact_entity_recall_detail"]["run_config"]["seed_top_k"] == 10
+    assert (saved["fact_entity_recall_detail"]["run_config"]
+            ["expand_graph_matches_production"]) is False
     skipped = fi.run_improvement(sources=("drift",), days=3)
     assert skipped.get("fact_entity_recall") is None, "off by default"
     assert skipped.get("fact_entity_recall_detail") is None, "null is the only 'did not run'"
+    # The scheduled route (`report_eval` defaults False, and the autonomy task never
+    # passes `--report-eval`) is byte-for-byte what it was: no score, no detail, and
+    # so no config to name — a stubbed-in empty config would be the "measured
+    # nothing" reading #702 refuses, and #3009's scope bound says a scheduled record
+    # must not start carrying the new field.
+    assert "run_config" not in str(skipped.get("fact_entity_recall_detail")), skipped
+
+
+def test_the_recorded_run_config_survives_from_the_scorer_into_the_saved_record(world, monkeypatch):
+    """#3009 clause 3 across the whole boundary: real scorer path, real record.
+
+    Only the corpus-touching calls are spied, so what lands in the JSON is the dict
+    `_fact_entity_recall_detail` built — including the `build_run_config` output —
+    and the assertion is that the saved file's `fact_entity_recall_detail.run_config`
+    equals the config the scorer named, not merely that a key exists.
+    """
+    facts_root, st, _ = world
+    _write_facts(facts_root, "QMD", "state",
+                 [{"fact": "QMD indexes the vault.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+    recorded: dict = {}
+    monkeypatch.setattr(fi, "_load_run_eval", _spy_run_eval_loading(recorded))
+    rec = fi.run_improvement(entities=["QMD"], report_eval=True, eval_limit=2)
+    assert rec["fact_entity_recall"] == 0.5, rec["fact_entity_recall"]
+    saved = _persisted_record(rec)
+    cfg = saved["fact_entity_recall_detail"]["run_config"]
+    for key in REQUIRED_RUN_CONFIG_KEYS:
+        assert key in cfg, (key, sorted(cfg))
+    assert cfg["seed_top_k"] == recorded["knobs"]["seed_top_k"], (cfg, recorded["knobs"])
 
 
 def test_recall_detail_keeps_the_per_query_evidence_run_eval_returned():
@@ -1608,6 +1652,130 @@ def test_recall_detail_keeps_the_per_query_evidence_run_eval_returned():
     assert [q["fact_entity_recall"] for q in detail["per_query"]] == [1.0, 0.0, None]
     assert detail["per_query"][0]["fact_entities_matched"] == ["vllm"]
     assert detail["per_query"][1]["expected_entities"] == ["qmd", "djev"]
+
+
+# ── #3009: the score names the arm that produced it ─────────────────────────
+#
+# `eval/run_eval.py::build_run_config` has stamped 15 configuration keys into every
+# nightly artifact since #843 (seed count), #1000 (the expand_graph parity field)
+# and #1486 (semantic seeding), for one reason: a score whose knobs are unknown
+# cannot be compared with tomorrow's. The improvement pass calls the SAME scorer and
+# records only `score`, `queries`, `queries_answered`, `errors`, `per_query`. So
+# `RECALL_SEED_TOP_K` 5→10 (2026-09-11) and semantic seeding (`dbfde750`, 2026-09-25)
+# both redefined what `fact_entity_recall` means while the record shape did not
+# change, and `git_head` cannot separate arms inside a commit span.
+#
+# These nodes pin the record to the nightly artifact's own source: the config comes
+# from `build_run_config` over the parser `run_eval` defaults itself from, so the
+# stamp and the call are one read of one namespace, and a knob moved under the
+# loaded module changes what the next record says.
+
+#: The five keys #3009's acceptance names. `build_run_config` emits fifteen; these
+#: are the ones a reader of the improvement record needs to know whether two
+#: scores are the same measurement — the two seed inputs and the parity verdicts.
+REQUIRED_RUN_CONFIG_KEYS = ("seed_top_k", "semantic_seeding", "expand_graph",
+                            "expand_graph_matches_production",
+                            "matches_production_defaults")
+
+
+def _spy_run_eval_loading(recorded):
+    """Load the REAL `eval/run_eval.py`, with its retrieval and its aggregator
+    replaced by recorders, through the seam `_fact_entity_recall_detail` loads by.
+
+    Only the two calls that touch a corpus are replaced. `build_parser`,
+    `build_run_config`, `_semantic_seeding_record` and `_dup.calibration_agreement`
+    stay the real ones, because the thing under test is which namespace the recorded
+    configuration is derived from — and a fake of THAT would be an assertion about
+    this file's own invention, the tautology `build_parser`'s docstring names for the
+    hand-mirrored version of these same defaults.
+    """
+    real_load = fi._load_run_eval
+
+    def _spy():
+        module = real_load()
+
+        def _recording_run_eval(queries, limit=20, **knobs):
+            recorded["limit"] = limit
+            recorded["knobs"] = knobs
+            return [{"id": q.get("id"), "category": "?",
+                     "scoring": {"fact_entity_recall": 0.5,
+                                 "fact_entities_matched": ["vllm"]},
+                     "expected": {"entities": ["vllm"]}, "error": None}
+                    for q in queries]
+
+        module.run_eval = _recording_run_eval
+        module.summarize = lambda recs: {"overall": {
+            "fact_entity_recall_avg": 0.5, "errors": 0}}
+        return module
+
+    return _spy
+
+
+def test_the_scored_recall_record_names_the_arm_that_scored_it(monkeypatch):
+    """#3009 clause 1: `run_config` rides beside the score, and carries the
+    configuration keys the nightly artifact already carries."""
+    recorded: dict = {}
+    monkeypatch.setattr(fi, "_load_run_eval", _spy_run_eval_loading(recorded))
+    detail = fi._fact_entity_recall_detail(limit=2)
+    assert detail is not None, detail
+    cfg = detail["run_config"]
+    for key in REQUIRED_RUN_CONFIG_KEYS:
+        assert key in cfg, (key, sorted(cfg))
+    # The three verdicts this consumer is actually read for, at the defaults of the
+    # module that was loaded: the eval scores the graph leg expanded, production
+    # does not (#1000), so the arm is named by its own field while the parity flag
+    # stays green. Values here are read, not asserted from a literal the page and
+    # this file would then both re-state.
+    assert cfg["expand_graph"] is True, cfg
+    assert cfg["expand_graph_matches_production"] is False, cfg
+    assert cfg["matches_production_defaults"] is True, cfg
+    assert isinstance(cfg["semantic_seeding"], dict), cfg
+
+
+def test_the_recorded_seed_top_k_is_the_knob_the_run_measured_against(monkeypatch):
+    """#3009 clause 2: the field cannot be a restated literal, because moving the
+    knob the loaded module measures against moves both the call and the record.
+
+    `vault.RECALL_SEED_TOP_K` is patched to 7 BEFORE the eval script is loaded, and
+    `run_eval.py` imports that name at module scope, so the freshly loaded module's
+    parser default and its parity term both read 7. An implementation restating 10 —
+    or reading `agent_mcp.vault` itself instead of the parser the run goes through —
+    records 10 here and fails on the line below, which is also the #843 failure
+    reproduced: a night seeded at 5 beside a production seeded at 10 that both read
+    `matches_production_defaults: true`.
+    """
+    from agent_mcp import vault
+    recorded: dict = {}
+    monkeypatch.setattr(vault, "RECALL_SEED_TOP_K", 7)
+    monkeypatch.setattr(fi, "_load_run_eval", _spy_run_eval_loading(recorded))
+    detail = fi._fact_entity_recall_detail(limit=2)
+    assert detail["run_config"]["seed_top_k"] == 7, detail["run_config"]
+    # One namespace, not two readers: the count the stamp names is the count the
+    # scorer was actually handed, so the record describes the run it is attached to
+    # rather than the machine it happens to be running on.
+    assert recorded["knobs"]["seed_top_k"] == 7, recorded["knobs"]
+    assert detail["run_config"]["seed_top_k"] == recorded["knobs"]["seed_top_k"]
+
+
+def test_the_recall_config_is_build_run_config_output_not_a_parallel_spelling(monkeypatch):
+    """#3009 clause 1's second half: the record's config IS what
+    `eval/run_eval.py::build_run_config` stamps, key set and values included.
+
+    Compared against a builder read off the same freshly loaded module at the same
+    defaults: a hand-built dict in `fact_improvement.py` — a subset that grows
+    stale, or a superset that invents keys — fails here on the key set even while
+    every value it did copy is correct, which is the drift #843 and #1547 fixed for
+    the nightly artifact and never for this consumer.
+    """
+    recorded: dict = {}
+    real_load = fi._load_run_eval
+    monkeypatch.setattr(fi, "_load_run_eval", _spy_run_eval_loading(recorded))
+    detail = fi._fact_entity_recall_detail(limit=2)
+    reference = real_load()
+    assert detail["run_config"] == reference.build_run_config(
+        reference.build_parser().parse_args([])), (
+        "the improvement record's run_config drifted from the artifact builder")
+    assert "seed_top_k" in detail["run_config"] and "semantic_seeding" in detail["run_config"]
 
 
 def test_a_refused_entity_is_not_recorded_as_scanned_and_clean(world):
