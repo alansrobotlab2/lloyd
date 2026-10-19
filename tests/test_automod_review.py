@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -5348,3 +5349,76 @@ def test_the_post_landing_advisory_names_the_owed_entry_not_a_tag():
     assert "confirm clause 2 now that the change is live" in line
     assert "owed-check" in line
     assert "needs-human" not in line and "tag" not in line
+
+
+# ── the number SHOWN must be the index the merge checks (#3002) ────────────
+# `build_vault_prompt` numbers each clause by its position and
+# `merge_grading_chunks` reads the answer's `clause` value back as that same
+# position. A stored contract that carries its own leading `1.` / `2.` / `4.` /
+# `5.` therefore prints TWO numbers on one line, and the grader answers the one
+# it can read: #2991's `automod_vault_land` was refused eight times as
+# `no verdict for clause(s) 4 in the answer for clause(s) 4 (1 clause per call)
+# [3 grading generations issued]`, with the generation behind the 03:50:11Z row
+# writing `Clause 5 — one activity-log line on #2806 … : MET` for a slice of
+# index 4. The answer was real; the index was the stored enumerator.
+
+STORED_SELF_NUMBERED = [
+    "1. Both witness files exist at the named vault paths and `git ls-files` lists both.",
+    "2. The note states the pre-landing reading with its figures.",
+    "4. The note quotes `wc -l -c < backlog/data/x.json` matching the bytes it ships.",
+    "5. Exactly one activity-log line naming that path and sha256 is appended to #2806.",
+]
+CONTENT_OF_THOSE = [c[3:] for c in STORED_SELF_NUMBERED]
+DOUBLE_NUMBERED = re.compile(r"^[0-9]+[.] [0-9]+[.)]")
+
+
+def test_a_gap_numbered_contract_shows_one_number_and_it_is_the_merge_index(isolated):
+    """#3002 clause 2, measured on the prompt and the merge in one breath: a
+    contract whose stored prefixes skip `3.` still grades as the FOUR clauses the
+    list holds, and the one number printed for its last clause is the 4 the merge
+    will look for."""
+    write_item(isolated, 604, clauses=list(STORED_SELF_NUMBERED))
+    contract = RV.item_contract(604)
+    assert len(contract["clauses"]) == 4, (
+        f"a 4-entry list must be a 4-clause contract: {contract['clauses']}")
+    assert contract["clauses"] == CONTENT_OF_THOSE, contract["clauses"]
+    prompt = RV.build_vault_prompt(contract=contract, paths=["a.md"], diff="+a",
+                                   vault=isolated, clause_indices=[4])
+    doubled = [ln for ln in prompt.splitlines() if DOUBLE_NUMBERED.match(ln)]
+    assert doubled == [], f"a clause shown under two numbers: {doubled}"
+    shown = [ln for ln in prompt.splitlines() if re.match(r"^[0-9]+[.] ", ln)]
+    assert len(shown) == 1, f"one clause asked, one clause shown: {shown}"
+    assert shown[0] == f"4. {CONTENT_OF_THOSE[3]}", shown[0]
+    # And the answer that index produces is the verdict #2991 lost.
+    merged, why = RV.merge_grading_chunks(
+        [[4]], [{"clauses": [{"clause": 4, "verdict": "met", "evidence_path": "a.md"}]}])
+    assert why == "", why
+    assert [c["clause"] for c in merged["clauses"]] == [4]
+
+
+def test_an_answer_for_a_clause_outside_its_slice_is_still_dropped():
+    """#3002 clause 4. The fix is the numbering, not the completeness check: a
+    `clause` value outside the slice this call was asked for is discarded exactly
+    as before, and the gap it leaves still refuses. #2991 stops failing because
+    the grader is now shown `4`, never because the gap was tolerated — and
+    #2263's rule exists because a grader that answers a clause it was not asked
+    to grade has not graded the one it was.
+    """
+    merged, why = RV.merge_grading_chunks(
+        [[4]], [{"clauses": [{"clause": 5, "verdict": "met", "evidence_path": "a.md"}]}])
+    assert merged is None and "no verdict for clause(s) 4" in why, why
+    # A call that answers the WHOLE contract in every generation still contributes
+    # only its own slice, so its extra answers are not counted as duplicates.
+    ok, why = RV.merge_grading_chunks(
+        [[1], [2]],
+        [{"clauses": [{"clause": 1, "verdict": "met", "evidence_path": "a.md"},
+                      {"clause": 2, "verdict": "met", "evidence_path": "a.md"}]},
+         {"clauses": [{"clause": 2, "verdict": "met", "evidence_path": "a.md"}]}])
+    assert why == "", why
+    assert [c["clause"] for c in ok["clauses"]] == [1, 2]
+    # The turn-text rescue filters identically (#2721): an out-of-slice verdict in
+    # the generation's own prose is not a verdict either.
+    recovered = RV.recover_grading_from_turn_text(
+        '{"premise": "sound", "clauses": [{"clause": 5, "verdict": "met",'
+        ' "evidence_path": "a.md"}]}', [4])
+    assert recovered is None, recovered

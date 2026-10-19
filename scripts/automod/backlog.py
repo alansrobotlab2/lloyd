@@ -1121,7 +1121,7 @@ def clean_clauses(values, *, limit: int = READ_MAX_CLAUSES) -> list[str]:
             out.append(s[:CLAUSE_MAX_CHARS])
         if len(out) >= limit:
             break
-    return out
+    return _strip_self_numbering(out)
 
 
 def cap_new_clauses(values) -> tuple[list[str], list[str]]:
@@ -1411,6 +1411,68 @@ def _witness_within_size_bound(path) -> bool:
     """
     size = _witness_size(path)
     return size is not None and size <= WITNESS_MAX_BYTES
+
+
+# ── a contract that numbers itself (#3002) ────────────────────────────────────
+#
+# Why this sits here and not beside `clean_clauses`, which is the only caller: the
+# two line numbers a test pins from ANOTHER tree — the `WITNESS_MAX_BYTES` constant
+# above at :1268 and the applying check at :1413 — are cited by
+# `~/obsidian/skills/autonomy-data-pipeline/SKILL.md` and checked by
+# `tests/test_skill_stranded_ruled_sets.py::test_the_witness_ceiling_cite_resolves_in_the_tree_it_names`,
+# which reads the LIVE vault and this file together. An insertion above :1268 moved
+# the constant to :1317 and broke that pin for a tree this diff does not touch, so
+# the gate's `tests` rung failed on it. Module-level functions resolve by name at
+# call time, so the definition lands here with the cost of a longer scroll and the
+# benefit that no cited line number in this file moves.
+
+def _self_numbered(entries: list[str]) -> bool:
+    """Is this whole list a clause set that brought its own numbering along?
+
+    True only when EVERY entry opens on an `<n>.` / `<n>)` marker AND the numbers
+    run upward — `1., 2., 4., 5.` qualifies; a lone `2. GB of free space must
+    remain` among unnumbered siblings does not, and neither does a single entry
+    numbered `2.`, which is far likelier to be a quantity than clause 2 of a list
+    nobody finished. Requiring the WHOLE list is what keeps a measurement a
+    measurement: the enumerator and the one space after it are the only bytes ever
+    removed, and `split_clause_lines` has applied the same reading to a body
+    section through the same `_CLAUSE_LINE` since #1378.
+    """
+    if not entries:
+        return False
+    nums: list[int] = []
+    for s in entries:
+        m = _CLAUSE_LINE.match(s)
+        if not m:
+            return False
+        nums.append(int(m.group(1)))
+    if len(nums) == 1:
+        return nums[0] == 1
+    return all(b > a for a, b in zip(nums, nums[1:]))
+
+
+def _strip_self_numbering(entries: list[str]) -> list[str]:
+    """Drop the leading enumerators of a self-numbered clause list, keeping order.
+
+    The number a clause is GRADED under is its position: `build_vault_prompt`
+    renders `f"{i}. {clauses[i - 1]}"` and `merge_grading_chunks` reads the
+    answer's `clause` value back as that same index. A list carrying its own `N.`
+    therefore shows the grader two numbers and it answers the one it can read —
+    #2991's `automod_vault_land` was refused eight times as
+    `no verdict for clause(s) 4 in the answer for clause(s) 4 … [3 grading
+    generations issued]` because its 4th of four clauses is stored `5. Exactly one
+    activity-log line …` and the generation answered index 5, which the merge
+    DROPS as out-of-slice (#2263), turning a real `met` into a gap. Stripping here
+    makes the shown number and the checked index the same number by construction,
+    and leaves every stored clause's content untouched.
+    """
+    if not _self_numbered(entries):
+        return entries
+    seen: list[str] = []
+    for s in (_CLAUSE_LINE.match(t).group(2) for t in entries):
+        if s and s not in seen:
+            seen.append(s)
+    return seen
 
 
 #: A witness name belongs to its first occupant, and this generator was the thing

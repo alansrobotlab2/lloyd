@@ -479,3 +479,71 @@ def test_the_cap_gates_the_over_bound_note_as_hard_as_the_clause(tmp_path, isola
         f"and with a slot free the note is owed, so the at-cap half is a brake: "
         f"{fm2.get('human_clauses')}")
 
+
+
+# ── a contract that numbers itself (#3002) ─────────────────────────────────
+# The number a clause is GRADED under is its position: `build_vault_prompt`
+# renders `f"{i}. {clauses[i - 1]}"` and `merge_grading_chunks` matches the
+# answer's `clause` value against that same index. A stored list that carries its
+# own `1.`/`2.`/`4.`/`5.` therefore shows the grader TWO numbers per clause, and
+# the grader answers the one it can read: #2991's `automod_vault_land` failed
+# eight times as `no verdict for clause(s) 4 … [3 grading generations issued]`
+# because its 4th clause is stored as `5. Exactly one activity-log line …` and
+# the generation answered `{"clause": 5}` — an index outside the slice, which the
+# merge drops (#2263), so a real `met` became a gap and the witness was reverted.
+# The gaps in the stored numbering are not noise: #2991 has no `3.` because that
+# clause moved to `human_clauses`.
+
+SELF_NUMBERED = [
+    "1. Both witness files exist at the named vault paths and `git ls-files` lists both.",
+    "2. The note states the pre-landing reading with its figures.",
+    "4. The note quotes `wc -l -c < backlog/data/x.json` matching the bytes it ships.",
+    "5. Exactly one activity-log line naming that path and sha256 is appended to #2806.",
+]
+# Each stored text minus its own `N. ` enumerator and the one space after it.
+UNNUMBERED = [c[3:] for c in SELF_NUMBERED]
+
+
+def test_a_self_numbered_contract_is_stripped_to_its_content():
+    """#3002 clause 1. Every entry of the list opens on an enumerator, so the
+    enumerators are the list's numbering, not any clause's content, and the
+    clause text the grader receives starts with its content."""
+    assert B.clean_clauses(SELF_NUMBERED) == UNNUMBERED
+
+
+def test_a_contract_read_from_an_item_is_stripped_and_keeps_its_clause_count(isolated):
+    """The read path the grader actually uses — front matter through
+    `acceptance_clauses_of` — not just the helper. Four entries stay four: the
+    numbering is stripped, the clauses are not dropped."""
+    p = write_item(isolated, 66120, extra={"acceptance_clauses": list(SELF_NUMBERED)})
+    clauses = B.acceptance_clauses_of(None, _fm(p))
+    assert clauses == UNNUMBERED, clauses
+    assert len(clauses) == 4, f"a 4-entry list must grade as 4 clauses: {clauses}"
+
+
+def test_the_write_path_stores_the_contract_unnumbered(isolated):
+    """What stops the NEXT self-numbered contract. The triage prompt tells every
+    triage to write `"1." "2."`, and a gap opens the moment one clause moves to
+    `HUMAN_CLAUSES` or falls past the clause cap — which is exactly #2991's shape.
+    Storing content makes the position the only number there is."""
+    p = write_item(isolated, 66121)
+    B.record_verdict(B.item_by_id(66121), "confirmed", "re-measured, unchanged",
+                     acceptance="x", acceptance_clauses=list(SELF_NUMBERED))
+    assert list(_fm(p)["acceptance_clauses"]) == UNNUMBERED, _fm(p)["acceptance_clauses"]
+
+
+def test_a_clause_whose_leading_digits_are_a_measurement_survives_byte_for_byte():
+    """#3002 clause 3. One entry opening `2. GB of free space …` among unnumbered
+    siblings is a quantity, not clause 2 of a list: stripping it would delete a
+    unit out of the contract, so the all-entries test is what makes stripping safe."""
+    stored = ["The volume has 3 mounts",
+              "2. GB of free space must remain after the sweep",
+              "The note records the count"]
+    assert B.clean_clauses(stored) == stored
+    # A lone entry is no numbering either unless it opens at 1: nothing here
+    # says "clause 2", and the digits are the measurement.
+    lone = ["2. GB of free space must remain after the sweep"]
+    assert B.clean_clauses(lone) == lone
+    # A single clause that does number itself at 1 is still just a numbering.
+    assert B.clean_clauses(["1. Both witness files exist at the named vault paths."]) == \
+        ["Both witness files exist at the named vault paths."]
