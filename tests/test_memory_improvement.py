@@ -3252,6 +3252,177 @@ def test_wrapper_exit_codes_keep_their_distinct_meanings(monkeypatch, capsys):
     assert "unreadable" not in out, out
 
 
+# ── #3006: a blast-radius halt must leave the process, not only the record ────
+#
+# `run_improvement`'s last-resort guard (the `changed > 1` branch of its apply
+# loop, `agent_mcp/fact_improvement.py:2557-2564`) records an error row, sets
+# `entry["stopped"]`, zeroes the budget and `break`s. It raises nothing, so the
+# ladder above it saw a run that finished and exited 0: the scheduler recorded a
+# success, `/api/autonomy/health`'s `script_alarm_runs` never moved, and the only
+# trace was one stdout line plus a field in a JSON record nobody opens.
+#
+# What the new rung keys on matters as much as that it exists. `entry["stopped"]`
+# ALSO carries "run action budget" (`fact_improvement.py:2549`), which is simply
+# the normal end of a capped apply — so a rung on any `stopped` key would make
+# every budget-limited night red, and the alarm would be dismissed inside a week.
+
+#: The value the writer records for a blast-radius halt, verbatim, and the code
+#: the CLI now returns for it. 4 is the first code this CLI does not already use:
+#: 2 is the unreadable store (and argparse's own usage error), 3 the budget
+#: overrun, and 1 the bare "[error] improvement pass failed" path.
+BLAST_RADIUS_HALT = "blast radius exceeded one fact per action"
+BLAST_RADIUS_EXIT = 4
+
+
+def _halt_entry(**over):
+    """One `per_entity` entry as a halted apply leaves it: the over-reach logged
+    as an un-applied action, the halt on `stopped`, the store healthy and the
+    budget NOT overrun — the exact record that exited 0 before #3006."""
+    entry = {"entity": "Widget", "error": None, "stopped": BLAST_RADIUS_HALT,
+             "actions": [{"kind": "confidence", "loser_fact": "x" * 40,
+                          "reason": "probe", "applied": False, "changed": 3,
+                          "error": "writer expired 3 facts for one action; "
+                                   "run halted for this entity"}]}
+    entry.update(over)
+    return entry
+
+
+def _clean_entry(**over):
+    """The same entity with one fact expired and no halt recorded: what a normal
+    capped apply leaves behind, and the control that keeps the new rung honest."""
+    entry = _halt_entry(**over)
+    entry.pop("stopped", None)
+    entry["actions"] = [{"kind": "confidence", "loser_fact": "x" * 40,
+                         "reason": "probe", "applied": True, "changed": 1,
+                         "error": None}]
+    return entry
+
+
+def _exit_over(monkeypatch, capsys, argv, **rec_over):
+    """The CLI's `main()` over a stubbed record, as (code, stdout, stderr).
+
+    stderr too, unlike the `run` helper in
+    `test_wrapper_exit_codes_keep_their_distinct_meanings` above: #3006's alarm
+    has to land in the TEXT of a tool result. `app/autonomy.py` scans tool
+    results with `EXIT_SENTINEL_RE` and records what it finds in the run's
+    `meta_json.script_alarm` — it never sees the exit code, which is the whole
+    reason #2619's alarm night recorded `status: success`.
+    """
+    rec = {"apply": True, "signals": ["drift"], "entities": ["Widget"],
+           "drift_candidates_total": 1, "actions_planned": 2, "actions_taken": 1,
+           "before_active": 10, "after_active": 9, "delta_active": -1,
+           "per_entity": [_halt_entry()], "store_ok": True, "store_error": None,
+           "kg_db": "/x/kg.sqlite", "fact_entity_recall": None,
+           "record_path": "/x/record.json"}
+    rec.update(rec_over)
+    spec = importlib.util.spec_from_file_location(
+        "fact_improvement_script_blast_radius", _SCRIPT_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(fi, "run_improvement", lambda **kw: rec)
+    monkeypatch.setattr(sys, "argv", ["fact-improvement.py", *argv])
+    code = mod.main()
+    cap = capsys.readouterr()
+    return code, cap.out, cap.err
+
+
+def test_a_blast_radius_halt_exits_a_code_distinct_from_2_and_3(monkeypatch, capsys):
+    """Clause 1: a halted apply — store healthy, budget not overrun — can no
+    longer exit 0. Before #3006 all three cases below printed exit 0, the halt
+    byte-identical to a clean apply."""
+    code, out, err = _exit_over(monkeypatch, capsys,
+                                ["--apply", "--entity", "Widget", "--max-actions", "10"])
+    assert code == BLAST_RADIUS_EXIT, (
+        f"a halt with store_ok True and actions_taken 1 <= 10 must not exit 0 "
+        f"(the #3006 premise); got {code}\nstdout:\n{out}\nstderr:\n{err}")
+    assert code not in (2, 3), (
+        "the halt is neither the unreadable-store rung nor the budget overrun; "
+        "collapsing it into either loses which guard fired")
+    # And the halt stays printed on both halves of the stream: the human branch
+    # carries `= Widget: stopped — <halt>` on stdout, the `[error]` alarm goes to
+    # stderr beside the overrun rung's (so a `--json` reader still parses
+    # stdout). A code with no line saying which guard fired is the false green in
+    # a different column (#1383's rule).
+    assert BLAST_RADIUS_HALT in out, out
+    assert "= Widget: stopped —" in out, out
+    assert "[error] blast radius exceeded for Widget" in err, err
+
+
+def test_a_halted_apply_prints_the_sentinel_the_fleet_scanner_reads(monkeypatch, capsys):
+    """Clause 4: the halt's code reaches `app/autonomy.py`'s scanner on BOTH
+    streams, in the shape it matches — checked against the real
+    `_scan_exit_sentinels`, not a copy of its regex, so the format cannot drift
+    from the reader without one of these two tests going red. Checked in human
+    and `--json` mode alike: task 84's runner pipes, and a code that only prints
+    on one branch of the printer is still invisible on the other."""
+    from app.autonomy import _scan_exit_sentinels
+
+    expected = {"fact-improvement.py": BLAST_RADIUS_EXIT}
+    for argv in (["--apply", "--entity", "Widget", "--max-actions", "10"],
+                 ["--apply", "--json"]):
+        code, out, err = _exit_over(monkeypatch, capsys, argv)
+        assert code == BLAST_RADIUS_EXIT, argv
+        for text, where in ((out, "stdout"), (err, "stderr")):
+            assert _scan_exit_sentinels(text) == expected, (
+                f"{where} of {argv} does not read back as an alarm for this "
+                f"script at this code:\n{text}")
+
+    # The sentinel is the ONLY thing the halt adds to stdout: the alarm went to
+    # stderr, so a `--json` consumer can still take the record off the front of
+    # the stream. This is the trade the rung makes — the fleet reads the merged
+    # stream and needs the line, a JSON reader must not be handed prose.
+    code, out, err = _exit_over(monkeypatch, capsys, ["--apply", "--json"])
+    payload = json.loads(out[:out.index("\nLLOYD_SCRIPT_EXIT")])
+    assert payload["per_entity"][0]["stopped"] == BLAST_RADIUS_HALT, payload
+    assert out.count("LLOYD_SCRIPT_EXIT") == 1, (
+        f"exactly one sentinel line, last: {out!r}")
+
+
+def test_the_halt_rung_keys_on_the_halt_value_not_on_any_stop(monkeypatch, capsys):
+    """Clause 2: `stopped` is not the alarm — its VALUE is. "run action budget"
+    is how every capped apply ends, so an alarm on any `stopped` key would make
+    a normal night red; a clean apply has no `stopped` at all and stays green.
+    Neither may print a sentinel line: `exit=0` is deliberately unmatchable by
+    `EXIT_SENTINEL_RE`, and emitting one anyway would say "a script ran" where
+    the marker means "a script is red"."""
+    code, out, err = _exit_over(
+        monkeypatch, capsys, ["--apply", "--entity", "Widget", "--max-actions", "10"],
+        per_entity=[_halt_entry(stopped="run action budget"), _clean_entry()])
+    assert code == 0, (
+        f"a budget stop is the normal end of a capped apply, not an alarm; "
+        f"got {code}\nstdout:\n{out}\nstderr:\n{err}")
+    assert "LLOYD_SCRIPT_EXIT" not in out + err, (
+        "a green run must print no exit sentinel — one on a 0 would make the "
+        "marker mean 'ran' instead of 'red'")
+
+    code, out, err = _exit_over(
+        monkeypatch, capsys, ["--apply", "--entity", "Widget", "--max-actions", "10"],
+        per_entity=[_clean_entry()])
+    assert code == 0, f"a clean apply stays green; got {code}\n{out}\n{err}"
+    assert "LLOYD_SCRIPT_EXIT" not in out + err, out
+
+
+def test_the_halt_rung_leaves_3_and_2_their_codes_and_their_order(monkeypatch, capsys):
+    """Clause 3: the new rung is additive. A budget overrun keeps 3 even while
+    an entity also carries the halt (the overrun is the bigger number and the
+    older signal, and it is checked first), and an unreadable store with no halt
+    keeps 2 — the halt must not swallow either existing verdict."""
+    code, out, err = _exit_over(
+        monkeypatch, capsys, ["--apply", "--entity", "Widget", "--max-actions", "10"],
+        actions_taken=11, actions_planned=11)
+    assert code == 3, (
+        f"a 11-of-10 overrun keeps 3 even beside a halt; got {code}\n{out}\n{err}")
+    assert "over the 10 allowed" in err, err
+
+    code, out, err = _exit_over(
+        monkeypatch, capsys, ["--apply", "--entity", "Widget", "--max-actions", "10"],
+        per_entity=[_clean_entry()], store_ok=False,
+        store_error="StoreUnavailable: gone",
+        before_active=-1, after_active=-1, delta_active=None)
+    assert code == 2, f"an unreadable store with no halt keeps 2; got {code}\n{out}"
+    assert "[warn] knowledge-graph store unreadable: StoreUnavailable: gone" in out, out
+
+
 # ── #1654: an unreadable store must stop the WRITES, not the pass ────────────
 #
 # #1383 made an unreadable store loud — one probe, a verdict in the record, a

@@ -18,10 +18,25 @@ even when the markdown-driven half (drift, contradiction pairs) succeeded,
 because partial success must be reportable as partial, not as clean. Exits 3
 when it completed but claims to have changed more facts than its own budget
 allowed — a distinct code, and an overrun keeps it even when the store was
-also unreadable. A consumer that reports success when it could not see the
-graph is worse than none — same rule knowledge-health-report.py runs on (it
+also unreadable. Exits 4 when the apply loop stopped mid-run because ONE
+ACTION marked more than one fact (the blast-radius halt, #3006): facts may
+already have been retired by the action that tripped it, so a run that
+halted can never report itself as a success — and 4 is printed only for that
+value, never for the ordinary `run action budget` stop that ends a capped
+apply. A consumer that reports success when it could not see the graph is
+worse than none — same rule knowledge-health-report.py runs on (it
 prints `STORE UNAVAILABLE: …` to stderr; this pass keeps its line beside the
 counts on stdout, where a counts-reader cannot miss it).
+
+The 4 path also prints `LLOYD_SCRIPT_EXIT: fact-improvement.py exit=4` on
+stdout AND stderr before it leaves (#2619, whose rule this borrows): a
+scheduled run's exit code dies inside the agent turn that invoked it, so the
+line is the half the fleet can read — `app/autonomy.py` scans each tool result
+for it into that run's `meta_json.script_alarm`, which is what
+`/api/autonomy/health`'s `script_alarm_runs` counts. The 2 and 3 rungs return
+their codes only, as they always have: a code that prints no sentinel is
+invisible to that counter, and closing that gap for the other two rungs is a
+separate decision, not part of #3006.
 """
 
 from __future__ import annotations
@@ -35,6 +50,45 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from agent_mcp import fact_improvement as fi  # noqa: E402
+
+#: Exit code for a run whose apply loop hit the blast-radius guard
+#: (`agent_mcp/fact_improvement.py::run_improvement`, the `changed > 1` branch).
+#: 4 because 2 is the unreadable store and argparse's own usage error, 3 is the
+#: budget overrun, and 1 is the generic "the pass raised" path.
+BLAST_RADIUS_EXIT = 4
+
+#: Marker line naming this script's real exit code, printed just before a
+#: non-zero exit. Its format is `app/autonomy.py`'s `EXIT_SENTINEL_RE`, and
+#: `tests/test_memory_improvement.py::test_a_halted_apply_prints_the_sentinel_the_fleet_scanner_reads`
+#: checks the output against that module's real `_scan_exit_sentinels` rather
+#: than a copy of the pattern, so the two cannot drift quietly
+#: (#2619, `scripts/memory/knowledge-health-report.py::emit_exit_sentinel`).
+EXIT_SENTINEL_PREFIX = "LLOYD_SCRIPT_EXIT: "
+
+
+def _emit_exit_sentinel(code: int) -> None:
+    """Print the exit-code marker line on both streams. See EXIT_SENTINEL_PREFIX.
+
+    Both, and last: the scheduled invocation pipes `2>&1 | tail`, so a line that
+    only exists on one stream, or only before the rest of the output, is the
+    line that gets lost.
+    """
+    line = f"{EXIT_SENTINEL_PREFIX}{Path(__file__).name} exit={code}"
+    print(line)
+    print(line, file=sys.stderr)
+
+
+def _blast_radius_halt(rec: dict) -> list:
+    """Entities this run halted on, for the blast-radius guard (#3006).
+
+    Keys on the VALUE, never on a `stopped` key being present: the same field
+    carries `RUN_BUDGET_STOP` on every apply that simply ran out of budget, and
+    that is the normal end of a capped run, not a writer that over-reached.
+    """
+    return [str(entry.get("entity") or "?")
+            for entry in (rec.get("per_entity") or [])
+            if isinstance(entry, dict)
+            and entry.get("stopped") == fi.BLAST_RADIUS_HALT]
 
 
 def main() -> int:
@@ -201,6 +255,26 @@ def main() -> int:
               " allowed by this run — inspect the record before trusting it",
               file=sys.stderr)
         return 3
+    halted = _blast_radius_halt(rec)
+    if halted:
+        # Checked after the overrun so a 10-fact night keeps its 3, and before
+        # the store rung because a writer that just marked more than it was
+        # aimed at is the fact a reader has to see first: the store may be
+        # perfectly healthy and the facts still be gone (#3006). The per-entity
+        # `= <entity>: stopped — …` line above carries the same fact, but only
+        # on the human branch — under `--json` stdout was the record and nothing
+        # named the halt at all, which is how a halted apply reached the
+        # scheduler looking like a successful run. Like the overrun rung above,
+        # the `[error]` line goes to stderr so a `--json` reader still gets a
+        # parseable record on stdout; the sentinel below is the one line that
+        # goes to both, because the scheduler reads the streams merged.
+        print(f"[error] blast radius exceeded for {', '.join(halted)}: one action "
+              "marked more than one fact, so the apply stopped for that entity — "
+              "facts may already be retired; inspect "
+              f"{rec.get('record_path') or rec.get('record_error') or 'the run record'} "
+              "before trusting this run", file=sys.stderr)
+        _emit_exit_sentinel(BLAST_RADIUS_EXIT)
+        return BLAST_RADIUS_EXIT
     if rec.get("store_ok") is False:
         # #1383: the markdown half may have planned and reported everything
         # correctly and the graph still was never seen. Checked after the

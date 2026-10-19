@@ -179,14 +179,32 @@ action whose loser carries an attribution is aimed by that identity, which is th
 only route allowed to attach the `conflicts_with` trace (#1817); a `superseded`
 action keeps the substring route — `_aim_substring` grows 60 → 120 → full text and
 drops the action if the probe still matches two stored facts — with
-`stop_after_first=True`, so one action cannot mark two facts that contain the same
-sentence. The `invalid_at`/`invalid_reason` vs `expired_at`/`expire_reason` split
-this section used to promise for later is in place today. What remains of the old
-protection is the tripwire above the writer: `run_improvement` records an error and
-halts the entity if a mark ever lands on more than one fact, but it halts into the
-record and a stdout line only — the CLI still exits 0, so a halted apply is a
-successful run to the scheduler (#3006). The live collision count is in
-`scripts/memory/measure_fact_id_collisions.py`.
+`stop_after_first=True`. That flag caps the route at one mark **per file**, not per
+action: both `if stop_after_first: break` statements sit inside the per-fact loop,
+while the loop above it walks every file in the scope, so an action aimed at a phrase
+two category files share leaves one mark in each.
+
+That is the route the guard above the writer is still reachable from, and the only
+one. `apply_action`'s scope is
+`[FACTS_ROOT / action["loser_source_file"]]` when the loser carries an attribution
+and `list(entity_dir.glob("*.md"))` when it does not — the plan writes `""` for an
+unattributed loser — so a `superseded` action whose loser came from a view with no
+`source_file` scans every fact file of the entity, one mark per file, and returns
+`expired_count` above 1 on ordinary data (a phrase two categories happen to share).
+The `(file, id)` identity route is the capped one: its scope is the single attributed
+file and `stop_after_first=True` stops at that file's first mark, so it cannot mark
+two facts and cannot trip the guard, duplicated ids notwithstanding. The
+`invalid_at`/`invalid_reason` vs `expired_at`/`expire_reason` split this section used
+to promise for later is in place today. What remains of the old protection is that
+tripwire: `run_improvement` records an error and halts the entity if a mark ever
+lands on more than one fact. It used to halt into the record and one stdout line
+only, so the CLI exited 0 and a halted apply was a successful run to the scheduler;
+it now returns **4** and prints `LLOYD_SCRIPT_EXIT: fact-improvement.py exit=4` on
+both streams (#3006), because the run that tripped the guard has already retired a
+fact and the operator has to be told before the next reader trusts the record. The
+alarm keys on the halt's VALUE, so the ordinary `run action budget` stop that ends a
+capped apply still exits 0, and a budget overrun still returns 3. The live collision
+count is in `scripts/memory/measure_fact_id_collisions.py`.
 
 ## 4. What it did to the metric it is required to move
 
@@ -309,8 +327,8 @@ a day before its code half).
 | path | role |
 |---|---|
 | `agent_mcp/fact_improvement.py` | the loop: signals → plan → apply → record |
-| `scripts/memory/fact-improvement.py` | CLI; exits 2 on an unreadable store, 3 when the run's action budget is overrun — a blast-radius halt exits 0 (#3006) |
-| `tests/test_memory_improvement.py` | 124 tests (2026-10-19), incl. the one-fact-per-action and near-duplicate guards, the per-category rescan's scope rules (#1251), and the schedule wiring (task armed + script named by the skill exists) |
+| `scripts/memory/fact-improvement.py` | CLI; exits 2 on an unreadable store, 3 when the run's action budget is overrun, **4** when the apply loop halted on the blast-radius guard, with `LLOYD_SCRIPT_EXIT: fact-improvement.py exit=4` on both streams so the halt reaches `meta_json.script_alarm` / `script_alarm_runs` instead of exiting 0 unseen (#3006). The halt is reachable only from the **text route whose `loser_source_file` is empty** — scope `entity_dir.glob("*.md")`, one mark per file, so a phrase two category files share marks one in each; the `(file, id)` identity route is capped at one mark and cannot trip it (§3) |
+| `tests/test_memory_improvement.py` | 129 tests (2026-10-19), incl. the one-fact-per-action and near-duplicate guards, the per-category rescan's scope rules (#1251), the exit-code ladder and the blast-radius halt's 4 + sentinel line (#3006), and the schedule wiring (task armed + script named by the skill exists) |
 | `skills/fact-improvement/SKILL.md` + `autonomy/84-fact-improvement.md` | the scheduled consumer — armed `up_next`, daily, window 14:00 local, plan mode only |
 
 ## Review log

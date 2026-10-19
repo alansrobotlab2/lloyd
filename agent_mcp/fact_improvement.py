@@ -380,6 +380,15 @@ _LINEAGE_FIELDS = ("source_doc", "source_hash")
 MAX_ACTIONS_PER_ENTITY = 5
 # Cap per run across all entities.
 MAX_ACTIONS_PER_RUN = 25
+# The two things `entry["stopped"]` can say about an entity's apply loop, named
+# because the difference is the whole content of the alarm downstream: a budget
+# stop is the ordinary end of a capped apply, while the blast-radius halt means
+# one action marked more than one fact and the loop refused to keep deleting.
+# `scripts/memory/fact-improvement.py` exits on the VALUE of the second one only
+# (#3006) — keying on a `stopped` key being present at all would make every
+# budget-limited run red, which is how an alarm gets ignored.
+RUN_BUDGET_STOP = "run action budget"
+BLAST_RADIUS_HALT = "blast radius exceeded one fact per action"
 # Substring length used to aim `fact_invalidate` at one fact. The tool matches
 # on a case-insensitive substring, so a 60-char prefix is specific in practice.
 _SUBSTRING_LEN = 60
@@ -2546,20 +2555,26 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         if apply_writes:
             for action in plan["actions"]:
                 if budget <= 0:
-                    entry["stopped"] = "run action budget"
+                    entry["stopped"] = RUN_BUDGET_STOP
                     break
                 result = apply_action(action, now_iso)
                 changed = int(result.get("expired_count") or 0)
-                # One action, at most one fact: `apply_action` only ever aims a
-                # substring that matches a single stored fact. Anything larger
-                # here means the writer over-reached, so the run reports it and
-                # stops rather than continuing to delete.
+                # One action, at most one fact. `stop_after_first=True` caps the
+                # text route at ONE MARK PER FILE, not per action: the scope is
+                # every category file of the entity whenever the loser carries no
+                # attribution (`loser_source_file` empty), so a phrase shared by
+                # facts in two of those files marks one in each. The `(file, id)`
+                # identity route is the capped one and cannot reach 2. Either
+                # way a count above 1 means the writer over-reached, so the run
+                # reports it and stops rather than continuing to delete — and
+                # `scripts/memory/fact-improvement.py` now exits 4 on this value
+                # instead of reporting the halted apply as a clean run (#3006).
                 if changed > 1:
                     entry["actions"].append({
                         "kind": action["kind"], "loser_fact": action["loser_fact"][:90],
                         "reason": action["reason"], "applied": False, "changed": changed,
                         "error": f"writer expired {changed} facts for one action; run halted for this entity"})
-                    entry["stopped"] = "blast radius exceeded one fact per action"
+                    entry["stopped"] = BLAST_RADIUS_HALT
                     budget = 0
                     break
                 taken += changed
