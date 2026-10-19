@@ -1660,3 +1660,145 @@ def test_the_claims_instruction_tells_a_pilot_run_to_bind_a_closed_set():
         block = autonomy._evidence_prompt(tid, gaps=[])
         assert f"{evidence.RUN_RECORDS_DIR}/<task_id>" in block, (
             f"pilot task {tid} is not being handed the closed-set rule")
+
+
+# ── A directory where the check needs a file (#2993) ────────────────────────
+#
+# Every check below is handed a REAL directory seeded with real files, and every
+# one of them used to grade the directory as if it were a missing file:
+# `refuted observed=0` with the false detail `does not exist` for `count_eq` and
+# `json_key`, and — the only false PASS of the set — `verified` for
+# `regex expect=absent`, because a path that "does not exist" cannot hold a
+# match. Four such misgrades sat in the ledger (runs 20261013_090004_1712aa,
+# 20261012_050010_a0f87f, 20261004_050044_c1b854, 20260928_080049_141f03, on
+# `_pipeline/reflection`, `autonomy-runs` and `safety`). A check that never ran
+# is the check's failure, so all three sites now return `insufficient` with a
+# detail naming the directory and the check — never a count, never a pass.
+
+def _seed_dir(tmp_path, name="reflection"):
+    """A directory holding files, so a `count_eq` over it is a check that could
+    have produced a number and did not — not a check against empty space."""
+    d = tmp_path / name
+    d.mkdir()
+    (d / "a.md").write_text("handoff one\n")
+    (d / "b.md").write_text("handoff two\n")
+    return d
+
+
+def test_count_eq_matches_over_a_directory_is_insufficient_not_refuted(tmp_path):
+    d = _seed_dir(tmp_path)
+    v = verify_claim({"claim": "11 checked_at entries", "check": {
+        "kind": "count_eq", "path": "reflection", "measure": "matches",
+        "pattern": "checked_at", "expected": 11}}, root=tmp_path)
+    assert v["status"] == "insufficient"
+    assert v["observed"] is None, "a directory is not a count of zero"
+    assert str(d) in v["detail"] and "matches" in v["detail"]
+    assert "does not exist" not in v["detail"]
+
+
+def test_count_eq_bytes_and_lines_over_a_directory_are_insufficient_too(tmp_path):
+    d = _seed_dir(tmp_path)
+    for measure in ("bytes", "lines"):
+        v = verify_claim({"claim": f"the store is 26 {measure}", "check": {
+            "kind": "count_eq", "path": "reflection", "measure": measure,
+            "expected": 26}}, root=tmp_path)
+        assert v["status"] == "insufficient", measure
+        assert v["observed"] is None, measure
+        assert str(d) in v["detail"] and measure in v["detail"], v["detail"]
+        assert "does not exist" not in v["detail"], v["detail"]
+
+
+def test_json_key_over_a_directory_is_insufficient_not_refuted(tmp_path):
+    d = _seed_dir(tmp_path, name="state")
+    (d / "pipeline.json").write_text(json.dumps({"rows_written": 25}))
+    v = verify_claim({"claim": "state records 25 rows", "check": {
+        "kind": "json_key", "path": "state", "key": "rows_written",
+        "expected": 25}}, root=tmp_path)
+    assert v["status"] == "insufficient" and v["observed"] is None
+    assert str(d) in v["detail"] and "json_key" in v["detail"]
+    assert "does not exist" not in v["detail"]
+
+
+def test_regex_expect_absent_over_a_directory_cannot_verify(tmp_path):
+    """The false pass: an absence claim used to be satisfied by pointing at a
+    directory, and the bundle then recorded it as a fact the next run has to
+    PRESERVE rather than a gap it has to address."""
+    d = _seed_dir(tmp_path)
+    for want in ("absent", "match"):
+        v = verify_claim({"claim": f"no Traceback in the store ({want})", "check": {
+            "kind": "regex", "path": "reflection", "pattern": "Traceback",
+            "expect": want}}, root=tmp_path)
+        assert v["status"] == "insufficient", want
+        assert v["observed"] is None, want
+        assert str(d) in v["detail"] and "regex" in v["detail"], v["detail"]
+
+    b = verify_bundle([{"claim": "no Traceback in the store",
+                        "check": {"kind": "regex", "path": "reflection",
+                                  "pattern": "Traceback", "expect": "absent"}}],
+                      root=tmp_path)
+    assert b["verified"] == []
+    assert b["counts"] == {"total": 1, "verified": 0, "refuted": 0,
+                           "insufficient": 1}
+    assert b["gap"] == [f"[insufficient] no Traceback in the store — {d} is a "
+                        f"directory, not a file — the regex check never ran, so "
+                        f"bind the file inside it"]
+
+
+# ── The controls: a genuinely missing file keeps today's grades ─────────────
+
+def test_a_missing_file_keeps_every_grade_it_has_today(tmp_path):
+    """Clause 5's control. `run_scheduled-task_20261018_080011_14b93a` is the
+    live positive case: a `does not exist` refutation is honest ONLY when the
+    path really is absent, so the new branch may not widen it. The directory
+    probes above and these lines are the two halves of one distinction — the
+    gap text is what separates them, and it says `is a directory` for one and
+    `does not exist` for the other."""
+    (tmp_path / "here.md").write_text("| Total relationships | 0 |\n")
+    missing = "no-such-file-xyz.md"
+
+    assert verify_claim({"claim": "a match", "check": {
+        "kind": "regex", "path": missing, "pattern": "Traceback",
+        "expect": "match"}}, root=tmp_path)["status"] == "refuted"
+    absent = verify_claim({"claim": "no match", "check": {
+        "kind": "regex", "path": missing, "pattern": "Traceback",
+        "expect": "absent"}}, root=tmp_path)
+    assert absent["status"] == "verified" and absent["observed"] == 0
+    assert "does not exist" in absent["detail"]
+
+    json_v = verify_claim({"claim": "25 rows", "check": {
+        "kind": "json_key", "path": missing, "key": "rows_written",
+        "expected": 25}}, root=tmp_path)
+    assert json_v["status"] == "refuted" and json_v["observed"] is None
+    assert "does not exist" in json_v["detail"]
+
+    for measure, check in (
+            ("bytes", {"measure": "bytes", "expected": 100}),
+            ("lines", {"measure": "lines", "expected": 3}),
+            ("matches", {"measure": "matches", "pattern": "Traceback",
+                         "expected": 2})):
+        v = verify_claim({"claim": f"the file has {measure}",
+                          "check": dict(kind="count_eq", path=missing, **check)},
+                         root=tmp_path)
+        assert v["status"] == "refuted", measure
+        assert v["observed"] == 0, measure
+        assert "does not exist" in v["detail"], v["detail"]
+
+    assert verify_claim({"claim": "a match on a real file", "check": {
+        "kind": "regex", "path": "here.md",
+        "pattern": r"^\| Total relationships \| 0 \|$"}},
+        root=tmp_path)["status"] == "verified"
+
+
+def test_count_eq_measure_files_over_a_path_that_is_a_file_stays_refuted(tmp_path):
+    """The `files` measure needs a directory and says so: a FILE is not one, and
+    that is a false count, not an unevaluable check. The missing-directory half
+    of this is pinned by
+    `test_count_eq_on_a_missing_directory_is_refuted_with_a_zero`; the new
+    directory branch sits in the OTHER branch and may not reach either."""
+    f = tmp_path / "notes.md"
+    f.write_text("a\nb\n")
+    v = verify_claim({"claim": "3 files", "check": {
+        "kind": "count_eq", "path": "notes.md", "measure": "files",
+        "expected": 3}}, root=tmp_path)
+    assert v["status"] == "refuted" and v["observed"] == 0
+    assert "is not a directory" in v["detail"]

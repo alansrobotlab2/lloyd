@@ -177,6 +177,31 @@ def _read_text(target: Path) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _directory_target(target: Path, check_name: str) -> tuple[str, Any, str]:
+    """A file-measuring check was handed a directory: it never ran, so it graded nothing.
+
+    `verify_claim`'s own rule, and the module's rule 2 above: every failure mode of
+    the *check itself* is `insufficient`, and only a check that ran and disagreed
+    with the disk is `refuted`. Keying on `not target.is_file()` conflated the two,
+    so a `count_eq` over a directory reported `refuted observed=0` with the false
+    detail `does not exist`, and `regex expect=absent` reported *verified* — a
+    directory satisfying an absence claim, which the next run is then told to
+    preserve. Four `count_eq` misgrades of exactly this shape sit in the ledger rows
+    from 2026-09-28 onward, over `_pipeline/reflection`, `autonomy-runs` and
+    `safety` (#2993).
+
+    The grade alone is not what this helper is for. Deleting the guard instead would
+    land the right status by accident — `_read_text` raises `IsADirectoryError`,
+    which `verify_claim` already catches as `insufficient` — but with the detail
+    `read failed: [Errno 21] Is a directory`, naming neither the check that failed
+    to run nor what to bind. That detail is the whole instruction the next run of
+    the task gets, so it names the directory, the check, and the repair.
+    """
+    return ("insufficient", None,
+            f"{target} is a directory, not a file — the {check_name} check never "
+            f"ran, so bind the file inside it")
+
+
 # ── The four checks ────────────────────────────────────────────────────────
 
 def _check_file_exists(check: dict, root: Path) -> tuple[str, Any, str]:
@@ -250,6 +275,8 @@ def _check_count_eq(check: dict, root: Path) -> tuple[str, Any, str]:
                     f"record is in that corpus before its claims are graded.")
         observed = sum(1 for p in target.glob(pattern) if p.is_file())
     else:
+        if target.is_dir():
+            return _directory_target(target, f"count_eq measure={measure}")
         if not target.is_file():
             return ("refuted", 0, f"{target} does not exist")
         if measure == "bytes":
@@ -301,6 +328,8 @@ def _check_json_key(check: dict, root: Path) -> tuple[str, Any, str]:
     key = check.get("key")
     if not isinstance(key, str) or not key:
         return "insufficient", None, "json_key needs a dotted `key`"
+    if target.is_dir():
+        return _directory_target(target, "json_key")
     if not target.is_file():
         return "refuted", None, f"{target} does not exist"
     try:
@@ -328,6 +357,10 @@ def _check_regex(check: dict, root: Path) -> tuple[str, Any, str]:
     want = str(check.get("expect") or "match")
     if want not in ("match", "absent"):
         return "insufficient", None, "regex `expect` must be match or absent"
+    if target.is_dir():
+        # The `absent` arm below is the one this branch exists for: an absence
+        # claim used to be satisfiable by pointing `path` at a directory.
+        return _directory_target(target, "regex")
     if not target.is_file():
         if want == "absent":
             return "verified", 0, f"{target} does not exist, so nothing matches"
