@@ -49,7 +49,8 @@ indistinguishable from the legacy backtick-wrapped row form that
 no room.** A ledger lives in the topic directory, but since #2212 it is not measured
 by the topic ceiling every other file there gets: `app/memory_ceiling.ledger_ceiling`
 derives its bound as `LEDGER_MULTIPLIER` times the ceiling of the file it audits
-(76,800 B for `memory-md-ledger`, 49,152 B for `user-md-ledger`), because a row is
+(at time of writing 4 x MEMORY.md's 25,600 B for `memory-md-ledger`, and 4 x
+USER.md's 16,384 B for `user-md-ledger`), because a row is
 written per loaded line and the old shared bound would have stopped the audit with
 lines still uncovered. Its only bound is still `memory_add`'s `topic_size_error`
 refusal — now a message that names that derived bound and says not to split the

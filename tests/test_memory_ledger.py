@@ -360,10 +360,11 @@ def test_curate_stays_off_while_the_index_has_room_to_append(tmp_path):
 # never a way to make room (#1881). What #2212 did is change the bound the room is
 # measured against. Before it, a ledger was an ordinary topic file and its only
 # bound was the 32,768 B write refusal; since it, `memory-md-ledger` and
-# `user-md-ledger` are measured at `ledger_ceiling()` — 3 x the ceiling of the file
-# each audits, 76,800 B and 49,152 B — while every other topic file keeps the
-# shared 32,768 B. The node that pins "never a way to make room" below therefore
-# refuses an oversized write against 49,152 B now, and the finding is unchanged:
+# `user-md-ledger` are measured at `ledger_ceiling()` — `LEDGER_MULTIPLIER` x the
+# ceiling of the file each audits, 102,400 B and 65,536 B since #3015 fired #2212's
+# trigger — while every other topic file keeps the shared 32,768 B. The node that pins
+# "never a way to make room" below therefore refuses an oversized write against the
+# `user-md-ledger` bound, and the finding is unchanged:
 # archivable rows in the file buy a write nothing.
 
 GONE = "**A line that was retired** — it is no longer in USER.md at all"
@@ -465,9 +466,10 @@ def test_retire_is_never_a_way_to_make_room(tmp_path, monkeypatch):
     now. The behaviour this node exists to pin is untouched — a ledger write that
     would cross the file's bound is refused while archivable rows sit in it, and the
     retire step has no flag that could be used to fit a row — but the bound is no
-    longer the shared topic ceiling: `user-md-ledger` is measured at 3 x USER.md's
-    16,384 B = 49,152 B since #2212. The shared constant is asserted to stay 32,768
-    two lines below, which is the half this change must NOT move."""
+    longer the shared topic ceiling: `user-md-ledger` is measured at 4 x USER.md's
+    16,384 B = 65,536 B (3 x until #3015, which moved the multiple and this number with
+    it). The shared constant is asserted to stay 32,768 two lines below, which is the
+    half neither change must move."""
     import inspect
 
     from agent_mcp import session
@@ -483,12 +485,12 @@ def test_retire_is_never_a_way_to_make_room(tmp_path, monkeypatch):
     assert ml.status(d)["USER.md"]["orphan_rows"], "the fixture holds an archivable row"
 
     ledger_bound = ceiling.topic_ceiling("topics/user-md-ledger")
-    assert ledger_bound == 49_152, "the derived ledger bound moved"
+    assert ledger_bound == 65_536, "the derived ledger bound moved"
     res = session._memory_add({"file": "topics/user-md-ledger",
                                "entry": "- anchor: " + "y" * (ledger_bound + 1)})
 
     assert res.get("code") == "INVALID_PARAM", res
-    assert "49,152" in res["error"], res
+    assert "65,536" in res["error"], res
     assert "32,768" not in res["error"], res
     assert ledger.read_bytes() == before, "the refused write retired nothing to fit"
     assert not (d / "reviews").exists(), "and archived nothing"

@@ -8,9 +8,16 @@ in. Measured 2026-10-05: `MEMORY.md` carries 90 index lines and the
 shared 32,768 B topic ceiling holds ~48 rows — coverage would stop at little over
 half the file, mid-audit, on a night that did nothing wrong.
 
-So the guard derives a ledger's bound: 3 x `prompt_surface.memory_ceiling()` of
-the audited file, which is 76,800 B for `memory-md-ledger` (3 x 25,600) and
-49,152 B for `user-md-ledger` (3 x 16,384). Every other topic file keeps
+So the guard derives a ledger's bound: `LEDGER_MULTIPLIER` x
+`prompt_surface.memory_ceiling()` of the audited file, which is 102,400 B for
+`memory-md-ledger` (4 x 25,600) and 65,536 B for `user-md-ledger` (4 x 16,384). The
+multiple was 3 until #3015 fired #2212's own re-open trigger on 2026-10-19 (the ledger
+at 75,863 B of its then-76,800 B bound, `MEMORY.md` under 24,000 B), so the literals
+below are the fired trigger's numbers, not a fresh policy. A node that needs a size
+relative to the bound derives it from `ledger_ceiling()`; only the nodes that OWN the
+figure — the arithmetic node, the multiplier-block node and the clause-2 boundary node —
+write it as a literal, so a bump has three places to move and not a dozen. Every other
+topic file keeps
 `TOPIC_FILE_CEILING_BYTES` = 32,768, unchanged — a topic is pulled whole into a
 tool result, a ledger never is (`step-2a-ter-curation.md` §1: it "is never loaded
 into a prompt"), so the reason a topic is bounded does not apply to a ledger.
@@ -93,24 +100,125 @@ ORDINARY = "voice-loop"
 
 # ── clause 4: the bound is derived, and it does not spread ────────────────────
 
-def test_the_ledger_bound_is_three_times_the_ceiling_of_the_file_it_audits():
-    """Clause 4: the number is arithmetic over the audited file's own ceiling, so
-    the two stay together if `prompt_surface` ever moves a ceiling — and neither
-    number is a literal someone has to remember to update.
+def test_the_ledger_bound_is_four_times_the_ceiling_of_the_file_it_audits():
+    """Clause 1 of #3015, and clause 4 of #2212 unchanged in kind: the number is
+    arithmetic over the audited file's own ceiling, so the two stay together if
+    `prompt_surface` ever moves a ceiling — and neither number is a literal someone
+    has to remember to update.
 
-    `memory-md-ledger` audits MEMORY.md (25,600 B) -> 76,800 B; `user-md-ledger`
-    audits USER.md (16,384 B) -> 49,152 B. 49,152 B over `user-md-ledger`'s live
-    496 B mean row is ~99 rows against 53 loaded lines, which is why USER.md is
-    not yet hitting a wall and MEMORY.md is.
+    `memory-md-ledger` audits MEMORY.md (25,600 B) -> 102,400 B; `user-md-ledger`
+    audits USER.md (16,384 B) -> 65,536 B. Both literals moved with
+    `LEDGER_MULTIPLIER` when #3015 raised it from 3 to 4, and the second one moved
+    with it whether anyone wanted it to or not — which is the property this node
+    exists to pin: one constant, two bounds, no second number to forget.
+
+    The slack each bound leaves is what the bump bought: 102,400 B against the live
+    75,863 B ledger is 26,537 B, ~12 nights at the +2,235 B a 10-stamp curation pass
+    measured on 2026-10-19; over the 847.5 B mean row across its 89 rows that bound
+    holds ~120 rows. `user-md-ledger` sits at 33,991 B of 65,536 B, ~132 rows at its
+    own ~496 B mean against 53 loaded lines, so USER.md was never near a wall.
     """
     assert ps.memory_ceiling("MEMORY.md") == 25_600
     assert ps.memory_ceiling("USER.md") == 16_384
+    assert ceiling.LEDGER_MULTIPLIER == 4, (
+        "the two literals below are 4 x, and #2212's trigger authorizes exactly 4 — a "
+        "fifth would need its own ruling, not an edit here")
 
-    assert ceiling.ledger_ceiling("memory-md-ledger") == 76_800
-    assert ceiling.ledger_ceiling("user-md-ledger") == 49_152
+    assert ceiling.ledger_ceiling("memory-md-ledger") == 102_400
+    assert ceiling.ledger_ceiling("user-md-ledger") == 65_536
     for stem, audited in ceiling.MEMORY_LEDGERS.items():
         assert ceiling.ledger_ceiling(stem) == ceiling.LEDGER_MULTIPLIER * ps.memory_ceiling(audited)
         assert ceiling.topic_ceiling(f"{ceiling.TOPIC_PREFIX}{stem}") == ceiling.ledger_ceiling(stem)
+
+
+def test_the_raised_bound_refuses_one_byte_past_it_and_admits_that_byte(tmp_path, monkeypatch):
+    """#3015 clause 2: the boundary moved with the constant, at the byte and in the text.
+
+    The nightly this item exists for is a write of a few hundred bytes into a ledger
+    that had 937 B of slack, so what matters is not that the bound is bigger but that
+    the SAME call decides differently across it: 102,400 B is accepted and 102,401 B is
+    refused. Both are asked of `memory_write_error` as `memory_add` asks it — a
+    prospective write over a file that does not exist yet, which is the state a first
+    row arrives in — so the pair cannot be satisfied by a guard that only measures
+    bytes already on disk. `MEMORIES_DIR` is redirected to the fixture vault because the
+    guard decides "is this a ledger?" by realpath against that root: unredirected, a
+    `tmp_path` file is outside the corpus, every size is permitted, and the accept half
+    of this node is an unreached branch.
+
+    The refusal text is graded in the same breath because it is the surface a curator
+    acts on, and #3015 moved the number it quotes. It must name 102,400, must spell the
+    derivation (`4 x MEMORY.md's 25,600-byte ceiling`) so a reader can see which
+    constant to argue with, and must still say DO NOT SPLIT: `LEDGERS` in
+    `scripts/memory/memory_ledger.py` reads one file per loaded file, so a second live
+    ledger is rows `status` cannot see, which is a worse failure than the refusal.
+
+    The two sizes come from `ledger_ceiling()` rather than from arithmetic on a literal,
+    so this node stays a boundary check across any future bump; the literal 102,400
+    below is only ever the string the message has to carry.
+    """
+    root = tmp_path / "lloyd"
+    (root / "memory").mkdir(parents=True)
+    monkeypatch.setattr(ceiling, "MEMORIES_DIR", root)
+    bound = ceiling.ledger_ceiling("memory-md-ledger")
+    assert bound == 102_400, "clause 1 owns this figure; the boundary is meaningless without it"
+    ledger = root / "memory" / "memory-md-ledger.md"
+
+    assert ceiling.memory_write_error(ledger, "x" * bound) is None, (
+        f"a write of exactly the bound ({bound} B) was refused: a nightly that fits "
+        "inside its ceiling is not the run this item is about")
+    msg = ceiling.memory_write_error(ledger, "x" * (bound + 1))
+    assert msg is not None, (
+        f"102,401 B into a ledger whose bound is {bound} B was ACCEPTED, so the bound "
+        "did not move and tomorrow's curation pass will be refused or not at random")
+    assert "102,400" in msg, f"the refusal must name the bound it measured against: {msg}"
+    assert "4 x MEMORY.md's 25,600-byte ceiling" in msg, (
+        f"a refusal that names a number without its derivation leaves a curator with "
+        f"nothing to argue with and no way to see it is derived: {msg}")
+    assert "Do not split a live ledger" in msg, (
+        f"the advice half of a ledger refusal is the half that protects the audit: {msg}")
+    assert "32,768" not in msg, msg
+
+
+def test_no_repo_module_quotes_the_old_ledger_cap_as_the_live_bound():
+    """#3015 clause 3: no module that ENFORCES a bound may still print the old one.
+
+    `app/memory_ceiling.py` and `scripts/memory/memory_ledger.py` are the two files a
+    curator reads to learn what a ledger's cap is, beside the guard's own refusal. Each
+    quoted `76,800 B` as the live number in prose; both now spell the derivation
+    instead, because a bound restated as a literal is a second number that has to be
+    remembered, and #3015 is the proof it is not: the multiplier moved under a comment
+    block that had already explained the arithmetic.
+
+    The shape is `_assert_no_ledger_ceiling_claim`'s, and so is its discipline about the
+    0-hit: a ban on a string nobody can show is present in the file it is looking at is
+    indistinguishable from a typo. So each file is first read non-trivially (a short
+    read or a missing constant makes every absence below free), and the pattern is
+    proven to fire by matching it against the sentence the same commit replaced, quoted
+    from the file it was quoted out of. `scripts/memory/memory_ledger.py`'s line is in
+    `OLD_CAP_PROSE` because that is the only way to know the search string is real.
+
+    Deliberately NOT in scope: the committed witness fixture and the live curation
+    skill, which both still say 76,800 and are pinned doing so by
+    `test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling`. A
+    skill edit needs a re-frozen fixture in the same commit (#2468/#2628's pairing) and
+    the vault half is this item's follow-on round, not this one's.
+    """
+    old = "76,800"
+    assert old in ("(76,800 B for `memory-md-ledger`, 49,152 B for `user-md-ledger`), "
+                   "because a row is"), (
+        "the search string is not a fragment of the line this clause retired, so every "
+        "absence below is a pattern nobody has shown can fire")
+
+    for rel, marker in (("app/memory_ceiling.py", "LEDGER_MULTIPLIER"),
+                        ("scripts/memory/memory_ledger.py", "LEDGERS")):
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        assert len(src) > 5_000 and marker in src, (
+            f"{rel} reads as {len(src)} B without {marker!r}, so an absence of "
+            f"{old!r} here proves nothing about the guard")
+        hits = [ln for ln in src.splitlines() if old in ln]
+        assert hits == [], (
+            f"{rel} still quotes {old} — {hits[:3]} — so the prose a curator reads "
+            "contradicts the bound the same file derives")
 
 
 def test_the_input_that_restores_32768_is_the_audited_file_ceiling(tmp_path, monkeypatch):
@@ -168,8 +276,8 @@ def test_a_third_topic_stem_never_receives_the_ledger_bound():
     bound is a property of two named files, not of the topics directory.
 
     `topics/voice-loop` and `topics/big` are measured at 32,768 B exactly as before,
-    and `ledger_ceiling` answers None for them, so no future topic inherits 76,800 B
-    by living in the same directory as a ledger. `topics/big` is the stem
+    and `ledger_ceiling` answers None for them, so no future topic inherits a
+    ledger's multiple by living in the same directory as a ledger. `topics/big` is the stem
     `tests/test_memory_index_cap.py` has pinned since review 2026-09-24, so the two
     files assert the same number from opposite directions.
     """
@@ -254,7 +362,7 @@ def test_the_validator_measures_a_ledger_against_the_same_bound(tmp_path):
         return [e for e in report["errors"] if "topic file" in e]
 
     assert topic_errors("memory-md-ledger") == [], (
-        "a 40,000 B ledger is inside its derived 76,800 B bound, so the report must "
+        "a 40,000 B ledger is inside its derived bound, so the report must "
         "stay clean — at the base blob this same fixture reported the shared 32,768 B "
         "topic ceiling as an error")
     ordinary = topic_errors(ORDINARY)
@@ -575,7 +683,9 @@ def test_the_vault_write_lane_measures_a_ledger_against_the_derived_bound(tmp_pa
     #1010/#507 was about when the nightly grew USER.md to 95,302 B through an
     ungated lane. The two calls differ only in byte count, so the pair attributes the
     difference in outcome to the bound and not to the content: at 40,000 B the ceiling
-    does not refuse at all, at 78,000 B it refuses naming 76,800.
+    does not refuse at all, and one byte past `ledger_ceiling()` it refuses, naming the
+    derived bound — which is 102,400 B since #3015 fired #2212's trigger, so a lane still
+    refusing at 76,800 B would be this node's failure.
 
     Both `VAULT` and `MEMORIES_DIR` are redirected together because the guard decides
     "is this a topic file?" by realpath against the memories root; patching only the
@@ -598,9 +708,10 @@ def test_the_vault_write_lane_measures_a_ledger_against_the_derived_bound(tmp_pa
         f"the accepted half must actually write, or the assertion above is an "
         f"unreached branch: {accepted} bytes on disk")
 
-    big = V._vault_write({"path": rel, "content": pad + "x" * 78_000})
+    over = ceiling.ledger_ceiling("memory-md-ledger") + 1
+    big = V._vault_write({"path": rel, "content": pad + "x" * over})
     err = str(big.get("error", ""))
-    assert "76,800" in err, f"a ledger over its bound must name the bound: {big}"
+    assert "102,400" in err, f"a ledger over its bound must name the bound: {big}"
     assert "32,768" not in err, err
     assert written.stat().st_size == accepted, (
         "a refused write must enter the vault nowhere; the guard returns before the "
@@ -788,6 +899,13 @@ def test_the_archived_gate_report_still_says_the_round_refused_on_skips_not_revi
 # reader instead of inherited from a run that had already moved on. The stale pair it
 # carried before (~113 rows at a 675 B mean row, ~127 index lines at a 202 B mean, both
 # measured 2026-10-05) was refreshed in place to 672 B / 197 B for the same reason.
+#
+# #3015, 2026-10-19: the trigger FIRED, on its own terms and with the same two commands.
+# `memory-md-ledger` 75,863 B (> 70,000) while `MEMORY.md` 20,449 B (< 24,000), 89 rows at
+# an 847.5 B mean, one curation pass having stamped 10 `checked:` fields for +2,235 B. The
+# multiple is 4 as that ruling pre-authorized, and the block below says so. What the note
+# above still owns is the 2026-10-09 measurement, which is not being rewritten: a dated
+# reading stays in the log, and the paragraph above it says "on 2026-10-09" for that reason.
 
 #: Both halves of the retired claim, exactly as `app/memory_ceiling.py` spelled them at
 #: `ff3e5a89`. The first is clause 1's phrase; the second is the RECOMMENDATION that phrase
@@ -796,7 +914,9 @@ def test_the_archived_gate_report_still_says_the_round_refused_on_skips_not_revi
 RETIRED_MULTIPLIER_CLAIMS = ("not decided here", "tightening call")
 
 #: The line the block is the header of — and the string clause 5 requires to still hit.
-MULTIPLIER_DECL = "LEDGER_MULTIPLIER = 3"
+#: #3015 raised it to 4 on #2212's trigger; this is the constant's ONLY spelling in the
+#: repo, which is what makes the grep below a positive control rather than a tautology.
+MULTIPLIER_DECL = "LEDGER_MULTIPLIER = 4"
 
 #: The sentence that carried the retired claim, quoted from `app/memory_ceiling.py` at
 #: `ff3e5a89`. It exists here only as the positive control below: the ban is a 0-hit, and a
@@ -890,7 +1010,10 @@ def test_the_multiplier_block_states_the_ruling_the_trigger_and_the_commands():
     MEMORY.md's index budget does not move`, with the reason the ruling gave (`lowering the
     audited file's ceiling ... would shrink loaded memory, the thing this guard protects`).
     A block that merely dropped the old sentence would pass a bare absence check while
-    leaving `LEDGER_MULTIPLIER = 3` unjustified — the same defect, one sentence shorter.
+    leaving `LEDGER_MULTIPLIER = 4` unjustified — the same defect, one sentence shorter.
+    After #3015 that ruling's own words sit inside the block under "held that", because the
+    block's first job is still to say why a multiple is a multiple; what #3015 adds is that
+    the ruling's trigger then fired, which is the assert group below it.
 
     Clause 3 — the re-open trigger as the ruling's OWN numbers (`memory-md-ledger over
     70,000 B while MEMORY.md is under 24,000 B raises the multiplier to 4`) and attributed
@@ -898,18 +1021,21 @@ def test_the_multiplier_block_states_the_ruling_the_trigger_and_the_commands():
     is a decided conditional and not somebody's guess. Both numbers are read as the pair
     they are: the ledger crossing 70,000 B is only half of it.
 
-    Clause 4 — the two commands that re-derive the means the block quotes, `wc -c` over
-    `lloyd/MEMORY.md` and the mean-row `awk` over `lloyd/memory/memory-md-ledger.md`. The
-    `awk` program's own pattern (`^- \[`) is pinned because it is what makes the mean a
-    mean of ROWS; a block that named `awk` and some program would leave the figure with no
-    way back to the file.
+    Clause 4 (#3015) — the trigger's own firing recorded, with its date and its two
+    measured bytes, and the multiple it authorized named as the one in force. Then the two
+    commands that re-derive the means the block quotes, `wc -c` over `lloyd/MEMORY.md` and
+    the mean-row `awk` over `lloyd/memory/memory-md-ledger.md`. The `awk` program's own
+    pattern (`^- \[`) is pinned because it is what makes the mean a mean of ROWS; a block
+    that named `awk` and some program would leave the figure with no way back to the file.
 
-    The last assert is the one that makes this more than a text search: the number the
+    The last asserts are the ones that make this more than a text search: the number the
     comment states is the number the code holds. Raise `LEDGER_MULTIPLIER` without editing
     the block, or edit the block to say 4 while the constant stays 3, and this is the node
-    that notices the two have parted company. The pre-existing
-    `test_the_ledger_bound_is_three_times_the_ceiling_of_the_file_it_audits` is what shows
-    no behaviour moved: 76,800 B and 49,152 B, unchanged.
+    that notices the two have parted company. Where the behaviour literals moved is pinned
+    by its own node:
+    `test_the_ledger_bound_is_four_times_the_ceiling_of_the_file_it_audits` now reads
+    102,400 B and 65,536 B, and `test_the_input_that_restores_32768_is_the_audited_file_ceiling`
+    is the node that still pins the fallback under the shared topic ceiling, unchanged.
     """
     block, flat = _multiplier_block()
     assert "fixed multiple, not a derivation" in flat, block
@@ -922,12 +1048,23 @@ def test_the_multiplier_block_states_the_ruling_the_trigger_and_the_commands():
     assert ("memory-md-ledger over 70,000 B while MEMORY.md is under 24,000 B raises the "
             "multiplier to 4") in flat, flat
 
+    # #3015 clause 4: the block must say which side of that trigger the code is on. A
+    # block that quotes a conditional without saying it fired leaves `= 4` unjustified and
+    # reads as an unexplained widening — the shape #2467 retired the "still owed" sentence
+    # for. So: the firing is attributed, dated, carries the two measured figures, and
+    # names the multiple now in force beside the constant it authorizes.
+    assert "#3015 is the nightly that found both" in flat, flat
+    assert "2026-10-19" in flat, flat
+    assert "75,863 B" in flat and "20,449 B" in flat, flat
+    assert ("#3015 raised it to 4" in flat or "4 is the pre-authorized multiple" in flat), flat
+
     assert "wc -c lloyd/MEMORY.md" in flat, flat
     assert "awk" in flat and r"^- \[" in flat, flat
     assert "s += length($0)+1" in flat and "END {print n, s/n}" in flat, flat
     assert "lloyd/memory/memory-md-ledger.md" in flat, flat
 
-    assert ceiling.LEDGER_MULTIPLIER == 3, (
-        "the block says the multiplier stays at 3; the constant says otherwise")
-    assert ceiling.ledger_ceiling("memory-md-ledger") == 76_800
-    assert ceiling.ledger_ceiling("user-md-ledger") == 49_152
+    assert ceiling.LEDGER_MULTIPLIER == 4, (
+        "the block records the trigger firing and authorizing 4; the constant says "
+        "otherwise, and one of the two is a claim nobody checked")
+    assert ceiling.ledger_ceiling("memory-md-ledger") == 102_400
+    assert ceiling.ledger_ceiling("user-md-ledger") == 65_536

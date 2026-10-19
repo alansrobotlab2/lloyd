@@ -926,28 +926,33 @@ def test_a_long_name_outside_the_topics_directory_is_still_nobody_s_business(
 # `tests/test_memory_ledger_bound.py`.
 
 
-def test_a_ledger_write_of_40000_bytes_is_allowed_and_78000_names_76800(memories_root):
-    """Clause 1. The exact probe this item was triaged on: before the change,
-    `memory_write_error` answered a 40,000 B prospective `memory-md-ledger` write
-    with "over the 32,768-byte topic file ceiling (7,232 B over)", refusing bytes
-    the file is entitled to hold.
+def test_a_ledger_write_of_40000_bytes_is_allowed_and_one_byte_past_the_bound_names_it(memories_root):
+    """Clause 1 of #2212, re-pointed by #3015 at the bound that replaced the first one.
+    The probe's shape is unchanged and so is its purpose: before #2212,
+    `memory_write_error` answered a 40,000 B prospective `memory-md-ledger` write with
+    "over the 32,768-byte topic file ceiling (7,232 B over)", refusing bytes the file
+    is entitled to hold.
 
-    After it, the same call answers None, and the 78,000 B call refuses naming
-    76,800 — the bound it was actually measured against — while the string 32,768
-    appears nowhere in that message. Naming the wrong bound is the failure that
-    would send a curator to split a live ledger, which `LEDGERS` cannot read back.
+    After it, the same call answers None, and a write one byte past the derived bound
+    refuses naming that bound — 102,400 since #3015 raised the multiple to 4 — while the
+    string 32,768 appears nowhere in that message. Naming the wrong bound is the failure
+    that would send a curator to split a live ledger, which `LEDGERS` cannot read back;
+    over-bound by exactly one byte is where a wrong number does most damage, because it
+    is also the size a nightly's next row actually is (#3015's own 937 B of slack was
+    four such writes away from being zero).
     """
     _, root = memories_root
     ledger = root / "memory" / "memory-md-ledger.md"
+    bound = ceiling.ledger_ceiling("memory-md-ledger")
 
     assert ceiling.memory_write_error(ledger, "x" * 40_000) is None
-    assert ceiling.ledger_ceiling("memory-md-ledger") == 76_800, "the derived bound moved"
+    assert bound == 102_400, "the derived bound moved"
 
-    msg = ceiling.memory_write_error(ledger, "x" * 78_000)
+    msg = ceiling.memory_write_error(ledger, "x" * (bound + 1))
     assert msg is not None, "a ledger is still bounded, just not at 32,768 B"
-    assert "76,800" in msg, msg
+    assert "102,400" in msg, msg
     assert "32,768" not in msg, f"a ledger refusal must not quote the shared ceiling: {msg}"
-    assert "1,200 B over" in msg, msg
+    assert "1 B over" in msg, msg
 
 
 def test_an_ordinary_topic_stem_is_still_refused_one_byte_past_32768(memories_root):
@@ -976,22 +981,25 @@ def test_a_ledger_write_inside_its_bound_is_accepted_however_full_the_disk_is(me
     a 70,000 B write sits inside the derived 76,800 B bound, so it passes with no escape
     in the tree at all. The case the escape exists for is the node below.
 
-    What this node owns is that the guard still measures an over-bound ledger: 80,000
-    bytes on disk, a 70,000 B write accepted, a 90,000 B write refused naming 76,800 —
+    What this node owns is that the guard still measures an over-bound ledger: 110,000
+    bytes on disk, a 100,000 B write accepted, a 110,001 B write refused naming 102,400 —
     so the derived ceiling cannot read as "this file is unbounded now", and the refusal
-    cannot name the wrong number. The fixture is deliberately an already-over-bound
-    ledger: it is the state a real `memory-md-ledger` reaches the first night its rows
-    outgrow 76,800 B, and the only state where the two guards can be told apart.
+    cannot name the wrong number. The sizes are the bound's own arithmetic, so the node
+    survives a multiplier the way the guard does. The fixture is deliberately an
+    already-over-bound ledger: it is the state a real `memory-md-ledger` reaches the
+    first night its rows outgrow its bound, and the only state where the two guards can
+    be told apart.
     """
     _, root = memories_root
     (root / "memory").mkdir(parents=True, exist_ok=True)
     ledger = root / "memory" / "memory-md-ledger.md"
-    ledger.write_text("x" * 80_000, encoding="utf-8")
+    bound = ceiling.ledger_ceiling("memory-md-ledger")
+    ledger.write_text("x" * (bound + 7_600), encoding="utf-8")
 
-    assert ceiling.ledger_ceiling("memory-md-ledger") == 76_800, "the derived bound moved"
-    assert ceiling.memory_write_error(ledger, "x" * 70_000) is None
-    msg = ceiling.memory_write_error(ledger, "x" * 90_000)
-    assert msg is not None and "76,800" in msg, msg
+    assert bound == 102_400, "the derived bound moved"
+    assert ceiling.memory_write_error(ledger, "x" * (bound - 2_400)) is None
+    msg = ceiling.memory_write_error(ledger, "x" * (bound + 7_601))
+    assert msg is not None and "102,400" in msg, msg
     assert "32,768" not in msg, f"a ledger refusal must not quote the shared ceiling: {msg}"
 
 
@@ -1003,17 +1011,17 @@ def test_an_over_bound_ledger_uses_the_shrink_escape_over_its_own_bound(memories
     than the bytes already on disk, measured before either bound so one rule covers the
     byte ceiling, the tight limit and the name — so a file over its ceiling can always be
     rewritten shorter. For a ledger the only interesting instance of that is a write that
-    is BOTH over the derived bound AND shorter than the file: 90,000 B on disk, trimmed to
-    78,000 B — still 1,200 B over its bound, and still the repair the file needs. Without
-    the escape that write is refused, and an over-bound ledger could only ever be
+    is BOTH over the derived bound AND shorter than the file: 120,000 B on disk, trimmed
+    to 104,000 B — still 1,600 B over its bound, and still the repair the file needs.
+    Without the escape that write is refused, and an over-bound ledger could only ever be
     repaired by a rewrite that lands under the bound in a single cut: the freeze #2173
     exists to prevent, moved from the shared ceiling onto the derived one.
 
-    Four calls say where the rule stops. 78,000 and 80,000 both accepted — every strictly
+    Four calls say where the rule stops. 104,000 and 110,000 both accepted — every strictly
     smaller write is, so a curator may trim in stages and stop above the bound without the
-    guard blocking the next cut. 90,000, equal to the bytes on disk and therefore not
-    smaller than them, refused naming 76,800 and not 32,768: the escape ends at strictly
-    smaller, and a same-size rewrite keeps the overrun exactly as over as it was. 90,001
+    guard blocking the next cut. 120,000, equal to the bytes on disk and therefore not
+    smaller than them, refused naming 102,400 and not 32,768: the escape ends at strictly
+    smaller, and a same-size rewrite keeps the overrun exactly as over as it was. 120,001
     refused the same way — a growth is measured against the derived bound, which is also
     the half proving the two acceptances above were the escape firing and not a guard that
     stopped measuring.
@@ -1021,23 +1029,24 @@ def test_an_over_bound_ledger_uses_the_shrink_escape_over_its_own_bound(memories
     _, root = memories_root
     (root / "memory").mkdir(parents=True, exist_ok=True)
     ledger = root / "memory" / "memory-md-ledger.md"
-    ledger.write_text("x" * 90_000, encoding="utf-8")
-
     bound = ceiling.ledger_ceiling("memory-md-ledger")
-    assert bound == 76_800, "the derived bound moved, and the sizing below with it"
-    trim = 78_000
+    disk = bound + 17_600
+    ledger.write_text("x" * disk, encoding="utf-8")
+
+    assert bound == 102_400, "the derived bound moved, and the sizing below with it"
+    trim = bound + 1_600
     assert trim > bound, (
         f"the write under test must be OVER the bound ({bound}) or this node is the one "
         "above again, which is the finding it was written to answer")
-    for smaller in (trim, 80_000):
+    for smaller in (trim, bound + 7_600):
         assert ceiling.memory_write_error(ledger, "x" * smaller) is None, (
-            f"the shrink escape did not fire for a {smaller} B write into a 90,000 B "
+            f"the shrink escape did not fire for a {smaller} B write into a {disk} B "
             "ledger: an over-bound ledger can now only be repaired by a write that lands "
             "under the bound in one go")
 
-    for not_smaller in (90_000, 90_001):
+    for not_smaller in (disk, disk + 1):
         msg = ceiling.memory_write_error(ledger, "x" * not_smaller)
-        assert msg is not None and "76,800" in msg, (not_smaller, msg)
+        assert msg is not None and "102,400" in msg, (not_smaller, msg)
         assert "32,768" not in msg, (
             f"a ledger refusal must not quote the shared ceiling: {msg}")
 

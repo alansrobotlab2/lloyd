@@ -440,24 +440,42 @@ def topic_slug_error(stem: str) -> str:
 
 #: How many times the audited file's own ceiling a live ledger may reach.
 #:
-#: Three, because the ledger's cost and the loaded file's cost are different
-#: quantities. A loaded line costs prompt bytes on every turn; a ledger row is never
-#: rendered into a prompt at all — `app/prompt_surface.py` composes the two loaded
-#: files and nothing under `memory/topics/` — so its own size limit is bookkeeping,
-#: not context, and tying it to the topic ceiling measured the wrong thing. The
-#: multiplier is a fixed multiple, not a derivation: 3 x MEMORY.md's ceiling holds
-#: ~113 rows at the ledger's 672 B mean row, while the same ceiling permits ~127
-#: index lines at MEMORY.md's 197 B mean, so past ~113 loaded lines the ledger runs
-#: out first. Which of the two moves there is no longer owed — #2212's owed-check
-#: ruling of 2026-10-09: the multiplier stays at 3 and MEMORY.md's index budget does
-#: not move, because lowering the audited file's ceiling to force a pairing would
-#: shrink loaded memory, the thing this guard protects. Its re-open trigger: a
-#: nightly finding memory-md-ledger over 70,000 B while MEMORY.md is under 24,000 B
-#: raises the multiplier to 4. Both means re-derive live under `~/obsidian/` with
-#: `wc -c lloyd/MEMORY.md`, and over `lloyd/memory/memory-md-ledger.md`:
+#: Four now, and the reason it is a multiple at all is unchanged: the ledger's cost
+#: and the loaded file's cost are different quantities. A loaded line costs prompt
+#: bytes on every turn; a ledger row is never rendered into a prompt at all —
+#: `app/prompt_surface.py` composes the two loaded files and nothing under
+#: `memory/topics/` — so its own size limit is bookkeeping, not context, and tying it
+#: to the topic ceiling measured the wrong thing. The multiplier is a fixed multiple,
+#: not a derivation: 4 x MEMORY.md's ceiling holds ~120 rows at the live 847.5 B mean
+#: row (89 rows measured 2026-10-19), which is the coverage `status` reports as
+#: complete; 3 x held ~90 of them, and the ledger reached that wall rather than the
+#: ~113 the stale 672 B mean row had predicted, because every re-check appends a
+#: `— earlier: <previous stamp>` history to its row (rows carrying history mean
+#: 1,086 B against 793 B for rows that have none).
+#:
+#: WHY 4 AND NOT A NEW POLICY. #2212's owed-check ruling of 2026-10-09 held that the
+#: multiplier stays at 3 and MEMORY.md's index budget does not move, because lowering
+#: the audited file's ceiling to force a pairing would shrink loaded memory, the thing
+#: this guard protects. That ruling is not being revisited — it shipped its own re-open
+#: trigger, "a nightly finding memory-md-ledger over 70,000 B while MEMORY.md is under
+#: 24,000 B raises the multiplier to 4", and #3015 is the nightly that found both
+#: halves measured on 2026-10-19: `memory-md-ledger` 75,863 B with 937 B of slack, and
+#: `MEMORY.md` 20,449 B, after one curation pass stamped 10 `checked:` fields for
+#: +2,235 B and the next pass would cross the bound and be refused with
+#: `topic_size_error`. So 4 is the pre-authorized multiple the ruling named, taken on
+#: its own terms: still bounded, still derived, and MEMORY.md's ceiling unmoved.
+#:
+#: What the multiple does NOT buy is stability. At the measured +2,235 B a night the
+#: new headroom is ~12 nights, and the durable fix is a bounded-history rule for the
+#: `checked:` stamp in the curation skill's §2 — a vault-side change, which §1 of that
+#: skill currently forbids ("do not rewrite the ledger shorter to fit another row"), so
+#: it needs its own authorized ruling rather than being folded in here.
+#:
+#: Both means re-derive live under `~/obsidian/` with `wc -c lloyd/MEMORY.md`, and over
+#: `lloyd/memory/memory-md-ledger.md`:
 #: `awk '/^- \[/ {n++; s += length($0)+1} END {print n, s/n}'`.
 #: The input that, if missing, restores 32,768 B is `memory_ceiling(loaded_file)`.
-LEDGER_MULTIPLIER = 3
+LEDGER_MULTIPLIER = 4
 
 #: ledger-topic stem -> the loaded file whose ceiling it is bounded by. Declared
 #: here, not read from `scripts/memory/memory_ledger.py`, because that module already
@@ -465,8 +483,12 @@ LEDGER_MULTIPLIER = 3
 #: `tests/test_memory_ledger_bound.py::
 #: test_the_stems_the_guard_treats_as_ledgers_are_the_ones_the_script_reads`, since
 #: an unequal pair means the guard bounds a file nobody audits, or leaves the real
-#: ledger at a bound it will outgrow. `memory-md-ledger` at 76,800 B and
-#: `user-md-ledger` at 49,152 B.
+#: ledger at a bound it will outgrow. Ask `ledger_ceiling()` for either bound rather
+#: than remembering it: no literal ledger cap is quoted in this module, because a bound
+#: repeated in prose is a second number to rot when the multiplier above moves, which
+#: is what `tests/test_memory_ledger_bound.py::
+#: test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling` already
+#: bans a curator's text from doing.
 MEMORY_LEDGERS: dict[str, str] = {
     "memory-md-ledger": "MEMORY.md",
     "user-md-ledger": "USER.md",
@@ -475,7 +497,7 @@ MEMORY_LEDGERS: dict[str, str] = {
 
 def ledger_ceiling(stem: str) -> int | None:
     """The byte bound of the live ledger whose topic stem is `stem`, or None if `stem`
-    is not a ledger. Derived, never stored: 3 x `memory_ceiling()` of the loaded file
+    is not a ledger. Derived, never stored: `LEDGER_MULTIPLIER` x `memory_ceiling()` of the loaded file
     the ledger audits, so changing MEMORY.md's ceiling moves its ledger's bound with
     it instead of leaving a second number to rot."""
     audited = MEMORY_LEDGERS.get(stem)
@@ -520,7 +542,7 @@ def _topic_size_message(name: str, size: int, ceiling: int) -> str:
     # `audited_ceiling`, not `audited`: the ledger prose needs the number it quotes to
     # exist. An audited file that answers None has already had its bound fall back to
     # TOPIC_FILE_CEILING_BYTES in `ledger_ceiling`, and a refusal that then printed
-    # "3 x MEMORY.md's None-byte ceiling" would be a message no reader could act on —
+    # "N x MEMORY.md's None-byte ceiling" would be a message no reader could act on —
     # so a ledger that lost the file it audits is described as the ordinary topic file
     # the guard is actually measuring it as.
     if audited_ceiling is None:
