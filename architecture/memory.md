@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, memory]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-10-19
 ---
 
 # Memory: the `improve` loop and the memory tool surface
@@ -41,7 +41,9 @@ put every fact into the context.
 
 Naming an entity is still not a decision about its entire history.
 `fact_invalidate` refuses without `fact_substring` or `category`, the reasoning
-that also made `fact_resolve` stop defaulting to `auto_resolve=true`.
+that also took `auto_resolve` out of `fact_resolve` altogether: it is a report
+now, and the write verb is a separate one, `fact_resolve_apply`, which keys each
+mark on `(source_file, fact_id)` through `app.fact_ids.fact_identity`.
 
 ## 2. `improve`: the detector is evidence, never a verdict
 
@@ -87,9 +89,15 @@ taken from the rows of the refused read rather than from a file listing, so the
 facts planned against and the facts scanned cannot disagree. The bound is not
 raised — each piece goes through the same check, and a category over 50 is skipped
 and named in `categories_skipped`. Cost falls with the coverage: Σn_c² ≤ 50·n
-comparisons against n², which is what took 113 seconds on `Lloyd` — live, `QMD`
-is 5.5 million whole-entity pairs against 208 once partitioned, 39 of its 3,321
-facts scanned and 5 of its 13 files named as skipped. What the
+comparisons against n², which is what took 113 seconds on `Lloyd`. The ratio moves
+with every re-extraction, so read it as a shape and not a figure: on 2026-09-21
+`QMD` was 5.5 million whole-entity pairs against 208 partitioned; re-measured
+2026-10-18 by counting `^- entity:` rows per category file it is 1,028 facts over
+8 files, of which `state` (579) and `event` (413) are over the bound and skipped —
+36 facts across 6 files scanned, ~195 comparisons against ~527,000 whole. That is
+3.5% of the entity, and the record says which categories were skipped by name but
+never how many facts they held, so a small `pairs_before` on a hub cannot be told
+apart from a clean one (#3007). What the
 partition cannot do is pair a fact with one in a *different* category, which is why
 it runs only on the refusal path: an entity at or under the bound is still scanned
 whole, and an entity that reaches the retry had nothing scanned at all before. The
@@ -97,8 +105,11 @@ plan and the record therefore carry `scan_scope` (`entity` / `by_category`) and
 `categories_skipped` — after #1251, `refused: false` no longer means "scanned
 whole", and only those two fields say which it was.
 
-Two bounds sit under the evidence rules, and they are what the CLI's exit 3
-is checking: `MAX_ACTIONS_PER_ENTITY = 5` and `MAX_ACTIONS_PER_RUN = 25`.
+Two bounds sit under the evidence rules — `MAX_ACTIONS_PER_ENTITY = 5`, applied
+by `plan_entity` to one entity's plan, and `MAX_ACTIONS_PER_RUN = 25`, the budget
+the write loop spends down — and the second is what the CLI's exit 3 checks: it
+fires only when `actions_taken` exceeds the run's `--max-actions`, so an
+over-planned entity is invisible to the exit code.
 Expiring twenty facts because a heuristic shrugged is not an improvement, and
 a god-node's contradiction list is long enough to do exactly that. Both
 counters are also deliberately un-fakeable in the other direction:
@@ -117,14 +128,21 @@ and the CLI's `entities scanned=` line takes the refusals off the count and name
 them (`refused=7 (AI Agents, LLM, …)`).
 
 Signal sources, both real, neither invented:
-- **corrections** — entities named in `~/obsidian/memory/corrections.md`, the
-  user's own log of things gotten wrong. Consumed before this only by the
-  behaviour/prompt loops; nothing routed it into fact quality. An entry is
-  credited to an entity only if a token in its heading is a **registered
-  entity**, so a heading can never invent an entity to delete facts about.
+- **corrections** — entities named in the correction logs, read from **three**
+  surfaces since #2789 and returned newest-first with the source on every signal
+  (`corrections_paths()`): `memory/corrections.md` (`## <date> — <text>`),
+  `lloyd/USER.md`'s `## corrections_log` bullets, and the `lloyd/MEMORY.md`
+  index's `[feedback]` bullets — the last is the live dated channel, because
+  USER.md's two standing bullets carry no date of their own and its file-clock
+  fallback (`timestamp: 2026-07-11`) sits outside the window, so USER.md
+  contributing 0 signals is the design and not a broken channel. An entry is
+  credited to an entity only if a token in it is a **registered entity** name
+  (checked against the store, dates and prose stripped first), so an entry can
+  never invent an entity to delete facts about.
 - **drift** — entities with a fact row *created* inside N days: the newest
-  per-row `created_at` in the fact files' front matter, read by regex (~1.4 s
-  over 11,959 dirs), not file mtimes (#1461). The nightly rebuild rewrites the
+  per-row `created_at` in the fact files' front matter, read by regex (~1.4 s over
+  11,959 dirs in September; 15,243 dirs on 2026-10-18, and the nightly record
+  publishes the denominator as `drift_corpus_total`), not file mtimes (#1461). The nightly rebuild rewrites the
   whole tree, so on 2026-09-25 11,806 of 11,807 dirs had a fresh mtime and the
   pool was the corpus. A full re-extraction still re-stamps every row, so the
   record carries the census — `drift_corpus_total`, `drift_pool_fraction`,
@@ -135,7 +153,7 @@ Signal sources, both real, neither invented:
 
 Writers are the existing tools called as functions. Three writers of
 `expired_at` would be the drift bug `fact_get` and the router already had
-— `_reindex_files` (`agent_mcp/facts.py:80-92`), whose docstring is the rule:
+— `_reindex_files` (`agent_mcp/facts.py:159`), whose docstring is the rule:
 the markdown is the fact layer, `facts_idx` is what the router, `fact_get`
 and the health report actually read, and a write that skips the reindex leaves
 the two disagreeing. Every run writes a JSON record under
@@ -144,34 +162,51 @@ string per action.
 
 ## 3. Why it does not call `fact_resolve`, even though that is the right verb
 
-`fact_resolve(auto_resolve=true)` selects losers by **fact id**, and fact ids
-are per-file counters: `Assistant/state-001` and `Assistant/usage-001` are
-different facts with the same id (19 facts in that entity share `fact-001`).
-Measured on a copy of the live store, one plan of 2 actions invalidated **25
-facts** — `Assistant` went from 29 active facts to 4 — because each id lookup
-hit every fact sharing the loser's id across all category files.
+`fact_resolve` used to take `auto_resolve=true`, and it selected losers by
+**fact id**, and fact ids are per-file counters: `Assistant/state-001` and
+`Assistant/usage-001` are different facts with the same id (19 facts in that
+entity share `fact-001`). Measured on a copy of the live store, one plan of 2
+actions invalidated **25 facts** — `Assistant` went from 29 active facts to 4 —
+because each id lookup hit every fact sharing the loser's id across all category
+files.
 
-So `apply_action` aims `fact_invalidate` at a substring verified to match
-**exactly one** stored fact (growing 60 → 120 → full text, dropped if still
-ambiguous), and the run records it as an error and stops that entity if a
-writer ever expires more than one fact for one action. The `confidence` vs
-`superseded` distinction is preserved in the reason string so the fields can be
-re-tagged (`invalid_at` rather than `expired_at`) once ids are entity-unique.
-Filed as its own item.
+That defect is closed at the writers, and the loop moved with it: `apply_action`
+no longer calls `fact_invalidate` but the marking route underneath it,
+`agent_mcp/facts.py::_apply_fact_marks`, which `fact_resolve_apply` and
+`fact_invalidate` also share, so there is one front-matter writer again and it
+keys every mark on `(file, id)` (`app.fact_ids.fact_identity`). A `confidence`
+action whose loser carries an attribution is aimed by that identity, which is the
+only route allowed to attach the `conflicts_with` trace (#1817); a `superseded`
+action keeps the substring route — `_aim_substring` grows 60 → 120 → full text and
+drops the action if the probe still matches two stored facts — with
+`stop_after_first=True`, so one action cannot mark two facts that contain the same
+sentence. The `invalid_at`/`invalid_reason` vs `expired_at`/`expire_reason` split
+this section used to promise for later is in place today. What remains of the old
+protection is the tripwire above the writer: `run_improvement` records an error and
+halts the entity if a mark ever lands on more than one fact, but it halts into the
+record and a stdout line only — the CLI still exits 0, so a halted apply is a
+successful run to the scheduler (#3006). The live collision count is in
+`scripts/memory/measure_fact_id_collisions.py`.
 
 ## 4. What it did to the metric it is required to move
 
 `fact_entity_recall` from `eval/run_eval.py`, measured on **copies** of the live
 fact tree and `kg.sqlite` via `LLOYD_FACTS_ROOT`/`LLOYD_KG_DB`; the live store
-was never opened. Production knobs passed explicitly — `run_eval()`'s
-*signature* defaults are the pre-#322 configuration (`graph_rerank=False`,
-`alpha=0.5`) while only the *argparse* defaults come from `agent_mcp.vault`, so
-calling `run_eval(queries)` measures a configuration nothing serves. The trap
-is the gap between the signature (`eval/run_eval.py:184-188`) and the argparse
-block (`:428-442`, which imports `RECALL_GRAPH_RERANK` / `RECALL_RERANK_ALPHA`
-from `agent_mcp.vault` and carries the comment recording the 2026-09-03 review
-that found it); `fact_improvement._fact_entity_recall` fell into it on the
-first version.
+was never opened (the record's `isolated`, `facts_root` and `kg_db` say which
+copies a score came from). There *was* a knob trap here, and it is closed at the
+source rather than by remembering: `run_eval()`'s signature defaults
+(`eval/run_eval.py:777-786`) are now the same `RECALL_*` constants its argparse
+defaults use (`:2312`, `:2329`), imported at `:46-48` — #498 (`0a7c239e`,
+2026-09-14) deleted the restated literals, one of which, `rerank_alpha=0.5`
+against production's 0.3, is what made this section's first version measure a
+configuration nothing served. The knobs are still passed explicitly, so the
+measurement never depends on the pinning holding. The live divergence is a
+different knob: `expand_graph=True`, passed deliberately by
+`_fact_entity_recall_detail`, against a production that has defaulted
+`RECALL_EXPAND_GRAPH = False` since `7389a1fc` (2026-09-22, `agent_mcp/vault.py:510`).
+So the loop's acceptance metric scores an arm nothing serves, and
+`matches_production_defaults` reads False for it in the same way it would for a
+knob bug (#3005).
 
 | pass | facts expired | active facts | `fact_entity_recall` |
 |---|---|---|---|
@@ -213,10 +248,12 @@ expired 8 more — 18 of those 30 refused outright as god-nodes — including
 #376's acceptance says "a change that cannot move that metric is not this
 feature". Two findings say the criterion is mis-aimed rather than the code dead:
 
-1. **The metric is pool-composition-bound.** `_rank` (`agent_mcp/vault.py:1023`)
-   caps the returned fact list at `FACT_RANK_CAP_SEED=10`
+1. **The metric is pool-composition-bound.** `_rank` (`agent_mcp/vault.py:2637`,
+   nested in `_vault_recall_base` at `:2363`, over the pool `_collect` builds at
+   `:2599`) caps the returned fact list at `FACT_RANK_CAP_SEED=10`
    (`agent_mcp/retrieval.py:118`; graph-expanded neighbours get their own
-   `FACT_RANK_CAP_GRAPH=5`) across *all* seed entities — the only per-entity
+   `FACT_RANK_CAP_GRAPH=5`, `:119`, on the leg production does not run while
+   `RECALL_EXPAND_GRAPH` is False) across *all* seed entities — the only per-entity
    guardrail is a query-token filter, and it applies only above
    `FACT_GODNODE_THRESHOLD=50`. So
    `fact_entity_recall` records which entities won 10 slots, and expiring
@@ -249,10 +286,21 @@ this loop expired none, which is the honest proportion to keep in view — the
 quality of the corpus is set by what writes into it, and an expiry loop
 bounded at 25 actions a run is not the lever that moves it.
 
+Both of those figures are history now, and the shape is the part to keep: the
+2026-10-18 nightly read 40 entities and planned 0 actions, `before_active`
+**161,255** — down from 09-11 because `general` facts were quarantined out of the
+tree (`scripts/memory/quarantine_general_facts.py`) — and its
+`fact_entity_recall` and `fact_entity_recall_detail` were both **null**, as they
+are in every record back to 2026-10-03, because the shipped invocation does not
+pass `--report-eval`. The metric named as the acceptance bar is therefore measured
+only when someone remembers to ask for it, which is what #3004 is about; the
+fields' existence is not evidence that a score was taken.
+
 Filed out of this round, so the next reader does not re-derive them: **#659**
 (the metric is insensitive to the mechanism — what to measure instead), **#660**
-(`fact_resolve(auto_resolve=true)` selects by colliding fact ids — the
-2 → 25 collateral above, reproduced minimally 09-09), **#661** (nothing checks
+(`fact_resolve(auto_resolve=true)` selected by colliding fact ids — the
+2 → 25 collateral above, reproduced minimally 09-09; the selection is by
+`(file, id)` now, so this reads as history, not as an open defect), **#661** (nothing checks
 that a skill's named script exists, which is how this item's vault half shipped
 a day before its code half).
 
@@ -261,6 +309,22 @@ a day before its code half).
 | path | role |
 |---|---|
 | `agent_mcp/fact_improvement.py` | the loop: signals → plan → apply → record |
-| `scripts/memory/fact-improvement.py` | CLI; exits 2 on failure, 3 on blast-radius overrun |
-| `tests/test_memory_improvement.py` | 47 tests, incl. the one-fact-per-action and near-duplicate guards, the per-category rescan's scope rules (#1251), and the schedule wiring (task armed + script named by the skill exists) |
+| `scripts/memory/fact-improvement.py` | CLI; exits 2 on an unreadable store, 3 when the run's action budget is overrun — a blast-radius halt exits 0 (#3006) |
+| `tests/test_memory_improvement.py` | 124 tests (2026-10-19), incl. the one-fact-per-action and near-duplicate guards, the per-category rescan's scope rules (#1251), and the schedule wiring (task armed + script named by the skill exists) |
 | `skills/fact-improvement/SKILL.md` + `autonomy/84-fact-improvement.md` | the scheduled consumer — armed `up_next`, daily, window 14:00 local, plan mode only |
+
+## Review log
+
+- 2026-10-19 — **stale**. The loop, the god-node bound and the plan-mode consumer
+  are as described; the parts that had moved were the writer route (§3 now goes
+  through `_apply_fact_marks` keyed on `(file, id)`, with the `invalid_at` split
+  already landed and `fact_resolve` no longer taking `auto_resolve` at all), the
+  §4 knob-trap paragraph (closed at the source by #498; the live divergence is
+  `expand_graph=True` against a production that defaults it False), the
+  corrections channel (three surfaces since #2789, `lloyd/MEMORY.md` the live
+  dated one), and four pointers/counts (`facts.py:159`, `vault.py:2637`, the
+  drift corpus at 15,243 dirs, 124 tests). Filed #3004 (the nightly never scores
+  the metric this doc calls the acceptance bar), #3005 (the metric's arm is not
+  production's, undistinguishable from a knob bug), #3006 (a blast-radius halt
+  exits 0) and #3007 (a partial hub scan publishes pair counts with no fact
+  denominator).
