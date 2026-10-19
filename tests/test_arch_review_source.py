@@ -340,22 +340,73 @@ def test_a_group_names_a_doc_and_a_section(tree):
     assert not any("bad-entry" in i for i in ids)
 
 
+# Both jobs docs declare a group's members in the heading line itself —
+# `## Watch the machinery: #91 #92 …` — and every member then owns a `| #N |` row
+# inside that section. So the expected row set is derived from the heading, never
+# typed here: #2806 wrote a literal `range` over its own seven ids into this file,
+# and the three members that joined §Watch the machinery months later walked
+# straight past it while the check stayed green. One formula, shared by every
+# check below, so no membership number is written down twice.
+_MEMBER_IDS_IN_HEADING = re.compile(r"#(\d+)")
+_MEMBER_ROW = re.compile(r"^\|\s*#(\d+)\s*\|", re.MULTILINE)
+
+
+def _heading_members(text: str, name: str) -> list[str]:
+    """The member ids a group's own `## <Name>: <ids>` heading declares.
+
+    Empty for a heading that names none, which is normal: all four `workers-jobs`
+    groups are decorated in prose (`## 3. Dispatch — one door onto the autonomy
+    fleet`), so an id-less group contributes no expectation rather than a failing
+    one.
+    """
+    span = A.find_section(text, name)
+    if not span:
+        return []
+    heading = text.splitlines()[span[0] - 1]
+    return [f"#{n}" for n in _MEMBER_IDS_IN_HEADING.findall(heading)]
+
+
+def _assert_rows_cover_the_heading(text: str, name: str, where: str) -> list[str]:
+    """Assert each id the heading declares owns a `| #N |` row inside its span.
+
+    `find_section`'s span is what a reviewer is handed, so a declared member whose
+    row falls outside it is a member nobody reads. Returns the derived ids so a
+    caller can report how many it checked without typing a number.
+    """
+    span = A.find_section(text, name)
+    assert span, (
+        f"{where}: no `## ` heading `find_section` resolves for §{name}, so the turn "
+        f"would record `section_missing` and file nothing")
+    declared = _heading_members(text, name)
+    body = "\n".join(text.splitlines()[span[0] - 1:span[1]])
+    rows = {f"#{n}" for n in _MEMBER_ROW.findall(body)}
+    absent = [i for i in declared if i not in rows]
+    assert not absent, (
+        f"{where}: §{name} declares {len(declared)} members in its heading and {len(absent)} "
+        f"of them ({', '.join(absent)}) have no `| #N |` row inside the span a reviewer is "
+        f"shown (lines {span[0]}–{span[1]}) — the group would be reviewed with its "
+        f"members' rows outside the lines it can read")
+    return declared
+
+
 def test_the_live_group_list_offers_every_group_the_jobs_doc_declares():
-    """#2806. The picklist is built from `config.yaml`, and until this round nothing
-    asked whether `config.yaml` had everything in it.
+    """#2806, and #2990 after it. The picklist is built from `config.yaml`, and
+    until #2806 nothing asked whether `config.yaml` had everything in it.
 
     `test_a_group_names_a_doc_and_a_section` covers `all_units` over a fixture list,
     so it says what the function does with the names it is handed and nothing about
     whether the real list names the real doc's sections. That gap is how
     §Watch the machinery — `architecture/autonomy-jobs.md`'s eighth group, added at
-    `b221481c` with seven jobs behind it — sat for four days with no unit that could
-    be picked: `find_section` resolved it, so the one direction that gets reported
-    (`section_missing`, for a name with no heading) stayed green. Read through the
-    production lookup rather than a fixture tree, as
+    `b221481c` with its members' rows already in the doc — sat for four days with no
+    unit that could be picked: `find_section` resolved it, so the one direction that
+    gets reported (`section_missing`, for a name with no heading) stayed green. Read
+    through the production lookup rather than a fixture tree, as
     `test_autonomy_jobs_doc_claims.py::test_every_configured_group_still_resolves_to_a_heading_in_the_doc`
     does, because the pair under test is this checkout's config and this checkout's
-    doc. No line numbers are asserted: the membership that matters is the seven rows
-    inside the section a reviewer would be handed.
+    doc. No line numbers are asserted: the membership that matters is the rows the
+    heading itself declares, inside the section a reviewer would be handed — and the
+    count is derived per group, because the range #2806 typed here over the ids that
+    existed then never once asked about the members added after it.
     """
     from workers.sources import get_sources_config
 
@@ -371,22 +422,73 @@ def test_the_live_group_list_offers_every_group_the_jobs_doc_declares():
         f"picklist is a group nobody reviews")
 
     want = "group:autonomy-jobs:Watch the machinery"
+    jobs_doc = (root / "architecture" / "autonomy-jobs.md").read_text()
+    declared = _heading_members(jobs_doc, "Watch the machinery")
     assert want in by_id, (
-        f"{want} is not on the picklist, so the seven jobs in §Watch the machinery "
-        f"have no unit that can ever be picked. Offered groups: {sorted(group_ids)}")
+        f"{want} is not on the picklist, so the {len(declared)} members §Watch the "
+        f"machinery declares in its heading have no unit that can ever be picked. "
+        f"Offered groups: {sorted(group_ids)}")
     assert (by_id[want]["kind"], by_id[want]["doc"], by_id[want]["name"]) == (
         "group", "autonomy-jobs", "Watch the machinery")
 
-    text = (root / "architecture" / "autonomy-jobs.md").read_text()
-    span = A.find_section(text, by_id[want]["name"])
-    assert span, (
-        "the unit is offered and its section cannot be found, so the turn would "
-        "record `section_missing` and file nothing")
-    section = "\n".join(text.splitlines()[span[0] - 1:span[1]])
-    absent = [f"#{n}" for n in range(91, 98) if f"| #{n} |" not in section]
-    assert not absent, (
-        f"the unit's own section is missing the job rows {absent} — the group would "
-        f"be reviewed with its members' rows outside the lines a reviewer is shown")
+    checked = _assert_rows_cover_the_heading(jobs_doc, "Watch the machinery",
+                                             where="architecture/autonomy-jobs.md")
+    assert checked, (
+        "§Watch the machinery's heading declares no member id at all, so the row check "
+        "just now was handed an empty expectation and proved nothing")
+
+    # The same rule over every configured group, each against its own doc, so a
+    # regroup is caught by the heading that changed rather than by a number typed
+    # here. A group whose heading names no ids contributes no expectation and is
+    # skipped, never failed: the four workers-jobs headings are prose.
+    covered, id_less = [], []
+    for slug, name in A.parse_groups(cfg.get("groups")):
+        text = (root / "architecture" / f"{slug}.md").read_text()
+        if not _heading_members(text, name):
+            id_less.append(f"{slug}:{name}")
+            continue
+        _assert_rows_cover_the_heading(text, name, where=f"architecture/{slug}.md")
+        covered.append(f"{slug}:{name}")
+    assert covered, (
+        f"no configured group's heading declared a member id, so the row check proved "
+        f"nothing about coverage; skipped as id-less: {id_less}")
+    assert [c for c in covered if c.startswith("autonomy-jobs:")], (
+        f"every autonomy-jobs group lists its members both in its own heading and in "
+        f"§The functions, and not one of them did — covered: {covered}, skipped as "
+        f"id-less: {id_less}")
+
+
+def test_a_seeded_missing_row_breaks_the_group_list_offers_check(tmp_path):
+    """The derived rule has to be able to fail, and has to say who went missing.
+
+    Dropping one member's row while its id stays in the heading is the way a
+    hand-kept doc goes wrong, and nothing else in either doc contradicts it. The
+    live doc passes the very call the seeded copy raises on, so the failure is a
+    property of the rule and not of the fixture.
+    """
+    root = Path(__file__).resolve().parent.parent
+    live = (root / "architecture" / "autonomy-jobs.md").read_text()
+    name = "Watch the machinery"
+    declared = _heading_members(live, name)
+    assert declared, (
+        f"§{name}'s heading declares no members, so there is nothing here to seed")
+
+    _assert_rows_cover_the_heading(live, name, where="the live architecture/autonomy-jobs.md")
+
+    victim = declared[-1]
+    lines = live.splitlines()
+    kept = [l for l in lines if not re.match(rf"^\|\s*{re.escape(victim)}\s*\|", l)]
+    assert len(kept) == len(lines) - 1, (
+        f"seeding was to remove exactly the {victim} row and removed "
+        f"{len(lines) - len(kept)} lines, so the copy would prove nothing")
+    copy = tmp_path / "autonomy-jobs.md"
+    copy.write_text("\n".join(kept) + "\n")
+
+    with pytest.raises(AssertionError) as ei:
+        _assert_rows_cover_the_heading(copy.read_text(), name,
+                                       where=f"the seeded copy {copy.name}")
+    assert victim in str(ei.value), (
+        f"the check failed but never named the member it missed: {ei.value}")
 
 
 @pytest.mark.parametrize("heading,want", [
