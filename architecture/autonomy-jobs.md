@@ -852,7 +852,7 @@ moves one out: `scripts/groundskeeper/retention-sweep.py` prunes logs, sessions 
 run records, never a backlog file; `app/backlog_move.py` is a status-move *recorder*
 ("One definition of 'record a backlog status move'") and never touches a path; the
 only writer in the tree that removes a backlog file is `backlog_task_delete`
-(`app/routers/backlog.py:812`), which deletes rather than archives and is wired to
+(`app/routers/backlog.py:849`), which deletes rather than archives and is wired to
 no job. The board hides the pile after `DONE_WINDOW_DAYS = 7`
 (`web/src/components/pages/BacklogPage.tsx:572`), so nothing downstream feels it
 either. Archiving ~1,488 files is a bulk human-gated move in a protected path, and

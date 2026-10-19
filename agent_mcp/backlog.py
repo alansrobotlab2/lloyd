@@ -8,20 +8,31 @@ Tools: backlog_boards, backlog_tasks, backlog_get_task, backlog_write_task
 """
 
 import json
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
 
-import yaml
 from mcp.types import Tool
 
 from agent_mcp._shared import parse_frontmatter_text, text_result
 from agent_mcp import backlog_similar as SIM
+from app import backlog_write as BW
+from app.atomic_io import commit_lock
 from app.backlog_boards import BOARDS, UnknownBoard, check_board
 from app.backlog_move import now_stamp
 from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import SPAWN_TAG_PREFIX, new_task_tags, normalize_tags
 from app import frontmatter as FM
+
+logger = logging.getLogger(__name__)
+
+#: Why a save failed is information the caller can act on, and the two reasons
+#: `save_task` returns False for are not distinguishable from its return value alone: the
+#: item file's front matter stopped being readable, or the store's commit lock did not
+#: come free within the wait. Both leave the file exactly as it was (#3036).
+SAVE_FAILED = ("Failed to save task: the item file was left unchanged — its front "
+               "matter no longer parses, or the write lock could not be taken")
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 VALID_STATUSES = frozenset(PIPELINE_STATUSES)
@@ -71,6 +82,19 @@ def load_task(task_id: int) -> dict | None:
 
 
 def save_task(task: dict) -> bool:
+    """Commit one task dict to its file, under the store's cross-process lock.
+
+    The parse that produced `task` was taken in `load_task`, and on the
+    `backlog_write_task` path everything between that read and this write — the
+    dedupe scoring, the `similar`/`merged` decision, the OKF stamping — runs
+    outside any lock. `app/backlog_write.write_item` therefore re-reads the file
+    *inside* the critical section and keeps any `activity_log` row another lane
+    appended in the meantime, which is the half of a lost update that a dict
+    rebuilt from a stale parse cannot fix on its own (#3036). A key this dict
+    does not carry is still written as absent — that is what deleting a key
+    means here — and the value of every key it does carry is this lane's, as it
+    always was.
+    """
     if "filename" not in task:
         return False
     if task.get("_yaml_broken"):
@@ -88,10 +112,27 @@ def save_task(task: dict) -> bool:
         if isinstance(value, datetime):
             value = value.isoformat()
         fm[key] = value
-    fm_yaml = yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)
-    body = task.get("body", "")
-    filepath.write_text(f"---\n{fm_yaml}---\n\n{body}")
-    return True
+    # `body` is stripped by `parse_frontmatter`, so the blank line after the
+    # closing fence is added back here: the bytes this writer has always emitted
+    # are `---\n<dump>---\n\n<body>`, and `item_text` inserts `body` verbatim.
+    body = f"\n{task.get('body', '')}"
+    try:
+        with commit_lock(filepath) as lock:
+            if BW.write_item(filepath, fm, body, lock=lock):
+                return True
+        # Refused by the primitive: the file's front matter stopped being
+        # readable between `load_task` and here. Leaving it alone is the whole
+        # point, and it is the same answer `_yaml_broken` gives above.
+        logger.warning("save_task refused on %s: its front matter will not parse; "
+                       "the file was left unchanged", filepath)
+        return False
+    except TimeoutError as exc:
+        # A lock this lane could not take within the wait means another writer is
+        # wedged on the item. Failing is the only honest answer: the caller gets
+        # `success: false`, and the file is exactly what it was.
+        logger.warning("save_task could not lock %s: %s; the file was left unchanged",
+                       filepath, exc)
+        return False
 
 
 def add_activity(task: dict, message: str) -> dict:
@@ -438,7 +479,7 @@ def _handle_write(args: dict) -> str:
             "hand before writing to it (a rewrite would drop the fields the "
             "fallback could not read)."})
     if not save_task(task):
-        return json.dumps({"success": False, "error": "Failed to save task"})
+        return json.dumps({"success": False, "error": SAVE_FAILED})
     if promotion is not None:
         _apply_promotion(task_id, promotion, activity or "")
     if creating:

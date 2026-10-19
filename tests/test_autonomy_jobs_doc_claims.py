@@ -3700,7 +3700,7 @@ REQUIRED_CITATIONS = frozenset({
     "tests/test_skill_tool_names.py:150",          # ALLOWED_TO_MENTION
     "scripts/skill_lint.py:281",                   # PHANTOM_EXEMPT
     "agent_mcp/skills.py:87",                      # _QUARANTINE_STATUSES
-    "app/routers/backlog.py:812",                  # backlog_task_delete
+    "app/routers/backlog.py:849",                  # backlog_task_delete
     "web/src/components/pages/BacklogPage.tsx:572",   # DONE_WINDOW_DAYS
     "app/paths.py:278",                            # VAULT_FACTS_ROOT, added by #2795
 })
@@ -3857,7 +3857,7 @@ def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
     (`app/autonomy.py:2898` twice — §The functions and §Evidence pilot — then
     `tests/test_worker_evidence.py:686`, `tests/test_skill_tool_names.py:150`,
     `scripts/skill_lint.py:281`, `agent_mcp/skills.py:87`,
-    `app/routers/backlog.py:812`,
+    `app/routers/backlog.py:849`,
     `web/src/components/pages/BacklogPage.tsx:572`, `app/paths.py:278` from #2795, and
     `eval/djev_name_prior_probe.py:647` from cffd22e6), the nine of them named in
     `REQUIRED_CITATIONS`. The tenth distinct pair in the file — `app/autonomy.py:710`,

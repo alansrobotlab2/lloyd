@@ -65,7 +65,9 @@ from app.backlog_move import record_status_move
 from app.backlog_tags import NEEDS_HUMAN_TAG, is_spawn_tag, new_task_tags, normalize_tags
 # Standard-library-only by design (see its docstring): this module is the light
 # one the automod CLI loads, so the shared fence rule must not drag in `mcp`.
-from app import frontmatter as FM
+# `app.backlog_write` and `app.atomic_io` hold to the same rule (#3036).
+from app import backlog_write as BW, frontmatter as FM
+from app.atomic_io import commit_lock
 from app.data_root import PRODUCTION_DATA_ROOT
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
@@ -2100,10 +2102,16 @@ def _write_item(path: Path, fm: dict, body: str) -> None:
     may legitimately give front matter. That is why the refusal guard sits on the
     five writers that dump straight back and this sink still cannot destroy a
     front matter (#1020).
+
+    The lock here covers this sink's own write; the three callers parse outside
+    it, so what protects a caller whose parse went stale is `write_item`'s
+    re-read inside this critical section — the file's `activity_log` rows are
+    merged from disk rather than taken from the caller's dict (#3036). Returns
+    False, having written nothing, when the file on disk is the one shape no
+    writer may dump over: front matter that will not parse.
     """
-    path.write_text(
-        f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
-        f"---\n{body}", encoding="utf-8")
+    with commit_lock(path) as lock:
+        return BW.write_item(path, fm, body, lock=lock)
 
 
 #: What a vault-surface clause is told when it asks for an amendment (#1987).
@@ -2445,44 +2453,49 @@ def update_frontmatter(path: Path, updates: dict, *, activity: str = "",
     MCP writer guards the same case with `_yaml_broken`. It is `_unparsed_guard`,
     shared now by every writer in this module that parses and re-dumps. A key set
     to None is removed.
+
+    The whole read-modify-write runs inside `commit_lock(path)` — read, guard,
+    take-back, key edits, tag edits, stamp and replace — because this is the
+    writer every other job in the system calls (`owed.add_owed`, the cluster
+    triage, the gate's amendment route), and a lock taken only around the write
+    would leave the read that decides what to write looking at a file another
+    lane had already replaced (#3036).
     """
-    text = path.read_text(encoding="utf-8")
-    fm, body = _split_frontmatter(text)
-    if _unparsed_guard(path, text, fm, "update_frontmatter"):
-        return False
-    changed = False
-    # Take-back first, on the item as it was: the caller's own `owed` update
-    # below is what the item should end with. Run after it, the take-back
-    # erased the decide entries a single call both wrote and untagged — the
-    # 2026-09-27 migration lost five that way.
-    if NEEDS_HUMAN_TAG in remove_tags and _take_back(fm):
-        changed = True
-    for k, v in (updates or {}).items():
-        if v is None:
-            if k in fm:
-                del fm[k]
-                changed = True
-        elif fm.get(k) != v:
-            fm[k] = v
+    with commit_lock(path) as lock:
+        text = path.read_text(encoding="utf-8")
+        fm, body = _split_frontmatter(text)
+        if _unparsed_guard(path, text, fm, "update_frontmatter"):
+            return False
+        changed = False
+        # Take-back first, on the item as it was: the caller's own `owed` update
+        # below is what the item should end with. Run after it, the take-back
+        # erased the decide entries a single call both wrote and untagged — the
+        # 2026-09-27 migration lost five that way.
+        if NEEDS_HUMAN_TAG in remove_tags and _take_back(fm):
             changed = True
-    raw_tags = fm.get("tags")
-    tags = normalize_tags(raw_tags)
-    new_tags = [t for t in tags if t not in remove_tags] + [t for t in add_tags if t not in tags]
-    if new_tags != tags or (add_tags or remove_tags) and not isinstance(raw_tags, list):
-        fm["tags"] = new_tags
-        changed = True
-    if not changed and not activity:
-        return False
-    stamp = now_stamp()
-    if activity:
-        log = list(fm.get("activity_log") or [])
-        log.append(f"**{stamp}** — {activity}")
-        fm["activity_log"] = log
-    fm["updated"] = stamp
-    path.write_text(
-        f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
-        f"---\n{body}", encoding="utf-8")
-    return True
+        for k, v in (updates or {}).items():
+            if v is None:
+                if k in fm:
+                    del fm[k]
+                    changed = True
+            elif fm.get(k) != v:
+                fm[k] = v
+                changed = True
+        raw_tags = fm.get("tags")
+        tags = normalize_tags(raw_tags)
+        new_tags = [t for t in tags if t not in remove_tags] + [t for t in add_tags if t not in tags]
+        if new_tags != tags or (add_tags or remove_tags) and not isinstance(raw_tags, list):
+            fm["tags"] = new_tags
+            changed = True
+        if not changed and not activity:
+            return False
+        stamp = now_stamp()
+        if activity:
+            log = list(fm.get("activity_log") or [])
+            log.append(f"**{stamp}** — {activity}")
+            fm["activity_log"] = log
+        fm["updated"] = stamp
+        return BW.write_item(path, fm, body, lock=lock)
 
 
 def all_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
@@ -4337,9 +4350,14 @@ def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
     section = (f"\n\n## Automod landed — {stamp[:10]}\n\n`{commit[:8]}`, {where}, "
                f"{'settled' if round_id else 'committed'} {settled_at}.\n\n"
                + ("**Closed.** " if close else "**Left open.** ") + why + "\n")
-    item.path.write_text(
-        f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
-        f"---\n{body.rstrip()}{section}", encoding="utf-8")
+    # Locked replace. This is the finalizer's write — the one the promote path
+    # makes while the autocode source is moving statuses on its worker tick — and
+    # it dumps an `fm` parsed before it, so an activity row another lane appended
+    # in that window survives only because `write_item` re-reads the file inside
+    # this critical section (#3036). `O.add_owed` below deliberately runs after the
+    # lock is released: it is itself a locked writer of the same file.
+    with commit_lock(item.path) as lock:
+        BW.write_item(item.path, fm, f"{body.rstrip()}{section}", lock=lock)
     if fm.get("human_clauses"):
         # What the item itself records as owed is owed from the moment its landing
         # is recorded, whoever the caller is and whether or not this call closes.
@@ -4947,33 +4965,38 @@ def _apply_status(path: Path, status: str, why: str, *,
     the item it is reached through was loaded with defaulted fields, so an
     unparseable file looks perfectly open here right up until the write
     destroys it (#1020).
+
+    Read, guards, the recorder's own edits and the replace all sit inside
+    `commit_lock(path)`. This is the writer the autocode source runs on every
+    worker tick and the reconciler runs after a landing, while Mission Control
+    answers a board save for the same item — the two status writers the doc
+    names above. Holding the lock over the read is what stops a move computed
+    from a superseded parse from overwriting one that already landed (#3036).
     """
-    text = path.read_text(encoding="utf-8")
-    fm, body = _split_frontmatter(text)
-    if _unparsed_guard(path, text, fm, "_apply_status"):
-        return False
-    if fm.get("status") == status or fm.get("status") == "done":
-        return False
-    # A take-back is the tag actually coming off, or the item going back into
-    # the implement pool. The reconciler passes the tag on every move, so
-    # without this a move to `draft` of an item that never carried it erased
-    # the `decide` entry the owed-check job needed to find it.
-    takes_back = NEEDS_HUMAN_TAG in remove_tags and (
-        NEEDS_HUMAN_TAG in normalize_tags(fm.get("tags")) or status == IMPLEMENT_POOL_STATUS)
-    # What a move *writes* is `app.backlog_move`, shared with the Mission Control
-    # route (#1023). What stays here is this writer's own policy about which moves
-    # it accepts, and it cannot move into the shared recorder: `done` is terminal
-    # for the loop, while a human reopening a closed card from the board has to be
-    # allowed — the two writers legitimately disagree there.
-    if not record_status_move(fm, status, why, add_tags=add_tags,
-                              remove_tags=remove_tags):
-        return False
-    if takes_back:
-        _take_back(fm)
-    path.write_text(
-        f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
-        f"---\n{body}", encoding="utf-8")
-    return True
+    with commit_lock(path) as lock:
+        text = path.read_text(encoding="utf-8")
+        fm, body = _split_frontmatter(text)
+        if _unparsed_guard(path, text, fm, "_apply_status"):
+            return False
+        if fm.get("status") == status or fm.get("status") == "done":
+            return False
+        # A take-back is the tag actually coming off, or the item going back into
+        # the implement pool. The reconciler passes the tag on every move, so
+        # without this a move to `draft` of an item that never carried it erased
+        # the `decide` entry the owed-check job needed to find it.
+        takes_back = NEEDS_HUMAN_TAG in remove_tags and (
+            NEEDS_HUMAN_TAG in normalize_tags(fm.get("tags")) or status == IMPLEMENT_POOL_STATUS)
+        # What a move *writes* is `app.backlog_move`, shared with the Mission Control
+        # route (#1023). What stays here is this writer's own policy about which moves
+        # it accepts, and it cannot move into the shared recorder: `done` is terminal
+        # for the loop, while a human reopening a closed card from the board has to be
+        # allowed — the two writers legitimately disagree there.
+        if not record_status_move(fm, status, why, add_tags=add_tags,
+                                  remove_tags=remove_tags):
+            return False
+        if takes_back:
+            _take_back(fm)
+        return BW.write_item(path, fm, body, lock=lock)
 
 
 def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS,
@@ -5369,9 +5392,8 @@ def reopen_reverted_landings(ledger: Path, boards: tuple[str, ...] | None = DEFA
             continue
         fm.pop(LANDED_MARKER, None)
         fm[REVERTED_MARKER] = commit
-        item.path.write_text(
-            f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
-            f"---\n{body}", encoding="utf-8")
+        with commit_lock(item.path) as lock:
+            BW.write_item(item.path, fm, body, lock=lock)
         S.append_event({"event": "item_reopened", "item_id": item.id, "by": "rollback",
                         "commit": commit, "to": to, "verdict": verdict}, path=ledger)
         out.append({"item_id": item.id, "commit": commit, "to": to, "verdict": verdict})
@@ -5414,22 +5436,25 @@ def note_item(item_id: int, text: str) -> bool:
     sets (`activity_log`, `updated`) — the same destruction `update_frontmatter`
     has always refused, reached here through `open_items`, which admits an
     unparseable file with defaulted fields (#1020).
+
+    The board walk that finds the item stays outside the lock; the read that
+    supplies the journal being appended to, the guard and the replace are all
+    inside `commit_lock(item.path)`, so a note cannot be written from a parse
+    taken before another lane's move and erase that move's own log row (#3036).
     """
     for item in open_items(None):
         if item.id == int(item_id):
-            raw = item.path.read_text(encoding="utf-8")
-            fm, body = _split_frontmatter(raw)
-            if _unparsed_guard(item.path, raw, fm, "note_item"):
-                return False
-            stamp = now_stamp()
-            log = list(fm.get("activity_log") or [])
-            log.append(f"**{stamp}** — {text}")
-            fm["activity_log"] = log
-            fm["updated"] = stamp
-            item.path.write_text(
-                f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
-                f"---\n{body}", encoding="utf-8")
-            return True
+            with commit_lock(item.path) as lock:
+                raw = item.path.read_text(encoding="utf-8")
+                fm, body = _split_frontmatter(raw)
+                if _unparsed_guard(item.path, raw, fm, "note_item"):
+                    return False
+                stamp = now_stamp()
+                log = list(fm.get("activity_log") or [])
+                log.append(f"**{stamp}** — {text}")
+                fm["activity_log"] = log
+                fm["updated"] = stamp
+                return BW.write_item(item.path, fm, body, lock=lock)
     return False
 
 
@@ -6396,21 +6421,19 @@ def tag_item(item_id: int, *, add: tuple[str, ...] = (), remove: tuple[str, ...]
     """
     for item in open_items(None):
         if item.id == int(item_id):
-            raw = item.path.read_text(encoding="utf-8")
-            fm, body = _split_frontmatter(raw)
-            if _unparsed_guard(item.path, raw, fm, "tag_item"):
-                return False
-            took_back = NEEDS_HUMAN_TAG in remove and _take_back(fm)
-            tags = normalize_tags(fm.get("tags"))
-            new = [t for t in tags if t not in remove] + [t for t in add if t not in tags]
-            if new == tags and isinstance(fm.get("tags"), list) and not took_back:
-                return False
-            fm["tags"] = new
-            fm["updated"] = now_stamp()
-            item.path.write_text(
-                f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
-                f"---\n{body}", encoding="utf-8")
-            return True
+            with commit_lock(item.path) as lock:
+                raw = item.path.read_text(encoding="utf-8")
+                fm, body = _split_frontmatter(raw)
+                if _unparsed_guard(item.path, raw, fm, "tag_item"):
+                    return False
+                took_back = NEEDS_HUMAN_TAG in remove and _take_back(fm)
+                tags = normalize_tags(fm.get("tags"))
+                new = [t for t in tags if t not in remove] + [t for t in add if t not in tags]
+                if new == tags and isinstance(fm.get("tags"), list) and not took_back:
+                    return False
+                fm["tags"] = new
+                fm["updated"] = now_stamp()
+                return BW.write_item(item.path, fm, body, lock=lock)
     return False
 
 
@@ -6590,10 +6613,12 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         section += (f"\n**Past the {MAX_CLAUSES}-clause budget — not graded, not part of the "
                     f"contract:**\n" + "\n".join(f"- {c}" for c in past_cap) + "\n")
 
-    item.path.write_text(
-        f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
-        f"---\n{body.rstrip()}{section}",
-        encoding="utf-8")
+    # Locked replace, narrow on purpose: the `O.add_owed` call below is itself a
+    # locked writer of this same file, and flock is per open file description — a
+    # second `commit_lock` taken while this one is held would wait on itself until
+    # the wait expires rather than re-entering.
+    with commit_lock(item.path) as lock:
+        BW.write_item(item.path, fm, f"{body.rstrip()}{section}", lock=lock)
     # A verdict that leaves the item parked with no one to act — `not_code`,
     # `unverifiable`, or a confirmed contract only a protected path can land —
     # is a decision owed to Lloyd, not a draft that sits until a person looks

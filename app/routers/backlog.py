@@ -26,11 +26,12 @@ import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agent_mcp._shared import parse_frontmatter_text
+from app import backlog_write as BW
+from app.atomic_io import commit_lock
 from app.backlog_boards import (BOARDS, DEFAULT_BOARD, UnknownBoard,
                                 board_ids, check_board)
 from app.backlog_move import now_stamp, record_status_move, utc_instant
@@ -271,26 +272,62 @@ def _backlog_board_map() -> dict:
 
 
 def _write_task_file(filepath: Path, fm: dict, body: str) -> None:
+    """Replace one item file with `fm`, under the store's cross-process lock.
+
+    Deliberately the byte-for-byte shape this route has always written — the
+    assembly moved to `app/backlog_write.item_text`, which emits the same
+    `---\\n<dump>---\\n<blank>\\n<body>`. Two of its
+    consequences are pre-existing and were ruled out of scope when clause 3 was
+    amended on 2026-09-17 (see the `activity` log on item #1199): `yaml.dump`
+    re-quotes and re-wraps a hand-written frontmatter block — `created:` comes back
+    quoted on the 266 of 1,129 board files that store it unquoted (counted on the
+    live board 2026-09-17, `grep -c '^created: [0-9]'`) — and `_backlog_parse_fm`
+    hands back a `.strip()`ed body, so the file loses its trailing newline (800 of
+    1,141 files had one, same count). The clause as
+    graded is therefore "a priority-only update changes **no body text**", not
+    "byte-identical apart from priority:/updated:" — the latter was true only of
+    files the route itself wrote. Closing the re-flow means preserving the block's
+    original text through a write: a write-path change, recorded as a finding on
+    #1199, not a payload fix. What must never move is the body, which
+    `tests/test_backlog_body_roundtrip.py::
+    test_a_priority_only_update_survives_frontmatter_the_writer_would_reflow` pins
+    for a non-canonical block.
+
+    What did move, and what #3036 fixes here, is a key another writer wrote. Both
+    callers parsed the file outside any lock, edited the dict, and handed it here
+    for a bare `write_text` of the whole re-dumped block. A board save that
+    overlapped an automod status move therefore dropped that move's `activity_log`
+    row, and because this route only ever writes the keys in `_TaskUpdate` plus
+    `type`/`segment`/`board`/`position`, it also dropped keys it never reads —
+    `group`, `members`, `acceptance_clauses`, `automod_landed`, `owed`. `write_item`
+    re-reads the file inside the lock and keeps a journal row the caller's dict
+    does not carry, so the route's own keys stay the route's and the log stops
+    losing rows.
+
+    Two refusals come back as HTTP errors, both leaving the file untouched: a 409
+    when the front matter now on disk will not parse, and a 503 when the lock does
+    not come free inside the wait — a wedged automod finalizer must cost the board
+    an error it can show, not a request that hangs. The 409 is a second one beside
+    `_reject_broken_fm`, which `backlog_task_update` raises from a parse taken
+    *before* the lock: this is the refusal for a file that broke between that parse
+    and this write, and for `backlog_task_create`, which never had a broken-front
+    matter check at all, the only one.
+    """
     clean = {k: (v.isoformat() if isinstance(v, datetime) else v)
              for k, v in fm.items() if v is not None}
-    fm_yaml = yaml.dump(clean, default_flow_style=False, allow_unicode=True, sort_keys=False)
-    # Deliberately the byte-for-byte shape this route has always written. Two of its
-    # consequences are pre-existing and were ruled out of scope when clause 3 was
-    # amended on 2026-09-17 (see the `activity` log on item #1199): `yaml.dump`
-    # re-quotes and re-wraps a hand-written frontmatter block — `created:` comes back
-    # quoted on the 266 of 1,129 board files that store it unquoted (counted on the
-    # live board 2026-09-17, `grep -c '^created: [0-9]'`) — and `_backlog_parse_fm`
-    # hands back a `.strip()`ed body, so the file loses its trailing newline (800 of
-    # 1,141 files had one, same count). The clause as
-    # graded is therefore "a priority-only update changes **no body text**", not
-    # "byte-identical apart from priority:/updated:" — the latter was true only of
-    # files the route itself wrote. Closing the re-flow means preserving the block's
-    # original text through a write: a write-path change, recorded as a finding on
-    # #1199, not a payload fix. What must never move is the body, which
-    # `tests/test_backlog_body_roundtrip.py::
-    # test_a_priority_only_update_survives_frontmatter_the_writer_would_reflow` pins
-    # for a non-canonical block.
-    filepath.write_text(f"---\n{fm_yaml}---\n\n{body}")
+    try:
+        with commit_lock(filepath) as lock:
+            written = BW.write_item(filepath, clean, f"\n{body}", lock=lock)
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"could not take the backlog write lock for {filepath.name}: the "
+                   f"item was left unchanged, so retry the save ({exc})") from exc
+    if not written:
+        raise HTTPException(
+            status_code=409,
+            detail=f"front matter of {filepath.name} will not parse; fix the file by "
+                   f"hand — the item was left unchanged")
     _fm_cache_invalidate(filepath)
 
 

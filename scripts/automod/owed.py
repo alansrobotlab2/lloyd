@@ -445,8 +445,13 @@ def close_item(path: Path, why: str) -> bool:
     A pending hand-run (#3017) refuses the close: the receipt command exits
     non-zero, the status is left exactly as it was, and the refusal is written to
     the item's activity log naming the failing receipt, so a reader of the item
-    can tell "held" from "nobody tried"."""
-    import yaml
+    can tell "held" from "nobody tried".
+
+    The replace goes through the store's one write path (`backlog._write_item`:
+    cross-process lock, re-read inside it, temp-then-`os.replace`), because this
+    closer runs in the owed-check job while the autocode source and the board are
+    writing the same item file — a fourth bare `write_text` here would put back
+    exactly the lost update #3036 is about."""
     from app.backlog_move import record_status_move
     from scripts.automod import backlog as B
     text = path.read_text(encoding="utf-8")
@@ -463,10 +468,9 @@ def close_item(path: Path, why: str) -> bool:
                               remove_tags=(B.NEEDS_HUMAN_TAG,)):
         return False
     fm["closed_by"] = "owed-check"
-    path.write_text(
-        f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
-        f"---\n{body}", encoding="utf-8")
-    return True
+    # False only when the file on disk turned out to be the one shape no writer
+    # may dump over — front matter that will not parse — and then nothing moved.
+    return B._write_item(path, fm, body)
 
 
 # The cheap first test, NOT the guard: the words one incident produced (#1772 on
