@@ -7750,3 +7750,169 @@ def test_the_recovery_tag_survives_the_shrink_note_and_the_800_char_clip(vault, 
     assert "clause(s) 4, 5" in row["findings"], row["findings"]
     assert "shrank to 1 clause per call" in row["findings"], row["findings"]
     assert len(row["findings"]) <= 800, len(row["findings"])
+
+
+# ===========================================================================
+# #3039: a refused land must not delete a backlog item file HEAD never tracked.
+#
+# `revert_paths` decided that an untracked path is one the round CREATED and
+# unlinked it whole. On a vault round the round's own item file is always in that
+# path set — the acceptance clauses end with it — so a diverged review deleted the
+# very artifact it was grading, and the census text the clauses cited with it.
+#
+# It fired on the round that filed this item. The 2026-10-19T21:56:56Z
+# `vault_land ok=false` row for item 3035 lists 8 reverted paths, among them that
+# item's own file and the successor filing the same round had just created. A bare
+# path in such a row is not proof of deletion — the tracked branch appends one too —
+# so what decides it is the vault history: `git log --follow --name-status --
+# 'backlog/3035-*'` holds exactly one entry, `A
+# backlog/3035-triage-stranded-merged-finding-blocks-after-the-he.md` at ffbb7139.
+# The file was untracked at HEAD when the refusal fired, so the unlink was the only
+# branch that could act on it, and the implementer had to retype the item.
+#
+# The achievable property is "not deleted". Git holds no pre-round copy of a path
+# untracked at HEAD and `app/backlog_write.py` keeps no second store — the markdown
+# file IS the store — so the bytes that survive are the round's. #2437's reason to
+# delete a created file (it goes on arming the task the refusal exists to stop)
+# reaches `autonomy/*.md` and stops there: a `backlog/*.md` arms no task and feeds
+# no prompt, which is what
+# `test_loaders_run_only_for_paths_that_feed_a_prompt_or_the_scheduler` already pins.
+# ===========================================================================
+
+#: The round's edit to its own item file, in the shape `app/backlog_write.py` writes.
+ROUND_ITEM_TEXT = "---\nstatus: up_next\n---\n# item, rewritten by the round\n"
+
+#: A successor item the same round filed: NOT the item the round was opened for.
+SUCCESSOR_TEXT = "---\nstatus: draft\n---\n# successor filed by the round\n"
+
+#: A task file the round created, with front matter that parses, so the only thing
+#: separating it from the backlog files above is the directory it lives in.
+CREATED_TASK_TEXT = "---\nid: 1\nstatus: up_next\n---\n# task, created by the round\n"
+
+
+def _untrack_at_head(vault, rel: str) -> None:
+    """Drop `rel` from HEAD while leaving its bytes on disk.
+
+    That is the shape every item filed since the vault's last `backlog/` commit is in:
+    `app/backlog_write.py` writes the file and stops, so a new item stays untracked
+    until some unrelated lane sweeps `backlog/` into a commit.
+    """
+    git(vault, "rm", "-q", "--cached", "--", rel)
+    git(vault, "commit", "-q", "-m", f"fixture: stop tracking {rel}")
+    assert git(vault, "cat-file", "-e", f"HEAD:{rel}").returncode != 0, rel
+
+
+def _broken_created_task(vault, rel: str = "autonomy/2-new.md") -> str:
+    """Create a task file whose front matter does not parse, and name it: the refusal.
+
+    The refusal has to come from somewhere other than the paths under test, exactly as
+    `_refused_land` arranges it for #2437. Unparseable front matter on a created file is
+    also the error `validate()` short-circuits on, so the deeper rails — the loader
+    subprocess, the schedule guard — never run in these four nodes.
+    """
+    (vault / rel).write_text("---\nnot: [valid\n---\n", encoding="utf-8")
+    return rel
+
+
+def _refused_batch(paths, *, item_id=None):
+    """Refuse a land over `paths` and hand back its row (see `_refused_land`)."""
+    with pytest.raises(V.VaultRoundError, match="reverted"):
+        V.land(list(paths), "item: the round's edit", item_id=item_id)
+    return _events("vault_land")[-1]
+
+
+def test_a_refused_land_keeps_an_untracked_backlog_item_file(vault):
+    """Clause 1: the round's own item file survives the refusal that reverts it.
+
+    `backlog/9-item.md` is untracked at HEAD and carries the round's edit; the land is
+    refused for a reason elsewhere in the batch. Afterwards the file is on disk and
+    `git status` shows it as `??`. Its bytes are the round's, and that is the whole
+    claim: there is no pre-round copy of an untracked path to restore.
+    """
+    _untrack_at_head(vault, "backlog/9-item.md")
+    f = vault / "backlog" / "9-item.md"
+    f.write_text(ROUND_ITEM_TEXT, encoding="utf-8")
+    row = _refused_batch(["backlog/9-item.md", _broken_created_task(vault)])
+
+    assert f.exists(), (
+        f"the refusal deleted the item it was grading: {row['reverted']}")
+    assert f.read_text(encoding="utf-8") == ROUND_ITEM_TEXT
+    # `-uall` because plain `--short` collapses a directory whose every file is
+    # untracked into one `?? backlog/` line, which names the file without proving it.
+    assert "?? backlog/9-item.md" in \
+        git(vault, "status", "--short", "--untracked-files=all").stdout, (
+            "a kept item file is untracked again, not a committed one")
+
+
+def test_a_refused_land_keeps_a_created_item_that_is_not_the_round_s_own(vault):
+    """Clause 2: the keep rule is the path class, not the round's `item_id`.
+
+    One refusal over two backlog paths: the item the round was opened for (9, its file
+    untracked and edited) and a successor the round CREATED (10). Both survive. A rule
+    keyed to `item_id` would keep 9 and delete 10 — and deleting the successor is what
+    actually happened on 2026-10-19, where one refusal took `backlog/3035-*.md` and the
+    newly filed `backlog/3036-*.md` together.
+    """
+    _untrack_at_head(vault, "backlog/9-item.md")
+    (vault / "backlog/9-item.md").write_text(ROUND_ITEM_TEXT, encoding="utf-8")
+    succ = vault / "backlog" / "10-successor.md"
+    succ.write_text(SUCCESSOR_TEXT, encoding="utf-8")
+    row = _refused_batch(["backlog/9-item.md", "backlog/10-successor.md",
+                          _broken_created_task(vault)], item_id=9)
+
+    assert (vault / "backlog" / "9-item.md").exists(), row["reverted"]
+    assert succ.exists(), (
+        "the successor filing is not the item the round was opened for, so an "
+        f"item_id-keyed keep rule would have deleted it: {row['reverted']}")
+    assert succ.read_text(encoding="utf-8") == SUCCESSOR_TEXT
+
+
+def test_a_refused_land_still_deletes_an_untracked_autonomy_task(vault):
+    """Clause 3: the carve-out does not widen — a created task file still goes.
+
+    One refusal, two files untracked at HEAD, one of each class: the backlog item stays
+    and the autonomy task is gone. #2437's reason stands for the task — a created
+    `autonomy/*.md` left in the tree goes on arming the task the refusal exists to stop
+    — and a `backlog/*.md` arms nothing, so deletion there buys no safety.
+    """
+    _untrack_at_head(vault, "autonomy/1-task.md")
+    _untrack_at_head(vault, "backlog/9-item.md")
+    task = vault / "autonomy" / "1-task.md"
+    task.write_text(CREATED_TASK_TEXT, encoding="utf-8")
+    item = vault / "backlog" / "9-item.md"
+    item.write_text(ROUND_ITEM_TEXT, encoding="utf-8")
+    row = _refused_batch(["autonomy/1-task.md", "backlog/9-item.md",
+                          _broken_created_task(vault)])
+
+    assert not task.exists(), (
+        "#2437: a created task file left on disk keeps arming the task this refusal "
+        "exists to stop — the #3039 keep rule covers backlog/ item files and nothing else"
+    )
+    assert item.exists(), row["reverted"]
+
+
+def test_the_refusal_row_distinguishes_a_kept_item_file_from_a_removed_one(vault):
+    """Clause 4: the row says which path it kept, not only which it deleted.
+
+    One refusal over an untracked backlog item, an untracked autonomy task and the
+    created file that caused it. The backlog entry carries an annotation; the other two
+    stay the bare path — the shape
+    `test_a_path_that_preserves_nothing_reverts_exactly_as_today` pins — so the
+    difference between "kept on disk" and "unlinked" is readable off the row without
+    opening the vault.
+    """
+    _untrack_at_head(vault, "backlog/9-item.md")
+    _untrack_at_head(vault, "autonomy/1-task.md")
+    (vault / "backlog" / "9-item.md").write_text(ROUND_ITEM_TEXT, encoding="utf-8")
+    (vault / "autonomy" / "1-task.md").write_text(CREATED_TASK_TEXT, encoding="utf-8")
+    row = _refused_batch(["backlog/9-item.md", "autonomy/1-task.md",
+                          _broken_created_task(vault)])
+
+    assert row["ok"] is False and len(row["reverted"]) == 3, row["reverted"]
+    kept = row["reverted"][0]
+    assert kept != "backlog/9-item.md", (
+        "a bare entry is the shape a REMOVED path has, so an unannotated kept path "
+        "makes the row lie: " + repr(row["reverted"]))
+    assert kept.startswith("backlog/9-item.md") and "kept" in kept, kept
+    assert row["reverted"][1] == "autonomy/1-task.md", row["reverted"]
+    assert row["reverted"][2] == "autonomy/2-new.md", row["reverted"]

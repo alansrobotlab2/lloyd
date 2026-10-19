@@ -850,6 +850,33 @@ def _revert_tracked_path(p: str) -> str:
                                      for field, value in restored) + ")"
 
 
+#: #3039: an untracked path under this prefix survives a refusal instead of being
+#: unlinked. `backlog/` holds board prose and nothing else — `app/backlog_write.py`
+#: writes these files, the kanban reads them, and a backlog edit is not handed to a
+#: loader at all (`test_loaders_run_only_for_paths_that_feed_a_prompt_or_the_scheduler`)
+#: — so #2437's reason to delete a created file has no purchase here: it is an
+#: `autonomy/<n>-*.md` that arms a task, and a `backlog/<id>-*.md` arms nothing.
+#: Deleting one bought no safety and cost the board the item: on 2026-10-19 a single
+#: diverged review of item 3035 took that item's own file and the successor filing
+#: `backlog/3036-*.md` with it, because the clauses of a vault round end with its own
+#: item file, so that file is in every such round's path set.
+#:
+#: The rule is the path class, deliberately not `item_id`: the case that fired deleted
+#: a created item that was NOT the one the round was opened for.
+BACKLOG_PATH_PREFIX = "backlog/"
+
+#: How a kept path is marked in a `reverted` list (#3039 clause 4). A bare entry is what
+#: a path that was put back at HEAD or unlinked has, so an unannotated kept path would
+#: make the row claim a deletion that did not happen.
+KEPT_UNTRACKED_NOTE = (" kept (untracked backlog item file: left on disk, bytes are "
+                       "the round's — git holds no pre-round copy)")
+
+
+def _kept_when_untracked(p: str) -> bool:
+    """True for an untracked path a refused land must leave on disk (#3039)."""
+    return p.startswith(BACKLOG_PATH_PREFIX) and p.endswith(".md")
+
+
 def revert_paths(paths: list[str]) -> list[str]:
     """Put the round's paths back: tracked ones to HEAD, new ones removed.
 
@@ -861,6 +888,13 @@ def revert_paths(paths: list[str]) -> list[str]:
     file cannot both keep a completion's stamp and stop arming the task the
     refusal exists to stop, which is owed ruling 3 on #2437 rather than a call to
     make here.
+
+    #3039 carves one class out of that unlink and it is exactly the class #2437 was
+    not about: a `backlog/*.md` arms no task, so removal is pure loss, and the loss
+    falls on the board's own record — the round's item file and any item it filed are
+    in `paths` on every vault round. The achievable property there is "not deleted":
+    an untracked path has no HEAD copy, and `app/backlog_write.py` keeps no second
+    store (the markdown file IS the store), so the bytes that survive are the round's.
     """
     undone: list[str] = []
     for p in paths:
@@ -868,8 +902,11 @@ def revert_paths(paths: list[str]) -> list[str]:
         if tracked:
             undone.append(_revert_tracked_path(p))
         elif (VAULT / p).exists():
-            (VAULT / p).unlink()
-            undone.append(p)
+            if _kept_when_untracked(p):
+                undone.append(p + KEPT_UNTRACKED_NOTE)
+            else:
+                (VAULT / p).unlink()
+                undone.append(p)
     return undone
 
 
