@@ -1134,9 +1134,35 @@ WORKTREE_DIR_MAX_AGE_DAYS = 7
 #: clock the file stores above use — which every create or remove directly inside it
 #: refreshes. `tests/conftest.py:223` and `architecture/testing.md:30-31` tell every human
 #: and agent to make `~/lloyd-work/check-$$` for test runs, so the store has a permanently
-#: self-renewing producer; a `check-$$` cut by `git worktree add` is held by the registered
-#: rail whatever its age, and the window reaches only the abandoned ones.
+#: self-renewing producer; a `check-$$` cut by `git worktree add` is held by the window at
+#: `REGISTERED_DIR_MAX_AGE_DAYS` below, and this one reaches only the abandoned ones.
 SCRATCH_DIR_MAX_AGE_DAYS = 7
+#: Delete a dir in this store that IS a registered git worktree, past this many days.
+#:
+#: #3003, and the rail this constant bounds is the one the store's other two windows
+#: cannot reach. `SCRATCH_DIR_MAX_AGE_DAYS` above skips every registered path before it
+#: ever asks an age, and `automod.worktree.prune_orphans` is `git worktree prune`, which
+#: deregisters only a worktree whose working directory is ALREADY gone. The two rules
+#: excluded each other's case exactly, and the case between them is the common one: the
+#: throwaway checkout `tests/conftest.py:248` cuts with `git worktree add --detach
+#: ~/lloyd-work/check-$$ HEAD` and whose `git worktree remove it after` half nobody
+#: completes. Measured on 2026-10-18: 38 registered worktrees, 3,191 MiB, mtimes 12-18 d,
+#: and `git worktree prune --dry-run --verbose` printing nothing because every working
+#: directory still exists. So a forgotten checkout was held by the ref it left in
+#: `.git/worktrees/` forever, and the rung's own report line said so honestly
+#: (`36 registered`) while having no rule that could act on it.
+#:
+#: Same horizon as the unregistered one, same argument as above: a registered dir whose
+#: producer was told in the same sentence to remove it has a weaker claim to be wanted
+#: than a round home, which is kept 7 days as forensics. The registration is what bought
+#: it the extra protection, and a registration is a leak marker here, not a reason.
+#:
+#: Aged on the entry's OWN mtime, as the window above is — so a checkout somebody is
+#: still using renews itself and is not reclaimed, which is the whole reason this is a
+#: window and not "delete every `check-*`". The 13 dirs that were 1.8-6.6 d old at
+#: triage are kept by exactly that, and go on the next tick if their producer never
+#: returns.
+REGISTERED_DIR_MAX_AGE_DAYS = 7
 #: Delete an `automod/<round_id>` branch this many days after the round settled — but
 #: only once its tip is an ancestor of `main`, which is the state that says the work is
 #: in the tree and is what makes an irreversible delete forensic-safe.
@@ -1360,20 +1386,91 @@ def _bytes_under(dir: Path) -> int:
     return total
 
 
-def _names_registered(dir: Path, registered: list[str]) -> bool:
-    """Whether `git worktree list` named any path at or under `dir`.
+def _registered_under(dir: Path, registered: list[str]) -> list[str]:
+    """The registered paths at or under `dir`, spelled as `git worktree list` printed
+    them.
 
-    Both sides go through `realpath` because the round layout is a symlink farm by
-    design (`worktree.ensure_round_home` links into the live tree), and a registered
-    path spelled through a link would otherwise read as "not registered" while the
-    worktree is live — the one mistake this guard exists to make impossible.
+    `_names_registered` is this filtered to a boolean; the reclaim needs the paths
+    themselves, because `git worktree remove` is addressed by the string git printed and
+    NOT by anything derived from the directory it is standing next to. #3003's hazard:
+    `~/lloyd/.git/worktrees/` holds an admin dir literally named `lloyd`, and it belongs
+    to a worktree under `~/.cache/`, not to the main checkout (a main working tree has no
+    admin dir). A rule keyed to `.git/worktrees/*` names, or to a basename regex, aims at
+    the wrong tree; a rule keyed to the path string cannot.
+
+    Both sides go through `realpath` because the round layout is a symlink farm by design
+    (`worktree.ensure_round_home` links into the live tree), and a registered path spelled
+    through a link would otherwise read as "not registered" while the worktree is live —
+    the one mistake this guard exists to make impossible.
     """
     real = Path(os.path.realpath(dir))
-    for path in registered:
-        candidate = Path(os.path.realpath(path))
-        if candidate == real or real in candidate.parents:
-            return True
-    return False
+    return [path for path in registered
+            if (candidate := Path(os.path.realpath(path))) == real
+            or real in candidate.parents]
+
+
+def _names_registered(dir: Path, registered: list[str]) -> bool:
+    """Whether `git worktree list` named any path at or under `dir`."""
+    return bool(_registered_under(dir, registered))
+
+
+def _remove_registered_worktrees(repo: Path, paths: list[str]) -> tuple[int, str]:
+    """Take a forgotten checkout's registration WITH its directory. (#3003 clause 2)
+
+    Runs the trio `workers/sources/arch_review.py::remove_worktree:1411-1418` runs per
+    registration, through `automod.worktree`'s own `git`/`prune` helpers: `git worktree
+    remove --force` on the path `git worktree list` printed, then `rmtree` ONLY if the
+    directory survives that, then `git worktree prune`. Neither `worktree.remove` nor
+    `prune_orphans` can stand in: `remove` takes a round id and derives the path from the
+    round layout (a `check-$` has no round id), and `prune_orphans` only deregisters a
+    worktree whose working dir is ALREADY gone — which is exactly what a live `check-*`
+    is not, so `git worktree prune --dry-run` printed nothing over all 38 of them. A bare `shutil.rmtree` is precisely what this rule must not do:
+    it frees the bytes and leaves `.git/worktrees/<name>/` behind, so `git worktree list`
+    still names a tree that is not there and the store's byte count is bounded while its
+    registration count is not.
+
+    `--force` is what makes the common case work — a `check-$` a test run left behind is
+    full of untracked files, and plain `git worktree remove` refuses those ("contains
+    untracked files (use 'force' if sure)"). It is NOT what makes this safe: a refusal
+    still falls through to the `rmtree`, and nothing is counted as gone until the re-list
+    below stops naming the path. Measured and recorded on #3003: dropping `--force` from
+    the call keeps `tests/test_retention_sweep.py -k registration` green, so the re-list
+    is what pins this rule, not the flag.
+
+    Returns `(gone, why)` — how many of `paths` are ABSENT from a fresh `git worktree
+    list` afterwards (read back, not assumed from the subprocess exit code) and the first
+    failure verbatim.
+    """
+    worktree = _automod_module("worktree")
+    if worktree is None:
+        return 0, ("scripts.automod.worktree is not importable from this tree, so a "
+                   "registered worktree cannot be removed safely")
+    wanted = {os.path.realpath(p) for p in paths}
+    why = ""
+    for path in paths:
+        try:
+            r = worktree.git(repo, "worktree", "remove", "--force", str(path))
+            if r.returncode != 0 and Path(path).is_dir():
+                why = why or (f"{path}: git worktree remove --force said "
+                              f"{(r.stderr or r.stdout or '').strip()[:160]}")
+            # git takes the tree and its registration together; the rmtree only mops up
+            # a directory git refused to remove, and that refusal is already recorded.
+            if Path(path).is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+        except Exception as exc:  # a git failure here is reported, never swallowed
+            why = why or f"{path}: {exc}"
+    try:
+        worktree.prune(repo)
+    except Exception as exc:
+        why = why or f"git worktree prune failed: {exc}"
+    try:
+        left = {os.path.realpath(p) for p in worktree.list_registered(repo)}
+    except Exception as exc:
+        return 0, why or f"the registration re-list after removing failed: {exc}"
+    gone = len(wanted - left)
+    if not why and gone != len(wanted):
+        why = f"{len(wanted) - gone} of {len(wanted)} registration(s) still listed"
+    return gone, why
 
 
 def _registered_worktrees(repo: Path) -> list[str]:
@@ -1395,14 +1492,17 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
                             registered: list[str] | None = None) -> dict:
     """Reclaim `~/lloyd-work/` entries: a round home past its settle time, scratch past mtime.
 
-    Two windows, one store. A name matching `ROUND_ID_PREFIX` is a round the ledger should
+    Three windows, one store. A name matching `ROUND_ID_PREFIX` is a round the ledger should
     be able to date, so it is aged on its newest `promotions.jsonl` event and kept at any
     age when no row exists (#1644's clause 3). Every other entry — the `cp -a` copies, the
     probe dirs, the pruned `check-$$` worktrees — has no row to date it by and is aged on
-    its own mtime past SCRATCH_DIR_MAX_AGE_DAYS (#2099). Before either window is consulted,
-    the same two rails are asked of EVERY name, round-spelled or not: the round
-    `current.json` names and any directory `git worktree list` names at or under the entry
-    are kept whatever their age.
+    its own mtime past SCRATCH_DIR_MAX_AGE_DAYS (#2099). A registered non-round entry got no
+    window at all until #3003 and is now aged on the same clock past
+    REGISTERED_DIR_MAX_AGE_DAYS; see that constant for why the registered rail was never the
+    bound it was described as. The rails are asked of EVERY name, round-spelled or not,
+    BEFORE any window is: the round `current.json` names, an `SM_` home the ledger can date,
+    and `~/lloyd` itself are kept whatever their age, and a registration inside the
+    registration window is kept as a renewing producer.
 
     The rails come first, and in that order, because the failure they each prevent is
     different: reclaiming the in-flight round's home destroys a gate mid-run, and reclaiming
@@ -1421,17 +1521,24 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
       young          a round settled inside the horizon — kept, still recent forensics
       untracked      NO ledger row, so no settle time — never deleted (clause 3)
       scratch_kept   a non-round entry inside the window — kept, its mtime says used
-      registered     `git worktree list` names a path under it — never deleted, any age
+      registered     kept by a registration: the round layout (any age), or a non-round
+                     checkout renewed inside REGISTERED_DIR_MAX_AGE_DAYS (#3003)
+      deregistered   a registered NON-round entry past that window — removed under
+                     `--apply`, due for removal in a dry run, exactly like
+                     `reclaimed_scratch` above it, and never counted in `registered`
+                     because it is not being kept
       live           the round `current.json` names — never deleted, any age
       not_a_dir      a symlink or a plain file — never touched by this rung
-      failed         `rmtree` or the age read refused (permissions, a busy mount)
+      failed         `git worktree remove` refused, `rmtree` or the age read refused
+                     (permissions, a busy mount); `why` carries the first reason verbatim
     """
     root = Path(work_root if work_root is not None else AUTOMOD_WORK_ROOT)
     times = _settle_times(Path(ledger if ledger is not None else AUTOMOD_LEDGER))
     live = _current_round(Path(current if current is not None else AUTOMOD_CURRENT))
     out = {"reclaimed": 0, "reclaimed_rounds": 0, "reclaimed_scratch": 0, "bytes": 0,
            "young": 0, "untracked": 0, "scratch_kept": 0, "registered": 0, "live": 0,
-           "not_a_dir": 0, "failed": 0, "skip": ""}
+           "deregistered": 0,
+           "not_a_dir": 0, "failed": 0, "skip": "", "why": ""}
     if not root.is_dir():
         return out
     if registered is None:
@@ -1442,6 +1549,7 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
             return out
     cutoff = now - WORKTREE_DIR_MAX_AGE_DAYS * 86400
     scratch_cutoff = now - SCRATCH_DIR_MAX_AGE_DAYS * 86400
+    reg_cutoff = now - REGISTERED_DIR_MAX_AGE_DAYS * 86400
     try:
         entries = sorted(root.iterdir(), key=lambda p: p.name)
     except OSError as exc:
@@ -1455,8 +1563,44 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
             if live is not None and dir.name == live:
                 out["live"] += 1
                 continue
-            if _names_registered(dir, registered):
-                out["registered"] += 1
+            under = _registered_under(dir, registered) if registered else []
+            if under:
+                # The registered rail used to be an unconditional `continue`, and that
+                # is what made the store unbounded (#3003): a `check-$$` cut by
+                # `git worktree add` IS a registration, so it was kept at any age,
+                # while `git worktree prune` reaches only dirs already gone — two
+                # rails each excluding the other's case. What the other rails still
+                # need protected here is the round layout; everything else is now
+                # bounded by REGISTERED_DIR_MAX_AGE_DAYS.
+                if dir.name.startswith(ROUND_ID_PREFIX):
+                    # A round home is dated by its ledger row, which is the more
+                    # specific fact, and clause 3 keeps it protected however
+                    # registered it is. The live round never reaches here at all.
+                    out["registered"] += 1
+                    continue
+                try:
+                    mtime = dir.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                if mtime > reg_cutoff:
+                    out["registered"] += 1  # renewed by use; its producer may return
+                    continue
+                entry_bytes = _bytes_under(dir)  # measured while it still exists
+                if apply:
+                    gone, why = _remove_registered_worktrees(repo, under)
+                    if gone < len(under):
+                        out["failed"] += 1
+                        out["why"] = out["why"] or f"{dir.name}: {why}"
+                        continue
+                    shutil.rmtree(dir, ignore_errors=True)
+                # Counted in BOTH modes, the way the scratch rail counts a due entry:
+                # `reclaimed` means "removed (--apply) or due for removal (dry run)",
+                # so a dry run printing `0 reclaimed, 0.0 MiB freed` for a pending
+                # deregistration would contradict its own key list and print one state
+                # as two different lines.
+                out["deregistered"] += 1
+                out["reclaimed"] += 1
+                out["bytes"] += entry_bytes
                 continue
             # Both rails have now been answered for this name, whatever it is spelled
             # like. What the name still decides below is only WHICH age can date it: a
@@ -1792,6 +1936,16 @@ def _worktree_line(w: dict) -> str:
     label itself keeps the wording #1644 shipped — `autonomy/79-retention-sweep.md`
     quotes this line in those words — and the scratch half spells its own window inside
     its own bucket.
+
+    #3003. `registered` now means ONLY "kept by registration" (the round layout, plus a
+    non-round checkout renewed inside its window), and a registered entry PAST that
+    window rides the reclaimed split as `1 deregistered`, counted in BOTH modes like
+    the `1 scratch` beside it, because `reclaimed` means "removed or due" here. That is
+    the pair the old line could not express: at filing it printed `36 registered` and
+    nothing reclaimed, which read as "held by registration" when the truth was that a
+    forgotten `check-$` had never been bounded at all. One state therefore prints one
+    line: a dry run and an `--apply` over an identical store answer the same, which is
+    what makes the dry-run line readable as the approval prompt it is.
     """
     if w["skip"]:
         return f"  ~/lloyd-work round dirs >{WORKTREE_DIR_MAX_AGE_DAYS}d: " \
@@ -1803,10 +1957,16 @@ def _worktree_line(w: dict) -> str:
     if w["not_a_dir"]:
         kept.append(f"{w['not_a_dir']} not a directory")
     if w["failed"]:
-        kept.append(f"{w['failed']} FAILED to remove")
+        # The reason rides along, the way the branch store reports its two
+        # FAILED cases: a count of registrations this store could not take down
+        # tells an operator nothing about which name git refused.
+        kept.append(f"{w['failed']} FAILED to remove"
+                    + (f" ({w['why']})" if w["why"] else ""))
+    deregistered = f", {w['deregistered']} deregistered" if w["deregistered"] else ""
     return (f"  ~/lloyd-work round dirs >{WORKTREE_DIR_MAX_AGE_DAYS}d: "
             f"{w['reclaimed']} reclaimed "
-            f"({w['reclaimed_rounds']} round home, {w['reclaimed_scratch']} scratch), "
+            f"({w['reclaimed_rounds']} round home, {w['reclaimed_scratch']} scratch"
+            f"{deregistered}), "
             f"{w['bytes'] / 1024 / 1024:.1f} MiB freed (kept: {', '.join(kept)})")
 
 

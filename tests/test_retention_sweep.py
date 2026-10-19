@@ -3288,6 +3288,14 @@ def _scratchdir(rs, name: str, *, size: int = 100, days: float | None = None,
     entry = rs.AUTOMOD_WORK_ROOT / name
     if registered_at is not None:
         _git_ok(registered_at, "worktree", "add", "-q", "--detach", str(entry), "main")
+        # Untracked ON PURPOSE, because a `check-$` a test run leaves behind is full of
+        # untracked files and plain `git worktree remove` refuses those ("contains
+        # untracked files (use 'force' if sure)") — which is why the call passes `--force`.
+        # What the flag is NOT is the safety net, and no node here pretends it is: with
+        # `--force` dropped from the call, `-k registration` stays green, because a git
+        # refusal falls through to the `rmtree` and the count comes from a fresh
+        # `git worktree list` either way. That re-list is what the nodes assert.
+        (entry / "payload.txt").write_text("x" * size)
     else:
         entry.mkdir(parents=True)
         (entry / "payload.txt").write_text("x" * size)
@@ -3351,15 +3359,25 @@ def test_the_liveness_rails_are_asked_of_a_non_round_name_too(rs, automod, capsy
     that path, the same short-circuit stops being merely misleading and becomes a `rmtree`
     over a checkout git still believes in.
 
-    Both entries are seeded 400 days old, far outside the window, so the ONLY thing that can
-    keep them is the rail each is named for: age says delete here, and a node that passes on
-    a young fixture would prove nothing. The `not_a_dir` count is asserted zero as well —
-    that bucket is where the prefix test used to put them, and a non-zero count is the
-    short-circuit still being there.
+    The live round is seeded 400 days old, far outside every window in this store, so the
+    ONLY thing that can keep it is the rail it is named for: age says delete here, and a
+    node that passes on a young fixture would prove nothing. The registered entry sits
+    inside `REGISTERED_DIR_MAX_AGE_DAYS` for the same node's own question — #3003 made a
+    registered non-round checkout reclaimable past that window, so what this node pins is
+    that BOTH rails are consulted for a non-round name before the age window is, and the
+    age itself is not what is doing the keeping. Its companion,
+    `test_a_registered_non_round_dir_is_reclaimed_past_the_registration_window_and_kept_inside_it`,
+    owns the window. The `not_a_dir` count is asserted zero as well — that bucket is where
+    the prefix test used to put them, and a non-zero count is the short-circuit still
+    being there.
     """
     _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
     now = time.time()
-    registered = _scratchdir(rs, "base1961", registered_at=automod, days=400)
+    # Inside the registration window #3003 opened: this node pins the ORDER of the
+    # rails, and a registered non-round entry that is also past that window is now
+    # reclaimed, which is the other node's subject. The live round has no window at
+    # all, so it stays at 400 days — age cannot be what keeps it.
+    registered = _scratchdir(rs, "base1961", registered_at=automod, days=1)
     rs.AUTOMOD_CURRENT.write_text(json.dumps({"round_id": "cand-in-flight",
                                               "branch": "automod/cand-in-flight"}))
     in_flight = _scratchdir(rs, "cand-in-flight", days=400)
@@ -3509,6 +3527,189 @@ def test_the_scratch_outcome_is_its_own_count_and_a_dry_run_deletes_nothing(rs, 
     assert (rs.AUTOMOD_WORK_ROOT / "restore-hf").is_symlink(), (
         "a symlink is not a directory and this rung never touches it, even when its target "
         "has just been reclaimed")
+
+
+def test_a_registered_non_round_dir_is_reclaimed_past_the_registration_window_and_kept_inside_it(
+        rs, automod, capsys, monkeypatch):
+    """Clauses 1 and 2 together: #3003 bounds what #2099 left unbounded.
+
+    `tests/conftest.py:246-248` tells every agent that runs the suite to `git worktree
+    add --detach ~/lloyd-work/check-$$ … and git worktree remove it after`, and the
+    second half of that sentence is the half nobody completes: at filing the rung printed
+    `0 reclaimed … 36 registered`, and `git -C ~/lloyd worktree list` named 38 linked
+    worktrees totalling 3,191 MiB, 12 to 18 days old. `prune_orphans`
+    (`automod/worktree.py:422-426`) could not reach one of them either — it only
+    deregisters a worktree whose directory is ALREADY gone, so `git worktree prune
+    --dry-run --verbose` printed nothing over all 38. The two rails excluded each
+    other's case exactly: the registered rail answered before the age window, and the
+    age window only ever saw unregistered names.
+
+    One node seeds both sides of the new horizon, because the two halves are one
+    statement: an 8-day-old forgotten checkout goes, a 1-day-old one stays and is counted
+    `registered`. A rule that deleted everything passes a delete-only assertion, and a
+    rule that deleted nothing passes a keep-only one, so only the pair pins the window.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    now = time.time()
+    due = _scratchdir(rs, "check-2882", days=8, registered_at=automod)
+    inside = _scratchdir(rs, "chk2245", days=1, registered_at=automod)
+    assert rs._names_registered(due, rs._registered_worktrees(automod)), \
+        "the fixture did not register a worktree git can see"
+
+    dry = rs.sweep_automod_worktrees(apply=False, now=now, repo=automod)
+    assert dry["reclaimed"] == 1 and dry["deregistered"] == 1, (
+        f"a dry run must count the pending deregistration as the reclaim it is, the way "
+        f"the scratch rail counts a due entry, not file it under `kept:`: {dry}")
+    assert due.is_dir() and inside.is_dir(), (
+        f"a dry run DELETED something: due={due.exists()} inside={inside.exists()}")
+
+    out = rs.sweep_automod_worktrees(apply=True, now=now, repo=automod)
+    assert out["reclaimed"] == 1 and out["deregistered"] == 1 and out["failed"] == 0, out
+    assert out["reclaimed_rounds"] == 0 and out["reclaimed_scratch"] == 0, (
+        f"taking a registration down is neither existing window's decision: {out}")
+    assert out["registered"] == 1, (
+        f"the 1-day entry must be kept and counted `registered`: {out}")
+    assert not due.exists(), (
+        "a registered non-round dir 8 days old was kept, which is the held-forever rail "
+        "#3003 was filed against")
+    assert inside.is_dir(), (
+        f"an entry inside the {rs.REGISTERED_DIR_MAX_AGE_DAYS}-day window went while its "
+        "producer may still be running")
+    # Clause 2's first half: the registration went WITH the directory.
+    left = rs._registered_worktrees(automod)
+    assert not rs._names_registered(due, left), (
+        f"`git worktree list` still names the reclaimed path — the dangling registration "
+        f"a bare rmtree leaves: {sorted(left)}")
+    assert rs._names_registered(inside, left), (
+        "the kept entry lost its registration while keeping its directory")
+
+
+def test_the_registration_removal_leaves_no_admin_dir_behind(rs, automod, capsys,
+                                                             monkeypatch):
+    """Clause 2 at git's own level, where a bare `rmtree` is caught by evidence.
+
+    `.git/worktrees/<name>/` IS the registration. A `shutil.rmtree` of the working tree
+    frees the bytes, reports the freed megabytes, and leaves that admin directory, so the
+    NEXT `git worktree list` names a tree that is not on disk — a store that looks bounded
+    while the repo's own inventory is wrong. `git worktree prune` would clear it one sweep
+    too late, after the report has already been read. So this node asks git twice: the
+    path must be gone from `git worktree list --porcelain`, and the admin directory must
+    have gone with it.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    now = time.time()
+    due = _scratchdir(rs, "owed2016", days=9, registered_at=automod)
+    admin = automod / ".git" / "worktrees" / due.name
+    assert admin.is_dir(), (
+        "the fixture's `git worktree add` left no admin dir, so this node would prove "
+        "nothing about the thing it is checking")
+
+    out = rs.sweep_automod_worktrees(apply=True, now=now, repo=automod)
+    assert out["deregistered"] == 1 and out["failed"] == 0, out
+    assert not due.exists(), "the directory survived a reported deregistration"
+    porcelain = subprocess.run(["git", "-C", str(automod), "worktree", "list",
+                                "--porcelain"], capture_output=True, text=True,
+                               check=True).stdout
+    assert str(due) not in porcelain, f"git still names the reclaimed path: {porcelain!r}"
+    assert not admin.exists(), (
+        f"bytes freed, registration left behind at {admin} — exactly what clause 2 "
+        "forbids, and what the next `git worktree list` would report as a missing tree")
+    assert (automod / "file.txt").is_file(), (
+        "removing a linked worktree touched the main working tree")
+
+
+def test_the_registration_window_never_outranks_the_round_rails(rs, automod, capsys,
+                                                                monkeypatch):
+    """Clause 3: what a registration is LOAD-BEARING for stays at any age.
+
+    Both entries are seeded 400 days old — far outside `REGISTERED_DIR_MAX_AGE_DAYS` — so
+    age says delete both and only a rail can keep them: the home `current.json` names,
+    and an `SM_` home the ledger can date. That round case is the one this store cannot
+    afford to get wrong: removing a registered round home while its round is gated or
+    landing is the destruction #2099's clause 5 was written to make unreachable, and a
+    window added for forgotten `check-*` dirs must not reopen it.
+
+    The protection is on the resolved PATH, never on a basename or an admin-dir name:
+    `~/lloyd/.git/worktrees/` holds a directory literally named `lloyd`, and it belongs to
+    an out-of-tree checkout rather than to the main working tree (which has no admin dir at
+    all), so a rule keyed to registration NAMES would aim at the wrong tree.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    now = time.time()
+    rs.AUTOMOD_CURRENT.write_text(json.dumps({"round_id": "SM_LIVE",
+                                              "branch": "automod/SM_LIVE"}))
+    live = _workdir(rs, "SM_LIVE", registered_at=automod)
+    settled = _workdir(rs, "SM_SETTLED", registered_at=automod)
+    _settle(rs, "SM_SETTLED", days=400)
+    _backdate(live, 400)
+    _backdate(settled, 400)
+    before = sorted(rs._registered_worktrees(automod))
+    assert rs._names_registered(live, before) and rs._names_registered(settled, before), \
+        "the fixtures did not register worktrees the rung can see"
+
+    out = rs.sweep_automod_worktrees(apply=True, now=now, repo=automod)
+    assert out["live"] == 1, (
+        f"the round `current.json` names did not land in the `live round` bucket: {out}")
+    assert out["deregistered"] == 0 and out["reclaimed"] == 0, (
+        f"the registration window outranked a rail: {out}")
+    assert out["registered"] == 1, (
+        "the settled round's home belongs in `registered`, because this store asks the "
+        "registered rail BEFORE it reads the ledger for any name — so it is the "
+        "registration, not its 400-day settle row, that is keeping it here. The row is "
+        "what dates the same home once it is deregistered, which is #1644 clause 3's own "
+        f"node's subject, not this line's: {out}")
+    assert live.is_dir(), (
+        "the live round's home was removed — a round that was gating or landing lost its "
+        "tree, which is the destruction #2099 clause 5 forbids")
+    assert settled.is_dir(), (
+        "a settled round's forensic home was removed while its registration held it")
+    assert sorted(rs._registered_worktrees(automod)) == before, (
+        "the sweep deregistered something it never removed")
+    assert (automod / "file.txt").is_file() and (rs._TREE / "scripts").is_dir(), (
+        "the main working tree was touched")
+
+
+def test_the_registration_outcome_is_its_own_count_and_one_state_prints_one_line(
+        rs, automod, capsys, monkeypatch):
+    """Clause 4: a `0 reclaimed` says WHY, and the mode must not change the answer.
+
+    The line #2099 shipped put every registered entry in one bucket meaning "held by a
+    rail forever", so nothing on it distinguished a store working as designed from one
+    where a forgotten checkout had simply never been bounded — which is how 3,191 MiB sat
+    there reporting a clean sweep. The new outcome therefore gets its own named number
+    beside the existing kept counts, and one state prints one line whatever mode asked:
+    the dry run and the `--apply` over an identical store print the SAME line: the
+    pending deregistration is already counted as `1 reclaimed (0 round home, 0 scratch,
+    1 deregistered)` while the directory is still on disk. `reclaimed` means "removed
+    (--apply) or due for removal (dry run)" in this rung's own key list, which is how the
+    scratch rail and `_branch_line` already read it, and a pending delete that only shows
+    up AFTER it happened cannot inform the mode whose whole job is showing an operator
+    what they are about to approve. The count is a value inside the reclaimed split, not
+    a twelfth automod line: a new line would move this file's 21-line production census
+    and its 18-line refused census for no operator gain.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    now = time.time()
+    due = _scratchdir(rs, "check-9999", days=8, registered_at=automod)
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+
+    dry = rs.sweep_automod_worktrees(apply=False, now=now, repo=automod)
+    assert rs.main() == 0                       # argv says dry run
+    dry_line = _store_line(capsys.readouterr().out, "lloyd-work round dirs")
+    assert "1 reclaimed (0 round home, 0 scratch, 1 deregistered)" in dry_line, dry_line
+    assert dry["reclaimed"] == 1 and dry["deregistered"] == 1, dry
+    assert due.is_dir(), f"a dry run deleted the worktree it was only reporting: {due}"
+
+    out = rs.sweep_automod_worktrees(apply=True, now=now, repo=automod)
+    applied = rs._worktree_line(out)
+    assert applied == dry_line, (
+        f"one state, one line — the dry run and `--apply` over an identical store must "
+        f"not disagree, or the dry-run line is not an approval prompt:\n  dry:     "
+        f"{dry_line}\n  applied: {applied}")
+    assert out["deregistered"] == 1 and out["reclaimed"] == 1 and out["failed"] == 0, out
+    assert not due.exists(), (
+        "the entry the dry run reported as due was not reclaimed by `--apply`")
+    assert "FAILED" not in applied, applied
 
 
 def test_a_branch_goes_only_at_thirty_days_and_only_when_its_tip_is_in_main(rs,
