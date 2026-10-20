@@ -2,7 +2,7 @@
 segment: architecture
 tags: [architecture,subliminal,memory,prefetch]
 type: architecture
-updated: 2026-09-24
+updated: 2026-10-20
 status: implemented
 ---
 
@@ -41,7 +41,9 @@ User message arrives at app/routers/messages.py (or voice.py)
     │   │   was a second, already-diverged copy of the same six rules, and
     │   │   only the vault one was reachable by the promotion path (#465))
     │   ├─ <memory> — MEMORY.md + USER.md
-    │   ├─ <available_skills> (names only)
+    │   ├─ <available_skills> — names, plus a ≤100-char description on the
+    │   │   30-day most-used skills since 2026-09-25 (`skills.index.descriptions:
+    │   │   true`, budget 12,000 chars; `eval/measurements/skills-index-2026-09-25.md`)
     │   ├─ <goal> / <plan> / <active_todos>
     │   ├─ Platform hint  ← deliberately timestamp-free (prefix cache)
     │   ├─ Background-bash contract
@@ -50,6 +52,11 @@ User message arrives at app/routers/messages.py (or voice.py)
     ├─→ prefetch_context_async(text, session_id, plan_mode)   [per-message]
     │   │
     │   ├─→ drain_ambient_prefetch(session_id)      [loop thread, before any guard]
+    │   │
+    │   ├─→ drain_next_session_notes()              [loop thread, before any guard]
+    │   │   The file-backed sibling of the ambient queue (#1516), gated on
+    │   │   `is_user_session` since #2598 so a worker turn cannot eat the
+    │   │   overnight brief — see [[ambient-context-injection]]
     │   │
     │   ├─→ SessionFocus.update(text)               [loop thread, in-memory]
     │   │   Accumulate weighted keywords, decay old by 0.75/turn
@@ -81,24 +88,31 @@ User message arrives at app/routers/messages.py (or voice.py)
 ```
 
 `prefetch_context_async` is awaited from [messages.py](../app/routers/messages.py)
-(stream + sync chat paths) and [voice.py](../app/routers/voice.py). Its cheap half
-(ambient drain, focus update) runs on the event-loop thread in request order; the
+(the `POST /api/message/stream` handler — `POST /api/message` was deleted in
+`6a866ae1`, so there is one chat call site now) and
+[voice.py](../app/routers/voice.py). Its cheap half
+(ambient drain, next-session-notes drain, focus update) runs on the event-loop
+thread in request order; the
 budgeted search phase runs in a worker thread via `asyncio.to_thread`, so the
 loop keeps serving other sessions, SSE streams, and Inner Voice while it waits.
 Before 2026-09-03 the sync call blocked the loop for the full budget on every
-message. Callers pass `plan_mode` through so prefetch does not re-read the
-session JSON they just loaded. Ambient turns (`build_ambient_turn`) skip prefetch.
+message. Callers still pass `plan_mode` through — but since #2598 the cheap half
+reads the session JSON anyway for the notes gate, so the saving that parameter
+was added for no longer happens (#3082). Ambient turns (`build_ambient_turn`) skip prefetch.
 The sync `prefetch_context` remains for scripts and tests.
 
 Two things follow from *where* the call sits that are easy to miss. Nothing in
-this path gates on platform, and every session-backed worker source posts to
-`/api/message/stream` — so an `autocode`, `autotriage`, `youtube-digest` or
-`deep-research` turn is prefetched exactly like a chat turn and leaves a
+the *retrieval* half of this path gates on platform, and every session-backed
+worker source posts to `/api/message/stream` — so an `autocode`, `autotriage`,
+`youtube-digest` or `deep-research` turn is prefetched exactly like a chat turn
+and leaves a
 `role="subliminal"` row of its own. (A direct-path run — `run_prompt_on_primary`,
 `autonomy.run_task` — calls `run_query` itself and is prefetched by nothing; see
-[[background-runs]].) And the 20-turn memory nudge lives in the **streaming**
-handler only: the sync chat path and the voice path call `prefetch_context_async`
-without it, so a session driven entirely through either never sees one.
+[[background-runs]].) The one exception is the notes drain: #2598 gated it on
+`is_user_session` precisely because worker turns *do* arrive here, and consuming
+that channel is deleting it. And the 20-turn memory nudge lives in the **streaming**
+handler only: the voice path calls `prefetch_context_async`
+without it, so a session driven entirely through voice never sees one.
 
 ## Latency budget
 
@@ -122,8 +136,8 @@ QMD daemon on GPU 0):
 
 | Worker | Before | After | Note |
 |---|---|---|---|
-| skills | ~83 ms | ~0.2 ms | token sets memoized on the cached skill dicts (re-counted 2026-09-20: 189 retrievable skills from 192 dirs in `~/obsidian/skills` — `~/lloyd/skills` does not exist) |
-| backlog (index refresh) | ~216 ms every 60 s | ~1.2 ms | incremental mtime scan (re-counted 2026-09-20: 1,235 board files, ids spanning 9–1297, not 328/498 — the per-file cost is what moved the cold refresh off ~216 ms) |
+| skills | ~83 ms | ~0.2 ms | token sets memoized on the cached skill dicts (re-counted 2026-10-20: 210 skill dirs in `~/obsidian/skills`, 12 quarantined by `status:` → ~198 retrievable; `~/lloyd/skills` still does not exist) |
+| backlog (index refresh) | ~216 ms every 60 s | ~1.2 ms | incremental mtime scan (re-counted 2026-10-20: 3,018 `backlog/*.md`, ids 9–3080, not 328/498/1,235 — a full scandir+stat pass over them now measures 8.7 ms, which is what the 60 s re-stat costs; only changed-mtime files are re-parsed) |
 | facts | ~5 ms warm | ~5 ms | ~150 ms once per process (entity index) |
 | sessions | <5 ms | <5 ms | temporal queries only |
 | vault lex leg | — | 6–50 ms warm; 0.5–1.3 s per cold term | 1–4 short calls; soft-waited 150 ms, then carried over |
@@ -173,16 +187,24 @@ facts@6ms vault@140ms` shows when each one arrived.
 
 ### Worker 1: Skill search
 
-- **Source:** `~/obsidian/skills/` + `~/lloyd/skills/`, via `_iter_skills()`
-  (`agent_mcp/skills.py::SKILLS_DIRS`). Only the vault root exists today —
-  ~190 skills; the repo-local root is in the list and absent on disk, which
-  `_iter_skills` skips silently. `prompt_builder` carries the same two roots
-  and imports `_QUARANTINE_STATUSES` from the MCP module rather than
-  restating it, so the advertised index and the retrievable set cannot drift.
+- **Source:** the roots in `agent_mcp/skills.py::SKILLS_DIRS` — the two builtin
+  roots (`~/obsidian/skills/` and `~/lloyd/skills/`) unioned with whatever
+  `config.yaml skills.directories` names, deduped (#1294). Only the vault root
+  exists today — 210 dirs, ~198 retrievable; the repo-local root is in the list
+  and absent on disk, which `_iter_skills` skips silently. One walker decides
+  what a live skill is: `prompt_builder` imports `iter_active_skills` and
+  `is_quarantined_skill_file` from that module and takes its walk roots from
+  `SKILLS_DIRS` rather than carrying its own copy, so the advertised index and
+  the retrievable set cannot drift.
 - **Method:** `_score_skill(skill, tokens, require_metadata_hit=True)` —
-  `name×3.0 + desc×2.0 + tags×1.5 + min(body_hits, 4)×0.3`
+  `name×3.0 + desc×2.0 + tags×1.5 + min(body_hits, 4)×0.3`, plus
+  `pseudo_query_hits × weight` when the #1490 Skill2Query arm is on
+  (`skills.pseudo_queries.enabled`; **off** in `config.yaml` today, and
+  `~/lloyd-data/_pipeline/skill-pseudo-queries.json` has never been generated, so
+  the effective formula is the four terms above).
 - **Metadata-hit gate:** a skill with zero name/desc/tag overlap scores 0.0
-  regardless of body accidents. Fixes #311, where generic stopword queries pulled
+  regardless of body accidents (a pseudo-query hit counts as a metadata hit when
+  the arm is on). Fixes #311, where generic stopword queries pulled
   powerpoint/youtube skills into graph-classifier sessions. Body hits are a
   tiebreaker, not a qualifier.
 - **Output:** first skill full body (≤6000 chars), second skill excerpt (≤500 chars)
@@ -192,7 +214,7 @@ facts@6ms vault@140ms` shows when each one arrived.
   ~1 ms). Name/description/tag/body token sets are memoized on each cached dict
   by `skills._skill_token_sets` under a private `_tok` key, so scoring the
   whole set is one set intersection per skill (~0.2–1 ms; 283 skills when
-  this was measured, ~190 today) instead of re-tokenizing 1.5 MB of bodies
+  this was measured, ~198 today) instead of re-tokenizing 1.5 MB of bodies
   per turn.
 - **Quarantine:** a skill whose frontmatter `status:` is one of `inactive`,
   `archived`, `disabled`, `retired`, `quarantined` is excluded from retrieval
@@ -236,13 +258,19 @@ facts@6ms vault@140ms` shows when each one arrived.
   were added 2026-09-03: 8 of 20 eval queries expect docs there, and the
   agent's own design docs and task notes are what it needs mid-task. Warm lex
   cost for 6 → 9 collections: +5–30 ms.
-  This list is also what keeps prefetch on qmd's **per-collection** path. Since
-  2026-09-09 `_qmd_daemon_search` sends `collections: []` — one global ANN scan
-  instead of eleven exact ones — but only when the caller's list is a superset
-  of `VAULT_SEGMENTS`. Prefetch's nine omit `personal`, `people` and `skills`
-  and add `sessions`, so it never qualifies and never will while the exclusions
-  above hold. That is the intended trade, not an oversight: a global top-k can
-  starve a small collection, and prefetch is already scoped deliberately.
+  This list is also what keeps prefetch on qmd's **per-collection** path, and
+  since #504 so does everyone else's: `_qmd_daemon_search` used to send
+  `collections: []` for a caller whose list was a superset of `VAULT_SEGMENTS`
+  (one global ANN scan instead of eleven exact ones, 2026-09-09), and that
+  widening is now **reversed** — an unrestricted search names `VAULT_SEGMENTS`
+  outright, because a global top-k starved the small collections (`autonomy` is
+  ~1% of the corpus and lost 5 of 5 expected docs at a 40-row pool). Prefetch's
+  nine omit `personal`, `people` and `skills`
+  and add `sessions`, so it is a scope-restricted request either way: its own
+  subset, `[:limit]` back with no fold, its pool equal to its answer, and none of
+  the global fusion or per-collection-floor payload the recall path sends. That
+  is the intended trade, not an oversight — prefetch is scoped deliberately and
+  is on a latency budget.
 - **Two legs, sequenced:**
   - **3a `lex` only** — 6–50 ms per call once the terms are warm, 0.5–1.3 s
     on a term's first sight. Waited on for at most 150 ms after the other
@@ -345,13 +373,15 @@ precision-first parallel source that sidesteps that entirely.
 - **Method:** regex `(?:#(\d{2,4})|(?<!\d)(\d{3,4})(?!\d))` casts a wide net; the
   precision gate is **existence in the live backlog index**. Unknown numbers are
   dropped silently. The negative lookarounds mean `20260421` yields no match.
-  Live IDs span 9–890 (9–387 when this was written; the board has roughly
-  doubled twice since), which collides with HTTP status codes and millisecond
+  Live IDs span 9–3080 (9–387 when this was written; the board has roughly
+  doubled several times since), which collides with HTTP status codes and millisecond
   values, so a **bare** number is also rejected when followed by a unit
   (`300ms`, `512mb`, `3 sec`) or preceded by code/port context (`HTTP 302`,
   `returned a 404`, `port 8080`, `BUDGET_MS = 300`). `#NNN` is never filtered.
 - **Source:** `~/obsidian/backlog/*.md`, indexed by leading task ID. The
-  directory is re-stat'ed every 60 s (~1 ms for 330 files; ~830 today) and only files whose
+  directory is re-stat'ed every 60 s (3,018 `.md` files on 2026-10-20; a full
+  scandir+stat pass measures 8.7 ms, so the minute boundary costs ~0.015 ms/s of
+  averaged GIL time) and only files whose
   mtime changed are re-read and parsed; the old rebuild re-parsed every file
   (~216 ms of GIL-held CPU landing inside the budget once a minute). A stale
   cache is retained on rescan failure rather than breaking prefetch.
@@ -378,6 +408,22 @@ producer already decided was worth showing.
 - Entries carry `expires_at`; expired ones are evicted silently on drain.
 - Rendered **first** in the context block, framed explicitly as passive: *"The user
   did NOT ask — reference them only if naturally relevant."*
+- Each line carries `_server clock when queued: <stamp>`, the server's own reading
+  of `enqueued_at` (#1197) — never a date the producer composed.
+
+### The next-session-notes sibling (#1516)
+
+The same `_prefetch_prepare` also drains a **file-backed** channel,
+`drain_next_session_notes()` → `<next-session-notes>` inside the same `<context>`
+envelope, rendered second (after ambient, before skills). It exists because the
+ambient queue is per-session and in-memory: a 03:00 pass with no session to name
+has nothing to enqueue into. Three differences matter — it survives a restart, it
+holds a note for **exactly one turn** (consuming it is deleting it), and since
+#2598 the drain is gated on `is_user_session` so an overnight worker turn cannot
+eat the brief meant for the first human one. Caps, TTL, and the write doors are
+[[ambient-context-injection]]'s to state. Its one gap here: the subliminal badge
+list in `_messages_subliminal.py` still has no `notes` tag, so the persisted row
+understates the turn (#3081).
 
 ## Conversation focus tracking
 
@@ -424,17 +470,25 @@ call extracting 3–5 topic phrases from the last 10 user/assistant messages:
 User messages → secondary model → ["servo PID tuning", "Alfie shoulder joint", "motor temperature"]
 ```
 
-- **Endpoint:** resolved via `resolve_model_alias("secondary")` in
-  `app/secondary_models.py`. `secondary_enabled` has been **true** since
-  2026-09-03 (`de893d7`), so these calls land on the real secondary slot —
-  `:8091`, Qwen3.6-35B-A3B UD-Q3_K_XL under llama.cpp on GPU 2 since
-  2026-09-06. While the flag was false the alias rewrote to the primary at
-  `:8096` and every caller asking for the secondary silently got Flash-Next;
-  that rewrite still fires if anyone turns it back off, and logs itself once
-  per name when it does. The slot is single-tenant (`--parallel 1`), so a
-  topic extraction queues behind whatever post-session summary, voice rewrite
-  or session title is already there — which is the whole reason this call is
-  fired after the turn and never inside it.
+- **Endpoint:** `_endpoint(job)` in `app/secondary_models.py` picks the alias per
+  job and passes it through `resolve_model_alias("secondary")`. **There is no
+  secondary slot on this box any more:** `secondary_enabled` is **false** as of
+  2026-09-20 (`551e9044`, "Retire the secondary slot and put DiffusionGemma
+  (djev) on GPU 2"), the llama.cpp Qwen3.6-35B-A3B at `:8091` is not running
+  (`curl :8091/v1/models` → no connection), and GPU 2's 24 GiB card carries the
+  djev engines instead (`:8010` vLLM / `:8011` structured — a 24 GiB card is
+  single-tenant for either, so the two flags are an either/or and
+  `start-djev.sh` refuses on the VRAM check). So every one of these calls — focus
+  topics, capture summary, fact extraction — resolves `secondary` → `primary` and
+  lands on vLLM at `:8096`. That is the designed behaviour, not a degradation
+  (`server.py` reconciles the supervisord process against the flag on every boot),
+  and the rewrite logs itself once per name. Two riders: `title` is pinned to
+  `primary` independently of the flag by `JOBS_ON_PRIMARY` (#551's measured
+  routing, `eval/secondary-routing/decisions.yaml`), and when a job lands off its
+  *decided* engine, `_endpoint` says which one at INFO (#1445) — because when the
+  slot was retired, `voice` moved with every guard green and nothing named it.
+  The queueing sentence below is still true, it is just a queue behind the user's
+  own turns now rather than behind a second engine's jobs.
 - **Timing:** background `asyncio.ensure_future()` after the turn completes — zero
   user-facing latency.
 - **One-turn delay:** results are available on the NEXT message, not the current one.
@@ -474,8 +528,17 @@ Sections render in this order (`_format_context`):
 Background producers queued these signals for you. The user did NOT ask —
 reference them only if naturally relevant to what they're saying now.
 - **[autonomy:task-42]** Nightly reflection finished with 2 config fixes
+  _server clock when queued: 2026-10-20 04:12 UTC_
   > [≤800 char body]
 </ambient-signals>
+<next-session-notes>
+A background pass left these notes for the next session, and this turn is the
+first to read them — the channel holds them exactly once, so they will not
+appear again. …
+- **[nightly-reflection]** QMD index rebuilt with the decoded-path fix
+  _written: 2026-10-20 03:40 UTC_
+  > [≤ NEXT_SESSION_CONTENT_MAX char body]
+</next-session-notes>
 <skill name="autonomy-error-handling" score="14.5">
 [full skill body, ≤6000 chars]
 </skill>
@@ -491,8 +554,8 @@ reference them only if naturally relevant to what they're saying now.
 - [QMD] QMD is installed at version 1.0.8 (confidence: 1.0)
 </facts>
 <vault-context>
-- **Alfie Servo Settings** (score: 0.93): PID gains shoulder=0.8/0.1/0.05...
-- **2026-04-13 Daily Notes** (score: 0.56): Discussed servo tuning approach...
+- **Alfie Servo Settings** (score: 0.93, file: projects/alfie/servo-settings.md, line: 41): PID gains shoulder=0.8/0.1/0.05...
+- **2026-04-13 Daily Notes** (score: 0.56, file: memory/2026-04-13.md): Discussed servo tuning approach...
 </vault-context>
 <recent-sessions>
 - [2026-09-02T11:19] (primary, 24 msgs): servo tuning | shoulder oscillation
@@ -531,16 +594,20 @@ diffing `prefetched_text` against the original `text` and persists it as a
 `role="subliminal"` message right after the user message, so the chat UI can show
 what the agent actually saw.
 
-Three injection shapes are classified (first match wins):
+Five injection shapes are classified (first match wins), in this order:
 
 | Kind | Marker |
 |---|---|
-| `memory_nudge` | leading `<system-reminder>` |
+| `memory_nudge` | leading `<system-reminder>` (checked before `prefetch`, so a nudge+`<context>` combo surfaces as the nudge) |
 | `ambient_envelope` | leading `<ambient ` (text is *inside* the wrapper, so the whole thing is the injection) |
 | `prefetch` | leading `<context>` |
+| `session_state` | leading `<session_state>` |
+| `memory_delta` | leading `<memory_delta>` |
 
 Source badges are detected by tag presence: `ambient`, `skills`, `backlog`,
-`facts`, `vault`, `sessions`, `hint`, `ide`. Scripts that filter by role skip
+`facts`, `vault`, `sessions`, `hint`, `ide`, `state`, `memory_delta`. There is no
+badge for `<next-session-notes>`, so a turn that consumed an overnight brief
+persists without naming it (#3081). Scripts that filter by role skip
 these entries for free.
 
 The prefix is recovered by stripping `"\n\n" + text` from the end of the
@@ -587,22 +654,33 @@ Background tasks fired via `asyncio.ensure_future` after a turn completes
 
 ### `_post_session_capture`
 
-1. Skips already-`captured` sessions.
+1. Skips already-`captured` sessions — but **only for the summary half.** Since
+   #1159 fact extraction has its own per-session `fact_watermark` and is *not*
+   suppressed by `captured`; a summary is written once, extraction follows the
+   turns that arrive after it. `_MIN_TURNS_FOR_EXTRACTION = 3` still gates the
+   *first* pass, and since #1647 it counts human turns
+   (`count_human_user_turns`, which excludes `[System: Background task ...`
+   rows), because a watchdog's injected turn used to arm extraction on a session
+   nobody spoke in.
 2. Exports the session as searchable markdown. A user session goes to
    `vault-derived/sessions/` — which is why `sessions` is a QMD collection the
    vault worker searches — and a background one to
    `vault-derived/sessions-background/`, which qmd does not watch. The watcher
    *embeds* on every change, and the background sessions that reach this task
-   are ~70 a day (479 in the week to 2026-09-10, against 99 chats). A
+   are ~70 a day (479 in the week to 2026-09-10, against 99 chats; re-counted
+   2026-10-20 the other way round — 17 chats and 2,932 background files touched in
+   the last 8 days, because autocode and the triage agents are now the bulk of the
+   tree). Either way the ratio is the argument for step 3 below. A
    background session then stops here, marked `captured`, without steps 3–5:
    the summary, the daily note and fact extraction are about the user's day.
    Only chat-path turns fire this task, so what arrives is the session-backed
    workers; an autonomy or `run_prompt_on_primary` run's record is its session
    JSON. See [[background-runs]].
-3. Builds a ≤4000-char transcript and asks the secondary model for a summary. A
+3. Builds a ≤4000-char transcript and asks the secondary alias for a summary —
+   which today means the primary, see Tier 2. A
    `TRIVIAL` verdict marks the session captured and stops.
 4. Appends the summary to the daily note.
-5. With ≥3 user messages, extracts durable facts and writes them through
+5. Past the turn gate, extracts durable facts and writes them through
    `_fact_add` into `_pipeline/vault-derived/facts/<Entity>/` under category
    `session-extracted`. Confidence 0.75, provenance `EXTRACTED`, linked to
    the source session. Cuts fact-extraction latency from the 11-hour nightly cycle
@@ -690,21 +768,39 @@ Tier-2 topic extraction (above).
 | Service | Port | GPU | Purpose |
 |---------|------|-----|---------|
 | QMD daemon | 8181 | GPU 0 | Hybrid BM25 + vector search, embedding model (`Qwen3-Embedding-0.6B-Q8_0` since 2026-09-21, `embeddinggemma-300M-Q8_0` before; the fork in `~/lloyd/qmd`). Single node process — serializes requests. **Vec-leg timing was corpus-proportional under the exact per-collection scans: 2.5–3.0 s at the 2026-09-20 index (15,850 files / 38,907 chunks). The fork's in-memory `VecIndex` removed that: 52 ms p50 / 57 ms p90 for prefetch's hybrid call on 2026-09-24, so the leg lands in budget.** The one thing that does NOT scale with corpus is the *fixed startup tax*: `embed ≈ vec ≈ chunk+1` ms on every query, warm, any text, any leg (39 ms on a 6-char word). 3.0 s is the worst case for a straggler, so a 500 ms carry-over is safe; lex leg 10–80 ms and AND-only |
-| vLLM primary (Qwen3.8-Flash-Next) | 8096 | GPU 1 (RTX PRO 6000, `--gpu-memory-utilization 0.9345`) | Main agent model. Served capture/fact/focus extraction too while `secondary_enabled` was false |
-| llama.cpp secondary (Qwen3.6-35B-A3B UD-Q3_K_XL) | 8091 | GPU 2 (RTX 3090) | Capture / fact / focus / title extraction. Running, `secondary_enabled: true`. Single-tenant (`--parallel 1`) — these jobs queue behind each other. **Not** Inner Voice: the observer is pinned to `primary` in config.yaml after a 4B briefly landed in this slot and intervened on 40% of judged events |
-| Qwen3-TTS | 8090 | GPU 0 | Voice output |
+| vLLM primary (Qwen3.8-Flash-Next-nvfp4, 262,144 ctx) | 8096 | GPU 1 (RTX PRO 6000, `--gpu-memory-utilization 0.9345`) | Main agent model, and since 2026-09-20 the *only* chat-completions engine: it serves capture/fact/focus/title extraction too, because the `secondary` alias rewrites to it |
+| djev (DiffusionGemma 26B-A4B) | 8010 vLLM / 8011 structured | GPU 2 (RTX 3090) | What replaced the llama.cpp secondary slot in that GPU's memory (`551e9044`, `secondary_enabled: false`). Structured decisions only — rank/classify/triage — **not** a chat alias, so no Tier-2 job routes here; the two engines are an either/or on a 24 GiB card. Not Inner Voice either: the observer is pinned to `primary` in config.yaml after a 4B briefly landed in this GPU's slot and intervened on 40% of judged events |
+| Qwen3-TTS (qwen3-tts) | 8093 | — | Voice output, vLLM-omni (`--omni`). `:8090` is the **vendored** Kokoro server (`/health` 200 today), which the TTS fallback chain still treats as the lowest-priority link; see [[voice]] |
 | lloyd-mcp aggregator | 8500 | — | All agent tools |
 
 ## Evaluation
 
-`eval/run_eval.py` + `eval/vault_recall_queries.yaml` — 20 hand-written queries over
+`eval/run_eval.py` + `eval/vault_recall_queries.yaml` — hand-written queries over
 the live personal vault, scored for `entity_hit` / `doc_hit` / `topk_overlap`
 against expected entities and documents. Written to baseline retrieval before and
-after graph-vote re-ranking changes.
+after graph-vote re-ranking changes. The gold set is **81 queries**, not the 20
+this page counted on 2026-09-20 (single 19, multi-hop 19, hard 12, technical 11,
+fuzzy 11, recent 9), and `run_prefetch_eval.py` loads the same file, so its
+"dev set of 20" is 81 too. #1552 re-pointed every `expect_docs` path that had gone
+unreadable, so any comparison against an artifact older than that is void.
 
-Current official baseline (`eval/baselines/baseline-20260920-005445.json`,
-rerun 2026-09-20; all prior baselines void for entity-side
-metrics after the #380 Phase 0b expectation audit):
+**Baselines left the repo:** `app.paths.EVAL_BASELINES_DIR` is now
+`~/lloyd-data/eval/baselines/`, and what lives there is **nightly** — one
+`nightly-YYYYMMDD-*.json` a day at ~06:00 UTC, 126 artifacts as of 2026-10-20.
+`baseline-20260920-005445.json` no longer exists on disk (#2846 swept it), so the
+table below is history, not a current reading: doc_hit was 15/20 on a
+**20-query** set and `entity_hit` 1.00 counted facts, not docs. Current nightly
+(`nightly-20261020-20261020-060645.json`, `leg=dev`, 81 queries,
+`matches_production_defaults: true`, avg 848 ms against a 4,800 ms nightly
+budget): **doc_hit 0.704 · mrr_doc 0.527 · entity_hit 0.877**, and by category
+doc_hit is fuzzy 0.909, technical 0.818, single 0.684, recent 0.667, multi-hop
+0.632, hard 0.500 — the same shape as the old table, with fuzzy/technical
+near-solved and the misses in hard + multi-hop.
+
+The 2026-09-20 artifact, on the 20-query set (`leg=prod-defaults`, the only one
+that advertised `matches_production_defaults: true` — the graph-vote artifacts
+carry `expand_graph: true` and do not), rerun after the #380 Phase 0b expectation
+audit voided all prior baselines for entity-side metrics:
 
 | Metric | Value |
 |---|---|
@@ -833,3 +929,29 @@ with the genuinely correct answer, never an easier target.
   in-memory `VecIndex` replaced the per-collection exact scans. The leg now
   lands on the same turn and is fused with the lex leg (`_fuse_fresh_vault`);
   carry-over is the busy-daemon fallback. First-turn doc_hit 0.151 → 0.221.
+  - **2026-10-20 (`stale`):** Re-checked every path, number and flag against the
+    tree. Mechanism claims held (budget, constants, worker table, carry-over,
+    fusion floor 5, filters, the two role filters, the `subliminal`-is-a-record
+    rule). Corrected: **the secondary slot is retired** — `secondary_enabled:
+    false` since `551e9044` (2026-09-20), nothing serves `:8091`, djev's
+    DiffusionGemma owns GPU 2, so Tier 2 runs on the primary and `title` is pinned
+    there by `JOBS_ON_PRIMARY` (#551); the infra table now says so. qmd's
+    **global-scan widening is reversed** (#504): an unrestricted search names
+    `VAULT_SEGMENTS` instead of sending `collections: []`, so the superset sentence
+    is gone. The **`POST /api/message` sync chat path no longer exists**
+    (`6a866ae1`) — one chat caller plus voice — which also retires the "sync path
+    has no nudge" clause; the platform-neutrality claim is now scoped to the
+    retrieval half, because #2598 gated the notes drain on `is_user_session`. Added
+    the **`<next-session-notes>` drain** (#1516/#2598) to the flow and the section
+    list, and the five shapes + ten badges in `_messages_subliminal.py`. Corpus
+    counts re-measured: 210 skill dirs / ~198 retrievable / 12 quarantined, 3,018
+    backlog files with ids 9–3080, a full backlog stat pass at 8.7 ms, 17 chat vs
+    2,932 background session files touched in the last 8 days. Evaluation section:
+    the gold set is **81 queries**, `eval/baselines/` is now
+    `~/lloyd-data/eval/baselines/`, the cited `baseline-20260920-005445.json` has
+    been swept, and the live reading is the nightly (doc_hit 0.704 / mrr_doc 0.527
+    / entity_hit 0.877 on 2026-10-20). `#1299` verified still open. Filed **#3081**
+    (the notes section is invisible to the subliminal badge list) and **#3082**
+    (`_prefetch_prepare` re-parses the whole session JSON on the event loop for one
+    `platform` field, which voids the `plan_mode` pass-through this page still
+    claims saves that read).
