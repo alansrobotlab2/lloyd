@@ -2816,17 +2816,17 @@ def get_due_tasks(*, now: Optional[datetime.datetime] = None) -> list[dict]:
 # ── Task execution via Claude Agent SDK ───────────────────────────────────────
 
 def _load_skill_content(skill_name: str) -> Optional[str]:
-    """Resolve a skill name (slug) or path to SKILL.md content.
+    """Resolve a skill reference — a slug, or a path to a SKILL.md — to its content.
 
-    Priority:
-      1. If skill_name looks like a filesystem path (contains / or .md), use it directly.
-      2. Otherwise treat it as a slug → ~/obsidian/skills/<slug>/SKILL.md.
+    A value containing / or ending in .md is a path and nothing else: it is read as
+    given, and a miss there is terminal (None) — that value is never re-read as a
+    slug. Anything else is a slug at ~/obsidian/skills/<slug>/SKILL.md.
     """
     skill_name = str(skill_name or "").strip()
     if not skill_name or skill_name.lower() in ("null", "none"):
         return None
 
-    # If it's already a path, try it directly first
+    # Shape decides, once: a value shaped like a path is handled as a path only
     if "/" in skill_name or skill_name.endswith(".md"):
         expanded = Path(skill_name.replace("~", str(Path.home())))
         if expanded.exists():
@@ -2834,7 +2834,7 @@ def _load_skill_content(skill_name: str) -> Optional[str]:
                 return expanded.read_text(encoding="utf-8")
             except Exception:
                 return None
-        # Path didn't exist — fall through to slug resolution below
+        # A path miss is terminal: this returns None, it never retries as a slug
         return None
 
     # Treat as slug: ~/obsidian/skills/<slug>/SKILL.md

@@ -1574,3 +1574,143 @@ def test_the_live_doc_names_the_3012_pair_and_the_linter_reads_its_rows(tmp_path
             f"{tid}'s warnings name only one of the two tables: {named}. #3012 is one row "
             "in EACH membership table, and a warning that names one sends a reader to add "
             "that one and leave the other wrong")
+
+
+# ── #3074: a path-valued skill reference is a path, and a miss on it is terminal ─
+#
+# The path branch of `_load_skill_content` carried the comment `# Path didn't exist
+# — fall through to slug resolution below` directly above a `return None`, so the
+# prose promised a retry the next statement refused to take. The no-retry rule is
+# the contract — `skill_resolves` above states it and
+# `test_the_skill_check_resolves_exactly_what_the_dispatch_loader_loads` pins the
+# two verdicts coinciding — so the comment was the only wrong artefact, and the
+# wrong artefact is what sends the next reader hunting for a fallback. These nodes
+# pin the behaviour, the prose that describes it, and the way the mirroring file
+# cites it. Nothing here changes dispatch.
+
+
+def test_a_moved_skill_path_is_a_terminal_miss_and_never_retries_as_a_slug(
+        tmp_path, monkeypatch):
+    """`<tmp>/gone-skill/SKILL.md` (deleted) → None, while `gone-skill` → the body.
+
+    One skill, spelled two ways: its slug is present in the patched skills root,
+    and the path that named it is written and then removed, which is what a move
+    leaves behind. A loader that retried a dead path as a slug would return the
+    body for both values and the first assert is what catches it; the retry option
+    #3074 explicitly rejected is therefore pinned out, not merely unimplemented.
+    """
+    from app import autonomy
+
+    slug_dir = tmp_path / "obsidian" / "skills" / "gone-skill"
+    slug_dir.mkdir(parents=True)
+    body = "# gone skill\n"
+    (slug_dir / "SKILL.md").write_text(body, encoding="utf-8")
+    dead_path = tmp_path / "moved-away" / "gone-skill" / "SKILL.md"
+    dead_path.parent.mkdir(parents=True)
+    dead_path.write_text(body, encoding="utf-8")
+    dead_path.unlink()
+
+    real_path_cls = autonomy.Path
+
+    class _VaultHome(real_path_cls):  # Path.home() is how the loader finds skills
+        @classmethod
+        def home(cls):
+            return tmp_path
+
+    monkeypatch.setattr(autonomy, "Path", _VaultHome)
+
+    assert autonomy._load_skill_content(str(dead_path)) is None, (
+        "a path miss is no longer terminal: the path branch resolved a value that "
+        "names a file which does not exist")
+    assert autonomy._load_skill_content("gone-skill") == body, (
+        "the slug branch must still find the same skill by name")
+
+
+def test_no_prose_inside_the_loader_promises_a_slug_retry_for_a_path_miss():
+    """The item's verify-after command, as a node: no `fall…` inside the loader.
+
+    Read through `inspect.getsource` of the live function rather than a line range,
+    so the guard follows the function when it moves and cannot be satisfied by an
+    edit somewhere else in the file. It asserts three things: no sentence in the
+    function offers a fall-through at all; the docstring says a path value is a path
+    and nothing else and that a miss is terminal; and the comment over the path
+    branch's `return None` says the same while that branch still ends in `return
+    None` — a comment that merely stopped lying, next to a branch that had grown the
+    retry, would still fail here.
+    """
+    from app import autonomy
+
+    src = inspect.getsource(autonomy._load_skill_content)
+    assert re.search(r"\bfall", src, re.IGNORECASE) is None, (
+        "a sentence inside _load_skill_content offers a fall-through again — that "
+        f"promise is what #3074 was filed over:\n{src}")
+
+    defs = [n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef)]
+    assert defs, f"no function definition parsed out of:\n{src}"
+    doc = ast.get_docstring(defs[0]) or ""
+    assert "path and nothing else" in doc, (
+        f"the docstring must say a path value is a path and nothing else: {doc!r}")
+    assert "terminal" in doc.lower(), (
+        f"the docstring must say a miss on a path is terminal: {doc!r}")
+
+    lines = src.splitlines()
+    guard = next((i for i, ln in enumerate(lines) if '"/" in skill_name' in ln), None)
+    assert guard is not None, f"the path/slug guard is gone from the loader:\n{src}"
+    slug_start = next((i for i in range(guard + 1, len(lines))
+                       if "obsidian" in lines[i]), None)
+    assert slug_start is not None, f"the slug branch is gone from the loader:\n{src}"
+    branch = lines[guard:slug_start]
+    comments = " ".join(ln.strip() for ln in branch if ln.strip().startswith("#"))
+    assert "terminal" in comments.lower(), (
+        f"the comment over the path miss must say the miss is terminal, not stay "
+        f"silent about it: {branch}")
+    code = [ln.strip() for ln in branch
+            if ln.strip() and not ln.strip().startswith("#")]
+    assert code[-1] == "return None", (
+        f"the path branch must end by returning None rather than reaching the slug "
+        f"branch: {code}")
+
+
+def test_the_linter_names_the_loader_instead_of_citing_its_line_numbers():
+    """The mirroring file cites the symbol, because a bare number silently rots.
+
+    `(:894)` and `(:883-891)` were true of a root-level `autonomy.py`; the move into
+    `app/` (`f9863c64`) left them ~1900 lines short of the function they named, and
+    nothing graded a code comment's line refs, so they sat there reading like
+    instructions. The two sites that describe skill resolution now name
+    `_load_skill_content`, and the vacuity guard below is what stops this node
+    passing because a rename deleted the text it was looking at.
+    """
+    from scripts.autonomy import validate_tasks as vt
+
+    text = SCRIPT.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    anchor = next((i for i, ln in enumerate(lines)
+                   if ln.startswith("DEFAULT_SKILLS_DIR")), None)
+    assert anchor is not None, (
+        "DEFAULT_SKILLS_DIR is gone, so the comment that mirrors the loader's skills "
+        "root has nothing left to sit above")
+    top = anchor
+    while top > 0 and lines[top - 1].lstrip().startswith("#"):
+        top -= 1
+    skills_root_comment = "\n".join(lines[top:anchor])
+    assert "_load_skill_content" in skills_root_comment, (
+        f"the skills-root comment no longer names the loader it mirrors: "
+        f"{skills_root_comment!r}")
+    assert re.search(r"\(:\d", skills_root_comment) is None, (
+        f"the skills-root comment cites a bare line number again: "
+        f"{skills_root_comment!r}")
+
+    defs = [n for n in ast.parse(inspect.getsource(vt.skill_resolves)).body
+            if isinstance(n, ast.FunctionDef)]
+    assert defs, "skill_resolves no longer parses as a function"
+    doc = ast.get_docstring(defs[0]) or ""
+    assert "_load_skill_content" in doc, (
+        f"skill_resolves' docstring no longer names the loader it mirrors: {doc!r}")
+    assert re.search(r"\(:\d", doc) is None, (
+        f"skill_resolves' docstring cites bare line numbers again: {doc!r}")
+
+    assert ":894" not in text and ":883-891" not in text, (
+        "one of the two pre-app/ line numbers is back in "
+        f"{SCRIPT.relative_to(ROOT)}: "
+        f"{[ln for ln in lines if ':894' in ln or ':883-891' in ln]}")

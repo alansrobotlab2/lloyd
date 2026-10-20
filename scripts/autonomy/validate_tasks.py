@@ -105,7 +105,7 @@ except Exception:  # noqa: BLE001
     MODEL_ROW_ALIASES = None
 
 DEFAULT_DIR = Path.home() / "obsidian" / "autonomy"
-# Mirrors the slug branch of autonomy._load_skill_content (:894), which is the
+# Mirrors the slug branch of app.autonomy._load_skill_content, which is the
 # only skills root that path consults. --skills-dir overrides it.
 DEFAULT_SKILLS_DIR = Path.home() / "obsidian" / "skills"
 # config.yaml sits at the repo root, two levels above scripts/autonomy/.
@@ -301,13 +301,13 @@ def model_names(config_path: Path) -> set[str] | None:
 
 
 def skill_resolves(value: str, skills_dirs: list[Path]) -> bool:
-    """Whether autonomy._load_skill_content would return content for this value.
+    """Whether app.autonomy._load_skill_content would return content for this value.
 
     A value containing '/' or ending in .md is used as a path and nothing else —
-    a missing path returns None rather than falling back to the slug branch
-    (:883-891). Anything else is a slug resolved against each skills dir as
-    `<dir>/<slug>/SKILL.md` (:894). A path naming a directory fails the same way
-    dispatch does: read_text on it raises, and the loader returns None.
+    _load_skill_content's path branch returns None on a miss rather than retrying
+    it as a slug. Anything else is a slug, resolved by that loader's slug branch
+    against each skills dir as `<dir>/<slug>/SKILL.md`. A path naming a directory
+    fails the same way dispatch does: read_text raises, loader returns None.
     """
     expanded = Path(value.replace("~", str(Path.home())))
     if "/" in value or value.endswith(".md"):
