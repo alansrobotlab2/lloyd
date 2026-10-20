@@ -611,14 +611,23 @@ only view of that seam.
 **This seam records nothing in production, and #1372 is the item that noticed.**
 Since #1336 put djev in as the recall's ranker, the dispatch's first arm is
 `if ranker == "djev":`, which ranks the pool and returns; this hook is the
-`elif reranker is None:` below it. It is **structurally dark**, not quiet —
-`shadow.jsonl` holds 34 `rerank` rows, newest 2026-09-21T08:57:40Z, while
-`dedupe` and `entity` in the same file have grown past 145 and 46 and still grow
-daily (probe 2026-09-23T19:07Z). Its one live window is the kill switch pulled
-to `"qmd"` with the engine still answering — a ranker rollback, which is exactly
-when djev's-order-beside-the-cross-encoder's is worth having. `djev_status` says
-all of this now: `shadow.seam_log` is rows and newest row per seam, and
-`shadow.structurally_dark` names the seam the dispatch itself cannot reach.
+`elif reranker is None:` below it. It is **structurally dark**, not quiet.
+
+The row stream is read from `djev_status`, not from this page: `shadow.seam_log`
+reports rows and newest row per seam off `shadow.jsonl` itself, and
+`shadow.structurally_dark` names the seam the dispatch itself cannot reach. Re-measure
+there — every figure below is a dated probe, not the state of the file, and the
+newest-row field is precisely the one that moves: at least one `rerank` row has
+landed since the probe quoted here, which is what a rollback window looks like in
+a log. **Probe 2026-09-23T19:07Z**: `shadow.jsonl` holding 34 `rerank` rows with
+newest 2026-09-21T08:57:40Z, while `dedupe` and `entity` in the same file had
+grown past 145 and 46 and were still growing daily. The shape that reading shows —
+rerank's stream stopped where the other two kept moving — is what this section
+asserts; the counts are the probe's.
+
+Its one live window remains the kill switch pulled to `"qmd"` with the engine
+still answering — a ranker rollback, which is exactly when
+djev's-order-beside-the-cross-encoder's is worth having.
 
 When it does run, the hook sits between the daily-log demote sort and the
 `[:limit]` slice. At that point `documents` holds qmd's reranked pool in the

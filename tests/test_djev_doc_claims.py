@@ -151,19 +151,34 @@ def test_the_fixture_titles_the_doc_counts_still_exist():
 
 # ── #1372: the rerank seam's prose says when it can fire ────────────────────
 #
-# The item was filed from prose, not from code. `app/djev_shadow.py` opened with
-# "Three seams call this — reranking in `agent_mcp/vault.py`", `config.yaml`
-# still calls it "The lead seam: both `vault_recall` and `memory_ops.recall`
-# pass through it", and `architecture/djev.md` says the seam runs "on every
-# recall". Since #1336 none of those is true: djev IS the recall's ranker, so
-# the hook sits under an `elif` the first arm never reaches, and `rerank`'s last
-# production row is 2026-09-21T08:57:40Z while `dedupe` and `entity` keep
-# flowing. A description that presents a structurally dark seam as a live one is
-# what makes its silence unreadable — so the descriptions are asserted, not just
-# corrected once.
+# The item was filed from prose, not from code, and what follows is four
+# PROBE-TIME readings (2026-09-23), not a present-state claim. At that probe
+# `app/djev_shadow.py` opened with "Three seams call this — reranking in
+# `agent_mcp/vault.py`", `config.yaml` called the hook "The lead seam: both
+# `vault_recall` and `memory_ops.recall` pass through it", and
+# `architecture/djev.md` said the seam runs "on every recall". Since #1336 none
+# of those is true: djev IS the recall's ranker, so the hook sits under an `elif`
+# the first arm never reaches. Two things have moved since, which is exactly why
+# neither may be kept here as a fact: #1628 re-worded that `config.yaml` comment
+# to name the firing condition instead of a rank (which is what lets the guard
+# below cover the file at all), and the row stream is a log that grows — what the
+# probe read was `rerank` newest at 2026-09-21T08:57:40Z with `dedupe` and
+# `entity` still flowing, and the live figure is whatever `djev_status`'s
+# `shadow.seam_log` reports per seam, which §6.1 now points to rather than
+# restating. A description that presents a structurally dark seam as a live one
+# is what makes its silence unreadable — so the descriptions are asserted, not
+# just corrected once.
 
 SHADOW_SRC = ROOT / "app" / "djev_shadow.py"
 VAULT_SRC = ROOT / "agent_mcp" / "vault.py"
+#: The live config. Its `shadow.seams` comments are the seam description no round
+#: can repair: `config.yaml` sits in `scripts/automod/spec.py`'s `DENIED_GLOBS`,
+#: so a self-modification round that read a wrong sentence in it would have to
+#: hand the fix to a human, while the same sentence in `vault.py` is one edit
+#: away. That asymmetry is the reason to guard the file, not a reason to skip it —
+#: and #3084 is the second item filed from this prose after #1628, so the needle
+#: is the reader.
+CONFIG_SRC = ROOT / "config.yaml"
 
 
 def _module_docstring(path: Path) -> str:
@@ -190,14 +205,46 @@ def test_the_shadow_docstring_names_when_the_rerank_seam_can_fire():
             f"except under the kill switch to qmd — it lost {needle!r}")
 
 
-#: Every file that describes the seams: the recorder, the caller, and the doc
-#: the #1324 record above is guarded in. #1372 is a defect about descriptions,
-#: so the scan covers all three rather than only the two the clause names.
-SEAM_DESCRIPTIONS = [SHADOW_SRC, VAULT_SRC, DOC]
+#: Every file that describes the seams: the recorder, the caller, the doc the
+#: #1324 record above is guarded in, and the live config. #1372 is a defect about
+#: descriptions, so the scan covers every surface that carries one rather than
+#: only the two the clause names — and the config is the surface a round cannot
+#: edit, which is where a description is most likely to be found stale and least
+#: likely to be fixed.
+SEAM_DESCRIPTIONS = [SHADOW_SRC, VAULT_SRC, DOC, CONFIG_SRC]
+
+#: The claims that make a structurally dark seam read as a live one: a rank
+#: ("lead") and a frequency ("on every recall" / "the three shadow seams" — a
+#: count of live callers). Both were in the prose #1372 was filed from, and both
+#: describe volume where the truth is a condition.
+LIVE_SEAM_NEEDLES = ["lead seam", "the three shadow seams"]
+
+
+def _assert_no_live_seam_claims(text: str, *, where: str, frequency: bool = True) -> None:
+    """Refuse any text that describes the rerank seam by a rank or a frequency.
+
+    A helper rather than a node body because the check has two callers proving
+    different things: the parametrised node runs it over every guarded file, and
+    `test_the_needle_check_refuses_the_sentence_it_exists_to_refuse` feeds it the
+    sentence it exists to refuse. A guard whose only green path is "the corpus
+    happens to contain no match" cannot be told apart from one that cannot match
+    anything, and the file that most needs this one is the file no round may edit.
+
+    `frequency=False` is `vault.py`'s exemption, stated by the node that asks for
+    it: it says "on every recall" about the #1335 latency of the graph arm, which
+    is true of it.
+    """
+    lowered = text.lower()
+    needles = list(LIVE_SEAM_NEEDLES) + (["on every recall"] if frequency else [])
+    for needle in needles:
+        assert needle not in lowered, (
+            f"{where} still says {needle!r} about the rerank seam. While "
+            "djev is the recall's ranker the dispatch never reaches it, so state "
+            "the condition it fires under instead of a volume or a rank.")
 
 
 @pytest.mark.parametrize("path", SEAM_DESCRIPTIONS,
-                         ids=["djev_shadow", "vault", "djev.md"])
+                         ids=["djev_shadow", "vault", "djev.md", "config.yaml"])
 def test_no_djev_description_calls_rerank_a_seam_production_reaches(path):
     """Clause 2, second half. "Lead seam" was the phrase in two of these files —
     `app/djev_shadow.py`'s eval-muting paragraph and
@@ -206,19 +253,13 @@ def test_no_djev_description_calls_rerank_a_seam_production_reaches(path):
     in the doc, two sections from the one that knew better (§8.1: "The shadow
     seam does not run when djev ranks"). Those are the claims that make a dark
     seam read as a quiet one, so the needles are asserted, not just corrected
-    once: a rank or a frequency is where a stale seam description shows up."""
-    text = path.read_text().lower()
-    needles = ["lead seam", "the three shadow seams"]
-    if path != VAULT_SRC:
-        # `vault.py` is 2,000 lines and says "on every recall" about the #1335
-        # latency of the graph arm, which is true of it; the frequency claim
-        # that matters there is the hook's own, checked just below.
-        needles.append("on every recall")
-    for needle in needles:
-        assert needle not in text, (
-            f"{path.name} still says {needle!r} about the rerank seam. While "
-            "djev is the recall's ranker the dispatch never reaches it, so state "
-            "the condition it fires under instead of a volume or a rank.")
+    once: a rank or a frequency is where a stale seam description shows up.
+
+    `config.yaml`'s case was the gap #3084 closes: its `shadow.seams` comment
+    carried the lead-seam sentence until #1628, and nothing in the suite read the
+    file, so the correction was invisible to every later round."""
+    _assert_no_live_seam_claims(path.read_text(), where=path.name,
+                                frequency=path != VAULT_SRC)
     if path is VAULT_SRC:
         import inspect
         hook = inspect.getsource(vault._djev_shadow_rerank).lower()
@@ -228,19 +269,56 @@ def test_no_djev_description_calls_rerank_a_seam_production_reaches(path):
                 "which is the sentence that made the seam look live")
 
 
+def test_the_needle_check_refuses_the_sentence_it_exists_to_refuse():
+    """The guard's red side, which is the only thing distinguishing it from a
+    no-op. `config.yaml` is in `DENIED_GLOBS`, so the way the lead-seam sentence
+    gets back into it is a human edit no round ever sees, and the sole evidence
+    the guard would leave is a green parametrisation — which is what #1372's
+    correction had for company until now. So the helper is fed the sentence it was
+    written for (the one the comment block above quotes, and what
+    `config.yaml`'s `shadow.seams.rerank` comment replaced it with in #1628), and
+    the assertion is on the needle that bit, not merely on raising.
+
+    The paired green half is the same file's real text: without it, this node
+    would only prove the helper is noisy."""
+    lead_seam_comment = ("# Reranking, the lead seam: both `vault_recall` and "
+                         "`memory_ops.recall` pass through it.")
+    with pytest.raises(AssertionError) as raised:
+        _assert_no_live_seam_claims(lead_seam_comment, where="config.yaml")
+    assert "lead seam" in str(raised.value), (
+        f"it raised, but not on the phrase — the needles have moved and the "
+        f"parametrised node is now guarding something else: {raised.value}")
+    _assert_no_live_seam_claims(CONFIG_SRC.read_text(), where="config.yaml")
+
+
 def test_the_seam_section_states_the_row_stream_it_left_behind():
-    """The doc has to carry the measured end of the stream, because "dark" is
-    only checkable against something: the newest `rerank` row is a fact a reader
-    can re-measure in `shadow.jsonl`, and the day it stopped is the day #1336
-    landed."""
+    """§6.1 has to carry the SHAPE of the stream, not its readings, because
+    "dark" is only checkable against something and a typed count is not: the
+    numbers a reader needs are what `djev_status`'s `shadow.seam_log` reports per
+    seam off `shadow.jsonl` itself, and that route can be re-measured while a
+    figure in prose cannot.
+
+    The node used to assert the literal `2026-09-21T08:57:40`, which inverted the
+    guard: it passed on a doc asserting 34 rows and a newest row that had since
+    moved (a `rerank` row landed 2026-10-11T17:44:09Z, so the rollback window
+    reopened after the stated end), and it would have failed an honest correction.
+    So what stays pinned is what cannot go stale — that the seam is unreachable
+    rather than idle, what would lift it, and the pointer to the live source."""
     text = DOC.read_text()
     section = text[text.index("### 6.1"):text.index("### 6.2")]
     assert "structurally dark" in section, (
         "§6.1 no longer says the seam is unreachable rather than idle")
-    assert "2026-09-21T08:57:40" in section, (
-        "§6.1 lost the newest-rerank-row timestamp, which is the sentence that "
-        "makes 'dark' a claim someone else can re-measure")
     assert "kill switch" in section, "§6.1 no longer names what would lift it"
+    assert "shadow.seam_log" in section, (
+        "§6.1 lost the pointer to the live row stream, and with it the only way a "
+        "reader can check what §6.1 says about rows — every count typed here is a "
+        "dated probe, and an undated one reads as a present state")
+    assert "djev_status" in section, (
+        "the pointer has to name the route that answers, not just the key inside it")
+    probe = "probe 2026-09-23"
+    assert probe in section.lower(), (
+        f"{probe!r} no longer labels the figures in §6.1, so the 34/145/46 "
+        "readings are back to being present-state claims a rerank row can falsify")
 
 
 def test_the_shadow_hook_says_it_runs_only_under_the_other_ranker():
