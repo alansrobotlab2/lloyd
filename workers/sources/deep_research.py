@@ -30,7 +30,7 @@ import asyncio
 import logging
 import re
 import subprocess
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -142,6 +142,32 @@ def note_path_for(topic: str, *, today: Optional[str] = None) -> Path:
     """
     day = today or datetime.now(timezone.utc).date().isoformat()
     return NOTES_DIR / f"{day}-{_slug(topic)}.md"
+
+
+#: A filename's leading `YYYY-MM-DD`, as `note_path_for` writes it.
+_DAY_PREFIX_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+
+def note_day(path: Path) -> Optional[str]:
+    """The day this note's filename carries, or None if it carries no real one.
+
+    The prompt tells the turn what today is (#3049), and the only "today" it
+    may assert is the one in the path it is told to write: the payload's
+    `artifact_path` was stamped at enqueue time, and a row claimed after UTC
+    midnight is a day past it. So the sentence is read out of the filename
+    rather than from the clock, and a path that names no date gets no sentence
+    — a date asserted from `now()` is exactly the claim this cannot make.
+
+    Re-validated as a calendar date and re-emitted in ISO form, so a filename
+    like `2026-13-45-x.md` cannot be quoted to the turn as a date either.
+    """
+    m = _DAY_PREFIX_RE.match(path.name)
+    if not m:
+        return None
+    try:
+        return date.fromisoformat(m.group(1)).isoformat()
+    except ValueError:
+        return None
 
 
 def parse_result(text: str) -> Optional[dict]:
@@ -486,14 +512,34 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     if not skill:
         return await give_up_or_retry(f"skill {SKILL} not found", {"skill_missing": True})
 
-    task_block = "\n".join([
+    # The day stated to the turn is the day `path` carries, never the instant
+    # this line runs (#3049). `path` came from the payload, stamped by
+    # `enqueue_if_due` through `note_path_for`, and the two instants are not
+    # the same day when a row is claimed after UTC midnight — this source sits
+    # at priority 70 behind autocode/autotriage/arch-review with
+    # `max_inflight: 1`, and queue coalescing on the per-topic `dedup_key`
+    # means a long-held row's payload is the only payload that ever runs. The
+    # old line asserted `datetime.now()` and then forbade the turn to check
+    # it, so the one date it could not look up was the one that was wrong.
+    # Nothing here recomputes the path from the claim day: `_note_is_real`
+    # above and `store.finish` below keep the enqueue-day path, and a
+    # claim-day path would point that recovery check at a file an earlier
+    # attempt could not have written and re-research a topic already written
+    # up. Note also that `Bash` is denied on the strength of this sentence
+    # supplying the date, so it stays for every path that carries one.
+    day = note_day(path)
+    task_lines = [
         "## Your task",
         "",
         f"Topic #{topic_id}: {topic}",
         f"Domain: {claimed['domain'] or 'unspecified'}",
         f"Write your note to exactly this path: {path}",
-        f"Today's date is {datetime.now(timezone.utc).date().isoformat()} — "
-        f"it is already in that filename, so do not look it up.",
+    ]
+    if day:
+        task_lines.append(
+            f"Today's date is {day} — it is already in that filename, "
+            "so do not look it up.")
+    task_lines += [
         "",
         "The topic is given. Do not read any queue and do not pick a different "
         "one. Start by calling vault_recall on it: if the vault already covers "
@@ -510,8 +556,9 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         "Three searches that turn up nothing is a real answer: say "
         "`RESULT: nothing_found` with one line of why. It is recorded, and it "
         "is what stops this topic being proposed again.",
-    ])
-    prompt = build_skill_prompt(skill, job=NAME, task_block=task_block)
+    ]
+    prompt = build_skill_prompt(skill, job=NAME,
+                                task_block="\n".join(task_lines))
 
     # Baseline before the turn: anything already dirty is not this turn's.
     vault_before = await asyncio.to_thread(_vault_dirty_paths)

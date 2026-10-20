@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -80,9 +81,17 @@ def _turn(text: str, *, writes: Path | None = None, **kw):
     return run
 
 
-def _payload(registry, notes, topic="Speculative decoding for local agent loops"):
+def _payload(registry, notes, topic="Speculative decoding for local agent loops",
+             *, today=None):
+    """A payload as `enqueue_if_due` would stamp one.
+
+    `today` is the day the ENQUEUE ran, which is what `note_path_for` puts in
+    the filename and therefore what the payload carries. A row claimed after
+    UTC midnight carries a day that is not the claim day (#3049), so the
+    tests that care about that pass it explicitly.
+    """
     row = registry.propose(topic, domain="local-llm-serving")
-    path = D.note_path_for(topic)
+    path = D.note_path_for(topic, today=today)
     return {"topic_id": row["id"], "topic": topic, "domain": "local-llm-serving",
             "artifact_path": str(path), "max_turns": 60}, row["id"], path
 
@@ -213,7 +222,6 @@ async def test_an_empty_registry_enqueues_nothing(registry, queue, notes):
 
 
 async def test_a_crashed_turn_is_reclaimed_before_the_next_tick(registry, queue, notes):
-    from datetime import datetime, timedelta, timezone
     topic = registry.propose("a topic whose backend died mid-turn")["id"]
     registry.claim(topic, by="worker", queue_id=99)
     old = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
@@ -512,6 +520,121 @@ async def test_the_prompt_gives_the_topic_the_path_and_the_date(
     assert "Do not read any queue" in prompt
     assert "RESULT: <written|nothing_found|duplicate>" in prompt
     assert "## Steps" in prompt or "Step 1" in prompt, "the skill body is included"
+
+
+# ---------------------------------------------------------------------------
+# The date the turn is told (#3049)
+#
+# `note_path_for` fixes the filename's day at ENQUEUE (`enqueue_if_due`), and
+# `execute` takes that path from the payload; the prompt used to state
+# `datetime.now()` as "today", so the two were computed at different instants
+# and nothing reconciled them. The gap is reachable: this source sits at
+# priority 70 behind autocode (40), autotriage (55) and arch-review (62) with
+# `max_inflight: 1`, and a row whose `dedup_key` is still `queued|claimed|
+# running` coalesces, so a long-held row's stale payload is the only payload
+# that will ever run for that topic. Measured over the 86 `deep-research` rows
+# in workers.db to 2026-10-20 the crossing had never fired (max lag 1001.5 min
+# on row #505, every enqueue in 00:00-05:00 UTC), which is why the fix is the
+# sentence and not the path.
+# ---------------------------------------------------------------------------
+
+
+async def test_the_prompt_names_the_day_the_path_carries_not_the_claim_day(
+        registry, queue, notes, monkeypatch):
+    """Clause 1: an enqueued-late row claimed after UTC midnight must be told
+    the date in the filename it is told to write, never its claim day."""
+    now = datetime.now(timezone.utc)
+    claim_day = now.date().isoformat()
+    enqueue_day = (now.date() - timedelta(days=1)).isoformat()
+    payload, topic_id, path = _payload(registry, notes, today=enqueue_day)
+    assert path.name.startswith(enqueue_day)
+    turn = _turn(f"RESULT: written\nNOTE: {path}\n", writes=path)
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    await D.execute(_item(payload))
+    prompt = turn.prompt
+    assert f"Today's date is {enqueue_day}" in prompt, (
+        "the sentence must state the filename's day, which is the only date "
+        "the turn can check it against")
+    assert f"Today's date is {claim_day}" not in prompt, (
+        "the prompt asserts no date the path does not carry")
+
+
+async def test_a_path_with_no_leading_date_gets_no_date_sentence_at_all(
+        registry, queue, notes, monkeypatch):
+    """Clause 2: when the payload's path names no day, the prompt says nothing
+    about the day — it does not fall back to asserting claim-day. The path
+    line still names the path, which is what the turn actually needs."""
+    payload, topic_id, _ = _payload(registry, notes)
+    path = notes / "undated-handwritten-slug.md"
+    payload["artifact_path"] = str(path)
+    turn = _turn(f"RESULT: written\nNOTE: {path}\n", writes=path)
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert "Today's date is" not in turn.prompt, (
+        "an asserted date the filename contradicts is the bug, just arrived "
+        "from the other direction")
+    assert f"Write your note to exactly this path: {path}" in turn.prompt
+    assert out["artifact_path"] == str(path)
+    assert registry.get(topic_id)["artifact_path"] == str(path)
+
+
+async def test_a_normal_run_is_still_told_not_to_look_the_date_up(
+        registry, queue, notes, monkeypatch):
+    """Clause 3: `Bash` is on the deny list on the stated ground that the date
+    and the path are supplied, so for the 100 % of runs whose path carries
+    today the whole sentence — including `do not look it up` — survives."""
+    payload, topic_id, path = _payload(registry, notes)
+    today = datetime.now(timezone.utc).date().isoformat()
+    assert path.name.startswith(today)
+    turn = _turn(f"RESULT: written\nNOTE: {path}\n", writes=path)
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    await D.execute(_item(payload))
+    prompt = turn.prompt
+    assert f"Today's date is {today}" in prompt
+    assert "do not look it up" in prompt, "the reason Bash is denied"
+    assert "it is already in that filename" in prompt
+
+
+async def test_the_claim_day_recomputes_no_path_anywhere_in_the_run(
+        registry, queue, notes, monkeypatch):
+    """Clause 4: the fix is the sentence, not the path. `execute` reads
+    `_note_is_real` on the payload's enqueue-day path and settles the topic
+    with that same path, even with the clock wound far ahead of it — a
+    claim-day path would point the recovery check at a file an earlier attempt
+    could not have written, and re-research a topic whose note already exists."""
+    now = datetime.now(timezone.utc)
+    enqueue_day = (now.date() - timedelta(days=1)).isoformat()
+    payload, topic_id, path = _payload(registry, notes, today=enqueue_day)
+
+    checked: list[Path] = []
+    real_note_is_real = D._note_is_real
+
+    def spy_note_is_real(p):
+        checked.append(Path(p))
+        return real_note_is_real(p)
+    monkeypatch.setattr(D, "_note_is_real", spy_note_is_real)
+
+    class WoundForwardClock:
+        """What `datetime.now()` would answer on the claim day, a year on."""
+        @staticmethod
+        def now(tz=None):
+            return datetime(2027, 10, 20, 9, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(D, "datetime", WoundForwardClock)
+
+    turn = _turn(f"RESULT: written\nNOTE: {path}\n", writes=path)
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["artifact_path"] == str(path), (
+        "the payload's enqueue-day path, not one recomputed from the clock")
+    assert registry.get(topic_id)["artifact_path"] == str(path)
+    assert checked == [path, path], (
+        "_note_is_real is consulted on the payload's path before the turn and "
+        "again after it, and on no recomputed path")
+    assert f"Today's date is {enqueue_day}" in turn.prompt
 
 
 async def test_a_vault_write_outside_knowledge_is_flagged(
