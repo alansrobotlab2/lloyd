@@ -3504,6 +3504,47 @@ SEPT_30_SHAPE = {
 FIRED_SHAPE = {**SEPT_30_SHAPE,
                "vec0": {**SEPT_30_SHAPE["vec0"], "occupancy": 0.2379}}
 
+#: The live 2026-10-20 nightly artifact, transcribed where it matters
+#: (`~/lloyd-data/_pipeline/reflection/qmd-index-maintenance-2026-10-20.json`):
+#: 60,542 live rows in 184,320 allocated slots = occupancy 0.3285, 483.5 MiB dead,
+#: `need_capacity: false`, exit 0. The state #3072's lead-time signal exists for: at
+#: the measured 0.0134–0.0189 occupancy/night this reaches the 0.25 red trigger in
+#: about four nights, and until this change nothing said so before it did.
+OCT_20_SHAPE = {
+    "index_bytes": 2_156_615_728,
+    "footprint": {"total": 2_156_615_728, "main": 1_074_098_176,
+                  "wal": 1_080_387_632, "shm": 2_129_920},
+    "vectors_total": 60_542, "vectors_orphaned": 37, "vectors_live": 60_505,
+    "orphan_ratio": 0.0006, "documents": 8_852,
+    "vec0": {"chunks": 180, "allocated_slots": 184_320, "live_rows": 60_542,
+             "occupancy": 0.3285, "allocated_mib": 720.0, "dead_mib": 483.5},
+}
+
+#: The run the night after the 2026-10-05 side-copy swap
+#: (`~/lloyd-data/_pipeline/reflection/qmd-index-maintenance-2026-10-06.json`):
+#: 43,769 live rows in 53,248 slots = occupancy 0.822, 37.0 MiB dead. The other side
+#: of the band — freshly rebuilt, nothing owed — and the reason the approaching bound
+#: is 0.50 and not simply "not yet red": a warning that prints for two weeks after
+#: every rebuild is a warning nobody reads.
+OCT_06_SHAPE = {
+    "index_bytes": 1_134_933_400,
+    "footprint": {"total": 1_134_933_400, "main": 565_436_416,
+                  "wal": 568_382_872, "shm": 1_114_112},
+    "vectors_total": 43_769, "vectors_orphaned": 40, "vectors_live": 43_729,
+    "orphan_ratio": 0.0009, "documents": 13_740,
+    "vec0": {"chunks": 52, "allocated_slots": 53_248, "live_rows": 43_769,
+             "occupancy": 0.822, "allocated_mib": 208.0, "dead_mib": 37.0},
+}
+
+#: Neither condition, for the same reason the floor exists in #844: a thin index
+#: whose ratio looks bad but whose dead bytes are a rounding error (0.20 occupancy,
+#: 10.0 MiB dead — under the red trigger AND a twentieth of the 256 MiB floor).
+#: Approaching must be False here, or the band is a ratio alarm wearing the new
+#: predicate's clothes.
+SPARSE_INDEX_SHAPE = {**OCT_06_SHAPE,
+                      "vec0": {**OCT_06_SHAPE["vec0"],
+                               "occupancy": 0.20, "dead_mib": 10.0}}
+
 
 def _run_over_shape(monkeypatch, tmp_path, shape: dict, capsys,
                     tag: str = "run", probe_via_sh: bool = False):
@@ -3654,6 +3695,133 @@ def test_a_fired_verdict_escalates_without_touching_the_index(monkeypatch, tmp_p
     assert "after" not in report, "the mutating section ran on a fired verdict"
     # And the numbers it escalated on are the ones it measured, unchanged.
     assert report["before"]["vec0"] == FIRED_SHAPE["vec0"]
+
+
+# ── #3072: the green lead-time signal in front of the red trigger ──────────────
+#
+# `need_capacity` is the only capacity state this job reports, and it fires once
+# occupancy is already under 0.25 — the night the hand rebuild is overdue. The
+# measured October series decayed 0.822 (10-06, the night after the swap) to 0.3285
+# (10-20) with `need_capacity: false` on all fifteen of those nightly reports, so the
+# first red exit is also a person's first notice of a 37-minute job. `capacity_approaching`
+# names the same measurement while the run is still green: no new action, no new exit
+# code, one more key in the dated JSON and one more line in the summary.
+
+
+def test_capacity_approaching_is_true_only_inside_the_lead_time_band():
+    """Clauses 1 and 2: the band, on its own and on the measured readings.
+
+    True exactly from the 0.25 red trigger (inclusive) up to the named 0.50 bound
+    (exclusive) once the 256 MiB dead floor is cleared — the two constants at
+    :305-306 plus `CAPACITY_APPROACHING_OCCUPANCY`, and no new number invented in
+    the predicate. `capacity_verdict` owns everything below the trigger, so the two
+    can never be True on one reading.
+    """
+    assert m.CAPACITY_APPROACHING_OCCUPANCY == 0.50
+    # The measured 2026-10-20 nightly: 0.3285 with 483.5 MiB dead, inside the band.
+    assert m.capacity_approaching(OCT_20_SHAPE["vec0"]) is True
+    # The live 2026-09-30 shape #1897 runs on (0.3379, 275.4 MiB) is in the band too,
+    # which is why its nodes' "no OWED line" assertions have to survive a printed
+    # approaching line: that shape is green AND warned.
+    assert m.capacity_approaching(SEPT_30_SHAPE["vec0"]) is True
+    # A fired reading belongs to the red verdict and never to this one.
+    assert m.capacity_approaching(FIRED_SHAPE["vec0"]) is False
+    assert m.capacity_verdict(FIRED_SHAPE["vec0"]) is True
+    # The night after the 2026-10-05 swap: 0.822 over the bound and 37.0 MiB dead.
+    assert m.capacity_approaching(OCT_06_SHAPE["vec0"]) is False
+    assert m.capacity_verdict(OCT_06_SHAPE["vec0"]) is False
+    # Neither condition: 0.20 occupancy AND 10.0 MiB dead.
+    assert m.capacity_approaching(SPARSE_INDEX_SHAPE["vec0"]) is False
+    assert m.capacity_verdict(SPARSE_INDEX_SHAPE["vec0"]) is False
+    # Each bound on its own, so an off-by-one at either edge is caught: the trigger
+    # and the floor are inclusive, the 0.50 bound is exclusive.
+    assert m.capacity_approaching({"occupancy": 0.25, "dead_mib": 256.0}) is True
+    assert m.capacity_approaching({"occupancy": 0.4999, "dead_mib": 256.0}) is True
+    assert m.capacity_approaching({"occupancy": 0.50, "dead_mib": 483.5}) is False
+    assert m.capacity_approaching({"occupancy": 0.2499, "dead_mib": 483.5}) is False
+    assert m.capacity_approaching({"occupancy": 0.3285, "dead_mib": 255.9}) is False
+    # An UNMEASURED vec0 is not a low-occupancy vec0: no tables, a query that raised,
+    # and an empty index each report no occupancy at all, and each must stay silent
+    # rather than warn about a rebuild nobody can size.
+    assert m.capacity_approaching(None) is False
+    assert m.capacity_approaching({}) is False
+    assert m.capacity_approaching(
+        {"error": "OperationalError('no such table: vec0_vector_chunks00')"}) is False
+    assert m.capacity_approaching({"occupancy": None, "dead_mib": 900.0}) is False
+
+
+def test_an_in_band_run_writes_the_key_into_the_report_and_still_exits_zero(
+        monkeypatch, tmp_path, capsys):
+    """Clauses 3 and 5: the key is on every run, and it is not a second alarm.
+
+    Each shape runs through `_run_over_shape`, the same helper the fired and quiet
+    #1897 nodes use, so the report is the dated JSON the nightly job actually writes
+    (`_write_report` dumps the whole dict) rather than a hand-built one. The 2026-10-20
+    state must be True with `need_capacity` False and rc 0; the 2026-10-06 state False;
+    and the fired state False with `need_capacity` True, because the bands are disjoint.
+    """
+    rc, report, _ = _run_over_shape(monkeypatch, tmp_path, OCT_20_SHAPE, capsys,
+                                    tag="approaching")
+    assert report["capacity_approaching"] is True
+    assert report["need_capacity"] is False, "the band must not bleed into the red verdict"
+    assert report["daemon_healthy"] is True
+    assert rc == 0, ("an approaching run that exits 1 is a second alarm, not a notice")
+    # Present and False, not absent: a key that appears only when it fires is
+    # indistinguishable from a check that did not run (#1598's rule).
+    _, healthy, _ = _run_over_shape(monkeypatch, tmp_path, OCT_06_SHAPE, capsys,
+                                    tag="healthy")
+    assert healthy["capacity_approaching"] is False
+    assert healthy["need_capacity"] is False
+    _, thin, _ = _run_over_shape(monkeypatch, tmp_path, SPARSE_INDEX_SHAPE, capsys,
+                                 tag="thin")
+    assert thin["capacity_approaching"] is False
+    # The fired night: the red verdict's key True, this one False, and still red.
+    rc_fired, fired, _ = _run_over_shape(monkeypatch, tmp_path, FIRED_SHAPE, capsys,
+                                         tag="fired")
+    assert fired["capacity_approaching"] is False and fired["need_capacity"] is True
+    assert rc_fired != 0
+    # And `_exit_code` itself, which this change must not have learned to read: an
+    # approaching report on a healthy daemon is green.
+    assert m._exit_code({"need_capacity": False, "daemon_healthy": True,
+                         "capacity_approaching": True}) == 0
+
+
+def test_the_summary_line_and_the_report_key_are_the_same_predicate(
+        monkeypatch, tmp_path, capsys):
+    """Clause 4: one line, naming the three figures, and nothing outside the band.
+
+    Asserted on the printed lines because the summary is what a person reads. The
+    wording is load-bearing in one specific way: two #1897 nodes COUNT the printed
+    lines containing `capacity OWED` and `BY HAND`, so the approaching line collides
+    with neither literal — it is a different state, and an in-band run must not be
+    able to make those counters read 2.
+    """
+    rc, report, out = _run_over_shape(monkeypatch, tmp_path, OCT_20_SHAPE, capsys,
+                                      tag="print")
+    said = [ln for ln in out.splitlines() if "capacity APPROACHING" in ln]
+    assert len(said) == 1, out
+    assert report["capacity_approaching"] is True, (
+        "the printed line and the report key are one predicate; they cannot disagree")
+    assert "32.9 % occupancy" in said[0], said[0]
+    assert "484 MiB dead" in said[0], said[0]
+    assert "side-copy rebuild" in said[0] and "by hand" in said[0], said[0]
+    assert "25%" in said[0], said[0]
+    # The fired-state literals are unique to a fired run even though this run warns.
+    assert "capacity OWED" not in out, out
+    assert "BY HAND" not in out, out
+    # The measurement line above it is untouched: this adds a line, it does not
+    # rewrite the one that has been printed since #1598.
+    assert "capacity verdict False" in out, out
+    assert rc == 0, out
+    # Out of the band, silent — and silent in step with the key.
+    _, healthy, h_out = _run_over_shape(monkeypatch, tmp_path, OCT_06_SHAPE, capsys,
+                                        tag="print-healthy")
+    assert "capacity APPROACHING" not in h_out, h_out
+    assert healthy["capacity_approaching"] is False
+    _, thin, t_out = _run_over_shape(monkeypatch, tmp_path, SPARSE_INDEX_SHAPE, capsys,
+                                     tag="print-thin")
+    assert "capacity APPROACHING" not in t_out, t_out
+    assert thin["capacity_approaching"] is False
 
 
 #: Where #1897's witness lives once committed. `~/lloyd-data/_pipeline/reflection/`

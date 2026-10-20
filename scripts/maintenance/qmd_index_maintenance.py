@@ -304,6 +304,17 @@ CHECKPOINT_BUSY_TIMEOUT_S = 5.0
 # 766 MiB dead) both are far past; after the 09-21 rebuild (56%) neither is.
 CAPACITY_OCCUPANCY_TRIGGER = 0.25
 CAPACITY_DEAD_MIB_FLOOR = 256
+#: Lead-time bound (#3072), the upper edge of the band in FRONT of the red trigger.
+#: `capacity_verdict` is red-only and fires once occupancy drops below 0.25, which is
+#: the night the hand rebuild is already overdue: the measured decay after the
+#: 2026-10-05 swap walked 0.822 (10-06) down to 0.3285 (10-20) at 0.0134–0.0189
+#: occupancy/night with `need_capacity: false` on every one of those nightly reports,
+#: so the first red exit was a person's first notice of a 37-minute job. Between 0.50
+#: and 0.25 the same measurement is ~12 nights of notice at that rate, which is why
+#: the bound is 0.50 and not simply "not yet red" — 0.822 is the night after a
+#: rebuild, and a warning printed for two weeks after every swap is one nobody reads.
+#: `_exit_code` deliberately does not read this band: a notice, not a second alarm.
+CAPACITY_APPROACHING_OCCUPANCY = 0.50
 VEC0_REBUILD_RULED_OUT = (
     "ruled out as an unattended action: the one measured rebuild (2026-09-21 "
     "model switch) was a side copy re-embedded in full and swapped in, 1.25 GB "
@@ -1428,6 +1439,28 @@ def capacity_verdict(vec0: dict | None) -> bool:
     if not vec0 or vec0.get("occupancy") is None:
         return False
     return (vec0["occupancy"] < CAPACITY_OCCUPANCY_TRIGGER
+            and vec0.get("dead_mib", 0) >= CAPACITY_DEAD_MIB_FLOOR)
+
+
+def capacity_approaching(vec0: dict | None) -> bool:
+    """True in the lead-time band in front of the red trigger, False everywhere else.
+
+    Exactly `CAPACITY_OCCUPANCY_TRIGGER <= occupancy < CAPACITY_APPROACHING_OCCUPANCY`
+    with `CAPACITY_DEAD_MIB_FLOOR` cleared — the same three constants `capacity_verdict`
+    reads, no new number invented here. The two are disjoint by construction: the red
+    verdict owns every reading below the trigger, this owns the run-up to it, so a
+    fired night never also prints the approaching line.
+
+    It exists because #1897's verdict is a tripwire and a tripwire cannot give notice:
+    on the measured 2026-10 series it stayed False for fifteen nightly runs while
+    occupancy decayed 0.822 → 0.3285, and the run that fired was the run that first
+    said anything at all. An UNMEASURED vec0 (no tables, a query that raised, an empty
+    index) is not a low-occupancy vec0, so the guard is the same one above.
+    """
+    if not vec0 or vec0.get("occupancy") is None:
+        return False
+    occ = vec0["occupancy"]
+    return (CAPACITY_OCCUPANCY_TRIGGER <= occ < CAPACITY_APPROACHING_OCCUPANCY
             and vec0.get("dead_mib", 0) >= CAPACITY_DEAD_MIB_FLOOR)
 
 
@@ -2857,6 +2890,13 @@ def main() -> int:
     # half of "reported": a fired verdict now also carries what is owed, to whom,
     # and on what numbers, and it moves the exit code through `_exit_code`.
     report["need_capacity"] = capacity_verdict(before.get("vec0"))
+    # The green half of the same measurement (#3072): reported, never acted on, and
+    # never read by `_exit_code` — the point is notice, not a second red night. It is
+    # set on every run like `need_capacity` (#1598's rule: a key that appears only when
+    # it fires is indistinguishable from a check that did not run), and the one summary
+    # line below is driven off this key, so the dated JSON and the printed line cannot
+    # disagree with each other.
+    report["capacity_approaching"] = capacity_approaching(before.get("vec0"))
     report["vec0_rebuild"] = VEC0_REBUILD_RULED_OUT
     if report["need_capacity"]:
         report["capacity_owed_to_a_person"] = capacity_owed(
@@ -3049,6 +3089,20 @@ def _emit(r: dict, as_json: bool) -> None:
               f"   capacity verdict {r.get('need_capacity')}")
     elif v.get("error"):
         print(f"  vec0 occupancy    not measured: {v['error']}")
+    if r.get("capacity_approaching"):
+        # The lead-time line (#3072). The measurement line above says what the index
+        # looks like and `capacity OWED` below says what is already overdue; this is the
+        # state in front of both, green and exit 0, named early enough that the hand
+        # rebuild can be scheduled rather than discovered by a red exit. Read off the
+        # report key, so it prints exactly when the dated JSON says it should. Wording is
+        # load-bearing: it carries neither the `capacity OWED` literal nor the uppercase
+        # `BY HAND` of the fired run's instruction, because those two lines are counted
+        # by name and this is a different state.
+        print(f"  capacity APPROACHING  {100*v['occupancy']:.1f} % occupancy, "
+              f"{v['dead_mib']:,.0f} MiB dead — a hand side-copy rebuild is due "
+              f"before the red trigger at "
+              f"{100*CAPACITY_OCCUPANCY_TRIGGER:.0f}% occupancy fires; the route is "
+              f"`--rebuild-side-copy <name>` then `--swap`, by hand")
     owed = r.get("capacity_owed_to_a_person")
     if owed:
         # Its own line, and the run's exit status (#1897). The `capacity verdict
