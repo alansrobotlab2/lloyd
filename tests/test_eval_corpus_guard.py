@@ -29,7 +29,9 @@ code under test.
 import contextlib
 import json
 import os
+import re
 import shutil
+import statistics
 import socket
 import subprocess
 import sys
@@ -38,7 +40,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from app.paths import LLOYD_HOME, production_data_root  # noqa: E402
+from app.paths import (ACCOUNT_HOME, LIVE_CHECKOUT, LLOYD_HOME,  # noqa: E402
+                      production_data_root)
 
 ROOT = Path(__file__).resolve().parent.parent
 _VENV = ROOT / ".venvs" / "lloyd" / "bin" / "python"
@@ -3353,10 +3356,34 @@ def test_a_collection_deployed_but_not_named_leaves_its_label_unreachable():
 # indices differ by exactly that one collection, and the note prints the 36-file listing
 # rather than summarising it. Like every guard here it reads derived data, so
 # `require_live_data` skips by name on a checkout that never regenerated them.
-TRIAL_DIR = Path.home() / "lloyd-data" / "eval" / "3076"
+#: The trial's scratch lives in the PRODUCTION data root, not under `$HOME`: the gate
+#: runs this suite with `HOME` at the round's farm, where `<round>/home/lloyd-data` is
+#: its own directory holding 16 entries and NO `eval/3076`, so every node below skipped
+#: instead of grading (`43 tests skipped (limit 40)`). `production_data_root()`
+#: (imported at :43) is `ACCOUNT_HOME / "lloyd-data"` and names the real one, which is
+#: also what the trial runner itself wrote through.
+#: ...and the vault the note and the probe live in, and the qmd config the no-touch
+#: proof reads, are anchored the same way for the same reason: the gate does NOT run
+#: this file in the real home. `scripts/automod/gate.py:1595` sets `"HOME": str(home)`
+#: with `home` = `<round>/home`, the farm `scripts/automod/worktree.py:78
+#: ensure_round_home` builds. Measured in this round's farm: `obsidian` and `.config`
+#: are SYMLINKS to the live ones, so a path built from `$HOME` names the same bytes but
+#: a DIFFERENT STRING — which is how SM_20261020_175859 lost two nodes, comparing a
+#: path the note printed verbatim: `'/home/alansrobotlab/.config/qmd/index.yml:14' !=
+#: '/home/alansrobotlab/lloyd-work/SM_20261020_175859/home/.config/qmd/index.yml:14'`.
+#: `lloyd-data` is not a symlink: it is its own directory, holding 16 entries and no
+#: `eval/3076`, so the same reads there are absent outright — the `43 tests skipped
+#: (limit 40)` that cost the round before that one its gate. Either way the read is
+#: wrong: clause 5's claim is about `~/.config/qmd/index.yml`, and certifying a symlink
+#: by its round-home name proves nothing about the file the daemon actually opens.
+#: `ACCOUNT_HOME` is passwd-derived and ignores `$HOME` (`app/data_root.py:77`), which
+#: is why `production_data_root()` was stable and these lines were not; it is also what
+#: the corpus's own header rule says `~/` means —
+#: `tests/test_architecture_coverage_doc_claims.py:257`.
+TRIAL_VAULT = ACCOUNT_HOME / "obsidian"
+TRIAL_DIR = production_data_root() / "eval" / "3076"
 TRIAL_ARTIFACTS = TRIAL_DIR / "data" / "eval" / "baselines"
-TRIAL_NOTE = Path.home() / "obsidian" / "eval" / "measurements" / \
-    "lloyd-architecture-ab-2026-10-20.md"
+TRIAL_NOTE = TRIAL_VAULT / "eval" / "measurements" / "lloyd-architecture-ab-2026-10-20.md"
 TRIAL_PROBE = TRIAL_NOTE.with_name("lloyd-architecture-ab-2026-10-20-probe.yaml")
 
 
@@ -3372,7 +3399,7 @@ def test_the_3076_side_index_ab_artifacts_record_what_the_note_claims():
     # `$QMD_CONFIG_DIR/<index-name>.yml`, so each side has its own file, and each was
     # written from the live config verbatim — the arm's with exactly one entry added.
     conf_dir = TRIAL_DIR / "idx" / "conf"
-    live = yaml.safe_load((Path.home() / ".config" / "qmd" / "index.yml").read_text())
+    live = yaml.safe_load(TRIAL_LIVE_YML.read_text())
     ctrl_conf = yaml.safe_load((conf_dir / "control.yml").read_text())
     arm_conf = yaml.safe_load((conf_dir / "arm.yml").read_text())
     assert len(ctrl_conf["collections"]) == len(live["collections"]), (
@@ -3432,3 +3459,663 @@ def test_the_3076_side_index_ab_artifacts_record_what_the_note_claims():
     anchored = [d for q in probe["queries"] for d in q["expect_docs"]]
     assert all(d.startswith("lloyd-architecture/") and d.endswith(".md") for d in anchored), anchored
     assert len(anchored) == len(probe["queries"]) == 10, anchored
+
+
+# --------------------------------------------------------------------------- #
+# 2026-10-20 round SM_20261020_175859 — #3076's five acceptance clauses, each
+# pinned by a node that re-derives its numbers from the trial's own artifacts
+# rather than trusting the note that prints them.
+#
+# WHY this section exists. The 2026-10-20T08:39 issue of
+# `eval/measurements/lloyd-architecture-ab-2026-10-20.md` was landed with every
+# artifact in place and still reported clauses 1-5 unmet, because the prose had
+# drifted from the bytes beside it:
+#   * the `qmd --index arm ls lloyd-architecture` listing was rekeyed with every
+#     path printed twice — 72 `qmd://lloyd-architecture/` URIs for the 36 the
+#     command emitted — and the node above accepted ANY count >= 36, so it passed
+#     straight through a listing that showed each document twice;
+#   * the two metric tables were a doc-gold-population (n=74) mean printed under
+#     "as recorded in the artifact JSONs", and the delta columns were the paired
+#     estimator over all 81, so one row read `mrr_doc 0.317 -> 0.323` beside a
+#     delta of +0.0151 whose own endpoints are 0.2867 and 0.3018;
+#   * the no-touch section printed output its commands cannot produce:
+#     `grep -c -- '- name: '` returns **0** for both qmd configs, not 14 (this
+#     fork's yml is a mapping, not a `- name:` list), and the quoted gold-set
+#     header line does not exist in `eval/vault_recall_queries.yaml`.
+# So each node below compares the note against an artifact, and where the clause
+# is about a command's output it re-runs the command. They also carry the
+# measurement's own load-bearing claims — that the arm's 36 docs are in the arm
+# index and not the control's, that the probe's labels are root-anchored because
+# doc matching is a substring test, and that a deployed-but-unsegmented
+# collection is unreachable through `vault_recall` (#3075 option (a) as written).
+# --------------------------------------------------------------------------- #
+
+TRIAL_INGEST = TRIAL_DIR / "ingest.json"
+TRIAL_SCORE = TRIAL_DIR / "score.json"
+TRIAL_REACH = TRIAL_DIR / "reach.json"
+TRIAL_RUNNER = TRIAL_DIR / "run_trial.py"
+# The two qmd collection configs: the one the daemon reads, and the tracked copy
+# the nightly drift check compares it against. Neither may name lloyd-architecture
+# while this trial's verdict is "nothing was deployed".
+TRIAL_LIVE_YML = ACCOUNT_HOME / ".config" / "qmd" / "index.yml"
+# The checkout the trial ran in. NOT `ROOT`, which at the gate is the round's worktree
+# whose paths the note never printed, and NOT `Path.home()/"lloyd"`, which at the gate
+# is `<round>/home/lloyd` — the worktree again, reached through the mirrored home.
+# `app.paths.LIVE_CHECKOUT` is `ACCOUNT_HOME / "lloyd"`, the one production answer.
+PRODUCTION_REPO = LIVE_CHECKOUT
+TRIAL_TEMPLATE_YML = PRODUCTION_REPO / "agent-services" / "conf" / "qmd-index.yml"
+DOC_METRICS = ("doc_hit_rate", "doc_recall_avg", "mrr_doc", "ndcg10")
+# The arm's whole content: the checkout's architecture docs, declared in a scratch
+# config. #3076 names this root and pattern verbatim, so it is not a constant to
+# widen — a retry that roots the collection somewhere else is a different trial.
+ARM_COLLECTION_ROOT = "/home/alansrobotlab/lloyd/architecture"
+ARM_COLLECTION_PATTERN = "**/*.md"
+# Every scored run the note reports, keyed by the trial's label prefix. `_arm`
+# names the arm so a mislabelled artifact cannot silently swap the two sides: the
+# control is the one whose index lacks the collection.
+TRIAL_RUN_LABELS = {
+    "x3076-81-control": "control", "x3076-81-arm": "arm",
+    "x3076r-81-control": "control", "x3076r-81-arm_plain": "arm",
+    "x3076r-81-arm_seg": "arm", "x3076r-81-control_seg": "control",
+    "x3076-probe-control": "control", "x3076-probe-arm": "arm",
+    "x3076r-probe-control": "control", "x3076r-probe-arm_plain": "arm",
+    "x3076r-probe-arm_seg": "arm", "x3076r-probe-control_seg": "control",
+}
+# Which daemon each side was allowed to reach. Production stays at 8181; an arm
+# that scored through production's daemon would be measuring the live config,
+# which is the one thing this trial promises not to do.
+ARM_PORTS = {"control": 8193, "arm": 8194}
+
+
+def _3076_require_trial() -> None:
+    """Skip by name on a machine that holds none of this trial's derived data, and
+    say WHICH piece is missing: `TRIAL_NOTE` absent and `TRIAL_ARTIFACTS` absent are
+    different statements, and the previous node already skips on the first of them."""
+    require_live_data(TRIAL_ARTIFACTS, "the #3076 side-index A/B artifact directory")
+    require_live_data(TRIAL_NOTE, "the #3076 measurement note", kind="file")
+    require_live_data(TRIAL_PROBE, "the #3076 probe set", kind="file")
+    require_live_data(TRIAL_INGEST, "the #3076 ingest record", kind="file")
+    require_live_data(TRIAL_SCORE, "the #3076 first-pass score record", kind="file")
+    require_live_data(TRIAL_REACH, "the #3076 head-to-head score record", kind="file")
+    require_live_data(TRIAL_RUNNER, "the #3076 trial runner", kind="file")
+
+
+def _3076_artifact(label_prefix: str):
+    """The newest scored artifact JSON for a run label, with its path."""
+    files = sorted(TRIAL_ARTIFACTS.glob(f"{label_prefix}-*.json"))
+    assert files, f"no scored artifact matching {label_prefix}"
+    return json.loads(files[-1].read_text()), files[-1]
+
+
+def _3076_run_record(label_prefix: str) -> dict:
+    """What the note's `run:` anchor must carry about one run, off that run's JSON:
+    which file, which side, how many collections the recall could name, how many
+    queries scored, how many gold docs the leg could not return, which index the
+    daemon served, and which daemon answered. Clause 2's evidence, all of it."""
+    art, path = _3076_artifact(label_prefix)
+    assert art["label"] == label_prefix, (path.name, art["label"])
+    side = TRIAL_RUN_LABELS[label_prefix]
+    o = art["summary"]["overall"]
+    corpus = art["corpus"]["doc"]
+    assert int(corpus["health_url"].rsplit(":", 1)[1].split("/")[0]) == ARM_PORTS[side]
+    assert corpus["index_path"] == str(TRIAL_DIR / "idx" / f"{side}.sqlite"), corpus
+    return {"artifact": path.name, "arm": side,
+            "gold_doc_collections": o["gold_doc_collections"],
+            "n_queries": o["n_queries"],
+            "gold_doc_unreturnable": len(o.get("gold_doc_unreturnable") or []),
+            "index_path": corpus["index_path"], "health_url": corpus["health_url"]}
+
+
+def _3076_table_row(label_prefix: str) -> dict:
+    """One table row: the collection count, the query count, and the four doc metrics
+    exactly as that artifact's `summary.overall` recorded them — no re-meaning."""
+    art, _ = _3076_artifact(label_prefix)
+    o = art["summary"]["overall"]
+    return {"gold_doc_collections": o["gold_doc_collections"], "n_queries": o["n_queries"],
+            **{m: o[m] for m in DOC_METRICS}}
+
+
+def _3076_anchor_map(text: str, kind: str) -> dict:
+    """`{key: payload}` for every `<!-- 3076:<kind>:<key> --> {json}` note line.
+
+    The anchors exist so a test can find the note's copy of a number without
+    regexing prose: the `file:line` of a markdown section moves the moment the
+    section is edited, and a guard that greps for a heading is a guard that goes
+    red on a typo.
+    """
+    out: dict[str, dict] = {}
+    for line in text.splitlines():
+        m = re.match(rf"^<!-- 3076:{re.escape(kind)}:(\S+) -->\s*(\{{.*\}})\s*$", line)
+        if m:
+            assert m.group(1) not in out, f"duplicate anchor {kind}:{m.group(1)}"
+            out[m.group(1)] = json.loads(m.group(2))
+    return out
+
+
+def _3076_fenced_blocks(text: str) -> list[list[str]]:
+    """The inner lines of every ```-fenced block in the note, in order."""
+    blocks: list[list[str]] = []
+    current = None
+    for line in text.splitlines():
+        if current is None and line.startswith("```"):
+            current = []
+        elif current is not None and line.startswith("```"):
+            blocks.append(current)
+            current = None
+        elif current is not None:
+            current.append(line)
+    assert current is None, "the note ends inside an unterminated fence"
+    return blocks
+
+
+def _3076_listing_block(text: str) -> list[str]:
+    """The note's one block that is a pure `qmd://lloyd-architecture/` listing.
+
+    Clause 1 wants the `ls` listing printed; this finds it structurally (a fenced
+    block whose every line is one of those URIs) instead of counting URIs across
+    the whole file, which is what let a duplicated listing through.
+    """
+    found = [b for b in _3076_fenced_blocks(text)
+             if b and all("qmd://lloyd-architecture/" in l for l in b)]
+    assert len(found) == 1, f"expected one arm listing block, found {len(found)}"
+    return found[0]
+
+
+def _3076_fenced_after(text: str, marker: str) -> list[str]:
+    """The fenced block that follows the note's line beginning `marker`."""
+    lines = text.splitlines()
+    hits = [k for k, l in enumerate(lines) if l.startswith(marker)]
+    assert len(hits) == 1, f"want exactly one line starting {marker!r}, found {len(hits)}"
+    rest = lines[hits[0] + 1:]
+    start = next((k for k, l in enumerate(rest) if l.startswith("```")), None)
+    assert start is not None, f"no fence follows {marker!r}"
+    out = []
+    for line in rest[start + 1:]:
+        if line.startswith("```"):
+            return out
+        out.append(line)
+    raise AssertionError(f"unterminated fence after {marker!r}")
+
+
+def _3076_paired(control: dict, cand: dict) -> dict:
+    """The trial's own paired estimator (`run_trial.py:278`), re-run here.
+
+    Re-derived rather than read from `reach.json` so a note that printed a
+    swapped-arm or wrong-population delta fails here even if the artifact it
+    cites was regenerated to match: endpoints are the per-record means over the
+    records BOTH arms scored, which for `doc_hit_rate`, `mrr_doc` and `ndcg10` is
+    all 81 and for `doc_recall_avg` is only the 74 with doc gold — the #1600
+    population divergence, applied deliberately, and the reason a table cell and
+    a delta can legitimately disagree while both are right.
+    """
+    a = {r["id"]: r for r in control["records"] if not r.get("error")}
+    b = {r["id"]: r for r in cand["records"] if not r.get("error")}
+    out: dict[str, dict] = {}
+    for metric, field in (("doc_hit_rate", "doc_hit"), ("doc_recall_avg", "doc_recall"),
+                          ("mrr_doc", "rr_doc"), ("ndcg10", "ndcg10")):
+        pairs = []
+        for i in a:
+            if i not in b:
+                continue
+            x, y = a[i]["scoring"].get(field), b[i]["scoring"].get(field)
+            if x is None or y is None:
+                continue
+            pairs.append((float(x), float(y)))
+        assert pairs, f"no paired {metric} values at all"
+        out[metric] = {
+            "control": round(statistics.fmean(x for x, _ in pairs), 4),
+            "arm": round(statistics.fmean(y for _, y in pairs), 4),
+            "delta": round(statistics.fmean(y - x for x, y in pairs), 4),
+            "n": len(pairs),
+            "wins": sum(1 for x, y in pairs if y > x),
+            "losses": sum(1 for x, y in pairs if y < x),
+        }
+    return out
+
+
+def test_the_3076_note_prints_the_arm_listing_the_command_emitted():
+    """Clause 1: the dated note records one arm and one control run built from ONE
+    snapshot, the arm's scratch config declaring `lloyd-architecture` rooted
+    `/home/alansrobotlab/lloyd/architecture` with pattern `**/*.md`, and the arm's
+    `qmd --index arm ls lloyd-architecture` printed as 36 documents.
+
+    The listing is compared to `ingest.json`'s captured stdout line for line. The
+    previous issue of the note rekeyed it and printed every path twice, and the
+    count-based assertion it satisfied (`>= 36` URIs) said nothing about whether
+    the 36 shown were the 36 emitted — 72 lines of 36 documents passed it.
+    """
+    _3076_require_trial()
+
+    # One snapshot, two indices: the arm config is the control config plus exactly
+    # the one entry the item specifies, in the same order. Anything else and the
+    # two arms differ by more than the collection, which was the whole point.
+    ctrl = yaml.safe_load((TRIAL_DIR / "idx/conf/control.yml").read_text())["collections"]
+    arm = yaml.safe_load((TRIAL_DIR / "idx/conf/arm.yml").read_text())["collections"]
+    assert list(arm) == list(ctrl) + ["lloyd-architecture"], (list(ctrl), list(arm))
+    assert len(ctrl) == 14 and len(arm) == 15, (len(ctrl), len(arm))
+    declared = arm["lloyd-architecture"]
+    assert declared["path"] == ARM_COLLECTION_ROOT, declared
+    assert declared["pattern"] == ARM_COLLECTION_PATTERN, declared
+
+    # The command's own bytes, and the arm index's own count of what it holds.
+    ing = json.loads(TRIAL_INGEST.read_text())
+    ls = ing["ls_stdout"].rstrip("\n").splitlines()
+    assert len(ls) == ing["ls_md_lines"] == 36, (len(ls), ing["ls_md_lines"])
+    assert ing["ls_rc"] == 0, ing["ls_rc"]
+    names = [l.rsplit("/", 1)[-1].strip() for l in ls]
+    assert len(set(names)) == 36, "the captured stdout itself repeats a document"
+    assert ing["arm_docs_in_collection"] == 36, ing["arm_docs_in_collection"]
+    assert sorted(names) == sorted(p.name for p in (ROOT / "architecture").rglob("*.md")), (
+        "the collection's 36 docs are not the checkout's 36 architecture docs")
+    # The retracted claim: the first issue said `workers.md` and `qmd.md` were absent
+    # from the ingest and called it "a defect in the arm's ingest". Both are listed.
+    for name in ("qmd.md", "workers.md"):
+        assert name in names, name
+
+    text = TRIAL_NOTE.read_text()
+    listing = _3076_listing_block(text)
+    assert listing == ls, (
+        f"the note's listing is not the command's stdout ({len(listing)} lines against "
+        f"{len(ls)}); first difference: "
+        + next((f"{a!r} != {b!r}" for a, b in zip(listing, ls) if a != b), "length"))
+    assert listing.count(listing[0]) == 1, "the printed listing repeats a line"
+    assert "36 lines, one per document" in text, "the note's own count of the listing"
+    # Clause 1's root and pattern must be readable in the note, not just on disk.
+    assert ARM_COLLECTION_ROOT in text and ARM_COLLECTION_PATTERN in text
+
+
+def _3076_func_body(src: str, name: str) -> str:
+    """One top-level function's source, so an env var set by its neighbour cannot
+    stand in for one set by it. `_run_arm` and `_run` are the two places an arm
+    process is built; a slice that runs to the next `def ` is what makes the
+    assertion about each of them mean what it says."""
+    start = src.index(f"def {name}(")
+    rest = src[start + len(f"def {name}("):]
+    end = rest.index("\ndef ")
+    return src[start:start + len(f"def {name}(") + end]
+
+
+def test_both_3076_arms_name_the_overlay_and_the_index_and_the_note_prints_14_vs_15():
+    """Clause 2: both arm run environments name `LLOYD_CONFIG_OVERLAY` AND
+    `LLOYD_QMD_INDEX`, and the note prints each artifact's `gold_doc_collections`
+    (control 14, arm 15) rather than None.
+
+    The second variable is not decoration. `app/doc_corpus.py:88-96 index_path_for`
+    ends `return None if os.environ.get(CONFIG_OVERLAY_ENV) else LIVE_INDEX`, so an
+    overlay WITHOUT `LLOYD_QMD_INDEX` makes `deployed_collections()` return None and
+    `run_eval.py:1944-1953` write `gold_doc_collections: null` — every arm then
+    reports nothing, and the 14-vs-15 count is the only evidence that the arm is the
+    arm. That is why this node reads the pair out of the runner source AND out of
+    each artifact, and why the note's printed copy has to match, field for field.
+    """
+    _3076_require_trial()
+
+    src = TRIAL_RUNNER.read_text()
+    for fn in ("_run_arm", "_run"):
+        body = _3076_func_body(src, fn)
+        assert "LLOYD_CONFIG_OVERLAY" in body, f"{fn} sets no config overlay"
+        assert "LLOYD_QMD_INDEX" in body, f"{fn} sets no index path: every artifact " \
+            "would report gold_doc_collections None and the arms would be indistinguishable"
+
+    text = TRIAL_NOTE.read_text()
+    assert "LLOYD_CONFIG_OVERLAY" in text and "LLOYD_QMD_INDEX" in text
+    printed = _3076_anchor_map(text, "run")
+    assert set(printed) == set(TRIAL_RUN_LABELS), (
+        f"note prints {sorted(set(printed) ^ set(TRIAL_RUN_LABELS))} differently")
+    for label, side in TRIAL_RUN_LABELS.items():
+        want = _3076_run_record(label)
+        assert printed[label] == want, (label, printed[label], want)
+        assert want["gold_doc_collections"] == (14 if side == "control" else 15), want
+        assert want["gold_doc_collections"] is not None, label
+    assert {p["gold_doc_collections"] for k, p in printed.items()
+            if TRIAL_RUN_LABELS[k] == "control"} == {14}
+    assert {p["gold_doc_collections"] for k, p in printed.items()
+            if TRIAL_RUN_LABELS[k] == "arm"} == {15}
+    assert "control 14, arm 15" in text
+
+
+def test_the_3076_cost_table_is_the_artifacts_said_over_the_same_81_queries():
+    """Clause 3: the note tabulates `doc_hit_rate` / `doc_recall_avg` / `mrr_doc` /
+    `ndcg10` for both sides over the SAME 81 queries with the delta stated, and says
+    on its face that this leg can only tie or lose.
+
+    Three separate ways this measurement was previously mis-transcribed, and one
+    invariant that is not about transcription at all:
+
+      * the table is compared cell by cell to `summary.overall`, so a doc-gold-population
+        mean can no longer be printed under the heading "as recorded in the artifact";
+      * the delta rows are compared to the trial's paired estimator RE-RUN here over the
+        per-record `scoring` values, so the two populations can be quoted together only
+        when each is labelled — the note's own `<!-- 3076:pair:... -->` lines carry them;
+      * "the same 81 queries" is checked as set equality of the scored record ids, not as
+        two `n_queries` fields that happen to agree;
+      * and the leg really is one-sided: `tests/test_eval_corpus_guard.py` forbids a
+        `lloyd-architecture/` gold label while no such collection is deployed, so the arm
+        has nothing new to hit on the 81. That is why the gain denominator is the probe.
+    """
+    _3076_require_trial()
+
+    text = TRIAL_NOTE.read_text()
+    cells: dict[str, dict] = {}
+    for line in text.splitlines():
+        m = re.match(r"^\| `(x3076r?-[\w-]+)` \|(.*)\|$", line.strip())
+        if m:
+            vals = [c.strip() for c in m.group(2).split("|")]
+            assert len(vals) == 6, (line, vals)
+            cells[m.group(1)] = dict(zip(
+                ("gold_doc_collections", "n_queries", *DOC_METRICS),
+                [int(vals[0]), int(vals[1])] + [float(v) for v in vals[2:]]))
+    assert set(cells) == set(TRIAL_RUN_LABELS), sorted(set(cells) ^ set(TRIAL_RUN_LABELS))
+    for label, row in cells.items():
+        assert row == _3076_table_row(label), (label, row)
+
+    # The same queries, not merely the same count of them.
+    for corpus, want_n in (("81", 81), ("probe", 10)):
+        labels = [k for k, s in TRIAL_RUN_LABELS.items()
+                  if (corpus == "81") == ("81" in k)]
+        id_sets = [set(r["id"] for r in _3076_artifact(l)[0]["records"]) for l in labels]
+        assert all(s == id_sets[0] for s in id_sets), corpus
+        assert len(id_sets[0]) == want_n, (corpus, len(id_sets[0]))
+
+    # Each printed delta against the estimator recomputed from raw records.
+    # Every delta the note shows, against the number the trial itself recorded.
+    reach = json.loads(TRIAL_REACH.read_text())["corpora"]
+    score = json.loads(TRIAL_SCORE.read_text())["corpora"]
+    pairs = _3076_anchor_map(text, "pair")
+    stored = {
+        "81/x3076": score["81"]["paired"],
+        "probe/x3076": score["probe"]["paired"],
+        "81/x3076r/arm_plain": reach["81"]["paired_vs_control"]["arm_plain"],
+        "81/x3076r/arm_seg": reach["81"]["paired_vs_control"]["arm_seg"],
+        "81/x3076r/control_seg": reach["81"]["paired_vs_control"]["control_seg"],
+        "probe/x3076r/arm_plain": reach["probe"]["paired_vs_control"]["arm_plain"],
+        "probe/x3076r/arm_seg_vs_control_seg": reach["probe"]["paired_seg_vs_control_seg"],
+        "probe/x3076r/arm_seg_vs_plainarm": reach["probe"]["paired_seg_vs_plainarm"],
+    }
+    assert set(pairs) == set(stored), sorted(set(pairs) ^ set(stored))
+    for key, want in stored.items():
+        assert pairs[key] == want, key
+    recompute = {
+        "81/x3076r/arm_plain": ("x3076r-81-control", "x3076r-81-arm_plain"),
+        "81/x3076r/arm_seg": ("x3076r-81-control_seg", "x3076r-81-arm_seg"),
+        "probe/x3076r/arm_seg_vs_control_seg": ("x3076r-probe-control_seg",
+                                               "x3076r-probe-arm_seg"),
+    }
+    for key, (ctrl_label, arm_label) in recompute.items():
+        mine = _3076_paired(_3076_artifact(ctrl_label)[0], _3076_artifact(arm_label)[0])
+        for metric in DOC_METRICS:
+            got, printed = mine[metric], pairs[key][metric]
+            for field in ("control", "arm", "delta", "n", "wins", "losses"):
+                assert printed[field] == got[field], (key, metric, field,
+                                                      printed[field], got[field])
+
+    # The one-sidedness the clause asks the note to admit out loud, plus the fact
+    # that makes it true and the denominators the two populations actually have.
+    assert "can only tie or lose" in text
+    corpus_labels = [d for q in yaml.safe_load(CORPUS.read_text())["queries"]
+                     for d in (q.get("expect_docs") or [])]
+    assert not [l for l in corpus_labels if l.startswith("lloyd-architecture/")], (
+        "an anchored lloyd-architecture/ gold label is in the corpus, so the cost leg is "
+        "no longer one-sided — which is only legal after a deployed collection")
+    assert sum(1 for l in CORPUS.read_text().splitlines() if l.startswith("  - id: ")) == 81
+    gold_docs = [q for q in yaml.safe_load(CORPUS.read_text())["queries"] if q.get("expect_docs")]
+    assert len(gold_docs) == 74, len(gold_docs)
+
+
+def test_the_3076_gain_probe_is_root_anchored_outside_the_repo_and_its_twins_are_quoted():
+    """Clause 4: an 8-12 query probe over the 26 checkout-only basenames, stored
+    OUTSIDE `~/lloyd` and passed via `--queries`, scored on both sides, every label
+    root-anchored `lloyd-architecture/<basename>`, with the control's returned paths
+    quoted for `qmd.md` and `workers.md`.
+
+    The anchoring is the clause. `_doc_pair_satisfied` (`eval/run_eval.py:478-486`)
+    matches doc paths with a SUBSTRING test, and `qmd.md` and `workers.md` also exist
+    at `~/obsidian/projects/lloyd/architecture/` — indexed by the deployed `projects`
+    collection on BOTH arms — so a bare `workers.md` label would be satisfied by the
+    stale vault twin and reported as a gain for a collection that returned nothing.
+    The node checks the control's quoted top-10 in both directions: no
+    `lloyd-architecture/` path may appear in it, and the twin
+    `projects/lloyd/architecture/workers.md` MUST appear, which is the false pass and
+    the proof that the anchor is what killed it.
+    """
+    _3076_require_trial()
+
+    assert TRIAL_PROBE.resolve().is_relative_to(TRIAL_VAULT), TRIAL_PROBE
+    assert not TRIAL_PROBE.resolve().is_relative_to(ROOT), (
+        "the probe lives in the repo, which the item's step 2 forbids")
+    assert TRIAL_PROBE.name == "lloyd-architecture-ab-2026-10-20-probe.yaml"
+    probe = yaml.safe_load(TRIAL_PROBE.read_text())
+    assert 8 <= len(probe["queries"]) <= 12, len(probe["queries"])
+    labels = [d for q in probe["queries"] for d in q["expect_docs"]]
+    assert len(labels) == len(probe["queries"]), "one gold doc per probe query"
+    assert all(l.startswith("lloyd-architecture/") for l in labels), labels
+
+    checkout = {p.name for p in (ROOT / "architecture").rglob("*.md")}
+    vault_twins = {p.name for p in (TRIAL_VAULT / "architecture").rglob("*.md")}
+    checkout_only = checkout - vault_twins
+    assert len(checkout_only) == 26, sorted(checkout_only)
+    got = {l.split("/")[-1] for l in labels}
+    assert got <= checkout_only, sorted(got - checkout_only)
+    assert {"qmd.md", "workers.md"} <= checkout_only
+    # The stale twins that make the anchoring load-bearing live one directory
+    # deeper, under the deployed `projects` collection — not in the vault's own
+    # `architecture` segment, which is what the 26 are measured against.
+    projects_twins = {p.name for p in (TRIAL_VAULT / "projects" / "lloyd" / "architecture").rglob("*.md")}
+    assert {"qmd.md", "workers.md"} <= projects_twins, sorted(projects_twins)
+
+    assert '"--queries"' in TRIAL_RUNNER.read_text(), "the runner never passes --queries"
+
+    twins = json.loads(TRIAL_REACH.read_text())["corpora"]["probe"]["twins"]
+    text = TRIAL_NOTE.read_text()
+    for side in ("control", "arm_plain", "arm_seg"):
+        for query_id in ("qmd", "workers"):
+            want = twins[side][query_id]["doc_paths_top10"]
+            quoted = _3076_fenced_after(
+                text, f"<!-- 3076:twin:{side}:{query_id} -->")
+            assert quoted == want, (side, query_id, quoted, want)
+            head = [l for l in text.splitlines()
+                    if l.startswith(f"<!-- 3076:twin:{side}:{query_id} -->")][0]
+            assert f"doc_hit={twins[side][query_id]['doc_hit']}" in head, head
+            assert f"expected_docs=['lloyd-architecture/{query_id}.md']" in head, head
+    control_paths = twins["control"]["workers"]["doc_paths_top10"]
+    assert not [p for p in control_paths if p.startswith("lloyd-architecture/")], control_paths
+    assert "projects/lloyd/architecture/workers.md" in control_paths, (
+        "the vault twin is gone from the control's top-10, so this node no longer "
+        "proves the anchored label is what prevented the false pass")
+    for side in ("arm_plain",):
+        for query_id in ("qmd", "workers"):
+            assert not [p for p in twins[side][query_id]["doc_paths_top10"]
+                        if p.startswith("lloyd-architecture/")], side
+    for query_id in ("qmd", "workers"):
+        arm_seg = twins["arm_seg"][query_id]["doc_paths_top10"]
+        assert arm_seg[0] == f"lloyd-architecture/{query_id}.md", arm_seg
+
+
+def test_the_3076_note_states_the_two_numbers_and_the_live_config_is_untouched():
+    """Clause 5: the decision is two numbers over their own denominators (cost =
+    delta over the 81, gain = delta over the probe) with the ship/revert rule beside
+    them, and the note proves `~/.config/qmd/index.yml` was never edited.
+
+    The no-touch proof is re-measured here, not believed. The first issue printed
+    `grep -c -- '- name: '` output claiming 14 and 14 for the two qmd configs; that
+    command returns **0** for them, because this fork's `index.yml` is a mapping
+    (`memory:` / `path:` / `pattern:`), not a `- name:` list — a no-touch section that
+    prints numbers its commands cannot produce is worse than no section. So this node
+    runs its own checks: the string `lloyd-architecture` occurs in neither config, the
+    live config still parses to 14 collections, the template still agrees with it, the
+    gold file still says 81 and has 81 entries, and every number in the note's own
+    no-touch block equals what the same command says now.
+    """
+    _3076_require_trial()
+
+    for path in (TRIAL_LIVE_YML, TRIAL_TEMPLATE_YML):
+        assert "lloyd-architecture" not in path.read_text(), (
+            f"{path} now declares the collection: the trial's no-touch claim is over "
+            "and the note must be superseded, not re-asserted")
+
+    live = yaml.safe_load(TRIAL_LIVE_YML.read_text())["collections"]
+    assert len(live) == 14, sorted(live)
+
+    text = TRIAL_NOTE.read_text()
+    block = _3076_fenced_after(text, "Re-run fresh at")
+    # Commands and their outputs, in the order they appear: a block of `$ cmd` lines
+    # followed by the lines that cmd printed. Read sequentially, because a dict built
+    # by filtering the whole tail is a dict whose first command "prints" every number
+    # in the block — which is how the previous issue's no-touch section could stand.
+    cmds: list[tuple[str, list[str]]] = []
+    for line in block:
+        stripped = line.strip()
+        if stripped.startswith("$ "):
+            cmds.append((stripped[2:], []))
+        elif stripped and cmds:
+            cmds[-1][1].append(stripped)
+    assert len({c for c, _ in cmds}) == len(cmds), [c for c, _ in cmds]
+    printed = dict(cmds)
+
+    def says(command: str, *expected: str):
+        hits = [k for k in printed if command in k]
+        assert len(hits) == 1, (command, sorted(printed))
+        assert printed[hits[0]] == list(expected), (command, printed[hits[0]], expected)
+
+    says("grep -c lloyd-architecture ~/.config/qmd/index.yml", "0", "rc=1")
+    says("grep -c lloyd-architecture ~/lloyd/agent-services/conf/qmd-index.yml", "0", "rc=1")
+    says("grep -cE '^  [A-Za-z0-9_-]+:$'",
+         f"{TRIAL_LIVE_YML}:14", f"{PRODUCTION_REPO}/agent-services/conf/qmd-index.yml:14")
+    says("qmd collection list | head -1", "Collections (14):")
+    says("qmd collection list | grep -c 'qmd://'", "14")
+    says("qmd collection list | grep -c 'lloyd-architecture'", "0")
+    says("grep -c '^  - id: ' ~/lloyd/eval/vault_recall_queries.yaml", "81")
+    says("find ~/lloyd/architecture -name '*.md' | wc -l",
+         str(len(list((PRODUCTION_REPO / "architecture").rglob("*.md")))))
+    header = [l for l in CORPUS.read_text().splitlines() if "GOLD SET SIZE" in l]
+    assert len(header) == 1 and " 81 queries" in header[0], header
+    says('grep -n "GOLD SET SIZE"', header[0].strip())
+
+    # The two numbers, each over its own denominator, and the rule they are read by.
+    cost = _3076_paired(_3076_artifact("x3076r-81-control_seg")[0],
+                        _3076_artifact("x3076r-81-arm_seg")[0])
+    gain = _3076_paired(_3076_artifact("x3076r-probe-control_seg")[0],
+                        _3076_artifact("x3076r-probe-arm_seg")[0])
+    lines = text.splitlines()
+    for word, stats in (("COST", cost), ("GAIN", gain)):
+        at = [k for k, l in enumerate(lines)
+              if l.startswith(f"{word}  over the") and "paired bootstrap" in l]
+        assert len(at) == 1, (word, len(at))
+        # A set note may write a negative with a typographic minus; the number is
+        # the number, so fold it rather than forbidding the typography.
+        body = lines[at[0] + 1].replace("\u2212", "-")
+        for metric in DOC_METRICS:
+            assert f"{metric} {stats[metric]['delta']:+.4f}" in body, (word, metric, body)
+    assert "COST  over the 81-query gold set" in text and "GAIN  over the 10-query probe" in text
+    for phrase in ("Ship is licensed only", "Revert / close #3075"):
+        assert phrase in text, phrase
+
+
+"""Append the node that pins the ANCHORING itself across a process boundary.
+
+Why this node exists: the previous round of #3076 failed its `tests` rung at the gate
+with two nodes red, and the reason was not the measurement — it was that the note and
+the probe set were read through `Path.home()`, and the gate runs this file with `HOME`
+pointed at `<round>/home`, whose `obsidian` is a clone of the vault taken when the
+round OPENED (`gate.py:1595` sets `"HOME": str(home)`; `worktree.ensure_round_home:78`
+builds the farm). The trial's note was repaired by a vault land AFTER the code round
+opened, so the gate graded superseded prose, and an earlier configuration skipped all
+six nodes for the same reason. `ACCOUNT_HOME` / `production_data_root()` are the
+production answer whatever `$HOME` says.
+
+A node that merely asserts `TRIAL_VAULT == ACCOUNT_HOME / "obsidian"` in-process is
+graded on the same interpreter that got it right by luck; the failure mode lives in a
+CHILD process whose environment differs. So this node launches `python -c` with a
+deliberately bogus `HOME` and asks the module, imported in that child, which paths it
+resolves — the exact seam the gate crosses.
+"""
+from pathlib import Path
+
+PROBE = r"""
+import sys, json
+sys.path.insert(0, %(rootr)s)
+import tests.test_eval_corpus_guard as m
+print(json.dumps({
+    "home": __import__("os").path.expanduser("~"),
+    "vault": str(m.TRIAL_VAULT),
+    "note": str(m.TRIAL_NOTE),
+    "probe": str(m.TRIAL_PROBE),
+    "live_yml": str(m.TRIAL_LIVE_YML),
+    "repo": str(m.PRODUCTION_REPO),
+    "dir": str(m.TRIAL_DIR),
+    "account": str(m.ACCOUNT_HOME),
+}))
+"""
+
+
+def test_the_3076_trial_paths_survive_the_home_the_gate_runs_them_under():
+    """The six #3076 nodes must resolve the SAME production paths in a child whose
+    `$HOME` is not the real one, because the gate runs this file under exactly such a
+    `$HOME` (`scripts/automod/gate.py:1595`) — so a trial read that follows `$HOME`
+    resolves through the round's farm instead of the account home, which is where
+    SM_20261020_175859's two nodes failed and the six before them skipped.
+
+    The child prints eight values. Six are the trial's own paths and each must equal
+    the constant this module holds however the child's `$HOME` is set: `TRIAL_VAULT`
+    (the vault the note and probe live in), `TRIAL_NOTE` and `TRIAL_PROBE` (clause 1
+    and clause 4's documents), `TRIAL_DIR` (the trial's scratch, production-anchored at
+    `ecddc4d3`), `TRIAL_LIVE_YML` (`~/.config/qmd/index.yml`, the no-touch proof's
+    subject — a mirrored copy would let the guard "prove" the file was untouched by
+    reading a clone of it) and `PRODUCTION_REPO` (`app.paths.LIVE_CHECKOUT`, whose paths
+    the note prints verbatim). The seventh is the child's `os.path.expanduser("~")`,
+    which must be the bogus one — proof the environment took — and the eighth is the
+    child's `ACCOUNT_HOME`, which under that bogus `$HOME` must still equal THIS
+    process's `ACCOUNT_HOME`: `app/data_root.py:77` derives it from `getpwuid`. That
+    difference between two homes inside one dict is the whole property the six anchors
+    lean on, and the reason the comparison is against the constant and never against
+    `Path.home()` — at the gate those two are different directories.
+    """
+    import json
+    import subprocess
+
+    bogus = Path("/tmp/definitely-not-the-real-home-3076")
+    assert bogus != Path.home(), "the fixture home must differ from the real one"
+
+    proc = subprocess.run(
+        [str(PY), "-c", PROBE % {"rootr": repr(str(ROOT))}],
+        cwd=str(ROOT), env={"PATH": "/usr/bin:/bin", "HOME": str(bogus),
+                            "PYTHONPATH": str(ROOT)},
+        capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert got["home"] == str(bogus), got
+    # Each expectation is built from the constant THIS MODULE anchored, never from
+    # `Path.home()`. The gate runs this file with `$HOME` at the round's mirrored home
+    # (`scripts/automod/gate.py:1595` → `<round>/home`), so there the parent's
+    # `Path.home()` is NOT the account home, and a claim written with `Path.home()`
+    # accuses a correctly-anchored child of following the bogus `$HOME`. That is this
+    # node's own defect restated inside the assertion meant to catch it: its first gate
+    # run failed at `account`, then at
+    # `got["vault"] == str(Path.home() / "obsidian")` — `'/home/alansrobotlab/obsidian'
+    # != '/home/alansrobotlab/lloyd-work/<round>/home/obsidian'` — so on a bare shell it
+    # could only ever pass where the bug is invisible. A $HOME-independence claim needs
+    # a $HOME-independent name on BOTH sides of the `==`.
+    assert got["account"] == str(ACCOUNT_HOME), (
+        f"the child's ACCOUNT_HOME ({got['account']}) is not this process's "
+        f"({ACCOUNT_HOME}), so app.data_root stopped being $HOME-independent and "
+        "every anchor below is a lie")
+    for key, mine in (("vault", TRIAL_VAULT), ("note", TRIAL_NOTE),
+                      ("probe", TRIAL_PROBE), ("live_yml", TRIAL_LIVE_YML),
+                      ("repo", PRODUCTION_REPO), ("dir", TRIAL_DIR)):
+        assert got[key] == str(mine), (key, got[key], str(mine))
+    assert got["note"].endswith("/eval/measurements/lloyd-architecture-ab-2026-10-20.md"), got
+    assert got["probe"].endswith("-probe.yaml") and got["probe"].startswith(got["vault"]), got
+    # The case that exists only at the gate: when this process is itself under a
+    # steered `$HOME`, an anchored path and a `$HOME`-built path are different FILES, so
+    # "nothing followed it" becomes a claim that can fail. On a bare shell
+    # `Path.home() == ACCOUNT_HOME` and this adds nothing to the loop above.
+    if Path.home() != ACCOUNT_HOME:
+        for key in ("vault", "note", "probe", "live_yml", "repo", "dir"):
+            assert not Path(got[key]).is_relative_to(Path.home()), (
+                key, got[key], f"resolves under the steered home {Path.home()}, so the "
+                "gate would be grading a mirror of the very file it is certifying")
+    # And the anchored files are really readable: a guard that "passes" because it
+    # skipped is what cost the previous round its gate.
+    for key in ("note", "probe", "live_yml"):
+        assert Path(got[key]).is_file(), (key, got[key])
