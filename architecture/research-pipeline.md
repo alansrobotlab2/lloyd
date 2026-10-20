@@ -81,16 +81,24 @@ Bounding the file would have fixed that and left the real problems:
 
 The 314 unique topics were imported as `archived` rows. They were the dedup
 corpus and nothing else: `archived` never counts toward a daily budget and
-never appears in `recent()`. **That corpus is not in the registry that runs
-today.** `stats()` reported `archived: 314` on 2026-09-20; measured 2026-10-20
-it returns no `archived` key at all over 117 rows whose ids run 1..117 — a
-restarted `AUTOINCREMENT` sequence, so the file the 2026-09-22 data-home move
-carried across was replaced by an empty one within a day (first live proposal
-2026-09-23). Nothing deletes `topics` rows, and `import_legacy` is idempotent
+never appears in `recent()`. **That corpus is still not in the registry that
+runs today, and `stats()` now says so as a number: `archived: 0`.** It reported
+`archived: 314` on 2026-09-20; the store measured on 2026-10-20 held 117 rows
+whose ids ran 1..117 — a restarted `AUTOINCREMENT` sequence, so the file the
+2026-09-22 data-home move carried across was replaced by an empty one within a
+day (first live proposal 2026-09-23). For the four weeks between those readings
+the payload said nothing either way: `by_status` was a bare `GROUP BY`, so a
+status with no rows emitted no key at all and an emptied corpus was
+indistinguishable from a never-imported one. #3085 ended both halves of that
+silence — `stats()` names the corpus count at zero (`DEDUP_CORPUS_STATUS`), and
+`import_legacy` with `dry_run=True` measures `existing` against the rows in the
+store instead of printing its initialiser, which is what makes the dry run below
+worth reading. Nothing deletes `topics` rows, and `import_legacy` is idempotent
 against the archive that is still in the vault, so the corpus is one command
-from back — which is also why its absence is invisible. Until it is back (or
-ruled dropped), `similar()` has no legacy side to match against and a retired
-checklist topic can be proposed and re-researched (#3046).
+from back. Running it is an operator's call, not a round's: it writes production
+`research.db`, which is outside this repo, and it is owed on #3085. Until it is
+back (or ruled dropped), `similar()` has no legacy side to match against and a
+retired checklist topic can be proposed and re-researched (#3046).
 
 ---
 

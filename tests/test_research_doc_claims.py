@@ -1071,6 +1071,36 @@ def test_the_doc_names_the_states_the_store_has():
         assert status in text, f"{status} is undocumented"
 
 
+def test_section_1_reports_the_corpus_as_a_number_not_as_an_absent_key():
+    """§1 asserted that `stats()` "returns no `archived` key at all". That was
+    true on 2026-10-20 and became false with #3085, which put the dedup-corpus
+    count in the payload at zero — so the sentence, not the store, is now the
+    defect: a reader who trusted it would take today's `archived: 0` for a
+    second and fresher loss.
+
+    Pinned in both directions, the way `test_the_written_row_names_finish_as_the_
+    verifier` does it: the omission-assertion may not come back, §1 states the
+    at-zero reading, and the constant it names is still the corpus status. The
+    scan stops at `## Review log`, which is a record of what a past pass saw.
+    """
+    from app import research_store
+
+    text = DOC.read_text(encoding="utf-8")
+    body = text.partition("## Review log")[0]
+    for line in body.splitlines():
+        if re.search(r"returns no `archived` key", line) or \
+           re.search(r"no `archived` key at all", line):
+            raise AssertionError(
+                "§1 still asserts stats() omits the dedup-corpus key; #3085 "
+                "made the payload carry it at zero")
+    assert "`archived: 0`" in body, "§1 must state the at-zero reading"
+    assert "DEDUP_CORPUS_STATUS" in body, (
+        "§1 names the constant that decides which key is always present")
+    assert research_store.DEDUP_CORPUS_STATUS == "archived", (
+        "and that constant is still the status §1 describes as the corpus")
+    assert "3085" in body, "§1 names the item that landed the payload key"
+
+
 def test_the_written_row_names_finish_as_the_verifier():
     """§2's `written` row claimed the disk check lives in the worker and *not*
     in `finish` (#1276). It was true when written; #1276 moved the check into

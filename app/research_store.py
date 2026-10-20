@@ -53,6 +53,18 @@ TERMINAL = frozenset({"written", "nothing_found", "duplicate", "archived", "reje
 #: budget, which must not count the 314 legacy rows imported as `archived`.
 PRODUCTIVE = ("written", "nothing_found")
 
+#: The status holding the legacy dedup corpus — the 314 rows `import_legacy`
+#: folds in from the retired checklist, and the only thing `similar()` had to
+#: match a reworded retired topic against. It is the one status `stats()` names
+#: even at zero: `by_status` is a `GROUP BY`, so a status with no rows emitted
+#: no key, and the corpus going missing read as a payload that never mentioned
+#: it rather than as `archived: 0` — the shape that let the loss sit unreported
+#: for four weeks (#3046). This is the reporting half (#3085); the restore
+#: itself is an operator command, and §1 of `architecture/research-pipeline.md`
+#: says which side is done. Only this key is injected — a zero-skeleton for
+#: every status would make `by_status` a claim about all seven at once.
+DEDUP_CORPUS_STATUS = "archived"
+
 #: Refuse new proposals past this depth. A generator that proposes 8 a night
 #: against a worker that researches 3 a day would otherwise pile up months of
 #: work nobody asked for, and the oldest of it would be answering questions
@@ -588,6 +600,13 @@ class ResearchStore:
         the store's own state, so a proposer can stop before `propose` refuses
         it. `stale_queued` keeps its own meaning: an individually ancient topic
         reported for human retirement.
+
+        `by_status` always carries `DEDUP_CORPUS_STATUS`, at zero included, so
+        an empty dedup corpus is a number in the payload instead of an absent
+        key. Every other status is silent when absent and `.get(..., 0)` is the
+        caller's job; the corpus is the exception because its absence is the
+        finding, and for four weeks the absence and the never-counted case were
+        the same payload (#3046 → #3085).
         """
         now = datetime.now(timezone.utc)
         today = now.date().isoformat()
@@ -595,6 +614,7 @@ class ResearchStore:
         with self._connect() as conn:
             by_status = {r["status"]: r["n"] for r in conn.execute(
                 "SELECT status, COUNT(*) AS n FROM topics GROUP BY status").fetchall()}
+            by_status.setdefault(DEDUP_CORPUS_STATUS, 0)
             placeholders = ",".join("?" * len(PRODUCTIVE))
             done_today = conn.execute(
                 f"SELECT COUNT(*) AS n FROM topics WHERE status IN ({placeholders}) "
@@ -650,7 +670,17 @@ class ResearchStore:
         answered. And a daily budget that counts `written` would be saturated
         forever by 314 rows dated 2024.
 
-        Idempotent: the UNIQUE key means a second run inserts nothing.
+        Idempotent: the UNIQUE key means a second run inserts nothing, and a
+        second run reports `inserted: 0, existing: <unique>`.
+
+        A `dry_run` reports the same `existing` a real run would, measured
+        against the rows that are in the store right now, and writes nothing.
+        Before #3085 it could not: the loop bailed out at `if dry_run: continue`
+        before the block that increments `existing`, so a dry run always printed
+        `existing: 0` — including against a store that already held all 314 keys.
+        The dry run is the only pre-flight there is before pointing this import
+        at production `research.db`, so a constant in that field is an operator
+        restoring rows that were never missing.
         """
         path = Path(md_path).expanduser()
         parsed = parse_legacy(path)
@@ -658,12 +688,22 @@ class ResearchStore:
                   "unchecked": parsed["unchecked"], "inserted": 0, "existing": 0,
                   "artifact_found": 0, "artifact_missing": 0,
                   "suspect_dates": parsed["suspect_dates"], "dry_run": dry_run}
+        have: set[str] = set()
+        if dry_run:
+            # One read of a table that holds a few hundred rows, rather than 314
+            # bound parameters — the same answer, no variable-count cliff if the
+            # archive ever grows past SQLite's limit.
+            with self._connect() as conn:
+                have = {r["key"] for r in conn.execute(
+                    "SELECT key FROM topics").fetchall()}
         for item in parsed["items"].values():
             if item["artifact_path"]:
                 result["artifact_found"] += 1
             elif item["artifact_raw"]:
                 result["artifact_missing"] += 1
             if dry_run:
+                if item["key"] in have:
+                    result["existing"] += 1
                 continue
             with self._lock, self._connect() as conn:
                 extra = {"legacy_occurrences": item["occurrences"]}

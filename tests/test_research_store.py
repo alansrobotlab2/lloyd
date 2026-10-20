@@ -366,6 +366,46 @@ def test_stats_reports_the_heads_wait_well_inside_the_stale_gate(s):
 
 
 # ---------------------------------------------------------------------------
+# The dedup corpus is named at zero (#3085)
+# ---------------------------------------------------------------------------
+
+
+def test_stats_reports_the_dedup_corpus_even_when_it_is_empty(s):
+    """`by_status` is a bare `GROUP BY`, so a status with no rows emits no key
+    at all. That is how the 314-row `archived` dedup corpus going missing read
+    for four weeks: not as `archived: 0`, but as a payload that never mentioned
+    the corpus (#3046, fixed as a reporting defect by #3085). The corpus is the
+    one status whose absence IS the alarm, so it is the one key the payload
+    carries unconditionally.
+
+    Only that one key is injected: `test_the_import_archives_everything_and_is_
+    idempotent` compares `by_status` by exact equality, and a full zero-skeleton
+    for every status would break it.
+    """
+    stats = s.stats()
+    assert stats["by_status"].get("archived", "MISSING") == 0, (
+        "an empty dedup corpus must read as 0, not as an absent key")
+    assert stats["total"] == 0, "a zero-valued key must not invent a row"
+
+    s.propose("a live topic")
+    stats = s.stats()
+    assert stats["by_status"]["archived"] == 0, "still named once live rows exist"
+    assert stats["by_status"]["queued"] == 1
+
+
+def test_the_dedup_corpus_count_is_the_real_one_once_rows_land(s):
+    """The key is a count, not a flag: once rows exist the `GROUP BY` answer
+    must win, and it must not be double-counted into `total`."""
+    tid = s.propose("a legacy-shaped topic")["id"]
+    with s._connect() as conn:
+        conn.execute("UPDATE topics SET status='archived' WHERE id=?", (tid,))
+
+    stats = s.stats()
+    assert stats["by_status"] == {"archived": 1}, "exactly one corpus key, no skeleton"
+    assert stats["total"] == 1
+
+
+# ---------------------------------------------------------------------------
 # The `written` disk gate (#1276)
 # ---------------------------------------------------------------------------
 
@@ -543,6 +583,28 @@ def test_a_dry_run_writes_nothing(s, legacy_file):
     out = s.import_legacy(legacy_file, dry_run=True)
     assert out["unique"] == 9 and out["inserted"] == 0
     assert s.stats()["total"] == 0
+
+
+def test_a_dry_run_measures_existing_against_the_store(s, legacy_file):
+    """The dry run used to `continue` before the block that increments
+    `existing`, so it printed `existing: 0` whether or not the keys were
+    already in the database — and the #3085 item text quotes exactly that
+    constant as its evidence that the corpus needed restoring. A dry run is
+    the only pre-flight an operator has before pointing the import at
+    production `research.db`, so `existing` has to be measured, not defaulted
+    (#3085). A real run's `existing` comes from the `ON CONFLICT DO NOTHING`
+    miss; the dry run now answers the same question by key, writing nothing."""
+    empty = s.import_legacy(legacy_file, dry_run=True)
+    assert empty["existing"] == 0, "an empty store has nothing to already hold"
+    assert empty["inserted"] == 0 and empty["dry_run"] is True
+    assert s.stats()["total"] == 0, "the empty-store dry run wrote nothing"
+
+    s.import_legacy(legacy_file)
+    out = s.import_legacy(legacy_file, dry_run=True)
+    assert out["existing"] == 9, "the keys the store holds must be reported"
+    assert out["inserted"] == 0
+    assert s.stats()["by_status"] == {"archived": 9}, (
+        "a dry run against a loaded store still writes nothing")
 
 
 def test_the_import_keeps_the_occurrence_count_it_collapsed(s, legacy_file):
