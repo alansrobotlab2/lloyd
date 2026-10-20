@@ -1392,8 +1392,12 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
 def _read_session_meta(session_id: str | None) -> dict:
     """The draining turn's own session JSON, or `{}` when there is nothing to read.
 
-    Read once per turn and asked two questions of it: the plan-mode flag, and
-    whether this turn is allowed to consume the next-session channel (#2598).
+    Called at most once per turn, and only while a reader still needs an answer:
+    the plan-mode flag when the caller did not supply one, and whether this turn is
+    allowed to consume the next-session channel (#2598). `_prefetch_prepare` is its
+    only caller, and it is the whole cost of the cheap half of prefetch — this
+    parses the entire session file, so an unneeded call is measured in hundreds of
+    kilobytes per turn on the event loop's own thread (#3082).
 
     `{}` is the answer for no session id, a missing file, unreadable bytes and
     bytes that are not an object — all four of which `is_user_session` reads as
@@ -1437,11 +1441,14 @@ def _prefetch_prepare(text: str, session_id: str | None,
     already decided a signal was worth showing should not be suppressed by a
     threshold that exists to skip *retrieval* on short messages.
 
-    The session JSON is read here, once, and both of its readers are below: the
-    plan-mode fallback, and the platform gate on the notes drain (#2598).
+    The session JSON is read here, and at most once, but only while a reader can
+    still be reached: the platform gate on the notes drain (#2598), which needs it
+    exactly when a note is waiting, and the plan-mode fallback, which needs it only
+    when the caller passed no flag. On the turn that has neither — `plan_mode`
+    supplied and the notes store empty, which is what a chat turn usually is — the
+    file is not touched (#3082). Both readers are below the ambient drain, which
+    never needed it.
     """
-    session_meta = _read_session_meta(session_id)
-
     # Drain ambient queue FIRST — even a short message should surface
     # queued background context. Don't let the MIN_MESSAGE_LEN guard
     # suppress injections the producer already decided were worth showing.
@@ -1452,6 +1459,37 @@ def _prefetch_prepare(text: str, session_id: str | None,
             ambient_entries = drain_ambient_prefetch(session_id)
         except Exception:
             ambient_entries = []  # Non-fatal
+
+    # Whether the notes channel holds anything decides, for this turn, whether the
+    # session JSON is read at all (#3082). That read is `json.loads` over the whole
+    # file on the event loop's own thread, and the file is not small: on 2026-10-20
+    # the median session under `~/lloyd-data/sessions` was 132,251 B and the largest
+    # live one 2,570,184 B, parsing in 0.38 ms and 7.55 ms (median of 7 in-process
+    # calls). The peek costs 0.051 ms on a drained store — a lock and a parse of a
+    # document whose steady state is `{"notes": []}`. The read exists for two
+    # questions only: the plan-mode flag, which a caller that passed `plan_mode` has
+    # already answered, and the platform gate below, which has no decision to make
+    # while the store holds nothing.
+    #
+    # A store this cannot inspect counts as one that may hold a note, never as an
+    # empty one. The failure mode a skip can introduce is an overnight brief that is
+    # never drained, and that leaves no log — the #910 shape — so the uncertain case
+    # does the work and the certain case does not.
+    notes_pending = True
+    try:
+        from app.next_session_notes import peek_next_session_notes
+        notes_pending = bool(peek_next_session_notes())
+    except Exception:
+        logger.warning("next-session notes: peek failed; treating the store as "
+                       "non-empty", exc_info=True)
+
+    # `None` here means "not read yet" and `{}` is the real answer for a session with
+    # no JSON behind it. Conflating them would have the second reader re-read a file
+    # that legitimately came back empty, so the sentinel is kept distinct and each
+    # reader below does its own read-if-absent: whichever runs first pays for the
+    # parse and the other reuses the answer. A turn with neither reader leaves the
+    # file untouched, which is the whole of #3082.
+    session_meta: dict | None = None
 
     # Then the next-session channel (#1516): a file, not a per-session dict, so a
     # note written at 03:00 by a pass that had no session to name is still here at
@@ -1471,14 +1509,17 @@ def _prefetch_prepare(text: str, session_id: str | None,
     # so a session with no JSON, a platform nobody named, or no session id at all
     # still drains and still gets its note.
     notes: list = []
-    try:
-        from app.sessions_io import is_user_session
-        from app.next_session_notes import drain_next_session_notes
-        if is_user_session(session_meta):
-            notes = drain_next_session_notes() or []
-    except Exception:
-        logger.warning("next-session notes: drain failed", exc_info=True)
-        notes = []
+    if notes_pending:
+        try:
+            from app.sessions_io import is_user_session
+            from app.next_session_notes import drain_next_session_notes
+            if session_meta is None:
+                session_meta = _read_session_meta(session_id)
+            if is_user_session(session_meta):
+                notes = drain_next_session_notes() or []
+        except Exception:
+            logger.warning("next-session notes: drain failed", exc_info=True)
+            notes = []
 
     if len(text.strip()) < MIN_MESSAGE_LEN and not ambient_entries and not notes:
         return None
@@ -1489,6 +1530,8 @@ def _prefetch_prepare(text: str, session_id: str | None,
         focus.update(text)
 
     if plan_mode is None:
+        if session_meta is None:
+            session_meta = _read_session_meta(session_id)
         plan_mode = _plan_mode_from_meta(session_meta)
 
     return ambient_entries, notes, focus, bool(plan_mode)

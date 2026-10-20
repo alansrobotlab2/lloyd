@@ -96,9 +96,16 @@ thread in request order; the
 budgeted search phase runs in a worker thread via `asyncio.to_thread`, so the
 loop keeps serving other sessions, SSE streams, and Inner Voice while it waits.
 Before 2026-09-03 the sync call blocked the loop for the full budget on every
-message. Callers still pass `plan_mode` through — but since #2598 the cheap half
-reads the session JSON anyway for the notes gate, so the saving that parameter
-was added for no longer happens (#3082). Ambient turns (`build_ambient_turn`) skip prefetch.
+message. Callers pass `plan_mode` through, and since #3082 the read that parameter
+was threaded through to avoid happens only while something still needs the file: the
+#2598 platform gate needs the session JSON exactly when the next-session store holds
+a note, and the plan-mode fallback needs it only when the caller supplied no flag. So
+a turn neither always reads that file nor never reads it — `_prefetch_prepare` asks
+the note store first, which costs a lock and a parse of a document whose steady state
+is an empty list, and reads the session JSON only if a reader can still be reached.
+A store it cannot inspect counts as one that may hold a note, never as an empty one:
+the failure this skip could introduce is a brief that is never drained, and that
+leaves no log. Ambient turns (`build_ambient_turn`) skip prefetch.
 The sync `prefetch_context` remains for scripts and tests.
 
 Two things follow from *where* the call sits that are easy to miss. Nothing in
@@ -975,3 +982,27 @@ with the genuinely correct answer, never an easier target.
   *What the persisted row carries* is itself read now:
   `tests/test_architecture_coverage_doc_claims.py::test_the_subliminal_page_enumerates_the_badge_tuple_the_code_carries`
   extracts it and compares it, name for name, to the tuple.
+- **2026-10-20 (#3082, code).** `_prefetch_prepare` now reads the session JSON only
+  while one of its two readers can still be reached: it peeks the next-session store
+  first and parses the session file iff a note is pending or the caller passed no
+  `plan_mode`, so the steady-state chat turn parses nothing at all. This supersedes
+  the parenthetical in the filing entry above — the pass-through saves that read
+  again — and the size of it is measured, not the 2026-09-03 stall class: on
+  2026-10-20 `json.loads` of the median session (132,251 B) cost 0.38 ms and of the
+  largest live file (2,570,184 B) 7.55 ms, median of 7 in-process calls, while the
+  peek that stands in for the read costs 0.051 ms on a drained store — all against
+  `PREFETCH_BUDGET_MS = 300`. The session-file count was ~12.4k that day and grows
+  daily, which is why the entry quotes sizes rather than a census.
+  The gate is untouched and still asks `is_user_session` whenever a note waits, which
+  is why `tests/test_next_session_notes.py` needed no edit, and each reader now does
+  its own read-if-absent so whichever runs first pays for the parse once.
+  `tests/test_prefetch_session_meta_read.py` pins zero `_read_session_meta` calls on
+  the supplied-flag/empty-store turn through both `_prefetch_prepare` and
+  `prefetch_context_async`, exactly one when a note is waiting, one when
+  `plan_mode=None`, the drained empty-notes store shape read cross-process, and a peek
+  that raises treated as pending rather than empty. The sentence above is itself
+  pinned now:
+  `tests/test_architecture_coverage_doc_claims.py::test_the_subliminal_page_states_the_read_rule_the_prefetch_code_enforces`
+  extracts it, requires it to name both readers and the decider, refuses the two
+  retired claims it has carried, and re-observes all three outcomes against the live
+  function so the prose cannot drift from the code.

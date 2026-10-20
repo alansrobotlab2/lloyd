@@ -6964,3 +6964,154 @@ def test_the_tools_page_review_log_records_the_caller_rather_than_its_absence():
         "days of logging"), (
         "the traffic phrases above are not the spellings a real count takes, "
         "so the absence checks would never have fired")
+
+
+# ── #3082: the prefetch passage's read rule is the rule the code enforces ─────
+
+#: The decision sentence `subliminal.md` states for the cheap half of prefetch. This
+#: one read has been described three different ways on this page — that passing
+#: `plan_mode` avoids it, that #2598 made that avoidance moot, and (now) that it
+#: happens only while a reader can still be reached — so the current rule is graded as
+#: a sentence rather than left as a reading.
+_PREFETCH_READ_RULE = "reads the session JSON only if a reader can still be reached"
+
+#: Claims about this read that are false of the code, including the two this page has
+#: actually published. Both directions are listed deliberately: "reads it every turn"
+#: was true until #3082 and "never reads it" becomes true the day someone deletes the
+#: plan-mode fallback, and a pin that watches only one half leaves the other to be
+#: rediscovered by a reader who assumes the page.
+_PREFETCH_READ_MISSTATEMENTS = (
+    "no longer happens",                  # the #2598 sentence that filed #3082
+    "reads the session JSON anyway",      # the same sentence, other half
+    "always reads the session JSON",
+    "reads the session JSON on every",
+    "never reads the session JSON",
+)
+
+
+def _prefetch_read_claim(text: str) -> str:
+    """The one block of a doc stating the #3082 read rule, soft wraps collapsed.
+
+    The unit is a blank-line-separated block, not a `## ` section: the passage sits
+    inside a longer section, and grading the section would grade sentences this node
+    never chose. Exactly one block may carry the rule — two would mean the extractor
+    is grading a claim nobody decided to grade, which is #2606's reason for wanting one
+    `Re-measured` paragraph.
+    """
+    units = [re.sub(r"\s+", " ", u).strip() for u in re.split(r"\n\s*\n", text)]
+    hits = [u for u in units if _PREFETCH_READ_RULE in u]
+    assert len(hits) == 1, (
+        f"{len(hits)} blocks carry {_PREFETCH_READ_RULE!r}; the node below grades one, "
+        "and this read has been stated wrongly here often enough that a second "
+        "spelling is drift rather than emphasis")
+    return hits[0]
+
+
+def _stale_read_claims(claim: str) -> list[str]:
+    """Which retired claims about this read a block carries. Kept separate from the
+    node so the control below can show the check fires on text, not on nothing.
+    """
+    return [s for s in _PREFETCH_READ_MISSTATEMENTS if s in claim]
+
+
+def test_the_subliminal_page_states_the_read_rule_the_prefetch_code_enforces(
+        tmp_path, monkeypatch):
+    """#3082: the page's sentence about the session-JSON read is checked against the
+    function it describes.
+
+    The passage is the third account of one read. `architecture/subliminal.md` said
+    callers pass `plan_mode` so prefetch would not re-read the session JSON; the arch
+    review that filed #3082 amended that to say #2598 had voided the saving; and this
+    round changed the behaviour so the saving happens again on the turn with neither
+    reader. A sentence corrected twice in ten days of one file's history is the kind
+    worth pinning rather than re-reading.
+
+    Graded the way this file's header asks. The extracted block is unique and
+    non-empty; its terms are compared to what `app.prefetch` actually does — the
+    behaviour is observed here rather than trusted from
+    `tests/test_prefetch_session_meta_read.py`, because the claim being checked is
+    precisely that the prose and the behaviour agree, and a node that cites another
+    file's fixtures for its own subject is grading a rumour; and the check is shown able
+    to fail, both ways, on text this test writes.
+
+    The behaviour the sentence stands for has three outcomes, and the node asserts all
+    three: no read when the caller supplied `plan_mode` and the store is drained, one
+    read when a note is waiting, one when the caller passed no flag. That last pair is
+    why the page may not say the file is never read.
+    """
+    import inspect
+
+    from app import prefetch
+    from app import next_session_notes as nsn
+
+    claim = _prefetch_read_claim(_text("subliminal.md"))
+
+    # The rule has to name both readers and the thing that decides between them, or it
+    # is a sentence about prefetch and not a rule about this read.
+    for term in ("plan_mode", "next-session store", "#2598"):
+        assert term in claim, (
+            f"the read rule no longer names {term!r}, so it no longer says when the "
+            f"parse happens: {claim[:180]}…")
+    assert _stale_read_claims(claim) == [], (
+        f"the page re-published a retired claim about this read: "
+        f"{_stale_read_claims(claim)}")
+
+    # The tree side, observed rather than read: the peek the passage names is what
+    # decides, and the session JSON is parsed only for a turn that has a reader.
+    src = inspect.getsource(prefetch._prefetch_prepare)
+    assert "peek_next_session_notes" in src, (
+        "the page says the note store decides whether the session JSON is parsed, but "
+        "_prefetch_prepare no longer asks it, so the sentence describes a read that "
+        "happens on every turn again")
+
+    store = tmp_path / "next_session_notes.json"
+    monkeypatch.setenv(nsn.STORE_PATH_ENV, str(store))
+    store.write_text('{"version": 1, "notes": []}', encoding="utf-8")
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "turn.json").write_text(
+        '{"session_id": "turn", "platform": "mission-control", '
+        '"plan": {"plan_mode": true}}', encoding="utf-8")
+    monkeypatch.setattr("app.paths.SESSIONS_DIR", sessions)
+
+    real = prefetch._read_session_meta
+    counted: list = []
+    monkeypatch.setattr(prefetch, "_read_session_meta",
+                        lambda sid: (counted.append(sid), real(sid))[1])
+
+    prefetch._prefetch_prepare("what is the djev port again", "turn", False)
+    assert counted == [], (
+        "the page says the file is read only while a reader can be reached; this turn "
+        f"supplied plan_mode against a drained store and read it {len(counted)}×")
+
+    nsn.write_next_session_note(source="nightly:brief",
+                                summary="GPU 2 is the only box still running djev.",
+                                content="djev moved to GPU 2 on port 8012.")
+    counted.clear()
+    prepared = prefetch._prefetch_prepare("what is the djev port again", "turn", False)
+    assert prepared is not None and len(counted) == 1, (
+        f"a note was waiting and the platform gate read the session JSON {len(counted)}×"
+        "; the page's rule says once, for the reader that needs it")
+
+    store.write_text('{"version": 1, "notes": []}', encoding="utf-8")
+    counted.clear()
+    prepared = prefetch._prefetch_prepare("what is the djev port again", "turn", None)
+    assert prepared is not None and len(counted) == 1, (
+        f"the plan-mode fallback read the session JSON {len(counted)}× on a turn with "
+        "an empty store, so the page cannot claim the file is never read")
+
+    # Shown to be able to fail, in both directions, on text this test writes: a page
+    # that states the rule twice is not gradable by one node, and a block carrying a
+    # retired claim must be named. Without these two the assertions above could be a
+    # pattern over an empty set.
+    duplicated = (f"{_PREFETCH_READ_RULE} when a reader needs it.\n\nbody\n\n"
+                  f"{_PREFETCH_READ_RULE} when a reader needs it.\n")
+    with pytest.raises(AssertionError) as exc:
+        _prefetch_read_claim(duplicated)
+    assert "2 blocks" in str(exc.value), (
+        f"the uniqueness rail did not fire on a doubled rule: {exc.value}")
+    assert _stale_read_claims(
+        "…the saving that parameter was added for no longer happens.") == [
+        "no longer happens"], (
+        "the retired-claim check does not catch the sentence that filed this item, so "
+        "it would not catch its return")
