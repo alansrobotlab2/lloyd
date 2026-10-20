@@ -900,3 +900,294 @@ def test_empty_window_prints_no_landings_and_n_a_and_record_keeps_the_new_keys(t
     assert written[0]["cost"]["n"] == 0 and written[0]["latency"]["landings"] == 0
     LO.record(row)                       # no path: the state dir, via landed_outcomes_path
     assert len(out.read_text().strip().splitlines()) == 2
+
+# ── #3079: the ledger the report reads is the live file PLUS its archives ──
+#
+# The groundskeeper retention sweep rolls old rows out of `promotions.jsonl` into
+# `promotions-archive-<YYYYMM>.jsonl.gz` beside it. Until this change the module read the
+# live file at both of its read sites (`by_author` at :1399 and `main()` at :1650), and
+# `state.ledger_rows` cannot reach an archive at all — `_decode_ledger` is a `read_text`
+# with no gzip — so the sweep silently redefined the report's population. Measured on the
+# real state dir at 16:16Z 2026-10-20, the base module printed `43.91 d, 21334 ledger
+# rows`, `guardian_rollbacks 0/518 (0.0 %)`, `rollback triggers …: —` and
+# `filed_before_ledger 0/0 (no landings)`, while all eleven `rollback_succeeded` rows sat
+# in `promotions-archive-202609.jsonl.gz`. Over the merged corpus the same code prints
+# `55300 ledger rows (21336 live + 33964 archived in 2 file(s))`, `9/1295 (0.7 %)` over
+# crash, data_damage, error_rate, promote_failed, regression, and `filed_before_ledger
+# n=6`. A swept live file is not a quiet period, and a 43.91-day header over 39 % of the
+# corpus was presenting it as one.
+
+import gzip
+import json as _json
+
+LIVE_NAME = "promotions.jsonl"
+ARCHIVE_NAME = "promotions-archive-202609.jsonl.gz"
+
+
+def _state(tmp_path: Path, live_rows=(), archived_rows=(),
+           archive_name: str = ARCHIVE_NAME) -> Path:
+    """A state dir holding the live ledger and one rolled archive beside it.
+
+    Written the way the sweep writes them — plain JSONL live, gzip archive — because the
+    property under test is exactly that a `.gz` sibling belongs to the population.
+    """
+    d = tmp_path / "state"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / LIVE_NAME).write_text("".join(_json.dumps(r) + "\n" for r in live_rows),
+                               encoding="utf-8")
+    if archived_rows:
+        with gzip.GzipFile(d / archive_name, "wb") as fh:
+            fh.write(("".join(_json.dumps(r) + "\n"
+                              for r in archived_rows)).encode("utf-8"))
+    return d / LIVE_NAME
+
+
+def _ev(event: str, *, round_id: str, ts: float, **kw) -> dict:
+    return {"event": event, "round_id": round_id, "ts": ts, **kw}
+
+
+
+
+def test_the_only_single_file_ledger_read_in_the_module_is_the_reader_itself():
+    """Clause 1, structurally: every ledger read in the module is inside the one reader.
+
+    `state.ledger_rows(path)` decodes ONE path and cannot open a `.gz`, so any call to it
+    outside `read_ledger`'s own decode helper is a read of one file whatever its docstring
+    claims. The clause — "no ledger read in the module resolves to one hard-coded file" —
+    is a property of the whole module, and a fixture can only sample one path through it,
+    so it is checked on the AST as well as behaviourally below.
+    """
+    import ast
+
+    src = Path(LO.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    helpers = {"_decode_one"}
+    offenders = []
+    for fn in [n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        if fn.name in helpers:
+            continue
+        for node in ast.walk(fn):
+            f = node.func if isinstance(node, ast.Call) else None
+            if f is None:
+                continue
+            name = getattr(f, "attr", None) or getattr(f, "id", None)
+            if name in ("ledger_rows", "_decode_ledger"):
+                offenders.append(f"{fn.name}() calls {name}()")
+    assert offenders == [], offenders
+    assert "def read_ledger" in src and "def ledger_files" in src
+
+
+def test_an_archived_only_rollback_reaches_rollback_rate_and_the_trigger_list(tmp_path,
+                                                                             repo: Path):
+    """Clauses 1 and 2: the reader globs at call time, so a `.gz`-only rollback is one.
+
+    The live file holds one clean landing; the archive holds a second landing and the
+    `rollback_succeeded` row that took it off `main`. Read live-only — what shipped —
+    `guardian_rollbacks` is 0/1 with an empty trigger list, which reads as a guardian that
+    never fired. Merged, the same two files give k=1 over both landings and name the
+    trigger. The assertions are on the report's own block and the header's trigger list,
+    not on the reader's return value, so a reader that merged the files but fed only the
+    live rows downstream still fails here.
+    """
+    a = _commit(repo, "a.md", "a", author=AGENT_MAIL, days_ago=20)
+    b = _commit(repo, "b.md", "b", author=AGENT_MAIL, days_ago=30)
+    state = _state(
+        tmp_path,
+        live_rows=[_ev("promoted", round_id="SM_L", ts=NOW - 20 * DAY, commit=a)],
+        archived_rows=[_ev("promoted", round_id="SM_A", ts=NOW - 30 * DAY, commit=b),
+                       _ev("rollback_succeeded", round_id="SM_A", ts=NOW - 29 * DAY,
+                           commit=b, trigger="regression")])
+
+    # The file list is a glob taken at call time: a second archive joins it with no
+    # change to any constant anywhere.
+    assert [f.name for f in LO.ledger_files(state)] == [LIVE_NAME, ARCHIVE_NAME]
+    (state.parent / "promotions-archive-202610.jsonl.gz").write_bytes(gzip.compress(b""))
+    assert [f.name for f in LO.ledger_files(state)] == [
+        LIVE_NAME, ARCHIVE_NAME, "promotions-archive-202610.jsonl.gz"], \
+        "the archive list is not globbed at call time"
+
+    events, population = LO.read_ledger(state)
+    assert population["live_rows"] == 1 and population["archived_rows"] == 2, population
+    assert population["archive_files"] == 1, population
+
+    # The shipped behaviour, asserted rather than narrated: the live file alone finds no
+    # rollback and no trigger, while the merged read finds one of each.
+    live_only = LO._decode_one(state)
+    assert (LO.rollback_rate(live_only, since=NOW - 40 * DAY,
+                             until=NOW)["k"],
+            LO.rollback_rate(live_only, since=NOW - 40 * DAY, until=NOW)["n"]) == (0, 1)
+
+    blk = LO.rollback_rate(events, since=NOW - 40 * DAY, until=NOW)
+    assert (blk["k"], blk["n"]) == (1, 2), blk
+
+    out = LO.by_author(now=NOW, events=events, population=population, repo=repo)
+    assert out["by_author"][LO.AGENT]["guardian_rollbacks"]["k"] == 1, \
+        out["by_author"][LO.AGENT]["guardian_rollbacks"]
+    assert out["rollback_triggers"] == ["regression"], out["rollback_triggers"]
+    assert "crash, data_damage" not in LO.render(out)
+    assert "regression" in LO.render(out)
+    # The block that reads the ledger itself reaches the archive too: `main()` shares the
+    # one reader, and this is the second of the module's two read sites.
+    # The module's SECOND read site is merged too — but it is pinned structurally rather
+    # than by calling it here: `human_input_block`'s window is the span the transcript
+    # corpus covers, and a fixture cannot supply one without reading the real sessions
+    # directory. `test_the_only_single_file_ledger_read_…` above is the check that no
+    # function besides the reader's own decode helper calls `state.ledger_rows`, which is
+    # what makes a single-file read at that site impossible rather than merely absent.
+
+
+def test_a_row_byte_identical_in_both_files_is_counted_once(tmp_path, repo: Path):
+    """Clause 2's second half: a sweep that died half-way cannot double-count.
+
+    The sweep removes rolled rows from the live file, so today 0 rows appear in both
+    (55,218 merged over 55,218 unique). This guards the partial roll — the only way a row
+    CAN be in both — and uses a rollback row, because that is the block a duplicate moves:
+    the same rollback twice would print as a second guardian firing on a commit the ledger
+    took back once.
+    """
+    a = _commit(repo, "a.md", "a", author=AGENT_MAIL, days_ago=20)
+    b = _commit(repo, "b.md", "b", author=AGENT_MAIL, days_ago=30)
+    shared = _ev("rollback_succeeded", round_id="SM_A", ts=NOW - 29 * DAY, commit=b,
+                 trigger="crash")
+    state = _state(
+        tmp_path,
+        live_rows=[_ev("promoted", round_id="SM_L", ts=NOW - 20 * DAY, commit=a), shared],
+        archived_rows=[_ev("promoted", round_id="SM_A", ts=NOW - 30 * DAY, commit=b),
+                       shared])
+    events, population = LO.read_ledger(state)
+    assert len(events) == 3, [_json.dumps(e, sort_keys=True) for e in events]
+    assert population["ledger_rows"] == 3, population
+    assert population["live_rows"] == 2 and population["archived_rows"] == 1, population
+    blk = LO.rollback_rate(events, since=NOW - 40 * DAY, until=NOW)
+    assert (blk["k"], blk["n"]) == (1, 2), blk
+
+
+def test_an_archived_round_widens_rounds_to_land_and_the_latency_cohort(tmp_path):
+    """Clause 3: an archived `review` row enters the denominator, an archived
+    `round_start` row joins the latency cohort, and a lost item file is still counted.
+
+    Two rounds, one entirely in the archive — and the archived one is the round that
+    needed TWO reviews. Read live-only, `rounds_to_land` reports n=1 at mean 1.0 with no
+    second attempt at all: the sweep removed the only evidence the loop ever iterate, in
+    the flattering direction, chosen by nothing but the calendar. Merged it is n=2 with a
+    1/2 second attempt and a higher mean. Same two rounds through `filing_latency`: the
+    archived `round_start` resolves the landing, so `missing_round_start` is 0 rather than
+    1 and the round is in a stratum's `n`.
+
+    The last half is what must not be traded away for a bigger cohort: a landing whose
+    item file is gone stays out of `n`, named in `missing_item_stamp` — the merged read
+    turns that counter from 0 to 5 on the real corpus, and a silent drop there would be
+    the same bug in a friendlier tense.
+    """
+    state = _state(
+        tmp_path,
+        live_rows=[_ev("round_start", round_id="SM_L", ts=NOW - 19 * DAY, item_id=101),
+                   _ev("review", round_id="SM_L", ts=NOW - 18 * DAY, verdict="pass"),
+                   _ev("promoted", round_id="SM_L", ts=NOW - 17 * DAY, commit="a" * 40)],
+        archived_rows=[_ev("round_start", round_id="SM_A", ts=NOW - 43 * DAY,
+                           item_id=102),
+                       _ev("review", round_id="SM_A", ts=NOW - 42 * DAY, verdict="pass"),
+                       _ev("review", round_id="SM_A", ts=NOW - 41 * DAY, verdict="pass"),
+                       _ev("promoted", round_id="SM_A", ts=NOW - 40 * DAY,
+                           commit="b" * 40)])
+
+    live_only = LO._decode_one(state)
+    r_live = LO.rounds_to_land(live_only, landed_rounds=LO._landed_rounds(live_only))
+    assert (r_live["n"], r_live["mean"]) == (1, 1.0), r_live
+    assert (r_live["k"], r_live["n"]) == (0, 1), r_live
+
+    events, population = LO.read_ledger(state)
+    r = LO.rounds_to_land(events, landed_rounds=LO._landed_rounds(events))
+    assert (r["n"], r["mean"]) == (2, 1.5), r
+    assert (r["k"], r["n"]) == (1, 2), r
+
+    board = tmp_path / "backlog"
+    board.mkdir()
+    for num, days in ((101, 40), (102, 45)):
+        stamp = (datetime.fromtimestamp(NOW, tz=timezone.utc)
+                 - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        (board / f"{num}-fixture.md").write_text(
+            f"---\ntype: note\nitem_id: {num}\nstatus: done\n"
+            f"created: '{stamp}'\n---\n\n# {num} — a fixture item\n", encoding="utf-8")
+    lat = LO.filing_latency(events, since=NOW - 60 * DAY, now=NOW,
+                            ledger_from=min(SC._ts(e) for e in events),
+                            backlog_dir=board)
+    assert lat["landings"] == 2, lat
+    assert lat["missing_round_start"] == 0, lat
+    assert lat["missing_item_stamp"] == 0, lat
+    assert sum(st["n"] for st in lat["strata"]) == 2, lat["strata"]
+
+    # Item file gone: out of n, and NAMED.
+    lat2 = LO.filing_latency(events, since=NOW - 60 * DAY, now=NOW,
+                             ledger_from=NOW - 60 * DAY, backlog_dir=tmp_path / "gone")
+    assert lat2["missing_item_stamp"] == 2, lat2
+    assert sum(st["n"] for st in lat2["strata"]) == 0, lat2
+    assert "2 no readable item `created:`" in LO.latency_text(lat2), LO.latency_text(lat2)
+
+
+def test_the_header_and_the_recorded_row_name_the_population_they_read(tmp_path,
+                                                                      repo: Path):
+    """Clause 4: the span and the row count come from the merged corpus, in words.
+
+    Before: `43.91 d, 21334 ledger rows` over a corpus of 55,218, with the window's start
+    taken from the live file's first row at 2026-09-06T18:19:23Z while the archive beside
+    it began at 17:27:02Z — 52 minutes and 26,417 rows earlier. After, the same sentence
+    carries the split and the archive count and `ledger_from` is the archive's row. The
+    assertion is on the rendered sentence because that sentence is what a human re-quotes;
+    a population that rode the JSON but not the header would still mislead the reader who
+    matters.
+    """
+    a = _commit(repo, "a.md", "a", author=AGENT_MAIL, days_ago=1)
+    b = _commit(repo, "b.md", "b", author=AGENT_MAIL, days_ago=9)
+    state = _state(
+        tmp_path,
+        live_rows=[_ev("promoted", round_id="SM_L", ts=NOW - DAY, commit=a)],
+        archived_rows=[_ev("promoted", round_id="SM_A", ts=NOW - 8 * DAY, commit=b)])
+    events, population = LO.read_ledger(state)
+    out = LO.by_author(now=NOW, events=events, population=population, repo=repo)
+    w = out["window"]
+    assert w["ledger_rows"] == 2, w
+    assert w["live_rows"] == 1 and w["archived_rows"] == 1 and w["archive_files"] == 1, w
+    assert w["ledger_from"] == LO._iso(NOW - 8 * DAY), (w["ledger_from"], w)
+    assert w["comparable_from"] == w["ledger_from"], w
+    head = LO.render(out).splitlines()[0]
+    assert "2 ledger rows" in head and "1 live + 1 archived in 1 file" in head, head
+
+    # A caller that passes `events` with no population is recorded as UNREAD, never as
+    # zero archived rows: a zero there is the same lie in a different tense.
+    bare = LO.by_author(now=NOW, events=events, repo=repo)
+    assert bare["window"]["archived_rows"] is None, bare["window"]
+    assert "archived-row split not recorded" in LO.render(bare).splitlines()[0], \
+        LO.render(bare).splitlines()[0]
+
+
+def test_read_ledger_decodes_each_file_once_and_record_appends_one_row(tmp_path):
+    """The cache instrument survives the merge, and `--record` still writes one row.
+
+    `tests/test_backlog_ledger_cache.py` (#1204) measures one DECODE per cycle through
+    `state.ledger_read_count()`. A merged reader written as a loop over `ledger_rows()`
+    would be fine, but one that decoded the live file twice — for the rows and again for
+    the population — would multiply that count, so the instrument is asserted here. And
+    recording stays what it always was: an appended line, no gate opened, nothing gated.
+    """
+    from scripts.automod import state as S
+    state = _state(
+        tmp_path,
+        live_rows=[_ev("promoted", round_id="R", ts=NOW, commit="a" * 40)],
+        archived_rows=[_ev("promoted", round_id="R2", ts=NOW - DAY, commit="b" * 40)])
+    S.ledger_rows_reset()
+    events, population = LO.read_ledger(state)
+    assert len(events) == 2
+    assert S.ledger_read_count(str(state)) == 1, "the live file was decoded twice"
+    assert population["ledger_files"] == [LIVE_NAME, ARCHIVE_NAME], \
+        population["ledger_files"]
+    dest = tmp_path / "landed_outcomes.jsonl"
+    row = {"window": {"ledger_rows": population["ledger_rows"],
+                      **{k: population[k] for k in
+                         ("live_rows", "archived_rows", "archive_files")}}}
+    LO.record(row, dest)
+    LO.record(row, dest)
+    lines = dest.read_text().strip().split("\n")
+    assert len(lines) == 2, lines
+    assert _json.loads(lines[-1])["window"]["live_rows"] == 1, lines[-1]

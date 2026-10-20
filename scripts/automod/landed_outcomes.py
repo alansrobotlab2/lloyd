@@ -164,6 +164,162 @@ def rate_text(row: dict) -> str:
             f"[{row['ci_low']:.3f}, {row['ci_high']:.3f}]")
 
 
+# ── the ledger, read whole ────────────────────────────────────────────────
+#
+# `scripts/automod/state.py::ledger_rows` decodes ONE path (`read_text`, no gzip),
+# and the groundskeeper retention sweep rolls old rows out of the live file into
+# `promotions-archive-<YYYYMM>.jsonl.gz` beside it on its own schedule
+# (`scripts/groundskeeper/retention-sweep.py:2293` removes what it rolled). So a
+# reader naming one file does not read a smaller window: it reads a population that
+# no longer contains the events it exists to count. Measured on the live state dir
+# 2026-10-20 15:00Z: live 21,254 rows, archives 26,417 + 7,547, merged 55,218 — and
+# ALL ELEVEN `rollback_succeeded` rows are in `promotions-archive-202609.jsonl.gz`,
+# zero in the live file. The shipped report therefore printed `guardian_rollbacks
+# 0/516 (0.0 %)` with `rollback triggers …: —` while the same functions over the
+# merged corpus read 9/1,293 with triggers `crash, data_damage, error_rate,
+# promote_failed, regression`, under a header that named the merged-looking span
+# `2026-09-06T18:19:23Z → 2026-10-20T14:59:48Z (43.86 d, 21252 ledger rows)`. A
+# swept ledger rendered as a quiet period. #2858 fixed exactly this for the
+# gate-to-land lag reader (`scripts/maintenance/gate_to_land_lag.py:130`); this is
+# the same reader for the same reason, and every ledger read in this module goes
+# through it.
+#
+# The glob is the point: a reader that hard-coded one month, or the live file,
+# silently redefines its own population. Dedupe is by canonical row, so a row the
+# sweep rolled but did not finish removing from the live file counts once (0 such
+# rows today — 55,218 merged vs 55,218 unique — so this guards a partial roll, not
+# a live defect). Decodes are cached per file on (mtime_ns, size, inode) exactly as
+# `state._decode_ledger` does, so one report run is one read of each file and
+# `tests/test_backlog_ledger_cache.py`'s "1 read per cycle" property holds.
+LEDGER_CACHE: dict[str, tuple[int, int, int, list[dict]]] = {}
+
+
+def ledger_files(ledger: Path | None = None) -> list[Path]:
+    """The live ledger plus every archive beside it, oldest month first.
+
+    `ledger` defaults to the live state file; a fixture passes its own live path and
+    the archives are globbed from ITS directory, which is what makes a hermetic
+    test able to prove an archived-only row reaches the report.
+    """
+    from scripts.automod import state as S
+    live = Path(ledger or S.LEDGER_PATH)
+    return [live, *sorted(live.parent.glob("promotions-archive-*.jsonl.gz"))]
+
+
+def _decode_one(path: Path) -> list[dict]:
+    """Decode one ledger file, cached on its identity, gzip transparently.
+
+    A plain JSONL file goes through `state.ledger_rows`, the cached single-flight
+    reader, so the merged read keeps #1204's one-decode-per-cycle property that
+    `state.ledger_read_count` instruments and `tests/test_backlog_ledger_cache.py`
+    asserts; the gzip branch has to be ours because `state._decode_ledger` is
+    `read_text` and cannot open one at all — which is exactly why the archives were
+    invisible to this report (#3079).
+    """
+    import gzip
+
+    from scripts.automod import state as S
+
+    if not str(path).endswith(".gz"):
+        return S.ledger_rows(path)
+
+    try:
+        st = path.stat()
+        text = gzip.decompress(path.read_bytes()).decode("utf-8", "replace")
+    except OSError:
+        return []
+    key = str(path)
+    hit = LEDGER_CACHE.get(key)
+    if hit and (hit[0], hit[1], hit[2]) == (st.st_mtime_ns, st.st_size, st.st_ino):
+        return hit[3]
+    rows = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue        # a truncated final line is normal in an appended JSONL
+        if isinstance(row, dict):
+            rows.append(row)
+    LEDGER_CACHE[key] = (st.st_mtime_ns, st.st_size, st.st_ino, rows)
+    return rows
+
+
+def read_ledger(ledger: Path | None = None) -> tuple[list[dict], dict[str, Any]]:
+    """The whole promotions ledger as it exists now: live file + every archive.
+
+    Returns `(rows, population)`. `population` is what the header and the recorded
+    row must carry, because `len(rows)` alone cannot tell a reader whether the live
+    file had been swept: `ledger_rows` (what the report is computed over),
+    `live_rows`, `archived_rows`, `archive_files` and `archive_names`.
+    """
+    files = ledger_files(ledger)
+    out: list[dict] = []
+    seen: set[str] = set()
+    live_rows = 0
+    per_file: dict[str, int] = {}
+    for i, f in enumerate(files):
+        rows = _decode_one(f)
+        kept = 0
+        for row in rows:
+            try:
+                key = json.dumps(row, sort_keys=True, default=str)
+            except (TypeError, ValueError):
+                key = repr(sorted(row.items(), key=lambda kv: str(kv[0])))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+            kept += 1
+        per_file[f.name] = kept
+        if i == 0:
+            live_rows = kept
+    archive_names = [f.name for f in files[1:] if per_file.get(f.name)]
+    return out, {
+        "ledger_rows": len(out),
+        "live_rows": live_rows,
+        "archived_rows": len(out) - live_rows,
+        "archive_files": len(archive_names),
+        "archive_names": archive_names,
+        "ledger_files": [f.name for f in files],
+    }
+
+
+def ledger_population(events: list[dict],
+                      population: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The population a report was computed over, stated as honestly as its caller
+    can state it.
+
+    A caller that read the ledger itself passes what `read_ledger` returned and the
+    split is exact. A unit caller that hands over a hand-built `events` list has no
+    files behind it, and saying `archived_rows: 0` there would be the same lie in
+    the other direction — so the split is reported as `None`, unread, while
+    `ledger_rows` is always the rows actually counted.
+    """
+    if population is not None:
+        return dict(population)
+    return {"ledger_rows": len(events), "live_rows": None, "archived_rows": None,
+            "archive_files": None, "archive_names": [],
+            "ledger_files": ["caller-supplied rows"]}
+
+
+def population_line(pop: dict[str, Any]) -> str:
+    """`21,254 ledger rows` becomes `55,218 ledger rows (21,254 live + 33,964 in 2
+    archive file(s))`. A pruned live file cannot then render as the whole ledger."""
+    n = pop.get("ledger_rows")
+    arch = pop.get("archived_rows")
+    if not isinstance(arch, int):
+        # Rows the caller handed over without saying where they came from: say so, in the
+        # header, rather than printing a bare count that reads as "the whole ledger".
+        return f"{n} ledger rows (archived-row split not recorded)"
+    if arch == 0:
+        return f"{n} ledger rows (no archive rows present)"
+    return (f"{n} ledger rows ({pop.get('live_rows')} live + {arch} archived in "
+            f"{pop.get('archive_files')} file(s))")
+
+
 # ── the measures ──────────────────────────────────────────────────────────
 
 def later_undo(commits: list[dict], *, repo: Path, arm: str,
@@ -850,6 +1006,7 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
               horizon_days: int = HUMAN_TOUCH_DAYS,
               ledger: Path | None = None, runs_db: Path | None = None,
               backlog_dir: Path | None = None,
+              population: dict[str, Any] | None = None,
               human_input: dict[str, Any] | None = None) -> dict[str, Any]:
     """One author-split report over `events` (the ledger) and `main`'s history.
 
@@ -869,6 +1026,14 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
     slow and non-reproducible; a withheld figure is honest. `ledger` is only for
     the `gate_duration_stats` yardstick beside the per-round figures, and
     `backlog_dir` resolves an item id to its `created:` stamp.
+
+    `population` is the second half of `read_ledger`'s answer — how many of the
+    rows came from the live file and how many from `promotions-archive-*.jsonl.gz`.
+    It rides the row and the header because `ledger_rows` alone cannot say whether
+    the live file had been swept: a report that reads 21,254 of 55,218 rows and
+    prints the number without the split is the report that called 11 archived
+    rollbacks a zero (#3079). Absent from a unit caller, the split is recorded as
+    unread rather than as zero.
     """
     repo = Path(repo or LIVE_ROOT)
     now = now or datetime.now(timezone.utc).timestamp()
@@ -939,7 +1104,10 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
                    "days": round((now - since) / 86400, 2),
                    "ledger_from": (_iso(led_from) if stamps else None),
                    "ledger_to": (_iso(led_to) if stamps else None),
-                   "ledger_rows": len(events),
+                   # …and the population the window's rows were drawn from: live vs
+                   # rolled-into-archive. `ledger_rows` is the merged count; the split
+                   # is what stops a swept live file reading as a short ledger.
+                   **ledger_population(events, population),
                    # The arms overlap only from the first ledger row: the human
                    # arm's history before it has no counterpart at all. The
                    # reach is the oldest HUMAN-arm commit of the WHOLE of
@@ -1001,7 +1169,7 @@ def render(row: dict[str, Any]) -> str:
                      + (f"single-arm ({single}), " if single else "")
                      + "no ledger counterpart to compare against")
     out = [f"landed-change outcomes by author — {w['from']} → {w['to']} "
-           f"({w['days']} d, {w['ledger_rows']} ledger rows)",
+           f"({w['days']} d, {population_line(w)})",
            f"comparable from {w['comparable_from']} (first ledger row); "
            f"human arm history reaches {w['human_history_from']}",
            excluded_line,
@@ -1394,9 +1562,11 @@ def human_input_block(*, now: float | None = None, days_requested: float = 30,
     corpus ages that far. Nothing here reads the checkout or writes anything: it is a
     read of transcripts, the ledger and (through uptake) nothing else.
     """
-    from scripts.automod import state as S
     now = now if now is not None else datetime.now(timezone.utc).timestamp()
-    events = S.ledger_rows(ledger or S.LEDGER_PATH) if events is None else events
+    # The merged read, same reason as `main()`: this block's ledger half counts
+    # `backlog_item_filed` rows, and a row the sweep rolled out of the live file is
+    # still a filing that happened (#3079).
+    events = read_ledger(ledger)[0] if events is None else events
     if corpus is None:
         # `data_root` is the DATA root: uptake's own enumeration resolves
         # `<root>/sessions/*.json[.gz]`, so the root is handed over as-is and a
@@ -1647,13 +1817,19 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     from scripts.automod import state as S
     days = None if args.since.strip().lower() in ("all", "0") else SC.parse_since(args.since)
-    events = S.ledger_rows(S.LEDGER_PATH)
+    # One read of the ledger as it actually exists — the live file plus every
+    # `promotions-archive-*.jsonl.gz` beside it — shared by both blocks below, so
+    # the rollback/cost/latency figures and the population in the header come from
+    # the same rows. Reading only `promotions.jsonl` here is what printed
+    # `guardian_rollbacks 0/516` with an empty trigger list while all 11
+    # `rollback_succeeded` rows sat in the 202609 archive (#3079).
+    events, population = read_ledger(S.LEDGER_PATH)
     now = datetime.now(timezone.utc).timestamp()
     # The block reads the transcript corpus, whose reach is shorter than any
     # `--days`; `human_input_block` prints the window it actually COVERED.
     blk = human_input_block(now=now, days_requested=float(args.days), events=events)
     row = by_author(now=now, events=events, since_days=days, ledger=S.LEDGER_PATH,
-                    runs_db=_workers_db(), human_input=blk)
+                    runs_db=_workers_db(), human_input=blk, population=population)
     print(json.dumps(row, indent=2, sort_keys=True) if args.json else render(row))
     if args.record:
         print(f"\nrecorded → {record(row)}")
