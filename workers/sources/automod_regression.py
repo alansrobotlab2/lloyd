@@ -286,23 +286,40 @@ FLOOR_BY_RESOLUTION = "resolution"
 # every artifact before that day): `regression_check` rows in `promotions.jsonl`
 # whose `pin.daemon.source` names `agent-qmd-daemon.conf`, created at or after
 # the first check under c6e79b45 (2026-09-22T04:08:33Z).
-# Re-checked 2026-10-03T23:28Z (#2145): 482 rows, 964 arm readings, spanning
-# 2026-09-22T04:08:33Z to 2026-10-03T22:23Z. Graded arm (current, replayed):
-# median 209.9, p95 247.4, max 274.9 ms (2026-09-22T06:07:48Z). Fresh baseline
-# arm: median 596.0, p95 648.8, max 824.3 ms — 824.268 as the ledger stores it —
-# at 2026-09-29T00:56:17Z, commit 81dabeff) — it is in the population because a change that moves djev's input
+# Everything from the next line to the command below is ONE DATED PUBLICATION,
+# stamped 2026-10-20T02:29Z (the read before it was 2026-10-03T23:28Z, #2145):
+# every count, median and maximum is what that command answered at that instant
+# over `promotions.jsonl` AND every `promotions-archive-*.jsonl.gz` rotated
+# beside it — the ledger sweep cut the live file on 2026-10-05, so the live file
+# alone is 506 of the 1,035 era rows and reads about half the population. It is
+# a publication, not a property of the ledger: the next current-era row moves
+# these figures, and it moves nothing else — the bound below is fixed and does
+# not move with them.
+#
+# Re-checked 2026-10-20T02:29Z: 1,035 rows, 2,070 arm readings, spanning
+# 2026-09-22T04:08:33Z to 2026-10-20T02:22:57Z. Graded arm (current, replayed):
+# median 221.0, p95 283.4, max 401.3 ms — 401.315 as the ledger stores it — at
+# 2026-10-17T07:54:49Z, commit bf52e97c. Fresh baseline arm: median 611.9, p95
+# 681.5, max 905.3 ms — 905.256 as the ledger stores it — at
+# 2026-10-19T15:30:09Z, commit 4a68589b; it is in the population because a change that moves djev's input
 # is judged on the fresh floor, and a healthy fresh reading must not report.
-# 0 of the 482 rows reads over 1,600 ms on either arm. The cross-encoder path
+# 0 of the 1,035 rows reads over 1,600 ms on either arm. The cross-encoder path
 # this replaced read a median 4,257-4,305 ms, so a recall that falls back onto
 # it (djev not answering, or a re-widening) reads over budget, which is the
 # report this ceiling is for. Re-check the population with this (run from the
 # repo root; it prints n, fresh median, graded median, fresh max, graded max,
-# and the count of rows over 1,600):
+# and the count of rows over 1,600). It reads the live ledger AND the rotated
+# archives, because the retention sweep cuts `promotions.jsonl` monthly and the
+# era spans two of those cuts — a live-file-only read answers 506 here today and
+# looks complete (the same house rule is `architecture/workers-jobs.md`: "Ingest
+# reads the rotated archive *and* the live ledger"):
 #
-#   .venvs/lloyd/bin/python -c "import json,pathlib,statistics as S; \
-#     P=pathlib.Path.home()/'.local/state/lloyd-automod/promotions.jsonl'; \
+#   .venvs/lloyd/bin/python -c "import json,pathlib,gzip,statistics as S; \
+#     D=pathlib.Path.home()/'.local/state/lloyd-automod'; \
+#     P=[D/'promotions.jsonl']+sorted(D.glob('promotions-archive-*.jsonl.gz')); \
 #     A=[(r['detail'] or {}).get('latency_ms_avg') or {} \
-#        for r in [json.loads(l) for l in P.read_text().splitlines() if l.strip()] \
+#        for p in P for l in (gzip.decompress(p.read_bytes()).decode() if p.suffix=='.gz' else p.read_text()).splitlines() if l.strip() \
+#        for r in [json.loads(l)] \
 #        if r.get('event')=='regression_check' \
 #        and (r.get('created_at') or '')>='2026-09-22T04:08:33Z' \
 #        and 'agent-qmd-daemon.conf' in str(r['pin']['daemon']['source']) \
@@ -312,9 +329,10 @@ FLOOR_BY_RESOLUTION = "resolution"
 #     round(max(a['after'] for a in A),1), sum(1 for a in A if max(a['before'],a['after'])>1600))"
 #
 # 1,600 ms is a FIXED bound RE-CHECKED against that ledger, NOT recomputed from
-# the max. The rule above run over the same 482 rows today reads 2 x 824.268 =
-# 1,648.5 -> 1,700 ms, and that looser number was declined: 0 of 482 rows even
-# reaches 1,600, the ~4,250 ms cross-encoder step this ceiling exists to catch
+# the max. The rule above run over the same 1,035 rows at that stamp reads 2 x
+# 905.256 = 1,810.5 -> 1,900 ms, and that looser number was declined: 0 of the
+# 1,035 rows even reaches 1,600, the ~4,250 ms cross-encoder step this ceiling
+# exists to catch
 # reports under either, and a constant re-derived from the running max can only
 # grow — every new record silently widens the tolerance the check is there to
 # hold, which is the defect #2145 closes. If a current-era row one day reads
@@ -342,9 +360,27 @@ FLOOR_BY_RESOLUTION = "resolution"
 # of the three is slow on BOTH arms at once — before-arm 8,053.5 / 6,798.7 /
 # 11,973.5 ms against that era's ~4,300 ms before-median — while its ranking
 # quality is identical to those eras' medians (ndcg10 0.592 / 0.582, doc_hit_rate
-# 1.00 on both arms), none of it recurs in the 482 current-era rows, and the raw
-# logs that could pin a cause have rotated away. It therefore stays outside the
-# population, and the 4,282-4,302 ms activity-bucket median measured in every
+# 1.00 on both arms), and none of it recurs in the 1,035 current-era rows. What
+# is missing is its CAUSE, and that gap is now measured rather than assumed
+# closed: the raw logs did NOT rotate away — `journalctl` reaches back to
+# 2026-08-24T14:04:45Z, so 2026-09-19 and 2026-09-20 are still in it — and the
+# host-level candidate the journal does offer is flat across the stall. The
+# journal's host-level noise that day is APEI/GHES PCIe errors reporting
+# `event severity: corrected` (sources 512 and 514): bucketed per calendar
+# half-hour over 2026-09-20 UTC, 45 non-empty buckets at median 60,
+# nearest-rank p90 102, max 147. The three tail instants sit inside that
+# distribution rather than above it — 70 / 76 / 97 in their calendar buckets,
+# 75 / 85 / 108 in the +/-15 min window centred on each timestamp, against the
+# 1,410 comparable centred windows of that day at median 58, nearest-rank p90
+# 102, max 150. Two of the three are at or below the day's p90 and the third is
+# 6 records over it, all well under its maximum, and none of them is the
+# order-of-magnitude burst a host stall would have to have. So the tail is
+# WITH a negative control, which is a different claim from unknowable: the
+# journal was read and the obvious hardware explanation was measured against
+# and does not fit. (Re-run trap: `journalctl -k` answers 0 APEI lines for these
+# windows — the records arrive unfiltered here — so a kernel-filtered grep is a
+# false zero, not an absence.) It therefore stays outside the population, and
+# the 4,282-4,302 ms activity-bucket median measured in every
 # +/-15 min window around it stands.
 #
 # nightly — NOT re-derived here. Its population is the nightly artifacts in
@@ -358,7 +394,7 @@ FLOOR_BY_RESOLUTION = "resolution"
 # widening does not account for, a finding on #1129), and every nightly since.
 LATENCY_BUDGET_MS = {
     "nightly": 4800.0,          # worst ever 4,408.0 (nightly-20260904-060219, pre-wipe)
-    "paired_check": 1600.0,     # worst ever 824.3 (ledger 2026-09-29T00:56:17Z, fresh arm); fixed, not recomputed
+    "paired_check": 1600.0,     # published max 905.3 (ledger 2026-10-19T15:30:09Z, fresh arm, re-checked 2026-10-20T02:29Z); the bound is fixed, not recomputed
 }
 # The two contexts this module knows, named so a caller passes one rather than a
 # free-text string that silently falls through to a default.

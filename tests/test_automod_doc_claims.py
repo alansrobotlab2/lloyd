@@ -549,23 +549,37 @@ def test_row_7_carries_the_era_d_ceiling_provenance_and_the_tail_ruling():
     The row used to end "…98 rows from 2026-09-22T04:08Z to 2026-09-24T13:46Z,
     graded arm median 161.5 / max 274.9 ms, fresh arm max 752.3 ms, so **1,600
     ms** … the tail was never attributed". Re-running the row's own filter on
-    2026-10-03 answers 482 rows, fresh arm max 824 ms, none over the bound; and the
-    2026-09-20 tail has since been ruled (#1247 owed entry 2: an unattributed
-    host-level stall of the excluded cross-encoder era, not a retrieval
-    degradation). Both halves are pinned because the doc is where a reader who never
-    opens `workers/sources/automod_regression.py` gets the ceiling, and because
-    `test_the_doc_states_the_limits_that_survive_the_pin` shows how reliably this
-    paragraph drifts from the code it describes.
+    2026-10-03 answers a smaller population, and re-running it live-AND-archives on
+    2026-10-20T02:29Z answers 1,035 rows with a fresh arm max of 905.3 ms, none
+    over the bound; and the 2026-09-20 tail has since been ruled (#1247 owed entry 2:
+    an unattributed host-level stall of the excluded cross-encoder era, not a
+    retrieval degradation). Both halves are pinned because the doc is where a reader
+    who never opens `workers/sources/automod_regression.py` gets the ceiling, and
+    because `test_the_doc_states_the_limits_that_survive_the_pin` shows how reliably
+    this paragraph drifts from the code it describes.
+
+    #3037 is the reason the figures are pinned as a DATED set: the row carried
+    2026-10-03's numbers for two weeks while the ledger produced larger ones, and
+    nothing failed. The publication date is therefore a needle too, and so is the
+    row's reach — a re-check that reads only the live `promotions.jsonl` answers
+    about half this era and looks no different from one that read all of it.
     """
     from workers.sources import automod_regression as R
     flat = _flat(DOC)
-    assert "482 rows" in flat, "row 7 no longer states the era-D population"
-    assert "824 ms" in flat, "row 7 no longer states the fresh arm's era-D maximum"
+    assert "1,035 rows" in flat, "row 7 no longer states the era-D population"
+    assert "905.3 ms" in flat, "row 7 no longer states the fresh arm's era-D maximum"
+    assert "401.3 ms" in flat, "row 7 no longer states the graded arm's era-D maximum"
+    assert "published 2026-10-20T02:29Z" in flat, (
+        "row 7's figures have lost the date they were read on, which is the only "
+        "thing that tells a reader whether they are still the current maxima")
+    assert "promotions-archive-" in flat, (
+        "row 7 no longer says the re-check reads the rotated archives as well as "
+        "the live ledger, so a future re-read can quietly halve the population")
     assert "not recomputed" in flat.lower(), (
         "row 7 does not say the bound is re-checked rather than recomputed, so a "
         "reader of the doc alone would still recompute it from the max")
-    assert "1,700 ms" in flat, (
-        "row 7 does not name the number recomputation would give (2 × 824), which "
+    assert "1,900 ms" in flat, (
+        "row 7 does not name the number recomputation would give (2 × 905.3), which "
         "is the number the fixed bound was declined against")
     assert "host-level" in flat and "not a retrieval degradation" in flat, (
         "row 7 has not recorded the 2026-09-20 tail ruling")
@@ -577,8 +591,13 @@ def test_row_7_carries_the_era_d_ceiling_provenance_and_the_tail_ruling():
     # from the doc today; the numbers are named here and not in
     # `test_automod_regression.py`, whose own constants ARE a provenance surface —
     # a stale figure belongs in exactly one file at a time.
+    # Each of these was published by row 7 and is superseded by the 2026-10-20 set.
+    # ("482" is not asserted bare: the doc cites a −0.482 confidence interval two
+    # thousand lines away, and a needle that trips on that is a needle nobody keeps.)
     for retired in ("752.3", "98 rows", "161.5", "1,504.6",
-                    "the tail was never attributed"):
+                    "the tail was never attributed",
+                    "482 rows", "482 current-era", "824", "210 /", "596 /",
+                    "1,648", "1,700 ms"):
         assert retired not in flat, f"row 7 still carries the retired claim {retired!r}"
 
     # And the two ceilings must still be stated in the rendering the code's values
