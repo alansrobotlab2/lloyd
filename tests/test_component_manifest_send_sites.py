@@ -32,7 +32,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import component_manifest as cm  # noqa: E402
 from app import secondary_models  # noqa: E402
-from app.compaction_llm import _post_chat_completion  # noqa: E402
+from app.compaction_llm import (  # noqa: E402
+    SUMMARIZATION_SYSTEM_PROMPT,
+    _post_chat_completion,
+    summarize_history,
+)
 from app.harness.finalizer import run_finalizer  # noqa: E402
 from app.harness.loop import run_query  # noqa: E402
 from app.harness.options import RunOptions  # noqa: E402
@@ -502,6 +506,162 @@ def test_the_routed_jobs_record_their_system_prompt(stub_engine, monkeypatch):
     assert by_name["system_prompt"]["bytes"] == len(
         secondary_models._TITLE_SYSTEM.encode("utf-8"))
 
+
+def test_the_summariser_site_records_its_own_system_prompt(stub_engine, monkeypatch):
+    """#3091 clause 1: the last site at 100% unrecorded now names a component.
+
+    `summarize_history` composes its request itself and has no session to key the
+    component registry on, so `app/compaction_llm.py::_post_chat_completion` was the
+    one send site whose every line read `components_captured: "unrecorded"`. The
+    repo-resident tally says so directly —
+    `scripts/maintenance/components_unrecorded_tally.py 2026-10-19` prints
+    `app/compaction_llm.py::_post_chat_completion lines=30 unrecorded=30 100.0%`, and
+    2026-10-13, 14 and 15 print the same 30/30, while the two sites #1782 already
+    fixed print 0.0%. This drives the real `summarize_history` across the stub socket,
+    so the payload is the module's own and `record_request` is the shipped one; only
+    the endpoint is pinned, so the line cannot depend on what live config happens to
+    resolve. `components_captured` must become `send_site`.
+    """
+    monkeypatch.setattr("app.compaction_llm._summary_endpoint",
+                        lambda _model: ("http://127.0.0.1:8096", "sum-model"))
+
+    monkeypatch.setattr("app.compaction_llm.httpx.AsyncClient", _PostClient)
+
+    asyncio.run(summarize_history([{"role": "user", "content": "do the thing"},
+                                   {"role": "assistant", "content": "done"}],
+                                  model="sum-model"))
+    cm.flush(timeout=8.0)
+
+    line = _lines()[-1]
+    assert line["send_site"] == "app/compaction_llm.py::_post_chat_completion", line
+    assert line["components_captured"] == cm._SEND_SITE, (
+        f"the summariser line still reads the honest blank: {line}")
+
+
+def test_the_summarisers_component_is_the_system_message_that_was_posted(
+        stub_engine, monkeypatch):
+    """#3091 clause 2: exactly one component, and its pair is of THIS request.
+
+    One component, not two and not zero: the summariser composes only the system
+    message, and the history it is summarising already rides the line as its own
+    per-message digest rows. The comparison is against the body the stub was actually
+    POSTED rather than a literal copy, so a change to how `summarize_history` assembles
+    the prompt moves the digest here instead of quietly turning this into a test of a
+    stale string. The byte count must move with the digest: a prompt that grew while
+    somebody re-derived the hash would otherwise read as a same-length edit. And the
+    block stays `{sha256, bytes}` — a `text` field is where a prompt copy would hide,
+    which is #3091's other clause.
+    """
+    monkeypatch.setattr("app.compaction_llm._summary_endpoint",
+                        lambda _model: ("http://127.0.0.1:8096", "sum-model"))
+
+    monkeypatch.setattr("app.compaction_llm.httpx.AsyncClient", _PostClient)
+
+    asyncio.run(summarize_history([{"role": "user", "content": "do the thing"},
+                                   {"role": "assistant", "content": "done"}],
+                                  model="sum-model"))
+    cm.flush(timeout=8.0)
+
+    line = _lines()[-1]
+    names = [c["name"] for c in line["components"]]
+    assert names == ["system_prompt"], (
+        f"the summariser composes exactly one component: {names}")
+    posted = _system_message(_PostClient.posted[-1])
+    assert posted == SUMMARIZATION_SYSTEM_PROMPT, (
+        "this call sent something other than the shipped summariser prompt")
+    entry = line["components"][0]
+    assert entry["sha256"] == _sha(SUMMARIZATION_SYSTEM_PROMPT), (
+        "the named digest is not the summariser prompt's, recomputed by hashlib")
+    assert entry["sha256"] == _sha(posted), (
+        "the named digest is not of the system message the stub was posted")
+    assert entry["bytes"] == len(posted.encode("utf-8")), (
+        "the byte count does not match the prompt that was sent")
+    assert set(entry) == {"name", "sha256", "bytes"}, (
+        f"the component block is more than a name and its digest pair: {sorted(entry)}")
+
+
+def test_the_incremental_fold_names_the_prompt_it_actually_sends(stub_engine,
+                                                                monkeypatch):
+    """The prompt that reaches this site in production is the FOLD one, not that one.
+
+    Triage carried `summarize_history`'s `SUMMARIZATION_SYSTEM_PROMPT` as the component
+    this site owes, and a reader who took that on faith would have written a node that
+    passes for the wrong reason. `app/compaction_state.py:562` (`fold`) calls
+    `summarize_incremental`, and every one of the 120 unrecorded lines this site wrote
+    on 2026-10-13/14/15/19 carries a `role: system` row of exactly 1,675 bytes, whereas
+    `SUMMARIZATION_SYSTEM_PROMPT` is 2,814 bytes and `INCREMENTAL_SYSTEM_PROMPT` alone
+    is 1,605 — so that traffic is the fold path with the caller's focus appended, and
+    not one of those lines came from `summarize_history`. Both callers are pinned
+    because the send site is shared: naming the prompt actually sent is the fix, and
+    naming whichever one a reader expected is not.
+    """
+    from app.compaction_llm import INCREMENTAL_SYSTEM_PROMPT, summarize_incremental
+
+    monkeypatch.setattr("app.compaction_llm._summary_endpoint",
+                        lambda _model: ("http://127.0.0.1:8096", "sum-model"))
+    focus = "name the blocking item, never the round id"
+
+    asyncio.run(summarize_incremental("PRIOR SUMMARY",
+                                      [{"role": "user", "content": "fold me"},
+                                       {"role": "assistant", "content": "folded"}],
+                                      model="sum-model", instructions=focus))
+    cm.flush(timeout=8.0)
+
+    posted = _system_message(_PostClient.posted[-1])
+    assert posted.startswith(INCREMENTAL_SYSTEM_PROMPT), (
+        "the fold request no longer sends the incremental prompt")
+    assert focus in posted, "the caller's focus is no longer appended"
+    assert posted != INCREMENTAL_SYSTEM_PROMPT, (
+        "a call that passed a focus posted the bare constant, so the digest pinned "
+        "below would not be the one the request carried")
+
+    line = _lines()[-1]
+    assert line["components_captured"] == cm._SEND_SITE, (
+        f"the fold line still reads the honest blank: {line}")
+    assert [c["name"] for c in line["components"]] == ["system_prompt"], line
+    entry = line["components"][0]
+    assert entry["sha256"] == _sha(posted), (
+        "a call with a focus named the bare prompt instead of what it sent")
+    assert entry["bytes"] == len(posted.encode("utf-8")), (
+        "the byte count is the constant's, not the sent message's")
+
+
+def test_a_summariser_request_with_no_system_message_stays_unrecorded(
+        stub_engine):
+    """#3091 clause 3: no system message, no component — the blank stays honest.
+
+    `summarize_history` always sends one, but the helper names only what a payload
+    carries, so a call that does not must not be handed a component it never sent. This
+    is the branch the other non-session sites lean on too: `components_from_payload`
+    returns `{}` for an absent system message and for an empty one, and an empty dict
+    at `record_request` leaves `_build_line` falling through to `unrecorded` — reporting
+    the gap rather than inventing a digest of nothing. Both spellings go through the
+    site's own `record_request` call, because a unit test of the helper could not tell
+    an empty dict from one the call site dropped.
+    """
+    for label, msgs in (
+            ("no system message", [{"role": "user", "content": "summarise this"}]),
+            ("empty system message", [{"role": "system", "content": ""},
+                                      {"role": "user", "content": "summarise this"}]),
+    ):
+        lines_before = len(_lines())
+        asyncio.run(_post_chat_completion("http://127.0.0.1:8096", "cmp-model", msgs,
+                                          max_tokens=900, timeout_seconds=1.0))
+        cm.flush(timeout=8.0)
+        assert len(_lines()) == lines_before + 1, (
+            f"{label}: the summariser site wrote no line at all")
+        line = _lines()[-1]
+        assert line["send_site"] == "app/compaction_llm.py::_post_chat_completion", line
+        assert line["components_captured"] == cm._UNRECORDED, (
+            f"{label}: the line claims a component it does not have: {line}")
+        assert line["components"] == [], (
+            f"{label}: a component was fabricated out of nothing: {line['components']}")
+        # The helper is what keeps the empty dict from arriving as a claim: assert it
+        # too, so a future "improvement" returning {"system_prompt": ""} is caught here
+        # and not only in the line.
+        assert cm.components_from_payload({"messages": msgs}) == {}, (
+            f"{label}: components_from_payload named something for a payload that sends "
+            "no system prompt")
 
 def test_a_digest_pair_handed_over_inline_reads_as_the_same_row_as_the_text():
     """#1880 clause 3: one reader, two shapes, this path included.

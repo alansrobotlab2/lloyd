@@ -31,7 +31,7 @@ from typing import Any
 
 import httpx
 
-from app.component_manifest import record_request
+from app.component_manifest import components_from_payload, record_request
 
 from app.compaction import estimate_tokens, _message_text
 
@@ -168,8 +168,23 @@ async def _post_chat_completion(
     # #581: manifest this non-streaming send site too. Never raises and
     # never delays: the digest is of the payload built above, and the file
     # write happens on the manifest's writer thread.
+    #
+    # `components=`, the same form the observer and the routed jobs settled on
+    # (#1782): a summarisation has no session to key the registry on —
+    # `components_for("")` short-circuits to `{}` — so without this the line falls
+    # through to `components_captured: "unrecorded"`, even though this site's two
+    # callers each always send a system message they composed themselves:
+    # `summarize_history` sends `SUMMARIZATION_SYSTEM_PROMPT` and
+    # `summarize_incremental` sends `INCREMENTAL_SYSTEM_PROMPT`, either one with the
+    # caller's focus appended when there is one. That made this the last send site
+    # left at 100% unrecorded — 30 of 30 lines on each of 2026-10-13, 14, 15 and 19,
+    # all 120 of them carrying a `role: system` row of 1,675 bytes, which is
+    # `INCREMENTAL_SYSTEM_PROMPT` (1,605 B) plus a focus, so the incremental path is
+    # what that traffic was. What gets named here is that message's digest pair and
+    # nothing else; a payload with no system message keeps the honest blank.
     record_request(base_url=base_url, model=model_name, payload=payload,
-                   send_site="app/compaction_llm.py::_post_chat_completion")
+                   send_site="app/compaction_llm.py::_post_chat_completion",
+                   components=components_from_payload(payload))
     async with httpx.AsyncClient(timeout=timeout_seconds) as cli:
         resp = await cli.post(
             url,

@@ -593,6 +593,64 @@ def test_no_written_line_carries_component_text(tmp_path, monkeypatch):
     assert not (store / "blobs").exists()
 
 
+def test_the_summarisers_prompt_crossed_the_seam_and_still_arrives_as_a_digest(
+        monkeypatch):
+    """#3091 clause 4: naming that prompt must not turn the store into a prompt archive.
+
+    #3091 is the site's last unfixed one, and the component it now names is a large
+    # one — `SUMMARIZATION_SYSTEM_PROMPT` is 2,790 characters / 2,814 bytes of
+    # instructions the summariser is told to follow — so the temptation to "just keep
+    # a copy" is strongest exactly here. This drives the real `summarize_history`
+    # across this file's HTTP seam, so the prompt is written by the module, sent by
+    # the module and digested by the module; then every file under the store root is
+    # read back. Neither the prompt, nor a distinctive fragment of it, nor the
+    # caller's focus sentence, nor the transcript may appear; the component block
+    # must be a name plus a sha256 and a byte count, with no text field to hold one.
+    """
+    from app.compaction_llm import SUMMARIZATION_SYSTEM_PROMPT, summarize_history
+    from app.config import CONFIG
+
+    fragment = "You are summarizing a long conversation"
+    assert fragment in SUMMARIZATION_SYSTEM_PROMPT, (
+        "the fragment this test searches the store for is no longer in the prompt")
+    monkeypatch.setitem(CONFIG, "models", {
+        "primary": {"base_url": "http://127.0.0.1:8096", "engine": "vllm"},
+        "secondary": {"base_url": "http://127.0.0.1:8097", "engine": "llama.cpp"},
+    })
+    monkeypatch.setattr("app.compaction_llm.httpx.AsyncClient", Engine)
+
+    asyncio.run(summarize_history(
+        [{"role": "user", "content": "the block being summarized"}],
+        model="primary", instructions="keep the wire format"))
+    cm.flush(timeout=5.0)
+
+    store = Path(os.environ["LLOYD_MANIFEST_STORE"])
+    written = "\n".join(p.read_text(encoding="utf-8")
+                        for p in Path(store).rglob("*") if p.is_file())
+    assert written, "the store wrote nothing, so this test would pass vacuously"
+    assert SUMMARIZATION_SYSTEM_PROMPT not in written
+    assert fragment not in written
+    assert "Additional focus for this summary" not in written, (
+        "the focus sentence the caller supplied reached the store verbatim")
+    assert "the block being summarized" not in written
+
+    lines = [ln for ln in _lines(store)
+             if ln["send_site"] == "app/compaction_llm.py::_post_chat_completion"]
+    assert len(lines) == 1, lines
+    assert lines[0]["components_captured"] == "send_site", lines[0]
+    comp = lines[0]["components"]
+    assert [c["name"] for c in comp] == ["system_prompt"], comp
+    assert set(comp[0]) == {"name", "sha256", "bytes"}, (
+        f"the component carries more than a name and a digest pair: {comp[0]}")
+    assert len(Engine.posted) == 1, (
+        f"the summariser should have crossed the seam exactly once: {Engine.posted}")
+    system_sent = Engine.posted[-1]["messages"][0]["content"]
+    assert comp[0]["sha256"] == "sha256:" + hashlib.sha256(
+        system_sent.encode("utf-8")).hexdigest()
+    assert comp[0]["bytes"] == len(system_sent.encode("utf-8"))
+    assert not (store / "blobs").exists()
+
+
 def test_the_store_resolves_outside_every_git_tree(tmp_path):
     """Clause 5, mechanically: the default store has no git tree among its ancestors.
 
