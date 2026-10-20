@@ -860,7 +860,7 @@ def test_the_finalizer_budget_stays_8192_on_both_sides_of_the_reader():
 # these — it returns the SAME response to every POST, and the whole question is
 # how many posts a tick made.
 
-def _drive_steward_tick(board, monkeypatch, responses):
+def _drive_steward_tick(board, monkeypatch, responses, *, seed=True):
     """One board-steward tick over a queued engine; returns the row and the bodies.
 
     `run_prompt_in_session` is replaced by a call into the REAL
@@ -868,6 +868,11 @@ def _drive_steward_tick(board, monkeypatch, responses):
     canned dict would let this file assert an `attempts=2` string no code wrote.
     The returned list is every finalizer request body in order, so a count of
     re-samples is a count of requests on the wire.
+
+    `seed=False` skips `_ten_item_board`, which is how #3088's nodes drive a
+    SECOND tick over the window the first was shown: the fixture stamps its
+    events with `time.time()`, so re-seeding between ticks would move the window
+    and make two rows sharing a `since_ts` trivially different things.
     """
     from app.harness import finalizer as F
     from app.harness import loop as L
@@ -905,7 +910,8 @@ def _drive_steward_tick(board, monkeypatch, responses):
                 "num_turns": 1, "structured": parsed, "structured_error": error}
 
     monkeypatch.setattr(C, "run_prompt_in_session", turn)
-    _ten_item_board(board)
+    if seed:
+        _ten_item_board(board)
     return asyncio.run(W.execute(SimpleNamespace(payload={"apply": False}))), posted
 
 
@@ -966,6 +972,219 @@ def test_a_tick_the_re_sample_recovers_publishes_no_failure_at_all(board, monkey
     assert out["status"] == "success", out
     assert "no structured answer" not in out["summary"], out["summary"]
     assert "attempts" not in out["summary"], out["summary"]
+
+
+# ── #3088: a diverged tick publishes itself, and keeps the window it was shown ─
+#
+# 19 divergence failures over 511 board-steward ticks from 2026-10-05 to
+# 2026-10-20 wrote no `board_steward` ledger row at all: `execute` returned the
+# failed record two lines before `_write_state` and `S.append_event`. Each node
+# below drives a REAL diverged tick — the captured shape drawn twice through the
+# real `loop._maybe_finalize` against the real `STEWARD_SCHEMA` — and reads back
+# the promotion ledger and `board_steward.json` themselves, so what is asserted is
+# the artefact a later reader finds, not the return value that already existed.
+
+#: One live divergence message, as the queue store records it. Re-read it with:
+#: `sqlite3 -readonly ~/lloyd-data/workers.db "SELECT substr(summary,1,120) FROM
+#: runs WHERE source='board-steward' AND summary LIKE '%diverged%' ORDER BY
+#: started_at DESC LIMIT 1"`. The source string is `board-steward` WITH A HYPHEN:
+#: `source='board_steward'` matches 0 rows, which reads as "the steward never runs".
+_LIVE_DIVERGENCE = ("[attempts=2] finalizer failed: generation diverged at 8192 "
+                    "tokens — every field this schema admits is capped")
+
+
+def _steward_rows():
+    """Every `board_steward` row in the fixture's ledger, oldest first."""
+    return [e for e in S.read_events(path=S.LEDGER_PATH, limit=1000)
+            if e.get("event") == "board_steward"]
+
+
+def _two_diverged_ticks_over_one_window(board, monkeypatch):
+    """Two ticks, each drawn twice into the same divergence, over one un-moving window.
+
+    The watermark is seeded an hour back so `since_ts` is a number with meaning
+    rather than the `0.0` of a missing state file, and the second tick is driven
+    `seed=False`: re-seeding would stamp a fresh set of events, and the two ticks
+    would no longer have been shown the same window.
+    """
+    since = time.time() - 3600.0
+    W._write_state({"last_ts": since, "last_run": since, "last_session": "seeded"})
+    first, _ = _drive_steward_tick(board, monkeypatch, [_DIVERGED_TICK, _DIVERGED_TICK])
+    second, _ = _drive_steward_tick(board, monkeypatch, [_DIVERGED_TICK, _DIVERGED_TICK],
+                                    seed=False)
+    assert (first["status"], second["status"]) == ("failed", "failed"), (first, second)
+    return _steward_rows(), W._read_state(), since
+
+
+def test_a_diverged_tick_publishes_a_ledger_row_naming_the_divergence(board, monkeypatch):
+    """Clause 1: a tick whose finalizer returns no structured answer appends a
+    `board_steward` event saying the tick diverged and carrying the finalizer's own
+    `structured_error`, where today no row is written at all.
+
+    The row is the whole item: four sampled live failures had zero `board_steward`
+    rows inside their own [started_at, completed_at] windows, so the ledger could
+    not show that any of them had been tried.
+    """
+    out, _ = _drive_steward_tick(board, monkeypatch, [_DIVERGED_TICK, _DIVERGED_TICK])
+    assert out["status"] == "failed", out
+    rows = _steward_rows()
+    assert len(rows) == 1, f"one diverged tick, {len(rows)} board_steward rows: {rows}"
+    row = rows[0]
+    assert row["diverged"] is True, row
+    assert "diverged" in row["summary"], row
+    err = out["summary"].split("no structured answer: ", 1)[1]
+    assert row["structured_error"] == err[:W.DIVERGENCE_ERROR_MAX], row["structured_error"]
+    assert _LIVE_DIVERGENCE in row["structured_error"], row["structured_error"]
+    assert "attempts=2" in row["structured_error"], row["structured_error"]
+    # A tick that judged nothing must not read as a verdict: the row carries the
+    # empty answer, so a later reader cannot mistake it for `moves: []` from a
+    # steward that looked at the board and decided to move nothing.
+    assert row["moves"] == [] and row["applied"] == [] and row["next_pick"] == 0, row
+    assert row["events"] > 0 and row["items_shown"] > 0, row
+    assert row["apply"] is False, row
+
+
+def test_two_diverged_ticks_over_one_window_share_their_since_ts(board, monkeypatch):
+    """Clause 2: the row records the window the failed tick was shown, so a
+    re-presentation is two rows carrying one `since_ts`.
+
+    This is the shape of the 2026-10-07 pair the item was filed on — failed at
+    05:25:50, failed again at 05:41:24 one 900 s interval later over the 11 events
+    the first tick had already been shown plus 6 new ones. Before #3088 neither
+    tick left a row, so 'the same window was retried' was arithmetic on the run
+    store rather than something the ledger could say.
+    """
+    rows, state, since = _two_diverged_ticks_over_one_window(board, monkeypatch)
+    assert len(rows) == 2, rows
+    assert [r["since_ts"] for r in rows] == [since, since], rows
+    assert {r["newest_ts"] for r in rows} == {rows[0]["newest_ts"]}, rows
+    assert rows[0]["newest_ts"] > since, "the row must describe a real window"
+    assert state.get("last_ts", 0.0) == rows[-1]["since_ts"], (
+        "the row's `since_ts` has to be the watermark the tick actually read")
+
+
+def test_a_diverged_tick_records_the_attempt_and_leaves_last_ts_alone(board, monkeypatch):
+    """Clause 3: the attempt lands in `board_steward.json` with a per-window count,
+    and the watermark does not move — because the re-presentation IS the recovery
+    mechanism. 6 of the 10 divergences of 2026-10-04→10-07 were repaired by the
+    next scheduled tick reading the same window again; advancing `last_ts` here
+    would trade a visible retry for a window the steward never judges.
+    """
+    rows, state, since = _two_diverged_ticks_over_one_window(board, monkeypatch)
+    assert state["last_ts"] == since, "a failed tick moved the watermark"
+    assert state["divergent_since_ts"] == since, state
+    assert state["divergent_streak"] == 2, state
+    assert [r["streak"] for r in rows] == [1, 2], rows
+    assert state["divergent_newest_ts"] == rows[-1]["newest_ts"] == rows[0]["newest_ts"], state
+    assert state["last_session"] == "s", state
+    # The counter is per window, not global: a failure over a different `since_ts`
+    # starts again at 1 rather than inheriting this one's streak.
+    W._write_state({**state, "divergent_since_ts": since + 5.0})
+    out, _ = _drive_steward_tick(board, monkeypatch, [_DIVERGED_TICK, _DIVERGED_TICK],
+                                 seed=False)
+    assert out["status"] == "failed", out
+    after = W._read_state()
+    assert after["divergent_streak"] == 1, after
+    assert after["last_ts"] == since, "resetting the counter moved the watermark"
+
+
+def test_a_diverged_tick_still_returns_the_record_it_returned_before(board, monkeypatch):
+    """Clause 4: the record the queue stores is the one #2370 left, and publishing
+    the failure does not disturb it.
+
+    `attempts=2` is asserted inside the first 500 characters because that is the
+    `runs.summary` column, and the message ends in up to 200 characters of
+    captured completion — the same limit that makes the ledger's own copy capped at
+    `DIVERGENCE_ERROR_MAX` characters keep the diagnosis and drop only the excerpt.
+    """
+    out, posted = _drive_steward_tick(board, monkeypatch, [_DIVERGED_TICK, _DIVERGED_TICK])
+    assert out["status"] == "failed", out
+    assert out["meta"] == {"session_id": "s"}, out
+    assert out["summary"].startswith("no structured answer: "), out["summary"]
+    assert _LIVE_DIVERGENCE in out["summary"], out["summary"]
+    assert "diverged at 8192 tokens" in out["summary"], out["summary"]
+    assert "not a budget" in out["summary"], out["summary"]
+    assert "attempts=2" in out["summary"][:500], repr(out["summary"])
+    assert len(posted) == 2, f"publishing changed the retry policy: {len(posted)} draws"
+
+
+def test_a_ledger_or_state_write_failure_cannot_replace_the_failed_record(board, monkeypatch):
+    """Clause 4's other half: `S.append_event` RAISES by design
+    (`scripts/automod/state.py:176-177`), and #3088 puts a call to it on the
+    failure path — so a ledger that will not take the row has to leave the queue
+    with the same `failed` record rather than an exception out of `execute`.
+    """
+    real_append = S.append_event
+
+    def _refuse_steward_row(entry, path=None):
+        if entry.get("event") == "board_steward":
+            raise RuntimeError("the ledger refuses the steward's row")
+        return real_append(entry, path=path)
+
+    def _refuse_state(d):
+        raise RuntimeError("state is unwritable")
+
+    monkeypatch.setattr(S, "append_event", _refuse_steward_row)
+    monkeypatch.setattr(W, "_write_state", _refuse_state)
+    out, posted = _drive_steward_tick(board, monkeypatch, [_DIVERGED_TICK, _DIVERGED_TICK])
+    assert out["status"] == "failed", out
+    assert "diverged at 8192 tokens" in out["summary"], out["summary"]
+    assert "not a budget" in out["summary"], out["summary"]
+    assert "attempts=2" in out["summary"][:500], repr(out["summary"])
+    assert len(posted) == 2, posted
+    assert _steward_rows() == [], "the ledger append was supposed to raise"
+    assert W._read_state() == {}, "the state write was supposed to raise"
+
+
+def test_the_budget_the_caps_and_the_resample_guard_are_untouched(board, monkeypatch):
+    """Clause 5: what this item forbids is where #2197 and #2370 left it, and the
+    publish brought no budget knob of its own.
+
+    `test_the_finalizer_budget_stays_8192_on_both_sides_of_the_reader` and
+    `test_every_node_of_the_steward_schema_is_bounded` above already pin the number
+    through the reader and the caps through the finalizer's own helper, mutation
+    loop included. What only this round could break, and what this node adds, is
+    that neither the changed failure path nor the new helper passes a token budget
+    anywhere, and that the text the ledger now stores is still the text
+    `should_resample_divergence` fires on — a reworded or over-truncated copy would
+    silently stop the re-sample, which is the retry this item chose to keep.
+    """
+    import inspect
+
+    from app.harness import finalizer as F
+    from app.harness.options import RunOptions
+
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml")
+                         .read_text(encoding="utf-8"))
+    assert cfg["harness"]["finalizer"]["max_tokens"] == 8192
+    assert RunOptions(model="primary").finalizer_max_tokens == 8192
+    for fn in (W.execute, W._record_divergence):
+        src = inspect.getsource(fn)
+        assert "max_tokens" not in src, f"{fn.__name__} now names a token budget"
+        assert "finalizer_max_tokens" not in src, f"{fn.__name__} now sets a budget"
+
+    props = W.STEWARD_SCHEMA["properties"]
+    move_props = props["moves"]["items"]["properties"]
+    assert props["moves"]["maxItems"] == W.MOVES_MAX == 40
+    assert (move_props["note"]["maxLength"], props["next_pick_reason"]["maxLength"],
+            props["summary"]["maxLength"]) == (W.NOTE_MAX, W.REASON_MAX, W.SUMMARY_MAX) \
+        == (300, 300, 400)
+    for name in ("tags_add", "tags_remove"):
+        assert move_props[name]["maxItems"] == W.TAGS_MAX == 6, name
+        assert move_props[name]["items"]["maxLength"] == W.TAG_MAX == 40, name
+    assert F._schema_is_bounded(W.STEWARD_SCHEMA)
+    assert not F._schema_is_bounded(_unbound(W.STEWARD_SCHEMA))
+
+    out, _ = _drive_steward_tick(board, monkeypatch, [_DIVERGED_TICK, _DIVERGED_TICK])
+    row = _steward_rows()[-1]
+    assert F.should_resample_divergence(row["structured_error"], W.STEWARD_SCHEMA) is True, \
+        row["structured_error"]
+    assert F.should_resample_divergence(
+        row["structured_error"] + " raise harness.finalizer.max_tokens.",
+        W.STEWARD_SCHEMA) is False, "the budget exclusion stopped firing"
+    assert F.should_resample_divergence(row["structured_error"],
+                                        _unbound(W.STEWARD_SCHEMA)) is False, (
+        "the unbounded-schema exclusion stopped firing")
 
 
 # ── #2197 clause 5: the failure counts have committed bytes behind them ──────

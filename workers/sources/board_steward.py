@@ -283,6 +283,75 @@ def _write_state(d: dict) -> None:
     p.write_text(json.dumps(d, indent=2), encoding="utf-8")
 
 
+#: How much of the finalizer's own `structured_error` a divergence row keeps. The
+#: live `runs.summary` column is capped at 500 characters and the message ends in
+#: up to 200 characters of captured completion (`app/harness/finalizer.py` files a
+#: divergence with `content[:200]!r`), so 400 keeps the whole diagnosis — the
+#: `diverged at 8192 tokens … not a budget` phrase and the `attempts=2` count that
+#: #2370 puts in front of it — and drops only the excerpt's tail.
+DIVERGENCE_ERROR_MAX = 400
+
+
+def _record_divergence(*, state: dict, apply: bool, since_ts: float, newest: float,
+                       events: int, items_shown: int, session_id: str | None,
+                       err_text: str) -> None:
+    """Publish a tick the finalizer never answered, and leave its window alone.
+
+    #3088. `execute` used to return the failed record two lines before
+    `_write_state` and `S.append_event`, so a diverged tick left nothing at all in
+    the promotion ledger: the 19 divergence failures over 511 board-steward ticks
+    from 2026-10-05 to 2026-10-20 produced no `board_steward` row between them —
+    four sampled runs, zero rows inside any one's [started_at, completed_at] — so
+    the ledger could not even show that a window had been tried. The 2026-10-07
+    pair is what that blindness hid: the tick at 05:25:50 failed, the next fired
+    one 900 s interval later at 05:41:24 with only 6 new events in, and its window
+    was the 11 events the first tick had already been shown plus those 6. That is
+    a re-presentation proven by arithmetic, and invisible to every later reader.
+
+    The window is deliberately NOT advanced. `tests/test_board_steward.py` records
+    that 6 of the 10 divergences of 2026-10-04→10-07 were recovered on the NEXT
+    scheduled tick, which is exactly what re-reading an un-advanced window buys;
+    moving `last_ts` here would trade a visible retry for a window the steward
+    never judges at all. What the failure path gains is the record: one state
+    write and one ledger row per failed tick, with `last_ts` passed through
+    untouched. `since_ts` is the row's join key — two failures over one window
+    carry the same value, which is what 'this window was retried' looks like.
+
+    `S.append_event` RAISES on failure (`scripts/automod/state.py:176-177`, on
+    purpose, unlike autoresearch's best-effort append), so both writes are
+    swallowed here: a tick that could not be judged stays a `failed` tick whatever
+    the ledger does about it, which is the guarantee #3088 clause 4 pins.
+    """
+    from scripts.automod import state as S
+    # A streak is per window, not global: a success replaces the state dict whole
+    # (`_write_state` at the foot of `execute`), so the counter only ever grows
+    # while the same `since_ts` is still the one being retried.
+    streak = (int(state.get("divergent_streak") or 0) + 1
+              if float(state.get("divergent_since_ts") or 0.0) == since_ts else 1)
+    try:
+        _write_state({**state,
+                      "last_run": time.time(),
+                      "last_session": session_id,
+                      "divergent_since_ts": since_ts,
+                      "divergent_newest_ts": newest,
+                      "divergent_ts": time.time(),
+                      "divergent_streak": streak})
+    except Exception as exc:  # noqa: BLE001 — the record is extra, the verdict is not
+        logger.warning("board steward: diverged state write failed: %s", exc)
+    try:
+        S.append_event({"event": "board_steward", "apply": apply,
+                        "diverged": True, "streak": streak,
+                        "structured_error": err_text[:DIVERGENCE_ERROR_MAX],
+                        "since_ts": since_ts, "newest_ts": newest,
+                        "events": events, "items_shown": items_shown,
+                        "moves": [], "next_pick": 0, "next_pick_reason": "",
+                        "applied": [], "session_id": session_id,
+                        "summary": f"tick diverged, no structured answer "
+                                   f"({events} events shown)"})
+    except Exception as exc:  # noqa: BLE001 — same reason: never replace the record
+        logger.warning("board steward: diverged ledger append failed: %s", exc)
+
+
 # ── input ────────────────────────────────────────────────────────────────
 
 def events_since(ledger: Path, since_ts: float, *, limit: int = DEFAULT_MAX_EVENTS,
@@ -603,7 +672,18 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     parsed = parse_steward(run.get("structured"))
     if parsed is None:
-        return {"status": "failed", "summary": f"no structured answer: {run.get('structured_error')}",
+        # Publish the failure and keep the window: `last_ts` is passed through
+        # inside `_record_divergence`, so the next tick re-reads exactly this
+        # window — the re-presentation that recovered 6 of the 10 divergences of
+        # 2026-10-04→10-07 — and the ledger now shows that it is a retry (#3088).
+        err = run.get("structured_error")
+        _record_divergence(state=state, apply=apply, since_ts=since_ts,
+                           newest=max((float(d.get("ts") or 0) for d in events),
+                                      default=since_ts),
+                           events=len(events), items_shown=len(shown),
+                           session_id=run.get("session_id"),
+                           err_text=str(err) if err is not None else "")
+        return {"status": "failed", "summary": f"no structured answer: {err}",
                 "meta": {"session_id": run.get("session_id")}}
 
     agree = agreement(parsed["moves"], expected, current)
