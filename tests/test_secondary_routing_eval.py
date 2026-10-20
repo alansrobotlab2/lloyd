@@ -100,6 +100,23 @@ def _fake_transport(monkeypatch, content: str = "ok", completion: int = 42) -> l
     return seen
 
 
+def _flag(monkeypatch, secondary_enabled):
+    """Pin `secondary_enabled` for one node, with the once-per-process
+    alias-rewrite log set cleared so no test inherits another one's state.
+
+    A harness node that reaches the secondary engine needs this spelled out now
+    that #3038 exists: `voice`'s rewrite skips the call entirely while the slot
+    is off, so a node measuring *the call* cannot inherit the live config's
+    value — `secondary_slot_state()` would refuse a real eval run in that state
+    anyway, which is exactly what "the eval can only be measured with the slot
+    on" means. `test_the_live_config_leaves_the_voice_arm_measurable` is the node
+    that reads the flag instead of pinning it."""
+    from app import config as app_config
+    monkeypatch.setitem(app_config.CONFIG, "secondary_enabled", secondary_enabled)
+    monkeypatch.setattr(app_config, "_ALIAS_REWRITES_LOGGED", set(), raising=False)
+    return app_config
+
+
 def test_primary_arm_really_reaches_the_primary_engine(monkeypatch):
     """The one claim the comparison rests on, checked from the URL the call
     used rather than from the label the run asked for.
@@ -151,6 +168,13 @@ def test_recording_installs_its_spy_and_takes_it_back_off(monkeypatch):
         calls.append(urllib.request.urlopen)     # what production saw at call time
         return _FakeResponse(body)
 
+    # The slot pinned ON, as its sibling two nodes above does and for the same
+    # reason: this node's subject is the call production makes, and #3038 made
+    # `voice` skip that call outright while `secondary_enabled` is false — which
+    # is the live value, so without this the function returns before the spy is
+    # ever reached and `output_tokens` is None. The skip is what
+    # test_the_harness_cannot_measure_the_voice_arm_with_the_slot_off is about.
+    _flag(monkeypatch, True)
     monkeypatch.setattr(urllib.request, "urlopen", fake)
     item = {"id": "voice-2", "input": "text with | a table", "anchors": []}
 
@@ -1594,3 +1618,261 @@ def test_the_static_guards_still_check_what_they_checked():
     assert sm._engine_for("voice") == "secondary"
     recorded = ev.load_decisions()
     assert ev.router_source(ev.ROUTER_PATH) == frozenset(recorded["on_primary"])
+
+
+# ── #3038: with the decided engine absent the rewrite is skipped, not rerouted ─
+
+#: 540 chars of the shape the voice route receives on a spoken turn: a heading, a
+#: bullet with inline code, a markdown link, a numbered list, a fenced block and
+#: both flavours of asterisk emphasis. The item's acceptance check POSTs 540
+#: chars, so this fixture *is* that input. It is over `_TRIVIAL_MAX_CHARS` (300)
+#: and carries markup, so `_is_trivially_speakable` is false for it and a rewrite
+#: would be paid for on the wrong engine on every turn.
+_MARKDOWN_REPLY = (
+    "## Nightly eval\n"
+    "- `doc_recall` came out at 0.550 on the pinned corpus\n"
+    "- the [retrieval eval](https://example.invalid/retrieval) arm moved up\n"
+    "1. the compare step reads its three columns again\n"
+    "2. nothing about this reply is a table\n"
+    "```\n$ pytest tests/test_secondary_routing_eval.py\n169 passed in 90.64s\n```\n"
+    "So the **pinned** corpus is fine and the score is the *code's*, not the "
+    "index's. The runner's defaults import from `agent_mcp.vault`, which is the "
+    "part the rework touched, and both stale columns are entirely gone"
+    " today. The flag is on."
+)
+
+#: 410 chars of plain prose with no markup of any kind — over the 300-char
+#: trivial cap, so it reaches the rewrite too, and it is the case that separates a
+#: cleanup from a rewrite: the cleanup must hand it back byte-identical.
+_PLAIN_REPLY = (
+    "The nightly eval ran and the pinned corpus score did not move, so the "
+    "compare step is reading the three columns it is supposed to read and the "
+    "runner's defaults still name the loader they always named. Nothing about "
+    "the rework changed what the report says, and no gate moved either. The two "
+    "static guards read the same two things they read before, which is the part "
+    "a doc-only change could quietly have broken."
+)
+
+
+class _SpyUrlopen:
+    """A `urlopen` stand-in that records every call and never touches a socket.
+
+    The skip is only real if nothing is dialled, so the skip tests assert this
+    recorded zero calls and the enabled-path test asserts exactly one. Replies in
+    the shape an OpenAI-compatible server sends, because `_chat_secondary` reads
+    `choices[0].message.content` and nothing else."""
+
+    def __init__(self, content="The nightly eval ran clean and the score held."):
+        self.calls = []
+        self._content = content
+
+    def __call__(self, req, timeout=None, **kw):
+        self.calls.append((req.full_url, req.data, timeout))
+        body = json.dumps(
+            {"choices": [{"message": {"content": self._content}}]}).encode()
+
+        class _Resp:
+            def read(self_inner):
+                return body
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+        return _Resp()
+
+
+def _post_summarize(text):
+    """One `POST /api/voice/summarize` against the router in a bare app — the
+    route's own surface, no server, no port, no engine."""
+    pytest.importorskip("fastapi")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.routers import voice as voice_router
+
+    app = FastAPI()
+    app.include_router(voice_router.router)
+    return TestClient(app).post("/api/voice/summarize", json={"text": text})
+
+
+def test_the_two_fixtures_are_the_shapes_the_skip_is_for():
+    """The precondition every test here leans on, measured once. `_MARKDOWN_REPLY`
+    is 540 chars — the input the item's acceptance check POSTs — and
+    `_PLAIN_REPLY` is 410. Both are over `_TRIVIAL_MAX_CHARS`, so both reach the
+    rewrite whatever their markup, which is why the skip has to be a decision
+    about the engine and never about the text."""
+    assert sm._TRIVIAL_MAX_CHARS == 300
+    assert len(_MARKDOWN_REPLY) == 540, len(_MARKDOWN_REPLY)
+    assert len(_PLAIN_REPLY) == 410, len(_PLAIN_REPLY)
+    assert sm._is_trivially_speakable(_MARKDOWN_REPLY) is False
+    assert sm._is_trivially_speakable(_PLAIN_REPLY) is False
+
+
+def test_no_call_is_made_when_voice_s_decided_engine_is_absent(monkeypatch):
+    """Clause 1: `secondary_enabled: false`, the decision still says `secondary`,
+    and the function returns None having made **zero** `urlopen` calls. Not a call
+    that failed, not a call rerouted to the primary — the primary is the engine
+    that just wrote this very text, so any call here is the cost with none of the
+    benefit the decision was about."""
+    spy = _SpyUrlopen()
+    monkeypatch.setattr(urllib.request, "urlopen", spy)
+    _flag(monkeypatch, False)
+
+    assert sm._engine_for("voice") == "secondary", "decisions.yaml still says secondary"
+    assert sm._secondary_engine_present() is False
+
+    assert sm._sync_secondary_voice_summary(_MARKDOWN_REPLY) is None
+    assert spy.calls == [], "a skip must make no HTTP call at all"
+
+
+def test_the_route_answers_used_summary_false_with_a_cleaned_fallback(monkeypatch):
+    """Clause 2: the same flag through `POST /api/voice/summarize`. It answers
+    `used_summary: false` and a **non-empty** `summary` derived from the input.
+    `agent-services/livekit_worker.py`'s existing fallback branch returns
+    `summary or text`, so this string is what gets spoken — an empty one would
+    speak the raw markdown, which is the thing `_NON_TRIVIAL_PATTERN` exists to
+    prevent."""
+    spy = _SpyUrlopen()
+    monkeypatch.setattr(urllib.request, "urlopen", spy)
+    _flag(monkeypatch, False)
+
+    body = _post_summarize(_MARKDOWN_REPLY).json()
+
+    assert body["used_summary"] is False, body
+    assert spy.calls == [], "the route must skip, not fail over"
+    summary = body["summary"]
+    assert summary, body
+    assert summary == sm._spoken_fallback(_MARKDOWN_REPLY), body
+    assert len(summary) <= sm._SPOKEN_FALLBACK_MAX_CHARS, len(summary)
+
+
+def test_the_rewrite_makes_exactly_one_call_when_the_engine_is_present(monkeypatch):
+    """Clause 3: the skip is a presence check and nothing more. With the slot on,
+    the call happens — once, at the endpoint the decision chose (`:8091`, not the
+    primary's `:8096`), carrying the text as the user turn — and the route hands
+    the model's own text back as `used_summary: true`."""
+    spoken = "The nightly eval ran clean and the score held."
+    spy = _SpyUrlopen(spoken)
+    monkeypatch.setattr(urllib.request, "urlopen", spy)
+    _flag(monkeypatch, True)
+
+    assert sm._secondary_engine_present() is True
+    out = sm._sync_secondary_voice_summary(_MARKDOWN_REPLY)
+
+    assert out == spoken, out
+    assert len(spy.calls) == 1, spy.calls
+    url, data, _timeout = spy.calls[0]
+    assert url == "http://127.0.0.1:8091/v1/chat/completions", url
+    payload = json.loads(data)
+    assert payload["model"] == "secondary", payload
+    assert payload["messages"][-1]["content"] == _MARKDOWN_REPLY
+
+    body = _post_summarize(_MARKDOWN_REPLY).json()
+    assert body == {"summary": spoken, "used_summary": True}, body
+    assert len(spy.calls) == 2, "the route made its own one call, not two"
+
+
+def test_the_spoken_fallback_is_deterministic_bounded_and_leaves_prose_alone():
+    """Clause 4: the cleanup the skip hands the speaker, with no model in the
+    loop. Fenced code and its fences gone; heading, bullet and numbered-list
+    markers gone; asterisk emphasis and inline-code backticks gone; a markdown
+    link reduced to its label; the result bounded to `_SPOKEN_FALLBACK_MAX_CHARS`
+    = 1200 on a sentence boundary. The 410-char plain reply comes back
+    byte-identical — that is the assertion that makes this a cleanup and not a
+    rewrite — and the same bytes always give the same answer."""
+    assert sm._SPOKEN_FALLBACK_MAX_CHARS == 1200
+
+    assert sm._spoken_fallback(_PLAIN_REPLY) == _PLAIN_REPLY
+
+    out = sm._spoken_fallback(_MARKDOWN_REPLY)
+    assert out == sm._spoken_fallback(_MARKDOWN_REPLY)
+    for gone in ("```", "## ", "$ pytest", "pytest tests/", "[retrieval eval](",
+                 "https://example.invalid", "**", "`", "- `doc_recall`",
+                 "1. ", "2. "):
+        assert gone not in out, (gone, out)
+    assert "doc_recall came out at 0.550 on the pinned corpus" in out, out
+    assert "retrieval eval arm moved up" in out, out
+    assert "pinned corpus is fine" in out, out
+    assert not [ln for ln in out.split("\n")
+                if ln.lstrip().startswith(("#", "-", "1.", "2."))], out
+
+    long_text = (_PLAIN_REPLY + " ") * 6           # ~2.5 KB of plain prose
+    assert len(long_text) > 1200, len(long_text)
+    bounded = sm._spoken_fallback(long_text)
+    assert len(bounded) <= 1200, len(bounded)
+    assert long_text.startswith(bounded), "the bound cuts; it does not summarise"
+    assert bounded.endswith("."), repr(bounded[-40:])
+
+
+def test_each_skip_logs_one_info_line_naming_the_job_and_the_reason(monkeypatch, caplog):
+    """Clause 5: a skip is only countable if it says so. One INFO per request from
+    either entry point — and those two are the only two a turn can reach, so a
+    skipped turn logs one line and never two. #1445's `routed job 'voice'` line
+    must **not** appear on this path: its claim is that a call was made to an
+    endpoint the decision did not choose, and after a skip no endpoint is resolved
+    at all. With the engine present, no skip line, because one would describe a
+    call that in fact happened."""
+    import logging
+    spy = _SpyUrlopen()
+    monkeypatch.setattr(urllib.request, "urlopen", spy)
+
+    def skip_lines():
+        with caplog.at_level(logging.INFO):
+            caplog.clear()
+            sm._sync_secondary_voice_summary(_MARKDOWN_REPLY)
+            direct = [r.getMessage() for r in caplog.records
+                      if "voice rewrite SKIPPED" in r.getMessage()]
+            caplog.clear()
+            _post_summarize(_MARKDOWN_REPLY)
+            route = [r.getMessage() for r in caplog.records
+                     if "voice rewrite SKIPPED" in r.getMessage()]
+        return direct, route
+
+    _flag(monkeypatch, False)
+    direct, route = skip_lines()
+
+    assert len(direct) == 1 and len(route) == 1, (direct, route)
+    for line in (direct[0], route[0]):
+        assert "'voice'" in line, line
+        assert "decided engine absent" in line, line
+        assert "no call made" in line, line
+        assert "routed job" not in line, line
+
+    _flag(monkeypatch, True)
+    with caplog.at_level(logging.INFO):
+        caplog.clear()
+        sm._sync_secondary_voice_summary(_MARKDOWN_REPLY)
+        assert [r.getMessage() for r in caplog.records
+                if "voice rewrite SKIPPED" in r.getMessage()] == []
+    assert len(spy.calls) == 1, spy.calls
+
+
+def test_the_harness_cannot_measure_the_voice_arm_with_the_slot_off(monkeypatch, caplog):
+    """The consequence the two harness nodes above now pin around. `run_trial` calls
+    the production function unmodified, so with the slot off a `voice` trial
+    measures a skip: no endpoint recorded, no tokens, both arms identical. That is
+    the same state `secondary_slot_state()` refuses a real eval run for — "both arms
+    reach one engine by design, not by accident" — reached here for the first time
+    by the skip rather than by the alias rewrite, and named in the log this time.
+    It is why the harness nodes pin the flag instead of inheriting it, and why a
+    decision-grade re-run of this eval is the only thing that can put `voice` back
+    on a measured rewrite."""
+    import logging
+    spy = _SpyUrlopen()
+    monkeypatch.setattr(urllib.request, "urlopen", spy)
+    _flag(monkeypatch, False)
+    item = {"id": "voice-2", "input": "text with | a table", "anchors": []}
+
+    assert ev.secondary_slot_state()[0] is False, "the state the harness refuses to run in"
+    with caplog.at_level(logging.INFO):
+        caplog.clear()
+        row = ev.run_trial("voice", item, "secondary")
+
+    assert spy.calls == [], "a skipped rewrite records nothing for the trial to read"
+    assert row["endpoint"] is None, row
+    assert row["output_tokens"] is None, row
+    assert row["error"] is None, "a skip is not an engine failure"
+    assert any("decided engine absent" in r.getMessage() for r in caplog.records), (
+        "the trial has to say why it measured nothing, or it reads as a dead engine")

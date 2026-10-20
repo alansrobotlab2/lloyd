@@ -284,6 +284,131 @@ _NON_TRIVIAL_PATTERN = re.compile(
 
 _TRIVIAL_MAX_CHARS = 300
 
+#: How long the model-free form of a skipped voice rewrite (#3038) may run.
+#: A spoken turn is TTS'd whole, so this is a ceiling and not a target:
+#: `_TRIVIAL_MAX_CHARS` is the length under which the route never asks for a
+#: rewrite at all, and a long answer that loses its tail is the price of having
+#: no engine to shorten it with. The cut lands on a sentence boundary when one
+#: falls inside the window.
+_SPOKEN_FALLBACK_MAX_CHARS = 1200
+
+#: Fenced code, whole, with its fences. The closing fence is optional because a
+#: truncated reply often never carries it.
+_FENCED_CODE_RE = re.compile(
+    r"^[ \t]*```[^\n]*\n.*?(?:^[ \t]*```[ \t]*$|\Z)", re.MULTILINE | re.DOTALL)
+
+#: A markdown link → its label. The URL is what a listener cannot hear; the
+#: label is what it stood for.
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+
+#: `**strong**` must be the first alternative or a bold's surviving pair of
+#: asterisks would be spoken as markup. **Underscore emphasis is deliberately
+#: not handled**: `_` is both an emphasis marker and an identifier character in
+#: the Python names these replies quote constantly (`doc_recall`,
+#: `_SPOKEN_FALLBACK_MAX_CHARS`), and guessing which is which is exactly the
+#: judgement the skipped model was for. An asterisk never occurs inside an
+#: identifier, so this rule cannot cost a name.
+_MD_EMPHASIS_RE = re.compile(r"\*\*(.+?)\*\*|\*(.+?)\*|\*\*")
+
+#: Heading, quote, bullet and numbered-list markers, in line position only.
+_MD_LINE_PREFIX_RE = re.compile(
+    r"^[ \t]*(?:#{1,6}[ \t]+|[>*][ \t]+|[-*+][ \t]+|\d{1,3}[.)][ \t]+)", re.MULTILINE)
+
+
+def _keep_marker_text(match: re.Match) -> str:
+    """The text between emphasis markers, or nothing for a lone leftover marker."""
+    for group in match.groups():
+        if group:
+            return group
+    return ""
+
+
+def _secondary_engine_present() -> bool:
+    """Is the slot `_engine_for` routes every non-`JOBS_ON_PRIMARY` job to actually on one?
+
+    `app.config.resolve_model_alias` rewrites the `secondary` alias to `primary`
+    while the flag is false — that rewrite is the whole reason `decisions.yaml`'s
+    `voice: keep_secondary` and a `:8096` endpoint coexist — so the flag is the
+    predicate. The default is `False` to match that resolver and the two other
+    readers of the key (`app/llm_slots.py`, `app/routers/models.py`): a `True`
+    here would call the slot present when the key is absent while the resolver
+    sent every caller to the primary, which is the mismatch this function exists
+    to notice. It reads `CONFIG` live (the resolver memoises per alias, not
+    this), so the answer follows the flag without a restart.
+    """
+    from app.config import CONFIG
+    return bool(CONFIG.get("secondary_enabled", False))
+
+
+def _voice_rewrite_engine_absent() -> bool:
+    """Is `voice`'s rewrite pointed at an empty slot?
+
+    The decision says `keep_secondary` (`eval/secondary-routing/decisions.yaml`)
+    while the alias says the primary, which is `secondary_enabled: false`
+    rewriting it in `app/config.py::resolve_model_alias`. Both halves are needed:
+    a job in `JOBS_ON_PRIMARY` is *meant* to be on the primary and has no absent
+    engine to skip for.
+    """
+    return _engine_for("voice") == "secondary" and not _secondary_engine_present()
+
+
+def _log_voice_rewrite_skipped(char_count: int) -> None:
+    """The one INFO line that marks a skipped voice rewrite (#3038).
+
+    Stands beside the #1445 `routed job 'voice'` line in `_endpoint` and replaces
+    it on this path: that one says a call was made to an endpoint the decision
+    did not choose, and after a skip no endpoint is reached, so it would be
+    false. #1445 made its line once per process; this one cannot be, because the
+    route behind it runs every spoken turn — so the count that matters is this
+    line's occurrences, and it is emitted from exactly two call sites that a
+    single request can only ever reach one of.
+    """
+    logging.getLogger("lloyd-server").info(
+        "[secondary-routing] voice rewrite SKIPPED: job 'voice' decided engine absent "
+        "(decisions.yaml records 'keep_secondary' while the 'secondary' alias is rewritten "
+        "with secondary_enabled false) — reason: decided engine absent, no call made; "
+        "%d chars get the deterministic cleanup instead",
+        char_count,
+    )
+
+
+def _spoken_fallback(text: str) -> str:
+    """What to speak when the voice rewrite is skipped: the reply, cleaned, no model.
+
+    The model exists because markdown, code and lists do not TTS gracefully —
+    `_NON_TRIVIAL_PATTERN` is that argument in regex form — so skipping the call
+    cannot hand the speaker the markup verbatim. This is the deterministic half
+    of the same job: fenced code and its fences gone, a link reduced to its
+    label, `**bold**`/`*em*`/`` `code` `` markers stripped, heading, quote and
+    list markers removed, blank lines squeezed (a blank line is a pause, not
+    content), then bounded to `_SPOKEN_FALLBACK_MAX_CHARS` on a sentence
+    boundary. Plain prose with no blank lines comes back byte-identical, and the
+    same bytes always give the same answer — nothing here is sampled.
+
+    Deliberately not done: a table's pipes survive, and so does `_underscore_`
+    emphasis. Flattening a table into spoken order is a judgement, and `_` is
+    both an emphasis marker and an identifier character in the Python names
+    these replies quote — telling them apart is the judgement the skipped model
+    was for. #3038's list is markers, not tables and not underscores.
+    """
+    s = (text or "").strip()
+    if not s:
+        return ""
+    s = _FENCED_CODE_RE.sub("", s)
+    s = _MD_LINK_RE.sub(r"\1", s)
+    s = _MD_EMPHASIS_RE.sub(_keep_marker_text, s)
+    s = s.replace("`", "")
+    s = _MD_LINE_PREFIX_RE.sub("", s)
+    s = re.sub(r"[ \t]+$", "", s, flags=re.MULTILINE)
+    s = re.sub(r"\n{2,}", "\n", s).strip()
+    if len(s) > _SPOKEN_FALLBACK_MAX_CHARS:
+        cut = s[:_SPOKEN_FALLBACK_MAX_CHARS]
+        # `str.rfind` answers -1 for "not in this window", so the best of the
+        # four is either a real boundary or every one of them missing.
+        best = max(cut.rfind(sep) for sep in ("\n", ". ", "! ", "? "))
+        s = cut[:best + 1].strip() if best >= 0 else cut.rstrip()
+    return s
+
 
 def _is_trivially_speakable(text: str) -> bool:
     """True when `text` is short, plain prose that can be TTS'd as-is.
@@ -305,9 +430,29 @@ def _sync_secondary_voice_summary(primary_text: str, timeout: float = 15.0) -> O
 
     Returns the spoken-form text, or None on failure (caller should fall
     back to the original primary text).
+
+    #3038 (from #1445's ruling B): when `voice`'s decided engine is the
+    secondary and the slot is empty, this returns None **before** resolving an
+    endpoint, so the request is never paid for. `decisions.yaml` records
+    `voice: keep_secondary` while `secondary_enabled: false` sends the alias to
+    the primary, and the primary is the engine that just produced this very
+    text — asking it to rewrite its own answer buys the thing the decision
+    declined. #1445's other branch (a decision-grade re-run re-pinning `voice`)
+    is a human call whose own file header forbids hand-editing, so the rewrite
+    is skipped instead of rerouted. `app/routers/voice.py` turns a skipped
+    rewrite into `used_summary: false` carrying `_spoken_fallback(text)`, and the
+    LiveKit worker's existing fallback branch speaks that. With the slot on, the
+    call below is unchanged.
     """
     text = (primary_text or "").strip()
     if not text:
+        return None
+
+    if _voice_rewrite_engine_absent():
+        # Before `_endpoint`, which is the point: reaching it would log #1445's
+        # `routed job 'voice'` line, and that line's whole claim is that a call
+        # went to an endpoint the decision did not choose.
+        _log_voice_rewrite_skipped(len(text))
         return None
 
     url, model_name = _endpoint("voice")

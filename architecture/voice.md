@@ -1086,10 +1086,13 @@ next thing the user says is still heard.
 - **`voice_turn` registers the turn id before any text exists**, into
   `_streamed_turns`. Assistant rows now carry `turn_id`
   (`app/transcript_entries.py`, both writers), and the session poller — which
-  still covers typed and ambient turns, rewrite included, though with
-  `secondary_enabled: false` since 2026-09-20 `resolve_model_alias` sends that
-  `/api/voice/summarize` call to the **primary**, the engine this rework moved
-  off it (see #1445) — skips any row a streamed turn wrote. Registered first,
+  still covers typed and ambient turns, rewrite included, though since
+  2026-09-20's `secondary_enabled: false` that `/api/voice/summarize` call is
+  **skipped while the secondary is absent** (#3038, #1445's ruling B): the route
+  answers `used_summary: false` carrying a deterministic cleanup of the text,
+  rather than paying the primary (the engine this rework moved off, and the one
+  that just wrote that text) to rewrite its own answer — see #1445 — skips any
+  row a streamed turn wrote. Registered first,
   the stream cannot race the poller for its own reply.
 - **Text before a tool call is said before the tool runs** ("Let me check the
   calendar."): `tool_start` flushes the clause stream.

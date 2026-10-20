@@ -499,6 +499,12 @@ async def voice_summarize(request: Request):
     call fails or returns empty — caller should still TTS the text but knows
     it's the raw primary, not the spoken rewrite. Caller does not need to
     branch on this; the convenience is just for logging/telemetry.
+
+    One false case is not a failure and does not echo the input: with
+    `voice`'s decided engine absent (#3038) no call is made at all, and
+    `summary` carries the deterministic cleanup of the input instead of its
+    markup — see `_spoken_fallback`. `used_summary` is still false, so
+    `agent-services/livekit_worker.py`'s existing fallback branch speaks it.
     """
     data = await request.json() if (await request.body()) else {}
     text = (data.get("text") or "").strip()
@@ -507,7 +513,10 @@ async def voice_summarize(request: Request):
 
     from app.secondary_models import (
         _is_trivially_speakable,
+        _log_voice_rewrite_skipped,
+        _spoken_fallback,
         _sync_secondary_voice_summary,
+        _voice_rewrite_engine_absent,
     )
 
     # Fast path: short, plain-prose replies don't benefit from a rewrite —
@@ -515,6 +524,18 @@ async def voice_summarize(request: Request):
     if _is_trivially_speakable(text):
         logger.info("voice_summarize: skipped secondary (%d chars, plain prose)", len(text))
         return JSONResponse({"summary": text, "used_summary": False})
+
+    # #3038: `voice`'s decision is `keep_secondary` and the secondary slot is
+    # empty, so the only engine that could take this call is the one that just
+    # wrote the text. Answer with the model-free cleanup — `_spoken_fallback`,
+    # because `_is_trivially_speakable` already proved this text carries markup
+    # or runs past 300 chars, which is the exact reason the rewrite exists — and
+    # let the worker's `used_summary: false` branch speak it. Checked here rather
+    # than inferred from the None below because that None is also what a real
+    # transport failure returns, and a failure must keep echoing the raw text.
+    if _voice_rewrite_engine_absent():
+        _log_voice_rewrite_skipped(len(text))
+        return JSONResponse({"summary": _spoken_fallback(text), "used_summary": False})
 
     # _sync_secondary_voice_summary uses urllib (sync). Run in executor so we
     # don't block the FastAPI event loop on the secondary's response time
