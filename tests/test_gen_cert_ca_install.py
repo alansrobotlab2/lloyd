@@ -848,3 +848,272 @@ def test_no_executable_line_under_scripts_reaches_system_trust() -> None:
     assert not offenders, (
         "these lines execute the machine-wide trust update that #1241 ruled a "
         "person's job: " + "; ".join(offenders))
+
+
+# ── #3073: gen-cert.sh reads the trust back after it installs ──────────────────────
+#
+# ``install-ca.sh`` exits 0 when it *skipped* the install — certutil off PATH warns on
+# stderr and succeeds (scripts/install-ca.sh:95) — and ``gen-cert.sh`` never read the
+# outcome, so a run that trusted nothing printed what a run that trusted something
+# printed. That is why the 2026-09-22 re-mint that left the retired CA under nickname
+# ``Lloyd CA`` was unattributable: the mint's exit status and stdout were the only
+# record, and both read success (#1726's owed entry). The guard pinned here is
+# ``install-ca.sh --check`` after *each* of gen-cert.sh's two trust installs, warning on
+# stdout and never changing the mint's exit status. It stays silent on a box whose store
+# is in sync — ``install-ca.sh --check`` here reports CHECK OK — so every arm below is
+# driven synthetically: a stale store built from a second CA, and a PATH with no
+# certutil.
+
+StaleMint = namedtuple("StaleMint", "bindir cert_dir home store other run")
+
+
+def _certutil_that_stores_nothing(bindir: Path) -> Path:
+    """Turn the sandbox's ``certutil`` into a wrapper that performs no store mutation.
+
+    ``-A`` (add) and ``-D`` (delete) exit 0 having touched nothing; every other
+    invocation is ``exec``'d against the real binary, so ``-L`` keeps reporting what the
+    store actually holds. That reproduces #1726's real failure mode on demand:
+    ``install-ca.sh`` prints ``installed … as 'Lloyd CA'`` and exits 0 while the store
+    goes on holding the previous CA, and ``--check`` fails on it for real. Nothing is
+    faked inside either script — ``INSTALL_CA`` is ``$SCRIPT_DIR/install-ca.sh``
+    (scripts/gen-cert.sh:50), so the substitution happens below the seam, where a
+    silently-skipped install actually happens.
+    """
+    assert CERTUTIL is not None, "certutil (nss-tools / libnss3-tools) is needed to wrap it"
+    wrapper = bindir / "certutil"
+    if wrapper.is_symlink() or wrapper.exists():
+        wrapper.unlink()
+    wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "# Test fixture (#3073): mutate nothing, but keep answering reads.\n"
+        'for arg in "$@"; do\n'
+        "  case \"$arg\" in\n"
+        "    -A|-D) exit 0 ;;\n"
+        "  esac\n"
+        "done\n"
+        f"exec {CERTUTIL} \"$@\"\n"
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+@pytest.fixture(scope="module")
+def stale_store_mint(minted: Minted, tmp_path_factory) -> StaleMint:
+    """One mint-path run whose trust install silently did nothing.
+
+    A *second* CA is installed into the store first (real ``install-ca.sh``, real
+    ``certutil``), then ``scripts/gen-cert.sh`` mints a fresh CA and leaf into an empty
+    cert dir with a ``certutil`` that no-ops mutations — so when the run's own
+    ``--check`` reads the store back, the nickname is present, trusted, and holds the
+    other key. HOME and ``LLOYD_NSS_DB`` are both temp paths, as everywhere in this
+    file: the real ``~/.pki/nssdb`` is never opened.
+    """
+    root = tmp_path_factory.mktemp("stale-trust")
+    bindir = _make_sandbox(root)
+    _certutil_that_stores_nothing(bindir)
+    cert_dir = root / "cert"          # empty, so the run takes the mint path
+    home = root / "home"
+    home.mkdir()
+    store = root / "nssdb"
+    other = _mint_ca(root / "other-ca")
+
+    seed = _run(INSTALL_CA, minted.bindir, [str(other)], cert_dir=cert_dir,
+                home=home, nss_db=store)
+    assert seed.returncode == 0, seed.stdout + seed.stderr
+    assert _stored_der_sha(store) == _ca_der_sha(other), (
+        "the seeded store does not hold the second CA, so there would be no drift to "
+        "detect and the assertions below would pass for the wrong reason")
+
+    run = _run(GEN_CERT, bindir, [], cert_dir=cert_dir, home=home, nss_db=store)
+    return StaleMint(bindir=bindir, cert_dir=cert_dir, home=home, store=store,
+                     other=other, run=run)
+
+
+def test_a_stale_store_makes_the_mint_warn_naming_both_sides(
+        stale_store_mint: StaleMint) -> None:
+    """Clause 1. The store holds another key while the run's install claims success, so
+    the run has to say so and reproduce ``install-ca.sh``'s own verdict: ``CHECK
+    FAILED``, the fingerprint the store holds, the fingerprint it should hold, and the
+    remedy an operator can paste.
+
+    The first assertion is the positive control — if the wrapper had let the install
+    through, the check would have passed and the warning's absence would read as a bug
+    in gen-cert.sh rather than as a broken fixture.
+    """
+    run = stale_store_mint.run
+    both = run.stdout + run.stderr
+
+    assert _stored_der_sha(stale_store_mint.store) == _ca_der_sha(stale_store_mint.other), (
+        "the wrapper certutil let the install reach the store, so this run had nothing "
+        "to detect; the warning asserted below cannot be attributed to the guard")
+
+    assert "CHECK FAILED" in both, (
+        f"the warning did not carry the check's own verdict:\n{both}")
+    stored = _fingerprint(stale_store_mint.other)
+    want = _fingerprint(stale_store_mint.cert_dir / "ca.crt")
+    assert stored != want, "the two fixture CAs are the same key; nothing to detect"
+    low = both.lower()
+    assert "stored" in low and "expected" in low, (
+        f"the warning named neither side of the comparison:\n{both}")
+    assert stored in both, f"stored fingerprint {stored!r} missing:\n{both}"
+    assert want in both, f"expected fingerprint {want!r} missing:\n{both}"
+    assert "bash scripts/install-ca.sh" in both, (
+        f"the warning carried no remedy an operator can run:\n{both}")
+    assert "[gen-cert] WARNING" in run.stdout, (
+        f"the guard's own line was not on the mint's stdout:\n{run.stdout}")
+
+
+def test_both_trust_install_sites_verify_and_not_just_the_bottom_of_the_file(
+        minted: Minted, stale_store_mint: StaleMint, tmp_path) -> None:
+    """Clause 2. ``gen-cert.sh`` installs the CA twice on purpose (:140 and :236 — the
+    skip branch exists because a step appended at the end never runs on a box that was
+    ever set up, #1241), so a guard written only at the bottom would cover exactly the
+    machines that need it least.
+
+    This run is the skip branch: same cert dir as the module fixture, a store seeded
+    with another CA, and the mutating-``certutil`` wrapper so it stays stale. The
+    mint-path arm of the pair is ``stale_store_mint``, asserted here as well so one node
+    covers "both sites".
+    """
+    bindir = _make_sandbox(tmp_path / "skip-site")
+    _certutil_that_stores_nothing(bindir)
+    home = tmp_path / "home"
+    home.mkdir()
+    store = tmp_path / "stale-skip-nssdb"
+    other = _mint_ca(tmp_path / "other-ca-skip")
+
+    seed = _run(INSTALL_CA, minted.bindir, [str(other)], cert_dir=minted.cert_dir,
+                home=home, nss_db=store)
+    assert seed.returncode == 0, seed.stdout + seed.stderr
+
+    run = _run(GEN_CERT, bindir, [], cert_dir=minted.cert_dir, home=home, nss_db=store)
+    both = run.stdout + run.stderr
+    assert "already exist" in run.stdout, (
+        f"the run did not take the skip branch this clause is about:\n{run.stdout}")
+    assert "[gen-cert] WARNING" in both, f"the skip branch trusted and never checked:\n{both}"
+    assert "bash scripts/install-ca.sh" in both, f"no remedy on the skip branch:\n{both}"
+    assert _fingerprint(other) in both, "the skip branch's warning named no stored key"
+    assert _fingerprint(minted.cert_dir / "ca.crt") in both, (
+        "the skip branch's warning named no expected key")
+
+    mint_both = stale_store_mint.run.stdout + stale_store_mint.run.stderr
+    assert "[gen-cert] WARNING" in mint_both, (
+        "the mint path's install site lost its guard while the skip branch kept one")
+
+
+def test_a_failed_trust_check_never_fails_the_mint(stale_store_mint: StaleMint) -> None:
+    """Clause 3. ``set -euo pipefail`` is at scripts/gen-cert.sh:46, so a bare
+    ``bash "$INSTALL_CA" --check …`` returning 1 or 2 would abort the run with *that*
+    code — a mint that wrote a CA, a key and a leaf would exit non-zero and print none
+    of its report, which is a worse failure than the drift it is warning about.
+
+    The guard is therefore errexit-exempt, and this is the arm that would catch it being
+    written bare: the same run whose check failed still exits 0 and still prints its
+    four ``wrote`` lines and its ``CA fingerprint:`` block.
+    """
+    run = stale_store_mint.run
+    assert "[gen-cert] WARNING" in run.stdout, (
+        "precondition: this run's verification did have to fail, or the exit status "
+        "asserted below proves nothing")
+
+    assert run.returncode == 0, (
+        f"a failing verification failed the mint (exit {run.returncode}):\n"
+        f"{run.stdout}\n{run.stderr}")
+    for name in ("ca.crt", "ca.key", "lloyd.crt", "lloyd.key"):
+        assert f"[gen-cert] wrote {stale_store_mint.cert_dir / name}" in run.stdout, (
+            f"the mint stopped reporting {name} once the check could fail")
+    assert "CA fingerprint:" in run.stdout, "the fingerprint block disappeared"
+    assert _fingerprint(stale_store_mint.cert_dir / "ca.crt") in run.stdout, (
+        "the printed fingerprint is not the CA the run minted")
+
+
+def test_the_certutil_absent_arm_names_the_remedy_and_its_own_reason(
+        minted: Minted, tmp_path) -> None:
+    """Clause 4. With no ``certutil`` the check answers 2 and prints ``CHECK
+    INCONCLUSIVE`` plus the reason — and no fingerprints at all
+    (scripts/install-ca.sh:88-90), which is why this arm asks for the reason and the
+    remedy and *not* for a sha256 the check cannot print. (The minted CA's fingerprint
+    does appear on stdout regardless, from the skip branch's own reporting at
+    scripts/gen-cert.sh:134-135, so absence-of-fingerprint is not assertable here and is
+    not what the clause asks.)
+
+    This is also the arm that used to be invisible end to end: install-ca.sh's
+    "Skipped installing" warning is on stderr and the run exited 0, so nothing on the
+    mint's stdout said the CA was untrusted.
+    """
+    bindir = _make_sandbox(tmp_path / "no-certutil-3", with_certutil=False)
+    assert not (bindir / "certutil").exists(), "the sandbox PATH still resolves certutil"
+    home = tmp_path / "home"
+    home.mkdir()
+    store = tmp_path / "no-certutil-nssdb"
+
+    run = _run(GEN_CERT, bindir, [], cert_dir=minted.cert_dir, home=home, nss_db=store)
+    both = run.stdout + run.stderr
+    assert run.returncode == 0, (
+        f"exit {run.returncode}: a missing certutil must not fail the mint:\n"
+        f"{run.stdout}\n{run.stderr}")
+    assert "[gen-cert] WARNING" in run.stdout, (
+        f"a skipped trust install passed unverified:\n{both}")
+    assert "bash scripts/install-ca.sh" in both, f"no remedy offered:\n{both}"
+    assert "CHECK INCONCLUSIVE" in both and "no certutil" in both, (
+        f"the warning carried no reason the operator can act on:\n{both}")
+    assert not (store / "cert9.db").exists(), (
+        "the read-only check created a certificate database")
+
+
+def test_the_read_back_added_no_write_path_and_no_system_trust() -> None:
+    """Clause 5, the parts a test can hold for ever.
+
+    Three static invariants over ``scripts/gen-cert.sh``:
+    * every non-comment line that invokes ``$INSTALL_CA`` either is one of the two
+      pre-existing write-mode installs or contains ``--check``, so the guard can never
+      grow a third way to mutate the store from the mint;
+    * each write-mode install has a ``--check`` after it, so neither site can be
+      quietly un-guarded by a reorder;
+    * each guard is written with ``||`` — under ``set -euo pipefail`` (scripts/gen-cert.sh:46)
+      a bare call would make a failing verification fail the mint.
+
+    ``scripts/install-ca.sh`` carrying no hunk in this diff is a fact about the diff,
+    which the gate's review rung reads directly; what this file pins is that the script
+    is still the one its own suite pins — exactly one ``certutil -D`` — and that the
+    read-back reached no machine-wide trust path, which #1241's ruling of
+    2026-09-27T18:56Z reserves for a person.
+    """
+    lines = GEN_CERT.read_text(encoding="utf-8").splitlines()
+
+    invoked = [(n, ln) for n, ln in enumerate(lines, 1)
+               if "$INSTALL_CA" in ln and not ln.lstrip().startswith("#")]
+    write_sites = [(n, ln) for n, ln in invoked if "--check" not in ln]
+    check_sites = [(n, ln) for n, ln in invoked if "--check" in ln]
+
+    assert len(write_sites) == 2, (
+        "gen-cert.sh must keep exactly its two pre-existing write-mode installs "
+        f"(:140 skip branch, :236 mint path); found "
+        f"{[(n, ln.strip()) for n, ln in write_sites]}")
+    assert len(check_sites) == 2, (
+        "each of the two install sites needs its own read-back; found "
+        f"{[(n, ln.strip()) for n, ln in check_sites]}")
+    for n, ln in write_sites:
+        assert any(m > n for m, _ in check_sites), (
+            f"the install at scripts/gen-cert.sh:{n} is followed by no `--check`: "
+            f"{ln.strip()}")
+    for n, ln in check_sites:
+        assert "||" in ln, (
+            f"the guard at scripts/gen-cert.sh:{n} is not errexit-exempt; "
+            "`set -euo pipefail` would abort the mint on its exit code: " + ln.strip())
+
+    install_src = INSTALL_CA.read_text(encoding="utf-8")
+    assert install_src.count("certutil -D") == 1, (
+        "install-ca.sh no longer holds exactly one deletion call, so this guard was "
+        f"built against a different script: {install_src.count('certutil -D')} found")
+
+    offenders = [
+        f"scripts/gen-cert.sh:{n}: {ln.strip()}"
+        for n, ln in enumerate(lines, 1)
+        if not ln.lstrip().startswith("#")
+        and any(tok in ln for tok in ("update-ca-trust", "/etc/ca-certificates",
+                                      "trust-source", "/etc/ssl/certs", "p11-kit"))
+    ]
+    assert not offenders, (
+        "these executable lines reach the machine-wide trust store, which #1241's "
+        "ruling reserves for a person: " + "; ".join(offenders))

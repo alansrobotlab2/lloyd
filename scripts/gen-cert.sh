@@ -138,6 +138,20 @@ if [[ -f "$CA_CRT" && -f "$CA_KEY" && -f "$SRV_CRT" && -f "$SRV_KEY" && $FORCE -
   # file would never run on exactly the machines that still need it (#1241 — a new
   # user, or a rebuilt store, on a host whose certs are already in place).
   bash "$INSTALL_CA" "$CA_CRT"
+  # Read the verdict back (#3073, #1726's owed entry). The install above exits 0 when
+  # it *skipped* — certutil off PATH warns on stderr and succeeds
+  # (scripts/install-ca.sh:95) — so a run that trusted nothing used to read as a clean
+  # one, which is why the Sep-22 re-mint that left the retired CA trusted was
+  # unattributable. `|| TRUST_RC=$?` is what keeps this off errexit: `set -euo pipefail`
+  # (:46) would otherwise abort the mint on the check's exit code, and a failed
+  # verification must never fail a mint that wrote its certificates.
+  TRUST_RC=0
+  TRUST_CHECK="$(bash "$INSTALL_CA" --check "$CA_CRT" 2>&1)" || TRUST_RC=$?
+  if [[ $TRUST_RC -ne 0 ]]; then
+    echo "[gen-cert] WARNING: the minted CA is not verifiably trusted — 'install-ca.sh --check' exited $TRUST_RC:"
+    printf '%s\n' "$TRUST_CHECK"
+    echo "          Remedy: bash scripts/install-ca.sh $CA_CRT"
+  fi
   exit 0
 fi
 
@@ -220,6 +234,17 @@ echo
 # a --force re-mint this is also what retires the previous CA's entry, which would
 # otherwise sit in the store still trusted for SSL — see scripts/install-ca.sh.
 bash "$INSTALL_CA" "$CA_CRT"
+# The mint path's share of the read-back (#3073). Same reason as the skip branch, and
+# the same errexit exemption: this is the last step of a run that has already written a
+# fresh CA and leaf, and 'install-ca.sh --check' exiting 1 (store holds another key) or
+# 2 (no certutil, so no verdict) is a warning to an operator, never a mint failure.
+TRUST_RC=0
+TRUST_CHECK="$(bash "$INSTALL_CA" --check "$CA_CRT" 2>&1)" || TRUST_RC=$?
+if [[ $TRUST_RC -ne 0 ]]; then
+  echo "[gen-cert] WARNING: the minted CA is not verifiably trusted — 'install-ca.sh --check' exited $TRUST_RC:"
+  printf '%s\n' "$TRUST_CHECK"
+  echo "          Remedy: bash scripts/install-ca.sh $CA_CRT"
+fi
 echo
 echo "Next: mint at least one client cert before enabling mTLS in Vite, e.g."
 echo "  bash scripts/mint-client-cert.sh host-browser"
