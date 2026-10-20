@@ -150,8 +150,30 @@ def run(*, backend: str, sessions_dir: Path, timeout: float = 150.0,
 # response length; until #828 the gate kept none of it, so nothing could say
 # whether THIS build's turn looks like the last one's. What follows is data
 # only: no function here returns a verdict, and nothing here may fail a rung.
-# Whether (and at which floor) agreement should ever gate is a human call,
-# made after reading measured same-build numbers.
+#
+# THE RULING, made on #828 (2026-10-04, re-ruled 2026-10-20) and written down
+# here by #3055: trace agreement NEVER gates a promotion. The comparison below
+# is informational, and permanently so — no per-feature agreement floor is
+# armed, here or in `gate.py`, and arming one is a person's decision, not this
+# file's. The question is closed; it is recorded rather than left open because
+# #828 is `done` and a closed item carries no instruction to the next reader.
+#
+# The numbers that closed it, and the denominator they are out of. The
+# committed artifact eval/canary_trace_samples.json holds ten repeats of the
+# canary turn against one canary build (a3a9baf687a0865d6c5e7279010f465a887f0c34,
+# measured_at 2026-09-24T20:39:04Z); ten consecutive samples compared pairwise
+# are NINE comparisons, and every figure below is out of those nine — #828's
+# ruling quotes 0/45, which is the same ten samples over all pairs rather than
+# consecutive ones. Re-derive them with `compare_traces` over `samples[i]` vs
+# `samples[i-1]`; tests/test_canary_trace_diff.py does exactly that and fails
+# if these drift:
+#     events_equal=0/9          response_chars_equal=0/9
+#     turns_equal=9/9           shape_equal=7/9  (the collapsed event sequence)
+# Strict event-sequence agreement on a healthy same build is zero. Token
+# streaming puts one `text_delta` per chunk, so the raw list's length follows
+# sampling and a floor on it would fail every healthy build; `turns` is the
+# only feature that agrees at all, and one integer says nothing about whether
+# a tool was dispatched — which the four assertions above already prove.
 
 # The rung-data keys that make up a trace; a reused rung strips them.
 TRACE_KEYS = ("events", "event_count", "turns", "response_chars")
@@ -193,8 +215,16 @@ def compare_traces(candidate: dict, baseline: dict | None) -> dict:
     shape, and the multiset difference both ways (`missing` = in the baseline
     and not the candidate, `extra` = the reverse). `event_count`, `turns`,
     `response_chars`: candidate, baseline, delta. With no baseline every
-    comparison is None and `has_baseline` is False. Deliberately no `ok`,
-    `pass` or `verdict` key."""
+    comparison is None and `has_baseline` is False.
+
+    POLICY, not a design note (#3055, on #828's ruling): this comparison is
+    informational and must never fail a rung. It carries no `ok`, `pass` or
+    `verdict` key *because* of that policy, and the key-shape is not the
+    guard — a caller deriving `ok: false` from `events["equal"] == False` one
+    layer up would satisfy this signature and break the ruling.
+    `gate.rung_canary_smoke` is that caller, and the four deterministic
+    assertions in `run` stay the only thing that fails the rung however far
+    the trace moves."""
     cand = candidate or {}
     ce = [str(e) for e in (cand.get("events") or [])]
     if not (isinstance(baseline, dict) and isinstance(baseline.get("events"), list)):

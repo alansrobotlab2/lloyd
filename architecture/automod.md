@@ -2115,7 +2115,7 @@ candidate that weakens the gate is judged by the old gate.
 | review | 3.5-6.5m | a diff that does not do what the item asked — §4.5 |
 | venv | 3s–5m | only when `requirements.txt` or `requirements.lock` changed — not `requirements-dev.txt`, §10 |
 | canary_boot | ~2-30s | a build that will not start |
-| canary_smoke | ~5-15s | a build that starts but cannot dispatch a tool |
+| canary_smoke | ~5-15s | a build that starts but cannot dispatch a tool — and only that. The structural trace it records beside the verdict (event sequence, event count, turns, response length, plus the diff against the previous passing smoke) is **informational and must never fail this rung** (#3055, on #828's ruling): the four deterministic assertions in `canary_smoke.run` are the only thing it can report, and no agreement floor is armed on any trace feature |
 | drill | ~35s | only when the diff touches the rollback path |
 
 Timings above are the measured runtimes of the last full ladder

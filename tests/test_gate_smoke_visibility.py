@@ -259,3 +259,98 @@ def test_an_unwritable_baseline_costs_the_comparison_not_the_rung(monkeypatch, t
     monkeypatch.setattr(G.S, "write_canary_trace", boom)
     ok, _, data = g.rung_canary_smoke()
     assert ok is True and data["has_trace"] is True
+
+
+# ── the trace never gates the rung (#3055) ─────────────────────────────────
+# The ruling recorded on #828 (2026-10-04, re-ruled 2026-10-20) is that trace
+# agreement NEVER gates a promotion. That was already the behaviour; it is
+# pinned here so that "informational" cannot quietly become "advisory" in a
+# later round. Two directions, because a one-sided pin is how a guard goes
+# soft: a moving trace must not fail the rung, and a broken dispatch must
+# still fail it on its own.
+
+_VERDICT_KEYS = {"ok", "pass", "passed", "verdict", "regression", "fail",
+                 "failed", "should_block", "gate_ok"}
+
+
+def _verdict_shaped(obj, path="$"):
+    """Yield (path, value) for every key in a rung payload that reads as a
+    verdict.
+
+    `compare_traces` carrying no `ok` key is not this guard: a caller can put
+    `"ok": False` into the rung's own `data`, beside the diff, and leave the
+    comparison pure — which satisfies `test_the_comparison_carries_no_verdict`
+    while gating on the trace all the way to the promotion record. So the walk
+    starts at what the rung returns, not at what the helper returns.
+    """
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if str(k).lower() in _VERDICT_KEYS:
+                yield f"{path}.{k}", v
+            yield from _verdict_shaped(v, f"{path}.{k}")
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from _verdict_shaped(v, f"{path}[{i}]")
+
+
+def test_a_moving_trace_leaves_no_verdict_anywhere_in_the_rung(monkeypatch, tmp_path):
+    """The maximum disagreement: a different sequence, a baseline with no
+    `tool_start`, different turn count and response length. The four assertions
+    hold, so the rung passes — and nothing it hands the report may read as a
+    refusal."""
+    G.S.write_canary_trace({"round_id": "SM_PREV",
+                            "trace": {"events": ["session", "tool_complete", "done"],
+                                      "event_count": 3, "turns": 7,
+                                      "response_chars": 900}},
+                           path=tmp_path / "canary_trace.json")
+    g = _gate_with_smoke(monkeypatch, tmp_path, _smoke_report(_EVENTS, turns=2, chars=40))
+    ok, detail, data = g.rung_canary_smoke()
+    assert ok is True
+    diff = data["trace_diff"]
+    assert diff["events"]["equal"] is False and diff["events"]["shape_equal"] is False
+    # The baseline has no tool_start and the run does, so it is the candidate
+    # that carries the extra event; `missing` is the other direction.
+    assert diff["events"]["missing"] == {}
+    assert diff["events"]["extra"] == {"thinking_delta": 2, "tool_start": 1,
+                                       "text_delta": 2}
+    assert diff["turns"]["delta"] == -5 and diff["response_chars"]["delta"] == -860
+    offenders = [(p, v) for p, v in _verdict_shaped(data) if v is not True]
+    assert not offenders, f"the rung reported a verdict off the trace: {offenders}"
+
+
+def test_the_rung_fails_only_where_its_assertions_fail(monkeypatch):
+    """The static half of the same ruling: one refusal path exists in the rung,
+    and it is the report's own `ok` — the four deterministic assertions. A
+    second `return False` here would be a floor on something, and the only
+    something left is the trace."""
+    src = (ROOT / "scripts" / "automod" / "gate.py").read_text(encoding="utf-8")
+    rung = src.split("def rung_canary_smoke")[1].split("def _canary_trace_diff")[0]
+    assert rung.count("return False") == 1, (
+        f"the rung has another refusal path than the smoke's own assertions:\n{rung}")
+    guarded = rung.split("return False")[0].rstrip().splitlines()[-1]
+    assert guarded.strip() == 'if not rep["ok"]:', (
+        f"the one refusal path is not the assertions: {guarded!r}")
+
+
+def test_a_build_that_cannot_dispatch_a_tool_still_fails_on_a_perfect_trace(monkeypatch,
+                                                                            tmp_path):
+    """The other direction of the same clause: recording that the trace never
+    gates must not soften the assertions. The baseline is byte-identical to
+    this run's trace, so trace agreement is perfect and rescues nothing."""
+    identical = {"round_id": "SM_PREV",
+                 "trace": {"events": list(_EVENTS), "event_count": len(_EVENTS),
+                           "turns": 2, "response_chars": 40}}
+    G.S.write_canary_trace(identical, path=tmp_path / "canary_trace.json")
+    rep = _smoke_report(_EVENTS)
+    rep["ok"] = False
+    rep["tool_called"] = False
+    rep["tool_result_ok"] = False
+    rep["errors"] = ["no Bash tool_start event — the model never dispatched a tool"]
+    g = _gate_with_smoke(monkeypatch, tmp_path, rep)
+    ok, detail, data = g.rung_canary_smoke()
+    assert ok is False
+    assert "never dispatched a tool" in detail
+    assert data["has_trace"] is True and data["events"] == _EVENTS
+    assert not (tmp_path / "canary_trace.json").read_text() == "", (
+        "a failing run is not a baseline, but the previous one survives")
+    assert G.S.read_canary_trace()["round_id"] == "SM_PREV"

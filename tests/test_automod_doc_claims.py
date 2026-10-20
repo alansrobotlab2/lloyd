@@ -2543,3 +2543,46 @@ def test_the_automod_tool_schemas_the_model_reads_cite_no_rung_by_number():
     skip = gate_tool.input_schema["properties"]["skip_smoke"]["description"]
     assert "canary_smoke" in skip, (
         f"the skip_smoke description no longer names the rung it skips: {skip!r}")
+
+
+# ── the canary_smoke row and the trace it reports (#3055) ──────────────────
+
+def test_the_canary_smoke_row_says_the_trace_diff_is_informational():
+    """#3055 clause 4: §4's rung table is where an operator asks what a rung can
+    refuse, and the `canary_smoke` row said only "a build that starts but
+    cannot dispatch a tool" while the rung also ships a per-feature trace diff
+    beside its verdict — `grep -n trace architecture/automod.md` returned zero
+    hits against five for `canary_smoke`.
+
+    This is the class of prose the file header calls load-bearing: a sentence
+    that disarms a metric. Read optimistically, an undocumented trace diff is
+    the thing that refuses a promotion because the model's event stream moved —
+    which #828 measured as impossible to arm (strict event equality is 0 of 9
+    consecutive pairs on one healthy build, so any floor on it fires every
+    round). Read pessimistically, a reader discounts the rung entirely. The row
+    now says which. `grep -c informational` over a 301 KB file is not the check:
+    the sentence has to be on the row a reader is actually looking at, so the
+    row is read here by its leading cell.
+    """
+    import inspect
+
+    from scripts.automod import canary_smoke as CS
+
+    text = DOC.read_text(encoding="utf-8")
+    rows = [ln for ln in text.splitlines() if ln.startswith("| canary_smoke |")]
+    assert len(rows) == 1, f"the rung table row is gone or duplicated: {rows}"
+    row = " ".join(rows[0].lower().split())
+    assert "informational" in row, rows[0]
+    assert re.search(r"must never fail (?:this|the) rung", row), (
+        f"the row does not forbid a trace difference failing the rung: {rows[0]}")
+    assert "no agreement floor is armed" in row, (
+        f"the row leaves the floor question open: {rows[0]}")
+    assert "human call" not in row, "the doc re-opens the question #828 closed"
+
+    # The row points at the assertions instead of the metric, so the pointer is
+    # followed: the function it names must still be the one holding them.
+    body = inspect.getsource(CS.run)
+    for feature in ("tool_called", "tool_result_ok", "done", "response_chars"):
+        assert feature in body, (
+            f"the row cites `canary_smoke.run` as the failure surface, but it "
+            f"no longer checks {feature}")
