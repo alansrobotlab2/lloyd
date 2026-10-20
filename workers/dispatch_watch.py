@@ -39,18 +39,36 @@ The delivery is ``DispatchWatch``: announce-once on a crossing, announce again o
 recovery, no ledger row, no auto-created task. It is ``workers/service_probe.py``
 (#1359) applied to the scheduler instead of to a port, including the part that
 makes it livable: a grace window in which a source that recovers is never
-announced at all. Here the window is a multiple of the source's own
+announced at all. The threshold is a multiple of the source's own
 ``interval_seconds``, which is why it is a multiple and not a constant —
 ``scheduled-task`` ticks every 60 s and ``autocode`` every 900 s, so a fixed
 threshold would be far too twitchy for one and far too slow for the other.
 
-Two false positives the threshold must not create, both pinned by tests in
+On top of that window sits a per-process rail (#3061), and it is the same one
+``ServiceProbe`` holds at ``workers/service_probe.py:165-168``: the FIRST measurement
+a watch takes in a process announces nothing, because the stamps it reads on a boot
+were written by the process that just died and their age measures that one's lifetime,
+not whether dispatch works. ``_scheduler_loop`` ticks this watch before
+``_scheduler_pass`` has stamped anything, so that first tick is the only kind a restart
+produces. Over the retained logs from 2026-10-16 05:55 to 2026-10-19 23:07 that put 28
+of 34 stall events within 60 s of a ``Worker pool started`` line with no
+``enqueue_if_due failed`` anywhere in the window: a signal that fires on every deploy
+is one a person learns to dismiss. A stall still standing at the SECOND measurement is
+announced there — one scheduler interval late, never lost — and a stall that was never
+announced cannot later report its own recovery. A pair of stamps that have BOTH aged
+past the window is the remaining downtime case and is reported as ``downtime``, not as
+a stall: a source whose every enqueue raises keeps its attempt stamp fresh, so nothing
+asking at all means the pool was not running.
+
+False positives the reading must not create, each pinned by a node in
 ``tests/test_workers_pool.py``: a source whose class declares
 ``REPOLL_ON_COMPLETE`` has its *attempt* stamp deliberately re-armed to the epoch
 after every finished run (``pool._repoll_on_complete``), which makes that stamp
 permanently stale on a source that is working, so the clean stamp is the only one
-this can read; and a source disabled in config is skipped before the pool reads
-any stamp, so its stamps go stale forever by design and are never judged.
+this can read — which is also why the downtime test below has to skip those sources
+rather than merely borrow their exemption; and a source disabled in config is skipped
+before the pool reads any stamp, so its stamps go stale forever by design and are
+never judged.
 """
 
 from __future__ import annotations
@@ -70,10 +88,17 @@ ATTEMPT_WM_KEY = "last_enqueue_check"
 OK_WM_KEY = "last_enqueue_ok"
 
 #: A source is stalled when its clean stamp is older than this many of its own
-#: dispatch intervals. Three is the smallest multiple that cannot fire on one
-#: skipped interval plus one slow tick, and a multiple rather than a duration
-#: because the 60-second source and the 900-second one have to be judged on their
-#: own clocks: 180 s for ``scheduled-task``, 2700 s for ``autocode``.
+#: dispatch intervals, and a multiple rather than a duration because the 60-second
+#: source and the 900-second one have to be judged on their own clocks: 180 s for
+#: ``scheduled-task``, 2700 s for ``autocode``.
+#:
+#: Three was chosen as the smallest multiple that could not fire on one skipped
+#: interval plus one slow tick. On this box that has been measured false at 3 x 60 s:
+#: six events between 2026-10-17 and 2026-10-19 sat at 186-209 s with no boot and no
+#: failed enqueue behind them, each recovering on the next pass — a whole-process block
+#: of ~190 s is enough. #3061's first-measurement rail is what keeps those transient
+#: ones off the page; whether a block that long deserves its own alarm is still open
+#: (#3061's owed ruling), so the factor is untouched.
 STALL_FACTOR = 3.0
 
 #: The interval a source is judged on when its config carries no
@@ -88,14 +113,18 @@ DEFAULT_INTERVAL_S = 3600
 #: stalled, distinct from one another so a reader can tell "healthy" from "not
 #: judgeable": ``pending`` (asked, not yet answered cleanly, inside the window),
 #: ``disabled`` (config says don't run it), ``unmeasured`` (no stamp at all, or a
-#: stamp that will not parse, or a watermark read that failed). Every state here
-#: is returned by some path.
+#: stamp that will not parse, or a watermark read that failed), and ``downtime`` —
+#: added for #3061 — where BOTH stamps are past the window, so nothing has asked
+#: either and the pool itself was not running. Not a stall, and not silent-by-
+#: accident: it is the answer to the question the stale stamp was being misread as.
+#: Every state here is returned by some path.
 STATE_OK = "ok"
 STATE_STALLED = "stalled"
 STATE_NEVER_SUCCEEDED = "never_succeeded"
 STATE_PENDING = "pending"
 STATE_DISABLED = "disabled"
 STATE_UNMEASURED = "unmeasured"
+STATE_DOWNTIME = "downtime"
 
 
 def _parse(value: Optional[str]) -> Optional[datetime]:
@@ -125,6 +154,12 @@ def verdict(*, ok_stamp: Optional[str], attempt_stamp: Optional[str],
     judged against a guessed threshold, and a source with no stamps is
     ``unmeasured`` too — a pool that has never reached a source has not stalled,
     it has not started, and those read the same until one of them has a stamp.
+
+    A stale clean stamp is read on its own; the attempt stamp is consulted only to
+    decide whether the missing clean return is a fault at all. It is not, when that
+    stamp has aged equally far: nothing has asked, which is ``downtime`` and silent,
+    and it is ``stalled`` the moment the pool is asking again without getting an
+    answer.
     """
     base: dict[str, Any] = {
         "stalled": False, "age_seconds": None, "threshold_seconds": None,
@@ -190,6 +225,28 @@ def verdict(*, ok_stamp: Optional[str], attempt_stamp: Optional[str],
 
     age = max(0.0, now_epoch - ok_dt.timestamp())
     if age > threshold:
+        # Both stamps past the window is a different event from one of them, and the
+        # two need different words (#3061). ``pool.py`` advances the attempt stamp on
+        # EVERY outcome, the raise included (``workers/pool.py:1635-1636``, sitting
+        # after the ``except`` at :1628-1630), so a source that is being asked and
+        # failing to answer keeps that stamp fresh — while a pool that was stopped,
+        # halted or simply restarting asked nothing and let both stamps age together.
+        # The DECLINED back-date at :1633-1634 cannot fake the second shape: it moves
+        # the attempt stamp by ``interval - retry``, never the ``factor`` the window
+        # needs. Sources that re-arm to the epoch are excluded outright, because for
+        # them this test would be permanently true and would swallow their real
+        # stalls — see the ``REPOLL_ON_COMPLETE`` paragraph in this module's docstring.
+        att_dt = _parse(attempt_stamp)
+        if not repoll_on_complete and att_dt is not None:
+            att_age = max(0.0, now_epoch - att_dt.timestamp())
+            if att_age > threshold:
+                return {**base, "age_seconds": age, "state": STATE_DOWNTIME,
+                        "stalled": False,
+                        "detail": (f"downtime, not a stall: nothing was even "
+                                   f"attempted in {att_age:.0f}s and no clean return "
+                                   f"in {age:.0f}s, both past the {threshold:.0f}s "
+                                   "window — the pool was not asking this source, so "
+                                   "its silence is the pool's, not the source's")}
         return {**base, "age_seconds": age, "state": STATE_STALLED, "stalled": True,
                 "detail": (f"no clean enqueue in {age:.0f}s, over the {threshold:.0f}s "
                            f"window ({factor:g} x {interval:.0f}s interval)")}
@@ -204,6 +261,18 @@ class DispatchWatch:
     dispatch stops and sees it recover, and nothing is written to the ledger. The
     threshold is a multiple of the source's own interval, which is itself the
     grace window; a source that recovers inside it was never announced at all.
+
+    Two rails keep the announcements worth reading, and the second is the one the
+    first cannot do alone. The threshold judges each source on its own clock; this
+    class additionally withholds an announcement until a stall has been MEASURED twice
+    (#3061) — the tick that opens a streak only records its start, and the recovery is
+    announced only for a stall that was announced. That covers the boot, where the
+    first tick is judging stamps the previous process left, and the whole-process blocks
+    this box also produces at ~190 s, which are already gone on the next measurement.
+    A stall's streak record is per source and lives only while the stall stands, so a
+    fault that persists is announced on its second measurement, one scheduler interval
+    after it was found, and never lost. Both dicts here are bounded by the number of
+    configured source names.
 
     ``sources`` may be a callable returning the per-source config mapping, which
     is how the pool passes it — ``get_sources_config()`` re-reads CONFIG per call
@@ -226,7 +295,8 @@ class DispatchWatch:
                  now_fn: Optional[Callable[[], float]] = None,
                  factor: float = STALL_FACTOR,
                  announce: Optional[Callable[[str, str, str], Any]] = None,
-                 repoll: Optional[set[str]] = None) -> None:
+                 repoll: Optional[set[str]] = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self._queue = queue
         self._sources = sources if callable(sources) else (lambda: sources)
         self._now = now_fn
@@ -234,6 +304,17 @@ class DispatchWatch:
         self._announce = announce
         self._stalled: set[str] = set()
         self._repoll = repoll
+        # Monotonic, on purpose and separately from `now_fn`. `now_fn` answers "how old
+        # is that stamp", so it has to be wall-clock: it is subtracted from an ISO
+        # timestamp written by another process. `clock` answers "how long has THIS
+        # process been watching the fault", and a wall clock cannot answer that — an NTP
+        # step or a boot from a wrong clock would move a stamp's age by hours, and the
+        # rail built on it would either announce on the first measurement or never.
+        # Same split as `ServiceProbe.clock` (workers/service_probe.py:138), the
+        # precedent #3061 cites. `_since` is keyed by configured source name and loses
+        # an entry the moment that source stops being stalled, so it cannot grow.
+        self._clock = clock
+        self._since: dict[str, float] = {}
 
     def _repoll_sources(self) -> set[str]:
         """Names whose declared re-arm makes the attempt stamp meaningless.
@@ -306,13 +387,30 @@ class DispatchWatch:
         """Judge every source and announce the crossings. Returns event lines.
 
         The crossing rule is what keeps a steady stall from becoming a recurring
-        alarm: the first pass that measures a stall announces it, and every later
-        one is silent until the source returns cleanly. A source with no stamps is
-        silent, so booting the pool is not an alarm; a source already measured
-        stalled IS announced on the first pass after a restart, because the clean
-        stamp outlives the pool and a restart must not hide a stall that was
-        already running.
+        alarm: the pass that measures a stall announces it, and every later one is
+        silent until the source returns cleanly.
+
+        One measurement of that rule is spent saying nothing (#3061): the pass that
+        OPENS a stall streak only records when it started, and the announcement waits
+        for a pass that still finds the source past its window. This replaces the
+        earlier rule, which announced a stall on the first pass after a restart on the
+        grounds that the clean stamp outlives the pool — true, and the reason the rule
+        was noise. The stamps outlive the pool precisely so a restart cannot hide a
+        fault, but the tick that reads them first cannot tell that fault from a
+        restart, and `_scheduler_loop` runs this before `_scheduler_pass` has stamped
+        anything, so every boot produced one. Over 2026-10-16 05:55 → 2026-10-19 23:07:
+        28 of 34 stall events within 60 s of a pool start, none of them behind a failed
+        enqueue. The same streak rail covers this box's ~190 s whole-process blocks,
+        which are gone by the next measurement. What a stall still standing at the
+        second measurement pays is one scheduler interval of delay, which is the price
+        #1359 already accepted for the same trade at `workers/service_probe.py:165-171`.
+
+        The streak clock is per source and is dropped the moment the source is not
+        stalled, so it cannot leak and cannot carry an old stall's patience into a new
+        one. A source that was never announced gets no recovery line either: reporting
+        the end of a fault nobody was told began is the other half of the noise.
         """
+        now = self._clock()
         events: list[str] = []
         for name, row in self.rows().items():
             if row["state"] == STATE_UNMEASURED:
@@ -323,14 +421,25 @@ class DispatchWatch:
                 logger.warning("dispatch_watch: cannot judge %s: %s",
                                name, row["detail"])
                 continue
-            if row["stalled"] == (name in self._stalled):
-                continue  # no crossing: a steady stall stays quiet
-            if row["stalled"]:
-                self._stalled.add(name)
-                text = f"dispatch stalled: {name} — {row['detail']}"
-            else:
+            if not row["stalled"]:
+                self._since.pop(name, None)
+                if name not in self._stalled:
+                    # Healthy all along, or a stall found inside the grace that has
+                    # since cleared — no announcement either way.
+                    continue
                 self._stalled.discard(name)
                 text = f"dispatch recovered: {name} — {row['detail']}"
+            elif name in self._stalled:
+                continue  # no crossing: a steady stall stays quiet
+            elif name not in self._since:
+                self._since[name] = now   # the grace pass: found, not yet announced
+                continue
+            else:
+                held = now - self._since[name]
+                self._stalled.add(name)
+                text = (f"dispatch stalled: {name} — {row['detail']} "
+                        f"(confirmed in this process {held:.0f}s after first "
+                        "measuring it)")
             events.append(text)
             # warning, not error, matching the announce level below: this is an
             # announcement about a stalled dispatcher, and the log level is what a

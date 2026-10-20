@@ -1822,8 +1822,10 @@ async def test_a_totals_failure_never_loses_the_run_record(q, monkeypatch, scrat
 # `last_enqueue_check` is the interval clock and has to advance whatever the
 # call does, or a source raising every tick is retried every tick. That is why
 # it cannot also be the signal that dispatch works — which is what
-# `workers/dispatch_watch.py` reads, and what the four tests below pin from
-# either side of the swallow at `workers/pool.py`.
+# `workers/dispatch_watch.py` reads, and what the tests below pin from either side of
+# the swallow at `workers/pool.py`. (#1681 brought the first four; #3061 added the
+# per-process-grace and downtime nodes, and the count is deliberately not kept as a
+# claim that the next edit has to maintain.)
 
 
 async def _one_pass_with(q, monkeypatch, *, raiser, cfg, repoll=False):
@@ -2023,26 +2025,223 @@ async def test_the_watch_is_silent_on_a_re_armed_or_disabled_source(q, monkeypat
     assert (row["stalled"] is False
             and row["state"] == dispatch_watch.STATE_DISABLED), row
 
-    # And a tick over a stall announces once, then stays quiet, then announces
-    # the recovery: a steady fault must not become a recurring alarm. On the
+    # And the ticks over a stall: the first one in this process says nothing, the
+    # second announces once, later ones stay quiet, and the recovery is announced
+    # when it comes — a steady fault must not become a recurring alarm. On the
     # 60-second source, which is `scheduled-task`'s real shape: 200 s old is
     # past its 180 s threshold, where the same stamp is inside the 900 s cfg
     # used by every block above.
+    #
+    # The leading empty tick is #3061: this is the boot shape — a watch built after
+    # the stamps were already old — and the first measurement it takes cannot tell
+    # a broken dispatcher from a restarted one. It used to be `len(...) == 1` here,
+    # asserting the burst as correct.
+    #
+    # The attempt stamp is re-stamped first because the blocks above left it at the
+    # epoch for the REPOLL_ON_COMPLETE case. `live` runs without that declaration, and
+    # a clean stamp AND an attempt stamp both past the window is the downtime verdict
+    # #3061 adds, not a stall — so leaving the epoch stamp here would have set a scene
+    # of a pool that was never asking, which is not the fault this sequence is about.
+    q.wm_set("s", "last_enqueue_check", datetime.now(timezone.utc).isoformat())
     q.wm_set("s", dispatch_watch.OK_WM_KEY,
              (datetime.now(timezone.utc) - timedelta(seconds=200)).isoformat())
     said = []
     live = dispatch_watch.DispatchWatch(
         queue=q, sources=lambda: {"s": {"enabled": True, "interval_seconds": 60}},
         announce=lambda *a: said.append(a), repoll=set())
-    assert len(live.tick()) == 1 and live.tick() == [] and live.tick() == []
+    assert live.tick() == [], (
+        "the measurement that merely FOUND a stall announced it, which on a restart "
+        "is an announcement about the process that just died")
+    assert len(live.tick()) == 1
+    assert live.tick() == [] and live.tick() == []
     q.wm_set("s", dispatch_watch.OK_WM_KEY, datetime.now(timezone.utc).isoformat())
     assert len(live.tick()) == 1
     assert [s[2] for s in said] == ["warn", "info"], said
 
 
-# ---------------------------------------------------------------------------
-# #1606 — the summary is cut on a word, and says so
-# ---------------------------------------------------------------------------
+# ── a boot must be silent: the per-process grace (#3061) ────────────────────
+#
+# `_scheduler_loop` calls `_watch_dispatch()` three lines before `_scheduler_pass()`
+# writes the first stamp of any kind, so the watch a process builds on its first tick
+# judges stamps the PREVIOUS process left, and their age measures how long that one was
+# alive. Correlating the retained `server.err*` files over 2026-10-16 05:55 →
+# 2026-10-19 23:07: 50 pool starts, 34 stall events, 28 of them within 60 s of a
+# "Worker pool started" line, 0 `enqueue_if_due failed` anywhere in the window, and 25
+# of the 34 followed by a `dispatch recovered` inside 180 s. Zero raising sources means
+# every one of those announcements was about downtime. The nodes below pin the rail
+# `workers/service_probe.py` has always had for the same failure (:138 a monotonic
+# clock, :165-168 the first measurement emits nothing, :170-171 announce only past a
+# grace) and the downtime discriminator that tells a dead pool from a dead dispatcher.
+
+
+def _one_stalled_source(q, *, age_s: float = 200.0, interval: int = 60,
+                        repoll=None, announce=None):
+    """A watch over one source whose clean stamp is `age_s` old, and nothing else.
+
+    200 s on a 60 s source is `scheduled-task`'s real shape: past its 180 s threshold.
+    That is what makes the silence asserted below worth asserting — the alternative is
+    a node that passes because nothing was ever wrong.
+    """
+    from datetime import timedelta
+    q.wm_set("s", dispatch_watch.OK_WM_KEY,
+             (datetime.now(timezone.utc) - timedelta(seconds=age_s)).isoformat())
+    said: list = []
+    watch = dispatch_watch.DispatchWatch(
+        queue=q,
+        sources=lambda: {"s": {"enabled": True, "interval_seconds": interval}},
+        announce=(lambda *a: said.append(a)) if announce is None else announce,
+        repoll=set() if repoll is None else repoll)
+    return watch, said
+
+
+async def test_the_first_measurement_of_a_boot_announces_nothing(q):
+    """#3061 clauses 1 and 3: the boot shape is silent, both ways.
+
+    The watermarks a fresh `DispatchWatch` reads were stamped by the process that just
+    died, so the first tick in a process cannot distinguish "this dispatcher stopped
+    answering" from "the pool was restarted 200 s after its last clean enqueue" — and
+    on this box the second reading is the only true one: 28 of 34 stall events landed
+    within 60 s of a start line with no failed enqueue in the window at all.
+
+    So the tick that FINDS the stall says nothing, and the row it judged is still
+    asserted to be a stall, because otherwise the silence below would be proving the
+    threshold changed rather than proving the grace holds. The second half is the
+    consequence people actually read: 25 of those 34 events were followed by
+    `dispatch recovered` inside 180 s, and a recovery is only an honest line about a
+    fault that has ended if somebody was told about the fault.
+    """
+    watch, said = _one_stalled_source(q)
+    row = watch.rows()["s"]
+    assert row["stalled"] is True and row["state"] == dispatch_watch.STATE_STALLED, (
+        "the scene is not set — this source is not stalled, so any silence at all "
+        f"would satisfy the assertions below: {row}")
+
+    assert watch.tick() == [], (
+        "a boot announced a stall on the one measurement that cannot separate the "
+        "previous process's stamps from a live fault")
+    assert said == [], f"the bell rang on the finding pass, not a crossing: {said}"
+
+    # The source was fine all along: the pass after the grace stamps it cleanly, and
+    # the un-announced stall must not resurface as a recovery.
+    q.wm_set("s", dispatch_watch.OK_WM_KEY, datetime.now(timezone.utc).isoformat())
+    assert watch.tick() == [], (
+        "an unannounced stall came back as a recovery, which reports the end of a "
+        "fault nobody was told began")
+    assert said == [], said
+
+
+async def test_a_stall_still_measured_on_the_next_pass_is_announced_then(q):
+    """#3061 clause 2: the grace delays a real stall by one pass and cannot hide one.
+
+    Same watch, same stamp, still 200 s against a 60 s interval. In production the
+    measurement in between is `_scheduler_pass` itself, which either refreshes the
+    clean stamp — the node above proves that path — or leaves it ageing. A silence here
+    would be the blindness this module was written for with a 60 s delay bolted on, so
+    what is asserted is the announcement, its level, and that it still says itself only
+    once.
+    """
+    watch, said = _one_stalled_source(q)
+    assert watch.tick() == []                       # the grace pass
+    events = watch.tick()
+    assert len(events) == 1, f"a stall measured twice announced {events}"
+    assert events[0].startswith("dispatch stalled: s — "), events[0]
+    assert [a[2] for a in said] == ["warn"], (
+        f"the delayed stall was announced at the wrong level: {said}")
+    assert watch.tick() == [] and watch.tick() == [], (
+        "a steady fault became a recurring alarm, the other way this module turns "
+        "into the noise it exists to remove")
+
+
+async def test_a_stamp_that_aged_only_because_the_pool_was_down_is_downtime(q):
+    """#3061 clause 4: an old clean stamp is not a stall when nothing ASKED either.
+
+    `verdict` judged the clean stamp's age and nothing else, so a pool that spent an
+    hour stopped — the restart itself, or a halt — reads on its next boot as a source
+    that stopped dispatching. The attempt stamp separates the two because the pool
+    writes it on EVERY outcome, including the raise (`workers/pool.py:1635-1636`, after
+    the `except` at :1628-1630): a live-but-failing source keeps it fresh, and only an
+    absent pool lets both stamps age together past the window. The DECLINED back-date
+    cannot fake the second shape either — it moves the attempt stamp by
+    `interval - retry`, at most one interval, never the three the window needs.
+
+    The exemption that has to survive is `REPOLL_ON_COMPLETE`
+    (`workers/sources/autocode.py:85`): that declaration re-arms the attempt stamp to
+    the epoch after every finished run, so "older than the window" is permanently true
+    for the one source this rule must never quiet.
+    """
+    from datetime import timedelta
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    q.wm_set("s", "last_enqueue_check",
+             (datetime.now(timezone.utc) - timedelta(seconds=200)).isoformat())
+    watch, _ = _one_stalled_source(q)               # clean stamp 200 s old, 60 s source
+
+    both_aged = watch.rows()["s"]
+    assert both_aged["state"] == dispatch_watch.STATE_DOWNTIME, both_aged
+    assert both_aged["stalled"] is False, both_aged
+    assert "downtime" in both_aged["detail"], both_aged
+    assert watch.tick() == [], (
+        "a verdict that says the pool was not running was announced as a source that "
+        "stopped dispatching")
+
+    # The fault the module exists for: still asking, no longer answering.
+    q.wm_set("s", "last_enqueue_check", datetime.now(timezone.utc).isoformat())
+    row = watch.rows()["s"]
+    assert row["stalled"] is True and row["state"] == dispatch_watch.STATE_STALLED, row
+
+    # Declined-and-back-dated is the benign in-between: on a 900 s interval with
+    # `retry_seconds: 60` the pool pulls the attempt stamp back by the 840 s difference
+    # (`workers/pool.py:1633-1634`), which is inside that source's 2700 s window, so a
+    # clean stamp past the window is still read as a stall and not as downtime.
+    wide, _ = _one_stalled_source(q, age_s=3000.0, interval=900)
+    q.wm_set("s", "last_enqueue_check",
+             (datetime.now(timezone.utc) - timedelta(seconds=840)).isoformat())
+    row = wide.rows()["s"]
+    assert row["threshold_seconds"] == 2700.0 and row["stalled"] is True, row
+
+    # A re-armed attempt stamp is not evidence of downtime. Same stamps, declaration on.
+    q.wm_set("s", "last_enqueue_check", epoch.isoformat())
+    repolling, _ = _one_stalled_source(q, repoll={"s"})
+    row = repolling.rows()["s"]
+    assert row["repoll_on_complete"] is True, row
+    assert row["stalled"] is True and row["state"] == dispatch_watch.STATE_STALLED, (
+        "the epoch re-arm bought a real stall the silence the grace exists for: "
+        f"{row}")
+
+    # No attempt stamp at all is the absence of evidence, not evidence of a stopped
+    # pool: the burden stays with the stale clean stamp.
+    q.wm_delete("s", "last_enqueue_check")
+    row = watch.rows()["s"]
+    assert row["stalled"] is True and row["state"] == dispatch_watch.STATE_STALLED, row
+
+
+async def test_one_announced_stall_leaves_one_log_line(q, monkeypatch, caplog):
+    """#3061 clause 5: one event, one line, at the level the module chose.
+
+    `tick()` logs every event it returns and then returns it, and `_watch_dispatch`
+    logged each one AGAIN at INFO under the identical `dispatch_watch:` prefix — 12 ms
+    apart in `server.err`, the 2026-10-19 17:54:45,587 WARNING and the 17:54:45,772
+    INFO for one `owed-check` stall. A person counting how often a source stalled
+    greps one prefix and gets double, and the same sentence sitting on two levels means
+    a warning filter and an info filter disagree about whether it happened at all.
+    """
+    import workers.sources as sources
+    monkeypatch.setattr(sources, "get_sources_config",
+                        lambda: {"s": {"enabled": True, "interval_seconds": 60}},
+                        raising=False)
+    pool = WorkerPool(q, slots=0, poll_idle_seconds=0.01)
+    watch, _ = _one_stalled_source(q)
+    pool._dispatch_watch = watch                    # the seat's own lazily-built slot
+    caplog.set_level(logging.INFO)
+
+    await pool._watch_dispatch()                    # the grace pass
+    await pool._watch_dispatch()                    # the crossing
+
+    logged = [(r.levelno, r.getMessage()) for r in caplog.records
+              if "dispatch_watch:" in r.getMessage()]
+    assert len(logged) == 1, f"one announced event left {len(logged)} lines: {logged}"
+    assert logged[0][1].startswith("dispatch_watch: dispatch stalled: s — "), logged[0]
+    assert [lvl for lvl, _ in logged] == [logging.WARNING], (
+        f"the surviving line is not the module's own WARNING: {logged}")
 #
 # `runs.summary` is 500 characters wide and every reader of a run — the
 # dashboard cell, the fleet-watchdog alert, the `grep` over a day of rows — reads

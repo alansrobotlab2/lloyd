@@ -1746,6 +1746,12 @@ class WorkerPool:
 
         Same seat as the poison sweep and the service probe and for the same
         reason: it must run whether or not the pass below survives. Never raises.
+
+        It is called BEFORE `_scheduler_pass`, which is where every stamp this watch
+        reads is written, so on a boot the watch is judging the previous process's
+        stamps — the case `DispatchWatch.tick` now holds its silence through (#3061).
+        The ordering is deliberate and stays: a pass that raises before it can stamp
+        must not also disarm the alarm, which is what #1681 was filed about.
         """
         try:
             from workers import dispatch_watch
@@ -1760,8 +1766,16 @@ class WorkerPool:
             # it would put a second concurrent reader on the same sqlite
             # connection, which is exactly the lock contention the sweep above
             # goes out of its way to avoid by keeping one thread.
-            for event in self._dispatch_watch.tick():
-                logger.info("dispatch_watch: %s", event)
+            # Its return value is dropped, and that is not an oversight (#3061):
+            # `tick()` already logged every event it produced, at the level it chose
+            # for that event, so this used to write the SAME sentence with the SAME
+            # prefix twice, 12 ms apart and on two levels — the 2026-10-19 17:54:45,587
+            # WARNING and the 17:54:45,772 INFO for one `owed-check` stall. Counting
+            # how often a source stalled meant halving what a grep returned, and a
+            # warning filter disagreed with an info filter about whether the event
+            # happened at all. `tick()` returns the strings for a caller that wants
+            # them; this seat wants neither them nor a second copy of each.
+            self._dispatch_watch.tick()
         except Exception as e:
             logger.warning("dispatch watch failed: %s", e, exc_info=True)
 
