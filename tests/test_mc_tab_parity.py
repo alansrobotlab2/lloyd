@@ -228,23 +228,215 @@ def test_the_sticky_exemption_is_exactly_the_declared_trio():
     )
 
 
-def test_a_declared_sticky_page_is_mounted_outside_the_map():
-    """A declared exemption must be a real mount, not an escape hatch.
+# ── What counts as a mount (#3042) ───────────────────────────────────────────
+#
+# `page === '<name>'` is a token, and Layout.tsx compares `page` for reasons
+# that mount nothing: :181 and :189 are `useEffect` bodies that only flip the
+# `…EverActive` flag, :212 is a hook argument (`enabled: page === 'chat' &&
+# !isMobile`) that only gates polling, and :499 hands `visible={…}` to a
+# component that is already mounted. A substring over the whole file is
+# satisfied by any one of them, so deleting the IDE's JSX block and leaving
+# its `useEffect` behind — which is what a restructure that folds Monaco
+# elsewhere actually looks like — kept the declaration green and put the tab
+# back to an empty pane. Two shapes in this file mount, and both are markup:
+#
+#   * a ternary inside an element's opening tag —
+#     `className={cn('…', page === 'ide' ? '' : 'hidden')}` — which is how a
+#     sticky pane hides without unmounting (:465, :516, :530, :551);
+#   * a comparison guarding a JSX block — `page === 'chat' && (` with an
+#     element following it — which is how the desktop chat header mounts
+#     (:393).
+#
+# A `useEffect` body and a hook argument object are plain TypeScript, and
+# neither shape reaches them. The scan errs toward red: a mount written in a
+# third idiom is refused until this matcher learns it, which is a visible
+# decision someone has to make, not the silent green #3042 was filed for.
 
-    Sticky here means "rendered by a `page === '<name>'` comparison outside
-    the map" — that is what `chat`, `ide` and `memory` do at Layout.tsx:391,
-    :528 and :549. A name added to STICKY_PAGES with no such mount is a tab
-    that renders nothing and a green suite.
+_TAG_OPENER = re.compile(r"<[A-Za-z]")  # `<div`, `<IdePage` — never `</div>`
+
+_MOUNT_SHAPES = {
+    # `page === 'ide' ? '' : 'hidden'` — and only inside an element tag.
+    "attr-ternary": r"\s*\?\s*[^:;{}]{0,40}:",
+    # `page === 'chat' && (<div …` / `&& <Foo />` — a block whose first child
+    # is an element. `[A-Za-z>]` so a fragment counts but `a < b` and `<=` do
+    # not; the comparison may be parenthesised, and a `{/* … */}` may lead.
+    "jsx-cond": r"\s*\)?\s*&&\s*(?:\(\s*)*(?:/\*.*?\*/\s*)*<[A-Za-z>]",
+}
+
+
+def _inside_element_tag(src: str, i: int) -> bool:
+    """Is offset `i` inside an element's opening tag, with its `>` still ahead?
+
+    The nearer of the two decides it. `>` is how a tag closes, and every other
+    `>` in a .tsx file — an arrow's `=>`, a generic's `Set<string>`, a closing
+    `</div>` — sits closer to code that is not in a tag than any opener does.
+    A ternary nested inside another element's attribute list therefore reads as
+    outside the tag, which fails closed: the author moves the ternary or
+    widens this matcher, and the hole never quietly reopens.
+    """
+    opens = [m.start() for m in _TAG_OPENER.finditer(src[:i])]
+    return bool(opens) and opens[-1] > src.rfind(">", 0, i)
+
+
+def _page_comparisons(src: str, page: str) -> list[tuple[int, str | None]]:
+    """Every `page === '<page>'` in `src`, as (offset, mount shape or None).
+
+    Shape is the key of ``_MOUNT_SHAPES`` that matched, or ``None`` for a
+    comparison that draws nothing. Offsets are returned rather than lines so
+    the caller can report where the bare ones are.
+    """
+    out: list[tuple[int, str | None]] = []
+    for m in re.finditer(re.escape(f"page === '{page}'"), src):
+        tail = src[m.end():m.end() + 200]
+        shape = None
+        if (re.match(_MOUNT_SHAPES["attr-ternary"], tail, re.DOTALL)
+                and _inside_element_tag(src, m.start())):
+            shape = "attr-ternary"
+        elif re.match(_MOUNT_SHAPES["jsx-cond"], tail, re.DOTALL):
+            shape = "jsx-cond"
+        out.append((m.start(), shape))
+    return out
+
+
+def _lines_of(src: str, offsets: list[int]) -> list[int]:
+    """1-based line numbers for character offsets, for the failure message."""
+    return sorted(src[:o].count("\n") + 1 for o in offsets)
+
+
+def test_a_declared_sticky_page_is_mounted_outside_the_map():
+    """A declared exemption must be a real mount, not a matching string.
+
+    Sticky here means "rendered by a `page === '<name>'` comparison *in
+    markup*, outside the map" — that is what the trio does at Layout.tsx:393
+    (the desktop chat header, `page === 'chat' && (`), :526-530
+    (`{ideEverActive && ( … page === 'ide' ? '' : 'hidden' … <IdePage /> …)}`)
+    and :547-551 (the same shape around `<MemoryPage />`). The file compares
+    `page` three more times outside any mount — :181, :189 and :212 — so a
+    file-wide substring could not tell a mount from a flag flip;
+    `test_a_sticky_page_whose_mount_was_refactored_away_goes_red` deletes one
+    mount, keeps its `useEffect`, and drives that on a synthetic tree.
     """
     src = (WEB / "components" / "Layout.tsx").read_text(encoding="utf-8")
     for page in sorted(STICKY_PAGES):
-        assert f"page === '{page}'" in src, (
-            f"'{page}' is declared in STICKY_PAGES but Layout.tsx never "
-            f"compares `page === '{page}'`, so nothing mounts it outside the "
-            "map and the exemption is hiding a tab that renders an empty "
-            "pane. Mount it sticky like the IDE (`{ideEverActive && …}` with "
-            "`page === 'ide' ? '' : 'hidden'`), or give it a PAGES entry."
+        found = _page_comparisons(src, page)
+        mounted = [shape for _, shape in found if shape]
+        print(f"sticky '{page}': {len(found)} comparison(s), "
+              f"mounts: {sorted(mounted) or 'none'}")
+        bare = _lines_of(src, [off for off, shape in found if not shape])
+        where = (f"not one `page === '{page}'` comparison is left in it"
+                 if not found else
+                 f"all {len(found)} `page === '{page}'` comparisons in it sit "
+                 f"outside JSX markup — line(s) {bare}")
+        assert mounted, (
+            f"'{page}' is declared in STICKY_PAGES but Layout.tsx mounts it "
+            f"nowhere: {where}. "
+            "A comparison in a `useEffect` body (`if (page === 'ide' "
+            "setIdeEverActive(true))`) only keeps a flag alive, and one in a "
+            "hook argument (`enabled: page === 'chat' && !isMobile`) only "
+            "gates polling — neither draws a pane, and STICKY_PAGES exists "
+            "precisely to excuse a tab from the map, so nothing else would "
+            "notice. Mount it in markup, sticky like the IDE "
+            "(`{ideEverActive && (<div className={cn(…, page === 'ide' "
+            "? '' : 'hidden')}> <IdePage /> </div>)})`, or give it a PAGES "
+            "entry."
         )
+
+
+def test_a_sticky_page_whose_mount_was_refactored_away_goes_red(
+        tmp_path, monkeypatch):
+    """#3042's hole, reproduced: the mount goes, the comparison stays, green.
+
+    The mutation is the refactor a restructure makes — Monaco's JSX block is
+    folded elsewhere or dropped, and the `useEffect` at Layout.tsx:180-182
+    that flips `ideEverActive` survives with it. That leaves exactly one
+    `page === 'ide'` in the file, in the effect, and it is the occurrence the
+    old file-wide substring matched, so the old assertion was satisfied by a
+    tab that now renders nothing.
+
+    Three verdicts are read off the mutated tree, and each fails alone. The
+    mutation has to have landed *as a mount removal* — the region deleted
+    still held the hidden ternary — and the effect comparison still has to be
+    there, or the scenario proves nothing. On that tree
+    `test_every_rendered_tab_has_a_render_map_entry` still PASSES, because
+    `ide` is sticky and therefore exempt from `PAGES` whatever the JSX says:
+    that is what makes the structural check the only guard on this hole and
+    not a second copy of the map check. And the sticky assertion fails,
+    naming `ide`.
+    """
+    lost = "ide"
+    web = tmp_path / "web" / "src"
+    layout = (WEB / "components" / "Layout.tsx").read_text(encoding="utf-8")
+
+    # Delete `{ideEverActive && ( … )}` whole, by paren balance, so the region
+    # removed is the mount rather than a line of it.
+    start = layout.index("{ideEverActive && (")
+    depth, end = 0, -1
+    for j in range(start, len(layout)):
+        if layout[j] == "(":
+            depth += 1
+        elif layout[j] == ")":
+            depth -= 1
+            if depth == 0:
+                end = j + 1
+                break
+    assert end > 0, (
+        "the `{ideEverActive && ( … )}` block no longer balances, so the "
+        "region deleted below is not the IDE's mount")
+    assert "page === 'ide' ? '' : 'hidden'" in layout[start:end], (
+        "the region being deleted no longer holds the IDE's mount, so this "
+        "scenario is not deleting a mount")
+
+    mutated = layout[:start] + layout[end:]
+    assert mutated.count(f"page === '{lost}'") == 1, (
+        "the mutation left more than one `page === 'ide'`, so a failure "
+        "below would not identify the effect comparison as the survivor")
+    assert f"if (page === '{lost}') setIdeEverActive(true)" in mutated, (
+        "the mutation took the `useEffect` comparison too, and the old "
+        "file-wide substring would have gone red for the wrong reason")
+    # …which is the old assertion's own predicate, holding over a file that
+    # no longer mounts the tab. If this reads false the hole is already shut.
+    assert f"page === '{lost}'" in mutated, (
+        "no `page === 'ide'` comparison survives the mount deletion, so the "
+        "substring assertion this item replaces could not be fooled here "
+        "either way — the scenario is vacuous")
+
+    for rel, text in (("components/Layout.tsx", mutated),
+                      # Unmutated, so the map assertion below is reading a
+                      # tree whose sidebar still offers every tab.
+                      ("components/Sidebar.tsx",
+                       (WEB / "components" / "Sidebar.tsx").read_text(encoding="utf-8"))):
+        dest = web / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+
+    me = sys.modules[__name__]
+    monkeypatch.setattr(me, "WEB", web)
+    assert (WEB / "components" / "Layout.tsx").read_text(encoding="utf-8") == mutated, (
+        "the patched WEB is not being read, so the verdicts below are being "
+        "taken from the live tree and prove nothing")
+
+    try:
+        test_every_rendered_tab_has_a_render_map_entry()
+    except AssertionError as exc:
+        raise AssertionError(
+            "the mount-less tree also broke "
+            "test_every_rendered_tab_has_a_render_map_entry, so the new "
+            "structural check is a duplicate of the map check rather than the "
+            f"only guard on this hole: {exc}")
+
+    try:
+        test_a_declared_sticky_page_is_mounted_outside_the_map()
+    except AssertionError as exc:
+        msg = str(exc)
+    else:
+        raise AssertionError(
+            f"Layout.tsx with its `{lost}EverActive && ( … )` mount deleted, "
+            f"and only the `useEffect` comparison left, still satisfied "
+            "test_a_declared_sticky_page_is_mounted_outside_the_map: the "
+            f"declaration is a substring match again, and '{lost}' is a tab "
+            "that renders an empty pane with a green suite")
+    assert lost in msg, f"the failure does not name the page: {msg}"
+    assert "STICKY_PAGES" in msg, f"the failure does not say who declared it: {msg}"
 
 
 def test_parsing_the_map_skips_the_comment_that_names_a_sticky_tab():
