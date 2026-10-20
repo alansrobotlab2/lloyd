@@ -1380,14 +1380,18 @@ def test_a_collected_count_the_command_contradicts_is_what_the_node_flags():
 #: The node below asks the second question: is line N inside
 #: something the file *defines*.
 #:
-#: The tolerance is the span, and only the span. The rule reports an anchor that
-#: lands on prose, a comment, a blank line between two definitions, or a
-#: definition other than the one the sentence is about; it does NOT ask that the
-#: enclosing definition's *name* appear in the citing sentence, which is the
-#: other half #2583 proposed and which is not shipped here: a threat-table cell
-#: is prose that never names a symbol, and `architecture/threat-model.md`'s own
-#: corrected cells would fail such a rule. Whether to add name proximity is an
-#: open question on the item, settled only against this rule's report rate.
+#: The tolerance is a span. The rule reports an anchor that lands on prose, a
+#: comment, or a blank line between two definitions; and since #3047 it also
+#: reports an anchor that lands in the WRONG definition — when the citing
+#: sentence names a symbol in the backticked-identifier shape immediately before
+#: the number, the anchor is graded against that symbol's span, so a number that
+#: drifted into a neighbouring function fails instead of reading as graded.
+#: That is the half #2583 proposed, shipped in its narrow form: it asks nothing
+#: of a sentence that names no symbol, which is why `architecture/threat-model.md`'s
+#: table cells — prose that cites a file path and never an identifier, the case
+#: triage ruled a name window would refuse — are graded by the span alone and
+#: stay green. The pairing is only as wide as the doc's own typography; an anchor
+#: the sentence gives no name for remains measurable by containment only.
 #:
 #: What is graded: a citation whose file resolves under one of the roots and
 #: parses as Python. Non-Python targets, a file that does not parse, and a
@@ -1493,11 +1497,158 @@ def unparsable_py_citations(text: str) -> list[tuple[str, Path, int]]:
             if definition_spans(hit) is None]
 
 
+#: What may sit between a backticked identifier and the `path:NNN` anchor that
+#: follows it and still count as *that identifier's* anchor: connective
+#: punctuation and at most one short word (`(check_bash_command` at `x.py:372`,
+#: `` `_parse_frontmatter` (`agent_mcp/skills.py:42`) ``). Measured over the corpus:
+#: every citation inside this window names the symbol it means, and the four that
+#: land outside that symbol's span are the drift this widening exists to catch.
+#: Admitting prose past the window starts accusing historical quotes: a Review-log
+#: line writing "(`app/autonomy.py:1999`) had drifted into `_dependency_refusal`"
+#: is REPORTING a drift, and #2583's own node has to keep reading that quote.
+_SYMBOL_GAP = re.compile(r"[^\w]{0,6}(?:at|in|of|is|the)?[^\w]{0,3}\Z")
+_BACKTICK = re.compile(r"`([A-Za-z_][\w.]*)`")
+
+#: The source extensions whose definitions the span rule can read.
+SOURCE_EXT = (".py", ".sh", ".ts", ".tsx", ".js", ".mjs", ".sql")
+
+#: A `:NNN` code span is a line anchor only where the line is not talking about an
+#: endpoint. Over the corpus's 92 bare spans, every port reading (`:8080`, `:8010`,
+#: `:2312`, `:8765`, `:8092`) sits on a line carrying endpoint vocabulary — a URL
+#: scheme, a loopback host, the word "port", an HTTP/API endpoint, or a unit or
+#: config filename beside it — while each continuation reading (`:433` after
+#: `_common.py:427`, `:1028` after `pool.py:1023`) sits on a line whose nearest
+#: preceding source token is a numbered citation of that same file. This veto
+#: applies to the one branch that has to guess, and it can only ever REMOVE a
+#: candidate, which is what the ~40 ports in the corpus require: no reading of it
+#: can invent an anchor.
+_ENDPOINT_HINT = re.compile(
+    r"://|localhost|127\.0\.0\.1|0\.0\.0\.0|\bports?\b|\bhttps?\b|\bapis?\b|"
+    r"websocket|unix:|\bendpoints?\b|\blisten\b|\bv?llm\b|"
+    r"\.(?:service|timer|socket|mount|conf|db|json|ya?ml|sqlite3?|log)\b", re.I)
+
+#: The source-file token a bare `:NNN` continues from. Dotted modules resolve
+#: (`agent_mcp.skills` -> `agent_mcp/skills.py`); `workers.db` and
+#: `thunderbird.service` are not sources, which is part of what keeps ports out.
+_SOURCE_TOKEN = re.compile(r"`([\w./-]+\.(?:py|sh|ts|tsx|js|mjs|sql))(?::(\d+))?`")
+
+
+def resolve_source(token: str) -> Path | None:
+    """A source file named in prose, by repo path or by dotted module name."""
+    direct = ROOT / token
+    if direct.exists():
+        return direct
+    as_path = token.replace(".", "/")
+    for ext in SOURCE_EXT:
+        hit = ROOT / (as_path + ext)
+        if hit.exists():
+            return hit
+    return None
+
+
+def _occurrences(text: str, span: str) -> list[int]:
+    """Every offset where `span` appears, so a repeated citation is judged in place."""
+    out, i = [], text.find(span)
+    while i >= 0:
+        out.append(i)
+        i = text.find(span, i + 1)
+    return out
+
+
+def _symbol_before(prefix: str) -> str | None:
+    """The identifier the prose immediately before an anchor names, if any.
+
+    Searched only through a gap connective punctuation could occupy. None is a
+    result, not a shrug: the anchor then keeps exactly the shipped rule instead of
+    being graded against a guess.
+    """
+    hits = list(_BACKTICK.finditer(prefix))
+    if not hits:
+        return None
+    return (hits[-1].group(1).split(".")[-1]
+            if _SYMBOL_GAP.match(prefix[hits[-1].end():]) else None)
+
+
+def named_symbol(text: str, span: str) -> str | None:
+    """The symbol a citation names anywhere it is cited, or None if none ever does.
+
+    The public form of `_symbol_before`, for a caller holding a citation string
+    rather than the prose: a span quoted twice in one doc is named by whichever
+    citation names it, which is what makes a seeded case testable.
+    """
+    for i in _occurrences(text, span):
+        name = _symbol_before(text[max(0, i - 90):i])
+        if name is not None:
+            return name
+    return None
+
+
+def bare_anchor_citations(text: str) -> list[tuple[str, Path, int, str]]:
+    """The `:NNN` code spans this rule owns, each with the prose that precedes it.
+
+    #2971 banned the `workers/queue.py:<n>` spelling corpus-wide; this is the other
+    half of that spelling — a number whose file was named earlier on the same line
+    (`(`workers/pool.py:1023`, body `:1028`)`) — and the extractor never saw it,
+    because `_CITATION` requires a slash-bearing path before the colon. Owning it is
+    the cheaper call: measured at #3047's head, 17 corpus spans resolve this way and
+    exactly one of them was wrong — `architecture/guard-coverage.md:93`'s `:412`, one
+    line below the `def` it meant, which this diff re-points to `:413` — so banning
+    the spelling would rewrite the corpus to earn nothing while owning it catches the
+    drift for free.
+
+    Two shapes, in trust order. (a) CONTINUATION: the nearest preceding source token
+    on the line is itself a numbered citation of a source file, so the bare number is
+    that file's next anchor. (b) SAME-LINE FILE: the line names a source file with no
+    number. Branch (b) is the one that can mistake a port for a line number, but the
+    endpoint veto runs over both: the prefix of a line that has already said
+    `http://localhost` or `vllm:` or the word "port" is not evidence about a number,
+    whichever shape that number is, and grading a continuation on such a line has
+    produced exactly one false anchor in measurement versus none lost. A bare span
+    with neither shape is not a citation: `:8010` alone in djev's port table has no
+    file to be wrong about.
+    """
+    out: list[tuple[str, Path, int, str]] = []
+    for line in text.splitlines():
+        for m in re.finditer(r"`:(\d+)`", line):
+            before = line[:m.start()]
+            toks = list(_SOURCE_TOKEN.finditer(before))
+            numbered = [t for t in toks if t.group(2)]
+            if _ENDPOINT_HINT.search(before):
+                continue
+            if numbered:
+                token = numbered[-1].group(1)
+            elif toks:
+                token = toks[-1].group(1)
+            else:
+                continue
+            hit = resolve_source(token)
+            if hit is not None and hit.suffix == ".py":
+                out.append((m.group(0), hit, int(m.group(1)), before))
+    return out
+
+
+def _span_verdict(spans: list[tuple[int, int, str]], line: int,
+                  name: str | None) -> bool:
+    """False when the anchor is mis-anchored: named symbol first, else any definition."""
+    named = [s for s in spans if s[2] == name] if name else []
+    return any(lo <= line <= hi for lo, hi, _n in (named or spans))
+
+
 def anchor_span_report(text: str) -> tuple[list[tuple[str, Path, int]], list[str]]:
     """`(graded, mis_anchored)` for one doc: what the span rule read, and what it objects to.
 
     `mis_anchored` carries the span as the doc wrote it, which is the only
     spelling a reader can go and find.
+
+    Two questions, in order. If the citing prose names a symbol that resolves to a
+    definition in that file, the anchor must fall inside THAT symbol's span: the
+    shipped rule only ever asked whether the number fell inside some definition,
+    which is how a citation drifting from `_row_task_id` (5249-5261) into
+    `_dependency_refusal` (1991-2119) stayed green — 1999 is inside *a* definition,
+    just not the one its sentence named. A symbol the file no longer defines, and an
+    anchor whose prose names no symbol, both keep the shipped question unchanged, so
+    widening drops no case #2583 caught. Bare `:NNN` spans then join the graded set
+    under the same two questions.
     """
     graded: list[tuple[str, Path, int]] = []
     bad: list[str] = []
@@ -1506,7 +1657,17 @@ def anchor_span_report(text: str) -> tuple[list[tuple[str, Path, int]], list[str
         if spans is None:
             continue
         graded.append((span, hit, line))
-        if not any(lo <= line <= hi for lo, hi, _name in spans):
+        # Judged per occurrence: the same span can be cited by two sentences and
+        # only one of them may name a symbol, so all must agree.
+        if not all(_span_verdict(spans, line, _symbol_before(text[max(0, i - 90):i]))
+                   for i in _occurrences(text, span)):
+            bad.append(span)
+    for span, hit, line, prefix in bare_anchor_citations(text):
+        spans = definition_spans(hit)
+        if spans is None:
+            continue
+        graded.append((span, hit, line))
+        if not _span_verdict(spans, line, _symbol_before(prefix)):
             bad.append(span)
     return graded, bad
 
@@ -1545,7 +1706,8 @@ def test_every_line_anchor_in_an_architecture_doc_lands_inside_a_definition(slug
         "graded none of them")
     assert not bad, (
         f"{slug} anchors {len(graded)} citations into parseable Python and "
-        f"{len(bad)} of them land outside every definition in the file: "
+        f"{len(bad)} of them fail the span rule — outside every definition in "
+        f"the file, or outside the definition their own sentence names: "
         f"{sorted(bad)}. A line number smaller than the file's line count is "
         "not an anchor — it is a pointer into whatever comment, docstring or "
         "blank line happens to be at that offset, and the next edit to the file "
@@ -1675,7 +1837,10 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     one a threat row means is the name-proximity half of the item, which triage
     ruled unsatisfiable as written — a threat-table cell is prose that never
     names a symbol, so that rule would refuse `architecture/threat-model.md`'s
-    own corrected cells — and which the item carries as an owed ruling.
+    own corrected cells — and which #3047 shipped narrowly: the named-symbol
+    comparison applies only where the sentence's own typography supplies a
+    backticked identifier, so a table cell naming a path and nothing else is
+    still graded by containment alone.
 
     So this node asserts the silence. It pins the same four DEFINITIONS #2583
     was filed with, read out of the tree rather than remembered, and it is what
@@ -1713,8 +1878,96 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
         f"`{lease}:{heads[lease]['grant']}` |\n")
     assert bad == [], (
         f"the span rule is now reporting anchors that land on a real `def` "
-        f"({bad}) — either the rule grew a name window, which is the owed "
-        "ruling and needs the item's sign-off, or these two lines moved")
+        f"({bad}) — the named-symbol half shipped in #3047, and neither cell "
+        "names an identifier, so only a move of these two lines can explain it")
+
+
+def test_a_drifted_anchor_is_reported_though_it_lands_inside_a_definition():
+    """#3047 clauses 1 and 2, on one seeded pair that cannot go stale.
+
+    `agent_mcp/skills.py` is seeded here because it is small, parses, and holds
+    two module-level defs with nothing else between them: `_config_skill_dirs`
+    (41-61) and `_parse_frontmatter` (96-122). Line 42 is therefore inside a real
+    definition — the shipped rule passed it — while being 54 lines away from the
+    one the sentence names. Both numbers are measured from `definition_spans`
+    below rather than typed, so this node survives the day someone inserts a line
+    into that module, which is exactly the event it is written to detect.
+    """
+    spans = definition_spans(ROOT / "agent_mcp/skills.py")
+    assert spans is not None, "agent_mcp/skills.py stopped parsing"
+    named = {lo: hi for lo, hi, name in spans if name == "_parse_frontmatter"}
+    other = {lo: hi for lo, hi, name in spans if name == "_config_skill_dirs"}
+    assert named and other, "the seeded pair is gone from agent_mcp/skills.py"
+    drift = min(other) + 1                       # inside _config_skill_dirs
+    inside = min(named) + 1                      # inside _parse_frontmatter
+    assert drift not in named, "the seed stopped being a drift"
+
+    citing = lambda line: (
+        "`_parse_frontmatter` (`agent_mcp/skills.py:%d`) splits the block.\n" % line)
+
+    # Clause 1: drifted, yet inside some definition — the shipped rule's blind spot.
+    graded, bad = anchor_span_report(citing(drift))
+    assert len(graded) == 1, "the seeded citation was not graded at all"
+    assert bad == ["agent_mcp/skills.py:%d" % drift], (
+        "an anchor inside the WRONG definition reads as graded: the name beside "
+        "it is the only thing that says otherwise")
+
+    # Clause 2: the same sentence passes once the number is the symbol's.
+    graded_ok, bad_ok = anchor_span_report(citing(inside))
+    assert len(graded_ok) == 1 and bad_ok == [], (
+        f"the rule reported a correct anchor ({bad_ok}) — it must be able to "
+        "report drift without reporting the symbol")
+
+
+def test_an_anchor_naming_no_symbol_keeps_the_shipped_span_rule():
+    """#3047 clause 3: the widening subtracts nothing #2583 caught.
+
+    Both sentences cite `agent_mcp/skills.py` with no backticked identifier in
+    the ~28 characters before the span, so `named_symbol` returns None for them
+    and they fall to the shipped rule unchanged: inside any definition passes,
+    outside every definition is reported. `:63` is the blank line between two
+    module defs; `:110` sits inside `_parse_frontmatter`, which the sentence says
+    nothing about and the rule still cannot object to.
+    """
+    named_in_neither = "`agent_mcp/skills.py:%d` is cited with no name.\n"
+    blank, inside = named_in_neither % 63, named_in_neither % 110
+    assert named_symbol(blank, "`agent_mcp/skills.py:63`") is None, (
+        "the seed now names a symbol, so it no longer tests the unnamed path")
+    assert anchor_span_report(blank)[1] == ["agent_mcp/skills.py:63"], (
+        "the widening lost the #2583 case: an anchor in the blank line between "
+        "two definitions must still be reported")
+    assert anchor_span_report(inside)[1] == [], (
+        "an unnamed anchor inside SOME definition must still pass — the widened "
+        "rule only constrains a citation that names a symbol")
+
+
+def test_a_bare_line_anchor_is_graded_and_a_port_never_is():
+    """#3047 clause 5: the `:NNN` spelling is owned, and ownership costs no ports.
+
+    Owning a spelling the extractor never matched means first deciding which
+    `:NNN` spans are line numbers at all. The corpus's 92 bare spans split three
+    ways, and all three are seeded here on one line so a rule that only handles
+    one shape cannot pass it: a continuation after an anchored path (`:100`,
+    inside `_parse_frontmatter`), a stale continuation (`:80`, in the gap between
+    two defs), and two port spellings that a number-blind rule would grade as
+    line 8080 and 5173 of a Python file — which would have invented anchors out
+    of `localhost:8080` and `vllm:8080` on the day it shipped.
+    """
+    line = ("`agent_mcp/skills.py:96`, body `:100` and stale `:80`; vLLM at "
+            "`http://localhost:8080`, djev at `vllm:8080`, MC on `:5173`\n")
+    graded = bare_anchor_citations(line)
+    assert [g[0] for g in graded] == ["`:100`", "`:80`"], (
+        f"the continuation rule graded {[(g[0]) for g in graded]}; it must take "
+        "the two spans that continue the source path on the line and no others")
+    assert all("8080" not in g[0] and "5173" not in g[0] for g in graded), (
+        "a port was read as a line number, which is how owning this spelling "
+        "would have manufactured 40+ false anchors across the corpus")
+
+    _g, bad = anchor_span_report(line)
+    assert bad == ["`:80`"], (
+        f"a bare span was mis-reported as {bad}: `:100` is inside the function "
+        "line names, `:80` sits in the gap between `_dedupe_paths` and "
+        "objection available")
 
 
 def test_the_span_rule_grades_the_file_the_resolver_pointed_at(tmp_path, monkeypatch):
@@ -2314,7 +2567,7 @@ def test_the_nodes_2625_files_are_green_with_nothing_hidden():
 # drift that quietly: `app.paths.VAULT_ROOT` is either in the module or it is not.
 #
 # Scope is deliberate and is asserted, not assumed. The doc still cites line
-# numbers elsewhere (`app/harness/safety.py:372`, `agent_mcp/builtin_fs.py:238`,
+# numbers elsewhere (`app/harness/safety.py:417`, `agent_mcp/builtin_fs.py:238`,
 # `agent_mcp/vault.py:1608`), and this guard must leave them alone — a doc-wide
 # ban would be a different rule than the one clause 4 states, and would be
 # satisfied by deleting citations rather than replacing them.

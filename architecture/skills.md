@@ -275,7 +275,7 @@ a deliver in both registration orders.
 ### 4. Autonomy, by name
 
 A scheduled task binds its skill in frontmatter: `skill_name` (a slug) or
-`skill_path`. `autonomy._load_skill_content` (`app/autonomy.py:931`) resolves a
+`skill_path`. `autonomy._load_skill_content` (`app/autonomy.py:2818`) resolves a
 value containing `/` or ending `.md` as a path, and anything else as
 `~/obsidian/skills/<slug>/SKILL.md`; the body is pasted into the task prompt
 under "Follow the skill instructions below" (`:976`).
@@ -307,7 +307,7 @@ There is no install tool, no catalog, no remote source, and no `skills_get` or
 
 ## Frontmatter
 
-`_parse_frontmatter` (`agent_mcp/skills.py:42`) splits on the first `\n---`
+`_parse_frontmatter` (`agent_mcp/skills.py:96`) splits on the first `\n---`
 after a leading `---` and `yaml.safe_load`s it; a parse failure degrades to an
 empty mapping and a body, never an exception. Fields the loaders actually read:
 
