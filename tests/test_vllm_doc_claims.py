@@ -2391,19 +2391,30 @@ def test_the_replication_outcome_is_stated_where_the_deferral_and_the_ruling_sto
     assert (f"2026-09-29 on {_word(len(unexplained(filing_raw)))} event and this day on "
             f"{_word(len(unexplained(replication_raw)) - 1)}, or "
             f"{_word(len(unexplained(replication_raw)))} with the marginal one") in p
-    # An exclusion, not a cause; and not filed.
+    # An exclusion, not a cause; and the ask is dropped, not pending.
     assert "an exclusion and not a cause" in p
-    assert "it is not filed" in p
+    assert "DROPPED, not owed" in p and DROP_CARRIER in p, (
+        f"the paragraph no longer says the escalation is dropped with {DROP_CARRIER}: "
+        "#2250 was closed rejected on 2026-10-12 and the owed wording is what re-files it")
+    assert not _external_ask_phrases(p), (
+        f"the paragraph re-opens the external write with {_external_ask_phrases(p)}")
     assert not re.search(r"github\.com/vllm-project/vllm/issues/\d+", _section(10)), (
-        "§10 names an upstream issue; the 'not filed' sentences must go when it does")
+        "§10 names an upstream issue; the escalation was dropped on 2026-10-12, so an issue "
+        "URL here could only be a fabrication")
 
     both = (FILING_EXTRACT.name, REPLICATION_EXTRACT.name)
     ruling = _reopen_bullet()
     ruling = ruling[:ruling.index(_RULE_ANCHOR)]
     assert "decided rather than parked" not in ruling
     assert "has since been met on two independent counted days" in ruling
-    assert "the re-open has fired and the upstream report is owed" in ruling
-    assert "It has not been filed" in ruling
+    assert "So the re-open has fired" in ruling, (
+        "the re-open firing is the finding and stays said; what left is the ask it produced")
+    assert DROP_SENTENCE in ruling and "DROPPED, not owed" in ruling, (
+        f"the accepted-loss paragraph must carry the hand ruling — {DROP_SENTENCE} — with "
+        "its effect: this is the sentence a reader of the accepted loss reaches for the "
+        "upstream consequence, and it must not leave them waiting on a write")
+    assert not _external_ask_phrases(ruling), (
+        f"the paragraph re-opens the external write with {_external_ask_phrases(ruling)}")
     for name in both:
         assert name in ruling, f"the accepted-loss paragraph does not name {name}"
 
@@ -3057,11 +3068,17 @@ def test_the_third_day_question_is_recorded_as_ruled_not_as_owed():
     assert "the accepted-loss ruling and its consequence stand as written" in p, (
         "the paragraph does not say what the third day did NOT change: the ruling and its "
         "published consequence")
-    assert "the report is owed and it is not filed" in p, (
-        "the ruled consequence has to be the published one — report owed, and unfiled")
-    assert "#2250 Half A" in p, (
-        "filing stays Alan's alone; the paragraph names the item owning the external write "
-        "rather than leaving it to whoever reads this next")
+    assert DROP_SENTENCE in p and "DROPPED, not owed" in p, (
+        f"the paragraph must carry the hand ruling — {DROP_SENTENCE} — with its effect. The "
+        "half that used to stop a reader closing the ruling as pending was 'it is not "
+        "filed', and after 2026-10-12 that was the misleading half: it left the write "
+        "looking owed. Naming the dropped ask and the hand that dropped it is what keeps a "
+        "later reader from re-opening it")
+    assert not _external_ask_phrases(p), (
+        f"the paragraph re-opens the external write with {_external_ask_phrases(p)}: #2250 "
+        "is closed rejected, so neither an open ownership nor an owed wording may stand for "
+        "the external ask here — the paragraph names #2250 as the item the ruling was made "
+        "ON, which is a different sentence")
 
 
 def test_the_review_log_bullet_records_the_ruling_instead_of_an_owed_question():
@@ -3090,9 +3107,19 @@ def test_the_review_log_bullet_records_the_ruling_instead_of_an_owed_question():
     assert "owed-check ruled on 2026-10-06" in b, (
         "the bullet does not say who ruled and when, so the entry reads as the reviewer's "
         "own view rather than a settled ruling")
-    assert "the report stays owed and unfiled" in b, (
-        "the bullet must carry the consequence unchanged: owed, and not filed")
-    assert "#2250 Half A" in b, "the bullet keeps the external write owned by #2250"
+    assert SUPERSEDE_PREFIX in b and DROP_DATE in b and DROP_ITEM in b, (
+        f"the bullet gained no dated supersession note ({SUPERSEDE_PREFIX}, naming "
+        f"{DROP_DATE} and {DROP_ITEM}). This is a dated Review-log entry, so the page's own "
+        "convention is to append a note rather than rewrite the 2026-10-05 text: #2852's "
+        '"superseded on the evidence set" entry above is the precedent, and rewriting the '
+        "entry would erase what the reviewer knew on 2026-10-05")
+    assert "evidence set grew" in b and "no comment had been written" in b, (
+        "the 2026-10-05 entry's own dated reading was overwritten rather than superseded: it "
+        "recorded that the evidence set grew and that no comment had been written, and both "
+        "stay true as of the date on the entry")
+    assert DROP_EFFECT in b, (
+        f"the supersession note does not state the effect ({DROP_EFFECT}), so a reader of the "
+        "Review log learns the ask stopped but not that nothing is owed because of it")
 
 
 def test_the_ruled_stance_names_the_evidence_set_the_extract_set_derives(cfg):
@@ -3156,11 +3183,20 @@ def test_the_reword_keeps_every_graded_span_bounded_and_both_rails_intact(readin
         "misses answer for this day's one")
     assert "2026-10-01 count" not in _replication_bullet(), (
         "the 2026-09-27 span now runs into the 10-01 paragraph it is supposed to stop at")
-    assert "it is not filed" in p, (
-        "the ruled consequence survives the re-wording — the report is owed and it is NOT "
-        "filed, and those two sentences are what leave §10 free of an issue URL")
+    assert DROP_SENTENCE in p and DROP_EFFECT in p, (
+        "the ruled consequence survives the re-wording only as the ruling now reads: the "
+        f"condition IS met on the counted days and the escalation is {DROP_EFFECT} "
+        f"({DROP_SENTENCE}). Both halves are still load-bearing — an issue URL would make a "
+        "'filed' claim true by accident, and a paragraph giving only the condition would "
+        "leave the reader waiting on a write. The span is bounded at the next bullet, so this "
+        "cannot be answered by the ruling paragraph above")
+    assert not _external_ask_phrases(p), (
+        f"the re-worded paragraph re-opens the ask with {_external_ask_phrases(p)}")
     assert not re.search(r"github\.com/vllm-project/vllm/issues/\d+", _section(10)), (
-        "§10 names an upstream issue; the 'not filed' sentences must go when it does")
+        "§10 names an upstream issue, and this node's §10-scoped URL rail is one of the two "
+        "the page shipped with: the write was dropped on 2026-10-12, so an issue number here "
+        "could only be an invented one")
+
     assert not re.search(r"\((a|b|c|d)\) (passes|fails)", p), (
         "the re-worded paragraph marks a criterion pass/fail inside the counted reading's "
         "span, where _verdict allows exactly one such mark")
@@ -3378,9 +3414,14 @@ def test_the_seventh_day_chat_miss_qualifies_on_the_measured_pool(seventh_raw, c
         in churned[0], (
         f"the day-level churn join is not the pinned reading ({day['misses_gap_churned_free_pool']} "
         f"of {day['misses_with_gap']}), so the page is quoting the unmeasured null as a number")
-    assert "it is not filed" in p, (
-        "the ruled consequence carries to this day too: a fourth qualifying day adds "
-        "evidence, not stance, and the report stays unfiled")
+    assert DROP_SENTENCE in p and DROP_EFFECT in p, (
+        "the ruled consequence carries to this day too, and so does the escalation's state — "
+        "said, not implied: a fourth qualifying day adds evidence, not stance, and the ask is "
+        f"{DROP_EFFECT} ({DROP_SENTENCE}). This is the paragraph #2852 appended after a "
+        "mid-sentence owed clause and inherited nothing from, which is why its ruling sits at "
+        "the end of it")
+    assert not _external_ask_phrases(p), (
+        f"the fourth-day paragraph re-opens the ask with {_external_ask_phrases(p)}")
 
 
 # ── #2912: 2026-10-12, the eighth extract — a pinned reading §10 does not count ────────────
@@ -3558,3 +3599,395 @@ def test_the_eighth_extract_joins_the_family_without_moving_a_graded_reading(eig
     assert EIGHTH_EXTRACT.name not in raw_doc, (
         "§10 now cites a fixture it does not count, so the page points a reader at an extract no "
         "criterion grades")
+
+
+# ── #3053: the 2026-10-12 hand ruling, and the ban on renewing the ask it dropped ─────────
+#
+# §10 spent six weeks saying the vLLM#57032 report "is owed", "stays owed", "is not filed",
+# and "owned by #2250 Half A". Alan ruled by hand on 2026-10-12 that the comment is not to
+# be posted, and closed #2250 `rejected`: "do not post the vLLM#57032 comment; dropped, not
+# owed". Nothing in the repo carried that, so `git grep -n 'dropped, not owed'` read 0 hits
+# and the page kept renewing an ask a closed item owns — 6aeb124b (#2852) renewed it four
+# days after the ruling, and the suite demanded it in eight places. The renewal is not
+# laziness: the owed sentence sits mid-paragraph, so a new counted day appended after it
+# inherits nothing, and a fifth qualifying day is coming (the extract job writes through
+# 2026-10-18 and the day set is derived from the fixtures). That is why the nodes below are
+# derived and why the shape, not just the wording, is pinned.
+#
+# Two refusals, deliberate. `_RULE_ANCHOR`'s trigger-(ii) ruling says the drop "may not be
+# treated as settled here" — a ROUND may not decide it, while a hand ruling from Alan is
+# exactly what settles it, so no sentence below re-declares the triggers live. And the page
+# records on 2026-09-29 that a round may not write to vLLM, so the ban below is on
+# promising the write, never on refusing to perform it.
+
+#: The hand ruling, in the words the page now uses for it. The date, the item and the ruler
+#: are separate constants because each is pinned as a distinct fact.
+DROP_DATE = "2026-10-12"
+DROP_ITEM = "#2250"
+DROP_RULER = "Alan"
+DROP_CARRIER = "Alan ruled by hand on 2026-10-12, on #2250, that the vLLM#57032 comment is"
+DROP_SENTENCE = ("Alan ruled by hand on 2026-10-12, on #2250, that the vLLM#57032 comment "
+                 "is not to be posted")
+#: The dated supersession note both Review-log entries gained. Appended, never a rewrite: the
+#: entries are dated evidence of what the reviewer knew on 2026-10-05 and 2026-10-16, and the
+#: page's own precedent for correcting a dated entry by date is #2852's "superseded on the
+#: evidence set by #2852" note.
+SUPERSEDE_PREFIX = "2026-10-20: superseded on the escalation by Alan's hand ruling"
+#: What the ruling did, and the two words that must always sit beside the date. The pair is
+#: pinned because either half alone is refusable: "dropped" without "not owed" leaves a
+#: reader wondering whether the debt stands, and "not owed" without a ruler leaves a
+#: floating decision — which is how #2964 reads an "owed-check ruling" that never ran.
+DROP_EFFECT = "DROPPED, not owed"
+
+#: The phrases that re-open the external write. Phrase-scoped, never the bare word `owed`:
+#: §10 legitimately carries owed-check's own rulings (the 2026-09-26 chat-gate decision
+#: around line 830, the fourth-day standing around line 954) and #3053 clause 5 requires
+#: those untouched — a ban on the word would be a clause no diff can satisfy.
+EXTERNAL_ASK_PHRASES = ("it is not filed", "report is owed", "report stays owed",
+                        "will be filed", "unfiled", "Half A", "Owed: the upstream report",
+                        "Alan's to file")
+#: The same as one alternation, for the CHECK grep in #3053 clause 1. The item's grep is the
+#: first six; the last two are added here because the page's 2026-10-01 Review-log entry
+#: promises the write as `Owed: the upstream report itself … is Alan's to file`, which no
+#: phrase in the item's list matches. The item's own grep therefore reaches 0 with that
+#: sentence still standing — the same under-inclusiveness its first bullet warns about for
+#: the 09-29 paragraph's `the upstream report is owed`, extended to a line the triage
+#: counted as one of its 7 hits but its phrase list did not cover.
+EXTERNAL_ASK_GREP = ("report (is|follows from that and is) owed|report stays owed"
+                     "|it is not filed|unfiled|Half A|Owed: the upstream report"
+                     "|Alan's to file")
+#: Two true sentences the page carries ABOUT the ban. Neither is in the phrase list, and that
+#: non-overlap is what the last node measures rather than pattern-matching: a rail that
+#: caught them would push the next round to write "no report will be filed", which is the
+#: ban's own wording.
+_ASK_REFUSALS = (
+    "this page promises no write to a third-party repository and records no issue URL",
+    "#2250 closed rejected: do not post the vLLM#57032 comment; dropped, not owed",
+)
+#: A counted day's own figures, so "keeps its figures" has a witness. Year-shaped tokens are
+#: filtered at the call site: every paragraph names its own date, and a date is not a
+#: measurement.
+_DAY_FIGURE_RE = re.compile(r"\d[\d,]{2,}|\d+\.\d+%")
+#: The newest Review-log entry. The file's one review-bullet span helper is bounded to the
+#: 2026-10-05 entry, so the 10-16 entry — the one #2852 renewed the ask in — needs its own.
+_REVIEW_2026_10_16 = "- 2026-10-16 — "
+
+
+def _review_bullet_2026_10_16() -> str:
+    """The Review-log entry for #2852, bounded at the next bullet or the end of the page."""
+    raw = DOC.read_text(encoding="utf-8")
+    start = raw.index(_REVIEW_2026_10_16)
+    body = start + len(_REVIEW_2026_10_16)
+    nxt = re.search(r"^- |^## ", raw[body:], re.M)
+    end = body + nxt.start() if nxt else len(raw)
+    return " ".join(raw[start:end].split()).replace("**", "")
+
+#: A counted day's heading, matched by DATE and not by the word `count`: the first
+#: qualifying day's heading is `The 2026-09-29 re-open: the first day the ruling's own
+#: filing condition is met`, not `The 2026-09-29 count`, because it was the first and had no
+#: ordinal to take. A prefix keyed on `count` locates three of the four days and reports the
+#: fourth as missing, which is a finder bug wearing the costume of a page bug.
+_DAY_HEAD = "- **The {} "
+
+
+def _raw_page() -> str:
+    """The page as written, bold markers stripped and the trigger-(ii) re-arm ruling removed.
+
+    `DOC` is a path and every span helper in this file reads it itself; this is the same read
+    for the whole-page nodes. `_RULE_ANCHOR`'s paragraph is dropped from the span because it
+    is where `a hand ruling` appears in the page's own words, and a scan of the page for a
+    ruling would otherwise find that paragraph and call it the ruling.
+    """
+    raw = DOC.read_text(encoding="utf-8")
+    lines = [ln for ln in raw.splitlines() if _RULE_ANCHOR not in ln]
+    return " ".join(" ".join("\n".join(lines).split()).split()).replace("**", "")
+
+
+def _external_ask_phrases(span: str) -> list[str]:
+    """Phrases in `span` promising the external write. A span holding none is untouched."""
+    return [ph for ph in EXTERNAL_ASK_PHRASES if ph in span]
+
+
+def _external_ask_prose(spans: dict[str, str]) -> dict[str, list[str]]:
+    """`{span: [phrase, ...]}` for every banned phrase still standing in `spans`.
+
+    A span with none is NOT reported: §10 has fourteen bullets and #2912's uncounted-day
+    paragraph is inside the section slice, so listing untouched spans would make the
+    failure message unreadable and invite fixing prose that was never wrong.
+    """
+    return {name: hits for name, hits in
+            ((n, _external_ask_phrases(t)) for n, t in spans.items()) if hits}
+
+
+def _counted_day_paragraph(day: str) -> str:
+    """One counted day's §10 paragraph, whitespace-normalised, from heading to next heading.
+
+    Derived rather than read from a helper per day, because the day set is derived: a node
+    that asked for `_sixth_bullet()` or `_seventh_bullet()` by name is a node that stops
+    covering the page the moment a fifth day arrives with no helper. `**` is stripped the way
+    every other span helper here strips it, so a fact is pinned by its words and not by
+    whether the page chose to bold it — which is the same property #3051's triage found
+    missing in `_sixth_bullet()`, where the bold made an exact-string assert pass on prose
+    nobody would have written that way twice.
+    """
+    # NOT `_section(10)`: that span helper collapses every newline into a space, and a
+    # paragraph is only separable from its neighbours while the newlines are there.
+    lines = DOC.read_text(encoding="utf-8").splitlines()
+    head = _DAY_HEAD.format(day)
+    start = [i for i, ln in enumerate(lines) if ln.startswith(head)]
+    assert len(start) == 1, (
+        f"the {day} counted-day paragraph is not locatable by its own {_DAY_HEAD.format(day)!r} "
+        f"heading (found {len(start)}); the heading text is how this node knows which "
+        "paragraph it is reading, and a fifth day has to arrive with one")
+    rest = lines[start[0] + 1:]
+    end = next((i for i, ln in enumerate(rest) if ln.startswith("- **")), len(rest))
+    return " ".join(" ".join([lines[start[0]], *rest[:end]]).split()).replace("**", "")
+
+
+#: A day paragraph with the ruling cut out — what the derived asserts must refuse. It keeps
+#: the figures, the extract sentence and the tail position, and drops only the decision, so
+#: a finder that ignored that decision would report this as passing. The figures are the
+#: 2026-10-15 paragraph's own, which is why this control reads as a real paragraph.
+_CONTROL_DROPPED_PROSE = (
+    "- **The 2026-10-15 count: a seventh chat-turn gap-joined miss, and the fourth "
+    "qualifying day.** 38,941 cold misses, 17 of them in chat turns. **166** of "
+    "44,839,037 prompt tokens recomputed (0.0004%), and 7 of 104 prefill records "
+    "carrying a token sample. The extract is committed as "
+    "`tests/fixtures/vllm_prefix_miss_2026-10-15.json`, because the engine lines behind it "
+    "expire the way every other day's do and the figures here are the ones a reader can "
+    "still check. The event is not-churned and unexplained. What this day changes is the "
+    "report's evidence set again.")
+#: The same paragraph carrying the ruling. Differs from the control by the ruling alone, so
+#: an assert that passes the control and refuses this one is keyed on nothing.
+_CONTROL_KEPT_PROSE = _CONTROL_DROPPED_PROSE.replace(
+    "The event is not-churned and unexplained.",
+    "The event is not-churned and unexplained, and this day's event joins the four-extract "
+    "evidence set rather than an ask: the escalation is DROPPED, not owed — Alan ruled by "
+    "hand on 2026-10-12, on #2250, that the vLLM#57032 comment is not to be posted, and no "
+    "counted day re-opens it.")
+#: §10 prose carrying every banned phrase, for the two rails' own controls. Each phrase is
+#: present as written in the ban, so a control assert that matches this string proves the
+#: finder can see all eight and not just the ones the page happened to use.
+_CONTROL_PROMISE_PROSE = ("The report is owed and it is not filed; the report stays owed and "
+                          "unfiled, and filing it belongs to #2250 Half A. Owed: the upstream "
+                          "report itself, which is Alan's to file. It will be filed once a "
+                          "fifth day qualifies.")
+
+
+def test_the_page_carries_the_ruling_in_the_two_places_a_reader_meets_it():
+    """#3053 clauses 1 and 2: the accepted-loss paragraph and the Review log both say the
+    escalation is dropped, with the date, the item, and whose hand it came from.
+
+    The pair is the point. §10's accepted-loss paragraph is what a reader of the ruled
+    consequence reaches for the upstream outcome, and the Review log is what a reader of the
+    page's history reaches for the same thing; either one left promising the write is a
+    door, and clause 1's grep is over the whole page precisely because the Review log is
+    outside §10's own bounds.
+    """
+    ruling = _reopen_bullet()
+    ruling = ruling[:ruling.index(_RULE_ANCHOR)]
+    assert DROP_SENTENCE in ruling and DROP_EFFECT in ruling, (
+        f"the accepted-loss paragraph does not carry {DROP_SENTENCE} with its effect "
+        f"{DROP_EFFECT}: it is the sentence that used to say the report is owed, and a "
+        "reader who finds it silent about 2026-10-12 has to assume the ask stands")
+    for name, bullet in (("2026-10-05", _review_bullet_2026_10_05()),
+                         ("2026-10-16", _review_bullet_2026_10_16())):
+        assert DROP_DATE in bullet and DROP_ITEM in bullet, (
+            f"the {name} Review-log bullet carries no dated reference to the ruling "
+            f"({DROP_DATE}, {DROP_ITEM})")
+    assert not _external_ask_prose({
+        "§10": _section(10).replace(_RULE_ANCHOR, ""), "page": _raw_page(),
+    }), (
+        "the page still promises the external write; clause 1's grep is the same measurement "
+        "as `grep -nE '%s' architecture/vllm.md`, which read 7 hits on 2026-10-20"
+        % EXTERNAL_ASK_GREP)
+    # Controls: a page with the ruling stripped, and page prose carrying each banned phrase.
+    assert DROP_SENTENCE not in _CONTROL_DROPPED_PROSE, (
+        "the ruling-stripped control still carries the ruling, so the asserts above are "
+        "reading a sentence that is not there")
+    assert set(_external_ask_phrases(_CONTROL_PROMISE_PROSE)) == set(EXTERNAL_ASK_PHRASES), (
+        f"the banned-phrase list is not all visible in the control prose: "
+        f"{set(EXTERNAL_ASK_PHRASES) - set(_external_ask_phrases(_CONTROL_PROMISE_PROSE))} "
+        "go undetected, so the rail's clean pass on the page means nothing")
+
+
+def test_no_owed_check_ruling_the_page_relies_on_is_loserased_in_passing(cfg):
+    """Clause 5's other half: what #3053 forbids is a phrase, not the word `owed`.
+
+    Four passages in §10 name a ruling owed-check made, and none is the external ask: the
+    2026-09-26 chat-gate decision (with `is owed-check's to rule` struck because it
+    contradicted the page's own trigger (i)), the accepted loss's ownership, the
+    2026-10-01 standing, and #2912's non-counting of 2026-10-12. Sweeping the word would
+    have quietly reversed all four — and the fourth is exactly what keeps 2026-10-12 out of
+    the day set, which is what the first nodes in this file hold.
+    """
+    s10 = _section(10)
+    for phrase, why in (
+        ("owed-check ruled on 2026-09-29 that 23 chat turns is the",
+         "the chat-gate re-count ruling of 2026-09-29, which is what the 23-turn figure in "
+         "the criteria rests on"),
+        ("The ruling is owed-check's and stands until a re-count moves it",
+         "the sentence saying whose ruling the gate is and what would move it"),
+        ("owed-check ruled it on 2026-10-01 (#1919)",
+         "the 2026-10-01 standing that says a third qualifying day changes the evidence set "
+         "and not the stance"),
+        ("owed-check ruled on 2026-10-06 (#2248's owed entry 3, recorded here by #2268)",
+         "the 2026-10-06 ruling that the condition was already met on the second counted "
+         "day, which is the standing the 10-01 paragraph still argues from"),
+    ):
+        assert phrase in s10, (
+            f"{why} is gone from §10. It is a ruling owed-check MADE, not an upstream ask, "
+            "so #3053's phrase-scoped ban must leave it standing — widening the ban to the "
+            "word `owed` would have deleted all four")
+    days = _qualifying_days(float(cfg["workers"]["kv_gate"]["max_kv_usage"]))
+    assert "2026-10-12" not in days, (
+        "2026-10-12 is in the derived day set, so a paragraph that keeps it out was edited — "
+        "that is a re-count wearing a wording fix, and e263cd0b (#2912) rails it out on "
+        "purpose")
+    assert not _external_ask_prose({"§10": s10.replace(_RULE_ANCHOR, "")}), (
+        "a span above still carries a promise phrasing; the four passages just checked are "
+        "owed-check's own rulings and are supposed to stay")
+
+
+def test_no_upstream_write_is_owed_anywhere_on_the_page(cfg):
+    """#3053 clause 1: the CHECK grep, run from inside the suite, over the WHOLE page.
+
+    Not scoped to `_section(10)`. §10's slice stops at §11's heading, which is above the
+    Review log, so a §10-only rail passes while the Review log still promises the write —
+    and 2 of the 7 hits this round removed were Review-log lines. The span assertion is
+    what makes that difference observable rather than assumed.
+    """
+    s10 = _section(10)
+    assert "## Review log" not in s10, (
+        "the Review log has moved inside §10's slice, so `_section(10)` now spans the whole "
+        "page and this node's separate whole-page scan is doing no extra work — which also "
+        "means the §10-only rails this file already had would suddenly cover the Review log, "
+        "and the reason #3053 clause 1 needed a whole-page grep would be gone")
+    page = _raw_page()
+    assert "## Review log" in page and "## 11." in page, (
+        "the page lost either its Review log or its §11 heading, and which of the two comes "
+        "first is what makes `_section(10)` narrower than the whole page — the fact this node "
+        "exists to check")
+    assert page.index("## Review log") > page.index("## 11."), (
+        "the Review log now sits above §11, so `_section(10)` already spans it and the "
+        "whole-page scan below is no longer covering text the §10 rails miss")
+    assert _external_ask_prose({
+        "§10": s10.replace(_RULE_ANCHOR, ""), "page": page,
+    }) == {}, (
+        f"the page still promises the external write; the same measurement as "
+        f"`grep -nE '{EXTERNAL_ASK_GREP}' architecture/vllm.md`, which read 7 hits on "
+        "2026-10-20")
+    assert _external_ask_phrases(_CONTROL_PROMISE_PROSE), (
+        "the finder is not finding the phrases, so the clean pass above is an empty scan")
+    assert not re.search(r"github\.com/vllm-project/vllm/issues/\d+", page), (
+        "the page names an upstream issue URL, and the write was dropped on 2026-10-12, so "
+        "an issue number on this page could only be an invented one")
+    assert re.search(r"github\.com/vllm-project/vllm/issues/\d+",
+                     "see github.com/vllm-project/vllm/issues/57032 for the annotation"), (
+        "the URL pattern does not match the URL form it bans, so every URL-rail assertion in "
+        "this file is a rail that cannot fire")
+
+
+def test_every_counted_day_paragraph_ends_naming_the_dropped_escalation(cfg):
+    """#3053 clause 3, derived over `_qualifying_days()`: the newest day's paragraph must
+    END with the ruling, and every earlier one must carry it.
+
+    Derived because the daily extract job is still running — `~/lloyd-data/vllm-prefix-miss/`
+    holds a file per day through 2026-10-18 — so a fifth qualifying day arrives without
+    anyone deciding to add one. Position is load-bearing, not style: the owed sentence this
+    replaces sat mid-paragraph in the 2026-10-15 count, which is why 6aeb124b could append a
+    new day after it and inherit nothing. A paragraph that ends on the measured pool hands
+    the next day's author no state to copy, so the newest day has to end on the decision.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    days = _qualifying_days(gate)
+    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15"], (
+        f"the counted-day set is {days}, so the pinned list in "
+        "test_the_ruled_stance_names_the_evidence_set_the_extract_set_derives has moved with "
+        "a real fifth day — which is the case this node exists for: the new paragraph has to "
+        "carry the ruling too")
+    figures_seen = set()
+    for day in days:
+        para = _counted_day_paragraph(day)
+        figures = set(_DAY_FIGURE_RE.findall(para))
+        figures_seen |= figures
+        assert figures, (
+            f"the {day} paragraph carries no comma-formatted or 3+-digit figure, so a reader "
+            "cannot check it against its extract")
+        assert f"vllm_prefix_miss_{day}.json" in para and "committed" in para, (
+            f"the {day} paragraph no longer names its own committed extract "
+            f"(`tests/fixtures/vllm_prefix_miss_{day}.json`), which is what makes the "
+            "evidence set checkable after the engine's own status lines rotate away")
+        assert DROP_DATE in para and DROP_EFFECT in para, (
+            f"the {day} paragraph does not name the ruling ({DROP_DATE}, {DROP_EFFECT}): a "
+            "counted day that speaks only of its own figures leaves the next author with no "
+            "state to inherit")
+        assert not _external_ask_phrases(para), (
+            f"the {day} paragraph re-opens the external write with "
+            f"{_external_ask_phrases(para)}")
+    assert len(figures_seen) >= 4, (
+        f"the four paragraphs present only {sorted(figures_seen)} between them, which is not "
+        "four days' worth of independent figures — the span is reading one paragraph four "
+        "times")
+    newest = _counted_day_paragraph(days[-1])
+    tail = " ".join(newest.split()[-45:])
+    assert DROP_SENTENCE in tail and DROP_RULER in tail, (
+        f"the newest counted-day paragraph ({days[-1]}) does not END naming the ruling with "
+        f"its ruler; its last 45 words are: {tail[:240]!r}. This is the shape that renewed "
+        "the ask: #2852 appended the fourth day after a paragraph that named the consequence "
+        "mid-sentence, and a paragraph ending on the measured pool gives the fifth day "
+        "nothing to copy")
+    # Controls: the two shapes this assert must refuse.
+    assert DROP_SENTENCE not in " ".join(_CONTROL_DROPPED_PROSE.split()[-45:]), (
+        "the control paragraph's tail carries the ruling, so the tail assert is not the "
+        "position check it claims to be")
+    assert DROP_SENTENCE in " ".join(_CONTROL_KEPT_PROSE.split()[-45:]), (
+        "the control carrying the ruling fails the tail assert too, so the assert is keyed "
+        "on a word like the date rather than on the ruling sentence")
+    assert _external_ask_phrases(_CONTROL_PROMISE_PROSE) and \
+        not _external_ask_phrases(_CONTROL_KEPT_PROSE), (
+        "the phrase finder is not scoped right: it must see the promise in the prose control "
+        "and nothing in the dropped-ruling control")
+
+
+def test_the_rail_refuses_an_upstream_ask_without_refusing_its_refusal(cfg):
+    """#3053 clause 4's edge, which #2852's nodes show is not hypothetical: this page holds
+    sentences that refuse the write and sentences that promise it, and they are one word
+    apart in places.
+
+    A rail that catches both pushes the page into writing "no report will be filed", which
+    is the ban's own wording — the fix becomes the thing the rail forbids, and the next
+    round reads a rail it has to route around. So the ban names the four promise phrasings,
+    and two true sentences about the ban are exempt by name.
+    """
+    s10 = _section(10).replace(_RULE_ANCHOR, "")
+    assert _ASK_REFUSALS[0] in s10, (
+        "§10 no longer says it promises no write to a third-party repository and records no "
+        "issue URL. That sentence is the page's own statement of the refusal, and it is the "
+        "reason a ban on PROMISING the write must not swallow a sentence REFUSING to "
+        "perform one")
+    for refusal in _ASK_REFUSALS:
+        assert refusal in _raw_page(), (
+            f"the page no longer carries {refusal!r}; it is a true sentence ABOUT the ban, "
+            "and the node that pins the ban's scope reads it as the exemption's witness")
+        assert not _external_ask_phrases(refusal), (
+            f"the ban's own exemption witness {refusal!r} trips the phrase list, so the ban "
+            "and the refusal are no longer distinguishable and the next round has to route "
+            "around the rail")
+    assert _external_ask_phrases("the report is owed and will be filed by the next round"), (
+        "the ban does not catch a plain promise to file, which is the sentence it exists for")
+    assert "will be filed" in _CONTROL_PROMISE_PROSE and \
+        _external_ask_phrases(_CONTROL_PROMISE_PROSE), (
+        "the ban does not catch 'will be filed' in the control prose, so clause 4's fourth "
+        "phrase is unpinned")
+    assert len(set(_ASK_REFUSALS) & set(EXTERNAL_ASK_PHRASES)) == 0, (
+        "an exemption witness is itself in the ban list, so the two lists overlap and the "
+        "rail's scope is no longer measurable")
+    for name, bullet in (("2026-10-05", _review_bullet_2026_10_05()),
+                         ("2026-10-16", _review_bullet_2026_10_16())):
+        assert not _external_ask_phrases(bullet), (
+            f"the {name} Review-log bullet still carries {_external_ask_phrases(bullet)}: "
+            "clause 4's supersession note is only worth having if the entry it is appended to "
+            "stops promising the write, and these two single-entry spans are read nowhere "
+            "else in this file, so a whole-page scan alone would not notice a promise left "
+            "in one of them")
