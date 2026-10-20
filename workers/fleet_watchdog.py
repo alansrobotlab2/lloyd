@@ -1515,10 +1515,12 @@ def _throughput_alert_message(census: dict) -> str:
     NOT replaced — the day is what the rules weighed and what a reader re-pricing the
     floor counts — and no rule reads the new number: it is legibility, not a third leg.
 
-    The rate's denominator is `max(minutes_since_boot, 15)`, not the elapsed minutes:
-    three failures two minutes after a boot are 22.5 / 15 min un-floored, a figure that
-    describes how recently the machine was switched on rather than how hard the pool is
-    failing, and would itself read as the incident this clause is meant to discount.
+    The rate's denominator is
+    `max(minutes_since_boot, _THROUGHPUT_RATE_WINDOW_MINUTES)`, not the elapsed
+    minutes: three failures two minutes after a boot are 22.5 / 15 min un-floored,
+    a figure that describes how recently the machine was switched on rather than how
+    hard the pool is failing, and would itself read as the incident this clause is
+    meant to discount.
 
     When the machine would not give an instant the clause is absent entire — no count,
     no rate, no anchor — because the alternative is printing a rate measured from a boot
@@ -1540,8 +1542,13 @@ def _throughput_alert_message(census: dict) -> str:
     if census["boot"] is not None:
         window = max(census["minutes_since_boot"], _THROUGHPUT_RATE_WINDOW_MINUTES)
         rate = (census["since_boot"] * _THROUGHPUT_RATE_WINDOW_MINUTES / window)
+        # The unit is interpolated for the same reason the divisor is (#3063): a
+        # literal `15` here agrees with the constant today and silently stops agreeing
+        # the day it moves, leaving a line that normalises to one window and labels
+        # itself another.
         boot_part = (f"; {census['since_boot']} of them since host boot "
-                     f"{census['boot'].isoformat()} = {rate:.2f} / 15 min "
+                     f"{census['boot'].isoformat()} = {rate:.2f} "
+                     f"/ {_THROUGHPUT_RATE_WINDOW_MINUTES} min "
                      f"({census['minutes_since_boot']} min since boot)")
     return (
         f"worker pool failure throughput: {census['newer']} failed runs on UTC "

@@ -3060,3 +3060,98 @@ async def test_the_line_keeps_its_old_shape_when_the_host_will_not_give_a_boot_i
     assert "other 2" in line, line
     assert f"failures span {_THROUGHPUT_DAY}T" in line and "Z to " in line, line
     assert "America/Los_Angeles" in line, line
+
+
+# ── #3063: the window the label prints is the window that did the dividing ────
+# `_THROUGHPUT_RATE_WINDOW_MINUTES` (= 15) is the denominator every since-boot rate
+# above is normalised to. The line computed WITH it (`git grep -n
+# '_THROUGHPUT_RATE_WINDOW_MINUTES' workers/fleet_watchdog.py`) and then printed the
+# unit as a literal `15`. Today the two agree, which is why nothing was red; the day
+# the constant moves, the one artifact a person triages an incident from divides by
+# one window and calls it another. These nodes move the constant and read what comes
+# out — first the rendered label, then the sentence beside it in the docstring.
+
+async def test_the_since_boot_rate_label_names_the_window_constant_not_a_literal(
+        board, monkeypatch, tmp_path):
+    """#3063 clause 1: move `_THROUGHPUT_RATE_WINDOW_MINUTES` and the label moves.
+
+    The census under test is the one #2956 clause 1 describes — 12 of the day's 45
+    failures at or after the pinned boot, 1085 minutes before the pinned clock —
+    because the census never reads the constant (the formatter is its only reader),
+    so patching it changes only what the LINE says. At window 30 the rate is
+    12 * 30 / max(1085, 30) = 0.3318, so the honest line is `= 0.33 / 30 min`; the
+    code before this change printed `= 0.33 / 15 min`, a unit that had already
+    drifted from the arithmetic beside it. The absence of `/ 15 min` is most of the
+    clause: a line carrying the new number AND the old one is still two windows.
+
+    The line is then driven a second time through `tick`, the seat that actually
+    posts it, because the render a person reads is produced there against the REAL
+    clock, not at the formatter — so that pass asserts the unit and not the rate, and
+    a formatter-only test could not tell a posted line from an unposted one.
+    """
+    _boot_pinned(monkeypatch)
+    _unsuppressed_census(monkeypatch)
+    q = _throughput_queue(tmp_path / "window-30.db",
+                          _boot_split_rows() + _throughput_rows(_THROUGHPUT_PREV, 20))
+    census = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    assert census is not None and census["since_boot"] == 12 \
+        and census["minutes_since_boot"] == 1085, (
+        "this node renders the #2956 fixture (12 of the day's 45 failures at or after "
+        f"the pinned 06:00Z boot, 1085 min before the pinned clock), got {census}")
+    monkeypatch.setattr(fw, "_THROUGHPUT_RATE_WINDOW_MINUTES", 30)
+    line = fw._throughput_alert_message(census)
+    assert "= 0.33 / 30 min" in line, (
+        "with the window at 30 the rate is 12 * 30 / 1085 = 0.3318 per 30 min, so the "
+        f"line neither divided by 30 nor labelled its own window 30 min: {line}")
+    assert "/ 15 min" not in line, (
+        f"the window in the label is a literal that survived moving the constant: "
+        f"{line}")
+    assert "(1085 min since boot)" in line, (
+        f"the elapsed window the label belongs to is no longer on the line: {line}")
+
+    alerts = _watch_alerts(monkeypatch)
+    await fw.tick(q)
+    assert len(alerts) == 1, (
+        f"a 45-vs-20 day over the pinned floor posted {len(alerts)} lines, so the "
+        f"posted text is not the text under test: {alerts}")
+    assert "/ 30 min" in alerts[0], (
+        f"the line that reaches a person labels its rate with something other than "
+        f"the constant: {alerts[0]}")
+    assert "/ 15 min" not in alerts[0], (
+        f"the posted line still carries the literal window: {alerts[0]}")
+
+
+def test_the_docstring_that_states_the_rate_denominator_names_the_constant():
+    """#3063 clause 3: the denominator sentence names the constant, not a number.
+
+    `_throughput_alert_message`'s docstring stated the denominator as
+    `max(minutes_since_boot, 15)`. The rendered label now interpolates, and a prose
+    number beside it drifts the same silent way: whoever moves the constant to 30
+    reads a sentence still saying 15 and re-prices the floor against a window nobody
+    set. The node takes the function's own source through `inspect`, cuts the ONE
+    sentence that states the denominator at its NEXT SENTENCE BOUNDARY (a period, so
+    rewording the sentence narrows what is checked instead of raising here), and asks
+    of that sentence that the denominator expression name
+    `_THROUGHPUT_RATE_WINDOW_MINUTES`. The expression is pinned rather than the digit
+    `15` banned, because the same sentence carries the worked `22.5 / 15 min` example
+    of an UNFLOORED denominator — arithmetic at the shipped value, not a claim about
+    the window, and left alone by the item's own finding.
+    """
+    src = inspect.getsource(fw._throughput_alert_message)
+    start = src.find("The rate's denominator is")
+    assert start != -1, (
+        "the sentence stating what the since-boot rate divides by is gone, so nothing "
+        "here can say whether it names the constant or a number")
+    tail = src[start:]
+    ends = [i for i in (tail.find(". "), tail.find(".\n")) if i > 0]
+    assert ends, (
+        f"the denominator sentence never ends, so this node could not bound the text "
+        f"it is grading: {tail[:120]!r}")
+    sentence = tail[:min(ends) + 1]
+    assert ("max(minutes_since_boot, _THROUGHPUT_RATE_WINDOW_MINUTES)"
+            in sentence), (
+        f"the denominator sentence does not name the constant the divisor reads: "
+        f"{sentence!r}")
+    assert "max(minutes_since_boot, 15)" not in sentence, (
+        f"the denominator sentence still states the window as a bare 15, so it drifts "
+        f"the day the constant moves: {sentence!r}")
