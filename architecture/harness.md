@@ -172,7 +172,13 @@ change ledger, which is where to look for it.
 turn; each of its parts has an off switch read at the moment it would speak —
 `budget_anchor.enabled` (both budget clocks, `app/deadline_anchor.py`),
 `todo_anchor.enabled`, `context_anchor.enabled` — and an absent key means on
-(#769; only `context_anchor` is in config.yaml today). Anchor messages are not
+(#769 added the first two; `config.yaml` has carried all three, each
+`enabled: true`, since 2026-10-20). Those two #769 switches gate the minority
+of what actually fires: on the ledger tallied 2026-10-20 they are 2,215 of
+15,552 recorded anchor fires, about 14%, while `goal_card` is 13,193 — about
+85% — and is gated by `inner_voice.observer.goal_card_to_primary`, not
+`harness.*`, on the same `todo_anchor_interval_iterations` cadence. Anchor
+messages are not
 persisted, so the loop records each one it appends as a `harness.anchor_fired`
 event in `event_logs/<session_id>.events.jsonl`, naming the anchor, its level,
 the iteration and the turn: `grep -h '"harness.anchor_fired"'

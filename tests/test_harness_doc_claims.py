@@ -1350,3 +1350,118 @@ def test_the_structured_verdicts_bullet_dates_the_property_and_warms_up_correctl
     assert not WARM_UP_FIRST_REQUEST_RE.search(OLD_WARM_UP_WARNING), (
         "the first-request requirement also matches the old warning, so it would "
         "be satisfied by the prose this item fixed")
+
+
+# ── #3050: the `## Config` anchor paragraph must not assert an absence the ───
+# ── shipped file contradicts, and must date the share its switches cover. ────
+
+#: The section the anchor switches are described in.
+CONFIG_SECTION_HEADING = "## Config"
+
+#: The three anchor off switches that paragraph enumerates.
+ANCHOR_FLAG_KEYS = ("budget_anchor", "todo_anchor", "context_anchor")
+
+#: The sentence #3050 found stale, kept verbatim as a control input: the
+#: detectors below have to fire on it and stay quiet on the shipped prose, or
+#: a clean scan here proves nothing. (#769 shipped the first two flags in code
+#: only; the keys went into config.yaml on 2026-10-20.)
+STALE_ANCHOR_SENTENCE = "(#769; only `context_anchor` is in config.yaml today)"
+
+#: Sentences asserting an anchor switch is not in `config.yaml`. Kept as
+#: patterns rather than one literal because the stale claim was phrased as an
+#: exclusivity ("only X is in config.yaml today"), which a reader acts on just
+#: as hard as a plain absence.
+ANCHOR_ABSENT_CLAIM_RES = [
+    re.compile(r"only `([a-z_]+)` is in `?config\.yaml`? today", re.I),
+    re.compile(r"`([a-z_]+)\.enabled`[^.]{0,90}\b(?:is absent|is not (?:yet )?in"
+               r"\s+config|does not (?:yet )?exist)\b", re.I),
+    re.compile(r"config\.yaml carries neither", re.I),
+]
+
+#: The share sentence: the paired count over the tally total it was taken
+#: from, with the percent the doc prints beside it. Requiring the counts and
+#: the total is what stops a share being restated as a bare percentage nobody
+#: can re-derive.
+ANCHOR_PAIRED_SHARE_RE = re.compile(
+    r"([\d,]+) of ([\d,]+) recorded anchor fires, about (\d+)%")
+
+#: The 2026-10-20 anchor tally as `tests/test_anchor_flags_and_ledger.py`
+#: measures it and as this doc quotes it: `budget_anchor`'s two kinds plus
+#: `todo` against the whole ledger, and `goal_card` beside them.
+ANCHOR_TALLY_DATE = "2026-10-20"
+ANCHOR_PAIRED_FIRES = 2_215
+ANCHOR_TOTAL_FIRES = 15_552
+ANCHOR_GOAL_CARD_FIRES = 13_193
+
+
+def _absent_anchor_claims(text: str) -> list[str]:
+    """Phrases in `text` asserting an anchor switch is absent from config.yaml."""
+    return [m.group(0) for rx in ANCHOR_ABSENT_CLAIM_RES
+            for m in rx.finditer(text)]
+
+
+def test_the_config_paragraph_no_longer_claims_an_anchor_flag_absent():
+    """#3050 clause 4: "only `context_anchor` is in config.yaml today" is false
+    as of 2026-10-20, and the file it contradicts is the one the runtime boots.
+
+    The claim is pinned against `CONFIG`, read the way `anchor_enabled` reads
+    it, not against a literal in this file: a later commit that drops a key
+    from config.yaml has to fail here rather than let the stale sentence
+    quietly become true again.
+    """
+    flat = " ".join(_section(DOC_TEXT, CONFIG_SECTION_HEADING).split())
+    assert not _absent_anchor_claims(flat), (
+        f"the Config paragraph asserts an absent anchor switch: "
+        f"{_absent_anchor_claims(flat)}")
+    assert _absent_anchor_claims(" ".join(STALE_ANCHOR_SENTENCE.split())), (
+        "the detectors do not fire on the pre-fix sentence, so the clean scan "
+        "above is a scan of nothing")
+    shipped = {k for k in ANCHOR_FLAG_KEYS
+               if isinstance((CONFIG.get("harness") or {}).get(k), dict)}
+    assert shipped == set(ANCHOR_FLAG_KEYS), (
+        f"config.yaml carries {sorted(shipped)} of the three anchor switches the "
+        "paragraph enumerates, so prose and file have part ways again")
+    for key in ANCHOR_FLAG_KEYS:
+        assert f"`{key}.enabled`" in flat, (
+            f"the paragraph no longer names `{key}.enabled` among the switches")
+
+
+def test_the_config_paragraph_dates_the_share_the_two_flags_cover():
+    """Clause 4's other half: how much of the ledger each ablation could reach.
+
+    Undated and unquantified, three switches read as three equal levers, which
+    is how an ablation gets pointed at the minority of fires and concludes
+    anchors do nothing. `goal_card` is 84.8% of this ledger, is gated by
+    `inner_voice.observer.goal_card_to_primary` rather than `harness.*`, and
+    restates on the todo anchor's own cadence — all three facts belong beside
+    the share.
+    """
+    flat = " ".join(_section(DOC_TEXT, CONFIG_SECTION_HEADING).split())
+    assert ANCHOR_TALLY_DATE in flat, "the share is stated with no date beside it"
+    m = ANCHOR_PAIRED_SHARE_RE.search(flat)
+    assert m, (
+        "the paragraph no longer states the two flags' share as counts over the "
+        "tally total, so the percentage cannot be re-derived")
+    paired = int(m.group(1).replace(",", ""))
+    total = int(m.group(2).replace(",", ""))
+    pct = int(m.group(3))
+    assert (paired, total) == (ANCHOR_PAIRED_FIRES, ANCHOR_TOTAL_FIRES), (
+        f"the tally the doc quotes moved to {paired} of {total}; the constants "
+        "here and in tests/test_anchor_flags_and_ledger.py track the doc")
+    assert abs(paired / total * 100 - pct) < 0.6, (
+        f"{paired} of {total} is not {pct}%: the printed share does not follow "
+        "from the counts it cites")
+    assert f"{ANCHOR_GOAL_CARD_FIRES:,}" in flat, "goal_card's fire count left the doc"
+    goal_pct = round(ANCHOR_GOAL_CARD_FIRES / total * 100)
+    assert f"about {goal_pct}%" in flat, (
+        f"the paragraph does not give goal_card's share as about {goal_pct}%")
+    assert "`inner_voice.observer.goal_card_to_primary`" in flat, (
+        "the paragraph does not name the key that actually gates goal_card")
+    assert "`todo_anchor_interval_iterations`" in flat, (
+        "the paragraph does not say goal_card rides the todo anchor's cadence")
+    iv = (CONFIG.get("inner_voice") or {}).get("observer") or {}
+    assert "goal_card_to_primary" in iv, (
+        "config.yaml no longer carries inner_voice.observer.goal_card_to_primary, "
+        "which the paragraph names as goal_card's switch")
+    assert (CONFIG.get("harness") or {}).get("todo_anchor_interval_iterations"), (
+        "the cadence key the paragraph cites is not in config.yaml either")

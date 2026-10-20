@@ -530,6 +530,33 @@ harness:
   # prompt's <active_todos> block is frozen at turn start, so a turn that
   # creates its own list would otherwise never see it again. 0 disables.
   todo_anchor_interval_iterations: 10
+  # Budget anchor. One switch for the two budget clocks of a bounded turn: the
+  # wall clock, which emits ANCHOR_TAG kind `deadline_budget` at 70% and 90% of
+  # the run's timeout, and the iteration cap, which emits kind
+  # `iteration_budget` at 75% and 90% of `max_turns` — both built in
+  # app/deadline_anchor.py. Flipping this off silences those two `<budget>`
+  # messages and nothing else; `max_turns: 0`, or a run with no timeout,
+  # silences the same pair by removing the clock they measure.
+  # What it does NOT hold. The anchor ledger tallied 2026-10-20 — 15,552
+  # `harness.anchor_fired` events under ~/lloyd-data/event_logs/ — puts these
+  # two kinds at 1,838, about 12% of fires; together with `todo_anchor` below
+  # the pair covers about 14%. The loud anchor is `goal_card`: 13,193 fires,
+  # about 85%, gated by `inner_voice.observer.goal_card_to_primary` rather than
+  # by `harness.*`, and restated on this same
+  # `todo_anchor_interval_iterations` cadence.
+  budget_anchor:
+    enabled: true
+  # Todo anchor. Re-sends the `<active_todos>` list — ANCHOR_TAG kind `todo`,
+  # built by `todo_anchor` in app/routers/messages.py — once the list has gone
+  # `todo_anchor_interval_iterations` untouched with items still open, because
+  # the block in the system prompt is frozen at turn start. Flipping this off
+  # silences that re-send and nothing else; `todo_anchor_interval_iterations: 0`
+  # silences it too, by removing the cadence. On the same 2026-10-20 ledger
+  # this kind is 377 fires, about 2% of the total, and the goal card that
+  # restates the same contract — about 85% of fires — is gated by
+  # `inner_voice.observer.goal_card_to_primary`, not by this key.
+  todo_anchor:
+    enabled: true
   # Preserved thinking. Carry this many recent iterations' reasoning back
   # into history as each assistant message's `reasoning` field, which
   # Qwen3.8-Flash-Next renders into that turn's <think> block. Its model
