@@ -325,7 +325,7 @@ async def test_the_line_is_written_with_discord_home_channel_null(aut):
     disable alert fired three times in 38 minutes and reached nobody — and that was
     the reason this alert was written straight to the daily note instead of routed
     through it. Since #1592 the same call appends the refused alarm to the note
-    itself (app/discord_notify.py:493-496), so the null below is a premise about the
+    itself (app/discord_notify.py:506-509), so the null below is a premise about the
     transport this box ships with, not a claim that an alarm goes unseen.
 
     The premise is read out of `config.yaml`, the file that decides it, and is NOT
@@ -415,7 +415,7 @@ async def test_the_fast_failure_line_has_no_discord_code_path_at_all(aut, monkey
 # sentences under test are claims about code that does not run here — reading the
 # docstring string and locating the branch in the other module's source is what
 # crosses it. `tests/test_autonomy_failure_alert.py:1500`'s citation of
-# `app/discord_notify.py:477-479` is CORRECT (the `if not appended:` warning inside
+# `app/discord_notify.py:490-492` is CORRECT (the `if not appended:` warning inside
 # `_survive_the_dropped_alert`) and is deliberately outside this scope.
 
 # Phrases that describe `discord_alert` as if it still dropped an alarm on the
@@ -1497,7 +1497,7 @@ def test_a_drop_item_the_backend_cannot_be_read_back_is_left_as_it_stands(
 
 
 async def test_the_drop_branch_says_so_when_the_note_refuses_the_alert(aut, caplog):
-    """Clause 5: the witness `app/discord_notify.py:477-479` has never had.
+    """Clause 5: the witness `app/discord_notify.py:490-492` has never had.
 
     Before #1736 the drop path appended and returned unconditionally, so the only
     branch that ever KNEW an alarm had been lost kept its knowledge to itself; #1736

@@ -327,6 +327,18 @@ def _fold_clause(family: _AlarmFamily, suppressed: int,
     single line from reading as a decision that the alarm was dismissed (#1121's
     silence was exactly that reading, and #1661's parked-only log line exists for the
     same reason).
+
+    A reading-bearing line names TWO triggers, because it has two (#3062). Doubling
+    is the within-day gate `_doubled` implements; the next calendar day is the gate
+    `_day_records` implements, and it is the only one that can fire on a day's first
+    alarm — the reset drops the older day's records wholesale, so that fire has no
+    `last_emitted` to double against and `_doubled` answers False for a None baseline.
+    Promising only the doubling therefore described a gate that does not exist across
+    a day boundary, and the vault shows the line doing exactly that with a reading
+    that had not moved: `memory/2026-10-18.md`:12 and `memory/2026-10-19.md`:12 both
+    open the `past-next-run` family at `3 task(s) past their next_run` under the
+    doubling promise, and the line came anyway. The same `clear` is the tail of both
+    shapes below, so both are corrected by the one sentence.
     """
     shown = f"{reading:g} {family.unit}" if reading is not None else None
     if suppressed:
@@ -336,7 +348,8 @@ def _fold_clause(family: _AlarmFamily, suppressed: int,
     else:
         head = "[daily-note fold: this alarm writes at most one line a day here"
         beside = f"; its reading is {shown}" if shown else ""
-    clear = ("; the next line comes when that reading doubles]" if shown
+    clear = ("; the next line comes when that reading doubles, or on the next "
+             "calendar day]" if shown
              else "; the next line comes on the next calendar day]")
     return f" {head}{beside}{clear}"
 

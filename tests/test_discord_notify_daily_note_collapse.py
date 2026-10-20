@@ -156,6 +156,28 @@ def _state(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+_FOLD_CLAUSE = re.compile(r"\[daily-note fold: (.*)\]$")
+
+
+def _fold_clause_text(line: str) -> str:
+    """The `[daily-note fold: …]` clause a note line carries, or "" when it has none.
+
+    #3062 needs to assert what the fold's CLEARING SENTENCE promises, and the bullet
+    around it is the producer's own text (`workers/fleet_watchdog.py` builds the
+    alarm body). Reading only the clause keeps a test honest about which sentence it
+    graded: an alarm re-wording itself cannot make a promise about the next line come
+    true.
+
+    The `$` is what makes that guarantee real rather than intended: the fold writes
+    its clause as the line's tail, so anchoring is what keeps a suffix added after it
+    out of the graded text. A line whose clause is no longer its tail matches nothing,
+    and every caller asserts ON the returned text, so the helper fails closed — it
+    cannot quietly start grading somebody else's prose as fold wording.
+    """
+    found = _FOLD_CLAUSE.search(line)
+    return found.group(1) if found else ""
+
+
 @pytest.fixture()
 def fold(tmp_path, monkeypatch):
     """A note dir, a witness ledger and a fold state, all redirected as a PAIR.
@@ -329,13 +351,31 @@ def test_the_next_line_names_the_fires_it_folded_and_the_newest_reading(fold):
     A single `stalled` bullet under a page of session captures reads as a finding
     someone looked at and closed, which is the exact silence #1121 was filed about;
     the line therefore says it is at most one a day and names what brings the next.
+
+    What it names has to be BOTH triggers (#3062). The line used to promise only the
+    doubling, which is a within-day gate: `_day_records` replaces the whole per-day
+    record set on a day mismatch, so the first fire of a new calendar day finds no
+    `last_emitted` baseline and `_doubled` returns False on None. Doubling therefore
+    cannot be what brings that line — the reset is. `~/obsidian/memory/2026-10-18.md`
+    :12 and `2026-10-19.md`:12 both open the `past-next-run` family at the identical
+    reading `3 task(s) past their next_run` under the doubling promise, and the line
+    came anyway. The assertions below read the clause for the trigger rather than the
+    word "doubles", and do it for both shapes the fold prints: the first-fire line and
+    the `N earlier fires … newest reading X` line.
     """
     _fire(STALL_185)
     first = _lines(fold["notes"])[0]
+    first_tail = _fold_clause_text(first)
     assert "daily-note fold" in first, (
         f"the line does not say it is a bounded one: {first!r}")
-    assert "at most one line a day" in first and "doubles" in first, (
-        f"the line must state what would clear the silence: {first!r}")
+    assert "at most one line a day" in first, (
+        f"the line does not bound itself: {first!r}")
+    assert "next calendar day" in first_tail, (
+        "the first-fire line names doubling as the only thing that will bring the "
+        f"next line, and the day reset removes that gate: {first!r}")
+    assert "doubles" in first_tail, (
+        "the within-day doubling gate has to stay named on the line it gates: "
+        f"{first!r}")
     assert "185 min old" in first
 
     _fire(STALL_250)
@@ -351,6 +391,11 @@ def test_the_next_line_names_the_fires_it_folded_and_the_newest_reading(fold):
         f"the re-emit does not name the two fires it is carrying: {second!r}")
     assert "newest reading 915 min old" in second, (
         f"the re-emit does not name its own reading: {second!r}")
+    assert "next calendar day" in _fold_clause_text(second), (
+        "the folded-fires line reaches the same clearing sentence as the first one, "
+        f"so it must name the day reset too: {second!r}")
+    assert "doubles" in _fold_clause_text(second), (
+        f"the folded-fires line dropped the doubling gate it still has: {second!r}")
     assert "915 min old" in second
     assert "185 min" not in second.split("daily-note fold")[1], (
         f"the folded count must reset once carried, not accumulate the stale "
@@ -420,11 +465,20 @@ def test_the_fold_resets_at_the_next_calendar_day(fold):
     Yesterday's row is rewritten into the state file rather than the clock being
     moved, so what is under test is the comparison the fold makes and not a fake
     clock every later reader has to remember.
+
+    Since #3062 the node also READS the line the reset produced. The same reading
+    fires on both days, so nothing but the reset can have written the second one —
+    and that line used to end "the next line comes when that reading doubles", a
+    promise about a gate `_doubled` cannot evaluate on the first fire of a day
+    because `_day_records` has just dropped the day that held its baseline. A wording
+    that names only the doubling now fails here, which is the half the old assertion
+    on the word "doubles" could not fail on.
     """
     _fire(STALL_185)
     state = _state(fold["state"])
     assert state["day"] == _today(), state
     assert state["families"]["queue-age"]["emitted"] is True
+    assert state["families"]["queue-age"]["last_reading"] == 185.0, state
 
     yesterday = (datetime.now(ZoneInfo("America/Los_Angeles"))
                  - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -440,6 +494,24 @@ def test_the_fold_resets_at_the_next_calendar_day(fold):
         f"yesterday's 3 folded fires rode into today's line: {lines[1]!r}")
     assert _state(fold["state"])["day"] == _today(), (
         "the write did not re-stamp the state to the day it is counting")
+
+    # The two lines carry one reading, so the reset and not the tripwire is what
+    # brought the second: 185 min old on both days, and `_doubled` cannot say True
+    # for a reading against its own value.
+    assert "185 min old" in lines[0] and "185 min old" in lines[1], (
+        "the day-N+1 fire is not the reading yesterday's line carried, so this node "
+        f"is no longer replaying a pinned reading: {lines[1]!r}")
+    # Scene-setting, not a second check of the reset: the doubling gate itself is
+    # graded by `test_a_reading_that_has_not_doubled_stays_folded`. What this guard
+    # protects is the inference in the assertion under it — that nothing but the day
+    # reset can have written today's line.
+    assert _doubled(185.0, 185.0) is False, (
+        "an identical reading is not a doubling, so only the day reset can have "
+        "written today's line")
+    assert "next calendar day" in _fold_clause_text(lines[1]), (
+        "today's first line was produced by the day reset, so that is the trigger it "
+        f"has to name; naming only the doubling promises a gate that does not reach "
+        f"across the boundary: {lines[1]!r}")
 
 
 # ───────────────────────── the seams, walked for real ────────────────────────
@@ -476,6 +548,72 @@ def test_the_fold_survives_a_process_that_no_longer_exists(fold):
     assert _state(fold["state"])["families"]["queue-age"]["suppressed"] == 1, (
         "the folded fire was not counted, so the next line out will not say it "
         "happened: " + fold["state"].read_text(encoding="utf-8"))
+
+
+#: A day that is not today, stated as a constant rather than computed. `_day_records`
+#: compares one string, so any other day is the reset; a date this old can never
+#: collide with a clock that rolls while the node is running, which a `now - 1 day`
+#: computed in the parent and re-read by the child could.
+_AN_OLD_DAY = "2000-01-01"
+
+
+def test_a_restarted_process_on_a_new_day_names_the_reset_that_fired(fold):
+    """Clause 1 and clause 2 together, across both boundaries at once.
+
+    The two seam nodes above each cross one: this file's day-reset node rewrites the
+    state file inside one process, and the process node crosses the process inside one
+    day. The production event the re-worded sentence describes is their intersection —
+    the pool restarts ~12x a day, so the worker that emits the 03:00 PDT alarm is very
+    often a fresh interpreter reading a state file an earlier process stamped with
+    yesterday's date, holding a `last_reading` it is about to discard.
+
+    That is the case the old wording got wrong where it actually happens: the child has
+    no baseline of any kind — not because a reset dropped it in this process, but
+    because this process never had one — so the line it writes can only have been
+    brought by the day change, and pre-diff it promised a doubling gate. The clause the
+    child itself wrote is what is graded here, which no in-process node can produce: a
+    clause built by a process that inherited nothing from the one that wrote line 0.
+    """
+    _fire(STALL_185)
+    assert len(_lines(fold["notes"])) == 1
+
+    state = _state(fold["state"])
+    assert state["day"] == _today(), state
+    state["day"] = _AN_OLD_DAY                      # the file an earlier process left
+    state["families"]["queue-age"]["suppressed"] = 3
+    fold["state"].write_text(json.dumps(state), encoding="utf-8")
+
+    child = (
+        "import asyncio, sys; sys.path.insert(0, %r)\n"
+        "import app.discord_notify as dn\n"
+        "dn.CONFIG = {'discord': {'home_channel': None, 'token': ''}}\n"
+        "asyncio.run(dn.discord_alert(%r))\n" % (str(REPO), STALL_185))
+    env = dict(os.environ)
+    env.update({NOTE_ENV: str(fold["notes"]),
+                LEDGER_ENV: str(fold["ledger"]),
+                DAILY_NOTE_FOLD_STATE_ENV: str(fold["state"])})
+    done = subprocess.run([sys.executable, "-c", child], env=env, cwd=str(REPO),
+                          capture_output=True, text=True, timeout=180)
+    assert done.returncode == 0, done.stderr[-2000:]
+
+    lines = _lines(fold["notes"])
+    assert len(lines) == 2, (
+        "the day change did not re-open the family in a process that had never fired "
+        "it, so the reset is not what the two nodes above proved: "
+        + " | ".join(lines))
+    assert "185 min old" in lines[0] and "185 min old" in lines[1], (
+        "the child's line is not the reading the older day's line carried: "
+        f"{lines[1]!r}")
+    assert "earlier fires" not in lines[1], (
+        f"an older day's 3 folded fires rode into today's line: {lines[1]!r}")
+    assert "next calendar day" in _fold_clause_text(lines[1]), (
+        "the child wrote the line the reset produced, on a reading that cannot have "
+        "doubled from anything it knows, so naming only the doubling would promise a "
+        f"gate its own process could not evaluate: {lines[1]!r}")
+    assert "doubles" in _fold_clause_text(lines[1]), (
+        "naming the reset must not drop the within-day gate: " + lines[1])
+    assert _state(fold["state"])["day"] == _today(), (
+        "the child did not re-stamp the state to the day it is counting")
 
 
 def test_only_a_redirected_note_directory_without_a_redirected_state_disables_it(

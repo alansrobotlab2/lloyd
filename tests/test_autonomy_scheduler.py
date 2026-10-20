@@ -4431,8 +4431,8 @@ async def test_the_unparseable_alert_follows_transitions_not_scans(
 # one call short of the observable and the branch's own delivery had never run anywhere.
 #
 # The observable is the daily note, not Discord: `discord.home_channel` is null with an
-# empty token on this box, which is Alan's standing decision (app/discord_notify.py:400-
-# 403), so `_survive_the_dropped_alert`'s fallback is the transport's only branch here.
+# empty token on this box, which is Alan's standing decision (app/discord_notify.py:413-
+# 416), so `_survive_the_dropped_alert`'s fallback is the transport's only branch here.
 # The check that closes the residual is therefore a real scheduler tick whose alert is
 # followed all the way into `memory/<today>.md`, with only the two things that leave the
 # process stubbed — the model-server health probe and Discord's HTTP transport.
@@ -4447,7 +4447,7 @@ async def test_the_unparseable_alert_follows_transitions_not_scans(
 #   2  test_a_healed_task_file_is_reported_on_the_daily_note_too
 #   3  test_both_parse_alert_lines_carry_the_undelivered_prose
 
-#: `_survive_the_dropped_alert`'s own opening words (app/discord_notify.py:396), quoted
+#: `_survive_the_dropped_alert`'s own opening words (app/discord_notify.py:409), quoted
 #: rather than paraphrased: the delivery-failure prose every scheduler alarm shares,
 #: which is what tells a note line that travelled the transport from one some code path
 #: wrote straight to the file.
