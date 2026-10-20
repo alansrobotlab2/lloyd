@@ -31,17 +31,19 @@ that happens while the guardian is down must still read as a wipe when it
 comes back.
 
 Stdlib only, like everything the guardian imports. Also a CLI:
-    vaultwatch.py status | clear | sync-gate
+    vaultwatch.py status | clear | sync-gate | snapshot-age [REPO]
 """
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 VAULT_ROOT = os.environ.get("LLOYD_VAULT_ROOT", "/home/alansrobotlab/obsidian")
 GUARDIAN_STATE = Path(os.environ.get("LLOYD_GUARDIAN_STATE",
@@ -58,6 +60,23 @@ PERSIST_EVERY_SECONDS = 60.0
 # Directories whose churn is not note content: git packs loose objects by the
 # thousand.
 SKIP_DIRS = frozenset({".git"})
+
+#: Where `scripts/backup/backup-vault.sh` commits the vault, and how old that
+#: commit may get. This is the vault's only copy that is not the vault: the
+#: btrfs snapshots behind #1142's ruling cover `~/lloyd-data` alone
+#: (`scripts/backup/snapshot-data.sh` takes `DATA="$HOME/lloyd-data"`), and there
+#: is no remote by ruling. The path is stated as a `Path.home()` relative here and
+#: as `$HOME/...` in the script's own default, and
+#: tests/test_vaultwatch_vault_snapshot_age.py fails if the two stop agreeing —
+#: a check aimed at a repo nobody writes sees a stale HEAD forever and looks
+#: exactly like a check that passed.
+SNAPSHOT_REPO_REL = ".local/state/lloyd-vault-backup/vault.git"
+SNAPSHOT_REPO = Path.home() / SNAPSHOT_REPO_REL
+#: Same bounded age #1416 landed for the data root
+#: (`policy.SNAPSHOT_MAX_AGE_SECONDS`, `datawatch.snapshot_state`): the timer
+#: fires every 15 minutes, so 3 h is twelve missed cycles, and a check that
+#: alarms on one skipped cycle is a check that gets ignored.
+SNAPSHOT_MAX_AGE_SECONDS = 3 * 3600.0
 
 
 @dataclass
@@ -286,14 +305,84 @@ def sync_gate(root: str = VAULT_ROOT, state_dir: Path = GUARDIAN_STATE) -> tuple
     return True, f"{snap.total} files"
 
 
+def snapshot_repo() -> str:
+    """The vault's backup repository, from the same `LLOYD_VAULT_BACKUP_REPO`
+    override `backup-vault.sh` takes, so both name one repo without a config."""
+    return os.environ.get("LLOYD_VAULT_BACKUP_REPO") or str(SNAPSHOT_REPO)
+
+
+def _age_phrase(age: float) -> str:
+    """An age in the unit a person reads: `27 m`, `4 h 12 m`, `3 d 21 h`."""
+    minutes = int(age // 60)
+    if age < 3600.0:
+        return f"{minutes} m"
+    hours = int(age // 3600.0)
+    if age < 86400.0:
+        return f"{hours} h {minutes % 60} m"
+    return f"{int(age // 86400.0)} d {hours % 24} h"
+
+
+def snapshot_age_state(repo: str | None = None, max_age: float = SNAPSHOT_MAX_AGE_SECONDS,
+                       now: float | None = None) -> dict[str, Any]:
+    """How old the vault snapshot's HEAD commit is — the ONE read behind both
+    readers, as `datawatch.snapshot_state` is for the data root (#1416).
+
+    `committed_at` is git's `%ct`, the commit's own recorded time, so it survives
+    the repo being copied or its files being touched; `age` is that against
+    `now`. A repository that is missing, unreadable or has no commit at all is
+    reported `fresh: False` and NOT green-by-absence: `git log` answers `fatal:
+    not a git repository` for a path that does not resolve — which is how
+    `SETUP.md`'s own check is spelled with a literal `~` — and a reader that
+    treated "no commit time" as "no problem" would have called four dead days
+    fresh.
+
+    `repo=None` takes `snapshot_repo()`.
+    """
+    path = repo if repo is not None else snapshot_repo()
+    state: dict[str, Any] = {"repo": path, "sha": None, "committed_at": None,
+                             "age": None, "max_age": max_age, "fresh": False}
+    try:
+        out = subprocess.run(["git", "--git-dir", path, "log", "-1", "--format=%H %ct"],
+                             capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        out = None
+    if out is not None and out.returncode == 0:
+        fields = out.stdout.strip().split()
+        if len(fields) == 2:
+            state["sha"], state["committed_at"] = fields[0], int(fields[1])
+    if state["committed_at"] is None:
+        state["text"] = (f"{path} has no readable HEAD commit, so no vault snapshot is known "
+                         f"to be newer than the {max_age / 3600.0:g} h limit")
+        return state
+    state["age"] = (time.time() if now is None else now) - state["committed_at"]
+    state["fresh"] = state["age"] <= max_age
+    state["text"] = (f"{path} commit {state['sha'][:8]} is {_age_phrase(state['age'])} old"
+                     + ("" if state["fresh"]
+                        else f", past the {max_age / 3600.0:g} h limit"))
+    return state
+
+
+def snapshot_age_report(repo: str | None = None, max_age: float = SNAPSHOT_MAX_AGE_SECONDS,
+                        now: float | None = None) -> tuple[bool, str]:
+    """Green/non-green and the sentence, from the one measurement above."""
+    state = snapshot_age_state(repo, max_age, now)
+    return state["fresh"], state["text"]
+
+
 def main(argv: list[str]) -> int:
     cmd = argv[1] if len(argv) > 1 else "status"
     w = VaultWatch()
     if cmd == "status":
         snap = measure(w.root, skip_top=w.skip_top)
+        # `snapshot` is here because `status` is the reading of vault health a
+        # person or a check runs, and for four days it answered "tripwire not
+        # set, 8516 files" about a vault whose only out-of-vault copy had not
+        # moved since 2026-10-16. The tripwire guards the tree; the snapshot is
+        # what a restore would be taken from, and nothing looked at it.
         print(json.dumps({"tripped": w.tripped(),
                           "last_good": w.history[-1].to_dict() if w.history else None,
-                          "now": snap.to_dict() if snap else None}, indent=2))
+                          "now": snap.to_dict() if snap else None,
+                          "snapshot": snapshot_age_state()}, indent=2))
         return 0
     if cmd == "clear":
         existed = w.clear()
@@ -310,7 +399,15 @@ def main(argv: list[str]) -> int:
         ok, why = sync_gate()
         print(("ok: " if ok else "REFUSING: ") + why, file=sys.stdout if ok else sys.stderr)
         return 0 if ok else 1
-    print(f"usage: {argv[0]} status|clear|sync-gate", file=sys.stderr)
+    if cmd == "snapshot-age":
+        # A status code, not only a word: 370 exit-128 runs went unreported
+        # because every shape of this failure either exited 0 or was never
+        # measured, so the reading has to be one a check can run and fail on.
+        fresh, text = snapshot_age_report(argv[2] if len(argv) > 2 else None)
+        print(("fresh: " if fresh else "STALE: ") + text,
+              file=sys.stdout if fresh else sys.stderr)
+        return 0 if fresh else 1
+    print(f"usage: {argv[0]} status|clear|sync-gate|snapshot-age [REPO]", file=sys.stderr)
     return 2
 
 
