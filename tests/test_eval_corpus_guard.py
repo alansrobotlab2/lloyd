@@ -3184,3 +3184,251 @@ def test_the_gold_label_ratchet_reddens_when_a_pinned_label_narrows_unpinned():
     shaped_after = _substring_shaped_gold_labels(narrowed_away)
     assert sorted(shaped_after - rest) == [] and sorted(rest - shaped_after) == [], (
         sorted(shaped_after ^ rest))
+
+
+# ---------------------------------------------------------------------------
+# #3076: a label's collection has to be one the RECALL ASKS FOR, not merely one the
+# index serves.
+#
+# The side-index A/B published at `eval/measurements/lloyd-architecture-ab-2026-10-20.md`
+# built an arm whose qmd config declared `lloyd-architecture` rooted at
+# `~/lloyd/architecture` (36 docs, 997 chunk vectors, `qmd --index arm ls
+# lloyd-architecture` lists all 36, and a query restricted to that collection returns
+# them). Scored through the real document leg, ten probe queries over those same 36
+# documents came back 0.0 on every metric — on the arm exactly as on the control. The
+# collection was deployed, the documents were embedded and retrievable, and the recall
+# still never returned one, because `agent_mcp/vault.py:1007` sends
+# `list(VAULT_SEGMENTS) + extra` as the payload's `collections:` and `VAULT_SEGMENTS`
+# (:86-89) is the eleven vault segments. `app/doc_corpus.py::deployed_collections` reads
+# the index's own `store_collections` table, which is a WIDER set than the one the
+# retriever names: on the live index of 2026-10-20 the index serves 14 and the recall
+# names 11, and `autonomy-runs`, `sessions` and `subliminal` are the three the daemon
+# holds without the unrestricted search ever asking for them.
+#
+# So every returnability check that reads `store_collections` — including
+# `eval/run_eval.py::gold_docs_unreturnable`, whose output the artifact prints as
+# `gold_doc_unreturnable` — calls a label returnable when the retriever cannot request
+# it. A gold label rooted at `subliminal/` would be counted available, score 0 forever,
+# and read as a retrieval miss. That is #1599's permanent-miss shape arriving through a
+# door the #1662 guard cannot see, and it is why the trial's arm could measure zero on
+# its gain leg and look like a verdict.
+RECALL_SEGMENT_SOURCE = ROOT / "agent_mcp" / "vault.py"
+
+#: Collections the qmd index serves that the recall's unrestricted document leg never
+#: names in its `collections:` list. Each is indexed on purpose and reaches an answer
+#: another way: `sessions` is chat transcripts, which the recall asks for only as the
+#: episodic floor (`agent_mcp/vault.py:320` `RECALL_EPISODIC_FLOOR`, gated by
+#: `retrieval.recall.episodic_floors`), a route that pins one row per floor and is not a
+#: lane a document label can be scored on; `subliminal` re-indexes the vault for the
+#: background pass; `autonomy-runs` is run output. A gold label rooted at one of these is
+#: a permanent doc miss and must be named here or the corpus gains one quietly. When the
+#: owed ruling on #3076 deploys `lloyd-architecture`, its name has to join
+#: `VAULT_SEGMENTS` in the same change — deploying it in qmd's config alone puts it in
+#: this set, which is what
+#: `test_a_collection_deployed_but_not_named_leaves_its_label_unreachable` pins.
+COLLECTIONS_INDEXED_BUT_NOT_RECALLED = {"autonomy-runs", "sessions", "subliminal"}
+
+
+def _recall_named_collections() -> set:
+    """The collection names `vault_recall`/`vault_search` put in the qmd payload.
+
+    Read off `agent_mcp/vault.py`'s source by AST, not imported: this file's standing
+    discipline (`:1567-1573`) is that a guard may not be green by agreeing with the code
+    it guards, and importing `VAULT_SEGMENTS` would let a rename in that module silently
+    rename this guard's expectation with it. Parsing keeps the literal in one place while
+    still failing if the assignment is deleted or stops being a list of strings.
+    """
+    import ast
+
+    tree = ast.parse(RECALL_SEGMENT_SOURCE.read_text())
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and getattr(node.targets[0], "id", None) == "VAULT_SEGMENTS"):
+            return {e.value for e in node.value.elts if isinstance(e, ast.Constant)}
+    raise AssertionError(
+        f"no `VAULT_SEGMENTS = [...]` literal in {RECALL_SEGMENT_SOURCE}: the guard has "
+        "no denominator, and a corpus silently unchecked against a renamed list is the "
+        "failure this node exists to catch")
+
+
+def _label_root(label: str):
+    """The collection a label is rooted at, or None for a bare-basename label — the same
+    split the scorer's substring test (`run_eval.py:478-486`) makes against the
+    `<collection>/<rel>` paths qmd returns."""
+    return label.split("/", 1)[0] if "/" in label else None
+
+
+def _labels_the_recall_cannot_request(pairs: set, named: set) -> list:
+    """`query id -> label` pairs whose root is a collection the recall does not name.
+
+    The one predicate both the corpus check and its mutation test call, so neither can
+    drift from the other: a guard that re-implements its own negative in the test is a
+    guard that cannot fail.
+    """
+    return sorted((qid, lab) for qid, lab in (p.split(" -> ", 1) for p in pairs)
+                  if _label_root(lab) is not None and _label_root(lab) not in named)
+
+
+def test_no_gold_label_names_a_collection_the_recall_never_requests():
+    """#3076: every rooted gold label lives under a collection `vault_recall` names, and
+    every name the recall asks for is one the index serves.
+
+    The property fails in both directions and each is a different bug. A rooted label
+    outside the recall's list is a permanent doc miss no amount of retrieval quality can
+    clear — the arm of the trial above, seen from the corpus side. A name in the recall's
+    list that the index does not serve is the mirror: the payload asks for a collection
+    that holds nothing, and every real collection shares its candidate quota.
+    """
+    named = _recall_named_collections()
+    assert len(named) == 11, (
+        f"the recall names {len(named)} collections ({sorted(named)}); this node's claim "
+        "about the eleven vault segments and its read of `VAULT_SEGMENTS` have to be "
+        "re-read together, not re-literalled")
+
+    pairs = _gold_label_pairs()
+    rooted = [lab for _, lab in (p.split(" -> ", 1) for p in pairs)
+              if _label_root(lab) is not None]
+    assert rooted, f"{CORPUS} carries no rooted doc label — check the corpus loaded"
+    unrecalled = _labels_the_recall_cannot_request(pairs, named)
+    assert unrecalled == [], (
+        f"{unrecalled}: the label is rooted at a collection the recall never asks the "
+        "daemon for, so the query scores 0 on the document leg forever. Either the label "
+        "belongs under a named segment, or the collection joins VAULT_SEGMENTS in the "
+        "same change — deploying it in qmd's config alone does not make it retrievable "
+        "(#3076, eval/measurements/lloyd-architecture-ab-2026-10-20.md)")
+
+    served = {c["name"] for c in _deployed_collections()}
+    assert served, "the index reports no collections at all; the subset check is vacuous"
+    absent = sorted(named - served)
+    assert absent == [], (
+        f"{absent}: the recall asks for a collection the qmd index does not serve, so the "
+        "ask is dead weight in every unrestricted search's collection list")
+    gap = served - named
+    assert gap == COLLECTIONS_INDEXED_BUT_NOT_RECALLED, (
+        f"the index serves {sorted(gap)} that the recall does not name, and the "
+        "documented set says otherwise. A new one is a scoped-only collection no gold "
+        "label may be rooted at; a removed one means the recall grew a segment, which "
+        "changes the denominator of every doc-leg number in the trend")
+
+
+def test_a_collection_deployed_but_not_named_leaves_its_label_unreachable():
+    """The check has to be able to fail, and what fixes it is the recall's list.
+
+    One injected corpus, two labels under the same collection name: the name deployed but
+    not named by the recall (the trial's arm, exactly) and the name both deployed and
+    named (what an option-(a) deploy has to look like to do any good). A rule that
+    reported both rows, or neither, would be describing the deployment rather than
+    retrieval, and the trial would still be reading its own zero as a verdict.
+    """
+    named = set(_recall_named_collections())
+    served = {c["name"] for c in _deployed_collections()}
+    assert served, "no deployed collection list to inject against"
+    assert "lloyd-architecture" not in served, (
+        "the trial's premise has changed: a lloyd-architecture collection is deployed. "
+        "The owed ruling on #3076 decided that, and this node's control row has to be "
+        "re-read against the deployed set instead of asserted absent")
+
+    injected = {"qmd -> lloyd-architecture/qmd.md", "kg -> knowledge/ai/x.md",
+                "bare -> workers.md"}
+    # The un-named collection's label is flagged; a named segment's is not; a bare
+    # basename is not (the scorer's substring test can still reach it, which is the
+    # separate #1662 substring-shape problem, not this one).
+    assert _labels_the_recall_cannot_request(injected, named) == [
+        ("qmd", "lloyd-architecture/qmd.md")], named
+    # Name it, and the row clears with nothing else about the corpus changing. That is
+    # the whole difference between the trial's zero and its ten hits.
+    assert _labels_the_recall_cannot_request(injected, named | {"lloyd-architecture"}) == []
+    # And it is still not reachable if the index does not serve it: naming it in
+    # `VAULT_SEGMENTS` over an index without the collection is the `control_seg` row of
+    # that trial — 0.0 on every metric. Both halves, or the label is a miss.
+
+
+# ---------------------------------------------------------------------------
+# The #3076 trial's own artifacts, pinned rather than narrated.
+#
+# `eval/measurements/lloyd-architecture-ab-2026-10-20.md` is a measurement, and a
+# measurement quoted in prose is a claim. This node reads the twelve artifacts and the
+# arm's scratch qmd config off disk and asserts the three things the note's acceptance
+# depends on: the arm declared the collection rooted where the note says, the two side
+# indices differ by exactly that one collection, and the note prints the 36-file listing
+# rather than summarising it. Like every guard here it reads derived data, so
+# `require_live_data` skips by name on a checkout that never regenerated them.
+TRIAL_DIR = Path.home() / "lloyd-data" / "eval" / "3076"
+TRIAL_ARTIFACTS = TRIAL_DIR / "data" / "eval" / "baselines"
+TRIAL_NOTE = Path.home() / "obsidian" / "eval" / "measurements" / \
+    "lloyd-architecture-ab-2026-10-20.md"
+TRIAL_PROBE = TRIAL_NOTE.with_name("lloyd-architecture-ab-2026-10-20-probe.yaml")
+
+
+def test_the_3076_side_index_ab_artifacts_record_what_the_note_claims():
+    """One snapshot, two side indices, 14 vs 15 — and a 36-line listing, not a summary."""
+    import yaml
+
+    require_live_data(TRIAL_ARTIFACTS, "the #3076 side-index A/B artifact directory")
+    require_live_data(TRIAL_NOTE, "the #3076 measurement note", kind="file")
+    require_live_data(TRIAL_PROBE, "the #3076 probe set", kind="file")
+
+    # The two scratch configs beside the two indices. The fork reads
+    # `$QMD_CONFIG_DIR/<index-name>.yml`, so each side has its own file, and each was
+    # written from the live config verbatim — the arm's with exactly one entry added.
+    conf_dir = TRIAL_DIR / "idx" / "conf"
+    live = yaml.safe_load((Path.home() / ".config" / "qmd" / "index.yml").read_text())
+    ctrl_conf = yaml.safe_load((conf_dir / "control.yml").read_text())
+    arm_conf = yaml.safe_load((conf_dir / "arm.yml").read_text())
+    assert len(ctrl_conf["collections"]) == len(live["collections"]), (
+        "the control's scratch config is not the live config's collection set, so the "
+        "two arms did not start from one snapshot")
+    assert len(arm_conf["collections"]) == len(ctrl_conf["collections"]) + 1, (
+        f"the arm config differs from the control's by "
+        f"{len(arm_conf['collections']) - len(ctrl_conf['collections'])} collection(s), "
+        "not one: the A/B would be measuring something other than adding this one")
+    arm = arm_conf["collections"]["lloyd-architecture"]
+    assert arm["path"] == "/home/alansrobotlab/lloyd/architecture", arm
+    assert arm["pattern"] == "**/*.md", arm
+    assert set(arm_conf["collections"]) - set(ctrl_conf["collections"]) == {
+        "lloyd-architecture"}, sorted(set(arm_conf["collections"]) ^ set(
+            ctrl_conf["collections"]))
+    assert "lloyd-architecture" not in live["collections"], (
+        "the live qmd config now declares the collection, so the trial's whole premise "
+        "— an A/B with no live-config edit — has ended: this node has to be re-read "
+        "against a deployed collection, not re-asserted")
+
+    def head(label_prefix):
+        import glob
+        files = sorted((Path(f) for f in glob.glob(
+            str(TRIAL_ARTIFACTS / f"{label_prefix}-*.json"))), key=lambda f: f.stat().st_mtime)
+        assert files, f"no scored artifact matching {label_prefix}"
+        art = json.loads(files[-1].read_text())
+        return art, files[-1]
+
+    control, cfile = head("x3076-81-control")
+    arm_art, afile = head("x3076-81-arm")
+    assert control["summary"]["overall"]["n_queries"] == 81, cfile.name
+    assert arm_art["summary"]["overall"]["n_queries"] == 81, afile.name
+    # The 14-vs-15 count is the only evidence that the arm is the arm: without
+    # LLOYD_QMD_INDEX beside LLOYD_CONFIG_OVERLAY both report None (#3076's trap).
+    assert control["summary"]["overall"]["gold_doc_collections"] == 14, cfile.name
+    assert arm_art["summary"]["overall"]["gold_doc_collections"] == 15, afile.name
+    assert cfile.name != afile.name
+    # Each side scored its OWN index, and only the arm's holds the new collection.
+    import sqlite3
+    for art, want in ((control, False), (arm_art, True)):
+        path = (art["corpus"]["doc"]["index_path"])
+        assert path.startswith(str(TRIAL_DIR / "idx")), path
+        cols = [r[0] for r in sqlite3.connect(f"file:{path}?mode=ro", uri=True).execute(
+            "SELECT DISTINCT collection FROM documents")]
+        assert ("lloyd-architecture" in cols) is want, (path, sorted(cols))
+
+    # The note: the same two counts, the cost leg's tie stated, and the listing printed
+    # at full length — an elided "36 lines total" is a claim, 36 `qmd://` URIs are the
+    # command's output.
+    text = TRIAL_NOTE.read_text()
+    assert "control 14, arm 15" in text
+    assert text.count("qmd://lloyd-architecture/") >= 36, (
+        "the note summarises the `ls` listing instead of printing it; clause 1 asks for "
+        "the listing that shows 36 docs")
+    probe = yaml.safe_load(TRIAL_PROBE.read_text())
+    assert 8 <= len(probe["queries"]) <= 12, len(probe["queries"])
+    anchored = [d for q in probe["queries"] for d in q["expect_docs"]]
+    assert all(d.startswith("lloyd-architecture/") and d.endswith(".md") for d in anchored), anchored
+    assert len(anchored) == len(probe["queries"]) == 10, anchored
