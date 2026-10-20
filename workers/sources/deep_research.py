@@ -666,7 +666,20 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         result = "nothing_found"
         extra["downgraded_from"] = "duplicate"
 
-    note = (f"facts={parsed['facts'] or '?'} sources={parsed['sources'] or '?'}; "
+    # #3069: #1709's rule — disk decides, not the turn's own text — applied to the
+    # note as well as to `extra`. `facts_written` is the store's count for THIS
+    # session and the same value the mismatch flag is computed against, so the row
+    # can no longer say `facts=12` beside its own `facts_written: 14` (12 of the 68
+    # audited live rows did). The claim is not dropped: it stays labelled as
+    # `extra.facts_claimed`. Two shapes are deliberately left alone — a store that
+    # contributed no count at all (no session id, or the store refused) keeps
+    # today's claimed number, `'?'` included, and a disagreement still settles the
+    # topic exactly as it did. The one string that changes beyond the mismatch is an
+    # unusable claim over a store that DID answer: `facts=?` becomes the store's
+    # number, with `facts_claimed: null` still saying the turn's figure was unreadable.
+    store_facts = facts_audit.get("facts_written")
+    facts_shown = (parsed["facts"] or "?") if store_facts is None else store_facts
+    note = (f"facts={facts_shown} sources={parsed['sources'] or '?'}; "
             f"session {session_id}")
     if usable_pointer:
         note = f"duplicate of {pointer}; {note}"

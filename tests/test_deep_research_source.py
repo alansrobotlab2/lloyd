@@ -1592,3 +1592,235 @@ def test_the_pointer_grammar_ruling_is_recorded_as_settled_not_deferred():
     assert inspect.getsource(D._pointer_shaped).rstrip().endswith(
         'return "/" in value or value.endswith(".md")')
 
+
+# ───── The finish note prints the store's count, not the turn's (#3069) ──────
+# #1709 ruled that a fact count is decided by the store and not by the turn's own
+# `FACTS:` line — "disk decides, not the turn's own text" — and then applied that
+# rule to `extra` only. The note line kept printing `parsed["facts"]`, so the two
+# numbers on one row could disagree by construction, and on 12 of the 68 audited
+# live rows they did: topic 58's note reads
+# `facts=12 sources=12; session 20261008_182635_deepresearch_2407` while the same
+# row's `extra.facts_written` is 14, and topic 101 claimed 8 over a store of 18.
+# The registry row is where a human reads an outcome, so it must carry the number
+# the disk supports. The claim is not thrown away — it stays, labelled, as
+# `extra.facts_claimed`, which is also what the mismatch flag is computed from.
+# A reporting fix: nothing here gates anything (#1709's detector-not-revert ruling).
+
+#: Twelve findings plus two, for the node that replays a live disagreement: a
+#: store holding fourteen under a turn that claimed twelve.
+_FOURTEEN_FINDINGS = _TWELVE_FINDINGS + [
+    "speculative decoding composes with quantising the target, not instead of it",
+    "at batch one the draft's extra pass is the cheapest place to spend compute",
+]
+
+
+async def test_the_note_carries_the_store_count_over_a_lower_claim(
+        registry, queue, notes, fact_store, monkeypatch):
+    """Clause 1: a turn claiming 12 over a store holding 14 notes fourteen.
+
+    The claim survives beside it — `extra.facts_claimed` is still 12, and the
+    mismatch flag is still computed from the claim, so the note moving does not
+    hide the disagreement it was built to expose.
+    """
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(
+        _block(path, "12"), writes=path, add=_FOURTEEN_FINDINGS,
+        structured=_obj(facts="12", sources="4"), write_gate="off")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert turn.calls["n"] == 14, "the store has to hold the fourteen, not be told"
+    assert out["meta"]["facts_written"] == 14
+    assert out["meta"]["facts_claimed"] == 12
+    row = registry.get(topic_id)
+    assert row["outcome_note"] == f"facts=14 sources=4; session {FACTS_SESSION}", (
+        f"the note still prints the turn's own count: {row['outcome_note']!r}")
+    assert row["extra"]["facts_claimed"] == 12, (
+        "the claim has to survive, labelled, beside the number the note shows")
+    assert row["extra"]["facts_mismatch"] == {"written": 14, "claimed": 12}
+
+
+async def test_an_agreeing_store_leaves_the_note_byte_identical(
+        registry, queue, notes, fact_store, monkeypatch):
+    """Clause 2: claim 12, store 12, and the note is the string it already was.
+
+    Both forms, because the prefix is half of the note: the plain
+    `facts=<n> sources=<m>; session <sid>`, and that same string behind
+    `duplicate of <path>; ` when the pointer is usable. The second half runs a
+    separate session, since the store this node's first half filled would
+    otherwise decide the second half's count with twelve facts in it.
+    """
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(
+        _block(path, "12"), writes=path, add=_TWELVE_FINDINGS,
+        structured=_obj(facts="12", sources="4"), write_gate="off")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["meta"]["facts_written"] == 12 and out["meta"]["facts_claimed"] == 12
+    assert "facts_mismatch" not in out["meta"]
+    assert registry.get(topic_id)["outcome_note"] == (
+        f"facts=12 sources=4; session {FACTS_SESSION}")
+
+    pointer = "knowledge/research/2026-09-20-earlier.md"
+    payload2, topic2, path2 = _payload(registry, notes, topic="Draft-verification cost")
+    turn2 = _turn_writing_facts(
+        _block(path2, "2"), writes=path2, add=_TWELVE_FINDINGS[6:8],
+        session="20260928_deep_facts_agree",
+        structured=_obj("duplicate", duplicate_of=pointer, facts="2", sources="4"),
+        write_gate="off")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn2)
+
+    out2 = await D.execute(_item(payload2))
+    assert out2["meta"]["facts_written"] == 2 and out2["meta"]["facts_claimed"] == 2
+    assert registry.get(topic2)["outcome_note"] == (
+        f"duplicate of {pointer}; facts=2 sources=4; "
+        "session 20260928_deep_facts_agree")
+
+
+async def test_no_store_count_at_all_falls_back_to_the_claim_byte_for_byte(
+        registry, queue, notes, fact_store, monkeypatch):
+    """Clause 3: with nothing to reconcile against, the note is today's string.
+
+    Three shapes of "reconcile contributed nothing", all through the real
+    reconciler, not a stub: no session id, so `reconcile_fact_writes` answers
+    before it reaches a store; a store that raises, which `_common` swallows for
+    the same reason a detector that fires because the index was down is one nobody
+    reads; and that refusal over a claim that IS a number. The second half also
+    carries an unusable claim, which is today's `facts=?` and stays `facts=?` when
+    the store is the thing that failed.
+
+    The third shape is the one the four pre-existing note nodes sit on:
+    `test_a_written_note_is_recorded_with_its_artifact` and the three #1875 nodes
+    use the bare `_turn` helper, whose session has no knowledge-graph database at
+    all — `kg_store._require_database` refuses an absent path so that "0 from a
+    store that is not there" can never be read as an answer — so reconcile returns
+    `{}` there too and those notes keep their claims (`facts=7`, `facts=11`,
+    `facts=1`, `facts=6`). A store that is present and answers zero is a different
+    shape, pinned by `test_a_store_answering_zero_overrides_a_claim_of_seven`.
+    """
+    # No session id: nothing to attribute, so the turn's number stands.
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(_block(path, "9"), writes=path, add=[], session="")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["status"] == "success"
+    assert "facts_written" not in out["meta"], "reconcile contributed no count"
+    row = registry.get(topic_id)
+    assert row["outcome_note"] == "facts=9 sources=4; session ", (
+        f"the fallback note drifted: {row['outcome_note']!r}")
+
+    # A store that will not answer, and a claim neither path made a number of.
+    def _refusing_store(*a, **k):
+        raise RuntimeError("facts index offline")
+
+    monkeypatch.setattr(kg_store, "store", _refusing_store)
+    payload2, topic2, path2 = _payload(registry, notes,
+                                       topic="Grammar-constrained decode")
+    turn2 = _turn_writing_facts(
+        f"Research done.\nRESULT: written\nNOTE: {path2}\nSOURCES: 6\n",
+        writes=path2, add=[])
+    monkeypatch.setattr(D, "run_prompt_in_session", turn2)
+
+    out2 = await D.execute(_item(payload2))
+    assert "facts_written" not in out2["meta"]
+    assert registry.get(topic2)["outcome_note"] == (
+        f"facts=? sources=6; session {FACTS_SESSION}"), (
+        "an unusable claim still prints '?' when the store refused")
+
+    # The same refusal over a claim that IS a number: the fallback is that number,
+    # byte-for-byte — not '?', and not a count the store never gave.
+    payload3, topic3, path3 = _payload(
+        registry, notes, topic="KV-cache reuse across turns")
+    turn3 = _turn_writing_facts(_block(path3, "11"), writes=path3, add=[])
+    monkeypatch.setattr(D, "run_prompt_in_session", turn3)
+
+    out3 = await D.execute(_item(payload3))
+    assert "facts_written" not in out3["meta"]
+    assert registry.get(topic3)["outcome_note"] == (
+        f"facts=11 sources=4; session {FACTS_SESSION}"), (
+        "a refusal over a numeric claim must keep the claim, not invent a count")
+
+
+async def test_an_unusable_claim_over_an_answered_store_prints_the_store(
+        registry, queue, notes, fact_store, monkeypatch):
+    """The third shape: `facts=?` becomes the store's number, not a fallback.
+
+    Two audited live rows have `facts_claimed` null and printed `facts=?`. Here the
+    store answered — two facts — while neither the finalizer's object nor the block
+    gave a number, so the note carries two and the null stays on the row as the
+    record that the turn's own figure was unreadable. #1773's rescue of a
+    recoverable count is untouched: this is the residue it could not rescue.
+    """
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(
+        _block(path, "facts"), writes=path, add=_TWELVE_FINDINGS[:2],
+        structured=_obj(facts="facts", sources="sources"), write_gate="off")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["meta"]["facts_written"] == 2
+    assert out["meta"]["facts_claimed"] is None, (
+        "neither path gave a number, which is exactly what the null records")
+    assert "facts_mismatch" not in out["meta"], "an unreadable claim is no disagreement"
+    assert registry.get(topic_id)["outcome_note"] == (
+        f"facts=2 sources=4; session {FACTS_SESSION}"), (
+        "the store answered, so the note has no reason to print '?'")
+
+
+async def test_a_store_answering_zero_overrides_a_claim_of_seven(
+        registry, queue, notes, fact_store, monkeypatch):
+    """The note goes DOWN: a turn claiming 7 over an empty store notes 0.
+
+    This is the shape the clause names "a session holding no facts", reached the
+    only way that shape exists — a store that is really there and answers zero, not
+    a missing file. `app/kg_store.py`'s `_require_database` refuses an absent path
+    so that "0 from a store that is not there" can never be read as an answer, and
+    `reconcile_fact_writes` swallows that refusal as `{}`: the nodes that use the
+    bare `_turn` helper (`test_a_written_note_is_recorded_with_its_artifact` and the
+    three #1875 note nodes) are therefore on the fallback above, printing their
+    claims, and needed no edit. Here the store answers, so the note says what disk
+    says — and the topic still settles `written`, because this is a report.
+    """
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(_block(path, "7"), writes=path, add=[])
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["meta"]["facts_written"] == 0, (
+        "the fixture store exists, and it holds nothing for this session")
+    assert out["meta"]["facts_claimed"] == 7
+    assert out["meta"]["facts_mismatch"] == {"written": 0, "claimed": 7}
+    row = registry.get(topic_id)
+    assert row["outcome_note"] == f"facts=0 sources=4; session {FACTS_SESSION}", (
+        f"the note is still crediting the claim: {row['outcome_note']!r}")
+    assert row["status"] == "written" and row["artifact_path"] == str(path)
+
+
+async def test_the_note_fix_still_gates_nothing(registry, queue, notes,
+                                                fact_store, monkeypatch):
+    """Clause 5: the same disagreement settles exactly as it did before.
+
+    Status, artifact path and the mismatch flag are what they were while the
+    note printed the claim. A note that now agrees with the store must not have
+    quietly become a veto on the topic — #1709's ruling is detector, never
+    revert, and the fourteen facts the turn wrote are still fourteen.
+    """
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(
+        _block(path, "12"), writes=path, add=_FOURTEEN_FINDINGS,
+        structured=_obj(facts="12", sources="4"), write_gate="off")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["status"] == "success" and out["meta"]["result"] == "written"
+    assert out["artifact_path"] == str(path)
+    row = registry.get(topic_id)
+    assert row["status"] == "written"
+    assert row["artifact_path"] == str(path)
+    assert row["extra"]["facts_mismatch"] == {"written": 14, "claimed": 12}, (
+        "the flag is still raised off the claim, not off the note it now matches")
+    assert kg_store.store().facts_idx.count_by_session(FACTS_SESSION) == 14, (
+        "the detector detected, and reverted nothing")
+
