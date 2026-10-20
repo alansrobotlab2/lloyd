@@ -26,7 +26,7 @@ each backed by a router under `app/routers/`.
 | `autonomy` | `app/routers/autonomy.py` | the scheduled fleet, overdue vs held |
 | `backlog` | `app/routers/backlog.py` | the markdown kanban in `~/obsidian/backlog/` |
 | `memory`, `graph` | `app/routers/memory.py`, `entities.py` | facts, and the entity graph — which renders *inside* `memory`; the `graph` tab itself is still a stub page, with no sidebar button, reachable only by `mc_navigate` |
-| `skills`, `tools` | `skills.py`, `tools.py` | vault skills; tool toggles persisted to `DATA_ROOT/data/tool_overrides.yaml` (`app/paths.py::TOOL_OVERRIDES_PATH`) |
+| `skills`, `tools` | `skills.py`, `tools.py` | vault skills; tool toggles persisted to `$LLOYD_DATA/data/tool_overrides.yaml` (`app/paths.py::TOOL_OVERRIDES_PATH`) |
 | `services` | `services.py` → `app/supervisor_client.py` | supervisord status |
 | `settings` | `system.py`, `models.py` | config view, model identity |
 | `architecture` | `architecture.py` | a **source import-graph browser** for `.py`/`.ts`, not these docs |
