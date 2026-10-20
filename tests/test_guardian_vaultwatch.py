@@ -391,3 +391,117 @@ def test_a_real_top_level_folder_emptying_still_trips_and_an_exempt_one_never_do
     skip = VW.VaultWatch.skip_top
     assert VW.evaluate([before], emptied_exempt, skip_top=skip) is None
     assert "'notes' (40 files) emptied" in VW.evaluate([before], emptied_real, skip_top=skip)
+
+
+# ── a `clear` run in another process reaches the running watcher (#3095) ─────
+
+def test_a_clear_from_another_process_reaches_the_watcher_before_it_judges(tmp_path,
+                                                                          capsys):
+    """One instance keeps judging, another one clears, and the clear has to land.
+
+    Four minutes after the 2026-10-20 14:24:14 data trip, the operator removed the
+    second leftover checkout and ran the documented one-command reset — whose own
+    text promises to "re-baseline on the tree as it is now" — and the next guardian
+    tick, 14:28:32, tripped critical again on the folder that RESET had just
+    removed, with `before.ts` still the 14:24 baseline. It re-paused the worker pool
+    and re-halted promotions, and the surviving physical evidence is two incident
+    evidence directories four minutes apart. The CLI and the guardian are different
+    processes: `clear()` rewrote the state file and its own `history`, while the
+    running watcher still held the pre-incident baseline in memory and returned
+    early while latched, so it never appended and never re-read. What recovery
+    actually took was stopping the guardian unit, clearing, and starting it again —
+    which is how a one-command reset became a service restart, and why the fix is a
+    reload rather than an alias for `systemctl`.
+
+    Driven as two instances over one state directory, which IS the seam: same
+    classes, same files, nothing about the thing under test mocked out.
+    """
+    vault = _vault(tmp_path / "vault", files=600)
+    state = tmp_path / "state"
+
+    running = VW.VaultWatch(root=str(vault), state_dir=state)
+    running.clear()
+    shutil.rmtree(vault / "backlog")
+    reason, snap = running.tick()
+    assert reason == "top-level folder 'backlog' (150 files) vanished"
+    # `tick()` only judges; writing the latch marker is the CALLER's act, and the
+    # guardian is the only caller — `Guardian.check_vault` calls `trip()` with the
+    # actions it took. So the actions are stated here rather than left out, and the
+    # pause they record is what a re-trip would do a second time.
+    running.trip(reason, snap, {"workers_paused": True, "promotions_halted": True})
+    assert running.tripped(), "latched: that trip has been acted on"
+
+    # The order is the incident's: the operator removes a folder FIRST, then runs
+    # the reset. Getting it the other way round would describe a real loss and ask
+    # the watcher to ignore it, which is not what was ever asked of it.
+    shutil.rmtree(vault / "skills")
+
+    # The operator's process: a fresh instance, which is exactly what the CLI
+    # builds, run against the tree as it stands now.
+    operator = VW.VaultWatch(root=str(vault), state_dir=state)
+    assert operator.clear() is True
+    assert operator.tripped() is None
+
+    reason, _snap = running.tick()
+    assert reason is None, (
+        "the watcher was armed against a tree that still had `skills`, judged against "
+        "that rather than the baseline it had just been told to adopt, and latched on "
+        "the folder the operator had removed on purpose — which is the 14:28:32 "
+        "re-trip, on a tree its own reset had already blessed")
+    out = capsys.readouterr().out
+    assert "baseline reloaded" in out, (
+        "not tripping is half of it. A watcher that silently adopts another "
+        "process's baseline is a watcher whose history a reader cannot reconstruct "
+        "afterwards, so the reload is the surprising event and it gets said")
+
+
+def test_the_reload_keys_on_the_state_file_mtime_not_on_the_marker(tmp_path):
+    """The mtime is the trigger; a vanished marker only says when it may be asked.
+
+    Both edges fail, and differently. Fire on "marker gone" alone and the watcher's
+    own first healthy tick after a legitimate clear reloads what it just wrote and
+    collapses `history` to one entry — the harm `clear` exists to avoid, arriving by
+    the fix instead of the bug. Fire only on the marker and a state file rewritten
+    while the watcher was never tripped is invisible. So the comparison is against
+    the timestamp of OUR OWN last write, and the marker is consulted only to keep
+    the stat off the latched path.
+    """
+    vault = _vault(tmp_path / "vault", files=400)
+    state = tmp_path / "state"
+    w = VW.VaultWatch(root=str(vault), state_dir=state)
+    w.clear()
+
+    for _ in range(4):
+        assert w.tick()[0] is None
+    assert len(w.history) >= 4, (
+        "healthy ticks keep appending: a reload that fired on the watcher's own "
+        "writes would leave exactly one entry and disarm the window rules silently")
+    assert w._reload_if_rebaselined() is False, (
+        "our own persist is not somebody else's re-baseline")
+
+    (state / "vault_watch.json").touch()          # any other writer; no marker involved
+    assert w._reload_if_rebaselined() is True, (
+        "a moved mtime is the trigger, so a state file edited by hand or by another "
+        "watcher's clear is adopted whether or not anyone was ever tripped")
+
+
+def test_a_clear_that_ran_while_the_watcher_was_never_tripped_still_reloads(tmp_path):
+    """Same path, no marker anywhere: what matters is that the file was replaced."""
+    vault = _vault(tmp_path / "vault", files=400)
+    state = tmp_path / "state"
+    w = VW.VaultWatch(root=str(vault), state_dir=state)
+    w.clear()
+    for _ in range(3):
+        w.tick()
+    assert len(w.history) == 4
+
+    other = VW.VaultWatch(root=str(vault), state_dir=state)
+    other.clear()                                  # no marker existed; still a re-baseline
+    other_ts = other.history[0].ts
+    assert w.tick()[0] is None
+    assert len(w.history) == 2, (
+        "the new baseline replaces the long history and then this tick appends to it; "
+        "keeping the old entries would mean the clear changed nothing the next "
+        "judgement can see")
+    assert w.history[0].ts == other_ts, (
+        "and what it adopted is the operator's measurement, not its own earlier one")

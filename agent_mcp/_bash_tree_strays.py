@@ -185,14 +185,26 @@ def _saved_paths(state: dict, root: Path) -> set[str]:
     return set(entry.get("paths", [])) if isinstance(entry, dict) else set()
 
 
-def _snapshot_sync() -> "tuple[Path, set[str]] | None":
+def _snapshot_sync() -> "tuple[Path, set[str], 'tuple[Path, frozenset[str]] | None'] | None":
+    """The pre-call pair of snapshots: the code tree, and the runtime data root.
+
+    The third element is why this is a 3-tuple rather than two calls. "Did THIS
+    call lay a checkout under the data root" is a question about a BEFORE, and
+    `after()` is the only place the answer gets used; a snapshot taken there
+    would already contain the folder it is asking about, and the check would
+    report nothing forever while looking exactly like a check that passes. Both
+    roots therefore have to be read at the same instant as the tree, before the
+    command runs, and ride through the harness in the same object the tool already
+    threads from `before` to `after`. It is None when the data root cannot be
+    read, which costs the data-home half and nothing else.
+    """
     from app import live_strays
     root = _live_root()
     seen = live_strays.ignored(root)
-    return None if seen is None else (root, seen)
+    return None if seen is None else (root, seen, _data_root_top())
 
 
-async def before(session_id: str | None, args: dict[str, Any]) -> "tuple[Path, set[str]] | None":
+async def before(session_id: str | None, args: dict[str, Any]) -> "tuple | None":
     """The tree as it stands before the command, or None when this call is not
     measured (not a background session, a background command, an unreadable tree)."""
     if not isinstance(args, dict) or args.get("run_in_background"):
@@ -317,7 +329,7 @@ def _actionable_by(root: Path, paths: list[str]) -> str:
 
 
 def _record(session_id: str | None, command: str, root: Path, paths: list[str],
-            kind: str = "appeared") -> None:
+            kind: str = "appeared", actionable: str | None = None) -> None:
     """Append one fact to the durable journal; never raises.
 
     `kind` is on BOTH row shapes rather than only the new one. `removed` rows are the
@@ -346,12 +358,30 @@ def _record(session_id: str | None, command: str, root: Path, paths: list[str],
             "paths": paths,
             "command": str(command or "")[:400],
         }
-        try:
-            row["actionable_by"] = _actionable_by(root, paths)
-        except Exception as exc:  # noqa: BLE001 — a missing label costs the label only
-            logger.warning("tree stray reach rule unavailable (%s: %s); "
-                           "the row is journalled without it",
-                           type(exc).__name__, str(exc)[:160])
+        # The two branches are separate statements and the computed one keeps its
+        # stamp site as the plain assignment below, because that assignment is
+        # what `tests/test_bash_tree_strays.py::_label_field` reads out of this
+        # file's TEXT to learn the field's name: collapse the two into one
+        # conditional expression and three doc-pinning nodes go red on a rename
+        # that never happened.
+        #
+        # A caller that already knows the answer states it instead. `actionable_by`
+        # asks which instrument could ACT on the paths, and for a checkout under
+        # the data root that is settled by construction, not by asking the tree's
+        # reach rule: `stray_in_tree` walks the CODE tree for runtime files, the
+        # opposite direction, so the only honest label there is `BRACKET_ONLY`.
+        # Leaving it to be computed would exec the guardian's rule against
+        # `DATA_ROOT/agent-services/guardian` — a path that does not exist — and
+        # land the row without the key, which is the shape #2172 was filed for.
+        if actionable is None:
+            try:
+                row["actionable_by"] = _actionable_by(root, paths)
+            except Exception as exc:  # noqa: BLE001 — costs the label, not the row
+                logger.warning("tree stray reach rule unavailable (%s: %s); "
+                               "the row is journalled without it",
+                               type(exc).__name__, str(exc)[:160])
+        else:
+            row["actionable_by"] = actionable
         with target.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
     except Exception as exc:  # noqa: BLE001
@@ -494,14 +524,175 @@ def _after_sync(text: str, snap: "tuple[Path, set[str]]", session_id: str | None
     return f"{text}\n\n{note(root, appeared)}"
 
 
+#: The entry that says a directory is a code checkout, and how deep below a
+#: top-level folder of the runtime data root it may sit and still count as that
+#: folder being the checkout. The same property and the same bound as the
+#: guardian's (`vaultwatch.CHECKOUT_ENTRY`, `vaultwatch.CHECKOUT_MAX_DEPTH`), for
+#: the same two shapes, both from 2026-10-20: `~/lloyd-data/triage-3087/.git` (a
+#: `git worktree add` straight into the root) and
+#: `~/lloyd-data/triage-2918/checkout/.git` (a folder holding the checkout one
+#: level deeper). Kept as literals here rather than imported because this module
+#: is the MCP process and `vaultwatch` is the pinned guardian snapshot — neither
+#: imports the other today, and a shared import between them would be the first
+#: seam between two trees that update on different schedules. Pinned to agree by
+#: `tests/test_guardian_datawatch.py::the_checkout_spelling_is_the_same_both_ends`.
+CHECKOUT_ENTRY = ".git"
+CHECKOUT_MAX_DEPTH = 2
+
+
+def _data_root_top() -> "tuple[Path, frozenset[str]] | None":
+    """The runtime data root and the names standing in it, or None when unreadable.
+
+    Top-level names ONLY, which is why this costs one `scandir` of ~47 entries and
+    no stats: the question the data-home half asks is "did this call put a NEW
+    folder here", and a new folder is by definition a name that was not there
+    before. The recursion happens in `_new_checkouts`, over the new names alone —
+    usually zero, so the ordinary Bash call pays one directory read and one set
+    difference.
+    """
+    try:
+        from app.paths import DATA_ROOT
+        root = Path(DATA_ROOT)
+        with os.scandir(root) as it:
+            return root, frozenset(e.name for e in it)
+    except OSError:
+        return None
+
+
+def _holds_checkout(dirpath: Path) -> bool:
+    """Whether `dirpath` is, or directly holds, a git checkout.
+
+    Depth-bounded by construction: the caller hands it a top-level folder, so
+    `dirpath/.git` is depth 1 and a child's `.git` is depth 2, which is the bound
+    this module shares with the guardian. Going deeper is not a cheaper check, it
+    is a different claim — a repository cloned two levels down inside `_pipeline/`
+    does not make that store scratch, and the tripwire that has to decide whether
+    to stop guarding it reads the same bound.
+    """
+    try:
+        if (dirpath / CHECKOUT_ENTRY).exists():
+            return True
+        with os.scandir(dirpath) as it:
+            kids = [e for e in it if e.is_dir(follow_symlinks=False)]
+    except OSError:
+        return False
+    return any((Path(e.path) / CHECKOUT_ENTRY).exists() for e in kids)
+
+
+def _new_checkouts(root: Path, before: frozenset[str]) -> list[str]:
+    """Top-level folders of `root` that this call created AND that are git checkouts.
+
+    Newness is by name, so a checkout appearing inside a folder that was already
+    here is NOT caught by this half — `~/lloyd-data/_pipeline/clone/.git` for
+    instance. That asymmetry is deliberate and it is not a gap in the guard: what
+    makes a folder dangerous here is its SIZE and its VANISHING, and only a
+    top-level folder is what `vaultwatch` counts and what the folder rule fires
+    on. The tripwire-side flag reads the same depth from the root regardless of
+    newness, so the deeper clone is still refused an excuse — it simply is not
+    announced on the call that made it.
+    """
+    try:
+        with os.scandir(root) as it:
+            entries = sorted((e for e in it if e.name not in before),
+                             key=lambda e: e.name)
+    except OSError:
+        return []
+    out: list[str] = []
+    for e in entries:
+        try:
+            if e.is_dir(follow_symlinks=False) and _holds_checkout(Path(e.path)):
+                out.append(e.name)
+        except OSError:
+            continue
+    return out
+
+
+def checkout_note(root: Path, names: list[str]) -> str:
+    """The paragraph naming where a throwaway checkout does belong (#3095)."""
+    from app.paths import SCRATCH_CHECKOUT_ROOT
+    shown = ", ".join(names[:NOTE_PATHS])
+    more = f" (+{len(names) - NOTE_PATHS} more)" if len(names) > NOTE_PATHS else ""
+    return (
+        f"[checkout in the runtime data root] Now standing under {root} because of this "
+        f"call: {shown}{more}. A git checkout is not runtime data. A throwaway one "
+        f"belongs under {SCRATCH_CHECKOUT_ROOT} "
+        f"(e.g. `git worktree add --detach {SCRATCH_CHECKOUT_ROOT}/check-$$ HEAD`), which "
+        "is scratch and nobody watches; this root is watched file by file, so when you "
+        "delete this folder the data tripwire sees thousands of files vanish in one tick "
+        "and halts promotions and pauses the worker pool over a directory that was never "
+        "data. Remove it with `git worktree remove --force` and the folder with `rmdir`, "
+        "and run the throwaway from the root above next time (#3095).")
+
+
+def _data_root_check(session_id: str | None, command: str,
+                     snap: "tuple[Path, frozenset[str]]") -> str:
+    """The note for a checkout this call laid under the data root; journals it too.
+
+    Shares `ACK_FILE` with the tree half, keyed by this root's own path, because
+    the two questions are the same question — "have I already told a session about
+    the thing standing at this path" — and a second state file would be a second
+    place for the answer to disagree. Keyed separately from the code tree by
+    construction: `state` is keyed on the root string, and this root is not the
+    code tree. An entry drops out when the folder goes, so a fresh checkout at the
+    same name is a fresh finding, exactly as the tree half does it.
+    """
+    root, before = snap
+    found = _new_checkouts(root, before)
+    # No early return on an empty `found`. The call that CREATED a checkout and the
+    # call that REMOVED it are different calls, and the acknowledgement has to be
+    # dropped on the second one — return here and the folder stays acknowledged
+    # forever, so the next `triage-<id>` to land under this root is never reported
+    # again, which is the exact drift the tree half documents for a removed stray.
+    # The state file is read on that call and written only if the set moved, the
+    # same cost `_removed` pays.
+    state = _read_state()
+    key = str(root)
+    known = set((state.get(key) or {}).get("paths") or [])
+    # A name drops out of the acknowledgement as soon as it is not on disk, which is
+    # the same rule the tree half applies to a removed stray: the acknowledgement is
+    # of a folder STANDING there, and leaving it set would make the next checkout at
+    # that name — the next `triage-3087`, one folder per backlog item forever — read
+    # as already reported and go unnoted.
+    kept = {n for n in known if (root / n).exists()}
+    fresh = [n for n in found if n not in kept]
+    if fresh:
+        _record(session_id, command, root, fresh, kind="checkout-in-data-root",
+                actionable=BRACKET_ONLY)
+        logger.warning("session %s: git checkout(s) created under the runtime data root "
+                       "by a Bash call: %s", session_id, ", ".join(fresh))
+    if state is not None and kept | set(found) != known:
+        state[key] = {"paths": sorted(kept | set(found))}
+        try:
+            _write_state(state)
+        except Exception as exc:  # noqa: BLE001 — the row above is already the record
+            logger.warning("data-home checkout state write failed (%s: %s)",
+                           type(exc).__name__, str(exc)[:160])
+    return checkout_note(root, found) if fresh else ""
+
+
 async def after(text: str, snap: "tuple[Path, set[str]] | None", session_id: str | None,
                 command: Any) -> str:
     """`text`, plus the note when an ignored path appeared since `snap`."""
     if snap is None:
         return text
+    cmd = command if isinstance(command, str) else ""
     try:
-        return await asyncio.to_thread(_after_sync, text, snap, session_id,
-                                       command if isinstance(command, str) else "")
+        # `[:2]` because the tree half's own signature is the pair it has always
+        # taken; the third element belongs to the data-home half below.
+        text = await asyncio.to_thread(_after_sync, text, snap[:2], session_id, cmd)
     except Exception:  # noqa: BLE001
         logger.warning("tree stray check failed", exc_info=True)
         return text
+    # The data-home half, on the same result. Deliberately after the tree half and
+    # outside its try: the two guards watch different roots, a failure in one must
+    # not cost the other's note, and the tree half has early returns that mean
+    # nothing at all about whether a checkout landed in the data root. The
+    # snapshot is the one `before()` took, so a caller that passes a bare pair
+    # simply does not ask this question.
+    data_snap = snap[2] if len(snap) > 2 else None
+    if data_snap is not None:
+        try:
+            text += await asyncio.to_thread(_data_root_check, session_id, cmd, data_snap)
+        except Exception:  # noqa: BLE001
+            logger.warning("data-home checkout check failed", exc_info=True)
+    return text

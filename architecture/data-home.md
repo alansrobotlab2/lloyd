@@ -206,11 +206,49 @@ opt-in as the tree guard. The live-data cross-checks in `tests/` read through
   - the root is missing or was replaced;
   - the root lost its marker;
   - at least 10% and at least 200 files disappeared within 15 minutes;
-  - a top-level folder of 20 or more files emptied.
+  - a top-level folder of 20 or more files emptied;
+  - and, inherited from `vaultwatch.evaluate`, a top-level folder of 20 or more
+    files that is simply **gone**.
+
+  One folder is exempt from that last bullet, and the exemption is a property,
+  never a name: a top-level folder the last measurement recorded as holding a
+  code checkout — a `.git` file or directory at depth 1 or 2 below the root, the
+  shape `git worktree add` leaves — is not data, and deleting it is not data
+  loss. `vaultwatch.measure` records the flag on the `Snapshot` because the
+  folder is already gone by the time anyone could ask it, and
+  `DataWatch._excuse_vanished` reads that flag. A name cannot be the test
+  (#3095, upholding #2160's ruling): the scratch folders are `triage-<id>` and
+  `check-<pid>`, an open set, and a hand-maintained allowlist cannot close a
+  property over an open set. The depth bound is what keeps the exemption honest —
+  a repository cloned deep inside `sessions/` is a file inside a store, and the
+  store stays trippable. An excused folder is journalled and announced anyway, to
+  `tripwire-excused.jsonl` beside `data-tripped.json`: a rule that silently
+  skipped 3,347 files is a rule nobody could audit, and the same walk-back that
+  was benign on one day is a lost checkout on another.
+
+  That incident is why the first section of this page now names a home for a
+  throwaway **checkout** and not only for artefacts. On 2026-10-20 an autotriage
+  session ran `git worktree add --detach ~/lloyd-data/triage-3087/check HEAD` to
+  get a tree the test suite would accept, and its own clean-up 55 seconds later
+  was the trip. No rule in this page had been broken by that choice — this root is
+  where the prompt says every write belongs, and no line said where a scratch
+  checkout goes — so the same instrument now answers the mistake on the call that
+  makes it (`agent_mcp/_bash_tree_strays.py`, journal kind
+  `checkout-in-data-root`) and the prompt names `~/lloyd-work`. Three defences,
+  and the tripwire is the only one with evidence that prose would have been
+  insufficient: the offending session had the correct command on its screen 24
+  seconds earlier, in the conftest refusal, and chose the data root anyway.
 
   A trip pauses the pool, halts promotions, keeps a process listing, writes
   `data-tripped.json` and alerts critical. Only a human clears it
-  (`datawatch.py clear`). The watch is not armed until it first sees a marked
+  (`datawatch.py clear`), and the running watcher now notices that clear: it
+  compares the state file's timestamp with its own last write before each
+  judgement and reloads the baseline if a later writer moved it, saying so on
+  stdout. Until #3095 the CLI's `clear` rewrote only its own process's state, so
+  the guardian kept judging against the pre-incident baseline — which re-tripped
+  the 2026-10-20 incident at 14:28:32 on a folder the operator had just removed,
+  re-pausing the pool, and cost a `systemctl --user restart lloyd-guardian` to
+  work around a documented one-command reset. The watch is not armed until it first sees a marked
   root. Once an hour it also lists any runtime name that has come back into the
   tree (`datawatch.stray_in_tree`), which means some writer still resolves its
   path off the code.

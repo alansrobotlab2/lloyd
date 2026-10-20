@@ -138,6 +138,14 @@ PROMPT_MARKERS: dict[str, str] = {
     # which no other part of the prompt says — pinned against drift by
     # `test_the_shipped_marker_names_the_data_home_paragraph`.
     "data-home-hint": "Runtime data: everything Lloyd writes while running lives in",
+    # `#3095` (2026-10-20): the same paragraph now names where a THROWAWAY git
+    # checkout goes. Declared because the sentence is the whole defence: a
+    # triage session put a scratch worktree under the runtime data root and its
+    # own clean-up tripped the tripwire critical, and the only thing that
+    # distinguishes that route from the sanctioned one is a line of prose the
+    # model either reads or does not. If this reads `absent` in a session's
+    # `PROMPT_MARKERS` row, that session was never told.
+    "scratch-checkout-home": "A throwaway git checkout",
 }
 
 #: The two words a marker is ever reported as. Constants, because the grep a person
@@ -206,7 +214,7 @@ def log_marker_liveness(prompt: str, *, session_id: str = "",
 # The checkout root, from the one resolver. This module used to sit at the repo
 # root and spell it `Path(__file__).parent`, which silently became `app/` when it
 # moved into the package.
-from app.paths import DATA_ROOT, LLOYD_HOME
+from app.paths import DATA_ROOT, LLOYD_HOME, SCRATCH_CHECKOUT_ROOT
 
 # Anchor paths to the repo location rather than Path.home() so they resolve
 # regardless of who/where the process runs as.
@@ -1091,6 +1099,19 @@ def _data_home_hint() -> str:
     tree alerting hourly. The paragraph names the root, the one store a turn most
     often looks for, and the rule; the Bash tool reports a stray on the call that made
     it (`agent_mcp/_bash_tree_strays.py`) and the guardian is the backstop.
+
+    The last sentence is the same paragraph answering the question in the other
+    direction (#3095). Having been told everything it writes goes here, a triage
+    session ran `git worktree add --detach ~/lloyd-data/triage-3087/check HEAD`, and
+    the same session's own clean-up 55 seconds later tripped the data tripwire
+    critical over 3,347 files that had never been data. Naming the runtime root
+    without naming where a THROWAWAY CHECKOUT goes left that case to be invented on
+    the spot, and on the evidence it was invented wrong: the session had the correct
+    route on screen 24 seconds earlier, in the conftest refusal that quotes
+    `git worktree add --detach ~/lloyd-work/check-$$ HEAD`, and chose the data root
+    anyway — so this sentence is the weakest of the three defences, and the reason
+    it is short. The load-bearing two are the note on the call that did it and the
+    tripwire's own rule.
     """
     return (
         f"Runtime data: everything Lloyd writes while running lives in {DATA_ROOT}, "
@@ -1099,7 +1120,9 @@ def _data_home_hint() -> str:
         "is code only: read it, and edit tracked source there when the task is a code "
         "change, but never create a database, log, scratch or output file in it. Open a "
         f"store by its full path under {DATA_ROOT}; `sqlite3 <name>` on a path that does "
-        "not exist creates an empty database there."
+        "not exist creates an empty database there. A throwaway git checkout "
+        f"belongs under {SCRATCH_CHECKOUT_ROOT}, never the data root, where its "
+        "deletion reads as data loss (#3095)."
     )
 
 

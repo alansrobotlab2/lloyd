@@ -378,6 +378,35 @@ def describe_tree() -> str:
             f" DATA_ROOT={DATA_ROOT}")
 
 
+#: Where a THROWAWAY git checkout goes: a scratch `git worktree add`, a clone
+#: someone needs for one command. Named here because two surfaces have to agree
+#: on it without importing each other — the prompt (#3095) tells a session this
+#: instead of letting it invent a home, and `agent_mcp/_bash_tree_strays.py`
+#: reports it on the call that put a checkout in the wrong one. The wrong one is
+#: `DATA_ROOT`, which the module docstring sends every write to and which the
+#: guardian therefore watches file-by-file: on 2026-10-20 a triage session ran
+#: `git worktree add --detach ~/lloyd-data/triage-3087/check HEAD`, and deleting
+#: it 55 seconds later tripped the data tripwire critical, halting promotions and
+#: pausing the worker pool over a scratch directory.
+#:
+#: Deliberately NOT derived from `DATA_ROOT`, and not the same thing as it:
+#: `DATA_ROOT` moves with the tree that imports this module (a round's worktree
+#: gets its own), while a scratch checkout has one home whatever the tree, and it
+#: is the root the tripwire does NOT watch. `scripts/automod/worktree.py` builds
+#: automod's own round trees here too, so this is one directory with two writers
+#: and no more than that in common.
+#:
+#: It sits below every root derived from `DATA_ROOT` rather than beside them: a
+#: value that is not derived from the data root must not read as though it were.
+#: Second reason, and this one is a fact of the repo rather than of taste — this
+#: module's line numbers are anchored by name in `architecture/` and graded by
+#: `tests/test_architecture_coverage_doc_claims.py`, whose rule is that a number
+#: must sit inside the definition its own sentence names, so inserting a line here
+#: would move every citation below it out of the symbol it points at. A constant
+#: that belongs to no block therefore joins none of them.
+SCRATCH_CHECKOUT_ROOT = Path.home() / "lloyd-work"
+
+
 if IS_WORKTREE:
     # Once per process, because the module body runs once — and this is the ONLY
     # thing the detection changes: every constant above is untouched. A WARNING,

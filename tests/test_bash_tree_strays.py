@@ -1285,3 +1285,214 @@ def test_the_ruling_names_no_runtime_path_in_a_retired_layout(tmp_path, monkeypa
         ln.strip() for ln in tool.splitlines()
         if "_bash_tree_strays" in ln], (
         "the bracket now gates on the stray guard, i.e. a refusal was added")
+
+
+# ---------------------------------------------------------------------------
+# A throwaway git checkout landing under the RUNTIME DATA ROOT (#3095)
+#
+# Same instrument, opposite mistake. The nodes above catch a data file written
+# into the code tree; these catch a CODE CHECKOUT written into the data tree,
+# which is the direction that costs more: the data root is watched file by file
+# by `agent-services/guardian/datawatch.py`, so creating a worktree there and
+# deleting it 55 seconds later is, to the tripwire, 3,347 files vanishing in one
+# tick. On 2026-10-20 14:24:14 that halted promotions and paused the worker pool.
+# ---------------------------------------------------------------------------
+
+CHECKOUT_MARK = "[checkout in the runtime data root]"
+
+
+@pytest.fixture
+def data_root(tree, tmp_path, monkeypatch):
+    """The `tree` fixture plus a runtime data root the check reads instead of production.
+
+    `_data_root_top` imports `DATA_ROOT` inside the call, exactly as the tree half
+    re-reads the root each time, so redirecting the module attribute is the seam and
+    not a mock of the check.
+    """
+    from app import paths
+    root = tmp_path / "lloyd-data"
+    root.mkdir()
+    (root / ".lloyd-data-root").write_text("real data root\n", encoding="utf-8")
+    (root / "sessions").mkdir()
+    monkeypatch.setattr(paths, "DATA_ROOT", root)
+    return tree, root
+
+
+async def test_a_checkout_laid_under_the_data_root_is_named_on_that_call(data_root,
+                                                                          monkeypatch):
+    """Clause 1, driven by the real command from the incident."""
+    (repo, _journal), data = data_root
+    _as(monkeypatch, WORKER)
+    command = (f"mkdir -p {data}/triage-3087 && git -C {repo} worktree add --detach "
+               f"{data}/triage-3087/check HEAD")
+    text = await _run(command)
+
+    assert CHECKOUT_MARK in text, "the call that made it is the only place it can be said"
+    assert "triage-3087" in text
+    assert str(data) in text, "the note names the root it measured"
+    assert str(Path.home() / "lloyd-work") in text, (
+        "and the place a throwaway checkout does belong, which is the answer the "
+        "session was missing")
+    assert "[stray in the code tree]" not in text, (
+        "nothing landed in the code tree; the two halves report independently")
+
+
+async def test_the_checkout_is_journaled_in_the_tree_stray_shape(data_root, monkeypatch):
+    (repo, journal), data = data_root
+    _as(monkeypatch, WORKER)
+    command = (f"mkdir -p {data}/triage-2918 && git -C {repo} worktree add --detach "
+               f"{data}/triage-2918/checkout HEAD")
+    text = await _run(command)
+    # The precondition, named. Every assertion below is about what the CHECK wrote,
+    # and the check writes nothing unless the checkout exists — so when this node
+    # fails on a run count, the reader has to be able to tell "the guard did not
+    # fire" from "`git worktree add` did not run", which is a property of the runner
+    # and not of the guard. It is the only difference the row count cannot show.
+    assert "fatal:" not in text.lower(), (
+        f"the fixture's own `git worktree add` failed, so there was no checkout for "
+        f"the guard to find: {text[:400]}")
+
+    rows = _rows(journal)
+    checkout_rows = [r for r in rows if r.get("kind") == "checkout-in-data-root"]
+    assert len(checkout_rows) == 1, (
+        f"exactly one checkout row for the call that made it; the call wrote "
+        f"{[r.get('kind') for r in rows]}")
+    assert rows == checkout_rows, (
+        "and nothing else in the same journal: the code-tree half has its own root "
+        "and its own rule, and a call that touched only the data root must not "
+        "reach it")
+    row = checkout_rows[0]
+    assert row["session"] == WORKER
+    assert row["kind"] == "checkout-in-data-root"
+    assert row["paths"] == ["triage-2918"], (
+        "`paths` is the uncapped half of the row, and it is the half the alert is "
+        "about — which is why the cap on `command` below costs no information")
+    assert row["command"] == command[:400], (
+        "the row carries the command that made the checkout, cut at the journal's own "
+        "bound (`_record`: `str(command or '')[:400]`). Comparing it against the WHOLE "
+        "command made this node read its own runner: every path in the fixture comes "
+        "from pytest's `tmp_path`, which hangs off `TMPDIR`, and a gate run hands "
+        "children a 44-byte one (`~/lloyd-work/.t/<10 hex>`, "
+        "`scripts/automod/gate.py::_child_tmpdir`) where an interactive run has `/tmp` "
+        "— 4 bytes. The same guard was green locally, where this fixture's command is "
+        "40 characters shorter and lands under the cap, and red on the gate's 438 (its "
+        "diff line: 389 identical leading characters, 11 more to the cap, 38 after "
+        "it). The cap is a property of the "
+        "recorder; the fixture's length is not, and `TMPDIR` under a 44-byte root is "
+        "now exercised here too.")
+    assert len(row["command"]) <= 400, (
+        "the bound itself, stated, so the assertion above cannot be satisfied by a "
+        "row that simply dropped the field")
+    assert row["actionable_by"] == _bash_tree_strays.BRACKET_ONLY, (
+        "no instrument can act on a checkout in the data root, so the row says so")
+
+
+async def test_a_folder_holding_the_checkout_one_level_down_is_also_caught(data_root,
+                                                                           monkeypatch):
+    """The second real shape from 2026-10-20: `triage-2918/checkout/.git`."""
+    (repo, journal), data = data_root
+    _as(monkeypatch, WORKER)
+    await _run(f"mkdir -p {data}/triage-2918 && git -C {repo} worktree add --detach "
+               f"{data}/triage-2918/checkout HEAD")
+    assert "triage-2918" in _rows(journal)[0]["paths"], (
+        "the folder the tripwire would count is the top-level one, not `check`")
+
+
+async def test_an_ordinary_folder_in_the_data_root_is_not_reported(data_root, monkeypatch):
+    """A job writing a real artefact under the data root is doing its job."""
+    (repo, journal), data = data_root
+    _as(monkeypatch, WORKER)
+    text = await _run(f"mkdir -p {data}/_pipeline/out && : > {data}/_pipeline/out/x.json "
+                      "&& echo done")
+    assert CHECKOUT_MARK not in text
+    assert _rows(journal) == []
+
+
+async def test_a_store_that_already_held_a_repo_is_not_this_calls(data_root, monkeypatch):
+    """Only what the call CREATED is a finding, whatever is standing there."""
+    (repo, journal), data = data_root
+    (data / "sessions" / "clone").mkdir(parents=True)
+    (data / "sessions" / "clone" / ".git").mkdir()
+    _as(monkeypatch, WORKER)
+    text = await _run(f"ls {data} >/dev/null && echo done")
+    assert CHECKOUT_MARK not in text
+    assert _rows(journal) == []
+
+
+async def test_the_checkout_is_reported_once_per_folder(data_root, monkeypatch):
+    """A session that `ls`es the folder next turn must not be nagged again."""
+    (repo, journal), data = data_root
+    _as(monkeypatch, WORKER)
+    make = await _run(f"mkdir -p {data}/triage-3087 && git -C {repo} worktree add "
+                      f"--detach {data}/triage-3087/check HEAD")
+    again = await _run(f"ls {data}/triage-3087 && echo done")
+    assert CHECKOUT_MARK in make and CHECKOUT_MARK not in again
+    assert len(_rows(journal)) == 1
+
+
+async def test_a_fresh_checkout_at_a_reported_name_is_reported_again(data_root,
+                                                                     monkeypatch):
+    """One folder per backlog item, forever: `triage-3087` returning is a new incident."""
+    (repo, journal), data = data_root
+    _as(monkeypatch, WORKER)
+    await _run(f"mkdir -p {data}/triage-3087 && git -C {repo} worktree add --detach "
+               f"{data}/triage-3087/check HEAD")
+    await _run(f"git -C {repo} worktree remove --force {data}/triage-3087/check; "
+               f"rmdir {data}/triage-3087")
+    text = await _run(f"mkdir -p {data}/triage-3087 && git -C {repo} worktree add "
+                      f"--detach {data}/triage-3087/check HEAD")
+    assert CHECKOUT_MARK in text, (
+        "the acknowledgement is of a folder STANDING there; keeping it set after the "
+        "cleanup would blind the check to the next triage round forever")
+    assert len(_rows(journal)) == 2
+
+
+async def test_a_chat_session_laying_a_checkout_in_the_data_root_is_not_measured(
+        data_root, monkeypatch):
+    """The ruling #1530 is the gate for both halves; a person's own tool call is theirs."""
+    (repo, journal), data = data_root
+    _as(monkeypatch, CHAT)
+    text = await _run(f"mkdir -p {data}/triage-3087 && git -C {repo} worktree add "
+                      f"--detach {data}/triage-3087/check HEAD")
+    assert CHECKOUT_MARK not in text
+    assert _rows(journal) == []
+
+
+async def test_an_unreadable_data_root_costs_the_checkout_note_and_nothing_else(
+        data_root, tmp_path, monkeypatch):
+    (repo, journal), data = data_root
+    from app import paths
+    monkeypatch.setattr(paths, "DATA_ROOT", tmp_path / "no-such-data-root")
+    _as(monkeypatch, WORKER)
+    text = await _run(f"cd {repo} && : > workers.db && echo done")
+    assert "[stray in the code tree]" in text, "the tree half still reports"
+    assert CHECKOUT_MARK not in text
+    assert len(_rows(journal)) == 1
+
+
+async def test_the_data_root_is_snapshot_before_the_command_for_a_reason(data_root,
+                                                                        monkeypatch):
+    """The trap this design exists to avoid, pinned.
+
+    `after()` cannot ask "did this call put a folder here" — by the time it runs the
+    folder is there, and a check that measures only afterwards would report nothing
+    forever while looking exactly like a check that passes. So the data root is read
+    in `before()`, and a caller that hands `after` a snapshot taken afterwards is not
+    asking the question. This node drives both orders of the SAME command.
+    """
+    (repo, journal), data = data_root
+    _as(monkeypatch, WORKER)
+    command = (f"mkdir -p {data}/triage-4001 && git -C {repo} worktree add --detach "
+               f"{data}/triage-4001/check HEAD")
+
+    pre = _bash_tree_strays._data_root_top()
+    assert pre is not None and "triage-4001" not in pre[1], (
+        "nothing has run yet: this is the pre-call name set")
+    await _run(command)
+    post = _bash_tree_strays._data_root_top()
+    assert "triage-4001" in post[1], "the folder is standing there now"
+    assert _bash_tree_strays._new_checkouts(data, post[1]) == [], (
+        "measured against a snapshot taken after the command, the same folder the "
+        "check exists to find is invisible — which is why the snapshot is `before`'s")
+    assert _bash_tree_strays._new_checkouts(data, pre[1]) == ["triage-4001"], (
+        "against the pre-call set it is found, on the same state on disk")

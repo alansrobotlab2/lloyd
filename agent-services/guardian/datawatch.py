@@ -426,12 +426,56 @@ class DataWatch(V.VaultWatch):
     def armed(self) -> bool:
         return bool(self.history)
 
-    def judge(self, snap: V.Snapshot | None) -> str | None:
+    def _excuse_vanished(self, name: str, count: int,
+                         before: V.Snapshot) -> "str | None":
+        """A top-level folder this root measured as a git checkout is scratch, not store.
+
+        WHY IT IS ALLOWED HERE AND NOT FOR THE VAULT. The data root is the one
+        watched root a session is TOLD to write into, and since 2026-10-20 it is
+        also where `tests/conftest.py:241-247` sends a session that needs a
+        checkout: the refusal that fires when the suite is invoked from the
+        production tree literally prints
+        `git worktree add --detach ~/lloyd-work/check-$$ HEAD`. A session that
+        instead runs `git worktree add ~/lloyd-data/triage-3087/check HEAD` has
+        created a top-level folder of thousands of files that it is *expected* to
+        delete when it finishes, and the folder rule was built to fire on exactly
+        that shape. On 2026-10-20 14:24:14 it did: `triage-3087` (3347 files) went
+        from present to absent, promotions halted, the worker pool paused,
+        snapshots refused — and the before/after measurement differed in nothing
+        else but `event_logs` (+1). No data was missing.
+
+        WHY A MEASUREMENT AND NOT A NAME PATTERN. `triage-<id>` and `check-<pid>`
+        are named by whoever runs the command, so matching them is a
+        hand-maintained list over an open set, which is the standing ruling from
+        #2160 and the reason `skip_top` was not extended here. The flag comes from
+        `measure` seeing a `.git` entry inside the folder (depth bounded by
+        `vaultwatch.CHECKOUT_MAX_DEPTH`), so it is true of a folder because of
+        what is IN it.
+
+        WHY `RUNTIME_NAMES` IS A FLOOR, NOT AN ALLOWLIST. A repo cloned two levels
+        down inside a real store would flag that store as a checkout —
+        `_pipeline/` is where a tool cloning something would land — and losing
+        `_pipeline` is the event this tripwire exists to catch. So a name the root
+        already knows as a runtime store is never excused, whatever its flag says.
+        That list NARROWS the exemption, which is the opposite direction of failure
+        from the allowlist #2160 forbids: it can only ever make the tripwire
+        stricter, and every store on it was named before this rule existed.
+        """
+        if name in RUNTIME_NAMES:
+            return None
+        if name not in before.checkouts:
+            return None
+        return (f"top-level folder {name!r} ({count} files) went missing; not a trip — "
+                f"the last measurement saw a {V.CHECKOUT_ENTRY} entry inside it, so it "
+                f"was a git checkout and not one of this root's stores (#3095)")
+
+    def judge(self, snap: V.Snapshot | None,
+              excused: "list[str] | None" = None) -> str | None:
         if not self.armed:
             return None
         if snap is not None and not os.path.isfile(os.path.join(self.root, ROOT_MARKER)):
             return f"{self.root} lost its {ROOT_MARKER} marker"
-        return super().judge(snap)
+        return super().judge(snap, excused)
 
     def tick(self, now: float | None = None):
         # Not armed and nothing there yet: nothing to watch, nothing to record.

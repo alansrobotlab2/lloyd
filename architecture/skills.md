@@ -91,7 +91,7 @@ mechanisms rather than one with options.
 
 ### 1. The index, in the system prompt
 
-`prompt_builder._load_skills_index` (`app/prompt_builder.py:1258`) walks an optional
+`prompt_builder._load_skills_index` (`app/prompt_builder.py:1281`) walks an optional
 overlay root (`<overlay>/skills`, when `LLOYD_OVERLAY_DIR` is set — the
 autoresearch bench runner passes one; what it may put there is bounded by
 `_canonical_prompt_paths()` in `scripts/autoresearch/common.py`, today
