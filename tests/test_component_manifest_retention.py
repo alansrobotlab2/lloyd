@@ -96,14 +96,72 @@ _ABSENT = _Absent()
 
 @pytest.fixture(autouse=True)
 def _store(tmp_path, monkeypatch):
-    """A store of our own, the clock held still, and clean counters."""
+    """A store of our own, the clock held still, and a clean process.
+
+    `cm._stats` and `cm._registry` are both module globals, so anything a node
+    records in them is handed to the next node that runs in the same
+    interpreter. Only the counters used to be cleared here, and that asymmetry
+    is what made `test_the_bound_stays_1024_and_stays_a_pure_count` the only
+    failure under the land guard's parallel rung while passing every serial
+    draw: `--dist loadfile` runs whole files back to back in one worker, so an
+    entry an earlier file left was still in the registry when that node filled
+    it to the cap, and the eviction count it reads came to 4 against the 3 it
+    asserts (#3059). Clearing both globals on both edges, the way
+    `tests/test_health_manifest_stats.py` already does, takes this file out of
+    the leaker set and keeps a node here from being leaked into.
+    """
     monkeypatch.setenv("LLOYD_MANIFEST_STORE", str(tmp_path / "manifest-store"))
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.setattr(cm, "_today", lambda: _stamp(0))
     cm.reset_stats()
+    cm._reset_registry()
     yield tmp_path / "manifest-store"
     cm.flush(timeout=5.0)
+    cm._reset_registry()
     cm.reset_stats()
+
+
+def test_the_fixture_clears_the_registry_and_the_counters_on_both_edges(tmp_path, monkeypatch):
+    """#3059: the fixture has to out-clean the node beside it, on both edges.
+
+    Every node here gets `_store` automatically, and `_store` is the only thing
+    standing between one node's registry entries and the next node's readings —
+    the same boundary the land guard's `--dist loadfile` rung crosses when it
+    puts two *files* back to back in one worker process. A node cannot observe
+    its own teardown, so this drives the fixture object itself. A seeded entry
+    and a seeded counter stand in for what a same-worker neighbour leaves
+    behind; the setup edge runs, and both must be gone. Then this node leaves an
+    entry and a counter of its own, the teardown edge runs, and neither may
+    still be there when it has finished.
+
+    Each assert fails under exactly one removal: drop the setup edge's
+    `_reset_registry()` and the seeded entry is still there after setup; drop
+    the setup edge's `reset_stats()` and the seeded count is; drop either
+    teardown call and this node's own residue outlives the hand-off. The
+    `evictions` key is what gets seeded and read because it is the number the
+    bound node below asserts, and nothing in this node reaches the cap, so a
+    non-zero reading can only mean a counter nobody cleared.
+    """
+    drive = getattr(_store, "__wrapped__", None)
+    assert drive is not None, (
+        "_store is no longer a fixture function, so this node can no longer "
+        "drive its setup and teardown edges")
+
+    cm.note_components("a-neighbour-left-this", {"system_prompt": "p"})
+    cm._bump("evictions", 4)
+    assert cm._registry, "the seeded entry never reached the registry"
+
+    fixture_run = drive(tmp_path, monkeypatch)
+    assert fixture_run.send(None) == tmp_path / "manifest-store"
+    assert cm._registry == {}, [k for k in cm._registry]
+    assert cm.stats()["evictions"] == 0, cm.stats()
+
+    cm.note_components("this-node-leaves-this", {"system_prompt": "p"})
+    cm._bump("evictions", 2)
+    with pytest.raises(StopIteration):
+        fixture_run.send(None)
+    assert cm._registry == {}, [k for k in cm._registry]
+    assert cm.stats()["evictions"] == 0, cm.stats()
 
 
 def _names(store: Path) -> "set[str]":
