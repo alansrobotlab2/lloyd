@@ -1066,11 +1066,26 @@ base URL and the `task:*` session id all come from the history, so a
 continuation keeps its `LoadedToolSet` and its spill directory. Only
 `disallowed_tools` is merged live. The store is process-scoped and bounded
 (8 tasks, 30 minutes, 3 M chars). After an aggregator restart every id reads
-`unknown or evicted`. Nothing can stop a wedged child from outside the process:
+`unknown or evicted`. A wedged child can be stopped from outside the process:
 `_subagent_registry.steer()` and `cancel_run()` (#411) exist, the child honours
 both — it gets a real `cancel_event` and answers `stop_reason: cancelled` — and
-no tool, route or UI verb calls either one (#1135), so a hung `Task` holds its
-660 s call budget until the aggregator restarts. The three refusal reasons stay
+since `8ac6f4a8` (2026-09-24) each has a caller. The aggregator's
+`POST /subagents/{task_id}/cancel` and `/steer` (`agent_mcp/main.py`, answered
+by `_subagent_registry.control_request`) is proxied by the backend's
+`POST /api/subagents/{task_id}/cancel` and `/steer` (`app/routers/subagents.py`,
+mounted in `server.py`), and the person-facing end is the Running Agents
+panel's stop button (`web/src/components/RunningAgentsPanel.tsx`), which posts
+the spawning session's id through `api.cancelSubagent` (`web/src/api.ts`) so
+the button acts **for the spawning session**, not for whoever clicked it;
+`api.steerSubagent` is the client for the `/steer` verb and has no UI caller.
+Neither route widens the authority rule. The body names the session the request
+acts for, the aggregator builds a `CallerScope` from it, and
+`orchestrator-session` — the ratified policy (#411; #1135's owed-check rulings
+of 2026-10-04 and 2026-10-20, widening DECLINED) — refuses 403 a request naming
+any session but the one that spawned the child, exactly as it refuses a tool
+call from that session. A hung `Task` therefore holds its 660 s call budget
+only until the spawning session asks for it, from its own next turn or from
+that panel. The three refusal reasons stay
 distinct because they call for different next moves. `_sanitise` drops a trailing assistant message whose
 tool calls were never answered, the one invalid shape a cancel can leave and
 the one every engine rejects on replay.
@@ -1169,5 +1184,11 @@ EOF
   (dispatch compares the raw emitted name — #727), the hook list omitted the
   reversibility-tier gate #724 added inside `install_policy_hook`, and
   `builtin_fs`'s new `PROTECTED_WRITE_ROOTS` refusal was unmentioned. The §5
-  classification gaps are still open (#1326) and a stopped `Task` child still
-  has no caller behind `steer()`/`cancel_run()` (#1135).
+  classification gaps are still open (#1326).
+- **2026-10-20 — correction (#3054).** The entry above was overtaken three days
+  after it was written and still read as current: the caller it recorded as
+  missing for `steer()`/`cancel_run()` (#1135) shipped in `8ac6f4a8`
+  (2026-09-24) — the backend's `POST /api/subagents/{task_id}/cancel` and
+  `/steer` and the Running Agents panel's stop button — under the ratified
+  `orchestrator-session` policy (#411; #1135's owed-check rulings of
+  2026-10-04 and 2026-10-20). See **Subagents (`Task`)** above.

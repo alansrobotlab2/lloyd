@@ -667,3 +667,34 @@ def test_the_subagent_route_is_derived_from_the_aggregator_registry():
     url = subagent_route("task/x y", "cancel")
     assert url.startswith(route("state").rsplit("/state", 1)[0])
     assert url.endswith("/subagents/task%2Fx%20y/cancel")
+
+
+# ── 6. #3054: the prose edit changed no authority ────────────────────────────
+
+def test_policy_allows_still_decides_on_the_calling_session_alone():
+    """Clause 2: rewriting the policy's commentary into a CLOSED DECISION left
+    the rule itself exactly as the ruling ratified it.
+
+    Three cases, asserted at the function every refusal quotes: the spawning
+    session is allowed; a foreign session is refused; an unbound caller with an
+    empty session id is refused rather than trusted, because there is nothing to
+    compare it against — that fail-closed half is what #1135's 2026-10-20 ruling
+    called "fail-closed default preserved", so it is pinned, not narrated. The
+    refusal must keep naming `orchestrator-session`: the Mission Control route
+    copies that string into its 403 body, and it is the only reason a person who
+    clicked stop learns which rule said no.
+    """
+    rec = _row()
+    assert SR.policy_allows(rec, _caller(PARENT)), (
+        "the spawning session is the caller the ratified policy authorises")
+    assert not SR.policy_allows(rec, _caller(OTHER)), (
+        "a foreign session must stay refused — widening was DECLINED, not built")
+    assert not SR.policy_allows(rec, _caller("")), (
+        "an unbound caller has nothing to compare and must be refused")
+
+    with pytest.raises(SteeringRefused) as caught:
+        SR.steer(rec.task_id, INJECT_TEXT, caller=_caller(OTHER))
+    assert STEERING_POLICY in str(caught.value), (
+        f"the refusal does not name the policy that fired: {caught.value}")
+    assert not _injected(rec.chat_messages), (
+        "a refused steer must still append nothing to the child")

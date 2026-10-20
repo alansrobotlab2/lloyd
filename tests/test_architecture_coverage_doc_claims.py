@@ -6631,3 +6631,136 @@ def test_memory_doc_lets_the_record_name_its_own_eval_state():
                " the eval never ran")
     assert not _states_its_own_eval_state(
         body.replace("fact_entity_recall_status", "the status field"))
+
+
+# --------------------------------------------------------------------------- #
+# tools.md § Subagents (`Task`): the page must name the caller 8ac6f4a8
+# shipped, and the review-log line that recorded it missing must say so now
+# (#3054)
+# --------------------------------------------------------------------------- #
+
+#: The two false sentences `9fc111f7` (2026-09-21, "arch-review: doc:tools —
+#: current") put in the page, verbatim. Both were overtaken three days after
+#: they were written — `8ac6f4a8` shipped the caller on 2026-09-24 — and every
+#: later pass read the stale wording rather than the tree: the section's claim
+#: is what generated #1135's owed entry, the review-log line what generated
+#: #3054. Typed here rather than read back out of the doc, because a node whose
+#: needle comes from the page it is grading cannot fail.
+STALE_SUBAGENT_CALLER_PASSAGE = (
+    "no tool, route or UI verb calls either one (#1135), so a hung `Task` "
+    "holds its 660 s call budget until the aggregator restarts")
+STALE_SUBAGENT_CALLER_LOG = (
+    "a stopped `Task` child still has no caller behind "
+    "`steer()`/`cancel_run()` (#1135)")
+
+#: What the section has to say instead. The two verbs are the live ones
+#: (`app/routers/subagents.py`, proxied to the aggregator's `control_request`),
+#: the panel is the end a person presses, the 403 is what a request naming some
+#: other session meets, and the last two needles are the ruling the caller acts
+#: under — "a Mission Control caller exists" on its own would read as the
+#: widening having been built.
+SUBAGENT_CALLER_NEEDLES = (
+    "POST /api/subagents/{task_id}/cancel",   # the stop verb
+    "/steer",                                 # the append verb
+    "RunningAgentsPanel.tsx",                 # the panel's stop button
+    "for the spawning session",               # who the route acts for
+    "403",                                    # what a foreign session meets
+    "orchestrator-session",                   # the ratified authority rule
+    "widening DECLINED",                      # ... and that it was ruled, not assumed
+)
+
+#: A count of steering requests may not appear undated anywhere on the page:
+#: the one figure that exists was measured over owed-check's own window, and a
+#: zero copied into prose rots the first time someone clicks the button.
+STEERING_TRAFFIC_PHRASES = ("zero requests", "requests served", "served zero")
+
+
+def _subagent_section() -> str:
+    """§ Subagents (`Task`) — the page's last section before the review log."""
+    text = (ARCH / "tools.md").read_text(encoding="utf-8")
+    start = text.index("### Subagents (`Task`)")
+    return text[start:text.index("## Review log", start)]
+
+
+def _subagent_caller_gaps(body: str) -> list[str]:
+    """Every way the subagent section can fail the claim it now makes.
+
+    A predicate rather than bare assertions so the node below can show it
+    rejecting the sentences #3054 removed and not only accept the ones it
+    wrote: an absence check whose pattern matches nothing anywhere is a green
+    light permanently fixed on.
+    """
+    gaps = []
+    if STALE_SUBAGENT_CALLER_PASSAGE in body:
+        gaps.append("still claims no tool, route or UI verb calls "
+                    "steer()/cancel_run()")
+    gaps.extend(f"the section does not name {needle!r}"
+                for needle in SUBAGENT_CALLER_NEEDLES if needle not in body)
+    return gaps
+
+
+def test_the_tools_page_names_the_live_subagent_control_caller():
+    """Clause 3: the page cannot keep claiming a stop path that is one route away.
+
+    `8ac6f4a8` (2026-09-24) shipped `app/routers/subagents.py` and the Running
+    Agents panel's stop button; the §Subagents passage went on saying nothing
+    calls `steer()`/`cancel_run()` through four later edits of the same page,
+    and each reading re-filed the finding (#1135's owed entry, then #3054). The
+    rewrite has to carry the caller's *shape* and not just its existence: the
+    body names a session, the aggregator builds a `CallerScope` from it, and
+    the ratified `orchestrator-session` rule refuses 403 anything not the
+    spawning session — which is the whole content of "Mission Control is
+    already served acting FOR the spawning session".
+    """
+    body = _flat(_subagent_section())
+    assert not _subagent_caller_gaps(body), _subagent_caller_gaps(body)
+
+    # Can this node fail? The passage exactly as `9fc111f7` left it, through
+    # the same reader. If that text stopped flagging, the green above would be
+    # reporting a correction no sentence could have violated.
+    stale = _flat("Nothing can stop a wedged child from outside the process: "
+                  "`_subagent_registry.steer()` and `cancel_run()` (#411) "
+                  "exist, the child honours both — it gets a real "
+                  "`cancel_event` and answers `stop_reason: cancelled` — and "
+                  + STALE_SUBAGENT_CALLER_PASSAGE + ".")
+    assert _subagent_caller_gaps(stale) == (
+        ["still claims no tool, route or UI verb calls steer()/cancel_run()"]
+        + [f"the section does not name {needle!r}"
+           for needle in SUBAGENT_CALLER_NEEDLES]), _subagent_caller_gaps(stale)
+
+
+def test_the_tools_page_review_log_records_the_caller_rather_than_its_absence():
+    """Clause 4: the dated review entry stays dated, and the traffic count stays out.
+
+    A review log is a record of what a pass saw, so the fix is not to delete
+    the 2026-09-21 entry but to end the clause that still reads as a live gap —
+    that clause is what the 2026-10-20 owed pass read and filed. What the
+    correction has to add is the thing that ended it: the commit, the verbs, and
+    the policy the caller answers to. And the served-request figure owed-check
+    measured for the route ("zero requests in ten days of logging") stays off
+    the page: re-measuring it needs live traffic, so #3054's owed list owns the
+    number and its date, not this page.
+    """
+    text = (ARCH / "tools.md").read_text(encoding="utf-8")
+    log = _flat(text[text.index("## Review log"):])
+    assert STALE_SUBAGENT_CALLER_LOG not in log, (
+        "the review log still states the missing caller as today's state")
+    for needle in ("8ac6f4a8", "POST /api/subagents/{task_id}/cancel",
+                   "orchestrator-session"):
+        assert needle in log, f"the correction does not name {needle!r}"
+
+    # The sentence the check exists to catch, through the same reader.
+    assert STALE_SUBAGENT_CALLER_LOG in _flat(
+        "The §5 classification gaps are still open (#1326) and a stopped "
+        "`Task` child still has no caller behind "
+        "`steer()`/`cancel_run()` (#1135).")
+
+    section = _flat(_subagent_section())
+    for phrase in STEERING_TRAFFIC_PHRASES:
+        assert phrase not in log, f"the page published an undated {phrase!r}"
+        assert phrase not in section, f"the page published an undated {phrase!r}"
+    assert "zero requests" in _flat(
+        "the dispatch half is shipped and has served zero requests in ten "
+        "days of logging"), (
+        "the traffic phrases above are not the spellings a real count takes, "
+        "so the absence checks would never have fired")

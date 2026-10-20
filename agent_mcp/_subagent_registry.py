@@ -299,10 +299,17 @@ def snapshot() -> dict[str, Any]:
 # child cannot also be the one killing it, and the useful case after that is
 # the parent session's next turn cleaning up the child it left behind.
 #
-# Session-scoped, fail-closed, and the narrowest of the shapes the item
-# named. Widening it — the Inner Voice observer, a Mission Control button —
-# is a decision this module deliberately does not make for whoever asks
-# first; see `backlog/411-*` ("Needs a person").
+# CLOSED DECISION, not an open ask. #411 reserved the choice of policy to a
+# person and the person ruled, twice: #1135's owed-check rulings of
+# 2026-10-04 ("Ratify orchestrator-session as-is; widening DECLINED") and
+# 2026-10-20 ("orchestrator-session stays; widening DECLINED; fail-closed
+# default preserved") ratify `orchestrator-session` as it stands. The Mission
+# Control stop button that shipped on 2026-09-24 (`8ac6f4a8`) is NOT a
+# widening: `control_request` builds its `CallerScope` from the session the
+# request names, so the route acts FOR the spawning session and meets the
+# same 403 a tool call from anywhere else meets. A caller that needs a
+# broader scope — the Inner Voice observer, or a session other than the
+# parent's — files its own item; this module does not decide it.
 
 
 STEERING_POLICY = "orchestrator-session"
@@ -311,11 +318,11 @@ STEERING_POLICY = "orchestrator-session"
 def policy_allows(record: SubagentRecord, caller: CallerScope) -> bool:
     """THE authority rule for steering and cancelling a running child.
 
-    Named, in one place, and named in every refusal, because the choice of
-    policy is NOT this module's to make: `backlog/411-*` reserves it to a
-    person ("who may append to a running subagent — orchestrator parent only,
-    Inner Voice observer, Mission Control UI"). What is implemented is the
-    narrowest of those three and fail-closed:
+    Named, in one place, and named in every refusal. The choice of policy was
+    never this module's to make, and it has been made: CLOSED DECISION —
+    `orchestrator-session` ratified, widening DECLINED, by #411 and by #1135's
+    owed-check rulings of 2026-10-04 and 2026-10-20. What is implemented is
+    what that ruling ratified:
 
       * `orchestrator-session` — the child's caller must be acting for the
         session that spawned it. Session, not turn: a turn blocked inside a
@@ -325,9 +332,10 @@ def policy_allows(record: SubagentRecord, caller: CallerScope) -> bool:
         dispatch that arrived without `lloyd/session_id`) is never authorised,
         because there is nothing to compare against.
 
-    Widening it is a one-function edit plus a test, and whatever it becomes,
-    clause 2 of #411 stays true only for whichever policy is actually chosen.
-    A person must ratify or replace this one.
+    Widening it would be a one-function edit plus a test, and clause 2 of #411
+    stays true only for whichever policy is actually chosen — so a broader
+    caller (the Inner Voice observer, a session other than the parent's) files
+    its own item rather than editing this one.
     """
     return bool(caller.session_id) and caller.session_id == record.parent_session_id
 
