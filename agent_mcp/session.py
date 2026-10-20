@@ -109,26 +109,122 @@ _INVALID_FILE = ("Invalid file. Must be MEMORY.md, USER.md, or topics/<slug> "
 _DESTINATION_ALIASES = ("file_path", "filepath", "file_name", "filename",
                         "path", "memory_file", "destination", "target")
 
+# ── #3093: a destination can also arrive in a VALUE, or inside a KEY ─────────
+#
+# The 8 names above are a hand-maintained list, and a list cannot close a
+# property over an open set of spellings — the class rule of 2026-09-20 says so
+# about exactly this shape of guard. Two calls on 2026-10-17 carried a
+# destination no name on that list covers, and both fell through to the
+# `MEMORY.md` default:
+#
+#   memory_read `{"summary": "Reading fixed-producer-residue topic",
+#                 "file=file": "topics/a-fixed-producer-stale-residue-alarm"}`
+#       (session 20261017_040056_autonomy_1fcb, call
+#        chatcmpl-tool-8b7fb407d1438ba7, 04:05:44). The route sat in the VALUE;
+#        the read answered the 21,190-character loaded index as if it were the
+#        topic's.
+#   memory_add  `{"summary": "Recording the worktree-discipline lesson",
+#                 "file=\ntopics/uncommitted-worktree-edits-are-git-discardable.md
+#                  </parameter": "", "entry": "**A round's worktree holds…"}`
+#       (session 20261017_032629_autocode_bc9c, call
+#        chatcmpl-tool-bbc1d58b1ede5554, 03:41:36). The route sat in the KEY and
+#        that argument's value is the empty string, so a value-only check would
+#        still miss it; the write reached the default and was stopped only by the
+#        unrelated index cap — its logged result is verbatim "MEMORY.md would
+#        hold an index line of 1,304 characters, over the 300-character
+#        index-line cap".
+#
+# Cost of the property, measured rather than assumed: every `memory_*` call in
+# `~/lloyd-data/sessions/*.json` from 2026-10-08 (the #2407 schema warning)
+# through 2026-10-20 is 144 calls over 9 distinct argument keys, and exactly two
+# of those keys are not plain lowercase identifiers — these two. So the shape
+# rule below would have refused 2 of 144 real calls, and both are the defect.
+#: Arguments that are never scanned, because their VALUE is content or transport:
+#: the three prose fields, the entry-type enum, and the two fields the harness
+#: rides on every call. This is the union of the four memory schemas' declared
+#: properties minus `file` (an exact `file` key ends the check before it starts),
+#: so no tool here stops scanning an argument it does not declare — the item's
+#: scope, written as data. The prose fields are the ones that would otherwise
+#: break, because a loaded index row's whole text may ITSELF be a pointer
+#: (`memory_replace({"old_text": "topics/user-md-ledger", …})` replaces exactly
+#: such a row, and that value is destination-shaped to the test above); the five
+#: 2026-09-28 clean-up calls pass `memory_remove({"entry": "Removing misrouted row
+#: 1 from MEMORY.md"})` with no `file` and are right to, since MEMORY.md IS the
+#: file they meant. `type`'s four legal values are bare words, which `topic_slug`
+#: rejects (it wants the `topics/` prefix), so it is safe either way; it is on the
+#: list because the tool declares it, and 63 of the 80 `memory_add` calls in that
+#: same scan send it.
+_NON_ROUTE_KEYS = ("entry", "old_text", "new_text", "type", "summary", "tool_call_id")
+
+#: What an argument key has to look like to be a key at all: a plain lowercase
+#: identifier. One class covers every route marking either incident wore — `=`,
+#: `<`, a newline, `topics/`, a `.md` suffix — because not one of them is in it.
+_PLAIN_ARG_KEY_RE = re.compile(r"[a-z][a-z0-9_]*")
+
+
+def _names_a_destination(value) -> bool:
+    """Whether `value`, taken whole, names a file these tools would have opened.
+
+    `MEMORY.md`/`USER.md` by name, or anything `topic_slug` accepts, which covers
+    `topics/<slug>` and `topics/<slug>.md` alike. Going through `topic_slug`
+    rather than writing a second pattern is deliberate: it is the same grammar
+    `_resolve_file` uses to pick the file, so "this value names the file the call
+    would have opened" is true by construction and cannot drift from it — a
+    pattern of my own could have accepted a slug the resolver then refused, and
+    the refusal would have named a destination that was never reachable. A value
+    that merely mentions a file inside prose ("… from MEMORY.md") is not one,
+    which is the whole reason this is a whole-value test and not a substring scan.
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return text in MEMORY_FILES or topic_slug(text) is not None
+
 
 def _misnamed_destination(params: dict) -> Optional[str]:
-    """The key `params` names its destination under, when that key is not `file`.
+    """The key `params` carries its destination under, when that key is not `file`.
 
-    None when no alias key is present. `file` stays optional, with its
-    `MEMORY.md` default, on all four memory tools: #1729 ruled that settled on
-    2026-09-29 and #1796 re-affirmed it on 2026-09-30. Refusing mis-named
-    destination keys is the contract; requiring `file` would break the 10 of 15
+    None when the call names a destination under `file` or names one nowhere.
+    Three properties, in the order they are checked:
+
+    1. an alias key is present (`_DESTINATION_ALIASES`) — the #1729 refusal,
+       byte-unchanged;
+    2. no exact `file` key, and a non-content argument's WHOLE VALUE names a file
+       (`MEMORY.md`, `USER.md`, `topics/<slug>` with or without `.md`) — #3093.
+       Non-content means a key outside the tool's own declared arguments and
+       outside `summary`/`tool_call_id`, so content args and `summary` are never
+       scanned and prose that mentions a file still defaults, as it must;
+    3. no exact `file` key, and an argument KEY that is not a plain lowercase
+       identifier (`[a-z][a-z0-9_]*`) — the shape `file=\ntopics/<slug>.md
+       \n</parameter` wore, whose value is empty and so is unreachable from the
+       other side. The four schemas' keys are all lowercase snake_case, so a key
+       off that pattern has not named anything, route-marked or not.
+
+    `file` stays optional, with its `MEMORY.md` default, on all four memory
+    tools: #1729 ruled that settled on 2026-09-29 and #1796 re-affirmed it on
+    2026-09-30. Refusing a destination that arrives under any other key, or in
+    any other place, is the contract; requiring `file` would break the 10 of 15
     `memory_remove` calls and the one `memory_replace` call that omit it, while
     preventing nothing this refusal does not already prevent. The question
     reopens only on an observed mis-route of a call that omits `file` — never
     for an alias key, which the refusal catches on read and write alike. A call
-    that supplies a destination-looking key has stated which file it meant to
-    name, and quietly answering with the loaded index instead is the defect: a
+    that puts a route anywhere other than `file` has stated which file it meant
+    to name, and quietly answering with the loaded index instead is the defect: a
     write appends 2,290 B there (#1729) and a read hands back its bytes as if
-    they were the topic's (#1796). Checked before the path is resolved or
-    opened, so a refused call cannot touch a file at all.
+    they were the topic's (#1796) — which is what the two 2026-10-17 calls in the
+    block above did, under spellings no list of key names could have caught.
+    Checked before the path is resolved or opened, so a refused call cannot touch
+    a file at all.
     """
     for key in _DESTINATION_ALIASES:
         if key in params:
+            return key
+    if "file" in params:
+        return None
+    for key, value in params.items():
+        if key in _NON_ROUTE_KEYS:
+            continue
+        if not _PLAIN_ARG_KEY_RE.fullmatch(str(key)) or _names_a_destination(value):
             return key
     return None
 

@@ -40,6 +40,7 @@ import ast
 import asyncio
 import errno
 import fcntl
+import hashlib
 import json
 import multiprocessing as mp
 import os
@@ -2570,3 +2571,335 @@ def test_the_schema_warning_changes_no_refusal_and_no_call_that_uses_file():
     assert f"- {ZORKMID} warned-and-routed row" in got["content"], got
     assert got["path"] == str(SESSION.MEMORIES_ROOT / "memory" / "user-md-ledger.md"), got
     _assert_live_memory_files_clean(ZORKMID)
+
+
+# ── #3093: a destination in a VALUE, or inside a KEY, is still a mis-route ────
+#
+# `_DESTINATION_ALIASES` is 8 hand-typed names, and the two calls of 2026-10-17
+# carried their destination under spellings none of them is: one put the route in
+# the argument's VALUE, one put it in the argument's KEY (with an empty value, so
+# a value-only check would miss it too). Both fell through to the `MEMORY.md`
+# default. The nodes below therefore check a PROPERTY — no exact `file` key plus a
+# destination-shaped value on a non-content argument, or a key that is not a plain
+# lowercase identifier — and assert the list did NOT grow, because the list is the
+# thing that failed.
+#
+# Cost, measured over `~/lloyd-data/sessions/*.json` from 2026-10-08 to 2026-10-20:
+# 144 `memory_*` calls across 9 distinct argument keys, exactly 2 of which are not
+# plain lowercase identifiers — the two below. The property refuses 2 of 144 real
+# calls, and both are the defect.
+
+#: What #1729 shipped, restated so clause 3's assertion compares the guard against
+#: the 8 names and not against whatever the module happens to hold now.
+_SHIPPED_ALIASES = ("file_path", "filepath", "file_name", "filename",
+                    "path", "memory_file", "destination", "target")
+
+# The two logged calls, replayed verbatim: `messages[].tool_calls[].function
+# .arguments` copied out of the session transcripts, entry text and all.
+#   memory_read, session 20261017_040056_autonomy_1fcb, 2026-10-17T04:05:44
+_INCIDENT_READ = {"summary": "Reading fixed-producer-residue topic",
+                  "file=file": "topics/a-fixed-producer-stale-residue-alarm"}
+#   memory_add, session 20261017_032629_autocode_bc9c, 2026-10-17T03:41:36. The
+#   mangled key holds the route and its VALUE is the empty string, so this payload
+#   is the one that makes the key-shape half necessary on its own.
+_INCIDENT_ADD_KEY = ("file=\ntopics/uncommitted-worktree-edits-are-git-discardable.md"
+                     "\n</parameter")
+_INCIDENT_ADD_ENTRY = (
+    "**A round's worktree holds the round's work UNCOMMITTED until you commit, and a "
+    'routine-looking git command erases it silently.** Mid-round on #2893 '
+    '(`SM_20261017_102813`, 2026-10-17) I ran `git checkout HEAD -- .` in '
+    '`~/lloyd-work/SM_20261017_102813/home/lloyd` while looking for a stash. It '
+    'discarded 6 files of uncommitted edits (source + tests + doc), and `git status` '
+    'then reported a clean tree, which reads as an all-clear. I noticed only because '
+    '`grep -c growth_review_day app/failure_ledger.py` returned 0 on a file I had just '
+    'edited. Recovery that worked, verified 6/6 by hash: the harness journals every '
+    'write under `~/lloyd-data/sessions/<session>.changes/<turn_id>/index.json` — one '
+    'entry per path with `pre_sha256`, `post_sha256` and a `.pre` snapshot — and '
+    "`~/lloyd-data/sessions/<session>.json` carries every `Edit`/`Write` call's full "
+    '`old_string`/`new_string`/`content`. Replaying those calls onto the base files in '
+    "call order and comparing `sha256` to each entry's `post_sha256` restored all six "
+    'byte-for-byte. The `.pre` files are the BEFORE state, so they cannot restore the '
+    'work; the post hashes are the proof. Two rules follow: in a round, commit before '
+    'issuing any other git command; and treat an unexpectedly clean `git status` as '
+    'evidence to investigate.'
+)
+_INCIDENT_ADD = {"summary": "Recording the worktree-discipline lesson",
+                 _INCIDENT_ADD_KEY: "",
+                 "entry": _INCIDENT_ADD_ENTRY}
+#: `sha256` of the entry exactly as the transcript stores it, so "verbatim" below
+#: is a checkable claim and not my word for it. Recompute with:
+#: `.venvs/lloyd/bin/python -c "import json,hashlib;d=json.load(open('/home/alansrobotlab/lloyd-data/sessions/20261017_032629_autocode_bc9c.json'));print([hashlib.sha256((t['function']['arguments'] if isinstance(t['function']['arguments'],str) else json.dumps(t['function']['arguments'])).encode()).hexdigest() for m in d['messages'] for t in (m.get('tool_calls') or []) if t.get('id')=='chatcmpl-tool-bbc1d58b1ede5554'])"`
+_INCIDENT_ADD_ENTRY_SHA = "957f867fd234cd7cd02e4d276bd769fbf9fd92497609afe647999537c1c0c0ee"
+
+
+def _assert_refused(res: dict, key: str, *, verb: str) -> None:
+    """Every half of a refusal this item depends on, in one place.
+
+    `repr(key)` rather than `key`: the incident key contains newlines, and the
+    error quotes it through `repr`, which escapes them — a substring test on the
+    raw key would fail on a refusal that did name it.
+    """
+    assert res.get("code") == "INVALID_PARAM", f"{verb}: {res}"
+    assert "`file`" in res["error"], f"{verb} did not name the key to send: {res}"
+    assert repr(key) in res["error"], f"{verb} did not name the offending key: {res}"
+
+
+@pytest.mark.parametrize("dest", ["MEMORY.md", "USER.md", "topics/user-md-ledger",
+                                  "topics/user-md-ledger.md"])
+def test_a_destination_in_a_non_content_argument_value_is_refused(dest):
+    """Clause 1: the route may not arrive in a VALUE either, wherever the key is.
+
+    The 2026-10-17 read that started this named `topics/a-fixed-producer-stale-
+    residue-alarm` as the value of a key spelled `file=file`, and the answer was
+    the loaded index. The key here is `outfile` — a plain lowercase identifier the
+    alias list does not contain — so what fires is the value property and nothing
+    else: a pass cannot be borrowed from the key-shape rule. `content` absent is
+    the load-bearing assertion on the read, because a refusal that named the key
+    AND handed back the defaulted file's bytes would still leave the caller
+    reasoning on a file it never asked for.
+    """
+    mem = _index_file(INDEX_BEFORE)
+    assert SESSION._misnamed_destination({"outfile": dest}) == "outfile", dest
+    res = SESSION._memory_read({"outfile": dest, "summary": "check what is remembered"})
+    _assert_refused(res, "outfile", verb=f"read of {dest}")
+    assert "content" not in res, f"a refused read returned bytes anyway: {res}"
+    bad = SESSION._memory_add({"outfile": dest, "entry": f"- {ZORKMID} value-lane row"})
+    _assert_refused(bad, "outfile", verb=f"add aimed at {dest}")
+    assert mem.read_text(encoding="utf-8") == INDEX_BEFORE, "a refused call wrote the index"
+    assert not (SESSION.MEMORIES_ROOT / "memory" / "user-md-ledger.md").exists()
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+@pytest.mark.parametrize("bad_key", [
+    "file=file",
+    "file=\ntopics/user-md-ledger.md\n</parameter",
+    "topics/user-md-ledger",
+    "filePath", "FILE", "file name", " file", "file<name>"])
+def test_an_argument_key_that_is_not_a_plain_lowercase_identifier_is_refused(bad_key):
+    """Clause 2: a KEY that carries a route is refused even when its value is empty.
+
+    The autocode call of 2026-10-17 is this shape: its mangled argument's value is
+    `""`, so no scan of values could have caught it, and the write reached
+    MEMORY.md — stopped only by the unrelated 300-character index-line cap, with
+    the logged result "MEMORY.md would hold an index line of 1,304 characters".
+    Each key here is empty-valued and sits beside a real `entry`, so the refusal is
+    the key's doing alone. `filePath` and `FILE` are the same property on a
+    misspelling that carries no route at all: the schema's keys are lowercase
+    snake_case, and a caller that cannot reproduce one has not named its
+    destination, whatever it meant.
+    """
+    mem = _index_file(INDEX_BEFORE)
+    topics = SESSION.MEMORIES_ROOT / "memory"
+    before = sorted(p.name for p in topics.glob("*.md")) if topics.is_dir() else []
+    assert SESSION._misnamed_destination({bad_key: ""}) == bad_key, bad_key
+    res = SESSION._memory_add({bad_key: "", "entry": f"- {ZORKMID} key-shape row",
+                               "summary": "note it"})
+    _assert_refused(res, bad_key, verb=f"add under key {bad_key!r}")
+    assert mem.read_text(encoding="utf-8") == INDEX_BEFORE, "a refused add wrote the index"
+    assert not (topics / "user-md-ledger.md").exists(), (
+        "a refused add created the topic its mangled key named")
+    after = sorted(p.name for p in topics.glob("*.md")) if topics.is_dir() else []
+    assert after == before, "a refused add created a topic file that was not there before"
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+def test_both_logged_mis_routes_are_refused_with_the_alias_list_unchanged():
+    """Clause 3: the two calls that escaped, replayed exactly as logged, and the
+    fix is the property — `_DESTINATION_ALIASES` is asserted to have stayed 8.
+
+    Growing that tuple to `("file=file", "file=\\ntopics/…")` would close both
+    incidents and leave the class of failure untouched, which is the failure mode
+    the 2026-09-20 class rule names: a hand-maintained list cannot close a property
+    over an open set of spellings. So the tuple is compared to the shipped 8 FIRST,
+    and only then are the payloads replayed.
+    """
+    assert SESSION._DESTINATION_ALIASES == _SHIPPED_ALIASES, (
+        f"the alias list grew to close these incidents instead of the property "
+        f"closing them: {SESSION._DESTINATION_ALIASES}")
+    mem = _index_file(INDEX_BEFORE)
+    assert (hashlib.sha256(_INCIDENT_ADD["entry"].encode("utf-8")).hexdigest()
+            == _INCIDENT_ADD_ENTRY_SHA), "the replayed payload is not the logged one"
+
+    assert SESSION._misnamed_destination(_INCIDENT_READ) == "file=file", _INCIDENT_READ
+    res = SESSION._memory_read(dict(_INCIDENT_READ))
+    _assert_refused(res, "file=file", verb="the logged memory_read mis-route")
+    assert "content" not in res, f"the logged mis-routed read still returned bytes: {res}"
+
+    add = SESSION._memory_add(dict(_INCIDENT_ADD))
+    _assert_refused(add, _INCIDENT_ADD_KEY, verb="the logged memory_add mis-route")
+    assert SESSION._misnamed_destination(_INCIDENT_ADD) == _INCIDENT_ADD_KEY, (
+        "the empty-valued mangled key must be named by the guard, not skipped")
+    assert mem.read_text(encoding="utf-8") == INDEX_BEFORE, (
+        "the logged mis-routed add would still have appended to the loaded index")
+    assert not (SESSION.MEMORIES_ROOT / "memory"
+                / "uncommitted-worktree-edits-are-git-discardable.md").exists()
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+async def test_a_mangled_destination_key_reaches_the_model_as_a_refusal():
+    """The same payloads across the boundary they were really sent over.
+
+    `memory_read` and `memory_add` are served by the `lloyd-mcp` process, so what a
+    worker experiences is `_wrap`'s serialized body: `is_error` true, `code`
+    present, and no `content` field — the last of those is the one a caller can act
+    on, because a body carrying the loaded index next to an error would be read as
+    a result by anything that looks at content first.
+    """
+    mem = _index_file(INDEX_BEFORE)
+    res = await SESSION.call_tool("memory_read", dict(_INCIDENT_READ))
+    assert res.is_error is True, res
+    body = json.loads(res.content[0].text)
+    assert body["code"] == "INVALID_PARAM", body
+    assert "content" not in body, body
+    assert "`file`" in body["error"], body
+    assert mem.read_text(encoding="utf-8") == INDEX_BEFORE, body
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+def test_a_call_that_names_no_destination_anywhere_still_defaults(off_tree):
+    """Clause 4: the property must not eat the default the #1729 ruling left standing.
+
+    `file` stays optional, with its `MEMORY.md` default, on all four memory tools:
+    #1729 ruled that settled on 2026-09-29 and #1796 re-affirmed it on 2026-09-30.
+    Refusing mis-named destination keys is the contract; requiring `file` would
+    break the 10 of 15 `memory_remove` calls and the one `memory_replace` call that
+    omit it, while preventing nothing this refusal does not already prevent. The
+    question reopens only on an observed mis-route of a call that omits `file` —
+    never for an alias key, which the refusal catches on read and write alike.
+    What is new here is WHICH keys are never scanned: `entry`, `old_text` and
+    `new_text` hold prose that legitimately names a file — the 2026-09-28 clean-up
+    calls pass `memory_remove({"entry": "Removing misrouted row 1 from MEMORY.md"})`
+    with no `file` at all, correctly, because MEMORY.md IS the file they meant — and
+    `summary` is the harness's own field on every call, so
+    `memory_read({"summary": "Reading loaded USER.md"})` stays a defaulted read of
+    MEMORY.md rather than a refusal. A destination mentioned INSIDE prose, or in
+    `summary`, is not a destination argument; a whole value on a non-content key is.
+    """
+    root = off_tree["memories"]
+    mem = _index_file(INDEX_BEFORE)
+    (root / "USER.md").write_text("# Alan\n- stands\n", encoding="utf-8")
+
+    empty = SESSION._memory_read({})
+    assert empty["content"] == INDEX_BEFORE, empty
+    assert empty["file"] == "MEMORY.md", empty
+    prose_in_summary = SESSION._memory_read({"summary": "Reading loaded USER.md"})
+    assert "code" not in prose_in_summary, prose_in_summary
+    assert prose_in_summary["content"] == INDEX_BEFORE, prose_in_summary
+    assert prose_in_summary["file"] == "MEMORY.md", prose_in_summary
+    prose_in_value = SESSION._memory_read({"outfile": "see MEMORY.md for the row"})
+    assert "code" not in prose_in_value, prose_in_value
+    assert prose_in_value["content"] == INDEX_BEFORE, prose_in_value
+    # The refusal set is exactly the set of files these tools can open, and no
+    # wider. `SOUL.md` is a real file on this box that `_resolve_file` has no route
+    # to, so a value test spelled "ends in .md" would refuse a call the resolver
+    # would only have defaulted; the guard goes through `topic_slug` because that
+    # is the grammar the resolver itself uses.
+    unreachable = SESSION._memory_read({"outfile": "SOUL.md"})
+    assert "code" not in unreachable, unreachable
+    assert unreachable["content"] == INDEX_BEFORE, unreachable
+
+    assert SESSION._memory_add({"entry": f"- {ZORKMID} row mentioning USER.md here",
+                                "summary": "note it"})["success"]
+    assert mem.read_text(encoding="utf-8").endswith(
+        f"- {ZORKMID} row mentioning USER.md here\n")
+    # A declared argument the value test must not touch even so: 63 of the 80
+    # `memory_add` calls in the 2026-10-08→2026-10-20 scan send `type`. Its four
+    # legal values are bare words and `topic_slug` wants the `topics/` prefix, so
+    # they would survive a scan — it is the scope rule, not the pattern, that keeps
+    # the fleet's second-most-used memory argument out of the check.
+    typed = SESSION._memory_add({"entry": f"- {ZORKMID} typed row", "type": "project",
+                                 "summary": "note it"})
+    assert typed["success"], f"a declared enum value was read as a destination: {typed}"
+    assert mem.read_text(encoding="utf-8").endswith(f"- {ZORKMID} typed row\n")
+    # The load-bearing half of the scope: a loaded index row's whole text may
+    # ITSELF be a pointer, and then the destination-shaped value sits in `old_text`
+    # and `new_text` — the shape `memory_replace` is sent all day. Read that value
+    # as a route and the guard refuses the tool's ordinary work, on a call that
+    # never asked for a different file.
+    assert SESSION._memory_add({"entry": "- topics/user-md-ledger",
+                                "summary": "link the topic"})["success"]
+    pointer = SESSION._memory_replace({"old_text": "topics/user-md-ledger",
+                                       "new_text": "topics/user-md-ledger (see #3093)",
+                                       "summary": "mark it"})
+    assert pointer["success"], f"a pointer row's own text was read as a route: {pointer}"
+    assert "- topics/user-md-ledger (see #3093)\n" in mem.read_text(encoding="utf-8")
+    assert not (SESSION.MEMORIES_ROOT / "memory" / "user-md-ledger.md").exists(), (
+        "a defaulted replace wrote the topic its old_text merely named")
+    assert SESSION._memory_replace({"old_text": f"{ZORKMID} row mentioning",
+                                    "new_text": f"{ZORKMID} row mentioning MEMORY.md"})["success"]
+    assert SESSION._memory_remove({"entry": "mentioning MEMORY.md",
+                                   "summary": "clean up"})["success"]
+    assert SESSION._memory_remove({"entry": "typed row", "summary": "clean up"})["success"]
+    assert SESSION._memory_remove({"entry": "topics/user-md-ledger",
+                                   "summary": "clean up"})["success"]
+    assert mem.read_text(encoding="utf-8") == INDEX_BEFORE, (
+        "the defaulted round trip did not land back where it started")
+    # The two frozen positive controls still assert exactly what #1796 left them,
+    # which is the other half of this clause and the rail under the ruling.
+    for name, frozen in (
+            ("test_the_writers_still_write_when_the_destination_is_under_"
+             "file_or_defaulted", _WRITERS_CONTROL_ASSERTS),
+            ("test_memory_read_still_reads_when_the_destination_is_under_"
+             "file_or_defaulted", _READ_CONTROL_ASSERTS)):
+        assert _assert_lines("tests/test_memory_writer_lane.py", name) == frozen, (
+            f"{name} moved while the default was being defended")
+
+
+def test_an_exact_file_key_ends_the_check_before_another_key_can_matter(off_tree):
+    """The refusal is for a call that never named `file`, not for odd keys in general.
+
+    Scanning stops at an exact `file` key, so a call that satisfied the contract is
+    untouched by junk that came alongside it: it is not refused, and the extra
+    destination-shaped value neither moves the destination nor gets merged into it.
+    This is the rail under the guard's scope — #1729 left `file` optional with a
+    default, and the new property refuses a call for LACKING it, so a call that has
+    it must read the file it named and nothing else.
+    """
+    root = off_tree["memories"]
+    (root / "memory").mkdir(parents=True, exist_ok=True)
+    (root / "memory" / "user-md-ledger.md").write_text(
+        "---\ntype: note\n---\n\n# Topic\n- the real row\n", encoding="utf-8")
+    _index_file(INDEX_BEFORE)
+    assert SESSION._misnamed_destination(
+        {"file": "topics/user-md-ledger", "outfile": "MEMORY.md", "summary": "read it"}) is None
+    got = SESSION._memory_read({"file": "topics/user-md-ledger",
+                                "outfile": "MEMORY.md", "summary": "read it"})
+    assert "code" not in got, got
+    assert "- the real row" in got["content"], got
+    # The topic branch echoes `file` as the caller wrote it and puts the resolved
+    # file in `path`; only the loaded-memory branch rewrites `file` to MEMORY.md.
+    assert got["file"] == "topics/user-md-ledger", got
+    assert got["path"].endswith(f"memory{os.sep}user-md-ledger.md"), got
+
+
+def test_the_guard_states_the_new_property_beside_the_ruling_it_must_not_disturb():
+    """Clause 5: the docstring carries the property AND every commitment of #1892.
+
+    A reader of `_misnamed_destination` asks two questions of it — "what does this
+    refuse now?" and "may I make `file` required?" — and both have to be answered in
+    the same place, because the second question is what undoes the first answer.
+    The six settled-ruling phrases are re-asserted here rather than trusted from
+    `test_the_guard_docstring_states_the_settled_ruling_rather_than_an_owed_one`,
+    since adding the property text is precisely the edit that could have pushed one
+    of them out. The served-schema node below is the other half: prose in a
+    docstring is only worth what the schema still is.
+    """
+    doc = _docstring_of("agent_mcp/session.py", "_misnamed_destination")
+    for phrase in _SETTLED_RULING_PHRASES:
+        assert phrase in doc, f"adding the property pushed {phrase!r} out: {doc!r}"
+    assert not _OWED_RULING_RE.search(doc), f"the guard calls it owed again: {doc!r}"
+    for claim in ("VALUE", "KEY", "MEMORY.md", "USER.md", "topics/<slug>",
+                  "[a-z][a-z0-9_]*", "summary", "#3093"):
+        assert claim in doc, f"the guard does not state the new property: {claim!r}"
+    for tool, args in (("memory_read", {"outfile": "MEMORY.md"}),
+                       ("memory_add", {"entry": "x", "outfile": "MEMORY.md"}),
+                       ("memory_replace", {"old_text": "x", "outfile": "USER.md"}),
+                       ("memory_remove", {"entry": "x", "outfile": "MEMORY.md"})):
+        res = getattr(SESSION, "_" + tool)(args)
+        assert res.get("code") == "INVALID_PARAM", (tool, res)
+    schemas = _served_memory_schemas()
+    for name in MEMORY_TOOLS:
+        assert schemas[name]["required"] != ["file"], name
+        assert "file" in schemas[name]["properties"], name
+        assert not _OWED_RULING_RE.search(
+            {t.name: t for t in asyncio.run(SESSION.list_tools())}[name].description), name
