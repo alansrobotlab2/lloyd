@@ -421,9 +421,10 @@ has nothing to enqueue into. Three differences matter — it survives a restart,
 holds a note for **exactly one turn** (consuming it is deleting it), and since
 #2598 the drain is gated on `is_user_session` so an overnight worker turn cannot
 eat the brief meant for the first human one. Caps, TTL, and the write doors are
-[[ambient-context-injection]]'s to state. Its one gap here: the subliminal badge
-list in `_messages_subliminal.py` still has no `notes` tag, so the persisted row
-understates the turn (#3081).
+[[ambient-context-injection]]'s to state. Its badge in `_messages_subliminal.py`
+is `notes`, filed between `ambient` and `skills` because that is where
+`_format_context` renders it, so the persisted row names the single-use brief the
+turn consumed (#3081).
 
 ## Conversation focus tracking
 
@@ -604,11 +605,17 @@ Five injection shapes are classified (first match wins), in this order:
 | `session_state` | leading `<session_state>` |
 | `memory_delta` | leading `<memory_delta>` |
 
-Source badges are detected by tag presence: `ambient`, `skills`, `backlog`,
-`facts`, `vault`, `sessions`, `hint`, `ide`, `state`, `memory_delta`. There is no
-badge for `<next-session-notes>`, so a turn that consumed an overnight brief
-persists without naming it (#3081). Scripts that filter by role skip
-these entries for free.
+Source badges are detected by tag presence, in rendering order: `ambient`,
+`notes`, `skills`, `backlog`, `facts`, `vault`, `sessions`, `hint`, `ide`,
+`state`, `memory_delta` — eleven names over the nine section tags in
+`prefetch.CONTEXT_SECTION_TAGS`, the two extras being `state` and `memory_delta`,
+which ride the P1 turn tail rather than the context block. `notes` is
+`<next-session-notes>`'s badge: #3081 found the section rendered since #1516 with
+no entry in the list at all, so a turn that consumed an overnight brief persisted
+without naming it. `tests/test_prefetch.py::test_every_rendered_context_section_has_a_badge`
+now asserts every tag in `CONTEXT_SECTION_TAGS` has a marker here (`skill`
+matched as `<skill `, since `<skill>` never renders), so the two lists cannot
+drift in silence again. Scripts that filter by role skip these entries for free.
 
 The prefix is recovered by stripping `"\n\n" + text` from the end of the
 prefetched text; a single `"\n"` separator is accepted too. Without that, a
@@ -955,3 +962,16 @@ with the genuinely correct answer, never an easier target.
     (`_prefetch_prepare` re-parses the whole session JSON on the event loop for one
     `platform` field, which voids the `plan_mode` pass-through this page still
     claims saves that read).
+- **2026-10-20 (#3081, code).** `_SUBLIMINAL_SOURCE_TAGS` has a `notes` entry for
+  `<next-session-notes>`, filed between `ambient` and `skills` because that is
+  where `_format_context` renders the section, so a turn that consumed a nightly
+  brief persists one. The list is now **eleven** names against the nine tags in
+  `prefetch.CONTEXT_SECTION_TAGS` (the two extras being the turn-tail `state` and
+  `memory_delta`), which supersedes the "ten badges" count in the entry above.
+  `tests/test_prefetch.py` pins the badge, its rendering position read off
+  `_format_context`'s own output, and a guard that fails the suite on a section
+  added to the renderer without a badge — the drift nothing caught until the page
+  was re-read against the code and filed as #3081. The enumeration sentence in
+  *What the persisted row carries* is itself read now:
+  `tests/test_architecture_coverage_doc_claims.py::test_the_subliminal_page_enumerates_the_badge_tuple_the_code_carries`
+  extracts it and compares it, name for name, to the tuple.

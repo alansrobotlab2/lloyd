@@ -24,6 +24,7 @@ from agent_mcp import session as session_mod  # noqa: E402
 from agent_mcp import vault as vault_mod  # noqa: E402
 from agent_mcp.skills import _score_skill, _skill_token_sets, _tokenize  # noqa: E402
 from app.routers._messages_subliminal import (  # noqa: E402
+    _SUBLIMINAL_SOURCE_TAGS,
     _classify_subliminal,
     _detect_subliminal_sources,
     _extract_subliminal_prefix,
@@ -62,6 +63,161 @@ def test_extract_prefix_no_injection():
 def test_detect_sources_includes_ide():
     prefix = "<context>\n<vault-context>\n- a\n</vault-context>\n<ide_state>\n  visible_file: x\n</ide_state>\n</context>"
     assert _detect_subliminal_sources(prefix) == ["vault", "ide"]
+
+
+def test_detect_sources_includes_next_session_notes():
+    """#3081 clause 1: a turn that consumed an overnight brief must say so.
+
+    The section's own rendered preamble promises the agent this turn is the
+    first to read the note and that it will not appear again, so it is the one
+    injection a human auditing the turn asks about — and until now the badge
+    list had no entry for it, so the persisted row named every other part and
+    silently omitted the single-use one.
+    """
+    from app.routers._messages_subliminal import _build_subliminal_entry
+    from app.sessions_io import SessionTurn
+    from datetime import datetime
+
+    prefix = ("<context>\n<next-session-notes>\n- **[nightly:reflection]** "
+              "brief\n</next-session-notes>\n</context>")
+    assert _detect_subliminal_sources(prefix) == ["notes"]
+
+    # And through the row builder, which is what Mission Control reads:
+    # `web/src/components/ChatPanel.tsx` renders `subliminal.sources` verbatim,
+    # so `notes` has to be in the persisted metadata, not just in the prefix.
+    row = _build_subliminal_entry(
+        SessionTurn(turn_id="t1", source="user", payload={},
+                    enqueued_at=datetime.now()),
+        prefix, "2026-10-20T18:00:00")
+    assert row["subliminal"]["sources"] == ["notes"]
+
+
+def test_notes_badge_sits_in_rendering_position():
+    """#3081 clause 2, read off the renderer rather than a hand-typed block.
+
+    `_format_context` puts the notes part after the ambient drain and before
+    the skill loop, and `_SUBLIMINAL_SOURCE_TAGS` claims in its own comment
+    that its ordering "matches rendering order in
+    `prefetch._format_context()`" — the sentence that went false when #1516
+    added the section. The claim has two halves, so the assertion does: the byte
+    order the renderer produced, and the badge list agreeing with it. A test
+    that only compared the detector's output would be reading the tuple against
+    itself — the detector returns badges in tuple order whatever the block says —
+    so moving the notes part below the skill loop would have passed it.
+    """
+    from app.next_session_notes import NextSessionNote
+    from app.sessions_io import AmbientPrefetchEntry
+
+    block = prefetch._format_context(
+        [(9.0, {"name": "tiny", "raw": "# Tiny\nNEVER do the thing.\n"})], [],
+        ambient_entries=[AmbientPrefetchEntry(
+            source="autotriage", summary="Brief + Triage", enqueued_at=1.0)],
+        notes=[NextSessionNote(source="nightly:reflection",
+                               summary="overnight brief", content="body",
+                               enqueued_at=1.0, expires_at=2.0)])
+    # Half one: the order the renderer itself wrote, by byte offset.
+    offsets = {marker: block.index(marker) for marker in
+               ("<ambient-signals>", "<next-session-notes>", '<skill name="')}
+    assert offsets["<ambient-signals>"] < offsets["<next-session-notes>"] \
+        < offsets['<skill name="'], offsets
+    # Half two: the badge list agrees with that order.
+    assert _detect_subliminal_sources(block) == ["ambient", "notes", "skills"]
+
+
+def test_every_rendered_context_section_has_a_badge():
+    """#3081 clause 3: the two lists are one fact written twice, so pin them.
+
+    `prefetch.CONTEXT_SECTION_TAGS` is the inventory of sections
+    `_format_context` renders — its own comment: "a section not named here is
+    one whose cost nobody measures" — and `_SUBLIMINAL_SOURCE_TAGS` is the
+    inventory of parts a persisted `subliminal` row claims to have carried. A
+    section added to the renderer without a badge never shows up in Mission
+    Control's "what did the agent see" strip, which is exactly how
+    `<next-session-notes>` shipped. The guard reads one way only: `state` and
+    `memory_delta` come from the P1 turn tail (`app/prompt_layout.py`), not
+    from `_format_context`, so they hold a badge and no section tag by design.
+    """
+    markers = [marker for _, marker in _SUBLIMINAL_SOURCE_TAGS]
+    # `<skill>` never renders: every skill part carries `name=`/`score=`
+    # attributes, so its badge matches the opening `<skill ` — the same
+    # distinction `_SECTION_TOKEN_RE`'s lookahead makes in `app/prefetch.py`.
+    unbadged = [section for section in prefetch.CONTEXT_SECTION_TAGS
+                if f"<{section}>" not in markers
+                and f"<{section} " not in markers]
+    assert unbadged == [], f"sections rendered with no subliminal badge: {unbadged}"
+
+
+def test_the_renderer_cannot_emit_a_section_the_tuple_does_not_name():
+    """#3081 clause 3, second hop: `_format_context` emits only sections
+    `prefetch.CONTEXT_SECTION_TAGS` names.
+
+    The guard above compares badges to that tuple, and the tuple is
+    hand-maintained — so a part added to the renderer but never to the tuple
+    would still ship both unmeasured and unbadged, and the clause's promise
+    ("adding a section to `_format_context` without a badge fails the suite")
+    would only hold for someone who remembered the middle step. Two blocks
+    between them exercise everything the renderer can emit, because
+    `<skill-hint>` fires only when no skill matched.
+
+    `_section_spans` is not reused on purpose: it builds its own regex FROM
+    `CONTEXT_SECTION_TAGS`, so a tag absent from the tuple is invisible to it —
+    the exact blind spot this node exists to close. `ide_state` is absent from
+    both blocks because `_prefetch_run` splices it in after the render.
+    """
+    from app.next_session_notes import NextSessionNote
+    from app.sessions_io import AmbientPrefetchEntry
+
+    def emitted_sections(block: str) -> list[str]:
+        """Section names opened at depth 1 of the `<context>` envelope.
+
+        A hand-rolled depth count rather than a regex over known tags: the
+        whole point is to notice a tag nobody has named anywhere.
+        """
+        tags, depth = [], 0
+        for closing, tag in re.findall(
+                r"<(/?)([a-z][a-z0-9_-]*)(?=[\s>/])", block):
+            if closing:
+                depth -= 1
+            else:
+                if depth == 1:
+                    tags.append(tag)
+                depth += 1
+        assert depth == 0, f"unbalanced tags in the rendered block: {block[:300]}"
+        return tags
+
+    def _blocks():
+        return [
+            prefetch._format_context(
+                [(9.0, {"name": "tiny", "raw": "# Tiny\nNEVER do the thing.\n"})],
+                ["- fact one"],
+                vault_results=[{"title": "Note", "snippet": "a snippet",
+                                "score": 0.5, "file": "knowledge/note.md"}],
+                session_results=[{"created_at": "2026-10-20T10:00:00",
+                                  "preview": "a preview", "message_count": 2,
+                                  "model": "gemma"}],
+                ambient_entries=[AmbientPrefetchEntry(
+                    source="autotriage", summary="Brief + Triage",
+                    enqueued_at=1.0)],
+                backlog_refs=["#3081 up_next: the notes badge"],
+                notes=[NextSessionNote(source="nightly:reflection",
+                                       summary="overnight brief", content="body",
+                                       enqueued_at=1.0, expires_at=2.0)]),
+            prefetch._format_context([], [], show_skill_hint=True),
+        ]
+
+    emitted = set()
+    for block in _blocks():
+        emitted |= set(emitted_sections(block))
+    unnamed = sorted(emitted - set(prefetch.CONTEXT_SECTION_TAGS))
+    assert unnamed == [], (
+        f"`_format_context` emits {unnamed}, which "
+        "`prefetch.CONTEXT_SECTION_TAGS` does not name — the section would be "
+        "invisible to the #562 size map and to the subliminal badge guard alike")
+    # The subset check above is not grading an empty set: the two blocks do
+    # exercise every tag the tuple names except `ide_state`, which is spliced in
+    # after the render, so a renderer that silently stopped emitting a part shows
+    # up here rather than shrinking what the first assertion can see.
+    assert emitted == set(prefetch.CONTEXT_SECTION_TAGS) - {"ide_state"}, emitted
 
 
 # ── Focus tracking ────────────────────────────────────────────────────────────

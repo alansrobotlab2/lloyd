@@ -22,12 +22,14 @@ are named by file, not by count: `tests/test_session_queue.py` and
 `tests/test_active_session_resolution.py` over the queue and the resolver,
 `tests/test_ambient_prefetch_retention.py` and `tests/test_session_doc_claims.py`
 over this page's own sentences, and the ambient cases in `tests/test_prefetch.py`.
-Re-measured 2026-10-16 by `--collect-only -q` on each file — collected nodes, not
+Re-measured 2026-10-20 by `--collect-only -q` on each file — collected nodes, not
 passing ones, so the figure ages rather than reassures:
 `tests/test_session_queue.py` 18, `tests/test_active_session_resolution.py` 5,
 `tests/test_ambient_prefetch_retention.py` 16,
 `tests/test_session_doc_claims.py` 12 (51 across those four), and
-`tests/test_prefetch.py` 93. Those five are the mechanism's surface, and
+`tests/test_prefetch.py` 97 — four arrived with #3081, the subliminal `notes`
+badge for `<next-session-notes>` and the guards around it. Those five are the
+mechanism's surface, and
 `tests/test_ambient_decision_turn_scope.py`, which came in with #2599, is a sixth
 that pins the decision store rather than the queue. Another file
 reads this page's own sentences —

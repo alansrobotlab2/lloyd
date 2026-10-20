@@ -32,9 +32,17 @@ _SUBLIMINAL_KINDS = (
 )
 
 # Tag → source-name map for the summary badge. Ordering matches rendering
-# order in `prefetch._format_context()`.
+# order in `prefetch._format_context()`. A section that is missing from here is
+# a part of the turn Mission Control never shows — that is how
+# `<next-session-notes>` shipped invisible (#3081) — so
+# `tests/test_prefetch.py::test_every_rendered_context_section_has_a_badge`
+# now fails the suite on it, against `prefetch.CONTEXT_SECTION_TAGS`.
+# `state` and `memory_delta` are the deliberate extras: they ride the P1 turn
+# tail (`app/prompt_layout.py`), so they are rendered by nobody in
+# `_format_context` and the guard does not expect them.
 _SUBLIMINAL_SOURCE_TAGS = (
     ("ambient",  "<ambient-signals>"),
+    ("notes",    "<next-session-notes>"),
     ("skills",   "<skill "),
     ("backlog",  "<backlog-refs>"),
     ("facts",    "<facts>"),

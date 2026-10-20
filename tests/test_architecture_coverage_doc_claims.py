@@ -1453,6 +1453,116 @@ def test_a_collected_count_the_command_contradicts_is_what_the_node_flags():
     assert stated == 73 and actual != 73, stale
 
 
+# ── #3081: the badge list `subliminal.md` enumerates is one tuple ────────────
+
+#: The lead-in of the sentence in `subliminal.md`'s "What the persisted row
+#: carries" section that enumerates every subliminal badge name. The page states
+#: the list as prose rather than a table, so the extractor below parses it out of
+#: that sentence.
+_BADGE_CLAIM_LEAD = "Source badges are detected by tag presence"
+
+#: Spelled-out counts, because the sentence writes its two figures as words. The
+#: node builds the expected phrase FROM the code and demands it in the prose, so
+#: an unmapped count is a failure naming itself, not a silent pass.
+_COUNT_WORDS = {"two": 2, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+                "twelve": 12}
+
+
+def _count_word(n: int) -> str:
+    word = next((w for w, v in _COUNT_WORDS.items() if v == n), None)
+    assert word, (
+        f"the page spells its counts and {n} is not in `_COUNT_WORDS` — the set "
+        "it prices moved; add the word and correct the sentence")
+    return word
+
+
+def _badge_list_claim(text: str) -> tuple[list[str], str]:
+    """The badge names the page enumerates, in the order it states them, plus the
+    paragraph after the em dash that counts them and names the two extras.
+
+    The list is captured up to the dash rather than to a full stop because the
+    sentence's own tail cites `` `prefetch.CONTEXT_SECTION_TAGS` `` — a period
+    inside a path citation would otherwise end the extraction mid-sentence. The
+    tail runs to the end of its prose unit, the same unit split
+    `_pseudo_query_cache_claim` uses, because the numbers and the extras the page
+    states are in that sentence and nowhere else. Finding the lead-in at all is
+    the non-empty proof this file demands of every extractor: a page that dropped
+    the enumeration would otherwise pass on an empty list.
+    """
+    m = re.search(
+        rf"{re.escape(_BADGE_CLAIM_LEAD)}.{{0,600}}?:\s*"
+        r"((?:`[a-z_]+`,\s*)*`[a-z_]+`)\s*—(.*?)(?:\n\n|\n(?=- )|\Z)",
+        text, re.DOTALL)
+    assert m, (
+        f"`subliminal.md` no longer carries a sentence starting "
+        f"{_BADGE_CLAIM_LEAD!r} with a backticked badge list and a counting "
+        "clause — the page stopped enumerating the list, so the node grading it "
+        "has nothing to read")
+    names = re.findall(r"`([a-z_]+)`", m.group(1))
+    assert names, "the badge sentence matched with no backticked names in it"
+    tail = re.sub(r"\s+", " ", m.group(2)).strip()
+    assert tail, "the badge sentence has no counting clause to grade"
+    return names, tail
+
+
+def test_the_subliminal_page_enumerates_the_badge_tuple_the_code_carries():
+    """#3081's two sentences were corrected, but nothing in the tree could read
+    the correction, so the page is free to go stale again the same way.
+
+    `_SUBLIMINAL_SOURCE_TAGS` (`app/routers/_messages_subliminal.py`) is the code;
+    the sentence in `architecture/subliminal.md` is a copy of it. The gap the item
+    was filed about sat unnoticed from #1516 until the page was re-read against
+    the tree — and the count-claim family (#2606) is the proof that a sentence
+    without a reader rots. So this node extracts the page's list and compares it
+    to the tuple, name for name and in order, then builds the counting phrases
+    from `len()` and demands those exact words in the prose.
+
+    `skill` is the entry whose marker is a prefix, not a whole tag: a skill part
+    always renders with `name=`/`score=` attributes, so its badge matches
+    `<skill ` and `<skill>` never appears — the same reason `_SECTION_TOKEN_RE` in
+    `app/prefetch.py` carries a lookahead instead of a word boundary, since `\b`
+    matches between `skill` and `-hint`. The page names the badge `skill` either
+    way, so the comparison is name-to-name.
+    """
+    from app.prefetch import CONTEXT_SECTION_TAGS
+    from app.routers._messages_subliminal import _SUBLIMINAL_SOURCE_TAGS
+
+    text = _text("subliminal.md")
+    stated, tail = _badge_list_claim(text)
+    carried = [name for name, _marker in _SUBLIMINAL_SOURCE_TAGS]
+    assert stated == carried, (
+        f"the page enumerates {stated} but `_SUBLIMINAL_SOURCE_TAGS` carries "
+        f"{carried} — the sentence states rendering order, so a badge added to "
+        "the tuple without it is the drift #3081 was filed about")
+
+    assert f"{_count_word(len(carried))} names" in tail, (
+        f"the page's counting clause ({tail[:160]}…) does not spell the "
+        f"{len(carried)} badge names the tuple now carries")
+    assert f"{_count_word(len(CONTEXT_SECTION_TAGS))} section tags" in tail, (
+        f"the page does not spell the {len(CONTEXT_SECTION_TAGS)} section tags "
+        f"`prefetch.CONTEXT_SECTION_TAGS` inventories today")
+
+    # The page's two extras are a claim about the code, not a style choice: a
+    # badge whose marker is not a rendered section tag rides the P1 turn tail
+    # (`app/prompt_layout.py`), and those are the only two of its kind.
+    section_markers = {f"<{s}>" for s in CONTEXT_SECTION_TAGS} | {
+        f"<{s} " for s in CONTEXT_SECTION_TAGS}
+    extras = [name for name, marker in _SUBLIMINAL_SOURCE_TAGS
+              if marker not in section_markers]
+    expected = (f"the {_count_word(len(extras))} extras being "
+                + " and ".join(f"`{e}`" for e in extras))
+    assert expected in tail, (
+        f"the page must state the extras as {expected!r}; it says {tail[:200]!r} "
+        "— a third non-section badge, or a renamed one, is prose drift")
+
+    # Discrimination: drop one badge name from the sentence and the extracted
+    # list has to change, or the first assertion above is reading nothing.
+    dropped = _badge_list_claim(text.replace("`notes`, `skills`", "`skills`"))
+    assert dropped[0] == [n for n in carried if n != "notes"], (
+        "deleting `notes` from the enumerated list left the extraction showing "
+        "the badge anyway — the node would grade a page that dropped it")
+
+
 # ── #2583: a line anchor has to land inside a definition, not just a file ────
 
 #: What the resolution node above asks of a `path:NNN` citation is that the FILE
