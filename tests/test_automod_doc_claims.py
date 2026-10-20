@@ -1895,6 +1895,169 @@ def test_part8_says_where_the_lazy_load_knob_is_defined_and_where_it_is_overridd
         "launcher's default, not as a second copy of it")
 
 
+# ── agent-tts.conf's own comments (#3044) ───────────────────────────────────
+#
+# The conf used to close its incident block with "That config's own comment still
+# claims \"~75 s\"." — an open ask pointing a reader at the vendored tree. The
+# owed-check job refused that ask twice: #2147's pass on 2026-10-07 ("Not doing it,
+# and this is the last pass that should file it") and #1446's on 2026-10-19 ("Retire
+# the ask; do not hand-edit the gitignored vendored tree for a comment"). A
+# retraction-less alarm is why one measurement filed the same ask three times, and
+# both refusals justify themselves partly by citing this conf's line as the thing
+# that already flags the comment — so the fix converts the ask into the closed
+# decision and does NOT delete the flag.
+#
+# The numbers come from `~/lloyd-data/logs/services/agent-tts.err`: pair each
+# `lazy_load=` line with the next "Backend ready" and count the "AUTOTUNE
+# benchmarking" blocks between. Boot COUNTS are parse-definition-dependent (three
+# boots log autotune blocks and still reach ready in 29-33 s), which is why the conf
+# publishes the two ranges and the nodes below assert the ranges, never a count.
+#
+# The one figure the conf must keep for the 2026-09-19 incident is "4 min 6 s", and
+# it is first-voice-turn-to-audio LATENCY under lazy loading — #2147's triage ruled
+# it is not a boot window — while "~75 s" stays unrefuted, because compile time is
+# not measurable from the logs.
+
+TTS_CONF = ROOT / "agent-services" / "supervisor" / "conf.d" / "agent-tts.conf"
+
+#: Phrases that read as an open to-do. Each is a way of writing "somebody still owes
+#: this edit", which is the ask #1446 and #2147 both refused.
+TTS_OPEN_ASK_PHRASES = ("still claims", "needs fixing", "needs to be fixed",
+                        "should be fixed", "should be updated", "to be updated",
+                        "TODO", "FIXME", "unfixed", "still owes")
+
+#: Phrases that would call the vendored figure a refuted number. It is not: compile
+#: time is unmeasurable from the logs, so nothing here may claim it was measured wrong.
+TTS_REFUTED_NUMBER_PHRASES = ("is stale", "stale", "wrong number", "incorrect",
+                              "measured wrong", "is false")
+
+
+def _tts_conf_flat() -> str:
+    """`agent-tts.conf` with every run of whitespace collapsed to one space.
+
+    The comments wrap at ~80 columns, so every sentence here is split across lines;
+    matching raw bytes would let the open ask #3044 retires come back with a newline
+    in the middle of it.
+    """
+    return _flat(TTS_CONF)
+
+
+def test_the_tts_conf_flags_the_vendored_comment_without_an_open_ask():
+    """Clause 1: the flag survives, the to-do does not.
+
+    Two refusals lean on this conf's line as the thing that already flags the vendored
+    comment, so deleting the mention would contradict the retire rationale they
+    recorded. What has to go is the reading that somebody still owes the edit.
+    """
+    flat = _tts_conf_flat()
+    for phrase in TTS_OPEN_ASK_PHRASES:
+        assert phrase not in flat, f"the conf is an open ask again ({phrase!r})"
+    # ...and the flag itself is still there: the file, the string it carries, and the
+    # word that says whose sentence it is.
+    assert "config.yaml" in flat, (
+        "the conf no longer points at the vendored config whose comment this is "
+        "about — the refusals cite this line as the flag, so it may not be deleted")
+    assert "~75 s" in flat, "the flagged figure itself has gone missing from the conf"
+    assert "upstream" in flat, (
+        "the mention survives only as a flag if it still says the sentence is "
+        "upstream's rather than ours")
+
+
+def test_the_tts_conf_records_the_vendored_comment_as_a_closed_decision():
+    """Clause 2: closed tense, with the decision, its owners and its reopen rule.
+
+    The block has to carry four things or the next owed-check pass files the ask
+    again: that the text is upstream's in the gitignored clone, that the loop decided
+    not to hand-edit it, the two refusals that did, and #3040's rule for when it may
+    be touched. It must not call the figure refuted, because 75 s is unrefuted —
+    compile time is unmeasurable from the logs.
+    """
+    flat = _tts_conf_flat()
+    for phrase in TTS_REFUTED_NUMBER_PHRASES:
+        assert phrase not in flat, (
+            f"the conf calls the vendored figure refuted ({phrase!r}); nothing "
+            "measures compile time, so 75 s is unrefuted, not stale")
+    assert "CLOSED DECISION" in flat, (
+        "the block has lost the marker that tells a reader this is a ruling and not "
+        "an ask")
+    assert "upstream" in flat and "gitignor" in flat, (
+        "the two facts that make the path not this loop's to edit")
+    assert re.search(r"owed-check[^.]*\bretired\b", flat), (
+        "the retirement must be attributed to the job that actually did it")
+    assert "#2147" in flat and "2026-10-07" in flat, "the first refusal, with its date"
+    assert "#1446" in flat and "2026-10-19" in flat, "the second refusal, with its date"
+    assert "#3040" in flat and "behavioural" in flat, (
+        "#3040's standing rule is the reopen condition: correct the comment only "
+        "alongside a behavioural change to the vendored tree")
+    assert "unrefuted" in flat, (
+        "the conf must say the figure was never measured against, not that it holds")
+
+
+def test_the_tts_conf_publishes_both_measured_boot_regimes_with_the_autotune_as_discriminator():
+    """Clause 3: two eager-boot ranges, the discriminator, and what "4 min 6 s" is.
+
+    Ranges and not counts on purpose: three boots log "AUTOTUNE benchmarking" blocks
+    and still reach "Backend ready" in 29-33 s, so a count of cold boots is a reading
+    of where the parse draws its line, while both bands themselves reproduce.
+    """
+    flat = _tts_conf_flat()
+    assert re.search(r"discriminator is the inductor autotune", flat), (
+        "the two regimes have to be named by what separates them, or a reader "
+        "averages them into one number")
+    assert "93-278 s" in flat, "the autotune boot range"
+    assert "2026-10-16 10:37:32" in flat and "10:42:10" in flat, (
+        "the worst autotune boot has to carry its own stamps")
+    assert "4 min 38 s" in flat, "278 s, in the form a reader compares against"
+    assert "10-50 s" in flat, "the warm-inductor-cache boot range"
+    assert "29-33 s" in flat, (
+        "the straddling boots are what make boot counts unpublishable, so the "
+        "reason has to stay next to the ranges")
+
+    lat = [s for s in re.split(r"(?<=[.!?])\s+", flat) if "4 min 6 s" in s]
+    assert len(lat) == 1, f"'4 min 6 s' should appear once, as one measurement: {lat}"
+    assert "first voice turn" in lat[0] and "audio" in lat[0] and "2026-09-19" in lat[0], (
+        "'4 min 6 s' is the 2026-09-19 first-voice-turn-to-audio latency; #2147's "
+        f"triage ruled it is not a boot window: {lat[0]}")
+    assert "boot window" not in lat[0], (
+        f"the latency must not be re-labelled a boot window: {lat[0]}")
+    assert "~4 min" in flat, (
+        "the /health cost of eager loading stays published — 278 s is the worst cold "
+        "boot, which is what makes ~4 min a fair number")
+
+
+def test_the_tts_conf_keeps_the_incident_record_and_the_eager_override():
+    """Clause 4: the rewrite touched comments, so the record and the fix both stand.
+
+    The timestamps and the read=120.0 consequence are the evidence that eager loading
+    was worth its cost, and the `environment=` line is the fix itself — the node above
+    requires that same regex for SETUP.md's sake, so a comment rewrite that ate either
+    half fails in two places.
+    """
+    conf = TTS_CONF.read_text(encoding="utf-8")
+    flat = _tts_conf_flat()
+    for stamp in ("19:54", "20:04:42", "20:08:48"):
+        assert stamp in flat, f"the incident timeline lost {stamp}"
+    assert "read=120.0" in flat and "DISCARDS" in flat, (
+        "the consequence that made this more than a delay: the worker drops "
+        "utterances, it does not only speak them late")
+    assert "20:06:42" in flat and "20:08:42" in flat and "20:08:56" in flat, (
+        "the two 120 s timeouts and the mid-sentence answer are what date-stamp the "
+        "discard claim")
+    assert re.search(r'environment=.*TTS_LAZY_LOAD="false"', conf), (
+        "the eager override the doc points at is gone from the conf it lives in")
+    # And the block those three citations name has to stay where they say it is:
+    # `agent-tts.conf:24-26` is cited by line number by `agent-services/guardian/
+    # guardian.py`, `agent-services/guardian/policy.py` and this suite's
+    # `test_guardian_predicates.py::test_a_synthesiser_that_is_compiling_is_not_yet_
+    # down`, which is why #3044's new blocks were added BELOW this one — an inserted
+    # line above it would move three citations and leave all three pointing at prose
+    # that no longer says what they quote it as saying.
+    cited = " ".join(conf.splitlines()[23:26])
+    assert "/health" in cited and "~4 min" in cited, (
+        f"agent-tts.conf:24-26 no longer holds the /health cost block its three "
+        f"line-number citations quote: {cited!r}")
+
+
 # --- §4.5f The confirmation pass (#1903, #2017, #2400) -----------------------
 #
 # `65ec576a` flipped `automod.review.confirm` to `off` and pinned the comment
