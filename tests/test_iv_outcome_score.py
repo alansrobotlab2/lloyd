@@ -416,3 +416,289 @@ def test_the_default_run_drops_the_test_sessions_and_the_flag_keeps_them(tmp_pat
         "`tests/test_iv_measurement.py`, which passes the option by name"
     )
 
+
+
+# ── #3051: #833's authority ruling, recorded where the scorer is actually read ────────
+#
+# The script printed "The authority decision is a human call." at the foot of every
+# report and deferred the same decision in its docstring, two weeks after the decision
+# was made: #833's authority ruling went record-only on 2026-10-04 and became permanent
+# on 2026-10-18, when iv-chat-1 read 0 sessions in both arms (architecture/inner-voice.md,
+# "iv-chat-1 read 0/0, and that closed the keep/change question"). A deferral that
+# outlives its decision is not modesty, it is an open question on disk: the sentence is
+# the reason #3051 was filed. These nodes pin the ruling in both surfaces a reader of the
+# report meets — the printed header and the module docstring — and pin it against the doc
+# that carries it, because three carriers of one decision can drift exactly the way the
+# TEST_SESSION_IDS counts above did.
+#
+# The ruling is quoted WITHOUT a lift, precision or base rate on purpose. The doc carries
+# 0.08 / 4.82 / 0.0166; a read-only run over 2026-09-18..2026-10-19 gave 0.079 / 5.98 /
+# 0.0132 the same day this was written, and #3051's own text quoted 0.080 / 6.20 / 0.0129
+# for that same window. Three carriers of one measurement already disagree, which is the
+# failure `test_the_current_denominator_is_dated_and_matches_the_architecture_doc` exists
+# to refuse — so the script points at the command that reproduces the figures instead of
+# restating them.
+
+#: The text #3051 replaced, verbatim, as a control input (literal rather than a
+#: `git show` because in a worktree that resolves to this round's own HEAD).
+_DEFERRING_SENTENCES_BEFORE_3051 = """Whether a class predicts a bad outcome or only flags
+elevated risk — and the keep / record-only / change-the-prompt decision that follows —
+is a human call; the header states only the lift over the base rate."""
+
+#: The retire/reopen condition #3051's claim (3) asked to be written into both carriers.
+#: Kept here ONLY as a control input: the condition already ran (#2963 evaluated it on
+#: 2026-10-18, both arms 0 sessions / 0 turns) and can never fire again, because
+#: `scripts/iv_ab_report.py` selects its sessions solely from the stored
+#: `inner_voice_ab` stamp (`:67`, `:144`) and no session file carries one. Writing it as
+#: a live reopen trigger would install an unsatisfiable condition beside the record that
+#: says it resolved, so the finder below has to be able to SEE this shape.
+_SUPERSEDE_CLAIM_3051 = ("superseded only when iv_ab_report.py experiment iv-chat-1 "
+                         "reports non-zero sessions in BOTH arms")
+
+_RECORDED_DATE = re.compile(r"recorded (?:on )?(\d{4}-\d{2}-\d{2})")
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_AB_MENTION = re.compile(r"iv-chat-1|iv_ab_report|A/B", re.I)
+_CONDITIONAL = re.compile(r"\b(if|when|once|unless|supersed\w*|revisit\w*"
+                          r"|reconsider\w*|reopen\w*)\b", re.I)
+_NEGATION = re.compile(r"\b(no|not|never|cannot|nothing|0/0|0 sessions|0 turns)\b", re.I)
+_METRIC_LITERAL = re.compile(r"\b(precision|lift|base[ -]rate)\b[^.\n]{0,24}?\d*\.\d+", re.I)
+
+#: architecture/inner-voice.md's inject[model] figures. Copied into the script they would
+#: make it a fourth carrier of one measurement.
+_DOC_FLAG_FIGURES = ("0.08", "4.82", "0.0166")
+
+
+def _authority_block(out: str) -> str:
+    """The printed ruling, from its `Authority:` line to the end of the report."""
+    lines = out.splitlines()
+    start = [i for i, ln in enumerate(lines) if ln.strip().startswith("Authority:")]
+    assert len(start) == 1, (
+        f"`Authority:` is printed {len(start)} times in the report, so 'the header states "
+        "the ruling' names no one block to read")
+    return " ".join(" ".join(lines[start[0]:]).split())
+
+
+def _printed_report(tmp_path, capsys) -> str:
+    """One real non-JSON run over a fixture root: the header the item is about."""
+    db, logs = _root(tmp_path, [("s1", "t1", "inject", "go", None, T0)],
+                     {("s1", "t1"): ("stop", [])})
+    assert S.main(["--db", str(db), "--event-logs", str(logs)]) == 0
+    return capsys.readouterr().out
+
+
+def _docstring_ruling() -> str:
+    """The module docstring's counterfactual-limit paragraph, whitespace-normalised."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", S.__doc__ or "")]
+    hits = [p for p in paras if "Counterfactual limit" in p]
+    assert len(hits) == 1, (
+        f"the docstring has {len(hits)} paragraphs naming 'Counterfactual limit', so "
+        "'the counterfactual-limit paragraph records the ruling' is ambiguous — and the "
+        "paragraph is the site #3051 named, not a new one beside it")
+    return " ".join(hits[0].split())
+
+
+def _ruling_statement(text: str) -> str | None:
+    """The sentence recording the authority ruling, or None when nothing records it.
+
+    The word `record-only` alone is NOT the ruling: the pre-#3051 deferral already
+    contained it, as one option in "the keep / record-only / change-the-prompt decision
+    that follows — is a human call". A finder keyed on the word would have passed on the
+    text this round replaced, so a ruling statement needs the decision it names
+    (`authority`), the verdict, and the date it was recorded.
+    """
+    for s in _sentences(text):
+        if (re.search(r"authorit\w+", s, re.I) and "record-only" in s
+                and _RECORDED_DATE.search(s)):
+            return " ".join(s.split())
+    return None
+
+
+def _reopen_conditions(text: str) -> list[str]:
+    """Sentences offering an A/B result as a way to reopen or supersede the ruling.
+
+    A sentence may mention iv-chat-1 conditionally only while denying it counts: the
+    ruling's own text does exactly that ("Nothing read here reopens it: iv-chat-1 scored
+    0 sessions in both of its arms… so it can report no result to compare").
+    """
+    return [s for s in _sentences(text)
+            if _AB_MENTION.search(s) and _CONDITIONAL.search(s)
+            and not _NEGATION.search(s)]
+
+
+def _doc_ruling_block(doc: str) -> str | None:
+    """The architecture bullet that carries the ruling, or None if it has gone.
+
+    Keyed on the bullet's own heading text, so renaming or deleting the passage reads as
+    a missing ruling and turns this file red — the alternative is a script that states a
+    ruling the doc no longer carries.
+    """
+    lines = doc.splitlines()
+    head = [i for i, ln in enumerate(lines)
+            if ln.strip().startswith("- **") and "iv-chat-1 read 0/0" in ln]
+    if len(head) != 1:
+        return None
+    rest = lines[head[0] + 1:]
+    end = next((i for i, ln in enumerate(rest)
+                if ln.startswith("- **") or ln.startswith("## ")), len(rest))
+    return " ".join(" ".join([lines[head[0]], *rest[:end]]).split())
+
+
+def _ruling_facts(text: str) -> dict:
+    """What a carrier says about the ruling, reduced to what two carriers can be equal on."""
+    m = _RECORDED_DATE.search(text)
+    return {"verdict": "record-only" if "record-only" in text else "other",
+            "permanent": "permanent" in text,
+            "recorded_on": m.group(1) if m else None,
+            "dates": set(_ISO_DATE.findall(text))}
+
+
+def test_the_printed_header_states_the_ruling_instead_of_deferring_it(tmp_path, capsys):
+    """Clause 1: the report a person actually reads says the decision is made.
+
+    Run through `S.main` over a fixture root, not read out of the source: the item's
+    complaint was about the printed footer, and a footer assembled from pieces can carry
+    a sentence the source never contains.
+    """
+    # The machine-facing caller first. `iv_metrics_record.py:699` runs this script as a
+    # CHILD and `json.loads` its stdout, so the ruling belongs in the human report and
+    # must not leak into the JSON one — `_run` parses exactly that stdout, and would raise
+    # on a ruling printed before the payload.
+    db, logs = _root(tmp_path, [("s1", "t1", "inject", "go", None, T0)],
+                     {("s1", "t1"): ("stop", [])})
+    assert _run(capsys, db, logs)["label"] == "stop_reason"
+    assert S.main(["--db", str(db), "--event-logs", str(logs)]) == 0
+    out = capsys.readouterr().out
+    assert "Authority:" in out, "the human report prints no ruling block to read"
+    assert "human call" not in out, (
+        "the report still defers the authority decision to a person — that sentence is "
+        "what re-filed this item (#3051), and #833's ruling was made on 2026-10-04")
+    block = _authority_block(out)
+    assert "record-only" in block, (
+        f"the header's ruling block states no verdict: {block!r}")
+    assert "observer is kept" in block and "prompt is not changed" in block, (
+        "the header does not say what record-only keeps and what it refuses: the observer "
+        "is kept and scored, its prompt is not changed on these numbers")
+    assert "architecture/inner-voice.md" in block, (
+        "the header states a ruling with no carrier, so a reader has nowhere to check it "
+        "and nowhere to change it")
+    # Control: the replaced footer did defer, so the assertion above is aimed at a
+    # sentence that used to be printed.
+    assert "human call" in _DEFERRING_SENTENCES_BEFORE_3051, (
+        "the control text no longer defers the decision, so 'no human call in the report' "
+        "is checking a string that nothing ever printed")
+    assert _ruling_statement(_DEFERRING_SENTENCES_BEFORE_3051) is None, (
+        "the finder read a ruling out of the pre-#3051 deferral, so it is keyed on the "
+        "word `record-only` alone — which the deferral already contained")
+
+
+def test_the_docstring_records_the_ruling_at_its_former_two_sites():
+    """Clause 2: both places that deferred now record, and neither was deleted to do it."""
+    assert "human call" not in _SOURCE, (
+        f"`human call` is back in scripts/iv_outcome_score.py "
+        f"({_SOURCE.count('human call')}×); #3051 named two sites, the counterfactual-limit "
+        "paragraph and the printed footer, and the file has to hold neither")
+    ruling = _docstring_ruling()
+    assert _ruling_statement(ruling) is not None, (
+        f"the counterfactual-limit paragraph carries no dated authority ruling: {ruling!r}")
+    assert "recorded 2026-10-04" in ruling and "permanent 2026-10-18" in ruling, (
+        "the ruling is recorded without both its dates — decided 2026-10-04, made permanent "
+        "2026-10-18 — so a reader cannot tell an open question from a closed one")
+    assert "keep / record-only / change-the-prompt" not in ruling, (
+        "the paragraph still offers the decision as a three-way menu; the menu is what made "
+        "it look unmade")
+    assert "Counterfactual limit" in ruling and "self-inflicted" in ruling, (
+        "the paragraph was replaced rather than rewritten: the counterfactual caveat is "
+        "still true and still has to be read before any TP count in the table")
+
+
+def test_the_ruling_cites_carrier_and_command_and_adds_no_metric(tmp_path, capsys):
+    """Clause 3: point at the carrier and the command, and add no figure to the file."""
+    surfaces = {"docstring": _docstring_ruling(), "header": _authority_block(
+        _printed_report(tmp_path, capsys))}
+    for name, text in surfaces.items():
+        assert "architecture/inner-voice.md" in text, (
+            f"the {name}'s ruling cites no carrier")
+        assert "scripts/iv_outcome_score.py --since" in text, (
+            f"the {name}'s ruling names no command that reproduces the measurement, so a "
+            "reader is asked to trust a number nobody can re-run")
+        bad = _METRIC_LITERAL.findall(text)
+        assert not bad, (
+            f"the {name}'s ruling carries a metric literal {bad}: the same window read "
+            "0.079 / 5.98 / 0.0132 against the doc's 0.08 / 4.82 / 0.0166, and a figure "
+            "copied into a fourth carrier is the drift #2964 pinned above")
+    for fig in _DOC_FLAG_FIGURES:
+        assert fig not in _SOURCE, (
+            f"architecture/inner-voice.md's {fig} was copied into the script, which is how "
+            "one measurement ends up with four carriers that disagree")
+
+
+def test_the_ruling_is_permanent_and_no_ab_result_reopens_it(tmp_path, capsys):
+    """Clause 4: permanent, with its reason — and no live reopen trigger beside it.
+
+    #3051's claim (3) asked for exactly the condition that already ran: iv-chat-1's arms
+    cannot be stamped, so an A/B result can never arrive to satisfy it.
+    """
+    surfaces = {"docstring": _docstring_ruling(), "header": _authority_block(
+        _printed_report(tmp_path, capsys))}
+    for name, text in surfaces.items():
+        assert "permanent" in text and "2026-10-18" in text, (
+            f"the {name} states the ruling without its permanence, so a reader looks for a "
+            "way to reopen it")
+        assert "0 sessions in both" in text, (
+            f"the {name} does not say why the ruling closed: iv-chat-1 read 0 sessions in "
+            "both arms, which is #2963's reading of 2026-10-18")
+        assert not _reopen_conditions(text), (
+            f"the {name} offers an A/B result as a condition that would reopen the ruling: "
+            f"{_reopen_conditions(text)} — the condition was evaluated on 2026-10-18 and "
+            "`iv_ab_report.py` can never see a stamped session from that window")
+    # Control: the condition #3051's claim (3) asked to be written is visible to the
+    # finder, so the loop above is a rule and not a tautology.
+    assert _reopen_conditions(_SUPERSEDE_CLAIM_3051), (
+        "the finder let #3051's own claim (3) through, so no text here is actually being "
+        "checked for a reopen condition")
+
+
+def test_the_script_and_the_architecture_doc_carry_one_ruling():
+    """Clause 5: one ruling, two carriers, compared the way #2964 compares its figures.
+
+    The doc half of #3051 was already done (`2f6bd2de`, 2026-10-18), which is the good
+    outcome: what has to stay true is that the script says the same thing the doc says.
+    Two carriers of one decision that may drift apart is how the code came to say 99.5%
+    while the doc had been corrected to 5%, so the comparison is the pin — and it goes
+    red if the doc's passage is renamed or deleted, since a script stating a ruling
+    nobody else carries is not an agreement.
+    """
+    block = _doc_ruling_block(_DOC)
+    assert block is not None, (
+        "architecture/inner-voice.md no longer carries the bullet headed `iv-chat-1 read "
+        "0/0, and that closed the keep/change question`, so the script's ruling has no "
+        "carrier to agree with — restore the doc or change the ruling in both places")
+    doc_stmt = _ruling_statement(block)
+    assert doc_stmt is not None, (
+        "the ruling bullet is present but states no dated record-only authority decision, "
+        f"so the two carriers cannot be compared: {block[:400]!r}")
+    script_stmt = _ruling_statement(_docstring_ruling())
+    assert script_stmt is not None, (
+        "the script's counterfactual-limit paragraph states no dated ruling to compare")
+    doc_facts, script_facts = _ruling_facts(doc_stmt), _ruling_facts(script_stmt)
+    assert script_facts["verdict"] == doc_facts["verdict"] == "record-only", (
+        f"the script says {script_facts['verdict']} and the architecture doc says "
+        f"{doc_facts['verdict']} — one decision, two carriers, diverging")
+    assert script_facts["recorded_on"] == doc_facts["recorded_on"], (
+        f"the script dates the ruling {script_facts['recorded_on']} and the doc dates it "
+        f"{doc_facts['recorded_on']}")
+    assert script_facts["permanent"] and doc_facts["permanent"], (
+        "one carrier says the ruling is permanent and the other no longer does; #2149's "
+        "reopen condition was evaluated 2026-10-18 and closed it")
+    assert "2026-10-18" in block, (
+        "the doc no longer dates the closing reading, so the script's `permanent` has "
+        "nothing behind it")
+    # Controls: a doc that changed its mind, and a doc that lost the passage.
+    flipped = doc_stmt.replace("record-only", "change the observer prompt")
+    assert _ruling_facts(flipped)["verdict"] != doc_facts["verdict"], (
+        "the comparison could not tell a record-only ruling from a prompt change, so "
+        "agreement here would prove nothing")
+    assert _doc_ruling_block(_DOC.replace("iv-chat-1 read 0/0", "the A/B read nothing")) \
+        is None, (
+        "the finder still located the ruling after its heading was reworded, so a doc that "
+        "deleted the passage would be read as still carrying it")

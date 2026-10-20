@@ -39,8 +39,17 @@ Counterfactual limit: a `cancel` usually CAUSES `stop_reason: cancelled`, so
 its TP count is partly self-inflicted, and there is no observed world where the
 observer stayed quiet. Its FP rate must come from matched near-miss turns, not
 from this ratio. Whether a class predicts a bad outcome or only flags elevated
-risk — and the keep / record-only / change-the-prompt decision that follows —
-is a human call; the header states only the lift over the base rate.
+risk is still not answerable from this table, but the decision that used to
+wait on it is made, and this file is not where it is renegotiated: #833's
+authority ruling, recorded 2026-10-04 and made permanent 2026-10-18, is
+record-only — IV keeps observing and scoring, and the observer's prompt is not
+changed on these numbers. Its carrier is architecture/inner-voice.md, under
+"iv-chat-1 read 0/0, and that closed the keep/change question"; reproduce any
+class's rate with `.venvs/lloyd/bin/python scripts/iv_outcome_score.py --since
+<ISO> --until <ISO> --json`. Nothing read here reopens the ruling: iv-chat-1
+scored 0 sessions in both of its arms, and `iv_ab_report.py` reads only the
+stored `inner_voice_ab` stamp, so it can report no result to compare — re-arming
+a stamped window is a separate human decision, not another run of this scorer.
 
 Read-only, like iv_grade: usage.db is opened with `mode=ro`, blobs are read,
 nothing is written.
@@ -265,8 +274,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n  '—' = under {MIN_RATED} scored rows: counts only, no rate.")
     print("  lift = precision / base rate. Above 1 says the class fires more often on"
           " turns that end badly;\n  it does not say the intervention caused or"
-          " prevented anything (see the docstring's\n  counterfactual limit)."
-          " The authority decision is a human call.\n")
+          " prevented anything (see the docstring's\n  counterfactual limit).")
+    print("  Authority: #833's ruling, recorded 2026-10-04 and made permanent 2026-10-18,"
+          " is record-only:\n  the observer is kept and keeps being scored; its prompt is"
+          " not changed on these numbers.\n  Carrier: architecture/inner-voice.md, under"
+          " \"iv-chat-1 read 0/0, and that closed the\n  keep/change question\". Reproduce"
+          " a class with:\n      .venvs/lloyd/bin/python scripts/iv_outcome_score.py"
+          " --since <ISO> --until <ISO> --json\n  Nothing read here reopens it: iv-chat-1"
+          " scored 0 sessions in both arms, and its arms are\n  never stamped for a session"
+          " that already exists, so it can report no result to compare;\n  re-arming a"
+          " stamped window is a separate human decision, not another run of this scorer.\n")
     return 0
 
 
