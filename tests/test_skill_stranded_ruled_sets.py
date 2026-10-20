@@ -118,13 +118,26 @@ STALE_APPLY_CLAIMS = {
         r"one new[^\n]{0,40}kg-stranded", re.I),
 }
 
-# The one apply that has ever written a `name-embedding:` stranded edge: an attended by-hand
-# `--apply` at this instant, recorded by #3029 on the vault side and named by PS-2's and
-# PS-3's RULED markers on this side. It is a constant here rather than something scraped from
-# the comment because the point of comparing them is that a marker which LOSES the date is a
-# failure — a marker reading `EXECUTED` with no instant cannot be aged, re-checked, or
-# attributed to the `store-backups/kg-stranded-20261019T164420Z.sqlite` it is stored beside.
+# The apply that wrote `PS-2`'s and `PS-3`'s edges: an attended by-hand `--apply` at this
+# instant, recorded by #3029 on the vault side and named by those two keys' RULED markers on
+# this side. It is a constant here rather than something scraped from the comment because the
+# point of comparing them is that a marker which LOSES the date is a failure — a marker
+# reading `EXECUTED` with no instant cannot be aged, re-checked, or attributed to the
+# `store-backups/kg-stranded-20261019T164420Z.sqlite` it is stored beside.
 APPLY_INSTANT = "2026-10-19T16:44:20Z"
+
+# It is no longer the only apply: #3060's carrier was applied by hand 16h31m later, and that
+# write is what `PS-4`'s marker has to name. So a ruled key's marker is weighed against THAT
+# key's instant, held per key here — one constant for all keys could only ever describe the
+# set applied first, and the only way to make `PS-4` agree with it would be to stamp it with
+# the instant of a backup it is not stored in.
+PS_4_APPLY_INSTANT = "2026-10-20T09:15:39Z"
+
+#: Every ruled key except `PS-1` (excused: its status rides on `PS-2`'s receipt sentence) and
+#: the apply instant its marker must declare. A key missing from this map fails the node that
+#: reads it and names itself, rather than being skipped or borrowing a date.
+APPLY_INSTANTS = {"PS-2": APPLY_INSTANT, "PS-3": APPLY_INSTANT,
+                  "PS-4": PS_4_APPLY_INSTANT}
 
 
 def _missing(path: Path) -> str:
@@ -986,14 +999,21 @@ def test_the_marker_checker_refuses_a_state_the_store_contradicts():
 
 
 def test_every_ruled_key_besides_ps_1_declares_a_state_the_store_agrees_with():
-    """The agreement check runs over `RULED`'s keys, not over two names written into a node.
+    """The agreement check runs over `RULED`'s keys, not over names written into a node.
 
-    `RULED` is an open set — a fifth ruled set is the whole point of having a dict — so a
-    check that enumerates `PS-2` and `PS-3` by name leaves the next key born unchecked, which
-    is the class of guard that cannot hold. `PS-1` is the single named exception and it is
-    justified in the file it is excused by: PS-2's comment carries that set's own receipt
+    `RULED` is an open set — a further ruled set is the whole point of having a dict — so a
+    check that enumerates its keys by name leaves the next key born unchecked, which is the
+    class of guard that cannot hold. `PS-1` is the single named exception and it is justified
+    in the file it is excused by: PS-2's comment carries that set's own receipt
     (`PS1_LIVE=5/5`, the pre-apply probe of #2998's bullet 10), so its status is recorded on
     the page, beside a key that declares its own. Nothing else may be silent.
+
+    What each key is measured against is now its OWN entry in `APPLY_INSTANTS`, and that is
+    #3065's point: `PS-2` and `PS-3` were written by the apply of 2026-10-19T16:44:20Z, while
+    `PS-4`'s two edges went in at 2026-10-20T09:15:39Z, so a single module constant on the
+    right-hand side would read `PS-4`'s true marker as a lie — and the only edit that would
+    silence it is the false one, stamping a set with the instant of a backup that does not
+    hold it. A key with no entry fails here and names itself.
     """
     section = _step_2_5_section(_skill_text())
     ruled = _ruled_dict(_setcheck_script(section))
@@ -1004,12 +1024,298 @@ def test_every_ruled_key_besides_ps_1_declares_a_state_the_store_agrees_with():
     for key in sorted(ruled):
         if key == "PS-1":
             continue
+        assert key in APPLY_INSTANTS, (
+            f"{key} is in `RULED` with {len(ruled[key])} pair(s) but has no entry in "
+            f"APPLY_INSTANTS: {sorted(APPLY_INSTANTS)}. Add the instant of the apply that "
+            "wrote ITS edges — every settled set's edges are live, so without its own date "
+            "this node could only skip it or accuse it")
         state, instant = _execution_claim(section, key, live)
-        assert state == "executed" and instant == APPLY_INSTANT, (
+        assert state == "executed" and instant == APPLY_INSTANTS[key], (
             f"{key} ({len(ruled[key])} pairs) declares {state}"
             + (f" at {instant}" if instant else "")
             + f", and the live store holds all {len(ruled[key])} of its pairs — every ruled "
-            f"set whose edges are live has to name {APPLY_INSTANT} as its apply")
+            f"set whose edges are live has to name its own apply, {APPLY_INSTANTS[key]}, "
+            f"the run whose `store-backups/kg-stranded-*.sqlite` holds it")
     assert count >= 19, (
         f"{count} active `name-embedding:` edges: the pilot wrote 12 on 2026-10-05T14:22:23Z "
         f"and the PS-3 apply added 7, so a count under 19 is the store losing written work")
+
+
+# ── #3065: the record left standing after the SECOND apply ──────────────────
+#
+# Everything above this line was written while the store read 19 active `name-embedding:`
+# edges, and a present-tense sentence about the store gets read as "today" by whoever finds it.
+# #3060's carrier was applied by hand at 2026-10-20T09:15:39Z — receipt
+# `ACTIVE_NAME_EMBEDDING=21 PAIRS_LIVE=2/2 MISSING=0`, exit 0 — and the skill is the only party
+# that did not move with it: `RULED` never gained the set those two edges belong to, two
+# sentences still described 19 edges as the state of the store, and three of the verification
+# readings it tells an executor to take were never sound. The nodes below pin the corrected
+# record. None of them runs `--apply` or opens the store for write: §3's executor rule is
+# unchanged by this, and the store is the constant this diff must leave where #3060 left it.
+
+PS_4_PAIRS = {("Automod Scorecard", "automod"), ("automod tests rung", "automod")}
+
+#: The Step 2.5 run that printed PS-4's set — `novel=['Automod Scorecard -> automod',
+#: 'automod tests rung -> automod'] covered_by=none`, `covered_by` being none precisely because
+#: no key held them. A runtime artefact under `_pipeline/`, which has no history and is empty
+#: under the gate's scaffolded HOME, so the same two rows are synthesised as well and the file
+#: is used only when the box still has it.
+PS_4_PROPOSALS = (Path.home() / "lloyd-data/_pipeline"
+                  / "stranded-proposals-2026-10-20T084644Z.jsonl")
+
+
+def _ps4_pair_payload() -> str:
+    """PS-4's two proposal rows in the shape `link_stranded_entities.py` writes them.
+
+    Synthesised off the committed PS-2 witness's row shape for the reason spelled out on
+    `_ps3_seven_pair_payload`: `_pipeline/` has no history, so a node that read only the
+    runtime file would silently check nothing wherever the gate runs it.
+    """
+    rows = [json.loads(l) for l in
+            _committed_ps2_bytes().decode().splitlines() if l.strip()]
+    out = []
+    for source in sorted(s for s, _ in PS_4_PAIRS):
+        r = dict(rows[0])
+        r.update({"source": source, "target": "automod",
+                  "evidence": f"name-embedding: 'automod' is a registered entity name "
+                              f"inside '{source}'"})
+        out.append(r)
+    return "".join(json.dumps(r) + "\n" for r in out)
+
+
+def _verify_bullet(section: str) -> str:
+    """The bullet that states the readings an apply leaves — the file's verification step."""
+    return _one([b for b in _bullets(section) if "12 + N" in b],
+                "bullet stating the readings an apply actually leaves (12 + N)")
+
+
+def test_ps_4_is_ruled_and_a_reprint_of_its_pairs_is_covered_not_novel(tmp_path):
+    """#3065 clause 1: `RULED` gains PS-4, so Step 2.5 stops re-printing a decided set.
+
+    `RULED` records what has been RULED, and a set whose edges are live belongs in it for
+    exactly the reason PS-2 and PS-3 do: without the key the set-check answers `covered_by=none`
+    for a pair set a human has already settled, which is the filing trigger. That is not
+    hypothetical — Step 2.5's run of 2026-10-20T084644Z printed these two pairs and filed
+    #3060, which then ran to the same apply this record already describes. The severity today is
+    low because the live edges themselves keep both entities out of the degree-zero pool, so a
+    reprint needs one of those edges to expire first; the missing key is what makes that reprint
+    a new decision rather than a covered one.
+
+    The pairs must be EXACTLY these two. A key carrying a third pair would answer
+    `covered_by=['PS-4']` for proposals nobody ruled on, which is a fabricated authorization —
+    the failure #2829's over-inclusion list is the precedent for.
+    """
+    section = _step_2_5_section(_skill_text())
+    script = _setcheck_script(section)
+    ruled = _ruled_dict(script)
+    assert "PS-4" in ruled, (
+        f"RULED holds {sorted(ruled)}: PS-4's two edges have been live in the store since "
+        "2026-10-20T09:15:39Z, so the next run reprinting that pair set still reads "
+        "covered_by=none and files a carrier for a decision already made")
+    assert ruled["PS-4"] == PS_4_PAIRS, (
+        f"PS-4 reads {sorted(ruled['PS-4'])}, expected exactly {sorted(PS_4_PAIRS)} — the two "
+        "pairs Step 2.5 printed at 2026-10-20T084644Z and nothing else")
+    assert ruled["PS-4"].isdisjoint(ruled["PS-3"]), (
+        "PS-4 shares a pair with PS-3, so covered_by= would name two sets for one pair and "
+        "the smallest-covering-set answer this snippet is designed to give stops meaning "
+        "anything")
+
+    state, instant = _execution_claim(section, "PS-4", _live_name_embedding_pairs()[1])
+    assert state == "executed" and instant == PS_4_APPLY_INSTANT, (
+        f"PS-4's RULED marker declares {state}" + (f" at {instant}" if instant else "") +
+        f": the store holds both of its pairs, written by the apply of "
+        f"{PS_4_APPLY_INSTANT}, and a marker that denies that invites a re-apply of live "
+        "edges while a bare `EXECUTED` with no instant cannot be attributed to a backup")
+
+    out = _run_setcheck(script, "ps4-two-pair", _ps4_pair_payload(), tmp_path)
+    assert out.endswith("pairs=2 novel=none covered_by=['PS-4']"), (
+        f"the snippet reads a reprint of PS-4's pairs as {out!r}; `novel=` naming a pair is "
+        "the filing trigger, and `covered_by=none` for a settled set is what filed #3060")
+
+    if PS_4_PROPOSALS.is_file():
+        real = PS_4_PROPOSALS.read_text(encoding="utf-8")
+        assert _pairs_in(real) == PS_4_PAIRS, (
+            f"{PS_4_PROPOSALS} prints {sorted(_pairs_in(real))}, not the two pairs PS-4 rules "
+            "— either this set drifted or the node is reading the wrong run's artefact")
+        out = _run_setcheck(script, "ps4-runtime", real, tmp_path)
+        assert out.endswith("pairs=2 novel=none covered_by=['PS-4']"), (
+            f"the snippet over the real {PS_4_PROPOSALS.name} reads {out!r}: a reprint of "
+            "that file must come back covered")
+
+
+def test_a_ruled_marker_is_weighed_against_its_own_key_instant_not_one_constant():
+    """#3065 clause 2: with two applies on the record, one constant cannot weigh both markers.
+
+    The agreement node used to compare every key's declared instant against `APPLY_INSTANT`,
+    the 2026-10-19 write. That was true of every key then and stopped being true the moment
+    #3060's apply landed: `PS-4`'s edges went in 16h31m later, so the honest marker
+    `EXECUTED 2026-10-20T09:15:39Z` fails a comparison against the older date, and the only
+    edit that would satisfy it is the false one — stamping a set with the instant of the apply
+    that did not write it, which then points a reader at
+    `store-backups/kg-stranded-20261019T164420Z.sqlite` for edges that are not in it.
+
+    Pinned three ways: the table's own values, the two instants differing (a single-constant
+    comparison could only ever describe the earlier apply), and the node's source reading the
+    per-key entry rather than the module constant.
+    """
+    import inspect
+
+    assert APPLY_INSTANTS["PS-2"] == APPLY_INSTANTS["PS-3"] == "2026-10-19T16:44:20Z", (
+        f"PS-2 and PS-3 are weighed against {APPLY_INSTANTS}: both sets were written by the "
+        "one attended apply of 2026-10-19T16:44:20Z, whose backup is "
+        "`store-backups/kg-stranded-20261019T164420Z.sqlite`, and moving this value would "
+        "make their true markers read as lies")
+    assert APPLY_INSTANTS["PS-4"] == "2026-10-20T09:15:39Z", (
+        f"PS-4 is weighed against {APPLY_INSTANTS['PS-4']}, but #3060's carrier was applied at "
+        "2026-10-20T09:15:39Z — receipt ACTIVE_NAME_EMBEDDING=21 PAIRS_LIVE=2/2 MISSING=0, "
+        "exit 0")
+    assert PS_4_APPLY_INSTANT != APPLY_INSTANT, (
+        "the two applies have collapsed onto one instant: a per-key table with one value is "
+        "the module constant again, and the node it feeds cannot tell PS-4's marker from PS-3's")
+
+    src = inspect.getsource(
+        test_every_ruled_key_besides_ps_1_declares_a_state_the_store_agrees_with)
+    assert "APPLY_INSTANTS[key]" in src, (
+        "the agreement node is back to comparing every ruled key against one constant, which "
+        "is the comparison that cannot hold across two applies")
+    assert "instant == APPLY_INSTANT," not in src, (
+        "the bare-constant comparison survived inside the node that reads the table")
+
+
+def test_no_present_tense_reading_claims_nineteen_active_edges_and_the_pasts_stay():
+    """#3065 clause 3: the store's present tense reads 21; every past reading keeps its date.
+
+    The two sentences were about today: "the store at 19 active `name-embedding:` edges with
+    all seven pairs live" (the `pairs=0` label branch) and "the store reads 19 active
+    `name-embedding:` edges" (the scope paragraph's settle). Both went false at
+    2026-10-20T09:15:39Z. The arithmetic is attributed per set, and it is NINE pairs — PS-3's
+    seven and PS-4's two — because `PS-1` ⊂ `PS-2` ⊂ `PS-3` contributes no pair of its own, so
+    "ten" would be a fresh false figure of exactly the kind this item is about.
+
+    What must NOT move is the history and the receipt: `ACTIVE_NAME_EMBEDDING=19
+    PAIRS_LIVE=7/7 MISSING=0` is #3011's probe's measured output on 2026-10-19, the pass
+    condition "exits 0 only at 19 active `name-embedding:` edges" is that probe's own floor, and
+    `len(rows)>=19` is the live receipt's floor — a floor is not a statement about today's
+    count, and rewriting it would rewrite the command owed.py runs.
+    """
+    text = _skill_text()
+    for stale in ("store reads 19 active", "store at 19 active"):
+        assert stale not in text, (
+            f"{SKILL_PATH} still says {stale!r}: the store has read 21 active "
+            "`name-embedding:` edges since 2026-10-20T09:15:39Z, and a present-tense store "
+            "count is read as today")
+
+    section = _sd_stranded_1_section(text)
+    flat = " ".join(section.split())
+    for sentence in ("the store at 21 active `name-embedding:` edges",
+                     "the store reads 21 active `name-embedding:` edges"):
+        assert sentence in flat, (
+            f"one of the two replaced readings is missing its number — expected {sentence!r} "
+            "in the section; those are the `pairs=0` label branch and the scope settle, and a "
+            "half-corrected record is still stale prose")
+    assert "`PS-3`'s seven" in flat and "`PS-4`'s two" in flat, (
+        "the 21 has to be attributed to the two applies that wrote it — PS-3's seven pairs at "
+        "2026-10-19T16:44:20Z and PS-4's two at 2026-10-20T09:15:39Z — or a reader cannot tell "
+        "which backup holds which edges")
+    assert "nine ruled pairs" in flat, (
+        "the enumerated ruled pairs are nine, not a rounder number: PS-1 and PS-2 are inside "
+        "PS-3 and add nothing of their own")
+    for wrong in ("ten pairs", "10 pairs", "ten ruled pairs"):
+        assert wrong not in flat, f"the section claims {wrong!r}; the enumerated count is nine"
+
+    assert "ACTIVE_NAME_EMBEDDING=19 PAIRS_LIVE=7/7 MISSING=0" in section, (
+        "the 2026-10-19 measured form of #3011's probe is gone: it is the past-tense record of "
+        "what the PS-3 apply left, and deleting it leaves only the today figure")
+    assert "exits 0 only at **19 active `name-embedding:` edges**" in flat, (
+        "the receipt's own pass condition stopped saying 19: that number is the probe's floor "
+        "(12 pilot + PS-3's 7), not a claim about today, and the probe is run by owed.py")
+    assert "len(rows)>=19" in section.replace(" ", ""), (
+        "the live receipt's floor was edited: it is a floor, still true at 21, and it is the "
+        "reading that decides whether a carrier may close")
+
+
+def test_the_copy_reading_names_the_backup_method_and_says_what_a_lone_main_file_reads():
+    """#3065 clause 4: copying `kg.sqlite` alone is not copying the store.
+
+    The instruction used to be "a fresh read-only copy through `app.kg_store`", which an
+    executor follows as `shutil.copy2` of the one file named. That reads the PRE-WRITE count and
+    looks like a refutation of a write that succeeded: reproduced 2026-10-20T10:05Z on this box,
+    where the live store reads 21 active `name-embedding:` edges through `app.kg_store` and a
+    copy of `kg.sqlite` alone — 159,481,856 bytes, with 8,157,632 bytes of uncheckpointed
+    `kg.sqlite-wal` beside it — reads 19. The same trap was what #3060's triage hit three minutes
+    after its own apply printed `applied 2 edges`.
+
+    A stale snapshot that reads like a refutation is worse than no snapshot, because the action
+    it invites is the write that is already done. So the step now names `KGStore.backup(dest_path)`
+    — one required destination, no default — and says in the same breath what the shortcut reads.
+    """
+    section = _sd_stranded_1_section(_skill_text())
+    bullet = _verify_bullet(section)
+    assert "KGStore.backup(dest_path)" in bullet, (
+        "the verification bullet still sends an executor to 'a fresh read-only copy' without "
+        "naming the method that takes a snapshot coherently: `KGStore.backup(dest_path)`, "
+        "`app/kg_store.py:412`")
+    assert "kg.sqlite-wal" in bullet and "kg.sqlite-shm" in bullet, (
+        "the bullet must name what a hand copy has to take beside the main file, or the "
+        "alternative it offers is the trap it is warning about")
+    assert "PRE-WRITE" in bullet, (
+        "the sentence names the method but not the failure: a main-file-only copy reads the "
+        "count from before the write, which reads as a refutation")
+    assert "a fresh read-only copy through `app.kg_store`" not in section, (
+        "the unsound instruction is still in the section verbatim, wherever the sound one was "
+        "put beside it")
+
+
+def test_the_backup_is_matched_by_epoch_and_an_empty_dry_run_disowns_being_a_test():
+    """#3065 clause 5: the two readings that could not bear their weight, disarmed in place.
+
+    **MTIME.** The step said to match the new backup against the pilot's by MTIME and never
+    named a command, and the string form of mtime on this box is a trap: the system runs
+    UTC−7, so `ls --time-style=+%Y-%m-%dT%H:%M:%SZ` prints LOCAL wall-clock wearing a literal
+    `Z`. Measured 2026-10-20T10:05Z: `store-backups/kg-stranded-20261020T091539Z.sqlite` prints
+    `2026-10-20T02:15:39Z`, seven hours BEFORE the apply that made it, while `stat -c %Y` gives
+    1792487739, which `date -u -d @1792487739` converts to 2026-10-20T09:15:39Z — the filename's
+    own instant. The two applies are 16h31m apart and their backups' epochs agree with that; only
+    the printed strings invert. The pilot's file is the one
+    whose name and mtime agree, because its stamp was written on the local clock — so the string
+    comparison ranks the two backups correctly only by accident, and it can never tie either to
+    the apply it belongs to. Hence: epoch, or the run's own printed
+    `applied N edges; backup → …` line.
+
+    **`proposed edges` 0.** The step said the next dry run prints 0 and calls that verification.
+    It cannot be one: the candidate set is re-derived every run from Step 1's fresh mints, so the
+    number reports today's extraction, not yesterday's write. `~/lloyd-data/_pipeline/`
+    `stranded-standing-decision.log` printed `proposed=0` at 2026-10-19T195646Z,
+    2026-10-20T001216Z and 2026-10-20T043126Z and then `proposed=2` at 2026-10-20T084644Z with
+    no apply between the four — the reappearance was a fresh set, not a lost write. The sound
+    reading is the pair-level one, the carrier's `hand_run.receipt`.
+    """
+    section = _sd_stranded_1_section(_skill_text())
+    bullet = _verify_bullet(section)
+
+    assert "stat -c %Y" in bullet, (
+        "MTIME is still named without the command that measures it, which is how the string "
+        "trap got into the step at all")
+    assert "LOCAL wall-clock" in bullet and "literal `Z`" in bullet, (
+        "the bullet must say why the ls string cannot be trusted: on this box it is local "
+        "wall-clock carrying a Z that says UTC")
+    assert "date -u" in bullet, (
+        "the bullet names the epoch but not the conversion that ties it to the filename, so a "
+        "reader cannot check the reading without knowing the offset")
+    assert "applied N edges" in bullet, (
+        "the printed line is the other sound route to the same backup and the step's first "
+        "listed reading; it must survive the mtime rewrite")
+
+    pilot = _one([b for b in _bullets(section) if "Authorization — the pilot" in b],
+                 "authorization bullet for the pilot")
+    assert "stat -c %Y" in pilot, (
+        "the pilot's own artefacts are still to be matched by mtime with no command named, "
+        "and its filename stamp is the local one — the worst case for a string comparison")
+
+    lower = bullet.lower()
+    assert "not a closure test" in lower, (
+        "`proposed edges` 0 is still offered as the check that an apply worked; the standing "
+        "log shows 0, 0, 0 then 2 with no apply between, so it reports the extraction")
+    assert "hand_run.receipt" in bullet, (
+        "the disarmament has to say what to read instead: the pair-level receipt, which asks "
+        "this store for every pair of its own set at exact source+target")
