@@ -5836,6 +5836,22 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
             "runs_in_window": (row["runs"] if row else 0),
             "fail_rate": (row["fail_rate"] if row else None),
             "hold": hold_reason(t, tasks, now=now),
+            # #3070: the task's OWN `parked:` ruling, so this payload can say
+            # which of its stalls are decisions. It is the same accessor the
+            # watchdog row carries (`workers/fleet_watchdog.py:653`) and the one
+            # Mission Control exempts on (`app/routers/dashboard.py:643-646`), so
+            # the three stall surfaces read one declaration instead of two of
+            # them holding it and this one asking the reader to guess. `hold`
+            # cannot stand in for it: for any status but `up_next` it is the bare
+            # status string (see `hold_reason` above), which is how #68, #98,
+            # #100 and #101 all reached the payload reading `hold: 'draft'` on
+            # 2026-10-20 while only the first two were parked by ruling.
+            # A LABEL, never a filter: this list is the widened scan #1121 built
+            # because #68 went dark ~50 cycles with every surface calling it
+            # healthy, and dropping a declared park from it would re-create that
+            # hole behind the very field that names the park. Membership is
+            # `past_next_run` and nothing else.
+            "parked": parked_declaration(t),
         })
     stalled.sort(key=lambda s: (-(s["gap_ratio"] or 0.0), s["task_id"]))
 

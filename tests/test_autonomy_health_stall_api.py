@@ -521,3 +521,188 @@ def test_the_watchdog_skill_prints_the_alarm_field():
     assert rest.split("## Step 3")[0].count("script_alarm_runs") >= 1, (
         "Step 2 does not judge `script_alarm_runs`, so the printed number "
         "decides nothing")
+
+
+# ── #3070: the stall list has to say which of its stalls are rulings ───────────
+#
+# This payload was the fleet's one parked-blind surface. The watchdog puts the
+# task's OWN `parked:` declaration on every stall row
+# (`workers/fleet_watchdog.py:653`) and counts declared parks separately in the
+# alert it sends (`:825-826`, `:857-858`), and Mission Control exempts a
+# dispatch-stopping status only where the file declares the park
+# (`app/routers/dashboard.py:643-646`, landed as 7e5294d6 for #3016). The health
+# payload carried neither half, so its three readers disagreed about which stalls
+# were decisions. Measured live 2026-10-20T11:18:23Z at repo aa7e29e0,
+# `GET /api/autonomy/health?days=1` returned stalled ids ['100', '101', '68',
+# '98'] and every row's key set was ['expected_interval_seconds', 'fail_rate',
+# 'frequency', 'gap_ratio', 'hold', 'hours_past_next_run', 'hours_since_last_run',
+# 'name', 'never_run', 'runs_in_window', 'status', 'task_id'] — no `parked` —
+# while #68 (`~/obsidian/autonomy/68-morning-brief-triage.md:18`, Alan parked it
+# 2026-09-17) and #98 (`98-retag-untagged-facts.md:34`, ruled spent 2026-10-17)
+# state a ruling in their own front matter and #100/#101 state nothing.
+#
+# `hold` cannot answer this, which is why the key is new and not a re-read:
+# `hold_reason` returns the bare status string for any status but `up_next`
+# (`app/autonomy.py:2712-2713`), so all four live rows read `hold: 'draft'` —
+# the same inference #1121 forbids.
+#
+# THE FIELD IS A LABEL, NEVER A FILTER. `stalled` exists because #68 went dark for
+# ~50 cycles while every surface called it the healthiest job on the board, and a
+# `parked` key that suppressed a row would re-create exactly that on the model of
+# Alan's standing #68 ruling. So the value and the membership are pinned
+# together below: a row that loses its declaration fails one node, and a board
+# that loses a row fails another.
+#
+# Clause → node, one graded clause to one node, all three in this file:
+#   clause 1 (every row carries its own declaration, read through
+#            `app.autonomy.parked_declaration`) →
+#            test_every_stalled_row_carries_its_own_parked_declaration
+#   clause 2 (the field labels and never filters: one declared park and one
+#            undeclared gap, both stay listed) →
+#            test_the_parked_field_labels_a_stall_and_never_filters_one
+#   clause 3 (membership is the shared predicate alone, at one instant) →
+#            test_the_stalled_membership_is_the_shared_predicate_and_nothing_else
+# Clause 4 is a no-op guard on purpose and is deliberately NOT built here: the MCP
+# `autonomy_health` description (`agent_mcp/autonomy.py:655-675`) names no
+# `stalled`-row key at all, so the pre-existing
+# `test_the_autonomy_health_tool_describes_fields_the_payload_actually_has` above
+# passes whether or not the description ever mentions the new key, and the
+# description is untouched by this diff.
+
+#: Alan's ruling on #68, byte-for-byte the value `parked:` parses to in
+#: `~/obsidian/autonomy/68-morning-brief-triage.md:18` (308 characters, measured
+#: 2026-10-20 through the same yaml the scheduler reads). The node below seeds a
+#: temp file with exactly this string and requires the payload to hand it back
+#: unaltered, which is clause 1's "verbatim" half: a row whose value was
+#: truncated, re-wrapped or re-derived fails on it character by character.
+PARK_SENTENCE = (
+    "Alan parked this task on purpose on 2026-09-17: do not restore it to up_next "
+    "and do not re-file an item to re-enable it. The row stays status: draft until "
+    "he says otherwise. This key is the stall-alert suppression (#1592): it is "
+    "what tells the next_run stall scan that this gap is a decision and not a "
+    "stall.")
+
+
+def _seed_parked_board(dirn: Path) -> None:
+    """One board holding both kinds of stall, at the pinned instant `PIN`.
+
+    68 and 98 are the two live declared parks in both spellings — a ruling
+    sentence, and a bare `parked: true`. 100 and 101 are today's un-armed
+    hand-downs: `status: draft` past its `next_run` with nothing declaring the
+    gap, one spelling the key absent and one spelling it `parked: false`, which
+    `parked_declaration` also reads as undeclared. 102 is on cadence and 103
+    carries no stamps at all, so `next_run_gap` answers `past_next_run: False`
+    for both and neither belongs in the list.
+    """
+    late = (PIN - dt.timedelta(hours=12, minutes=15)).isoformat()
+    _task_file(dirn, 68, "Morning Brief Triage", "draft",
+               last_run=late, next_run=late, parked=PARK_SENTENCE)
+    _task_file(dirn, 98, "Retag Untagged Facts", "draft",
+               last_run=late, next_run=late, parked=True)
+    _task_file(dirn, 100, "Chain Hand Down", "draft", last_run=late, next_run=late)
+    _task_file(dirn, 101, "Second Hand Down", "draft",
+               last_run=late, next_run=late, parked=False)
+    _task_file(dirn, 102, "On Cadence", "up_next",
+               last_run=(PIN - dt.timedelta(minutes=15)).isoformat(),
+               next_run=(PIN + dt.timedelta(minutes=15)).isoformat())
+    _task_file(dirn, 103, "Never Stamped", "draft")
+
+
+def test_every_stalled_row_carries_its_own_parked_declaration(client, autonomy_dir):
+    """#3070 clause 1: declared parks split from undeclared gaps in the payload.
+
+    All four spellings of the key are read, because the accessor has three
+    answers and the payload has to carry them: the sentence verbatim, `'true'`
+    for a bare `parked: true`, and `''` for a file whose key is absent or false.
+    The loop asserts the key is on EVERY row rather than on the interesting ones,
+    because a consumer that prints it unconditionally dies on the row that lacks
+    it — the shape the idle-task node above already refuses for
+    `script_alarm_runs`.
+    """
+    _seed_parked_board(autonomy_dir)
+    body = client.get("/api/autonomy/health", params={"days": 1}).json()
+    assert "error" not in body, body
+    stalled = {s["task_id"]: s for s in body["stalled"]}
+    assert stalled, "the seeded board produced no stalled rows to read"
+
+    for tid, expected in (("68", PARK_SENTENCE), ("98", "true"),
+                          ("100", ""), ("101", "")):
+        assert tid in stalled, (
+            f"task {tid} is absent from the seeded stalls: {sorted(stalled)}")
+        assert "parked" in stalled[tid], (
+            f"row {tid} carries no `parked` key, so this payload is still "
+            f"parked-blind. Its keys are {sorted(stalled[tid])}")
+        assert stalled[tid]["parked"] == expected, (
+            f"row {tid} reported {stalled[tid]['parked']!r}, expected "
+            f"{expected!r}: the value must be the task file's own declaration "
+            "read through app.autonomy.parked_declaration")
+
+    assert all("parked" in s for s in body["stalled"]), (
+        "a stalled row reached the payload with no `parked` key at all")
+    assert stalled["68"]["parked"] != stalled["68"]["hold"], (
+        "`parked` was filled from the status, which is the inference `hold` "
+        "already makes and the one app/autonomy.py:2712-2713 is written to")
+
+
+def test_the_parked_field_labels_a_stall_and_never_filters_one(client, autonomy_dir):
+    """#3070 clause 2: the label may not buy a quieter stall list.
+
+    Both kinds are on the same board, so a change that dropped declared parks
+    (the tempting edit, because it makes the alert shorter) and a change that
+    dropped undeclared gaps both fail here naming the id it lost. The undeclared
+    half is also pinned on its own, unchanged by this diff, by
+    `test_the_health_endpoint_reports_a_draft_task_as_stalled` above — #68's real
+    row shape with no declaration in the file, which is the case the ~50 dark
+    cycles of #1121 were about.
+    """
+    _seed_parked_board(autonomy_dir)
+    body = client.get("/api/autonomy/health", params={"days": 1}).json()
+    assert "error" not in body, body
+    ids = {s["task_id"] for s in body["stalled"]}
+
+    assert {"68", "100"} <= ids, (
+        f"the new label dropped a row — declared park 68 and undeclared gap 100 "
+        f"must both stay listed: {sorted(ids)}")
+    assert ids == {"68", "98", "100", "101"}, (
+        f"membership moved with the new field: {sorted(ids)}")
+    declared = {s["task_id"] for s in body["stalled"] if s["parked"]}
+    assert declared == {"68", "98"}, (
+        f"the payload cannot split the two kinds of stall from its own fields: "
+        f"declared={sorted(declared)}")
+
+
+def test_the_stalled_membership_is_the_shared_predicate_and_nothing_else(
+        client, autonomy_dir):
+    """#3070 clause 3: this node's node — at one instant the ids are exactly the
+    tasks `next_run_gap(task, now=PIN)['past_next_run']` is true for.
+
+    The falsifiable assertion is the literal one, stated first: the four seeded
+    stalls, and the two non-stalls named as absent. It fails on a payload that
+    adds a task, drops one, or lists all six. The set equality after it is the
+    cross-check that the list and the predicate answer with ONE verdict — it
+    compares the payload against production's own accessor over the same six
+    files, so on its own it cannot fail (both sides would move together), and it
+    is here because clause 3 is written in exactly those terms and a reader
+    should see the pair, not one half of it.
+
+    The two absentees matter as much as the four members: 102 is on cadence and
+    103 carries no `next_run` stamp at all — the #99 shape this item deliberately
+    does not widen for, because a chain-filed hand-down arrives as `status:
+    draft` by design and an alarm on "draft and never ran" lights permanently.
+    """
+    _seed_parked_board(autonomy_dir)
+    body = client.get("/api/autonomy/health", params={"days": 1}).json()
+    assert "error" not in body, body
+    ids = {s["task_id"] for s in body["stalled"]}
+
+    assert ids == {"68", "98", "100", "101"}, (
+        f"membership is no longer the four seeded stalls: {sorted(ids)}")
+    assert not (ids & {"102", "103"}), (
+        f"a task that is on cadence or carries no next_run stamp reached the "
+        f"list: {sorted(ids & {'102', '103'})}")
+
+    expected = {str(t.get("id")) for t in A._iter_task_files()
+                if A.next_run_gap(t, now=PIN)["past_next_run"]}
+    assert ids == expected, (
+        f"the payload's stalls {sorted(ids)} are not the tasks "
+        f"next_run_gap(...)['past_next_run'] flags {sorted(expected)}")
