@@ -92,7 +92,48 @@ same shape.
 ## Reproduce
 
     flock -s <scratchpad>/primary.lock python eval/autoresearch_judge_compare.py generate --draws 3
+    flock -s <scratchpad>/primary.lock python eval/autoresearch_judge_compare.py generate --tasks <ids> --draws 3
     flock -s <scratchpad>/primary.lock python eval/autoresearch_judge_compare.py score --k 5
     python eval/autoresearch_judge_compare.py report   # → autoresearch-judge-compare-2026-09-24.json
 
-Both engine phases resume from the jsonl files.
+Both engine phases resume from the jsonl files: `generate` skips every
+`(task_id, condition, draw)` already in the traces file and appends the rest, so a
+pass never rewrites or duplicates a measured row — which is what makes the
+`--tasks` selector safe to run beside the 2026-09-24 corpus.
+
+## Coverage — 13 of 28 live bench ids (#3057, re-read 2026-10-20)
+
+Everything above is a statistic over the **13** task ids this corpus holds (78
+traces). `~/obsidian/lloyd/bench` has **28** live tasks and
+`eval/autoresearch_assertions.yaml` has 28 keys, so every one of the other 15
+rides on assertions whose judge agreement was never checked here: the mode is
+`binary` by default (`configured_rubric_mode`, `scripts/autoresearch/judge.py:126`
+— no `autoresearch.judge.rubric_mode` key is set in config.yaml, so
+`DEFAULT_RUBRIC_MODE` applies, and it prints `binary` on 2026-10-20), and in that
+mode a task with an assertion set goes straight to `_score_assertions`
+(`judge.py:769-771`) with no per-task escape but `graded: true`. That split used to be a set difference
+each reader took between two files; `report` now prints it as a `coverage` block,
+and the committed json above carries it:
+
+- `n_live` 28, `n_scored` 13, `n_missing` 15.
+- **`excluded:requires_runtime` (5)** — `bench_014_audit_dead_wikilinks`,
+  `bench_015_audit_cross_entity_fact_copies`, `bench_016_audit_skill_dead_paths`,
+  `bench_017_audit_unresolved_task_skills`, `bench_026_contradiction_supersede_chain`.
+  Tools-only: a direct completion has no known-good arm, so both conditions would
+  be guesses (`_tasks` drops them; `bench_010` is the hand-written exception).
+  Reaching them needs hand-written good/bad reply sets like `bench_010`'s, or a
+  ruling that the union target is 23, not 28.
+- **`untraced` (10)** — `bench_018_skill_invocation_rare_interp`,
+  `bench_019_skill_invocation_retired_schedule`, `bench_020_skill_inventory_coverage_gap`,
+  `bench_021_skill_invocation_self_kill`, `bench_022_skill_invocation_never_ran_chain`,
+  `bench_023_skill_invocation_shadowed_import_chain`, `bench_024_recall_user_fact_incidental`,
+  `bench_025_skill_invocation_never_ran_resume_chain`, `bench_027_recall_user_fact_topic_read`,
+  `bench_028_contradiction_two_kinds`. These are the owed re-measurement: those ten
+  ids through `generate --tasks … --draws 3` is 10 × 2 × 3 = 60 generation calls,
+  then `score --k 5` over the 60 new traces is 300 judge calls binary-only or 600
+  with the scalar leg. Whether the scalar leg is worth 300 more calls for the new
+  tasks is the owed run's decision, not this file's.
+
+Re-running `report` over the unchanged corpus (2026-10-20) produced this json
+byte for byte apart from the `coverage` block added to it, so the 13 measured
+tasks' flip rate and agreement counts are untouched by this change.

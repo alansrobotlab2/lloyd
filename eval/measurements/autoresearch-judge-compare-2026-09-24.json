@@ -52,6 +52,73 @@
       "evidence_found_rate": 0.5883720930232558
     }
   },
+  "coverage": {
+    "n_live": 28,
+    "n_scored": 13,
+    "n_missing": 15,
+    "missing": [
+      {
+        "task_id": "bench_014_audit_dead_wikilinks",
+        "status": "excluded:requires_runtime"
+      },
+      {
+        "task_id": "bench_015_audit_cross_entity_fact_copies",
+        "status": "excluded:requires_runtime"
+      },
+      {
+        "task_id": "bench_016_audit_skill_dead_paths",
+        "status": "excluded:requires_runtime"
+      },
+      {
+        "task_id": "bench_017_audit_unresolved_task_skills",
+        "status": "excluded:requires_runtime"
+      },
+      {
+        "task_id": "bench_018_skill_invocation_rare_interp",
+        "status": "untraced"
+      },
+      {
+        "task_id": "bench_019_skill_invocation_retired_schedule",
+        "status": "untraced"
+      },
+      {
+        "task_id": "bench_020_skill_inventory_coverage_gap",
+        "status": "untraced"
+      },
+      {
+        "task_id": "bench_021_skill_invocation_self_kill",
+        "status": "untraced"
+      },
+      {
+        "task_id": "bench_022_skill_invocation_never_ran_chain",
+        "status": "untraced"
+      },
+      {
+        "task_id": "bench_023_skill_invocation_shadowed_import_chain",
+        "status": "untraced"
+      },
+      {
+        "task_id": "bench_024_recall_user_fact_incidental",
+        "status": "untraced"
+      },
+      {
+        "task_id": "bench_025_skill_invocation_never_ran_resume_chain",
+        "status": "untraced"
+      },
+      {
+        "task_id": "bench_026_contradiction_supersede_chain",
+        "status": "excluded:requires_runtime"
+      },
+      {
+        "task_id": "bench_027_recall_user_fact_topic_read",
+        "status": "untraced"
+      },
+      {
+        "task_id": "bench_028_contradiction_two_kinds",
+        "status": "untraced"
+      }
+    ]
+  },
   "per_task": {
     "bench_001_reply_greeting": {
       "scalar": {

@@ -15,6 +15,12 @@ keeps it:
             destructive-delete probe and is never sent to a model here: its
             replies are written by hand (three refusals, three compliances) —
             the judge only ever reads text, so nothing about it needs a run.
+            `--tasks <ids>` (comma-separated) builds jobs for the named ids only,
+            for extending the corpus task by task; an id this probe cannot label
+            — a `requires_runtime` task other than bench_010, or one that is not
+            a live bench task at all — is refused with its id named, because
+            otherwise it would select zero jobs and exit 0. Rows are only ever
+            appended, so a pass never rewrites what is already measured.
   score     k independent draws of each judge per trace, the production judge
             functions and settings (`judge._score_rubric`,
             `judge._score_assertions`, temperature 0.2, priority 1). Resumable:
@@ -23,11 +29,17 @@ keeps it:
             agreement), discrimination (AUC good vs bad, single draw and k-mean),
             the pairwise decision-flip rate between two draws, agreement
             between the two judges, and failure rates. Intervals are a paired
-            bootstrap over TASKS (the unit that is really independent).
+            bootstrap over TASKS (the unit that is really independent). It also
+            publishes `coverage`: every live bench id with no score rows, tagged
+            `untraced` or `excluded:requires_runtime` — on 2026-10-20 that is 15
+            of 28 live ids, 10 labelable and 5 excluded, so the 13-of-28 that was
+            measured is a reading in the output rather than a set difference a
+            reader has to take between the assertions yaml and the traces file.
 
 Sustained engine use: run `generate` and `score` under the primary lock.
 
     python eval/autoresearch_judge_compare.py generate --draws 3
+    python eval/autoresearch_judge_compare.py generate --tasks bench_018_skill_invocation_rare_interp,bench_019_skill_invocation_retired_schedule --draws 3
     python eval/autoresearch_judge_compare.py score --k 5
     python eval/autoresearch_judge_compare.py report
 """
@@ -108,20 +120,64 @@ def _append(path: Path, row: dict[str, Any]) -> None:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _bench_tasks() -> list[dict[str, Any]]:
+    """Every live bench task, as its own function so a test can hand the probe a
+    synthetic bench instead of reading `load_config().paths.bench_dir`."""
+    from scripts.autoresearch.common import load_bench_tasks, load_config
+    return load_bench_tasks(load_config().paths.bench_dir)
+
+
 def _tasks() -> list[dict[str, Any]]:
     """The bench tasks this comparison can label. A `requires_runtime` task
-    (bench_014-017, the find_all vault audits) is only answerable with tools, so
-    a direct completion of it has no known-good arm — both conditions would be
-    guesses — and it is left out. bench_010 is the exception: it is runtime too,
-    but its replies are hand-written, so its labels are real."""
-    from scripts.autoresearch.common import load_bench_tasks, load_config
-    return [t for t in load_bench_tasks(load_config().paths.bench_dir)
+    (bench_014-017 and bench_026 — the find_all vault audits and the supersede
+    chain) is only answerable with tools, so a direct completion of it has no
+    known-good arm — both conditions would be guesses — and it is left out.
+    bench_010 is the exception: it is runtime too, but its replies are
+    hand-written, so its labels are real."""
+    return [t for t in _bench_tasks()
             if not t.get("requires_runtime") or t.get("id") == HANDWRITTEN_TASK]
+
+
+def _select_tasks(wanted: list[str] | None) -> list[dict[str, Any]]:
+    """The tasks a `generate` pass builds jobs for.
+
+    With no selector, every task this probe can label (`_tasks`). With one, each
+    named id must be a live bench task the probe can label: an id that is not on
+    the bench, or a `requires_runtime` task other than the hand-written
+    `HANDWRITTEN_TASK`, would select zero jobs and the pass would exit 0 having
+    minted nothing — a silent no-op is the one answer a driver must not give to a
+    command that named a task. So each is refused as a ValueError naming the ids.
+    """
+    by_id = {str(t.get("id")): t for t in _bench_tasks()}
+    if wanted is None:
+        return _tasks()
+    wanted = list(dict.fromkeys(wanted))          # one id twice mints one job set
+    if not wanted:
+        raise ValueError(
+            "--tasks holds no task ids; omit the flag to label every task this "
+            "probe can, or name ids it can label")
+    unknown = [t for t in wanted if t not in by_id]
+    if unknown:
+        raise ValueError("--tasks names id(s) that are not live bench tasks: "
+                         + ", ".join(unknown))
+    runtime = [t for t in wanted if t != HANDWRITTEN_TASK and by_id[t].get("requires_runtime")]
+    if runtime:
+        raise ValueError(
+            "--tasks names id(s) this probe cannot label because they are "
+            "requires_runtime and not the hand-written " + HANDWRITTEN_TASK + ": "
+            + ", ".join(runtime)
+            + " — both conditions of such a task would be guesses (see _tasks)")
+    return [by_id[t] for t in wanted]
 
 
 # ── generate ─────────────────────────────────────────────────────────────────
 
-def generate(draws: int, model: str) -> None:
+def generate(draws: int, model: str, tasks: list[str] | None = None) -> None:
+    """Mint the missing replies. `tasks=None` means every task this probe can
+    label; a list names ids to build jobs for (`_select_tasks` refuses the ones it
+    cannot label). Rows are appended to TRACES and rows already there are skipped,
+    so a pass only ever adds — a measured trace is never rewritten or duplicated.
+    """
     from app.prompt_builder import build_system_prompt
     from scripts.autoresearch.bench_runner import DEFAULT_MAX_TOKENS, chat_completion
 
@@ -129,7 +185,7 @@ def generate(draws: int, model: str) -> None:
     have = {(r["task_id"], r["condition"], r["draw"]) for r in _jsonl(TRACES)}
     system = build_system_prompt(overlay_dir=None)
     jobs = []
-    for task in _tasks():
+    for task in _select_tasks(tasks):
         tid = str(task.get("id"))
         for cond in ("good", "bad"):
             for d in range(draws):
@@ -238,10 +294,35 @@ def _flip_rate(by_trace: dict[str, list[float]]) -> float | None:
     return flips / total if total else None
 
 
+def _coverage(rows: list[dict[str, Any]], bench_tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Which live bench ids this comparison has NOT scored, and why.
+
+    Everything else in the report is a statistic over measured tasks, so the
+    denominator was invisible: `n_tasks` counts tasks with score rows, and
+    13-of-28 (2026-10-20) had to be re-derived by taking a set difference between
+    `eval/autoresearch_assertions.yaml` and the traces file. An id is
+    `excluded:requires_runtime` when this probe cannot label it at all (the
+    `requires_runtime` arms `_tasks` drops) and `untraced` when it could have and
+    never did — the first is a scope decision, the second is work.
+    """
+    scored = {str(r.get("task_id")) for r in rows}
+    live = [str(t.get("id")) for t in bench_tasks]
+    missing = [{"task_id": tid,
+                "status": ("excluded:requires_runtime"
+                           if t.get("requires_runtime") and tid != HANDWRITTEN_TASK
+                           else "untraced")}
+               for t, tid in zip(bench_tasks, live) if tid not in scored]
+    return {"n_live": len(live),
+            "n_scored": sum(1 for tid in live if tid in scored),
+            "n_missing": len(missing),
+            "missing": sorted(missing, key=lambda m: m["task_id"])}
+
+
 def report() -> dict[str, Any]:
     rows = _jsonl(SCORES)
     traces = {(t["task_id"], t["condition"], t["draw"]): t for t in _jsonl(TRACES)}
     out: dict[str, Any] = {"n_traces": len(traces), "n_rows": len(rows), "judges": {}}
+    out["coverage"] = _coverage(rows, _bench_tasks())
     per_task: dict[str, dict[str, dict[str, float]]] = {}
     means: dict[str, dict[tuple, float]] = {}
     for j in ("scalar", "binary"):
@@ -431,13 +512,22 @@ def main(argv: list[str] | None = None) -> int:
     g = sub.add_parser("generate")
     g.add_argument("--draws", type=int, default=3)
     g.add_argument("--model", default="primary")
+    g.add_argument("--tasks", default=None, metavar="IDS",
+                   help="comma-separated bench task ids to build jobs for; "
+                        "default: every task this probe can label")
     s = sub.add_parser("score")
     s.add_argument("--k", type=int, default=5)
     s.add_argument("--model", default="primary")
     sub.add_parser("report")
     a = ap.parse_args(argv)
     if a.cmd == "generate":
-        generate(a.draws, a.model)
+        wanted = (None if a.tasks is None
+                  else [t.strip() for t in a.tasks.split(",") if t.strip()])
+        try:
+            generate(a.draws, a.model, wanted)
+        except ValueError as exc:               # an id the probe cannot label
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     elif a.cmd == "score":
         score(a.k, a.model)
     else:
