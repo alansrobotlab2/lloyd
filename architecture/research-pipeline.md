@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, research]
 type: reference
 status: implemented
-date: 2026-09-19
+date: 2026-10-20
 ---
 
 # The research registry
@@ -65,7 +65,8 @@ Bounding the file would have fixed that and left the real problems:
   night after night.
 - **A tick was not evidence.** The consumer, `domain-research`, ticked the box
   whether or not the turn produced anything. 90 of its 142 notes have the body
-  `(no response)`, and every one of those topics is now closed on disk. The
+  `(no response)`, and every one of those topics was settled before the registry
+  was reset (the `archived` paragraph below). The
   source was retired with this change on 2026-09-08 and is gone from both
   `config.yaml` and `SOURCE_REGISTRY`. Its 142 notes sat staged and untriaged
   under `pending-research/domain-research/` (`app/paths.py::
@@ -78,9 +79,18 @@ Bounding the file would have fixed that and left the real problems:
 - **Four writers, whole-file read-modify-write, no lock.** The same shape that
   produced the 2026-08-22 knowledge-graph wipe.
 
-The 314 unique topics were imported as `archived` rows. They are the dedup
+The 314 unique topics were imported as `archived` rows. They were the dedup
 corpus and nothing else: `archived` never counts toward a daily budget and
-never appears in `recent()`.
+never appears in `recent()`. **That corpus is not in the registry that runs
+today.** `stats()` reported `archived: 314` on 2026-09-20; measured 2026-10-20
+it returns no `archived` key at all over 117 rows whose ids run 1..117 — a
+restarted `AUTOINCREMENT` sequence, so the file the 2026-09-22 data-home move
+carried across was replaced by an empty one within a day (first live proposal
+2026-09-23). Nothing deletes `topics` rows, and `import_legacy` is idempotent
+against the archive that is still in the vault, so the corpus is one command
+from back — which is also why its absence is invisible. Until it is back (or
+ruled dropped), `similar()` has no legacy side to match against and a retired
+checklist topic can be proposed and re-researched (#3046).
 
 ---
 
@@ -101,7 +111,7 @@ from the lock, which only one process holds.
 | `written` | a note exists on disk, verified by `finish` itself: `_require_real_note` refuses any `artifact_path` that is not a file holding at least `MIN_NOTE_BYTES` (400) bytes, raising `ValueError` before the `UPDATE` so the row stays `researching` and `reclaim_stale` can retry it. The worker's `deep_research._note_is_real` applies the same bar and is now belt-and-braces (#1276) |
 | `nothing_found` | searched, found nothing — a real answer, and the one that stops it coming back |
 | `duplicate` | the vault already covers it; names what does |
-| `archived` | imported from the retired checklist; dedup corpus only |
+| `archived` | imported from the retired checklist; dedup corpus only — zero rows since the 2026-09-22/23 reset (§1) |
 | `rejected` | should not have been proposed |
 
 Two statements carry the concurrency, and both were written the naive way
@@ -156,15 +166,19 @@ pages, and why its retries live **here** rather than in `workers.db` — is
 [[workers-jobs]] § `deep-research`.
 
 The one rule worth repeating on this side of the seam, because it is what the
-registry exists to carry: `workers/pool.py` records an in-band
-`{"status": "failed"}` as a **completed** run (`mark_completed` at `:717`,
-immediately after the `run_status == "failed"` branch decides the log level) and
-then reports the outcome. Only a *raised* exception — a timeout or a drain —
-takes the `status="failed"` run-record path at `:744` / `:773`. So a source that
+registry exists to carry: when a source *returns* `{"status": "failed"}`,
+`workers/pool.py` writes the **run** row with `status="failed"` and then settles
+the **queue** row with `mark_completed` — both on the arm that follows
+`source.execute`, before the log line that reads `run_status` only to choose
+WARNING over INFO. So the run counts as a failure to fleet health and burns no
+retry budget; nothing on that arm reaches `mark_failed`. Only a *raised*
+exception — the pool's `TimeoutError` arm or a drain — records a failed run
+*and* fails the queue row, and `mark_failed` is the only thing that re-queues
+an item. So a source that
 returns `failed` and expects a queue retry does not get one, and `release()` /
 `exhaust()` here are the retry ladder: `max_attempts` from `workers.max_attempts`
 (3), backoff of one `interval_seconds` (3600 s), and a
-`DrainActive` that releases with no backoff at all.
+`DrainActive` that releases with no backoff at all. (#3048)
 
 ---
 
@@ -174,7 +188,7 @@ A topic row carries `queue_id` (the `workers.db` item that researched it) and
 `session_id` (the transcript). `runs.queue_id` is the join back to the run
 record, and it is what `autonomy` leans on too: `/api/autonomy/health` reads
 `WorkQueue.list_runs_joined` in `workers/queue.py` (a `LEFT JOIN` on
-`r.queue_id = q.id`) and `_row_task_id` (`app/autonomy.py:1999`) recovers the task
+`r.queue_id = q.id`) and `_row_task_id` in `app/autonomy.py` recovers the task
 id from the joined queue payload when the run row carries none. The pool never
 passes its `run_id` into `execute`, so the queue id is the link.
 
@@ -192,9 +206,14 @@ passes its `run_id` into `execute`, so the queue id is the link.
   two weeks with `stale_queued: 0` — so since 2026-09-24 the same payload
   also carries `max_queued`, `queued_fraction`, `at_cap` and `head_age_days`
   (#1277), which is what lets the generator's "at its cap → stop" rule fire
-  from `research_stats` instead of from a refusal. Whether the cap should
-  derive from `daily_max`, and what to do with the priority-55/60 cohort
-  `next()` never reaches, are still open rulings on that item.
+  from `research_stats` instead of from a refusal. The two questions that item
+  left open were ruled on 2026-10-03: `MAX_QUEUED` stays a hard 40 rather than
+  deriving from `daily_max` — a derived cap moves intake on a `config.yaml` edit
+  nobody can read as intent — and a capped night that executed keeps reporting
+  `success`. The starved priority cohort that item named went with the registry
+  reset above; a 55-weighted one is filling in again (23 of 32 queued, measured
+  2026-10-20) and `next()` still drains `priority ASC`, so whether it is reached
+  depends only on the 50s ahead of it clearing.
 - **The generator is still an autonomy task**, so it inherits that path's
   timeout semantics rather than the pool's — #65 at `timeout_seconds: 1500`,
   under `scheduled-task`'s 3600 s pool cap so the task's own timer is the one
@@ -209,6 +228,28 @@ passes its `run_id` into `execute`, so the queue id is the link.
 
 ## Review log
 
+- **2026-10-20 — `stale`.** Every mechanism still runs, but three things the body
+  asserted as present tense had moved. §3's retry rule was describing the wrong
+  record: an in-band `{"status": "failed"}` writes a **failed run** and a
+  **completed queue row**, and the raised-exception arms write the same failed
+  run — what separates them is `mark_failed`, not the run status — so the
+  sentence now says that and drops its `:717` / `:744` / `:773` anchors, which
+  were ~1200 lines out after the #2510 cost-outlier trigger moved the pool and
+  reordered that arm; §4's `_row_task_id` anchor (`app/autonomy.py:1999`) had
+  drifted into `_dependency_refusal` and is now a pointer, the form #2971
+  settled on for `workers/queue.py`. §1's `archived` corpus is gone: 314 rows
+  measured 2026-09-20, none today, over 117 rows whose ids restart at 1, so the
+  registry is a fresh file from 2026-09-23 and the legacy dedup side of
+  `similar()` is empty (#3046). §5's "still open rulings" were ruled on
+  2026-10-03: hard cap stays 40, a capped night stays `success`. Verified against
+  the tree, `config.yaml`, `~/obsidian/autonomy/65-research-queue-generator.md`
+  and the store's own
+  `stats()`; the health routes were read unclamped (`window_clamped_to_hours`
+  null on both at `days=7`), and this unit states no fleet figure to carry.
+  Filed: #3046 (empty `archived` corpus, unreported), #3047 (the anchor guard
+  passes a citation that drifted to another symbol), #3048 (nothing pins §3's
+  inversion), #3049 (the note's date is stamped at enqueue, the prompt asserts
+  claim-day).
 - **2026-09-20 — `current`.** §2's `written` row moved the verification into the
   store: `ResearchStore.finish` now refuses a `written` whose `artifact_path` is
   not a real file of at least `MIN_NOTE_BYTES` bytes, before it writes, so the
