@@ -1613,3 +1613,198 @@ def test_both_docs_state_that_a_non_green_row_does_not_imply_exit_3():
         assert "does not by itself imply exit 3" in text, name
         assert "#1865" in text, name
         assert "client_record" in text, name
+
+
+# ---------------------------------------------------------------- #3077
+# "`uncovered_files` split into a `durable` and a `derived` integer that sum to
+# `total`, classified by a rule over the gap path itself".
+#
+# Measured on this box 2026-10-20: the gap is 390 paths and the standing line has
+# printed nothing but that number since #1753 landed, because 192 of the paths are
+# dated witnesses under `backlog/data/` and 5 more are runtime stores — so the line
+# reads 390 forever and the set a lost disk actually destroys is invisible inside it.
+# The split is a rule over the path string because the item's own discriminator was
+# measured the same day and is false: the vault's git tracks 383 of the 390 gap
+# paths (the witnesses are committed on purpose), so "tracked means durable"
+# classifies the whole set as durable and separates nothing.
+#
+# Out of these clauses by the triage ruling: where NEW witnesses get written, and
+# the item's `durable < 100` verify-after. Both need the human decision on whether
+# the committed witnesses and the runtime stores stay in the vault at all.
+DERIVED_CLASS_GAPS = [
+    "backlog/data/2026-10-18.2983-lloyd-data-workers.db",   # a dated witness, by directory
+    "backlog/data/2026-10-19.3003-ledger.jsonl",
+    "backlog/data/nested/deeper/witness.jsonl",             # a prefix, not a depth
+    "knowledge/graph.db",                                   # a runtime store, by suffix
+    "memory/skills-usage.jsonl",
+    "memory/audit/writes.jsonl",
+    "knowledge/graph.db-wal",                               # the store's WAL sidecars
+    "knowledge/graph.db-shm",
+]
+DURABLE_CLASS_GAPS = [
+    "people/registry.json",                                 # the registry the item names
+    "skills/autolink/autolink.py",                          # a skill sidecar
+    "templates/fact-file-template.yaml",                    # a vault template
+    "people/dave_cullen.lab",
+    "projects/robotics/build.md",                           # and the vault's own notes
+    "projects/notes/2026-10-19.md",
+]
+
+
+def test_the_uncovered_files_block_splits_the_gap_into_durable_and_derived(rig):
+    """Clause 1: `--component vault_sync --format json` reports `uncovered_files.durable`
+    and `uncovered_files.derived` as integers whose sum equals `uncovered_files.total`,
+    on a plant whose classes are known and with no round-trip flag. The older pair is
+    checked summing to the same total too, because the two tallies cut the same set on
+    different axes (extension vs class) and neither may drift from `total`."""
+    rig.plant_state_db(local=DERIVED_CLASS_GAPS + DURABLE_CLASS_GAPS, server=[])
+    payload, proc = rig.json("--component", "vault_sync")
+    unc = payload["vault_sync"]["uncovered_files"]
+    assert unc["status"] == shc.UNCOVERED_MEASURED, unc
+    assert unc["durable"] == len(DURABLE_CLASS_GAPS), unc
+    assert unc["derived"] == len(DERIVED_CLASS_GAPS), unc
+    for key in ("durable", "derived"):
+        assert isinstance(unc[key], int) and not isinstance(unc[key], bool), (key, unc[key])
+    assert unc["durable"] + unc["derived"] == unc["total"] == 14, unc
+    assert unc["markdown"] == 2 and unc["markdown"] + unc["non_markdown"] == unc["total"], unc
+    assert sum(unc["by_type"].values()) == unc["total"], unc["by_type"]
+    assert proc.returncode == DEGRADED_EXIT, proc.stdout
+
+
+def test_the_split_classifies_each_gap_by_a_rule_over_the_path_itself(rig):
+    """Clause 2: a path under `backlog/data/` at any depth, or ending `.db`, `.jsonl`,
+    `.db-wal` or `.db-shm` wherever it sits, is derived; a `.md` note or
+    `people/registry.json` is durable. Asserted per class with each class planted alone,
+    so a classifier that inverted one class, matched the directory only at one depth, or
+    forgot a WAL suffix moves a number here. No path named below is one the live vault
+    holds in its gap set — the rule has to work on a path it has never seen."""
+    rig.plant_state_db(local=DERIVED_CLASS_GAPS, server=[])
+    unc = rig.json("--component", "vault_sync")[0]["vault_sync"]["uncovered_files"]
+    assert unc["derived"] == len(DERIVED_CLASS_GAPS) and unc["durable"] == 0, unc
+    assert unc["total"] == len(DERIVED_CLASS_GAPS), unc
+
+    rig.plant_state_db(local=DURABLE_CLASS_GAPS, server=[])
+    unc = rig.json("--component", "vault_sync")[0]["vault_sync"]["uncovered_files"]
+    assert unc["durable"] == len(DURABLE_CLASS_GAPS) and unc["derived"] == 0, unc
+    assert unc["total"] == len(DURABLE_CLASS_GAPS), unc
+
+
+def test_a_markdown_witness_inside_backlog_data_is_derived_by_the_directory_rule(rig):
+    """The two halves of clause 2 meet in one shape: a `.md` file inside `backlog/data/`.
+    The directory is checked first, because the directory is the mechanism that decides
+    whether this box wrote the file or received it — a markdown witness is still a
+    witness — and clause 2's `.md`-means-durable half is about a path outside it. The
+    live markdown gap is 0 today, so this shape does not move the standing figures; it is
+    pinned so the precedence is a decision and not an accident of one if-statement's
+    order. The extension tally is checked alongside it as UNAFFECTED: both `.md` paths
+    are still markdown, which is the whole reason the two figures are separate fields."""
+    rig.plant_state_db(local=["backlog/data/2026-10-19.3003-note.md",
+                              "projects/notes/standup.md"], server=[])
+    unc = rig.json("--component", "vault_sync")[0]["vault_sync"]["uncovered_files"]
+    assert unc["derived"] == 1 and unc["durable"] == 1, unc
+    assert unc["markdown"] == 2 and unc["by_type"][".md"] == 2, unc
+
+
+def test_the_text_line_prints_the_durable_and_derived_pair_beside_the_verdict(rig):
+    """Clause 3: the text format prints `durable N / derived M` on the line under the
+    vault_sync verdict, and for one manifest N and M are the two numbers the JSON
+    reports for the same plant — the two formats read one manifest, so a text line that
+    re-derived the split differently (or rounded it) fails here rather than printing a
+    second opinion about the same gap."""
+    rig.plant_state_db(local=DERIVED_CLASS_GAPS[:3] + DURABLE_CLASS_GAPS[:2], server=[])
+    unc = rig.json("--component", "vault_sync")[0]["vault_sync"]["uncovered_files"]
+    assert (unc["durable"], unc["derived"]) == (2, 3), unc
+    pair = f"durable {unc['durable']} / derived {unc['derived']}"
+
+    lines = rig.run("--component", "vault_sync", fmt="text").stdout.splitlines()
+    verdict = [i for i, line in enumerate(lines) if "obsidian-sync —" in line]
+    assert verdict, "no vault_sync verdict line in the text output"
+    below = lines[verdict[0]:verdict[0] + 4]
+    assert any(pair in line for line in below), (pair, below)
+
+
+@pytest.mark.parametrize("shape", ["no-registration", "no-state-db",
+                                   "state-db-not-a-database"])
+def test_the_new_figures_are_unknown_never_zero_when_the_manifest_cannot_be_read(rig, shape):
+    """Clause 4: the two new figures follow the rule #1753 set for the old ones — an
+    absent or unreadable manifest keeps `status: unknown` with `durable` and `derived`
+    None, never 0. A zero here reads as "the filter drops nothing that could be
+    regenerated", which is the reassurance an unreadable manifest has never earned. The
+    non-green state, the exit code and the text line's `unknown` are the ones that shape
+    already produced, and the registration is left byte for byte as it was found."""
+    if shape == "no-registration":
+        spec = rig.spec(linked=False)
+    else:
+        spec = rig.spec()
+        reg = rig.plant_live_registration()
+        if shape == "no-state-db":
+            assert not (reg / "state.db").exists()
+        else:
+            (reg / "state.db").write_bytes(b"definitely not a sqlite database\n" * 64)
+    before = rig.registration_digest()
+    payload, proc = rig.json("--component", "vault_sync", spec=spec)
+    unc = payload["vault_sync"]["uncovered_files"]
+    assert unc["status"] == shc.UNCOVERED_UNKNOWN, unc
+    assert unc["durable"] is None and unc["derived"] is None, unc
+    assert unc["total"] is None and unc["markdown"] is None, unc
+    assert payload["overall_status"] == "degraded", payload
+    assert proc.returncode == DEGRADED_EXIT, proc.stdout
+
+    text = rig.run("--component", "vault_sync", spec=spec, fmt="text").stdout
+    assert "durable 0 / derived 0" not in text, text
+    assert "local files with no server-side copy: unknown" in text, text
+    assert rig.registration_digest() == before
+
+
+def test_the_split_moves_no_verdict_between_two_manifests_of_the_same_size(rig):
+    """Clause 5: the split is a report about the gap, not a fact about sync, so 192
+    committed witnesses must not make the component any less green than 192 notes were.
+    Two manifests of the same size, the same extension and the same markdown count,
+    differing ONLY in the directory rule: `state`, `kind`, `healthy`, `reason`, the
+    overall status, the exit code and the rollup's reason line all come out identical,
+    while the two splits are opposites. A later change that makes `durable` a reason to
+    alarm fails here, at the process boundary, not in a predicate."""
+    derived_only = [f"backlog/data/{4000 + n}.json" for n in range(192)]
+    durable_only = [f"backlog/reports/{4000 + n}.json" for n in range(192)]
+    seen = {}
+    for label, gaps in (("derived-only", derived_only), ("durable-only", durable_only)):
+        rig.plant_state_db(local=gaps, server=[])
+        payload, proc = rig.json("--component", "vault_sync")
+        seen[label] = (payload, proc)
+        block = payload["vault_sync"]
+        unc = block["uncovered_files"]
+        assert unc["total"] == 192, (label, unc)
+        assert block["state"] == shc.VAULT_SYNC_ROUNDTRIP_SKIPPED, (label, block)
+        assert block["kind"] == "unproven" and block["healthy"] is False, (label, block)
+        assert payload["overall_status"] == "degraded" and proc.returncode == DEGRADED_EXIT
+
+    derived, durable = seen["derived-only"], seen["durable-only"]
+    assert derived[0]["vault_sync"]["uncovered_files"] == {
+        **derived[0]["vault_sync"]["uncovered_files"], "derived": 192, "durable": 0}, derived[0]
+    assert durable[0]["vault_sync"]["uncovered_files"]["durable"] == 192, durable[0]
+    assert durable[0]["vault_sync"]["uncovered_files"]["derived"] == 0, durable[0]
+    for key in ("state", "reason", "detail", "kind", "healthy"):
+        assert (derived[0]["vault_sync"][key] == durable[0]["vault_sync"][key]
+                and derived[1].returncode == durable[1].returncode), key
+    assert derived[0]["reasons"] == durable[0]["reasons"] == [
+        f"vault_sync: vault sync state {durable[0]['vault_sync']['state']} "
+        f"(reason {durable[0]['vault_sync']['reason']}: "
+        f"{durable[0]['vault_sync']['detail']})"], derived[0]["reasons"]
+
+
+def test_a_caught_up_row_reads_the_same_outage_with_a_durable_or_a_derived_split():
+    """The same clause one level down, on the predicate that decides whether this row
+    claims the exit code: `vault_sync_is_outage` reads `status`, `pending`,
+    `markdown_missing` and the record age, and never the class split — so a row whose
+    residue is 193 durable files it cannot regenerate is exactly as much an outage as
+    one whose 268 are all regenerable witnesses. Both stay non-green (`kind: unproven`,
+    `healthy: false`) and both stay out of the DEGRADED reasons, which is #1752's
+    reading of a committing box unchanged by #3077."""
+    for gaps in (dict(CLEAN_GAPS, durable=193, derived=0),
+                 dict(CLEAN_GAPS, durable=0, derived=268),
+                 dict(CLEAN_GAPS, durable=76, derived=192)):
+        row = _as_recorded(record=dict(CLEAN_RECORD), gaps=gaps)
+        assert row["kind"] == "unproven" and row["healthy"] is False, gaps
+        assert shc.vault_sync_is_outage(row) is False, gaps
+        healthy, reasons = _overall(row)
+        assert healthy is True and reasons == [], (gaps, reasons)
