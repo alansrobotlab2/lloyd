@@ -989,6 +989,95 @@ def test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree(slug)
         f"reason: {missing}")
 
 
+#: The words `subliminal.md` uses for the #1490 Skill2Query cache being absent.
+#: Matched inside a whitespace-collapsed bullet rather than a physical line,
+#: because the sentence is hard-wrapped and the phrase straddles a wrap in the
+#: fixed spelling.
+_NEVER_GENERATED_CACHE = "has never been generated"
+
+#: A cache file that cannot exist by construction. The control cites the same
+#: directory the real cache would live in — so it proves the reader reaches the
+#: data root and asks it for a file — but is not the real filename, because a
+#: control naming `skill-pseudo-queries.json` would go satisfiable the day the
+#: arm is switched on and that generator run, which is a box state, not a
+#: property of this check.
+_NEVER_WRITTEN_CONTROL = "~/lloyd-data/_pipeline/skill-pseudo-queries-zzz-control.json"
+
+
+def _pseudo_query_cache_claim(text: str) -> str:
+    """The one bullet of a doc that says the #1490 cache has never been generated,
+    with its soft wraps collapsed to single spaces.
+
+    The unit is a list item, not a blank-line block: this doc's `Prefetch
+    workers` bullets run consecutively with no blank between them, so a block
+    would span the `Source:` bullet as well and the node below would be grading a
+    sentence it never named. Exactly one unit may carry the phrase, for the reason
+    #2606 demands one `Re-measured` paragraph: two would mean the extractor is
+    grading a claim nobody decided to grade.
+    """
+    units = [re.sub(r"\s+", " ", u).strip()
+             for u in re.split(r"\n\s*\n|\n(?=- )", text)]
+    hits = [u for u in units if _NEVER_GENERATED_CACHE in u]
+    assert len(hits) == 1, (
+        f"{len(hits)} bullets carry {_NEVER_GENERATED_CACHE!r}; the node below "
+        "grades one, so a second is a claim nothing reads")
+    return hits[0]
+
+
+def test_the_absent_pseudo_query_cache_is_cited_by_what_defines_it():
+    """#3083: a sentence may report a runtime file absent; it may not do it with a
+    citation nobody can follow.
+
+    `subliminal.md` said the #1490 Skill2Query cache has never been generated and
+    named it `~/lloyd-data/_pipeline/skill-pseudo-queries.json`. Both halves were
+    true — `scripts/skill_pseudo_queries.py` writes that file offline and
+    `agent_mcp/skills.py::pseudo_query_settings` only reads it when
+    `skills.pseudo_queries.enabled` is `True` — and the second was still a
+    pointer to nothing: a box where the arm has never run holds no such file
+    under any of the four roots, which is precisely what the node above reports.
+
+    The fix is the sentence, not an exemption entry. `STALE_EXEMPTION_CEILING`'s
+    comment is the precedent — entries were cleared by correcting the sentence
+    until the citation resolves — and an exemption would be a worse trade here
+    than most: it would excuse the path for as long as the arm stays off and
+    outlive its reason the moment the file is written, since the anti-growth rail
+    only refuses an entry no doc cites, never one that stopped being needed. So
+    the sentence now names the constant that decides the location,
+    `SKILL_PSEUDO_QUERIES_PATH` at `app/paths.py:195`, which holds whether or not
+    the cache exists.
+
+    Graded three ways: every citation in that claim resolves; no exemption
+    anywhere in the list excuses a `skill-pseudo-queries` spelling, so the green
+    cannot be bought with debt; and the reader is shown to catch an unresolvable
+    citation of this exact shape, so the first assertion is a check and not a
+    pattern over an empty set.
+    """
+    claim = _pseudo_query_cache_claim(_text("subliminal.md"))
+    cited = cited_citations(claim)
+    assert cited, (
+        "the cache claim cites no path at all — the sentence stopped being "
+        "checkable, so asserting it has no broken citation proves nothing")
+    unresolved = [span for span, path, _line in cited
+                  if _resolved_or_none(path) is None]
+    assert unresolved == [], (
+        f"the claim's citations resolve under none of the {len(CITATION_ROOTS)} "
+        f"roots: {unresolved} — name the constant that defines the location "
+        "instead of the runtime file the arm has not written")
+
+    excused = [f"{slug}: {span}" for slug, entries in PATH_CITATION_EXEMPTIONS.items()
+               for span in entries if "skill-pseudo-queries" in span]
+    assert excused == [], (
+        f"the absent cache was exempted rather than re-pointed: {excused} — an "
+        "exemption here is an excuse that outlives the arm being off")
+
+    control = f"the cache `{_NEVER_WRITTEN_CONTROL}` {_NEVER_GENERATED_CACHE}"
+    caught = [span for span, path, _line in cited_citations(control)
+              if _resolved_or_none(path) is None]
+    assert caught == [_NEVER_WRITTEN_CONTROL], (
+        f"the reader caught {caught} in a citation of the pre-fix shape, so the "
+        "assertion above would pass on a doc that cites nothing")
+
+
 def test_the_path_extractor_is_what_the_check_depends_on():
     """Negative control over deliberately wrong text: one real path, one
     invented one, one line number past the end. If the extractor could not tell
